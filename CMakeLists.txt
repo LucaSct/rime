@@ -84,10 +84,15 @@ add_subdirectory(engine/app)    # launcher stub (M0) → application framework (
 #   add_subdirectory(engine/physics)     # rigid bodies, collision
 #   add_subdirectory(engine/destruction) # part-based destruction (headline system)
 
-# Tests are wired in brick M0.2 (doctest via Conan):
-# if(RIME_BUILD_TESTS)
-#     enable_testing()
-#     add_subdirectory(tests)
-# endif()
+# ── Tests ───────────────────────────────────────────────────────────────────────
+# Unit tests live under tests/ (one target per module; see docs/ROADMAP.md, "Testing &
+# profiling"). doctest is resolved by Conan as a test-only dependency, so we only look
+# for it when tests are enabled. enable_testing() turns on CTest, which `ctest --preset
+# dev` then drives.
+if(RIME_BUILD_TESTS)
+    enable_testing()
+    find_package(doctest REQUIRED)
+    add_subdirectory(tests)
+endif()
 
 message(STATUS "Rime ${PROJECT_VERSION} — Milestone 0. Targets: rime_core, rime_hello.")

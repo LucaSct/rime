@@ -38,3 +38,9 @@ class RimeRecipe(ConanFile):
         #   1. It proves the Conan -> CMake pipeline end-to-end in Milestone 0.
         #   2. It will become the basis of the engine's logging in Milestone 1.
         self.requires("fmt/10.2.1")
+
+        # doctest: a fast-compiling, header-only unit-test framework. Declared as a
+        # *test* requirement -- it is needed to build and run our tests, but it is not
+        # part of the engine we ship, so it must never leak to consumers of Rime. Conan
+        # keeps test_requires out of the package's runtime requirement graph.
+        self.test_requires("doctest/2.4.11")
