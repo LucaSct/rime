@@ -21,9 +21,12 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > **Brick M0.3 (Rust workspace) — done:** Cargo workspace under `tools/` (`resolver = "2"`,
 > shared `[workspace.package]`), pinned via `rust-toolchain.toml` (stable + rustfmt/clippy),
 > with the `rime-cli` crate (binary `rime`) as a stub. `cargo fmt --check`, `cargo clippy
-> -D warnings`, `cargo build`, and `cargo test` all pass. **Remaining M0 bricks:** M0.4
-> cross-platform dev scripts (`scripts/setup`+`scripts/build`), M0.5 CI matrix
-> (Win/Linux/macOS) with format/lint/license gates.
+> -D warnings`, `cargo build`, and `cargo test` all pass.
+> **Brick M0.4 (dev scripts) — done:** `scripts/setup` + `scripts/build` (POSIX `.sh` +
+> Windows `.ps1`) give one-command setup and build of both halves. `build.sh --clean`
+> rebuilds C++ (conan→cmake→ctest) and Rust (cargo build+test) from scratch on macOS;
+> the `.ps1` mirrors are exercised by CI on Windows. **Remaining M0 brick:** M0.5 CI
+> matrix (Win/Linux/macOS) with format/lint/license gates.
 
 ## Ordering principles (why this sequence)
 
