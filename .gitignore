@@ -1,0 +1,46 @@
+# ─── C++ / CMake build output ────────────────────────────────────────────────
+/build/
+/out/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+compile_commands.json
+
+# ─── Rust / Cargo (tools/) ───────────────────────────────────────────────────
+target/
+**/*.rs.bk
+# NOTE: we keep Cargo.lock checked in — the Rust tools are binaries/applications.
+
+# ─── Shaders: keep sources, ignore compiled artifacts ────────────────────────
+*.spv
+
+# ─── Editors / IDEs ──────────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+.idea/
+*.user
+.vs/
+.cache/
+.clangd/
+
+# ─── OS cruft ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Local-only / secrets ────────────────────────────────────────────────────
+*.local
+.env

@@ -1,0 +1,51 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "vendor": {
+    "$comment": [
+      "Preset files are strict JSON (no comments), but CMake ignores everything under",
+      "`vendor` — so this is where we keep human notes. Each configure preset consumes",
+      "the Conan-generated toolchain in its build directory (run `conan install` first,",
+      "or just use scripts/build). Layout: build/<preset>/ holds both the Conan files",
+      "and the CMake build tree."
+    ]
+  },
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "Dev (Debug)",
+      "description": "Debug build with assertions; the default for day-to-day work.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/dev",
+      "toolchainFile": "${sourceDir}/build/dev/conan_toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "RIME_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (RelWithDebInfo)",
+      "description": "Optimized build with debug info, for profiling and shipping.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "toolchainFile": "${sourceDir}/build/release/conan_toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "RIME_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "default", "stopOnFailure": false }
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+# Rime C++ style. Run clang-format; don't hand-format.
+# Philosophy: readable first (the code teaches), consistent always.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+NamespaceIndentation: None
+IndentCaseLabels: true
+
+# Line width
+ColumnLimit: 100
+
+# Braces: attach (K&R-ish) — opening brace on the same line.
+BreakBeforeBraces: Attach
+Cpp11BracedListStyle: true
+
+# Pointers/references bind to the type: `int* p`, `const T& r`.
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Keep trivial things compact, but never hide control flow.
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+
+# Includes: group and sort. main-header, then <std>, then "project".
+SortIncludes: CaseInsensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>'      # C system headers
+    Priority: 2
+  - Regex: '^<.*>'         # C++ standard / external
+    Priority: 3
+  - Regex: '.*'            # project headers
+    Priority: 4
+
+# Spacing & alignment
+SpaceBeforeParens: ControlStatements
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+BinPackParameters: false
+BinPackArguments: false
+AllowAllParametersOfDeclarationOnNextLine: false
+
+# Misc
+FixNamespaceComments: true
+ReflowComments: true
+SeparateDefinitionBlocks: Always
+EmptyLineBeforeAccessModifier: LogicalBlock
