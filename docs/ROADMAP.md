@@ -9,24 +9,18 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
-> **Status (2026-06-17):** Repo scaffolded. **Milestone 0 in progress.**
-> **Brick M0.1 (C++ build foundations) — done:** `conan install` → `cmake --preset dev`
-> → `ninja` builds `rime::core` (static lib) and `rime_hello`, which runs and prints the
-> engine version. fmt is resolved via Conan; the build is warnings-as-errors clean; and
-> `compile_commands.json` is exported for clangd.
-> **Brick M0.2 (C++ test harness) — done:** doctest wired via Conan (a test-only
-> dependency) behind `RIME_BUILD_TESTS`, with a `tests/` tree (one target per module) and
-> a `rime_add_test` helper. First test exercises `rime::core`; `ctest --preset dev` is
-> green.
-> **Brick M0.3 (Rust workspace) — done:** Cargo workspace under `tools/` (`resolver = "2"`,
-> shared `[workspace.package]`), pinned via `rust-toolchain.toml` (stable + rustfmt/clippy),
-> with the `rime-cli` crate (binary `rime`) as a stub. `cargo fmt --check`, `cargo clippy
-> -D warnings`, `cargo build`, and `cargo test` all pass.
-> **Brick M0.4 (dev scripts) — done:** `scripts/setup` + `scripts/build` (POSIX `.sh` +
-> Windows `.ps1`) give one-command setup and build of both halves. `build.sh --clean`
-> rebuilds C++ (conan→cmake→ctest) and Rust (cargo build+test) from scratch on macOS;
-> the `.ps1` mirrors are exercised by CI on Windows. **Remaining M0 brick:** M0.5 CI
-> matrix (Win/Linux/macOS) with format/lint/license gates.
+> **Status (2026-06-17):** **Milestone 0 (build bootstrap & skeleton) — COMPLETE.**
+> The repo is public at https://github.com/LucaSct/rime and **CI is green on Windows,
+> Linux, and macOS**. One command (`scripts/build`) builds and tests both halves: the C++
+> engine (`rime::core` + `rime_hello`) and the Rust tooling (`rime-cli`) build with
+> warnings-as-errors, `rime_hello` runs, and the first unit tests pass. Format / lint /
+> license gates are enforced in CI. Bricks M0.1–M0.5 landed as five commits (see `git log`):
+> C++ build (Conan+CMake+Ninja, fmt) · doctest harness · Rust Cargo workspace · one-command
+> dev scripts · the GitHub Actions matrix.
+>
+> **Next: Milestone 1 (Core foundation)** — allocators, SIMD math (+ derivations), the
+> work-stealing job system, logging/asserts + profiling, minimal reflection, the module
+> loader. Re-plan into bricks before building (see the M1 detail below).
 
 ## Ordering principles (why this sequence)
 
