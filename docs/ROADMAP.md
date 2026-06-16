@@ -20,7 +20,8 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 >
 > **Next: Milestone 1 (Core foundation)** — allocators, SIMD math (+ derivations), the
 > work-stealing job system, logging/asserts + profiling, minimal reflection, the module
-> loader. Re-plan into bricks before building (see the M1 detail below).
+> loader. **Decomposed into bricks M1.1–M1.8** (see the M1 detail below); first up is
+> **M1.1 — diagnostics (log/assert/timing)**.
 
 ## Ordering principles (why this sequence)
 
@@ -77,6 +78,15 @@ matrix with format/lint/license gates. *Inspired by: modern C++/Rust project hyg
 (+ derivation notes); cache-friendly containers (slot map, handle table); a
 **work-stealing job system**; logging/asserts + profiling hooks; minimal **reflection**;
 the **module loader**. *Inspired by: O3DE modules; Bevy/DOD.*
+
+*Bricks (planned 2026-06-17, bottom-up):* **M1.1** diagnostics (log/assert/timing) ·
+**M1.2** allocators (arena/stack/pool, tracked) · **M1.3** math I — vectors & matrices
+(+derivation) · **M1.4** math II — quaternions & transforms (+derivation) · **M1.5**
+containers — slot map / handle table · **M1.6** work-stealing job system (+ a sample that
+saturates all cores) · **M1.7** minimal reflection (describe + serialize a struct) ·
+**M1.8** module loader. Proofs map to M1's "done when": test battery (all) · cores
+saturated (M1.6) · struct serialized (M1.7) · module loaded at runtime (M1.8). After M1.1,
+the memory / math / reflection lines can proceed in parallel.
 
 **M2 — Platform & window.** `engine/platform` — window, input, filesystem, timers,
 threads for Win32/Linux/macOS. No OS `#ifdef`s leak upward. Sample `00-hello-window`.
