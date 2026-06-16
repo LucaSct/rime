@@ -17,9 +17,13 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > **Brick M0.2 (C++ test harness) — done:** doctest wired via Conan (a test-only
 > dependency) behind `RIME_BUILD_TESTS`, with a `tests/` tree (one target per module) and
 > a `rime_add_test` helper. First test exercises `rime::core`; `ctest --preset dev` is
-> green. **Remaining M0 bricks:** M0.3 Rust workspace + `rime-cli`, M0.4 cross-platform dev
-> scripts (`scripts/setup`+`scripts/build`), M0.5 CI matrix (Win/Linux/macOS) with
-> format/lint/license gates.
+> green.
+> **Brick M0.3 (Rust workspace) — done:** Cargo workspace under `tools/` (`resolver = "2"`,
+> shared `[workspace.package]`), pinned via `rust-toolchain.toml` (stable + rustfmt/clippy),
+> with the `rime-cli` crate (binary `rime`) as a stub. `cargo fmt --check`, `cargo clippy
+> -D warnings`, `cargo build`, and `cargo test` all pass. **Remaining M0 bricks:** M0.4
+> cross-platform dev scripts (`scripts/setup`+`scripts/build`), M0.5 CI matrix
+> (Win/Linux/macOS) with format/lint/license gates.
 
 ## Ordering principles (why this sequence)
 

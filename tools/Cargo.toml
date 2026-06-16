@@ -1,0 +1,13 @@
+# Rime's Rust tooling — a Cargo workspace (the Rust half of the two-toolchain build; see
+# docs/adr/0001). Crates are added as milestones land (editor, asset-pipeline, ffi, …);
+# see tools/README.md for the planned set. Shared package metadata lives in
+# [workspace.package] so every crate inherits one version / edition / license.
+[workspace]
+resolver = "2"
+members = ["rime-cli"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["The Rime Engine Authors"]

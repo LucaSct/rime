@@ -1,0 +1,6 @@
+# Pins the Rust toolchain for contributors and CI alike: stable, plus the components our
+# conventions require (rustfmt for formatting, clippy for lints — see tools/README.md).
+# rustup reads this automatically for any cargo command run inside tools/.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

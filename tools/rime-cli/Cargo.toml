@@ -1,0 +1,17 @@
+# rime-cli — Rime's command-line entry point (build/cook a project, run headless, inspect
+# assets). Milestone-0 stub: today it only proves the Rust toolchain + workspace build and
+# run, mirroring rime_hello on the C++ side. Real subcommands arrive from M6, talking to
+# the engine only across the stable FFI boundary (see tools/README.md, docs/adr/0001).
+[package]
+name = "rime-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Command-line tools for the Rime engine"
+
+# The installed binary is `rime` — the short command users actually type — while the crate
+# keeps the descriptive name `rime-cli`.
+[[bin]]
+name = "rime"
+path = "src/main.rs"
