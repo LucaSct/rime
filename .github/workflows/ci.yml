@@ -1,0 +1,94 @@
+# Rime CI — the Milestone-0 proof: the project builds and tests green on Windows, Linux,
+# and macOS, and passes the format / lint / license gates. "Power > portability" still
+# means all three OSes are gated from day one (VISION #2, ROADMAP ordering principle #4).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same ref supersedes in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # one OS failing shouldn't hide the others
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # CMake + Ninja on every OS (our presets use the Ninja generator).
+      - name: Install CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      # Ninja needs cl.exe on PATH on Windows; this exports the MSVC env for later steps.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Conan
+        run: |
+          pip install "conan>=2,<3"
+          conan profile detect --force
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # One command builds + tests both halves (see scripts/build.{sh,ps1}). Running the
+      # dev scripts here is what keeps them honest across all three OSes.
+      - name: Build & test (Unix)
+        if: runner.os != 'Windows'
+        run: ./scripts/build.sh
+
+      - name: Build & test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+  lint:
+    name: format, lint & license
+    runs-on: ubuntu-latest # style/lint are OS-independent — check once.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      # Pinned so formatting is deterministic and matches what we run locally.
+      - name: Install clang-format
+        run: pip install "clang-format==20.1.8"
+
+      - name: C++ formatting (clang-format)
+        run: find engine tests \( -name '*.cpp' -o -name '*.hpp' \) -exec clang-format --dry-run --Werror {} +
+
+      - name: Rust formatting (cargo fmt)
+        working-directory: tools
+        run: cargo fmt --all -- --check
+
+      - name: Rust lints (clippy)
+        working-directory: tools
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: License headers (SPDX)
+        run: ./scripts/check-license-headers.sh

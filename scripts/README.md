@@ -10,6 +10,7 @@ never hide what they do — read them to learn the actual commands.
 | --- | --- |
 | `setup.sh` / `setup.ps1` | Check the toolchain; auto-install the user-local pieces (Conan in an isolated venv, Rust via rustup) and guide on the rest (CMake ≥ 3.24, Ninja, a C++ compiler, the **Vulkan SDK** — needed from M3). |
 | `build.sh` / `build.ps1` | Configure + build the engine (Conan + CMake) and the tools (Cargo) and run their tests, in one step. |
+| `check-license-headers.sh` | Verify every C++/Rust source carries the SPDX header (CLAUDE.md). Run by CI's license gate. |
 
 ```sh
 scripts/setup.sh                 # once, to get the toolchains in place
