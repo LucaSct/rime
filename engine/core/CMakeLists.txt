@@ -11,7 +11,11 @@ add_library(rime_core STATIC
     src/version.cpp
     src/diagnostics/log.cpp
     src/diagnostics/assert.cpp
-    src/diagnostics/profile.cpp)
+    src/diagnostics/profile.cpp
+    src/memory/arena.cpp
+    src/memory/stack_allocator.cpp
+    src/memory/pool.cpp
+    src/memory/memory_tracker.cpp)
 
 # Namespaced alias so dependents link `rime::core`, matching our C++ namespace and
 # signalling "this is a target, not a raw library name."

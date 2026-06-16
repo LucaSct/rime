@@ -4,7 +4,8 @@ rime_add_test(rime_core_tests
     version_test.cpp
     log_test.cpp
     assert_test.cpp
-    profile_test.cpp)
+    profile_test.cpp
+    memory_test.cpp)
 
 target_link_libraries(rime_core_tests
     PRIVATE rime::core)
