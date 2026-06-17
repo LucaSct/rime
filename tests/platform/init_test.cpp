@@ -9,11 +9,13 @@
 #include <thread>
 
 #include "rime/platform/init.hpp"
+#include "rime/platform/window.hpp"
 
 TEST_CASE("init/shutdown lifetime and the main-thread guard") {
     using namespace rime::platform;
 
-    CHECK(init()); // first init succeeds
+    set_headless(true); // a unit test must never bring up a real window server
+    CHECK(init());      // first init succeeds
     CHECK(is_initialized());
     CHECK_FALSE(init());     // double-init is rejected, leaving the layer initialized
     CHECK(on_main_thread()); // the test body runs on the thread that called init()

@@ -19,7 +19,8 @@ native (no GLFW/SDL).
 | Brick | Provides | State |
 | --- | --- | --- |
 | M2.1 | module + seam, `init`/`shutdown` + main-thread contract, monotonic `Clock`, `set_thread_name` | landed |
-| M2.2 | `Window` + event pump (Cocoa → Win32 → X11 → Wayland) | planned |
+| M2.2a | `Window` + event pump + native-handle seam + null backend + **Cocoa** | landed |
+| M2.2b–d | **Win32** · **X11** · **Wayland** window backends | planned |
 | M2.3 | keyboard/mouse events + polled `Input` state | planned |
 | M2.4 | filesystem + frame timer | planned |
 

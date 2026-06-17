@@ -9,14 +9,18 @@
 # OS-agnostic sources — built on every platform.
 add_library(rime_platform STATIC
     src/platform.cpp
-    src/clock.cpp)
+    src/clock.cpp
+    src/event_queue.cpp
+    src/window.cpp
+    src/null/window_null.cpp)
 
 # Namespaced alias so dependents link rime::platform (matching rime::core).
 add_library(rime::platform ALIAS rime_platform)
 
 # Public headers: the OS-agnostic interface, visible to dependents and to our own backends.
 target_include_directories(rime_platform
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # private seam headers (platform_backend.hpp)
 
 # Depends only on the layer below (the layer cake). Threads::Threads arrives transitively
 # (rime::core links it PUBLIC) and is what the pthread-based backends below need.
@@ -27,14 +31,23 @@ target_link_libraries(rime_platform
 # Each branch contributes only its OS's sources. As more of M2 lands (window, input, base dirs)
 # each backend dir grows; the selection logic stays here, one place, and the headers stay clean.
 if(APPLE)
+    # The Cocoa backend is Objective-C++ (.mm); enable that language and compile it with ARC so
+    # Objective-C object lifetimes are automatic. Cocoa (windows/events) + QuartzCore (CAMetalLayer).
+    enable_language(OBJCXX)
     target_sources(rime_platform PRIVATE
-        src/cocoa/threads_cocoa.cpp)
+        src/cocoa/threads_cocoa.cpp
+        src/cocoa/window_cocoa.mm)
+    set_source_files_properties(src/cocoa/window_cocoa.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    set_target_properties(rime_platform PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
+    target_link_libraries(rime_platform PRIVATE "-framework Cocoa" "-framework QuartzCore")
 elseif(WIN32)
     target_sources(rime_platform PRIVATE
-        src/win32/threads_win32.cpp)
+        src/win32/threads_win32.cpp
+        src/win32/window_win32.cpp)
 elseif(UNIX)
     target_sources(rime_platform PRIVATE
-        src/linux/threads_posix.cpp)
+        src/linux/threads_posix.cpp
+        src/linux/window_linux.cpp)
 endif()
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.

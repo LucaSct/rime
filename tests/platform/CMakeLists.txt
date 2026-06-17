@@ -4,7 +4,9 @@
 rime_add_test(rime_platform_tests
     clock_test.cpp
     threads_test.cpp
-    init_test.cpp)
+    init_test.cpp
+    event_test.cpp
+    window_test.cpp)
 
 target_link_libraries(rime_platform_tests
     PRIVATE rime::platform)

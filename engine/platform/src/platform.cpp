@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #include <thread>
 
+#include "platform_backend.hpp"
 #include "rime/platform/init.hpp"
 #include "rime/platform/threads.hpp"
 
@@ -28,10 +29,23 @@ bool init() {
     // Name the main thread so it is identifiable in a debugger/profiler — alongside the job
     // system's workers once those are named too.
     set_thread_name("rime-main");
+    // Start from a clean run-loop state: no stale events, not quitting.
+    detail::clear_events();
+    detail::reset_quit();
+    // Bring up the OS windowing system (NSApplication / DPI awareness / the X11|Wayland
+    // connection) unless we are headless (unit tests, display-less CI).
+    if (!headless()) {
+        detail::native_init();
+    }
     return true;
 }
 
 void shutdown() {
+    if (!headless()) {
+        detail::native_shutdown();
+    }
+    detail::clear_events();
+    detail::reset_quit();
     g_initialized = false;
     g_main_thread_id = std::thread::id{};
 }
