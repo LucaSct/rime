@@ -20,7 +20,8 @@ add_library(rime_core STATIC
     src/math/quat.cpp
     src/math/transform.cpp
     src/jobs/job_system.cpp
-    src/reflect/serialize.cpp)
+    src/reflect/serialize.cpp
+    src/modules/module_manager.cpp)
 
 # Namespaced alias so dependents link `rime::core`, matching our C++ namespace and
 # signalling "this is a target, not a raw library name."
