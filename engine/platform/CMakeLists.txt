@@ -55,12 +55,52 @@ elseif(UNIX)
         src/linux/threads_posix.cpp
         src/linux/window_linux.cpp
         src/linux/window_x11.cpp
+        src/linux/window_wayland.cpp
         src/linux/keymap_linux.cpp
         src/linux/paths_linux.cpp)
 
     # X11 (Xlib) backend. CMake ships FindX11; X11::X11 is the imported Xlib target.
     find_package(X11 REQUIRED)
     target_link_libraries(rime_platform PRIVATE X11::X11)
+
+    # Wayland backend: the client library + xkbcommon (keyboard), located via pkg-config.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
+    pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
+
+    # Wayland ships its protocols as XML; wayland-scanner turns the xdg-shell description into C
+    # client glue — a header we include and a marshalling .c we compile. Locate the scanner and the
+    # protocol data dir from their .pc files (with a find_program fallback for the scanner).
+    pkg_get_variable(WAYLAND_SCANNER wayland-scanner wayland_scanner)
+    if(NOT WAYLAND_SCANNER)
+        find_program(WAYLAND_SCANNER NAMES wayland-scanner REQUIRED)
+    endif()
+    pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+    set(_xdg_xml "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
+    set(_wl_gen "${CMAKE_CURRENT_BINARY_DIR}/wayland")
+    file(MAKE_DIRECTORY "${_wl_gen}")
+    add_custom_command(
+        OUTPUT "${_wl_gen}/xdg-shell-client-protocol.h"
+        COMMAND ${WAYLAND_SCANNER} client-header "${_xdg_xml}"
+                "${_wl_gen}/xdg-shell-client-protocol.h"
+        DEPENDS "${_xdg_xml}" VERBATIM)
+    add_custom_command(
+        OUTPUT "${_wl_gen}/xdg-shell-protocol.c"
+        COMMAND ${WAYLAND_SCANNER} private-code "${_xdg_xml}" "${_wl_gen}/xdg-shell-protocol.c"
+        DEPENDS "${_xdg_xml}" VERBATIM)
+
+    # The generated marshalling code is C and not ours to hold to -Werror, so it builds as its own
+    # static lib with default flags; rime_platform links it and inherits the generated header's dir.
+    enable_language(C)
+    add_library(rime_xdg_shell STATIC
+        "${_wl_gen}/xdg-shell-protocol.c"
+        "${_wl_gen}/xdg-shell-client-protocol.h")
+    target_include_directories(rime_xdg_shell PUBLIC "${_wl_gen}")
+    target_link_libraries(rime_xdg_shell PUBLIC PkgConfig::WAYLAND)
+
+    target_link_libraries(rime_platform
+        PRIVATE rime_xdg_shell PkgConfig::WAYLAND PkgConfig::XKBCOMMON)
+    add_dependencies(rime_platform rime_xdg_shell) # generate the protocol header before compiling
 endif()
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.

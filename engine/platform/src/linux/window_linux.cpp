@@ -9,10 +9,9 @@
 
 // Linux windowing backend selector. Unlike the single-backend OSes, Linux chooses its windowing
 // system at runtime and forwards the native_* seam calls to the winner. Wayland is preferred when
-// the session advertises one ($WAYLAND_DISPLAY); X11 is the fallback (and, until brick M2.2d lands
-// the Wayland backend, the only choice). If neither connects — a display-less box that did not opt
-// into the null backend — g_backend stays null and create_window returns nullptr, exactly as the
-// earlier placeholder did.
+// the session advertises one ($WAYLAND_DISPLAY); X11 is the fallback. If neither connects — a
+// display-less box that did not opt into the null backend — g_backend stays null and create_window
+// returns nullptr, exactly as the earlier placeholder did.
 namespace rime::platform::detail {
 namespace {
 
@@ -21,7 +20,17 @@ const LinuxBackend* g_backend = nullptr;
 } // namespace
 
 void native_init() {
-    // Wayland-first selection arrives with the Wayland backend (M2.2d). For now: X11 only.
+    // Prefer Wayland when the session advertises one; each backend's init() connects to its server
+    // and reports whether it is actually usable here, so a failed Wayland probe falls through to
+    // X11.
+    if (const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
+        wayland_display != nullptr && wayland_display[0] != '\0') {
+        const LinuxBackend& wayland = wayland_backend();
+        if (wayland.init()) {
+            g_backend = &wayland;
+            return;
+        }
+    }
     const LinuxBackend& x11 = x11_backend();
     if (x11.init()) {
         g_backend = &x11;
