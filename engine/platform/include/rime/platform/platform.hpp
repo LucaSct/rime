@@ -10,6 +10,7 @@
 #include "rime/platform/clock.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/platform/init.hpp"
+#include "rime/platform/input.hpp"
 #include "rime/platform/keyboard.hpp"
 #include "rime/platform/mouse.hpp"
 #include "rime/platform/native_window.hpp"

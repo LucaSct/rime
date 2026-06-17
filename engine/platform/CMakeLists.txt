@@ -12,6 +12,7 @@ add_library(rime_platform STATIC
     src/clock.cpp
     src/event_queue.cpp
     src/window.cpp
+    src/input.cpp
     src/null/window_null.cpp)
 
 # Namespaced alias so dependents link rime::platform (matching rime::core).
