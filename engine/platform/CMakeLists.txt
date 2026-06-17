@@ -49,10 +49,18 @@ elseif(WIN32)
         src/win32/window_win32.cpp
         src/win32/paths_win32.cpp)
 elseif(UNIX)
+    # Linux chooses its windowing system at runtime (Wayland or X11), so both backends are compiled
+    # in and window_linux.cpp dispatches between them. keymap_linux is shared (evdev -> Key).
     target_sources(rime_platform PRIVATE
         src/linux/threads_posix.cpp
         src/linux/window_linux.cpp
+        src/linux/window_x11.cpp
+        src/linux/keymap_linux.cpp
         src/linux/paths_linux.cpp)
+
+    # X11 (Xlib) backend. CMake ships FindX11; X11::X11 is the imported Xlib target.
+    find_package(X11 REQUIRED)
+    target_link_libraries(rime_platform PRIVATE X11::X11)
 endif()
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.
