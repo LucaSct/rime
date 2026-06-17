@@ -28,3 +28,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0001](0001-cpp-core-rust-tooling.md) — C++ core + Rust tooling
 - [ADR-0002](0002-vulkan-first-rhi.md) — Vulkan-first behind a thin RHI
 - [ADR-0003](0003-apache-2-license.md) — Apache-2.0 license
+- [ADR-0004](0004-math-conventions.md) — math conventions (float, column-major, RH, Vulkan clip space)
