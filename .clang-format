@@ -53,3 +53,46 @@ FixNamespaceComments: true
 ReflowComments: true
 SeparateDefinitionBlocks: Always
 EmptyLineBeforeAccessModifier: LogicalBlock
+---
+# Objective-C++ (.mm) — the macOS/Cocoa platform backend. clang-format classifies .mm as
+# Objective-C and refuses to format it under a Cpp-only config, so it needs its own section. We
+# mirror the C++ style above so .mm reads identically, and add the ObjC-specific knobs.
+Language: ObjC
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+NamespaceIndentation: None
+IndentCaseLabels: true
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+Cpp11BracedListStyle: true
+PointerAlignment: Left
+ReferenceAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+SortIncludes: CaseInsensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>'
+    Priority: 2
+  - Regex: '^<.*>'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4
+SpaceBeforeParens: ControlStatements
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+BinPackParameters: false
+BinPackArguments: false
+AllowAllParametersOfDeclarationOnNextLine: false
+FixNamespaceComments: true
+ReflowComments: true
+SeparateDefinitionBlocks: Always
+EmptyLineBeforeAccessModifier: LogicalBlock
+ObjCBlockIndentWidth: 4
+ObjCSpaceAfterProperty: false
+ObjCSpaceBeforeProtocolList: true

@@ -48,6 +48,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # The native Linux window backends link against the system windowing libraries: X11/Xlib,
+      # plus Wayland (wayland-client + wayland-scanner for the xdg-shell protocol) and xkbcommon for
+      # Wayland keyboards. macOS/Windows use OS frameworks already present on their runners.
+      - name: Install Linux windowing deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols
+
       # One command builds + tests both halves (see scripts/build.{sh,ps1}). Running the
       # dev scripts here is what keeps them honest across all three OSes.
       - name: Build & test (Unix)
@@ -80,7 +90,7 @@ jobs:
         run: pip install "clang-format==20.1.8"
 
       - name: C++ formatting (clang-format)
-        run: find engine tests \( -name '*.cpp' -o -name '*.hpp' \) -exec clang-format --dry-run --Werror {} +
+        run: find engine tests \( -name '*.cpp' -o -name '*.hpp' -o -name '*.mm' \) -exec clang-format --dry-run --Werror {} +
 
       - name: Rust formatting (cargo fmt)
         working-directory: tools
