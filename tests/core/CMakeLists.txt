@@ -8,7 +8,8 @@ rime_add_test(rime_core_tests
     memory_test.cpp
     math_test.cpp
     quat_test.cpp
-    transform_test.cpp)
+    transform_test.cpp
+    slot_map_test.cpp)
 
 target_link_libraries(rime_core_tests
     PRIVATE rime::core)

@@ -14,6 +14,20 @@ Entries are grouped roughly by area and kept short on purpose.
   loadable at runtime. "Gem" is O3DE's name for the idea; Rime just says "module."
 - **Core / kernel.** The lowest layer everything depends on: memory, math, containers,
   the job system, logging, reflection, and the module loader.
+- **Handle (generational).** A small, copyable id that refers to an element in a
+  container instead of a raw pointer — an `index` plus a `generation` stamp. Survives the
+  container relocating its storage, and detects *use-after-free*: reusing a slot bumps its
+  generation, so a stale handle (old generation) is rejected. See
+  [design/slot-map.md](design/slot-map.md).
+- **Slot map.** A container giving O(1) insert/erase/lookup via generational handles while
+  keeping values in a *packed* (gap-free) array for cache-friendly iteration. The backbone
+  of handle-based, data-oriented storage (entities, assets, GPU objects).
+- **Dense vs. sparse array.** *Dense* = packed with no gaps (great to iterate). *Sparse* =
+  indexed by id with holes (great for O(1) lookup). The slot map combines both: a sparse
+  slot table redirects handles to values living in a dense array.
+- **Swap-and-pop.** O(1) removal from an unordered array: move the last element into the
+  hole left by the removed one, then shrink by one. Keeps the array dense; order is not
+  preserved.
 - **RHI — Render Hardware Interface.** The abstraction that hides the specific graphics
   API. Engine code talks to the RHI; a *backend* (e.g. Vulkan) implements it. Lets us
   add D3D12/Metal later without rewriting the renderer.
