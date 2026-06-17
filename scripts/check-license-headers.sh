@@ -12,7 +12,7 @@ while IFS= read -r f; do
         echo "missing SPDX header: $f"
         missing=1
     fi
-done < <(find engine tests tools -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.rs' \))
+done < <(find engine tests tools -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.mm' -o -name '*.rs' \))
 
 if [ "$missing" -ne 0 ]; then
     echo ""

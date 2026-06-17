@@ -80,7 +80,7 @@ jobs:
         run: pip install "clang-format==20.1.8"
 
       - name: C++ formatting (clang-format)
-        run: find engine tests \( -name '*.cpp' -o -name '*.hpp' \) -exec clang-format --dry-run --Werror {} +
+        run: find engine tests \( -name '*.cpp' -o -name '*.hpp' -o -name '*.mm' \) -exec clang-format --dry-run --Werror {} +
 
       - name: Rust formatting (cargo fmt)
         working-directory: tools
