@@ -276,13 +276,19 @@ void kb_modifiers(void*,
     }
 }
 
-const wl_keyboard_listener g_keyboard_listener = {
-    .keymap = kb_keymap,
-    .enter = kb_enter,
-    .leave = kb_leave,
-    .key = kb_key,
-    .modifiers = kb_modifiers,
-};
+// Value-initialize the listener (every member null) and then set only the events we handle. This
+// way the optional trailing members newer protocol versions add — repeat_info here, the axis_*
+// family on the pointer below — need not be named, which also keeps -Wmissing-field-initializers
+// (GCC warns on designated initializers that omit them) satisfied across libwayland versions.
+const wl_keyboard_listener g_keyboard_listener = [] {
+    wl_keyboard_listener l{};
+    l.keymap = kb_keymap;
+    l.enter = kb_enter;
+    l.leave = kb_leave;
+    l.key = kb_key;
+    l.modifiers = kb_modifiers;
+    return l;
+}();
 
 void ptr_enter(void*,
                wl_pointer*,
@@ -375,13 +381,15 @@ void ptr_axis(void*, wl_pointer*, std::uint32_t, std::uint32_t axis, wl_fixed_t 
     post_event(e);
 }
 
-const wl_pointer_listener g_pointer_listener = {
-    .enter = ptr_enter,
-    .leave = ptr_leave,
-    .motion = ptr_motion,
-    .button = ptr_button,
-    .axis = ptr_axis,
-};
+const wl_pointer_listener g_pointer_listener = [] {
+    wl_pointer_listener l{};
+    l.enter = ptr_enter;
+    l.leave = ptr_leave;
+    l.motion = ptr_motion;
+    l.button = ptr_button;
+    l.axis = ptr_axis;
+    return l;
+}();
 
 void seat_capabilities(void*, wl_seat* seat, std::uint32_t caps) {
     const bool has_keyboard = (caps & WL_SEAT_CAPABILITY_KEYBOARD) != 0;
@@ -442,10 +450,12 @@ void toplevel_close(void* data, xdg_toplevel*) {
     static_cast<WaylandWindow*>(data)->notify_close();
 }
 
-const xdg_toplevel_listener g_toplevel_listener = {
-    .configure = toplevel_configure,
-    .close = toplevel_close,
-};
+const xdg_toplevel_listener g_toplevel_listener = [] {
+    xdg_toplevel_listener l{};
+    l.configure = toplevel_configure;
+    l.close = toplevel_close;
+    return l;
+}();
 
 void registry_global(void*,
                      wl_registry* registry,
