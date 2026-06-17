@@ -102,8 +102,9 @@ threads for Win32/Linux/macOS. No OS `#ifdef`s leak upward. Sample `00-hello-win
 (backends compiled per-OS under `src/<platform>/`, never `#ifdef`-ed into public headers),
 plus `init`/`shutdown`, a monotonic clock, and thread-naming; *proof:* builds and links on
 all three OSes (CI). · **M2.2** window — open/close/resize and the event pump behind a
-`Window` interface; windowing/input backend chosen here (proposed: **GLFW behind the seam**
-for a fast path to first pixels, native backends a later option — its own ADR). · **M2.3**
+`Window` interface, implemented **natively** (no GLFW/SDL — ADR-0006). Decomposed per-OS:
+**M2.2a** `Window`/event seam + native-handle struct + null backend + **Cocoa**; **M2.2b**
+**Win32**; **M2.2c** **X11/Xlib**; **M2.2d** **Wayland** + runtime backend selection. · **M2.3**
 input — keyboard & mouse as events + polled state through the platform interface. · **M2.4**
 filesystem & time — file/path utilities (read/write, exists, base dirs) and a
 high-resolution frame timer (complementing `core` profiling). · **M2.5** sample
@@ -111,10 +112,12 @@ high-resolution frame timer (complementing `core` profiling). · **M2.5** sample
 cleanly, CI-built on all three OSes. M2's "done when" maps to M2.5. After M2.1, the
 window/input and filesystem/time lines can proceed in parallel.
 
-> *Open decision for M2.2:* windowing/input backend — **GLFW** (fast, Vulkan-friendly,
-> cross-platform; behind our seam so it's swappable) vs **native** (Win32/Cocoa/Xlib-Wayland;
-> maximum control, ~3× the work) vs **SDL**. Recommendation: GLFW first behind the `Window`
-> seam, native backends later if needed — to be settled in an ADR when M2.2 is planned.
+> *Decided for M2.2 (ADR-0006):* the windowing/input backend is **native** — Win32 / Cocoa /
+> Xlib + Wayland — for full control of DPI, raw input, cursor capture, event timing, and
+> fullscreen, and to ship zero windowing dependencies (VISION #1). The `Window`/event seam keeps
+> a backend swappable (a GLFW backend could still be added later for bring-up). "Native" is
+> scoped to windowing/input; the clock and filesystem use `std::chrono`/`std::filesystem`, with
+> native shims only where std has no answer (thread naming, exe path, user dirs).
 
 **M3 — RHI + Vulkan backend (first pixels).** `engine/rhi` interfaces (device, swapchain,
 command buffers, pipelines, descriptors, sync) + the **Vulkan backend** (only place that
