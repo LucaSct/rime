@@ -73,11 +73,11 @@ find_package(fmt REQUIRED)
 # ── Modules ───────────────────────────────────────────────────────────────────
 # Added bottom-up as each is implemented. The dependency order mirrors the layer cake
 # in docs/ARCHITECTURE.md (a module may only depend on layers below it).
-add_subdirectory(engine/core)   # foundation: version (M0); memory, math, jobs… (M1+)
-add_subdirectory(engine/app)    # launcher stub (M0) → application framework (later)
+add_subdirectory(engine/core)     # foundation: version (M0); memory, math, jobs… (M1+)
+add_subdirectory(engine/platform) # OS abstraction: window, input, files, threads (M2+)
+add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
 
 # Not yet wired — they land in later milestones/bricks (see docs/ROADMAP.md):
-#   add_subdirectory(engine/platform)    # window, input, files, threads
 #   add_subdirectory(engine/rhi)         # Render Hardware Interface (+ Vulkan backend)
 #   add_subdirectory(engine/ecs)         # the data-oriented world
 #   add_subdirectory(engine/render)      # render graph + high-level renderer
@@ -102,4 +102,4 @@ if(RIME_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-message(STATUS "Rime ${PROJECT_VERSION} — Milestone 0. Targets: rime_core, rime_hello.")
+message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_hello.")
