@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// 00-hello-window — a minimal driver for the M2 platform layer: open a native window, pump the OS
-// event queue, react to a few input events, and close cleanly. There is no rendering yet (that is
-// M3); this exists so the window/input seam can be seen and felt on a real machine. The full M2.5
-// proof (live FPS in the title, CI on all three OSes) lands once the frame timer (M2.4) is in.
+// 00-hello-window — the M2.5 proof for the platform layer: open a native window, run a real frame
+// loop, react to keyboard/mouse through the polled Input layer (M2.3), show a live FPS readout in
+// the title bar via FrameTimer (M2.4), and close cleanly. There is no rendering yet (that is M3);
+// this exercises the whole window/input/timing seam end to end on Windows, Linux (Wayland or X11),
+// and macOS — the same source, no OS #ifdefs.
 //
-// Run it:   build/dev/bin/hello_window           (opens a real window)
+// Run it:   build/dev/bin/hello_window            (opens a real window)
 //           build/dev/bin/hello_window --headless (null backend; for CI / display-less machines)
 
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -38,9 +40,8 @@ int main(int argc, char** argv) {
 
     auto window = create_window(desc);
     if (!window) {
-        // The native backend for this OS is not implemented yet (Win32/Linux are stubs until
-        // M2.2b-d); on macOS this should not happen.
-        std::fprintf(stderr, "create_window() returned null — no native window backend yet?\n");
+        std::fprintf(
+            stderr, "create_window() returned null — no native window backend for this session?\n");
         shutdown();
         return 1;
     }
@@ -52,25 +53,22 @@ int main(int argc, char** argv) {
                 fb.height,
                 window->content_scale());
 
-    // The game loop: pump the OS each frame, drain our event queue, react. pump_events() returns
-    // false once a close/quit is requested; should_close() is the per-window equivalent.
+    Input input;
+    FrameTimer timer;
+    double last_title_update = 0.0;
+
+    // The frame loop: tick the clock, start a new input frame, pump the OS, fold this frame's
+    // events into Input (printing the window-level ones), then query polled state. pump_events()
+    // returns false once a close/quit has been requested; should_close() is the per-window
+    // equivalent.
     while (pump_events() && !window->should_close()) {
+        timer.tick();
+        input.new_frame();
+
         Event e{};
         while (poll_event(e)) {
+            input.process(e);
             switch (e.type) {
-                case EventType::KeyDown:
-                    if (e.key.key == Key::Escape) {
-                        window->request_close();
-                    }
-                    break;
-                case EventType::TextInput:
-                    std::printf("text: %s\n", e.text.utf8);
-                    break;
-                case EventType::MouseButton:
-                    if (e.button.down) {
-                        std::printf("mouse button %d down\n", static_cast<int>(e.button.button));
-                    }
-                    break;
                 case EventType::WindowResize:
                     std::printf("resize: %ux%u px\n", e.resize.size.width, e.resize.size.height);
                     break;
@@ -81,7 +79,29 @@ int main(int argc, char** argv) {
                     break;
             }
         }
-        // No renderer yet, so cap the loop so it does not spin a core flat (~125 Hz).
+
+        // Polled input (M2.3): edge-triggered queries plus the text typed this frame.
+        if (input.key_pressed(Key::Escape)) {
+            window->request_close();
+        }
+        if (input.mouse_pressed(MouseButton::Left)) {
+            std::printf("left click at %.0f, %.0f\n", input.mouse_x(), input.mouse_y());
+        }
+        if (!input.text().empty()) {
+            std::printf("text: %s\n", std::string(input.text()).c_str());
+        }
+
+        // Live FPS in the title bar (M2.4 FrameTimer), refreshed ~4x/second so it stays readable.
+        if (timer.elapsed_seconds() - last_title_update > 0.25) {
+            last_title_update = timer.elapsed_seconds();
+            char title[96];
+            std::snprintf(
+                title, sizeof(title), "Rime — hello window — %.0f FPS", timer.smoothed_fps());
+            window->set_title(title);
+        }
+
+        // No renderer/vsync yet, so cap the loop (~125 Hz) instead of spinning a core flat. Once M3
+        // drives presentation the swapchain paces the frame and this sleep goes away.
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }
 
