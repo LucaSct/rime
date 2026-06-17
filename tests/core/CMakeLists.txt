@@ -9,7 +9,11 @@ rime_add_test(rime_core_tests
     math_test.cpp
     quat_test.cpp
     transform_test.cpp
-    slot_map_test.cpp)
+    slot_map_test.cpp
+    chase_lev_deque_test.cpp)
+
+# The work-stealing-deque test spins up real threads, so it needs the platform threads library.
+find_package(Threads REQUIRED)
 
 target_link_libraries(rime_core_tests
-    PRIVATE rime::core)
+    PRIVATE rime::core Threads::Threads)

@@ -97,6 +97,16 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Job system / task scheduler.** Splits work into many small *jobs* spread across CPU
   cores, often *work-stealing* (idle cores grab jobs from busy ones). The backbone of
   multicore engine performance.
+- **Work-stealing deque (Chase-Lev).** The per-worker queue behind work stealing: its
+  owner pushes/pops one end (LIFO, uncontended), while idle threads *steal* from the other
+  end (FIFO). Lock-free. See [design/work-stealing-deque.md](design/work-stealing-deque.md).
+- **Lock-free / atomic / memory ordering.** *Lock-free*: threads coordinate via atomic
+  operations instead of mutexes, so no thread waits on another holding a lock. *Memory
+  ordering* (relaxed / acquire / release / seq-cst) controls how one thread's memory writes
+  become visible to others — the correctness knobs of lock-free code.
+- **ABA problem.** A lock-free hazard: a value reads as `A`, changes to `B`, then back to
+  `A`, fooling a compare-and-swap into thinking nothing changed. Avoided here by using
+  ever-increasing indices that are never reused.
 - **Cache-friendly.** Laid out so the CPU's caches are used well (usually contiguous
   arrays processed in order). Often a bigger win than algorithmic cleverness.
 - **SIMD.** "Single Instruction, Multiple Data" — CPU instructions that process several
