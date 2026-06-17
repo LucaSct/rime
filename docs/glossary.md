@@ -107,6 +107,9 @@ Entries are grouped roughly by area and kept short on purpose.
 - **ABA problem.** A lock-free hazard: a value reads as `A`, changes to `B`, then back to
   `A`, fooling a compare-and-swap into thinking nothing changed. Avoided here by using
   ever-increasing indices that are never reused.
+- **Fork/join.** A parallel pattern: *fork* work into many jobs, then *join* (wait) until
+  they all finish. In Rime a job group shares an atomic counter; `parallel_for` forks one
+  job per chunk and joins before returning. See [design/job-system.md](design/job-system.md).
 - **Cache-friendly.** Laid out so the CPU's caches are used well (usually contiguous
   arrays processed in order). Often a bigger win than algorithmic cleverness.
 - **SIMD.** "Single Instruction, Multiple Data" — CPU instructions that process several

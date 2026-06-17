@@ -84,6 +84,13 @@ add_subdirectory(engine/app)    # launcher stub (M0) → application framework (
 #   add_subdirectory(engine/physics)     # rigid bodies, collision
 #   add_subdirectory(engine/destruction) # part-based destruction (headline system)
 
+# ── Samples ─────────────────────────────────────────────────────────────────────
+# Runnable example projects that exercise the engine; each milestone's proof lives here.
+# First up: M1.6's job-system core-saturation demo.
+if(RIME_BUILD_SAMPLES)
+    add_subdirectory(samples)
+endif()
+
 # ── Tests ───────────────────────────────────────────────────────────────────────
 # Unit tests live under tests/ (one target per module; see docs/ROADMAP.md, "Testing &
 # profiling"). doctest is resolved by Conan as a test-only dependency, so we only look

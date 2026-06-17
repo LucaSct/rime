@@ -18,7 +18,8 @@ add_library(rime_core STATIC
     src/memory/memory_tracker.cpp
     src/math/mat.cpp
     src/math/quat.cpp
-    src/math/transform.cpp)
+    src/math/transform.cpp
+    src/jobs/job_system.cpp)
 
 # Namespaced alias so dependents link `rime::core`, matching our C++ namespace and
 # signalling "this is a target, not a raw library name."
@@ -29,11 +30,15 @@ add_library(rime::core ALIAS rime_core)
 target_include_directories(rime_core
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# The job system spins up std::thread workers, so core needs the platform threads library.
+# PUBLIC so anything linking rime::core (modules, tests, samples) also gets it.
+find_package(Threads REQUIRED)
+
 # fmt is PUBLIC because our public headers use it: the logging macros expand to fmt::format
 # at the call site, and version_string formats with it. Keeping the dependency public is
-# therefore required, not just convenient.
+# therefore required, not just convenient. Threads is PUBLIC for the reason noted above.
 target_link_libraries(rime_core
-    PUBLIC fmt::fmt)
+    PUBLIC fmt::fmt Threads::Threads)
 
 # Assertions (RIME_ASSERT / RIME_ASSERT_MSG / RIME_VERIFY) are active in Debug-style builds
 # and compiled out otherwise; RIME_PANIC is always on. PUBLIC so everyone linking rime::core
