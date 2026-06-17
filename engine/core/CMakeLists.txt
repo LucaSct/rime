@@ -16,7 +16,9 @@ add_library(rime_core STATIC
     src/memory/stack_allocator.cpp
     src/memory/pool.cpp
     src/memory/memory_tracker.cpp
-    src/math/mat.cpp)
+    src/math/mat.cpp
+    src/math/quat.cpp
+    src/math/transform.cpp)
 
 # Namespaced alias so dependents link `rime::core`, matching our C++ namespace and
 # signalling "this is a target, not a raw library name."

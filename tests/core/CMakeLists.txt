@@ -6,7 +6,9 @@ rime_add_test(rime_core_tests
     assert_test.cpp
     profile_test.cpp
     memory_test.cpp
-    math_test.cpp)
+    math_test.cpp
+    quat_test.cpp
+    transform_test.cpp)
 
 target_link_libraries(rime_core_tests
     PRIVATE rime::core)
