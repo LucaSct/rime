@@ -125,3 +125,10 @@ Entries are grouped roughly by area and kept short on purpose.
   *brick* is a small, individually-planned, reviewable piece of a milestone.
 - **Stub.** A placeholder implementation that compiles but isn't real yet. Always
   labeled as such.
+- **Reflection.** The ability to inspect a type's structure (its fields, their names,
+  types, and offsets) at runtime. Lets generic code — serializers, editor inspectors —
+  work on any registered struct without per-type boilerplate. See
+  [design/reflection.md](design/reflection.md).
+- **Serialization.** Turning in-memory data into a flat byte stream (and back), e.g. to
+  save a scene or cook an asset. Rime's is reflection-driven: register a struct and it
+  serializes for free.
