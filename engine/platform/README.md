@@ -20,9 +20,10 @@ native (no GLFW/SDL).
 | --- | --- | --- |
 | M2.1 | module + seam, `init`/`shutdown` + main-thread contract, monotonic `Clock`, `set_thread_name` | landed |
 | M2.2a | `Window` + event pump + native-handle seam + null backend + **Cocoa** | landed |
-| M2.2b–d | **Win32** · **X11** · **Wayland** window backends | planned |
-| M2.3 | keyboard/mouse events + polled `Input` state | planned |
-| M2.4 | filesystem + frame timer | planned |
+| M2.2b–d | **Win32** · **X11** · **Wayland** window backends (Linux selects at runtime) | landed |
+| M2.3 | keyboard/mouse events + polled `Input` state | landed |
+| M2.4 | filesystem (file I/O, exe + per-user base dirs) + frame timer | landed |
+| M2.5 | `00-hello-window` proof — live FPS in the title + polled input | landed |
 
 ## Layout
 
@@ -33,5 +34,5 @@ src/cocoa/  src/win32/  src/linux/   # per-OS backends, compiled only on their O
 ```
 
 `std` is used where it already wraps the OS-native call (the monotonic clock is
-`std::chrono::steady_clock`; filesystem will be `std::filesystem`); native code is written only
-where the standard library has no answer — thread naming today, windowing/input next.
+`std::chrono::steady_clock`; filesystem is `std::filesystem`); native code is written only where the
+standard library has no answer — windowing/input, thread naming, the executable path, and user dirs.

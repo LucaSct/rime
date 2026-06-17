@@ -127,6 +127,19 @@ Entries are grouped roughly by area and kept short on purpose.
   `$XDG_DATA_HOME` (default `~/.local/share`), config in `$XDG_CONFIG_HOME` (`~/.config`), cache in
   `$XDG_CACHE_HOME` (`~/.cache`). The platform layer follows it on Linux, and the equivalent
   `~/Library` and `%APPDATA%`/`%LOCALAPPDATA%` conventions on macOS and Windows.
+- **Windowing system / backend.** The OS service that owns on-screen windows and input. Rime has a
+  native backend per system — **Win32** (Windows), **Cocoa** (macOS), and on Linux both **X11** (the
+  long-standing X Window System) and **Wayland** (its modern replacement) — all behind one `Window`
+  interface; Linux picks Wayland or X11 at runtime.
+- **Compositor (Wayland).** The Wayland display server: it owns the screen and composites client
+  surfaces. Wayland is a *protocol*, so a client binds the interfaces it needs (compositor, shell,
+  seat) from a registry and communicates through asynchronous messages rather than direct calls.
+- **xdg-shell.** The Wayland protocol extension that gives a bare surface a desktop-window role —
+  title, move/resize, minimize/close — via `xdg_surface` + `xdg_toplevel`. Its client code is
+  generated from an XML description by `wayland-scanner` at build time.
+- **DPI / content scale.** The ratio between physical pixels and layout points on HiDPI/Retina
+  displays. A window reports its *framebuffer* size (real pixels, what the swapchain uses), its
+  *logical* size (points/DIPs), and their ratio (`content_scale()`).
 
 ## Project & process
 

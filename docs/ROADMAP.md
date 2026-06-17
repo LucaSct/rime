@@ -24,13 +24,17 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > reflection · the runtime module loader. Math bricks ship derivation notes (`docs/math/`),
 > systems bricks ship design notes (`docs/design/`), and decisions live in ADRs 0004–0005.
 >
-> **In progress: Milestone 2 (Platform & window)** — `engine/platform`: window, input, filesystem,
-> timers, threads, behind a seam with no OS `#ifdef`s leaking upward. **Bricks M2.1–M2.5** (see the
-> M2 detail below). Landed so far (see `git log`): **M2.1** module & seam · **M2.2a** the
-> `Window`/event seam + null + Cocoa backend · **M2.3** polled keyboard/mouse input · **M2.4**
-> filesystem & time (file I/O, executable + per-user base dirs, frame timer). Remaining: the
-> **M2.2b/c/d** Win32/X11/Wayland window backends and **M2.5** the `00-hello-window` proof across
-> all three OSes — M2's "done when".
+> **Milestone 2 (Platform & window) — COMPLETE.** `engine/platform` provides window, input,
+> filesystem, timers, and threads behind a seam with no OS `#ifdef`s leaking upward. All bricks
+> landed (see `git log`): **M2.1** module & seam · **M2.2a–d** a native window + event pump on
+> **Cocoa, Win32, X11, and Wayland** (Linux selects Wayland or X11 at runtime) · **M2.3** polled
+> keyboard/mouse input · **M2.4** filesystem + frame timer · **M2.5** the `00-hello-window` proof.
+> CI builds and link-checks all four backends on Windows/Linux/macOS; the runnable proof opens a
+> window and handles input on Cocoa/Win32/X11 (a Wayland surface is created and event-wired but maps
+> on screen once the M3 renderer attaches a buffer).
+>
+> **Next: Milestone 3 (RHI + Vulkan backend) — first pixels.** A textured quad through the RHI on
+> Windows/Linux + macOS/MoltenVK; the window's `native_handle()` becomes a Vulkan surface.
 
 ## Ordering principles (why this sequence)
 
