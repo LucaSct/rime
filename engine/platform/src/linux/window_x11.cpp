@@ -37,6 +37,15 @@ namespace {
 Display* g_display = nullptr;
 Atom g_wm_delete = 0;
 
+class X11Window;
+
+// Maps each X11 window id to its C++ wrapper so the pump can route an XEvent to the right window. A
+// function-local static -> constructed on first use, with no static-init-order concerns.
+std::unordered_map<::Window, X11Window*>& g_windows() {
+    static std::unordered_map<::Window, X11Window*> windows;
+    return windows;
+}
+
 KeyMods mods_from_state(unsigned int state) {
     KeyMods m = KeyMods::None;
     if ((state & ShiftMask) != 0) {
@@ -309,14 +318,6 @@ private:
     bool have_last_mouse_ = false;
     bool should_close_ = false;
 };
-
-// Function-local static for the window registry, so it is constructed on first use and never
-// involved in static-init order (the backend may build a window early). Maps each X11 window id to
-// its C++ wrapper so the pump can route an XEvent to the right window.
-std::unordered_map<::Window, X11Window*>& g_windows() {
-    static std::unordered_map<::Window, X11Window*> windows;
-    return windows;
-}
 
 bool x11_init() {
     XInitThreads(); // we pump on one thread, but X requires this before any threaded use later
