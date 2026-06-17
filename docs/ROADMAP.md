@@ -9,19 +9,25 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
-> **Status (2026-06-17):** **Milestone 0 (build bootstrap & skeleton) — COMPLETE.**
-> The repo is public at https://github.com/LucaSct/rime and **CI is green on Windows,
-> Linux, and macOS**. One command (`scripts/build`) builds and tests both halves: the C++
-> engine (`rime::core` + `rime_hello`) and the Rust tooling (`rime-cli`) build with
-> warnings-as-errors, `rime_hello` runs, and the first unit tests pass. Format / lint /
-> license gates are enforced in CI. Bricks M0.1–M0.5 landed as five commits (see `git log`):
-> C++ build (Conan+CMake+Ninja, fmt) · doctest harness · Rust Cargo workspace · one-command
-> dev scripts · the GitHub Actions matrix.
+> **Status (2026-06-17):** **Milestones 0 (build bootstrap) and 1 (core foundation) —
+> COMPLETE.** The repo is public at https://github.com/LucaSct/rime with **CI green on
+> Windows, Linux, and macOS**. `scripts/build` builds and tests the C++ engine and the Rust
+> tooling with warnings-as-errors; format / lint / license-header gates are enforced in CI.
 >
-> **Next: Milestone 1 (Core foundation)** — allocators, SIMD math (+ derivations), the
-> work-stealing job system, logging/asserts + profiling, minimal reflection, the module
-> loader. **Decomposed into bricks M1.1–M1.8** (see the M1 detail below); first up is
-> **M1.1 — diagnostics (log/assert/timing)**.
+> **M1 (core foundation) is done — all four "done when" proofs pass:** the unit-test battery
+> is green; `samples/jobs_core_saturation` saturates the cores through the work-stealing job
+> system; reflection describes and round-trips a struct through bytes; and a module loads at
+> runtime. Bricks M1.1–M1.8 landed as focused commits (see `git log`): diagnostics
+> (log/assert/timing) · allocators (arena/stack/pool, tracked) · math I (vectors & matrices)
+> · math II (quaternions & transforms) · containers (generational slot map) · the lock-free
+> work-stealing deque (M1.6a) and the job system + core-saturation sample (M1.6b) · minimal
+> reflection · the runtime module loader. Math bricks ship derivation notes (`docs/math/`),
+> systems bricks ship design notes (`docs/design/`), and decisions live in ADRs 0004–0005.
+>
+> **Next: Milestone 2 (Platform & window)** — `engine/platform`: window, input, filesystem,
+> timers, threads, behind a seam with no OS `#ifdef`s leaking upward. **Decomposed into
+> bricks M2.1–M2.5** (see the M2 detail below); first up is **M2.1 — the platform module &
+> seam**.
 
 ## Ordering principles (why this sequence)
 
@@ -90,6 +96,25 @@ the memory / math / reflection lines can proceed in parallel.
 
 **M2 — Platform & window.** `engine/platform` — window, input, filesystem, timers,
 threads for Win32/Linux/macOS. No OS `#ifdef`s leak upward. Sample `00-hello-window`.
+
+*Bricks (planned 2026-06-17, bottom-up):* **M2.1** platform module & seam — the
+`engine/platform` target, public interface headers, and OS-backend selection in CMake
+(backends compiled per-OS under `src/<platform>/`, never `#ifdef`-ed into public headers),
+plus `init`/`shutdown`, a monotonic clock, and thread-naming; *proof:* builds and links on
+all three OSes (CI). · **M2.2** window — open/close/resize and the event pump behind a
+`Window` interface; windowing/input backend chosen here (proposed: **GLFW behind the seam**
+for a fast path to first pixels, native backends a later option — its own ADR). · **M2.3**
+input — keyboard & mouse as events + polled state through the platform interface. · **M2.4**
+filesystem & time — file/path utilities (read/write, exists, base dirs) and a
+high-resolution frame timer (complementing `core` profiling). · **M2.5** sample
+`00-hello-window` — **the proof:** a window opens, handles keyboard/mouse, and closes
+cleanly, CI-built on all three OSes. M2's "done when" maps to M2.5. After M2.1, the
+window/input and filesystem/time lines can proceed in parallel.
+
+> *Open decision for M2.2:* windowing/input backend — **GLFW** (fast, Vulkan-friendly,
+> cross-platform; behind our seam so it's swappable) vs **native** (Win32/Cocoa/Xlib-Wayland;
+> maximum control, ~3× the work) vs **SDL**. Recommendation: GLFW first behind the `Window`
+> seam, native backends later if needed — to be settled in an ADR when M2.2 is planned.
 
 **M3 — RHI + Vulkan backend (first pixels).** `engine/rhi` interfaces (device, swapchain,
 command buffers, pipelines, descriptors, sync) + the **Vulkan backend** (only place that
