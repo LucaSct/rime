@@ -7,7 +7,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <cstdint>
+#include <thread>
 
 #include "rime/platform/clock.hpp"
 
@@ -18,4 +20,18 @@ TEST_CASE("Clock::now_ns is monotonic and nonzero") {
     CHECK(a != 0);
     // steady_clock never runs backwards, so back-to-back reads are non-decreasing.
     CHECK(b >= a);
+}
+
+TEST_CASE("FrameTimer measures positive deltas and counts frames") {
+    using rime::platform::FrameTimer;
+    FrameTimer timer;
+
+    timer.tick(); // first tick only sets the baseline; its delta is 0
+    CHECK(timer.frame_count() == 1);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    timer.tick();
+    CHECK(timer.frame_count() == 2);
+    CHECK(timer.delta_seconds() > 0.0);
+    CHECK(timer.elapsed_seconds() > 0.0);
 }

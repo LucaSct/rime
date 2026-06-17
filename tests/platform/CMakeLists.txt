@@ -7,7 +7,8 @@ rime_add_test(rime_platform_tests
     init_test.cpp
     event_test.cpp
     window_test.cpp
-    input_test.cpp)
+    input_test.cpp
+    filesystem_test.cpp)
 
 target_link_libraries(rime_platform_tests
     PRIVATE rime::platform)

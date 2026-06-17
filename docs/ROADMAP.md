@@ -24,10 +24,13 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > reflection · the runtime module loader. Math bricks ship derivation notes (`docs/math/`),
 > systems bricks ship design notes (`docs/design/`), and decisions live in ADRs 0004–0005.
 >
-> **Next: Milestone 2 (Platform & window)** — `engine/platform`: window, input, filesystem,
-> timers, threads, behind a seam with no OS `#ifdef`s leaking upward. **Decomposed into
-> bricks M2.1–M2.5** (see the M2 detail below); first up is **M2.1 — the platform module &
-> seam**.
+> **In progress: Milestone 2 (Platform & window)** — `engine/platform`: window, input, filesystem,
+> timers, threads, behind a seam with no OS `#ifdef`s leaking upward. **Bricks M2.1–M2.5** (see the
+> M2 detail below). Landed so far (see `git log`): **M2.1** module & seam · **M2.2a** the
+> `Window`/event seam + null + Cocoa backend · **M2.3** polled keyboard/mouse input · **M2.4**
+> filesystem & time (file I/O, executable + per-user base dirs, frame timer). Remaining: the
+> **M2.2b/c/d** Win32/X11/Wayland window backends and **M2.5** the `00-hello-window` proof across
+> all three OSes — M2's "done when".
 
 ## Ordering principles (why this sequence)
 

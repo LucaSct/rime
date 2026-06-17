@@ -117,6 +117,17 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Hot path.** Code that runs every frame / very frequently. Where performance rules
   override convenience.
 
+## Platform & OS
+
+- **Monotonic clock.** A clock that only ever moves forward at a steady rate and never jumps
+  (unlike wall-clock time, which NTP/DST can shift). The right source for measuring durations and
+  frame times — only *differences* are meaningful. Rime's `platform::Clock` wraps
+  `std::chrono::steady_clock`.
+- **XDG Base Directory.** The Linux/freedesktop convention for where per-user files live: data in
+  `$XDG_DATA_HOME` (default `~/.local/share`), config in `$XDG_CONFIG_HOME` (`~/.config`), cache in
+  `$XDG_CACHE_HOME` (`~/.cache`). The platform layer follows it on Linux, and the equivalent
+  `~/Library` and `%APPDATA%`/`%LOCALAPPDATA%` conventions on macOS and Windows.
+
 ## Project & process
 
 - **ADR — Architecture Decision Record.** A short document capturing one significant

@@ -21,4 +21,27 @@ public:
     [[nodiscard]] static std::uint64_t now_ns() noexcept;
 };
 
+// Per-frame timing built on Clock: the delta time the simulation integrates with, plus a smoothed
+// FPS readout and a frame counter. Call tick() once per frame; the first call only establishes the
+// baseline (its delta is 0).
+class FrameTimer {
+public:
+    void tick() noexcept;
+
+    [[nodiscard]] double delta_seconds() const noexcept { return delta_s_; } // last frame's dt
+
+    [[nodiscard]] double elapsed_seconds() const noexcept; // since the first tick
+
+    [[nodiscard]] double smoothed_fps() const noexcept { return smoothed_fps_; }
+
+    [[nodiscard]] std::uint64_t frame_count() const noexcept { return frames_; }
+
+private:
+    std::uint64_t start_ns_ = 0;
+    std::uint64_t last_ns_ = 0;
+    double delta_s_ = 0.0;
+    double smoothed_fps_ = 0.0;
+    std::uint64_t frames_ = 0;
+};
+
 } // namespace rime::platform

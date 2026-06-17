@@ -13,6 +13,7 @@ add_library(rime_platform STATIC
     src/event_queue.cpp
     src/window.cpp
     src/input.cpp
+    src/filesystem.cpp
     src/null/window_null.cpp)
 
 # Namespaced alias so dependents link rime::platform (matching rime::core).
@@ -37,18 +38,21 @@ if(APPLE)
     enable_language(OBJCXX)
     target_sources(rime_platform PRIVATE
         src/cocoa/threads_cocoa.cpp
-        src/cocoa/window_cocoa.mm)
+        src/cocoa/window_cocoa.mm
+        src/cocoa/paths_cocoa.cpp)
     set_source_files_properties(src/cocoa/window_cocoa.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
     set_target_properties(rime_platform PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
     target_link_libraries(rime_platform PRIVATE "-framework Cocoa" "-framework QuartzCore")
 elseif(WIN32)
     target_sources(rime_platform PRIVATE
         src/win32/threads_win32.cpp
-        src/win32/window_win32.cpp)
+        src/win32/window_win32.cpp
+        src/win32/paths_win32.cpp)
 elseif(UNIX)
     target_sources(rime_platform PRIVATE
         src/linux/threads_posix.cpp
-        src/linux/window_linux.cpp)
+        src/linux/window_linux.cpp
+        src/linux/paths_linux.cpp)
 endif()
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.
