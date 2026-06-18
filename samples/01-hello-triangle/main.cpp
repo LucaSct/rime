@@ -1,21 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// 01-hello-triangle — the M3.3 proof, runnable form. It brings up the RHI, renders Rime's first
-// triangle into an off-screen image, reads the pixels back, and prints an ASCII preview so a human
-// can see the result with no window and no GPU image viewer. This is the "first pixels" milestone:
-// the same render is asserted pixel-by-pixel by tests/rhi/offscreen_triangle_test (the CI gate).
+// 01-hello-triangle — Rime's first triangle, rendered through the RHI, two ways:
+//   * windowed (M3.4, the default): open a native window, build a swapchain from it, and *present*
+//     the triangle each frame with frames-in-flight — the headed proof that pixels reach a screen
+//     (and the moment the M2 Wayland surface finally maps, since it shows only once a buffer is
+//     attached).
+//   * off-screen (M3.3, --offscreen, and the automatic fallback where there's no display): render
+//     into an image, read it back, and print an ASCII preview — runnable anywhere, including on a
+//     software GPU (lavapipe) in CI. This is the form tests/rhi/offscreen_triangle_test asserts on.
 //
-// M3.4 will upgrade this same sample to present the triangle in a real window via a swapchain (and
-// finally map the M2 Wayland surface); for now, off-screen keeps it runnable anywhere — including
-// on the software GPU (lavapipe) used in CI.
-//
-// Run it:   build/dev/bin/hello_triangle
+// Run it:   build/dev/bin/hello_triangle                 (opens a window)
+//           build/dev/bin/hello_triangle --frames 120    (present 120 frames, then exit)
+//           build/dev/bin/hello_triangle --offscreen     (ASCII preview; no window needed)
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <string_view>
 #include <vector>
 
+#include "rime/platform/platform.hpp"
 #include "rime/rhi/rhi.hpp"
 #include "triangle_render.hpp"
 
@@ -23,10 +29,15 @@
 #include "triangle.frag.spv.h"
 #include "triangle.vert.spv.h"
 
-int main() {
+namespace {
+
+constexpr rime::rhi::ClearColor kClear{0.1f, 0.1f, 0.3f, 1.0f}; // dark blue
+
+// Off-screen path (M3.3): render to an image, read it back, ASCII-preview it. No window, no display,
+// no hardware GPU needed — the same render the pixel-readback CI gate asserts on.
+int run_offscreen() {
     rime::rhi::DeviceDesc desc{};
     desc.app_name = "01-hello-triangle";
-
     auto device = rime::rhi::create_device(desc);
     if (!device) {
         std::fprintf(stderr,
@@ -34,14 +45,13 @@ int main() {
                      "ICD (e.g. lavapipe / MoltenVK) installed?\n");
         return 1;
     }
-    std::printf("01-hello-triangle: rendering on '%s'\n", device->adapter().name.c_str());
+    std::printf("01-hello-triangle: rendering off-screen on '%s'\n", device->adapter().name.c_str());
 
     const std::uint32_t size = 32; // small, so the ASCII preview fits a terminal
-    const rime::rhi::ClearColor clear{0.1f, 0.1f, 0.3f, 1.0f};
     const std::vector<std::uint8_t> pixels =
         rime_sample::render_triangle_offscreen(*device,
                                                size,
-                                               clear,
+                                               kClear,
                                                triangle_vert_spv,
                                                sizeof(triangle_vert_spv),
                                                triangle_frag_spv,
@@ -54,14 +64,131 @@ int main() {
         for (std::uint32_t x = 0; x < size; ++x) {
             const std::uint8_t* p = &pixels[(static_cast<std::size_t>(y) * size + x) * 4];
             const int luminance = (p[0] * 3 + p[1] + p[2]) / 5; // 0..~255
-            const int idx = luminance * 9 / 255;                // 0..9 into the ramp
-            std::putchar(ramp[idx]);
+            std::putchar(ramp[luminance * 9 / 255]);            // 0..9 into the ramp
         }
         std::putchar('\n');
     }
-
-    std::printf("01-hello-triangle: rendered a %ux%u triangle off-screen. First pixels!\n",
-                size,
-                size);
+    std::printf("01-hello-triangle: rendered a %ux%u triangle off-screen. First pixels!\n", size, size);
     return 0;
+}
+
+// Windowed path (M3.4): open a native window, build a swapchain, and present the triangle each frame
+// until the window closes (or `max_frames` is reached, for automated runs). Returns false when no
+// window/device/surface is available, so main() can fall back to the off-screen path.
+bool run_windowed(int max_frames) {
+    using namespace rime::platform;
+
+    if (!init()) {
+        std::fprintf(stderr, "01-hello-triangle: platform::init() failed\n");
+        return false;
+    }
+
+    WindowDesc wd{};
+    wd.title = "Rime — 01 hello triangle";
+    wd.width = 640;
+    wd.height = 480;
+    auto window = create_window(wd);
+    if (!window) {
+        shutdown();
+        return false; // no window backend / no display -> caller falls back to off-screen
+    }
+    window->show();
+
+    rime::rhi::DeviceDesc dd{};
+    dd.app_name = "01-hello-triangle";
+    auto device = rime::rhi::create_device(dd);
+    if (!device) {
+        shutdown();
+        return false; // no GPU/ICD -> fall back
+    }
+
+    rime::rhi::SwapchainDesc sd{};
+    sd.window = window->native_handle();
+    const Extent2D fb = window->framebuffer_size();
+    sd.extent = {fb.width, fb.height};
+    auto swapchain = device->create_swapchain(sd);
+    if (!swapchain) {
+        std::fprintf(stderr, "01-hello-triangle: could not create a swapchain for this window\n");
+        device.reset();
+        shutdown();
+        return false;
+    }
+
+    std::printf("01-hello-triangle: presenting on '%s' (%ux%u). Press ESC or close the window.\n",
+                device->adapter().name.c_str(),
+                swapchain->extent().width,
+                swapchain->extent().height);
+
+    // Build the triangle against the swapchain's color format (the pipeline bakes the format in).
+    auto tri = rime_sample::make_triangle(*device,
+                                          swapchain->format(),
+                                          triangle_vert_spv,
+                                          sizeof(triangle_vert_spv),
+                                          triangle_frag_spv,
+                                          sizeof(triangle_frag_spv));
+
+    // The frame loop: pump the OS, fold events into Input (so ESC closes), then acquire -> record ->
+    // present. acquire/present return an out-of-date signal on resize; we rebuild the swapchain and
+    // carry on. Presentation paces the loop (FIFO vsync), so there is no manual sleep here.
+    Input input;
+    int frames = 0;
+    while (pump_events() && !window->should_close()) {
+        if (max_frames > 0 && frames >= max_frames) break;
+
+        input.new_frame();
+        Event e{};
+        while (poll_event(e)) input.process(e);
+        if (input.key_pressed(Key::Escape)) window->request_close();
+
+        rime::rhi::TextureHandle target = swapchain->acquire_next_image();
+        if (!target.is_valid()) { // out of date (window resized): rebuild and try again next frame
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+            continue;
+        }
+
+        auto cmd = device->begin_commands();
+        rime_sample::record_triangle(*cmd, tri, target, swapchain->extent(), kClear);
+        if (!swapchain->present(*cmd)) {
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+        }
+        ++frames;
+    }
+
+    // Tear down GPU objects before the platform, swapchain before the device it borrows.
+    device->wait_idle();
+    rime_sample::destroy_triangle(*device, tri);
+    swapchain.reset();
+    device.reset();
+    shutdown();
+    std::printf("01-hello-triangle: presented %d frame%s. First pixels on screen!\n",
+                frames,
+                frames == 1 ? "" : "s");
+    return true;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    bool offscreen = false;
+    int frames = 0; // 0 = run until the window is closed
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view a(argv[i]);
+        if (a == "--offscreen" || a == "--headless") {
+            offscreen = true;
+        } else if (a == "--windowed") {
+            offscreen = false;
+        } else if (a == "--frames" && i + 1 < argc) {
+            frames = std::atoi(argv[++i]);
+        }
+    }
+
+    if (offscreen) return run_offscreen();
+
+    // Default to the windowed presentation proof; fall back to the off-screen ASCII preview where
+    // there is no window/display (over SSH, or a CI runner) so the sample still runs everywhere.
+    if (run_windowed(frames)) return 0;
+    std::printf("01-hello-triangle: no window/display available — falling back to off-screen.\n");
+    return run_offscreen();
 }
