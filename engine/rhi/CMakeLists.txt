@@ -29,10 +29,34 @@ if(RIME_RHI_VULKAN)
         src/vulkan/device_vulkan.cpp
         src/vulkan/resources_vulkan.cpp
         src/vulkan/pipeline_vulkan.cpp
-        src/vulkan/command_buffer_vulkan.cpp)
+        src/vulkan/command_buffer_vulkan.cpp
+        src/vulkan/surface_vulkan.cpp     # M3.4: VkSurfaceKHR from a platform window
+        src/vulkan/swapchain_vulkan.cpp)  # M3.4: swapchain + frames-in-flight + present
 
     # Lets the agnostic factory (src/device.cpp) compile in the call to the Vulkan backend.
     target_compile_definitions(rime_rhi PRIVATE RIME_RHI_VULKAN=1)
+
+    # Presentation (M3.4): surface creation (src/vulkan/surface_vulkan.cpp) is the one place the
+    # backend touches an OS windowing type. Define this OS's VK_USE_PLATFORM_* so volk / the Vulkan
+    # headers declare the matching vkCreate*SurfaceKHR and its create-info struct — mirroring how
+    # engine/platform compiles one window backend per OS. Linux compiles BOTH Xlib and Wayland (it
+    # selects at runtime), so it needs both macros and both libraries' headers.
+    if(APPLE)
+        target_compile_definitions(rime_rhi PRIVATE VK_USE_PLATFORM_METAL_EXT)
+    elseif(WIN32)
+        target_compile_definitions(rime_rhi PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+    elseif(UNIX)
+        target_compile_definitions(rime_rhi PRIVATE
+            VK_USE_PLATFORM_XLIB_KHR VK_USE_PLATFORM_WAYLAND_KHR)
+        # The Xlib/Wayland surface create-info structs reference Display*/wl_display*, so the surface
+        # TU needs <X11/Xlib.h> and <wayland-client.h>. Reuse the same imported targets that
+        # engine/platform locates; we link them only for their headers (the vkCreate*SurfaceKHR
+        # entry points are resolved at runtime via volk / vkGetInstanceProcAddr, not linked).
+        find_package(X11 REQUIRED)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
+        target_link_libraries(rime_rhi PRIVATE X11::X11 PkgConfig::WAYLAND)
+    endif()
 
     # VMA is a single header whose *implementation* must be compiled in exactly one TU. It is
     # third-party C++ we don't hold to -Werror, so — exactly like rime_xdg_shell for the Wayland

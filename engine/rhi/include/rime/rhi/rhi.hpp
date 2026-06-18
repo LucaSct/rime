@@ -14,4 +14,5 @@
 #include "rime/rhi/command_buffer.hpp"
 #include "rime/rhi/device.hpp"
 #include "rime/rhi/resources.hpp"
+#include "rime/rhi/swapchain.hpp"
 #include "rime/rhi/types.hpp"

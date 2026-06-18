@@ -114,6 +114,9 @@ VulkanDevice::~VulkanDevice() {
         if (s.module) vkDestroyShaderModule(device_, s.module, nullptr);
     }
     for (auto& t : textures_) {
+        // Swapchain backbuffers own their image+view; the VulkanSwapchain frees them in its own
+        // destructor (which runs first, before the device). Skip them here so we never double-free.
+        if (t.from_swapchain) continue;
         if (t.view) vkDestroyImageView(device_, t.view, nullptr);
         if (t.image) vmaDestroyImage(allocator_, t.image, t.allocation);
     }
@@ -161,6 +164,31 @@ bool VulkanDevice::create_instance(const DeviceDesc& desc) {
     if (has_ext(exts, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
         enabled_exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
         flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
+
+    // Surface extensions (M3.4): enable VK_KHR_surface + this OS's window-system surface extension(s)
+    // when present, so a Swapchain can later be created from a platform window. The Device stays
+    // window-agnostic — we only make presentation *possible*; a headless build (lavapipe in CI) has
+    // none of these and the off-screen path needs no surface, so this degrades gracefully. The
+    // VK_USE_PLATFORM_* macros are set per-OS in CMakeLists.txt (Linux compiles both Xlib + Wayland).
+    if (has_ext(exts, VK_KHR_SURFACE_EXTENSION_NAME)) {
+        enabled_exts.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+        if (has_ext(exts, VK_EXT_METAL_SURFACE_EXTENSION_NAME))
+            enabled_exts.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+#endif
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+        if (has_ext(exts, VK_KHR_WIN32_SURFACE_EXTENSION_NAME))
+            enabled_exts.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+#endif
+#if defined(VK_USE_PLATFORM_XLIB_KHR)
+        if (has_ext(exts, VK_KHR_XLIB_SURFACE_EXTENSION_NAME))
+            enabled_exts.push_back(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
+#endif
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
+        if (has_ext(exts, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME))
+            enabled_exts.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+#endif
     }
 
     const std::string app_name(desc.app_name);
@@ -278,6 +306,11 @@ bool VulkanDevice::create_logical_device() {
     if (has_ext(exts, "VK_KHR_portability_subset")) {
         enabled_exts.push_back("VK_KHR_portability_subset");
     }
+    // VK_KHR_swapchain (M3.4): the device-level half of presentation. Enabled when present so a
+    // Swapchain can be created; absent on a headless software ICD, where we never present.
+    if (has_ext(exts, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+        enabled_exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
 
     VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     f13.dynamicRendering = VK_TRUE;
@@ -376,6 +409,41 @@ void VulkanDevice::submit_blocking(CommandBuffer& commands) {
 
 void VulkanDevice::wait_idle() {
     if (device_) vkDeviceWaitIdle(device_);
+}
+
+std::unique_ptr<Swapchain> VulkanDevice::create_swapchain(const SwapchainDesc& desc) {
+    return VulkanSwapchain::create(*this, desc);
+}
+
+void VulkanDevice::submit_with_sync(VulkanCommandBuffer& vcb,
+                                    VkSemaphore wait,
+                                    VkSemaphore signal,
+                                    VkFence fence) {
+    VkCommandBuffer cmd = vcb.handle();
+    VK_CHECK(vkEndCommandBuffer(cmd));
+
+    // synchronization2 submit: wait the image-acquired semaphore, signal render-finished, trip the
+    // in-flight fence. We wait at COLOR_ATTACHMENT_OUTPUT so earlier pipeline stages can overlap the
+    // acquire, and only the color write blocks on the image being ready.
+    VkSemaphoreSubmitInfo wait_si{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    wait_si.semaphore = wait;
+    wait_si.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    VkSemaphoreSubmitInfo signal_si{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    signal_si.semaphore = signal;
+    signal_si.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    VkCommandBufferSubmitInfo csi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    csi.commandBuffer = cmd;
+
+    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.waitSemaphoreInfoCount = 1;
+    si.pWaitSemaphoreInfos = &wait_si;
+    si.commandBufferInfoCount = 1;
+    si.pCommandBufferInfos = &csi;
+    si.signalSemaphoreInfoCount = 1;
+    si.pSignalSemaphoreInfos = &signal_si;
+    VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &si, fence));
 }
 
 std::unique_ptr<Device> create_vulkan_device(const DeviceDesc& desc) {

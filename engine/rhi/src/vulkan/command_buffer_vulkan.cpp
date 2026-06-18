@@ -9,42 +9,9 @@
 #include "vulkan/vulkan_backend.hpp"
 
 namespace rime::rhi {
-namespace {
 
-// One image layout transition via synchronization2. The stage/access masks say "the work that must
-// finish before the transition" (src) and "the work that waits for it" (dst). We pass them in so
-// each call site states its exact dependency rather than over-synchronizing with a full barrier.
-void transition_image(VkCommandBuffer cmd,
-                      VkImage image,
-                      VkImageLayout old_layout,
-                      VkImageLayout new_layout,
-                      VkPipelineStageFlags2 src_stage,
-                      VkAccessFlags2 src_access,
-                      VkPipelineStageFlags2 dst_stage,
-                      VkAccessFlags2 dst_access) {
-    VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = src_stage;
-    barrier.srcAccessMask = src_access;
-    barrier.dstStageMask = dst_stage;
-    barrier.dstAccessMask = dst_access;
-    barrier.oldLayout = old_layout;
-    barrier.newLayout = new_layout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-
-    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dep.imageMemoryBarrierCount = 1;
-    dep.pImageMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2(cmd, &dep);
-}
-
-} // namespace
+// Image-layout transitions use the shared transition_image() in vulkan_common.hpp (synchronization2);
+// the swapchain's present-layout transition reuses the same helper.
 
 void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     VulkanTexture* tex = device_.lookup(info.color.target);

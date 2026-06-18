@@ -8,6 +8,7 @@
 
 #include "rime/rhi/command_buffer.hpp"
 #include "rime/rhi/resources.hpp"
+#include "rime/rhi/swapchain.hpp"
 #include "rime/rhi/types.hpp"
 
 // The Device is the root of the RHI: it owns the GPU connection and is the factory for every
@@ -79,6 +80,13 @@ public:
 
     // Block until the GPU is idle. Used before tearing down resources.
     virtual void wait_idle() = 0;
+
+    // ── Presentation (M3.4) ────────────────────────────────────────────────────────────────
+    // Create a swapchain that presents to a platform window (built from its NativeWindow handles).
+    // Returns nullptr if the device has no surface/swapchain support — e.g. a headless device on a
+    // software ICD, where the off-screen path is used instead. The Device stays window-agnostic; the
+    // returned Swapchain is the only object that owns a surface. See swapchain.hpp / ADR-0009.
+    [[nodiscard]] virtual std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) = 0;
 
 protected:
     Device() = default; // construct only through create_device()

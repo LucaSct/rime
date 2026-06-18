@@ -2,12 +2,16 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "rime/core/containers/slot_map.hpp"
+#include "rime/platform/native_window.hpp"
 #include "rime/rhi/command_buffer.hpp"
 #include "rime/rhi/device.hpp"
+#include "rime/rhi/swapchain.hpp"
 #include "vulkan/vulkan_common.hpp"
 
 // The concrete Vulkan implementation of the RHI. VulkanDevice owns the instance/device/queues/VMA
@@ -38,6 +42,9 @@ struct VulkanTexture {
     // Single-threaded recording in M3 makes this simple bookkeeping; the render graph will own
     // layout/lifetime tracking properly later.
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // True for a swapchain backbuffer: the VkImage is owned by the VkSwapchainKHR, not VMA, so
+    // teardown destroys our view but must NOT vmaDestroyImage it (the swapchain frees the image).
+    bool from_swapchain = false;
 };
 
 struct VulkanShader {
@@ -50,6 +57,8 @@ struct VulkanPipeline {
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
 };
+
+class VulkanCommandBuffer; // defined below; VulkanDevice::submit_with_sync takes one by reference
 
 class VulkanDevice final : public Device {
 public:
@@ -78,6 +87,8 @@ public:
     void submit_blocking(CommandBuffer& commands) override;
     void wait_idle() override;
 
+    [[nodiscard]] std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
+
     // ── Internals used by VulkanCommandBuffer (same module) ──────────────────────────────────
     [[nodiscard]] VkDevice vk_device() const noexcept { return device_; }
     [[nodiscard]] VulkanBuffer* lookup(BufferHandle h) noexcept {
@@ -89,6 +100,27 @@ public:
     [[nodiscard]] VulkanPipeline* lookup(PipelineHandle h) noexcept {
         return pipelines_.get(rebrand<VulkanPipeline>(h));
     }
+
+    // ── Internals used by VulkanSwapchain (same module) ──────────────────────────────────────
+    [[nodiscard]] VkInstance vk_instance() const noexcept { return instance_; }
+    [[nodiscard]] VkPhysicalDevice vk_physical() const noexcept { return physical_; }
+    [[nodiscard]] std::uint32_t graphics_family() const noexcept { return graphics_family_; }
+    [[nodiscard]] VkQueue graphics_queue() const noexcept { return graphics_queue_; }
+    [[nodiscard]] VkCommandPool vk_command_pool() const noexcept { return command_pool_; }
+
+    // End + submit `cmd` with this frame's synchronization (wait the image-acquired semaphore at the
+    // color-output stage, signal render-finished, trip the in-flight fence) — the present-paced
+    // counterpart to submit_blocking(). Does not wait or free the command buffer: the swapchain
+    // waits the fence and frees the buffer when the frame slot recurs.
+    void submit_with_sync(VulkanCommandBuffer& cmd, VkSemaphore wait, VkSemaphore signal, VkFence fence);
+
+    // Register/forget a swapchain backbuffer as a texture so it flows through the normal command
+    // path (begin_rendering, transitions). adopt returns the public handle; forget erases the slot
+    // only — the swapchain owns and frees the VkImage/VkImageView itself.
+    [[nodiscard]] TextureHandle adopt_swapchain_image(const VulkanTexture& t) {
+        return rebrand<Texture>(textures_.insert(t));
+    }
+    void forget_texture(TextureHandle h) noexcept { textures_.erase(rebrand<VulkanTexture>(h)); }
 
 private:
     VulkanDevice() = default;
@@ -141,6 +173,60 @@ public:
 private:
     VulkanDevice& device_;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+};
+
+// Create a VkSurfaceKHR for a platform window. The one OS-touching spot in the backend: it switches
+// on NativeWindow.system and calls the matching vkCreate*SurfaceKHR, each guarded by the platform's
+// VK_USE_PLATFORM_* macro (set per-OS in CMakeLists.txt, mirroring engine/platform's per-OS backend
+// selection). Returns VK_NULL_HANDLE on failure (after logging). Defined in surface_vulkan.cpp.
+[[nodiscard]] VkSurfaceKHR create_surface(VkInstance instance,
+                                          const platform::NativeWindow& window) noexcept;
+
+// The Vulkan swapchain: a VkSurfaceKHR + VkSwapchainKHR, its backbuffer images (registered as
+// textures so begin_rendering can target them), and the per-frame synchronization that overlaps CPU
+// recording with GPU execution (frames-in-flight). Created from a VulkanDevice; see swapchain.hpp.
+class VulkanSwapchain final : public Swapchain {
+public:
+    static std::unique_ptr<VulkanSwapchain> create(VulkanDevice& device, const SwapchainDesc& desc);
+    ~VulkanSwapchain() override;
+
+    [[nodiscard]] TextureHandle acquire_next_image() override;
+    bool present(CommandBuffer& commands) override;
+    void recreate(Extent2D extent) override;
+    [[nodiscard]] Format format() const override { return rhi_format_; }
+    [[nodiscard]] Extent2D extent() const override { return {extent_.width, extent_.height}; }
+
+private:
+    explicit VulkanSwapchain(VulkanDevice& device) noexcept : device_(device) {}
+    bool build(Extent2D extent);          // (re)create the swapchain, its images/views, per-image sync
+    void destroy_swapchain_objects() noexcept; // images/views/swapchain (keeps the surface + per-frame sync)
+
+    // Two frames in flight: while the GPU works on frame N the CPU records frame N+1. Each in-flight
+    // slot owns an image-available semaphore, an in-flight fence, and the command buffer it last
+    // submitted (freed when the slot recurs). render-finished is per *image* (not per frame) so a
+    // present never waits on a semaphore still pending from a different image — the standard fix.
+    static constexpr std::uint32_t kFramesInFlight = 2;
+
+    VulkanDevice& device_;
+    VkSurfaceKHR surface_ = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
+    VkFormat vk_format_ = VK_FORMAT_UNDEFINED;
+    Format rhi_format_ = Format::Undefined;
+    VkColorSpaceKHR color_space_ = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    VkPresentModeKHR present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
+    VkExtent2D extent_{};
+    bool vsync_ = true;
+
+    std::vector<VkImage> images_;             // owned by the swapchain
+    std::vector<VkImageView> views_;          // owned by us, one per image
+    std::vector<TextureHandle> handles_;      // the RHI handle each image is registered under
+    std::vector<VkSemaphore> render_finished_; // one per image
+
+    std::array<VkSemaphore, kFramesInFlight> image_available_{};
+    std::array<VkFence, kFramesInFlight> in_flight_{};
+    std::array<VkCommandBuffer, kFramesInFlight> frame_cmd_{}; // deferred free (in flight until slot recurs)
+    std::uint32_t frame_ = 0;        // current in-flight slot
+    std::uint32_t image_index_ = 0;  // last acquired swapchain image index
 };
 
 // Factory used by the agnostic create_device() in src/device.cpp. Declared here (not in a public

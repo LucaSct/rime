@@ -81,6 +81,20 @@ template <class Dst, class Src>
     return VK_FORMAT_UNDEFINED;
 }
 
+// Reverse of to_vk for the handful of formats a swapchain surface reports back to us (M3.4): we pick
+// a VkFormat from the surface's supported list and need to hand the caller the matching rhi::Format
+// so it can build a pipeline whose color attachment matches. Only swapchain-relevant formats are
+// mapped; anything else is Undefined (and logged by the caller).
+[[nodiscard]] inline Format from_vk(VkFormat f) noexcept {
+    switch (f) {
+        case VK_FORMAT_R8G8B8A8_UNORM: return Format::RGBA8Unorm;
+        case VK_FORMAT_R8G8B8A8_SRGB: return Format::RGBA8Srgb;
+        case VK_FORMAT_B8G8R8A8_UNORM: return Format::BGRA8Unorm;
+        case VK_FORMAT_B8G8R8A8_SRGB: return Format::BGRA8Srgb;
+        default: return Format::Undefined;
+    }
+}
+
 [[nodiscard]] inline VkBufferUsageFlags to_vk(BufferUsage u) noexcept {
     VkBufferUsageFlags out = 0;
     if (has(u, BufferUsage::Vertex)) out |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
@@ -146,6 +160,41 @@ template <class Dst, class Src>
         case VK_PHYSICAL_DEVICE_TYPE_CPU: return DeviceType::Cpu;
         default: return DeviceType::Other;
     }
+}
+
+// One image-layout transition via synchronization2 (the Vulkan 1.3 barrier model). The stage/access
+// masks name "the work that must finish before the transition" (src) and "the work that waits for
+// it" (dst), so each call site states its exact dependency instead of over-synchronizing. Shared by
+// the command encoder (render-target / transfer transitions) and the swapchain (the present-layout
+// transition) — one definition, one place the barrier idiom is explained.
+inline void transition_image(VkCommandBuffer cmd,
+                             VkImage image,
+                             VkImageLayout old_layout,
+                             VkImageLayout new_layout,
+                             VkPipelineStageFlags2 src_stage,
+                             VkAccessFlags2 src_access,
+                             VkPipelineStageFlags2 dst_stage,
+                             VkAccessFlags2 dst_access) noexcept {
+    VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = src_stage;
+    barrier.srcAccessMask = src_access;
+    barrier.dstStageMask = dst_stage;
+    barrier.dstAccessMask = dst_access;
+    barrier.oldLayout = old_layout;
+    barrier.newLayout = new_layout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dep);
 }
 
 } // namespace rime::rhi
