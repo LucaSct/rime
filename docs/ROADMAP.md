@@ -33,8 +33,14 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > window and handles input on Cocoa/Win32/X11 (a Wayland surface is created and event-wired but maps
 > on screen once the M3 renderer attaches a buffer).
 >
-> **Next: Milestone 3 (RHI + Vulkan backend) — first pixels.** A textured quad through the RHI on
-> Windows/Linux + macOS/MoltenVK; the window's `native_handle()` becomes a Vulkan surface.
+> **Milestone 3 (RHI + Vulkan backend) — in progress (first pixels).** The graphics seam
+> `engine/rhi` and its Vulkan backend are up: a `Device` (volk + VMA, Vulkan 1.3 dynamic rendering +
+> synchronization2), offline GLSL→SPIR-V shaders, and a triangle rendered **off-screen** with a
+> pixel-readback proof — bricks **M3.1–M3.3** (*implemented; first green build + CI run pending*). The
+> off-screen proof is what lets M3 run **GPU-free in CI** on lavapipe, mirroring M2's headless split.
+> **Next:** M3.4 swapchain/presentation (the triangle in a real window; the M2 Wayland surface finally
+> maps) and M3.5 textures + descriptors → the **textured quad** (M3's "done when"). Decisions in
+> ADRs 0007 (Vulkan bootstrapping) and 0008 (offline shaders).
 
 ## Ordering principles (why this sequence)
 
@@ -130,6 +136,28 @@ window/input and filesystem/time lines can proceed in parallel.
 command buffers, pipelines, descriptors, sync) + the **Vulkan backend** (only place that
 includes Vulkan headers); GLSL/HLSL→SPIR-V; VMA. Samples `01-hello-triangle` → textured
 quad. *(ADR-0002.)*
+
+*Bricks (planned 2026-06-18, bottom-up):* **M3.1** the `engine/rhi` seam (agnostic interface +
+opaque handles) and Vulkan device bring-up — instance + validation, physical-device selection
+(requires Vulkan 1.3 + dynamic rendering + synchronization2), logical device + queue, VMA; *proof:*
+builds & link-checks the backend on all three OSes (CI) and a headless device-creation test on
+**lavapipe**. · **M3.2** offline GLSL→SPIR-V (`rime_add_shaders`, mirroring `wayland-scanner`) + the
+RHI `Shader`. · **M3.3** graphics pipeline (dynamic rendering, no render-pass objects), the command
+encoder, vertex buffers/textures, and an **off-screen triangle verified by pixel readback** — the
+GPU-free "first pixels" proof (`tests/rhi`), runnable as `samples/01-hello-triangle`. · **M3.4**
+`VkSurfaceKHR` from `platform::NativeWindow` (all four window systems) + swapchain + frames-in-flight
++ present — the triangle in a real window (Win/Linux + macOS/MoltenVK), and the M2 Wayland surface
+finally maps. · **M3.5** index buffers, texture upload + sampler + descriptor model → the **textured
+quad** (M3's "done when"). M3.1–M3.3 land the first triangle off-screen; M3.4–M3.5 put it on screen
+and texture it.
+
+> *Decided for M3 (ADRs 0007–0008):* the Vulkan backend uses the **volk** meta-loader (no loader
+> linked at build time), **VMA** for memory, and a **Vulkan 1.3** baseline — **dynamic rendering +
+> synchronization2**, so there are no `VkRenderPass`/`VkFramebuffer` objects and the RHI maps cleanly
+> onto the M5 render graph. Shaders are compiled **offline** (GLSL→SPIR-V at build time) and embedded;
+> the engine ships no runtime shader compiler. Build dependencies come from **Conan**; the runtime
+> loader + ICD (a GPU driver, **MoltenVK** on macOS, **lavapipe** on GPU-less CI) are the
+> environment's, so the off-screen render proof runs green on all three OSes without a GPU.
 
 **M4 — ECS / the world.** `engine/ecs` — entities, components, archetype storage,
 parallel systems on the job system, queries, a transform hierarchy. Sample

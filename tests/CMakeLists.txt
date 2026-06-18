@@ -20,3 +20,8 @@ endfunction()
 
 add_subdirectory(core)
 add_subdirectory(platform)
+
+# The RHI tests render through the Vulkan backend, so they only exist when it is built.
+if(RIME_RHI_VULKAN)
+    add_subdirectory(rhi)
+endif()

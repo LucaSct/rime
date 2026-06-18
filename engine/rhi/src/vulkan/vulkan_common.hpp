@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+#pragma once
+
+// The Vulkan backend's private toolbox: the third-party includes (confined to this directory by
+// the seam, ADR-0002), a Vk_CHECK macro, the RHI-enum -> Vulkan-enum translation table, and the
+// "rebrand" trick that lets a public handle index a backend SlotMap. Nothing here is visible
+// outside engine/rhi/src/vulkan.
+
+#include <volk.h> // volk defines VK_NO_PROTOTYPES and brings in the Vulkan headers
+
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#include <vk_mem_alloc.h> // declarations only; the implementation lives in vma_impl.cpp
+
+#include <cstdint>
+
+#include "rime/core/containers/handle.hpp"
+#include "rime/core/diagnostics/assert.hpp"
+#include "rime/core/diagnostics/log.hpp"
+#include "rime/rhi/types.hpp"
+
+namespace rime::rhi {
+
+// Map a VkResult to its enumerator name, for log messages. Only the codes we actually expect are
+// spelled out; anything else prints its number.
+[[nodiscard]] inline const char* result_string(VkResult r) noexcept {
+    switch (r) {
+        case VK_SUCCESS: return "VK_SUCCESS";
+        case VK_NOT_READY: return "VK_NOT_READY";
+        case VK_TIMEOUT: return "VK_TIMEOUT";
+        case VK_INCOMPLETE: return "VK_INCOMPLETE";
+        case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+        case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+        case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+        case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+        case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+        case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+        case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+        default: return "VK_ERROR_<other>";
+    }
+}
+
+// Check a Vulkan call: log on failure and trip an assertion in checked builds. Vulkan creation
+// paths additionally test their results and return gracefully; this macro is the loud backstop for
+// "should never fail" calls (and surfaces the exact call site in the message).
+#define VK_CHECK(expr)                                                                             \
+    do {                                                                                           \
+        const VkResult _vk_r = (expr);                                                             \
+        if (_vk_r != VK_SUCCESS) {                                                                 \
+            RIME_ERROR("Vulkan: {} -> {}", #expr, ::rime::rhi::result_string(_vk_r));              \
+            RIME_ASSERT_MSG(_vk_r == VK_SUCCESS, "VK_CHECK failed");                               \
+        }                                                                                          \
+    } while (false)
+
+// A public RHI handle (e.g. Handle<Buffer>) and the backend's SlotMap handle (Handle<VulkanBuffer>)
+// have identical layout — both are {index, generation}. They differ only in their phantom tag, which
+// keeps the *public* API type-safe. At the public/backend boundary we re-tag a handle to the
+// backend's value type so it can index the backend's SlotMap. This is the one sanctioned place that
+// conversion happens, and it is a pure field copy.
+template <class Dst, class Src>
+[[nodiscard]] inline core::Handle<Dst> rebrand(core::Handle<Src> h) noexcept {
+    return core::Handle<Dst>{h.index, h.generation};
+}
+
+// ── RHI enum -> Vulkan enum translation ─────────────────────────────────────────────────────
+[[nodiscard]] inline VkFormat to_vk(Format f) noexcept {
+    switch (f) {
+        case Format::Undefined: return VK_FORMAT_UNDEFINED;
+        case Format::R8Unorm: return VK_FORMAT_R8_UNORM;
+        case Format::RGBA8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
+        case Format::RGBA8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
+        case Format::BGRA8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
+        case Format::BGRA8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
+        case Format::RG32Float: return VK_FORMAT_R32G32_SFLOAT;
+        case Format::RGB32Float: return VK_FORMAT_R32G32B32_SFLOAT;
+        case Format::RGBA32Float: return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case Format::D32Float: return VK_FORMAT_D32_SFLOAT;
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+[[nodiscard]] inline VkBufferUsageFlags to_vk(BufferUsage u) noexcept {
+    VkBufferUsageFlags out = 0;
+    if (has(u, BufferUsage::Vertex)) out |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (has(u, BufferUsage::Index)) out |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (has(u, BufferUsage::Uniform)) out |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    if (has(u, BufferUsage::Storage)) out |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (has(u, BufferUsage::TransferSrc)) out |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (has(u, BufferUsage::TransferDst)) out |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    return out;
+}
+
+[[nodiscard]] inline VkImageUsageFlags to_vk(TextureUsage u) noexcept {
+    VkImageUsageFlags out = 0;
+    if (has(u, TextureUsage::ColorAttachment)) out |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (has(u, TextureUsage::DepthStencil)) out |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (has(u, TextureUsage::Sampled)) out |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (has(u, TextureUsage::TransferSrc)) out |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (has(u, TextureUsage::TransferDst)) out |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    return out;
+}
+
+[[nodiscard]] inline VkAttachmentLoadOp to_vk(LoadOp op) noexcept {
+    switch (op) {
+        case LoadOp::Load: return VK_ATTACHMENT_LOAD_OP_LOAD;
+        case LoadOp::Clear: return VK_ATTACHMENT_LOAD_OP_CLEAR;
+        case LoadOp::DontCare: return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    }
+    return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+}
+
+[[nodiscard]] inline VkAttachmentStoreOp to_vk(StoreOp op) noexcept {
+    switch (op) {
+        case StoreOp::Store: return VK_ATTACHMENT_STORE_OP_STORE;
+        case StoreOp::DontCare: return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    }
+    return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+}
+
+[[nodiscard]] inline VkPrimitiveTopology to_vk(PrimitiveTopology t) noexcept {
+    switch (t) {
+        case PrimitiveTopology::TriangleList: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        case PrimitiveTopology::TriangleStrip: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        case PrimitiveTopology::LineList: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        case PrimitiveTopology::PointList: return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    }
+    return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+}
+
+[[nodiscard]] inline VkCullModeFlags to_vk(CullMode c) noexcept {
+    switch (c) {
+        case CullMode::None: return VK_CULL_MODE_NONE;
+        case CullMode::Front: return VK_CULL_MODE_FRONT_BIT;
+        case CullMode::Back: return VK_CULL_MODE_BACK_BIT;
+    }
+    return VK_CULL_MODE_NONE;
+}
+
+[[nodiscard]] inline DeviceType to_rhi(VkPhysicalDeviceType t) noexcept {
+    switch (t) {
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return DeviceType::IntegratedGpu;
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return DeviceType::DiscreteGpu;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return DeviceType::VirtualGpu;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU: return DeviceType::Cpu;
+        default: return DeviceType::Other;
+    }
+}
+
+} // namespace rime::rhi

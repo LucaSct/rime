@@ -39,8 +39,29 @@ class RimeRecipe(ConanFile):
         #   2. It will become the basis of the engine's logging in Milestone 1.
         self.requires("fmt/10.2.1")
 
+        # ── RHI Vulkan backend (Milestone 3) ──────────────────────────────────────────
+        # We deliberately depend on only what we *build* against, not what we *run* against.
+        # volk is a Vulkan "meta-loader": it dlopen()s the platform Vulkan loader
+        # (libvulkan.{so,dylib} / vulkan-1.dll) at runtime via volkInitialize(), so we link
+        # NO loader at build time -- only the headers (types/enums) and volk's dispatch table.
+        # The runtime loader *and* an ICD (a real GPU driver, MoltenVK on macOS, or lavapipe in
+        # CI) are provided by the environment, not Conan -- the same dev-vs-CI split M2 used for
+        # windows. We use the newest stable headers; the *runtime* baseline we require is Vulkan
+        # 1.3 (dynamic rendering + synchronization2) -- see docs/adr/0007.
+        self.requires("vulkan-headers/1.4.313.0")
+        self.requires("volk/1.4.313.0")
+        # VMA (Vulkan Memory Allocator): header-only, battle-tested GPU allocator. We never
+        # call vkAllocateMemory directly; VMA sub-allocates from a few big device allocations.
+        self.requires("vulkan-memory-allocator/3.3.0")
+
         # doctest: a fast-compiling, header-only unit-test framework. Declared as a
         # *test* requirement -- it is needed to build and run our tests, but it is not
         # part of the engine we ship, so it must never leak to consumers of Rime. Conan
         # keeps test_requires out of the package's runtime requirement graph.
         self.test_requires("doctest/2.4.11")
+
+    def build_requirements(self):
+        # glslang gives us glslangValidator, which compiles our GLSL shaders to SPIR-V at
+        # build time (ADR-0008 -- offline compilation, no runtime shader compiler shipped).
+        # A *build-context* tool: it runs on the build machine and is never part of Rime.
+        self.tool_requires("glslang/1.4.313.0")

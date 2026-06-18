@@ -76,7 +76,35 @@ Entries are grouped roughly by area and kept short on purpose.
   dynamic, shadow-casting lights affordably.
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
-  render graph automates them.
+  render graph automates them. Vulkan's modern form is *synchronization2*
+  (`VkImageMemoryBarrier2`), which states the source/destination stage+access in one place.
+- **SPIR-V.** The binary intermediate language GPUs consume. Rime authors shaders in GLSL
+  and compiles them to SPIR-V *at build time* (offline; see
+  [adr/0008](adr/0008-offline-shader-compilation.md)), then hands the bytes to the RHI.
+- **Command buffer.** A recorded list of GPU commands (begin a render, bind, draw, copy)
+  that is built on the CPU and then *submitted* to a queue for the GPU to execute.
+- **Swapchain.** The set of images the windowing system shows on screen, cycled
+  (*presented*) one per frame. Off-screen rendering needs no swapchain — which is why
+  Rime's first-pixels proof can run headlessly in CI (it renders to an image and reads it
+  back). Presentation, and thus the swapchain, arrives in M3.4.
+- **Dynamic rendering.** The Vulkan 1.3 way to render without pre-declared `VkRenderPass`/
+  `VkFramebuffer` objects: you simply begin/end rendering against an attachment. Less
+  boilerplate, and a clean fit for a render graph. Rime's RHI uses it (ADR-0007).
+- **Descriptor / descriptor set.** How a shader is told *which* resources (textures,
+  buffers, samplers) to use — a binding table the pipeline reads from. Rime's RHI adds
+  these with the textured quad (M3.5).
+- **Validation layers.** Optional Vulkan layers that check every API call for misuse and
+  report errors. Rime enables them in debug builds (off when optimized), so mistakes are
+  caught loudly and early.
+- **VMA (Vulkan Memory Allocator).** A widely-used library that sub-allocates GPU memory
+  from a few large device allocations, so the engine never calls `vkAllocateMemory`
+  directly. Rime asks for memory by *access pattern* (GpuOnly / CpuToGpu / GpuToCpu).
+- **volk.** A Vulkan "meta-loader": it loads the Vulkan entry points at runtime (and
+  per-device), so the engine links no loader at build time. See ADR-0007.
+- **Loader / ICD.** The Vulkan *loader* (`libvulkan`) is the library apps call; an *ICD*
+  (Installable Client Driver) is an actual implementation it dispatches to — a GPU driver,
+  **MoltenVK** (Vulkan-on-Metal, for macOS), or **lavapipe** (Mesa's CPU/software Vulkan,
+  used to run Rime's render proof on GPU-less CI machines).
 
 ## Physics & destruction
 

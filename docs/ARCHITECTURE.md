@@ -81,12 +81,17 @@ Windowing, input, filesystem, high-resolution timers, threads/atomics — one in
 three implementations (Win32, Linux, macOS). Keeps OS `#ifdef`s out of the rest of the
 engine.
 
-### `rhi` ⚪ — *Render Hardware Interface (the graphics seam)*
+### `rhi` 🟡 — *Render Hardware Interface (the graphics seam)*
 A modern, explicit graphics abstraction (devices, queues, command buffers, pipelines,
 descriptor/binding model, synchronization). **The Vulkan backend is the only code that
-includes Vulkan headers.** Everything above talks to `rhi` interfaces. This is the seam
-that lets D3D12 / Metal / console backends arrive later without touching the renderer.
-→ [ADR-0002](adr/0002-vulkan-first-rhi.md)
+includes Vulkan headers** — enforced by the build (its deps are linked PRIVATE), not just
+by review. Everything above talks to `rhi` interfaces. This is the seam that lets D3D12 /
+Metal / console backends arrive later without touching the renderer. *Built (M3.1–M3.3):*
+device bring-up (volk + VMA, Vulkan 1.3 dynamic rendering + synchronization2), buffers/
+textures/shaders/pipelines, and an off-screen render verified by pixel readback.
+*Planned:* swapchain/presentation (M3.4) and textures+descriptors → the textured quad
+(M3.5). → [ADR-0002](adr/0002-vulkan-first-rhi.md),
+[ADR-0007](adr/0007-vulkan-backend-bootstrapping.md), [design/rhi.md](design/rhi.md)
 
 ### `ecs` ⚪ — *the world, as data*
 An **Entity-Component-System**: entities are ids; components are plain data stored in

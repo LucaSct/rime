@@ -51,15 +51,31 @@ jobs:
       # The native Linux window backends link against the system windowing libraries: X11/Xlib,
       # plus Wayland (wayland-client + wayland-scanner for the xdg-shell protocol) and xkbcommon for
       # Wayland keyboards. macOS/Windows use OS frameworks already present on their runners.
-      - name: Install Linux windowing deps
+      #
+      # We also install a Vulkan *runtime* here so the M3 "first pixels" proof actually runs on this
+      # GPU-less runner: mesa-vulkan-drivers provides lavapipe (a software Vulkan 1.3 device, auto-
+      # discovered by the loader libvulkan1), and vulkan-validationlayers gives the debug build its
+      # validation. RIME_REQUIRE_VULKAN=1 makes the rhi tests treat "no device" as a failure (so a
+      # broken driver can't pass as green) — set for Linux only, where we know an ICD is present.
+      # (The Vulkan *build* deps — headers/volk/VMA/glslang — come from Conan, not apt.)
+      - name: Install Linux deps (windowing + Vulkan runtime)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols
+            libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
+          echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
 
       # One command builds + tests both halves (see scripts/build.{sh,ps1}). Running the
       # dev scripts here is what keeps them honest across all three OSes.
+      #
+      # M3 note: the Vulkan backend builds and link-checks on all three OSes (the M2.1-style proof);
+      # the rhi *render* proof (off-screen triangle, pixel-verified) runs where an ICD is present —
+      # enforced on Linux via lavapipe (RIME_REQUIRE_VULKAN=1 above). On macOS/Windows there is no ICD
+      # on the runner, so the rhi tests skip (create_device returns null) — the backend is still
+      # proven to compile and link. Running the proof on macOS/MoltenVK + Windows/SwiftShader is a
+      # tracked follow-up (M3.4+).
       - name: Build & test (Unix)
         if: runner.os != 'Windows'
         run: ./scripts/build.sh

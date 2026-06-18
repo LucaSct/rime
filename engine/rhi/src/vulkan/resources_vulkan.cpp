@@ -1,0 +1,187 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// GPU resource creation/destruction and host<->device transfer for the Vulkan backend: buffers and
+// images go through VMA (we never call vkAllocateMemory directly), shader modules wrap SPIR-V. The
+// public API hands back opaque handles; here is where they are minted into the per-kind SlotMaps.
+
+#include <cstring>
+#include <string>
+#include <utility>
+
+#include "vulkan/vulkan_backend.hpp"
+
+namespace rime::rhi {
+
+BufferHandle VulkanDevice::create_buffer(const BufferDesc& desc) {
+    VkBufferUsageFlags usage = to_vk(desc.usage);
+    // Device-local buffers are almost always uploaded into, so always allow them as a transfer
+    // destination (the staging copy that fills them lands in a later transfer brick).
+    if (desc.memory == MemoryUsage::GpuOnly) usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = desc.size;
+    bci.usage = usage;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO; // VMA picks the heap from the access pattern below
+    switch (desc.memory) {
+        case MemoryUsage::GpuOnly:
+            break;
+        case MemoryUsage::CpuToGpu:
+            aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            break;
+        case MemoryUsage::GpuToCpu:
+            aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            break;
+    }
+
+    VulkanBuffer b;
+    b.size = desc.size;
+    b.usage = desc.usage;
+    b.memory = desc.memory;
+    const VkResult r = vmaCreateBuffer(allocator_, &bci, &aci, &b.buffer, &b.allocation, &b.info);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR("rhi: vmaCreateBuffer('{}') failed: {}", desc.debug_name, result_string(r));
+        return {};
+    }
+
+    // One-shot upload at creation, for host-visible memory (info.pMappedData is the persistent map
+    // we requested with VMA_ALLOCATION_CREATE_MAPPED_BIT).
+    if (desc.initial_data) {
+        if (b.info.pMappedData) {
+            std::memcpy(b.info.pMappedData, desc.initial_data, desc.size);
+            vmaFlushAllocation(allocator_, b.allocation, 0, desc.size);
+        } else {
+            RIME_WARN("rhi: initial_data ignored for device-local buffer '{}' (needs staging)",
+                      desc.debug_name);
+        }
+    }
+    return rebrand<Buffer>(buffers_.insert(b));
+}
+
+TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = to_vk(desc.format);
+    ici.extent = {desc.extent.width, desc.extent.height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = to_vk(desc.usage);
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO; // device-local color target
+
+    VulkanTexture t;
+    t.extent = desc.extent;
+    t.format = ici.format;
+    t.usage = desc.usage;
+    t.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkResult r = vmaCreateImage(allocator_, &ici, &aci, &t.image, &t.allocation, nullptr);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR("rhi: vmaCreateImage('{}') failed: {}", desc.debug_name, result_string(r));
+        return {};
+    }
+
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = t.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = ici.format;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.baseMipLevel = 0;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount = 1;
+
+    r = vkCreateImageView(device_, &vci, nullptr, &t.view);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkCreateImageView('{}') failed: {}", desc.debug_name, result_string(r));
+        vmaDestroyImage(allocator_, t.image, t.allocation);
+        return {};
+    }
+    return rebrand<Texture>(textures_.insert(t));
+}
+
+ShaderHandle VulkanDevice::create_shader(const ShaderDesc& desc) {
+    VkShaderModuleCreateInfo sci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    sci.codeSize = desc.spirv_size_bytes; // bytes, not words
+    sci.pCode = desc.spirv;
+
+    VulkanShader s;
+    s.stage = desc.stage;
+    s.entry_point = std::string(desc.entry_point);
+    const VkResult r = vkCreateShaderModule(device_, &sci, nullptr, &s.module);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkCreateShaderModule('{}') failed: {}", desc.debug_name, result_string(r));
+        return {};
+    }
+    return rebrand<Shader>(shaders_.insert(std::move(s)));
+}
+
+void VulkanDevice::destroy(BufferHandle handle) {
+    const auto h = rebrand<VulkanBuffer>(handle);
+    if (auto* b = buffers_.get(h)) {
+        vmaDestroyBuffer(allocator_, b->buffer, b->allocation);
+        buffers_.erase(h);
+    }
+}
+
+void VulkanDevice::destroy(TextureHandle handle) {
+    const auto h = rebrand<VulkanTexture>(handle);
+    if (auto* t = textures_.get(h)) {
+        if (t->view) vkDestroyImageView(device_, t->view, nullptr);
+        vmaDestroyImage(allocator_, t->image, t->allocation);
+        textures_.erase(h);
+    }
+}
+
+void VulkanDevice::destroy(ShaderHandle handle) {
+    const auto h = rebrand<VulkanShader>(handle);
+    if (auto* s = shaders_.get(h)) {
+        if (s->module) vkDestroyShaderModule(device_, s->module, nullptr);
+        shaders_.erase(h);
+    }
+}
+
+void VulkanDevice::write_buffer(BufferHandle handle,
+                                const void* data,
+                                std::size_t size,
+                                std::size_t offset) {
+    auto* b = buffers_.get(rebrand<VulkanBuffer>(handle));
+    if (!b) {
+        RIME_ERROR("rhi: write_buffer on an invalid handle");
+        return;
+    }
+    if (!b->info.pMappedData) {
+        RIME_ERROR("rhi: write_buffer on a non-host-visible buffer (use CpuToGpu/GpuToCpu memory)");
+        return;
+    }
+    std::memcpy(static_cast<char*>(b->info.pMappedData) + offset, data, size);
+    vmaFlushAllocation(allocator_, b->allocation, offset, size); // no-op on coherent memory
+}
+
+void VulkanDevice::read_buffer(BufferHandle handle,
+                               void* dst,
+                               std::size_t size,
+                               std::size_t offset) {
+    auto* b = buffers_.get(rebrand<VulkanBuffer>(handle));
+    if (!b) {
+        RIME_ERROR("rhi: read_buffer on an invalid handle");
+        return;
+    }
+    if (!b->info.pMappedData) {
+        RIME_ERROR("rhi: read_buffer on a non-host-visible buffer (use GpuToCpu memory)");
+        return;
+    }
+    vmaInvalidateAllocation(allocator_, b->allocation, offset, size); // make device writes visible
+    std::memcpy(dst, static_cast<const char*>(b->info.pMappedData) + offset, size);
+}
+
+} // namespace rime::rhi

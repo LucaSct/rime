@@ -19,6 +19,29 @@ permissions and limitations under the License.
 Third-party components
 --------------------------------------------------------------------------------
 
-Rime vendors and depends on third-party software, each under its own license. As
-dependencies are added under third_party/, record them here with their copyright and
-license so downstream users have a complete attribution list. (None yet.)
+Rime depends on third-party software, each under its own license. Dependencies are
+resolved by Conan (see /conanfile.py) rather than vendored under third_party/, but are
+recorded here so downstream users have a complete attribution list.
+
+Runtime / shipped dependencies:
+
+  - fmt — formatting library.
+      Copyright (c) 2012-present, Victor Zverovich and contributors. MIT License.
+  - Vulkan-Headers — Khronos Vulkan API headers (RHI Vulkan backend).
+      Copyright (c) The Khronos Group Inc. Apache License 2.0.
+  - volk — Vulkan meta-loader.
+      Copyright (c) 2018-present, Arseny Kapoulkine. MIT License.
+  - VulkanMemoryAllocator (VMA) — GPU memory allocator.
+      Copyright (c) Advanced Micro Devices, Inc. (GPUOpen). MIT License.
+
+Build-time / tooling dependencies (not shipped in the engine binary):
+
+  - doctest — unit-test framework (test builds only).
+      Copyright (c) 2016-2023, Viktor Kirilov. MIT License.
+  - glslang — GLSL-to-SPIR-V compiler, used at build time to compile shaders.
+      Copyright (c) The Khronos Group Inc. and contributors. BSD-3-Clause / Apache-2.0.
+  - SPIRV-Tools, SPIRV-Headers — SPIR-V tooling (transitive build dependency of glslang).
+      Copyright (c) The Khronos Group Inc. Apache License 2.0 / MIT.
+
+The Vulkan runtime loader and an ICD (a GPU driver, MoltenVK on macOS, or lavapipe in CI)
+are provided by the host environment, not by Rime.
