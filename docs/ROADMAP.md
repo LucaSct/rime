@@ -33,14 +33,15 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > window and handles input on Cocoa/Win32/X11 (a Wayland surface is created and event-wired but maps
 > on screen once the M3 renderer attaches a buffer).
 >
-> **Milestone 3 (RHI + Vulkan backend) — in progress (first pixels).** The graphics seam
-> `engine/rhi` and its Vulkan backend are up: a `Device` (volk + VMA, Vulkan 1.3 dynamic rendering +
-> synchronization2), offline GLSL→SPIR-V shaders, and a triangle rendered **off-screen** with a
-> pixel-readback proof — bricks **M3.1–M3.3** (*implemented; first green build + CI run pending*). The
-> off-screen proof is what lets M3 run **GPU-free in CI** on lavapipe, mirroring M2's headless split.
-> **Next:** M3.4 swapchain/presentation (the triangle in a real window; the M2 Wayland surface finally
-> maps) and M3.5 textures + descriptors → the **textured quad** (M3's "done when"). Decisions in
-> ADRs 0007 (Vulkan bootstrapping) and 0008 (offline shaders).
+> **Milestone 3 (RHI + Vulkan backend) — in progress.** The graphics seam `engine/rhi` and its Vulkan
+> backend are up: a `Device` (volk + VMA, Vulkan 1.3 dynamic rendering + synchronization2), offline
+> GLSL→SPIR-V shaders, and a triangle rendered **off-screen** with a pixel-readback proof
+> (**M3.1–M3.3**); plus **swapchain presentation** — the same triangle in a real window via
+> frames-in-flight, with surfaces built from `platform::NativeWindow` across all four window systems
+> (**M3.4**, ADR-0009). Verified locally on macOS/MoltenVK (Vulkan 1.3.334); the off-screen proof keeps
+> M3 runnable **GPU-free in CI** on lavapipe, mirroring M2's headless split. **Next:** M3.5 textures +
+> sampler + descriptors → the **textured quad** (M3's "done when"). Decisions in ADRs 0007 (Vulkan
+> bootstrapping), 0008 (offline shaders), and 0009 (swapchain/presentation).
 
 ## Ordering principles (why this sequence)
 

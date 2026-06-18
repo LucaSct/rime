@@ -60,15 +60,39 @@ prints an ASCII preview so a human can see it too.
 
 `begin_commands()` → record → `submit_blocking()` submits the work and waits on a fence. One render,
 one submit, one wait — the simplest correct model, and exactly right for a one-shot off-screen render.
-It is *not* how a real frame loop works: M3.4 introduces frames-in-flight (overlapping CPU recording
-with GPU execution), paced by swapchain presentation. We build the simple thing first and label it.
+It is *not* how a real frame loop works: M3.4 adds frames-in-flight (overlapping CPU recording with
+GPU execution), paced by swapchain presentation. We build the simple thing first and label it.
+
+## Presentation and the swapchain (M3.4)
+
+Putting the triangle in a window adds one object — `rhi::Swapchain`, created from the `Device` and a
+`platform::NativeWindow` — and deliberately *nothing* to the `Device`'s shape: the Device stays
+window-agnostic, so the headless off-screen proof keeps running GPU-free in CI. The swapchain is the
+only RHI object that owns a `VkSurfaceKHR`; surface extensions are enabled opportunistically (present
+on a real GPU/MoltenVK, absent on lavapipe), so presentation is purely additive. See ADR-0009.
+
+The frame loop is the shape the render graph will drive: `acquire_next_image()` hands back a backbuffer
+*as an ordinary `TextureHandle`* (so `begin_rendering` and the layout transitions work on it
+unchanged), you record a render into it, and `present()` submits with this frame's synchronization and
+queues the present. An invalid handle (or a false from `present`) means "out of date" — the window
+resized — so the caller calls `recreate()` and continues. Two **frames in flight** overlap CPU and GPU
+(per-frame image-available semaphore + in-flight fence; a per-image render-finished semaphore gates the
+present); presentation itself paces the loop (FIFO vsync), so there is no manual sleep.
+
+Surface creation is the one place the backend touches an OS windowing type: `surface_vulkan.cpp`
+switches on `NativeWindow.system` and calls the matching `vkCreate*SurfaceKHR`, each branch guarded by
+a per-OS `VK_USE_PLATFORM_*` macro — the same "add a backend dir/branch, not an `#ifdef` in a header"
+discipline `engine/platform` uses. The `NativeWindow` handles stay type-erased (`void*`); only this
+file reinterprets them.
 
 ## Deliberate limitations (labeled, per CLAUDE.md)
 
 - **Device owns its instance.** One `Device` == one instance + physical + logical device + allocator.
   A separate `Instance`/adapter-enumeration object (multi-GPU, explicit adapter choice) is a clean
   later seam; not needed for first pixels.
-- **Blocking submit, no pipelining.** See above — frames-in-flight is M3.4.
+- **Blocking submit for off-screen; frames-in-flight for the window.** `submit_blocking()` is the
+  one-shot off-screen path (M3.3); the swapchain (M3.4) overlaps two frames. Command-buffer
+  pooling/recycling is still a later optimization — today each submission allocates one.
 - **One vertex buffer, empty pipeline layout.** No index buffers, descriptors, or samplers yet; those
   arrive with the textured quad (M3.5). Push constants and multiple attachments come with the renderer.
 - **`std::unique_ptr<CommandBuffer>` per submission.** A small allocation per submit; command-buffer

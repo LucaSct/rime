@@ -86,7 +86,18 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Swapchain.** The set of images the windowing system shows on screen, cycled
   (*presented*) one per frame. Off-screen rendering needs no swapchain — which is why
   Rime's first-pixels proof can run headlessly in CI (it renders to an image and reads it
-  back). Presentation, and thus the swapchain, arrives in M3.4.
+  back). Presentation, and thus the swapchain, lands in M3.4 (ADR-0009).
+- **Surface (`VkSurfaceKHR`).** The Vulkan handle that ties a swapchain to a specific OS
+  window. Rime builds it from `platform::NativeWindow` (the type-erased native handles) —
+  the one place the Vulkan backend touches an OS windowing type.
+- **Present mode.** How finished frames reach the display. *FIFO* queues them and shows
+  one per refresh (vsync, tear-free, always available — Rime's default); *mailbox* keeps
+  only the newest (low latency, may drop frames). Off-screen rendering has no present mode.
+- **Frames in flight.** Letting the CPU record the next frame while the GPU still works on
+  the previous one, instead of stalling. Rime keeps 2, each with its own synchronization
+  (an image-available semaphore + an in-flight fence; a per-image render-finished
+  semaphore gates the present). The M3.3 off-screen proof, by contrast, submits one frame
+  and blocks — the simplest correct model, replaced by this once presentation paces frames.
 - **Dynamic rendering.** The Vulkan 1.3 way to render without pre-declared `VkRenderPass`/
   `VkFramebuffer` objects: you simply begin/end rendering against an attachment. Less
   boilerplate, and a clean fit for a render graph. Rime's RHI uses it (ADR-0007).
