@@ -9,7 +9,7 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
-> **Status (2026-06-17):** **Milestones 0 (build bootstrap) and 1 (core foundation) —
+> **Status (2026-06-21):** **Milestones 0 (build bootstrap) and 1 (core foundation) —
 > COMPLETE.** The repo is public at https://github.com/LucaSct/rime with **CI green on
 > Windows, Linux, and macOS**. `scripts/build` builds and tests the C++ engine and the Rust
 > tooling with warnings-as-errors; format / lint / license-header gates are enforced in CI.
@@ -33,15 +33,17 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > window and handles input on Cocoa/Win32/X11 (a Wayland surface is created and event-wired but maps
 > on screen once the M3 renderer attaches a buffer).
 >
-> **Milestone 3 (RHI + Vulkan backend) — in progress.** The graphics seam `engine/rhi` and its Vulkan
+> **Milestone 3 (RHI + Vulkan backend) — COMPLETE.** The graphics seam `engine/rhi` and its Vulkan
 > backend are up: a `Device` (volk + VMA, Vulkan 1.3 dynamic rendering + synchronization2), offline
 > GLSL→SPIR-V shaders, and a triangle rendered **off-screen** with a pixel-readback proof
-> (**M3.1–M3.3**); plus **swapchain presentation** — the same triangle in a real window via
-> frames-in-flight, with surfaces built from `platform::NativeWindow` across all four window systems
-> (**M3.4**, ADR-0009). Verified locally on macOS/MoltenVK (Vulkan 1.3.334); the off-screen proof keeps
-> M3 runnable **GPU-free in CI** on lavapipe, mirroring M2's headless split. **Next:** M3.5 textures +
-> sampler + descriptors → the **textured quad** (M3's "done when"). Decisions in ADRs 0007 (Vulkan
-> bootstrapping), 0008 (offline shaders), and 0009 (swapchain/presentation).
+> (**M3.1–M3.3**); **swapchain presentation** — the same triangle in a real window via frames-in-flight,
+> with surfaces built from `platform::NativeWindow` across all four window systems (**M3.4**, ADR-0009);
+> and **index buffers + texture upload + samplers + a combined-image-sampler descriptor model** that
+> draw M3's "done when" — a **textured quad**, pixel-verified off-screen (`tests/rhi/textured_quad_test`,
+> four R/G/B/Y quadrants) and presented in a window (**M3.5**, ADR-0010). Verified locally on
+> macOS/MoltenVK (Vulkan 1.3.334); the off-screen proofs keep M3 runnable **GPU-free in CI** on lavapipe,
+> mirroring M2's headless split. Decisions in ADRs 0007 (Vulkan bootstrapping), 0008 (offline shaders),
+> 0009 (swapchain/presentation), and 0010 (textures & descriptors). **Next:** M4 — ECS / the world.
 
 ## Ordering principles (why this sequence)
 

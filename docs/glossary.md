@@ -102,8 +102,28 @@ Entries are grouped roughly by area and kept short on purpose.
   `VkFramebuffer` objects: you simply begin/end rendering against an attachment. Less
   boilerplate, and a clean fit for a render graph. Rime's RHI uses it (ADR-0007).
 - **Descriptor / descriptor set.** How a shader is told *which* resources (textures,
-  buffers, samplers) to use — a binding table the pipeline reads from. Rime's RHI adds
-  these with the textured quad (M3.5).
+  buffers, samplers) to use — a binding table the pipeline reads from. Rime's M3.5 model is
+  deliberately minimal: a pipeline that opts in (`sampled_texture`) gets one set holding a
+  single *combined image-sampler*, bound per draw; richer per-material sets arrive with the
+  render graph (ADR-0010).
+- **Combined image-sampler.** One descriptor that bundles a texture (its *image view*) with a
+  *sampler* — the least machinery to give a shader something to sample. Vulkan also allows
+  separate image/sampler descriptors and bindless arrays; Rime starts combined and grows into
+  those at the render graph.
+- **Sampler.** The GPU object that says *how* a texture is read: *filtering* (Nearest =
+  blocky/exact texels, Linear = smooth interpolation) and *addressing* (what a UV outside
+  [0,1] does — repeat, clamp…). Decoupled from the image, so one texture can be read several
+  ways.
+- **Texel.** A single element of a texture ("texture pixel"); a 2×2 texture has four texels.
+- **UV / texture coordinate.** The 2-D coordinate (conventionally `u`,`v` in [0,1]) saying
+  where on a texture a vertex samples; the rasterizer interpolates it across a triangle so each
+  pixel reads the right texel.
+- **Index buffer.** A list of indices into the vertex buffer defining which vertices form each
+  triangle, so shared corners are stored once (a quad: 4 vertices + 6 indices, not 6 vertices).
+  Used by an *indexed* draw.
+- **Staging buffer.** A temporary CPU-visible buffer used to get data into a fast *device-local*
+  resource the CPU can't write directly: fill the staging buffer, then copy it across on the
+  GPU. Rime uploads textures this way (`write_texture`).
 - **Validation layers.** Optional Vulkan layers that check every API call for misuse and
   report errors. Rime enables them in debug builds (off when optimized), so mistakes are
   caught loudly and early.

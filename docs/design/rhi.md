@@ -1,12 +1,14 @@
-# The Render Hardware Interface — design note (M3.1–M3.3)
+# The Render Hardware Interface — design note (M3.1–M3.5)
 
 Companion to `engine/rhi/`. The RHI is the graphics **seam**: the thin, API-agnostic interface every
 rendering layer targets, with exactly one backend (Vulkan) underneath. It is the most important
 structural bet in the engine after the job system — get the seam right and D3D12/Metal/console
 backends are *additions*; get it wrong and the renderer is welded to one API. See
 [ADR-0002](../adr/0002-vulkan-first-rhi.md) (why Vulkan-behind-a-seam),
-[ADR-0007](../adr/0007-vulkan-backend-bootstrapping.md) (the Vulkan stack), and
-[ADR-0008](../adr/0008-offline-shader-compilation.md) (shaders).
+[ADR-0007](../adr/0007-vulkan-backend-bootstrapping.md) (the Vulkan stack),
+[ADR-0008](../adr/0008-offline-shader-compilation.md) (shaders),
+[ADR-0009](../adr/0009-swapchain-and-presentation.md) (presentation), and
+[ADR-0010](../adr/0010-textures-and-descriptors.md) (textures & descriptors).
 
 ## The seam, and how it's enforced
 
@@ -54,7 +56,10 @@ center is the triangle's red, a corner is the clear color. No surface, no swapch
 needed, so it runs on **lavapipe** (Mesa's software Vulkan) in CI on all three OSes and is
 bit-deterministic. The on-screen swapchain path (M3.4) is the dev/headed proof. `tests/rhi/
 offscreen_triangle_test` is the CI gate; `samples/01-hello-triangle` runs the identical render and
-prints an ASCII preview so a human can see it too.
+prints an ASCII preview so a human can see it too. M3's *actual* headline — the textured quad — uses
+the very same machinery: `tests/rhi/textured_quad_test` asserts the four R/G/B/Y quadrants of a 2×2
+texture pixel by pixel, and `samples/02-textured-quad` runs the identical render (windowed, or an
+off-screen colored-letter preview).
 
 ## Submission model (M3-simple)
 
@@ -85,6 +90,36 @@ a per-OS `VK_USE_PLATFORM_*` macro — the same "add a backend dir/branch, not a
 discipline `engine/platform` uses. The `NativeWindow` handles stay type-erased (`void*`); only this
 file reinterprets them.
 
+## Textures, samplers & descriptors (M3.5)
+
+The textured quad is M3's "done when," and the one new idea it forces is **descriptors** — how a
+shader is told *which* resources to read. Three small resources lead up to it, then the descriptor
+model ties them to the shader. See ADR-0010.
+
+- **Index buffers.** `bind_index_buffer(buffer, IndexType, offset)` + `draw_indexed(...)` let triangles
+  share vertices (a quad is 4 vertices + 6 indices). `IndexType` is `Uint16`/`Uint32` — 16-bit halves
+  bandwidth and covers meshes up to ~65k vertices.
+- **Texture upload.** `Device::write_texture(handle, data, size)` copies tightly-packed pixels into a
+  device-local image **through a staging buffer**, blocking, and leaves it shader-readable — the same
+  one-shot model as `submit_blocking`. The image must carry `TransferDst` usage. Batched/streamed
+  uploads are the asset pipeline's job (M6).
+- **Samplers.** A `Sampler` is *how* an image is read (min/mag `Filter`, `AddressMode` for out-of-range
+  UVs), decoupled from the image so one texture can be sampled different ways. The vocabulary is a
+  deliberate small subset (`Nearest`/`Linear`, `Repeat`/`ClampToEdge`), grown on demand.
+
+**The descriptor model is intentionally one notch above trivial.** A pipeline opts in with a single
+flag — `GraphicsPipelineDesc::sampled_texture = true` — and the backend gives it a descriptor-set
+layout of exactly *set 0, binding 0 = one combined image-sampler, fragment stage* (a GLSL `sampler2D`);
+a non-sampling pipeline keeps the empty layout from M3.3. At draw time `bind_texture(binding, texture,
+sampler)` (after `bind_pipeline`) allocates that set lazily from a small device-owned pool, **caches it
+on the pipeline**, and rewrites it *only when the texture/sampler changes* — so a static material never
+rewrites a set that may still be in flight on another frame (this is what makes it correct under the
+swapchain's two frames-in-flight). A **combined image-sampler** (one descriptor tying an image view +
+sampler) is the least machinery that works; separate descriptors and bindless are deferred to where
+they pay off — the render graph. The deliberate cost is that a set lives *on the pipeline*, conflating
+"material" with "pipeline" — one texture per pipeline, fine for a quad, replaced by per-draw/per-material
+sets when the render graph owns binding.
+
 ## Deliberate limitations (labeled, per CLAUDE.md)
 
 - **Device owns its instance.** One `Device` == one instance + physical + logical device + allocator.
@@ -93,8 +128,10 @@ file reinterprets them.
 - **Blocking submit for off-screen; frames-in-flight for the window.** `submit_blocking()` is the
   one-shot off-screen path (M3.3); the swapchain (M3.4) overlaps two frames. Command-buffer
   pooling/recycling is still a later optimization — today each submission allocates one.
-- **One vertex buffer, empty pipeline layout.** No index buffers, descriptors, or samplers yet; those
-  arrive with the textured quad (M3.5). Push constants and multiple attachments come with the renderer.
+- **One combined image-sampler per pipeline; no push constants or uniform buffers.** M3.5 adds index
+  buffers, texture upload, samplers, and a single-binding descriptor set (above) — but the set is cached
+  *per pipeline* (one texture per material), and there are still no push constants, uniform buffers,
+  vertex-stage textures, or multiple color attachments. Those arrive with the renderer / render graph (M5).
 - **`std::unique_ptr<CommandBuffer>` per submission.** A small allocation per submit; command-buffer
   pooling/recycling is a later optimization, to be made with measurement.
 - **Layout tracking is a single field per texture.** Correct for single-threaded M3 recording; the
@@ -102,8 +139,8 @@ file reinterprets them.
 
 ## Where this goes
 
-The render graph (M5) records its passes through this interface; the ECS-driven renderer feeds it;
-M3.5 adds the descriptor/sampler model for textures; M3.4 adds the swapchain so it all reaches a
-window (and finally maps the M2 Wayland surface). Everything visual in Rime ultimately crosses this
-seam. *Inspired by: the RHI/RDG discipline of UE5, WebGPU's clean resource model, and the "thin
-explicit abstraction over one good backend" approach proven by sokol-gfx and wgpu.*
+The render graph (M5) records its passes through this interface, and the ECS-driven renderer feeds it.
+With M3.4 (the swapchain, reaching a window — and finally mapping the M2 Wayland surface) and M3.5 (the
+texture/sampler/descriptor model) both in place, **M3 is complete**: everything visual in Rime
+ultimately crosses this seam. *Inspired by: the RHI/RDG discipline of UE5, WebGPU's clean resource
+model, and the "thin explicit abstraction over one good backend" approach proven by sokol-gfx and wgpu.*
