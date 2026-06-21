@@ -49,6 +49,7 @@ public:
     [[nodiscard]] virtual ShaderHandle create_shader(const ShaderDesc& desc) = 0;
     [[nodiscard]] virtual PipelineHandle create_graphics_pipeline(const GraphicsPipelineDesc& desc) =
         0;
+    [[nodiscard]] virtual SamplerHandle create_sampler(const SamplerDesc& desc) = 0;
 
     // Destruction is explicit and overloaded per handle type. Destroying an invalid/stale handle is
     // a no-op. (RAII wrappers can be layered on top later; the primitive stays explicit.)
@@ -56,6 +57,7 @@ public:
     virtual void destroy(TextureHandle handle) = 0;
     virtual void destroy(ShaderHandle handle) = 0;
     virtual void destroy(PipelineHandle handle) = 0;
+    virtual void destroy(SamplerHandle handle) = 0;
 
     // ── Host <-> device data transfer (host-visible buffers) ───────────────────────────────
     // write_buffer copies CPU bytes into a host-visible buffer; read_buffer copies them back out
@@ -69,6 +71,12 @@ public:
                              void* dst,
                              std::size_t size,
                              std::size_t offset = 0) = 0;
+
+    // Upload pixels into a texture (which must have TransferDst usage). Copies `size` bytes — tightly
+    // packed, in the texture's format, covering its full extent — through a staging buffer and leaves
+    // the image in a shader-readable layout. One-shot and blocking (the M3-simple model, like
+    // submit_blocking); batched/streamed uploads arrive with the renderer and asset pipeline.
+    virtual void write_texture(TextureHandle handle, const void* data, std::size_t size) = 0;
 
     // ── Command submission ─────────────────────────────────────────────────────────────────
     // begin_commands hands out a fresh encoder. record into it, then submit_blocking submits the

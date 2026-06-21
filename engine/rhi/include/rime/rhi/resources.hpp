@@ -36,6 +36,16 @@ struct TextureDesc {
     std::string_view debug_name = {};
 };
 
+// A sampler describes *how* a shader reads a texture — the min/mag filtering and what happens for UVs
+// outside [0,1]. It is decoupled from the texture (the same image can be read different ways), and is
+// created once via Device::create_sampler then bound alongside a texture (CommandBuffer::bind_texture).
+struct SamplerDesc {
+    Filter mag_filter = Filter::Linear;
+    Filter min_filter = Filter::Linear;
+    AddressMode address_mode = AddressMode::Repeat;
+    std::string_view debug_name = {};
+};
+
 struct ShaderDesc {
     ShaderStage stage = ShaderStage::Vertex;
 
@@ -74,6 +84,10 @@ struct GraphicsPipelineDesc {
     Format color_format = Format::RGBA8Unorm;
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
     CullMode cull = CullMode::None;
+    // When true, the pipeline declares a descriptor set 0 with one combined image-sampler at binding
+    // 0 (a fragment-stage `sampler2D`), bound at draw time with CommandBuffer::bind_texture. M3.5's
+    // minimal descriptor model — one texture; the render graph grows richer sets later.
+    bool sampled_texture = false;
     std::string_view debug_name = {};
 };
 

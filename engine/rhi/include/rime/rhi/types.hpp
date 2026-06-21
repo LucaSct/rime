@@ -28,11 +28,13 @@ struct Buffer;
 struct Texture;
 struct Shader;
 struct Pipeline;
+struct Sampler;
 
 using BufferHandle = core::Handle<Buffer>;
 using TextureHandle = core::Handle<Texture>;
 using ShaderHandle = core::Handle<Shader>;
 using PipelineHandle = core::Handle<Pipeline>;
+using SamplerHandle = core::Handle<Sampler>;
 
 // ── Small geometric PODs ────────────────────────────────────────────────────────────────────
 // rhi has its own Extent2D (rather than reusing platform::Extent2D) so the graphics seam owns its
@@ -128,6 +130,15 @@ enum class ShaderStage : std::uint8_t { Vertex, Fragment, Compute };
 enum class PrimitiveTopology : std::uint8_t { TriangleList, TriangleStrip, LineList, PointList };
 
 enum class CullMode : std::uint8_t { None, Front, Back };
+
+// Index buffer element width. 16-bit indexes halve bandwidth and suffice for meshes up to 65k
+// vertices (the common case); 32-bit covers the rest.
+enum class IndexType : std::uint8_t { Uint16, Uint32 };
+
+// How a texture is sampled. Filter is the min/mag interpolation (Nearest = blocky, exact texels;
+// Linear = smooth); AddressMode is what happens outside [0,1] UVs. A small, intentional subset.
+enum class Filter : std::uint8_t { Nearest, Linear };
+enum class AddressMode : std::uint8_t { Repeat, ClampToEdge };
 
 // ── Adapter (physical GPU) description ──────────────────────────────────────────────────────
 enum class DeviceType : std::uint8_t { Other, IntegratedGpu, DiscreteGpu, VirtualGpu, Cpu };

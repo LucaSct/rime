@@ -56,6 +56,18 @@ struct VulkanShader {
 struct VulkanPipeline {
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
+    // Set when the pipeline samples a texture (GraphicsPipelineDesc::sampled_texture): the descriptor
+    // set-0 layout, plus a lazily-allocated, cached descriptor set that bind_texture fills in. M3.5
+    // has a single static material, so the set is allocated once and reused every frame; bound_*
+    // record what it currently points at, so we only re-write it when the texture/sampler change.
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    TextureHandle bound_texture{};
+    SamplerHandle bound_sampler{};
+};
+
+struct VulkanSampler {
+    VkSampler sampler = VK_NULL_HANDLE;
 };
 
 class VulkanCommandBuffer; // defined below; VulkanDevice::submit_with_sync takes one by reference
@@ -73,15 +85,18 @@ public:
     [[nodiscard]] TextureHandle create_texture(const TextureDesc& desc) override;
     [[nodiscard]] ShaderHandle create_shader(const ShaderDesc& desc) override;
     [[nodiscard]] PipelineHandle create_graphics_pipeline(const GraphicsPipelineDesc& desc) override;
+    [[nodiscard]] SamplerHandle create_sampler(const SamplerDesc& desc) override;
 
     void destroy(BufferHandle handle) override;
     void destroy(TextureHandle handle) override;
     void destroy(ShaderHandle handle) override;
     void destroy(PipelineHandle handle) override;
+    void destroy(SamplerHandle handle) override;
 
     void write_buffer(BufferHandle handle, const void* data, std::size_t size, std::size_t offset)
         override;
     void read_buffer(BufferHandle handle, void* dst, std::size_t size, std::size_t offset) override;
+    void write_texture(TextureHandle handle, const void* data, std::size_t size) override;
 
     [[nodiscard]] std::unique_ptr<CommandBuffer> begin_commands() override;
     void submit_blocking(CommandBuffer& commands) override;
@@ -100,6 +115,11 @@ public:
     [[nodiscard]] VulkanPipeline* lookup(PipelineHandle h) noexcept {
         return pipelines_.get(rebrand<VulkanPipeline>(h));
     }
+    [[nodiscard]] VulkanSampler* lookup(SamplerHandle h) noexcept {
+        return samplers_.get(rebrand<VulkanSampler>(h));
+    }
+    // The shared pool bind_texture allocates its (cached, per-pipeline) descriptor set from.
+    [[nodiscard]] VkDescriptorPool descriptor_pool() const noexcept { return descriptor_pool_; }
 
     // ── Internals used by VulkanSwapchain (same module) ──────────────────────────────────────
     [[nodiscard]] VkInstance vk_instance() const noexcept { return instance_; }
@@ -132,6 +152,7 @@ private:
     bool create_logical_device();
     bool create_allocator();
     bool create_command_pool();
+    bool create_descriptor_pool();
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT messenger_ = VK_NULL_HANDLE;
@@ -140,6 +161,7 @@ private:
     std::uint32_t graphics_family_ = 0;
     VkQueue graphics_queue_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE; // M3.5: combined image-sampler sets
     VmaAllocator allocator_ = nullptr;
     bool validation_ = false;
 
@@ -149,6 +171,7 @@ private:
     core::SlotMap<VulkanTexture> textures_;
     core::SlotMap<VulkanShader> shaders_;
     core::SlotMap<VulkanPipeline> pipelines_;
+    core::SlotMap<VulkanSampler> samplers_;
 };
 
 class VulkanCommandBuffer final : public CommandBuffer {
@@ -160,12 +183,19 @@ public:
     void end_rendering() override;
     void bind_pipeline(PipelineHandle pipeline) override;
     void bind_vertex_buffer(BufferHandle buffer, std::uint64_t offset) override;
+    void bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset) override;
+    void bind_texture(std::uint32_t binding, TextureHandle texture, SamplerHandle sampler) override;
     void set_viewport(const Viewport& viewport) override;
     void set_scissor(const Rect2D& scissor) override;
     void draw(std::uint32_t vertex_count,
               std::uint32_t instance_count,
               std::uint32_t first_vertex,
               std::uint32_t first_instance) override;
+    void draw_indexed(std::uint32_t index_count,
+                      std::uint32_t instance_count,
+                      std::uint32_t first_index,
+                      std::int32_t vertex_offset,
+                      std::uint32_t first_instance) override;
     void copy_texture_to_buffer(TextureHandle src, BufferHandle dst) override;
 
     [[nodiscard]] VkCommandBuffer handle() const noexcept { return cmd_; }
@@ -173,6 +203,7 @@ public:
 private:
     VulkanDevice& device_;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+    VulkanPipeline* current_pipeline_ = nullptr; // set by bind_pipeline; bind_texture needs its layout
 };
 
 // Create a VkSurfaceKHR for a platform window. The one OS-touching spot in the backend: it switches

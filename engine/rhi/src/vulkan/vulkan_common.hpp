@@ -152,6 +152,19 @@ template <class Dst, class Src>
     return VK_CULL_MODE_NONE;
 }
 
+[[nodiscard]] inline VkIndexType to_vk(IndexType t) noexcept {
+    return t == IndexType::Uint16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+}
+
+[[nodiscard]] inline VkFilter to_vk(Filter f) noexcept {
+    return f == Filter::Linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+}
+
+[[nodiscard]] inline VkSamplerAddressMode to_vk(AddressMode m) noexcept {
+    return m == AddressMode::ClampToEdge ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+                                         : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+}
+
 [[nodiscard]] inline DeviceType to_rhi(VkPhysicalDeviceType t) noexcept {
     switch (t) {
         case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return DeviceType::IntegratedGpu;

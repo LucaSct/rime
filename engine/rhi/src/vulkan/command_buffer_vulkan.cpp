@@ -61,6 +61,7 @@ void VulkanCommandBuffer::bind_pipeline(PipelineHandle pipeline) {
         RIME_ERROR("rhi: bind_pipeline with an invalid handle");
         return;
     }
+    current_pipeline_ = p; // remembered so bind_texture can find the pipeline's descriptor layout
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipeline);
 }
 
@@ -73,6 +74,65 @@ void VulkanCommandBuffer::bind_vertex_buffer(BufferHandle buffer, std::uint64_t 
     VkBuffer vb = b->buffer;
     VkDeviceSize off = offset;
     vkCmdBindVertexBuffers(cmd_, 0, 1, &vb, &off);
+}
+
+void VulkanCommandBuffer::bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset) {
+    VulkanBuffer* b = device_.lookup(buffer);
+    if (!b) {
+        RIME_ERROR("rhi: bind_index_buffer with an invalid handle");
+        return;
+    }
+    vkCmdBindIndexBuffer(cmd_, b->buffer, offset, to_vk(type));
+}
+
+void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
+                                       TextureHandle texture,
+                                       SamplerHandle sampler) {
+    if (current_pipeline_ == nullptr || current_pipeline_->set_layout == VK_NULL_HANDLE) {
+        RIME_ERROR("rhi: bind_texture without a bound texture-sampling pipeline (sampled_texture?)");
+        return;
+    }
+    VulkanTexture* tex = device_.lookup(texture);
+    VulkanSampler* smp = device_.lookup(sampler);
+    if (!tex || !smp) {
+        RIME_ERROR("rhi: bind_texture with an invalid texture/sampler handle");
+        return;
+    }
+
+    // Allocate the pipeline's descriptor set once (cached on the pipeline), then write it only when
+    // the texture/sampler it points at changes — so a static material never re-writes a set that may
+    // still be in flight on another frame. M3.5's single-material descriptor model (see ADR-0010).
+    VulkanPipeline* p = current_pipeline_;
+    if (p->set == VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = device_.descriptor_pool();
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &p->set_layout;
+        if (vkAllocateDescriptorSets(device_.vk_device(), &ai, &p->set) != VK_SUCCESS) {
+            RIME_ERROR("rhi: failed to allocate a descriptor set");
+            p->set = VK_NULL_HANDLE;
+            return;
+        }
+        p->bound_texture = {};
+        p->bound_sampler = {};
+    }
+    if (p->bound_texture != texture || p->bound_sampler != sampler) {
+        VkDescriptorImageInfo img{};
+        img.sampler = smp->sampler;
+        img.imageView = tex->view;
+        img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = p->set;
+        w.dstBinding = binding;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &img;
+        vkUpdateDescriptorSets(device_.vk_device(), 1, &w, 0, nullptr);
+        p->bound_texture = texture;
+        p->bound_sampler = sampler;
+    }
+    vkCmdBindDescriptorSets(
+        cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, 1, &p->set, 0, nullptr);
 }
 
 void VulkanCommandBuffer::set_viewport(const Viewport& viewport) {
@@ -98,6 +158,14 @@ void VulkanCommandBuffer::draw(std::uint32_t vertex_count,
                                std::uint32_t first_vertex,
                                std::uint32_t first_instance) {
     vkCmdDraw(cmd_, vertex_count, instance_count, first_vertex, first_instance);
+}
+
+void VulkanCommandBuffer::draw_indexed(std::uint32_t index_count,
+                                       std::uint32_t instance_count,
+                                       std::uint32_t first_index,
+                                       std::int32_t vertex_offset,
+                                       std::uint32_t first_instance) {
+    vkCmdDrawIndexed(cmd_, index_count, instance_count, first_index, vertex_offset, first_instance);
 }
 
 void VulkanCommandBuffer::copy_texture_to_buffer(TextureHandle src, BufferHandle dst) {

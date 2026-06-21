@@ -125,6 +125,25 @@ ShaderHandle VulkanDevice::create_shader(const ShaderDesc& desc) {
     return rebrand<Shader>(shaders_.insert(std::move(s)));
 }
 
+SamplerHandle VulkanDevice::create_sampler(const SamplerDesc& desc) {
+    VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sci.magFilter = to_vk(desc.mag_filter);
+    sci.minFilter = to_vk(desc.min_filter);
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; // no mipmaps in M3.5
+    sci.addressModeU = to_vk(desc.address_mode);
+    sci.addressModeV = to_vk(desc.address_mode);
+    sci.addressModeW = to_vk(desc.address_mode);
+    sci.maxLod = VK_LOD_CLAMP_NONE;
+
+    VulkanSampler s;
+    const VkResult r = vkCreateSampler(device_, &sci, nullptr, &s.sampler);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkCreateSampler('{}') failed: {}", desc.debug_name, result_string(r));
+        return {};
+    }
+    return rebrand<Sampler>(samplers_.insert(s));
+}
+
 void VulkanDevice::destroy(BufferHandle handle) {
     const auto h = rebrand<VulkanBuffer>(handle);
     if (auto* b = buffers_.get(h)) {
@@ -147,6 +166,14 @@ void VulkanDevice::destroy(ShaderHandle handle) {
     if (auto* s = shaders_.get(h)) {
         if (s->module) vkDestroyShaderModule(device_, s->module, nullptr);
         shaders_.erase(h);
+    }
+}
+
+void VulkanDevice::destroy(SamplerHandle handle) {
+    const auto h = rebrand<VulkanSampler>(handle);
+    if (auto* s = samplers_.get(h)) {
+        if (s->sampler) vkDestroySampler(device_, s->sampler, nullptr);
+        samplers_.erase(h);
     }
 }
 
@@ -182,6 +209,70 @@ void VulkanDevice::read_buffer(BufferHandle handle,
     }
     vmaInvalidateAllocation(allocator_, b->allocation, offset, size); // make device writes visible
     std::memcpy(dst, static_cast<const char*>(b->info.pMappedData) + offset, size);
+}
+
+void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::size_t size) {
+    auto* t = textures_.get(rebrand<VulkanTexture>(handle));
+    if (!t) {
+        RIME_ERROR("rhi: write_texture on an invalid handle");
+        return;
+    }
+
+    // Staging buffer: a host-visible, mapped buffer we memcpy the pixels into, then copy on the GPU
+    // into the device-local image. The CPU never writes device-local memory directly — this transfer
+    // is how data crosses to GpuOnly storage (the path the renderer/asset pipeline will later batch).
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = size;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    aci.flags =
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VkBuffer staging = VK_NULL_HANDLE;
+    VmaAllocation staging_alloc = nullptr;
+    VmaAllocationInfo staging_info{};
+    if (vmaCreateBuffer(allocator_, &bci, &aci, &staging, &staging_alloc, &staging_info) !=
+        VK_SUCCESS) {
+        RIME_ERROR("rhi: write_texture staging allocation failed");
+        return;
+    }
+    std::memcpy(staging_info.pMappedData, data, size);
+    vmaFlushAllocation(allocator_, staging_alloc, 0, size);
+
+    // One-shot, blocking copy: UNDEFINED -> TRANSFER_DST, copy buffer -> image, then -> SHADER_READ so
+    // the image is immediately samplable. (We overwrite the whole image, so the old layout is moot.)
+    auto cmd = begin_commands();
+    VkCommandBuffer vk = static_cast<VulkanCommandBuffer&>(*cmd).handle();
+
+    transition_image(vk,
+                     t->image,
+                     VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     0,
+                     VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {t->extent.width, t->extent.height, 1};
+    vkCmdCopyBufferToImage(vk, staging, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    transition_image(vk,
+                     t->image,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    submit_blocking(*cmd); // blocks until the upload completes, then the staging buffer is safe to free
+    vmaDestroyBuffer(allocator_, staging, staging_alloc);
 }
 
 } // namespace rime::rhi

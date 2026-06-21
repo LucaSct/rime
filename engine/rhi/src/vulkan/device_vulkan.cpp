@@ -91,6 +91,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(const DeviceDesc& desc) {
     if (!dev->create_logical_device()) return nullptr;
     if (!dev->create_allocator()) return nullptr;
     if (!dev->create_command_pool()) return nullptr;
+    if (!dev->create_descriptor_pool()) return nullptr;
 
     RIME_INFO("rhi: Vulkan device ready — GPU '{}' (Vulkan {}.{}.{}){}",
               dev->adapter_.name,
@@ -109,6 +110,10 @@ VulkanDevice::~VulkanDevice() {
     for (auto& p : pipelines_) {
         if (p.pipeline) vkDestroyPipeline(device_, p.pipeline, nullptr);
         if (p.layout) vkDestroyPipelineLayout(device_, p.layout, nullptr);
+        if (p.set_layout) vkDestroyDescriptorSetLayout(device_, p.set_layout, nullptr);
+    }
+    for (auto& smp : samplers_) {
+        if (smp.sampler) vkDestroySampler(device_, smp.sampler, nullptr);
     }
     for (auto& s : shaders_) {
         if (s.module) vkDestroyShaderModule(device_, s.module, nullptr);
@@ -125,6 +130,7 @@ VulkanDevice::~VulkanDevice() {
     }
 
     if (command_pool_) vkDestroyCommandPool(device_, command_pool_, nullptr);
+    if (descriptor_pool_) vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
     if (allocator_) vmaDestroyAllocator(allocator_);
     if (device_) vkDestroyDevice(device_, nullptr);
     if (messenger_) vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
@@ -365,6 +371,26 @@ bool VulkanDevice::create_command_pool() {
     const VkResult r = vkCreateCommandPool(device_, &ci, nullptr, &command_pool_);
     if (r != VK_SUCCESS) {
         RIME_ERROR("rhi: vkCreateCommandPool failed: {}", result_string(r));
+        return false;
+    }
+    return true;
+}
+
+bool VulkanDevice::create_descriptor_pool() {
+    // A small shared pool for M3.5's combined image-sampler descriptor sets. Each sampling pipeline
+    // allocates one set, cached and reused across frames (the textured quad is static), so a handful
+    // is ample; the M5 render graph will own a real per-frame descriptor allocator instead.
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_size.descriptorCount = 16;
+
+    VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    ci.maxSets = 16;
+    ci.poolSizeCount = 1;
+    ci.pPoolSizes = &pool_size;
+    const VkResult r = vkCreateDescriptorPool(device_, &ci, nullptr, &descriptor_pool_);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkCreateDescriptorPool failed: {}", result_string(r));
         return false;
     }
     return true;

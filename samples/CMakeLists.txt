@@ -6,5 +6,6 @@ add_subdirectory(00-hello-window)      # M2: open a native window, pump input (p
 
 # Needs the Vulkan RHI backend (the agnostic interface alone can't render).
 if(RIME_RHI_VULKAN)
-    add_subdirectory(01-hello-triangle) # M3.3: render a triangle off-screen through the RHI
+    add_subdirectory(01-hello-triangle) # M3.3/M3.4: a triangle off-screen, then presented in a window
+    add_subdirectory(02-textured-quad)  # M3.5: an indexed, textured quad (M3's "done when")
 endif()

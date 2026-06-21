@@ -93,12 +93,35 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     dyn.dynamicStateCount = 2;
     dyn.pDynamicStates = dyn_states;
 
-    // No descriptor sets or push constants in M3 — an empty layout. Descriptors (for the textured
-    // quad's sampler) arrive in M3.5.
+    // Descriptor set layout (M3.5): a sampling pipeline declares set 0 with one combined image
+    // sampler at binding 0, visible to the fragment shader (a GLSL `sampler2D`). A non-sampling
+    // pipeline keeps an empty layout. The descriptor *set* is allocated lazily and cached by
+    // bind_texture; here we only describe its shape. No push constants yet.
+    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+    if (desc.sampled_texture) {
+        VkDescriptorSetLayoutBinding binding{};
+        binding.binding = 0;
+        binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        binding.descriptorCount = 1;
+        binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        dslci.bindingCount = 1;
+        dslci.pBindings = &binding;
+        if (vkCreateDescriptorSetLayout(device_, &dslci, nullptr, &set_layout) != VK_SUCCESS) {
+            RIME_ERROR("rhi: vkCreateDescriptorSetLayout failed");
+            return {};
+        }
+    }
+
     VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    if (set_layout != VK_NULL_HANDLE) {
+        lci.setLayoutCount = 1;
+        lci.pSetLayouts = &set_layout;
+    }
     VkPipelineLayout layout = VK_NULL_HANDLE;
     if (vkCreatePipelineLayout(device_, &lci, nullptr, &layout) != VK_SUCCESS) {
         RIME_ERROR("rhi: vkCreatePipelineLayout failed");
+        if (set_layout) vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
         return {};
     }
 
@@ -125,6 +148,7 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
 
     VulkanPipeline p;
     p.layout = layout;
+    p.set_layout = set_layout;
     const VkResult r =
         vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
     if (r != VK_SUCCESS) {
@@ -132,6 +156,7 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
                    desc.debug_name,
                    result_string(r));
         vkDestroyPipelineLayout(device_, layout, nullptr);
+        if (set_layout) vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
         return {};
     }
     return rebrand<Pipeline>(pipelines_.insert(p));
@@ -142,6 +167,9 @@ void VulkanDevice::destroy(PipelineHandle handle) {
     if (auto* p = pipelines_.get(h)) {
         if (p->pipeline) vkDestroyPipeline(device_, p->pipeline, nullptr);
         if (p->layout) vkDestroyPipelineLayout(device_, p->layout, nullptr);
+        if (p->set_layout) vkDestroyDescriptorSetLayout(device_, p->set_layout, nullptr);
+        // p->set (if allocated) is freed when the descriptor pool is destroyed at device teardown —
+        // M3.5 has one material, so we don't individually free pooled sets here.
         pipelines_.erase(h);
     }
 }

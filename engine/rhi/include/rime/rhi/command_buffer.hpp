@@ -46,6 +46,17 @@ public:
     virtual void bind_pipeline(PipelineHandle pipeline) = 0;
     virtual void bind_vertex_buffer(BufferHandle buffer, std::uint64_t offset = 0) = 0;
 
+    // Bind an index buffer for indexed drawing; `type` (16- or 32-bit) must match how the indices
+    // were written. Pair with draw_indexed(). Indexed draws let vertices be shared between triangles
+    // (a quad is 4 vertices + 6 indices instead of 6 vertices).
+    virtual void bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset = 0) = 0;
+
+    // Bind a texture + sampler to a shader binding (descriptor set 0) of the currently bound
+    // pipeline — call after bind_pipeline(). The pipeline must have been created to sample a texture
+    // (GraphicsPipelineDesc::sampled_texture). This is the M3.5 descriptor model: a single combined
+    // image-sampler; richer descriptor sets arrive with the render graph.
+    virtual void bind_texture(std::uint32_t binding, TextureHandle texture, SamplerHandle sampler) = 0;
+
     // Viewport/scissor are dynamic pipeline state, so they're set per-recording rather than baked
     // into the pipeline — the same pipeline can draw to differently sized targets.
     virtual void set_viewport(const Viewport& viewport) = 0;
@@ -55,6 +66,14 @@ public:
                       std::uint32_t instance_count = 1,
                       std::uint32_t first_vertex = 0,
                       std::uint32_t first_instance = 0) = 0;
+
+    // Draw using the bound index buffer: `index_count` indices from `first_index`, with
+    // `vertex_offset` added to each index before the vertex is fetched.
+    virtual void draw_indexed(std::uint32_t index_count,
+                              std::uint32_t instance_count = 1,
+                              std::uint32_t first_index = 0,
+                              std::int32_t vertex_offset = 0,
+                              std::uint32_t first_instance = 0) = 0;
 
     // Copy a (TransferSrc) texture's pixels into a (TransferDst, host-visible) buffer, tightly
     // packed. This is how the M3 proof gets rendered pixels back to the CPU to verify them. The
