@@ -20,6 +20,7 @@ endfunction()
 
 add_subdirectory(core)
 add_subdirectory(platform)
+add_subdirectory(render) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
 
 # The RHI tests render through the Vulkan backend, so they only exist when it is built.
 if(RIME_RHI_VULKAN)
