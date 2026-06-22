@@ -13,15 +13,17 @@ rime_add_test(rime_rhi_tests
     offscreen_triangle_test.cpp
     textured_quad_test.cpp
     depth_test.cpp
-    pushconst_test.cpp)
+    pushconst_test.cpp
+    mesh_offscreen_test.cpp)
 
 target_link_libraries(rime_rhi_tests
-    PRIVATE rime::rhi)
+    PRIVATE rime::rhi) # rime::core (the camera math the mesh proof uses) comes transitively via rhi
 
 # Share each render helper + its shaders with the matching sample (one source of truth per proof).
 target_include_directories(rime_rhi_tests
     PRIVATE ${CMAKE_SOURCE_DIR}/samples/01-hello-triangle
-            ${CMAKE_SOURCE_DIR}/samples/02-textured-quad)
+            ${CMAKE_SOURCE_DIR}/samples/02-textured-quad
+            ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer)
 rime_add_shaders(rime_rhi_tests
     ${CMAKE_SOURCE_DIR}/samples/01-hello-triangle/shaders/triangle.vert
     ${CMAKE_SOURCE_DIR}/samples/01-hello-triangle/shaders/triangle.frag
@@ -30,4 +32,6 @@ rime_add_shaders(rime_rhi_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pushconst.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pushconst.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pushconst.frag
+    ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.vert
+    ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.frag)

@@ -20,3 +20,11 @@ Small, focused projects built **on** Rime. Samples have two jobs:
 Samples are added as the features they exercise come online. `99-the-block` is the
 "vertical slice" of the dream described in [../VISION.md](../VISION.md) — when it runs
 and looks/feels right, the core thesis is proven.
+
+> The numbers above are the *planned* milestone ladder; the on-disk samples track the
+> features actually built so far (`00-hello-window`, `01-hello-triangle`,
+> `02-textured-quad`). One extra app rides along outside that ladder:
+>
+> | Sample | Demonstrates |
+> | --- | --- |
+> | `03-icem-viewer` | load a computed part (binary STL) and draw it lit + depth-correct, orbitable; the seed of the ICEM 3-D viewer (depth + camera + push-constant MVP + a studio shade). `--offscreen` renders one frame to a PPM. |

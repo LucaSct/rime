@@ -4,7 +4,8 @@
 # "a test compiles a header the sample owns" pattern the rhi tests use) and link rime::core. As more
 # viewer math lands (colormaps, streamline integration), its tests join this target.
 rime_add_test(rime_render_tests
-    camera_test.cpp)
+    camera_test.cpp
+    stl_test.cpp)
 
 target_link_libraries(rime_render_tests
     PRIVATE rime::core)
