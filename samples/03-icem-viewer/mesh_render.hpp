@@ -22,8 +22,20 @@ namespace rime::viewer {
 struct MeshPush {
     core::Mat4 mvp;       // clip-from-world (proj * view); 64 bytes
     float cam_pos[4];     // world-space eye position (xyz) + pad; 16 bytes
+    // Cross-section half-space: a fragment is discarded where dot(plane.xyz, world_pos) > plane.w, so
+    // (plane.xyz = unit normal, plane.w = signed offset) cuts the part open along that plane. The
+    // disabled state is plane = (0,0,0, +big): dot is 0, never exceeds w, so nothing is clipped.
+    float clip_plane[4];  // 16 bytes
 };
-static_assert(sizeof(MeshPush) == 80, "MeshPush must match the shader push_constant block (mat4 + vec4)");
+static_assert(sizeof(MeshPush) == 96,
+              "MeshPush must match the shader push_constant block (mat4 + vec4 + vec4)");
+
+// A clip plane that is disabled (clips nothing) — the default for a non-sectioned view.
+[[nodiscard]] inline MeshPush with_no_clip(MeshPush p) noexcept {
+    p.clip_plane[0] = p.clip_plane[1] = p.clip_plane[2] = 0.0f;
+    p.clip_plane[3] = 1e30f;
+    return p;
+}
 
 // GPU resources for one mesh, owned by the caller and released with destroy_mesh().
 struct GpuMesh {

@@ -19,12 +19,19 @@ layout(location = 0) out vec4 out_color;
 layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 cam_pos;
+    vec4 clip_plane; // xyz = unit normal, w = signed offset; discard where dot(N,p) > w (disabled: N=0)
 } pc;
 
 void main() {
+    // Cross-section: cut away the half-space in front of the plane so the interior is revealed.
+    if (dot(pc.clip_plane.xyz, v_world_pos) > pc.clip_plane.w) discard;
+
     vec3 N = normalize(v_normal);
     vec3 V = normalize(pc.cam_pos.xyz - v_world_pos);
-    if (dot(N, V) < 0.0) N = -N; // two-sided: face the viewer so back/interior faces are shaded
+    // A face that the cut exposes points roughly along the section normal and away from the viewer;
+    // flipping the normal toward the viewer (two-sided) lights those interior walls instead of leaving
+    // them black, which is what makes the section read as a solid cutaway.
+    if (dot(N, V) < 0.0) N = -N;
 
     const vec3 L = normalize(vec3(0.4, 0.85, 0.5)); // fixed key light direction (world space)
     float diffuse = max(dot(N, L), 0.0);

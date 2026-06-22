@@ -58,7 +58,22 @@ void setup_camera(OrbitCamera& cam, const CpuMesh& mesh, float aspect, rime::cor
     cam.pitch = rime::core::radians(20.0f);
 }
 
-MeshPush make_push(const OrbitCamera& cam, float aspect) {
+// Interactive cross-section state: a world-axis-aligned plane that cuts the part open. `axis` picks
+// the plane normal (x/y/z), `sign` which half is removed, `offset` where along the axis the plane sits.
+struct Clip {
+    bool on = false;
+    int axis = 0;        // 0 = x, 1 = y, 2 = z
+    float sign = 1.0f;   // +1 removes the +axis half, -1 the −axis half
+    float offset = 0.0f; // plane position along the axis, in world units
+};
+
+rime::core::Vec3 axis_unit(int axis) {
+    return axis == 0 ? rime::core::Vec3{1, 0, 0}
+         : axis == 1 ? rime::core::Vec3{0, 1, 0}
+                     : rime::core::Vec3{0, 0, 1};
+}
+
+MeshPush make_push(const OrbitCamera& cam, float aspect, const Clip& clip) {
     MeshPush p{};
     p.mvp = cam.view_proj(aspect);
     const rime::core::Vec3 e = cam.eye();
@@ -66,6 +81,18 @@ MeshPush make_push(const OrbitCamera& cam, float aspect) {
     p.cam_pos[1] = e.y;
     p.cam_pos[2] = e.z;
     p.cam_pos[3] = 1.0f;
+    if (clip.on) {
+        // normal = sign·axis, offset w = sign·offset → discard where dot(N,p) > w cuts the chosen half
+        // at coordinate `offset` (see the derivation in mesh_render.hpp / the shader).
+        const rime::core::Vec3 n = axis_unit(clip.axis) * clip.sign;
+        p.clip_plane[0] = n.x;
+        p.clip_plane[1] = n.y;
+        p.clip_plane[2] = n.z;
+        p.clip_plane[3] = clip.sign * clip.offset;
+    } else {
+        p.clip_plane[0] = p.clip_plane[1] = p.clip_plane[2] = 0.0f;
+        p.clip_plane[3] = 1e30f; // disabled: nothing is clipped
+    }
     return p;
 }
 
@@ -87,7 +114,8 @@ bool write_ppm(const std::string& path,
 int run_offscreen(const CpuMesh& mesh,
                   const std::string& out_path,
                   std::uint32_t size,
-                  rime::core::Vec3 world_up) {
+                  rime::core::Vec3 world_up,
+                  Clip clip) {
     rime::rhi::DeviceDesc desc{};
     desc.app_name = "03-icem-viewer";
     auto device = rime::rhi::create_device(desc);
@@ -99,10 +127,13 @@ int run_offscreen(const CpuMesh& mesh,
     OrbitCamera cam;
     setup_camera(cam, mesh, 1.0f, world_up); // square image → aspect 1
 
+    // A sectioned snapshot cuts through the part center along the chosen axis.
+    if (clip.on) clip.offset = rime::core::dot(mesh.center(), axis_unit(clip.axis));
+
     const std::vector<std::uint8_t> px = rime::viewer::render_mesh_offscreen(*device,
                                                                             size,
                                                                             mesh,
-                                                                            make_push(cam, 1.0f),
+                                                                            make_push(cam, 1.0f, clip),
                                                                             kClear,
                                                                             mesh_vert_spv,
                                                                             sizeof(mesh_vert_spv),
@@ -191,8 +222,13 @@ bool run_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_frames
         setup_camera(cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
     }
 
-    std::printf("icem_viewer: presenting %u triangles on '%s'. Drag=orbit, right-drag=pan, "
-                "wheel=zoom, F=reframe, ESC=quit.\n",
+    Clip clip;
+    clip.offset = rime::core::dot(mesh.center(), axis_unit(clip.axis));
+    const float clip_step = std::max(std::max(mesh.radius(), 1e-4f) * 0.02f, 1e-5f);
+
+    std::printf("icem_viewer: presenting %u triangles on '%s'.\n"
+                "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
+                "  section: C=toggle, X/Y/Z=axis, N=flip side, [ ]=move plane\n",
                 mesh.triangle_count(),
                 device->adapter().name.c_str());
 
@@ -218,6 +254,24 @@ bool run_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_frames
         if (input.wheel_y() != 0.0f) cam.zoom(input.wheel_y());
         if (input.key_pressed(Key::F)) cam.frame(mesh.center(), std::max(mesh.radius(), 1e-4f), aspect);
 
+        // Cross-section controls. Selecting an axis re-centers the plane on the part.
+        if (input.key_pressed(Key::C)) clip.on = !clip.on;
+        if (input.key_pressed(Key::X)) {
+            clip.axis = 0;
+            clip.offset = rime::core::dot(mesh.center(), axis_unit(0));
+        }
+        if (input.key_pressed(Key::Y)) {
+            clip.axis = 1;
+            clip.offset = rime::core::dot(mesh.center(), axis_unit(1));
+        }
+        if (input.key_pressed(Key::Z)) {
+            clip.axis = 2;
+            clip.offset = rime::core::dot(mesh.center(), axis_unit(2));
+        }
+        if (input.key_pressed(Key::N)) clip.sign = -clip.sign;
+        if (input.key_down(Key::LeftBracket)) clip.offset -= clip_step;
+        if (input.key_down(Key::RightBracket)) clip.offset += clip_step;
+
         rime::rhi::TextureHandle target = swapchain->acquire_next_image();
         if (!target.is_valid()) {
             device->wait_idle();
@@ -229,7 +283,7 @@ bool run_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_frames
         }
 
         auto cmd = device->begin_commands();
-        rime::viewer::record_mesh(*cmd, gpu, target, depth, ext, make_push(cam, aspect), kClear);
+        rime::viewer::record_mesh(*cmd, gpu, target, depth, ext, make_push(cam, aspect, clip), kClear);
         if (!swapchain->present(*cmd)) {
             device->wait_idle();
             const Extent2D s = window->framebuffer_size();
@@ -259,6 +313,7 @@ int main(int argc, char** argv) {
     std::uint32_t size = 512;
     int frames = 0;
     rime::core::Vec3 world_up{0.0f, 0.0f, 1.0f}; // ICEM parts are authored z-up
+    Clip clip; // off unless --clip is given (offscreen); the window toggles it interactively
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a(argv[i]);
@@ -267,6 +322,10 @@ int main(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') out_path = argv[++i];
         } else if (a == "--windowed") {
             offscreen = false;
+        } else if (a == "--clip" && i + 1 < argc) {
+            const std::string_view ax(argv[++i]);
+            clip.on = true;
+            clip.axis = (ax == "y") ? 1 : (ax == "z") ? 2 : 0;
         } else if (a == "--size" && i + 1 < argc) {
             size = static_cast<std::uint32_t>(std::max(8, std::atoi(argv[++i])));
         } else if (a == "--frames" && i + 1 < argc) {
@@ -291,8 +350,8 @@ int main(int argc, char** argv) {
         mesh = rime::viewer::make_unit_cube();
     }
 
-    if (offscreen) return run_offscreen(mesh, out_path, size, world_up);
+    if (offscreen) return run_offscreen(mesh, out_path, size, world_up, clip);
     if (run_windowed(mesh, world_up, frames)) return 0;
     std::printf("icem_viewer: no window/display — falling back to off-screen (%s).\n", out_path.c_str());
-    return run_offscreen(mesh, out_path, size, world_up);
+    return run_offscreen(mesh, out_path, size, world_up, clip);
 }

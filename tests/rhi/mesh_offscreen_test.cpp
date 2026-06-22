@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <utility>
 #include <vector>
 
 #include "rime/rhi/rhi.hpp"
@@ -99,4 +100,70 @@ TEST_CASE("viewer renders a lit cube off-screen") {
     CHECK(frac < 0.95); // ...and so is some background
     CHECK(max_lum > 150.0f); // real shading reaches bright highlights
     CHECK(black == 0);       // no collapsed-normal black holes
+}
+
+TEST_CASE("viewer cross-section clips a half-space and reveals the interior") {
+    using namespace rime::rhi;
+
+    auto device = create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping cross-section render");
+        return;
+    }
+
+    const std::uint32_t size = 128;
+    const ClearColor clear{0.05f, 0.05f, 0.06f, 1.0f};
+    const rime::viewer::CpuMesh cube = rime::viewer::make_unit_cube(); // x,y,z ∈ [-1, 1]
+
+    rime::viewer::OrbitCamera cam;
+    cam.frame(cube.center(), cube.radius(), 1.0f);
+    cam.yaw = rime::core::radians(35.0f);
+    cam.pitch = rime::core::radians(20.0f);
+
+    // Render with a given clip plane and return (lit fraction, center luminance).
+    const auto render = [&](float nx, float ny, float nz, float w) {
+        rime::viewer::MeshPush push{};
+        push.mvp = cam.view_proj(1.0f);
+        const rime::core::Vec3 e = cam.eye();
+        push.cam_pos[0] = e.x;
+        push.cam_pos[1] = e.y;
+        push.cam_pos[2] = e.z;
+        push.cam_pos[3] = 1.0f;
+        push.clip_plane[0] = nx;
+        push.clip_plane[1] = ny;
+        push.clip_plane[2] = nz;
+        push.clip_plane[3] = w;
+        const std::vector<std::uint8_t> px = rime::viewer::render_mesh_offscreen(*device,
+                                                                                size,
+                                                                                cube,
+                                                                                push,
+                                                                                clear,
+                                                                                mesh_vert_spv,
+                                                                                sizeof(mesh_vert_spv),
+                                                                                mesh_frag_spv,
+                                                                                sizeof(mesh_frag_spv));
+        std::size_t lit = 0;
+        for (std::uint32_t i = 0; i < size * size; ++i) {
+            if (luminance(&px[static_cast<std::size_t>(i) * 4]) > 40.0f) ++lit;
+        }
+        const float center = luminance(&px[(static_cast<std::size_t>(size / 2) * size + size / 2) * 4]);
+        return std::pair<double, float>{static_cast<double>(lit) / (size * size), center};
+    };
+
+    const auto none = render(0.0f, 0.0f, 0.0f, 0.0f);  // dot=0 never exceeds 0 → clips nothing
+    const auto half = render(1.0f, 0.0f, 0.0f, 0.0f);  // discard x > 0 → keep the −x half
+    const auto allc = render(1.0f, 0.0f, 0.0f, -1.5f); // discard x > −1.5 → the whole cube is removed
+
+    // The section removes geometry: a half cut shows less than the whole, and cutting past the part
+    // shows essentially nothing.
+    CHECK(half.first < none.first);
+    CHECK(half.first > 0.02); // ...but the remaining half is still clearly on screen
+    CHECK(allc.first < 0.01); // cutting beyond the part empties the frame
+
+    // The cut reveals the interior rather than punching a hole to the background: the kept half still
+    // lights up (two-sided shading on the now-exposed inner faces).
+    CHECK(half.second > 40.0f);
 }
