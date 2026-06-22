@@ -169,7 +169,9 @@ parallel systems on the job system, queries, a transform hierarchy. Sample
 **M5 — Render graph + PBR (first light).** `engine/render` — **render graph** (passes,
 transient resources, auto-barriers), mesh/material/camera, **PBR** (+ derivation), depth
 pre-pass, one dynamic light. Samples `03-render-graph`, `04-first-light`. The home for
-M10. *Inspired by: UE5 render-graph discipline.*
+M10. *Inspired by: UE5 render-graph discipline.* — *Note: the RHI **depth attachment** and
+depth test (ADR-0011) were pulled ahead of M5 to unblock the ICEM viewer; the render graph
+adopts and extends them (multiple targets, stencil, MSAA).*
 
 **M6 — Asset pipeline + runtime assets.** `tools/asset-pipeline` (Rust) imports glTF +
 textures → cooked formats; `engine/assets` loads/streams at runtime; `tools/rime-cli`

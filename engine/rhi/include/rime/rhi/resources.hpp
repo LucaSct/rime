@@ -84,6 +84,16 @@ struct GraphicsPipelineDesc {
     Format color_format = Format::RGBA8Unorm;
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
     CullMode cull = CullMode::None;
+
+    // Depth state. Off by default, so the existing flat-2D pipelines (triangle, quad) are unchanged.
+    // When `depth_test` is on, the pass must supply a matching DepthStencilAttachment and `depth_format`
+    // must equal that attachment's format (dynamic rendering matches pipeline and pass by format, not
+    // by a render-pass object). `depth_write` controls whether passing fragments update the depth
+    // buffer (turn it off for, e.g., a translucent overlay that should test but not occlude).
+    bool depth_test = false;
+    bool depth_write = true;
+    CompareOp depth_compare = CompareOp::Less;
+    Format depth_format = Format::Undefined;
     // When true, the pipeline declares a descriptor set 0 with one combined image-sampler at binding
     // 0 (a fragment-stage `sampler2D`), bound at draw time with CommandBuffer::bind_texture. M3.5's
     // minimal descriptor model — one texture; the render graph grows richer sets later.

@@ -78,6 +78,18 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+    // Depth/stencil state. We always provide a valid struct (rather than leaving pDepthStencilState
+    // null) so the pipeline is well-defined on every driver; when depth_test is off it simply disables
+    // the test+write, which is exactly the old behavior. Stencil stays disabled until the cross-section
+    // brick needs it.
+    VkPipelineDepthStencilStateCreateInfo ds{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = desc.depth_test ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = (desc.depth_test && desc.depth_write) ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = to_vk(desc.depth_compare);
+    ds.depthBoundsTestEnable = VK_FALSE;
+    ds.stencilTestEnable = VK_FALSE;
+
     VkPipelineColorBlendAttachmentState blend{};
     blend.blendEnable = VK_FALSE;
     blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -131,6 +143,10 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     rendering.colorAttachmentCount = 1;
     rendering.pColorAttachmentFormats = &color_format;
+    // Declare the depth attachment's format too, so dynamic rendering can match this pipeline to a
+    // pass that carries a depth buffer. UNDEFINED (the default when depth_test is off) means "no depth
+    // attachment", matching a RenderingInfo with no depth_stencil.
+    if (desc.depth_test) rendering.depthAttachmentFormat = to_vk(desc.depth_format);
 
     VkGraphicsPipelineCreateInfo pci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pci.pNext = &rendering;
@@ -141,6 +157,7 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     pci.pViewportState = &vp;
     pci.pRasterizationState = &rs;
     pci.pMultisampleState = &ms;
+    pci.pDepthStencilState = &ds;
     pci.pColorBlendState = &cb;
     pci.pDynamicState = &dyn;
     pci.layout = layout;

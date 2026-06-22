@@ -42,12 +42,46 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     att.clearValue.color.float32[2] = info.color.clear.b;
     att.clearValue.color.float32[3] = info.color.clear.a;
 
+    // Optional depth attachment — this is what turns a flat-2D pass into a depth-tested 3-D one.
+    // Transition the depth image into a depth-attachment layout (through its *depth* aspect), then
+    // describe it like the color attachment but with a depth/stencil clear value. The fragment tests
+    // run at the early/late-fragment-test stages, so that is where the write becomes available.
+    // `depth_att` must outlive the vkCmdBeginRendering call below, hence the function-scope declaration.
+    VkRenderingAttachmentInfo depth_att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    if (info.depth_stencil) {
+        VulkanTexture* dtex = device_.lookup(info.depth_stencil->target);
+        if (!dtex) {
+            RIME_ERROR("rhi: begin_rendering with an invalid depth target");
+        } else {
+            transition_image(cmd_,
+                             dtex->image,
+                             dtex->layout,
+                             VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                             0,
+                             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                             VK_IMAGE_ASPECT_DEPTH_BIT);
+            dtex->layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+
+            depth_att.imageView = dtex->view;
+            depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            depth_att.loadOp = to_vk(info.depth_stencil->load_op);
+            depth_att.storeOp = to_vk(info.depth_stencil->store_op);
+            depth_att.clearValue.depthStencil.depth = info.depth_stencil->clear_depth;
+            depth_att.clearValue.depthStencil.stencil = info.depth_stencil->clear_stencil;
+        }
+    }
+
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea.offset = {0, 0};
     ri.renderArea.extent = {tex->extent.width, tex->extent.height};
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &att;
+    // imageView stays null if there was no depth attachment (or its lookup failed) → color-only pass.
+    if (depth_att.imageView != VK_NULL_HANDLE) ri.pDepthAttachment = &depth_att;
     vkCmdBeginRendering(cmd_, &ri);
 }
 

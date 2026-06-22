@@ -152,6 +152,41 @@ template <class Dst, class Src>
     return VK_CULL_MODE_NONE;
 }
 
+[[nodiscard]] inline VkCompareOp to_vk(CompareOp op) noexcept {
+    switch (op) {
+        case CompareOp::Never: return VK_COMPARE_OP_NEVER;
+        case CompareOp::Less: return VK_COMPARE_OP_LESS;
+        case CompareOp::Equal: return VK_COMPARE_OP_EQUAL;
+        case CompareOp::LessEqual: return VK_COMPARE_OP_LESS_OR_EQUAL;
+        case CompareOp::Greater: return VK_COMPARE_OP_GREATER;
+        case CompareOp::NotEqual: return VK_COMPARE_OP_NOT_EQUAL;
+        case CompareOp::GreaterEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+        case CompareOp::Always: return VK_COMPARE_OP_ALWAYS;
+    }
+    return VK_COMPARE_OP_LESS;
+}
+
+// Is this a depth (or depth-stencil) format? Used to pick the image-view/barrier aspect: depth images
+// are referenced through their depth aspect, color images through the color aspect. Kept in one place
+// so every site that builds a subresource range agrees.
+[[nodiscard]] inline bool is_depth_format(VkFormat f) noexcept {
+    switch (f) {
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D16_UNORM:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The image aspect a view/barrier should target for a given format. Depth-only for the depth formats
+// we use today; the stencil aspect is added alongside the cross-section (stencil) brick.
+[[nodiscard]] inline VkImageAspectFlags aspect_for(VkFormat f) noexcept {
+    return is_depth_format(f) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+}
+
 [[nodiscard]] inline VkIndexType to_vk(IndexType t) noexcept {
     return t == IndexType::Uint16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
 }
@@ -187,7 +222,8 @@ inline void transition_image(VkCommandBuffer cmd,
                              VkPipelineStageFlags2 src_stage,
                              VkAccessFlags2 src_access,
                              VkPipelineStageFlags2 dst_stage,
-                             VkAccessFlags2 dst_access) noexcept {
+                             VkAccessFlags2 dst_access,
+                             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT) noexcept {
     VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     barrier.srcStageMask = src_stage;
     barrier.srcAccessMask = src_access;
@@ -198,7 +234,7 @@ inline void transition_image(VkCommandBuffer cmd,
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.aspectMask = aspect;
     barrier.subresourceRange.baseMipLevel = 0;
     barrier.subresourceRange.levelCount = 1;
     barrier.subresourceRange.baseArrayLayer = 0;

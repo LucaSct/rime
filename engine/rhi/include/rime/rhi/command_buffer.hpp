@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include "rime/rhi/types.hpp"
 
@@ -19,7 +20,7 @@
 namespace rime::rhi {
 
 // One color attachment for a dynamic-rendering pass: the texture to draw into and what to do with
-// its contents on entry/exit. (Depth and multiple color targets arrive with the render graph.)
+// its contents on entry/exit. (Multiple color targets arrive with the render graph.)
 struct ColorAttachment {
     TextureHandle target;
     LoadOp load_op = LoadOp::Clear;
@@ -27,10 +28,27 @@ struct ColorAttachment {
     ClearColor clear = {};
 };
 
+// The depth(-stencil) attachment for a dynamic-rendering pass: the depth texture to test/write
+// against and what to do with its contents on entry/exit. This is what makes opaque 3-D draw
+// correctly — without it, the painter's-order last-drawn fragment wins. `clear_depth = 1.0` clears to
+// the far plane (the right default for a `Less` depth test). `clear_stencil` is carried now but only
+// takes effect once the stencil aspect is wired in the cross-section brick; depth is enough for 3-D.
+struct DepthStencilAttachment {
+    TextureHandle target;
+    LoadOp load_op = LoadOp::Clear;
+    StoreOp store_op = StoreOp::DontCare; // depth is usually transient; Store only if sampled later
+    float clear_depth = 1.0f;
+    std::uint32_t clear_stencil = 0;
+};
+
 // Describes a dynamic-rendering scope. The render area defaults to the full target extent (the
-// backend reads it from the texture), so the common case needs only the color attachment.
+// backend reads it from the color target), so the common case needs only the color attachment.
+// `depth_stencil` is optional: leave it unset for a flat 2-D pass (the M3 triangle/quad), set it to
+// enable depth-tested 3-D. The pipeline bound inside the pass must agree (GraphicsPipelineDesc depth
+// fields) — depth on here ⇔ depth_test + matching depth_format on the pipeline.
 struct RenderingInfo {
     ColorAttachment color;
+    std::optional<DepthStencilAttachment> depth_stencil;
 };
 
 class CommandBuffer {

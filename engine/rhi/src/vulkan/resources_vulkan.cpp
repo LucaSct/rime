@@ -94,7 +94,8 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
     vci.image = t.image;
     vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vci.format = ici.format;
-    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    // A depth image is viewed through its depth aspect, a color image through its color aspect.
+    vci.subresourceRange.aspectMask = aspect_for(ici.format);
     vci.subresourceRange.baseMipLevel = 0;
     vci.subresourceRange.levelCount = 1;
     vci.subresourceRange.baseArrayLayer = 0;

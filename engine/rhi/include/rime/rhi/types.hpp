@@ -131,6 +131,21 @@ enum class PrimitiveTopology : std::uint8_t { TriangleList, TriangleStrip, LineL
 
 enum class CullMode : std::uint8_t { None, Front, Back };
 
+// How a fragment's depth is compared against the value already in the depth buffer (the depth test).
+// With our 0=near .. 1=far depth convention, `Less` is the usual choice — a fragment is kept only if
+// it is nearer than what was drawn before, which is what makes opaque 3-D draw correctly regardless
+// of submission order. Mirrors VkCompareOp one-to-one; reused for the stencil test when that lands.
+enum class CompareOp : std::uint8_t {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+};
+
 // Index buffer element width. 16-bit indexes halve bandwidth and suffice for meshes up to 65k
 // vertices (the common case); 32-bit covers the rest.
 enum class IndexType : std::uint8_t { Uint16, Uint32 };
