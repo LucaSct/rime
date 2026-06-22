@@ -98,6 +98,15 @@ struct GraphicsPipelineDesc {
     // 0 (a fragment-stage `sampler2D`), bound at draw time with CommandBuffer::bind_texture. M3.5's
     // minimal descriptor model — one texture; the render graph grows richer sets later.
     bool sampled_texture = false;
+
+    // Bytes of push-constant data the pipeline accepts, visible to both the vertex and fragment
+    // stages. 0 (the default) means none. Push constants are the smallest way to hand a shader a little
+    // per-draw data — the model-view-projection matrix, a clip plane, a colormap range — without a
+    // descriptor set or buffer. Keep it ≤128 bytes, the value guaranteed on every Vulkan device. Set
+    // the data per draw with CommandBuffer::push_constants. (Uniform buffers, for larger/shared data,
+    // arrive with the render graph / material layer.)
+    std::uint32_t push_constant_size = 0;
+
     std::string_view debug_name = {};
 };
 

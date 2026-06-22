@@ -36,3 +36,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0009](0009-swapchain-and-presentation.md) — swapchain, presentation & frame pacing
 - [ADR-0010](0010-textures-and-descriptors.md) — textures, samplers & the descriptor model
 - [ADR-0011](0011-depth-attachment.md) — depth attachment & the depth test (pulled ahead of M5)
+- [ADR-0012](0012-push-constants.md) — push constants for small per-draw data (MVP, …)

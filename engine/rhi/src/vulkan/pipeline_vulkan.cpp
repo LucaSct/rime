@@ -125,10 +125,22 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         }
     }
 
+    // One push-constant range (if requested), visible to both stages, covering [0, size). Storing the
+    // stage mask on the pipeline lets push_constants() pass the matching stageFlags to vkCmdPushConstants.
+    const VkShaderStageFlags pc_stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkPushConstantRange pc_range{};
+    pc_range.stageFlags = pc_stages;
+    pc_range.offset = 0;
+    pc_range.size = desc.push_constant_size;
+
     VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     if (set_layout != VK_NULL_HANDLE) {
         lci.setLayoutCount = 1;
         lci.pSetLayouts = &set_layout;
+    }
+    if (desc.push_constant_size > 0) {
+        lci.pushConstantRangeCount = 1;
+        lci.pPushConstantRanges = &pc_range;
     }
     VkPipelineLayout layout = VK_NULL_HANDLE;
     if (vkCreatePipelineLayout(device_, &lci, nullptr, &layout) != VK_SUCCESS) {
@@ -166,6 +178,7 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     VulkanPipeline p;
     p.layout = layout;
     p.set_layout = set_layout;
+    p.push_constant_stages = desc.push_constant_size > 0 ? pc_stages : 0;
     const VkResult r =
         vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
     if (r != VK_SUCCESS) {

@@ -75,6 +75,12 @@ public:
     // image-sampler; richer descriptor sets arrive with the render graph.
     virtual void bind_texture(std::uint32_t binding, TextureHandle texture, SamplerHandle sampler) = 0;
 
+    // Upload `size` bytes of push-constant data (from `offset`) to the currently bound pipeline,
+    // visible to its vertex and fragment stages. Call after bind_pipeline; the pipeline must have been
+    // created with a matching `push_constant_size`. This is the per-draw fast path for a small block
+    // such as an MVP matrix — no descriptor set, no buffer. Keep within the pipeline's declared size.
+    virtual void push_constants(const void* data, std::uint32_t size, std::uint32_t offset = 0) = 0;
+
     // Viewport/scissor are dynamic pipeline state, so they're set per-recording rather than baked
     // into the pipeline — the same pipeline can draw to differently sized targets.
     virtual void set_viewport(const Viewport& viewport) = 0;

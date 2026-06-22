@@ -12,7 +12,8 @@ rime_add_test(rime_rhi_tests
     device_test.cpp
     offscreen_triangle_test.cpp
     textured_quad_test.cpp
-    depth_test.cpp)
+    depth_test.cpp
+    pushconst_test.cpp)
 
 target_link_libraries(rime_rhi_tests
     PRIVATE rime::rhi)
@@ -27,4 +28,6 @@ rime_add_shaders(rime_rhi_tests
     ${CMAKE_SOURCE_DIR}/samples/02-textured-quad/shaders/quad.vert
     ${CMAKE_SOURCE_DIR}/samples/02-textured-quad/shaders/quad.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pushconst.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pushconst.frag)

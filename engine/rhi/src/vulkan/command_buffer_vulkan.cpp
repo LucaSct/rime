@@ -169,6 +169,19 @@ void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
         cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, 1, &p->set, 0, nullptr);
 }
 
+void VulkanCommandBuffer::push_constants(const void* data, std::uint32_t size, std::uint32_t offset) {
+    if (current_pipeline_ == nullptr || current_pipeline_->push_constant_stages == 0) {
+        RIME_ERROR("rhi: push_constants without a bound pipeline that declares push_constant_size");
+        return;
+    }
+    vkCmdPushConstants(cmd_,
+                       current_pipeline_->layout,
+                       current_pipeline_->push_constant_stages,
+                       offset,
+                       size,
+                       data);
+}
+
 void VulkanCommandBuffer::set_viewport(const Viewport& viewport) {
     VkViewport vp{};
     vp.x = viewport.x;

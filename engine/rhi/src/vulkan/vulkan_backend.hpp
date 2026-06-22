@@ -64,6 +64,9 @@ struct VulkanPipeline {
     VkDescriptorSet set = VK_NULL_HANDLE;
     TextureHandle bound_texture{};
     SamplerHandle bound_sampler{};
+    // Stage mask of the pipeline's push-constant range (0 = none). push_constants() needs it because
+    // vkCmdPushConstants must be told which stages the data is for, and it must match the range.
+    VkShaderStageFlags push_constant_stages = 0;
 };
 
 struct VulkanSampler {
@@ -185,6 +188,7 @@ public:
     void bind_vertex_buffer(BufferHandle buffer, std::uint64_t offset) override;
     void bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset) override;
     void bind_texture(std::uint32_t binding, TextureHandle texture, SamplerHandle sampler) override;
+    void push_constants(const void* data, std::uint32_t size, std::uint32_t offset) override;
     void set_viewport(const Viewport& viewport) override;
     void set_scissor(const Rect2D& scissor) override;
     void draw(std::uint32_t vertex_count,
