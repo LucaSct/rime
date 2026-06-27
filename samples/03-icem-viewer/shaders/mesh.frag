@@ -9,6 +9,11 @@
 // Lighting is two-sided (the normal is flipped to face the viewer) so a cross-section's interior walls
 // — which face inward — are lit too, not left black. Constants are baked in for now; they become
 // material/lighting inputs when the render graph lands.
+//
+// Field colormap (C1): when a field is bound (vmax > vmin in the push constant), the surface albedo is
+// replaced by a colormap of the simulation field sampled at the fragment's world position — the same
+// shade then lights it, so the computed temperature/etc. reads on the part and on the cut-revealed
+// interior. With no field bound, the path below is identical to the plain lit shade. See colormap.md.
 #version 450
 
 layout(location = 0) in vec3 v_world_pos;
@@ -16,11 +21,33 @@ layout(location = 1) in vec3 v_normal;
 
 layout(location = 0) out vec4 out_color;
 
+// Must match MeshPush in mesh_render.hpp and the block in mesh.vert (one shared 128-byte block).
 layout(push_constant) uniform Push {
     mat4 mvp;
-    vec4 cam_pos;
-    vec4 clip_plane; // xyz = unit normal, w = signed offset; discard where dot(N,p) > w (disabled: N=0)
+    vec4 cam_pos;     // xyz = eye position (world)
+    vec4 clip_plane;  // xyz = unit normal, w = signed offset; discard where dot(N,p) > w (disabled: N=0)
+    vec4 field_scale; // xyz = world->uvw scale, w = vmin
+    vec4 field_bias;  // xyz = world->uvw bias,  w = vmax  (field is "on" iff vmax > vmin)
 } pc;
+
+// The field volume: R = value (dilated into the absent shell), G = validity. 3-D texture, trilinear.
+layout(set = 0, binding = 0) uniform sampler3D u_field;
+
+// 5-stop "turbo-lite" transfer function: blue (cold) -> cyan -> green -> yellow -> red (hot). Ordered
+// enough to read a field at a glance and intuitive for temperature; a full perceptual map (viridis/
+// turbo) is a drop-in later. The same stops draw the legend bar. See docs/math/colormap.md.
+vec3 colormap(float t) {
+    const vec3 c0 = vec3(0.20, 0.30, 0.80); // 0.00 blue
+    const vec3 c1 = vec3(0.10, 0.70, 0.90); // 0.25 cyan
+    const vec3 c2 = vec3(0.25, 0.80, 0.30); // 0.50 green
+    const vec3 c3 = vec3(0.95, 0.85, 0.20); // 0.75 yellow
+    const vec3 c4 = vec3(0.90, 0.20, 0.15); // 1.00 red
+    float x = clamp(t, 0.0, 1.0) * 4.0;
+    if (x < 1.0) return mix(c0, c1, x);
+    if (x < 2.0) return mix(c1, c2, x - 1.0);
+    if (x < 3.0) return mix(c2, c3, x - 2.0);
+    return mix(c3, c4, x - 3.0);
+}
 
 void main() {
     // Cross-section: cut away the half-space in front of the plane so the interior is revealed.
@@ -42,7 +69,15 @@ void main() {
     const vec3 ground = vec3(0.20, 0.18, 0.16);
     vec3 ambient = mix(ground, sky, up);
 
-    const vec3 base = vec3(0.80, 0.80, 0.82); // light-metal albedo
+    // Albedo: the field colormap when a field is bound, else the neutral light-metal base.
+    vec3 base = vec3(0.80, 0.80, 0.82);
+    bool field_on = pc.field_bias.w > pc.field_scale.w; // vmax > vmin
+    if (field_on) {
+        vec3 uvw = v_world_pos * pc.field_scale.xyz + pc.field_bias.xyz;
+        float value = texture(u_field, uvw).r;
+        float t = (value - pc.field_scale.w) / (pc.field_bias.w - pc.field_scale.w);
+        base = colormap(t);
+    }
     vec3 color = base * (0.5 * ambient + 0.9 * diffuse);
 
     // Fresnel rim: brightens grazing angles to outline the form.

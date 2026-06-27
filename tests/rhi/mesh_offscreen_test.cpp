@@ -167,3 +167,85 @@ TEST_CASE("viewer cross-section clips a half-space and reveals the interior") {
     // lights up (two-sided shading on the now-exposed inner faces).
     CHECK(half.second > 40.0f);
 }
+
+TEST_CASE("viewer colours the part by a field (colormap, C1)") {
+    using namespace rime::rhi;
+
+    auto device = create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping field render");
+        return;
+    }
+
+    const std::uint32_t size = 128;
+    const ClearColor clear{0.05f, 0.05f, 0.06f, 1.0f};
+    const rime::viewer::CpuMesh cube = rime::viewer::make_unit_cube(); // x,y,z ∈ [-1, 1]
+
+    // A 2×2×2 field that ramps along z: value 0 on the bottom slice (→ blue), 1 on the top (→ red);
+    // validity 1 everywhere. node-major index i + 2*(j + 2*k).
+    std::vector<float> vol(2 * 2 * 2 * 4, 0.0f);
+    for (int k = 0; k < 2; ++k)
+        for (int j = 0; j < 2; ++j)
+            for (int i = 0; i < 2; ++i) {
+                const std::size_t gi = static_cast<std::size_t>(i) + 2 * (j + 2 * k);
+                vol[gi * 4 + 0] = (k == 0) ? 0.0f : 1.0f; // value
+                vol[gi * 4 + 1] = 1.0f;                    // validity
+                vol[gi * 4 + 3] = 1.0f;
+            }
+
+    rime::viewer::OrbitCamera cam;
+    cam.frame(cube.center(), cube.radius(), 1.0f);
+    cam.yaw = rime::core::radians(35.0f);
+    cam.pitch = rime::core::radians(20.0f);
+
+    rime::viewer::MeshPush push{};
+    push.mvp = cam.view_proj(1.0f);
+    const rime::core::Vec3 eye = cam.eye();
+    push.cam_pos[0] = eye.x;
+    push.cam_pos[1] = eye.y;
+    push.cam_pos[2] = eye.z;
+    push.cam_pos[3] = 1.0f;
+    push.clip_plane[0] = push.clip_plane[1] = push.clip_plane[2] = 0.0f;
+    push.clip_plane[3] = 1e30f; // no clip
+    // World [-1,1]³ → uvw with a 2-node axis: scale = 1/(h·n) = 0.25, bias = 0.5/n − origin/(h·n) = 0.5.
+    for (int c = 0; c < 3; ++c) {
+        push.field_scale[c] = 0.25f;
+        push.field_bias[c] = 0.5f;
+    }
+    push.field_scale[3] = 0.0f; // vmin
+    push.field_bias[3] = 1.0f;  // vmax  (vmax > vmin → field on)
+
+    const std::vector<std::uint8_t> px = rime::viewer::render_mesh_offscreen(*device,
+                                                                            size,
+                                                                            cube,
+                                                                            push,
+                                                                            clear,
+                                                                            mesh_vert_spv,
+                                                                            sizeof(mesh_vert_spv),
+                                                                            mesh_frag_spv,
+                                                                            sizeof(mesh_frag_spv),
+                                                                            vol.data(),
+                                                                            2,
+                                                                            2,
+                                                                            2);
+    REQUIRE(px.size() == static_cast<std::size_t>(size) * size * 4);
+
+    // The colormap must put both ends on the part: cold (blue-dominant) and hot (red-dominant) pixels.
+    // A plain metal shade (the field-off path) would have neither.
+    std::size_t part = 0, blue = 0, red = 0, black = 0;
+    for (std::uint32_t i = 0; i < size * size; ++i) {
+        const std::uint8_t* p = &px[static_cast<std::size_t>(i) * 4];
+        if (p[0] < 8 && p[1] < 8 && p[2] < 8) ++black;
+        if (luminance(p) <= 40.0f) continue; // background
+        ++part;
+        if (p[2] > p[0] + 25 && p[2] > p[1]) ++blue;          // blue/cyan-dominant → cold end
+        else if (p[0] > p[1] + 25 && p[0] > p[2] + 25) ++red; // red-dominant → hot end
+    }
+    CHECK(part > 0);
+    CHECK(blue > 30); // the cold end is clearly shown
+    CHECK(red > 10);  // ...and so is the hot end → a real value range, not a flat colour
+    CHECK(black == 0);
+}

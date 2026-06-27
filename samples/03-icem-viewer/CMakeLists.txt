@@ -12,6 +12,8 @@ target_link_libraries(icem_viewer
 
 rime_add_shaders(icem_viewer
     shaders/mesh.vert
-    shaders/mesh.frag)
+    shaders/mesh.frag
+    shaders/legend.vert
+    shaders/legend.frag)
 
 rime_apply_common_target_options(icem_viewer)

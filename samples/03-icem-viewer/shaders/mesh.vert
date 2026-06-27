@@ -14,9 +14,13 @@ layout(location = 1) in vec3 in_normal;
 layout(location = 0) out vec3 v_world_pos;
 layout(location = 1) out vec3 v_normal;
 
+// Must match MeshPush in mesh_render.hpp and the block in mesh.frag (one shared 128-byte block).
 layout(push_constant) uniform Push {
     mat4 mvp;
-    vec4 cam_pos; // xyz = camera/eye position in world space
+    vec4 cam_pos;     // xyz = camera/eye position in world space
+    vec4 clip_plane;  // (fragment) cross-section half-space
+    vec4 field_scale; // (fragment) world->uvw scale + vmin in .w
+    vec4 field_bias;  // (fragment) world->uvw bias  + vmax in .w
 } pc;
 
 void main() {
