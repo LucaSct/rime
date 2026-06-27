@@ -19,7 +19,8 @@ rime_add_test(rime_rhi_tests
     stencil_cap_test.cpp
     cap_offscreen_test.cpp
     warp_offscreen_test.cpp
-    iso_offscreen_test.cpp)
+    iso_offscreen_test.cpp
+    streamlines_offscreen_test.cpp)
 
 target_link_libraries(rime_rhi_tests
     PRIVATE rime::rhi) # rime::core (the camera math the mesh proof uses) comes transitively via rhi
@@ -50,4 +51,6 @@ rime_add_shaders(rime_rhi_tests
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/warp.vert
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/warp.frag
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/iso.vert
-    ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/iso.frag)
+    ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/iso.frag
+    ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/streamline.vert
+    ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/streamline.frag)
