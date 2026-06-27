@@ -80,20 +80,36 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
 
     // Depth/stencil state. We always provide a valid struct (rather than leaving pDepthStencilState
     // null) so the pipeline is well-defined on every driver; when depth_test is off it simply disables
-    // the test+write, which is exactly the old behavior. Stencil stays disabled until the cross-section
-    // brick needs it.
+    // the test+write, which is exactly the old behavior. Stencil (ADR-0014) is two-sided: front- and
+    // back-facing triangles get separate ops, so the cross-section cap can count surfaces in one draw.
     VkPipelineDepthStencilStateCreateInfo ds{
         VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     ds.depthTestEnable = desc.depth_test ? VK_TRUE : VK_FALSE;
     ds.depthWriteEnable = (desc.depth_test && desc.depth_write) ? VK_TRUE : VK_FALSE;
     ds.depthCompareOp = to_vk(desc.depth_compare);
     ds.depthBoundsTestEnable = VK_FALSE;
-    ds.stencilTestEnable = VK_FALSE;
+    ds.stencilTestEnable = desc.stencil_test ? VK_TRUE : VK_FALSE;
+    if (desc.stencil_test) {
+        const auto face = [&](const StencilFace& f) {
+            VkStencilOpState s{};
+            s.failOp = to_vk(f.fail);
+            s.passOp = to_vk(f.pass);
+            s.depthFailOp = to_vk(f.depth_fail);
+            s.compareOp = to_vk(f.compare);
+            s.compareMask = desc.stencil_read_mask;
+            s.writeMask = desc.stencil_write_mask;
+            s.reference = desc.stencil_reference;
+            return s;
+        };
+        ds.front = face(desc.stencil_front);
+        ds.back = face(desc.stencil_back);
+    }
 
     VkPipelineColorBlendAttachmentState blend{};
     blend.blendEnable = VK_FALSE;
-    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blend.colorWriteMask = desc.color_write ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
+                                            : 0;
 
     VkPipelineColorBlendStateCreateInfo cb{
         VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
@@ -155,10 +171,16 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     rendering.colorAttachmentCount = 1;
     rendering.pColorAttachmentFormats = &color_format;
-    // Declare the depth attachment's format too, so dynamic rendering can match this pipeline to a
-    // pass that carries a depth buffer. UNDEFINED (the default when depth_test is off) means "no depth
-    // attachment", matching a RenderingInfo with no depth_stencil.
-    if (desc.depth_test) rendering.depthAttachmentFormat = to_vk(desc.depth_format);
+    // Declare the depth/stencil attachment formats so dynamic rendering can match this pipeline to a
+    // pass that carries them. We key off the attachment *format*, not just which test is enabled: a
+    // stencil-only pass (the cap's marking draw) still binds the depth-stencil image, so every pipeline
+    // used there must declare both formats to agree with the pass. UNDEFINED (the default when neither
+    // test is on) means "no depth/stencil attachment", matching a RenderingInfo with no depth_stencil.
+    if (desc.depth_test || desc.stencil_test) {
+        const VkFormat df = to_vk(desc.depth_format);
+        rendering.depthAttachmentFormat = df;
+        if (has_stencil(df)) rendering.stencilAttachmentFormat = df;
+    }
 
     VkGraphicsPipelineCreateInfo pci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pci.pNext = &rendering;

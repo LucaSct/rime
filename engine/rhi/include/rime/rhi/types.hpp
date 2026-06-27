@@ -84,6 +84,7 @@ enum class Format : std::uint32_t {
     RGB32Float,   // vec3 vertex attribute (positions, colors)
     RGBA32Float,  // vec4 vertex attribute
     D32Float,     // depth (arrives when we add a depth pre-pass in M5)
+    D32FloatS8,   // combined depth + 8-bit stencil (the cross-section cap, ADR-0014)
 };
 
 // What a buffer can be used for. Bit flags: OR them together (see RIME_RHI_FLAGS below). The
@@ -154,6 +155,18 @@ enum class IndexType : std::uint8_t { Uint16, Uint32 };
 // Linear = smooth); AddressMode is what happens outside [0,1] UVs. A small, intentional subset.
 enum class Filter : std::uint8_t { Nearest, Linear };
 enum class AddressMode : std::uint8_t { Repeat, ClampToEdge };
+
+// What happens to the stencil value on a (stencil) test result. The cross-section cap (ADR-0014)
+// needs Keep, Replace, and the wrapping increment/decrement (to count surfaces along a view ray).
+// Mirrors VkStencilOp; a small subset, grown as needed.
+enum class StencilOp : std::uint8_t {
+    Keep,
+    Zero,
+    Replace,
+    IncrementWrap,
+    DecrementWrap,
+    Invert,
+};
 
 // ── Adapter (physical GPU) description ──────────────────────────────────────────────────────
 enum class DeviceType : std::uint8_t { Other, IntegratedGpu, DiscreteGpu, VirtualGpu, Cpu };

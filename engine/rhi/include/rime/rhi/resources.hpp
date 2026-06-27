@@ -79,6 +79,16 @@ struct VertexLayout {
     std::span<const VertexAttribute> attributes = {};
 };
 
+// One side's stencil behaviour: how the stencil value changes on test/depth failure or pass, and the
+// comparison against the reference (masked by `stencil_read_mask`). Defaults are inert (always pass,
+// keep the value), so a pipeline with stencil off ignores these. See ADR-0014.
+struct StencilFace {
+    StencilOp fail = StencilOp::Keep;       // stencil test failed
+    StencilOp depth_fail = StencilOp::Keep; // stencil passed but depth failed
+    StencilOp pass = StencilOp::Keep;       // both passed
+    CompareOp compare = CompareOp::Always;  // (ref & read_mask) <compare> (value & read_mask)
+};
+
 // Everything needed to bake a graphics pipeline. In M3 a pipeline targets a single color
 // attachment via dynamic rendering (no VkRenderPass object — see ADR-0007), so the desc carries the
 // color format directly rather than a render-pass handle.
@@ -99,6 +109,22 @@ struct GraphicsPipelineDesc {
     bool depth_write = true;
     CompareOp depth_compare = CompareOp::Less;
     Format depth_format = Format::Undefined;
+
+    // Stencil state (ADR-0014). Off by default. When on, the pass must supply a stencil-capable
+    // depth-stencil attachment (a D32FloatS8 target) and `depth_format` names it. `stencil_front` /
+    // `stencil_back` are the two-sided ops (front- vs back-facing triangles) — with cull off, one draw
+    // can increment on back faces and decrement on front faces, which is how the cross-section cap
+    // counts where the cut plane is inside the solid. Reference/masks are baked (static) for now.
+    bool stencil_test = false;
+    StencilFace stencil_front = {};
+    StencilFace stencil_back = {};
+    std::uint32_t stencil_read_mask = 0xFF;
+    std::uint32_t stencil_write_mask = 0xFF;
+    std::uint32_t stencil_reference = 0;
+
+    // When false, the pipeline writes no colour (colorWriteMask = 0): the stencil-marking pass updates
+    // only the stencil buffer, leaving the rendered image untouched. Default true (normal colour output).
+    bool color_write = true;
     // When true, the pipeline declares a descriptor set 0 with one combined image-sampler at binding
     // 0 (a fragment-stage `sampler2D`), bound at draw time with CommandBuffer::bind_texture. M3.5's
     // minimal descriptor model — one texture; the render graph grows richer sets later.

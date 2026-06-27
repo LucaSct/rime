@@ -15,7 +15,8 @@ rime_add_test(rime_rhi_tests
     depth_test.cpp
     pushconst_test.cpp
     mesh_offscreen_test.cpp
-    volume_texture_test.cpp)
+    volume_texture_test.cpp
+    stencil_cap_test.cpp)
 
 target_link_libraries(rime_rhi_tests
     PRIVATE rime::rhi) # rime::core (the camera math the mesh proof uses) comes transitively via rhi
@@ -37,4 +38,6 @@ rime_add_shaders(rime_rhi_tests
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.vert
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volume.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volume.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volume.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/stencil_mark.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/stencil_solid.frag)

@@ -47,30 +47,42 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     // describe it like the color attachment but with a depth/stencil clear value. The fragment tests
     // run at the early/late-fragment-test stages, so that is where the write becomes available.
     // `depth_att` must outlive the vkCmdBeginRendering call below, hence the function-scope declaration.
+    // A combined depth-stencil target (D32FloatS8, ADR-0014) is transitioned through its depth+stencil
+    // aspect and into the depth-stencil-attachment layout, and is bound as *both* the depth and the
+    // stencil attachment (one view serves both). A plain depth target keeps the depth-only path.
     VkRenderingAttachmentInfo depth_att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    VkRenderingAttachmentInfo stencil_att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    bool stencil_bound = false;
     if (info.depth_stencil) {
         VulkanTexture* dtex = device_.lookup(info.depth_stencil->target);
         if (!dtex) {
             RIME_ERROR("rhi: begin_rendering with an invalid depth target");
         } else {
+            const bool stencil = has_stencil(dtex->format);
+            const VkImageLayout layout = stencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                                 : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             transition_image(cmd_,
                              dtex->image,
                              dtex->layout,
-                             VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                             layout,
                              VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                              0,
                              VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
                                  VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                              VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                             VK_IMAGE_ASPECT_DEPTH_BIT);
-            dtex->layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+                             aspect_for(dtex->format));
+            dtex->layout = layout;
 
             depth_att.imageView = dtex->view;
-            depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            depth_att.imageLayout = layout;
             depth_att.loadOp = to_vk(info.depth_stencil->load_op);
             depth_att.storeOp = to_vk(info.depth_stencil->store_op);
             depth_att.clearValue.depthStencil.depth = info.depth_stencil->clear_depth;
             depth_att.clearValue.depthStencil.stencil = info.depth_stencil->clear_stencil;
+            if (stencil) {
+                stencil_att = depth_att; // same view + layout; the clear carries the stencil value
+                stencil_bound = true;
+            }
         }
     }
 
@@ -82,6 +94,7 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     ri.pColorAttachments = &att;
     // imageView stays null if there was no depth attachment (or its lookup failed) → color-only pass.
     if (depth_att.imageView != VK_NULL_HANDLE) ri.pDepthAttachment = &depth_att;
+    if (stencil_bound) ri.pStencilAttachment = &stencil_att;
     vkCmdBeginRendering(cmd_, &ri);
 }
 

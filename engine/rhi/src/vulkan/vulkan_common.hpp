@@ -77,6 +77,7 @@ template <class Dst, class Src>
         case Format::RGB32Float: return VK_FORMAT_R32G32B32_SFLOAT;
         case Format::RGBA32Float: return VK_FORMAT_R32G32B32A32_SFLOAT;
         case Format::D32Float: return VK_FORMAT_D32_SFLOAT;
+        case Format::D32FloatS8: return VK_FORMAT_D32_SFLOAT_S8_UINT;
     }
     return VK_FORMAT_UNDEFINED;
 }
@@ -166,6 +167,18 @@ template <class Dst, class Src>
     return VK_COMPARE_OP_LESS;
 }
 
+[[nodiscard]] inline VkStencilOp to_vk(StencilOp op) noexcept {
+    switch (op) {
+        case StencilOp::Keep: return VK_STENCIL_OP_KEEP;
+        case StencilOp::Zero: return VK_STENCIL_OP_ZERO;
+        case StencilOp::Replace: return VK_STENCIL_OP_REPLACE;
+        case StencilOp::IncrementWrap: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+        case StencilOp::DecrementWrap: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+        case StencilOp::Invert: return VK_STENCIL_OP_INVERT;
+    }
+    return VK_STENCIL_OP_KEEP;
+}
+
 // Is this a depth (or depth-stencil) format? Used to pick the image-view/barrier aspect: depth images
 // are referenced through their depth aspect, color images through the color aspect. Kept in one place
 // so every site that builds a subresource range agrees.
@@ -181,10 +194,18 @@ template <class Dst, class Src>
     }
 }
 
-// The image aspect a view/barrier should target for a given format. Depth-only for the depth formats
-// we use today; the stencil aspect is added alongside the cross-section (stencil) brick.
+// Does this format carry a stencil aspect alongside depth? (The cross-section cap, ADR-0014.)
+[[nodiscard]] inline bool has_stencil(VkFormat f) noexcept {
+    return f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D24_UNORM_S8_UINT;
+}
+
+// The image aspect a view/barrier should target for a given format: color for a colour image, depth
+// for a depth image, depth+stencil for a combined depth-stencil image (one view serves both the depth
+// and stencil attachments in dynamic rendering).
 [[nodiscard]] inline VkImageAspectFlags aspect_for(VkFormat f) noexcept {
-    return is_depth_format(f) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    if (!is_depth_format(f)) return VK_IMAGE_ASPECT_COLOR_BIT;
+    return has_stencil(f) ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+                          : VK_IMAGE_ASPECT_DEPTH_BIT;
 }
 
 [[nodiscard]] inline VkIndexType to_vk(IndexType t) noexcept {
