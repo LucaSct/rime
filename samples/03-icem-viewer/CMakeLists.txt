@@ -14,6 +14,9 @@ rime_add_shaders(icem_viewer
     shaders/mesh.vert
     shaders/mesh.frag
     shaders/legend.vert
-    shaders/legend.frag)
+    shaders/legend.frag
+    shaders/capmark.frag
+    shaders/cap.vert
+    shaders/cap.frag)
 
 rime_apply_common_target_options(icem_viewer)

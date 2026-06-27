@@ -150,6 +150,32 @@ inline void destroy_mesh(rhi::Device& device, const GpuMesh& m) {
     device.destroy(m.vbuf);
 }
 
+// Bind + draw the mesh into an already-open rendering scope (pipeline, field volume, push constant,
+// vertex buffer, viewport/scissor, draw). Split out of record_mesh so the cross-section cap can draw
+// the mesh, a stencil-marking pass, and the cap — all within one begin/end_rendering scope.
+inline void draw_mesh(rhi::CommandBuffer& cmd,
+                      const GpuMesh& m,
+                      rhi::Extent2D extent,
+                      const MeshPush& push) {
+    using namespace rime::rhi;
+    cmd.bind_pipeline(m.pipeline);
+    cmd.bind_texture(0, m.field_tex, m.field_sampler); // the field volume for mesh.frag's colormap
+    cmd.push_constants(&push, sizeof(MeshPush));
+    cmd.bind_vertex_buffer(m.vbuf, 0);
+
+    Viewport vp{};
+    vp.width = static_cast<float>(extent.width);
+    vp.height = static_cast<float>(extent.height);
+    vp.max_depth = 1.0f;
+    cmd.set_viewport(vp);
+    Rect2D sc{};
+    sc.width = extent.width;
+    sc.height = extent.height;
+    cmd.set_scissor(sc);
+
+    cmd.draw(m.vertex_count);
+}
+
 // Record one lit frame: clear color + depth, then draw the mesh with the camera matrix pushed in.
 inline void record_mesh(rhi::CommandBuffer& cmd,
                         const GpuMesh& m,
@@ -172,22 +198,7 @@ inline void record_mesh(rhi::CommandBuffer& cmd,
     ri.depth_stencil = da;
 
     cmd.begin_rendering(ri);
-    cmd.bind_pipeline(m.pipeline);
-    cmd.bind_texture(0, m.field_tex, m.field_sampler); // the field volume for mesh.frag's colormap
-    cmd.push_constants(&push, sizeof(MeshPush));
-    cmd.bind_vertex_buffer(m.vbuf, 0);
-
-    Viewport vp{};
-    vp.width = static_cast<float>(extent.width);
-    vp.height = static_cast<float>(extent.height);
-    vp.max_depth = 1.0f;
-    cmd.set_viewport(vp);
-    Rect2D sc{};
-    sc.width = extent.width;
-    sc.height = extent.height;
-    cmd.set_scissor(sc);
-
-    cmd.draw(m.vertex_count);
+    draw_mesh(cmd, m, extent, push);
     cmd.end_rendering();
 }
 
