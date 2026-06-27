@@ -36,6 +36,7 @@ struct VulkanTexture {
     VkImageView view = VK_NULL_HANDLE;
     VmaAllocation allocation = nullptr;
     Extent2D extent{};
+    std::uint32_t depth = 1; // >1 → a 3-D (volume) image; 1 → ordinary 2-D
     VkFormat format = VK_FORMAT_UNDEFINED;
     TextureUsage usage = TextureUsage::None;
     // The image's current layout, tracked so the command encoder can insert the right transition.

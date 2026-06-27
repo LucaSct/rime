@@ -31,6 +31,11 @@ struct BufferDesc {
 
 struct TextureDesc {
     Extent2D extent = {1, 1};
+    // Number of depth slices. 1 (the default) is an ordinary 2-D image; >1 makes a 3-D (volume)
+    // texture of extent width×height×depth, sampled in a shader with a `sampler3D` at normalized
+    // (u,v,w). Volumes are how a scalar/vector simulation field is uploaded for trilinear sampling
+    // (the ICEM viewer's field colormap / slice). See ADR-0013.
+    std::uint32_t depth = 1;
     Format format = Format::RGBA8Unorm;
     TextureUsage usage = TextureUsage::None;
     std::string_view debug_name = {};

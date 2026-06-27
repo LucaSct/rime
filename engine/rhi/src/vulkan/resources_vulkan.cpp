@@ -64,10 +64,14 @@ BufferHandle VulkanDevice::create_buffer(const BufferDesc& desc) {
 }
 
 TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
+    // depth > 1 selects a 3-D (volume) image, sampled with a sampler3D; depth == 1 is the ordinary
+    // 2-D case. The same VkFormat/usage/aspect logic serves both — only the image/view type and the
+    // extent's depth differ (ADR-0013).
+    const bool is_3d = desc.depth > 1;
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.imageType = is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     ici.format = to_vk(desc.format);
-    ici.extent = {desc.extent.width, desc.extent.height, 1};
+    ici.extent = {desc.extent.width, desc.extent.height, desc.depth};
     ici.mipLevels = 1;
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -80,6 +84,7 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
 
     VulkanTexture t;
     t.extent = desc.extent;
+    t.depth = desc.depth;
     t.format = ici.format;
     t.usage = desc.usage;
     t.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -92,7 +97,7 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
 
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = t.image;
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.viewType = is_3d ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
     vci.format = ici.format;
     // A depth image is viewed through its depth aspect, a color image through its color aspect.
     vci.subresourceRange.aspectMask = aspect_for(ici.format);
@@ -259,7 +264,7 @@ void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::si
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = 1;
-    region.imageExtent = {t->extent.width, t->extent.height, 1};
+    region.imageExtent = {t->extent.width, t->extent.height, t->depth};
     vkCmdCopyBufferToImage(vk, staging, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     transition_image(vk,
