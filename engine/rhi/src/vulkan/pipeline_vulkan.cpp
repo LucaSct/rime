@@ -131,7 +131,9 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         binding.binding = 0;
         binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // Visible to vertex + fragment: the field volume is sampled in the fragment shader (colormap)
+        // and, for the displacement/modal warp (C3), in the vertex shader (vertex texture fetch).
+        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         dslci.bindingCount = 1;
         dslci.pBindings = &binding;

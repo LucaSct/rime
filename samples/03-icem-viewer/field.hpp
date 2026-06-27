@@ -192,4 +192,128 @@ inline std::string rd_str(std::istream& is) {
     return sf;
 }
 
+// A vector (vec3) field — a displacement or modal mode shape — prepared as an RGBA32F volume (xyz =
+// vector, w = validity) for the warp: the vertex shader fetches xyz to displace the surface, and the
+// fragment shader colours by |vector| / vmag_max. Same world→uvw affine as the scalar field.
+struct VectorField {
+    std::string name;
+    std::string unit;
+    std::uint32_t nx = 0, ny = 0, nz = 0;
+    std::vector<float> rgba;  // nx*ny*nz * 4: xyz = vector (dilated into the absent shell), w = valid
+    float vmag_max = 0.0f;    // max |vector| over the solid (warp + colormap normalization)
+    float scale[3] = {0, 0, 0};
+    float bias[3] = {0, 0, 0};
+
+    [[nodiscard]] bool usable() const { return nx > 0 && ny > 0 && nz > 0 && vmag_max > 0.0f; }
+    [[nodiscard]] std::uint32_t depth() const { return nz; }
+};
+
+// Load the first vec3 (3-component) field from a .icef — or the one named `want`. nullopt on error or
+// if no matching vector field exists.
+[[nodiscard]] inline std::optional<VectorField> load_icef_vector(const std::string& path,
+                                                                 const std::string& want = "") {
+    std::ifstream is(path, std::ios::binary);
+    if (!is) return std::nullopt;
+
+    char magic[4];
+    is.read(magic, 4);
+    if (std::memcmp(magic, "ICEF", 4) != 0) return std::nullopt;
+    if (detail::rd_u32(is) != 1u) return std::nullopt;
+    (void)detail::rd_u32(is);
+
+    const double ox = detail::rd_f64(is), oy = detail::rd_f64(is), oz = detail::rd_f64(is);
+    const double h = detail::rd_f64(is);
+    const std::uint32_t nx = detail::rd_u32(is), ny = detail::rd_u32(is), nz = detail::rd_u32(is);
+    const std::size_t count = static_cast<std::size_t>(nx) * ny * nz;
+
+    const std::uint32_t nfields = detail::rd_u32(is);
+    std::string cname, cunit;
+    std::vector<double> chosen; // the selected vec3 field, 3 per node (NaN where absent)
+    for (std::uint32_t f = 0; f < nfields; ++f) {
+        const std::string name = detail::rd_str(is);
+        const std::string unit = detail::rd_str(is);
+        const int comp = detail::rd_i32(is);
+        std::vector<double> data(count * static_cast<std::size_t>(comp));
+        for (double& v : data) v = detail::rd_f64(is);
+        if (chosen.empty() && comp == 3 && (want.empty() || name == want)) {
+            chosen = std::move(data);
+            cname = name;
+            cunit = unit;
+        }
+    }
+    if (chosen.empty() || count == 0) return std::nullopt;
+
+    std::vector<std::uint8_t> mask(count);
+    if (count) is.read(reinterpret_cast<char*>(mask.data()), static_cast<std::streamsize>(count));
+    if (!is) return std::nullopt;
+
+    VectorField vf;
+    vf.name = cname;
+    vf.unit = cunit;
+    vf.nx = nx;
+    vf.ny = ny;
+    vf.nz = nz;
+
+    const auto idx = [&](std::uint32_t i, std::uint32_t j, std::uint32_t k) {
+        return static_cast<std::size_t>(i) +
+               static_cast<std::size_t>(nx) * (static_cast<std::size_t>(j) + static_cast<std::size_t>(ny) * k);
+    };
+    const auto solid = [&](std::size_t gi) {
+        return mask[gi] && !std::isnan(chosen[gi * 3 + 0]);
+    };
+
+    // Max magnitude over the solid (for warp + colour normalization).
+    for (std::size_t gi = 0; gi < count; ++gi) {
+        if (!solid(gi)) continue;
+        const double x = chosen[gi * 3 + 0], y = chosen[gi * 3 + 1], z = chosen[gi * 3 + 2];
+        vf.vmag_max = std::max(vf.vmag_max, static_cast<float>(std::sqrt(x * x + y * y + z * z)));
+    }
+    if (vf.vmag_max <= 0.0f) vf.vmag_max = 1.0f; // a zero field → avoid divide-by-zero
+
+    // Dilate the vector one voxel into the absent shell (component-wise mean of solid neighbours), so
+    // vertex-fetch + trilinear sampling near the boundary read real vectors. Validity keeps the mask.
+    vf.rgba.assign(count * 4, 0.0f);
+    for (std::uint32_t k = 0; k < nz; ++k)
+        for (std::uint32_t j = 0; j < ny; ++j)
+            for (std::uint32_t i = 0; i < nx; ++i) {
+                const std::size_t gi = idx(i, j, k);
+                float vec[3] = {0, 0, 0};
+                if (solid(gi)) {
+                    for (int c = 0; c < 3; ++c) vec[c] = static_cast<float>(chosen[gi * 3 + c]);
+                } else {
+                    double sum[3] = {0, 0, 0};
+                    int n = 0;
+                    const int di[6] = {-1, 1, 0, 0, 0, 0}, dj[6] = {0, 0, -1, 1, 0, 0},
+                              dk[6] = {0, 0, 0, 0, -1, 1};
+                    for (int d = 0; d < 6; ++d) {
+                        const long ni = static_cast<long>(i) + di[d], nj = static_cast<long>(j) + dj[d],
+                                   nk = static_cast<long>(k) + dk[d];
+                        if (ni < 0 || nj < 0 || nk < 0 || ni >= nx || nj >= ny || nk >= nz) continue;
+                        const std::size_t gn = idx(static_cast<std::uint32_t>(ni),
+                                                   static_cast<std::uint32_t>(nj),
+                                                   static_cast<std::uint32_t>(nk));
+                        if (solid(gn)) {
+                            for (int c = 0; c < 3; ++c) sum[c] += chosen[gn * 3 + c];
+                            ++n;
+                        }
+                    }
+                    if (n)
+                        for (int c = 0; c < 3; ++c) vec[c] = static_cast<float>(sum[c] / n);
+                }
+                vf.rgba[gi * 4 + 0] = vec[0];
+                vf.rgba[gi * 4 + 1] = vec[1];
+                vf.rgba[gi * 4 + 2] = vec[2];
+                vf.rgba[gi * 4 + 3] = mask[gi] ? 1.0f : 0.0f;
+            }
+
+    const double org[3] = {ox, oy, oz};
+    const std::uint32_t dim[3] = {nx, ny, nz};
+    for (int c = 0; c < 3; ++c) {
+        const double hd = h * static_cast<double>(dim[c]);
+        vf.scale[c] = static_cast<float>(1.0 / hd);
+        vf.bias[c] = static_cast<float>(0.5 / static_cast<double>(dim[c]) - org[c] / hd);
+    }
+    return vf;
+}
+
 } // namespace rime::viewer

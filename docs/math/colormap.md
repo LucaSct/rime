@@ -79,6 +79,27 @@ key for the surface colours (top = $v_\max$, bottom = $v_\min$). Numeric tick la
 rendering (Rime's from-scratch UI, brick **E2**); until then the range is printed to the console and the
 window title.
 
+## Vector fields: the warp (C3)
+
+A **vector** field — a structural displacement or a modal mode shape (ICEM exports both as vec3 `.icef`
+fields) — is shown by **warping** the surface along it. The vec3 is uploaded as an RGBA32F volume
+(xyz = vector, w = validity), and the **vertex** shader fetches it (a vertex texture fetch) at each
+vertex's rest position $\mathbf p$ and displaces:
+
+$$ \mathbf p' = \mathbf p + g\,\mathbf d(\mathbf p), \qquad \mathbf d = \text{field at }\mathbf p, $$
+
+with a gain $g$. For a **modal mode** the gain is animated, $g(t) = \dfrac{A\,r}{|\mathbf d|_{\max}}\,
+\sin(2\pi f t)$, so the shape oscillates between $\pm A r$ peak displacement ($A\approx0.25$ of the part
+radius $r$, $f\approx0.6$ Hz) — the mode "breathes". The surface is coloured by the normalised magnitude
+$t = |\mathbf d|/|\mathbf d|_{\max}$ through the same colormap, so high-amplitude regions read hot. The
+mode shape from `smallest_eigenpair` is $M$-normalised (arbitrary overall scale), which is why the gain
+normalises by $|\mathbf d|_{\max}$ — only the *shape* matters. The field volume's descriptor is made
+visible to the vertex stage for the fetch (the only RHI change C3 needed).
+
+(The rest normals are reused on the warped surface — an approximation, fine for a deformation preview;
+exact warped normals and **streamlines / arrow glyphs** for a true 3-D *velocity* field come with the
+flow viz once ICEM computes 3-D CFD, Phase D.)
+
 ## Verification
 
 `tests/rhi/mesh_offscreen_test` renders the unit cube with a synthetic field that ramps along z (value 0
@@ -86,3 +107,7 @@ at the bottom, 1 at the top) and asserts the part shows **both** blue-dominant (
 (hot) pixels — i.e. the world→uvw map, the 3-D sample, and the colormap all ran — while the field-**off**
 render stays neutral grey (the plain shade is unchanged). End to end, the viewer loads ICEM's brick23
 `field.icef` (temperature 700–800 K on a 7×7×3 grid) and colours the wall patch blue→red.
+
+`tests/rhi/warp_offscreen_test` warps the cube by a vec3 field and checks the surface **moves** (the
+warped and undeformed renders differ) and is coloured by magnitude. End to end, `icem_viewer --warp
+mode1` animates the brick23 patch's fundamental mode shape, coloured by amplitude.
