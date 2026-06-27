@@ -35,6 +35,7 @@
 #include "camera.hpp"
 #include "cap.hpp"
 #include "field.hpp"
+#include "iso.hpp"
 #include "legend.hpp"
 #include "mesh_render.hpp"
 #include "stl.hpp"
@@ -44,6 +45,8 @@
 #include "cap.frag.spv.h"
 #include "cap.vert.spv.h"
 #include "capmark.frag.spv.h"
+#include "iso.frag.spv.h"
+#include "iso.vert.spv.h"
 #include "legend.frag.spv.h"
 #include "legend.vert.spv.h"
 #include "mesh.frag.spv.h"
@@ -646,6 +649,162 @@ bool run_warp_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_f
     return true;
 }
 
+// Build the raymarch push: inverse view-projection (for per-pixel rays), the world→uvw affine, the
+// isovalue + value range, step count, and the iso/DVR mode.
+rime::viewer::IsoPush make_iso_push(const OrbitCamera& cam, float aspect, const ScalarField& sf,
+                                    float isovalue, bool dvr) {
+    rime::viewer::IsoPush p{};
+    p.inv_vp = rime::core::inverse(cam.view_proj(aspect));
+    for (int c = 0; c < 3; ++c) {
+        p.field_scale[c] = sf.scale[c];
+        p.field_bias[c] = sf.bias[c];
+    }
+    p.field_scale[3] = isovalue;
+    p.field_bias[3] = sf.vmin;
+    p.meta[0] = sf.vmax;
+    p.meta[1] = 192.0f; // raymarch steps
+    p.meta[2] = dvr ? 1.0f : 0.0f;
+    return p;
+}
+
+// Off-screen isosurface/DVR snapshot.
+int run_iso_offscreen(const CpuMesh& mesh, const std::string& out_path, std::uint32_t size,
+                      rime::core::Vec3 world_up, const ScalarField& sf, float isovalue, bool dvr) {
+    rime::rhi::DeviceDesc desc{};
+    desc.app_name = "03-icem-viewer";
+    auto device = rime::rhi::create_device(desc);
+    if (!device) {
+        std::fprintf(stderr, "icem_viewer: no Vulkan device available\n");
+        return 1;
+    }
+    OrbitCamera cam;
+    setup_camera(cam, mesh, 1.0f, world_up);
+    const std::vector<std::uint8_t> px = rime::viewer::render_iso_offscreen(
+        *device, size, mesh, make_iso_push(cam, 1.0f, sf, isovalue, dvr), kClear, mesh_vert_spv,
+        sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), iso_vert_spv, sizeof(iso_vert_spv),
+        iso_frag_spv, sizeof(iso_frag_spv), sf.rgba.data(), sf.nx, sf.ny, sf.nz);
+
+    std::size_t lit = 0;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(size) * size; ++i)
+        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40) ++lit;
+    std::printf("icem_viewer: %s of '%s' at %.4g — covers %.1f%% of a %ux%u frame\n",
+                dvr ? "DVR" : "isosurface", sf.name.c_str(), static_cast<double>(isovalue),
+                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size), size, size);
+    if (!write_ppm(out_path, px, size, size)) {
+        std::fprintf(stderr, "icem_viewer: could not write '%s'\n", out_path.c_str());
+        return 1;
+    }
+    std::printf("icem_viewer: wrote %s\n", out_path.c_str());
+    return 0;
+}
+
+// Windowed isosurface: raymarch the scalar field; [ ] move the isovalue, V toggles DVR.
+bool run_iso_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_frames,
+                      const ScalarField& sf, float isovalue, bool dvr) {
+    using namespace rime::platform;
+    if (!init()) return false;
+    WindowDesc wd{};
+    wd.title = "Rime — ICEM viewer (isosurface)";
+    wd.width = 1280;
+    wd.height = 720;
+    auto window = create_window(wd);
+    if (!window) {
+        shutdown();
+        return false;
+    }
+    window->show();
+
+    rime::rhi::DeviceDesc dd{};
+    dd.app_name = "03-icem-viewer";
+    auto device = rime::rhi::create_device(dd);
+    if (!device) {
+        shutdown();
+        return false;
+    }
+    rime::rhi::SwapchainDesc sd{};
+    sd.window = window->native_handle();
+    const Extent2D fb = window->framebuffer_size();
+    sd.extent = {fb.width, fb.height};
+    auto swapchain = device->create_swapchain(sd);
+    if (!swapchain) {
+        device.reset();
+        shutdown();
+        return false;
+    }
+
+    auto gpu = rime::viewer::make_mesh(*device, swapchain->format(), rime::rhi::Format::D32Float, mesh,
+                                       mesh_vert_spv, sizeof(mesh_vert_spv), mesh_frag_spv,
+                                       sizeof(mesh_frag_spv), sf.rgba.data(), sf.nx, sf.ny, sf.nz);
+    rime::viewer::Iso iso = rime::viewer::make_iso(*device, swapchain->format(), iso_vert_spv,
+                                                   sizeof(iso_vert_spv), iso_frag_spv, sizeof(iso_frag_spv));
+    rime::viewer::Legend legend = rime::viewer::make_legend(*device, swapchain->format(),
+                                                            legend_vert_spv, sizeof(legend_vert_spv),
+                                                            legend_frag_spv, sizeof(legend_frag_spv));
+
+    OrbitCamera cam;
+    {
+        const rime::rhi::Extent2D e = swapchain->extent();
+        setup_camera(cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
+    }
+    const float step = std::max(sf.vmax - sf.vmin, 1e-6f) * 0.02f;
+    std::printf("icem_viewer: raymarching field '%s' [%s] range %.4g .. %.4g on '%s'.\n"
+                "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
+                "  isosurface: [ ]=move isovalue, V=toggle DVR (current iso %.4g)\n",
+                sf.name.c_str(), sf.unit.c_str(), static_cast<double>(sf.vmin),
+                static_cast<double>(sf.vmax), device->adapter().name.c_str(),
+                static_cast<double>(isovalue));
+
+    Input input;
+    int frames = 0;
+    while (pump_events() && !window->should_close()) {
+        if (max_frames > 0 && frames >= max_frames) break;
+        input.new_frame();
+        Event e{};
+        while (poll_event(e)) input.process(e);
+        if (input.key_pressed(Key::Escape)) window->request_close();
+        if (input.key_pressed(Key::V)) dvr = !dvr;
+        if (input.key_down(Key::LeftBracket)) isovalue = std::max(sf.vmin, isovalue - step);
+        if (input.key_down(Key::RightBracket)) isovalue = std::min(sf.vmax, isovalue + step);
+
+        const rime::rhi::Extent2D ext = swapchain->extent();
+        const float h = static_cast<float>(ext.height);
+        const float aspect = static_cast<float>(ext.width) / h;
+        if (input.mouse_down(MouseButton::Left)) cam.orbit(input.mouse_dx() * 0.008f, -input.mouse_dy() * 0.008f);
+        if (input.mouse_down(MouseButton::Right) || input.mouse_down(MouseButton::Middle))
+            cam.pan(input.mouse_dx() / h, input.mouse_dy() / h);
+        if (input.wheel_y() != 0.0f) cam.zoom(input.wheel_y());
+        if (input.key_pressed(Key::F)) cam.frame(mesh.center(), std::max(mesh.radius(), 1e-4f), aspect);
+
+        rime::rhi::TextureHandle target = swapchain->acquire_next_image();
+        if (!target.is_valid()) {
+            device->wait_idle();
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+            continue;
+        }
+        auto cmd = device->begin_commands();
+        rime::viewer::record_iso(*cmd, iso, gpu.field_tex, gpu.field_sampler, target, ext,
+                                 make_iso_push(cam, aspect, sf, isovalue, dvr), kClear);
+        rime::viewer::record_legend(*cmd, legend, target, ext);
+        if (!swapchain->present(*cmd)) {
+            device->wait_idle();
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+        }
+        ++frames;
+    }
+
+    device->wait_idle();
+    rime::viewer::destroy_legend(*device, legend);
+    rime::viewer::destroy_iso(*device, iso);
+    rime::viewer::destroy_mesh(*device, gpu);
+    swapchain.reset();
+    device.reset();
+    shutdown();
+    std::printf("icem_viewer: presented %d isosurface frame%s.\n", frames, frames == 1 ? "" : "s");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -657,6 +816,10 @@ int main(int argc, char** argv) {
     bool no_cap = false;
     bool warp_mode = false;     // --warp: animate the surface by a vec3 field (C3)
     std::string warp_name;      // optional vec3 field name to warp by (else the first vec3 field)
+    bool iso_mode = false;      // --iso: raymarched isosurface of a scalar field (C2)
+    bool iso_given = false;
+    float iso_value = 0.0f;
+    bool dvr = false;           // --dvr: direct volume rendering instead of an isosurface
     std::uint32_t size = 512;
     int frames = 0;
     rime::core::Vec3 world_up{0.0f, 0.0f, 1.0f}; // ICEM parts are authored z-up
@@ -678,6 +841,15 @@ int main(int argc, char** argv) {
         } else if (a == "--warp") {
             warp_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') warp_name = argv[++i];
+        } else if (a == "--iso") {
+            iso_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                iso_value = static_cast<float>(std::atof(argv[++i]));
+                iso_given = true;
+            }
+        } else if (a == "--dvr") {
+            iso_mode = true;
+            dvr = true;
         } else if (a == "--clip" && i + 1 < argc) {
             const std::string_view ax(argv[++i]);
             clip.on = true;
@@ -723,6 +895,24 @@ int main(int argc, char** argv) {
         if (offscreen) return run_warp_offscreen(mesh, out_path, size, world_up, *vfield);
         if (run_warp_windowed(mesh, world_up, frames, *vfield)) return 0;
         return run_warp_offscreen(mesh, out_path, size, world_up, *vfield);
+    }
+
+    // --iso / --dvr: GPU raymarched isosurface or DVR of a scalar field (C2).
+    if (iso_mode) {
+        const std::string spath = field_path.empty() ? sibling_icef(stl_path) : field_path;
+        auto sf = rime::viewer::load_icef_scalar(spath);
+        if (!sf) {
+            std::fprintf(stderr, "icem_viewer: --iso needs a scalar field in '%s'\n", spath.c_str());
+            return 1;
+        }
+        const float iso = iso_given ? iso_value : 0.5f * (sf->vmin + sf->vmax);
+        std::printf("icem_viewer: %s field '%s' [%s] range %.4g .. %.4g, iso %.4g (%s)\n",
+                    dvr ? "DVR of" : "isosurface of", sf->name.c_str(), sf->unit.c_str(),
+                    static_cast<double>(sf->vmin), static_cast<double>(sf->vmax),
+                    static_cast<double>(iso), spath.c_str());
+        if (offscreen) return run_iso_offscreen(mesh, out_path, size, world_up, *sf, iso, dvr);
+        if (run_iso_windowed(mesh, world_up, frames, *sf, iso, dvr)) return 0;
+        return run_iso_offscreen(mesh, out_path, size, world_up, *sf, iso, dvr);
     }
 
     // Load a simulation field: an explicit --field path, else the STL's sibling <stem>.icef if present.
