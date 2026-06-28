@@ -24,7 +24,12 @@ layout(push_constant) uniform Push {
 } pc;
 
 void main() {
-    v_world_pos = in_position;
+    vec3 pos = in_position;
+    // Assembly mode (cam_pos.w > 1.5, E1): shift this part by its exploded-view offset (field_bias.xyz,
+    // world units) so an assembly's nested shells fan apart. Normal mode keeps the model identity — the
+    // camera orbits the part, not the reverse — so the position/normal stay in world space.
+    if (pc.cam_pos.w > 1.5) pos += pc.field_bias.xyz;
+    v_world_pos = pos;
     v_normal = in_normal;
-    gl_Position = pc.mvp * vec4(in_position, 1.0);
+    gl_Position = pc.mvp * vec4(pos, 1.0);
 }

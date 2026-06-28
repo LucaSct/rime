@@ -21,7 +21,8 @@ rime_add_test(rime_rhi_tests
     warp_offscreen_test.cpp
     iso_offscreen_test.cpp
     streamlines_offscreen_test.cpp
-    viscous_offscreen_test.cpp)
+    viscous_offscreen_test.cpp
+    assembly_offscreen_test.cpp)
 
 target_link_libraries(rime_rhi_tests
     PRIVATE rime::rhi) # rime::core (the camera math the mesh proof uses) comes transitively via rhi

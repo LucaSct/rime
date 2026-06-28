@@ -69,10 +69,16 @@ void main() {
     const vec3 ground = vec3(0.20, 0.18, 0.16);
     vec3 ambient = mix(ground, sky, up);
 
-    // Albedo: the field colormap when a field is bound, else the neutral light-metal base.
+    // Albedo: a flat per-part tint in assembly mode (E1), else the field colormap when a field is bound,
+    // else the neutral light-metal base. Assembly mode (cam_pos.w > 1.5) carries the part colour in
+    // field_scale.xyz — the same push slots the colormap uses, free here because an assembly binds no
+    // field; the two-sided lighting below then shades the tint exactly like any other albedo.
     vec3 base = vec3(0.80, 0.80, 0.82);
+    bool assembly = pc.cam_pos.w > 1.5;
     bool field_on = pc.field_bias.w > pc.field_scale.w; // vmax > vmin
-    if (field_on) {
+    if (assembly) {
+        base = pc.field_scale.xyz;
+    } else if (field_on) {
         vec3 uvw = v_world_pos * pc.field_scale.xyz + pc.field_bias.xyz;
         float value = texture(u_field, uvw).r;
         float t = (value - pc.field_scale.w) / (pc.field_bias.w - pc.field_scale.w);

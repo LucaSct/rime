@@ -18,6 +18,7 @@
 //           icem_viewer part.stl --offscreen v.ppm --clip z --field field.icef
 //           icem_viewer viscous.stl --flow velocity      # streamlines of the computed flow (D)
 //           icem_viewer viscous.stl --dvr --speed        # DVR of the speed boundary layer (D2)
+//           icem_viewer --assembly tokamak/              # many parts: colour, toggle, explode (E1)
 //           icem_viewer                                  # no file -> a unit cube, runs anywhere
 
 #include <algorithm>
@@ -27,12 +28,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "assembly.hpp"
 #include "camera.hpp"
 #include "cap.hpp"
 #include "field.hpp"
@@ -1164,6 +1167,223 @@ bool run_flow_windowed(const CpuMesh& mesh,
     return true;
 }
 
+// ---- Assemblies (E1): many parts, per-part colour + visibility, exploded view ----
+
+// List the parts on the console so the number-key toggles make sense. (A real on-screen UI — text,
+// clickable rows — is E2; until then the "legend" lives here.)
+void print_assembly(const rime::viewer::Assembly& a) {
+    std::printf("icem_viewer: assembly of %zu parts —\n", a.parts.size());
+    for (std::size_t i = 0; i < a.parts.size(); ++i)
+        std::printf("    %zu  %-18s  rgb(%.2f %.2f %.2f)\n",
+                    i + 1,
+                    a.parts[i].name.c_str(),
+                    static_cast<double>(a.parts[i].color.x),
+                    static_cast<double>(a.parts[i].color.y),
+                    static_cast<double>(a.parts[i].color.z));
+}
+
+// Aim the camera at the (possibly exploded) assembly: frame its enclosing sphere at this explode
+// factor.
+void frame_assembly(OrbitCamera& cam,
+                    const rime::viewer::Assembly& a,
+                    float aspect,
+                    float factor,
+                    rime::core::Vec3 world_up) {
+    const float r = rime::viewer::framing_radius(a, factor);
+    cam.world_up = world_up;
+    cam.z_near = std::max(r * 0.02f, 1e-4f);
+    cam.z_far = r * 100.0f + 10.0f;
+    cam.min_distance = r * 0.02f;
+    cam.max_distance = r * 100.0f;
+    cam.frame(a.center, r, aspect);
+    cam.yaw = rime::core::radians(35.0f);
+    cam.pitch = rime::core::radians(20.0f);
+}
+
+// Off-screen assembly snapshot.
+int run_assembly_offscreen(const rime::viewer::Assembly& a,
+                           const std::string& out_path,
+                           std::uint32_t size,
+                           rime::core::Vec3 world_up,
+                           float factor) {
+    rime::rhi::DeviceDesc desc{};
+    desc.app_name = "03-icem-viewer";
+    auto device = rime::rhi::create_device(desc);
+    if (!device) {
+        std::fprintf(stderr, "icem_viewer: no Vulkan device available\n");
+        return 1;
+    }
+    OrbitCamera cam;
+    frame_assembly(cam, a, 1.0f, factor, world_up);
+    const std::vector<std::uint8_t> px =
+        rime::viewer::render_assembly_offscreen(*device,
+                                                size,
+                                                a,
+                                                cam.view_proj(1.0f),
+                                                cam.eye(),
+                                                factor,
+                                                kClear,
+                                                mesh_vert_spv,
+                                                sizeof(mesh_vert_spv),
+                                                mesh_frag_spv,
+                                                sizeof(mesh_frag_spv));
+    std::size_t lit = 0;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(size) * size; ++i)
+        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40)
+            ++lit;
+    std::printf("icem_viewer: %zu of %zu parts visible%s — covers %.1f%% of a %ux%u frame\n",
+                a.visible_count(),
+                a.parts.size(),
+                factor > 0.01f ? " (exploded)" : "",
+                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size),
+                size,
+                size);
+    if (!write_ppm(out_path, px, size, size)) {
+        std::fprintf(stderr, "icem_viewer: could not write '%s'\n", out_path.c_str());
+        return 1;
+    }
+    std::printf("icem_viewer: wrote %s\n", out_path.c_str());
+    return 0;
+}
+
+// Windowed assembly: orbit the machine, toggle parts with the number keys, explode/collapse with E.
+bool run_assembly_windowed(rime::viewer::Assembly& a,
+                           rime::core::Vec3 world_up,
+                           int max_frames,
+                           float explode_target) {
+    using namespace rime::platform;
+    if (!init())
+        return false;
+    WindowDesc wd{};
+    wd.title = "Rime — ICEM viewer (assembly)";
+    wd.width = 1280;
+    wd.height = 720;
+    auto window = create_window(wd);
+    if (!window) {
+        shutdown();
+        return false;
+    }
+    window->show();
+
+    rime::rhi::DeviceDesc dd{};
+    dd.app_name = "03-icem-viewer";
+    auto device = rime::rhi::create_device(dd);
+    if (!device) {
+        shutdown();
+        return false;
+    }
+    rime::rhi::SwapchainDesc sd{};
+    sd.window = window->native_handle();
+    const Extent2D fb = window->framebuffer_size();
+    sd.extent = {fb.width, fb.height};
+    auto swapchain = device->create_swapchain(sd);
+    if (!swapchain) {
+        device.reset();
+        shutdown();
+        return false;
+    }
+
+    rime::viewer::AssemblyGpu gpu = rime::viewer::make_assembly_gpu(*device,
+                                                                    swapchain->format(),
+                                                                    rime::rhi::Format::D32FloatS8,
+                                                                    a,
+                                                                    mesh_vert_spv,
+                                                                    sizeof(mesh_vert_spv),
+                                                                    mesh_frag_spv,
+                                                                    sizeof(mesh_frag_spv));
+    rime::rhi::TextureHandle depth = make_depth(*device, swapchain->extent());
+
+    OrbitCamera cam;
+    {
+        const rime::rhi::Extent2D e = swapchain->extent();
+        frame_assembly(
+            cam, a, static_cast<float>(e.width) / static_cast<float>(e.height), 0.0f, world_up);
+    }
+    print_assembly(a);
+    std::printf("  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
+                "  assembly: 1-9/0 toggle a part, E explode/collapse, A show all parts\n"
+                "  rendering on '%s'.\n",
+                device->adapter().name.c_str());
+
+    const Key digit[10] = {Key::Num1,
+                           Key::Num2,
+                           Key::Num3,
+                           Key::Num4,
+                           Key::Num5,
+                           Key::Num6,
+                           Key::Num7,
+                           Key::Num8,
+                           Key::Num9,
+                           Key::Num0};
+    float factor = 0.0f;
+    float target = explode_target;
+
+    Input input;
+    int frames = 0;
+    while (pump_events() && !window->should_close()) {
+        if (max_frames > 0 && frames >= max_frames)
+            break;
+        input.new_frame();
+        Event e{};
+        while (poll_event(e))
+            input.process(e);
+        if (input.key_pressed(Key::Escape))
+            window->request_close();
+        if (input.key_pressed(Key::E))
+            target = (target > 0.5f) ? 0.0f : 1.0f;
+        if (input.key_pressed(Key::A))
+            for (rime::viewer::Part& p : a.parts)
+                p.visible = true;
+        for (int d = 0; d < 10; ++d)
+            if (input.key_pressed(digit[d]) && static_cast<std::size_t>(d) < a.parts.size())
+                a.parts[d].visible = !a.parts[d].visible;
+        // Ease the explode factor toward its target so E animates the parts apart / back together.
+        factor += std::clamp(target - factor, -0.03f, 0.03f);
+
+        const rime::rhi::Extent2D ext = swapchain->extent();
+        const float hh = static_cast<float>(ext.height);
+        const float aspect = static_cast<float>(ext.width) / hh;
+        if (input.mouse_down(MouseButton::Left))
+            cam.orbit(input.mouse_dx() * 0.008f, -input.mouse_dy() * 0.008f);
+        if (input.mouse_down(MouseButton::Right) || input.mouse_down(MouseButton::Middle))
+            cam.pan(input.mouse_dx() / hh, input.mouse_dy() / hh);
+        if (input.wheel_y() != 0.0f)
+            cam.zoom(input.wheel_y());
+        if (input.key_pressed(Key::F))
+            cam.frame(a.center, rime::viewer::framing_radius(a, factor), aspect);
+
+        rime::rhi::TextureHandle tgt = swapchain->acquire_next_image();
+        if (!tgt.is_valid()) {
+            device->wait_idle();
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+            device->destroy(depth);
+            depth = make_depth(*device, swapchain->extent());
+            continue;
+        }
+        auto cmd = device->begin_commands();
+        rime::viewer::record_assembly(
+            *cmd, gpu, a, tgt, depth, ext, cam.view_proj(aspect), cam.eye(), factor, kClear);
+        if (!swapchain->present(*cmd)) {
+            device->wait_idle();
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+            device->destroy(depth);
+            depth = make_depth(*device, swapchain->extent());
+        }
+        ++frames;
+    }
+
+    device->wait_idle();
+    device->destroy(depth);
+    rime::viewer::destroy_assembly_gpu(*device, gpu);
+    swapchain.reset();
+    device.reset();
+    shutdown();
+    std::printf("icem_viewer: presented %d assembly frame%s.\n", frames, frames == 1 ? "" : "s");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1184,6 +1404,10 @@ int main(int argc, char** argv) {
     bool speed_mode =
         false; // --speed: colour/iso/DVR the scalar speed |v| of a vec3 velocity field (D2)
     std::string speed_name; // optional vec3 velocity field name (else the first vec3 field)
+    std::string
+        assembly_dir;     // --assembly <dir>: load every *.stl as a coloured, toggleable part (E1)
+    bool explode = false; // --explode [factor]: start the assembly view exploded
+    float explode_factor = 1.0f;
     std::uint32_t size = 512;
     int frames = 0;
     rime::core::Vec3 world_up{0.0f, 0.0f, 1.0f}; // ICEM parts are authored z-up
@@ -1224,6 +1448,12 @@ int main(int argc, char** argv) {
             speed_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 speed_name = argv[++i];
+        } else if (a == "--assembly") {
+            assembly_dir = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : ".";
+        } else if (a == "--explode") {
+            explode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                explode_factor = static_cast<float>(std::atof(argv[++i]));
         } else if (a == "--clip" && i + 1 < argc) {
             const std::string_view ax(argv[++i]);
             clip.on = true;
@@ -1237,6 +1467,29 @@ int main(int argc, char** argv) {
         } else if (!a.empty() && a[0] != '-') {
             stl_path = a;
         }
+    }
+
+    // --assembly <dir> (or a directory passed as the positional path): load every *.stl in it as a
+    // coloured, individually toggleable part and show them together, with an exploded view (E1).
+    {
+        std::error_code ec;
+        if (assembly_dir.empty() && !stl_path.empty() &&
+            std::filesystem::is_directory(stl_path, ec))
+            assembly_dir = stl_path;
+    }
+    if (!assembly_dir.empty()) {
+        auto assembly = rime::viewer::load_assembly(assembly_dir);
+        if (!assembly) {
+            std::fprintf(
+                stderr, "icem_viewer: no loadable STL parts in '%s'\n", assembly_dir.c_str());
+            return 1;
+        }
+        const float factor = explode ? explode_factor : 0.0f;
+        if (offscreen)
+            return run_assembly_offscreen(*assembly, out_path, size, world_up, factor);
+        if (run_assembly_windowed(*assembly, world_up, frames, factor))
+            return 0;
+        return run_assembly_offscreen(*assembly, out_path, size, world_up, factor);
     }
 
     CpuMesh mesh;
