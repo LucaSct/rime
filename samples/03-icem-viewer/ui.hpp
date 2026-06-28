@@ -63,6 +63,13 @@ public:
     // True while a widget is being dragged (e.g. a slider) — the app suppresses camera input then.
     [[nodiscard]] bool is_active() const { return active_ != 0; }
 
+    // Helpers for building custom widgets out of quad()/text() (e.g. the provenance list rows): is the
+    // cursor over this rect, and was it clicked (pressed) inside it this frame?
+    [[nodiscard]] bool hovered_in(float x, float y, float w, float h) const { return hit(x, y, w, h); }
+    [[nodiscard]] bool clicked_in(float x, float y, float w, float h) const {
+        return press_ && hit(x, y, w, h);
+    }
+
     // --- layout: open a panel; subsequent widgets stack down its inside ---
     void panel(float x, float y, float w, float h, Color bg = {0.10f, 0.11f, 0.14f, 1.0f}) {
         quad(x, y, w, h, bg);

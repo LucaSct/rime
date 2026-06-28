@@ -245,8 +245,12 @@ render graph: the **depth attachment** (ADR-0011), **push constants** (ADR-0012)
   immediate-mode UI** on the RHI — a built-in bitmap font + panel/label/button/checkbox/slider, no Dear
   ImGui, drawn as one alpha-tested overlay pass; the assembly control panel toggles parts and scrubs the
   explode slider ([ADR-0015](adr/0015-imgui-free-ui.md), `docs/math/ui-text-layout.md`,
-  `tests/rhi/ui_offscreen_test`) — **DONE**. Next: E3 a **provenance panel** (surface ICEM's ledger —
-  *why* a dimension is what it is) · E4 polish (screenshot / turntable export, perf). **IN PROGRESS.**
+  `tests/rhi/ui_offscreen_test`) — **DONE**. E3 a **provenance panel** — `--provenance` reads ICEM's
+  `.icejson` "why" Ledger (the DAG of which law / material / rule / safety-factor produced every value)
+  and lays it out on the E2 UI as an origin-tinted, scrollable list; clicking a value expands its
+  **derivation** (the values it was computed from). Shares a file format with ICEM, never code
+  (`docs/math/provenance-panel.md`, `tests/rhi/provenance_offscreen_test`) — **DONE**. Next: E4 polish
+  (screenshot / turntable export, perf). **IN PROGRESS.**
 
 Each viewer brick follows Rime's conventions — a `docs/math/` derivation for the math-heavy ones, an ADR
 for engine decisions, an off-screen pixel-readback proof in `tests/rhi/` that stays GPU-free in CI, and

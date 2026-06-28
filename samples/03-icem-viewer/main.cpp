@@ -42,6 +42,8 @@
 #include "iso.hpp"
 #include "legend.hpp"
 #include "mesh_render.hpp"
+#include "provenance.hpp"
+#include "provenance_view.hpp"
 #include "rime/platform/platform.hpp"
 #include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
@@ -518,18 +520,20 @@ bool run_windowed(const CpuMesh& mesh,
     return true;
 }
 
-// Derive the sibling field file for an STL path: replace the extension with .icef (so ICEM's
-// `field.stl` pairs with its `field.icef`). Returns empty for an empty path.
-std::string sibling_icef(const std::string& stl_path) {
-    if (stl_path.empty())
+// Replace a path's extension (or append, if it has none): so `chamber.stl` pairs with its sibling
+// `chamber.icef` / `chamber.icejson`. Returns empty for an empty path.
+std::string replace_extension(const std::string& path, const char* ext) {
+    if (path.empty())
         return {};
-    const std::size_t slash = stl_path.find_last_of("/\\");
-    const std::size_t dot = stl_path.find_last_of('.');
-    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
-        return stl_path.substr(0, dot) + ".icef";
-    }
-    return stl_path + ".icef";
+    const std::size_t slash = path.find_last_of("/\\");
+    const std::size_t dot = path.find_last_of('.');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        return path.substr(0, dot) + ext;
+    return path + ext;
 }
+
+// The sibling computed-field file for an STL path (ICEM's `field.stl` pairs with its `field.icef`).
+std::string sibling_icef(const std::string& stl_path) { return replace_extension(stl_path, ".icef"); }
 
 // Off-screen warped snapshot: a static peak-deformation view (gain = 25% of the part radius).
 int run_warp_offscreen(const CpuMesh& mesh,
@@ -1486,6 +1490,128 @@ bool run_assembly_windowed(rime::viewer::Assembly& a,
     return true;
 }
 
+// ---- Provenance (E3): surface ICEM's "why" Ledger on the from-scratch UI ----
+
+// Off-screen provenance snapshot — the panel with the verdict node's derivation expanded.
+int run_provenance_offscreen(const rime::viewer::Provenance& prov,
+                             const std::string& out_path,
+                             std::uint32_t size) {
+    rime::rhi::DeviceDesc desc{};
+    desc.app_name = "03-icem-viewer";
+    auto device = rime::rhi::create_device(desc);
+    if (!device) {
+        std::fprintf(stderr, "icem_viewer: no Vulkan device available\n");
+        return 1;
+    }
+    rime::viewer::ui::Ui gui;
+    int selected = prov.nodes.empty() ? -1 : static_cast<int>(prov.nodes.size()) - 1; // the verdict
+    gui.begin(static_cast<float>(size), static_cast<float>(size), -1.0f, -1.0f, false);
+    build_provenance_panel(gui, prov, selected, 0.0f, static_cast<float>(size), static_cast<float>(size));
+    gui.end();
+    const rime::rhi::ClearColor clear{0.06f, 0.07f, 0.09f, 1.0f};
+    const std::vector<std::uint8_t> px = rime::viewer::ui::render_ui_offscreen(
+        *device, size, gui, clear, ui_vert_spv, sizeof(ui_vert_spv), ui_frag_spv, sizeof(ui_frag_spv));
+    std::printf("icem_viewer: provenance of '%s' — %zu nodes, verdict %s\n",
+                prov.design.c_str(),
+                prov.nodes.size(),
+                prov.passes ? "PASS" : "FAIL");
+    if (!write_ppm(out_path, px, size, size)) {
+        std::fprintf(stderr, "icem_viewer: could not write '%s'\n", out_path.c_str());
+        return 1;
+    }
+    std::printf("icem_viewer: wrote %s\n", out_path.c_str());
+    return 0;
+}
+
+// Windowed provenance: click a value to expand its derivation, the wheel scrolls the ledger.
+bool run_provenance_windowed(const rime::viewer::Provenance& prov, int max_frames) {
+    using namespace rime::platform;
+    if (!init()) return false;
+    WindowDesc wd{};
+    wd.title = "Rime — ICEM viewer (provenance)";
+    wd.width = 1100;
+    wd.height = 820;
+    auto window = create_window(wd);
+    if (!window) {
+        shutdown();
+        return false;
+    }
+    window->show();
+
+    rime::rhi::DeviceDesc dd{};
+    dd.app_name = "03-icem-viewer";
+    auto device = rime::rhi::create_device(dd);
+    if (!device) {
+        shutdown();
+        return false;
+    }
+    rime::rhi::SwapchainDesc sd{};
+    sd.window = window->native_handle();
+    const Extent2D fb = window->framebuffer_size();
+    sd.extent = {fb.width, fb.height};
+    auto swapchain = device->create_swapchain(sd);
+    if (!swapchain) {
+        device.reset();
+        shutdown();
+        return false;
+    }
+    rime::viewer::ui::UiRenderer uir =
+        rime::viewer::ui::make_ui_renderer(*device, swapchain->format(), ui_vert_spv,
+                                           sizeof(ui_vert_spv), ui_frag_spv, sizeof(ui_frag_spv));
+    rime::viewer::ui::Ui gui;
+    int selected = -1;
+    float scroll = 0.0f, content = 0.0f;
+    std::printf("icem_viewer: provenance '%s' (%zu nodes) — click a value to see why, wheel scrolls, "
+                "ESC quits. On '%s'.\n",
+                prov.design.c_str(),
+                prov.nodes.size(),
+                device->adapter().name.c_str());
+
+    Input input;
+    int frames = 0;
+    while (pump_events() && !window->should_close()) {
+        if (max_frames > 0 && frames >= max_frames) break;
+        input.new_frame();
+        Event e{};
+        while (poll_event(e)) input.process(e);
+        if (input.key_pressed(Key::Escape)) window->request_close();
+
+        const rime::rhi::Extent2D ext = swapchain->extent();
+        const float W = static_cast<float>(ext.width), H = static_cast<float>(ext.height);
+        if (input.wheel_y() != 0.0f) scroll -= input.wheel_y() * 40.0f;
+        scroll = std::clamp(scroll, 0.0f, std::max(0.0f, content - (H - 86.0f)));
+
+        gui.begin(W, H, input.mouse_x(), input.mouse_y(), input.mouse_down(MouseButton::Left));
+        content = build_provenance_panel(gui, prov, selected, scroll, W, H);
+        gui.end();
+
+        rime::rhi::TextureHandle tgt = swapchain->acquire_next_image();
+        if (!tgt.is_valid()) {
+            device->wait_idle();
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+            continue;
+        }
+        rime::viewer::ui::upload_ui(*device, uir, gui);
+        auto cmd = device->begin_commands();
+        rime::viewer::ui::record_ui(*cmd, uir, tgt, ext, rime::rhi::LoadOp::Clear, kClear);
+        if (!swapchain->present(*cmd)) {
+            device->wait_idle();
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+        }
+        ++frames;
+    }
+
+    device->wait_idle();
+    rime::viewer::ui::destroy_ui_renderer(*device, uir);
+    swapchain.reset();
+    device.reset();
+    shutdown();
+    std::printf("icem_viewer: presented %d provenance frame%s.\n", frames, frames == 1 ? "" : "s");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1510,6 +1636,8 @@ int main(int argc, char** argv) {
         assembly_dir;     // --assembly <dir>: load every *.stl as a coloured, toggleable part (E1)
     bool explode = false; // --explode [factor]: start the assembly view exploded
     float explode_factor = 1.0f;
+    bool prov_mode = false; // --provenance: show ICEM's "why" Ledger (.icejson) on the UI (E3)
+    std::string prov_path;  // explicit .icejson path; else provenance.icejson / an STL sibling is tried
     std::uint32_t size = 512;
     int frames = 0;
     rime::core::Vec3 world_up{0.0f, 0.0f, 1.0f}; // ICEM parts are authored z-up
@@ -1556,6 +1684,10 @@ int main(int argc, char** argv) {
             explode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 explode_factor = static_cast<float>(std::atof(argv[++i]));
+        } else if (a == "--provenance") {
+            prov_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                prov_path = argv[++i];
         } else if (a == "--clip" && i + 1 < argc) {
             const std::string_view ax(argv[++i]);
             clip.on = true;
@@ -1569,6 +1701,29 @@ int main(int argc, char** argv) {
         } else if (!a.empty() && a[0] != '-') {
             stl_path = a;
         }
+    }
+
+    // --provenance: surface ICEM's "why" Ledger (.icejson) on the from-scratch UI (E3). A panel-only
+    // view — no 3-D mesh — so it dispatches before any STL/assembly loading. The file is an explicit
+    // --provenance <path>, else `provenance.icejson` (what `icem provenance <dir>` writes), else an
+    // STL sibling <stem>.icejson.
+    if (prov_mode) {
+        std::string ppath = prov_path;
+        if (ppath.empty())
+            ppath = stl_path.empty() ? "provenance.icejson" : replace_extension(stl_path, ".icejson");
+        auto prov = rime::viewer::load_provenance(ppath);
+        if (!prov) {
+            std::fprintf(stderr,
+                         "icem_viewer: could not load ICEM provenance '%s' "
+                         "(generate one with `icem provenance <dir>`)\n",
+                         ppath.c_str());
+            return 1;
+        }
+        if (offscreen)
+            return run_provenance_offscreen(*prov, out_path, size);
+        if (run_provenance_windowed(*prov, frames))
+            return 0;
+        return run_provenance_offscreen(*prov, out_path, size);
     }
 
     // --assembly <dir> (or a directory passed as the positional path): load every *.stl in it as a
