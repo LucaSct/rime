@@ -237,8 +237,14 @@ render graph: the **depth attachment** (ADR-0011), **push constants** (ADR-0012)
   viscous Navier–Stokes); the viewer renders the computed velocity as **RK4 streamlines** coloured by
   speed (`docs/math/streamlines.md`), and — **D2·V** — derives the scalar **speed** $\lVert\mathbf u\rVert$
   so the colormap / isotach / slice / **DVR** show the viscous **boundary layer** as a volume
-  (`tests/rhi/viscous_offscreen_test`). **Rime side DONE.** D3 (compressibility → Mach) and D4 (the
-  turbojet flow view on brick10/11 geometry) are ICEM-coupled and follow there.
+  (`tests/rhi/viscous_offscreen_test`). **DONE.** **D3 — compressibility:** ICEM gained a third CFD model
+  (brick26, `core/sim/compressible.hpp`) — quasi-1-D isentropic **de Laval nozzle** flow recovered from the
+  area–Mach relation, where ρ/T/p ride the flow, gated against `thermo::gasdyn`; the viewer colours the
+  nozzle by the computed **Mach** field (0.15 subsonic inlet → green sonic throat → 2.47 supersonic exit),
+  cross-sectioned. **D4 — turbojet/nozzle flow view:** a from-scratch **gas-path chart** — `--chart` / **H**
+  overlays a 2-D line plot of the field along the flow axis (Mach vs station, with the dashed M = 1 sonic
+  line), built on a new `ui.hpp` `line()` primitive (`docs/math/gas-path-chart.md`,
+  `tests/rhi/chart_offscreen_test`). **DONE — milestone D complete.**
 - **E — assemblies, from-scratch UI, provenance.** E1 multi-part **assemblies** — the ITER-class tokamak
   loads as 10 colour-tinted, number-key-toggleable parts with an axial **exploded view**
   (`tests/rhi/assembly_offscreen_test`, `docs/math/assembly.md`) — **DONE**. E2 a **from-scratch

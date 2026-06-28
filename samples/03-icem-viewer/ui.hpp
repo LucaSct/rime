@@ -12,6 +12,7 @@
 // ui_render.hpp. See docs/math/ui-text-layout.md.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -173,6 +174,24 @@ public:
         push(x, y, -1.0f, -1.0f, c);
         push(x + w, y + h, -1.0f, -1.0f, c);
         push(x, y + h, -1.0f, -1.0f, c);
+    }
+
+    // A straight line of pixel `thickness` between two screen points, drawn as a thin quad along the
+    // segment's perpendicular. The gas-path chart's axes and curves use it (the UI is otherwise all
+    // axis-aligned quads); u = −1 marks it untextured for the shader, like quad().
+    void line(float x0, float y0, float x1, float y1, float thickness, Color c) {
+        const float dx = x1 - x0, dy = y1 - y0;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 1.0e-6f)
+            return;
+        const float nx = -dy / len * thickness * 0.5f; // half-width along the perpendicular
+        const float ny = dx / len * thickness * 0.5f;
+        push(x0 + nx, y0 + ny, -1.0f, -1.0f, c);
+        push(x1 + nx, y1 + ny, -1.0f, -1.0f, c);
+        push(x1 - nx, y1 - ny, -1.0f, -1.0f, c);
+        push(x0 + nx, y0 + ny, -1.0f, -1.0f, c);
+        push(x1 - nx, y1 - ny, -1.0f, -1.0f, c);
+        push(x0 - nx, y0 - ny, -1.0f, -1.0f, c);
     }
 
     // Draw a string as one textured quad per glyph, sampled from the font atlas. Monospace;

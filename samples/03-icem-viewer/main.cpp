@@ -38,6 +38,7 @@
 #include "assembly.hpp"
 #include "camera.hpp"
 #include "cap.hpp"
+#include "chart.hpp"
 #include "field.hpp"
 #include "iso.hpp"
 #include "legend.hpp"
@@ -376,7 +377,8 @@ bool run_windowed(const CpuMesh& mesh,
                   int max_frames,
                   const ScalarField* field,
                   bool field_on,
-                  bool cap_on) {
+                  bool cap_on,
+                  bool chart_on) {
     using namespace rime::platform;
 
     if (!init())
@@ -447,6 +449,12 @@ bool run_windowed(const CpuMesh& mesh,
                                                             sizeof(legend_frag_spv));
     rime::rhi::TextureHandle depth = make_depth(*device, swapchain->extent());
 
+    // The from-scratch UI (E2), here drawing the gas-path chart (D4) as an overlay pass.
+    rime::viewer::ui::UiRenderer uir = rime::viewer::ui::make_ui_renderer(
+        *device, swapchain->format(), ui_vert_spv, sizeof(ui_vert_spv), ui_frag_spv,
+        sizeof(ui_frag_spv));
+    rime::viewer::ui::Ui chart_gui;
+
     OrbitCamera cam;
     {
         const rime::rhi::Extent2D e = swapchain->extent();
@@ -460,6 +468,7 @@ bool run_windowed(const CpuMesh& mesh,
     bool show_field = field != nullptr && field_on;
     bool show_cap =
         cap_on; // a section fills its cut face by default; K toggles the solid cap (B2b)
+    bool show_chart = chart_on && field != nullptr; // the gas-path chart (needs a scalar field)
     int shots = 0; // P-key screenshots taken this session (numbers the output files)
 
     std::printf(
@@ -470,7 +479,7 @@ bool run_windowed(const CpuMesh& mesh,
         mesh.triangle_count(),
         device->adapter().name.c_str());
     if (field) {
-        std::printf("  field: '%s' [%s] range %.4g .. %.4g — G=toggle colormap (%s)\n",
+        std::printf("  field: '%s' [%s] range %.4g .. %.4g — G=toggle colormap, H=gas-path chart (%s)\n",
                     field->name.c_str(),
                     field->unit.c_str(),
                     static_cast<double>(field->vmin),
@@ -532,6 +541,9 @@ bool run_windowed(const CpuMesh& mesh,
         // Solid-cap toggle for the cross-section (B2b).
         if (input.key_pressed(Key::K))
             show_cap = !show_cap;
+        // Gas-path chart toggle (D4) — the loaded scalar (Mach/T/p) plotted along the flow axis.
+        if (input.key_pressed(Key::H) && field)
+            show_chart = !show_chart;
         // P: screenshot the live view. Re-render it square at a crisp resolution off-screen (the same
         // render_view the snapshot/turntable use) and write a numbered PPM — no swapchain readback path
         // needed, and the saved frame is higher-res than the window.
@@ -547,6 +559,16 @@ bool run_windowed(const CpuMesh& mesh,
             } else {
                 std::fprintf(stderr, "icem_viewer: could not write screenshot '%s'\n", name.c_str());
             }
+        }
+
+        // Build + upload the gas-path chart for this frame (a screen-space overlay anchored bottom-left).
+        if (show_chart && field) {
+            const float CW = static_cast<float>(ext.width), CH = static_cast<float>(ext.height);
+            const float cw = std::min(460.0f, CW - 24.0f), ch = 210.0f;
+            chart_gui.begin(CW, CH, -1.0f, -1.0f, false);
+            rime::viewer::build_gas_path_chart(chart_gui, *field, 12.0f, CH - ch - 12.0f, cw, ch);
+            chart_gui.end();
+            rime::viewer::ui::upload_ui(*device, uir, chart_gui);
         }
 
         rime::rhi::TextureHandle target = swapchain->acquire_next_image();
@@ -572,6 +594,9 @@ bool run_windowed(const CpuMesh& mesh,
                                      clip.on && show_cap);
         if (field && show_field)
             rime::viewer::record_legend(*cmd, legend, target, ext);
+        // The chart overlays everything (LoadOp::Load preserves the scene + legend beneath it).
+        if (show_chart && field)
+            rime::viewer::ui::record_ui(*cmd, uir, target, ext, rime::rhi::LoadOp::Load, kClear);
         if (!swapchain->present(*cmd)) {
             device->wait_idle();
             const Extent2D s = window->framebuffer_size();
@@ -584,6 +609,7 @@ bool run_windowed(const CpuMesh& mesh,
 
     device->wait_idle();
     device->destroy(depth);
+    rime::viewer::ui::destroy_ui_renderer(*device, uir);
     rime::viewer::destroy_legend(*device, legend);
     rime::viewer::destroy_cap(*device, cap);
     rime::viewer::destroy_mesh(*device, gpu);
@@ -1714,6 +1740,7 @@ int main(int argc, char** argv) {
     std::string prov_path;  // explicit .icejson path; else provenance.icejson / an STL sibling is tried
     bool turntable = false; // --turntable [N]: render a full 360° orbit to N numbered PPM frames (E4)
     int turntable_frames = 72; // default 72 frames = one every 5°
+    bool chart = false; // --chart: overlay the gas-path chart (the field along the flow axis) (D4)
     std::uint32_t size = 512;
     int frames = 0;
     rime::core::Vec3 world_up{0.0f, 0.0f, 1.0f}; // ICEM parts are authored z-up
@@ -1768,6 +1795,8 @@ int main(int argc, char** argv) {
             turntable = true;
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 turntable_frames = std::max(1, std::atoi(argv[++i]));
+        } else if (a == "--chart") {
+            chart = true;
         } else if (a == "--clip" && i + 1 < argc) {
             const std::string_view ax(argv[++i]);
             clip.on = true;
@@ -1973,7 +2002,7 @@ int main(int argc, char** argv) {
 
     if (offscreen)
         return run_offscreen(mesh, out_path, size, world_up, clip, fptr, field_on, cap_on);
-    if (run_windowed(mesh, world_up, frames, fptr, field_on, cap_on))
+    if (run_windowed(mesh, world_up, frames, fptr, field_on, cap_on, chart))
         return 0;
     std::printf("icem_viewer: no window/display — falling back to off-screen (%s).\n",
                 out_path.c_str());
