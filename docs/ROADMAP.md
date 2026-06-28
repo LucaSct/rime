@@ -249,8 +249,12 @@ render graph: the **depth attachment** (ADR-0011), **push constants** (ADR-0012)
   `.icejson` "why" Ledger (the DAG of which law / material / rule / safety-factor produced every value)
   and lays it out on the E2 UI as an origin-tinted, scrollable list; clicking a value expands its
   **derivation** (the values it was computed from). Shares a file format with ICEM, never code
-  (`docs/math/provenance-panel.md`, `tests/rhi/provenance_offscreen_test`) — **DONE**. Next: E4 polish
-  (screenshot / turntable export, perf). **IN PROGRESS.**
+  (`docs/math/provenance-panel.md`, `tests/rhi/provenance_offscreen_test`) — **DONE**. E4 **export polish**
+  — `--turntable N` renders a full 360° orbit to a numbered PPM sequence (frame $i$ at azimuth
+  $\varphi_0+2\pi i/N$) with per-frame render-throughput stats, the windowed **P** key screenshots the live
+  view, and all three share one off-screen `render_view` path so the export is pixel-identical to the
+  interactive frame (`turntable.hpp`, `docs/math/orbit-camera.md` §export, `tests/rhi/turntable_test`) —
+  **DONE**. **Milestone E complete.**
 
 Each viewer brick follows Rime's conventions — a `docs/math/` derivation for the math-heavy ones, an ADR
 for engine decisions, an off-screen pixel-readback proof in `tests/rhi/` that stays GPU-free in CI, and

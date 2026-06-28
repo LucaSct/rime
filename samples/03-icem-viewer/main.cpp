@@ -48,6 +48,7 @@
 #include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
 #include "streamlines.hpp"
+#include "turntable.hpp"
 #include "ui.hpp"
 #include "ui_render.hpp"
 #include "warp.hpp"
@@ -203,6 +204,37 @@ bool write_ppm(const std::string& path,
     return static_cast<bool>(out);
 }
 
+// Render one lit, square (aspect-1) frame of the part at camera `cam` to an RGBA8 pixel buffer. The one
+// place that dispatches plain vs. sectioned (capped) rendering, shared by the single snapshot, the
+// turntable export and the windowed screenshot — so all three stay pixel-for-pixel the same view. A
+// sectioned frame carries the solid cap (and the field on the cut face); an unclipped one is the plain
+// lit part. `cap_on` is ignored unless `clip.on`.
+std::vector<std::uint8_t> render_view(rime::rhi::Device& device,
+                                      const CpuMesh& mesh,
+                                      const OrbitCamera& cam,
+                                      std::uint32_t size,
+                                      const Clip& clip,
+                                      const ScalarField* field,
+                                      bool field_on,
+                                      bool cap_on) {
+    const bool use_field = field != nullptr && field_on;
+    const float* frgba = use_field ? field->rgba.data() : nullptr;
+    const std::uint32_t fnx = use_field ? field->nx : 1;
+    const std::uint32_t fny = use_field ? field->ny : 1;
+    const std::uint32_t fnz = use_field ? field->nz : 1;
+    if (clip.on) {
+        return rime::viewer::render_section_offscreen(
+            device, size, mesh, make_push(cam, 1.0f, clip, field, field_on),
+            make_cap_push(cam, 1.0f, clip, field, field_on, mesh), kClear, cap_on, mesh_vert_spv,
+            sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), capmark_frag_spv,
+            sizeof(capmark_frag_spv), cap_vert_spv, sizeof(cap_vert_spv), cap_frag_spv,
+            sizeof(cap_frag_spv), frgba, fnx, fny, fnz);
+    }
+    return rime::viewer::render_mesh_offscreen(
+        device, size, mesh, make_push(cam, 1.0f, clip, field, field_on), kClear, mesh_vert_spv,
+        sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), frgba, fnx, fny, fnz);
+}
+
 // Off-screen path: render one frame to `out_path` (PPM) and report how much of the frame the part
 // covers. No window/display needed — the render the CI gate asserts on.
 int run_offscreen(const CpuMesh& mesh,
@@ -230,52 +262,8 @@ int run_offscreen(const CpuMesh& mesh,
         clip.offset = rime::core::dot(mesh.center(), axis_unit(clip.axis));
 
     const bool use_field = field != nullptr && field_on;
-    const float* frgba = use_field ? field->rgba.data() : nullptr;
-    const std::uint32_t fnx = use_field ? field->nx : 1;
-    const std::uint32_t fny = use_field ? field->ny : 1;
-    const std::uint32_t fnz = use_field ? field->nz : 1;
-
-    // A clipped snapshot renders the sectioned part with the solid cap (and the field on the cut
-    // face); an unclipped one is the plain lit part.
-    std::vector<std::uint8_t> px;
-    if (clip.on) {
-        px = rime::viewer::render_section_offscreen(
-            *device,
-            size,
-            mesh,
-            make_push(cam, 1.0f, clip, field, field_on),
-            make_cap_push(cam, 1.0f, clip, field, field_on, mesh),
-            kClear,
-            cap_on,
-            mesh_vert_spv,
-            sizeof(mesh_vert_spv),
-            mesh_frag_spv,
-            sizeof(mesh_frag_spv),
-            capmark_frag_spv,
-            sizeof(capmark_frag_spv),
-            cap_vert_spv,
-            sizeof(cap_vert_spv),
-            cap_frag_spv,
-            sizeof(cap_frag_spv),
-            frgba,
-            fnx,
-            fny,
-            fnz);
-    } else {
-        px = rime::viewer::render_mesh_offscreen(*device,
-                                                 size,
-                                                 mesh,
-                                                 make_push(cam, 1.0f, clip, field, field_on),
-                                                 kClear,
-                                                 mesh_vert_spv,
-                                                 sizeof(mesh_vert_spv),
-                                                 mesh_frag_spv,
-                                                 sizeof(mesh_frag_spv),
-                                                 frgba,
-                                                 fnx,
-                                                 fny,
-                                                 fnz);
-    }
+    const std::vector<std::uint8_t> px =
+        render_view(*device, mesh, cam, size, clip, field, field_on, cap_on);
 
     std::size_t lit = 0;
     for (std::size_t i = 0; i < static_cast<std::size_t>(size) * size; ++i) {
@@ -298,6 +286,74 @@ int run_offscreen(const CpuMesh& mesh,
         return 1;
     }
     std::printf("icem_viewer: wrote %s\n", out_path.c_str());
+    return 0;
+}
+
+// Turntable export (E4): render `frames` lit snapshots orbiting the part through a full 360°, one PPM
+// each (numbered off the out template — icem_view.ppm → icem_view_000.ppm …), and report the render
+// throughput. Headless by nature — a showcase loop over the proven off-screen path, reusing one device.
+// The "perf" half: each frame is timed, and the min / avg / max ms and the frames-per-second print at the
+// end, an honest measure of the engine's offscreen render+readback rate on this GPU.
+int run_turntable_offscreen(const CpuMesh& mesh,
+                            const std::string& out_path,
+                            std::uint32_t size,
+                            rime::core::Vec3 world_up,
+                            Clip clip,
+                            const ScalarField* field,
+                            bool field_on,
+                            bool cap_on,
+                            int frames) {
+    frames = std::max(frames, 1);
+    rime::rhi::DeviceDesc desc{};
+    desc.app_name = "03-icem-viewer";
+    auto device = rime::rhi::create_device(desc);
+    if (!device) {
+        std::fprintf(stderr, "icem_viewer: no Vulkan device available\n");
+        return 1;
+    }
+
+    OrbitCamera cam;
+    setup_camera(cam, mesh, 1.0f, world_up);
+    if (clip.on)
+        clip.offset = rime::core::dot(mesh.center(), axis_unit(clip.axis));
+    const float yaw0 = cam.yaw;
+
+    std::printf("icem_viewer: turntable — %d frames of %u triangles at %ux%u on '%s'%s%s …\n",
+                frames,
+                mesh.triangle_count(),
+                size,
+                size,
+                device->adapter().name.c_str(),
+                (field && field_on) ? " (field colormap)" : "",
+                clip.on ? " (sectioned)" : "");
+
+    double t_sum = 0.0, t_min = 1e30, t_max = 0.0;
+    for (int i = 0; i < frames; ++i) {
+        cam.yaw = rime::viewer::turntable_yaw(i, frames, yaw0);
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::vector<std::uint8_t> px =
+            render_view(*device, mesh, cam, size, clip, field, field_on, cap_on);
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        t_sum += ms;
+        t_min = std::min(t_min, ms);
+        t_max = std::max(t_max, ms);
+
+        const std::string frame_path = rime::viewer::turntable_frame_path(out_path, i);
+        if (!write_ppm(frame_path, px, size, size)) {
+            std::fprintf(stderr, "icem_viewer: could not write '%s'\n", frame_path.c_str());
+            return 1;
+        }
+    }
+
+    const double avg = t_sum / frames;
+    std::printf("icem_viewer: wrote %s … %s — %.1f ms/frame avg (%.1f .. %.1f), %.1f fps\n",
+                rime::viewer::turntable_frame_path(out_path, 0).c_str(),
+                rime::viewer::turntable_frame_path(out_path, frames - 1).c_str(),
+                avg,
+                t_min,
+                t_max,
+                avg > 0.0 ? 1000.0 / avg : 0.0);
     return 0;
 }
 
@@ -404,11 +460,13 @@ bool run_windowed(const CpuMesh& mesh,
     bool show_field = field != nullptr && field_on;
     bool show_cap =
         cap_on; // a section fills its cut face by default; K toggles the solid cap (B2b)
+    int shots = 0; // P-key screenshots taken this session (numbers the output files)
 
     std::printf(
         "icem_viewer: presenting %u triangles on '%s'.\n"
         "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
-        "  section: C=toggle, X/Y/Z=axis, N=flip side, [ ]=move plane, K=toggle solid cap\n",
+        "  section: C=toggle, X/Y/Z=axis, N=flip side, [ ]=move plane, K=toggle solid cap\n"
+        "  P=screenshot (icem_shot_NNN.ppm)\n",
         mesh.triangle_count(),
         device->adapter().name.c_str());
     if (field) {
@@ -474,6 +532,22 @@ bool run_windowed(const CpuMesh& mesh,
         // Solid-cap toggle for the cross-section (B2b).
         if (input.key_pressed(Key::K))
             show_cap = !show_cap;
+        // P: screenshot the live view. Re-render it square at a crisp resolution off-screen (the same
+        // render_view the snapshot/turntable use) and write a numbered PPM — no swapchain readback path
+        // needed, and the saved frame is higher-res than the window.
+        if (input.key_pressed(Key::P)) {
+            constexpr std::uint32_t shot_size = 1024;
+            const std::vector<std::uint8_t> shot =
+                render_view(*device, mesh, cam, shot_size, clip, field, show_field, show_cap);
+            const std::string name = rime::viewer::turntable_frame_path("icem_shot.ppm", shots);
+            if (write_ppm(name, shot, shot_size, shot_size)) {
+                std::printf("icem_viewer: screenshot → %s (%ux%u)\n", name.c_str(), shot_size,
+                            shot_size);
+                ++shots;
+            } else {
+                std::fprintf(stderr, "icem_viewer: could not write screenshot '%s'\n", name.c_str());
+            }
+        }
 
         rime::rhi::TextureHandle target = swapchain->acquire_next_image();
         if (!target.is_valid()) {
@@ -1638,6 +1712,8 @@ int main(int argc, char** argv) {
     float explode_factor = 1.0f;
     bool prov_mode = false; // --provenance: show ICEM's "why" Ledger (.icejson) on the UI (E3)
     std::string prov_path;  // explicit .icejson path; else provenance.icejson / an STL sibling is tried
+    bool turntable = false; // --turntable [N]: render a full 360° orbit to N numbered PPM frames (E4)
+    int turntable_frames = 72; // default 72 frames = one every 5°
     std::uint32_t size = 512;
     int frames = 0;
     rime::core::Vec3 world_up{0.0f, 0.0f, 1.0f}; // ICEM parts are authored z-up
@@ -1688,6 +1764,10 @@ int main(int argc, char** argv) {
             prov_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 prov_path = argv[++i];
+        } else if (a == "--turntable") {
+            turntable = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                turntable_frames = std::max(1, std::atoi(argv[++i]));
         } else if (a == "--clip" && i + 1 < argc) {
             const std::string_view ax(argv[++i]);
             clip.on = true;
@@ -1884,6 +1964,12 @@ int main(int argc, char** argv) {
     const ScalarField* fptr = field ? &*field : nullptr;
     const bool field_on = field.has_value() && !no_field;
     const bool cap_on = !no_cap;
+
+    // --turntable: a headless 360° orbit to a numbered PPM sequence (honours --clip / --field), no
+    // window. Dispatched before the windowed/offscreen single-shot since it is its own export mode.
+    if (turntable)
+        return run_turntable_offscreen(
+            mesh, out_path, size, world_up, clip, fptr, field_on, cap_on, turntable_frames);
 
     if (offscreen)
         return run_offscreen(mesh, out_path, size, world_up, clip, fptr, field_on, cap_on);

@@ -109,6 +109,23 @@ $$d = \frac{r}{\sin\big(\min(\beta_y,\beta_x)\big)}\cdot m,$$
 with a margin $m\gtrsim 1$ for breathing room. The unit test confirms a silhouette point
 $\mathbf c + r\,\hat{\mathbf v}$ then projects inside the NDC box.
 
+## Turntable & screenshot export (E4)
+
+The same camera drives the viewer's headless **export** path (`--turntable N`, `turntable.hpp`). A
+turntable holds the part fixed under world-fixed studio lighting and spins the camera a full revolution,
+so frame $i$ of $N$ simply sets the azimuth
+
+$$ \varphi_i = \varphi_0 + 2\pi\,\frac{i}{N}, \qquad i = 0,1,\dots,N-1, $$
+
+leaving pitch $\theta$ and distance $d$ at the framed start pose. The $N$ views are evenly spaced by
+$2\pi/N$; frame $N$ would coincide with frame $0$, so we render $[0,N)$ and the sequence loops seamlessly
+(turn the PPMs into a GIF/MP4). Because the light is fixed in world space, the lit side sweeps across the
+form as it turns — the point of a turntable — rather than a camera-attached headlight that would flatten
+it. Each frame goes through the **one** off-screen render path (`render_view`, shared with the single
+snapshot and the windowed `P` screenshot), so the export is pixel-identical to the interactive view, and
+timing every frame yields an honest min/avg/max ms and frames-per-second for the engine's render+readback
+rate on the present GPU.
+
 ---
 
 ### Alternatives considered
