@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// 03-icem-viewer — the ICEM viewer. It loads a computed part (a binary STL, e.g. ICEM's brick6 thrust
-// chamber) and draws it depth-correct and lit, orbitable with the mouse; cuts a cross-section to see
-// inside it (B2); and, when a computed simulation field is supplied (ICEM's .icef, e.g. the brick23
-// temperature field), colours the part — and the interior the cut reveals — by that field with a
-// colormap + legend (C1). Two modes, like the other samples:
-//   * windowed (default): present via the swapchain — drag to orbit, right-drag to pan, wheel to zoom,
+// 03-icem-viewer — the ICEM viewer. It loads a computed part (a binary STL, e.g. ICEM's brick6
+// thrust chamber) and draws it depth-correct and lit, orbitable with the mouse; cuts a
+// cross-section to see inside it (B2); and, when a computed simulation field is supplied (ICEM's
+// .icef, e.g. the brick23 temperature field), colours the part — and the interior the cut reveals —
+// by that field with a colormap + legend (C1). Two modes, like the other samples:
+//   * windowed (default): present via the swapchain — drag to orbit, right-drag to pan, wheel to
+//   zoom,
 //     F to reframe, C to toggle the section, G to toggle the field colormap, ESC to quit;
-//   * off-screen (--offscreen [file.ppm]): render one frame to a file (and print coverage) — runnable
+//   * off-screen (--offscreen [file.ppm]): render one frame to a file (and print coverage) —
+//   runnable
 //     anywhere, GPU-free in CI. tests/rhi/mesh_offscreen_test asserts on this exact render.
 //
-// Run it:   build/dev/bin/icem_viewer field.stl --field field.icef   # part coloured by the field
-//           build/dev/bin/icem_viewer field.stl                      # auto-loads sibling field.icef
-//           build/dev/bin/icem_viewer part.stl --offscreen view.ppm --clip z --field field.icef
-//           build/dev/bin/icem_viewer            # no file → a unit cube, so it runs out of the box
+// Run it:   icem_viewer field.stl --field field.icef    # part coloured by the field
+//           icem_viewer field.stl                        # auto-loads the sibling field.icef
+//           icem_viewer part.stl --offscreen v.ppm --clip z --field field.icef
+//           icem_viewer viscous.stl --flow velocity      # streamlines of the computed flow (D)
+//           icem_viewer viscous.stl --dvr --speed        # DVR of the speed boundary layer (D2)
+//           icem_viewer                                  # no file -> a unit cube, runs anywhere
 
 #include <algorithm>
 #include <chrono>
@@ -29,15 +33,14 @@
 #include <string_view>
 #include <vector>
 
-#include "rime/platform/platform.hpp"
-#include "rime/rhi/rhi.hpp"
-
 #include "camera.hpp"
 #include "cap.hpp"
 #include "field.hpp"
 #include "iso.hpp"
 #include "legend.hpp"
 #include "mesh_render.hpp"
+#include "rime/platform/platform.hpp"
+#include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
 #include "streamlines.hpp"
 #include "warp.hpp"
@@ -67,9 +70,9 @@ using rime::viewer::VectorField;
 
 constexpr rime::rhi::ClearColor kClear{0.08f, 0.09f, 0.11f, 1.0f}; // dark studio background
 
-// Point the camera at the part: frame its bounding sphere, set near/far to bracket it, and start from
-// a pleasant three-quarter view. ICEM authors parts z-up (cylinders/revolves about z), so that is the
-// default orbit axis.
+// Point the camera at the part: frame its bounding sphere, set near/far to bracket it, and start
+// from a pleasant three-quarter view. ICEM authors parts z-up (cylinders/revolves about z), so that
+// is the default orbit axis.
 void setup_camera(OrbitCamera& cam, const CpuMesh& mesh, float aspect, rime::core::Vec3 world_up) {
     const float r = std::max(mesh.radius(), 1e-4f);
     cam.world_up = world_up;
@@ -83,7 +86,8 @@ void setup_camera(OrbitCamera& cam, const CpuMesh& mesh, float aspect, rime::cor
 }
 
 // Interactive cross-section state: a world-axis-aligned plane that cuts the part open. `axis` picks
-// the plane normal (x/y/z), `sign` which half is removed, `offset` where along the axis the plane sits.
+// the plane normal (x/y/z), `sign` which half is removed, `offset` where along the axis the plane
+// sits.
 struct Clip {
     bool on = false;
     int axis = 0;        // 0 = x, 1 = y, 2 = z
@@ -92,13 +96,14 @@ struct Clip {
 };
 
 rime::core::Vec3 axis_unit(int axis) {
-    return axis == 0 ? rime::core::Vec3{1, 0, 0}
-         : axis == 1 ? rime::core::Vec3{0, 1, 0}
-                     : rime::core::Vec3{0, 0, 1};
+    return axis == 0   ? rime::core::Vec3{1, 0, 0}
+           : axis == 1 ? rime::core::Vec3{0, 1, 0}
+                       : rime::core::Vec3{0, 0, 1};
 }
 
-// Fill a (scale, bias) push pair from a loaded field, or zero it (which the shader reads as "no field":
-// the neutral metal albedo). vmin/vmax ride in the .w components; the field is "on" iff vmax > vmin.
+// Fill a (scale, bias) push pair from a loaded field, or zero it (which the shader reads as "no
+// field": the neutral metal albedo). vmin/vmax ride in the .w components; the field is "on" iff
+// vmax > vmin.
 void fill_field(float scale[4], float bias[4], const ScalarField* field, bool on) {
     if (field && on) {
         for (int c = 0; c < 3; ++c) {
@@ -117,7 +122,10 @@ void set_field_push(MeshPush& p, const ScalarField* field, bool on) {
     fill_field(p.field_scale, p.field_bias, field, on);
 }
 
-MeshPush make_push(const OrbitCamera& cam, float aspect, const Clip& clip, const ScalarField* field,
+MeshPush make_push(const OrbitCamera& cam,
+                   float aspect,
+                   const Clip& clip,
+                   const ScalarField* field,
                    bool field_on) {
     MeshPush p{};
     p.mvp = cam.view_proj(aspect);
@@ -127,8 +135,8 @@ MeshPush make_push(const OrbitCamera& cam, float aspect, const Clip& clip, const
     p.cam_pos[2] = e.z;
     p.cam_pos[3] = 1.0f;
     if (clip.on) {
-        // normal = sign·axis, offset w = sign·offset → discard where dot(N,p) > w cuts the chosen half
-        // at coordinate `offset` (see the derivation in mesh_render.hpp / the shader).
+        // normal = sign·axis, offset w = sign·offset → discard where dot(N,p) > w cuts the chosen
+        // half at coordinate `offset` (see the derivation in mesh_render.hpp / the shader).
         const rime::core::Vec3 n = axis_unit(clip.axis) * clip.sign;
         p.clip_plane[0] = n.x;
         p.clip_plane[1] = n.y;
@@ -142,18 +150,24 @@ MeshPush make_push(const OrbitCamera& cam, float aspect, const Clip& clip, const
     return p;
 }
 
-// Build the cap-quad push: the camera matrix, the same field colormap params as the surface, and the
-// cut rectangle — a square of side ~2·radius on the cutting plane, centred on the part (the stencil
-// trims it to the solid). axis/offset come from the clip.
-rime::viewer::CapPush make_cap_push(const OrbitCamera& cam, float aspect, const Clip& clip,
-                                    const ScalarField* field, bool field_on, const CpuMesh& mesh) {
+// Build the cap-quad push: the camera matrix, the same field colormap params as the surface, and
+// the cut rectangle — a square of side ~2·radius on the cutting plane, centred on the part (the
+// stencil trims it to the solid). axis/offset come from the clip.
+rime::viewer::CapPush make_cap_push(const OrbitCamera& cam,
+                                    float aspect,
+                                    const Clip& clip,
+                                    const ScalarField* field,
+                                    bool field_on,
+                                    const CpuMesh& mesh) {
     rime::viewer::CapPush c{};
     c.mvp = cam.view_proj(aspect);
     fill_field(c.field_scale, c.field_bias, field, field_on);
 
     const rime::core::Vec3 ctr = mesh.center();
     const float r = std::max(mesh.radius(), 1e-4f) * 1.05f;
-    const auto comp = [](const rime::core::Vec3& p, int i) { return i == 0 ? p.x : i == 1 ? p.y : p.z; };
+    const auto comp = [](const rime::core::Vec3& p, int i) {
+        return i == 0 ? p.x : i == 1 ? p.y : p.z;
+    };
     const int a = clip.axis;
     const int u = (a == 0) ? 1 : 0; // the two in-plane axes (those that aren't the plane normal)
     const int v = (a == 2) ? 1 : 2;
@@ -171,7 +185,8 @@ bool write_ppm(const std::string& path,
                std::uint32_t w,
                std::uint32_t h) {
     std::ofstream out(path, std::ios::binary);
-    if (!out) return false;
+    if (!out)
+        return false;
     out << "P6\n" << w << ' ' << h << "\n255\n";
     for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
         out.write(reinterpret_cast<const char*>(&rgba[i * 4]), 3); // RGB, drop alpha
@@ -193,7 +208,8 @@ int run_offscreen(const CpuMesh& mesh,
     desc.app_name = "03-icem-viewer";
     auto device = rime::rhi::create_device(desc);
     if (!device) {
-        std::fprintf(stderr, "icem_viewer: no Vulkan device available (driver / lavapipe / MoltenVK?)\n");
+        std::fprintf(stderr,
+                     "icem_viewer: no Vulkan device available (driver / lavapipe / MoltenVK?)\n");
         return 1;
     }
 
@@ -201,7 +217,8 @@ int run_offscreen(const CpuMesh& mesh,
     setup_camera(cam, mesh, 1.0f, world_up); // square image → aspect 1
 
     // A sectioned snapshot cuts through the part center along the chosen axis.
-    if (clip.on) clip.offset = rime::core::dot(mesh.center(), axis_unit(clip.axis));
+    if (clip.on)
+        clip.offset = rime::core::dot(mesh.center(), axis_unit(clip.axis));
 
     const bool use_field = field != nullptr && field_on;
     const float* frgba = use_field ? field->rgba.data() : nullptr;
@@ -209,36 +226,63 @@ int run_offscreen(const CpuMesh& mesh,
     const std::uint32_t fny = use_field ? field->ny : 1;
     const std::uint32_t fnz = use_field ? field->nz : 1;
 
-    // A clipped snapshot renders the sectioned part with the solid cap (and the field on the cut face);
-    // an unclipped one is the plain lit part.
+    // A clipped snapshot renders the sectioned part with the solid cap (and the field on the cut
+    // face); an unclipped one is the plain lit part.
     std::vector<std::uint8_t> px;
     if (clip.on) {
         px = rime::viewer::render_section_offscreen(
-            *device, size, mesh, make_push(cam, 1.0f, clip, field, field_on),
-            make_cap_push(cam, 1.0f, clip, field, field_on, mesh), kClear, cap_on, mesh_vert_spv,
-            sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), capmark_frag_spv,
-            sizeof(capmark_frag_spv), cap_vert_spv, sizeof(cap_vert_spv), cap_frag_spv,
-            sizeof(cap_frag_spv), frgba, fnx, fny, fnz);
+            *device,
+            size,
+            mesh,
+            make_push(cam, 1.0f, clip, field, field_on),
+            make_cap_push(cam, 1.0f, clip, field, field_on, mesh),
+            kClear,
+            cap_on,
+            mesh_vert_spv,
+            sizeof(mesh_vert_spv),
+            mesh_frag_spv,
+            sizeof(mesh_frag_spv),
+            capmark_frag_spv,
+            sizeof(capmark_frag_spv),
+            cap_vert_spv,
+            sizeof(cap_vert_spv),
+            cap_frag_spv,
+            sizeof(cap_frag_spv),
+            frgba,
+            fnx,
+            fny,
+            fnz);
     } else {
-        px = rime::viewer::render_mesh_offscreen(*device, size, mesh,
-                                                 make_push(cam, 1.0f, clip, field, field_on), kClear,
-                                                 mesh_vert_spv, sizeof(mesh_vert_spv), mesh_frag_spv,
-                                                 sizeof(mesh_frag_spv), frgba, fnx, fny, fnz);
+        px = rime::viewer::render_mesh_offscreen(*device,
+                                                 size,
+                                                 mesh,
+                                                 make_push(cam, 1.0f, clip, field, field_on),
+                                                 kClear,
+                                                 mesh_vert_spv,
+                                                 sizeof(mesh_vert_spv),
+                                                 mesh_frag_spv,
+                                                 sizeof(mesh_frag_spv),
+                                                 frgba,
+                                                 fnx,
+                                                 fny,
+                                                 fnz);
     }
 
     std::size_t lit = 0;
     for (std::size_t i = 0; i < static_cast<std::size_t>(size) * size; ++i) {
         // A pixel is "part" if it is brighter than the dark background in any channel.
-        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40) ++lit;
+        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40)
+            ++lit;
     }
     const double pct = 100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size);
-    std::printf("icem_viewer: rendered %u triangles on '%s'%s — part covers %.1f%% of a %ux%u frame\n",
-                mesh.triangle_count(),
-                device->adapter().name.c_str(),
-                use_field ? " (field colormap)" : "",
-                pct,
-                size,
-                size);
+    std::printf(
+        "icem_viewer: rendered %u triangles on '%s'%s — part covers %.1f%% of a %ux%u frame\n",
+        mesh.triangle_count(),
+        device->adapter().name.c_str(),
+        use_field ? " (field colormap)" : "",
+        pct,
+        size,
+        size);
 
     if (!write_ppm(out_path, px, size, size)) {
         std::fprintf(stderr, "icem_viewer: could not write '%s'\n", out_path.c_str());
@@ -248,8 +292,9 @@ int run_offscreen(const CpuMesh& mesh,
     return 0;
 }
 
-// Create a depth-stencil target sized to the swapchain; recreated alongside the swapchain on resize.
-// D32FloatS8 (depth + stencil) so the cross-section cap's stencil pass has somewhere to write (ADR-0014).
+// Create a depth-stencil target sized to the swapchain; recreated alongside the swapchain on
+// resize. D32FloatS8 (depth + stencil) so the cross-section cap's stencil pass has somewhere to
+// write (ADR-0014).
 rime::rhi::TextureHandle make_depth(rime::rhi::Device& device, rime::rhi::Extent2D extent) {
     rime::rhi::TextureDesc td{};
     td.extent = extent;
@@ -259,7 +304,8 @@ rime::rhi::TextureHandle make_depth(rime::rhi::Device& device, rime::rhi::Extent
     return device.create_texture(td);
 }
 
-// Windowed path: present the lit, orbitable part until the window closes (or max_frames is reached).
+// Windowed path: present the lit, orbitable part until the window closes (or max_frames is
+// reached).
 bool run_windowed(const CpuMesh& mesh,
                   rime::core::Vec3 world_up,
                   int max_frames,
@@ -268,7 +314,8 @@ bool run_windowed(const CpuMesh& mesh,
                   bool cap_on) {
     using namespace rime::platform;
 
-    if (!init()) return false;
+    if (!init())
+        return false;
     WindowDesc wd{};
     wd.title = "Rime — ICEM viewer";
     wd.width = 1280;
@@ -338,20 +385,23 @@ bool run_windowed(const CpuMesh& mesh,
     OrbitCamera cam;
     {
         const rime::rhi::Extent2D e = swapchain->extent();
-        setup_camera(cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
+        setup_camera(
+            cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
     }
 
     Clip clip;
     clip.offset = rime::core::dot(mesh.center(), axis_unit(clip.axis));
     const float clip_step = std::max(std::max(mesh.radius(), 1e-4f) * 0.02f, 1e-5f);
     bool show_field = field != nullptr && field_on;
-    bool show_cap = cap_on; // a section fills its cut face by default; K toggles the solid cap (B2b)
+    bool show_cap =
+        cap_on; // a section fills its cut face by default; K toggles the solid cap (B2b)
 
-    std::printf("icem_viewer: presenting %u triangles on '%s'.\n"
-                "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
-                "  section: C=toggle, X/Y/Z=axis, N=flip side, [ ]=move plane, K=toggle solid cap\n",
-                mesh.triangle_count(),
-                device->adapter().name.c_str());
+    std::printf(
+        "icem_viewer: presenting %u triangles on '%s'.\n"
+        "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
+        "  section: C=toggle, X/Y/Z=axis, N=flip side, [ ]=move plane, K=toggle solid cap\n",
+        mesh.triangle_count(),
+        device->adapter().name.c_str());
     if (field) {
         std::printf("  field: '%s' [%s] range %.4g .. %.4g — G=toggle colormap (%s)\n",
                     field->name.c_str(),
@@ -364,12 +414,15 @@ bool run_windowed(const CpuMesh& mesh,
     Input input;
     int frames = 0;
     while (pump_events() && !window->should_close()) {
-        if (max_frames > 0 && frames >= max_frames) break;
+        if (max_frames > 0 && frames >= max_frames)
+            break;
 
         input.new_frame();
         Event e{};
-        while (poll_event(e)) input.process(e);
-        if (input.key_pressed(Key::Escape)) window->request_close();
+        while (poll_event(e))
+            input.process(e);
+        if (input.key_pressed(Key::Escape))
+            window->request_close();
 
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float h = static_cast<float>(ext.height);
@@ -380,11 +433,14 @@ bool run_windowed(const CpuMesh& mesh,
         if (input.mouse_down(MouseButton::Right) || input.mouse_down(MouseButton::Middle)) {
             cam.pan(input.mouse_dx() / h, input.mouse_dy() / h);
         }
-        if (input.wheel_y() != 0.0f) cam.zoom(input.wheel_y());
-        if (input.key_pressed(Key::F)) cam.frame(mesh.center(), std::max(mesh.radius(), 1e-4f), aspect);
+        if (input.wheel_y() != 0.0f)
+            cam.zoom(input.wheel_y());
+        if (input.key_pressed(Key::F))
+            cam.frame(mesh.center(), std::max(mesh.radius(), 1e-4f), aspect);
 
         // Cross-section controls. Selecting an axis re-centers the plane on the part.
-        if (input.key_pressed(Key::C)) clip.on = !clip.on;
+        if (input.key_pressed(Key::C))
+            clip.on = !clip.on;
         if (input.key_pressed(Key::X)) {
             clip.axis = 0;
             clip.offset = rime::core::dot(mesh.center(), axis_unit(0));
@@ -397,13 +453,18 @@ bool run_windowed(const CpuMesh& mesh,
             clip.axis = 2;
             clip.offset = rime::core::dot(mesh.center(), axis_unit(2));
         }
-        if (input.key_pressed(Key::N)) clip.sign = -clip.sign;
-        if (input.key_down(Key::LeftBracket)) clip.offset -= clip_step;
-        if (input.key_down(Key::RightBracket)) clip.offset += clip_step;
+        if (input.key_pressed(Key::N))
+            clip.sign = -clip.sign;
+        if (input.key_down(Key::LeftBracket))
+            clip.offset -= clip_step;
+        if (input.key_down(Key::RightBracket))
+            clip.offset += clip_step;
         // Field colormap toggle (only meaningful when a field was loaded).
-        if (input.key_pressed(Key::G) && field) show_field = !show_field;
+        if (input.key_pressed(Key::G) && field)
+            show_field = !show_field;
         // Solid-cap toggle for the cross-section (B2b).
-        if (input.key_pressed(Key::K)) show_cap = !show_cap;
+        if (input.key_pressed(Key::K))
+            show_cap = !show_cap;
 
         rime::rhi::TextureHandle target = swapchain->acquire_next_image();
         if (!target.is_valid()) {
@@ -426,7 +487,8 @@ bool run_windowed(const CpuMesh& mesh,
                                      make_cap_push(cam, aspect, clip, field, show_field, mesh),
                                      kClear,
                                      clip.on && show_cap);
-        if (field && show_field) rime::viewer::record_legend(*cmd, legend, target, ext);
+        if (field && show_field)
+            rime::viewer::record_legend(*cmd, legend, target, ext);
         if (!swapchain->present(*cmd)) {
             device->wait_idle();
             const Extent2D s = window->framebuffer_size();
@@ -452,7 +514,8 @@ bool run_windowed(const CpuMesh& mesh,
 // Derive the sibling field file for an STL path: replace the extension with .icef (so ICEM's
 // `field.stl` pairs with its `field.icef`). Returns empty for an empty path.
 std::string sibling_icef(const std::string& stl_path) {
-    if (stl_path.empty()) return {};
+    if (stl_path.empty())
+        return {};
     const std::size_t slash = stl_path.find_last_of("/\\");
     const std::size_t dot = stl_path.find_last_of('.');
     if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
@@ -494,17 +557,34 @@ int run_warp_offscreen(const CpuMesh& mesh,
     p.field_scale[3] = 0.25f * r / vf.vmag_max; // peak warp = 25% radius
     p.field_bias[3] = vf.vmag_max;
 
-    const std::vector<std::uint8_t> px = rime::viewer::render_warp_offscreen(
-        *device, size, mesh, p, kClear, mesh_vert_spv, sizeof(mesh_vert_spv), mesh_frag_spv,
-        sizeof(mesh_frag_spv), warp_vert_spv, sizeof(warp_vert_spv), warp_frag_spv,
-        sizeof(warp_frag_spv), vf.rgba.data(), vf.nx, vf.ny, vf.nz);
+    const std::vector<std::uint8_t> px = rime::viewer::render_warp_offscreen(*device,
+                                                                             size,
+                                                                             mesh,
+                                                                             p,
+                                                                             kClear,
+                                                                             mesh_vert_spv,
+                                                                             sizeof(mesh_vert_spv),
+                                                                             mesh_frag_spv,
+                                                                             sizeof(mesh_frag_spv),
+                                                                             warp_vert_spv,
+                                                                             sizeof(warp_vert_spv),
+                                                                             warp_frag_spv,
+                                                                             sizeof(warp_frag_spv),
+                                                                             vf.rgba.data(),
+                                                                             vf.nx,
+                                                                             vf.ny,
+                                                                             vf.nz);
 
     std::size_t lit = 0;
     for (std::size_t i = 0; i < static_cast<std::size_t>(size) * size; ++i)
-        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40) ++lit;
+        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40)
+            ++lit;
     std::printf("icem_viewer: warped %u triangles by field '%s' — covers %.1f%% of a %ux%u frame\n",
-                mesh.triangle_count(), vf.name.c_str(),
-                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size), size, size);
+                mesh.triangle_count(),
+                vf.name.c_str(),
+                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size),
+                size,
+                size);
     if (!write_ppm(out_path, px, size, size)) {
         std::fprintf(stderr, "icem_viewer: could not write '%s'\n", out_path.c_str());
         return 1;
@@ -515,10 +595,13 @@ int run_warp_offscreen(const CpuMesh& mesh,
 
 // Windowed warp: animate the surface by the vector field (a modal mode "breathes"), coloured by the
 // field magnitude with a legend. M freezes/runs the animation.
-bool run_warp_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_frames,
+bool run_warp_windowed(const CpuMesh& mesh,
+                       rime::core::Vec3 world_up,
+                       int max_frames,
                        const VectorField& vf) {
     using namespace rime::platform;
-    if (!init()) return false;
+    if (!init())
+        return false;
     WindowDesc wd{};
     wd.title = "Rime — ICEM viewer (warp)";
     wd.width = 1280;
@@ -549,30 +632,50 @@ bool run_warp_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_f
     }
 
     const rime::rhi::Format depth_fmt = rime::rhi::Format::D32FloatS8;
-    auto gpu = rime::viewer::make_mesh(*device, swapchain->format(), depth_fmt, mesh, mesh_vert_spv,
-                                       sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv),
-                                       vf.rgba.data(), vf.nx, vf.ny, vf.nz);
-    rime::viewer::Warp warp = rime::viewer::make_warp(*device, swapchain->format(), depth_fmt,
-                                                      warp_vert_spv, sizeof(warp_vert_spv),
-                                                      warp_frag_spv, sizeof(warp_frag_spv));
-    rime::viewer::Legend legend = rime::viewer::make_legend(*device, swapchain->format(),
-                                                            legend_vert_spv, sizeof(legend_vert_spv),
-                                                            legend_frag_spv, sizeof(legend_frag_spv));
+    auto gpu = rime::viewer::make_mesh(*device,
+                                       swapchain->format(),
+                                       depth_fmt,
+                                       mesh,
+                                       mesh_vert_spv,
+                                       sizeof(mesh_vert_spv),
+                                       mesh_frag_spv,
+                                       sizeof(mesh_frag_spv),
+                                       vf.rgba.data(),
+                                       vf.nx,
+                                       vf.ny,
+                                       vf.nz);
+    rime::viewer::Warp warp = rime::viewer::make_warp(*device,
+                                                      swapchain->format(),
+                                                      depth_fmt,
+                                                      warp_vert_spv,
+                                                      sizeof(warp_vert_spv),
+                                                      warp_frag_spv,
+                                                      sizeof(warp_frag_spv));
+    rime::viewer::Legend legend = rime::viewer::make_legend(*device,
+                                                            swapchain->format(),
+                                                            legend_vert_spv,
+                                                            sizeof(legend_vert_spv),
+                                                            legend_frag_spv,
+                                                            sizeof(legend_frag_spv));
     rime::rhi::TextureHandle depth = make_depth(*device, swapchain->extent());
 
     OrbitCamera cam;
     {
         const rime::rhi::Extent2D e = swapchain->extent();
-        setup_camera(cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
+        setup_camera(
+            cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
     }
     const float r = std::max(mesh.radius(), 1e-4f);
     const float amp = 0.25f * r; // peak displacement = 25% of the part radius
     const float freq = 0.6f;     // Hz
 
-    std::printf("icem_viewer: warping %u triangles by field '%s' (|max| %.4g) on '%s'.\n"
-                "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit; M=freeze/run\n",
-                mesh.triangle_count(), vf.name.c_str(), static_cast<double>(vf.vmag_max),
-                device->adapter().name.c_str());
+    std::printf(
+        "icem_viewer: warping %u triangles by field '%s' (|max| %.4g) on '%s'.\n"
+        "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit; M=freeze/run\n",
+        mesh.triangle_count(),
+        vf.name.c_str(),
+        static_cast<double>(vf.vmag_max),
+        device->adapter().name.c_str());
 
     Input input;
     int frames = 0;
@@ -580,26 +683,34 @@ bool run_warp_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_f
     float phase = 0.0f; // seconds of animation accumulated (held when frozen)
     auto last = std::chrono::steady_clock::now();
     while (pump_events() && !window->should_close()) {
-        if (max_frames > 0 && frames >= max_frames) break;
+        if (max_frames > 0 && frames >= max_frames)
+            break;
         input.new_frame();
         Event e{};
-        while (poll_event(e)) input.process(e);
-        if (input.key_pressed(Key::Escape)) window->request_close();
-        if (input.key_pressed(Key::M)) animate = !animate;
+        while (poll_event(e))
+            input.process(e);
+        if (input.key_pressed(Key::Escape))
+            window->request_close();
+        if (input.key_pressed(Key::M))
+            animate = !animate;
 
         const auto now = std::chrono::steady_clock::now();
         const float dt = std::chrono::duration<float>(now - last).count();
         last = now;
-        if (animate) phase += dt;
+        if (animate)
+            phase += dt;
 
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float h = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / h;
-        if (input.mouse_down(MouseButton::Left)) cam.orbit(input.mouse_dx() * 0.008f, -input.mouse_dy() * 0.008f);
+        if (input.mouse_down(MouseButton::Left))
+            cam.orbit(input.mouse_dx() * 0.008f, -input.mouse_dy() * 0.008f);
         if (input.mouse_down(MouseButton::Right) || input.mouse_down(MouseButton::Middle))
             cam.pan(input.mouse_dx() / h, input.mouse_dy() / h);
-        if (input.wheel_y() != 0.0f) cam.zoom(input.wheel_y());
-        if (input.key_pressed(Key::F)) cam.frame(mesh.center(), r, aspect);
+        if (input.wheel_y() != 0.0f)
+            cam.zoom(input.wheel_y());
+        if (input.key_pressed(Key::F))
+            cam.frame(mesh.center(), r, aspect);
 
         const float gain = (amp / vf.vmag_max) * std::sin(2.0f * 3.14159265f * freq * phase);
         MeshPush p{};
@@ -654,8 +765,11 @@ bool run_warp_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_f
 
 // Build the raymarch push: inverse view-projection (for per-pixel rays), the world→uvw affine, the
 // isovalue + value range, step count, and the iso/DVR mode.
-rime::viewer::IsoPush make_iso_push(const OrbitCamera& cam, float aspect, const ScalarField& sf,
-                                    float isovalue, bool dvr) {
+rime::viewer::IsoPush make_iso_push(const OrbitCamera& cam,
+                                    float aspect,
+                                    const ScalarField& sf,
+                                    float isovalue,
+                                    bool dvr) {
     rime::viewer::IsoPush p{};
     p.inv_vp = rime::core::inverse(cam.view_proj(aspect));
     for (int c = 0; c < 3; ++c) {
@@ -671,8 +785,13 @@ rime::viewer::IsoPush make_iso_push(const OrbitCamera& cam, float aspect, const 
 }
 
 // Off-screen isosurface/DVR snapshot.
-int run_iso_offscreen(const CpuMesh& mesh, const std::string& out_path, std::uint32_t size,
-                      rime::core::Vec3 world_up, const ScalarField& sf, float isovalue, bool dvr) {
+int run_iso_offscreen(const CpuMesh& mesh,
+                      const std::string& out_path,
+                      std::uint32_t size,
+                      rime::core::Vec3 world_up,
+                      const ScalarField& sf,
+                      float isovalue,
+                      bool dvr) {
     rime::rhi::DeviceDesc desc{};
     desc.app_name = "03-icem-viewer";
     auto device = rime::rhi::create_device(desc);
@@ -682,17 +801,36 @@ int run_iso_offscreen(const CpuMesh& mesh, const std::string& out_path, std::uin
     }
     OrbitCamera cam;
     setup_camera(cam, mesh, 1.0f, world_up);
-    const std::vector<std::uint8_t> px = rime::viewer::render_iso_offscreen(
-        *device, size, mesh, make_iso_push(cam, 1.0f, sf, isovalue, dvr), kClear, mesh_vert_spv,
-        sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), iso_vert_spv, sizeof(iso_vert_spv),
-        iso_frag_spv, sizeof(iso_frag_spv), sf.rgba.data(), sf.nx, sf.ny, sf.nz);
+    const std::vector<std::uint8_t> px =
+        rime::viewer::render_iso_offscreen(*device,
+                                           size,
+                                           mesh,
+                                           make_iso_push(cam, 1.0f, sf, isovalue, dvr),
+                                           kClear,
+                                           mesh_vert_spv,
+                                           sizeof(mesh_vert_spv),
+                                           mesh_frag_spv,
+                                           sizeof(mesh_frag_spv),
+                                           iso_vert_spv,
+                                           sizeof(iso_vert_spv),
+                                           iso_frag_spv,
+                                           sizeof(iso_frag_spv),
+                                           sf.rgba.data(),
+                                           sf.nx,
+                                           sf.ny,
+                                           sf.nz);
 
     std::size_t lit = 0;
     for (std::size_t i = 0; i < static_cast<std::size_t>(size) * size; ++i)
-        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40) ++lit;
+        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40)
+            ++lit;
     std::printf("icem_viewer: %s of '%s' at %.4g — covers %.1f%% of a %ux%u frame\n",
-                dvr ? "DVR" : "isosurface", sf.name.c_str(), static_cast<double>(isovalue),
-                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size), size, size);
+                dvr ? "DVR" : "isosurface",
+                sf.name.c_str(),
+                static_cast<double>(isovalue),
+                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size),
+                size,
+                size);
     if (!write_ppm(out_path, px, size, size)) {
         std::fprintf(stderr, "icem_viewer: could not write '%s'\n", out_path.c_str());
         return 1;
@@ -702,10 +840,15 @@ int run_iso_offscreen(const CpuMesh& mesh, const std::string& out_path, std::uin
 }
 
 // Windowed isosurface: raymarch the scalar field; [ ] move the isovalue, V toggles DVR.
-bool run_iso_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_frames,
-                      const ScalarField& sf, float isovalue, bool dvr) {
+bool run_iso_windowed(const CpuMesh& mesh,
+                      rime::core::Vec3 world_up,
+                      int max_frames,
+                      const ScalarField& sf,
+                      float isovalue,
+                      bool dvr) {
     using namespace rime::platform;
-    if (!init()) return false;
+    if (!init())
+        return false;
     WindowDesc wd{};
     wd.title = "Rime — ICEM viewer (isosurface)";
     wd.width = 1280;
@@ -735,48 +878,77 @@ bool run_iso_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_fr
         return false;
     }
 
-    auto gpu = rime::viewer::make_mesh(*device, swapchain->format(), rime::rhi::Format::D32Float, mesh,
-                                       mesh_vert_spv, sizeof(mesh_vert_spv), mesh_frag_spv,
-                                       sizeof(mesh_frag_spv), sf.rgba.data(), sf.nx, sf.ny, sf.nz);
-    rime::viewer::Iso iso = rime::viewer::make_iso(*device, swapchain->format(), iso_vert_spv,
-                                                   sizeof(iso_vert_spv), iso_frag_spv, sizeof(iso_frag_spv));
-    rime::viewer::Legend legend = rime::viewer::make_legend(*device, swapchain->format(),
-                                                            legend_vert_spv, sizeof(legend_vert_spv),
-                                                            legend_frag_spv, sizeof(legend_frag_spv));
+    auto gpu = rime::viewer::make_mesh(*device,
+                                       swapchain->format(),
+                                       rime::rhi::Format::D32Float,
+                                       mesh,
+                                       mesh_vert_spv,
+                                       sizeof(mesh_vert_spv),
+                                       mesh_frag_spv,
+                                       sizeof(mesh_frag_spv),
+                                       sf.rgba.data(),
+                                       sf.nx,
+                                       sf.ny,
+                                       sf.nz);
+    rime::viewer::Iso iso = rime::viewer::make_iso(*device,
+                                                   swapchain->format(),
+                                                   iso_vert_spv,
+                                                   sizeof(iso_vert_spv),
+                                                   iso_frag_spv,
+                                                   sizeof(iso_frag_spv));
+    rime::viewer::Legend legend = rime::viewer::make_legend(*device,
+                                                            swapchain->format(),
+                                                            legend_vert_spv,
+                                                            sizeof(legend_vert_spv),
+                                                            legend_frag_spv,
+                                                            sizeof(legend_frag_spv));
 
     OrbitCamera cam;
     {
         const rime::rhi::Extent2D e = swapchain->extent();
-        setup_camera(cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
+        setup_camera(
+            cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
     }
     const float step = std::max(sf.vmax - sf.vmin, 1e-6f) * 0.02f;
     std::printf("icem_viewer: raymarching field '%s' [%s] range %.4g .. %.4g on '%s'.\n"
                 "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
                 "  isosurface: [ ]=move isovalue, V=toggle DVR (current iso %.4g)\n",
-                sf.name.c_str(), sf.unit.c_str(), static_cast<double>(sf.vmin),
-                static_cast<double>(sf.vmax), device->adapter().name.c_str(),
+                sf.name.c_str(),
+                sf.unit.c_str(),
+                static_cast<double>(sf.vmin),
+                static_cast<double>(sf.vmax),
+                device->adapter().name.c_str(),
                 static_cast<double>(isovalue));
 
     Input input;
     int frames = 0;
     while (pump_events() && !window->should_close()) {
-        if (max_frames > 0 && frames >= max_frames) break;
+        if (max_frames > 0 && frames >= max_frames)
+            break;
         input.new_frame();
         Event e{};
-        while (poll_event(e)) input.process(e);
-        if (input.key_pressed(Key::Escape)) window->request_close();
-        if (input.key_pressed(Key::V)) dvr = !dvr;
-        if (input.key_down(Key::LeftBracket)) isovalue = std::max(sf.vmin, isovalue - step);
-        if (input.key_down(Key::RightBracket)) isovalue = std::min(sf.vmax, isovalue + step);
+        while (poll_event(e))
+            input.process(e);
+        if (input.key_pressed(Key::Escape))
+            window->request_close();
+        if (input.key_pressed(Key::V))
+            dvr = !dvr;
+        if (input.key_down(Key::LeftBracket))
+            isovalue = std::max(sf.vmin, isovalue - step);
+        if (input.key_down(Key::RightBracket))
+            isovalue = std::min(sf.vmax, isovalue + step);
 
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float h = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / h;
-        if (input.mouse_down(MouseButton::Left)) cam.orbit(input.mouse_dx() * 0.008f, -input.mouse_dy() * 0.008f);
+        if (input.mouse_down(MouseButton::Left))
+            cam.orbit(input.mouse_dx() * 0.008f, -input.mouse_dy() * 0.008f);
         if (input.mouse_down(MouseButton::Right) || input.mouse_down(MouseButton::Middle))
             cam.pan(input.mouse_dx() / h, input.mouse_dy() / h);
-        if (input.wheel_y() != 0.0f) cam.zoom(input.wheel_y());
-        if (input.key_pressed(Key::F)) cam.frame(mesh.center(), std::max(mesh.radius(), 1e-4f), aspect);
+        if (input.wheel_y() != 0.0f)
+            cam.zoom(input.wheel_y());
+        if (input.key_pressed(Key::F))
+            cam.frame(mesh.center(), std::max(mesh.radius(), 1e-4f), aspect);
 
         rime::rhi::TextureHandle target = swapchain->acquire_next_image();
         if (!target.is_valid()) {
@@ -786,8 +958,14 @@ bool run_iso_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_fr
             continue;
         }
         auto cmd = device->begin_commands();
-        rime::viewer::record_iso(*cmd, iso, gpu.field_tex, gpu.field_sampler, target, ext,
-                                 make_iso_push(cam, aspect, sf, isovalue, dvr), kClear);
+        rime::viewer::record_iso(*cmd,
+                                 iso,
+                                 gpu.field_tex,
+                                 gpu.field_sampler,
+                                 target,
+                                 ext,
+                                 make_iso_push(cam, aspect, sf, isovalue, dvr),
+                                 kClear);
         rime::viewer::record_legend(*cmd, legend, target, ext);
         if (!swapchain->present(*cmd)) {
             device->wait_idle();
@@ -821,8 +999,11 @@ MeshPush flow_push(const OrbitCamera& cam, float aspect) {
 }
 
 // Off-screen streamlines snapshot.
-int run_flow_offscreen(const CpuMesh& mesh, const std::string& out_path, std::uint32_t size,
-                       rime::core::Vec3 world_up, const VectorField& vf) {
+int run_flow_offscreen(const CpuMesh& mesh,
+                       const std::string& out_path,
+                       std::uint32_t size,
+                       rime::core::Vec3 world_up,
+                       const VectorField& vf) {
     rime::rhi::DeviceDesc desc{};
     desc.app_name = "03-icem-viewer";
     auto device = rime::rhi::create_device(desc);
@@ -832,24 +1013,39 @@ int run_flow_offscreen(const CpuMesh& mesh, const std::string& out_path, std::ui
     }
     OrbitCamera cam;
     setup_camera(cam, mesh, 1.0f, world_up);
-    const std::vector<std::uint8_t> px = rime::viewer::render_streamlines_offscreen(
-        *device, size, vf, flow_push(cam, 1.0f), kClear, streamline_vert_spv, sizeof(streamline_vert_spv),
-        streamline_frag_spv, sizeof(streamline_frag_spv));
+    const std::vector<std::uint8_t> px =
+        rime::viewer::render_streamlines_offscreen(*device,
+                                                   size,
+                                                   vf,
+                                                   flow_push(cam, 1.0f),
+                                                   kClear,
+                                                   streamline_vert_spv,
+                                                   sizeof(streamline_vert_spv),
+                                                   streamline_frag_spv,
+                                                   sizeof(streamline_frag_spv));
     std::size_t lit = 0;
     for (std::size_t i = 0; i < static_cast<std::size_t>(size) * size; ++i)
-        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40) ++lit;
-    std::printf("icem_viewer: streamlines of '%s' — cover %.1f%% of a %ux%u frame\n", vf.name.c_str(),
-                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size), size, size);
-    if (!write_ppm(out_path, px, size, size)) return 1;
+        if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40)
+            ++lit;
+    std::printf("icem_viewer: streamlines of '%s' — cover %.1f%% of a %ux%u frame\n",
+                vf.name.c_str(),
+                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size),
+                size,
+                size);
+    if (!write_ppm(out_path, px, size, size))
+        return 1;
     std::printf("icem_viewer: wrote %s\n", out_path.c_str());
     return 0;
 }
 
 // Windowed streamlines: orbit the computed flow, lines coloured by speed, with the legend.
-bool run_flow_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_frames,
+bool run_flow_windowed(const CpuMesh& mesh,
+                       rime::core::Vec3 world_up,
+                       int max_frames,
                        const VectorField& vf) {
     using namespace rime::platform;
-    if (!init()) return false;
+    if (!init())
+        return false;
     WindowDesc wd{};
     wd.title = "Rime — ICEM viewer (flow)";
     wd.width = 1280;
@@ -880,41 +1076,59 @@ bool run_flow_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_f
     }
 
     const std::vector<float> verts = rime::viewer::build_streamlines(vf);
-    rime::viewer::StreamlineView flow = rime::viewer::make_streamlines(
-        *device, swapchain->format(), rime::rhi::Format::D32FloatS8, streamline_vert_spv,
-        sizeof(streamline_vert_spv), streamline_frag_spv, sizeof(streamline_frag_spv), verts);
-    rime::viewer::Legend legend = rime::viewer::make_legend(*device, swapchain->format(),
-                                                            legend_vert_spv, sizeof(legend_vert_spv),
-                                                            legend_frag_spv, sizeof(legend_frag_spv));
+    rime::viewer::StreamlineView flow =
+        rime::viewer::make_streamlines(*device,
+                                       swapchain->format(),
+                                       rime::rhi::Format::D32FloatS8,
+                                       streamline_vert_spv,
+                                       sizeof(streamline_vert_spv),
+                                       streamline_frag_spv,
+                                       sizeof(streamline_frag_spv),
+                                       verts);
+    rime::viewer::Legend legend = rime::viewer::make_legend(*device,
+                                                            swapchain->format(),
+                                                            legend_vert_spv,
+                                                            sizeof(legend_vert_spv),
+                                                            legend_frag_spv,
+                                                            sizeof(legend_frag_spv));
     rime::rhi::TextureHandle depth = make_depth(*device, swapchain->extent());
 
     OrbitCamera cam;
     {
         const rime::rhi::Extent2D e = swapchain->extent();
-        setup_camera(cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
+        setup_camera(
+            cam, mesh, static_cast<float>(e.width) / static_cast<float>(e.height), world_up);
     }
     std::printf("icem_viewer: %u streamline segments of field '%s' (|u|max %.4g) on '%s'.\n"
                 "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n",
-                flow.vertex_count / 2, vf.name.c_str(), static_cast<double>(vf.vmag_max),
+                flow.vertex_count / 2,
+                vf.name.c_str(),
+                static_cast<double>(vf.vmag_max),
                 device->adapter().name.c_str());
 
     Input input;
     int frames = 0;
     while (pump_events() && !window->should_close()) {
-        if (max_frames > 0 && frames >= max_frames) break;
+        if (max_frames > 0 && frames >= max_frames)
+            break;
         input.new_frame();
         Event e{};
-        while (poll_event(e)) input.process(e);
-        if (input.key_pressed(Key::Escape)) window->request_close();
+        while (poll_event(e))
+            input.process(e);
+        if (input.key_pressed(Key::Escape))
+            window->request_close();
 
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float hh = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / hh;
-        if (input.mouse_down(MouseButton::Left)) cam.orbit(input.mouse_dx() * 0.008f, -input.mouse_dy() * 0.008f);
+        if (input.mouse_down(MouseButton::Left))
+            cam.orbit(input.mouse_dx() * 0.008f, -input.mouse_dy() * 0.008f);
         if (input.mouse_down(MouseButton::Right) || input.mouse_down(MouseButton::Middle))
             cam.pan(input.mouse_dx() / hh, input.mouse_dy() / hh);
-        if (input.wheel_y() != 0.0f) cam.zoom(input.wheel_y());
-        if (input.key_pressed(Key::F)) cam.frame(mesh.center(), std::max(mesh.radius(), 1e-4f), aspect);
+        if (input.wheel_y() != 0.0f)
+            cam.zoom(input.wheel_y());
+        if (input.key_pressed(Key::F))
+            cam.frame(mesh.center(), std::max(mesh.radius(), 1e-4f), aspect);
 
         rime::rhi::TextureHandle target = swapchain->acquire_next_image();
         if (!target.is_valid()) {
@@ -926,7 +1140,8 @@ bool run_flow_windowed(const CpuMesh& mesh, rime::core::Vec3 world_up, int max_f
             continue;
         }
         auto cmd = device->begin_commands();
-        rime::viewer::record_streamlines(*cmd, flow, target, depth, ext, flow_push(cam, aspect), kClear);
+        rime::viewer::record_streamlines(
+            *cmd, flow, target, depth, ext, flow_push(cam, aspect), kClear);
         rime::viewer::record_legend(*cmd, legend, target, ext);
         if (!swapchain->present(*cmd)) {
             device->wait_idle();
@@ -958,14 +1173,17 @@ int main(int argc, char** argv) {
     bool offscreen = false;
     bool no_field = false;
     bool no_cap = false;
-    bool warp_mode = false;     // --warp: animate the surface by a vec3 field (C3)
-    std::string warp_name;      // optional vec3 field name to warp by (else the first vec3 field)
-    bool flow_mode = false;     // --flow: streamlines of a vec3 velocity field (D)
-    std::string flow_name;      // optional vec3 velocity field name (else the first vec3 field)
-    bool iso_mode = false;      // --iso: raymarched isosurface of a scalar field (C2)
+    bool warp_mode = false; // --warp: animate the surface by a vec3 field (C3)
+    std::string warp_name;  // optional vec3 field name to warp by (else the first vec3 field)
+    bool flow_mode = false; // --flow: streamlines of a vec3 velocity field (D)
+    std::string flow_name;  // optional vec3 velocity field name (else the first vec3 field)
+    bool iso_mode = false;  // --iso: raymarched isosurface of a scalar field (C2)
     bool iso_given = false;
     float iso_value = 0.0f;
-    bool dvr = false;           // --dvr: direct volume rendering instead of an isosurface
+    bool dvr = false; // --dvr: direct volume rendering instead of an isosurface
+    bool speed_mode =
+        false; // --speed: colour/iso/DVR the scalar speed |v| of a vec3 velocity field (D2)
+    std::string speed_name; // optional vec3 velocity field name (else the first vec3 field)
     std::uint32_t size = 512;
     int frames = 0;
     rime::core::Vec3 world_up{0.0f, 0.0f, 1.0f}; // ICEM parts are authored z-up
@@ -975,7 +1193,8 @@ int main(int argc, char** argv) {
         const std::string_view a(argv[i]);
         if (a == "--offscreen" || a == "--headless") {
             offscreen = true;
-            if (i + 1 < argc && argv[i + 1][0] != '-') out_path = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                out_path = argv[++i];
         } else if (a == "--windowed") {
             offscreen = false;
         } else if (a == "--field" && i + 1 < argc) {
@@ -986,10 +1205,12 @@ int main(int argc, char** argv) {
             no_cap = true;
         } else if (a == "--warp") {
             warp_mode = true;
-            if (i + 1 < argc && argv[i + 1][0] != '-') warp_name = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                warp_name = argv[++i];
         } else if (a == "--flow") {
             flow_mode = true;
-            if (i + 1 < argc && argv[i + 1][0] != '-') flow_name = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                flow_name = argv[++i];
         } else if (a == "--iso") {
             iso_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -999,6 +1220,10 @@ int main(int argc, char** argv) {
         } else if (a == "--dvr") {
             iso_mode = true;
             dvr = true;
+        } else if (a == "--speed") {
+            speed_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                speed_name = argv[++i];
         } else if (a == "--clip" && i + 1 < argc) {
             const std::string_view ax(argv[++i]);
             clip.on = true;
@@ -1023,26 +1248,36 @@ int main(int argc, char** argv) {
         }
         mesh = std::move(*loaded);
     } else {
-        std::printf("icem_viewer: no STL given — showing a unit cube. Pass a binary STL to view a part.\n");
+        std::printf(
+            "icem_viewer: no STL given — showing a unit cube. Pass a binary STL to view a part.\n");
         mesh = rime::viewer::make_unit_cube();
     }
 
-    // --warp: animate the surface by a computed vec3 field (displacement / modal mode shape). It reads
-    // the same .icef (explicit --field, else the STL's sibling), picking a vector field by name.
+    // --warp: animate the surface by a computed vec3 field (displacement / modal mode shape). It
+    // reads the same .icef (explicit --field, else the STL's sibling), picking a vector field by
+    // name.
     if (warp_mode) {
         const std::string vpath = field_path.empty() ? sibling_icef(stl_path) : field_path;
         auto vfield = rime::viewer::load_icef_vector(vpath, warp_name);
         if (!vfield) {
-            std::fprintf(stderr,
-                         "icem_viewer: --warp needs a vec3 field in '%s' (e.g. displacement or mode1)\n",
-                         vpath.c_str());
+            std::fprintf(
+                stderr,
+                "icem_viewer: --warp needs a vec3 field in '%s' (e.g. displacement or mode1)\n",
+                vpath.c_str());
             return 1;
         }
         std::printf("icem_viewer: warp field '%s' [%s] |max| %.4g on a %ux%ux%u grid (%s)\n",
-                    vfield->name.c_str(), vfield->unit.c_str(), static_cast<double>(vfield->vmag_max),
-                    vfield->nx, vfield->ny, vfield->nz, vpath.c_str());
-        if (offscreen) return run_warp_offscreen(mesh, out_path, size, world_up, *vfield);
-        if (run_warp_windowed(mesh, world_up, frames, *vfield)) return 0;
+                    vfield->name.c_str(),
+                    vfield->unit.c_str(),
+                    static_cast<double>(vfield->vmag_max),
+                    vfield->nx,
+                    vfield->ny,
+                    vfield->nz,
+                    vpath.c_str());
+        if (offscreen)
+            return run_warp_offscreen(mesh, out_path, size, world_up, *vfield);
+        if (run_warp_windowed(mesh, world_up, frames, *vfield))
+            return 0;
         return run_warp_offscreen(mesh, out_path, size, world_up, *vfield);
     }
 
@@ -1051,51 +1286,86 @@ int main(int argc, char** argv) {
         const std::string vpath = field_path.empty() ? sibling_icef(stl_path) : field_path;
         auto vfield = rime::viewer::load_icef_vector(vpath, flow_name);
         if (!vfield) {
-            std::fprintf(stderr, "icem_viewer: --flow needs a vec3 velocity field in '%s'\n", vpath.c_str());
+            std::fprintf(
+                stderr, "icem_viewer: --flow needs a vec3 velocity field in '%s'\n", vpath.c_str());
             return 1;
         }
         std::printf("icem_viewer: flow field '%s' [%s] |u|max %.4g on a %ux%ux%u grid (%s)\n",
-                    vfield->name.c_str(), vfield->unit.c_str(), static_cast<double>(vfield->vmag_max),
-                    vfield->nx, vfield->ny, vfield->nz, vpath.c_str());
-        if (offscreen) return run_flow_offscreen(mesh, out_path, size, world_up, *vfield);
-        if (run_flow_windowed(mesh, world_up, frames, *vfield)) return 0;
+                    vfield->name.c_str(),
+                    vfield->unit.c_str(),
+                    static_cast<double>(vfield->vmag_max),
+                    vfield->nx,
+                    vfield->ny,
+                    vfield->nz,
+                    vpath.c_str());
+        if (offscreen)
+            return run_flow_offscreen(mesh, out_path, size, world_up, *vfield);
+        if (run_flow_windowed(mesh, world_up, frames, *vfield))
+            return 0;
         return run_flow_offscreen(mesh, out_path, size, world_up, *vfield);
     }
 
-    // --iso / --dvr: GPU raymarched isosurface or DVR of a scalar field (C2).
+    // A scalar field for the colormap / legend / isosurface / DVR: either a scalar straight from
+    // the .icef, or — with --speed — the magnitude |v| derived from a vec3 velocity field (D2·V),
+    // so the viscous boundary layer can be shown as a coloured surface, isotach or DVR volume, not
+    // only as lines.
+    const auto load_scalar = [&](const std::string& path) -> std::optional<ScalarField> {
+        if (speed_mode) {
+            auto vf = rime::viewer::load_icef_vector(path, speed_name);
+            if (!vf)
+                return std::nullopt;
+            return rime::viewer::speed_field(*vf);
+        }
+        return rime::viewer::load_icef_scalar(path);
+    };
+
+    // --iso / --dvr: GPU raymarched isosurface or DVR of a scalar field (C2; or the speed scalar,
+    // D2·V).
     if (iso_mode) {
         const std::string spath = field_path.empty() ? sibling_icef(stl_path) : field_path;
-        auto sf = rime::viewer::load_icef_scalar(spath);
+        auto sf = load_scalar(spath);
         if (!sf) {
-            std::fprintf(stderr, "icem_viewer: --iso needs a scalar field in '%s'\n", spath.c_str());
+            std::fprintf(stderr,
+                         "icem_viewer: --iso needs a %s in '%s'\n",
+                         speed_mode ? "vec3 velocity field (--speed)" : "scalar field",
+                         spath.c_str());
             return 1;
         }
         const float iso = iso_given ? iso_value : 0.5f * (sf->vmin + sf->vmax);
         std::printf("icem_viewer: %s field '%s' [%s] range %.4g .. %.4g, iso %.4g (%s)\n",
-                    dvr ? "DVR of" : "isosurface of", sf->name.c_str(), sf->unit.c_str(),
-                    static_cast<double>(sf->vmin), static_cast<double>(sf->vmax),
-                    static_cast<double>(iso), spath.c_str());
-        if (offscreen) return run_iso_offscreen(mesh, out_path, size, world_up, *sf, iso, dvr);
-        if (run_iso_windowed(mesh, world_up, frames, *sf, iso, dvr)) return 0;
+                    dvr ? "DVR of" : "isosurface of",
+                    sf->name.c_str(),
+                    sf->unit.c_str(),
+                    static_cast<double>(sf->vmin),
+                    static_cast<double>(sf->vmax),
+                    static_cast<double>(iso),
+                    spath.c_str());
+        if (offscreen)
+            return run_iso_offscreen(mesh, out_path, size, world_up, *sf, iso, dvr);
+        if (run_iso_windowed(mesh, world_up, frames, *sf, iso, dvr))
+            return 0;
         return run_iso_offscreen(mesh, out_path, size, world_up, *sf, iso, dvr);
     }
 
-    // Load a simulation field: an explicit --field path, else the STL's sibling <stem>.icef if present.
+    // Load a simulation field: an explicit --field path, else the STL's sibling <stem>.icef if
+    // present.
     std::optional<ScalarField> field;
     const bool explicit_field = !field_path.empty();
-    if (field_path.empty()) field_path = sibling_icef(stl_path);
+    if (field_path.empty())
+        field_path = sibling_icef(stl_path);
     if (!field_path.empty()) {
-        field = rime::viewer::load_icef_scalar(field_path);
+        field = load_scalar(field_path);
         if (field) {
-            std::printf("icem_viewer: loaded field '%s' [%s] range %.4g .. %.4g on a %ux%ux%u grid (%s)\n",
-                        field->name.c_str(),
-                        field->unit.c_str(),
-                        static_cast<double>(field->vmin),
-                        static_cast<double>(field->vmax),
-                        field->nx,
-                        field->ny,
-                        field->nz,
-                        field_path.c_str());
+            std::printf(
+                "icem_viewer: loaded field '%s' [%s] range %.4g .. %.4g on a %ux%ux%u grid (%s)\n",
+                field->name.c_str(),
+                field->unit.c_str(),
+                static_cast<double>(field->vmin),
+                static_cast<double>(field->vmax),
+                field->nx,
+                field->ny,
+                field->nz,
+                field_path.c_str());
         } else if (explicit_field) {
             std::fprintf(stderr, "icem_viewer: could not load field '%s'\n", field_path.c_str());
         }
@@ -1105,8 +1375,11 @@ int main(int argc, char** argv) {
     const bool field_on = field.has_value() && !no_field;
     const bool cap_on = !no_cap;
 
-    if (offscreen) return run_offscreen(mesh, out_path, size, world_up, clip, fptr, field_on, cap_on);
-    if (run_windowed(mesh, world_up, frames, fptr, field_on, cap_on)) return 0;
-    std::printf("icem_viewer: no window/display — falling back to off-screen (%s).\n", out_path.c_str());
+    if (offscreen)
+        return run_offscreen(mesh, out_path, size, world_up, clip, fptr, field_on, cap_on);
+    if (run_windowed(mesh, world_up, frames, fptr, field_on, cap_on))
+        return 0;
+    std::printf("icem_viewer: no window/display — falling back to off-screen (%s).\n",
+                out_path.c_str());
     return run_offscreen(mesh, out_path, size, world_up, clip, fptr, field_on, cap_on);
 }

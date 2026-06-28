@@ -212,3 +212,38 @@ back forever. **M6–M9** make it usable and show the first destruction. **M10�
 the "wow." We re-plan at each boundary.
 
 > The frost does not form all at once. Crystal by crystal. ❄
+
+---
+
+## Appendix: the ICEM Viewer (Frostlens) — a flagship application
+
+Rime's first non-trivial **application**: a from-scratch 3-D viewer for the computed engineering
+parts, simulation fields and flow produced by **ICEM** (a separate, deterministic
+computational-engineering project). It is built *on* Rime — `samples/03-icem-viewer` links only
+`engine/{core,platform,rhi}` — so it **dogfoods the engine** and pulls exactly the features Rime's own
+roadmap wants next. Several RHI bricks were landed early to serve it and are adopted+extended by the M5
+render graph: the **depth attachment** (ADR-0011), **push constants** (ADR-0012), **3-D/volume textures**
+(ADR-0013) and **stencil** state (ADR-0014). The two repos share only *files* (STL/OBJ meshes + a native
+`.icef` field binary), never code. Full plan lives outside the repo; the brick ladder, with proofs:
+
+- **A — foundations.** A1 depth attachment (RHI) · A2 orbit camera · A3 the `.icef` field bridge (ICEM
+  side). **DONE.**
+- **B — surfaces + cross-section.** B1 load an STL → lit, depth-correct, orbitable part · B2 movable clip
+  plane + **stencil solid cap** to look *inside* a part. **DONE.**
+- **C — visualize the existing simulations.** C1 colour the part (and the cut face) by an `.icef` scalar
+  field + legend · C2 GPU raymarched **isosurface + DVR** · C3 vector-field **warp** (animated
+  displacement / modal mode). **DONE.**
+- **D — real 3-D CFD → flow view.** ICEM grew a genuine 3-D CFD ladder (D1 inviscid potential flow, D2
+  viscous Navier–Stokes); the viewer renders the computed velocity as **RK4 streamlines** coloured by
+  speed (`docs/math/streamlines.md`), and — **D2·V** — derives the scalar **speed** $\lVert\mathbf u\rVert$
+  so the colormap / isotach / slice / **DVR** show the viscous **boundary layer** as a volume
+  (`tests/rhi/viscous_offscreen_test`). **Rime side DONE.** D3 (compressibility → Mach) and D4 (the
+  turbojet flow view on brick10/11 geometry) are ICEM-coupled and follow there.
+- **E — assemblies, from-scratch UI, provenance.** E1 multi-part **assemblies** (the ITER-class tokamak
+  as toggleable, coloured parts) · E2 a **from-scratch immediate-mode UI** on the RHI (text + widgets,
+  reusable by Rime's future editor) · E3 a **provenance panel** (surface ICEM's ledger — *why* a
+  dimension is what it is) · E4 polish (screenshot / turntable export, perf). **IN PROGRESS.**
+
+Each viewer brick follows Rime's conventions — a `docs/math/` derivation for the math-heavy ones, an ADR
+for engine decisions, an off-screen pixel-readback proof in `tests/rhi/` that stays GPU-free in CI, and
+an auto-committed+pushed focused change.
