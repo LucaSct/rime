@@ -23,6 +23,8 @@ rime_add_shaders(icem_viewer
     shaders/iso.vert
     shaders/iso.frag
     shaders/streamline.vert
-    shaders/streamline.frag)
+    shaders/streamline.frag
+    shaders/ui.vert
+    shaders/ui.frag)
 
 rime_apply_common_target_options(icem_viewer)

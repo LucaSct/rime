@@ -241,10 +241,12 @@ render graph: the **depth attachment** (ADR-0011), **push constants** (ADR-0012)
   turbojet flow view on brick10/11 geometry) are ICEM-coupled and follow there.
 - **E — assemblies, from-scratch UI, provenance.** E1 multi-part **assemblies** — the ITER-class tokamak
   loads as 10 colour-tinted, number-key-toggleable parts with an axial **exploded view**
-  (`tests/rhi/assembly_offscreen_test`, `docs/math/assembly.md`) — **DONE**. Next: E2 a **from-scratch
-  immediate-mode UI** on the RHI (text + widgets, reusable by Rime's future editor) · E3 a **provenance
-  panel** (surface ICEM's ledger — *why* a dimension is what it is) · E4 polish (screenshot / turntable
-  export, perf). **IN PROGRESS.**
+  (`tests/rhi/assembly_offscreen_test`, `docs/math/assembly.md`) — **DONE**. E2 a **from-scratch
+  immediate-mode UI** on the RHI — a built-in bitmap font + panel/label/button/checkbox/slider, no Dear
+  ImGui, drawn as one alpha-tested overlay pass; the assembly control panel toggles parts and scrubs the
+  explode slider ([ADR-0015](adr/0015-imgui-free-ui.md), `docs/math/ui-text-layout.md`,
+  `tests/rhi/ui_offscreen_test`) — **DONE**. Next: E3 a **provenance panel** (surface ICEM's ledger —
+  *why* a dimension is what it is) · E4 polish (screenshot / turntable export, perf). **IN PROGRESS.**
 
 Each viewer brick follows Rime's conventions — a `docs/math/` derivation for the math-heavy ones, an ADR
 for engine decisions, an off-screen pixel-readback proof in `tests/rhi/` that stays GPU-free in CI, and
