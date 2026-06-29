@@ -261,6 +261,19 @@ render graph: the **depth attachment** (ADR-0011), **push constants** (ADR-0012)
   view, and all three share one off-screen `render_view` path so the export is pixel-identical to the
   interactive frame (`turntable.hpp`, `docs/math/orbit-camera.md` §export, `tests/rhi/turntable_test`) —
   **DONE**. **Milestone E complete.**
+- **F — the engine cut-away (Bview).** ICEM's showcase is a computed **geared turbofan**: `icem engine`
+  emits 15 `engine_*.stl` parts plus `engine_core.icef` / `engine_bypass.icef`, each carrying a `velocity`
+  and a `mach` field. This view **fuses D and E** into how engineers actually draw an engine — the
+  multi-part assembly, now opened by a **meridional cut-away** clip plane through the flow axis, drawn in
+  **one shared-camera, shared-depth pass** with **streamlines** traced through both ducts and coloured by
+  the computed **Mach** (not raw speed), on one Mach scale shared by core and bypass. Sharing the depth
+  buffer makes the remaining metal occlude the flow behind it while the opened half reveals it — a true
+  cut-away. `--engine <dir>` (oriented y-up, the engine lying horizontal); the panel gains a CUT-AWAY
+  toggle + Mach readout, and **C** toggles the section. No new pipeline/shader/RHI: the assembly's mesh
+  clip is switched on and the Mach rides the streamline `w` channel the speed used to. A latent streamline
+  bug surfaced here — a line reaching an open OUTFLOW face ran straight to `max_steps` because the sampler
+  clamps at the domain edge; it is now stopped at the domain bound (`engine.hpp`,
+  `docs/math/engine-view.md`, `tests/rhi/engine_offscreen_test`). **DONE.**
 
 Each viewer brick follows Rime's conventions — a `docs/math/` derivation for the math-heavy ones, an ADR
 for engine decisions, an off-screen pixel-readback proof in `tests/rhi/` that stays GPU-free in CI, and

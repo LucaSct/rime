@@ -59,13 +59,62 @@ inline std::array<float, 4> sample_field(const VectorField& vf, float wx, float 
     return out;
 }
 
+// Trilinear sample of a ScalarField's volume at a world point → (value, validity). Mirrors
+// sample_field (the vector sampler) but reads the scalar's R = value, G = validity channels. Used to
+// colour a streamline by an *auxiliary* field carried on the same grid as the velocity — for the
+// engine cut-away that auxiliary field is the computed Mach number, so the lines read true Mach
+// rather than raw speed.
+inline std::array<float, 2> sample_scalar(const ScalarField& sf, float wx, float wy, float wz) {
+    const int nx = static_cast<int>(sf.nx), ny = static_cast<int>(sf.ny), nz = static_cast<int>(sf.nz);
+    float g[3] = {(wx * sf.scale[0] + sf.bias[0]) * nx - 0.5f,
+                  (wy * sf.scale[1] + sf.bias[1]) * ny - 0.5f,
+                  (wz * sf.scale[2] + sf.bias[2]) * nz - 0.5f};
+    const int dim[3] = {nx, ny, nz};
+    int lo[3];
+    float fr[3];
+    for (int c = 0; c < 3; ++c) {
+        if (g[c] < 0.0f) g[c] = 0.0f;
+        if (g[c] > dim[c] - 1.0f) g[c] = static_cast<float>(dim[c] - 1);
+        lo[c] = static_cast<int>(std::floor(g[c]));
+        if (lo[c] > dim[c] - 2) lo[c] = (dim[c] >= 2) ? dim[c] - 2 : 0;
+        fr[c] = g[c] - static_cast<float>(lo[c]);
+    }
+    const auto idx = [&](int i, int j, int k) {
+        return (static_cast<std::size_t>(i) + static_cast<std::size_t>(nx) *
+                (static_cast<std::size_t>(j) + static_cast<std::size_t>(ny) * k)) * 4;
+    };
+    std::array<float, 2> out{0, 0};
+    for (int ch = 0; ch < 2; ++ch) { // 0 = value, 1 = validity
+        const int x1 = (nx >= 2) ? lo[0] + 1 : lo[0];
+        const int y1 = (ny >= 2) ? lo[1] + 1 : lo[1];
+        const int z1 = (nz >= 2) ? lo[2] + 1 : lo[2];
+        const auto v = [&](int i, int j, int k) { return sf.rgba[idx(i, j, k) + ch]; };
+        const float c00 = v(lo[0], lo[1], lo[2]) * (1 - fr[0]) + v(x1, lo[1], lo[2]) * fr[0];
+        const float c10 = v(lo[0], y1, lo[2]) * (1 - fr[0]) + v(x1, y1, lo[2]) * fr[0];
+        const float c01 = v(lo[0], lo[1], z1) * (1 - fr[0]) + v(x1, lo[1], z1) * fr[0];
+        const float c11 = v(lo[0], y1, z1) * (1 - fr[0]) + v(x1, y1, z1) * fr[0];
+        const float c0 = c00 * (1 - fr[1]) + c10 * fr[1];
+        const float c1 = c01 * (1 - fr[1]) + c11 * fr[1];
+        out[ch] = c0 * (1 - fr[2]) + c1 * fr[2];
+    }
+    return out;
+}
+
 } // namespace detail
 
-// Trace streamlines and pack them as a LineList of vec4 vertices (xyz = world position, w = speed /
-// vmag_max). Seeds are a grid across the inlet (the low-z face of the field volume); each is integrated
-// downstream by arc-length RK4 of the normalized velocity, so the points are evenly spaced regardless of
-// local speed. A line stops when it leaves the solid (validity < 0.5) or the velocity vanishes.
-[[nodiscard]] inline std::vector<float> build_streamlines(const VectorField& vf, int n_seed = 18,
+// Trace streamlines and pack them as a LineList of vec4 vertices (xyz = world position, w = colour
+// coordinate in [0,1]). Seeds are a grid across the inlet (the low-z face of the field volume); each
+// is integrated downstream by arc-length RK4 of the normalized velocity, so the points are evenly
+// spaced regardless of local speed. A line stops when it leaves the solid (validity < 0.5) or the
+// velocity vanishes.
+//
+// The colour coordinate is, by default, the local speed |u|/vmag_max (the plain --flow look). When an
+// auxiliary scalar `color` (on the same grid) and a positive `color_ref` are supplied, the lines are
+// instead coloured by that scalar / color_ref — the engine cut-away passes the computed Mach field
+// and a Mach reference shared across the core and bypass ducts, so both read on one Mach scale.
+[[nodiscard]] inline std::vector<float> build_streamlines(const VectorField& vf,
+                                                          const ScalarField* color = nullptr,
+                                                          float color_ref = 0.0f, int n_seed = 18,
                                                           int max_steps = 800) {
     std::vector<float> verts;
     if (!vf.usable() || vf.scale[0] == 0.0f) return verts;
@@ -76,6 +125,18 @@ inline std::array<float, 4> sample_field(const VectorField& vf, float wx, float 
         p[0] = (u - vf.bias[0]) / vf.scale[0];
         p[1] = (v - vf.bias[1]) / vf.scale[1];
         p[2] = (w - vf.bias[2]) / vf.scale[2];
+    };
+    // A point is in the field's domain iff its texel coordinate lands in [0,1]^3. The sampler *clamps*
+    // outside the volume, so without this a line that reaches an OUTFLOW face (a valid edge — exactly
+    // what the engine's open core/bypass nozzles are) would keep integrating the clamped edge velocity
+    // in a straight line until max_steps, shooting far past the geometry. Stopping at the domain bound
+    // ends each line at the duct exit instead.
+    const auto in_domain = [&](const float p[3]) {
+        for (int c = 0; c < 3; ++c) {
+            const float t = p[c] * vf.scale[c] + vf.bias[c];
+            if (t < -0.01f || t > 1.01f) return false;
+        }
+        return true;
     };
     // Unit flow direction at p (returns false if outside the fluid or stagnant).
     const auto dir = [&](const float p[3], float g[3]) {
@@ -109,15 +170,23 @@ inline std::array<float, 4> sample_field(const VectorField& vf, float wx, float 
                 for (int c = 0; c < 3; ++c)
                     pn[c] = p[c] + (ds / 6.0f) * (k1[c] + 2.0f * k2[c] + 2.0f * k3[c] + k4[c]);
 
-                const auto r = detail::sample_field(vf, p[0], p[1], p[2]);
-                const float speed = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]) / vf.vmag_max;
-                const float t = speed < 0.0f ? 0.0f : (speed > 1.0f ? 1.0f : speed);
-                // LineList segment p → pn, both vertices coloured by the speed at p.
+                // Colour coordinate at p: the auxiliary scalar (e.g. Mach) / color_ref when supplied,
+                // else the local speed |u|/vmag_max. Clamped to the colormap's [0,1] domain.
+                float w;
+                if (color && color_ref > 0.0f) {
+                    w = detail::sample_scalar(*color, p[0], p[1], p[2])[0] / color_ref;
+                } else {
+                    const auto r = detail::sample_field(vf, p[0], p[1], p[2]);
+                    w = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]) / vf.vmag_max;
+                }
+                const float t = w < 0.0f ? 0.0f : (w > 1.0f ? 1.0f : w);
+                // LineList segment p → pn, both vertices coloured by the field at p.
                 verts.insert(verts.end(), {p[0], p[1], p[2], t, pn[0], pn[1], pn[2], t});
                 p[0] = pn[0];
                 p[1] = pn[1];
                 p[2] = pn[2];
-                if (detail::sample_field(vf, p[0], p[1], p[2])[3] < 0.5f) break; // left the fluid
+                if (!in_domain(p) || detail::sample_field(vf, p[0], p[1], p[2])[3] < 0.5f)
+                    break; // left the domain or the fluid
             }
         }
     }
@@ -193,6 +262,30 @@ inline void destroy_streamlines(rhi::Device& device, const StreamlineView& s) {
     device.destroy(s.vbuf);
 }
 
+// Draw a prepared streamline view into an ALREADY-OPEN rendering scope (mirrors draw_assembly), so the
+// lines can be composited with other geometry that shares the camera and depth buffer. The engine
+// cut-away (Bview) draws the cut-away assembly and then the core/bypass streamlines into one pass, so
+// the lines depth-test against the metal — visible in the opened half, occluded by the solid behind.
+inline void draw_streamlines(rhi::CommandBuffer& cmd,
+                             const StreamlineView& s,
+                             rhi::Extent2D extent,
+                             const MeshPush& push) {
+    using namespace rime::rhi;
+    cmd.bind_pipeline(s.pipeline);
+    cmd.push_constants(&push, sizeof(MeshPush));
+    cmd.bind_vertex_buffer(s.vbuf, 0);
+    Viewport vp{};
+    vp.width = static_cast<float>(extent.width);
+    vp.height = static_cast<float>(extent.height);
+    vp.max_depth = 1.0f;
+    cmd.set_viewport(vp);
+    Rect2D sc{};
+    sc.width = extent.width;
+    sc.height = extent.height;
+    cmd.set_scissor(sc);
+    if (s.vertex_count > 0) cmd.draw(s.vertex_count);
+}
+
 inline void record_streamlines(rhi::CommandBuffer& cmd,
                                const StreamlineView& s,
                                rhi::TextureHandle color,
@@ -213,19 +306,7 @@ inline void record_streamlines(rhi::CommandBuffer& cmd,
     ri.depth_stencil = da;
 
     cmd.begin_rendering(ri);
-    cmd.bind_pipeline(s.pipeline);
-    cmd.push_constants(&push, sizeof(MeshPush));
-    cmd.bind_vertex_buffer(s.vbuf, 0);
-    Viewport vp{};
-    vp.width = static_cast<float>(extent.width);
-    vp.height = static_cast<float>(extent.height);
-    vp.max_depth = 1.0f;
-    cmd.set_viewport(vp);
-    Rect2D sc{};
-    sc.width = extent.width;
-    sc.height = extent.height;
-    cmd.set_scissor(sc);
-    if (s.vertex_count > 0) cmd.draw(s.vertex_count);
+    draw_streamlines(cmd, s, extent, push);
     cmd.end_rendering();
 }
 

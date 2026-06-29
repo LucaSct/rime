@@ -23,6 +23,7 @@ rime_add_test(rime_rhi_tests
     streamlines_offscreen_test.cpp
     viscous_offscreen_test.cpp
     assembly_offscreen_test.cpp
+    engine_offscreen_test.cpp
     ui_offscreen_test.cpp
     provenance_offscreen_test.cpp
     turntable_test.cpp
