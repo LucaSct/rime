@@ -5,7 +5,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # main AND long-lived feature branches. feat/icem-viewer once accumulated 57 commits
+    # that never saw CI (pushed without a PR) — a branch must not be able to do that
+    # silently again, so feature-branch pushes build too.
+    branches: [main, "feat/**"]
   pull_request:
 
 # A newer push to the same ref supersedes in-flight runs.
