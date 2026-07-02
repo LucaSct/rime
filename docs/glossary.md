@@ -76,7 +76,66 @@ Entries are grouped roughly by area and kept short on purpose.
   dynamic, shadow-casting lights affordably.
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
-  render graph automates them.
+  render graph automates them. Vulkan's modern form is *synchronization2*
+  (`VkImageMemoryBarrier2`), which states the source/destination stage+access in one place.
+- **SPIR-V.** The binary intermediate language GPUs consume. Rime authors shaders in GLSL
+  and compiles them to SPIR-V *at build time* (offline; see
+  [adr/0008](adr/0008-offline-shader-compilation.md)), then hands the bytes to the RHI.
+- **Command buffer.** A recorded list of GPU commands (begin a render, bind, draw, copy)
+  that is built on the CPU and then *submitted* to a queue for the GPU to execute.
+- **Swapchain.** The set of images the windowing system shows on screen, cycled
+  (*presented*) one per frame. Off-screen rendering needs no swapchain — which is why
+  Rime's first-pixels proof can run headlessly in CI (it renders to an image and reads it
+  back). Presentation, and thus the swapchain, lands in M3.4 (ADR-0009).
+- **Surface (`VkSurfaceKHR`).** The Vulkan handle that ties a swapchain to a specific OS
+  window. Rime builds it from `platform::NativeWindow` (the type-erased native handles) —
+  the one place the Vulkan backend touches an OS windowing type.
+- **Present mode.** How finished frames reach the display. *FIFO* queues them and shows
+  one per refresh (vsync, tear-free, always available — Rime's default); *mailbox* keeps
+  only the newest (low latency, may drop frames). Off-screen rendering has no present mode.
+- **Frames in flight.** Letting the CPU record the next frame while the GPU still works on
+  the previous one, instead of stalling. Rime keeps 2, each with its own synchronization
+  (an image-available semaphore + an in-flight fence; a per-image render-finished
+  semaphore gates the present). The M3.3 off-screen proof, by contrast, submits one frame
+  and blocks — the simplest correct model, replaced by this once presentation paces frames.
+- **Dynamic rendering.** The Vulkan 1.3 way to render without pre-declared `VkRenderPass`/
+  `VkFramebuffer` objects: you simply begin/end rendering against an attachment. Less
+  boilerplate, and a clean fit for a render graph. Rime's RHI uses it (ADR-0007).
+- **Descriptor / descriptor set.** How a shader is told *which* resources (textures,
+  buffers, samplers) to use — a binding table the pipeline reads from. Rime's M3.5 model is
+  deliberately minimal: a pipeline that opts in (`sampled_texture`) gets one set holding a
+  single *combined image-sampler*, bound per draw; richer per-material sets arrive with the
+  render graph (ADR-0010).
+- **Combined image-sampler.** One descriptor that bundles a texture (its *image view*) with a
+  *sampler* — the least machinery to give a shader something to sample. Vulkan also allows
+  separate image/sampler descriptors and bindless arrays; Rime starts combined and grows into
+  those at the render graph.
+- **Sampler.** The GPU object that says *how* a texture is read: *filtering* (Nearest =
+  blocky/exact texels, Linear = smooth interpolation) and *addressing* (what a UV outside
+  [0,1] does — repeat, clamp…). Decoupled from the image, so one texture can be read several
+  ways.
+- **Texel.** A single element of a texture ("texture pixel"); a 2×2 texture has four texels.
+- **UV / texture coordinate.** The 2-D coordinate (conventionally `u`,`v` in [0,1]) saying
+  where on a texture a vertex samples; the rasterizer interpolates it across a triangle so each
+  pixel reads the right texel.
+- **Index buffer.** A list of indices into the vertex buffer defining which vertices form each
+  triangle, so shared corners are stored once (a quad: 4 vertices + 6 indices, not 6 vertices).
+  Used by an *indexed* draw.
+- **Staging buffer.** A temporary CPU-visible buffer used to get data into a fast *device-local*
+  resource the CPU can't write directly: fill the staging buffer, then copy it across on the
+  GPU. Rime uploads textures this way (`write_texture`).
+- **Validation layers.** Optional Vulkan layers that check every API call for misuse and
+  report errors. Rime enables them in debug builds (off when optimized), so mistakes are
+  caught loudly and early.
+- **VMA (Vulkan Memory Allocator).** A widely-used library that sub-allocates GPU memory
+  from a few large device allocations, so the engine never calls `vkAllocateMemory`
+  directly. Rime asks for memory by *access pattern* (GpuOnly / CpuToGpu / GpuToCpu).
+- **volk.** A Vulkan "meta-loader": it loads the Vulkan entry points at runtime (and
+  per-device), so the engine links no loader at build time. See ADR-0007.
+- **Loader / ICD.** The Vulkan *loader* (`libvulkan`) is the library apps call; an *ICD*
+  (Installable Client Driver) is an actual implementation it dispatches to — a GPU driver,
+  **MoltenVK** (Vulkan-on-Metal, for macOS), or **lavapipe** (Mesa's CPU/software Vulkan,
+  used to run Rime's render proof on GPU-less CI machines).
 
 ## Physics & destruction
 

@@ -9,7 +9,7 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
-> **Status (2026-06-17):** **Milestones 0 (build bootstrap) and 1 (core foundation) —
+> **Status (2026-06-21):** **Milestones 0 (build bootstrap) and 1 (core foundation) —
 > COMPLETE.** The repo is public at https://github.com/LucaSct/rime with **CI green on
 > Windows, Linux, and macOS**. `scripts/build` builds and tests the C++ engine and the Rust
 > tooling with warnings-as-errors; format / lint / license-header gates are enforced in CI.
@@ -33,8 +33,17 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > window and handles input on Cocoa/Win32/X11 (a Wayland surface is created and event-wired but maps
 > on screen once the M3 renderer attaches a buffer).
 >
-> **Next: Milestone 3 (RHI + Vulkan backend) — first pixels.** A textured quad through the RHI on
-> Windows/Linux + macOS/MoltenVK; the window's `native_handle()` becomes a Vulkan surface.
+> **Milestone 3 (RHI + Vulkan backend) — COMPLETE.** The graphics seam `engine/rhi` and its Vulkan
+> backend are up: a `Device` (volk + VMA, Vulkan 1.3 dynamic rendering + synchronization2), offline
+> GLSL→SPIR-V shaders, and a triangle rendered **off-screen** with a pixel-readback proof
+> (**M3.1–M3.3**); **swapchain presentation** — the same triangle in a real window via frames-in-flight,
+> with surfaces built from `platform::NativeWindow` across all four window systems (**M3.4**, ADR-0009);
+> and **index buffers + texture upload + samplers + a combined-image-sampler descriptor model** that
+> draw M3's "done when" — a **textured quad**, pixel-verified off-screen (`tests/rhi/textured_quad_test`,
+> four R/G/B/Y quadrants) and presented in a window (**M3.5**, ADR-0010). Verified locally on
+> macOS/MoltenVK (Vulkan 1.3.334); the off-screen proofs keep M3 runnable **GPU-free in CI** on lavapipe,
+> mirroring M2's headless split. Decisions in ADRs 0007 (Vulkan bootstrapping), 0008 (offline shaders),
+> 0009 (swapchain/presentation), and 0010 (textures & descriptors). **Next:** M4 — ECS / the world.
 
 ## Ordering principles (why this sequence)
 
@@ -131,6 +140,28 @@ command buffers, pipelines, descriptors, sync) + the **Vulkan backend** (only pl
 includes Vulkan headers); GLSL/HLSL→SPIR-V; VMA. Samples `01-hello-triangle` → textured
 quad. *(ADR-0002.)*
 
+*Bricks (planned 2026-06-18, bottom-up):* **M3.1** the `engine/rhi` seam (agnostic interface +
+opaque handles) and Vulkan device bring-up — instance + validation, physical-device selection
+(requires Vulkan 1.3 + dynamic rendering + synchronization2), logical device + queue, VMA; *proof:*
+builds & link-checks the backend on all three OSes (CI) and a headless device-creation test on
+**lavapipe**. · **M3.2** offline GLSL→SPIR-V (`rime_add_shaders`, mirroring `wayland-scanner`) + the
+RHI `Shader`. · **M3.3** graphics pipeline (dynamic rendering, no render-pass objects), the command
+encoder, vertex buffers/textures, and an **off-screen triangle verified by pixel readback** — the
+GPU-free "first pixels" proof (`tests/rhi`), runnable as `samples/01-hello-triangle`. · **M3.4**
+`VkSurfaceKHR` from `platform::NativeWindow` (all four window systems) + swapchain + frames-in-flight
++ present — the triangle in a real window (Win/Linux + macOS/MoltenVK), and the M2 Wayland surface
+finally maps. · **M3.5** index buffers, texture upload + sampler + descriptor model → the **textured
+quad** (M3's "done when"). M3.1–M3.3 land the first triangle off-screen; M3.4–M3.5 put it on screen
+and texture it.
+
+> *Decided for M3 (ADRs 0007–0008):* the Vulkan backend uses the **volk** meta-loader (no loader
+> linked at build time), **VMA** for memory, and a **Vulkan 1.3** baseline — **dynamic rendering +
+> synchronization2**, so there are no `VkRenderPass`/`VkFramebuffer` objects and the RHI maps cleanly
+> onto the M5 render graph. Shaders are compiled **offline** (GLSL→SPIR-V at build time) and embedded;
+> the engine ships no runtime shader compiler. Build dependencies come from **Conan**; the runtime
+> loader + ICD (a GPU driver, **MoltenVK** on macOS, **lavapipe** on GPU-less CI) are the
+> environment's, so the off-screen render proof runs green on all three OSes without a GPU.
+
 **M4 — ECS / the world.** `engine/ecs` — entities, components, archetype storage,
 parallel systems on the job system, queries, a transform hierarchy. Sample
 `02-ecs-playground`.
@@ -138,7 +169,10 @@ parallel systems on the job system, queries, a transform hierarchy. Sample
 **M5 — Render graph + PBR (first light).** `engine/render` — **render graph** (passes,
 transient resources, auto-barriers), mesh/material/camera, **PBR** (+ derivation), depth
 pre-pass, one dynamic light. Samples `03-render-graph`, `04-first-light`. The home for
-M10. *Inspired by: UE5 render-graph discipline.*
+M10. *Inspired by: UE5 render-graph discipline.* — *Note: several RHI features were pulled
+ahead of M5 to unblock the ICEM viewer — the **depth attachment** + depth test (ADR-0011),
+**push constants** (ADR-0012), and **3-D/volume textures** (ADR-0013, for field colormaps).
+The render graph adopts and extends them (multiple targets, stencil, MSAA, streamed volumes).*
 
 **M6 — Asset pipeline + runtime assets.** `tools/asset-pipeline` (Rust) imports glTF +
 textures → cooked formats; `engine/assets` loads/streams at runtime; `tools/rime-cli`
@@ -178,3 +212,69 @@ back forever. **M6–M9** make it usable and show the first destruction. **M10�
 the "wow." We re-plan at each boundary.
 
 > The frost does not form all at once. Crystal by crystal. ❄
+
+---
+
+## Appendix: the ICEM Viewer (Frostlens) — a flagship application
+
+Rime's first non-trivial **application**: a from-scratch 3-D viewer for the computed engineering
+parts, simulation fields and flow produced by **ICEM** (a separate, deterministic
+computational-engineering project). It is built *on* Rime — `samples/03-icem-viewer` links only
+`engine/{core,platform,rhi}` — so it **dogfoods the engine** and pulls exactly the features Rime's own
+roadmap wants next. Several RHI bricks were landed early to serve it and are adopted+extended by the M5
+render graph: the **depth attachment** (ADR-0011), **push constants** (ADR-0012), **3-D/volume textures**
+(ADR-0013) and **stencil** state (ADR-0014). The two repos share only *files* (STL/OBJ meshes + a native
+`.icef` field binary), never code. Full plan lives outside the repo; the brick ladder, with proofs:
+
+- **A — foundations.** A1 depth attachment (RHI) · A2 orbit camera · A3 the `.icef` field bridge (ICEM
+  side). **DONE.**
+- **B — surfaces + cross-section.** B1 load an STL → lit, depth-correct, orbitable part · B2 movable clip
+  plane + **stencil solid cap** to look *inside* a part. **DONE.**
+- **C — visualize the existing simulations.** C1 colour the part (and the cut face) by an `.icef` scalar
+  field + legend · C2 GPU raymarched **isosurface + DVR** · C3 vector-field **warp** (animated
+  displacement / modal mode). **DONE.**
+- **D — real 3-D CFD → flow view.** ICEM grew a genuine 3-D CFD ladder (D1 inviscid potential flow, D2
+  viscous Navier–Stokes); the viewer renders the computed velocity as **RK4 streamlines** coloured by
+  speed (`docs/math/streamlines.md`), and — **D2·V** — derives the scalar **speed** $\lVert\mathbf u\rVert$
+  so the colormap / isotach / slice / **DVR** show the viscous **boundary layer** as a volume
+  (`tests/rhi/viscous_offscreen_test`). **DONE.** **D3 — compressibility:** ICEM gained a third CFD model
+  (brick26, `core/sim/compressible.hpp`) — quasi-1-D isentropic **de Laval nozzle** flow recovered from the
+  area–Mach relation, where ρ/T/p ride the flow, gated against `thermo::gasdyn`; the viewer colours the
+  nozzle by the computed **Mach** field (0.15 subsonic inlet → green sonic throat → 2.47 supersonic exit),
+  cross-sectioned. **D4 — turbojet/nozzle flow view:** a from-scratch **gas-path chart** — `--chart` / **H**
+  overlays a 2-D line plot of the field along the flow axis (Mach vs station, with the dashed M = 1 sonic
+  line), built on a new `ui.hpp` `line()` primitive (`docs/math/gas-path-chart.md`,
+  `tests/rhi/chart_offscreen_test`). **DONE — milestone D complete.**
+- **E — assemblies, from-scratch UI, provenance.** E1 multi-part **assemblies** — the ITER-class tokamak
+  loads as 10 colour-tinted, number-key-toggleable parts with an axial **exploded view**
+  (`tests/rhi/assembly_offscreen_test`, `docs/math/assembly.md`) — **DONE**. E2 a **from-scratch
+  immediate-mode UI** on the RHI — a built-in bitmap font + panel/label/button/checkbox/slider, no Dear
+  ImGui, drawn as one alpha-tested overlay pass; the assembly control panel toggles parts and scrubs the
+  explode slider ([ADR-0015](adr/0015-imgui-free-ui.md), `docs/math/ui-text-layout.md`,
+  `tests/rhi/ui_offscreen_test`) — **DONE**. E3 a **provenance panel** — `--provenance` reads ICEM's
+  `.icejson` "why" Ledger (the DAG of which law / material / rule / safety-factor produced every value)
+  and lays it out on the E2 UI as an origin-tinted, scrollable list; clicking a value expands its
+  **derivation** (the values it was computed from). Shares a file format with ICEM, never code
+  (`docs/math/provenance-panel.md`, `tests/rhi/provenance_offscreen_test`) — **DONE**. E4 **export polish**
+  — `--turntable N` renders a full 360° orbit to a numbered PPM sequence (frame $i$ at azimuth
+  $\varphi_0+2\pi i/N$) with per-frame render-throughput stats, the windowed **P** key screenshots the live
+  view, and all three share one off-screen `render_view` path so the export is pixel-identical to the
+  interactive frame (`turntable.hpp`, `docs/math/orbit-camera.md` §export, `tests/rhi/turntable_test`) —
+  **DONE**. **Milestone E complete.**
+- **F — the engine cut-away (Bview).** ICEM's showcase is a computed **geared turbofan**: `icem engine`
+  emits 15 `engine_*.stl` parts plus `engine_core.icef` / `engine_bypass.icef`, each carrying a `velocity`
+  and a `mach` field. This view **fuses D and E** into how engineers actually draw an engine — the
+  multi-part assembly, now opened by a **meridional cut-away** clip plane through the flow axis, drawn in
+  **one shared-camera, shared-depth pass** with **streamlines** traced through both ducts and coloured by
+  the computed **Mach** (not raw speed), on one Mach scale shared by core and bypass. Sharing the depth
+  buffer makes the remaining metal occlude the flow behind it while the opened half reveals it — a true
+  cut-away. `--engine <dir>` (oriented y-up, the engine lying horizontal); the panel gains a CUT-AWAY
+  toggle + Mach readout, and **C** toggles the section. No new pipeline/shader/RHI: the assembly's mesh
+  clip is switched on and the Mach rides the streamline `w` channel the speed used to. A latent streamline
+  bug surfaced here — a line reaching an open OUTFLOW face ran straight to `max_steps` because the sampler
+  clamps at the domain edge; it is now stopped at the domain bound (`engine.hpp`,
+  `docs/math/engine-view.md`, `tests/rhi/engine_offscreen_test`). **DONE.**
+
+Each viewer brick follows Rime's conventions — a `docs/math/` derivation for the math-heavy ones, an ADR
+for engine decisions, an off-screen pixel-readback proof in `tests/rhi/` that stays GPU-free in CI, and
+an auto-committed+pushed focused change.

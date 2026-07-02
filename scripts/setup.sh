@@ -57,11 +57,16 @@ else
     ok "installed $(cargo --version)"
 fi
 
-say "Vulkan SDK (needed from Milestone 3, not before)"
+say "Vulkan runtime (to RUN the renderer; the build's Vulkan deps come from Conan)"
+# Building needs no Vulkan SDK — Conan supplies the headers, volk, VMA, and glslang (see conanfile.py
+# / docs/adr/0007). A Vulkan *runtime* is only needed to actually run the renderer: a GPU driver
+# (ships the ICD), MoltenVK on macOS, or a software ICD (lavapipe) for headless machines.
 if [ -n "${VULKAN_SDK:-}" ] || command -v vulkaninfo >/dev/null 2>&1; then
-    ok "Vulkan SDK detected"
+    ok "Vulkan runtime detected"
 else
-    warn "not found — fine for now; install from https://vulkan.lunarg.com before M3 (macOS uses MoltenVK)"
+    warn "none found — the build still works (Conan supplies the Vulkan build deps). To *run* the"
+    warn "renderer: a GPU driver, MoltenVK (macOS: brew install molten-vk vulkan-loader), or a"
+    warn "software ICD (lavapipe). Validation layers come with the LunarG SDK: https://vulkan.lunarg.com"
 fi
 
 say "setup complete — next: scripts/build.sh"

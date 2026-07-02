@@ -32,8 +32,10 @@ Say 'Rust (cargo, rustfmt, clippy)'
 if (Get-Command cargo -EA SilentlyContinue) { Ok "cargo — $(cargo --version)" }
 else { Warn 'rust missing — install from https://rustup.rs (rustup-init.exe), then re-run' }
 
-Say 'Vulkan SDK (needed from Milestone 3)'
-if ($env:VULKAN_SDK) { Ok 'Vulkan SDK detected' }
-else { Warn 'not found — install from https://vulkan.lunarg.com before M3' }
+Say 'Vulkan runtime (to RUN the renderer; the build''s Vulkan deps come from Conan)'
+# Building needs no Vulkan SDK — Conan supplies headers/volk/VMA/glslang. A Vulkan runtime (GPU
+# driver, or a software ICD like lavapipe for headless) is only needed to run the renderer.
+if ($env:VULKAN_SDK) { Ok 'Vulkan runtime detected' }
+else { Warn 'none found — the build still works (Conan supplies the Vulkan build deps). To run the renderer, install a GPU driver, or the LunarG SDK for validation layers: https://vulkan.lunarg.com' }
 
 Say 'setup complete — next: scripts/build.ps1'
