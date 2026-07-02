@@ -10,8 +10,8 @@
 
 namespace rime::rhi {
 
-// Image-layout transitions use the shared transition_image() in vulkan_common.hpp (synchronization2);
-// the swapchain's present-layout transition reuses the same helper.
+// Image-layout transitions use the shared transition_image() in vulkan_common.hpp
+// (synchronization2); the swapchain's present-layout transition reuses the same helper.
 
 void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     VulkanTexture* tex = device_.lookup(info.color.target);
@@ -44,12 +44,13 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
 
     // Optional depth attachment — this is what turns a flat-2D pass into a depth-tested 3-D one.
     // Transition the depth image into a depth-attachment layout (through its *depth* aspect), then
-    // describe it like the color attachment but with a depth/stencil clear value. The fragment tests
-    // run at the early/late-fragment-test stages, so that is where the write becomes available.
-    // `depth_att` must outlive the vkCmdBeginRendering call below, hence the function-scope declaration.
-    // A combined depth-stencil target (D32FloatS8, ADR-0014) is transitioned through its depth+stencil
-    // aspect and into the depth-stencil-attachment layout, and is bound as *both* the depth and the
-    // stencil attachment (one view serves both). A plain depth target keeps the depth-only path.
+    // describe it like the color attachment but with a depth/stencil clear value. The fragment
+    // tests run at the early/late-fragment-test stages, so that is where the write becomes
+    // available. `depth_att` must outlive the vkCmdBeginRendering call below, hence the
+    // function-scope declaration. A combined depth-stencil target (D32FloatS8, ADR-0014) is
+    // transitioned through its depth+stencil aspect and into the depth-stencil-attachment layout,
+    // and is bound as *both* the depth and the stencil attachment (one view serves both). A plain
+    // depth target keeps the depth-only path.
     VkRenderingAttachmentInfo depth_att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     VkRenderingAttachmentInfo stencil_att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     bool stencil_bound = false;
@@ -92,9 +93,12 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &att;
-    // imageView stays null if there was no depth attachment (or its lookup failed) → color-only pass.
-    if (depth_att.imageView != VK_NULL_HANDLE) ri.pDepthAttachment = &depth_att;
-    if (stencil_bound) ri.pStencilAttachment = &stencil_att;
+    // imageView stays null if there was no depth attachment (or its lookup failed) → color-only
+    // pass.
+    if (depth_att.imageView != VK_NULL_HANDLE)
+        ri.pDepthAttachment = &depth_att;
+    if (stencil_bound)
+        ri.pStencilAttachment = &stencil_att;
     vkCmdBeginRendering(cmd_, &ri);
 }
 
@@ -123,7 +127,9 @@ void VulkanCommandBuffer::bind_vertex_buffer(BufferHandle buffer, std::uint64_t 
     vkCmdBindVertexBuffers(cmd_, 0, 1, &vb, &off);
 }
 
-void VulkanCommandBuffer::bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset) {
+void VulkanCommandBuffer::bind_index_buffer(BufferHandle buffer,
+                                            IndexType type,
+                                            std::uint64_t offset) {
     VulkanBuffer* b = device_.lookup(buffer);
     if (!b) {
         RIME_ERROR("rhi: bind_index_buffer with an invalid handle");
@@ -136,7 +142,8 @@ void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
                                        TextureHandle texture,
                                        SamplerHandle sampler) {
     if (current_pipeline_ == nullptr || current_pipeline_->set_layout == VK_NULL_HANDLE) {
-        RIME_ERROR("rhi: bind_texture without a bound texture-sampling pipeline (sampled_texture?)");
+        RIME_ERROR(
+            "rhi: bind_texture without a bound texture-sampling pipeline (sampled_texture?)");
         return;
     }
     VulkanTexture* tex = device_.lookup(texture);
@@ -147,8 +154,9 @@ void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
     }
 
     // Allocate the pipeline's descriptor set once (cached on the pipeline), then write it only when
-    // the texture/sampler it points at changes — so a static material never re-writes a set that may
-    // still be in flight on another frame. M3.5's single-material descriptor model (see ADR-0010).
+    // the texture/sampler it points at changes — so a static material never re-writes a set that
+    // may still be in flight on another frame. M3.5's single-material descriptor model (see
+    // ADR-0010).
     VulkanPipeline* p = current_pipeline_;
     if (p->set == VK_NULL_HANDLE) {
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -182,7 +190,9 @@ void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
         cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, 1, &p->set, 0, nullptr);
 }
 
-void VulkanCommandBuffer::push_constants(const void* data, std::uint32_t size, std::uint32_t offset) {
+void VulkanCommandBuffer::push_constants(const void* data,
+                                         std::uint32_t size,
+                                         std::uint32_t offset) {
     if (current_pipeline_ == nullptr || current_pipeline_->push_constant_stages == 0) {
         RIME_ERROR("rhi: push_constants without a bound pipeline that declares push_constant_size");
         return;

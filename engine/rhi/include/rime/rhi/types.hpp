@@ -80,11 +80,11 @@ enum class Format : std::uint32_t {
     RGBA8Srgb,
     BGRA8Unorm, // the common swapchain format (arrives with presentation in M3.4)
     BGRA8Srgb,
-    RG32Float,    // vec2 vertex attribute (e.g. UVs)
-    RGB32Float,   // vec3 vertex attribute (positions, colors)
-    RGBA32Float,  // vec4 vertex attribute
-    D32Float,     // depth (arrives when we add a depth pre-pass in M5)
-    D32FloatS8,   // combined depth + 8-bit stencil (the cross-section cap, ADR-0014)
+    RG32Float,   // vec2 vertex attribute (e.g. UVs)
+    RGB32Float,  // vec3 vertex attribute (positions, colors)
+    RGBA32Float, // vec4 vertex attribute
+    D32Float,    // depth (arrives when we add a depth pre-pass in M5)
+    D32FloatS8,  // combined depth + 8-bit stencil (the cross-section cap, ADR-0014)
 };
 
 // What a buffer can be used for. Bit flags: OR them together (see RIME_RHI_FLAGS below). The
@@ -132,10 +132,11 @@ enum class PrimitiveTopology : std::uint8_t { TriangleList, TriangleStrip, LineL
 
 enum class CullMode : std::uint8_t { None, Front, Back };
 
-// How a fragment's depth is compared against the value already in the depth buffer (the depth test).
-// With our 0=near .. 1=far depth convention, `Less` is the usual choice — a fragment is kept only if
-// it is nearer than what was drawn before, which is what makes opaque 3-D draw correctly regardless
-// of submission order. Mirrors VkCompareOp one-to-one; reused for the stencil test when that lands.
+// How a fragment's depth is compared against the value already in the depth buffer (the depth
+// test). With our 0=near .. 1=far depth convention, `Less` is the usual choice — a fragment is kept
+// only if it is nearer than what was drawn before, which is what makes opaque 3-D draw correctly
+// regardless of submission order. Mirrors VkCompareOp one-to-one; reused for the stencil test when
+// that lands.
 enum class CompareOp : std::uint8_t {
     Never,
     Less,
@@ -187,19 +188,19 @@ struct AdapterInfo {
 // re-adds just the operators a flag set needs, scoped to one enum, so `BufferUsage::Vertex |
 // BufferUsage::TransferSrc` works and `has(usage, BufferUsage::Vertex)` tests membership — with no
 // implicit conversions leaking elsewhere.
-#define RIME_RHI_FLAGS(E)                                                                           \
-    constexpr E operator|(E a, E b) noexcept {                                                      \
-        return static_cast<E>(static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b));       \
+#define RIME_RHI_FLAGS(E)                                                                          \
+    constexpr E operator|(E a, E b) noexcept {                                                     \
+        return static_cast<E>(static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b));      \
     }                                                                                              \
-    constexpr E operator&(E a, E b) noexcept {                                                      \
-        return static_cast<E>(static_cast<std::uint32_t>(a) & static_cast<std::uint32_t>(b));       \
+    constexpr E operator&(E a, E b) noexcept {                                                     \
+        return static_cast<E>(static_cast<std::uint32_t>(a) & static_cast<std::uint32_t>(b));      \
     }                                                                                              \
-    constexpr E& operator|=(E& a, E b) noexcept {                                                   \
+    constexpr E& operator|=(E& a, E b) noexcept {                                                  \
         a = a | b;                                                                                 \
         return a;                                                                                  \
     }                                                                                              \
-    [[nodiscard]] constexpr bool has(E set, E flag) noexcept {                                      \
-        return (static_cast<std::uint32_t>(set) & static_cast<std::uint32_t>(flag)) != 0;           \
+    [[nodiscard]] constexpr bool has(E set, E flag) noexcept {                                     \
+        return (static_cast<std::uint32_t>(set) & static_cast<std::uint32_t>(flag)) != 0;          \
     }
 
 RIME_RHI_FLAGS(BufferUsage)

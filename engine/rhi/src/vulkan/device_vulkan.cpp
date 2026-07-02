@@ -7,12 +7,12 @@
 // needs and what lets the proof run on a software GPU (lavapipe) in CI. Presentation is added in
 // M3.4 by creating a swapchain from a platform::NativeWindow.
 
-#include "vulkan/vulkan_backend.hpp"
-
 #include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "vulkan/vulkan_backend.hpp"
 
 namespace rime::rhi {
 namespace {
@@ -49,14 +49,16 @@ VkDebugUtilsMessengerCreateInfoEXT make_messenger_info() {
 
 bool has_layer(const std::vector<VkLayerProperties>& layers, const char* name) {
     for (const auto& l : layers) {
-        if (std::strcmp(l.layerName, name) == 0) return true;
+        if (std::strcmp(l.layerName, name) == 0)
+            return true;
     }
     return false;
 }
 
 bool has_ext(const std::vector<VkExtensionProperties>& exts, const char* name) {
     for (const auto& e : exts) {
-        if (std::strcmp(e.extensionName, name) == 0) return true;
+        if (std::strcmp(e.extensionName, name) == 0)
+            return true;
     }
     return false;
 }
@@ -67,7 +69,8 @@ std::optional<std::uint32_t> find_graphics_family(VkPhysicalDevice pd) {
     std::vector<VkQueueFamilyProperties> fams(n);
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &n, fams.data());
     for (std::uint32_t i = 0; i < n; ++i) {
-        if (fams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) return i;
+        if (fams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+            return i;
     }
     return std::nullopt;
 }
@@ -78,20 +81,28 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(const DeviceDesc& desc) {
     // volk dynamically loads the Vulkan loader. Failing here is the expected, graceful outcome on a
     // machine with no Vulkan at all (no driver, no software ICD) — we return null so callers skip.
     if (volkInitialize() != VK_SUCCESS) {
-        RIME_WARN("rhi: no Vulkan loader present (volkInitialize failed) — no GPU device available");
+        RIME_WARN(
+            "rhi: no Vulkan loader present (volkInitialize failed) — no GPU device available");
         return nullptr;
     }
 
     auto dev = std::unique_ptr<VulkanDevice>(new VulkanDevice());
     dev->validation_ = desc.enable_validation;
 
-    if (!dev->create_instance(desc)) return nullptr;
-    if (dev->validation_) dev->create_debug_messenger(); // best-effort; absence is not fatal
-    if (!dev->pick_physical_device()) return nullptr;
-    if (!dev->create_logical_device()) return nullptr;
-    if (!dev->create_allocator()) return nullptr;
-    if (!dev->create_command_pool()) return nullptr;
-    if (!dev->create_descriptor_pool()) return nullptr;
+    if (!dev->create_instance(desc))
+        return nullptr;
+    if (dev->validation_)
+        dev->create_debug_messenger(); // best-effort; absence is not fatal
+    if (!dev->pick_physical_device())
+        return nullptr;
+    if (!dev->create_logical_device())
+        return nullptr;
+    if (!dev->create_allocator())
+        return nullptr;
+    if (!dev->create_command_pool())
+        return nullptr;
+    if (!dev->create_descriptor_pool())
+        return nullptr;
 
     RIME_INFO("rhi: Vulkan device ready — GPU '{}' (Vulkan {}.{}.{}){}",
               dev->adapter_.name,
@@ -103,38 +114,54 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(const DeviceDesc& desc) {
 }
 
 VulkanDevice::~VulkanDevice() {
-    if (device_) vkDeviceWaitIdle(device_);
+    if (device_)
+        vkDeviceWaitIdle(device_);
 
     // Tear down in reverse dependency order. Resources first (some via VMA), then the allocator,
     // then the device, then instance-level objects.
     for (auto& p : pipelines_) {
-        if (p.pipeline) vkDestroyPipeline(device_, p.pipeline, nullptr);
-        if (p.layout) vkDestroyPipelineLayout(device_, p.layout, nullptr);
-        if (p.set_layout) vkDestroyDescriptorSetLayout(device_, p.set_layout, nullptr);
+        if (p.pipeline)
+            vkDestroyPipeline(device_, p.pipeline, nullptr);
+        if (p.layout)
+            vkDestroyPipelineLayout(device_, p.layout, nullptr);
+        if (p.set_layout)
+            vkDestroyDescriptorSetLayout(device_, p.set_layout, nullptr);
     }
     for (auto& smp : samplers_) {
-        if (smp.sampler) vkDestroySampler(device_, smp.sampler, nullptr);
+        if (smp.sampler)
+            vkDestroySampler(device_, smp.sampler, nullptr);
     }
     for (auto& s : shaders_) {
-        if (s.module) vkDestroyShaderModule(device_, s.module, nullptr);
+        if (s.module)
+            vkDestroyShaderModule(device_, s.module, nullptr);
     }
     for (auto& t : textures_) {
         // Swapchain backbuffers own their image+view; the VulkanSwapchain frees them in its own
         // destructor (which runs first, before the device). Skip them here so we never double-free.
-        if (t.from_swapchain) continue;
-        if (t.view) vkDestroyImageView(device_, t.view, nullptr);
-        if (t.image) vmaDestroyImage(allocator_, t.image, t.allocation);
+        if (t.from_swapchain)
+            continue;
+        if (t.view)
+            vkDestroyImageView(device_, t.view, nullptr);
+        if (t.image)
+            vmaDestroyImage(allocator_, t.image, t.allocation);
     }
     for (auto& b : buffers_) {
-        if (b.buffer) vmaDestroyBuffer(allocator_, b.buffer, b.allocation);
+        if (b.buffer)
+            vmaDestroyBuffer(allocator_, b.buffer, b.allocation);
     }
 
-    if (command_pool_) vkDestroyCommandPool(device_, command_pool_, nullptr);
-    if (descriptor_pool_) vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
-    if (allocator_) vmaDestroyAllocator(allocator_);
-    if (device_) vkDestroyDevice(device_, nullptr);
-    if (messenger_) vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
-    if (instance_) vkDestroyInstance(instance_, nullptr);
+    if (command_pool_)
+        vkDestroyCommandPool(device_, command_pool_, nullptr);
+    if (descriptor_pool_)
+        vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+    if (allocator_)
+        vmaDestroyAllocator(allocator_);
+    if (device_)
+        vkDestroyDevice(device_, nullptr);
+    if (messenger_)
+        vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
+    if (instance_)
+        vkDestroyInstance(instance_, nullptr);
 }
 
 bool VulkanDevice::create_instance(const DeviceDesc& desc) {
@@ -172,11 +199,12 @@ bool VulkanDevice::create_instance(const DeviceDesc& desc) {
         flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     }
 
-    // Surface extensions (M3.4): enable VK_KHR_surface + this OS's window-system surface extension(s)
-    // when present, so a Swapchain can later be created from a platform window. The Device stays
-    // window-agnostic — we only make presentation *possible*; a headless build (lavapipe in CI) has
-    // none of these and the off-screen path needs no surface, so this degrades gracefully. The
-    // VK_USE_PLATFORM_* macros are set per-OS in CMakeLists.txt (Linux compiles both Xlib + Wayland).
+    // Surface extensions (M3.4): enable VK_KHR_surface + this OS's window-system surface
+    // extension(s) when present, so a Swapchain can later be created from a platform window. The
+    // Device stays window-agnostic — we only make presentation *possible*; a headless build
+    // (lavapipe in CI) has none of these and the off-screen path needs no surface, so this degrades
+    // gracefully. The VK_USE_PLATFORM_* macros are set per-OS in CMakeLists.txt (Linux compiles
+    // both Xlib + Wayland).
     if (has_ext(exts, VK_KHR_SURFACE_EXTENSION_NAME)) {
         enabled_exts.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 #if defined(VK_USE_PLATFORM_METAL_EXT)
@@ -213,9 +241,11 @@ bool VulkanDevice::create_instance(const DeviceDesc& desc) {
     ci.enabledExtensionCount = static_cast<std::uint32_t>(enabled_exts.size());
     ci.ppEnabledExtensionNames = enabled_exts.data();
 
-    // Chaining the messenger info on pNext also catches messages emitted *during* instance creation.
+    // Chaining the messenger info on pNext also catches messages emitted *during* instance
+    // creation.
     VkDebugUtilsMessengerCreateInfoEXT dbg = make_messenger_info();
-    if (validation_) ci.pNext = &dbg;
+    if (validation_)
+        ci.pNext = &dbg;
 
     const VkResult r = vkCreateInstance(&ci, nullptr, &instance_);
     if (r != VK_SUCCESS) {
@@ -253,25 +283,38 @@ bool VulkanDevice::pick_physical_device() {
     for (VkPhysicalDevice pd : devices) {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(pd, &props);
-        if (props.apiVersion < VK_API_VERSION_1_3) continue;
+        if (props.apiVersion < VK_API_VERSION_1_3)
+            continue;
 
         // Require our 1.3 baseline features (ADR-0007): dynamic rendering + synchronization2.
         VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
         f2.pNext = &f13;
         vkGetPhysicalDeviceFeatures2(pd, &f2);
-        if (!f13.dynamicRendering || !f13.synchronization2) continue;
-        if (!find_graphics_family(pd).has_value()) continue;
+        if (!f13.dynamicRendering || !f13.synchronization2)
+            continue;
+        if (!find_graphics_family(pd).has_value())
+            continue;
 
         // Prefer a real discrete GPU, but a CPU device (lavapipe) is perfectly acceptable — it is
         // exactly what we want in CI, where there is no hardware GPU.
         int score = 0;
         switch (props.deviceType) {
-            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: score = 1000; break;
-            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: score = 500; break;
-            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: score = 250; break;
-            case VK_PHYSICAL_DEVICE_TYPE_CPU: score = 100; break;
-            default: score = 10; break;
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+                score = 1000;
+                break;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+                score = 500;
+                break;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+                score = 250;
+                break;
+            case VK_PHYSICAL_DEVICE_TYPE_CPU:
+                score = 100;
+                break;
+            default:
+                score = 10;
+                break;
         }
         if (score > best_score) {
             best_score = score;
@@ -378,8 +421,8 @@ bool VulkanDevice::create_command_pool() {
 
 bool VulkanDevice::create_descriptor_pool() {
     // A small shared pool for M3.5's combined image-sampler descriptor sets. Each sampling pipeline
-    // allocates one set, cached and reused across frames (the textured quad is static), so a handful
-    // is ample; the M5 render graph will own a real per-frame descriptor allocator instead.
+    // allocates one set, cached and reused across frames (the textured quad is static), so a
+    // handful is ample; the M5 render graph will own a real per-frame descriptor allocator instead.
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     pool_size.descriptorCount = 16;
@@ -434,7 +477,8 @@ void VulkanDevice::submit_blocking(CommandBuffer& commands) {
 }
 
 void VulkanDevice::wait_idle() {
-    if (device_) vkDeviceWaitIdle(device_);
+    if (device_)
+        vkDeviceWaitIdle(device_);
 }
 
 std::unique_ptr<Swapchain> VulkanDevice::create_swapchain(const SwapchainDesc& desc) {
@@ -449,8 +493,8 @@ void VulkanDevice::submit_with_sync(VulkanCommandBuffer& vcb,
     VK_CHECK(vkEndCommandBuffer(cmd));
 
     // synchronization2 submit: wait the image-acquired semaphore, signal render-finished, trip the
-    // in-flight fence. We wait at COLOR_ATTACHMENT_OUTPUT so earlier pipeline stages can overlap the
-    // acquire, and only the color write blocks on the image being ready.
+    // in-flight fence. We wait at COLOR_ATTACHMENT_OUTPUT so earlier pipeline stages can overlap
+    // the acquire, and only the color write blocks on the image being ready.
     VkSemaphoreSubmitInfo wait_si{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     wait_si.semaphore = wait;
     wait_si.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;

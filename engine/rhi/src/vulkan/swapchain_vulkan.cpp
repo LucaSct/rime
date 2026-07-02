@@ -17,9 +17,9 @@
 namespace rime::rhi {
 namespace {
 
-// Pick a surface format: prefer 8-bit BGRA (the near-universal swapchain format), UNORM over SRGB so
-// the presented color matches what the shader wrote (the off-screen proof is UNORM too). Fall back
-// to whatever the surface lists first.
+// Pick a surface format: prefer 8-bit BGRA (the near-universal swapchain format), UNORM over SRGB
+// so the presented color matches what the shader wrote (the off-screen proof is UNORM too). Fall
+// back to whatever the surface lists first.
 VkSurfaceFormatKHR choose_format(const std::vector<VkSurfaceFormatKHR>& formats) {
     for (const auto& f : formats) {
         if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
@@ -34,7 +34,8 @@ VkSurfaceFormatKHR choose_format(const std::vector<VkSurfaceFormatKHR>& formats)
 VkPresentModeKHR choose_present_mode(const std::vector<VkPresentModeKHR>& modes, bool vsync) {
     if (!vsync) {
         for (auto m : modes) {
-            if (m == VK_PRESENT_MODE_MAILBOX_KHR) return m;
+            if (m == VK_PRESENT_MODE_MAILBOX_KHR)
+                return m;
         }
     }
     return VK_PRESENT_MODE_FIFO_KHR;
@@ -48,14 +49,15 @@ std::unique_ptr<VulkanSwapchain> VulkanSwapchain::create(VulkanDevice& device,
     sc->vsync_ = desc.vsync;
 
     sc->surface_ = create_surface(device.vk_instance(), desc.window);
-    if (sc->surface_ == VK_NULL_HANDLE) return nullptr; // create_surface logged the cause
+    if (sc->surface_ == VK_NULL_HANDLE)
+        return nullptr; // create_surface logged the cause
 
     // The graphics queue must also support present to this surface. True for all our targets
     // (desktop GPUs, MoltenVK); we verify rather than assume, and fail loudly if not (M3.4 uses one
     // queue for both — a dedicated present queue is a later refinement if a target ever needs it).
     VkBool32 supported = VK_FALSE;
-    vkGetPhysicalDeviceSurfaceSupportKHR(device.vk_physical(), device.graphics_family(), sc->surface_,
-                                         &supported);
+    vkGetPhysicalDeviceSurfaceSupportKHR(
+        device.vk_physical(), device.graphics_family(), sc->surface_, &supported);
     if (!supported) {
         RIME_ERROR("rhi: the graphics queue family cannot present to this surface");
         vkDestroySurfaceKHR(device.vk_instance(), sc->surface_, nullptr);
@@ -77,7 +79,8 @@ std::unique_ptr<VulkanSwapchain> VulkanSwapchain::create(VulkanDevice& device,
         }
     }
 
-    if (!sc->build(desc.extent)) return nullptr;
+    if (!sc->build(desc.extent))
+        return nullptr;
     RIME_INFO("rhi: swapchain ready — {}x{}, {} images, {}",
               sc->extent_.width,
               sc->extent_.height,
@@ -91,22 +94,28 @@ VulkanSwapchain::~VulkanSwapchain() {
     VkDevice dev = device_.vk_device();
     destroy_swapchain_objects(); // images/views/swapchain + per-image semaphores + forget handles
     for (std::uint32_t i = 0; i < kFramesInFlight; ++i) {
-        if (image_available_[i]) vkDestroySemaphore(dev, image_available_[i], nullptr);
-        if (in_flight_[i]) vkDestroyFence(dev, in_flight_[i], nullptr);
+        if (image_available_[i])
+            vkDestroySemaphore(dev, image_available_[i], nullptr);
+        if (in_flight_[i])
+            vkDestroyFence(dev, in_flight_[i], nullptr);
         if (frame_cmd_[i] != VK_NULL_HANDLE)
             vkFreeCommandBuffers(dev, device_.vk_command_pool(), 1, &frame_cmd_[i]);
     }
-    if (surface_) vkDestroySurfaceKHR(device_.vk_instance(), surface_, nullptr);
+    if (surface_)
+        vkDestroySurfaceKHR(device_.vk_instance(), surface_, nullptr);
 }
 
 void VulkanSwapchain::destroy_swapchain_objects() noexcept {
     VkDevice dev = device_.vk_device();
-    for (auto h : handles_) device_.forget_texture(h); // erase slots; the GPU objects are ours below
+    for (auto h : handles_)
+        device_.forget_texture(h); // erase slots; the GPU objects are ours below
     for (auto v : views_) {
-        if (v) vkDestroyImageView(dev, v, nullptr);
+        if (v)
+            vkDestroyImageView(dev, v, nullptr);
     }
     for (auto s : render_finished_) {
-        if (s) vkDestroySemaphore(dev, s, nullptr);
+        if (s)
+            vkDestroySemaphore(dev, s, nullptr);
     }
     handles_.clear();
     views_.clear();
@@ -146,8 +155,8 @@ bool VulkanSwapchain::build(Extent2D extent) {
     present_mode_ = choose_present_mode(modes, vsync_);
 
     // Size to the surface: when currentExtent is the 0xFFFFFFFF sentinel the surface defers to us
-    // (Wayland), so clamp the requested framebuffer size to the allowed range; otherwise the surface
-    // dictates the size (most platforms), so we use it verbatim.
+    // (Wayland), so clamp the requested framebuffer size to the allowed range; otherwise the
+    // surface dictates the size (most platforms), so we use it verbatim.
     if (caps.currentExtent.width != 0xFFFFFFFFu) {
         extent_ = caps.currentExtent;
     } else {
@@ -162,7 +171,8 @@ bool VulkanSwapchain::build(Extent2D extent) {
 
     // Triple-buffer when allowed (minImageCount+1), clamped to maxImageCount (0 means unlimited).
     std::uint32_t image_count = caps.minImageCount + 1;
-    if (caps.maxImageCount > 0 && image_count > caps.maxImageCount) image_count = caps.maxImageCount;
+    if (caps.maxImageCount > 0 && image_count > caps.maxImageCount)
+        image_count = caps.maxImageCount;
 
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = surface_;
@@ -172,7 +182,8 @@ bool VulkanSwapchain::build(Extent2D extent) {
     ci.imageExtent = extent_;
     ci.imageArrayLayers = 1;
     // Render into the images, and allow copying out of them (transfer src) so a backbuffer can also
-    // feed a readback — mirroring the off-screen target's usage and keeping the proof paths uniform.
+    // feed a readback — mirroring the off-screen target's usage and keeping the proof paths
+    // uniform.
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; // one queue family (graphics == present)
     ci.preTransform = caps.currentTransform;
@@ -188,7 +199,8 @@ bool VulkanSwapchain::build(Extent2D extent) {
         return false;
     }
 
-    // The new swapchain exists; retire the previous generation (oldSwapchain let the driver reuse it).
+    // The new swapchain exists; retire the previous generation (oldSwapchain let the driver reuse
+    // it).
     destroy_swapchain_objects();
     swapchain_ = new_swapchain;
 
@@ -247,9 +259,10 @@ TextureHandle VulkanSwapchain::acquire_next_image() {
     }
 
     std::uint32_t idx = 0;
-    const VkResult r = vkAcquireNextImageKHR(dev, swapchain_, UINT64_MAX, image_available_[frame_],
-                                             VK_NULL_HANDLE, &idx);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) return {}; // invalid handle: caller calls recreate()
+    const VkResult r = vkAcquireNextImageKHR(
+        dev, swapchain_, UINT64_MAX, image_available_[frame_], VK_NULL_HANDLE, &idx);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR)
+        return {}; // invalid handle: caller calls recreate()
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         RIME_ERROR("rhi: vkAcquireNextImageKHR failed: {}", result_string(r));
         return {};
@@ -262,8 +275,8 @@ TextureHandle VulkanSwapchain::acquire_next_image() {
 bool VulkanSwapchain::present(CommandBuffer& commands) {
     auto& vcb = static_cast<VulkanCommandBuffer&>(commands);
 
-    // Transition the just-rendered backbuffer from color-attachment to present layout, recorded into
-    // the same command buffer right before we end + submit it.
+    // Transition the just-rendered backbuffer from color-attachment to present layout, recorded
+    // into the same command buffer right before we end + submit it.
     VulkanTexture* tex = device_.lookup(handles_[image_index_]);
     transition_image(vcb.handle(),
                      tex->image,
@@ -275,8 +288,8 @@ bool VulkanSwapchain::present(CommandBuffer& commands) {
                      0);
     tex->layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-    device_.submit_with_sync(vcb, image_available_[frame_], render_finished_[image_index_],
-                             in_flight_[frame_]);
+    device_.submit_with_sync(
+        vcb, image_available_[frame_], render_finished_[image_index_], in_flight_[frame_]);
     frame_cmd_[frame_] = vcb.handle(); // alive until this slot recurs (freed in acquire_next_image)
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -288,7 +301,8 @@ bool VulkanSwapchain::present(CommandBuffer& commands) {
     const VkResult r = vkQueuePresentKHR(device_.graphics_queue(), &pi);
 
     frame_ = (frame_ + 1) % kFramesInFlight;
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) return false; // caller recreates
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR)
+        return false; // caller recreates
     if (r != VK_SUCCESS) {
         RIME_ERROR("rhi: vkQueuePresentKHR failed: {}", result_string(r));
         return false;
@@ -299,11 +313,13 @@ bool VulkanSwapchain::present(CommandBuffer& commands) {
 void VulkanSwapchain::recreate(Extent2D extent) {
     device_.wait_idle();
     VkDevice dev = device_.vk_device();
-    // Reset per-frame sync to a clean state: an image-available semaphore left signaled by an acquire
-    // whose frame we abandoned (a resize between acquire and present) would trip validation when
-    // reused, so recreate those semaphores and free any deferred command buffers before rebuilding.
+    // Reset per-frame sync to a clean state: an image-available semaphore left signaled by an
+    // acquire whose frame we abandoned (a resize between acquire and present) would trip validation
+    // when reused, so recreate those semaphores and free any deferred command buffers before
+    // rebuilding.
     for (std::uint32_t i = 0; i < kFramesInFlight; ++i) {
-        if (image_available_[i]) vkDestroySemaphore(dev, image_available_[i], nullptr);
+        if (image_available_[i])
+            vkDestroySemaphore(dev, image_available_[i], nullptr);
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VK_CHECK(vkCreateSemaphore(dev, &si, nullptr, &image_available_[i]));
         if (frame_cmd_[i] != VK_NULL_HANDLE) {

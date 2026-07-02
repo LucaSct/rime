@@ -3,13 +3,15 @@
 //
 // Proof for the engine cut-away (Bview): ICEM's geared turbofan shown as the sectioned, coloured
 // assembly AND its computed flow in one pass. A synthetic stand-in for what `icem engine` emits — a
-// solid casing cube plus a vec3 velocity field flowing along +z with a *Mach* scalar that ramps from
-// 0.2 at the inlet to 0.9 at the outlet — exercises the three new things the view must do:
+// solid casing cube plus a vec3 velocity field flowing along +z with a *Mach* scalar that ramps
+// from 0.2 at the inlet to 0.9 at the outlet — exercises the three new things the view must do:
 //   1. Mach colouring (data): build_streamlines, given the Mach scalar + a reference, colours each
-//      vertex by Mach/Mach_ref, so the w channel spans cool (≈0.22) at the inlet to hot (1.0) at the
-//      outlet — i.e. the lines read true Mach, not raw speed.
-//   2. combined render: the cut-away assembly and the streamlines draw into one shared scope, so both
-//      land on screen at once (the casing is red; the cool inlet streamlines are unambiguously blue).
+//      vertex by Mach/Mach_ref, so the w channel spans cool (≈0.22) at the inlet to hot (1.0) at
+//      the outlet — i.e. the lines read true Mach, not raw speed.
+//   2. combined render: the cut-away assembly and the streamlines draw into one shared scope, so
+//   both
+//      land on screen at once (the casing is red; the cool inlet streamlines are unambiguously
+//      blue).
 //   3. cut-away: switching the clip plane on removes solid, so less of the red casing is drawn than
 //      with the whole engine.
 // Off-screen + readback, GPU-free on lavapipe in CI.
@@ -24,20 +26,18 @@
 #include <string>
 #include <vector>
 
-#include "rime/rhi/rhi.hpp"
-
 #include "assembly.hpp"
 #include "camera.hpp"
 #include "engine.hpp"
 #include "field.hpp"
-#include "mesh_render.hpp"
-#include "stl.hpp"
-#include "streamlines.hpp"
-
 #include "mesh.frag.spv.h"
 #include "mesh.vert.spv.h"
+#include "mesh_render.hpp"
+#include "rime/rhi/rhi.hpp"
+#include "stl.hpp"
 #include "streamline.frag.spv.h"
 #include "streamline.vert.spv.h"
+#include "streamlines.hpp"
 
 namespace {
 bool vulkan_required() {
@@ -60,10 +60,12 @@ rime::viewer::Part cube_part(float half, std::string name) {
     return p;
 }
 
-// Count background / red / blue pixels (dominant-channel classification, robust to studio lighting).
+// Count background / red / blue pixels (dominant-channel classification, robust to studio
+// lighting).
 struct Hues {
     std::size_t lit = 0, red = 0, blue = 0;
 };
+
 Hues classify(const std::vector<std::uint8_t>& px, std::uint32_t size) {
     Hues h{};
     for (std::uint32_t i = 0; i < size * size; ++i) {
@@ -154,10 +156,22 @@ TEST_CASE("viewer fuses the cut-away assembly with Mach-coloured streamlines (Bv
     const auto render = [&](bool cutaway) {
         const std::array<float, 4> clip =
             rime::viewer::make_clip_plane(cutaway, 1, 1.0f, scene.assembly.center.y);
-        return rime::viewer::render_engine_offscreen(
-            *device, size, scene, cam.view_proj(1.0f), cam.eye(), clip, 0.0f, clear, mesh_vert_spv,
-            sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), streamline_vert_spv,
-            sizeof(streamline_vert_spv), streamline_frag_spv, sizeof(streamline_frag_spv));
+        return rime::viewer::render_engine_offscreen(*device,
+                                                     size,
+                                                     scene,
+                                                     cam.view_proj(1.0f),
+                                                     cam.eye(),
+                                                     clip,
+                                                     0.0f,
+                                                     clear,
+                                                     mesh_vert_spv,
+                                                     sizeof(mesh_vert_spv),
+                                                     mesh_frag_spv,
+                                                     sizeof(mesh_frag_spv),
+                                                     streamline_vert_spv,
+                                                     sizeof(streamline_vert_spv),
+                                                     streamline_frag_spv,
+                                                     sizeof(streamline_frag_spv));
     };
 
     const Hues cut = classify(render(true), size);

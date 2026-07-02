@@ -4,13 +4,15 @@
 // Proof for the depth-attachment brick (A1) — depth testing, made deterministic and GPU-free in CI.
 // It renders two overlapping triangles that cover the image center at different depths and colors:
 //   near (z = 0.25) green, submitted FIRST; far (z = 0.75) red, submitted SECOND.
-// The exact same geometry, in the exact same order, is drawn twice — the only difference is whether a
-// depth buffer is attached and tested:
-//   * depth ON  → the nearer (green) triangle wins even though red was drawn last  ⇒ center is GREEN.
+// The exact same geometry, in the exact same order, is drawn twice — the only difference is whether
+// a depth buffer is attached and tested:
+//   * depth ON  → the nearer (green) triangle wins even though red was drawn last  ⇒ center is
+//   GREEN.
 //   * depth OFF → painter's order wins, so the last-drawn (red) triangle covers it ⇒ center is RED.
 // That color flip at the center is an unambiguous proof the depth test is doing its job (and the
-// depth-OFF control proves the geometry really overlaps and submission order would otherwise decide).
-// Off-screen + readback, so it runs on a software GPU (lavapipe) in CI. (main() is in device_test.cpp.)
+// depth-OFF control proves the geometry really overlaps and submission order would otherwise
+// decide). Off-screen + readback, so it runs on a software GPU (lavapipe) in CI. (main() is in
+// device_test.cpp.)
 
 #include <doctest/doctest.h>
 
@@ -105,14 +107,16 @@ TEST_CASE("rhi depth test: nearer fragments win regardless of draw order") {
         pd.depth_test = depth;
         pd.depth_write = depth;
         pd.depth_compare = CompareOp::Less;
-        if (depth) pd.depth_format = Format::D32Float;
+        if (depth)
+            pd.depth_format = Format::D32Float;
         pd.debug_name = depth ? "depth-on-pipeline" : "depth-off-pipeline";
         return device->create_graphics_pipeline(pd);
     };
     const PipelineHandle pipe_on = make_pipeline(true);
     const PipelineHandle pipe_off = make_pipeline(false);
 
-    // One color target per pass + a single shared depth buffer (only the depth-ON pass attaches it).
+    // One color target per pass + a single shared depth buffer (only the depth-ON pass attaches
+    // it).
     const auto make_color = [&](const char* name) {
         TextureDesc td{};
         td.extent = {size, size};

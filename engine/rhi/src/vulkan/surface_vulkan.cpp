@@ -23,11 +23,13 @@ VkSurfaceKHR create_surface(VkInstance instance, const platform::NativeWindow& w
             auto create = reinterpret_cast<PFN_vkCreateMetalSurfaceEXT>(
                 vkGetInstanceProcAddr(instance, "vkCreateMetalSurfaceEXT"));
             if (!create) {
-                RIME_ERROR("rhi: vkCreateMetalSurfaceEXT unavailable (VK_EXT_metal_surface missing?)");
+                RIME_ERROR(
+                    "rhi: vkCreateMetalSurfaceEXT unavailable (VK_EXT_metal_surface missing?)");
                 return VK_NULL_HANDLE;
             }
             VkMetalSurfaceCreateInfoEXT ci{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
-            ci.pLayer = reinterpret_cast<const CAMetalLayer*>(window.handle); // CAMetalLayer* (M2 Cocoa)
+            ci.pLayer =
+                reinterpret_cast<const CAMetalLayer*>(window.handle); // CAMetalLayer* (M2 Cocoa)
             VkSurfaceKHR surface = VK_NULL_HANDLE;
             const VkResult r = create(instance, &ci, nullptr, &surface);
             if (r != VK_SUCCESS) {

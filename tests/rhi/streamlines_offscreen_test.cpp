@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for the viewer's streamlines (D·V). A synthetic vec3 velocity field flows along +z and speeds
-// up downstream; build_streamlines integrates it (RK4) and render_streamlines_offscreen draws the lines
-// coloured by speed. Assertions: the integrator produces lines (non-empty vertex list), they appear on
-// screen, and the fast (downstream) end is hot-red — i.e. the lines are coloured by the computed speed.
-// Off-screen + readback, GPU-free on lavapipe in CI.
+// Proof for the viewer's streamlines (D·V). A synthetic vec3 velocity field flows along +z and
+// speeds up downstream; build_streamlines integrates it (RK4) and render_streamlines_offscreen
+// draws the lines coloured by speed. Assertions: the integrator produces lines (non-empty vertex
+// list), they appear on screen, and the fast (downstream) end is hot-red — i.e. the lines are
+// coloured by the computed speed. Off-screen + readback, GPU-free on lavapipe in CI.
 
 #include <doctest/doctest.h>
 
@@ -14,15 +14,13 @@
 #include <cstdlib>
 #include <vector>
 
-#include "rime/rhi/rhi.hpp"
-
 #include "camera.hpp"
 #include "field.hpp"
 #include "mesh_render.hpp"
-#include "streamlines.hpp"
-
+#include "rime/rhi/rhi.hpp"
 #include "streamline.frag.spv.h"
 #include "streamline.vert.spv.h"
+#include "streamlines.hpp"
 
 namespace {
 bool vulkan_required() {
@@ -77,17 +75,26 @@ TEST_CASE("viewer traces and draws streamlines of a velocity field (D)") {
 
     const std::uint32_t size = 128;
     const ClearColor clear{0.05f, 0.05f, 0.06f, 1.0f};
-    const std::vector<std::uint8_t> px = rime::viewer::render_streamlines_offscreen(
-        *device, size, vf, push, clear, streamline_vert_spv, sizeof(streamline_vert_spv),
-        streamline_frag_spv, sizeof(streamline_frag_spv));
+    const std::vector<std::uint8_t> px =
+        rime::viewer::render_streamlines_offscreen(*device,
+                                                   size,
+                                                   vf,
+                                                   push,
+                                                   clear,
+                                                   streamline_vert_spv,
+                                                   sizeof(streamline_vert_spv),
+                                                   streamline_frag_spv,
+                                                   sizeof(streamline_frag_spv));
     REQUIRE(px.size() == static_cast<std::size_t>(size) * size * 4);
 
     std::size_t lines = 0, red = 0;
     for (std::uint32_t i = 0; i < size * size; ++i) {
         const std::uint8_t* p = &px[static_cast<std::size_t>(i) * 4];
-        if (p[0] <= 40 && p[1] <= 40 && p[2] <= 40) continue; // background
+        if (p[0] <= 40 && p[1] <= 40 && p[2] <= 40)
+            continue; // background
         ++lines;
-        if (p[0] > p[1] + 25 && p[0] > p[2] + 25) ++red; // hot (fast, downstream)
+        if (p[0] > p[1] + 25 && p[0] > p[2] + 25)
+            ++red; // hot (fast, downstream)
     }
     CHECK(lines > 50); // the streamlines are on screen
     CHECK(red > 5);    // ...and the fast end is coloured hot — speed colouring works

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for ADR-0014 — stencil state, the mechanism the cross-section cap is built on. In one render
-// pass into a colour + D32FloatS8 depth-stencil target it: (1) draws a centred triangle that writes
-// stencil = 1 where it covers, with colour writes masked off; then (2) draws a full-screen triangle
-// that passes the stencil test only where stencil == 1 and paints it green. Reading back, the centre
-// (inside the marked triangle) is green and a corner (stencil still 0) stays the clear colour — which
-// can only happen if stencil clear, two-sided stencil write (Replace), the colour-write mask, and the
-// stencil compare all worked. Off-screen + readback, GPU-free on lavapipe in CI. (main() in device_test.)
+// Proof for ADR-0014 — stencil state, the mechanism the cross-section cap is built on. In one
+// render pass into a colour + D32FloatS8 depth-stencil target it: (1) draws a centred triangle that
+// writes stencil = 1 where it covers, with colour writes masked off; then (2) draws a full-screen
+// triangle that passes the stencil test only where stencil == 1 and paints it green. Reading back,
+// the centre (inside the marked triangle) is green and a corner (stencil still 0) stays the clear
+// colour — which can only happen if stencil clear, two-sided stencil write (Replace), the
+// colour-write mask, and the stencil compare all worked. Off-screen + readback, GPU-free on
+// lavapipe in CI. (main() in device_test.)
 
 #include <doctest/doctest.h>
 
@@ -16,7 +17,6 @@
 #include <vector>
 
 #include "rime/rhi/rhi.hpp"
-
 #include "stencil_mark.vert.spv.h"
 #include "stencil_solid.frag.spv.h"
 #include "volume.vert.spv.h" // the full-screen triangle (shared with the volume proof)
@@ -46,12 +46,15 @@ TEST_CASE("rhi stencil: mark a region then fill only where stencil is set (ADR-0
         sd.spirv_size_bytes = bytes;
         return device->create_shader(sd);
     };
-    const ShaderHandle mark_vs = shader(ShaderStage::Vertex, stencil_mark_vert_spv, sizeof(stencil_mark_vert_spv));
-    const ShaderHandle full_vs = shader(ShaderStage::Vertex, volume_vert_spv, sizeof(volume_vert_spv));
-    const ShaderHandle solid_fs = shader(ShaderStage::Fragment, stencil_solid_frag_spv, sizeof(stencil_solid_frag_spv));
+    const ShaderHandle mark_vs =
+        shader(ShaderStage::Vertex, stencil_mark_vert_spv, sizeof(stencil_mark_vert_spv));
+    const ShaderHandle full_vs =
+        shader(ShaderStage::Vertex, volume_vert_spv, sizeof(volume_vert_spv));
+    const ShaderHandle solid_fs =
+        shader(ShaderStage::Fragment, stencil_solid_frag_spv, sizeof(stencil_solid_frag_spv));
 
-    // Marking pipeline: write stencil = 1 where drawn, no colour, no depth. Two-sided (cull off) so the
-    // ops apply regardless of winding.
+    // Marking pipeline: write stencil = 1 where drawn, no colour, no depth. Two-sided (cull off) so
+    // the ops apply regardless of winding.
     GraphicsPipelineDesc mk{};
     mk.vertex_shader = mark_vs;
     mk.fragment_shader = solid_fs;

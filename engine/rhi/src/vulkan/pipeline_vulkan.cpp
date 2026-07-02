@@ -2,10 +2,10 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // Graphics pipeline creation for the Vulkan backend. We bake almost all fixed-function state into
-// the pipeline object (the explicit, modern model), leaving only viewport/scissor dynamic. Crucially
-// the pipeline targets a *color format* via VkPipelineRenderingCreateInfo rather than a VkRenderPass
-// — that is the Vulkan 1.3 "dynamic rendering" baseline (ADR-0007), and it is what keeps the RHI
-// free of render-pass/framebuffer objects and friendly to the future render graph.
+// the pipeline object (the explicit, modern model), leaving only viewport/scissor dynamic.
+// Crucially the pipeline targets a *color format* via VkPipelineRenderingCreateInfo rather than a
+// VkRenderPass — that is the Vulkan 1.3 "dynamic rendering" baseline (ADR-0007), and it is what
+// keeps the RHI free of render-pass/framebuffer objects and friendly to the future render graph.
 
 #include <vector>
 
@@ -79,9 +79,10 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     // Depth/stencil state. We always provide a valid struct (rather than leaving pDepthStencilState
-    // null) so the pipeline is well-defined on every driver; when depth_test is off it simply disables
-    // the test+write, which is exactly the old behavior. Stencil (ADR-0014) is two-sided: front- and
-    // back-facing triangles get separate ops, so the cross-section cap can count surfaces in one draw.
+    // null) so the pipeline is well-defined on every driver; when depth_test is off it simply
+    // disables the test+write, which is exactly the old behavior. Stencil (ADR-0014) is two-sided:
+    // front- and back-facing triangles get separate ops, so the cross-section cap can count
+    // surfaces in one draw.
     VkPipelineDepthStencilStateCreateInfo ds{
         VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     ds.depthTestEnable = desc.depth_test ? VK_TRUE : VK_FALSE;
@@ -131,8 +132,9 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         binding.binding = 0;
         binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         binding.descriptorCount = 1;
-        // Visible to vertex + fragment: the field volume is sampled in the fragment shader (colormap)
-        // and, for the displacement/modal warp (C3), in the vertex shader (vertex texture fetch).
+        // Visible to vertex + fragment: the field volume is sampled in the fragment shader
+        // (colormap) and, for the displacement/modal warp (C3), in the vertex shader (vertex
+        // texture fetch).
         binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         dslci.bindingCount = 1;
@@ -143,8 +145,9 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         }
     }
 
-    // One push-constant range (if requested), visible to both stages, covering [0, size). Storing the
-    // stage mask on the pipeline lets push_constants() pass the matching stageFlags to vkCmdPushConstants.
+    // One push-constant range (if requested), visible to both stages, covering [0, size). Storing
+    // the stage mask on the pipeline lets push_constants() pass the matching stageFlags to
+    // vkCmdPushConstants.
     const VkShaderStageFlags pc_stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     VkPushConstantRange pc_range{};
     pc_range.stageFlags = pc_stages;
@@ -163,7 +166,8 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     VkPipelineLayout layout = VK_NULL_HANDLE;
     if (vkCreatePipelineLayout(device_, &lci, nullptr, &layout) != VK_SUCCESS) {
         RIME_ERROR("rhi: vkCreatePipelineLayout failed");
-        if (set_layout) vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
+        if (set_layout)
+            vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
         return {};
     }
 
@@ -173,15 +177,17 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     rendering.colorAttachmentCount = 1;
     rendering.pColorAttachmentFormats = &color_format;
-    // Declare the depth/stencil attachment formats so dynamic rendering can match this pipeline to a
-    // pass that carries them. We key off the attachment *format*, not just which test is enabled: a
-    // stencil-only pass (the cap's marking draw) still binds the depth-stencil image, so every pipeline
-    // used there must declare both formats to agree with the pass. UNDEFINED (the default when neither
-    // test is on) means "no depth/stencil attachment", matching a RenderingInfo with no depth_stencil.
+    // Declare the depth/stencil attachment formats so dynamic rendering can match this pipeline to
+    // a pass that carries them. We key off the attachment *format*, not just which test is enabled:
+    // a stencil-only pass (the cap's marking draw) still binds the depth-stencil image, so every
+    // pipeline used there must declare both formats to agree with the pass. UNDEFINED (the default
+    // when neither test is on) means "no depth/stencil attachment", matching a RenderingInfo with
+    // no depth_stencil.
     if (desc.depth_test || desc.stencil_test) {
         const VkFormat df = to_vk(desc.depth_format);
         rendering.depthAttachmentFormat = df;
-        if (has_stencil(df)) rendering.stencilAttachmentFormat = df;
+        if (has_stencil(df))
+            rendering.stencilAttachmentFormat = df;
     }
 
     VkGraphicsPipelineCreateInfo pci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
@@ -206,11 +212,11 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     const VkResult r =
         vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
     if (r != VK_SUCCESS) {
-        RIME_ERROR("rhi: vkCreateGraphicsPipelines('{}') failed: {}",
-                   desc.debug_name,
-                   result_string(r));
+        RIME_ERROR(
+            "rhi: vkCreateGraphicsPipelines('{}') failed: {}", desc.debug_name, result_string(r));
         vkDestroyPipelineLayout(device_, layout, nullptr);
-        if (set_layout) vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
+        if (set_layout)
+            vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
         return {};
     }
     return rebrand<Pipeline>(pipelines_.insert(p));
@@ -219,9 +225,12 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
 void VulkanDevice::destroy(PipelineHandle handle) {
     const auto h = rebrand<VulkanPipeline>(handle);
     if (auto* p = pipelines_.get(h)) {
-        if (p->pipeline) vkDestroyPipeline(device_, p->pipeline, nullptr);
-        if (p->layout) vkDestroyPipelineLayout(device_, p->layout, nullptr);
-        if (p->set_layout) vkDestroyDescriptorSetLayout(device_, p->set_layout, nullptr);
+        if (p->pipeline)
+            vkDestroyPipeline(device_, p->pipeline, nullptr);
+        if (p->layout)
+            vkDestroyPipelineLayout(device_, p->layout, nullptr);
+        if (p->set_layout)
+            vkDestroyDescriptorSetLayout(device_, p->set_layout, nullptr);
         // p->set (if allocated) is freed when the descriptor pool is destroyed at device teardown —
         // M3.5 has one material, so we don't individually free pooled sets here.
         pipelines_.erase(h);

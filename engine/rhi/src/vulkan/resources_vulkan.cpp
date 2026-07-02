@@ -17,7 +17,8 @@ BufferHandle VulkanDevice::create_buffer(const BufferDesc& desc) {
     VkBufferUsageFlags usage = to_vk(desc.usage);
     // Device-local buffers are almost always uploaded into, so always allow them as a transfer
     // destination (the staging copy that fills them lands in a later transfer brick).
-    if (desc.memory == MemoryUsage::GpuOnly) usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (desc.memory == MemoryUsage::GpuOnly)
+        usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = desc.size;
@@ -34,8 +35,8 @@ BufferHandle VulkanDevice::create_buffer(const BufferDesc& desc) {
                         VMA_ALLOCATION_CREATE_MAPPED_BIT;
             break;
         case MemoryUsage::GpuToCpu:
-            aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
-                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            aci.flags =
+                VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
             break;
     }
 
@@ -161,7 +162,8 @@ void VulkanDevice::destroy(BufferHandle handle) {
 void VulkanDevice::destroy(TextureHandle handle) {
     const auto h = rebrand<VulkanTexture>(handle);
     if (auto* t = textures_.get(h)) {
-        if (t->view) vkDestroyImageView(device_, t->view, nullptr);
+        if (t->view)
+            vkDestroyImageView(device_, t->view, nullptr);
         vmaDestroyImage(allocator_, t->image, t->allocation);
         textures_.erase(h);
     }
@@ -170,7 +172,8 @@ void VulkanDevice::destroy(TextureHandle handle) {
 void VulkanDevice::destroy(ShaderHandle handle) {
     const auto h = rebrand<VulkanShader>(handle);
     if (auto* s = shaders_.get(h)) {
-        if (s->module) vkDestroyShaderModule(device_, s->module, nullptr);
+        if (s->module)
+            vkDestroyShaderModule(device_, s->module, nullptr);
         shaders_.erase(h);
     }
 }
@@ -178,7 +181,8 @@ void VulkanDevice::destroy(ShaderHandle handle) {
 void VulkanDevice::destroy(SamplerHandle handle) {
     const auto h = rebrand<VulkanSampler>(handle);
     if (auto* s = samplers_.get(h)) {
-        if (s->sampler) vkDestroySampler(device_, s->sampler, nullptr);
+        if (s->sampler)
+            vkDestroySampler(device_, s->sampler, nullptr);
         samplers_.erase(h);
     }
 }
@@ -225,8 +229,9 @@ void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::si
     }
 
     // Staging buffer: a host-visible, mapped buffer we memcpy the pixels into, then copy on the GPU
-    // into the device-local image. The CPU never writes device-local memory directly — this transfer
-    // is how data crosses to GpuOnly storage (the path the renderer/asset pipeline will later batch).
+    // into the device-local image. The CPU never writes device-local memory directly — this
+    // transfer is how data crosses to GpuOnly storage (the path the renderer/asset pipeline will
+    // later batch).
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = size;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -247,8 +252,9 @@ void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::si
     std::memcpy(staging_info.pMappedData, data, size);
     vmaFlushAllocation(allocator_, staging_alloc, 0, size);
 
-    // One-shot, blocking copy: UNDEFINED -> TRANSFER_DST, copy buffer -> image, then -> SHADER_READ so
-    // the image is immediately samplable. (We overwrite the whole image, so the old layout is moot.)
+    // One-shot, blocking copy: UNDEFINED -> TRANSFER_DST, copy buffer -> image, then -> SHADER_READ
+    // so the image is immediately samplable. (We overwrite the whole image, so the old layout is
+    // moot.)
     auto cmd = begin_commands();
     VkCommandBuffer vk = static_cast<VulkanCommandBuffer&>(*cmd).handle();
 
@@ -277,7 +283,8 @@ void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::si
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    submit_blocking(*cmd); // blocks until the upload completes, then the staging buffer is safe to free
+    submit_blocking(
+        *cmd); // blocks until the upload completes, then the staging buffer is safe to free
     vmaDestroyBuffer(allocator_, staging, staging_alloc);
 }
 

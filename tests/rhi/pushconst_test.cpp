@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for the push-constant brick (B1a). One pipeline draws a full-screen triangle whose color comes
-// entirely from a push constant; we render it into two targets with two different push-constant colors
-// in the same command buffer, then read back and assert each target got its color. That proves (a) a
-// push constant reaches the shader and (b) it can change per draw — the per-draw fast path the lit mesh
-// renderer relies on for its MVP matrix. Off-screen + readback, so it runs GPU-free on lavapipe in CI.
+// Proof for the push-constant brick (B1a). One pipeline draws a full-screen triangle whose color
+// comes entirely from a push constant; we render it into two targets with two different
+// push-constant colors in the same command buffer, then read back and assert each target got its
+// color. That proves (a) a push constant reaches the shader and (b) it can change per draw — the
+// per-draw fast path the lit mesh renderer relies on for its MVP matrix. Off-screen + readback, so
+// it runs GPU-free on lavapipe in CI.
 
 #include <doctest/doctest.h>
 
@@ -15,10 +16,9 @@
 #include <cstdlib>
 #include <vector>
 
-#include "rime/rhi/rhi.hpp"
-
 #include "pushconst.frag.spv.h"
 #include "pushconst.vert.spv.h"
+#include "rime/rhi/rhi.hpp"
 
 namespace {
 bool vulkan_required() {
@@ -87,30 +87,31 @@ TEST_CASE("rhi push constants reach the shader and change per draw") {
     const BufferHandle rb_a = make_readback("pc-readback-a");
     const BufferHandle rb_b = make_readback("pc-readback-b");
 
-    const auto record_pass =
-        [&](CommandBuffer& cmd, TextureHandle color, std::array<float, 4> rgba) {
-            RenderingInfo ri{};
-            ri.color.target = color;
-            ri.color.load_op = LoadOp::Clear;
-            ri.color.store_op = StoreOp::Store;
-            ri.color.clear = {0.0f, 0.0f, 0.0f, 1.0f};
-            cmd.begin_rendering(ri);
-            cmd.bind_pipeline(pipe);
-            cmd.push_constants(rgba.data(), static_cast<std::uint32_t>(rgba.size() * sizeof(float)));
+    const auto record_pass = [&](CommandBuffer& cmd,
+                                 TextureHandle color,
+                                 std::array<float, 4> rgba) {
+        RenderingInfo ri{};
+        ri.color.target = color;
+        ri.color.load_op = LoadOp::Clear;
+        ri.color.store_op = StoreOp::Store;
+        ri.color.clear = {0.0f, 0.0f, 0.0f, 1.0f};
+        cmd.begin_rendering(ri);
+        cmd.bind_pipeline(pipe);
+        cmd.push_constants(rgba.data(), static_cast<std::uint32_t>(rgba.size() * sizeof(float)));
 
-            Viewport vp{};
-            vp.width = static_cast<float>(size);
-            vp.height = static_cast<float>(size);
-            vp.max_depth = 1.0f;
-            cmd.set_viewport(vp);
-            Rect2D sc{};
-            sc.width = size;
-            sc.height = size;
-            cmd.set_scissor(sc);
+        Viewport vp{};
+        vp.width = static_cast<float>(size);
+        vp.height = static_cast<float>(size);
+        vp.max_depth = 1.0f;
+        cmd.set_viewport(vp);
+        Rect2D sc{};
+        sc.width = size;
+        sc.height = size;
+        cmd.set_scissor(sc);
 
-            cmd.draw(3);
-            cmd.end_rendering();
-        };
+        cmd.draw(3);
+        cmd.end_rendering();
+    };
 
     auto cmd = device->begin_commands();
     record_pass(*cmd, color_a, {1.0f, 0.0f, 0.0f, 1.0f}); // red

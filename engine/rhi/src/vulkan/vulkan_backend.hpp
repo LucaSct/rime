@@ -57,16 +57,18 @@ struct VulkanShader {
 struct VulkanPipeline {
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
-    // Set when the pipeline samples a texture (GraphicsPipelineDesc::sampled_texture): the descriptor
-    // set-0 layout, plus a lazily-allocated, cached descriptor set that bind_texture fills in. M3.5
-    // has a single static material, so the set is allocated once and reused every frame; bound_*
-    // record what it currently points at, so we only re-write it when the texture/sampler change.
+    // Set when the pipeline samples a texture (GraphicsPipelineDesc::sampled_texture): the
+    // descriptor set-0 layout, plus a lazily-allocated, cached descriptor set that bind_texture
+    // fills in. M3.5 has a single static material, so the set is allocated once and reused every
+    // frame; bound_* record what it currently points at, so we only re-write it when the
+    // texture/sampler change.
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkDescriptorSet set = VK_NULL_HANDLE;
     TextureHandle bound_texture{};
     SamplerHandle bound_sampler{};
-    // Stage mask of the pipeline's push-constant range (0 = none). push_constants() needs it because
-    // vkCmdPushConstants must be told which stages the data is for, and it must match the range.
+    // Stage mask of the pipeline's push-constant range (0 = none). push_constants() needs it
+    // because vkCmdPushConstants must be told which stages the data is for, and it must match the
+    // range.
     VkShaderStageFlags push_constant_stages = 0;
 };
 
@@ -78,8 +80,9 @@ class VulkanCommandBuffer; // defined below; VulkanDevice::submit_with_sync take
 
 class VulkanDevice final : public Device {
 public:
-    // Brings up Vulkan end to end. Returns nullptr (after logging) if no loader/ICD is present or no
-    // GPU meets the Vulkan 1.3 + dynamic-rendering + synchronization2 bar — so callers can degrade.
+    // Brings up Vulkan end to end. Returns nullptr (after logging) if no loader/ICD is present or
+    // no GPU meets the Vulkan 1.3 + dynamic-rendering + synchronization2 bar — so callers can
+    // degrade.
     static std::unique_ptr<VulkanDevice> create(const DeviceDesc& desc);
     ~VulkanDevice() override;
 
@@ -88,7 +91,8 @@ public:
     [[nodiscard]] BufferHandle create_buffer(const BufferDesc& desc) override;
     [[nodiscard]] TextureHandle create_texture(const TextureDesc& desc) override;
     [[nodiscard]] ShaderHandle create_shader(const ShaderDesc& desc) override;
-    [[nodiscard]] PipelineHandle create_graphics_pipeline(const GraphicsPipelineDesc& desc) override;
+    [[nodiscard]] PipelineHandle
+    create_graphics_pipeline(const GraphicsPipelineDesc& desc) override;
     [[nodiscard]] SamplerHandle create_sampler(const SamplerDesc& desc) override;
 
     void destroy(BufferHandle handle) override;
@@ -97,8 +101,10 @@ public:
     void destroy(PipelineHandle handle) override;
     void destroy(SamplerHandle handle) override;
 
-    void write_buffer(BufferHandle handle, const void* data, std::size_t size, std::size_t offset)
-        override;
+    void write_buffer(BufferHandle handle,
+                      const void* data,
+                      std::size_t size,
+                      std::size_t offset) override;
     void read_buffer(BufferHandle handle, void* dst, std::size_t size, std::size_t offset) override;
     void write_texture(TextureHandle handle, const void* data, std::size_t size) override;
 
@@ -110,33 +116,43 @@ public:
 
     // ── Internals used by VulkanCommandBuffer (same module) ──────────────────────────────────
     [[nodiscard]] VkDevice vk_device() const noexcept { return device_; }
+
     [[nodiscard]] VulkanBuffer* lookup(BufferHandle h) noexcept {
         return buffers_.get(rebrand<VulkanBuffer>(h));
     }
+
     [[nodiscard]] VulkanTexture* lookup(TextureHandle h) noexcept {
         return textures_.get(rebrand<VulkanTexture>(h));
     }
+
     [[nodiscard]] VulkanPipeline* lookup(PipelineHandle h) noexcept {
         return pipelines_.get(rebrand<VulkanPipeline>(h));
     }
+
     [[nodiscard]] VulkanSampler* lookup(SamplerHandle h) noexcept {
         return samplers_.get(rebrand<VulkanSampler>(h));
     }
+
     // The shared pool bind_texture allocates its (cached, per-pipeline) descriptor set from.
     [[nodiscard]] VkDescriptorPool descriptor_pool() const noexcept { return descriptor_pool_; }
 
     // ── Internals used by VulkanSwapchain (same module) ──────────────────────────────────────
     [[nodiscard]] VkInstance vk_instance() const noexcept { return instance_; }
+
     [[nodiscard]] VkPhysicalDevice vk_physical() const noexcept { return physical_; }
+
     [[nodiscard]] std::uint32_t graphics_family() const noexcept { return graphics_family_; }
+
     [[nodiscard]] VkQueue graphics_queue() const noexcept { return graphics_queue_; }
+
     [[nodiscard]] VkCommandPool vk_command_pool() const noexcept { return command_pool_; }
 
-    // End + submit `cmd` with this frame's synchronization (wait the image-acquired semaphore at the
-    // color-output stage, signal render-finished, trip the in-flight fence) — the present-paced
+    // End + submit `cmd` with this frame's synchronization (wait the image-acquired semaphore at
+    // the color-output stage, signal render-finished, trip the in-flight fence) — the present-paced
     // counterpart to submit_blocking(). Does not wait or free the command buffer: the swapchain
     // waits the fence and frees the buffer when the frame slot recurs.
-    void submit_with_sync(VulkanCommandBuffer& cmd, VkSemaphore wait, VkSemaphore signal, VkFence fence);
+    void
+    submit_with_sync(VulkanCommandBuffer& cmd, VkSemaphore wait, VkSemaphore signal, VkFence fence);
 
     // Register/forget a swapchain backbuffer as a texture so it flows through the normal command
     // path (begin_rendering, transitions). adopt returns the public handle; forget erases the slot
@@ -144,6 +160,7 @@ public:
     [[nodiscard]] TextureHandle adopt_swapchain_image(const VulkanTexture& t) {
         return rebrand<Texture>(textures_.insert(t));
     }
+
     void forget_texture(TextureHandle h) noexcept { textures_.erase(rebrand<VulkanTexture>(h)); }
 
 private:
@@ -208,7 +225,8 @@ public:
 private:
     VulkanDevice& device_;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
-    VulkanPipeline* current_pipeline_ = nullptr; // set by bind_pipeline; bind_texture needs its layout
+    VulkanPipeline* current_pipeline_ =
+        nullptr; // set by bind_pipeline; bind_texture needs its layout
 };
 
 // Create a VkSurfaceKHR for a platform window. The one OS-touching spot in the backend: it switches
@@ -229,18 +247,23 @@ public:
     [[nodiscard]] TextureHandle acquire_next_image() override;
     bool present(CommandBuffer& commands) override;
     void recreate(Extent2D extent) override;
+
     [[nodiscard]] Format format() const override { return rhi_format_; }
+
     [[nodiscard]] Extent2D extent() const override { return {extent_.width, extent_.height}; }
 
 private:
     explicit VulkanSwapchain(VulkanDevice& device) noexcept : device_(device) {}
-    bool build(Extent2D extent);          // (re)create the swapchain, its images/views, per-image sync
-    void destroy_swapchain_objects() noexcept; // images/views/swapchain (keeps the surface + per-frame sync)
 
-    // Two frames in flight: while the GPU works on frame N the CPU records frame N+1. Each in-flight
-    // slot owns an image-available semaphore, an in-flight fence, and the command buffer it last
-    // submitted (freed when the slot recurs). render-finished is per *image* (not per frame) so a
-    // present never waits on a semaphore still pending from a different image — the standard fix.
+    bool build(Extent2D extent); // (re)create the swapchain, its images/views, per-image sync
+    void destroy_swapchain_objects() noexcept; // images/views/swapchain (keeps the surface +
+                                               // per-frame sync)
+
+    // Two frames in flight: while the GPU works on frame N the CPU records frame N+1. Each
+    // in-flight slot owns an image-available semaphore, an in-flight fence, and the command buffer
+    // it last submitted (freed when the slot recurs). render-finished is per *image* (not per
+    // frame) so a present never waits on a semaphore still pending from a different image — the
+    // standard fix.
     static constexpr std::uint32_t kFramesInFlight = 2;
 
     VulkanDevice& device_;
@@ -253,16 +276,17 @@ private:
     VkExtent2D extent_{};
     bool vsync_ = true;
 
-    std::vector<VkImage> images_;             // owned by the swapchain
-    std::vector<VkImageView> views_;          // owned by us, one per image
-    std::vector<TextureHandle> handles_;      // the RHI handle each image is registered under
+    std::vector<VkImage> images_;              // owned by the swapchain
+    std::vector<VkImageView> views_;           // owned by us, one per image
+    std::vector<TextureHandle> handles_;       // the RHI handle each image is registered under
     std::vector<VkSemaphore> render_finished_; // one per image
 
     std::array<VkSemaphore, kFramesInFlight> image_available_{};
     std::array<VkFence, kFramesInFlight> in_flight_{};
-    std::array<VkCommandBuffer, kFramesInFlight> frame_cmd_{}; // deferred free (in flight until slot recurs)
-    std::uint32_t frame_ = 0;        // current in-flight slot
-    std::uint32_t image_index_ = 0;  // last acquired swapchain image index
+    std::array<VkCommandBuffer, kFramesInFlight>
+        frame_cmd_{};               // deferred free (in flight until slot recurs)
+    std::uint32_t frame_ = 0;       // current in-flight slot
+    std::uint32_t image_index_ = 0; // last acquired swapchain image index
 };
 
 // Factory used by the agnostic create_device() in src/device.cpp. Declared here (not in a public

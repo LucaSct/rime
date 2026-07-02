@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for the orbit-camera brick (A2). The camera is pure rime::core math, so its whole contract is
-// checked headless here — no window, no GPU: orbit angles place the eye on the sphere, the pole guard
-// clamps pitch, zoom/pan behave, the projection centers the target and orders depth correctly, the
-// fit-to-sphere framing keeps a part on screen, and a z-up world (ICEM's convention) also works.
+// Proof for the orbit-camera brick (A2). The camera is pure rime::core math, so its whole contract
+// is checked headless here — no window, no GPU: orbit angles place the eye on the sphere, the pole
+// guard clamps pitch, zoom/pan behave, the projection centers the target and orders depth
+// correctly, the fit-to-sphere framing keeps a part on screen, and a z-up world (ICEM's convention)
+// also works.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -68,7 +69,8 @@ TEST_CASE("orbit camera: pitch is clamped off the pole and stays finite") {
 
     // The view matrix must remain well-defined (no NaNs from a degenerate look_at basis).
     const rime::core::Mat4 v = cam.view();
-    for (float m : v.m) CHECK(std::isfinite(m));
+    for (float m : v.m)
+        CHECK(std::isfinite(m));
 }
 
 TEST_CASE("orbit camera: zoom is multiplicative and reversible") {
@@ -133,8 +135,8 @@ TEST_CASE("orbit camera: frame() fits a bounding sphere within the view") {
     CHECK(cam.target.y == doctest::Approx(center.y));
     CHECK(cam.target.z == doctest::Approx(center.z));
 
-    // A point on the sphere's silhouette (offset by the radius along the screen-up direction) projects
-    // inside the viewport — the part is fully visible, not clipped.
+    // A point on the sphere's silhouette (offset by the radius along the screen-up direction)
+    // projects inside the viewport — the part is fully visible, not clipped.
     const Vec3 top = center + cam.up() * radius;
     const Vec3 n = to_ndc(cam, aspect, top);
     CHECK(std::fabs(n.y) < 1.0f);

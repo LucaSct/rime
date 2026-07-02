@@ -23,9 +23,9 @@
 namespace rime::rhi {
 
 struct SwapchainDesc {
-    platform::NativeWindow window;  // the surface to present to (from Window::native_handle())
-    Extent2D extent;                // framebuffer size in pixels (Window::framebuffer_size())
-    bool vsync = true;              // FIFO present (tear-free, always supported); mailbox comes later
+    platform::NativeWindow window; // the surface to present to (from Window::native_handle())
+    Extent2D extent;               // framebuffer size in pixels (Window::framebuffer_size())
+    bool vsync = true; // FIFO present (tear-free, always supported); mailbox comes later
 };
 
 class Swapchain {
@@ -41,7 +41,8 @@ public:
     // Submit the commands recorded for this frame and present the acquired backbuffer. The backend
     // records the backbuffer's transition to a presentable layout, submits with this frame's
     // synchronization (wait image-acquired, signal render-finished, in-flight fence), then queues
-    // the present. Returns false if the swapchain became out of date — recreate() before next frame.
+    // the present. Returns false if the swapchain became out of date — recreate() before next
+    // frame.
     virtual bool present(CommandBuffer& commands) = 0;
 
     // Rebuild the swapchain for a new framebuffer size (on resize or an out-of-date result). Waits

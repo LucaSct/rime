@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for the provenance panel (E3) — surfacing ICEM's "why" Ledger (.icejson) on the from-scratch
-// UI. Three halves:
-//   * parser (CPU only, always runs): the line-based reader pulls the header (design / hash / pass-fail)
-//     and every node (origin / label / value / unit / causal inputs) out of a small .icejson, and rejects
-//     a file that is not one. This is the contract with ICEM's `know::provenance_json`, shared by file
-//     format only (rime repo docs/math/provenance-panel.md; icem repo docs/math/provenance-io.md).
+// Proof for the provenance panel (E3) — surfacing ICEM's "why" Ledger (.icejson) on the
+// from-scratch UI. Three halves:
+//   * parser (CPU only, always runs): the line-based reader pulls the header (design / hash /
+//   pass-fail)
+//     and every node (origin / label / value / unit / causal inputs) out of a small .icejson, and
+//     rejects a file that is not one. This is the contract with ICEM's `know::provenance_json`,
+//     shared by file format only (rime repo docs/math/provenance-panel.md; icem repo
+//     docs/math/provenance-io.md).
 //   * layout (CPU only, always runs): clicking a row selects it, clicking it again clears it, and a
 //     selected node with causes expands its derivation — so the panel grows by those sub-rows.
-//   * render (off-screen, GPU): the panel draws — its fill covers the frame, bright text pixels appear
-//     (the bitmap-font path), and the green of the PASS verdict + the CHK origin tag shows. GPU-free on
-//     lavapipe in CI; skipped (not failed) when no device, unless RIME_REQUIRE_VULKAN is set.
+//   * render (off-screen, GPU): the panel draws — its fill covers the frame, bright text pixels
+//   appear
+//     (the bitmap-font path), and the green of the PASS verdict + the CHK origin tag shows.
+//     GPU-free on lavapipe in CI; skipped (not failed) when no device, unless RIME_REQUIRE_VULKAN
+//     is set.
 
 #include <doctest/doctest.h>
 
@@ -37,8 +41,9 @@ bool vulkan_required() {
     return std::getenv("RIME_REQUIRE_VULKAN") != nullptr;
 }
 
-// A tiny synthetic ledger covering one of each major origin (Input / Material / Law / Rule / Derived),
-// so the layout + render proofs exercise the full origin-tag / colour vocabulary without touching ICEM.
+// A tiny synthetic ledger covering one of each major origin (Input / Material / Law / Rule /
+// Derived), so the layout + render proofs exercise the full origin-tag / colour vocabulary without
+// touching ICEM.
 rime::viewer::Provenance demo_ledger() {
     using rime::viewer::ProvNode;
     rime::viewer::Provenance p;
@@ -55,10 +60,12 @@ rime::viewer::Provenance demo_ledger() {
 
 } // namespace
 
-TEST_CASE("provenance: the .icejson reader parses header + nodes, rejects non-provenance (E3 parse)") {
+TEST_CASE(
+    "provenance: the .icejson reader parses header + nodes, rejects non-provenance (E3 parse)") {
     using namespace rime::viewer;
 
-    // ICEM writes one node object per line inside a one-line header object (no JSON library needed).
+    // ICEM writes one node object per line inside a one-line header object (no JSON library
+    // needed).
     const std::string text =
         "{\"kind\":\"icem-provenance\",\"version\":1,\"design\":\"demo widget\","
         "\"hash\":\"abc123def4567890\",\"passes\":true,\"nodes\":[\n"
@@ -111,7 +118,8 @@ TEST_CASE("provenance: the .icejson reader parses header + nodes, rejects non-pr
     std::filesystem::remove(bad);
 }
 
-TEST_CASE("provenance: clicking a row selects it; a selected node expands its derivation (E3 layout)") {
+TEST_CASE(
+    "provenance: clicking a row selects it; a selected node expands its derivation (E3 layout)") {
     using namespace rime::viewer;
     const Provenance prov = demo_ledger();
     const float W = 700.0f, H = 600.0f;
@@ -197,8 +205,14 @@ TEST_CASE("provenance: the panel renders — fill, text, the PASS/CHK greens (E3
     CHECK(gui.vertices().size() > 100); // header band + many rows + the expanded derivation
 
     const ClearColor clear{0.06f, 0.07f, 0.09f, 1.0f};
-    const std::vector<std::uint8_t> px = vui::render_ui_offscreen(
-        *device, size, gui, clear, ui_vert_spv, sizeof(ui_vert_spv), ui_frag_spv, sizeof(ui_frag_spv));
+    const std::vector<std::uint8_t> px = vui::render_ui_offscreen(*device,
+                                                                  size,
+                                                                  gui,
+                                                                  clear,
+                                                                  ui_vert_spv,
+                                                                  sizeof(ui_vert_spv),
+                                                                  ui_frag_spv,
+                                                                  sizeof(ui_frag_spv));
     REQUIRE(px.size() == static_cast<std::size_t>(size) * size * 4);
 
     std::size_t panel = 0, bright = 0, green = 0;
@@ -214,5 +228,5 @@ TEST_CASE("provenance: the panel renders — fill, text, the PASS/CHK greens (E3
     }
     CHECK(panel > 4000); // the opaque panel covers a large part of the frame
     CHECK(bright > 80);  // the bitmap-font rows render
-    CHECK(green > 8);     // PASS (header) + the green Rule/CHK tag
+    CHECK(green > 8);    // PASS (header) + the green Rule/CHK tag
 }

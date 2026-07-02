@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for the viewer's cross-section solid cap (B2b). It renders a unit cube cut in half by a clip
-// plane, twice — once with the cap, once without — through the same render_section_offscreen path the
-// app uses, with a z-ramp field bound. Assertions: (1) the cap visibly changes the cut face (the centre
-// pixel differs between capped and uncapped — the stencil-filled cap quad painted it), and (2) the
-// capped section shows the field colormap (cold-blue and hot-red both present) — i.e. the field is
-// drawn on the cut face (the slice). Off-screen + readback, GPU-free on lavapipe in CI.
+// Proof for the viewer's cross-section solid cap (B2b). It renders a unit cube cut in half by a
+// clip plane, twice — once with the cap, once without — through the same render_section_offscreen
+// path the app uses, with a z-ramp field bound. Assertions: (1) the cap visibly changes the cut
+// face (the centre pixel differs between capped and uncapped — the stencil-filled cap quad painted
+// it), and (2) the capped section shows the field colormap (cold-blue and hot-red both present) —
+// i.e. the field is drawn on the cut face (the slice). Off-screen + readback, GPU-free on lavapipe
+// in CI.
 
 #include <doctest/doctest.h>
 
@@ -15,18 +16,16 @@
 #include <cstdlib>
 #include <vector>
 
-#include "rime/rhi/rhi.hpp"
-
-#include "cap.hpp"
 #include "camera.hpp"
-#include "mesh_render.hpp"
-#include "stl.hpp"
-
 #include "cap.frag.spv.h"
+#include "cap.hpp"
 #include "cap.vert.spv.h"
 #include "capmark.frag.spv.h"
 #include "mesh.frag.spv.h"
 #include "mesh.vert.spv.h"
+#include "mesh_render.hpp"
+#include "rime/rhi/rhi.hpp"
+#include "stl.hpp"
 
 namespace {
 bool vulkan_required() {
@@ -102,10 +101,27 @@ TEST_CASE("viewer cross-section solid cap fills the cut face (B2b)") {
     cp.cap_meta[1] = 0.0f; // axis x
 
     const auto render = [&](bool do_cap) {
-        return rime::viewer::render_section_offscreen(
-            *device, size, cube, mp, cp, clear, do_cap, mesh_vert_spv, sizeof(mesh_vert_spv),
-            mesh_frag_spv, sizeof(mesh_frag_spv), capmark_frag_spv, sizeof(capmark_frag_spv),
-            cap_vert_spv, sizeof(cap_vert_spv), cap_frag_spv, sizeof(cap_frag_spv), vol.data(), 2, 2, 2);
+        return rime::viewer::render_section_offscreen(*device,
+                                                      size,
+                                                      cube,
+                                                      mp,
+                                                      cp,
+                                                      clear,
+                                                      do_cap,
+                                                      mesh_vert_spv,
+                                                      sizeof(mesh_vert_spv),
+                                                      mesh_frag_spv,
+                                                      sizeof(mesh_frag_spv),
+                                                      capmark_frag_spv,
+                                                      sizeof(capmark_frag_spv),
+                                                      cap_vert_spv,
+                                                      sizeof(cap_vert_spv),
+                                                      cap_frag_spv,
+                                                      sizeof(cap_frag_spv),
+                                                      vol.data(),
+                                                      2,
+                                                      2,
+                                                      2);
     };
     const std::vector<std::uint8_t> capped = render(true);
     const std::vector<std::uint8_t> uncapped = render(false);
@@ -116,24 +132,28 @@ TEST_CASE("viewer cross-section solid cap fills the cut face (B2b)") {
     };
 
     // (1) The cap changes the cut face: the centre pixel (on the x=0 cut, through the cube) differs
-    // between capped and uncapped. Without the cap you see the lit interior back wall; with it, the flat
-    // field-coloured cap.
+    // between capped and uncapped. Without the cap you see the lit interior back wall; with it, the
+    // flat field-coloured cap.
     const std::uint8_t* cc = at(capped, size / 2, size / 2);
     const std::uint8_t* uc = at(uncapped, size / 2, size / 2);
     const int dr = cc[0] - uc[0], dg = cc[1] - uc[1], db = cc[2] - uc[2];
     CHECK((dr * dr + dg * dg + db * db) > 200); // a clear colour change at the cut
 
-    // (2) The capped section shows the field colormap — cold (blue) and hot (red) both present — and no
-    // collapsed-normal black holes.
+    // (2) The capped section shows the field colormap — cold (blue) and hot (red) both present —
+    // and no collapsed-normal black holes.
     std::size_t part = 0, blue = 0, red = 0, black = 0;
     for (std::uint32_t i = 0; i < size * size; ++i) {
         const std::uint8_t* p = &capped[static_cast<std::size_t>(i) * 4];
-        if (p[0] < 8 && p[1] < 8 && p[2] < 8) ++black;
+        if (p[0] < 8 && p[1] < 8 && p[2] < 8)
+            ++black;
         const float lum = 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
-        if (lum <= 40.0f) continue;
+        if (lum <= 40.0f)
+            continue;
         ++part;
-        if (p[2] > p[0] + 25 && p[2] > p[1]) ++blue;
-        else if (p[0] > p[1] + 25 && p[0] > p[2] + 25) ++red;
+        if (p[2] > p[0] + 25 && p[2] > p[1])
+            ++blue;
+        else if (p[0] > p[1] + 25 && p[0] > p[2] + 25)
+            ++red;
     }
     CHECK(part > 0);
     CHECK(blue > 20);

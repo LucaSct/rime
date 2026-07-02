@@ -2,10 +2,11 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // Proof for the viewer's binary-STL loader (part of B1). It builds binary STLs in memory and checks
-// the parse: triangle/vertex counts, bounding box, and — the one that bit us — that face normals come
-// out unit length *regardless of scale*. A sub-millimetre triangle (a finely-meshed metre-scale ICEM
-// part) has a cross-product magnitude ~1e-8; a scale-blind normalize would null it to zero and the
-// surface would shade black, so this pins the scale-independent normalization. No GPU needed.
+// the parse: triangle/vertex counts, bounding box, and — the one that bit us — that face normals
+// come out unit length *regardless of scale*. A sub-millimetre triangle (a finely-meshed
+// metre-scale ICEM part) has a cross-product magnitude ~1e-8; a scale-blind normalize would null it
+// to zero and the surface would shade black, so this pins the scale-independent normalization. No
+// GPU needed.
 
 #include <doctest/doctest.h>
 
@@ -29,6 +30,7 @@ void put_f(std::vector<std::byte>& b, float f) {
     std::memcpy(t, &f, 4);
     b.insert(b.end(), t, t + 4);
 }
+
 void put_u32(std::vector<std::byte>& b, std::uint32_t v) {
     std::byte t[4];
     std::memcpy(t, &v, 4);
@@ -39,13 +41,15 @@ void put_u32(std::vector<std::byte>& b, std::uint32_t v) {
 // The stored normal is left zero so the loader must derive it from the geometry.
 std::vector<std::byte> build_stl(const std::vector<std::array<float, 9>>& tris) {
     std::vector<std::byte> b;
-    for (int i = 0; i < 80; ++i) b.push_back(std::byte{0}); // header
+    for (int i = 0; i < 80; ++i)
+        b.push_back(std::byte{0}); // header
     put_u32(b, static_cast<std::uint32_t>(tris.size()));
     for (const auto& t : tris) {
         put_f(b, 0.0f); // stored normal x/y/z = 0 → force geometric derivation
         put_f(b, 0.0f);
         put_f(b, 0.0f);
-        for (float v : t) put_f(b, v); // v0, v1, v2 (9 floats)
+        for (float v : t)
+            put_f(b, v);           // v0, v1, v2 (9 floats)
         b.push_back(std::byte{0}); // attribute byte count (uint16) = 0
         b.push_back(std::byte{0});
     }
@@ -77,8 +81,8 @@ TEST_CASE("stl loader: counts, bounds, and a unit-scale normal") {
 }
 
 TEST_CASE("stl loader: a sub-millimetre triangle still yields a unit normal (scale independence)") {
-    // The regression: a ~1e-4-sized triangle (cross-product magnitude ~1e-8). A scale-blind normalize
-    // would return zero here and the surface would shade black.
+    // The regression: a ~1e-4-sized triangle (cross-product magnitude ~1e-8). A scale-blind
+    // normalize would return zero here and the surface would shade black.
     const float s = 1.0e-4f;
     const auto bytes = build_stl({{{0, 0, 0, s, 0, 0, 0, s, 0}}});
     const auto mesh = load_stl_binary(bytes.data(), bytes.size());

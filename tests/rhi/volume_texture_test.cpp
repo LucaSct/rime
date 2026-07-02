@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for ADR-0013 — 3-D (volume) textures. It uploads a 1×1×2 RGBA32F volume (a red slice at w=0,
-// a green slice at w=1), then draws a full-screen triangle whose fragment shader samples the volume
-// down its depth (w) axis by screen-y. Reading the image back, the top half must be red and the bottom
-// half green — which can only happen if the 3-D image, the 3-D image view, the depth-aware staged
-// upload, and the `sampler3D` descriptor all worked end to end. Off-screen + readback, so it runs on a
-// software GPU (lavapipe) in CI with no display. (main() for this exe is in device_test.cpp.)
+// Proof for ADR-0013 — 3-D (volume) textures. It uploads a 1×1×2 RGBA32F volume (a red slice at
+// w=0, a green slice at w=1), then draws a full-screen triangle whose fragment shader samples the
+// volume down its depth (w) axis by screen-y. Reading the image back, the top half must be red and
+// the bottom half green — which can only happen if the 3-D image, the 3-D image view, the
+// depth-aware staged upload, and the `sampler3D` descriptor all worked end to end. Off-screen +
+// readback, so it runs on a software GPU (lavapipe) in CI with no display. (main() for this exe is
+// in device_test.cpp.)
 
 #include <doctest/doctest.h>
 
@@ -16,7 +17,6 @@
 #include <vector>
 
 #include "rime/rhi/rhi.hpp"
-
 #include "volume.frag.spv.h"
 #include "volume.vert.spv.h"
 
@@ -39,8 +39,14 @@ TEST_CASE("rhi samples a 3-D (volume) texture off-screen (pixel-verified)") {
     }
 
     // A 1×1×2 volume: slice 0 (w=0) red, slice 1 (w=1) green. RGBA32F, depth-major, tightly packed.
-    const std::array<float, 8> voxels = {{1.0f, 0.0f, 0.0f, 1.0f,    // w=0 → red
-                                          0.0f, 1.0f, 0.0f, 1.0f}};   // w=1 → green
+    const std::array<float, 8> voxels = {{1.0f,
+                                          0.0f,
+                                          0.0f,
+                                          1.0f, // w=0 → red
+                                          0.0f,
+                                          1.0f,
+                                          0.0f,
+                                          1.0f}}; // w=1 → green
     TextureDesc vtd{};
     vtd.extent = {1, 1};
     vtd.depth = 2; // → a 3-D image
@@ -71,7 +77,8 @@ TEST_CASE("rhi samples a 3-D (volume) texture off-screen (pixel-verified)") {
 
     GraphicsPipelineDesc pd{};
     pd.vertex_shader = vsh;
-    pd.fragment_shader = fsh; // no vertex layout: the full-screen triangle is generated from the index
+    pd.fragment_shader =
+        fsh; // no vertex layout: the full-screen triangle is generated from the index
     pd.color_format = Format::RGBA8Unorm;
     pd.topology = PrimitiveTopology::TriangleList;
     pd.cull = CullMode::None;
@@ -129,7 +136,7 @@ TEST_CASE("rhi samples a 3-D (volume) texture off-screen (pixel-verified)") {
     // Top of the image samples w≈0 (red slice); bottom samples w≈1 (green slice).
     const std::uint8_t* top = at(size / 2, size / 8);
     const std::uint8_t* bottom = at(size / 2, size - size / 8);
-    CHECK(top[0] > 128);    // top is red
+    CHECK(top[0] > 128); // top is red
     CHECK(top[1] < 128);
     CHECK(bottom[1] > 128); // bottom is green
     CHECK(bottom[0] < 128);

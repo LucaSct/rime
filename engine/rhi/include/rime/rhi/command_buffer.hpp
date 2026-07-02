@@ -30,9 +30,10 @@ struct ColorAttachment {
 
 // The depth(-stencil) attachment for a dynamic-rendering pass: the depth texture to test/write
 // against and what to do with its contents on entry/exit. This is what makes opaque 3-D draw
-// correctly — without it, the painter's-order last-drawn fragment wins. `clear_depth = 1.0` clears to
-// the far plane (the right default for a `Less` depth test). `clear_stencil` is carried now but only
-// takes effect once the stencil aspect is wired in the cross-section brick; depth is enough for 3-D.
+// correctly — without it, the painter's-order last-drawn fragment wins. `clear_depth = 1.0` clears
+// to the far plane (the right default for a `Less` depth test). `clear_stencil` is carried now but
+// only takes effect once the stencil aspect is wired in the cross-section brick; depth is enough
+// for 3-D.
 struct DepthStencilAttachment {
     TextureHandle target;
     LoadOp load_op = LoadOp::Clear;
@@ -44,8 +45,8 @@ struct DepthStencilAttachment {
 // Describes a dynamic-rendering scope. The render area defaults to the full target extent (the
 // backend reads it from the color target), so the common case needs only the color attachment.
 // `depth_stencil` is optional: leave it unset for a flat 2-D pass (the M3 triangle/quad), set it to
-// enable depth-tested 3-D. The pipeline bound inside the pass must agree (GraphicsPipelineDesc depth
-// fields) — depth on here ⇔ depth_test + matching depth_format on the pipeline.
+// enable depth-tested 3-D. The pipeline bound inside the pass must agree (GraphicsPipelineDesc
+// depth fields) — depth on here ⇔ depth_test + matching depth_format on the pipeline.
 struct RenderingInfo {
     ColorAttachment color;
     std::optional<DepthStencilAttachment> depth_stencil;
@@ -65,20 +66,23 @@ public:
     virtual void bind_vertex_buffer(BufferHandle buffer, std::uint64_t offset = 0) = 0;
 
     // Bind an index buffer for indexed drawing; `type` (16- or 32-bit) must match how the indices
-    // were written. Pair with draw_indexed(). Indexed draws let vertices be shared between triangles
-    // (a quad is 4 vertices + 6 indices instead of 6 vertices).
-    virtual void bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset = 0) = 0;
+    // were written. Pair with draw_indexed(). Indexed draws let vertices be shared between
+    // triangles (a quad is 4 vertices + 6 indices instead of 6 vertices).
+    virtual void
+    bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset = 0) = 0;
 
     // Bind a texture + sampler to a shader binding (descriptor set 0) of the currently bound
-    // pipeline — call after bind_pipeline(). The pipeline must have been created to sample a texture
-    // (GraphicsPipelineDesc::sampled_texture). This is the M3.5 descriptor model: a single combined
-    // image-sampler; richer descriptor sets arrive with the render graph.
-    virtual void bind_texture(std::uint32_t binding, TextureHandle texture, SamplerHandle sampler) = 0;
+    // pipeline — call after bind_pipeline(). The pipeline must have been created to sample a
+    // texture (GraphicsPipelineDesc::sampled_texture). This is the M3.5 descriptor model: a single
+    // combined image-sampler; richer descriptor sets arrive with the render graph.
+    virtual void
+    bind_texture(std::uint32_t binding, TextureHandle texture, SamplerHandle sampler) = 0;
 
     // Upload `size` bytes of push-constant data (from `offset`) to the currently bound pipeline,
-    // visible to its vertex and fragment stages. Call after bind_pipeline; the pipeline must have been
-    // created with a matching `push_constant_size`. This is the per-draw fast path for a small block
-    // such as an MVP matrix — no descriptor set, no buffer. Keep within the pipeline's declared size.
+    // visible to its vertex and fragment stages. Call after bind_pipeline; the pipeline must have
+    // been created with a matching `push_constant_size`. This is the per-draw fast path for a small
+    // block such as an MVP matrix — no descriptor set, no buffer. Keep within the pipeline's
+    // declared size.
     virtual void push_constants(const void* data, std::uint32_t size, std::uint32_t offset = 0) = 0;
 
     // Viewport/scissor are dynamic pipeline state, so they're set per-recording rather than baked

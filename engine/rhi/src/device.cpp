@@ -13,7 +13,8 @@
 namespace rime::rhi {
 
 #if defined(RIME_RHI_VULKAN)
-// Defined in src/vulkan/device_vulkan.cpp. Forward-declared here so we don't pull in Vulkan headers.
+// Defined in src/vulkan/device_vulkan.cpp. Forward-declared here so we don't pull in Vulkan
+// headers.
 std::unique_ptr<Device> create_vulkan_device(const DeviceDesc& desc);
 #endif
 

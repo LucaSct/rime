@@ -2,8 +2,8 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // The single translation unit that compiles the Vulkan Memory Allocator implementation. VMA ships
-// as one big header; defining VMA_IMPLEMENTATION in exactly one .cpp emits its function bodies here,
-// and every other TU includes the header for declarations only. This file is built in its own
+// as one big header; defining VMA_IMPLEMENTATION in exactly one .cpp emits its function bodies
+// here, and every other TU includes the header for declarations only. This file is built in its own
 // static lib (rime_vma) with default warning flags, because VMA is third-party code we don't hold
 // to Rime's -Werror — the same arrangement as rime_xdg_shell for the Wayland protocol glue.
 //
