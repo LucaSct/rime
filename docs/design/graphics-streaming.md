@@ -53,9 +53,11 @@ openh264 / royalty-free AV1 — never GPL x264 in the engine).
 - **S0.5 — the client.** `samples/04-remote-view`: a thin Rime-built client (platform window + an RHI
   textured quad presenting decoded frames, plus keyboard/mouse → backchannel). macOS/MoltenVK first;
   runs anywhere Rime runs.
-- **S0.6 — proof.** Run a headless sample on the Linux server, view + control it live from the Mac;
-  measure and record glass-to-glass latency. CI: codec/protocol unit tests (GPU-free) + a loopback
-  integration test on lavapipe frames.
+- **S0.6 — proof.** *Engine-side loopback ✅* — `tests/stream/loopback_stream_test.cpp` streams a
+  real lavapipe-rendered frame through the whole pipe (tap → encode → protocol → decode) over
+  `127.0.0.1` and checks it arrives bit-exact; runs in CI (the GPU-free codec/protocol tests join it).
+  *Remaining:* the live **cross-machine** view + control from the Mac, with glass-to-glass latency
+  measured and recorded — needs the windowed client (S0.5) and a display.
 
 ## The frame tap (S0.2)
 
