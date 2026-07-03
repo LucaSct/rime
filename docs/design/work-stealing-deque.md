@@ -43,7 +43,7 @@ everywhere" (slower) or "relaxed everywhere" (wrong). Each one earns its place.
 ```
 b = bottom (relaxed);  t = top (acquire);  buf = array (relaxed)
 if full: buf = grow(); array.store(buf, release)
-buf.put(b, item)                 // relaxed store into the slot
+buf.put(b, item)                 // release store into the slot (see "Publishing the payload")
 fence(release)                   // (A)
 bottom.store(b+1, relaxed)       // (B)
 ```
@@ -86,7 +86,7 @@ fence(seq_cst)                   // (D) — pairs with (C)
 b = bottom (acquire)
 if t < b:                        // non-empty
     buf = array (acquire)        // see the slot the owner released in push
-    x = buf.get(t)               // read BEFORE claiming
+    x = buf.get(t)               // acquire load; read BEFORE claiming
     if !top.CAS(t -> t+1, seq_cst): return ABORT   // lost the race; retry
     return x
 return EMPTY
@@ -97,6 +97,45 @@ owner could overwrite the slot in between. `ABORT` (distinct from `EMPTY`) tells
 deque may still have work — just try again or move on — versus genuinely empty. The **seq-cst
 fence (D)** pairs with `pop`'s (C): together they give a consistent global view of the
 `(top, bottom)` pair across owner and thief.
+
+### Publishing the payload — why the slots are `release`/`acquire`, not `relaxed`
+
+Lê et al. touch the slots with **relaxed** atomics and let the `top_`/`bottom_` fences carry all
+ordering. That is enough when the slot *is* the payload (an `int`, a small handle). Our deque
+carries **pointers** — the JobSystem stores `Job*` — so a thief that steals a pointer must also
+see the *pointee*: the `Job`'s `fn`/`counter` fields the owner wrote before pushing. By the
+standard the index protocol already guarantees this even with relaxed slots: push's release fence
+(A) is *sequenced before* the `bottom_` store, a thief's `acquire` load of `bottom_` reads that
+store, and [atomics.fences]/3 makes the fence *synchronize-with* the load — so everything the
+owner wrote before the push (the `Job` fields included) happens-before the thief's use. The code
+is data-race-free with relaxed slots.
+
+We nonetheless store and load the slot itself with **release/acquire**, for two reasons:
+
+1. **It makes the payload publication explicit** right where the pointer changes hands, instead of
+   asking the reader to chase a fence chain to convince themselves the pointee is visible.
+2. **ThreadSanitizer cannot follow synchronization through a standalone fence** — a well-known
+   TSan limitation for fence-based lock-free code. With relaxed slots TSan does not see the
+   happens-before that fence (A) establishes, so it reports the `Job` payload transfer as a race:
+
+   ```
+   WARNING: ThreadSanitizer: data race
+     Read  by thread T30:  std::function::operator()   job_system.cpp: execute()      (job->fn())
+     Prev write by main:   std::function::operator=     job_system.cpp: allocate_job() (job->fn = …)
+     Location: heap block … rime::core::Job             [the per-thread job ring]
+   ```
+
+   A release store paired with an acquire load *on the slot* is an edge TSan does model, so it sees
+   the transfer is ordered and the false positive disappears.
+
+This only **adds** ordering; it never weakens the index protocol, and the seq-cst `pop`/`steal`
+fences are untouched. The cost is nil on x86 (acquire/release are plain loads/stores under TSO)
+and a single `ldar`/`stlr` on ARM, paid once per push or steal — negligible beside the seq-cst
+fences already on those paths. Confirmed empirically on the Linux TSan bed: with relaxed slots the
+Clang TSan run flags exactly the race above; with release/acquire the full `rime_core_tests` suite
+(deque + JobSystem, incl. the 100k-item concurrent steal) runs clean. GCC's TSan models neither the
+fences nor helps here — which is why the CI TSan job runs on Clang (see `/CMakeLists.txt` and
+`.github/workflows/ci.yml`).
 
 ## Buffer growth and lifetime
 
@@ -124,6 +163,11 @@ so workers only touch atomics and all assertions run on the main thread after th
 was run 40× under contention while developing. Note: x86 is TSO (strongly ordered), so it cannot
 *by itself* exercise the weak-ordering bugs the seq-cst fences guard against — the orderings are
 written to the proof, and the CI matrix broadens the hardware over time.
+
+On top of the assertion tests, a Linux CI job (Phase 0.3) runs this suite under **ThreadSanitizer**
+on Clang, so a broken happens-before surfaces as a race report rather than only as a flaky
+miscount. TSan must be Clang (not GCC) and the slots are release/acquire (not relaxed) for the
+reasons in "Publishing the payload" above.
 
 ## Deliberate limitations (labeled, per CLAUDE.md)
 

@@ -12,20 +12,25 @@ usage() {
 Rime build — build the C++ engine and Rust tools, and run their tests.
 
 Usage: scripts/build.sh [options]
-  --preset dev|release   configuration to build (default: dev)
-  --no-tests             build only; skip ctest and cargo test
-  --cpp-only             build just the C++ engine
-  --rust-only            build just the Rust tools
-  --clean                remove build/<preset> and tools/target first
-  -h, --help             show this help
+  --preset dev|release       configuration to build (default: dev)
+  --sanitizer off|address|thread
+                             build the C++ engine with a sanitizer (default: off).
+                             address = ASan+UBSan, thread = TSan. GCC/Clang only.
+  --no-tests                 build only; skip ctest and cargo test
+  --cpp-only                 build just the C++ engine
+  --rust-only                build just the Rust tools
+  --clean                    remove build/<preset> and tools/target first
+  -h, --help                 show this help
 EOF
 }
 
-preset="dev"; run_tests=1; do_cpp=1; do_rust=1; clean=0
+preset="dev"; run_tests=1; do_cpp=1; do_rust=1; clean=0; sanitizer="off"
 while [ $# -gt 0 ]; do
     case "$1" in
         --preset)   preset="${2:?--preset needs a value}"; shift 2 ;;
         --preset=*) preset="${1#*=}"; shift ;;
+        --sanitizer)   sanitizer="${2:?--sanitizer needs a value}"; shift 2 ;;
+        --sanitizer=*) sanitizer="${1#*=}"; shift ;;
         --no-tests) run_tests=0; shift ;;
         --cpp-only) do_rust=0; shift ;;
         --rust-only) do_cpp=0; shift ;;
@@ -34,6 +39,11 @@ while [ $# -gt 0 ]; do
         *) echo "build.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
 done
+
+case "$sanitizer" in
+    off|address|thread) ;;
+    *) echo "build.sh: unknown --sanitizer '$sanitizer' (expected off, address, or thread)" >&2; exit 2 ;;
+esac
 
 # Map our CMake preset names to the CMAKE_BUILD_TYPE that Conan must resolve binaries for.
 case "$preset" in
@@ -66,8 +76,14 @@ if [ "$do_cpp" -eq 1 ]; then
     "$conan" install . -of "build/$preset" \
         -s build_type="$build_type" -s compiler.cppstd=20 --build=missing
 
-    say "C++: cmake configure ($preset)"
-    cmake --preset "$preset"
+    # Extra cache var layered on top of the preset. --sanitizer maps to the RIME_SANITIZER
+    # option (see /CMakeLists.txt); off is the default and adds nothing. The ${var:+…} guard
+    # expands to nothing when empty, so this stays safe under `set -u` (and on macOS bash 3.2).
+    san_arg=""
+    [ "$sanitizer" != "off" ] && san_arg="-DRIME_SANITIZER=$sanitizer"
+
+    say "C++: cmake configure ($preset${san_arg:+, sanitizer=$sanitizer})"
+    cmake --preset "$preset" ${san_arg:+"$san_arg"}
 
     say "C++: cmake build ($preset)"
     cmake --build --preset "$preset"

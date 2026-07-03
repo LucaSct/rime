@@ -50,21 +50,29 @@ rime/
 
 ## Build & run commands
 
-> These firm up in **Milestone 0** (build bootstrap). Until a command is real, it is
-> marked `(planned)`. Do not invent commands that don't exist yet — check first.
+> Real as of Milestone 0. The one-command path is **`scripts/build.sh`** (`scripts/build.ps1`
+> on Windows) — it runs `conan install`, configures, builds, and tests. The raw CMake presets
+> below also work, but only *after* a `conan install` has generated the toolchain in
+> `build/<preset>/` (which the script does for you). Prefer the script; still, don't invent
+> commands — check first.
 
 ```bash
-# C++ engine (planned)
-cmake --preset dev            # configure
+# One command: build the C++ engine + Rust tools, run all tests (dev = Debug)
+scripts/build.sh
+scripts/build.sh --preset release --no-tests
+scripts/build.sh --cpp-only --sanitizer address   # ASan+UBSan (GCC/Clang; see CI)
+
+# First-time toolchain setup (Conan venv, Rust, Vulkan runtime discovery)
+scripts/setup.sh
+
+# Under the hood, after `conan install . -of build/dev -s build_type=Debug ...`:
+cmake --preset dev            # configure (Ninja + the Conan toolchain)
 cmake --build --preset dev    # build
 ctest --preset dev            # run C++ tests
 
-# Rust tooling (planned)
-cargo build                   # from tools/
-cargo test                    # from tools/
-
-# Helpers (planned)
-scripts/setup.sh              # install/locate the toolchain + Vulkan SDK
+# Rust tooling (from tools/)
+cargo build
+cargo test
 ```
 
 ## Coding standards

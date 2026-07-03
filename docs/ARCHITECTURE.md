@@ -8,8 +8,11 @@ someone learning how engines work, so it defines ideas as it goes. It describes 
 - 🟡 **Designed** — the shape is decided; code is partial or stubbed.
 - ⚪ **Planned** — intended; not started.
 
-As of now, essentially everything is ⚪ — we are at the scaffolding stage. This is the
-blueprint we build toward.
+As of 2026-07 the **bottom of the layer cake is built and CI-green on Windows, Linux, and
+macOS**: `core` 🟢 and `platform` 🟢 (Milestones 0–2) and `rhi` 🟡 (Milestone 3 — the
+graphics seam and its Vulkan backend). Everything above — `ecs`, `render`, and the feature
+modules — is still ⚪. This document is the blueprint we build toward; the per-section tags
+below say how far each part has actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
 
@@ -63,7 +66,7 @@ This is the single most important structural rule in the codebase.
 Each becomes a subdirectory under `engine/` with its own README and build file. Listed
 bottom-up. (Names are stable targets; not all directories exist yet.)
 
-### `core` ⚪ — *the foundation everything stands on*
+### `core` 🟢 — *the foundation everything stands on*
 - **Memory:** custom allocators (linear/arena, pool, stack), tracked allocations. We
   control memory because AAA performance demands it.
 - **Math:** vectors, matrices, quaternions, transforms — SIMD-friendly.
@@ -76,21 +79,34 @@ bottom-up. (Names are stable targets; not all directories exist yet.)
 - **Module system:** load/unload modules at runtime, resolve their interfaces. This is
   the O3DE-style "Gem" mechanism, in our own minimal form.
 
-### `platform` ⚪ — *the thin OS abstraction*
+*Built (M1):* all of the above — allocators (arena/stack/pool, tracked), SIMD-friendly math
+(with derivation notes), a generational slot map, the **Chase-Lev work-stealing job system**,
+diagnostics (log/assert/timing), minimal reflection, and the runtime module loader. One
+caveat: the allocators are complete but not yet *load-bearing* — the ECS puts them to work
+at M4.
+
+### `platform` 🟢 — *the thin OS abstraction*
 Windowing, input, filesystem, high-resolution timers, threads/atomics — one interface,
 three implementations (Win32, Linux, macOS). Keeps OS `#ifdef`s out of the rest of the
-engine.
+engine. *Built (M2):* a native window + event pump on **Cocoa, Win32, X11, and Wayland**
+(Linux selects Wayland or X11 at runtime), polled keyboard/mouse input, filesystem, and a
+frame timer — all behind the seam, no OS `#ifdef` leaking upward ([ADR-0006](adr/0006-native-windowing.md)).
 
 ### `rhi` 🟡 — *Render Hardware Interface (the graphics seam)*
 A modern, explicit graphics abstraction (devices, queues, command buffers, pipelines,
 descriptor/binding model, synchronization). **The Vulkan backend is the only code that
 includes Vulkan headers** — enforced by the build (its deps are linked PRIVATE), not just
 by review. Everything above talks to `rhi` interfaces. This is the seam that lets D3D12 /
-Metal / console backends arrive later without touching the renderer. *Built (M3.1–M3.3):*
-device bring-up (volk + VMA, Vulkan 1.3 dynamic rendering + synchronization2), buffers/
-textures/shaders/pipelines, and an off-screen render verified by pixel readback.
-*Planned:* swapchain/presentation (M3.4) and textures+descriptors → the textured quad
-(M3.5). → [ADR-0002](adr/0002-vulkan-first-rhi.md),
+Metal / console backends arrive later without touching the renderer. *Built (M3, complete
+and CI-green):* device bring-up (volk + VMA, Vulkan 1.3 dynamic rendering + synchronization2),
+offline GLSL→SPIR-V shaders, graphics pipelines, buffers/textures/samplers, swapchain +
+presentation across all four window systems, and a combined-image-sampler descriptor model —
+proven by a windowed textured quad *and* GPU-free off-screen pixel-readback tests (ADRs 0007–0010).
+Extra features landed to serve the ICEM viewer and will be adopted by the M5 render graph:
+depth attachment (ADR-0011), push constants (ADR-0012), 3-D/volume textures (ADR-0013), and
+stencil (ADR-0014). *Known gaps before renderer-ready (M5):* no compute dispatch, no
+multiple-render-targets or blending, no MSAA/mipmaps, a single-set/single-binding descriptor
+model, one queue, a fixed two frames in flight, and single-threaded command recording. → [ADR-0002](adr/0002-vulkan-first-rhi.md),
 [ADR-0007](adr/0007-vulkan-backend-bootstrapping.md), [design/rhi.md](design/rhi.md)
 
 ### `ecs` ⚪ — *the world, as data*
@@ -136,9 +152,11 @@ Frostbite does it:
 Audio mixing/spatialization; skeletal animation & blending; runtime asset
 loading/streaming; networking/replication. Each behind its own interface.
 
-### `app` ⚪ — *the application framework & main loop*
+### `app` ⚪ (stub) — *the application framework & main loop*
 Ties a module set together into a runnable application: initializes subsystems, owns the
-frame loop (input → simulate → render → present), and shuts down cleanly.
+frame loop (input → simulate → render → present), and shuts down cleanly. *Today* it is only
+the Milestone-0 `rime_hello` launcher (it links `core` and prints the version); the real
+frame-loop framework is built at M5, once the render graph gives it something to drive.
 
 ## 4. Threading model ⚪
 

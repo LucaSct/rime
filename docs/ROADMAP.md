@@ -9,6 +9,16 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
+> viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,
+> Linux, and macOS** (Linux on lavapipe, `RIME_REQUIRE_VULKAN=1`) — that 57-commit branch had never
+> run CI before. Landing it needed the X11 leaky-macro fix (the engine had not compiled on Linux
+> since M3.1). CI now also builds `feat/**` pushes, and two Linux **sanitizer** jobs guard the
+> lock-free code (ASan+UBSan over all suites; Clang **ThreadSanitizer** over the deque + job system).
+> Direction set this session: **the editor is a client of the engine**
+> ([ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md)) and a graphics-**streaming** track
+> (Track S — S0 dev-stream now, shippable remote play later; see Cross-cutting tracks).
+>
 > **Status (2026-06-21):** **Milestones 0 (build bootstrap) and 1 (core foundation) —
 > COMPLETE.** The repo is public at https://github.com/LucaSct/rime with **CI green on
 > Windows, Linux, and macOS**. `scripts/build` builds and tests the C++ engine and the Rust
@@ -68,6 +78,13 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 - **Docs:** keep ARCHITECTURE, glossary, and ADRs current as we build.
 - **Audio & animation:** feature tracks that slot in — audio *stub* at M8 (destruction
   event fan-out), real audio ~M8–M9; skeletal animation ~M6–M7.
+- **Graphics streaming (Track S):** the engine renders → captures → encodes → transports → a thin
+  client presents and sends input back. **S0** (LAN/loopback dev-stream — TCP, JPEG/LZ4, a thin
+  Rime-built client) lands right after Phase 0, before M4; **S1+** (hardware codecs, QUIC/WebRTC)
+  post-M5. It is a **shippable engine feature** (`engine/stream` over `engine/net`), not dev-only
+  tooling, and the *same* versioned protocol carries the M9 editor viewport
+  ([ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md)). Ship-safe codecs only under
+  Apache-2.0 — never GPL x264 in the engine.
 
 ---
 
@@ -189,8 +206,13 @@ destructibles + connectivity, precomputed fracture, debris as real physics bodie
 `10-destructible-wall`. *Inspired by: Frostbite (Battlefield 6) — see
 [engine-survey.md](research/engine-survey.md).*
 
-**M9 — Editor v1 (Rust).** `tools/editor` — scene/world editing, reflection-driven
-inspectors, embedded live viewport, play-in-editor. *Inspired by: Unity/UE iteration.*
+**M9 — Editor v1 (Rust).** `tools/editor` — a **client of a live engine process**
+([ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md)): the Rust shell owns docking,
+reflection-driven inspectors, and the asset browser; the **engine renders the viewport** and
+delivers it over the (by then S1-hardened) streaming protocol; edits flow back as
+reflection-described component data. The viewport toolkit graduates from the ICEM viewer and the
+protocol is already proven by Track S, so M9 becomes assembly, not invention. Play-in-editor.
+*Inspired by: Frostbite's FrostEd (editor-as-client) + Unity/UE iteration.*
 
 **M10 — Advanced lighting (the Unreal-class push).** Each its own sub-effort + ADR:
 dynamic GI + reflections (Lumen-style), virtual shadow maps, many-lights

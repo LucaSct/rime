@@ -88,6 +88,110 @@ jobs:
         shell: pwsh
         run: ./scripts/build.ps1
 
+  # ── Sanitizer jobs (Phase 0.3) ──────────────────────────────────────────────────────
+  # Two Linux-only jobs that instrument the C++ engine and run its tests under a sanitizer.
+  # They exist to guard the hand-rolled lock-free code — the Chase-Lev work-stealing deque
+  # and the JobSystem built on it. Data races and memory errors in lock-free code are rare,
+  # load- and hardware-dependent, and almost impossible to catch by eye; sanitizers are how
+  # we keep them honest on every push. (Sanitizers are a GCC/Clang + Linux toolchain feature,
+  # so these run on ubuntu only.) The deque's ordering argument: docs/design/work-stealing-deque.md.
+
+  sanitize-address:
+    name: sanitizer (ASan + UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Conan
+        run: |
+          pip install "conan>=2,<3"
+          conan profile detect --force
+
+      # ASan+UBSan runs the FULL suite, including the Vulkan rhi tests on lavapipe, so it needs
+      # the same windowing dev libs (to build) and Vulkan runtime (to run) as the build job.
+      # RIME_REQUIRE_VULKAN=1 makes "no device" a failure rather than a silent skip.
+      - name: Install Linux deps (windowing + Vulkan runtime)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
+          echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
+
+      # -DRIME_SANITIZER=address (via --sanitizer) turns on ASan+UBSan for every engine target.
+      # -fno-sanitize-recover=all (set in CMakeLists) makes any UBSan finding abort with a
+      # nonzero exit; ASan/LSan likewise abort on a bad access or leak — so a finding fails CI.
+      - name: Build & test (ASan + UBSan)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ./scripts/build.sh --cpp-only --sanitizer address
+
+  sanitize-thread:
+    name: sanitizer (TSan, Clang)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Conan
+        run: |
+          pip install "conan>=2,<3"
+          conan profile detect --force
+
+      # TSan runs only rime_core_tests (deque + JobSystem) — pure rime::core, no GPU — so it
+      # needs no Vulkan runtime. It still *configures* the whole tree, and the platform module
+      # hard-requires X11 + Wayland at configure time, so those dev libs must be present.
+      - name: Install Linux deps (windowing, to configure)
+        run: |
+          sudo apt-get install -y \
+            libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols
+
+      # Why Clang, not GCC: GCC's ThreadSanitizer treats a standalone atomic_thread_fence as a
+      # no-op (it emits -Wtsan) and so cannot model the happens-before the deque's fences
+      # establish — it would UNDER-check the exact code we care about. Clang's TSan models the
+      # fences, so it is the meaningful run. (See the RIME_SANITIZER block in /CMakeLists.txt.)
+      #
+      # Why the two-profile split (host=Clang, build=GCC): our code must be built with Clang so
+      # TSan can instrument it (host profile). But glslang — the offline shader compiler — is a
+      # build-context *tool* we never run in this job; pinning the build profile to GCC lets
+      # Conan reuse its prebuilt glslang instead of compiling it from source under Clang. fmt,
+      # the one compiled host dependency core pulls in, builds in seconds. We then build only
+      # the rime_core_tests target, which keeps viewer/rhi code out of the Clang -Werror path.
+      - name: Configure + build rime_core_tests (Clang, TSan)
+        run: |
+          CC=clang CXX=clang++ conan profile detect --name clang --force
+          conan install . -of build/dev -s build_type=Debug -s compiler.cppstd=20 \
+            -pr:h clang -pr:b default --build=missing
+          CC=clang CXX=clang++ cmake -S . -B build/dev -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/build/dev/conan_toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Debug -DRIME_SANITIZER=thread
+          CC=clang CXX=clang++ cmake --build build/dev --target rime_core_tests
+
+      # halt_on_error=1 stops at the first race with a nonzero exit, so a regression fails fast.
+      - name: Run rime_core_tests under TSan
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build/dev -R rime_core_tests --output-on-failure
+
   lint:
     name: format, lint & license
     runs-on: ubuntu-latest # style/lint are OS-independent — check once.

@@ -17,7 +17,12 @@ scripts/setup.sh                 # once, to get the toolchains in place
 scripts/build.sh                 # build everything (dev) + run all tests
 scripts/build.sh --preset release --no-tests
 scripts/build.sh --cpp-only --clean
+scripts/build.sh --cpp-only --sanitizer address   # ASan+UBSan build (GCC/Clang; see CI)
 ```
+
+> `--sanitizer address|thread` sets the `RIME_SANITIZER` CMake option (`address` = ASan+UBSan,
+> `thread` = TSan). It instruments the C++ engine only and needs GCC/Clang. CI runs two Linux
+> sanitizer jobs on top of the normal matrix; `thread` guards the lock-free deque + job system.
 
 On Windows, use the `.ps1` equivalents (e.g. `pwsh scripts/build.ps1 -Preset release`).
 
