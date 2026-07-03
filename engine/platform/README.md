@@ -1,8 +1,8 @@
 # engine/platform — the thin OS abstraction
 
 `rime::platform` is the seam between cross-platform engine code and the operating system:
-**window, input, filesystem, timers, and thread utilities**, with one OS-agnostic interface
-and a separate backend per OS (macOS/Cocoa, Windows/Win32, Linux/X11 + Wayland).
+**window, input, filesystem, timers, thread utilities, and TCP sockets**, with one OS-agnostic
+interface and a separate backend per OS (macOS/Cocoa, Windows/Win32, Linux/X11 + Wayland).
 
 **The one rule:** *no OS `#ifdef`s leak upward.* OS-specific code lives only in
 `src/<platform>/` files that are compiled exclusively on their target OS (selected in
@@ -24,13 +24,15 @@ native (no GLFW/SDL).
 | M2.3 | keyboard/mouse events + polled `Input` state | landed |
 | M2.4 | filesystem (file I/O, exe + per-user base dirs) + frame timer | landed |
 | M2.5 | `00-hello-window` proof — live FPS in the title + polled input | landed |
+| S0.1 | **blocking TCP sockets** (`TcpListener`/`TcpSocket`) — transport seam for graphics streaming (Track S), and the seed of `engine/net` ([design](../../docs/design/net-sockets.md)) | landed |
 
 ## Layout
 
 ```
 include/rime/platform/   # OS-agnostic public interface (no OS headers here, ever)
 src/                     # OS-agnostic implementation (clock, lifetime, …)
-src/cocoa/  src/win32/  src/linux/   # per-OS backends, compiled only on their OS
+src/cocoa/  src/win32/  src/linux/  src/posix/   # per-OS backends, compiled only on their OS
+                                                 # (src/posix = BSD sockets, shared by Linux + macOS)
 ```
 
 `std` is used where it already wraps the OS-native call (the monotonic clock is
