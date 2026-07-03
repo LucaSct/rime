@@ -179,6 +179,12 @@ jobs:
       - name: Configure + build rime_core_tests (Clang, TSan)
         run: |
           CC=clang CXX=clang++ conan profile detect --name clang --force
+          # Pin the host profile's compiler executables so Conan builds host-profile deps (fmt)
+          # with Clang, not the default gcc. Without this, Conan configures fmt with /usr/bin/c++
+          # while injecting Clang's -stdlib flag, and the fmt build fails ("unrecognized
+          # command-line option -stdlib=libstdc++"). Build-context tools (glslang) stay on gcc.
+          printf '[conf]\ntools.build:compiler_executables={"c": "clang", "cpp": "clang++"}\n' \
+            >> "$(conan profile path clang)"
           conan install . -of build/dev -s build_type=Debug -s compiler.cppstd=20 \
             -pr:h clang -pr:b default --build=missing
           CC=clang CXX=clang++ cmake -S . -B build/dev -G Ninja \
