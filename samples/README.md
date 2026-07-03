@@ -29,3 +29,4 @@ and looks/feels right, the core thesis is proven.
 > | --- | --- |
 > | `03-icem-viewer` | load a computed part (binary STL) and draw it lit + depth-correct, orbitable; the seed of the ICEM 3-D viewer (depth + camera + push-constant MVP + a studio shade). `--offscreen` renders one frame to a PPM. |
 > | `codec_bench` | **benchmark** (Track S / S0.3): encode representative frames with each streaming codec (raw/LZ4/JPEG) and print ratio, throughput, wire bandwidth, and JPEG PSNR — the measurement behind [ADR-0017](../docs/adr/0017-streaming-codec.md). GPU-free: `codec_bench [w h] [frames]`. |
+> | `04-remote-view` | **Track S (S0.5)**: the remote-view endpoint. `remote_view server` renders a scene off-screen and streams it (tap → codec → protocol) while applying input a client sends back; `remote_view client --headless` connects, scripts input, and receives/decodes frames. The *windowed* client (present in a real window) is the display-dependent piece still to come. |

@@ -100,6 +100,12 @@ struct InputEvent {
 // A framed message stream over one blocking TcpSocket. Owns the socket (move-only, RAII). This is
 // what both ends hold: the server wraps an accepted connection, the client wraps its connected
 // socket, both call handshake() once, then trade messages.
+//
+// Threading: not thread-safe for concurrent *senders* or concurrent *receivers*, but **one sender
+// thread and one receiver thread may use it at the same time** — the send path and the recv path
+// share no mutable state but the socket handle, and TCP is full-duplex. That is exactly what a
+// streaming server needs: pump frames on one thread while draining input on another (see
+// samples/04-remote-view).
 class ProtocolConnection {
 public:
     explicit ProtocolConnection(platform::TcpSocket socket) noexcept;

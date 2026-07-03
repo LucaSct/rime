@@ -18,7 +18,7 @@ unchanged. It is a **removable** feature module (the engine builds without it), 
 | S0.2 | **frame tap** — `FrameStreamer`: copy a rendered texture to the CPU (RHI readback), double-buffered, with a measured per-frame cost | landed |
 | S0.3 | **codec** — `FrameEncoder`/`FrameDecoder`: JPEG (wire) + LZ4 (lossless) + Raw, chosen by measurement ([ADR-0017](../../docs/adr/0017-streaming-codec.md)) | landed |
 | S0.4 | **protocol** — `ProtocolConnection` + `FrameMessage`/`InputEvent`: a versioned, length-prefixed message stream over the S0.1 TCP sockets | landed |
-| S0.5 | the thin client (`samples/04-remote-view`) | planned |
+| S0.5 | remote-view endpoint (`samples/04-remote-view`): headless server + headless client (see + control) | landed (windowed client pending) |
 
 > The transport it streams over is the TCP sockets seam in `engine/platform`
 > ([design](../../docs/design/net-sockets.md), S0.1); at M11 that graduates into `engine/net` and
