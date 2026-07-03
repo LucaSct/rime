@@ -152,8 +152,23 @@ public:
 
 private:
     // A power-of-two circular array of atomic slots. Power-of-two capacity turns the modulo into a
-    // bit-mask. Slots are atomic so the per-element loads/stores are well-defined data races-free;
-    // the deque's fences (not per-slot ordering) provide the cross-thread happens-before.
+    // bit-mask.
+    //
+    // Slot ordering — release/acquire, a note the paper doesn't need but a *pointer-carrying*
+    // deque does. Lê et al. access the array with relaxed atomics and let the top/bottom fences
+    // carry all ordering; that is sufficient when the element IS the payload (say an int). But this
+    // deque carries POINTERS (the job system stores Job*), and the pointed-to object must be
+    // published too: a thief that steals a Job* must also see the Job's fields the owner wrote
+    // before pushing. The index fences already guarantee that by the standard — the release fence
+    // before push()'s bottom store synchronizes-with a thief's acquire load of bottom
+    // ([atomics.fences]/3), so everything the owner wrote before the push happens-before the
+    // thief's use — and the code is race-free with relaxed slots. We nonetheless publish on the
+    // slot itself, a release store paired with an acquire load, for two reasons: it makes the
+    // payload happens-before explicit exactly where the pointer is transferred, and ThreadSanitizer
+    // cannot follow synchronization through a standalone fence (a known TSan blind spot for
+    // fence-based lock-free code) — so without this it reports the payload transfer as a false
+    // race. This only ADDS ordering; it never weakens the index protocol, and the seq-cst
+    // pop/steal fences below are untouched. Write-up: docs/design/work-stealing-deque.md.
     struct Buffer {
         std::size_t cap;
         std::size_t mask;
@@ -162,12 +177,15 @@ private:
         explicit Buffer(std::size_t c)
             : cap(c), mask(c - 1), slots(std::make_unique<std::atomic<T>[]>(c)) {}
 
+        // Acquire: pairs with put()'s release so a stolen pointer's payload is visible to the
+        // thief.
         [[nodiscard]] T get(std::int64_t i) const noexcept {
-            return slots[static_cast<std::size_t>(i) & mask].load(std::memory_order_relaxed);
+            return slots[static_cast<std::size_t>(i) & mask].load(std::memory_order_acquire);
         }
 
+        // Release: publishes the element and, when it is a pointer, the object it points at.
         void put(std::int64_t i, T x) noexcept {
-            slots[static_cast<std::size_t>(i) & mask].store(x, std::memory_order_relaxed);
+            slots[static_cast<std::size_t>(i) & mask].store(x, std::memory_order_release);
         }
     };
 

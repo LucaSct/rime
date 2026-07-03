@@ -38,6 +38,56 @@ option(RIME_BUILD_SAMPLES "Build example projects under samples/" ON)
 option(RIME_BUILD_TESTS "Build unit tests" ON)
 option(RIME_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 
+# ── Sanitizers (Phase 0.3) ────────────────────────────────────────────────────
+# A build-wide switch for the Clang/GCC sanitizers, off by default. `address` enables
+# AddressSanitizer + UndefinedBehaviorSanitizer together (ASan finds use-after-free / OOB /
+# leaks; UBSan finds signed overflow, bad shifts, misaligned/invalid pointers, …). `thread`
+# enables ThreadSanitizer — the one that matters most to us, because it is how we keep the
+# hand-rolled lock-free Chase-Lev deque (engine/core/.../jobs/chase_lev_deque.hpp) and the
+# job system honest under real multi-threaded load, on weak-memory hardware CI can't provide.
+# ASan and TSan are mutually exclusive (they cannot coexist in one process), so this is a
+# single choice, not a set. Sanitizers are a GCC/Clang toolchain feature; on MSVC a non-off
+# value is rejected rather than silently ignored — the sanitizer CI jobs run on Linux. The
+# flags are validated + computed once here and applied to every target's compile AND link
+# lines in rime_apply_common_target_options() below (the single funnel all our targets use).
+set(RIME_SANITIZER "off" CACHE STRING "Build with a sanitizer: off | address (ASan+UBSan) | thread (TSan)")
+set_property(CACHE RIME_SANITIZER PROPERTY STRINGS off address thread)
+
+if(NOT RIME_SANITIZER MATCHES "^(off|address|thread)$")
+    message(FATAL_ERROR "RIME_SANITIZER must be one of: off | address | thread (got '${RIME_SANITIZER}').")
+endif()
+if(RIME_SANITIZER STREQUAL "off")
+    # No instrumentation; RIME_SANITIZER_FLAGS stays empty and the funnel below is a no-op.
+elseif(MSVC)
+    message(FATAL_ERROR
+        "RIME_SANITIZER=${RIME_SANITIZER} needs a GCC/Clang toolchain (the sanitizer CI jobs "
+        "run on Linux). Configure MSVC builds with -DRIME_SANITIZER=off.")
+elseif(RIME_SANITIZER STREQUAL "address")
+    # Pair ASan with UBSan: one build covers both, and they share the frame-pointer/stack-trace
+    # machinery. -fno-sanitize-recover=all makes any UBSan finding *abort* (a nonzero exit CI
+    # catches) instead of printing and continuing; -fno-omit-frame-pointer + -g keep every
+    # report's file:line readable even in optimized builds.
+    set(RIME_SANITIZER_FLAGS -fsanitize=address,undefined -fno-sanitize-recover=all
+                             -fno-omit-frame-pointer -g)
+else() # thread
+    set(RIME_SANITIZER_FLAGS -fsanitize=thread -fno-omit-frame-pointer -g)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # GCC's ThreadSanitizer cannot instrument a standalone std::atomic_thread_fence — it
+        # emits -Wtsan and treats the fence as a no-op. But the Chase-Lev deque's correctness
+        # rests on exactly those fences (the seq-cst StoreLoad barrier in pop()/steal(), per
+        # Lê/Pop/Cohen/Nardelli 2013). -Werror would turn that advisory into a hard build
+        # failure, so we downgrade it — but GCC's TSan then *under-checks* the deque (it can't
+        # see the happens-before the fences establish). Clang's TSan does model
+        # atomic_thread_fence, so use it for a meaningful run — which is why the CI TSan job
+        # runs on Clang. See docs/design/work-stealing-deque.md.
+        list(APPEND RIME_SANITIZER_FLAGS -Wno-tsan)
+        message(WARNING
+            "RIME_SANITIZER=thread with GCC: GCC's ThreadSanitizer cannot model the standalone "
+            "atomic_thread_fence()s the lock-free deque is built on, so it under-checks them. "
+            "Use Clang (CC=clang CXX=clang++) for a meaningful TSan run — the CI TSan job does.")
+    endif()
+endif()
+
 # ── Where build outputs go ────────────────────────────────────────────────────
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
@@ -59,6 +109,15 @@ function(rime_apply_common_target_options target)
         if(RIME_WARNINGS_AS_ERRORS)
             target_compile_options(${target} PRIVATE -Werror)
         endif()
+    endif()
+
+    # Sanitizer instrumentation (see RIME_SANITIZER above). The flags must reach both the
+    # compile line (to instrument this target's objects) and the link line (so the executable
+    # pulls in the sanitizer runtime), so we add both. RIME_SANITIZER_FLAGS is empty when the
+    # switch is off, making this a no-op for normal builds.
+    if(RIME_SANITIZER_FLAGS)
+        target_compile_options(${target} PRIVATE ${RIME_SANITIZER_FLAGS})
+        target_link_options(${target} PRIVATE ${RIME_SANITIZER_FLAGS})
     endif()
 endfunction()
 

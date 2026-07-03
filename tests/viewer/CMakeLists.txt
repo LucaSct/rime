@@ -3,12 +3,12 @@
 # math that lives with the ICEM viewer sample, so we put that directory on the include path (the same
 # "a test compiles a header the sample owns" pattern the rhi tests use) and link rime::core. As more
 # viewer math lands (colormaps, streamline integration), its tests join this target.
-rime_add_test(rime_render_tests
+rime_add_test(rime_viewer_tests
     camera_test.cpp
     stl_test.cpp)
 
-target_link_libraries(rime_render_tests
+target_link_libraries(rime_viewer_tests
     PRIVATE rime::core)
 
-target_include_directories(rime_render_tests
+target_include_directories(rime_viewer_tests
     PRIVATE ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer)
