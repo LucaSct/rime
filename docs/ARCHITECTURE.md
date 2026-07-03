@@ -152,6 +152,14 @@ Frostbite does it:
 Audio mixing/spatialization; skeletal animation & blending; runtime asset
 loading/streaming; networking/replication. Each behind its own interface.
 
+### `stream` 🟡 — *graphics streaming (Track S)*
+Capture a rendered frame, encode it, and ship it to a thin remote client that presents it and sends
+input back — **one stack** for dev streaming (now), the editor viewport (M9), and remote play (later).
+*Built (S0.2):* the **frame tap** (`FrameStreamer` — RHI readback, double-buffered, measured). A
+*removable* feature module that depends only on the RHI interface + the platform transport, so it
+captures from any backend. → [ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md),
+[design/graphics-streaming.md](design/graphics-streaming.md).
+
 ### `app` ⚪ (stub) — *the application framework & main loop*
 Ties a module set together into a runnable application: initializes subsystems, owns the
 frame loop (input → simulate → render → present), and shuts down cleanly. *Today* it is only

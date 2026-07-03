@@ -199,6 +199,7 @@ endif()
 add_subdirectory(engine/core)     # foundation: version (M0); memory, math, jobs… (M1+)
 add_subdirectory(engine/platform) # OS abstraction: window, input, files, threads (M2+)
 add_subdirectory(engine/rhi)      # Render Hardware Interface + Vulkan backend (M3)
+add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
 add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
 
 # Not yet wired — they land in later milestones/bricks (see docs/ROADMAP.md):
@@ -225,4 +226,4 @@ if(RIME_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_hello.")
+message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_stream, rime_hello.")

@@ -30,7 +30,9 @@ add_subdirectory(core)
 add_subdirectory(platform)
 add_subdirectory(viewer) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
 
-# The RHI tests render through the Vulkan backend, so they only exist when it is built.
+# The RHI tests render through the Vulkan backend, so they only exist when it is built. The frame-tap
+# (stream) proof also renders and reads pixels back, so it rides the same guard.
 if(RIME_RHI_VULKAN)
     add_subdirectory(rhi)
+    add_subdirectory(stream)
 endif()
