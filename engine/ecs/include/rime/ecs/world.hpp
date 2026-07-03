@@ -31,6 +31,8 @@
 // restructure the world concurrently.
 namespace rime::ecs {
 
+template <class... Ts> class Query; // defined in query.hpp (iterates the archetypes below)
+
 class World {
 public:
     World();
@@ -126,6 +128,18 @@ public:
     [[nodiscard]] const ComponentRegistry& components() const noexcept { return registry_; }
 
     [[nodiscard]] std::size_t archetype_count() const noexcept { return archetypes_.size(); }
+
+    // Archetype by index (< archetype_count()). Used by queries (query.hpp) and, later, the
+    // parallel system scheduler (M4.4) to enumerate storage.
+    [[nodiscard]] Archetype& archetype(std::size_t i) noexcept { return *archetypes_[i]; }
+
+    [[nodiscard]] const Archetype& archetype(std::size_t i) const noexcept {
+        return *archetypes_[i];
+    }
+
+    // Build a query over all entities that have every component in Ts. Iterate it with
+    // Query::for_each — see query.hpp. Defined out-of-line there (Query is incomplete here).
+    template <class... Ts> [[nodiscard]] Query<Ts...> query();
 
     // The signature of the archetype `e` currently lives in (the empty signature if `e` isn't
     // alive).

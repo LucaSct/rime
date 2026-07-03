@@ -20,7 +20,7 @@ from `core`'s allocators, and change detection built in — is decided in
 | M4.1 | `engine/ecs` seam; **entity directory** (generational spawn/despawn/liveness/recycling); **component registry** (reflection-aware) behind the `World` | landed |
 | M4.2a | archetype **storage primitives** — allocator-backed `ChunkPool`, per-signature `ChunkLayout`, `Chunk` SoA row store (swap-remove) | landed |
 | M4.2b | World integration — `Archetype` keyed by `ComponentSignature`; `spawn_with` / `add` / `remove` component = archetype move; `get`/`has`; directory `location` wired | landed |
-| M4.3 | queries + chunk-wise iteration | planned |
+| M4.3 | **`Query<Ts...>`** — column-wise iteration over the entities that have a given component set | landed |
 | M4.4 | parallel system scheduler on the `JobSystem` | planned |
 | M4.5 | transform hierarchy (`core::Transform` composition; change-detection's first consumer) | planned |
 | M4.6 | proof `samples/05-ecs-playground` — 100k+ entities in parallel, transforms composing | planned |
@@ -37,6 +37,7 @@ include/rime/ecs/
     chunk_pool.hpp          # allocator-backed 16 KiB chunk blocks (core::PoolAllocator, load-bearing)
     chunk.hpp               # per-signature SoA ChunkLayout + the Chunk row store (swap-remove)
     archetype.hpp           # an archetype's chunks; insert / component access / archetype-move removal
+    query.hpp               # Query<Ts...> — find matching archetypes, scan their columns
     world.hpp               # the World front door: entities, component types, and the archetypes
 src/
     entity_directory.cpp · signature.cpp · chunk_pool.cpp · chunk.cpp · archetype.cpp · world.cpp
@@ -58,6 +59,9 @@ world.get<Velocity>(e)->dx;                     // 1 — resolved through the en
 
 world.add_component<Health>(e, Health{100});    // archetype move: e relocates, keeps Position+Velocity
 world.remove_component<Velocity>(e);            // another move; Position + Health preserved
+
+// Iterate every entity that has all of Ts, column-wise across matching archetypes:
+world.query<Position, Velocity>().for_each([](Position& p, Velocity& v) { p.x += v.dx; });
 
 world.despawn(e);                               // tears the row out; a swapped entity is fixed up
 world.get<Position>(e);                         // nullptr — stale entity, safe no-op

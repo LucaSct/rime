@@ -18,12 +18,13 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > decomposed into bricks **M4.0–M4.6** (see the M4 detail below). **M4.0 landed:**
 > [ADR-0018](adr/0018-ecs-storage-model.md) settles the storage model — **archetype/SoA chunked
 > tables**, generational-`Handle` entities, chunks drawn from `core`'s (now load-bearing) allocators,
-> and change detection designed in from day one. **M4.1 + M4.2 have since landed** — the `engine/ecs`
+> and change detection designed in from day one. **M4.1 – M4.3 have since landed** — the `engine/ecs`
 > module: the generational entity directory + reflection-aware component registry (M4.1), the
-> allocator-backed chunk storage primitives `ChunkPool` / `ChunkLayout` / `Chunk` (M4.2a), and the
+> allocator-backed chunk storage primitives `ChunkPool` / `ChunkLayout` / `Chunk` (M4.2a), the
 > `World` archetype integration — `spawn`, add/remove component = **archetype move**, `get`/`has`,
-> with the directory `location` wired (M4.2b). All ASan+UBSan-clean. **Next:** M4.3 — queries +
-> chunk-wise iteration.
+> directory `location` wired (M4.2b), and **`Query<Ts...>`** — column-wise iteration over the entities
+> that have a given component set (M4.3). All ASan+UBSan-clean. **Next:** M4.4 — the parallel system
+> scheduler (run a query's body across chunks on the `JobSystem`).
 >
 > **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
 > viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,
