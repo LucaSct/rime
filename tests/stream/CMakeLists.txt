@@ -10,6 +10,15 @@ rime_add_test(rime_stream_codec_tests
 target_link_libraries(rime_stream_codec_tests
     PRIVATE rime::stream)
 
+# The protocol proof (S0.4) is also GPU-free: serialization round-trips plus a loopback integration
+# test over 127.0.0.1 (handshake + input + a JPEG frame, end to end). It needs the sockets, so it
+# links rime::platform alongside rime::stream.
+rime_add_test(rime_stream_protocol_tests
+    protocol_test.cpp)
+
+target_link_libraries(rime_stream_protocol_tests
+    PRIVATE rime::stream rime::platform)
+
 # The frame-tap proof (S0.2) renders off-screen and reads the pixels back, so it needs the Vulkan
 # backend and a real device — build it only when the backend is on. Set RIME_REQUIRE_VULKAN in the
 # environment (CI does) to make a missing device a failure rather than a skip.

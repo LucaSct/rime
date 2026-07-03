@@ -158,8 +158,10 @@ input back — **one stack** for dev streaming (now), the editor viewport (M9), 
 *Built (S0.2):* the **frame tap** (`FrameStreamer` — RHI readback, double-buffered, measured).
 *Built (S0.3):* the **codec** (`FrameEncoder`/`FrameDecoder`) — JPEG (libjpeg-turbo) on the wire, LZ4
 for lossless, chosen by measurement ([ADR-0017](adr/0017-streaming-codec.md)); both libraries stay
-hidden behind the public header. A *removable* feature module that depends only on the RHI interface +
-the platform transport, so it captures from any backend. →
+hidden behind the public header. *Built (S0.4):* the **protocol** (`ProtocolConnection` +
+`FrameMessage`/`InputEvent`) — a versioned, length-prefixed message stream over the platform TCP
+sockets, the same wire the M9 editor viewport will ride. A *removable* feature module that depends
+only on the RHI interface + the platform transport, so it captures from any backend. →
 [ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md),
 [design/graphics-streaming.md](design/graphics-streaming.md).
 

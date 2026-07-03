@@ -32,7 +32,7 @@ protocol is already proven, the viewport toolkit already graduated from the ICEM
 | TCP transport primitive | `engine/platform` sockets ([net-sockets.md](net-sockets.md)) → `engine/net` at M11 | **S0.1 ✅** |
 | Frame tap (capture) | `engine/stream` — `FrameStreamer` | **S0.2 ✅** |
 | Codec | `engine/stream` — `FrameEncoder`/`FrameDecoder` | **S0.3 ✅** |
-| Versioned protocol | `engine/stream` (grows editor message types at M6/M9) | S0.4 |
+| Versioned protocol | `engine/stream` — `ProtocolConnection` (grows editor message types at M6/M9) | **S0.4 ✅** |
 | Thin client | `samples/04-remote-view` (built *on* Rime) → an `apps/` home later | S0.5 |
 
 `engine/stream` is a **removable** feature module that depends only on the RHI *interface* and the
@@ -48,8 +48,8 @@ openh264 / royalty-free AV1 — never GPL x264 in the engine).
 - **S0.2 — frame tap ✅** (this module). Detailed below.
 - **S0.3 — codec v0 ✅.** JPEG (libjpeg-turbo) on the wire, LZ4 for the lossless path — decided by
   measurement ([ADR-0017](../adr/0017-streaming-codec.md)). Detailed below.
-- **S0.4 — protocol v0.** Length-prefixed frame + input messages over TCP, **versioned header from
-  day one** (the editor rides this at M9). Keep v0 dumb.
+- **S0.4 — protocol v0 ✅.** Versioned, length-prefixed frame + input messages over TCP (the editor
+  rides this at M9). Detailed below.
 - **S0.5 — the client.** `samples/04-remote-view`: a thin Rime-built client (platform window + an RHI
   textured quad presenting decoded frames, plus keyboard/mouse → backchannel). macOS/MoltenVK first;
   runs anywhere Rime runs.
@@ -120,6 +120,42 @@ rationale are in [ADR-0017](../adr/0017-streaming-codec.md). Headline (1080p30, 
 Proof: `tests/stream/frame_codec_test.cpp` — **GPU-free**, so it runs on every CI OS: Raw/LZ4 are
 checked bit-exact, JPEG close (small mean error) and small, and every malformed call (bad format,
 size mismatch, corrupt input, dimension-lie) is refused rather than overrunning.
+
+## The protocol (S0.4)
+
+`protocol.hpp` defines how encoded frames go *down* and input events come *back*, framed over the
+S0.1 TCP sockets. This is the seam that **outlives S0**: the M9 editor viewport rides this exact
+protocol (ADR-0016), so it is **versioned from day one** and its message space is meant to grow
+(editor edit/inspect messages), never to be renumbered.
+
+Wire shape — all integers **little-endian** (chosen once so the bytes are identical on every
+compiler/CPU; we serialize field-by-field, never memcpy a struct):
+
+```
+Handshake (once per side, right after connect):  [ magic:u32 = "RMS1" ][ version:u16 ]
+Every message after that:                        [ type:u16 ][ length:u32 ][ payload:length ]
+```
+
+- **`FrameMessage`** (server → client): `[ seq | capture_us | codec | format | w | h | data… ]`.
+  Everything the peer needs to decode: the `Codec` and an `ImageDesc`, then the encoded bytes. `seq`
+  is for gap detection; `capture_us` is a monotonic stamp for latency (exact on loopback — S0.6).
+- **`InputEvent`** (client → server): one tagged struct — key up/down, pointer move/button/scroll —
+  so the server's event-injection loop (S0.5) stays a simple switch. Pixel format rides a **stable
+  wire code**, independent of `rhi::Format`'s internal numbering, so renumbering that enum never
+  breaks the wire.
+- **`ProtocolConnection`** owns one `TcpSocket`, does the `handshake()` (rejects a wrong
+  magic/version peer rather than misparsing it), and `send_message`/`recv_message` frame the
+  envelope. Receiving trusts nothing: a length over `kMaxMessageBytes` (64 MiB) is refused, and a
+  short/truncated read is a clean failure (`recv_exact`), not a misread.
+
+v0 is deliberately dumb: **blocking, length-prefixed, one message at a time.** Non-blocking /
+multiplexed I/O, compression negotiation, and TLS are later (S1–S2); the versioned header is what lets
+them arrive without breaking the editor.
+
+Proof: `tests/stream/protocol_test.cpp` — **GPU-free**. Message serialization round-trips (including
+signed and float fields) and rejects truncated / unknown-codec / unknown-format payloads; a **loopback
+integration test** over `127.0.0.1` shakes hands, sends input up, streams a JPEG frame down, and
+decodes it back to pixels — codec + protocol + sockets, end to end, no device.
 
 ## Later (post-M5)
 
