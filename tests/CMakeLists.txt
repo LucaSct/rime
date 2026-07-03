@@ -15,12 +15,20 @@ function(rime_add_test name)
     add_executable(${name} ${ARGN})
     target_link_libraries(${name} PRIVATE doctest::doctest)
     rime_apply_common_target_options(${name})
+    # doctest's header transitively includes libstdc++'s <ciso646>, whose C++20 deprecation
+    # #warning Clang surfaces even from a system header (GCC suppresses it). Under our -Werror
+    # that becomes a fatal error, so silence just the #warning diagnostic for test targets on
+    # Clang — third-party header noise, not our code. (The flag is quoted so CMake doesn't read
+    # the '#' as a comment.) This is what lets the Clang-based CI TSan job build the suite.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(${name} PRIVATE "-Wno-#warnings")
+    endif()
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
 add_subdirectory(core)
 add_subdirectory(platform)
-add_subdirectory(render) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
+add_subdirectory(viewer) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
 
 # The RHI tests render through the Vulkan backend, so they only exist when it is built.
 if(RIME_RHI_VULKAN)
