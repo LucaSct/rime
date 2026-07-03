@@ -27,6 +27,7 @@ function(rime_add_test name)
 endfunction()
 
 add_subdirectory(core)
+add_subdirectory(ecs)
 add_subdirectory(platform)
 add_subdirectory(viewer) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
 add_subdirectory(stream) # codec proof is GPU-free (always built); the frame-tap proof self-guards on RIME_RHI_VULKAN
