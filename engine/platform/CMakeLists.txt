@@ -14,6 +14,7 @@ add_library(rime_platform STATIC
     src/window.cpp
     src/input.cpp
     src/filesystem.cpp
+    src/socket.cpp
     src/null/window_null.cpp)
 
 # Namespaced alias so dependents link rime::platform (matching rime::core).
@@ -39,7 +40,8 @@ if(APPLE)
     target_sources(rime_platform PRIVATE
         src/cocoa/threads_cocoa.cpp
         src/cocoa/window_cocoa.mm
-        src/cocoa/paths_cocoa.cpp)
+        src/cocoa/paths_cocoa.cpp
+        src/posix/socket_posix.cpp) # BSD sockets — shared with Linux
     set_source_files_properties(src/cocoa/window_cocoa.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
     set_target_properties(rime_platform PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
     target_link_libraries(rime_platform PRIVATE "-framework Cocoa" "-framework QuartzCore")
@@ -47,7 +49,10 @@ elseif(WIN32)
     target_sources(rime_platform PRIVATE
         src/win32/threads_win32.cpp
         src/win32/window_win32.cpp
-        src/win32/paths_win32.cpp)
+        src/win32/paths_win32.cpp
+        src/win32/socket_win32.cpp)
+    # Winsock: the TCP sockets backend links the Windows sockets library.
+    target_link_libraries(rime_platform PRIVATE ws2_32)
 elseif(UNIX)
     # Linux chooses its windowing system at runtime (Wayland or X11), so both backends are compiled
     # in and window_linux.cpp dispatches between them. keymap_linux is shared (evdev -> Key).
@@ -57,7 +62,8 @@ elseif(UNIX)
         src/linux/window_x11.cpp
         src/linux/window_wayland.cpp
         src/linux/keymap_linux.cpp
-        src/linux/paths_linux.cpp)
+        src/linux/paths_linux.cpp
+        src/posix/socket_posix.cpp) # BSD sockets — shared with macOS
 
     # X11 (Xlib) backend. CMake ships FindX11; X11::X11 is the imported Xlib target.
     find_package(X11 REQUIRED)
