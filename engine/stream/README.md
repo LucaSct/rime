@@ -17,7 +17,7 @@ unchanged. It is a **removable** feature module (the engine builds without it), 
 | --- | --- | --- |
 | S0.2 | **frame tap** — `FrameStreamer`: copy a rendered texture to the CPU (RHI readback), double-buffered, with a measured per-frame cost | landed |
 | S0.3 | **codec** — `FrameEncoder`/`FrameDecoder`: JPEG (wire) + LZ4 (lossless) + Raw, chosen by measurement ([ADR-0017](../../docs/adr/0017-streaming-codec.md)) | landed |
-| S0.4 | versioned length-prefixed frame + input protocol | planned |
+| S0.4 | **protocol** — `ProtocolConnection` + `FrameMessage`/`InputEvent`: a versioned, length-prefixed message stream over the S0.1 TCP sockets | landed |
 | S0.5 | the thin client (`samples/04-remote-view`) | planned |
 
 > The transport it streams over is the TCP sockets seam in `engine/platform`
@@ -49,15 +49,34 @@ public header keeps libjpeg-turbo/lz4 **opaque** (behind `void*`), so consumers 
 client (S0.5) — link the libraries transitively but never include their headers. Reproduce the
 numbers with `samples/codec_bench` (GPU-free).
 
+## The protocol (S0.4)
+
+`ProtocolConnection` frames the codec's bytes for the wire and carries input back, over the S0.1 TCP
+sockets. It is **versioned from day one** (a magic + version handshake on connect) because the M9
+editor viewport rides this same protocol (ADR-0016). Wire shape — all little-endian:
+
+```
+Handshake (each side, once):  [ magic:u32 "RMS1" ][ version:u16 ]
+Every message:                [ type:u16 ][ length:u32 ][ payload ]
+```
+
+`FrameMessage` (server → client) carries `seq | capture_us | codec | format | w | h | data`;
+`InputEvent` (client → server) is one tagged struct for key/pointer events. Decoding **trusts
+nothing** — an over-long length or a truncated read is refused, not misparsed. v0 is deliberately
+dumb (blocking, one message at a time); the versioned header is what lets S1/S2 evolve it without
+breaking the editor. Details in [docs/design/graphics-streaming.md](../../docs/design/graphics-streaming.md).
+
 ## Layout
 
 ```
 include/rime/stream/   # public interface (no backend types, no codec-library headers)
   frame_streamer.hpp   #   S0.2 — the frame tap
   frame_codec.hpp      #   S0.3 — the codec (opaque handles)
+  protocol.hpp         #   S0.4 — the versioned wire protocol
 src/                   # implementation
   frame_streamer.cpp
   frame_codec.cpp      #   the only place <turbojpeg.h>/<lz4.h> are included
+  protocol.cpp         #   little-endian (de)serialization + the framed connection
 ```
 
 Proofs:
@@ -66,3 +85,5 @@ Proofs:
   on lavapipe in CI (GPU-free-skippable, like the RHI proofs).
 - `tests/stream/frame_codec_test.cpp` — **GPU-free**: synthesizes frames, checks Raw/LZ4 bit-exact,
   JPEG close + small, and every malformed call refused. Runs on every CI OS, device or not.
+- `tests/stream/protocol_test.cpp` — **GPU-free**: message serialization round-trips + malformed-input
+  rejection, and a **loopback** test (handshake + input + a JPEG frame, end to end over `127.0.0.1`).
