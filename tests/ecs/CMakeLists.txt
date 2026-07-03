@@ -3,7 +3,10 @@
 rime_add_test(rime_ecs_tests
     entity_directory_test.cpp
     world_test.cpp
-    component_registry_test.cpp)
+    component_registry_test.cpp
+    signature_test.cpp
+    chunk_pool_test.cpp
+    chunk_test.cpp)
 
 target_link_libraries(rime_ecs_tests
     PRIVATE rime::ecs)

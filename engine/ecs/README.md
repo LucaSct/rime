@@ -18,7 +18,8 @@ from `core`'s allocators, and change detection built in — is decided in
 | --- | --- | --- |
 | M4.0 | storage-model decision (archetype/SoA chunks; change detection) — [ADR-0018](../../docs/adr/0018-ecs-storage-model.md) | landed |
 | M4.1 | `engine/ecs` seam; **entity directory** (generational spawn/despawn/liveness/recycling); **component registry** (reflection-aware) behind the `World` | landed |
-| M4.2 | archetype / chunk storage; add/remove component = archetype move | planned |
+| M4.2a | archetype **storage primitives** — allocator-backed `ChunkPool`, per-signature `ChunkLayout`, `Chunk` SoA row store (swap-remove) | landed |
+| M4.2b | World integration — archetype keyed by `ComponentSignature`; spawn-with / add / remove component = archetype move | planned |
 | M4.3 | queries + chunk-wise iteration | planned |
 | M4.4 | parallel system scheduler on the `JobSystem` | planned |
 | M4.5 | transform hierarchy (`core::Transform` composition; change-detection's first consumer) | planned |
@@ -32,9 +33,12 @@ include/rime/ecs/
     entity.hpp              # Entity = core::Handle<EntityTag> (a generational id)
     entity_directory.hpp    # the flat, generational index → location table
     component.hpp           # ComponentId + type-erased ops + the reflection-aware registry
+    signature.hpp           # ComponentSignature — the sorted set of ids identifying an archetype
+    chunk_pool.hpp          # allocator-backed 16 KiB chunk blocks (core::PoolAllocator, load-bearing)
+    chunk.hpp               # per-signature SoA ChunkLayout + the Chunk row store (swap-remove)
     world.hpp               # the World front door (entities + component types; storage grows here)
 src/
-    entity_directory.cpp    # the directory implementation (World is header-only for now)
+    entity_directory.cpp · signature.cpp · chunk_pool.cpp · chunk.cpp   # (World is header-only for now)
 ```
 
 ## Using it (M4.1)
