@@ -37,3 +37,7 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0010](0010-textures-and-descriptors.md) — textures, samplers & the descriptor model
 - [ADR-0011](0011-depth-attachment.md) — depth attachment & the depth test (pulled ahead of M5)
 - [ADR-0012](0012-push-constants.md) — push constants for small per-draw data (MVP, …)
+- [ADR-0013](0013-3d-textures.md) — 3-D (volume) textures (field colormaps; pulled ahead of M5)
+- [ADR-0014](0014-stencil.md) — stencil state (for the cross-section cap)
+- [ADR-0015](0015-imgui-free-ui.md) — a from-scratch, imgui-free immediate-mode UI
+- [ADR-0016](0016-editor-is-a-client-of-the-engine.md) — the editor is a client of the engine (+ parallel-path rules)
