@@ -33,7 +33,7 @@ protocol is already proven, the viewport toolkit already graduated from the ICEM
 | Frame tap (capture) | `engine/stream` — `FrameStreamer` | **S0.2 ✅** |
 | Codec | `engine/stream` — `FrameEncoder`/`FrameDecoder` | **S0.3 ✅** |
 | Versioned protocol | `engine/stream` — `ProtocolConnection` (grows editor message types at M6/M9) | **S0.4 ✅** |
-| Thin client | `samples/04-remote-view` (built *on* Rime) → an `apps/` home later | S0.5 |
+| Server endpoint + headless client | `samples/04-remote-view` (built *on* Rime) | **S0.5 ◐** (windowed client pending) |
 
 `engine/stream` is a **removable** feature module that depends only on the RHI *interface* and the
 platform transport — never a graphics backend — so it captures from Vulkan today and any future
@@ -50,9 +50,13 @@ openh264 / royalty-free AV1 — never GPL x264 in the engine).
   measurement ([ADR-0017](../adr/0017-streaming-codec.md)). Detailed below.
 - **S0.4 — protocol v0 ✅.** Versioned, length-prefixed frame + input messages over TCP (the editor
   rides this at M9). Detailed below.
-- **S0.5 — the client.** `samples/04-remote-view`: a thin Rime-built client (platform window + an RHI
-  textured quad presenting decoded frames, plus keyboard/mouse → backchannel). macOS/MoltenVK first;
-  runs anywhere Rime runs.
+- **S0.5 — the endpoint ◐.** `samples/04-remote-view`, one binary, two roles: a **headless server**
+  (render off-screen → tap → encode → stream, applying the input the client sends back) and a
+  **headless client** (`client --headless`: script input, receive + decode frames, report / write
+  PPMs). Both run without a *display* on a lavapipe box — the full see-and-control loop, verified. The
+  remaining half is the **windowed client** (`client --window`): present decoded frames via the
+  02-textured-quad path + map real window key/mouse events to `InputEvent`. It needs a display, so it
+  lands on a machine with a screen (macOS/MoltenVK first).
 - **S0.6 — proof.** *Engine-side loopback ✅* — `tests/stream/loopback_stream_test.cpp` streams a
   real lavapipe-rendered frame through the whole pipe (tap → encode → protocol → decode) over
   `127.0.0.1` and checks it arrives bit-exact; runs in CI (the GPU-free codec/protocol tests join it).

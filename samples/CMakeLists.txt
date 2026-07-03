@@ -10,4 +10,5 @@ if(RIME_RHI_VULKAN)
     add_subdirectory(01-hello-triangle) # M3.3/M3.4: a triangle off-screen, then presented in a window
     add_subdirectory(02-textured-quad)  # M3.5: an indexed, textured quad (M3's "done when")
     add_subdirectory(03-icem-viewer)    # viewer B1: load a computed part (STL), draw it lit + depth-correct
+    add_subdirectory(04-remote-view)    # Track S0.5: headless streaming server + a client (see + control)
 endif()
