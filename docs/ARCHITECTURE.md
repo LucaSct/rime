@@ -155,9 +155,12 @@ loading/streaming; networking/replication. Each behind its own interface.
 ### `stream` 🟡 — *graphics streaming (Track S)*
 Capture a rendered frame, encode it, and ship it to a thin remote client that presents it and sends
 input back — **one stack** for dev streaming (now), the editor viewport (M9), and remote play (later).
-*Built (S0.2):* the **frame tap** (`FrameStreamer` — RHI readback, double-buffered, measured). A
-*removable* feature module that depends only on the RHI interface + the platform transport, so it
-captures from any backend. → [ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md),
+*Built (S0.2):* the **frame tap** (`FrameStreamer` — RHI readback, double-buffered, measured).
+*Built (S0.3):* the **codec** (`FrameEncoder`/`FrameDecoder`) — JPEG (libjpeg-turbo) on the wire, LZ4
+for lossless, chosen by measurement ([ADR-0017](adr/0017-streaming-codec.md)); both libraries stay
+hidden behind the public header. A *removable* feature module that depends only on the RHI interface +
+the platform transport, so it captures from any backend. →
+[ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md),
 [design/graphics-streaming.md](design/graphics-streaming.md).
 
 ### `app` ⚪ (stub) — *the application framework & main loop*

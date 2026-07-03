@@ -13,7 +13,7 @@ deliberate** — every dependency is code we ship, debug, and are bound by the l
   destiny; we don't pull in a library for something we should understand and own.
 - **Pin versions** and document why each dependency is here.
 
-## What we actually depend on (through M3)
+## What we actually depend on (through M3 + Track S)
 
 Rime pulls its C++ build dependencies through **Conan** (see [`../conanfile.py`](../conanfile.py)),
 not by vendoring source into this directory — so `third_party/` currently holds no code. Each
@@ -26,7 +26,13 @@ MIT / BSD), per the policy above.
 | GPU memory | **VulkanMemoryAllocator (VMA)** | Conan | battle-tested allocator (ADR-0007) |
 | Shader compilation | **glslang** | Conan | offline GLSL→SPIR-V at build time (ADR-0008); no runtime compiler shipped |
 | Formatting | **fmt** | Conan | logging + string formatting in `core` |
+| Streaming — lossy codec | **libjpeg-turbo** | Conan | the S0 wire codec (TurboJPEG API), SIMD JPEG; BSD-3/IJG — ship-safe (ADR-0017) |
+| Streaming — lossless codec | **lz4** | Conan | the lossless/local streaming path; BSD-2 (ADR-0017) |
 | C++ unit tests | **doctest** | Conan | header-only; one small test exe per module |
+
+> Both streaming codecs are **shipped** (games built on Rime stream through `engine/stream`) and
+> deliberately permissive. The engine never links **GPL x264** — the license trap ADR-0016 flagged;
+> hardware encoders / openh264 / royalty-free AV1 are the S1 paths (see ADR-0017).
 
 Decisions already made that *removed* a would-be dependency (VISION principle #1 — own our
 destiny):

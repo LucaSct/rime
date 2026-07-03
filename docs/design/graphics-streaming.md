@@ -31,7 +31,7 @@ protocol is already proven, the viewport toolkit already graduated from the ICEM
 | --- | --- | --- |
 | TCP transport primitive | `engine/platform` sockets ([net-sockets.md](net-sockets.md)) → `engine/net` at M11 | **S0.1 ✅** |
 | Frame tap (capture) | `engine/stream` — `FrameStreamer` | **S0.2 ✅** |
-| Codec | `engine/stream` | S0.3 |
+| Codec | `engine/stream` — `FrameEncoder`/`FrameDecoder` | **S0.3 ✅** |
 | Versioned protocol | `engine/stream` (grows editor message types at M6/M9) | S0.4 |
 | Thin client | `samples/04-remote-view` (built *on* Rime) → an `apps/` home later | S0.5 |
 
@@ -46,8 +46,8 @@ openh264 / royalty-free AV1 — never GPL x264 in the engine).
 - **S0.1 — sockets seam ✅.** Blocking TCP behind the platform seam (BSD/Winsock). See
   [net-sockets.md](net-sockets.md).
 - **S0.2 — frame tap ✅** (this module). Detailed below.
-- **S0.3 — codec v0.** JPEG (libjpeg-turbo, BSD) vs LZ4 on raw RGBA — **decide by measurement**,
-  record the numbers. Budget: raw 1080p30 ≈ 250 MB/s (no-go on WiFi); JPEG ≈ 10–20 MB/s (fine on LAN).
+- **S0.3 — codec v0 ✅.** JPEG (libjpeg-turbo) on the wire, LZ4 for the lossless path — decided by
+  measurement ([ADR-0017](../adr/0017-streaming-codec.md)). Detailed below.
 - **S0.4 — protocol v0.** Length-prefixed frame + input messages over TCP, **versioned header from
   day one** (the editor rides this at M9). Keep v0 dumb.
 - **S0.5 — the client.** `samples/04-remote-view`: a thin Rime-built client (platform window + an RHI
@@ -87,6 +87,39 @@ Design choices, and why:
 Proof: `tests/stream/frame_streamer_test.cpp` renders a known clear colour off-screen, captures it,
 and checks the CPU pixels + that consecutive captures land in independent buffers (double buffering).
 GPU-gated (lavapipe in CI), like the RHI proofs.
+
+## The codec (S0.3)
+
+`FrameEncoder`/`FrameDecoder` (`rime/stream/frame_codec.hpp`) shrink a captured frame enough to cross
+a network — raw 1080p30 is ~250 MB/s, so the codec is what makes streaming feasible at all. Three
+codecs behind one `Codec` enum (wire values fixed for the S0.4 protocol byte): **Raw** (baseline),
+**LZ4** (lossless, BSD), **Jpeg** (lossy, libjpeg-turbo TurboJPEG API, BSD). The decision is
+**measured**, not asserted — `samples/codec_bench` (GPU-free) is the harness; full numbers and the
+rationale are in [ADR-0017](../adr/0017-streaming-codec.md). Headline (1080p30, JPEG q80/4:2:0):
+
+| content | LZ4 wire MB/s | JPEG wire MB/s | JPEG PSNR |
+| --- | ---: | ---: | ---: |
+| shaded scene | 7.67 | **1.87** | 46 dB |
+| gradient | 42.5 | **1.75** | 50 dB |
+| flat UI | 1.06 | 3.73 | 49 dB |
+
+- **JPEG is the wire codec.** The only one under a WAN budget (~10–12 MB/s) *regardless of content*,
+  at near-lossless quality — LZ4's ratio collapses on the smooth/shaded frames a 3-D viewport mostly
+  is (over budget), while JPEG stays ~2 MB/s. Defaults: quality 80, 4:2:0 subsampling.
+- **LZ4 is the lossless/local path** — not for bandwidth (it loses there) but because it is exact and
+  its decode is nearly free, which the **M9 editor viewport** (local socket, no artifacts) will want.
+- Design choices, and why:
+  - **Libraries stay hidden.** The public header speaks `std::byte` and opaque `void*` handles; only
+    `frame_codec.cpp` includes `<turbojpeg.h>`/`<lz4.h>`. So the thin client (S0.5) decodes with only
+    `rime::stream` on its include path, and the libraries link **PRIVATE**.
+  - **Stateful, handle-reusing.** One `FrameEncoder` owns one TurboJPEG handle for a whole stream
+    (created lazily on first JPEG frame) — real streaming, and a fair benchmark.
+  - **Trusts nothing on decode.** LZ4 uses `_safe`; JPEG validates the stream's own dimensions against
+    the expected `ImageDesc` before writing, so a corrupt/rogue frame can't overrun the output buffer.
+
+Proof: `tests/stream/frame_codec_test.cpp` — **GPU-free**, so it runs on every CI OS: Raw/LZ4 are
+checked bit-exact, JPEG close (small mean error) and small, and every malformed call (bad format,
+size mismatch, corrupt input, dimension-lie) is refused rather than overrunning.
 
 ## Later (post-M5)
 

@@ -33,6 +33,11 @@ Runtime / shipped dependencies:
       Copyright (c) 2018-present, Arseny Kapoulkine. MIT License.
   - VulkanMemoryAllocator (VMA) — GPU memory allocator.
       Copyright (c) Advanced Micro Devices, Inc. (GPUOpen). MIT License.
+  - libjpeg-turbo — SIMD-accelerated JPEG codec (the TurboJPEG API); the Track S wire codec.
+      Copyright (c) 2009-2024 D. R. Commander and contributors; (c) 1991-2020 Thomas G. Lane,
+      Guido Vollbeding (IJG). BSD-3-Clause / IJG License / zlib License.
+  - lz4 — fast lossless compression; the Track S lossless streaming path.
+      Copyright (c) 2011-present, Yann Collet. BSD-2-Clause License.
 
 Build-time / tooling dependencies (not shipped in the engine binary):
 
