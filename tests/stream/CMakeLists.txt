@@ -28,4 +28,13 @@ if(RIME_RHI_VULKAN)
 
     target_link_libraries(rime_stream_tests
         PRIVATE rime::stream rime::rhi)
+
+    # The engine-side capstone (S0.6): a real rendered frame streamed end to end over a loopback
+    # socket — render -> tap -> encode -> protocol -> decode -> verify bit-exact. Needs a device (the
+    # render + readback), so it rides the same Vulkan guard and skips cleanly without one.
+    rime_add_test(rime_stream_loopback_tests
+        loopback_stream_test.cpp)
+
+    target_link_libraries(rime_stream_loopback_tests
+        PRIVATE rime::stream rime::rhi rime::platform)
 endif()
