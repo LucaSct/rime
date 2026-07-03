@@ -1,15 +1,16 @@
 # rime_stream — graphics streaming: capture -> encode -> transport (Track S).
 #
-# S0.2 seeds this module with the **frame tap** (FrameStreamer): copy a rendered RHI texture back to
-# the CPU, double-buffered and timed, so a later brick can encode it (S0.3) and send it over the
-# platform TCP sockets (S0.1). Later bricks add the codec and the versioned protocol; the whole
-# stack is meant to be a shippable, removable engine feature (engine/stream over the future
+# S0.2 seeded this module with the **frame tap** (FrameStreamer): copy a rendered RHI texture back to
+# the CPU, double-buffered and timed. S0.3 adds the **codec** (FrameEncoder/FrameDecoder): shrink that
+# frame with JPEG or LZ4 so it fits a network (ADR-0017). A later brick adds the versioned protocol;
+# the whole stack is meant to be a shippable, removable engine feature (engine/stream over the future
 # engine/net), per ADR-0016 and docs/design/graphics-streaming.md.
 #
 # It depends only on the RHI *interface* (any backend) and — transitively — core, so it captures from
 # Vulkan today and any future backend unchanged. No Vulkan headers here.
 add_library(rime_stream STATIC
-    src/frame_streamer.cpp)
+    src/frame_streamer.cpp
+    src/frame_codec.cpp)
 
 # Namespaced alias so dependents link rime::stream (matching the other modules).
 add_library(rime::stream ALIAS rime_stream)
@@ -19,8 +20,14 @@ target_include_directories(rime_stream
 
 # The RHI interface gives us Device / handles / descriptors; rime::core (log, handles) comes
 # transitively through rime::rhi.
+#
+# The codec libraries are linked PRIVATE: frame_codec.cpp is the only place that includes
+# <turbojpeg.h>/<lz4.h> — the public header hides them behind opaque void* handles — so consumers of
+# rime::stream (e.g. the S0.5 thin client) link the codecs transitively but never see their headers.
+# Targets resolved in the root CMakeLists (…-static for our static build). See conanfile.py, ADR-0017.
 target_link_libraries(rime_stream
-    PUBLIC rime::rhi)
+    PUBLIC rime::rhi
+    PRIVATE ${RIME_TURBOJPEG_TARGET} ${RIME_LZ4_TARGET})
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.
 rime_apply_common_target_options(rime_stream)

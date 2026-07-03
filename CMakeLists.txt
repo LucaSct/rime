@@ -193,6 +193,26 @@ if(RIME_RHI_VULKAN)
     find_package(VulkanMemoryAllocator REQUIRED) # GPUOpen::VulkanMemoryAllocator
 endif()
 
+# Streaming codec dependencies (Track S / S0.3), found once here so the imported targets are visible
+# to engine/stream below. libjpeg-turbo provides the TurboJPEG API (the lossy wire codec); lz4 the
+# lossless one — chosen by measurement in ADR-0017. Both are *shipped* (engine/stream is a
+# shippable feature) and both are permissive (BSD), per third_party/README.md. Their component target
+# names carry the link kind (…-static for our default static build), so pick whichever exists to
+# avoid hard-coding static vs. shared. See conanfile.py.
+find_package(libjpeg-turbo REQUIRED) # libjpeg-turbo::turbojpeg-static (or ::turbojpeg if shared)
+find_package(lz4 REQUIRED)           # LZ4::lz4_static (or LZ4::lz4_shared if shared)
+
+if(TARGET libjpeg-turbo::turbojpeg-static)
+    set(RIME_TURBOJPEG_TARGET libjpeg-turbo::turbojpeg-static)
+else()
+    set(RIME_TURBOJPEG_TARGET libjpeg-turbo::turbojpeg)
+endif()
+if(TARGET LZ4::lz4_static)
+    set(RIME_LZ4_TARGET LZ4::lz4_static)
+else()
+    set(RIME_LZ4_TARGET LZ4::lz4_shared)
+endif()
+
 # ── Modules ───────────────────────────────────────────────────────────────────
 # Added bottom-up as each is implemented. The dependency order mirrors the layer cake
 # in docs/ARCHITECTURE.md (a module may only depend on layers below it).

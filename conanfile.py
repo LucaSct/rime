@@ -54,6 +54,21 @@ class RimeRecipe(ConanFile):
         # call vkAllocateMemory directly; VMA sub-allocates from a few big device allocations.
         self.requires("vulkan-memory-allocator/3.3.0")
 
+        # ── Streaming codecs (Track S / S0.3) ─────────────────────────────────────────
+        # engine/stream captures a rendered frame and must get it small enough to cross a
+        # network. Two codecs, chosen by measurement (ADR-0017, docs/design/graphics-streaming.md):
+        #   - libjpeg-turbo: SIMD-accelerated JPEG (its TurboJPEG API). The lossy wire codec —
+        #     the only one that fits a WAN bandwidth budget (~15 MB/s vs raw's ~250 MB/s at
+        #     1080p30). BSD-3-Clause + IJG — ship-safe under Apache-2.0.
+        #   - lz4: fastest lossless byte compressor (multi-GB/s). Kept for the lossless / local
+        #     paths (e.g. the M9 editor viewport) where JPEG's artifacts are unwelcome. BSD-2.
+        # Both are *shipped* runtime deps (games built on Rime stream through engine/stream), so
+        # both licenses are Apache-2.0-compatible by the third_party/ policy. The engine never
+        # links GPL x264 (see ADR-0016). These are linked PRIVATE into rime_stream: the public
+        # codec header hides the libraries behind opaque handles, so consumers don't see them.
+        self.requires("libjpeg-turbo/3.0.4")
+        self.requires("lz4/1.10.0")
+
         # doctest: a fast-compiling, header-only unit-test framework. Declared as a
         # *test* requirement -- it is needed to build and run our tests, but it is not
         # part of the engine we ship, so it must never leak to consumers of Rime. Conan

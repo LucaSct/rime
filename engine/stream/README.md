@@ -16,7 +16,7 @@ unchanged. It is a **removable** feature module (the engine builds without it), 
 | Brick | Provides | State |
 | --- | --- | --- |
 | S0.2 | **frame tap** — `FrameStreamer`: copy a rendered texture to the CPU (RHI readback), double-buffered, with a measured per-frame cost | landed |
-| S0.3 | codec v0 (JPEG vs LZ4 on RGBA — decide by measurement) | planned |
+| S0.3 | **codec** — `FrameEncoder`/`FrameDecoder`: JPEG (wire) + LZ4 (lossless) + Raw, chosen by measurement ([ADR-0017](../../docs/adr/0017-streaming-codec.md)) | landed |
 | S0.4 | versioned length-prefixed frame + input protocol | planned |
 | S0.5 | the thin client (`samples/04-remote-view`) | planned |
 
@@ -34,15 +34,35 @@ N+1 is captured. Capture is **synchronous** in v0 (it stalls on the GPU copy); `
 cost so we can prove the win when asynchronous readback lands (S1). It does not know how the frame was
 drawn — the app renders, then hands the texture over — which keeps the tap decoupled from the renderer.
 
+## The codec (S0.3)
+
+`FrameEncoder`/`FrameDecoder` shrink a captured frame so it fits a network (raw 1080p30 ≈ 250 MB/s).
+Three codecs behind one `Codec` enum: **Raw** (baseline), **LZ4** (lossless), **Jpeg** (lossy). The
+choice was **measured**, not assumed — see [ADR-0017](../../docs/adr/0017-streaming-codec.md):
+
+- **JPEG is the wire codec** — the only one under a WAN budget on all content (~2 MB/s for a 1080p
+  scene at ~46 dB PSNR); LZ4's ratio collapses on smooth/shaded frames.
+- **LZ4 is the lossless / local path** — exact and nearly-free to decode, for the M9 editor viewport.
+
+The encoder/decoder are **stateful** (they own a reusable TurboJPEG handle, created lazily) and the
+public header keeps libjpeg-turbo/lz4 **opaque** (behind `void*`), so consumers — including the thin
+client (S0.5) — link the libraries transitively but never include their headers. Reproduce the
+numbers with `samples/codec_bench` (GPU-free).
+
 ## Layout
 
 ```
-include/rime/stream/   # public interface (no backend types)
-  frame_streamer.hpp
+include/rime/stream/   # public interface (no backend types, no codec-library headers)
+  frame_streamer.hpp   #   S0.2 — the frame tap
+  frame_codec.hpp      #   S0.3 — the codec (opaque handles)
 src/                   # implementation
   frame_streamer.cpp
+  frame_codec.cpp      #   the only place <turbojpeg.h>/<lz4.h> are included
 ```
 
-Proof: `tests/stream/frame_streamer_test.cpp` — render a known clear colour off-screen, capture it,
-verify the CPU pixels and that consecutive captures land in independent buffers. Needs a device, so it
-runs on lavapipe in CI (GPU-free-skippable, like the RHI proofs).
+Proofs:
+- `tests/stream/frame_streamer_test.cpp` — render a known clear colour off-screen, capture it, verify
+  the CPU pixels and that consecutive captures land in independent buffers. Needs a device, so it runs
+  on lavapipe in CI (GPU-free-skippable, like the RHI proofs).
+- `tests/stream/frame_codec_test.cpp` — **GPU-free**: synthesizes frames, checks Raw/LZ4 bit-exact,
+  JPEG close + small, and every malformed call refused. Runs on every CI OS, device or not.

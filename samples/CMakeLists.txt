@@ -3,6 +3,7 @@
 # Built when RIME_BUILD_SAMPLES is ON (the default); see the top-level CMakeLists.
 add_subdirectory(jobs_core_saturation) # M1.6: work-stealing job system saturating all cores
 add_subdirectory(00-hello-window)      # M2: open a native window, pump input (preview of M2.5)
+add_subdirectory(codec_bench)          # S0.3: measure the streaming codecs (raw/LZ4/JPEG); GPU-free
 
 # Needs the Vulkan RHI backend (the agnostic interface alone can't render).
 if(RIME_RHI_VULKAN)
