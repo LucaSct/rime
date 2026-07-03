@@ -21,14 +21,21 @@ raw pointers.
 
 | Brick | Provides | State |
 | --- | --- | --- |
-| M3.1 | RHI seam + Vulkan instance/device/queues/VMA; `Device` factory + `AdapterInfo` | implemented |
-| M3.2 | offline GLSL→SPIR-V (`rime_add_shaders`) + RHI `Shader` | implemented |
-| M3.3 | graphics `Pipeline`, command encoder (dynamic rendering), buffers/textures, off-screen render + readback — the **first-pixels** proof | implemented |
-| M3.4 | swapchain + present from a window (Win/Linux + macOS/MoltenVK) | planned |
-| M3.5 | textures + samplers + descriptors → the textured quad (M3 "done when") | planned |
+| M3.1 | RHI seam + Vulkan instance/device/queues/VMA; `Device` factory + `AdapterInfo` | landed |
+| M3.2 | offline GLSL→SPIR-V (`rime_add_shaders`) + RHI `Shader` | landed |
+| M3.3 | graphics `Pipeline`, command encoder (dynamic rendering), buffers/textures, off-screen render + readback — the **first-pixels** proof | landed |
+| M3.4 | swapchain + present from a window (Win/Linux + macOS/MoltenVK) | landed (ADR-0009) |
+| M3.5 | textures + samplers + descriptors → the textured quad (M3 "done when") | landed (ADR-0010) |
+| +viewer | depth attachment · push constants · 3-D/volume textures · stencil — pulled ahead of M5 to serve the ICEM viewer, adopted by the render graph later | landed (ADRs 0011–0014) |
 
-> *"implemented"* = code written and reviewed; the first green build + CI run (the proof
-> on lavapipe/MoltenVK) flips these to *landed*.
+> *"landed"* = merged and green in CI on all three OSes (Linux/lavapipe with
+> `RIME_REQUIRE_VULKAN=1`; macOS/MoltenVK locally). M3 is complete — the whole seam + Vulkan
+> backend shipped in PR #2 (2026-07).
+>
+> **Known gaps before the RHI is renderer-ready** (burned down early in M5, in graph-need
+> order): no compute dispatch / storage images, no multiple render targets or blending, no
+> MSAA/mipmaps, a single-set/single-binding descriptor model (16-set pool), one queue, a fixed
+> two frames in flight, and single-threaded command recording.
 
 ## Layout
 
