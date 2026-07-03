@@ -6,7 +6,8 @@ rime_add_test(rime_ecs_tests
     component_registry_test.cpp
     signature_test.cpp
     chunk_pool_test.cpp
-    chunk_test.cpp)
+    chunk_test.cpp
+    world_components_test.cpp)
 
 target_link_libraries(rime_ecs_tests
     PRIVATE rime::ecs)

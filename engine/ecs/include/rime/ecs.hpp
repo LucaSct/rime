@@ -6,11 +6,13 @@
 // public surface; include the individual headers when you only need one. See ADR-0018 for the
 // storage model and docs/design/ecs.md for the design.
 //
-// As of M4.2a: entities (generational ids), the entity directory, the component-type registry, and
-// the archetype **storage primitives** — the ChunkPool (allocator-backed 16 KiB blocks), the
-// per-signature chunk layout, and the Chunk SoA row store. The World-level add/remove/get that ties
-// storage to entities lands in M4.2b, queries + iteration in M4.3, parallel systems in M4.4.
+// As of M4.2b: entities (generational ids), the entity directory, the component-type registry, the
+// archetype storage (ChunkPool + per-signature ChunkLayout + Chunk SoA rows + Archetype), and the
+// World that ties them together — spawn, add/remove component (archetype move), and get/has.
+// Queries
+// + iteration land in M4.3, parallel systems in M4.4.
 
+#include "rime/ecs/archetype.hpp"
 #include "rime/ecs/chunk.hpp"
 #include "rime/ecs/chunk_pool.hpp"
 #include "rime/ecs/component.hpp"

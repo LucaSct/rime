@@ -142,6 +142,15 @@ void* Chunk::component(ComponentId id, std::uint32_t row) noexcept {
     return buffer_ + c->offset + static_cast<std::size_t>(row) * c->size;
 }
 
+const void* Chunk::component(ComponentId id, std::uint32_t row) const noexcept {
+    const ColumnLayout* c = layout_->column(id);
+    if (c == nullptr) {
+        return nullptr;
+    }
+    RIME_ASSERT(row < size_);
+    return buffer_ + c->offset + static_cast<std::size_t>(row) * c->size;
+}
+
 std::uint32_t Chunk::push_back(Entity entity) {
     RIME_ASSERT(!full());
     const std::uint32_t row = size_;
@@ -151,6 +160,19 @@ std::uint32_t Chunk::push_back(Entity entity) {
     }
     ++size_;
     return row;
+}
+
+std::uint32_t Chunk::push_back_uninitialized(Entity entity) {
+    RIME_ASSERT(!full());
+    const std::uint32_t row = size_;
+    entities()[row] = entity; // Entity is trivial; the component columns stay raw for the caller.
+    ++size_;
+    return row;
+}
+
+void Chunk::pop_back_raw() noexcept {
+    RIME_ASSERT(!empty());
+    --size_; // the caller already moved/destroyed the last row's components
 }
 
 Entity Chunk::swap_remove(std::uint32_t row) {

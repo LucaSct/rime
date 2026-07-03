@@ -77,6 +77,17 @@ public:
     // index. Precondition: !full().
     std::uint32_t push_back(Entity entity);
 
+    // Append a row owned by `entity` but leave its component storage **raw** (uninitialized): the
+    // caller must construct every component (by move or default) before the row is observed. This
+    // is the source-side half of an archetype move (M4.2b), where components are moved in from
+    // another archetype rather than default-constructed. Returns the new row index. Precondition:
+    // !full().
+    std::uint32_t push_back_uninitialized(Entity entity);
+
+    // Drop the last row **without** destroying its components — the caller has already moved or
+    // destroyed them (the archetype move relocates them out first). Precondition: !empty().
+    void pop_back_raw() noexcept;
+
     // Remove `row` by moving the last row into its place (swap-remove). Returns the entity
     // relocated into `row` so the caller can update that entity's directory location — or
     // kNullEntity if `row` was the last row (nothing moved). Precondition: row < size().
@@ -91,6 +102,7 @@ public:
 
     // Pointer to one component within a row (nullptr if absent). Prefer the typed get<T>().
     [[nodiscard]] void* component(ComponentId id, std::uint32_t row) noexcept;
+    [[nodiscard]] const void* component(ComponentId id, std::uint32_t row) const noexcept;
 
     template <class T> [[nodiscard]] T* get(ComponentId id, std::uint32_t row) noexcept {
         return static_cast<T*>(component(id, row));

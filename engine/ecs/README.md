@@ -19,7 +19,7 @@ from `core`'s allocators, and change detection built in — is decided in
 | M4.0 | storage-model decision (archetype/SoA chunks; change detection) — [ADR-0018](../../docs/adr/0018-ecs-storage-model.md) | landed |
 | M4.1 | `engine/ecs` seam; **entity directory** (generational spawn/despawn/liveness/recycling); **component registry** (reflection-aware) behind the `World` | landed |
 | M4.2a | archetype **storage primitives** — allocator-backed `ChunkPool`, per-signature `ChunkLayout`, `Chunk` SoA row store (swap-remove) | landed |
-| M4.2b | World integration — archetype keyed by `ComponentSignature`; spawn-with / add / remove component = archetype move | planned |
+| M4.2b | World integration — `Archetype` keyed by `ComponentSignature`; `spawn_with` / `add` / `remove` component = archetype move; `get`/`has`; directory `location` wired | landed |
 | M4.3 | queries + chunk-wise iteration | planned |
 | M4.4 | parallel system scheduler on the `JobSystem` | planned |
 | M4.5 | transform hierarchy (`core::Transform` composition; change-detection's first consumer) | planned |
@@ -36,25 +36,31 @@ include/rime/ecs/
     signature.hpp           # ComponentSignature — the sorted set of ids identifying an archetype
     chunk_pool.hpp          # allocator-backed 16 KiB chunk blocks (core::PoolAllocator, load-bearing)
     chunk.hpp               # per-signature SoA ChunkLayout + the Chunk row store (swap-remove)
-    world.hpp               # the World front door (entities + component types; storage grows here)
+    archetype.hpp           # an archetype's chunks; insert / component access / archetype-move removal
+    world.hpp               # the World front door: entities, component types, and the archetypes
 src/
-    entity_directory.cpp · signature.cpp · chunk_pool.cpp · chunk.cpp   # (World is header-only for now)
+    entity_directory.cpp · signature.cpp · chunk_pool.cpp · chunk.cpp · archetype.cpp · world.cpp
 ```
 
-## Using it (M4.1)
+## Using it (M4.2)
 
 ```cpp
 #include "rime/ecs.hpp"
 using namespace rime::ecs;
 
-World world;
-const Entity e = world.spawn();
-world.is_alive(e);              // true
-world.despawn(e);
-world.is_alive(e);              // false — and a stale copy of `e` stays false forever (generation guard)
+struct Position { float x, y, z; };
+struct Velocity { float dx, dy, dz; };
 
-world.register_component<Position>();          // once; idempotent
-const ComponentId id = world.component_id<Position>();
+World world;
+const Entity e = world.spawn_with(Position{0, 0, 0}, Velocity{1, 0, 0});
+world.has<Position>(e);                         // true
+world.get<Velocity>(e)->dx;                     // 1 — resolved through the entity's archetype
+
+world.add_component<Health>(e, Health{100});    // archetype move: e relocates, keeps Position+Velocity
+world.remove_component<Velocity>(e);            // another move; Position + Health preserved
+
+world.despawn(e);                               // tears the row out; a swapped entity is fixed up
+world.get<Position>(e);                         // nullptr — stale entity, safe no-op
 ```
 
 Components are plain, trivially-copyable structs (ADR-0018). Reflect one with `RIME_REFLECT_*` and

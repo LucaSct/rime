@@ -10,7 +10,9 @@ add_library(rime_ecs STATIC
     src/entity_directory.cpp
     src/signature.cpp
     src/chunk_pool.cpp
-    src/chunk.cpp)
+    src/chunk.cpp
+    src/archetype.cpp
+    src/world.cpp)
 
 # Namespaced alias so dependents link `rime::ecs`, matching our C++ namespace.
 add_library(rime::ecs ALIAS rime_ecs)
