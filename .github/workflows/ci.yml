@@ -157,9 +157,11 @@ jobs:
           pip install "conan>=2,<3"
           conan profile detect --force
 
-      # TSan runs only rime_core_tests (deque + JobSystem) — pure rime::core, no GPU — so it
-      # needs no Vulkan runtime. It still *configures* the whole tree, and the platform module
-      # hard-requires X11 + Wayland at configure time, so those dev libs must be present.
+      # TSan runs the pure-CPU suites — rime_core_tests (deque + JobSystem) and rime_ecs_tests
+      # (M4.4a's par_for_each over chunks, the first real multicore load on top of the deque) —
+      # both pure rime::core/ecs with no GPU, so no Vulkan runtime is needed. It still *configures*
+      # the whole tree, and the platform module hard-requires X11 + Wayland at configure time, so
+      # those dev libs must be present.
       - name: Install Linux deps (windowing, to configure)
         run: |
           sudo apt-get install -y \
@@ -174,9 +176,10 @@ jobs:
       # TSan can instrument it (host profile). But glslang — the offline shader compiler — is a
       # build-context *tool* we never run in this job; pinning the build profile to GCC lets
       # Conan reuse its prebuilt glslang instead of compiling it from source under Clang. fmt,
-      # the one compiled host dependency core pulls in, builds in seconds. We then build only
-      # the rime_core_tests target, which keeps viewer/rhi code out of the Clang -Werror path.
-      - name: Configure + build rime_core_tests (Clang, TSan)
+      # the one compiled host dependency core pulls in, builds in seconds. We then build only the
+      # rime_core_tests + rime_ecs_tests targets (rime_ecs depends only on rime::core), which keeps
+      # viewer/rhi code out of the Clang -Werror path.
+      - name: Configure + build core + ecs tests (Clang, TSan)
         run: |
           CC=clang CXX=clang++ conan profile detect --name clang --force
           # Pin the host profile's compiler executables so Conan builds host-profile deps (fmt)
@@ -190,13 +193,13 @@ jobs:
           CC=clang CXX=clang++ cmake -S . -B build/dev -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/build/dev/conan_toolchain.cmake" \
             -DCMAKE_BUILD_TYPE=Debug -DRIME_SANITIZER=thread
-          CC=clang CXX=clang++ cmake --build build/dev --target rime_core_tests
+          CC=clang CXX=clang++ cmake --build build/dev --target rime_core_tests rime_ecs_tests
 
       # halt_on_error=1 stops at the first race with a nonzero exit, so a regression fails fast.
-      - name: Run rime_core_tests under TSan
+      - name: Run core + ecs tests under TSan
         env:
           TSAN_OPTIONS: halt_on_error=1
-        run: ctest --test-dir build/dev -R rime_core_tests --output-on-failure
+        run: ctest --test-dir build/dev -R 'rime_core_tests|rime_ecs_tests' --output-on-failure
 
   lint:
     name: format, lint & license

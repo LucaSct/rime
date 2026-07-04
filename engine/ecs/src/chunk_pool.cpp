@@ -16,10 +16,13 @@ ChunkPool::Superblock::Superblock(std::byte* mem,
     : memory(mem), bytes(size), pool(mem, size, chunk_size, chunk_align) {}
 
 ChunkPool::Superblock::~Superblock() {
-    // Paired with the aligned ::operator new in add_superblock(). Sized+aligned delete so the
-    // runtime frees exactly what was requested (over-aligned allocations must be freed via the
-    // aligned form).
-    ::operator delete(memory, bytes, std::align_val_t{ChunkPool::kChunkAlign});
+    // Paired with the aligned ::operator new in add_superblock(): an over-aligned allocation MUST
+    // be freed through the aligned delete form. Deliberately the *unsized* aligned overload — the
+    // size parameter of `operator delete(void*, size_t, align_val_t)` is only a hint that lets an
+    // allocator skip a size lookup, and Clang before 19 ships with sized deallocation off by
+    // default (-fno-sized-deallocation), so libstdc++ never even declares that overload there
+    // (first seen on CI's Clang 18 TSan job; local Clang 21 accepted it silently).
+    ::operator delete(memory, std::align_val_t{ChunkPool::kChunkAlign});
 }
 
 ChunkPool::ChunkPool(std::size_t chunks_per_super)

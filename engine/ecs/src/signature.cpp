@@ -45,6 +45,26 @@ bool ComponentSignature::contains_all(const ComponentSignature& other) const noe
                          [](ComponentId a, ComponentId b) { return value_of(a) < value_of(b); });
 }
 
+bool ComponentSignature::intersects(const ComponentSignature& other) const noexcept {
+    // Both id vectors are sorted ascending, so walk them together (a merge) — O(n+m), no
+    // allocation. The first id present in both means the sets overlap.
+    std::size_t i = 0;
+    std::size_t j = 0;
+    while (i < ids_.size() && j < other.ids_.size()) {
+        const std::uint32_t a = value_of(ids_[i]);
+        const std::uint32_t b = value_of(other.ids_[j]);
+        if (a == b) {
+            return true;
+        }
+        if (a < b) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+    return false;
+}
+
 ComponentSignature ComponentSignature::with(ComponentId id) const {
     if (contains(id)) {
         return *this;

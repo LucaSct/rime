@@ -18,12 +18,32 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > decomposed into bricks **M4.0–M4.6** (see the M4 detail below). **M4.0 landed:**
 > [ADR-0018](adr/0018-ecs-storage-model.md) settles the storage model — **archetype/SoA chunked
 > tables**, generational-`Handle` entities, chunks drawn from `core`'s (now load-bearing) allocators,
-> and change detection designed in from day one. **M4.1 + M4.2 have since landed** — the `engine/ecs`
+> and change detection designed in from day one. **M4.1 – M4.3 have since landed** — the `engine/ecs`
 > module: the generational entity directory + reflection-aware component registry (M4.1), the
-> allocator-backed chunk storage primitives `ChunkPool` / `ChunkLayout` / `Chunk` (M4.2a), and the
+> allocator-backed chunk storage primitives `ChunkPool` / `ChunkLayout` / `Chunk` (M4.2a), the
 > `World` archetype integration — `spawn`, add/remove component = **archetype move**, `get`/`has`,
-> with the directory `location` wired (M4.2b). All ASan+UBSan-clean. **Next:** M4.3 — queries +
-> chunk-wise iteration.
+> directory `location` wired (M4.2b), **`Query<Ts...>`** — column-wise iteration over the entities that
+> have a given component set (M4.3), and **`Query::par_for_each`** — that iteration run across all cores
+> with **one chunk per job** (chunks are separate pooled buffers ⇒ no false sharing), the engine's
+> first real multicore load on the M1.6 deque; the Phase 0 **TSan** CI job now nets `rime_ecs_tests`
+> too (M4.4a), and the **`System` + `Schedule`** scheduler that batches systems into parallel **phases**
+> from their declared read/write **access sets** — independent systems run side by side, conflicting
+> ones fall into ordered phases (M4.4b), and a **`CommandBuffer`** that records structural edits
+> (spawn/despawn/add/remove) from inside a system — thread-safe under `par_for_each` — for the schedule
+> to apply at each phase boundary (M4.4c). **M4.4 is complete**: all ASan+UBSan-clean, and the
+> data-parallel, concurrent-systems, and concurrent-recording paths are all TSan-clean. **M4.5 has
+> since landed** — the **transform hierarchy**: `LocalTransform` / `WorldTransform` / `Parent` +
+> `propagate_transforms` composing `world = parent.world * local` depth-by-depth, each level updated in
+> parallel (flat scenes take a fully-parallel fast path); derivation in
+> [docs/math/transform-hierarchy.md](math/transform-hierarchy.md). Change detection's dirty-subtree
+> optimization is **deferred** (measure before optimize; recompute-all is correct + parallel).
+> **M4.6 has landed, and with it MILESTONE 4 IS COMPLETE**: the proof sample
+> `samples/05-ecs-playground` runs both of M4's "done when" clauses green — **200k entities stepped in
+> parallel** through the ECS (a `Query::par_for_each` integrate system on a `Schedule`), timed against a
+> serial baseline at **≈10× on 16 cores (Release)** and verified bit-for-bit identical, and a **transform
+> hierarchy** (a tank: hull → turret → barrel → muzzle) composing `world = parent·local` correctly and
+> following its root when moved. `engine/ecs` is in the default build; the sample self-checks (non-zero
+> exit on failure). **Next:** M5 — the render graph + PBR (first light).
 >
 > **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
 > viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,
@@ -212,16 +232,24 @@ despawn / liveness / recycling) + **component registration through reflection** 
 `ChunkLayout`, and the `Chunk` row store with swap-remove · **M4.2b** the World integration — an
 archetype keyed by `ComponentSignature`, spawn-with-components, and add/remove component = archetype
 move (the entity relocates; its directory location is wired). · **M4.3** **queries + chunk-wise
-iteration** — find the archetypes matching a signature and scan their columns. · **M4.4** the **parallel system scheduler** on the
-`JobSystem` (`parallel_for` over chunks; declared read/write sets → phase ordering) — the first
-real multicore load on the Chase-Lev deque, with Phase 0's TSan job as the net. · **M4.5** the
-**transform hierarchy** — parent/child, dirty propagation (change detection's first consumer),
-`core::Transform` composition (`world = parent * local`). · **M4.6** the proof sample
-`samples/05-ecs-playground` — **100k+ entities updating in parallel** and **transforms composing
-correctly** (M4's "done when"), perf measured and recorded; uncomment `engine/ecs` in the root
-`CMakeLists.txt`. M4.0–M4.3 build the world's data model bottom-up; M4.4 runs systems over it in
-parallel; M4.5–M4.6 land the two proofs. A `docs/design/ecs.md` note accompanies the storage
-bricks and a `docs/math/` derivation the transform hierarchy.
+iteration** — find the archetypes matching a signature and scan their columns. · **M4.4** the
+**parallel system scheduler** on the `JobSystem`, in three steps: **M4.4a** `Query::par_for_each` — the
+query body run across all cores with **one chunk per task** (chunks are separate pooled buffers ⇒ no
+false sharing), the first real multicore load on the Chase-Lev deque, with Phase 0's TSan job
+extended over `rime_ecs_tests` as the net · **M4.4b** the **`System` + `Schedule`** scheduler — declared
+read/write **access sets** batched into parallel **phases** (ASAP leveling of the conflict order:
+independent systems run together, conflicting ones keep declared order), phases run concurrently on the
+job system · **M4.4c** **deferred structural changes** — a command buffer applied at phase boundaries,
+lifting the no-structural-change-inside-a-system rule. · **M4.5** the
+**transform hierarchy** — `LocalTransform`/`WorldTransform`/`Parent` + `propagate_transforms`,
+`core::Transform` composition (`world = parent.world * local`) processed depth-by-depth with each level
+updated in parallel (flat scenes take a fully-parallel fast path); the change-detection dirty-subtree
+optimization is deferred (measure first). · **M4.6 (done)** the proof sample
+`samples/05-ecs-playground` — **200k entities updating in parallel** (≈10× on 16 cores, Release, verified
+bit-for-bit vs serial) and **transforms composing correctly** (M4's "done when"), self-checking;
+`engine/ecs` builds by default. M4.0–M4.3 build the world's data model bottom-up; M4.4 runs systems over
+it in parallel; M4.5–M4.6 land the two proofs. A `docs/design/ecs.md` note accompanies the storage
+bricks and a `docs/math/` derivation the transform hierarchy. **Milestone 4 complete.**
 
 **M5 — Render graph + PBR (first light).** `engine/render` — **render graph** (passes,
 transient resources, auto-barriers), mesh/material/camera, **PBR** (+ derivation), depth
