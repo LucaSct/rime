@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 
 #include "rime/rhi/types.hpp"
 
@@ -43,12 +44,20 @@ struct DepthStencilAttachment {
 };
 
 // Describes a dynamic-rendering scope. The render area defaults to the full target extent (the
-// backend reads it from the color target), so the common case needs only the color attachment.
-// `depth_stencil` is optional: leave it unset for a flat 2-D pass (the M3 triangle/quad), set it to
-// enable depth-tested 3-D. The pipeline bound inside the pass must agree (GraphicsPipelineDesc
-// depth fields) — depth on here ⇔ depth_test + matching depth_format on the pipeline.
+// backend reads it from the first color target), so the common case needs only the color
+// attachment. `depth_stencil` is optional: leave it unset for a flat 2-D pass (the M3
+// triangle/quad), set it to enable depth-tested 3-D. The pipeline bound inside the pass must
+// agree (GraphicsPipelineDesc depth fields) — depth on here ⇔ depth_test + matching depth_format
+// on the pipeline.
+//
+// Multiple render targets (M5.1b): fill `colors` with 2..kMaxColorAttachments attachments to have
+// one pass write several images at once (the fragment shader's location-i output lands in
+// colors[i]); it wins over `color` when non-empty, and the bound pipeline must declare matching
+// `color_formats`. All attachments share one extent. The span is read during begin_rendering
+// only (it may reference a caller-owned temporary).
 struct RenderingInfo {
     ColorAttachment color;
+    std::span<const ColorAttachment> colors = {};
     std::optional<DepthStencilAttachment> depth_stencil;
 };
 

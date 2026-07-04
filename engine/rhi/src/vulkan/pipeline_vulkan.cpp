@@ -7,6 +7,7 @@
 // VkRenderPass — that is the Vulkan 1.3 "dynamic rendering" baseline (ADR-0007), and it is what
 // keeps the RHI free of render-pass/framebuffer objects and friendly to the future render graph.
 
+#include <array>
 #include <vector>
 
 #include "vulkan/vulkan_backend.hpp"
@@ -106,16 +107,56 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         ds.back = face(desc.stencil_back);
     }
 
+    // Color attachment formats: the MRT list when declared, else the single-target sugar. One
+    // blend state is replicated across all attachments (BlendMode applies pipeline-wide, M5.1b).
+    std::array<VkFormat, kMaxColorAttachments> color_formats{};
+    std::uint32_t color_count = 1;
+    if (!desc.color_formats.empty()) {
+        if (desc.color_formats.size() > kMaxColorAttachments) {
+            RIME_ERROR("rhi: create_graphics_pipeline('{}') declares {} color targets (max {})",
+                       desc.debug_name,
+                       desc.color_formats.size(),
+                       kMaxColorAttachments);
+            return {};
+        }
+        color_count = static_cast<std::uint32_t>(desc.color_formats.size());
+        for (std::uint32_t i = 0; i < color_count; ++i)
+            color_formats[i] = to_vk(desc.color_formats[i]);
+    } else {
+        color_formats[0] = to_vk(desc.color_format);
+    }
+
+    // Blending (M5.1b): fixed-function "combine with what's already there". The presets bake the
+    // two classic factor pairs — Alpha (the "over" operator: src.a·src + (1−src.a)·dst, with the
+    // alpha channel accumulating coverage as a·1 + (1−a)·dst.a) and Additive (src + dst,
+    // saturating). None keeps the pre-M5.1b overwrite.
     VkPipelineColorBlendAttachmentState blend{};
-    blend.blendEnable = VK_FALSE;
+    blend.blendEnable = desc.blend != BlendMode::None ? VK_TRUE : VK_FALSE;
+    if (desc.blend == BlendMode::Alpha) {
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.colorBlendOp = VK_BLEND_OP_ADD;
+        blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    } else if (desc.blend == BlendMode::Additive) {
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.colorBlendOp = VK_BLEND_OP_ADD;
+        blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
     blend.colorWriteMask = desc.color_write ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
                                             : 0;
+    std::array<VkPipelineColorBlendAttachmentState, kMaxColorAttachments> blends{};
+    blends.fill(blend);
 
     VkPipelineColorBlendStateCreateInfo cb{
         VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    cb.attachmentCount = 1;
-    cb.pAttachments = &blend;
+    cb.attachmentCount = color_count;
+    cb.pAttachments = blends.data();
 
     const VkDynamicState dyn_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
@@ -181,11 +222,11 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     }
 
     // Dynamic rendering: declare the color attachment format(s) the pipeline will render into,
-    // instead of referencing a VkRenderPass.
-    VkFormat color_format = to_vk(desc.color_format);
+    // instead of referencing a VkRenderPass. `color_formats`/`color_count` were computed with the
+    // blend state above (MRT list, or the single-target sugar).
     VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    rendering.colorAttachmentCount = 1;
-    rendering.pColorAttachmentFormats = &color_format;
+    rendering.colorAttachmentCount = color_count;
+    rendering.pColorAttachmentFormats = color_formats.data();
     // Declare the depth/stencil attachment formats so dynamic rendering can match this pipeline to
     // a pass that carries them. We key off the attachment *format*, not just which test is enabled:
     // a stencil-only pass (the cap's marking draw) still binds the depth-stencil image, so every

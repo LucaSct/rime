@@ -116,6 +116,8 @@ template <class Dst, class Src>
             return VK_FORMAT_R32G32B32_SFLOAT;
         case Format::RGBA32Float:
             return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case Format::RGBA16Float:
+            return VK_FORMAT_R16G16B16A16_SFLOAT;
         case Format::D32Float:
             return VK_FORMAT_D32_SFLOAT;
         case Format::D32FloatS8:
