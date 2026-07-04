@@ -199,6 +199,8 @@ template <class Dst, class Src>
         out |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (has(u, TextureUsage::TransferDst))
         out |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (has(u, TextureUsage::Storage))
+        out |= VK_IMAGE_USAGE_STORAGE_BIT;
     return out;
 }
 

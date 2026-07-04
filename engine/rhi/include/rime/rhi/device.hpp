@@ -49,6 +49,11 @@ public:
     [[nodiscard]] virtual ShaderHandle create_shader(const ShaderDesc& desc) = 0;
     [[nodiscard]] virtual PipelineHandle
     create_graphics_pipeline(const GraphicsPipelineDesc& desc) = 0;
+    // A compute pipeline shares the PipelineHandle space with graphics — one handle type, one
+    // destroy() — and records which bind point it targets; binding it through the wrong call
+    // (bind_pipeline vs bind_compute_pipeline) is caught at record time. See ADR-0021.
+    [[nodiscard]] virtual PipelineHandle
+    create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
     [[nodiscard]] virtual SamplerHandle create_sampler(const SamplerDesc& desc) = 0;
 
     // Destruction is explicit and overloaded per handle type. Destroying an invalid/stale handle is

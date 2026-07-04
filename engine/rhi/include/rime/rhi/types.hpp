@@ -110,6 +110,7 @@ enum class TextureUsage : std::uint32_t {
     Sampled = 1u << 2,
     TransferSrc = 1u << 3,
     TransferDst = 1u << 4,
+    Storage = 1u << 5, // written/read by shaders via imageStore/imageLoad (compute, M5.2)
 };
 
 // Where a resource's memory lives, expressed by *access pattern* rather than heap type — VMA picks

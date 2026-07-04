@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// Compute shader for the storage-image proof: each invocation imageStore()s one texel of an rgba8
+// storage image with a value derived from its coordinate — R/G encode x/y exactly (x,y < 256 so
+// x/255 is exact in UNORM8), B is a 4×4 checker. The graphics half of the test then SAMPLES this
+// image, proving the compute → graphics handoff (general layout + the post-dispatch barrier).
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(img)))) {
+        return; // partial workgroups on non-multiple sizes write nothing
+    }
+    float checker = float(((p.x / 4) + (p.y / 4)) % 2);
+    imageStore(img, p, vec4(float(p.x) / 255.0, float(p.y) / 255.0, checker, 1.0));
+}
