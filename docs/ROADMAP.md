@@ -18,8 +18,12 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > decomposed into bricks **M4.0–M4.6** (see the M4 detail below). **M4.0 landed:**
 > [ADR-0018](adr/0018-ecs-storage-model.md) settles the storage model — **archetype/SoA chunked
 > tables**, generational-`Handle` entities, chunks drawn from `core`'s (now load-bearing) allocators,
-> and change detection designed in from day one. **Next:** M4.1 — the entity directory +
-> reflection-based component registration.
+> and change detection designed in from day one. **M4.1 + M4.2 have since landed** — the `engine/ecs`
+> module: the generational entity directory + reflection-aware component registry (M4.1), the
+> allocator-backed chunk storage primitives `ChunkPool` / `ChunkLayout` / `Chunk` (M4.2a), and the
+> `World` archetype integration — `spawn`, add/remove component = **archetype move**, `get`/`has`,
+> with the directory `location` wired (M4.2b). All ASan+UBSan-clean. **Next:** M4.3 — queries +
+> chunk-wise iteration.
 >
 > **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
 > viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,
@@ -203,9 +207,12 @@ one ([ADR-0018](adr/0018-ecs-storage-model.md)); *proof:* the ADR — no code, t
 rest of M4 cites. · **M4.1** the `engine/ecs` seam + **entity directory** (generational spawn /
 despawn / liveness / recycling) + **component registration through reflection** (registered once
 ⇒ serializable now, editor-inspectable at M9; extends `RIME_REFLECT_*`). · **M4.2**
-**archetype / chunk storage** — type-erased SoA columns in 16 KiB chunks; add/remove component =
-archetype move. · **M4.3** **queries + chunk-wise iteration** — find the archetypes matching a
-signature and scan their columns. · **M4.4** the **parallel system scheduler** on the
+**archetype / chunk storage**, in two steps: **M4.2a** the storage primitives — an allocator-backed
+`ChunkPool` (16 KiB blocks from `core`'s pool allocator, finally load-bearing), the per-signature SoA
+`ChunkLayout`, and the `Chunk` row store with swap-remove · **M4.2b** the World integration — an
+archetype keyed by `ComponentSignature`, spawn-with-components, and add/remove component = archetype
+move (the entity relocates; its directory location is wired). · **M4.3** **queries + chunk-wise
+iteration** — find the archetypes matching a signature and scan their columns. · **M4.4** the **parallel system scheduler** on the
 `JobSystem` (`parallel_for` over chunks; declared read/write sets → phase ordering) — the first
 real multicore load on the Chase-Lev deque, with Phase 0's TSan job as the net. · **M4.5** the
 **transform hierarchy** — parent/child, dirty propagation (change detection's first consumer),
