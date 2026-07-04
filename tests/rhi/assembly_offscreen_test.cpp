@@ -23,11 +23,11 @@
 #include <vector>
 
 #include "assembly.hpp"
-#include "camera.hpp"
 #include "mesh.frag.spv.h"
 #include "mesh.vert.spv.h"
 #include "mesh_render.hpp"
 #include "rime/core/math/mat.hpp"
+#include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 #include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
 
@@ -106,7 +106,7 @@ TEST_CASE("viewer draws a multi-part assembly — colour, visibility, exploded v
     const std::uint32_t size = 160;
     const ClearColor clear{0.05f, 0.05f, 0.06f, 1.0f};
     const auto render = [&](float factor) {
-        rime::viewer::OrbitCamera cam;
+        rime::render::OrbitCamera cam;
         cam.frame(a.center, rime::viewer::framing_radius(a, factor), 1.0f);
         cam.yaw = rime::core::radians(35.0f);
         cam.pitch = rime::core::radians(20.0f);

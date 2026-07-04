@@ -34,7 +34,7 @@ rime_add_test(rime_rhi_tests
     mip_timestamp_test.cpp)
 
 target_link_libraries(rime_rhi_tests
-    PRIVATE rime::rhi) # rime::core (the camera math the mesh proof uses) comes transitively via rhi
+    PRIVATE rime::rhi rime::render) # render: the orbit camera graduated there at M5.5
 
 # Share each render helper + its shaders with the matching sample (one source of truth per proof).
 target_include_directories(rime_rhi_tests

@@ -21,7 +21,6 @@
 #include <cstdlib>
 #include <vector>
 
-#include "camera.hpp"
 #include "field.hpp"
 #include "iso.frag.spv.h"
 #include "iso.hpp"
@@ -30,6 +29,7 @@
 #include "mesh.vert.spv.h"
 #include "mesh_render.hpp"
 #include "rime/core/math/mat.hpp"
+#include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 #include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
 #include "streamline.frag.spv.h"
@@ -97,7 +97,7 @@ TEST_CASE("viewer shows a viscous flow's boundary layer — speed field + stream
 
     const std::uint32_t size = 128;
     const ClearColor clear{0.05f, 0.05f, 0.06f, 1.0f};
-    rime::viewer::OrbitCamera cam;
+    rime::render::OrbitCamera cam;
     cam.frame(rime::core::Vec3{0, 0, 0}, 1.732f, 1.0f); // cube [-1,1] → radius √3
     cam.yaw = rime::core::radians(35.0f);
     cam.pitch = rime::core::radians(20.0f);

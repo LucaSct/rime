@@ -15,7 +15,7 @@ this graph, not as a renderer rewrite.
 | Brick | Provides | State |
 | --- | --- | --- |
 | M5.4 | **RenderGraph v0** — frame-declared raster/compute passes, virtual resources (`RGTexture`), `import`/`export`, compile (versioning → edges → topo order → cull), the transient cache, graph-owned barriers, per-pass GPU ms | landed |
-| M5.5 | the scene layer: `OrbitCamera` (graduated from the viewer), mesh/material registries, ECS render components | next |
+| M5.5 | the **scene layer** — `OrbitCamera` graduated from the viewer (ADR-0016 rule 3, the first parallel-path promotion), procedural primitives (plane/cube/uv-sphere, analytically exact) + `MeshRegistry`/`MaterialRegistry` behind dense ids, reflection-registered ECS render components (`MeshRef`, `MaterialRef`, `Camera`, lights) | landed |
 | M5.6 | the PBR forward pass library (depth pre-pass → HDR forward → tonemap) + `docs/math/pbr.md` | planned |
 
 Deliberate v0 bounds (ADR-0019 records why): serial recording on one queue (pass boundaries keep

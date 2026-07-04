@@ -12,11 +12,11 @@
 
 #include <cmath>
 
-#include "camera.hpp" // samples/03-icem-viewer, on the test's include path (see CMakeLists.txt)
+#include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 
 using rime::core::Vec3;
 using rime::core::Vec4;
-using rime::viewer::OrbitCamera;
+using rime::render::OrbitCamera;
 
 namespace {
 

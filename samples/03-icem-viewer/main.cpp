@@ -19,8 +19,9 @@
 //           icem_viewer viscous.stl --flow velocity      # streamlines of the computed flow (D)
 //           icem_viewer viscous.stl --dvr --speed        # DVR of the speed boundary layer (D2)
 //           icem_viewer --assembly tokamak/              # many parts: colour, toggle, explode (E1)
-//           icem_viewer --engine engine/                 # geared turbofan: cut-away + Mach flow (Bview)
-//           icem_viewer                                  # no file -> a unit cube, runs anywhere
+//           icem_viewer --engine engine/                 # geared turbofan: cut-away + Mach flow
+//           (Bview) icem_viewer                                  # no file -> a unit cube, runs
+//           anywhere
 
 #include <algorithm>
 #include <array>
@@ -38,7 +39,6 @@
 #include <vector>
 
 #include "assembly.hpp"
-#include "camera.hpp"
 #include "cap.hpp"
 #include "chart.hpp"
 #include "engine.hpp"
@@ -49,6 +49,7 @@
 #include "provenance.hpp"
 #include "provenance_view.hpp"
 #include "rime/platform/platform.hpp"
+#include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 #include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
 #include "streamlines.hpp"
@@ -76,9 +77,9 @@
 
 namespace {
 
+using rime::render::OrbitCamera;
 using rime::viewer::CpuMesh;
 using rime::viewer::MeshPush;
-using rime::viewer::OrbitCamera;
 using rime::viewer::ScalarField;
 using rime::viewer::VectorField;
 
@@ -208,11 +209,11 @@ bool write_ppm(const std::string& path,
     return static_cast<bool>(out);
 }
 
-// Render one lit, square (aspect-1) frame of the part at camera `cam` to an RGBA8 pixel buffer. The one
-// place that dispatches plain vs. sectioned (capped) rendering, shared by the single snapshot, the
-// turntable export and the windowed screenshot — so all three stay pixel-for-pixel the same view. A
-// sectioned frame carries the solid cap (and the field on the cut face); an unclipped one is the plain
-// lit part. `cap_on` is ignored unless `clip.on`.
+// Render one lit, square (aspect-1) frame of the part at camera `cam` to an RGBA8 pixel buffer. The
+// one place that dispatches plain vs. sectioned (capped) rendering, shared by the single snapshot,
+// the turntable export and the windowed screenshot — so all three stay pixel-for-pixel the same
+// view. A sectioned frame carries the solid cap (and the field on the cut face); an unclipped one
+// is the plain lit part. `cap_on` is ignored unless `clip.on`.
 std::vector<std::uint8_t> render_view(rime::rhi::Device& device,
                                       const CpuMesh& mesh,
                                       const OrbitCamera& cam,
@@ -228,15 +229,41 @@ std::vector<std::uint8_t> render_view(rime::rhi::Device& device,
     const std::uint32_t fnz = use_field ? field->nz : 1;
     if (clip.on) {
         return rime::viewer::render_section_offscreen(
-            device, size, mesh, make_push(cam, 1.0f, clip, field, field_on),
-            make_cap_push(cam, 1.0f, clip, field, field_on, mesh), kClear, cap_on, mesh_vert_spv,
-            sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), capmark_frag_spv,
-            sizeof(capmark_frag_spv), cap_vert_spv, sizeof(cap_vert_spv), cap_frag_spv,
-            sizeof(cap_frag_spv), frgba, fnx, fny, fnz);
+            device,
+            size,
+            mesh,
+            make_push(cam, 1.0f, clip, field, field_on),
+            make_cap_push(cam, 1.0f, clip, field, field_on, mesh),
+            kClear,
+            cap_on,
+            mesh_vert_spv,
+            sizeof(mesh_vert_spv),
+            mesh_frag_spv,
+            sizeof(mesh_frag_spv),
+            capmark_frag_spv,
+            sizeof(capmark_frag_spv),
+            cap_vert_spv,
+            sizeof(cap_vert_spv),
+            cap_frag_spv,
+            sizeof(cap_frag_spv),
+            frgba,
+            fnx,
+            fny,
+            fnz);
     }
-    return rime::viewer::render_mesh_offscreen(
-        device, size, mesh, make_push(cam, 1.0f, clip, field, field_on), kClear, mesh_vert_spv,
-        sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), frgba, fnx, fny, fnz);
+    return rime::viewer::render_mesh_offscreen(device,
+                                               size,
+                                               mesh,
+                                               make_push(cam, 1.0f, clip, field, field_on),
+                                               kClear,
+                                               mesh_vert_spv,
+                                               sizeof(mesh_vert_spv),
+                                               mesh_frag_spv,
+                                               sizeof(mesh_frag_spv),
+                                               frgba,
+                                               fnx,
+                                               fny,
+                                               fnz);
 }
 
 // Off-screen path: render one frame to `out_path` (PPM) and report how much of the frame the part
@@ -293,11 +320,12 @@ int run_offscreen(const CpuMesh& mesh,
     return 0;
 }
 
-// Turntable export (E4): render `frames` lit snapshots orbiting the part through a full 360°, one PPM
-// each (numbered off the out template — icem_view.ppm → icem_view_000.ppm …), and report the render
-// throughput. Headless by nature — a showcase loop over the proven off-screen path, reusing one device.
-// The "perf" half: each frame is timed, and the min / avg / max ms and the frames-per-second print at the
-// end, an honest measure of the engine's offscreen render+readback rate on this GPU.
+// Turntable export (E4): render `frames` lit snapshots orbiting the part through a full 360°, one
+// PPM each (numbered off the out template — icem_view.ppm → icem_view_000.ppm …), and report the
+// render throughput. Headless by nature — a showcase loop over the proven off-screen path, reusing
+// one device. The "perf" half: each frame is timed, and the min / avg / max ms and the
+// frames-per-second print at the end, an honest measure of the engine's offscreen render+readback
+// rate on this GPU.
 int run_turntable_offscreen(const CpuMesh& mesh,
                             const std::string& out_path,
                             std::uint32_t size,
@@ -338,7 +366,8 @@ int run_turntable_offscreen(const CpuMesh& mesh,
         const std::vector<std::uint8_t> px =
             render_view(*device, mesh, cam, size, clip, field, field_on, cap_on);
         const double ms =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count();
         t_sum += ms;
         t_min = std::min(t_min, ms);
         t_max = std::max(t_max, ms);
@@ -453,9 +482,12 @@ bool run_windowed(const CpuMesh& mesh,
     rime::rhi::TextureHandle depth = make_depth(*device, swapchain->extent());
 
     // The from-scratch UI (E2), here drawing the gas-path chart (D4) as an overlay pass.
-    rime::viewer::ui::UiRenderer uir = rime::viewer::ui::make_ui_renderer(
-        *device, swapchain->format(), ui_vert_spv, sizeof(ui_vert_spv), ui_frag_spv,
-        sizeof(ui_frag_spv));
+    rime::viewer::ui::UiRenderer uir = rime::viewer::ui::make_ui_renderer(*device,
+                                                                          swapchain->format(),
+                                                                          ui_vert_spv,
+                                                                          sizeof(ui_vert_spv),
+                                                                          ui_frag_spv,
+                                                                          sizeof(ui_frag_spv));
     rime::viewer::ui::Ui chart_gui;
 
     OrbitCamera cam;
@@ -474,20 +506,20 @@ bool run_windowed(const CpuMesh& mesh,
     bool show_chart = chart_on && field != nullptr; // the gas-path chart (needs a scalar field)
     int shots = 0; // P-key screenshots taken this session (numbers the output files)
 
-    std::printf(
-        "icem_viewer: presenting %u triangles on '%s'.\n"
-        "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
-        "  section: C=toggle, X/Y/Z=axis, N=flip side, [ ]=move plane, K=toggle solid cap\n"
-        "  P=screenshot (icem_shot_NNN.ppm)\n",
-        mesh.triangle_count(),
-        device->adapter().name.c_str());
+    std::printf("icem_viewer: presenting %u triangles on '%s'.\n"
+                "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, ESC=quit\n"
+                "  section: C=toggle, X/Y/Z=axis, N=flip side, [ ]=move plane, K=toggle solid cap\n"
+                "  P=screenshot (icem_shot_NNN.ppm)\n",
+                mesh.triangle_count(),
+                device->adapter().name.c_str());
     if (field) {
-        std::printf("  field: '%s' [%s] range %.4g .. %.4g — G=toggle colormap, H=gas-path chart (%s)\n",
-                    field->name.c_str(),
-                    field->unit.c_str(),
-                    static_cast<double>(field->vmin),
-                    static_cast<double>(field->vmax),
-                    show_field ? "on" : "off");
+        std::printf(
+            "  field: '%s' [%s] range %.4g .. %.4g — G=toggle colormap, H=gas-path chart (%s)\n",
+            field->name.c_str(),
+            field->unit.c_str(),
+            static_cast<double>(field->vmin),
+            static_cast<double>(field->vmax),
+            show_field ? "on" : "off");
     }
 
     Input input;
@@ -547,24 +579,26 @@ bool run_windowed(const CpuMesh& mesh,
         // Gas-path chart toggle (D4) — the loaded scalar (Mach/T/p) plotted along the flow axis.
         if (input.key_pressed(Key::H) && field)
             show_chart = !show_chart;
-        // P: screenshot the live view. Re-render it square at a crisp resolution off-screen (the same
-        // render_view the snapshot/turntable use) and write a numbered PPM — no swapchain readback path
-        // needed, and the saved frame is higher-res than the window.
+        // P: screenshot the live view. Re-render it square at a crisp resolution off-screen (the
+        // same render_view the snapshot/turntable use) and write a numbered PPM — no swapchain
+        // readback path needed, and the saved frame is higher-res than the window.
         if (input.key_pressed(Key::P)) {
             constexpr std::uint32_t shot_size = 1024;
             const std::vector<std::uint8_t> shot =
                 render_view(*device, mesh, cam, shot_size, clip, field, show_field, show_cap);
             const std::string name = rime::viewer::turntable_frame_path("icem_shot.ppm", shots);
             if (write_ppm(name, shot, shot_size, shot_size)) {
-                std::printf("icem_viewer: screenshot → %s (%ux%u)\n", name.c_str(), shot_size,
-                            shot_size);
+                std::printf(
+                    "icem_viewer: screenshot → %s (%ux%u)\n", name.c_str(), shot_size, shot_size);
                 ++shots;
             } else {
-                std::fprintf(stderr, "icem_viewer: could not write screenshot '%s'\n", name.c_str());
+                std::fprintf(
+                    stderr, "icem_viewer: could not write screenshot '%s'\n", name.c_str());
             }
         }
 
-        // Build + upload the gas-path chart for this frame (a screen-space overlay anchored bottom-left).
+        // Build + upload the gas-path chart for this frame (a screen-space overlay anchored
+        // bottom-left).
         if (show_chart && field) {
             const float CW = static_cast<float>(ext.width), CH = static_cast<float>(ext.height);
             const float cw = std::min(460.0f, CW - 24.0f), ch = 210.0f;
@@ -636,7 +670,9 @@ std::string replace_extension(const std::string& path, const char* ext) {
 }
 
 // The sibling computed-field file for an STL path (ICEM's `field.stl` pairs with its `field.icef`).
-std::string sibling_icef(const std::string& stl_path) { return replace_extension(stl_path, ".icef"); }
+std::string sibling_icef(const std::string& stl_path) {
+    return replace_extension(stl_path, ".icef");
+}
 
 // Off-screen warped snapshot: a static peak-deformation view (gain = 25% of the part radius).
 int run_warp_offscreen(const CpuMesh& mesh,
@@ -1333,10 +1369,10 @@ float build_assembly_panel(rime::viewer::ui::Ui& ui,
     return ph;
 }
 
-// The engine cut-away control panel: title, reset-view, a CUT-AWAY checkbox (the meridional section),
-// the explode slider, the Mach colour-scale readout (what the legend bar spans), and a checkbox per
-// part. Mirrors build_assembly_panel and is shared by the windowed view and the snapshot so both read
-// identically.
+// The engine cut-away control panel: title, reset-view, a CUT-AWAY checkbox (the meridional
+// section), the explode slider, the Mach colour-scale readout (what the legend bar spans), and a
+// checkbox per part. Mirrors build_assembly_panel and is shared by the windowed view and the
+// snapshot so both read identically.
 float build_engine_panel(rime::viewer::ui::Ui& ui,
                          rime::viewer::EngineScene& s,
                          float& explode_pct,
@@ -1619,13 +1655,15 @@ bool run_assembly_windowed(rime::viewer::Assembly& a,
 
 // ---- Engine cut-away (Bview): the coloured, sectioned assembly + Mach streamlines together ----
 
-// The meridional cut-away plane for the engine: a plane through the flow axis (ICEM authors the engine
-// axial direction as +z), so its normal is the *radial* +y — discarding y > centre.y opens the gas
-// path along the whole length. `on` = false leaves the plane disabled (whole engine).
-rime::core::Vec3 engine_clip_center(const rime::viewer::EngineScene& s) { return s.assembly.center; }
+// The meridional cut-away plane for the engine: a plane through the flow axis (ICEM authors the
+// engine axial direction as +z), so its normal is the *radial* +y — discarding y > centre.y opens
+// the gas path along the whole length. `on` = false leaves the plane disabled (whole engine).
+rime::core::Vec3 engine_clip_center(const rime::viewer::EngineScene& s) {
+    return s.assembly.center;
+}
 
-// Off-screen engine snapshot: the sectioned, coloured assembly + Mach-coloured streamlines, with the
-// Mach legend bar and the control panel drawn over it.
+// Off-screen engine snapshot: the sectioned, coloured assembly + Mach-coloured streamlines, with
+// the Mach legend bar and the control panel drawn over it.
 int run_engine_offscreen(rime::viewer::EngineScene& s,
                          const std::string& out_path,
                          std::uint32_t size,
@@ -1643,16 +1681,30 @@ int run_engine_offscreen(rime::viewer::EngineScene& s,
     OrbitCamera cam;
     frame_assembly(cam, s.assembly, 1.0f, factor, world_up);
 
-    rime::viewer::EngineGpu gpu = rime::viewer::make_engine_gpu(
-        *device, Format::RGBA8Unorm, Format::D32Float, s, mesh_vert_spv, sizeof(mesh_vert_spv),
-        mesh_frag_spv, sizeof(mesh_frag_spv), streamline_vert_spv, sizeof(streamline_vert_spv),
-        streamline_frag_spv, sizeof(streamline_frag_spv));
-    rime::viewer::Legend legend = rime::viewer::make_legend(
-        *device, Format::RGBA8Unorm, legend_vert_spv, sizeof(legend_vert_spv), legend_frag_spv,
-        sizeof(legend_frag_spv));
-    rime::viewer::ui::UiRenderer uir =
-        rime::viewer::ui::make_ui_renderer(*device, Format::RGBA8Unorm, ui_vert_spv,
-                                           sizeof(ui_vert_spv), ui_frag_spv, sizeof(ui_frag_spv));
+    rime::viewer::EngineGpu gpu = rime::viewer::make_engine_gpu(*device,
+                                                                Format::RGBA8Unorm,
+                                                                Format::D32Float,
+                                                                s,
+                                                                mesh_vert_spv,
+                                                                sizeof(mesh_vert_spv),
+                                                                mesh_frag_spv,
+                                                                sizeof(mesh_frag_spv),
+                                                                streamline_vert_spv,
+                                                                sizeof(streamline_vert_spv),
+                                                                streamline_frag_spv,
+                                                                sizeof(streamline_frag_spv));
+    rime::viewer::Legend legend = rime::viewer::make_legend(*device,
+                                                            Format::RGBA8Unorm,
+                                                            legend_vert_spv,
+                                                            sizeof(legend_vert_spv),
+                                                            legend_frag_spv,
+                                                            sizeof(legend_frag_spv));
+    rime::viewer::ui::UiRenderer uir = rime::viewer::ui::make_ui_renderer(*device,
+                                                                          Format::RGBA8Unorm,
+                                                                          ui_vert_spv,
+                                                                          sizeof(ui_vert_spv),
+                                                                          ui_frag_spv,
+                                                                          sizeof(ui_frag_spv));
 
     rime::viewer::ui::Ui gui;
     float explode_pct = factor * 100.0f;
@@ -1684,8 +1736,17 @@ int run_engine_offscreen(rime::viewer::EngineScene& s,
     const BufferHandle readback = device->create_buffer(rbd);
 
     auto cmd = device->begin_commands();
-    rime::viewer::record_engine(*cmd, gpu, s, color, depth, {size, size}, cam.view_proj(1.0f),
-                                cam.eye(), clip, factor, kClear);
+    rime::viewer::record_engine(*cmd,
+                                gpu,
+                                s,
+                                color,
+                                depth,
+                                {size, size},
+                                cam.view_proj(1.0f),
+                                cam.eye(),
+                                clip,
+                                factor,
+                                kClear);
     if (s.has_flow)
         rime::viewer::record_legend(*cmd, legend, color, {size, size});
     rime::viewer::ui::record_ui(*cmd, uir, color, {size, size});
@@ -1705,16 +1766,17 @@ int run_engine_offscreen(rime::viewer::EngineScene& s,
     for (std::size_t i = 0; i < static_cast<std::size_t>(size) * size; ++i)
         if (px[i * 4 + 0] > 40 || px[i * 4 + 1] > 40 || px[i * 4 + 2] > 40)
             ++lit;
-    std::printf("icem_viewer: engine — %zu/%zu parts, %s, Mach 0..%.2f%s — covers %.1f%% of a %ux%u "
-                "frame\n",
-                s.assembly.visible_count(),
-                s.assembly.parts.size(),
-                cutaway ? "cut-away" : "whole",
-                static_cast<double>(s.mach_max),
-                s.has_flow ? "" : " (no flow)",
-                100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size),
-                size,
-                size);
+    std::printf(
+        "icem_viewer: engine — %zu/%zu parts, %s, Mach 0..%.2f%s — covers %.1f%% of a %ux%u "
+        "frame\n",
+        s.assembly.visible_count(),
+        s.assembly.parts.size(),
+        cutaway ? "cut-away" : "whole",
+        static_cast<double>(s.mach_max),
+        s.has_flow ? "" : " (no flow)",
+        100.0 * static_cast<double>(lit) / (static_cast<double>(size) * size),
+        size,
+        size);
     if (!write_ppm(out_path, px, size, size)) {
         std::fprintf(stderr, "icem_viewer: could not write '%s'\n", out_path.c_str());
         return 1;
@@ -1723,8 +1785,9 @@ int run_engine_offscreen(rime::viewer::EngineScene& s,
     return 0;
 }
 
-// Windowed engine cut-away: orbit the sectioned, coloured engine with its Mach-coloured streamlines;
-// the control panel toggles parts, the cut-away and the explode; C also toggles the section.
+// Windowed engine cut-away: orbit the sectioned, coloured engine with its Mach-coloured
+// streamlines; the control panel toggles parts, the cut-away and the explode; C also toggles the
+// section.
 bool run_engine_windowed(rime::viewer::EngineScene& s,
                          rime::core::Vec3 world_up,
                          int max_frames,
@@ -1762,43 +1825,67 @@ bool run_engine_windowed(rime::viewer::EngineScene& s,
         return false;
     }
 
-    rime::viewer::EngineGpu gpu = rime::viewer::make_engine_gpu(
-        *device, swapchain->format(), rime::rhi::Format::D32FloatS8, s, mesh_vert_spv,
-        sizeof(mesh_vert_spv), mesh_frag_spv, sizeof(mesh_frag_spv), streamline_vert_spv,
-        sizeof(streamline_vert_spv), streamline_frag_spv, sizeof(streamline_frag_spv));
+    rime::viewer::EngineGpu gpu = rime::viewer::make_engine_gpu(*device,
+                                                                swapchain->format(),
+                                                                rime::rhi::Format::D32FloatS8,
+                                                                s,
+                                                                mesh_vert_spv,
+                                                                sizeof(mesh_vert_spv),
+                                                                mesh_frag_spv,
+                                                                sizeof(mesh_frag_spv),
+                                                                streamline_vert_spv,
+                                                                sizeof(streamline_vert_spv),
+                                                                streamline_frag_spv,
+                                                                sizeof(streamline_frag_spv));
     rime::rhi::TextureHandle depth = make_depth(*device, swapchain->extent());
-    rime::viewer::Legend legend =
-        rime::viewer::make_legend(*device, swapchain->format(), legend_vert_spv,
-                                  sizeof(legend_vert_spv), legend_frag_spv,
-                                  sizeof(legend_frag_spv));
-    rime::viewer::ui::UiRenderer uir = rime::viewer::ui::make_ui_renderer(
-        *device, swapchain->format(), ui_vert_spv, sizeof(ui_vert_spv), ui_frag_spv,
-        sizeof(ui_frag_spv));
+    rime::viewer::Legend legend = rime::viewer::make_legend(*device,
+                                                            swapchain->format(),
+                                                            legend_vert_spv,
+                                                            sizeof(legend_vert_spv),
+                                                            legend_frag_spv,
+                                                            sizeof(legend_frag_spv));
+    rime::viewer::ui::UiRenderer uir = rime::viewer::ui::make_ui_renderer(*device,
+                                                                          swapchain->format(),
+                                                                          ui_vert_spv,
+                                                                          sizeof(ui_vert_spv),
+                                                                          ui_frag_spv,
+                                                                          sizeof(ui_frag_spv));
     rime::viewer::ui::Ui gui;
 
     OrbitCamera cam;
     {
         const rime::rhi::Extent2D e = swapchain->extent();
-        frame_assembly(
-            cam, s.assembly, static_cast<float>(e.width) / static_cast<float>(e.height), 0.0f,
-            world_up);
+        frame_assembly(cam,
+                       s.assembly,
+                       static_cast<float>(e.width) / static_cast<float>(e.height),
+                       0.0f,
+                       world_up);
     }
     print_assembly(s.assembly);
-    std::printf("icem_viewer: engine cut-away — %zu parts, flow %s (Mach 0..%.2f), %u core + %u "
-                "bypass line segments.\n"
-                "  panel: CUT-AWAY toggles the section, drag EXPLODE, click a part to hide it\n"
-                "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, C=cut-away, E=explode, "
-                "ESC=quit\n"
-                "  rendering on '%s'.\n",
-                s.assembly.parts.size(),
-                s.has_flow ? "on" : "off",
-                static_cast<double>(s.mach_max),
-                gpu.has_core ? gpu.core.vertex_count / 2 : 0u,
-                gpu.has_bypass ? gpu.bypass.vertex_count / 2 : 0u,
-                device->adapter().name.c_str());
+    std::printf(
+        "icem_viewer: engine cut-away — %zu parts, flow %s (Mach 0..%.2f), %u core + %u "
+        "bypass line segments.\n"
+        "  panel: CUT-AWAY toggles the section, drag EXPLODE, click a part to hide it\n"
+        "  camera: drag=orbit, right-drag=pan, wheel=zoom, F=reframe, C=cut-away, E=explode, "
+        "ESC=quit\n"
+        "  rendering on '%s'.\n",
+        s.assembly.parts.size(),
+        s.has_flow ? "on" : "off",
+        static_cast<double>(s.mach_max),
+        gpu.has_core ? gpu.core.vertex_count / 2 : 0u,
+        gpu.has_bypass ? gpu.bypass.vertex_count / 2 : 0u,
+        device->adapter().name.c_str());
 
-    const Key digit[10] = {Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
-                           Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0};
+    const Key digit[10] = {Key::Num1,
+                           Key::Num2,
+                           Key::Num3,
+                           Key::Num4,
+                           Key::Num5,
+                           Key::Num6,
+                           Key::Num7,
+                           Key::Num8,
+                           Key::Num9,
+                           Key::Num0};
     float factor = 0.0f;
     float explode_pct = explode_target * 100.0f;
     bool cutaway = cutaway_start;
@@ -1831,7 +1918,10 @@ bool run_engine_windowed(rime::viewer::EngineScene& s,
         const float aspect = static_cast<float>(ext.width) / hh;
 
         const float mx = input.mouse_x(), my = input.mouse_y();
-        gui.begin(static_cast<float>(ext.width), static_cast<float>(ext.height), mx, my,
+        gui.begin(static_cast<float>(ext.width),
+                  static_cast<float>(ext.height),
+                  mx,
+                  my,
                   input.mouse_down(MouseButton::Left));
         bool reframe = input.key_pressed(Key::F);
         const float ph = build_engine_panel(gui, s, explode_pct, cutaway, reframe);
@@ -1863,8 +1953,8 @@ bool run_engine_windowed(rime::viewer::EngineScene& s,
             rime::viewer::make_clip_plane(cutaway, 1, 1.0f, engine_clip_center(s).y);
         rime::viewer::ui::upload_ui(*device, uir, gui);
         auto cmd = device->begin_commands();
-        rime::viewer::record_engine(*cmd, gpu, s, tgt, depth, ext, cam.view_proj(aspect), cam.eye(),
-                                    clip, factor, kClear);
+        rime::viewer::record_engine(
+            *cmd, gpu, s, tgt, depth, ext, cam.view_proj(aspect), cam.eye(), clip, factor, kClear);
         if (s.has_flow)
             rime::viewer::record_legend(*cmd, legend, tgt, ext);
         rime::viewer::ui::record_ui(*cmd, uir, tgt, ext);
@@ -1906,11 +1996,18 @@ int run_provenance_offscreen(const rime::viewer::Provenance& prov,
     rime::viewer::ui::Ui gui;
     int selected = prov.nodes.empty() ? -1 : static_cast<int>(prov.nodes.size()) - 1; // the verdict
     gui.begin(static_cast<float>(size), static_cast<float>(size), -1.0f, -1.0f, false);
-    build_provenance_panel(gui, prov, selected, 0.0f, static_cast<float>(size), static_cast<float>(size));
+    build_provenance_panel(
+        gui, prov, selected, 0.0f, static_cast<float>(size), static_cast<float>(size));
     gui.end();
     const rime::rhi::ClearColor clear{0.06f, 0.07f, 0.09f, 1.0f};
-    const std::vector<std::uint8_t> px = rime::viewer::ui::render_ui_offscreen(
-        *device, size, gui, clear, ui_vert_spv, sizeof(ui_vert_spv), ui_frag_spv, sizeof(ui_frag_spv));
+    const std::vector<std::uint8_t> px = rime::viewer::ui::render_ui_offscreen(*device,
+                                                                               size,
+                                                                               gui,
+                                                                               clear,
+                                                                               ui_vert_spv,
+                                                                               sizeof(ui_vert_spv),
+                                                                               ui_frag_spv,
+                                                                               sizeof(ui_frag_spv));
     std::printf("icem_viewer: provenance of '%s' — %zu nodes, verdict %s\n",
                 prov.design.c_str(),
                 prov.nodes.size(),
@@ -1926,7 +2023,8 @@ int run_provenance_offscreen(const rime::viewer::Provenance& prov,
 // Windowed provenance: click a value to expand its derivation, the wheel scrolls the ledger.
 bool run_provenance_windowed(const rime::viewer::Provenance& prov, int max_frames) {
     using namespace rime::platform;
-    if (!init()) return false;
+    if (!init())
+        return false;
     WindowDesc wd{};
     wd.title = "Rime — ICEM viewer (provenance)";
     wd.width = 1100;
@@ -1955,30 +2053,38 @@ bool run_provenance_windowed(const rime::viewer::Provenance& prov, int max_frame
         shutdown();
         return false;
     }
-    rime::viewer::ui::UiRenderer uir =
-        rime::viewer::ui::make_ui_renderer(*device, swapchain->format(), ui_vert_spv,
-                                           sizeof(ui_vert_spv), ui_frag_spv, sizeof(ui_frag_spv));
+    rime::viewer::ui::UiRenderer uir = rime::viewer::ui::make_ui_renderer(*device,
+                                                                          swapchain->format(),
+                                                                          ui_vert_spv,
+                                                                          sizeof(ui_vert_spv),
+                                                                          ui_frag_spv,
+                                                                          sizeof(ui_frag_spv));
     rime::viewer::ui::Ui gui;
     int selected = -1;
     float scroll = 0.0f, content = 0.0f;
-    std::printf("icem_viewer: provenance '%s' (%zu nodes) — click a value to see why, wheel scrolls, "
-                "ESC quits. On '%s'.\n",
-                prov.design.c_str(),
-                prov.nodes.size(),
-                device->adapter().name.c_str());
+    std::printf(
+        "icem_viewer: provenance '%s' (%zu nodes) — click a value to see why, wheel scrolls, "
+        "ESC quits. On '%s'.\n",
+        prov.design.c_str(),
+        prov.nodes.size(),
+        device->adapter().name.c_str());
 
     Input input;
     int frames = 0;
     while (pump_events() && !window->should_close()) {
-        if (max_frames > 0 && frames >= max_frames) break;
+        if (max_frames > 0 && frames >= max_frames)
+            break;
         input.new_frame();
         Event e{};
-        while (poll_event(e)) input.process(e);
-        if (input.key_pressed(Key::Escape)) window->request_close();
+        while (poll_event(e))
+            input.process(e);
+        if (input.key_pressed(Key::Escape))
+            window->request_close();
 
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float W = static_cast<float>(ext.width), H = static_cast<float>(ext.height);
-        if (input.wheel_y() != 0.0f) scroll -= input.wheel_y() * 40.0f;
+        if (input.wheel_y() != 0.0f)
+            scroll -= input.wheel_y() * 40.0f;
         scroll = std::clamp(scroll, 0.0f, std::max(0.0f, content - (H - 86.0f)));
 
         gui.begin(W, H, input.mouse_x(), input.mouse_y(), input.mouse_down(MouseButton::Left));
@@ -2033,13 +2139,15 @@ int main(int argc, char** argv) {
         false; // --speed: colour/iso/DVR the scalar speed |v| of a vec3 velocity field (D2)
     std::string speed_name; // optional vec3 velocity field name (else the first vec3 field)
     std::string
-        assembly_dir;     // --assembly <dir>: load every *.stl as a coloured, toggleable part (E1)
+        assembly_dir; // --assembly <dir>: load every *.stl as a coloured, toggleable part (E1)
     std::string engine_dir; // --engine <dir>: geared turbofan cut-away + Mach flow (Bview)
-    bool explode = false; // --explode [factor]: start the assembly view exploded
+    bool explode = false;   // --explode [factor]: start the assembly view exploded
     float explode_factor = 1.0f;
     bool prov_mode = false; // --provenance: show ICEM's "why" Ledger (.icejson) on the UI (E3)
-    std::string prov_path;  // explicit .icejson path; else provenance.icejson / an STL sibling is tried
-    bool turntable = false; // --turntable [N]: render a full 360° orbit to N numbered PPM frames (E4)
+    std::string
+        prov_path; // explicit .icejson path; else provenance.icejson / an STL sibling is tried
+    bool turntable =
+        false; // --turntable [N]: render a full 360° orbit to N numbered PPM frames (E4)
     int turntable_frames = 72; // default 72 frames = one every 5°
     bool chart = false; // --chart: overlay the gas-path chart (the field along the flow axis) (D4)
     std::uint32_t size = 512;
@@ -2115,14 +2223,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    // --provenance: surface ICEM's "why" Ledger (.icejson) on the from-scratch UI (E3). A panel-only
-    // view — no 3-D mesh — so it dispatches before any STL/assembly loading. The file is an explicit
+    // --provenance: surface ICEM's "why" Ledger (.icejson) on the from-scratch UI (E3). A
+    // panel-only view — no 3-D mesh — so it dispatches before any STL/assembly loading. The file is
+    // an explicit
     // --provenance <path>, else `provenance.icejson` (what `icem provenance <dir>` writes), else an
     // STL sibling <stem>.icejson.
     if (prov_mode) {
         std::string ppath = prov_path;
         if (ppath.empty())
-            ppath = stl_path.empty() ? "provenance.icejson" : replace_extension(stl_path, ".icejson");
+            ppath =
+                stl_path.empty() ? "provenance.icejson" : replace_extension(stl_path, ".icejson");
         auto prov = rime::viewer::load_provenance(ppath);
         if (!prov) {
             std::fprintf(stderr,
@@ -2145,16 +2255,17 @@ int main(int argc, char** argv) {
     if (!engine_dir.empty()) {
         auto scene = rime::viewer::load_engine(engine_dir);
         if (!scene) {
-            std::fprintf(stderr,
-                         "icem_viewer: no engine_*.stl parts in '%s' (generate with `icem engine %s`)\n",
-                         engine_dir.c_str(),
-                         engine_dir.c_str());
+            std::fprintf(
+                stderr,
+                "icem_viewer: no engine_*.stl parts in '%s' (generate with `icem engine %s`)\n",
+                engine_dir.c_str(),
+                engine_dir.c_str());
             return 1;
         }
         const float factor = explode ? explode_factor : 0.0f;
-        // The turbofan is authored with its flow axis along z, so it reads as a horizontal engine with
-        // the *radial* +y up — a property of the machine, not the ambiguous part-authoring convention
-        // the --up-y flag exists for. Frame it y-up regardless.
+        // The turbofan is authored with its flow axis along z, so it reads as a horizontal engine
+        // with the *radial* +y up — a property of the machine, not the ambiguous part-authoring
+        // convention the --up-y flag exists for. Frame it y-up regardless.
         const rime::core::Vec3 engine_up{0.0f, 1.0f, 0.0f};
         if (offscreen)
             return run_engine_offscreen(*scene, out_path, size, engine_up, factor, true);

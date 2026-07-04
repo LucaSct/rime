@@ -14,9 +14,9 @@
 #include <cstdlib>
 #include <vector>
 
-#include "camera.hpp"
 #include "field.hpp"
 #include "mesh_render.hpp"
+#include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 #include "rime/rhi/rhi.hpp"
 #include "streamline.frag.spv.h"
 #include "streamline.vert.spv.h"
@@ -66,7 +66,7 @@ TEST_CASE("viewer traces and draws streamlines of a velocity field (D)") {
     CHECK(verts.size() > 32);     // several segments
     CHECK(verts.size() % 4 == 0); // vec4 vertices
 
-    rime::viewer::OrbitCamera cam;
+    rime::render::OrbitCamera cam;
     cam.frame(rime::core::Vec3{0, 0, 0}, 1.732f, 1.0f);
     cam.yaw = rime::core::radians(35.0f);
     cam.pitch = rime::core::radians(20.0f);
