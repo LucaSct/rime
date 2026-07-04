@@ -100,6 +100,9 @@ VulkanSwapchain::~VulkanSwapchain() {
             vkDestroyFence(dev, in_flight_[i], nullptr);
         if (frame_cmd_[i] != VK_NULL_HANDLE)
             vkFreeCommandBuffers(dev, device_.vk_command_pool(), 1, &frame_cmd_[i]);
+        for (VkDescriptorPool pool : frame_pools_[i]) // wait_idle above: provably not in flight
+            device_.recycle_descriptor_pool(pool);
+        frame_pools_[i].clear();
     }
     if (surface_)
         vkDestroySurfaceKHR(device_.vk_instance(), surface_, nullptr);
@@ -257,6 +260,11 @@ TextureHandle VulkanSwapchain::acquire_next_image() {
         vkFreeCommandBuffers(dev, device_.vk_command_pool(), 1, &frame_cmd_[frame_]);
         frame_cmd_[frame_] = VK_NULL_HANDLE;
     }
+    // Same argument for the slot's transient descriptor pools (ADR-0020): the fence wait above
+    // proves their sets are no longer in flight, so they reset and return to the device.
+    for (VkDescriptorPool pool : frame_pools_[frame_])
+        device_.recycle_descriptor_pool(pool);
+    frame_pools_[frame_].clear();
 
     std::uint32_t idx = 0;
     const VkResult r = vkAcquireNextImageKHR(
@@ -291,6 +299,7 @@ bool VulkanSwapchain::present(CommandBuffer& commands) {
     device_.submit_with_sync(
         vcb, image_available_[frame_], render_finished_[image_index_], in_flight_[frame_]);
     frame_cmd_[frame_] = vcb.handle(); // alive until this slot recurs (freed in acquire_next_image)
+    frame_pools_[frame_] = vcb.release_descriptor_pools(); // recycled on the same schedule
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
@@ -326,6 +335,9 @@ void VulkanSwapchain::recreate(Extent2D extent) {
             vkFreeCommandBuffers(dev, device_.vk_command_pool(), 1, &frame_cmd_[i]);
             frame_cmd_[i] = VK_NULL_HANDLE;
         }
+        for (VkDescriptorPool pool : frame_pools_[i]) // wait_idle above: provably not in flight
+            device_.recycle_descriptor_pool(pool);
+        frame_pools_[i].clear();
     }
     build(extent);
 }

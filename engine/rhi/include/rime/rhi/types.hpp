@@ -128,6 +128,29 @@ enum class StoreOp : std::uint8_t { Store, DontCare };
 
 enum class ShaderStage : std::uint8_t { Vertex, Fragment, Compute };
 
+// Which pipeline stages can see a resource binding. A flag set (RIME_RHI_FLAGS below) distinct
+// from ShaderStage: ShaderStage names what one shader module *is*, StageMask names the set of
+// stages a binding is *visible to* — one binding often serves several stages (the mesh renderer's
+// field volume is sampled in both the vertex and fragment shader).
+enum class StageMask : std::uint32_t {
+    None = 0,
+    Vertex = 1u << 0,
+    Fragment = 1u << 1,
+    Compute = 1u << 2,
+};
+
+// What kind of resource a shader binding names — the RHI's small, intentional subset of Vulkan's
+// descriptor types (ADR-0020). UniformBuffer = small read-only constants (GLSL `uniform` block);
+// CombinedImageSampler = a texture + how to sample it, in one binding (GLSL `sampler2D/3D`);
+// StorageBuffer / StorageImage = read-write shader access — declared now so the enum is complete,
+// wired up when compute lands (M5.2).
+enum class BindingType : std::uint8_t {
+    UniformBuffer,
+    CombinedImageSampler,
+    StorageBuffer,
+    StorageImage,
+};
+
 enum class PrimitiveTopology : std::uint8_t { TriangleList, TriangleStrip, LineList, PointList };
 
 enum class CullMode : std::uint8_t { None, Front, Back };
@@ -205,5 +228,6 @@ struct AdapterInfo {
 
 RIME_RHI_FLAGS(BufferUsage)
 RIME_RHI_FLAGS(TextureUsage)
+RIME_RHI_FLAGS(StageMask)
 
 } // namespace rime::rhi

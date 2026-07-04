@@ -101,8 +101,6 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(const DeviceDesc& desc) {
         return nullptr;
     if (!dev->create_command_pool())
         return nullptr;
-    if (!dev->create_descriptor_pool())
-        return nullptr;
 
     RIME_INFO("rhi: Vulkan device ready — GPU '{}' (Vulkan {}.{}.{}){}",
               dev->adapter_.name,
@@ -152,8 +150,10 @@ VulkanDevice::~VulkanDevice() {
 
     if (command_pool_)
         vkDestroyCommandPool(device_, command_pool_, nullptr);
-    if (descriptor_pool_)
-        vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+    // Recycled transient descriptor pools (ADR-0020). Any pool an encoder still owns at this
+    // point is a caller bug (encoders must not outlive the device); the free-list is ours.
+    for (VkDescriptorPool pool : descriptor_pool_free_list_)
+        vkDestroyDescriptorPool(device_, pool, nullptr);
     if (allocator_)
         vmaDestroyAllocator(allocator_);
     if (device_)
@@ -419,24 +419,46 @@ bool VulkanDevice::create_command_pool() {
     return true;
 }
 
-bool VulkanDevice::create_descriptor_pool() {
-    // A small shared pool for M3.5's combined image-sampler descriptor sets. Each sampling pipeline
-    // allocates one set, cached and reused across frames (the textured quad is static), so a
-    // handful is ample; the M5 render graph will own a real per-frame descriptor allocator instead.
-    VkDescriptorPoolSize pool_size{};
-    pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    pool_size.descriptorCount = 16;
+VkDescriptorPool VulkanDevice::acquire_descriptor_pool() {
+    // Serve from the free-list when possible: a recycled pool costs one vkResetDescriptorPool,
+    // and steady-state frames stop creating pools entirely. Only a genuinely new high-water mark
+    // creates another one.
+    if (!descriptor_pool_free_list_.empty()) {
+        const VkDescriptorPool pool = descriptor_pool_free_list_.back();
+        descriptor_pool_free_list_.pop_back();
+        return pool;
+    }
 
+    // One transient pool's capacity. Sized so a typical frame fits in a single pool: 256 sets,
+    // with per-type counts covering the binding kinds ADR-0020 declares (storage counts are for
+    // M5.2's compute). An encoder that outgrows this simply chains another pool — capacity is a
+    // performance knob, never a correctness cap (the M3.5 16-set ceiling is gone).
+    const VkDescriptorPoolSize sizes[] = {
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 512},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 512},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 128},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 128},
+    };
     VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    ci.maxSets = 16;
-    ci.poolSizeCount = 1;
-    ci.pPoolSizes = &pool_size;
-    const VkResult r = vkCreateDescriptorPool(device_, &ci, nullptr, &descriptor_pool_);
+    ci.maxSets = 256;
+    ci.poolSizeCount = static_cast<std::uint32_t>(std::size(sizes));
+    ci.pPoolSizes = sizes;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    const VkResult r = vkCreateDescriptorPool(device_, &ci, nullptr, &pool);
     if (r != VK_SUCCESS) {
         RIME_ERROR("rhi: vkCreateDescriptorPool failed: {}", result_string(r));
-        return false;
+        return VK_NULL_HANDLE;
     }
-    return true;
+    return pool;
+}
+
+void VulkanDevice::recycle_descriptor_pool(VkDescriptorPool pool) noexcept {
+    if (pool == VK_NULL_HANDLE)
+        return;
+    // Whole-pool reset: every set the pool ever handed out dies at once. This is why transient
+    // sets are never individually freed — and why recycling must wait for the submission's fence.
+    vkResetDescriptorPool(device_, pool, 0);
+    descriptor_pool_free_list_.push_back(pool);
 }
 
 std::unique_ptr<CommandBuffer> VulkanDevice::begin_commands() {
@@ -474,6 +496,10 @@ void VulkanDevice::submit_blocking(CommandBuffer& commands) {
     VK_CHECK(vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX));
     vkDestroyFence(device_, fence, nullptr);
     vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
+    // The wait above proves the GPU is done with every transient descriptor set this encoder
+    // baked, so its pools can be reset and reused immediately (ADR-0020).
+    for (VkDescriptorPool pool : vcb.release_descriptor_pools())
+        recycle_descriptor_pool(pool);
 }
 
 void VulkanDevice::wait_idle() {

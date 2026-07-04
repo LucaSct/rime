@@ -13,6 +13,14 @@ namespace rime::rhi {
 // Image-layout transitions use the shared transition_image() in vulkan_common.hpp
 // (synchronization2); the swapchain's present-layout transition reuses the same helper.
 
+VulkanCommandBuffer::~VulkanCommandBuffer() {
+    // Pools still owned here mean this encoder was never submitted (the submission paths strip
+    // them via release_descriptor_pools), so no GPU work references their sets — recycling is
+    // safe.
+    for (VkDescriptorPool pool : pools_)
+        device_.recycle_descriptor_pool(pool);
+}
+
 void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     VulkanTexture* tex = device_.lookup(info.color.target);
     if (!tex) {
@@ -112,7 +120,12 @@ void VulkanCommandBuffer::bind_pipeline(PipelineHandle pipeline) {
         RIME_ERROR("rhi: bind_pipeline with an invalid handle");
         return;
     }
-    current_pipeline_ = p; // remembered so bind_texture can find the pipeline's descriptor layout
+    current_pipeline_ = p; // remembered so flush_bindings can find the layout + binding list
+    // A new pipeline may have a different set layout, and a bound descriptor set is only valid
+    // for compatible layouts — so the next draw must bake+bind a set for *this* pipeline even if
+    // the attached resources didn't change. The pending attachments themselves survive pipeline
+    // switches on purpose (attach a texture once, draw it through several pipelines).
+    bindings_dirty_ = !p->bindings.empty();
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipeline);
 }
 
@@ -141,9 +154,8 @@ void VulkanCommandBuffer::bind_index_buffer(BufferHandle buffer,
 void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
                                        TextureHandle texture,
                                        SamplerHandle sampler) {
-    if (current_pipeline_ == nullptr || current_pipeline_->set_layout == VK_NULL_HANDLE) {
-        RIME_ERROR(
-            "rhi: bind_texture without a bound texture-sampling pipeline (sampled_texture?)");
+    if (binding >= kMaxBindings) {
+        RIME_ERROR("rhi: bind_texture binding {} exceeds kMaxBindings ({})", binding, kMaxBindings);
         return;
     }
     VulkanTexture* tex = device_.lookup(texture);
@@ -152,42 +164,145 @@ void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
         RIME_ERROR("rhi: bind_texture with an invalid texture/sampler handle");
         return;
     }
+    // Record the attachment; it is baked into a transient descriptor set at the next draw
+    // (flush_bindings, ADR-0020). We stash the raw Vk objects now so flush never re-resolves
+    // handles — the price is the usual RHI rule that destroying a resource still referenced by
+    // an un-submitted encoder is invalid.
+    PendingBinding& pb = pending_[binding];
+    pb.used = true;
+    pb.type = BindingType::CombinedImageSampler;
+    pb.view = tex->view;
+    pb.sampler = smp->sampler;
+    bindings_dirty_ = true;
+}
 
-    // Allocate the pipeline's descriptor set once (cached on the pipeline), then write it only when
-    // the texture/sampler it points at changes — so a static material never re-writes a set that
-    // may still be in flight on another frame. M3.5's single-material descriptor model (see
-    // ADR-0010).
-    VulkanPipeline* p = current_pipeline_;
-    if (p->set == VK_NULL_HANDLE) {
-        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        ai.descriptorPool = device_.descriptor_pool();
-        ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &p->set_layout;
-        if (vkAllocateDescriptorSets(device_.vk_device(), &ai, &p->set) != VK_SUCCESS) {
-            RIME_ERROR("rhi: failed to allocate a descriptor set");
-            p->set = VK_NULL_HANDLE;
-            return;
+void VulkanCommandBuffer::bind_uniform_buffer(std::uint32_t binding,
+                                              BufferHandle buffer,
+                                              std::uint64_t offset,
+                                              std::uint64_t size) {
+    if (binding >= kMaxBindings) {
+        RIME_ERROR(
+            "rhi: bind_uniform_buffer binding {} exceeds kMaxBindings ({})", binding, kMaxBindings);
+        return;
+    }
+    VulkanBuffer* b = device_.lookup(buffer);
+    if (!b) {
+        RIME_ERROR("rhi: bind_uniform_buffer with an invalid buffer handle");
+        return;
+    }
+    if (!has(b->usage, BufferUsage::Uniform)) {
+        RIME_ERROR("rhi: bind_uniform_buffer on a buffer created without BufferUsage::Uniform");
+        return;
+    }
+    PendingBinding& pb = pending_[binding];
+    pb.used = true;
+    pb.type = BindingType::UniformBuffer;
+    pb.buffer = b->buffer;
+    pb.offset = offset;
+    pb.range = size == 0 ? VK_WHOLE_SIZE : size; // 0 = "through the end of the buffer"
+    bindings_dirty_ = true;
+}
+
+VkDescriptorSet VulkanCommandBuffer::allocate_transient_set(VkDescriptorSetLayout layout) {
+    // Try the newest pool first; treat exhaustion as growth, not failure. FRAGMENTED_POOL is the
+    // pre-1.1 spelling of the same condition, so both fall through to chaining a fresh pool.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!pools_.empty()) {
+            VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            ai.descriptorPool = pools_.back();
+            ai.descriptorSetCount = 1;
+            ai.pSetLayouts = &layout;
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            const VkResult r = vkAllocateDescriptorSets(device_.vk_device(), &ai, &set);
+            if (r == VK_SUCCESS)
+                return set;
+            if (r != VK_ERROR_OUT_OF_POOL_MEMORY && r != VK_ERROR_FRAGMENTED_POOL) {
+                RIME_ERROR("rhi: vkAllocateDescriptorSets failed: {}", result_string(r));
+                return VK_NULL_HANDLE;
+            }
         }
-        p->bound_texture = {};
-        p->bound_sampler = {};
+        const VkDescriptorPool fresh = device_.acquire_descriptor_pool();
+        if (fresh == VK_NULL_HANDLE)
+            return VK_NULL_HANDLE; // acquire logged the cause
+        pools_.push_back(fresh);
     }
-    if (p->bound_texture != texture || p->bound_sampler != sampler) {
-        VkDescriptorImageInfo img{};
-        img.sampler = smp->sampler;
-        img.imageView = tex->view;
-        img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = p->set;
-        w.dstBinding = binding;
+    RIME_ERROR("rhi: could not allocate a descriptor set from a fresh pool");
+    return VK_NULL_HANDLE;
+}
+
+void VulkanCommandBuffer::flush_bindings() {
+    if (!bindings_dirty_ || current_pipeline_ == nullptr)
+        return;
+    bindings_dirty_ = false;
+    VulkanPipeline* p = current_pipeline_;
+    if (p->set_layout == VK_NULL_HANDLE)
+        return; // pipeline declares no bindings; nothing to bake
+
+    // One transient set per (draw × pipeline-layout) — never reused, never individually freed;
+    // the whole pool resets when this encoder's submission finishes. This trades a tiny
+    // allocation per draw (cheap: pool bump allocation) for the freedom to change any binding
+    // between draws, which is exactly what per-draw UBO slices need. If profiling ever shows set
+    // churn dominating, caching identical sets is a contained optimization behind this seam.
+    const VkDescriptorSet set = allocate_transient_set(p->set_layout);
+    if (set == VK_NULL_HANDLE)
+        return;
+
+    // Fixed-size scratch keyed by the pipeline's declared bindings: infos must outlive the
+    // vkUpdateDescriptorSets call, and a fixed array keeps flush allocation-free.
+    std::array<VkDescriptorBufferInfo, kMaxBindings> buffer_infos{};
+    std::array<VkDescriptorImageInfo, kMaxBindings> image_infos{};
+    std::array<VkWriteDescriptorSet, kMaxBindings> writes{};
+    std::uint32_t write_count = 0;
+
+    for (const BindingDesc& b : p->bindings) {
+        if (b.binding >= kMaxBindings) {
+            RIME_ERROR("rhi: pipeline declares binding {} beyond kMaxBindings ({})",
+                       b.binding,
+                       kMaxBindings);
+            continue;
+        }
+        const PendingBinding& pb = pending_[b.binding];
+        if (!pb.used || pb.type != b.type) {
+            RIME_ERROR("rhi: draw with declared binding {} not attached (or wrong kind) — call "
+                       "bind_texture / bind_uniform_buffer first",
+                       b.binding);
+            continue;
+        }
+        VkWriteDescriptorSet& w = writes[write_count];
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = set;
+        w.dstBinding = b.binding;
         w.descriptorCount = 1;
-        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.pImageInfo = &img;
-        vkUpdateDescriptorSets(device_.vk_device(), 1, &w, 0, nullptr);
-        p->bound_texture = texture;
-        p->bound_sampler = sampler;
+        w.descriptorType = to_vk(b.type);
+        switch (b.type) {
+            case BindingType::UniformBuffer: {
+                VkDescriptorBufferInfo& bi = buffer_infos[write_count];
+                bi.buffer = pb.buffer;
+                bi.offset = pb.offset;
+                bi.range = pb.range;
+                w.pBufferInfo = &bi;
+                break;
+            }
+            case BindingType::CombinedImageSampler: {
+                VkDescriptorImageInfo& ii = image_infos[write_count];
+                ii.sampler = pb.sampler;
+                ii.imageView = pb.view;
+                ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                w.pImageInfo = &ii;
+                break;
+            }
+            case BindingType::StorageBuffer:
+            case BindingType::StorageImage:
+                // Declarable today so the enum is complete; readable/writable once compute lands.
+                RIME_ERROR("rhi: storage bindings are wired up with compute (M5.2)");
+                continue;
+        }
+        ++write_count;
     }
+    if (write_count > 0)
+        vkUpdateDescriptorSets(device_.vk_device(), write_count, writes.data(), 0, nullptr);
     vkCmdBindDescriptorSets(
-        cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, 1, &p->set, 0, nullptr);
+        cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, 1, &set, 0, nullptr);
 }
 
 void VulkanCommandBuffer::push_constants(const void* data,
@@ -227,6 +342,7 @@ void VulkanCommandBuffer::draw(std::uint32_t vertex_count,
                                std::uint32_t instance_count,
                                std::uint32_t first_vertex,
                                std::uint32_t first_instance) {
+    flush_bindings(); // bake pending resource attachments into this draw's descriptor set
     vkCmdDraw(cmd_, vertex_count, instance_count, first_vertex, first_instance);
 }
 
@@ -235,6 +351,7 @@ void VulkanCommandBuffer::draw_indexed(std::uint32_t index_count,
                                        std::uint32_t first_index,
                                        std::int32_t vertex_offset,
                                        std::uint32_t first_instance) {
+    flush_bindings();
     vkCmdDrawIndexed(cmd_, index_count, instance_count, first_index, vertex_offset, first_instance);
 }
 
