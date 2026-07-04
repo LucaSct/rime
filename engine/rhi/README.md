@@ -28,15 +28,16 @@ raw pointers.
 | M3.5 | textures + samplers + descriptors → the textured quad (M3 "done when") | landed (ADR-0010) |
 | +viewer | depth attachment · push constants · 3-D/volume textures · stencil — pulled ahead of M5 to serve the ICEM viewer, adopted by the render graph later | landed (ADRs 0011–0014) |
 | M5.1a | **descriptor model v2** — declared binding layouts (`GraphicsPipelineDesc::bindings`), `bind_uniform_buffer`, transient per-draw sets from recycled grow-on-demand pools (the 16-set cap is gone; `sampled_texture` stays as sugar) | landed (ADR-0020) |
+| M5.1b | **blending** (`BlendMode` presets: Alpha "over" / Additive) · **multiple render targets** (`color_formats` + `RenderingInfo::colors`, ≤ 8) · **`Format::RGBA16Float`** — the HDR scene target that keeps radiance > 1.0 for the tonemap pass | landed |
 
 > *"landed"* = merged and green in CI on all three OSes (Linux/lavapipe with
 > `RIME_REQUIRE_VULKAN=1`; macOS/MoltenVK locally). M3 is complete — the whole seam + Vulkan
 > backend shipped in PR #2 (2026-07).
 >
 > **Known gaps before the RHI is renderer-ready** (burned down early in M5, in graph-need
-> order): no compute dispatch / storage images (M5.2), no multiple render targets or blending
-> (M5.1b), no MSAA/mipmaps (mipmaps M5.3), one queue, a fixed two frames in flight, and
-> single-threaded command recording (seams kept by the render graph, ADR-0019).
+> order): no compute dispatch / storage images (M5.2), no MSAA/mipmaps (mipmaps M5.3), one
+> queue, a fixed two frames in flight, and single-threaded command recording (seams kept by the
+> render graph, ADR-0019).
 
 ## Layout
 

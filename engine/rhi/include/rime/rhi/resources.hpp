@@ -111,8 +111,17 @@ struct GraphicsPipelineDesc {
     ShaderHandle fragment_shader;
     VertexLayout vertex_layout = {};
     Format color_format = Format::RGBA8Unorm;
+    // Multiple render targets (M5.1b): the formats of ALL color attachments this pipeline writes,
+    // position-matched to RenderingInfo::colors. When non-empty it wins over `color_format`
+    // (which remains the ergonomic single-target spelling); ≤ kMaxColorAttachments entries. The
+    // fragment shader's layout(location = i) outputs map to attachment i.
+    std::span<const Format> color_formats = {};
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
     CullMode cull = CullMode::None;
+
+    // How this pipeline's fragments combine with the color target(s) — see BlendMode. None (the
+    // default) overwrites, exactly the pre-M5.1b behavior. Applies to every color attachment.
+    BlendMode blend = BlendMode::None;
 
     // Depth state. Off by default, so the existing flat-2D pipelines (triangle, quad) are
     // unchanged. When `depth_test` is on, the pass must supply a matching DepthStencilAttachment

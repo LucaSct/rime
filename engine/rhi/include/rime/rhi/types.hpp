@@ -83,6 +83,8 @@ enum class Format : std::uint32_t {
     RG32Float,   // vec2 vertex attribute (e.g. UVs)
     RGB32Float,  // vec3 vertex attribute (positions, colors)
     RGBA32Float, // vec4 vertex attribute
+    RGBA16Float, // the HDR scene-color target (M5.1b): float16 keeps >1 radiance for the tonemap
+                 // pass at half the bytes of RGBA32F; color+blend support is spec-mandatory
     D32Float,    // depth (arrives when we add a depth pre-pass in M5)
     D32FloatS8,  // combined depth + 8-bit stencil (the cross-section cap, ADR-0014)
 };
@@ -150,6 +152,20 @@ enum class BindingType : std::uint8_t {
     StorageBuffer,
     StorageImage,
 };
+
+// How a fragment's color combines with what the color target already holds. A tiny preset list
+// rather than raw source/destination blend factors — presets cover what real passes need and stay
+// teachable; the full factor matrix can arrive if a technique ever demands it. None = overwrite
+// (opaque geometry). Alpha = classic "over" transparency: out = src.a·src + (1−src.a)·dst (the UI
+// overlay, transparents). Additive = out = src + dst, saturating (light accumulation, glows).
+// One mode applies to all of a pipeline's color attachments (per-attachment blends when needed).
+enum class BlendMode : std::uint8_t { None, Alpha, Additive };
+
+// The most color attachments one raster pass may write (MRT). 8 matches every desktop
+// implementation we target (lavapipe, MoltenVK, the majors); the Vulkan-guaranteed floor is 4,
+// so a pass that insists on >4 targets narrows its device support — flagged here, checked
+// nowhere yet (measure/need first).
+inline constexpr std::uint32_t kMaxColorAttachments = 8;
 
 enum class PrimitiveTopology : std::uint8_t { TriangleList, TriangleStrip, LineList, PointList };
 

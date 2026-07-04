@@ -22,33 +22,51 @@ VulkanCommandBuffer::~VulkanCommandBuffer() {
 }
 
 void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
-    VulkanTexture* tex = device_.lookup(info.color.target);
-    if (!tex) {
-        RIME_ERROR("rhi: begin_rendering with an invalid color target");
+    // The attachment list: the MRT span when given, else the single `color` member (M5.1b). All
+    // targets share one extent (attachment 0's) and each is transitioned + described in turn.
+    const std::span<const ColorAttachment> colors =
+        !info.colors.empty() ? info.colors : std::span<const ColorAttachment>{&info.color, 1};
+    if (colors.size() > kMaxColorAttachments) {
+        RIME_ERROR("rhi: begin_rendering with {} color targets (max {})",
+                   colors.size(),
+                   kMaxColorAttachments);
         return;
     }
 
-    // Move the target into a color-attachment layout. Coming from whatever it was (UNDEFINED on
-    // first use), nothing earlier needs to complete first.
-    transition_image(cmd_,
-                     tex->image,
-                     tex->layout,
-                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                     0,
-                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-    tex->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    std::array<VkRenderingAttachmentInfo, kMaxColorAttachments> atts{};
+    VulkanTexture* tex0 = nullptr; // attachment 0 — supplies the render area
+    for (std::size_t i = 0; i < colors.size(); ++i) {
+        VulkanTexture* tex = device_.lookup(colors[i].target);
+        if (!tex) {
+            RIME_ERROR("rhi: begin_rendering with an invalid color target (attachment {})", i);
+            return;
+        }
+        if (i == 0)
+            tex0 = tex;
 
-    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = tex->view;
-    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    att.loadOp = to_vk(info.color.load_op);
-    att.storeOp = to_vk(info.color.store_op);
-    att.clearValue.color.float32[0] = info.color.clear.r;
-    att.clearValue.color.float32[1] = info.color.clear.g;
-    att.clearValue.color.float32[2] = info.color.clear.b;
-    att.clearValue.color.float32[3] = info.color.clear.a;
+        // Move the target into a color-attachment layout. Coming from whatever it was (UNDEFINED
+        // on first use), nothing earlier needs to complete first.
+        transition_image(cmd_,
+                         tex->image,
+                         tex->layout,
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                         0,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        tex->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkRenderingAttachmentInfo& att = atts[i];
+        att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        att.imageView = tex->view;
+        att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        att.loadOp = to_vk(colors[i].load_op);
+        att.storeOp = to_vk(colors[i].store_op);
+        att.clearValue.color.float32[0] = colors[i].clear.r;
+        att.clearValue.color.float32[1] = colors[i].clear.g;
+        att.clearValue.color.float32[2] = colors[i].clear.b;
+        att.clearValue.color.float32[3] = colors[i].clear.a;
+    }
 
     // Optional depth attachment — this is what turns a flat-2D pass into a depth-tested 3-D one.
     // Transition the depth image into a depth-attachment layout (through its *depth* aspect), then
@@ -97,10 +115,10 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
 
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea.offset = {0, 0};
-    ri.renderArea.extent = {tex->extent.width, tex->extent.height};
+    ri.renderArea.extent = {tex0->extent.width, tex0->extent.height};
     ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &att;
+    ri.colorAttachmentCount = static_cast<std::uint32_t>(colors.size());
+    ri.pColorAttachments = atts.data();
     // imageView stays null if there was no depth attachment (or its lookup failed) → color-only
     // pass.
     if (depth_att.imageView != VK_NULL_HANDLE)
