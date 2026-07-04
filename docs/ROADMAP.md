@@ -22,9 +22,13 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > module: the generational entity directory + reflection-aware component registry (M4.1), the
 > allocator-backed chunk storage primitives `ChunkPool` / `ChunkLayout` / `Chunk` (M4.2a), the
 > `World` archetype integration — `spawn`, add/remove component = **archetype move**, `get`/`has`,
-> directory `location` wired (M4.2b), and **`Query<Ts...>`** — column-wise iteration over the entities
-> that have a given component set (M4.3). All ASan+UBSan-clean. **Next:** M4.4 — the parallel system
-> scheduler (run a query's body across chunks on the `JobSystem`).
+> directory `location` wired (M4.2b), **`Query<Ts...>`** — column-wise iteration over the entities that
+> have a given component set (M4.3), and **`Query::par_for_each`** — that iteration run across all cores
+> with **one chunk per job** (chunks are separate pooled buffers ⇒ no false sharing), the engine's
+> first real multicore load on the M1.6 deque; the Phase 0 **TSan** CI job now nets `rime_ecs_tests`
+> too (M4.4a). All ASan+UBSan-clean, and the parallel path is TSan-clean. **Next:** M4.4b — the
+> system scheduler (declared read/write **access sets** → parallel phase ordering + deferred
+> structural changes).
 >
 > **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
 > viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,
@@ -213,9 +217,12 @@ despawn / liveness / recycling) + **component registration through reflection** 
 `ChunkLayout`, and the `Chunk` row store with swap-remove · **M4.2b** the World integration — an
 archetype keyed by `ComponentSignature`, spawn-with-components, and add/remove component = archetype
 move (the entity relocates; its directory location is wired). · **M4.3** **queries + chunk-wise
-iteration** — find the archetypes matching a signature and scan their columns. · **M4.4** the **parallel system scheduler** on the
-`JobSystem` (`parallel_for` over chunks; declared read/write sets → phase ordering) — the first
-real multicore load on the Chase-Lev deque, with Phase 0's TSan job as the net. · **M4.5** the
+iteration** — find the archetypes matching a signature and scan their columns. · **M4.4** the
+**parallel system scheduler** on the `JobSystem`, in two steps: **M4.4a** `Query::par_for_each` — the
+query body run across all cores with **one chunk per task** (chunks are separate pooled buffers ⇒ no
+false sharing), the first real multicore load on the Chase-Lev deque, with Phase 0's TSan job
+extended over `rime_ecs_tests` as the net · **M4.4b** the system scheduler proper — declared
+read/write **access sets** → parallel **phase ordering** + deferred structural changes. · **M4.5** the
 **transform hierarchy** — parent/child, dirty propagation (change detection's first consumer),
 `core::Transform` composition (`world = parent * local`). · **M4.6** the proof sample
 `samples/05-ecs-playground` — **100k+ entities updating in parallel** and **transforms composing

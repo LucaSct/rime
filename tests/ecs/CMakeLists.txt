@@ -8,7 +8,8 @@ rime_add_test(rime_ecs_tests
     chunk_pool_test.cpp
     chunk_test.cpp
     world_components_test.cpp
-    query_test.cpp)
+    query_test.cpp
+    parallel_query_test.cpp)
 
 target_link_libraries(rime_ecs_tests
     PRIVATE rime::ecs)

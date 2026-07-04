@@ -90,13 +90,50 @@ Before the type-erased storage can hold a component type `T`, it must be **regis
 Type identity without RTTI uses the classic *address-of-a-static* trick: `&type_key<T>::key` is a
 unique, stable key per `T`, so the registry maps types to ids with no `<typeinfo>` dependency.
 
+## M4.2–M4.3 — storage and queries (landed)
+
+Between M4.1 and here the storage model of ADR-0018 became real. An allocator-backed `ChunkPool`
+hands out 16 KiB blocks; a per-signature `ChunkLayout` places one SoA column per component (plus the
+Entity column) inside a chunk; an `Archetype` groups all entities of one signature across a list of
+chunks, keeping every chunk but the last full so a position is a compact `(chunk, row)`; and
+add/remove-component performs the **archetype move** (relocate the shared components to the new
+signature's archetype, swap-remove from the old). A `Query<Ts...>` (M4.3) then finds every archetype
+whose signature ⊇ `{Ts…}` and scans their chunks **column-wise** — the packed, per-row-lookup-free
+iteration the whole model exists for.
+
+## M4.4 — running systems in parallel (M4.4a landed)
+
+A *system* is a query's body run over the matching entities. M4.4a makes that run across all cores;
+M4.4b will schedule whole systems relative to one another.
+
+`Query<Ts...>::par_for_each(jobs, body[, grain])` is the parallel twin of `for_each`. Its key idea is
+the **parallel grain: one chunk per task**. Because every chunk is a *separate* pooled buffer
+(ADR-0018), handing whole chunks to different workers guarantees no two tasks ever touch the same
+cache line — data-parallelism with **no false sharing and no locks**, the payoff ADR-0018 designed the
+chunk grain to deliver. The implementation flattens every matching chunk (across every matching
+archetype) into one list and issues a **single** `core::JobSystem::parallel_for` over it, so the job
+system load-balances the entire query at once instead of joining once per archetype. `grain` (chunks
+per task, default 1) is the tuning knob for when a body is so cheap that per-task overhead would
+dominate — M4.6 measures and picks it.
+
+The contract is the discipline of any data-parallel loop. The body runs concurrently on **disjoint
+rows**, so writing through the component references it is handed is always race-free (different
+chunks ⇒ different memory). State the body *shares* across invocations is the caller's to synchronize,
+exactly as for `parallel_for`. And the structural-change rule tightens: a parallel body must not
+add/remove components or spawn/despawn — that would restructure the very archetypes being scanned.
+Batched, deferred structural edits are the job of the **system scheduler (M4.4b)**.
+
+This is the engine's *first real multicore load* on the M1.6 Chase-Lev deque, so the Phase 0
+ThreadSanitizer CI job now builds and runs `rime_ecs_tests` alongside `rime_core_tests` — the net that
+keeps the parallel path race-free on every push (`tests/ecs/parallel_query_test.cpp`).
+
 ## What's next
 
-- **M4.2** archetype/chunk storage — the SoA columns and the archetype-move that add/remove-component
-  performs; chunks drawn from `core`'s allocators (the module becomes load-bearing).
-- **M4.3** queries + chunk-wise iteration, and the entity `location` finally wired.
-- **M4.4** the parallel system scheduler on the `JobSystem`.
-- **M4.5** the transform hierarchy — `core::Transform` composition and change-detection's first
-  consumer (skip chunks whose locals didn't move).
+- **M4.4b** the system scheduler — systems declare their read/write component **access sets**, and the
+  scheduler batches non-conflicting systems into parallel **phases** (two systems may share a phase iff
+  neither writes what the other reads or writes) and applies deferred structural changes at phase
+  boundaries.
+- **M4.5** the transform hierarchy — `core::Transform` composition (`world = parent * local`) and
+  change-detection's first consumer (skip chunks whose locals didn't move).
 - **M4.6** the proof: `samples/05-ecs-playground`, 100k+ entities updating in parallel with transforms
   composing, measured.
