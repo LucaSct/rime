@@ -9,6 +9,23 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-04) — Milestone 4 merged to `main`; M5 begins.** The M4 stack landed via PRs
+> #11, #15, #13, #14 (#12 was closed by a base-branch race when #11 merged; #15 supersedes it),
+> CI-green on all three OSes + both sanitizer jobs. One first-contact find on the way in, caught
+> by the Clang TSan job — the first compiler to build `rime_ecs` under Clang: Clang < 19 defaults
+> sized-deallocation off, hiding the sized+aligned `operator delete`, so superblocks now free
+> through the unsized aligned form. **M5 — the render graph + PBR — is decomposed into bricks
+> M5.0–M5.9** (see the M5 detail below). Scope decisions recorded: **no shadows** in M5 (M10 owns
+> them), **no IBL**/cube textures, dogfood acceptance is an offscreen **test** expressing the
+> viewer's frame as a graph (ADR-0016 rule 4 — no viewer port), and first light gets watched
+> **live over Track S0 streaming** (`07-first-light --serve`) since the dev server is headless.
+> **M5.0 landed:** [ADR-0019](adr/0019-render-graph.md) settles the graph architecture —
+> **frame-declared passes** (rebuilt every frame, UE-RDG-style), **virtual resources** with a
+> desc-keyed transient cache, **declared access driving order, culling, *and* barriers** (emitted
+> as explicit transitions through a new RHI seam, cashing in the deferral `command_buffer.hpp`
+> has documented since M3), raster/compute/copy pass kinds, **serial single-queue v0 with the
+> parallel + async-compute seams kept open**, and per-pass GPU timestamps from day one.
+>
 > **Update (2026-07-03) — Track S0 landed; M4 (ECS) kicks off.** The **S0 dev-stream** track is in:
 > blocking TCP sockets (S0.1), the `engine/stream` frame tap (S0.2), the JPEG/LZ4 codec
 > (S0.3, [ADR-0017](adr/0017-streaming-codec.md)), the versioned protocol (S0.4), an engine-side
@@ -253,11 +270,43 @@ bricks and a `docs/math/` derivation the transform hierarchy. **Milestone 4 comp
 
 **M5 — Render graph + PBR (first light).** `engine/render` — **render graph** (passes,
 transient resources, auto-barriers), mesh/material/camera, **PBR** (+ derivation), depth
-pre-pass, one dynamic light. Samples `03-render-graph`, `04-first-light`. The home for
+pre-pass, one dynamic light. Samples `06-render-graph`, `07-first-light` (renumbered — 03/04
+were taken by the viewer and remote-view). The home for
 M10. *Inspired by: UE5 render-graph discipline.* — *Note: several RHI features were pulled
 ahead of M5 to unblock the ICEM viewer — the **depth attachment** + depth test (ADR-0011),
 **push constants** (ADR-0012), and **3-D/volume textures** (ADR-0013, for field colormaps).
 The render graph adopts and extends them (multiple targets, stencil, MSAA, streamed volumes).*
+
+*Bricks (planned 2026-07-04, bottom-up):* **M5.0** the architecture decision — a **frame-declared
+render graph** with virtual resources, declared access driving order *and* barriers, graph-owned
+transitions through a new RHI barrier API, serial single-queue v0 with the parallel seams kept
+([ADR-0019](adr/0019-render-graph.md)); *proof:* the ADR — no code, the decision the rest of M5
+cites. · **M5.1** RHI top-up I — **descriptor model v2**: declared binding layouts, **uniform
+buffers**, per-frame descriptor pools (ADR-0020); then **blending**, **multiple render targets**,
+and **RGBA16Float** (the HDR scene format); *proofs:* UBO-driven draw, blended quads, MRT —
+pixel-verified, GPU-free on lavapipe. · **M5.2** RHI top-up II — **compute pipelines + dispatch +
+storage buffers/images** (ADR-0021); *proofs:* compute pattern → exact readback; compute-written
+image sampled by a draw. · **M5.3** RHI top-up III — **mipmaps** (blit-generated chains) +
+**anisotropic sampling**; **GPU timestamps** + debug names/labels (RenderDoc legibility);
+*proofs:* minification pixel test; monotonic timestamps. · **M5.4** the **render graph v0** —
+`RGTexture`/`RGBuffer`, `add_pass` (raster/compute/copy), `import`, compile (resource versioning →
+edges → topological order → cull), the transient cache, graph-emitted barriers, per-pass timing;
+*proofs:* multi-pass pixel tests (incl. compute-in-graph, pass culling, transient reuse); compile
+overhead measured and recorded. · **M5.5** the **scene layer** — `OrbitCamera` graduates from the
+viewer (ADR-0016 rule 3), procedural mesh primitives + mesh/material registries, ECS render
+components registered through reflection (`Camera`, `MeshRef`, `MaterialRef`, lights). · **M5.6**
+the **PBR forward pipeline** — depth pre-pass → Cook-Torrance forward shading into HDR → tonemap,
+as reusable graph passes, + the `docs/math/pbr.md` derivation (ADR-0022); *proofs:* structural
+radiometric asserts on a metallic×roughness sphere grid. · **M5.7** **`engine/app` becomes real**
+— the fixed-tick frame loop (simulation ticks decoupled from render frames — the M11 seam;
+ADR-0023) with a headless mode; *proofs:* tick determinism; a headless CI run. · **M5.8** the
+**proof samples** — `06-render-graph` ("adding a pass is easy," demonstrated in ~10 lines) and
+`07-first-light` (M5's "done when": the lit PBR scene through the full stack; `--headless`
+self-check in CI; `--serve` streams it over Track S0 to the thin client for the first live look).
+· **M5.9** **dogfood acceptance** — the ICEM viewer's frame (mesh + stencil cap + UI overlay)
+expressed as a render graph in an offscreen test (ADR-0016 rule 4). M5.1–M5.3 make the RHI
+renderer-ready; M5.4 is the seam itself; M5.5–M5.7 build the scene and the loop; M5.8–M5.9 land
+the proofs.
 
 **M6 — Asset pipeline + runtime assets.** `tools/asset-pipeline` (Rust) imports glTF +
 textures → cooked formats; `engine/assets` loads/streams at runtime; `tools/rime-cli`
