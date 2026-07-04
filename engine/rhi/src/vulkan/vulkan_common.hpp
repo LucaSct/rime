@@ -160,6 +160,31 @@ template <class Dst, class Src>
     return out;
 }
 
+[[nodiscard]] inline VkDescriptorType to_vk(BindingType t) noexcept {
+    switch (t) {
+        case BindingType::UniformBuffer:
+            return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case BindingType::CombinedImageSampler:
+            return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        case BindingType::StorageBuffer:
+            return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case BindingType::StorageImage:
+            return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    }
+    return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // unreachable; satisfies -Werror=return-type
+}
+
+[[nodiscard]] inline VkShaderStageFlags to_vk(StageMask m) noexcept {
+    VkShaderStageFlags out = 0;
+    if (has(m, StageMask::Vertex))
+        out |= VK_SHADER_STAGE_VERTEX_BIT;
+    if (has(m, StageMask::Fragment))
+        out |= VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (has(m, StageMask::Compute))
+        out |= VK_SHADER_STAGE_COMPUTE_BIT;
+    return out;
+}
+
 [[nodiscard]] inline VkImageUsageFlags to_vk(TextureUsage u) noexcept {
     VkImageUsageFlags out = 0;
     if (has(u, TextureUsage::ColorAttachment))

@@ -44,3 +44,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0017](0017-streaming-codec.md) — the S0 streaming codec (JPEG on the wire, LZ4 for lossless)
 - [ADR-0018](0018-ecs-storage-model.md) — ECS storage model (archetype/SoA chunked tables; generational-handle entities; change detection)
 - [ADR-0019](0019-render-graph.md) — the render graph (frame-declared passes, virtual resources, graph-owned barriers)
+- [ADR-0020](0020-descriptor-model-v2.md) — descriptor model v2 (declared binding layouts; transient per-draw sets from recycled pools)

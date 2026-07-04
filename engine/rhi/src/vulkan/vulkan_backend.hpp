@@ -57,15 +57,13 @@ struct VulkanShader {
 struct VulkanPipeline {
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
-    // Set when the pipeline samples a texture (GraphicsPipelineDesc::sampled_texture): the
-    // descriptor set-0 layout, plus a lazily-allocated, cached descriptor set that bind_texture
-    // fills in. M3.5 has a single static material, so the set is allocated once and reused every
-    // frame; bound_* record what it currently points at, so we only re-write it when the
-    // texture/sampler change.
+    // The pipeline's declared set-0 shape (ADR-0020): the layout object plus the BindingDesc list
+    // it was built from (post-sugar). Descriptor *sets* are no longer cached here — M3.5 cached
+    // one set per pipeline, which cannot express bindings that change per draw (a UBO slice, a
+    // different texture); the encoder now bakes pending bindings into a transient set at each
+    // draw (VulkanCommandBuffer::flush_bindings), and `bindings` is what it validates against.
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    TextureHandle bound_texture{};
-    SamplerHandle bound_sampler{};
+    std::vector<BindingDesc> bindings;
     // Stage mask of the pipeline's push-constant range (0 = none). push_constants() needs it
     // because vkCmdPushConstants must be told which stages the data is for, and it must match the
     // range.
@@ -133,8 +131,14 @@ public:
         return samplers_.get(rebrand<VulkanSampler>(h));
     }
 
-    // The shared pool bind_texture allocates its (cached, per-pipeline) descriptor set from.
-    [[nodiscard]] VkDescriptorPool descriptor_pool() const noexcept { return descriptor_pool_; }
+    // Transient descriptor pools (ADR-0020). An encoder acquires a pool lazily on its first
+    // flush, allocates throwaway sets from it, and the pool returns here — reset whole, never
+    // per-set — once its submission provably finished (submit_blocking's wait, or a swapchain
+    // frame slot recurring past its fence). Acquiring from an empty free-list creates a new pool,
+    // so capacity grows with real demand instead of imposing a cap (M3.5's fixed 16-set pool is
+    // gone).
+    [[nodiscard]] VkDescriptorPool acquire_descriptor_pool();
+    void recycle_descriptor_pool(VkDescriptorPool pool) noexcept;
 
     // ── Internals used by VulkanSwapchain (same module) ──────────────────────────────────────
     [[nodiscard]] VkInstance vk_instance() const noexcept { return instance_; }
@@ -173,7 +177,6 @@ private:
     bool create_logical_device();
     bool create_allocator();
     bool create_command_pool();
-    bool create_descriptor_pool();
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT messenger_ = VK_NULL_HANDLE;
@@ -182,7 +185,7 @@ private:
     std::uint32_t graphics_family_ = 0;
     VkQueue graphics_queue_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
-    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE; // M3.5: combined image-sampler sets
+    std::vector<VkDescriptorPool> descriptor_pool_free_list_; // recycled transient pools
     VmaAllocator allocator_ = nullptr;
     bool validation_ = false;
 
@@ -200,12 +203,21 @@ public:
     VulkanCommandBuffer(VulkanDevice& device, VkCommandBuffer cmd) noexcept
         : device_(device), cmd_(cmd) {}
 
+    // An encoder that was never submitted still owns its transient descriptor pools; hand them
+    // straight back (nothing was submitted, so the pools are provably idle). Submitted encoders
+    // have already been stripped by release_descriptor_pools().
+    ~VulkanCommandBuffer() override;
+
     void begin_rendering(const RenderingInfo& info) override;
     void end_rendering() override;
     void bind_pipeline(PipelineHandle pipeline) override;
     void bind_vertex_buffer(BufferHandle buffer, std::uint64_t offset) override;
     void bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset) override;
     void bind_texture(std::uint32_t binding, TextureHandle texture, SamplerHandle sampler) override;
+    void bind_uniform_buffer(std::uint32_t binding,
+                             BufferHandle buffer,
+                             std::uint64_t offset,
+                             std::uint64_t size) override;
     void push_constants(const void* data, std::uint32_t size, std::uint32_t offset) override;
     void set_viewport(const Viewport& viewport) override;
     void set_scissor(const Rect2D& scissor) override;
@@ -222,11 +234,48 @@ public:
 
     [[nodiscard]] VkCommandBuffer handle() const noexcept { return cmd_; }
 
+    // Move the descriptor pools this encoder allocated sets from to the caller, which owns
+    // recycling them once the submission's fence has been waited (submit_blocking does it
+    // immediately after its wait; the swapchain defers to when the frame slot recurs — the same
+    // discipline as its deferred command-buffer free).
+    [[nodiscard]] std::vector<VkDescriptorPool> release_descriptor_pools() noexcept {
+        return std::move(pools_);
+    }
+
 private:
+    // One resource attached to a set-0 binding index, waiting to be baked into a descriptor set
+    // at the next draw. Which union-ish fields are valid depends on `type`; `used` marks the slot
+    // live. Raw Vk objects (not RHI handles) so flush never re-resolves SlotMaps.
+    struct PendingBinding {
+        bool used = false;
+        BindingType type = BindingType::UniformBuffer;
+        VkBuffer buffer = VK_NULL_HANDLE; // UniformBuffer (StorageBuffer at M5.2)
+        VkDeviceSize offset = 0;
+        VkDeviceSize range = VK_WHOLE_SIZE;
+        VkImageView view = VK_NULL_HANDLE; // CombinedImageSampler (StorageImage at M5.2)
+        VkSampler sampler = VK_NULL_HANDLE;
+    };
+
+    // The highest set-0 binding index a pipeline may declare. A deliberate small bound — a
+    // fixed array keeps flush allocation-free; raise it when a real shader outgrows it.
+    static constexpr std::uint32_t kMaxBindings = 16;
+
+    // Bake the pending bindings into one transient descriptor set and bind it (ADR-0020).
+    // Called by draw/draw_indexed when `bindings_dirty_`; no-op for pipelines with no layout.
+    void flush_bindings();
+
+    // Allocate one set of `layout` from the newest pool, acquiring/chaining a fresh pool from
+    // the device when there is none yet or the newest is exhausted (VK_ERROR_OUT_OF_POOL_MEMORY —
+    // growth, not failure).
+    [[nodiscard]] VkDescriptorSet allocate_transient_set(VkDescriptorSetLayout layout);
+
     VulkanDevice& device_;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     VulkanPipeline* current_pipeline_ =
-        nullptr; // set by bind_pipeline; bind_texture needs its layout
+        nullptr; // set by bind_pipeline; flush_bindings needs its layout + binding list
+    std::array<PendingBinding, kMaxBindings> pending_{};
+    bool bindings_dirty_ = false; // a bind_* or pipeline switch happened since the last flush
+    std::vector<VkDescriptorPool> pools_; // transient pools this encoder drew sets from
 };
 
 // Create a VkSurfaceKHR for a platform window. The one OS-touching spot in the backend: it switches
@@ -284,7 +333,9 @@ private:
     std::array<VkSemaphore, kFramesInFlight> image_available_{};
     std::array<VkFence, kFramesInFlight> in_flight_{};
     std::array<VkCommandBuffer, kFramesInFlight>
-        frame_cmd_{};               // deferred free (in flight until slot recurs)
+        frame_cmd_{}; // deferred free (in flight until slot recurs)
+    std::array<std::vector<VkDescriptorPool>, kFramesInFlight>
+        frame_pools_{};             // ditto: recycled when the slot's fence has been waited
     std::uint32_t frame_ = 0;       // current in-flight slot
     std::uint32_t image_index_ = 0; // last acquired swapchain image index
 };

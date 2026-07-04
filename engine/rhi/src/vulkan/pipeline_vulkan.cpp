@@ -122,23 +122,32 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     dyn.dynamicStateCount = 2;
     dyn.pDynamicStates = dyn_states;
 
-    // Descriptor set layout (M3.5): a sampling pipeline declares set 0 with one combined image
-    // sampler at binding 0, visible to the fragment shader (a GLSL `sampler2D`). A non-sampling
-    // pipeline keeps an empty layout. The descriptor *set* is allocated lazily and cached by
-    // bind_texture; here we only describe its shape. No push constants yet.
+    // Descriptor set-0 layout (ADR-0020): built from the pipeline's declared binding list — or
+    // from the M3.5 `sampled_texture` sugar, which expands to the one-texture layout every pre-M5
+    // pipeline used (binding 0, combined image-sampler, vertex+fragment — vertex too because the
+    // viewer's warp samples its field volume in the vertex shader). Here we only describe the
+    // set's *shape*; the actual descriptor sets are transient, baked per draw by the encoder's
+    // flush_bindings() from whatever bind_texture/bind_uniform_buffer attached.
+    std::vector<BindingDesc> bindings(desc.bindings.begin(), desc.bindings.end());
+    if (bindings.empty() && desc.sampled_texture) {
+        bindings.push_back(
+            {0, BindingType::CombinedImageSampler, StageMask::Vertex | StageMask::Fragment});
+    }
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-    if (desc.sampled_texture) {
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = 0;
-        binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        binding.descriptorCount = 1;
-        // Visible to vertex + fragment: the field volume is sampled in the fragment shader
-        // (colormap) and, for the displacement/modal warp (C3), in the vertex shader (vertex
-        // texture fetch).
-        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (!bindings.empty()) {
+        std::vector<VkDescriptorSetLayoutBinding> vk_bindings;
+        vk_bindings.reserve(bindings.size());
+        for (const BindingDesc& b : bindings) {
+            VkDescriptorSetLayoutBinding vb{};
+            vb.binding = b.binding;
+            vb.descriptorType = to_vk(b.type);
+            vb.descriptorCount = 1;
+            vb.stageFlags = to_vk(b.stages);
+            vk_bindings.push_back(vb);
+        }
         VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        dslci.bindingCount = 1;
-        dslci.pBindings = &binding;
+        dslci.bindingCount = static_cast<std::uint32_t>(vk_bindings.size());
+        dslci.pBindings = vk_bindings.data();
         if (vkCreateDescriptorSetLayout(device_, &dslci, nullptr, &set_layout) != VK_SUCCESS) {
             RIME_ERROR("rhi: vkCreateDescriptorSetLayout failed");
             return {};
@@ -208,6 +217,7 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     VulkanPipeline p;
     p.layout = layout;
     p.set_layout = set_layout;
+    p.bindings = std::move(bindings);
     p.push_constant_stages = desc.push_constant_size > 0 ? pc_stages : 0;
     const VkResult r =
         vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
@@ -231,8 +241,8 @@ void VulkanDevice::destroy(PipelineHandle handle) {
             vkDestroyPipelineLayout(device_, p->layout, nullptr);
         if (p->set_layout)
             vkDestroyDescriptorSetLayout(device_, p->set_layout, nullptr);
-        // p->set (if allocated) is freed when the descriptor pool is destroyed at device teardown —
-        // M3.5 has one material, so we don't individually free pooled sets here.
+        // Descriptor sets referencing this layout are transient (ADR-0020): they die with their
+        // pool's whole-pool reset, so there is nothing per-set to free here.
         pipelines_.erase(h);
     }
 }

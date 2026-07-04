@@ -64,6 +64,19 @@ struct ShaderDesc {
     std::string_view debug_name = {};
 };
 
+// One shader resource binding in descriptor set 0: which `binding` index it occupies, what kind
+// of resource lives there, and which stages read it. A pipeline declares its whole binding layout
+// up front (the *shape* of its descriptor set — what a shader's `layout(set=0, binding=N)`
+// declarations promise); the actual resources are attached at record time with
+// CommandBuffer::bind_uniform_buffer / bind_texture and baked into a transient descriptor set at
+// the next draw. This is the M5.1 descriptor model v2 (ADR-0020): one set, N declared bindings —
+// richer than M3.5's single cached combined image-sampler, still deliberately far from bindless.
+struct BindingDesc {
+    std::uint32_t binding = 0;
+    BindingType type = BindingType::CombinedImageSampler;
+    StageMask stages = StageMask::Vertex | StageMask::Fragment;
+};
+
 // One vertex attribute: which shader `location` it feeds, its `format`, and its byte `offset`
 // within a vertex. (location/format/offset is exactly the trio a graphics API needs to interpret
 // raw vertex bytes.)
@@ -129,10 +142,15 @@ struct GraphicsPipelineDesc {
     // updates only the stencil buffer, leaving the rendered image untouched. Default true (normal
     // colour output).
     bool color_write = true;
-    // When true, the pipeline declares a descriptor set 0 with one combined image-sampler at
-    // binding 0 (a fragment-stage `sampler2D`), bound at draw time with
-    // CommandBuffer::bind_texture. M3.5's minimal descriptor model — one texture; the render graph
-    // grows richer sets later.
+    // The pipeline's set-0 binding layout (ADR-0020) — see BindingDesc above. Empty (and
+    // sampled_texture false) means the pipeline binds no resources. The span is consumed during
+    // creation like everything else in a descriptor: the backend copies it out.
+    std::span<const BindingDesc> bindings = {};
+
+    // Sugar predating `bindings` (M3.5): true declares exactly {binding 0, CombinedImageSampler,
+    // Vertex|Fragment} — the "one texture" model every pre-M5 pipeline used. Ignored when
+    // `bindings` is non-empty. Kept so existing callers compile unchanged; new code should
+    // declare `bindings` explicitly.
     bool sampled_texture = false;
 
     // Bytes of push-constant data the pipeline accepts, visible to both the vertex and fragment

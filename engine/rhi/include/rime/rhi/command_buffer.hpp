@@ -71,12 +71,23 @@ public:
     virtual void
     bind_index_buffer(BufferHandle buffer, IndexType type, std::uint64_t offset = 0) = 0;
 
-    // Bind a texture + sampler to a shader binding (descriptor set 0) of the currently bound
-    // pipeline — call after bind_pipeline(). The pipeline must have been created to sample a
-    // texture (GraphicsPipelineDesc::sampled_texture). This is the M3.5 descriptor model: a single
-    // combined image-sampler; richer descriptor sets arrive with the render graph.
+    // Attach a texture + sampler to a CombinedImageSampler `binding` the currently bound
+    // pipeline declared (GraphicsPipelineDesc::bindings, or the sampled_texture sugar). Call
+    // after bind_pipeline(). Like bind_uniform_buffer, the attachment takes effect at the next
+    // draw, when all pending bindings are baked into one transient descriptor set (ADR-0020) —
+    // so the same binding may point at different resources from draw to draw.
     virtual void
     bind_texture(std::uint32_t binding, TextureHandle texture, SamplerHandle sampler) = 0;
+
+    // Attach `size` bytes at `offset` of a uniform buffer (BufferUsage::Uniform) to a
+    // UniformBuffer `binding` the currently bound pipeline declared. `size` 0 means "through the
+    // end of the buffer". Takes effect at the next draw (one transient descriptor set per draw —
+    // ADR-0020), so per-draw data can live as slices of one buffer, re-bound at a new offset
+    // between draws (respect the device's uniform-offset alignment; 256 is universally safe).
+    virtual void bind_uniform_buffer(std::uint32_t binding,
+                                     BufferHandle buffer,
+                                     std::uint64_t offset = 0,
+                                     std::uint64_t size = 0) = 0;
 
     // Upload `size` bytes of push-constant data (from `offset`) to the currently bound pipeline,
     // visible to its vertex and fragment stages. Call after bind_pipeline; the pipeline must have

@@ -120,6 +120,16 @@ they pay off — the render graph. The deliberate cost is that a set lives *on t
 "material" with "pipeline" — one texture per pipeline, fine for a quad, replaced by per-draw/per-material
 sets when the render graph owns binding.
 
+> **Superseded at M5.1a ([ADR-0020](../adr/0020-descriptor-model-v2.md)).** The paragraph above
+> describes M3.5, kept for the history it teaches. Today a pipeline *declares* its set-0 binding
+> layout (`GraphicsPipelineDesc::bindings` — UBOs and combined image-samplers; storage kinds wired
+> at M5.2), `bind_uniform_buffer`/`bind_texture` merely *attach* resources, and the encoder bakes
+> all attachments into a **transient descriptor set at each draw**, allocated from encoder-owned
+> pools that recycle through a device free-list once their submission's fence has been waited
+> (whole-pool reset, never per-set frees — nothing can rewrite a set the GPU still reads, by
+> construction). `sampled_texture` survives as sugar for the old one-texture layout, which is why
+> every pre-M5 call site still compiles verbatim. The 16-set pool is gone; pools grow on demand.
+
 ## Deliberate limitations (labeled, per CLAUDE.md)
 
 - **Device owns its instance.** One `Device` == one instance + physical + logical device + allocator.
