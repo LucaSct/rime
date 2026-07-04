@@ -6,17 +6,19 @@
 // public surface; include the individual headers when you only need one. See ADR-0018 for the
 // storage model and docs/design/ecs.md for the design.
 //
-// As of M4.4b: entities (generational ids), the entity directory, the component-type registry, the
+// As of M4.4c: entities (generational ids), the entity directory, the component-type registry, the
 // archetype storage (ChunkPool + per-signature ChunkLayout + Chunk SoA rows + Archetype), the World
 // that ties them together (spawn, add/remove component = archetype move, get/has), Query<Ts...> for
 // column-wise iteration over the entities that have a given set of components, Query::par_for_each
-// to run that iteration across all cores on the job system (one chunk per task), and the System +
+// to run that iteration across all cores on the job system (one chunk per task), the System +
 // Schedule scheduler that batches systems into parallel phases from their declared read/write
-// access sets. Deferred, batched structural edits at phase boundaries land in M4.4c.
+// access sets, and the CommandBuffer that records structural edits (spawn/despawn/add/remove) for
+// the schedule to apply at phase boundaries. The transform hierarchy lands in M4.5.
 
 #include "rime/ecs/archetype.hpp"
 #include "rime/ecs/chunk.hpp"
 #include "rime/ecs/chunk_pool.hpp"
+#include "rime/ecs/command_buffer.hpp"
 #include "rime/ecs/component.hpp"
 #include "rime/ecs/entity.hpp"
 #include "rime/ecs/entity_directory.hpp"

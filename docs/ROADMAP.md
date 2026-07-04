@@ -28,9 +28,12 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > first real multicore load on the M1.6 deque; the Phase 0 **TSan** CI job now nets `rime_ecs_tests`
 > too (M4.4a), and the **`System` + `Schedule`** scheduler that batches systems into parallel **phases**
 > from their declared read/write **access sets** — independent systems run side by side, conflicting
-> ones fall into ordered phases (M4.4b). All ASan+UBSan-clean, and both the data-parallel and the
-> concurrent-systems paths are TSan-clean. **Next:** M4.4c — **deferred structural changes** (a command
-> buffer applied at phase boundaries, lifting the "no spawn/despawn/add/remove inside a system" rule).
+> ones fall into ordered phases (M4.4b), and a **`CommandBuffer`** that records structural edits
+> (spawn/despawn/add/remove) from inside a system — thread-safe under `par_for_each` — for the schedule
+> to apply at each phase boundary (M4.4c). **M4.4 is complete**: all ASan+UBSan-clean, and the
+> data-parallel, concurrent-systems, and concurrent-recording paths are all TSan-clean. **Next:** M4.5
+> — the **transform hierarchy** (parent/child, dirty propagation = change detection's first consumer,
+> `core::Transform` composition `world = parent * local`).
 >
 > **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
 > viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,

@@ -4,6 +4,8 @@
 #include "rime/ecs/schedule.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <vector>
 
 namespace rime::ecs {
 
@@ -50,24 +52,36 @@ void Schedule::run(World& world, core::JobSystem& jobs) {
         rebuild();
     }
     for (const auto& phase : phases_) {
+        // One CommandBuffer per system in the phase, so concurrent systems never record into a
+        // shared one; they are applied once the phase joins. vector(n) builds the (mutex-holding,
+        // non-movable) buffers in place and never reallocates, so &commands[k] is stable for the
+        // jobs.
+        std::vector<CommandBuffer> commands(phase.size());
         if (phase.size() == 1) {
             // A lone system needs no fork/join — run it inline (it may still parallelize its own
-            // work across chunks via par_for_each). This is the common case for a big system that
-            // conflicts with its neighbors and thus sits alone in its phase.
-            systems_[phase[0]].run(world, jobs);
-            continue;
+            // work across chunks via par_for_each). The common case for a big system that conflicts
+            // with its neighbors and so sits alone in its phase.
+            systems_[phase[0]].run(world, jobs, commands[0]);
+        } else {
+            // Several independent systems: submit each as a job so they run side by side, then
+            // join. A body may itself call par_for_each here — that submit/wait-from-within-a-job
+            // is what the JobSystem's participating wait() supports (no deadlock even if all
+            // workers busy).
+            core::JobSystem::Counter counter{0};
+            for (std::size_t k = 0; k < phase.size(); ++k) {
+                System* system = &systems_[phase[k]];
+                CommandBuffer* buffer = &commands[k];
+                jobs.run([system, buffer, &world, &jobs] { system->run(world, jobs, *buffer); },
+                         &counter);
+            }
+            jobs.wait(counter);
         }
-        // Several independent systems: submit each as a job so they run side by side, then join
-        // before the next phase. The join publishes this phase's writes to the next one. A system
-        // body may itself call par_for_each here — that submit/wait-from-within-a-job is exactly
-        // what the JobSystem's participating wait() supports (no deadlock even if all workers
-        // busy).
-        core::JobSystem::Counter counter{0};
-        for (const std::uint32_t idx : phase) {
-            System* system = &systems_[idx];
-            jobs.run([system, &world, &jobs] { system->run(world, jobs); }, &counter);
+        // The safe point: no system is iterating now, so replay this phase's recorded structural
+        // edits, in system order. This join is also the barrier that makes them (and the phase's
+        // data writes) visible to the next phase.
+        for (auto& buffer : commands) {
+            buffer.apply(world);
         }
-        jobs.wait(counter);
     }
 }
 

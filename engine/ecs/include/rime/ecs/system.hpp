@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "rime/core/jobs/job_system.hpp"
+#include "rime/ecs/command_buffer.hpp"
 #include "rime/ecs/signature.hpp"
 #include "rime/ecs/world.hpp"
 
@@ -42,12 +43,15 @@ struct SystemAccess {
 };
 
 // A schedulable unit: a name (for debugging / the future editor), an access declaration, and the
-// body. The body is handed the World and the JobSystem, so it may parallelize its own work across
-// chunks with Query::par_for_each (M4.4a) while the scheduler parallelizes across systems.
+// body. The body is handed the World, the JobSystem (so it may parallelize its own work across
+// chunks with Query::par_for_each — M4.4a, while the scheduler parallelizes across systems), and a
+// CommandBuffer to record any structural changes — spawn/despawn/add/remove — which the scheduler
+// applies at the phase boundary (M4.4c). A body must never restructure the world directly
+// mid-phase.
 struct System {
     std::string name;
     SystemAccess access;
-    std::function<void(World&, core::JobSystem&)> run;
+    std::function<void(World&, core::JobSystem&, CommandBuffer&)> run;
 };
 
 // Build a component set (a system's read or write access) from component TYPES, registering each
@@ -57,8 +61,9 @@ struct System {
 //   System integrate{"integrate",
 //                    {/*reads*/ signature_of<Velocity>(world), /*writes*/
 //                    signature_of<Position>(world)},
-//                    [](World& w, core::JobSystem& j) { /* w.query<...>().par_for_each(j, ...) */
-//                    }};
+//                    [](World& w, core::JobSystem& j, CommandBuffer&) { /*
+//                    w.query<...>().par_for_each
+//                    */ }};
 template <class... Ts> [[nodiscard]] ComponentSignature signature_of(World& world) {
     return ComponentSignature{world.register_component<Ts>()...};
 }

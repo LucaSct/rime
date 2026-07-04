@@ -30,10 +30,12 @@
 // of mutually-conflicting systems — the irreducible amount of serialization the declared hazards
 // force. It is O(N²) conflict checks over N systems, trivial for the dozens of systems a frame has.
 //
-// Structural-change rule (unchanged from par_for_each): a system body may read and write component
-// DATA but must not add/remove components or spawn/despawn — that would restructure the archetypes
-// other systems in the same phase are concurrently scanning. Deferred, batched structural edits
-// applied at phase boundaries are the next brick (M4.4c).
+// Structural-change rule: a system body may read and write component DATA directly, but must NOT
+// add/remove components or spawn/despawn on the World mid-phase — that would restructure the
+// archetypes other systems in the same phase are concurrently scanning. Instead it records those
+// edits into the CommandBuffer it is handed, and the Schedule APPLIES each phase's command buffers
+// at the join at the end of that phase (M4.4c) — the safe point where no system is iterating, so a
+// later phase sees an earlier phase's spawns/despawns.
 namespace rime::ecs {
 
 class Schedule {
@@ -47,7 +49,8 @@ public:
     template <class Body> Schedule& add(std::string name, SystemAccess access, Body&& body) {
         return add(System{std::move(name),
                           std::move(access),
-                          std::function<void(World&, core::JobSystem&)>(std::forward<Body>(body))});
+                          std::function<void(World&, core::JobSystem&, CommandBuffer&)>(
+                              std::forward<Body>(body))});
     }
 
     // (Re)compute the phase batching from the systems' access sets. Called automatically by run()

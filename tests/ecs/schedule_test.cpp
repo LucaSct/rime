@@ -68,9 +68,9 @@ TEST_CASE("SystemAccess conflicts only when a write meets another access") {
 TEST_CASE("independent systems collapse into a single parallel phase") {
     World w;
     Schedule s;
-    s.add({"a", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&) {}});
-    s.add({"b", {{}, signature_of<st::Health>(w)}, [](World&, JobSystem&) {}});
-    s.add({"c", {signature_of<st::Vel>(w), {}}, [](World&, JobSystem&) {}});
+    s.add({"a", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&, CommandBuffer&) {}});
+    s.add({"b", {{}, signature_of<st::Health>(w)}, [](World&, JobSystem&, CommandBuffer&) {}});
+    s.add({"c", {signature_of<st::Vel>(w), {}}, [](World&, JobSystem&, CommandBuffer&) {}});
     s.rebuild();
 
     CHECK(s.phase_count() == 1);
@@ -80,11 +80,11 @@ TEST_CASE("independent systems collapse into a single parallel phase") {
 TEST_CASE("a conflict chain serializes into one phase per link, in declared order") {
     World w;
     Schedule s;
-    s.add({"write_pos", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&) {}});
+    s.add({"write_pos", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&, CommandBuffer&) {}});
     s.add({"pos_to_out",
            {signature_of<st::Pos>(w), signature_of<st::Out>(w)},
-           [](World&, JobSystem&) {}});
-    s.add({"read_out", {signature_of<st::Out>(w), {}}, [](World&, JobSystem&) {}});
+           [](World&, JobSystem&, CommandBuffer&) {}});
+    s.add({"read_out", {signature_of<st::Out>(w), {}}, [](World&, JobSystem&, CommandBuffer&) {}});
     s.rebuild();
 
     REQUIRE(s.phase_count() == 3);
@@ -96,10 +96,13 @@ TEST_CASE("a conflict chain serializes into one phase per link, in declared orde
 TEST_CASE("a system joins the phase after the last earlier system it conflicts with") {
     World w;
     Schedule s;
-    s.add({"write_pos", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&) {}}); // 0
-    s.add(
-        {"write_health", {{}, signature_of<st::Health>(w)}, [](World&, JobSystem&) {}}); // 1: indep
-    s.add({"read_pos", {signature_of<st::Pos>(w), {}}, [](World&, JobSystem&) {}});      // 2: ⨯ 0
+    s.add({"write_pos", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&, CommandBuffer&) {
+           }}); // 0
+    s.add({"write_health",
+           {{}, signature_of<st::Health>(w)},
+           [](World&, JobSystem&, CommandBuffer&) {}}); // 1: indep
+    s.add({"read_pos", {signature_of<st::Pos>(w), {}}, [](World&, JobSystem&, CommandBuffer&) {
+           }}); // 2: ⨯ 0
     s.rebuild();
 
     REQUIRE(s.phase_count() == 2);
@@ -111,8 +114,8 @@ TEST_CASE("a system joins the phase after the last earlier system it conflicts w
 TEST_CASE("two writers to the same component are serialized") {
     World w;
     Schedule s;
-    s.add({"w1", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&) {}});
-    s.add({"w2", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&) {}});
+    s.add({"w1", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&, CommandBuffer&) {}});
+    s.add({"w2", {{}, signature_of<st::Pos>(w)}, [](World&, JobSystem&, CommandBuffer&) {}});
     s.rebuild();
 
     CHECK(s.phase_count() == 2);
@@ -140,13 +143,13 @@ TEST_CASE("independent systems run concurrently over a shared archetype, race-fr
     // the access sets are meant to make impossible; TSan watches it.
     s.add({"move",
            {signature_of<st::Vel>(w), signature_of<st::Pos>(w)},
-           [](World& world, JobSystem& j) {
+           [](World& world, JobSystem& j, CommandBuffer&) {
                world.query<st::Pos, st::Vel>().par_for_each(
                    j, [](st::Pos& p, st::Vel& v) { p.x += v.dx; });
            }});
     s.add({"heal",
            {signature_of<st::Regen>(w), signature_of<st::Health>(w)},
-           [](World& world, JobSystem& j) {
+           [](World& world, JobSystem& j, CommandBuffer&) {
                world.query<st::Health, st::Regen>().par_for_each(
                    j, [](st::Health& h, st::Regen& g) { h.hp += g.r; });
            }});
@@ -176,12 +179,13 @@ TEST_CASE("a reader system sees an earlier writer system's output (phase orderin
     // set_pos writes Pos = 5; copy reads Pos and writes Out. copy conflicts set_pos (it reads what
     // set_pos writes), so it runs in a later phase and must observe 5. Concurrent/reversed
     // execution would leave Out at its initial value.
-    s.add({"set_pos", {{}, signature_of<st::Pos>(w)}, [](World& world, JobSystem& j) {
-               world.query<st::Pos>().par_for_each(j, [](st::Pos& p) { p.x = 5.0f; });
-           }});
+    s.add(
+        {"set_pos", {{}, signature_of<st::Pos>(w)}, [](World& world, JobSystem& j, CommandBuffer&) {
+             world.query<st::Pos>().par_for_each(j, [](st::Pos& p) { p.x = 5.0f; });
+         }});
     s.add({"copy",
            {signature_of<st::Pos>(w), signature_of<st::Out>(w)},
-           [](World& world, JobSystem& j) {
+           [](World& world, JobSystem& j, CommandBuffer&) {
                world.query<st::Pos, st::Out>().par_for_each(
                    j, [](st::Pos& p, st::Out& o) { o.v = p.x; });
            }});
@@ -218,7 +222,7 @@ TEST_CASE("a single data-parallel system runs via the inline path") {
     Schedule s;
     s.add({"move",
            {signature_of<st::Vel>(w), signature_of<st::Pos>(w)},
-           [](World& world, JobSystem& j) {
+           [](World& world, JobSystem& j, CommandBuffer&) {
                world.query<st::Pos, st::Vel>().par_for_each(
                    j, [](st::Pos& p, st::Vel& v) { p.x += v.dx; });
            }});
@@ -246,7 +250,7 @@ TEST_CASE("rebuild is idempotent and run repeats deterministically") {
     Schedule s;
     s.add({"move",
            {signature_of<st::Vel>(w), signature_of<st::Pos>(w)},
-           [](World& world, JobSystem& j) {
+           [](World& world, JobSystem& j, CommandBuffer&) {
                world.query<st::Pos, st::Vel>().par_for_each(
                    j, [](st::Pos& p, st::Vel& v) { p.x += v.dx; });
            }});

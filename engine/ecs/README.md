@@ -23,7 +23,7 @@ from `core`'s allocators, and change detection built in — is decided in
 | M4.3 | **`Query<Ts...>`** — column-wise iteration over the entities that have a given component set | landed |
 | M4.4a | **`Query::par_for_each`** — the query body run across all cores on the `JobSystem`, one chunk per task (no false sharing); TSan CI job extended over `rime_ecs_tests` | landed |
 | M4.4b | **`System` + `Schedule`** — declared read/write **access sets** batched into parallel **phases** (independent systems run concurrently, conflicting ones keep order) | landed |
-| M4.4c | deferred structural changes — a command buffer applied at phase boundaries (spawn/despawn/add/remove from inside a system) | planned |
+| M4.4c | **`CommandBuffer`** — record structural edits (spawn/despawn/add/remove) inside a system (thread-safe under `par_for_each`); the schedule applies them at each phase boundary | landed |
 | M4.5 | transform hierarchy (`core::Transform` composition; change-detection's first consumer) | planned |
 | M4.6 | proof `samples/05-ecs-playground` — 100k+ entities in parallel, transforms composing | planned |
 
@@ -42,6 +42,7 @@ include/rime/ecs/
     query.hpp               # Query<Ts...> — find matching archetypes, scan their columns; par_for_each
     system.hpp              # System + SystemAccess (read/write sets) + signature_of<Ts...> helper
     schedule.hpp            # Schedule — batch systems into parallel phases, run them on the JobSystem
+    command_buffer.hpp      # CommandBuffer — record structural edits, apply them at a safe point
     world.hpp               # the World front door: entities, component types, and the archetypes
 src/
     entity_directory.cpp · signature.cpp · chunk_pool.cpp · chunk.cpp · archetype.cpp · world.cpp · schedule.cpp
@@ -75,10 +76,12 @@ world.query<Position, Velocity>().par_for_each(jobs, [](Position& p, Velocity& v
 // orders conflicting ones (M4.4b):
 Schedule schedule;
 schedule.add({"move", {/*reads*/ signature_of<Velocity>(world), /*writes*/ signature_of<Position>(world)},
-             [](World& w, rime::core::JobSystem& j) {
+             [](World& w, rime::core::JobSystem& j, CommandBuffer& cmd) {
                  w.query<Position, Velocity>().par_for_each(j, [](Position& p, Velocity& v) { p.x += v.dx; });
+                 // ...and record any structural changes to be applied at the phase boundary:
+                 // w.query<Health>().par_for_each(j, [&](Entity e, Health& h){ if (h.hp<=0) cmd.despawn(e); });
              }});
-schedule.run(world, jobs);
+schedule.run(world, jobs);   // phases run in order; non-conflicting systems run side by side
 
 world.despawn(e);                               // tears the row out; a swapped entity is fixed up
 world.get<Position>(e);                         // nullptr — stale entity, safe no-op

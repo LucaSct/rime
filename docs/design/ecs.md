@@ -101,7 +101,7 @@ signature's archetype, swap-remove from the old). A `Query<Ts...>` (M4.3) then f
 whose signature ⊇ `{Ts…}` and scans their chunks **column-wise** — the packed, per-row-lookup-free
 iteration the whole model exists for.
 
-## M4.4 — running systems in parallel (M4.4a + M4.4b landed)
+## M4.4 — running systems in parallel (M4.4a–c landed)
 
 A *system* is a query's body run over the matching entities. M4.4a runs one system across all cores
 (data parallelism); M4.4b runs independent systems side by side (task parallelism). The two stack.
@@ -155,14 +155,34 @@ itself call `par_for_each`, so a scheduled run nests task parallelism over data 
 submit/wait from within a running job, which the job system's *participating* `wait()` handles without
 deadlock. This concurrent path is a second multicore load, so `tests/ecs/schedule_test.cpp` (two
 independent systems writing disjoint columns of one shared 20k-entity archetype) rides the same TSan
-CI net. The structural-change rule is unchanged and still load-bearing; lifting it with deferred,
-batched edits applied at phase boundaries is the next brick (**M4.4c**).
+CI net. The structural-change rule still holds inside a phase, but M4.4c below lifts it with deferred
+edits — a system records structural changes and the scheduler replays them at the phase boundary.
+
+### M4.4c — deferred structural changes: restructuring safely
+
+A system may not spawn/despawn or add/remove a component *directly* mid-phase — that moves entities
+between archetypes while other systems (or its own `par_for_each`) scan them. A `CommandBuffer`
+(`command_buffer.hpp`) breaks the deadlock: the body **records the intent** — `spawn`, `despawn`,
+`add_component`, `remove_component` — and `apply(World&)` **replays** it later, at a safe point. Each
+command is captured as a small closure over the typed `World` call, so the buffer needs no per-type
+erasure machinery and `apply` is just "run them in order"; the closure remembers the component type.
+
+Recording is **thread-safe** (a mutex guards the record list), because the natural place to record is
+*inside* `par_for_each` — "despawn every entity whose health hit zero" runs on many workers at once,
+all pushing into one buffer. Structural change is the rare, bursty path (ADR-0018), so the lock is
+uncontended in practice. The `Schedule` gives each system in a phase its **own** buffer (so concurrent
+systems never share one), and applies them — in system order — at the join that ends the phase. That
+join is exactly the safe point: no system is iterating, and it is also the barrier that makes the
+edits visible to the next phase. `tests/ecs/command_buffer_test.cpp` proves each op takes effect only
+on apply, that recording 10k despawns concurrently from `par_for_each` is race-free (TSan), and that
+the schedule applies a reaper system's despawns at its phase boundary.
+
+(Order note: commands replay in record order, which under parallel recording is unspecified *across*
+threads — so record commutative edits, the usual case. A future extension can reserve entity ids at
+record time so a deferred `spawn` returns a usable handle immediately; M4 doesn't need it.)
 
 ## What's next
 
-- **M4.4c** deferred structural changes — a command buffer that records spawn/despawn/add/remove during
-  a phase (when the world must stay structurally frozen) and applies them in order at a phase boundary,
-  lifting the "no structural change inside a system" restriction.
 - **M4.5** the transform hierarchy — `core::Transform` composition (`world = parent * local`) and
   change-detection's first consumer (skip chunks whose locals didn't move).
 - **M4.6** the proof: `samples/05-ecs-playground`, 100k+ entities updating in parallel with transforms
