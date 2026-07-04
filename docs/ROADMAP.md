@@ -36,8 +36,14 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > `propagate_transforms` composing `world = parent.world * local` depth-by-depth, each level updated in
 > parallel (flat scenes take a fully-parallel fast path); derivation in
 > [docs/math/transform-hierarchy.md](math/transform-hierarchy.md). Change detection's dirty-subtree
-> optimization is **deferred** (measure before optimize; recompute-all is correct + parallel). **Next:**
-> M4.6 — the proof sample `samples/05-ecs-playground` (100k+ in parallel, transforms composing).
+> optimization is **deferred** (measure before optimize; recompute-all is correct + parallel).
+> **M4.6 has landed, and with it MILESTONE 4 IS COMPLETE**: the proof sample
+> `samples/05-ecs-playground` runs both of M4's "done when" clauses green — **200k entities stepped in
+> parallel** through the ECS (a `Query::par_for_each` integrate system on a `Schedule`), timed against a
+> serial baseline at **≈10× on 16 cores (Release)** and verified bit-for-bit identical, and a **transform
+> hierarchy** (a tank: hull → turret → barrel → muzzle) composing `world = parent·local` correctly and
+> following its root when moved. `engine/ecs` is in the default build; the sample self-checks (non-zero
+> exit on failure). **Next:** M5 — the render graph + PBR (first light).
 >
 > **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
 > viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,
@@ -238,12 +244,12 @@ lifting the no-structural-change-inside-a-system rule. · **M4.5** the
 **transform hierarchy** — `LocalTransform`/`WorldTransform`/`Parent` + `propagate_transforms`,
 `core::Transform` composition (`world = parent.world * local`) processed depth-by-depth with each level
 updated in parallel (flat scenes take a fully-parallel fast path); the change-detection dirty-subtree
-optimization is deferred (measure first). · **M4.6** the proof sample
-`samples/05-ecs-playground` — **100k+ entities updating in parallel** and **transforms composing
-correctly** (M4's "done when"), perf measured and recorded; uncomment `engine/ecs` in the root
-`CMakeLists.txt`. M4.0–M4.3 build the world's data model bottom-up; M4.4 runs systems over it in
-parallel; M4.5–M4.6 land the two proofs. A `docs/design/ecs.md` note accompanies the storage
-bricks and a `docs/math/` derivation the transform hierarchy.
+optimization is deferred (measure first). · **M4.6 (done)** the proof sample
+`samples/05-ecs-playground` — **200k entities updating in parallel** (≈10× on 16 cores, Release, verified
+bit-for-bit vs serial) and **transforms composing correctly** (M4's "done when"), self-checking;
+`engine/ecs` builds by default. M4.0–M4.3 build the world's data model bottom-up; M4.4 runs systems over
+it in parallel; M4.5–M4.6 land the two proofs. A `docs/design/ecs.md` note accompanies the storage
+bricks and a `docs/math/` derivation the transform hierarchy. **Milestone 4 complete.**
 
 **M5 — Render graph + PBR (first light).** `engine/render` — **render graph** (passes,
 transient resources, auto-barriers), mesh/material/camera, **PBR** (+ derivation), depth

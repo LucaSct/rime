@@ -4,6 +4,7 @@
 add_subdirectory(jobs_core_saturation) # M1.6: work-stealing job system saturating all cores
 add_subdirectory(00-hello-window)      # M2: open a native window, pump input (preview of M2.5)
 add_subdirectory(codec_bench)          # S0.3: measure the streaming codecs (raw/LZ4/JPEG); GPU-free
+add_subdirectory(05-ecs-playground)    # M4.6: 200k entities in parallel + transforms composing; GPU-free
 
 # Needs the Vulkan RHI backend (the agnostic interface alone can't render).
 if(RIME_RHI_VULKAN)

@@ -25,7 +25,7 @@ from `core`'s allocators, and change detection built in — is decided in
 | M4.4b | **`System` + `Schedule`** — declared read/write **access sets** batched into parallel **phases** (independent systems run concurrently, conflicting ones keep order) | landed |
 | M4.4c | **`CommandBuffer`** — record structural edits (spawn/despawn/add/remove) inside a system (thread-safe under `par_for_each`); the schedule applies them at each phase boundary | landed |
 | M4.5 | **transform hierarchy** — `LocalTransform`/`WorldTransform`/`Parent` + `propagate_transforms` (`world = parent.world * local`), depth-by-depth, each level in parallel | landed |
-| M4.6 | proof `samples/05-ecs-playground` — 100k+ entities in parallel, transforms composing | planned |
+| M4.6 | proof `samples/05-ecs-playground` — 200k entities in parallel (≈10× on 16 cores), transforms composing; **M4 complete** | landed |
 
 ## Layout
 

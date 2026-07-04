@@ -203,10 +203,20 @@ profile shows it matters (measure before optimize) — recompute-all is correct 
 and change detection's real consumers (M9 editor sync, M11 replication) come later. The seam is
 designed; the optimization waits.
 
+## M4.6 — the proof (landed): Milestone 4 complete
+
+`samples/05-ecs-playground` runs both of M4's "done when" clauses green. (1) **200k entities update in
+parallel**: a compute-bound integrate kernel over the field, run serially via `Query::for_each` and
+across all cores via `Query::par_for_each` on a `System` `Schedule`, times at **≈10× on 16 cores
+(Release)** and is verified **bit-for-bit** identical to the serial run — the same-code-per-entity
+determinism the parallel model promises. (2) **transforms compose correctly**: a tank hierarchy (hull →
+turret → barrel → muzzle) whose world transforms equal the hand-composed product of the locals, and
+which follows the hull when it moves. The sample self-checks (non-zero exit on failure), so it is an
+honest smoke test as well as a demo. With it, **Milestone 4 is complete** — `engine/ecs` builds by
+default and the world-as-data seam is in.
+
 ## What's next
 
-- **M4.6** the proof: `samples/05-ecs-playground`, 100k+ entities updating in parallel with transforms
-  composing correctly, measured — and uncomment `engine/ecs` in the root `CMakeLists.txt`. Completes
-  M4's "done when".
 - **Change detection** (deferred) — the ADR-0018 per-column version stamps + dirty-subtree skipping,
-  to land when a profile or its editor/networking consumers call for it.
+  to land when a profile or its editor/networking consumers (M9/M11) call for it.
+- **M5** the render graph + PBR — the ECS's world transforms and mesh/material components feed it.
