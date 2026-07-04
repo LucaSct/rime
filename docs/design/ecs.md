@@ -181,9 +181,32 @@ the schedule applies a reaper system's despawns at its phase boundary.
 threads — so record commutative edits, the usual case. A future extension can reserve entity ids at
 record time so a deferred `spawn` returns a usable handle immediately; M4 doesn't need it.)
 
+## M4.5 — the transform hierarchy (landed)
+
+The first real *consumer-facing* system: parent/child placement composed into world space. Three
+components — `LocalTransform` (placement relative to the parent), `WorldTransform` (the absolute
+placement render/physics read), `Parent` (the entity hung off; absent or `kNullEntity` = a root) — and
+one pass, `propagate_transforms(world, jobs)`, computing `world = parent.world * local` for children
+and `world = local` for roots (`core::Transform::operator*` is the compose). Full derivation, including
+the parallelism argument, in [docs/math/transform-hierarchy.md](../math/transform-hierarchy.md).
+
+The one subtlety is **order**: a child must compose against its parent's *already-updated* world, so
+the pass processes the hierarchy **depth by depth** (roots first), and each depth level — whose members
+are mutually independent, writing their own world and only reading their parents' at a shallower,
+finished level — updates with a single `parallel_for`. The join between levels is the barrier that
+publishes a parent's world to its children. The common case, a flat scene with no parents, is all
+roots and takes a fully-parallel `world = local` fast path — the shape of the M4.6 proof.
+
+We recompute every world transform each call. ADR-0018's per-chunk change-detection stamps were meant
+to let this pass **skip subtrees whose locals didn't move** (dirty propagation); we defer that until a
+profile shows it matters (measure before optimize) — recompute-all is correct and trivially parallel,
+and change detection's real consumers (M9 editor sync, M11 replication) come later. The seam is
+designed; the optimization waits.
+
 ## What's next
 
-- **M4.5** the transform hierarchy — `core::Transform` composition (`world = parent * local`) and
-  change-detection's first consumer (skip chunks whose locals didn't move).
 - **M4.6** the proof: `samples/05-ecs-playground`, 100k+ entities updating in parallel with transforms
-  composing, measured.
+  composing correctly, measured — and uncomment `engine/ecs` in the root `CMakeLists.txt`. Completes
+  M4's "done when".
+- **Change detection** (deferred) — the ADR-0018 per-column version stamps + dirty-subtree skipping,
+  to land when a profile or its editor/networking consumers call for it.

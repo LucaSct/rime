@@ -24,7 +24,7 @@ from `core`'s allocators, and change detection built in — is decided in
 | M4.4a | **`Query::par_for_each`** — the query body run across all cores on the `JobSystem`, one chunk per task (no false sharing); TSan CI job extended over `rime_ecs_tests` | landed |
 | M4.4b | **`System` + `Schedule`** — declared read/write **access sets** batched into parallel **phases** (independent systems run concurrently, conflicting ones keep order) | landed |
 | M4.4c | **`CommandBuffer`** — record structural edits (spawn/despawn/add/remove) inside a system (thread-safe under `par_for_each`); the schedule applies them at each phase boundary | landed |
-| M4.5 | transform hierarchy (`core::Transform` composition; change-detection's first consumer) | planned |
+| M4.5 | **transform hierarchy** — `LocalTransform`/`WorldTransform`/`Parent` + `propagate_transforms` (`world = parent.world * local`), depth-by-depth, each level in parallel | landed |
 | M4.6 | proof `samples/05-ecs-playground` — 100k+ entities in parallel, transforms composing | planned |
 
 ## Layout
@@ -43,9 +43,10 @@ include/rime/ecs/
     system.hpp              # System + SystemAccess (read/write sets) + signature_of<Ts...> helper
     schedule.hpp            # Schedule — batch systems into parallel phases, run them on the JobSystem
     command_buffer.hpp      # CommandBuffer — record structural edits, apply them at a safe point
+    transform.hpp           # Local/World/Parent transform components + propagate_transforms
     world.hpp               # the World front door: entities, component types, and the archetypes
 src/
-    entity_directory.cpp · signature.cpp · chunk_pool.cpp · chunk.cpp · archetype.cpp · world.cpp · schedule.cpp
+    entity_directory.cpp · signature.cpp · chunk_pool.cpp · chunk.cpp · archetype.cpp · world.cpp · schedule.cpp · transform.cpp
 ```
 
 ## Using it

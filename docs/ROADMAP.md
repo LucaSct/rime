@@ -31,9 +31,13 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > ones fall into ordered phases (M4.4b), and a **`CommandBuffer`** that records structural edits
 > (spawn/despawn/add/remove) from inside a system — thread-safe under `par_for_each` — for the schedule
 > to apply at each phase boundary (M4.4c). **M4.4 is complete**: all ASan+UBSan-clean, and the
-> data-parallel, concurrent-systems, and concurrent-recording paths are all TSan-clean. **Next:** M4.5
-> — the **transform hierarchy** (parent/child, dirty propagation = change detection's first consumer,
-> `core::Transform` composition `world = parent * local`).
+> data-parallel, concurrent-systems, and concurrent-recording paths are all TSan-clean. **M4.5 has
+> since landed** — the **transform hierarchy**: `LocalTransform` / `WorldTransform` / `Parent` +
+> `propagate_transforms` composing `world = parent.world * local` depth-by-depth, each level updated in
+> parallel (flat scenes take a fully-parallel fast path); derivation in
+> [docs/math/transform-hierarchy.md](math/transform-hierarchy.md). Change detection's dirty-subtree
+> optimization is **deferred** (measure before optimize; recompute-all is correct + parallel). **Next:**
+> M4.6 — the proof sample `samples/05-ecs-playground` (100k+ in parallel, transforms composing).
 >
 > **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
 > viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,
@@ -231,8 +235,10 @@ read/write **access sets** batched into parallel **phases** (ASAP leveling of th
 independent systems run together, conflicting ones keep declared order), phases run concurrently on the
 job system · **M4.4c** **deferred structural changes** — a command buffer applied at phase boundaries,
 lifting the no-structural-change-inside-a-system rule. · **M4.5** the
-**transform hierarchy** — parent/child, dirty propagation (change detection's first consumer),
-`core::Transform` composition (`world = parent * local`). · **M4.6** the proof sample
+**transform hierarchy** — `LocalTransform`/`WorldTransform`/`Parent` + `propagate_transforms`,
+`core::Transform` composition (`world = parent.world * local`) processed depth-by-depth with each level
+updated in parallel (flat scenes take a fully-parallel fast path); the change-detection dirty-subtree
+optimization is deferred (measure first). · **M4.6** the proof sample
 `samples/05-ecs-playground` — **100k+ entities updating in parallel** and **transforms composing
 correctly** (M4's "done when"), perf measured and recorded; uncomment `engine/ecs` in the root
 `CMakeLists.txt`. M4.0–M4.3 build the world's data model bottom-up; M4.4 runs systems over it in

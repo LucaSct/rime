@@ -11,7 +11,8 @@ rime_add_test(rime_ecs_tests
     query_test.cpp
     parallel_query_test.cpp
     schedule_test.cpp
-    command_buffer_test.cpp)
+    command_buffer_test.cpp
+    transform_test.cpp)
 
 target_link_libraries(rime_ecs_tests
     PRIVATE rime::ecs)
