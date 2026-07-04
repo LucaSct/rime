@@ -9,6 +9,18 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-03) — Track S0 landed; M4 (ECS) kicks off.** The **S0 dev-stream** track is in:
+> blocking TCP sockets (S0.1), the `engine/stream` frame tap (S0.2), the JPEG/LZ4 codec
+> (S0.3, [ADR-0017](adr/0017-streaming-codec.md)), the versioned protocol (S0.4), an engine-side
+> loopback proof (S0.6), and the headless `samples/04-remote-view` server+client (S0.5) — the full
+> render→capture→encode→transport→present→input loop, verified GPU-free on lavapipe (S0.5's *windowed*
+> client is the one piece deferred to a machine with a display). **M4 — ECS / the world — now begins**,
+> decomposed into bricks **M4.0–M4.6** (see the M4 detail below). **M4.0 landed:**
+> [ADR-0018](adr/0018-ecs-storage-model.md) settles the storage model — **archetype/SoA chunked
+> tables**, generational-`Handle` entities, chunks drawn from `core`'s (now load-bearing) allocators,
+> and change detection designed in from day one. **Next:** M4.1 — the entity directory +
+> reflection-based component registration.
+>
 > **Update (2026-07-03) — Phase 0: land + harden.** `feat/icem-viewer` (all of M3 plus the ICEM
 > viewer through ladder **F**) merged to `main` via **PR #2** and is now **CI-green on Windows,
 > Linux, and macOS** (Linux on lavapipe, `RIME_REQUIRE_VULKAN=1`) — that 57-commit branch had never
@@ -181,7 +193,28 @@ and texture it.
 
 **M4 — ECS / the world.** `engine/ecs` — entities, components, archetype storage,
 parallel systems on the job system, queries, a transform hierarchy. Sample
-`02-ecs-playground`.
+`05-ecs-playground`.
+
+*Bricks (planned 2026-07-03, bottom-up):* **M4.0** the storage-model decision —
+**archetype/SoA chunked tables** over sparse sets, entity IDs on the generational
+`core::Handle`, chunks drawn from `core`'s allocators (the allocator module finally becomes
+load-bearing), and **change detection** via per-component version stamps designed in from day
+one ([ADR-0018](adr/0018-ecs-storage-model.md)); *proof:* the ADR — no code, the decision the
+rest of M4 cites. · **M4.1** the `engine/ecs` seam + **entity directory** (generational spawn /
+despawn / liveness / recycling) + **component registration through reflection** (registered once
+⇒ serializable now, editor-inspectable at M9; extends `RIME_REFLECT_*`). · **M4.2**
+**archetype / chunk storage** — type-erased SoA columns in 16 KiB chunks; add/remove component =
+archetype move. · **M4.3** **queries + chunk-wise iteration** — find the archetypes matching a
+signature and scan their columns. · **M4.4** the **parallel system scheduler** on the
+`JobSystem` (`parallel_for` over chunks; declared read/write sets → phase ordering) — the first
+real multicore load on the Chase-Lev deque, with Phase 0's TSan job as the net. · **M4.5** the
+**transform hierarchy** — parent/child, dirty propagation (change detection's first consumer),
+`core::Transform` composition (`world = parent * local`). · **M4.6** the proof sample
+`samples/05-ecs-playground` — **100k+ entities updating in parallel** and **transforms composing
+correctly** (M4's "done when"), perf measured and recorded; uncomment `engine/ecs` in the root
+`CMakeLists.txt`. M4.0–M4.3 build the world's data model bottom-up; M4.4 runs systems over it in
+parallel; M4.5–M4.6 land the two proofs. A `docs/design/ecs.md` note accompanies the storage
+bricks and a `docs/math/` derivation the transform hierarchy.
 
 **M5 — Render graph + PBR (first light).** `engine/render` — **render graph** (passes,
 transient resources, auto-barriers), mesh/material/camera, **PBR** (+ derivation), depth
