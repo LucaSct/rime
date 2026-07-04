@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// Compute shader for the storage-buffer proof: every invocation writes one element of a storage
+// buffer with a value derived from its global id — the "hello world" of GPGPU, chosen because the
+// CPU can verify every single element exactly. local_size_x = 64 is a safe, common workgroup
+// width (a multiple of every desktop wave size).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) buffer OutBuf {
+    uint data[];
+} out_buf;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    out_buf.data[gid] = gid * 7u + 3u;
+}

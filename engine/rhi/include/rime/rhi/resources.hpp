@@ -173,4 +173,17 @@ struct GraphicsPipelineDesc {
     std::string_view debug_name = {};
 };
 
+// Everything needed to bake a compute pipeline (M5.2, ADR-0021) — deliberately tiny next to the
+// graphics desc, because compute has no fixed-function state: one shader plus the same declared
+// set-0 binding layout (ADR-0020) and push-constant budget the graphics path uses. Storage
+// bindings (StorageBuffer / StorageImage) are compute's bread and butter — how a kernel reads and
+// writes bulk data — but the layout model is shared, so a compute pipeline may also read UBOs and
+// sampled textures.
+struct ComputePipelineDesc {
+    ShaderHandle shader; // a ShaderStage::Compute module
+    std::span<const BindingDesc> bindings = {};
+    std::uint32_t push_constant_size = 0; // visible to the compute stage
+    std::string_view debug_name = {};
+};
+
 } // namespace rime::rhi

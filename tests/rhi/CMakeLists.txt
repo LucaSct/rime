@@ -29,7 +29,8 @@ rime_add_test(rime_rhi_tests
     turntable_test.cpp
     chart_offscreen_test.cpp
     ubo_test.cpp
-    blend_mrt_test.cpp)
+    blend_mrt_test.cpp
+    compute_test.cpp)
 
 target_link_libraries(rime_rhi_tests
     PRIVATE rime::rhi) # rime::core (the camera math the mesh proof uses) comes transitively via rhi
@@ -51,6 +52,9 @@ rime_add_shaders(rime_rhi_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ubo.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ubo.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mrt.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fill.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pattern.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sample_storage.frag
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.vert
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volume.vert

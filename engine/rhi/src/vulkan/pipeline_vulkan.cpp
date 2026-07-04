@@ -14,6 +14,38 @@
 
 namespace rime::rhi {
 
+namespace {
+
+// Build the set-0 VkDescriptorSetLayout for a declared binding list (ADR-0020). Shared by the
+// graphics and compute pipeline paths — the layout model is identical on both sides, which is
+// what lets one dispatch and one draw attach the same resources.
+[[nodiscard]] VkDescriptorSetLayout make_set_layout(VkDevice device,
+                                                    const std::vector<BindingDesc>& bindings) {
+    if (bindings.empty())
+        return VK_NULL_HANDLE;
+    std::vector<VkDescriptorSetLayoutBinding> vk_bindings;
+    vk_bindings.reserve(bindings.size());
+    for (const BindingDesc& b : bindings) {
+        VkDescriptorSetLayoutBinding vb{};
+        vb.binding = b.binding;
+        vb.descriptorType = to_vk(b.type);
+        vb.descriptorCount = 1;
+        vb.stageFlags = to_vk(b.stages);
+        vk_bindings.push_back(vb);
+    }
+    VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dslci.bindingCount = static_cast<std::uint32_t>(vk_bindings.size());
+    dslci.pBindings = vk_bindings.data();
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    if (vkCreateDescriptorSetLayout(device, &dslci, nullptr, &layout) != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkCreateDescriptorSetLayout failed");
+        return VK_NULL_HANDLE;
+    }
+    return layout;
+}
+
+} // namespace
+
 PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
     VulkanShader* vs = shaders_.get(rebrand<VulkanShader>(desc.vertex_shader));
     VulkanShader* fs = shaders_.get(rebrand<VulkanShader>(desc.fragment_shader));
@@ -174,26 +206,9 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         bindings.push_back(
             {0, BindingType::CombinedImageSampler, StageMask::Vertex | StageMask::Fragment});
     }
-    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-    if (!bindings.empty()) {
-        std::vector<VkDescriptorSetLayoutBinding> vk_bindings;
-        vk_bindings.reserve(bindings.size());
-        for (const BindingDesc& b : bindings) {
-            VkDescriptorSetLayoutBinding vb{};
-            vb.binding = b.binding;
-            vb.descriptorType = to_vk(b.type);
-            vb.descriptorCount = 1;
-            vb.stageFlags = to_vk(b.stages);
-            vk_bindings.push_back(vb);
-        }
-        VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        dslci.bindingCount = static_cast<std::uint32_t>(vk_bindings.size());
-        dslci.pBindings = vk_bindings.data();
-        if (vkCreateDescriptorSetLayout(device_, &dslci, nullptr, &set_layout) != VK_SUCCESS) {
-            RIME_ERROR("rhi: vkCreateDescriptorSetLayout failed");
-            return {};
-        }
-    }
+    VkDescriptorSetLayout set_layout = make_set_layout(device_, bindings);
+    if (!bindings.empty() && set_layout == VK_NULL_HANDLE)
+        return {};
 
     // One push-constant range (if requested), visible to both stages, covering [0, size). Storing
     // the stage mask on the pipeline lets push_constants() pass the matching stageFlags to
@@ -265,6 +280,74 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     if (r != VK_SUCCESS) {
         RIME_ERROR(
             "rhi: vkCreateGraphicsPipelines('{}') failed: {}", desc.debug_name, result_string(r));
+        vkDestroyPipelineLayout(device_, layout, nullptr);
+        if (set_layout)
+            vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
+        return {};
+    }
+    return rebrand<Pipeline>(pipelines_.insert(p));
+}
+
+PipelineHandle VulkanDevice::create_compute_pipeline(const ComputePipelineDesc& desc) {
+    VulkanShader* cs = shaders_.get(rebrand<VulkanShader>(desc.shader));
+    if (!cs) {
+        RIME_ERROR("rhi: create_compute_pipeline with an invalid shader handle");
+        return {};
+    }
+    if (cs->stage != ShaderStage::Compute) {
+        RIME_ERROR("rhi: create_compute_pipeline('{}') with a non-compute shader", desc.debug_name);
+        return {};
+    }
+
+    // Compute pipelines have no fixed-function state at all: one shader stage, the shared
+    // set-layout model (ADR-0020), and an optional push-constant range — that is the whole
+    // recipe. Everything a kernel touches beyond push constants arrives through bindings.
+    std::vector<BindingDesc> bindings(desc.bindings.begin(), desc.bindings.end());
+    VkDescriptorSetLayout set_layout = make_set_layout(device_, bindings);
+    if (!bindings.empty() && set_layout == VK_NULL_HANDLE)
+        return {};
+
+    VkPushConstantRange pc_range{};
+    pc_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc_range.offset = 0;
+    pc_range.size = desc.push_constant_size;
+
+    VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    if (set_layout != VK_NULL_HANDLE) {
+        lci.setLayoutCount = 1;
+        lci.pSetLayouts = &set_layout;
+    }
+    if (desc.push_constant_size > 0) {
+        lci.pushConstantRangeCount = 1;
+        lci.pPushConstantRanges = &pc_range;
+    }
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (vkCreatePipelineLayout(device_, &lci, nullptr, &layout) != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkCreatePipelineLayout failed");
+        if (set_layout)
+            vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
+        return {};
+    }
+
+    VkComputePipelineCreateInfo pci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pci.stage.module = cs->module;
+    pci.stage.pName = cs->entry_point.c_str();
+    pci.layout = layout;
+
+    VulkanPipeline p;
+    p.layout = layout;
+    p.bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+    p.set_layout = set_layout;
+    p.bindings = std::move(bindings);
+    const VkShaderStageFlags cs_stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    p.push_constant_stages = desc.push_constant_size > 0 ? cs_stage : 0u;
+    const VkResult r =
+        vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR(
+            "rhi: vkCreateComputePipelines('{}') failed: {}", desc.debug_name, result_string(r));
         vkDestroyPipelineLayout(device_, layout, nullptr);
         if (set_layout)
             vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);

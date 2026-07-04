@@ -126,16 +126,22 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     if (stencil_bound)
         ri.pStencilAttachment = &stencil_att;
     vkCmdBeginRendering(cmd_, &ri);
+    in_rendering_ = true;
 }
 
 void VulkanCommandBuffer::end_rendering() {
     vkCmdEndRendering(cmd_);
+    in_rendering_ = false;
 }
 
 void VulkanCommandBuffer::bind_pipeline(PipelineHandle pipeline) {
     VulkanPipeline* p = device_.lookup(pipeline);
     if (!p) {
         RIME_ERROR("rhi: bind_pipeline with an invalid handle");
+        return;
+    }
+    if (p->bind_point != VK_PIPELINE_BIND_POINT_GRAPHICS) {
+        RIME_ERROR("rhi: bind_pipeline with a compute pipeline — use bind_compute_pipeline");
         return;
     }
     current_pipeline_ = p; // remembered so flush_bindings can find the layout + binding list
@@ -191,6 +197,11 @@ void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
     pb.type = BindingType::CombinedImageSampler;
     pb.view = tex->view;
     pb.sampler = smp->sampler;
+    // Sampling normally promises SHADER_READ_ONLY_OPTIMAL; an image living in GENERAL (a storage
+    // image a dispatch just wrote) is sampled in GENERAL instead — valid, and it saves the
+    // caller a transition the render graph will later own (ADR-0019).
+    pb.layout = tex->layout == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL
+                                                       : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     bindings_dirty_ = true;
 }
 
@@ -219,6 +230,123 @@ void VulkanCommandBuffer::bind_uniform_buffer(std::uint32_t binding,
     pb.offset = offset;
     pb.range = size == 0 ? VK_WHOLE_SIZE : size; // 0 = "through the end of the buffer"
     bindings_dirty_ = true;
+}
+
+void VulkanCommandBuffer::bind_storage_buffer(std::uint32_t binding,
+                                              BufferHandle buffer,
+                                              std::uint64_t offset,
+                                              std::uint64_t size) {
+    if (binding >= kMaxBindings) {
+        RIME_ERROR(
+            "rhi: bind_storage_buffer binding {} exceeds kMaxBindings ({})", binding, kMaxBindings);
+        return;
+    }
+    VulkanBuffer* b = device_.lookup(buffer);
+    if (!b) {
+        RIME_ERROR("rhi: bind_storage_buffer with an invalid buffer handle");
+        return;
+    }
+    if (!has(b->usage, BufferUsage::Storage)) {
+        RIME_ERROR("rhi: bind_storage_buffer on a buffer created without BufferUsage::Storage");
+        return;
+    }
+    PendingBinding& pb = pending_[binding];
+    pb.used = true;
+    pb.type = BindingType::StorageBuffer;
+    pb.buffer = b->buffer;
+    pb.offset = offset;
+    pb.range = size == 0 ? VK_WHOLE_SIZE : size;
+    bindings_dirty_ = true;
+}
+
+void VulkanCommandBuffer::bind_storage_image(std::uint32_t binding, TextureHandle texture) {
+    if (binding >= kMaxBindings) {
+        RIME_ERROR(
+            "rhi: bind_storage_image binding {} exceeds kMaxBindings ({})", binding, kMaxBindings);
+        return;
+    }
+    VulkanTexture* tex = device_.lookup(texture);
+    if (!tex) {
+        RIME_ERROR("rhi: bind_storage_image with an invalid texture handle");
+        return;
+    }
+    if (!has(tex->usage, TextureUsage::Storage)) {
+        RIME_ERROR("rhi: bind_storage_image on a texture created without TextureUsage::Storage");
+        return;
+    }
+    // Storage access requires the GENERAL layout. Transition here, at bind time — dispatches
+    // happen outside rendering scopes, and inside one a barrier is illegal anyway (hence the
+    // guard). The M3 philosophy holds until the graph owns barriers (ADR-0019): the backend puts
+    // the image where the declared use needs it.
+    if (tex->layout != VK_IMAGE_LAYOUT_GENERAL) {
+        if (in_rendering_) {
+            RIME_ERROR("rhi: bind_storage_image inside begin/end_rendering needs the image "
+                       "already in the general layout (bind it before the pass)");
+            return;
+        }
+        transition_image(cmd_,
+                         tex->image,
+                         tex->layout,
+                         VK_IMAGE_LAYOUT_GENERAL,
+                         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                         0,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                         aspect_for(tex->format));
+        tex->layout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    PendingBinding& pb = pending_[binding];
+    pb.used = true;
+    pb.type = BindingType::StorageImage;
+    pb.view = tex->view;
+    pb.sampler = VK_NULL_HANDLE; // storage images are raw texel access — no sampler
+    pb.layout = VK_IMAGE_LAYOUT_GENERAL;
+    bindings_dirty_ = true;
+}
+
+void VulkanCommandBuffer::bind_compute_pipeline(PipelineHandle pipeline) {
+    VulkanPipeline* p = device_.lookup(pipeline);
+    if (!p) {
+        RIME_ERROR("rhi: bind_compute_pipeline with an invalid handle");
+        return;
+    }
+    if (p->bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) {
+        RIME_ERROR("rhi: bind_compute_pipeline with a graphics pipeline — use bind_pipeline");
+        return;
+    }
+    current_pipeline_ = p;
+    bindings_dirty_ = !p->bindings.empty(); // same layout-compatibility rule as bind_pipeline
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, p->pipeline);
+}
+
+void VulkanCommandBuffer::dispatch(std::uint32_t gx, std::uint32_t gy, std::uint32_t gz) {
+    if (current_pipeline_ == nullptr ||
+        current_pipeline_->bind_point != VK_PIPELINE_BIND_POINT_COMPUTE) {
+        RIME_ERROR("rhi: dispatch without a bound compute pipeline");
+        return;
+    }
+    if (in_rendering_) {
+        RIME_ERROR("rhi: dispatch inside begin/end_rendering — compute is not part of a raster "
+                   "pass");
+        return;
+    }
+    flush_bindings();
+    vkCmdDispatch(cmd_, gx, gy, gz);
+
+    // v0's deliberately blunt correctness net: make this dispatch's writes available to
+    // EVERYTHING that follows (another dispatch, a draw that samples the result, a readback
+    // copy). One full memory barrier per dispatch is over-synchronization the render graph
+    // replaces with precise, declared-access-derived barriers at M5.4 (ADR-0019) — correctness
+    // first, precision when the owner with frame-global knowledge exists.
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd_, &dep);
 }
 
 VkDescriptorSet VulkanCommandBuffer::allocate_transient_set(VkDescriptorSetLayout layout) {
@@ -305,22 +433,32 @@ void VulkanCommandBuffer::flush_bindings() {
                 VkDescriptorImageInfo& ii = image_infos[write_count];
                 ii.sampler = pb.sampler;
                 ii.imageView = pb.view;
-                ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                ii.imageLayout = pb.layout; // SHADER_READ_ONLY, or GENERAL for storage-written
                 w.pImageInfo = &ii;
                 break;
             }
-            case BindingType::StorageBuffer:
-            case BindingType::StorageImage:
-                // Declarable today so the enum is complete; readable/writable once compute lands.
-                RIME_ERROR("rhi: storage bindings are wired up with compute (M5.2)");
-                continue;
+            case BindingType::StorageBuffer: {
+                VkDescriptorBufferInfo& bi = buffer_infos[write_count];
+                bi.buffer = pb.buffer;
+                bi.offset = pb.offset;
+                bi.range = pb.range;
+                w.pBufferInfo = &bi;
+                break;
+            }
+            case BindingType::StorageImage: {
+                VkDescriptorImageInfo& ii = image_infos[write_count];
+                ii.sampler = VK_NULL_HANDLE;
+                ii.imageView = pb.view;
+                ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL; // storage access requires GENERAL
+                w.pImageInfo = &ii;
+                break;
+            }
         }
         ++write_count;
     }
     if (write_count > 0)
         vkUpdateDescriptorSets(device_.vk_device(), write_count, writes.data(), 0, nullptr);
-    vkCmdBindDescriptorSets(
-        cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, p->layout, 0, 1, &set, 0, nullptr);
+    vkCmdBindDescriptorSets(cmd_, p->bind_point, p->layout, 0, 1, &set, 0, nullptr);
 }
 
 void VulkanCommandBuffer::push_constants(const void* data,

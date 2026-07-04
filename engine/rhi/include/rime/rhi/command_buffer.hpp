@@ -98,6 +98,20 @@ public:
                                      std::uint64_t offset = 0,
                                      std::uint64_t size = 0) = 0;
 
+    // Attach a storage buffer (BufferUsage::Storage) to a StorageBuffer `binding` — read-write
+    // bulk shader data, the compute path's staple (M5.2). Same attach-then-bake-at-dispatch/draw
+    // semantics as the other bind_* calls.
+    virtual void bind_storage_buffer(std::uint32_t binding,
+                                     BufferHandle buffer,
+                                     std::uint64_t offset = 0,
+                                     std::uint64_t size = 0) = 0;
+
+    // Attach a texture created with TextureUsage::Storage to a StorageImage `binding` — written
+    // and read by shaders via imageStore/imageLoad (GLSL `image2D`), not filtered sampling. The
+    // image must already be in the general layout (the backend puts it there the first time a
+    // dispatch touches it — see bind_storage_image's implementation notes).
+    virtual void bind_storage_image(std::uint32_t binding, TextureHandle texture) = 0;
+
     // Upload `size` bytes of push-constant data (from `offset`) to the currently bound pipeline,
     // visible to its vertex and fragment stages. Call after bind_pipeline; the pipeline must have
     // been created with a matching `push_constant_size`. This is the per-draw fast path for a small
@@ -127,6 +141,21 @@ public:
     // packed. This is how the M3 proof gets rendered pixels back to the CPU to verify them. The
     // backend transitions the texture to a transfer-source layout first.
     virtual void copy_texture_to_buffer(TextureHandle src, BufferHandle dst) = 0;
+
+    // ── Compute (M5.2, ADR-0021) ───────────────────────────────────────────────────────────
+    // Bind a compute pipeline (created with create_compute_pipeline). Compute has its own bind
+    // call because Vulkan keeps graphics and compute bind points separate on one command buffer;
+    // pending resource attachments are shared, so a buffer attached once can feed a compute
+    // dispatch and then a draw.
+    virtual void bind_compute_pipeline(PipelineHandle pipeline) = 0;
+
+    // Launch `gx × gy × gz` workgroups of the bound compute pipeline (the workgroup size itself
+    // is baked into the shader's local_size_*). Call OUTSIDE begin/end_rendering — compute is not
+    // part of a raster pass. Pending bindings are baked exactly as at a draw. v0 follows every
+    // dispatch with a conservative barrier so its writes are visible to whatever comes next
+    // (draws, copies, more dispatches) — precise, graph-derived barriers replace that blanket at
+    // M5.4 (ADR-0019).
+    virtual void dispatch(std::uint32_t gx, std::uint32_t gy, std::uint32_t gz = 1) = 0;
 
 protected:
     CommandBuffer() = default; // obtained only from Device::begin_commands()

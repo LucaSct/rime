@@ -57,6 +57,9 @@ struct VulkanShader {
 struct VulkanPipeline {
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
+    // Which bind point this pipeline targets (graphics or compute, M5.2). One handle type serves
+    // both kinds; binding through the wrong call is caught at record time against this field.
+    VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
     // The pipeline's declared set-0 shape (ADR-0020): the layout object plus the BindingDesc list
     // it was built from (post-sugar). Descriptor *sets* are no longer cached here — M3.5 cached
     // one set per pipeline, which cannot express bindings that change per draw (a UBO slice, a
@@ -91,6 +94,7 @@ public:
     [[nodiscard]] ShaderHandle create_shader(const ShaderDesc& desc) override;
     [[nodiscard]] PipelineHandle
     create_graphics_pipeline(const GraphicsPipelineDesc& desc) override;
+    [[nodiscard]] PipelineHandle create_compute_pipeline(const ComputePipelineDesc& desc) override;
     [[nodiscard]] SamplerHandle create_sampler(const SamplerDesc& desc) override;
 
     void destroy(BufferHandle handle) override;
@@ -218,6 +222,13 @@ public:
                              BufferHandle buffer,
                              std::uint64_t offset,
                              std::uint64_t size) override;
+    void bind_storage_buffer(std::uint32_t binding,
+                             BufferHandle buffer,
+                             std::uint64_t offset,
+                             std::uint64_t size) override;
+    void bind_storage_image(std::uint32_t binding, TextureHandle texture) override;
+    void bind_compute_pipeline(PipelineHandle pipeline) override;
+    void dispatch(std::uint32_t gx, std::uint32_t gy, std::uint32_t gz) override;
     void push_constants(const void* data, std::uint32_t size, std::uint32_t offset) override;
     void set_viewport(const Viewport& viewport) override;
     void set_scissor(const Rect2D& scissor) override;
@@ -249,11 +260,16 @@ private:
     struct PendingBinding {
         bool used = false;
         BindingType type = BindingType::UniformBuffer;
-        VkBuffer buffer = VK_NULL_HANDLE; // UniformBuffer (StorageBuffer at M5.2)
+        VkBuffer buffer = VK_NULL_HANDLE; // UniformBuffer / StorageBuffer
         VkDeviceSize offset = 0;
         VkDeviceSize range = VK_WHOLE_SIZE;
-        VkImageView view = VK_NULL_HANDLE; // CombinedImageSampler (StorageImage at M5.2)
+        VkImageView view = VK_NULL_HANDLE; // CombinedImageSampler / StorageImage
         VkSampler sampler = VK_NULL_HANDLE;
+        // The layout the descriptor promises the image is in when accessed: SHADER_READ_ONLY for
+        // ordinary sampling, GENERAL for storage images (and for sampling an image that lives in
+        // GENERAL, e.g. one a dispatch just wrote — sampling from GENERAL is valid, just not the
+        // "optimal" hint). Captured at bind time from the tracked image layout.
+        VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     };
 
     // The highest set-0 binding index a pipeline may declare. A deliberate small bound — a
@@ -272,9 +288,10 @@ private:
     VulkanDevice& device_;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     VulkanPipeline* current_pipeline_ =
-        nullptr; // set by bind_pipeline; flush_bindings needs its layout + binding list
+        nullptr; // set by bind_(compute_)pipeline; flush_bindings needs its layout + binding list
     std::array<PendingBinding, kMaxBindings> pending_{};
     bool bindings_dirty_ = false; // a bind_* or pipeline switch happened since the last flush
+    bool in_rendering_ = false;   // inside begin/end_rendering (barriers are illegal there)
     std::vector<VkDescriptorPool> pools_; // transient pools this encoder drew sets from
 };
 
