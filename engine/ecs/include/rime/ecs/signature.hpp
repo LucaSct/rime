@@ -32,6 +32,11 @@ public:
     // True iff every id in `other` is also in this signature (this ⊇ other) — the query match test.
     [[nodiscard]] bool contains_all(const ComponentSignature& other) const noexcept;
 
+    // True iff this and `other` share at least one id (set intersection non-empty). The system
+    // scheduler uses it to detect read/write hazards between systems (M4.4b): a write set that
+    // intersects another system's read or write set is a conflict.
+    [[nodiscard]] bool intersects(const ComponentSignature& other) const noexcept;
+
     // A new signature with `id` added / removed; this one is left unchanged. Adding a present id or
     // removing an absent one returns an equal signature.
     [[nodiscard]] ComponentSignature with(ComponentId id) const;

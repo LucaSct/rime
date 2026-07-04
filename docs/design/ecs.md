@@ -101,10 +101,12 @@ signature's archetype, swap-remove from the old). A `Query<Ts...>` (M4.3) then f
 whose signature ⊇ `{Ts…}` and scans their chunks **column-wise** — the packed, per-row-lookup-free
 iteration the whole model exists for.
 
-## M4.4 — running systems in parallel (M4.4a landed)
+## M4.4 — running systems in parallel (M4.4a + M4.4b landed)
 
-A *system* is a query's body run over the matching entities. M4.4a makes that run across all cores;
-M4.4b will schedule whole systems relative to one another.
+A *system* is a query's body run over the matching entities. M4.4a runs one system across all cores
+(data parallelism); M4.4b runs independent systems side by side (task parallelism). The two stack.
+
+### M4.4a — `par_for_each`: one system across the cores
 
 `Query<Ts...>::par_for_each(jobs, body[, grain])` is the parallel twin of `for_each`. Its key idea is
 the **parallel grain: one chunk per task**. Because every chunk is a *separate* pooled buffer
@@ -121,18 +123,46 @@ rows**, so writing through the component references it is handed is always race-
 chunks ⇒ different memory). State the body *shares* across invocations is the caller's to synchronize,
 exactly as for `parallel_for`. And the structural-change rule tightens: a parallel body must not
 add/remove components or spawn/despawn — that would restructure the very archetypes being scanned.
-Batched, deferred structural edits are the job of the **system scheduler (M4.4b)**.
+Batched, deferred structural edits are the job of a later brick (**M4.4c**).
 
 This is the engine's *first real multicore load* on the M1.6 Chase-Lev deque, so the Phase 0
 ThreadSanitizer CI job now builds and runs `rime_ecs_tests` alongside `rime_core_tests` — the net that
 keeps the parallel path race-free on every push (`tests/ecs/parallel_query_test.cpp`).
 
+### M4.4b — the scheduler: independent systems side by side
+
+`par_for_each` parallelizes *within* one system. The scheduler parallelizes *across* systems: given a
+list of systems, which may run at once? The answer is declared on each system as an **access set** —
+the components it reads and the components it writes (`System`, `SystemAccess` in `system.hpp`). Two
+systems **conflict** iff one writes a component the other reads or writes; read-read overlap is safe.
+That single rule carries the whole safety argument: if two systems don't conflict, then every location
+one writes is one the other never touches, so their column writes land in disjoint memory and running
+them concurrently is race-free — *even when they iterate the same archetype's chunks* (each writes a
+different column). The flip side is a contract the scheduler cannot check: a system must declare its
+access truthfully (the same discipline Unity DOTS and Bevy require).
+
+`Schedule` batches the systems into **phases** by *ASAP leveling* of the conflict order — a system is
+placed one phase past the last earlier system it conflicts with (`phase(j) = 1 + max{ phase(i) : i<j,
+i ⨯ j }`, else 0). Two properties fall out of that one line: no two systems in a phase conflict (so the
+phase runs concurrently), and conflicting systems keep their declared order (a writer's phase precedes
+its reader's). The phase count is exactly the longest chain of mutually-conflicting systems — the
+irreducible serialization the declared hazards force; everything else runs in parallel.
+
+Execution mirrors that structure: phases run in sequence, and the join between them is the barrier that
+publishes one phase's writes to the next. Within a phase each system is submitted as a job and they run
+side by side (a lone system in its phase is run inline — no needless fork/join). A system body may
+itself call `par_for_each`, so a scheduled run nests task parallelism over data parallelism — a
+submit/wait from within a running job, which the job system's *participating* `wait()` handles without
+deadlock. This concurrent path is a second multicore load, so `tests/ecs/schedule_test.cpp` (two
+independent systems writing disjoint columns of one shared 20k-entity archetype) rides the same TSan
+CI net. The structural-change rule is unchanged and still load-bearing; lifting it with deferred,
+batched edits applied at phase boundaries is the next brick (**M4.4c**).
+
 ## What's next
 
-- **M4.4b** the system scheduler — systems declare their read/write component **access sets**, and the
-  scheduler batches non-conflicting systems into parallel **phases** (two systems may share a phase iff
-  neither writes what the other reads or writes) and applies deferred structural changes at phase
-  boundaries.
+- **M4.4c** deferred structural changes — a command buffer that records spawn/despawn/add/remove during
+  a phase (when the world must stay structurally frozen) and applies them in order at a phase boundary,
+  lifting the "no structural change inside a system" restriction.
 - **M4.5** the transform hierarchy — `core::Transform` composition (`world = parent * local`) and
   change-detection's first consumer (skip chunks whose locals didn't move).
 - **M4.6** the proof: `samples/05-ecs-playground`, 100k+ entities updating in parallel with transforms
