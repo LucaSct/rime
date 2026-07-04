@@ -32,7 +32,9 @@ add_subdirectory(platform)
 add_subdirectory(viewer) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
 add_subdirectory(stream) # codec proof is GPU-free (always built); the frame-tap proof self-guards on RIME_RHI_VULKAN
 
-# The RHI tests render through the Vulkan backend, so they only exist when it is built.
+# The RHI and render-graph tests render through the Vulkan backend, so they only exist when it
+# is built.
 if(RIME_RHI_VULKAN)
     add_subdirectory(rhi)
+    add_subdirectory(render) # the render graph (M5.4): pixel proofs on lavapipe
 endif()

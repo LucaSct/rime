@@ -252,6 +252,7 @@ public:
     [[nodiscard]] bool read_timestamps(std::span<std::uint64_t> out_ns) override;
     void begin_debug_label(std::string_view name) override;
     void end_debug_label() override;
+    void texture_barrier(TextureHandle texture, ResourceState from, ResourceState to) override;
     void push_constants(const void* data, std::uint32_t size, std::uint32_t offset) override;
     void set_viewport(const Viewport& viewport) override;
     void set_scissor(const Rect2D& scissor) override;

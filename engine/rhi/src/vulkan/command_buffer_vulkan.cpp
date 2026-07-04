@@ -96,6 +96,39 @@ void VulkanCommandBuffer::begin_debug_label(std::string_view name) {
     vkCmdBeginDebugUtilsLabelEXT(cmd_, &label);
 }
 
+void VulkanCommandBuffer::texture_barrier(TextureHandle texture,
+                                          ResourceState from,
+                                          ResourceState to) {
+    if (in_rendering_) {
+        RIME_ERROR("rhi: texture_barrier inside begin/end_rendering — transition between passes");
+        return;
+    }
+    VulkanTexture* tex = device_.lookup(texture);
+    if (!tex) {
+        RIME_ERROR("rhi: texture_barrier with an invalid texture handle");
+        return;
+    }
+    const StateInfo src = to_vk(from);
+    const StateInfo dst = to_vk(to);
+    // Trust the caller's `from` for the stage/access half (the graph knows what last touched the
+    // resource) but the *tracked* layout for oldLayout: if the two disagree the tracked one is
+    // what the image is really in, and validation will name the caller's bookkeeping bug.
+    if (src.layout != tex->layout) {
+        RIME_WARN("rhi: texture_barrier 'from' disagrees with the tracked layout (caller "
+                  "bookkeeping vs backend tracking) — using the tracked layout");
+    }
+    transition_image(cmd_,
+                     tex->image,
+                     tex->layout,
+                     dst.layout,
+                     src.stages,
+                     src.access,
+                     dst.stages,
+                     dst.access,
+                     aspect_for(tex->format));
+    tex->layout = dst.layout;
+}
+
 void VulkanCommandBuffer::end_debug_label() {
     if (!device_.debug_utils_enabled() || vkCmdEndDebugUtilsLabelEXT == nullptr)
         return;

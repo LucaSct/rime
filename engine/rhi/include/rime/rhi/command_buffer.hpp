@@ -179,6 +179,16 @@ public:
     virtual void begin_debug_label(std::string_view name) = 0;
     virtual void end_debug_label() = 0;
 
+    // ── Explicit resource transitions (M5.4, ADR-0019) ────────────────────────────────────
+    // Move a texture from one usage state to another — the seam this header reserved since M3
+    // ("explicit barriers are a power-user feature we defer until the render graph needs
+    // explicit control"; it does now). The render graph derives (from, to) pairs from declared
+    // accesses with frame-global knowledge and calls this between passes; the backend turns each
+    // pair into the precise synchronization2 layout+stage+access barrier and updates its tracked
+    // layout, so the pre-existing implicit transitions (begin_rendering & friends) stay
+    // consistent for code that doesn't use a graph. Call outside begin/end_rendering.
+    virtual void texture_barrier(TextureHandle texture, ResourceState from, ResourceState to) = 0;
+
 protected:
     CommandBuffer() = default; // obtained only from Device::begin_commands()
 

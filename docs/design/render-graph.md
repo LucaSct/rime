@@ -1,10 +1,8 @@
 # Design note: the render graph (skeleton — M5.0)
 
-Companion to `engine/render` (not yet built) and [ADR-0019](../adr/0019-render-graph.md), which
-settles the architecture. This note is a **skeleton** at M5.0: it fixes the mental model and the
-API shape the bricks build toward, and is filled in with real code excerpts and measured numbers
-at **M5.4**, when the graph lands. Sections marked ⏳ are written then. (Stub honesty per
-CLAUDE.md.)
+Companion to `engine/render` and [ADR-0019](../adr/0019-render-graph.md), which settles the
+architecture. Written as a skeleton at M5.0; filled in at **M5.4** with the shipped design and
+the measured numbers (below).
 
 ## Why a graph at all
 
@@ -59,18 +57,58 @@ graph.add_raster_pass("tonemap", {.colors = {{back, LoadOp::DontCare}}, .reads =
 graph.execute(cmd_buffer);   // compile → transients → barriers → record, in declared-data order
 ```
 
-## ⏳ Compile, step by step (M5.4)
-Resource versioning, edge derivation, the topological order and its tiebreak, culling — with the
-real code and a worked example.
+## Compile, step by step (M5.4 — `render_graph.cpp`)
 
-## ⏳ Barriers: from declared access to synchronization2 (M5.4)
-The abstract `ResourceState` set, the transition table, and why the graph — not the backend — is
-the right owner (frame-global knowledge).
+1. **Edges by resource versioning.** Walk passes in declared order tracking, per resource, the
+   *last writer* and the *readers of that version*. A read depends on the last write (RAW); a
+   write depends on the last write (WAW) **and** every read of the old version (WAR — it must not
+   clobber data a reader still needs). This is SSA thinking applied to GPU resources: each write
+   mints a new version, and edges connect versions to their consumers. One consequence worth
+   internalizing (it is pinned by a test): a pass declared *before* a resource's writer reads the
+   **older version** — declaration order *is* data-flow order, never something the graph
+   second-guesses.
+2. **Liveness flows backwards.** Seed with passes that write anything *observable* (an imported
+   or exported resource), then walk the reverse edges: whoever a live pass depends on is live.
+   Everything else is **culled** — declared, ordered, never executed.
+3. **Topological order, declared order breaking ties** (Kahn's algorithm, lowest declared index
+   first). With versioned edges the declared order is always *a* valid topological order, so the
+   sort never surprises — its value is validation (a cycle is a caller bug caught by assert),
+   determinism, and the grouping information parallel recording will use later.
 
-## ⏳ The transient cache (M5.4)
-Desc-keyed reuse, lifetime rules, what "no aliasing in v0" costs and how we will measure when
-that changes.
+## Barriers: from declared access to synchronization2 (M5.4)
 
-## ⏳ Measured overhead (M5.4)
-Compile + record cost for the real frame and a synthetic ~100-pass graph, on this repo's dev
-server (Release), per "measure before optimize."
+Each declared access names a `rhi::ResourceState` — the RHI's coarse spelling of layout +
+stage/access (`ColorTarget`, `DepthTarget`, `ShaderRead`, `StorageReadWrite`, `TransferSrc/Dst`,
+`Present`). While recording, the graph tracks each resource's current state and emits
+`cmd.texture_barrier(physical, from, to)` whenever a pass needs it in a different one; the Vulkan
+backend maps both states through one table (`to_vk(ResourceState)`) into a precise
+synchronization2 image barrier and keeps its tracked layout in agreement.
+
+**The deliberate split:** attachment states are delegated to `begin_rendering`'s existing tracked
+transitions (which double as the write-after-write barrier between passes hitting the same
+target); the graph emits the transitions the backend *cannot* see coming — sampled/storage reads
+of a texture some earlier pass wrote, the exact hazard hand-rolled multi-pass code gets wrong
+first. One owner per kind of knowledge: frame-global read hazards in the graph, attachment
+mechanics in the backend. Full graph ownership of every transition arrives with parallel
+recording, when per-encoder tracked state stops existing.
+
+## The transient cache (M5.4)
+
+`create_texture` records a desc; memory exists only after compile. Physicals are satisfied from
+a cache keyed by **(extent, format, accumulated usage)** — usage is accumulated from the declared
+accesses themselves (an `RGTextureDesc` deliberately has no usage field, so declaration and usage
+cannot disagree; exported textures get `TransferSrc` added because "export" means someone outside
+reads them). A transient costs a real allocation the first frame its key appears, then recycles:
+`reset()` marks every cached texture free, `execute()` claims them back. Two accepted v0 bounds,
+both measured before changed: no **aliasing** (two transients with disjoint lifetimes could share
+memory; ADR-0019 defers this until a real workload shows the win) and no **eviction** (the cache
+grows to the high-water mark of distinct keys).
+
+## Measured overhead (M5.4, this repo's dev server)
+
+A synthetic worst case — a 100-pass chain, each pass sampling its predecessor's output (maximal
+edges) — **declares + compiles + records in ~1.3 ms in a Debug build** on the 16-core dev server
+(lavapipe; `tests/render/render_graph_test.cpp` prints it). The real M5 frame is 3–6 passes, i.e.
+noise. Per ADR-0019: if a profile ever disagrees at real pass counts, caching a compiled schedule
+keyed by the declaration is a contained optimization — but at these numbers, rebuilding the frame
+as data every frame costs nothing worth designing around.
