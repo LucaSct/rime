@@ -9,10 +9,10 @@ someone learning how engines work, so it defines ideas as it goes. It describes 
 - ⚪ **Planned** — intended; not started.
 
 As of 2026-07 the **bottom of the layer cake is built and CI-green on Windows, Linux, and
-macOS**: `core` 🟢 and `platform` 🟢 (Milestones 0–2) and `rhi` 🟡 (Milestone 3 — the
-graphics seam and its Vulkan backend). Everything above — `ecs`, `render`, and the feature
-modules — is still ⚪. This document is the blueprint we build toward; the per-section tags
-below say how far each part has actually come.
+macOS**: `core` 🟢 and `platform` 🟢 (Milestones 0–2), `rhi` 🟡 (Milestone 3 + the M5.1–M5.3
+renderer top-ups), `ecs` 🟢 (Milestone 4), and `render` 🟡 (the M5.4 render graph; the scene
+layer and PBR are landing now). The feature modules above are still ⚪. This document is the
+blueprint we build toward; the per-section tags below say how far each part has actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
 
@@ -109,13 +109,17 @@ multiple-render-targets or blending, no MSAA/mipmaps, a single-set/single-bindin
 model, one queue, a fixed two frames in flight, and single-threaded command recording. → [ADR-0002](adr/0002-vulkan-first-rhi.md),
 [ADR-0007](adr/0007-vulkan-backend-bootstrapping.md), [design/rhi.md](design/rhi.md)
 
-### `ecs` ⚪ — *the world, as data*
+### `ecs` 🟢 — *the world, as data*
 An **Entity-Component-System**: entities are ids; components are plain data stored in
 tight arrays; systems are functions that run over matching component sets, ideally in
 parallel via the job system. This is how we get both performance *and* a model that's
-easy to reason about and extend.
+easy to reason about and extend. *Built (M4, complete):* generational entities +
+reflection-registered components, archetype/SoA chunk storage on `core`'s allocators
+(ADR-0018), queries with `par_for_each` chunk parallelism, the access-set `Schedule`,
+deferred structural changes (`CommandBuffer`), and the parallel transform hierarchy —
+proven by 200k entities stepping at ≈10× on 16 cores (`samples/05-ecs-playground`).
 
-### `render` ⚪ — *where the picture comes from*
+### `render` 🟡 — *where the picture comes from*
 A high-level renderer built on a **render graph** (a.k.a. frame graph): each frame is
 described as a graph of passes and the resources they read/write; the graph schedules
 them, manages transient memory, and inserts barriers. This structure is precisely what
@@ -126,6 +130,11 @@ makes UE5-class techniques tractable:
 - **Virtual shadow maps** — high-res, consistent shadows.
 - **Many lights** (MegaLights-style) — large counts of shadow-casting lights.
 We don't build all of these at once; we build the render graph *so that they fit*.
+*Built (M5.4):* the **render graph v0** — frame-declared raster/compute passes, virtual
+resources with a cross-frame transient cache, declared access driving order, culling, and
+**graph-owned barriers** through the RHI's `texture_barrier` seam, with per-pass GPU
+timestamps + debug labels built in (ADR-0019, [design/render-graph.md](design/render-graph.md)).
+Next: the scene layer (M5.5) and the PBR pass library (M5.6).
 
 ### `physics` ⚪ — *simulation, multicore-first*
 Rigid bodies, collision, queries — designed around parallel simulation and the ability

@@ -172,6 +172,23 @@ inline constexpr std::uint32_t kMaxColorAttachments = 8;
 // far bigger frame than M5 draws, while keeping the backend's query pool fixed-size.
 inline constexpr std::uint32_t kMaxTimestamps = 64;
 
+// What a texture is being used AS at a point in the frame — the RHI's abstract spelling of
+// Vulkan's image layout + stage/access pairs (M5.4, ADR-0019). The render graph derives one
+// state per (pass, resource) from declared accesses and emits explicit transitions between
+// them; the backend maps each state to the precise synchronization2 masks. Deliberately coarse:
+// one state answers "who writes/reads it and how", not per-stage micro-scoping (that precision
+// arrives when profiles ask for it).
+enum class ResourceState : std::uint8_t {
+    Undefined,        // contents don't matter (fresh transient; first use)
+    ColorTarget,      // written as a color attachment
+    DepthTarget,      // written/tested as the depth(-stencil) attachment
+    ShaderRead,       // sampled or uniform-read by any shader stage
+    StorageReadWrite, // imageLoad/imageStore or storage-buffer access (general layout)
+    TransferSrc,      // blit/copy source
+    TransferDst,      // blit/copy destination
+    Present,          // handed to the swapchain for presentation
+};
+
 enum class PrimitiveTopology : std::uint8_t { TriangleList, TriangleStrip, LineList, PointList };
 
 enum class CullMode : std::uint8_t { None, Front, Back };
