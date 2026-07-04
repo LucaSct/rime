@@ -184,11 +184,16 @@ bool VulkanDevice::create_instance(const DeviceDesc& desc) {
         if (has_layer(layers, kValidationLayer) &&
             has_ext(exts, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
             enabled_layers.push_back(kValidationLayer);
-            enabled_exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         } else {
             RIME_WARN("rhi: validation requested but layer/debug-utils unavailable — disabling");
             validation_ = false;
         }
+    }
+    // Debug utils powers object names + command labels (M5.3) and is useful with or without
+    // validation — RenderDoc injects it too — so enable it whenever the loader offers it.
+    if (has_ext(exts, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
+        enabled_exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        debug_utils_ = true;
     }
 
     // MoltenVK and other Metal/translation drivers are "portability" implementations; the loader
@@ -367,6 +372,28 @@ bool VulkanDevice::create_logical_device() {
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     f2.pNext = &f13;
 
+    // Optional features/limits the sampler + timing paths use (M5.3). Anisotropic filtering is a
+    // feature we must *enable* (near-universal, but portability-class devices may lack it — then
+    // samplers silently degrade to plain trilinear, documented in SamplerDesc). Timestamps are a
+    // per-queue capability, not a feature: usable iff the queue reports nonzero valid bits.
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(physical_, &supported);
+    anisotropy_supported_ = supported.samplerAnisotropy == VK_TRUE;
+    f2.features.samplerAnisotropy = supported.samplerAnisotropy;
+
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physical_, &props);
+    max_anisotropy_limit_ = props.limits.maxSamplerAnisotropy;
+    timestamp_period_ns_ = props.limits.timestampPeriod;
+
+    std::uint32_t family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(family_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, families.data());
+    timestamps_supported_ = graphics_family_ < family_count &&
+                            families[graphics_family_].timestampValidBits > 0 &&
+                            timestamp_period_ns_ > 0.0f;
+
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     ci.pNext = &f2; // features passed via the features2 chain, so pEnabledFeatures stays null
     ci.queueCreateInfoCount = 1;
@@ -459,6 +486,22 @@ void VulkanDevice::recycle_descriptor_pool(VkDescriptorPool pool) noexcept {
     // sets are never individually freed — and why recycling must wait for the submission's fence.
     vkResetDescriptorPool(device_, pool, 0);
     descriptor_pool_free_list_.push_back(pool);
+}
+
+void VulkanDevice::set_debug_name(VkObjectType type,
+                                  std::uint64_t handle,
+                                  std::string_view name) noexcept {
+    // The debug_name every Desc carries finally reaches the driver (M5.3): validation errors and
+    // RenderDoc trees now say "icem-mesh-pipeline", not "0x7f3a...". Purely diagnostic — absent
+    // extension or empty name is a silent no-op.
+    if (!debug_utils_ || name.empty() || handle == 0 || vkSetDebugUtilsObjectNameEXT == nullptr)
+        return;
+    const std::string owned(name); // Vulkan wants NUL-terminated; string_view need not be
+    VkDebugUtilsObjectNameInfoEXT info{VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT};
+    info.objectType = type;
+    info.objectHandle = handle;
+    info.pObjectName = owned.c_str();
+    vkSetDebugUtilsObjectNameEXT(device_, &info);
 }
 
 std::unique_ptr<CommandBuffer> VulkanDevice::begin_commands() {

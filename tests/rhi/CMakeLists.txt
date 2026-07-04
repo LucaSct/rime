@@ -30,7 +30,8 @@ rime_add_test(rime_rhi_tests
     chart_offscreen_test.cpp
     ubo_test.cpp
     blend_mrt_test.cpp
-    compute_test.cpp)
+    compute_test.cpp
+    mip_timestamp_test.cpp)
 
 target_link_libraries(rime_rhi_tests
     PRIVATE rime::rhi) # rime::core (the camera math the mesh proof uses) comes transitively via rhi
@@ -55,6 +56,7 @@ rime_add_shaders(rime_rhi_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fill.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pattern.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sample_storage.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/minify_lod.frag
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.vert
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volume.vert

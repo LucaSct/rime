@@ -36,6 +36,13 @@ struct TextureDesc {
     // (u,v,w). Volumes are how a scalar/vector simulation field is uploaded for trilinear sampling
     // (the ICEM viewer's field colormap / slice). See ADR-0013.
     std::uint32_t depth = 1;
+    // Mip levels (M5.3). 1 (the default) = just the base image, exactly the pre-M5.3 behavior.
+    // >1 allocates a chain of progressively halved levels; write_texture() fills level 0 from the
+    // caller's pixels and generates the rest by GPU downsampling blits. Mipmaps are how sampling
+    // stays alias-free under minification: the hardware picks the level whose texels are closest
+    // to one-per-pixel (pair with SamplerDesc::mip_filter). Clamped to the chain length the
+    // extent supports; 2-D only for now (a mip-mapped volume has no consumer yet).
+    std::uint32_t mip_levels = 1;
     Format format = Format::RGBA8Unorm;
     TextureUsage usage = TextureUsage::None;
     std::string_view debug_name = {};
@@ -48,6 +55,16 @@ struct TextureDesc {
 struct SamplerDesc {
     Filter mag_filter = Filter::Linear;
     Filter min_filter = Filter::Linear;
+    // How to read a mip-mapped texture ACROSS its levels (M5.3): Nearest snaps to the closest
+    // level (visible "LOD pop" bands, but exact — and the right choice for textures with no
+    // chain); Linear blends the two straddling levels — with linear min/mag that is trilinear
+    // filtering, the standard for minified surfaces like a ground plane.
+    Filter mip_filter = Filter::Nearest;
+    // Anisotropic filtering (M5.3): 0 (or 1) = off; N up to 16 lets the sampler take N samples
+    // along the axis a surface is squashed in screen space — what keeps a floor readable at
+    // grazing angles where plain trilinear smears. Clamped to the device limit; silently off if
+    // the device lacks the feature (a documented degrade, not an error).
+    float max_anisotropy = 0.0f;
     AddressMode address_mode = AddressMode::Repeat;
     std::string_view debug_name = {};
 };

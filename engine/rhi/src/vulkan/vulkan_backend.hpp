@@ -36,7 +36,8 @@ struct VulkanTexture {
     VkImageView view = VK_NULL_HANDLE;
     VmaAllocation allocation = nullptr;
     Extent2D extent{};
-    std::uint32_t depth = 1; // >1 → a 3-D (volume) image; 1 → ordinary 2-D
+    std::uint32_t depth = 1;      // >1 → a 3-D (volume) image; 1 → ordinary 2-D
+    std::uint32_t mip_levels = 1; // full chain length allocated for this image (M5.3)
     VkFormat format = VK_FORMAT_UNDEFINED;
     TextureUsage usage = TextureUsage::None;
     // The image's current layout, tracked so the command encoder can insert the right transition.
@@ -144,6 +145,19 @@ public:
     [[nodiscard]] VkDescriptorPool acquire_descriptor_pool();
     void recycle_descriptor_pool(VkDescriptorPool pool) noexcept;
 
+    // GPU-timing facts the encoder needs (M5.3): whether the graphics queue can timestamp at all
+    // (timestampValidBits > 0) and the tick→nanosecond scale (limits.timestampPeriod).
+    [[nodiscard]] bool timestamps_supported() const noexcept { return timestamps_supported_; }
+
+    [[nodiscard]] float timestamp_period_ns() const noexcept { return timestamp_period_ns_; }
+
+    // True when VK_EXT_debug_utils is live — object naming + command labels are safe to call.
+    [[nodiscard]] bool debug_utils_enabled() const noexcept { return debug_utils_; }
+
+    // Attach a human-readable name to a Vk object (validation messages, RenderDoc trees). No-op
+    // without debug utils or with an empty name.
+    void set_debug_name(VkObjectType type, std::uint64_t handle, std::string_view name) noexcept;
+
     // ── Internals used by VulkanSwapchain (same module) ──────────────────────────────────────
     [[nodiscard]] VkInstance vk_instance() const noexcept { return instance_; }
 
@@ -192,6 +206,11 @@ private:
     std::vector<VkDescriptorPool> descriptor_pool_free_list_; // recycled transient pools
     VmaAllocator allocator_ = nullptr;
     bool validation_ = false;
+    bool debug_utils_ = false;          // VK_EXT_debug_utils enabled (names + labels, M5.3)
+    bool anisotropy_supported_ = false; // samplerAnisotropy feature enabled on the device
+    float max_anisotropy_limit_ = 1.0f; // limits.maxSamplerAnisotropy
+    bool timestamps_supported_ = false; // graphics queue timestampValidBits > 0
+    float timestamp_period_ns_ = 0.0f;  // nanoseconds per GPU timestamp tick
 
     AdapterInfo adapter_{};
 
@@ -229,6 +248,10 @@ public:
     void bind_storage_image(std::uint32_t binding, TextureHandle texture) override;
     void bind_compute_pipeline(PipelineHandle pipeline) override;
     void dispatch(std::uint32_t gx, std::uint32_t gy, std::uint32_t gz) override;
+    void write_timestamp(std::uint32_t slot) override;
+    [[nodiscard]] bool read_timestamps(std::span<std::uint64_t> out_ns) override;
+    void begin_debug_label(std::string_view name) override;
+    void end_debug_label() override;
     void push_constants(const void* data, std::uint32_t size, std::uint32_t offset) override;
     void set_viewport(const Viewport& viewport) override;
     void set_scissor(const Rect2D& scissor) override;
@@ -293,6 +316,11 @@ private:
     bool bindings_dirty_ = false; // a bind_* or pipeline switch happened since the last flush
     bool in_rendering_ = false;   // inside begin/end_rendering (barriers are illegal there)
     std::vector<VkDescriptorPool> pools_; // transient pools this encoder drew sets from
+    // GPU timing (M5.3): a lazily-created kMaxTimestamps-slot query pool, reset in full on first
+    // use. Owned by the encoder (destroyed with it), so read_timestamps stays valid after
+    // submit_blocking while the caller still holds the encoder.
+    VkQueryPool query_pool_ = VK_NULL_HANDLE;
+    std::uint32_t timestamp_high_water_ = 0; // 1 + highest slot written (bounds the readback)
 };
 
 // Create a VkSurfaceKHR for a platform window. The one OS-touching spot in the backend: it switches

@@ -30,14 +30,16 @@ raw pointers.
 | M5.1a | **descriptor model v2** — declared binding layouts (`GraphicsPipelineDesc::bindings`), `bind_uniform_buffer`, transient per-draw sets from recycled grow-on-demand pools (the 16-set cap is gone; `sampled_texture` stays as sugar) | landed (ADR-0020) |
 | M5.1b | **blending** (`BlendMode` presets: Alpha "over" / Additive) · **multiple render targets** (`color_formats` + `RenderingInfo::colors`, ≤ 8) · **`Format::RGBA16Float`** — the HDR scene target that keeps radiance > 1.0 for the tonemap pass | landed |
 | M5.2 | **compute** — `create_compute_pipeline` + `bind_compute_pipeline` + `dispatch`, storage buffers/images (`bind_storage_buffer` / `bind_storage_image`, GENERAL-layout handling), conservative post-dispatch barrier until the graph owns sync | landed (ADR-0021) |
+| M5.3 | **mipmaps** (`TextureDesc::mip_levels`, blit-generated chains) + **anisotropic sampling** (`SamplerDesc::mip_filter`/`max_anisotropy`, feature-gated) · **GPU timestamps** (`write_timestamp`/`read_timestamps`, ns) · **debug labels + object names** (`begin/end_debug_label`, `debug_name` → the driver, guarded on VK_EXT_debug_utils) | landed |
 
 > *"landed"* = merged and green in CI on all three OSes (Linux/lavapipe with
 > `RIME_REQUIRE_VULKAN=1`; macOS/MoltenVK locally). M3 is complete — the whole seam + Vulkan
 > backend shipped in PR #2 (2026-07).
 >
-> **Known gaps before the RHI is renderer-ready** (burned down early in M5, in graph-need
-> order): no MSAA/mipmaps (mipmaps M5.3), one queue, a fixed two frames in flight, and
-> single-threaded command recording (seams kept by the render graph, ADR-0019).
+> **Known gaps before the RHI is renderer-ready** (remaining after the M5.1–M5.3 top-ups): no
+> MSAA, one queue, a fixed two frames in flight, and single-threaded command recording — all
+> deliberate, with the seams kept by the render graph (ADR-0019). The RHI is now
+> **renderer-ready for M5.4**.
 
 ## Layout
 
