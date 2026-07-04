@@ -326,6 +326,10 @@ template <class Dst, class Src>
     return t == IndexType::Uint16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
 }
 
+[[nodiscard]] inline VkSamplerMipmapMode to_vk_mipmap(Filter f) noexcept {
+    return f == Filter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+}
+
 [[nodiscard]] inline VkFilter to_vk(Filter f) noexcept {
     return f == Filter::Linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
 }
@@ -363,7 +367,9 @@ inline void transition_image(VkCommandBuffer cmd,
                              VkAccessFlags2 src_access,
                              VkPipelineStageFlags2 dst_stage,
                              VkAccessFlags2 dst_access,
-                             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT) noexcept {
+                             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+                             std::uint32_t base_mip = 0,
+                             std::uint32_t level_count = VK_REMAINING_MIP_LEVELS) noexcept {
     VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     barrier.srcStageMask = src_stage;
     barrier.srcAccessMask = src_access;
@@ -375,8 +381,10 @@ inline void transition_image(VkCommandBuffer cmd,
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
     barrier.subresourceRange.aspectMask = aspect;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
+    // Defaults cover the whole chain (REMAINING == 1 level for the un-mipped majority); the mip
+    // generator (write_texture, M5.3) passes explicit single-level ranges while ping-ponging.
+    barrier.subresourceRange.baseMipLevel = base_mip;
+    barrier.subresourceRange.levelCount = level_count;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
 

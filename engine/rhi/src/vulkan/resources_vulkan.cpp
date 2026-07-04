@@ -69,15 +69,39 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
     // 2-D case. The same VkFormat/usage/aspect logic serves both — only the image/view type and the
     // extent's depth differ (ADR-0013).
     const bool is_3d = desc.depth > 1;
+
+    // Mip chain length (M5.3): what the caller asked for, clamped to what the extent supports
+    // (each level halves until 1×1 — floor(log2(max_dim)) + 1 levels). Volumes stay single-level
+    // (no consumer yet), loudly rather than silently.
+    std::uint32_t mips = desc.mip_levels == 0 ? 1u : desc.mip_levels;
+    if (is_3d && mips > 1) {
+        RIME_ERROR("rhi: create_texture('{}'): mip-mapped 3-D textures are unsupported (using 1)",
+                   desc.debug_name);
+        mips = 1;
+    }
+    std::uint32_t max_dim =
+        desc.extent.width > desc.extent.height ? desc.extent.width : desc.extent.height;
+    std::uint32_t full_chain = 1;
+    while (max_dim > 1) {
+        max_dim >>= 1;
+        ++full_chain;
+    }
+    if (mips > full_chain)
+        mips = full_chain;
+
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     ici.format = to_vk(desc.format);
     ici.extent = {desc.extent.width, desc.extent.height, desc.depth};
-    ici.mipLevels = 1;
+    ici.mipLevels = mips;
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = to_vk(desc.usage);
+    // Generating the chain (write_texture) blits level i-1 → i, which needs the image to be both
+    // a blit source and destination — added implicitly so callers only say "mip_levels = N".
+    if (mips > 1)
+        ici.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VmaAllocationCreateInfo aci{};
@@ -86,6 +110,7 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
     VulkanTexture t;
     t.extent = desc.extent;
     t.depth = desc.depth;
+    t.mip_levels = mips;
     t.format = ici.format;
     t.usage = desc.usage;
     t.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -103,7 +128,7 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
     // A depth image is viewed through its depth aspect, a color image through its color aspect.
     vci.subresourceRange.aspectMask = aspect_for(ici.format);
     vci.subresourceRange.baseMipLevel = 0;
-    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.levelCount = mips; // the sampled view spans the whole chain
     vci.subresourceRange.baseArrayLayer = 0;
     vci.subresourceRange.layerCount = 1;
 
@@ -113,6 +138,7 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
         vmaDestroyImage(allocator_, t.image, t.allocation);
         return {};
     }
+    set_debug_name(VK_OBJECT_TYPE_IMAGE, reinterpret_cast<std::uint64_t>(t.image), desc.debug_name);
     return rebrand<Texture>(textures_.insert(t));
 }
 
@@ -136,11 +162,18 @@ SamplerHandle VulkanDevice::create_sampler(const SamplerDesc& desc) {
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sci.magFilter = to_vk(desc.mag_filter);
     sci.minFilter = to_vk(desc.min_filter);
-    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; // no mipmaps in M3.5
+    sci.mipmapMode = to_vk_mipmap(desc.mip_filter); // across-level blend (trilinear when Linear)
     sci.addressModeU = to_vk(desc.address_mode);
     sci.addressModeV = to_vk(desc.address_mode);
     sci.addressModeW = to_vk(desc.address_mode);
     sci.maxLod = VK_LOD_CLAMP_NONE;
+    // Anisotropy (M5.3): on when the caller asks for >1 and the device has the feature; clamped
+    // to the hardware limit. Absent feature = plain trilinear (documented degrade, not an error).
+    if (desc.max_anisotropy > 1.0f && anisotropy_supported_) {
+        sci.anisotropyEnable = VK_TRUE;
+        sci.maxAnisotropy = desc.max_anisotropy < max_anisotropy_limit_ ? desc.max_anisotropy
+                                                                        : max_anisotropy_limit_;
+    }
 
     VulkanSampler s;
     const VkResult r = vkCreateSampler(device_, &sci, nullptr, &s.sampler);
@@ -148,6 +181,8 @@ SamplerHandle VulkanDevice::create_sampler(const SamplerDesc& desc) {
         RIME_ERROR("rhi: vkCreateSampler('{}') failed: {}", desc.debug_name, result_string(r));
         return {};
     }
+    set_debug_name(
+        VK_OBJECT_TYPE_SAMPLER, reinterpret_cast<std::uint64_t>(s.sampler), desc.debug_name);
     return rebrand<Sampler>(samplers_.insert(s));
 }
 
@@ -273,14 +308,78 @@ void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::si
     region.imageExtent = {t->extent.width, t->extent.height, t->depth};
     vkCmdCopyBufferToImage(vk, staging, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    transition_image(vk,
-                     t->image,
-                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                     VK_PIPELINE_STAGE_2_COPY_BIT,
-                     VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    // Mip generation (M5.3): the caller supplied level 0; each further level is a GPU blit of the
+    // previous one at half size (linear filter = a 2×2 box average). The ping-pong is all in the
+    // barriers: level i-1 flips DST→SRC once its content is final, level i is blitted, and so on
+    // down to 1×1. The whole chain then moves to SHADER_READ_ONLY together.
+    for (std::uint32_t level = 1; level < t->mip_levels; ++level) {
+        transition_image(vk,
+                         t->image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_BLIT_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_BLIT_BIT,
+                         VK_ACCESS_2_TRANSFER_READ_BIT,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         level - 1,
+                         1);
+        const auto dim = [](std::uint32_t base, std::uint32_t lvl) {
+            const std::uint32_t d = base >> lvl;
+            return static_cast<std::int32_t>(d == 0 ? 1u : d);
+        };
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = level - 1;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[1] = {dim(t->extent.width, level - 1), dim(t->extent.height, level - 1), 1};
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = level;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[1] = {dim(t->extent.width, level), dim(t->extent.height, level), 1};
+        vkCmdBlitImage(vk,
+                       t->image,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       t->image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1,
+                       &blit,
+                       VK_FILTER_LINEAR);
+    }
+    if (t->mip_levels > 1) {
+        // Levels 0..N-2 sit in TRANSFER_SRC (each was a blit source), the last in TRANSFER_DST.
+        transition_image(vk,
+                         t->image,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_BLIT_BIT,
+                         VK_ACCESS_2_TRANSFER_READ_BIT,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         0,
+                         t->mip_levels - 1);
+        transition_image(vk,
+                         t->image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_BLIT_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                         VK_IMAGE_ASPECT_COLOR_BIT,
+                         t->mip_levels - 1,
+                         1);
+    } else {
+        transition_image(vk,
+                         t->image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_COPY_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
     t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     submit_blocking(

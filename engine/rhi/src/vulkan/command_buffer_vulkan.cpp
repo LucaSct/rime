@@ -19,6 +19,87 @@ VulkanCommandBuffer::~VulkanCommandBuffer() {
     // safe.
     for (VkDescriptorPool pool : pools_)
         device_.recycle_descriptor_pool(pool);
+    // The timestamp query pool is encoder-owned so read_timestamps works after submission while
+    // the caller still holds the encoder; destroyed with it (the usual encoders-die-before-the-
+    // device contract).
+    if (query_pool_ != VK_NULL_HANDLE)
+        vkDestroyQueryPool(device_.vk_device(), query_pool_, nullptr);
+}
+
+void VulkanCommandBuffer::write_timestamp(std::uint32_t slot) {
+    if (!device_.timestamps_supported())
+        return; // documented degrade: read_timestamps will return false
+    if (slot >= kMaxTimestamps) {
+        RIME_ERROR(
+            "rhi: write_timestamp slot {} exceeds kMaxTimestamps ({})", slot, kMaxTimestamps);
+        return;
+    }
+    if (query_pool_ == VK_NULL_HANDLE) {
+        if (in_rendering_) {
+            RIME_ERROR("rhi: the first write_timestamp must be outside begin/end_rendering (the "
+                       "pool reset is illegal inside)");
+            return;
+        }
+        VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        ci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        ci.queryCount = kMaxTimestamps;
+        if (vkCreateQueryPool(device_.vk_device(), &ci, nullptr, &query_pool_) != VK_SUCCESS) {
+            RIME_ERROR("rhi: vkCreateQueryPool failed");
+            query_pool_ = VK_NULL_HANDLE;
+            return;
+        }
+        // Queries must be reset before first use; do the whole pool once, on this recording.
+        vkCmdResetQueryPool(cmd_, query_pool_, 0, kMaxTimestamps);
+    }
+    // ALL_COMMANDS = stamp when every prior command has fully completed — the unambiguous (if
+    // conservative) semantic; per-stage stamps are a graph-era refinement if profiles want them.
+    vkCmdWriteTimestamp2(cmd_, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, query_pool_, slot);
+    if (slot + 1 > timestamp_high_water_)
+        timestamp_high_water_ = slot + 1;
+}
+
+bool VulkanCommandBuffer::read_timestamps(std::span<std::uint64_t> out_ns) {
+    if (query_pool_ == VK_NULL_HANDLE || timestamp_high_water_ == 0 || out_ns.empty())
+        return false;
+    const std::uint32_t count = out_ns.size() < timestamp_high_water_
+                                    ? static_cast<std::uint32_t>(out_ns.size())
+                                    : timestamp_high_water_;
+    // The caller reads after submit_blocking returned, so results are ready; WAIT is a no-op
+    // backstop rather than a real stall.
+    const VkResult r = vkGetQueryPoolResults(device_.vk_device(),
+                                             query_pool_,
+                                             0,
+                                             count,
+                                             count * sizeof(std::uint64_t),
+                                             out_ns.data(),
+                                             sizeof(std::uint64_t),
+                                             VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkGetQueryPoolResults failed: {}", result_string(r));
+        return false;
+    }
+    // Ticks → nanoseconds (timestampPeriod is ns-per-tick). Double math keeps 48-bit tick values
+    // exact well past any frame duration we will ever time.
+    for (std::uint32_t i = 0; i < count; ++i) {
+        out_ns[i] = static_cast<std::uint64_t>(static_cast<double>(out_ns[i]) *
+                                               static_cast<double>(device_.timestamp_period_ns()));
+    }
+    return true;
+}
+
+void VulkanCommandBuffer::begin_debug_label(std::string_view name) {
+    if (!device_.debug_utils_enabled() || vkCmdBeginDebugUtilsLabelEXT == nullptr)
+        return;
+    const std::string owned(name); // NUL-terminated for the C API
+    VkDebugUtilsLabelEXT label{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+    label.pLabelName = owned.c_str();
+    vkCmdBeginDebugUtilsLabelEXT(cmd_, &label);
+}
+
+void VulkanCommandBuffer::end_debug_label() {
+    if (!device_.debug_utils_enabled() || vkCmdEndDebugUtilsLabelEXT == nullptr)
+        return;
+    vkCmdEndDebugUtilsLabelEXT(cmd_);
 }
 
 void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {

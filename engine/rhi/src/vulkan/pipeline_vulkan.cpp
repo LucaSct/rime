@@ -285,6 +285,8 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
             vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
         return {};
     }
+    set_debug_name(
+        VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<std::uint64_t>(p.pipeline), desc.debug_name);
     return rebrand<Pipeline>(pipelines_.insert(p));
 }
 
@@ -353,6 +355,8 @@ PipelineHandle VulkanDevice::create_compute_pipeline(const ComputePipelineDesc& 
             vkDestroyDescriptorSetLayout(device_, set_layout, nullptr);
         return {};
     }
+    set_debug_name(
+        VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<std::uint64_t>(p.pipeline), desc.debug_name);
     return rebrand<Pipeline>(pipelines_.insert(p));
 }
 

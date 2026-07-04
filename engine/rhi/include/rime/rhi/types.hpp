@@ -168,6 +168,10 @@ enum class BlendMode : std::uint8_t { None, Alpha, Additive };
 // nowhere yet (measure/need first).
 inline constexpr std::uint32_t kMaxColorAttachments = 8;
 
+// Timestamp slots per command buffer (M5.3): enough for begin/end pairs around every pass of a
+// far bigger frame than M5 draws, while keeping the backend's query pool fixed-size.
+inline constexpr std::uint32_t kMaxTimestamps = 64;
+
 enum class PrimitiveTopology : std::uint8_t { TriangleList, TriangleStrip, LineList, PointList };
 
 enum class CullMode : std::uint8_t { None, Front, Back };

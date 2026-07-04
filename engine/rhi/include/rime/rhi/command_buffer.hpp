@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 #include "rime/rhi/types.hpp"
 
@@ -156,6 +157,27 @@ public:
     // (draws, copies, more dispatches) — precise, graph-derived barriers replace that blanket at
     // M5.4 (ADR-0019).
     virtual void dispatch(std::uint32_t gx, std::uint32_t gy, std::uint32_t gz = 1) = 0;
+
+    // ── GPU timing + debug labels (M5.3) ──────────────────────────────────────────────────
+    // Stamp the GPU clock into `slot` (< kMaxTimestamps) when all prior work completes. Call
+    // outside begin/end_rendering. The render graph brackets every pass with a pair of these —
+    // "measure before optimize" made structural (ADR-0019). No-op when the device cannot
+    // timestamp (read_timestamps then returns false).
+    virtual void write_timestamp(std::uint32_t slot) = 0;
+
+    // After this command buffer's submission has completed (submit_blocking has returned), fetch
+    // the stamped slots into `out_ns` — nanoseconds on the GPU clock (timestampPeriod applied),
+    // comparable within one submission: pass_ms = (out_ns[end] - out_ns[begin]) / 1e6. Reads
+    // out_ns.size() slots from slot 0. Returns false (out untouched) if the device cannot
+    // timestamp or nothing was stamped.
+    [[nodiscard]] virtual bool read_timestamps(std::span<std::uint64_t> out_ns) = 0;
+
+    // Bracket a region of GPU work with a named label — what makes a RenderDoc/validation capture
+    // read like the render graph that recorded it ("depth-prepass", "forward-pbr", …). Nestable;
+    // no-ops when VK_EXT_debug_utils is absent (a release-driver norm, so never rely on them for
+    // correctness).
+    virtual void begin_debug_label(std::string_view name) = 0;
+    virtual void end_debug_label() = 0;
 
 protected:
     CommandBuffer() = default; // obtained only from Device::begin_commands()
