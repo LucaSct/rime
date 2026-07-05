@@ -10,8 +10,9 @@ someone learning how engines work, so it defines ideas as it goes. It describes 
 
 As of 2026-07 the **bottom of the layer cake is built and CI-green on Windows, Linux, and
 macOS**: `core` 🟢 and `platform` 🟢 (Milestones 0–2), `rhi` 🟡 (Milestone 3 + the M5.1–M5.3
-renderer top-ups), `ecs` 🟢 (Milestone 4), and `render` 🟡 (the M5.4 render graph; the scene
-layer and PBR are landing now). The feature modules above are still ⚪. This document is the
+renderer top-ups), `ecs` 🟢 (Milestone 4), `render` 🟡 (the M5.4 render graph + the M5.5 scene
+layer + the M5.6 forward-PBR pipeline, shown by `samples/06`/`07`), `stream` 🟡 (Track S0), and
+`app` 🟡 (the M5.7 fixed-tick loop). The feature modules above are still ⚪. This document is the
 blueprint we build toward; the per-section tags below say how far each part has actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
@@ -102,11 +103,14 @@ and CI-green):* device bring-up (volk + VMA, Vulkan 1.3 dynamic rendering + sync
 offline GLSL→SPIR-V shaders, graphics pipelines, buffers/textures/samplers, swapchain +
 presentation across all four window systems, and a combined-image-sampler descriptor model —
 proven by a windowed textured quad *and* GPU-free off-screen pixel-readback tests (ADRs 0007–0010).
-Extra features landed to serve the ICEM viewer and will be adopted by the M5 render graph:
-depth attachment (ADR-0011), push constants (ADR-0012), 3-D/volume textures (ADR-0013), and
-stencil (ADR-0014). *Known gaps before renderer-ready (M5):* no compute dispatch, no
-multiple-render-targets or blending, no MSAA/mipmaps, a single-set/single-binding descriptor
-model, one queue, a fixed two frames in flight, and single-threaded command recording. → [ADR-0002](adr/0002-vulkan-first-rhi.md),
+Extra features landed to serve the ICEM viewer: depth attachment (ADR-0011), push constants
+(ADR-0012), 3-D/volume textures (ADR-0013), and stencil (ADR-0014). *The M5.1–M5.3 renderer
+top-ups then closed the pre-render-graph gaps:* a **descriptor model v2** with declared binding
+layouts, uniform buffers, and per-frame transient sets (ADR-0020); **blending, multiple render
+targets, and RGBA16Float HDR** (M5.1b); **compute pipelines + storage resources** (ADR-0021);
+**mipmaps + anisotropy**, and **GPU timestamps + debug labels** (M5.3). *Remaining gaps (all
+deliberately deferred):* no MSAA, one queue (no async compute), a fixed two frames in flight, and
+single-threaded command recording — the render graph keeps the seams for these. → [ADR-0002](adr/0002-vulkan-first-rhi.md),
 [ADR-0007](adr/0007-vulkan-backend-bootstrapping.md), [design/rhi.md](design/rhi.md)
 
 ### `ecs` 🟢 — *the world, as data*
@@ -130,11 +134,15 @@ makes UE5-class techniques tractable:
 - **Virtual shadow maps** — high-res, consistent shadows.
 - **Many lights** (MegaLights-style) — large counts of shadow-casting lights.
 We don't build all of these at once; we build the render graph *so that they fit*.
-*Built (M5.4):* the **render graph v0** — frame-declared raster/compute passes, virtual
+*Built (M5.4–M5.8):* the **render graph v0** — frame-declared raster/compute passes, virtual
 resources with a cross-frame transient cache, declared access driving order, culling, and
-**graph-owned barriers** through the RHI's `texture_barrier` seam, with per-pass GPU
-timestamps + debug labels built in (ADR-0019, [design/render-graph.md](design/render-graph.md)).
-Next: the scene layer (M5.5) and the PBR pass library (M5.6).
+**graph-owned barriers** through the RHI's `texture_barrier` seam, with per-pass GPU timestamps
++ debug labels (ADR-0019, [design/render-graph.md](design/render-graph.md)); the **scene layer**
+(M5.5) — the graduated orbit camera, procedural meshes, mesh/material registries, and
+reflection-registered ECS render components; and the **forward-PBR pass library** (M5.6, ADR-0022,
+[math/pbr.md](math/pbr.md)) — depth pre-pass → Cook-Torrance HDR → tonemap, plus a `SceneRenderer`
+that extracts a World into that frame. Proven on screen by `samples/06-render-graph` and
+`samples/07-first-light` (M5's "done when": a lit PBR scene, headless or streamed).
 
 ### `physics` ⚪ — *simulation, multicore-first*
 Rigid bodies, collision, queries — designed around parallel simulation and the ability
@@ -174,11 +182,15 @@ only on the RHI interface + the platform transport, so it captures from any back
 [ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md),
 [design/graphics-streaming.md](design/graphics-streaming.md).
 
-### `app` ⚪ (stub) — *the application framework & main loop*
-Ties a module set together into a runnable application: initializes subsystems, owns the
-frame loop (input → simulate → render → present), and shuts down cleanly. *Today* it is only
-the Milestone-0 `rime_hello` launcher (it links `core` and prints the version); the real
-frame-loop framework is built at M5, once the render graph gives it something to drive.
+### `app` 🟡 — *the application framework & main loop*
+Ties a module set together into a runnable application: owns the `JobSystem`, ECS `World` + sim
+`Schedule`, and (optionally) an `rhi::Device` + render graph, and runs the frame loop. *Built
+(M5.7, headless):* `Application` with a **fixed simulation tick decoupled from the render frame**
+— the sim advances in equal `fixed_dt` steps via a time accumulator, the render callback runs once
+per frame with an interpolation alpha, and the whole thing is provable GPU-free (ADR-0023). The
+determinism this buys is the multiplayer (M11) seam. The windowed/swapchain *present* path is a
+documented seam (filled on a display); `rime_hello` stays the trivial M0 launcher. →
+[ADR-0023](adr/0023-app-fixed-tick-loop.md)
 
 ## 4. Threading model ⚪
 

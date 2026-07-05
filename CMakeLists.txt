@@ -228,9 +228,17 @@ add_subdirectory(engine/app)      # launcher stub (M0) → application framework
 #   add_subdirectory(engine/physics)     # rigid bodies, collision
 #   add_subdirectory(engine/destruction) # part-based destruction (headline system)
 
+# Turn on CTest BEFORE any subdirectory that registers tests. Samples register their headless
+# self-checks as smoke tests (add_test), and add_test only takes effect once enable_testing() has
+# run — so it must precede the samples subdir, not just the tests one.
+if(RIME_BUILD_TESTS)
+    enable_testing()
+endif()
+
 # ── Samples ─────────────────────────────────────────────────────────────────────
 # Runnable example projects that exercise the engine; each milestone's proof lives here.
-# First up: M1.6's job-system core-saturation demo.
+# First up: M1.6's job-system core-saturation demo. Some samples also register a headless
+# self-check as a CTest smoke test (guarded on a device — a skip where none exists).
 if(RIME_BUILD_SAMPLES)
     add_subdirectory(samples)
 endif()
@@ -238,10 +246,8 @@ endif()
 # ── Tests ───────────────────────────────────────────────────────────────────────
 # Unit tests live under tests/ (one target per module; see docs/ROADMAP.md, "Testing &
 # profiling"). doctest is resolved by Conan as a test-only dependency, so we only look
-# for it when tests are enabled. enable_testing() turns on CTest, which `ctest --preset
-# dev` then drives.
+# for it when tests are enabled. CTest was enabled above so `ctest --preset dev` drives it.
 if(RIME_BUILD_TESTS)
-    enable_testing()
     find_package(doctest REQUIRED)
     add_subdirectory(tests)
 endif()
