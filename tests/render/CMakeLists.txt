@@ -5,7 +5,8 @@
 # pattern — one source of truth per shader, same as the sample/test sharing everywhere else.
 rime_add_test(rime_render_tests
     render_graph_test.cpp
-    scene_layer_test.cpp)
+    scene_layer_test.cpp
+    pbr_pipeline_test.cpp)
 
 target_link_libraries(rime_render_tests
     PRIVATE rime::render)

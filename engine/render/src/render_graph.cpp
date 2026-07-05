@@ -347,8 +347,10 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
         // ── Graph-owned barriers (ADR-0019) ───────────────────────────────────────────────
         // Bring every declared resource into the state this pass needs. Attachment states are
         // deliberately delegated: begin_rendering() already performs tracked, correct attachment
-        // transitions (and doubles as the write-after-write barrier between passes hitting the
-        // same target), so the graph emits transitions for the cases the implicit path cannot
+        // transitions — and since M5.6 its REUSED-attachment transitions order against all prior
+        // writes, so it genuinely is the write-after-write / read-after-write barrier between
+        // passes hitting the same target (the depth pre-pass feeding the forward pass rides
+        // exactly that). The graph emits transitions for the cases the implicit path cannot
         // see — sampled/storage reads of textures some earlier pass wrote. One owner per kind of
         // knowledge: frame-global read hazards here, attachment mechanics in the backend.
         for (const Access& a : passes_[pi].accesses) {

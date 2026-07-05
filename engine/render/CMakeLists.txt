@@ -1,6 +1,6 @@
 # rime_render — the high-level renderer (M5): the render graph (M5.4), the scene layer — the
-# graduated orbit camera, mesh/material registries, the ECS render components (M5.5) — and next
-# the PBR pass library (M5.6).
+# graduated orbit camera, mesh/material registries, the ECS render components (M5.5) — and the
+# forward-PBR pass library + scene renderer (M5.6, ADR-0022).
 #
 # The graph core depends only on rime::rhi (which brings rime::core transitively); the scene
 # layer adds rime::ecs (components live in a World). Removable per the modularity guardrail:
@@ -9,7 +9,19 @@
 
 add_library(rime_render STATIC
     src/render_graph.cpp
-    src/mesh.cpp)
+    src/mesh.cpp
+    src/passes.cpp
+    src/scene_renderer.cpp)
+
+# The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
+# library, the same offline model the tests/samples use (ADR-0008). The generated headers are
+# PRIVATE — consumers see pass objects, never shader bytes.
+rime_add_shaders(rime_render
+    shaders/depth_only.vert
+    shaders/pbr_forward.vert
+    shaders/pbr_forward.frag
+    shaders/fullscreen.vert
+    shaders/tonemap.frag)
 
 # Namespaced alias so dependents link `rime::render`, matching our C++ namespace.
 add_library(rime::render ALIAS rime_render)
