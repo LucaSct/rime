@@ -47,3 +47,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0020](0020-descriptor-model-v2.md) — descriptor model v2 (declared binding layouts; transient per-draw sets from recycled pools)
 - [ADR-0021](0021-compute-pipelines.md) — compute pipelines (one handle space, shared bindings, blunt post-dispatch barriers until the graph)
 - [ADR-0022](0022-forward-pbr.md) — forward PBR (depth pre-pass → Cook–Torrance into HDR → tonemap; reusable graph passes)
+- [ADR-0023](0023-app-fixed-tick-loop.md) — the application framework (a fixed simulation tick decoupled from the render frame; the M11 seam)
