@@ -16,10 +16,10 @@
 #include <utility>
 #include <vector>
 
-#include "camera.hpp" // samples/03-icem-viewer (on the include path; see tests/rhi/CMakeLists.txt)
 #include "mesh.frag.spv.h"
 #include "mesh.vert.spv.h"
 #include "mesh_render.hpp"
+#include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 #include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
 
@@ -51,7 +51,7 @@ TEST_CASE("viewer renders a lit cube off-screen") {
     const rime::viewer::CpuMesh cube = rime::viewer::make_unit_cube();
 
     // Frame the cube from a three-quarter view, exactly as the app's setup does.
-    rime::viewer::OrbitCamera cam;
+    rime::render::OrbitCamera cam;
     cam.frame(cube.center(), cube.radius(), 1.0f);
     cam.yaw = rime::core::radians(35.0f);
     cam.pitch = rime::core::radians(20.0f);
@@ -121,7 +121,7 @@ TEST_CASE("viewer cross-section clips a half-space and reveals the interior") {
     const ClearColor clear{0.05f, 0.05f, 0.06f, 1.0f};
     const rime::viewer::CpuMesh cube = rime::viewer::make_unit_cube(); // x,y,z ∈ [-1, 1]
 
-    rime::viewer::OrbitCamera cam;
+    rime::render::OrbitCamera cam;
     cam.frame(cube.center(), cube.radius(), 1.0f);
     cam.yaw = rime::core::radians(35.0f);
     cam.pitch = rime::core::radians(20.0f);
@@ -203,7 +203,7 @@ TEST_CASE("viewer colours the part by a field (colormap, C1)") {
                 vol[gi * 4 + 3] = 1.0f;
             }
 
-    rime::viewer::OrbitCamera cam;
+    rime::render::OrbitCamera cam;
     cam.frame(cube.center(), cube.radius(), 1.0f);
     cam.yaw = rime::core::radians(35.0f);
     cam.pitch = rime::core::radians(20.0f);

@@ -16,7 +16,6 @@
 #include <cstdlib>
 #include <vector>
 
-#include "camera.hpp"
 #include "cap.frag.spv.h"
 #include "cap.hpp"
 #include "cap.vert.spv.h"
@@ -24,6 +23,7 @@
 #include "mesh.frag.spv.h"
 #include "mesh.vert.spv.h"
 #include "mesh_render.hpp"
+#include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 #include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
 
@@ -61,7 +61,7 @@ TEST_CASE("viewer cross-section solid cap fills the cut face (B2b)") {
                 vol[gi * 4 + 3] = 1.0f;
             }
 
-    rime::viewer::OrbitCamera cam;
+    rime::render::OrbitCamera cam;
     cam.frame(cube.center(), cube.radius(), 1.0f);
     cam.yaw = rime::core::radians(35.0f);
     cam.pitch = rime::core::radians(20.0f);

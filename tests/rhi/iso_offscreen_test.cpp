@@ -15,7 +15,6 @@
 #include <cstdlib>
 #include <vector>
 
-#include "camera.hpp"
 #include "iso.frag.spv.h"
 #include "iso.hpp"
 #include "iso.vert.spv.h"
@@ -23,6 +22,7 @@
 #include "mesh.vert.spv.h"
 #include "mesh_render.hpp"
 #include "rime/core/math/mat.hpp"
+#include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 #include "rime/rhi/rhi.hpp"
 #include "stl.hpp"
 
@@ -63,7 +63,7 @@ TEST_CASE("viewer raymarches an isosurface and a DVR of a scalar field (C2)") {
                 vol[gi * 4 + 1] = 1.0f;                   // validity
             }
 
-    rime::viewer::OrbitCamera cam;
+    rime::render::OrbitCamera cam;
     cam.frame(cube.center(), cube.radius(), 1.0f);
     cam.yaw = rime::core::radians(35.0f);
     cam.pitch = rime::core::radians(20.0f);
