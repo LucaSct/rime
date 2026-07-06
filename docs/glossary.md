@@ -197,6 +197,28 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Determinism / replication.** *Determinism*: the same inputs always produce the same
   result (vital for networked physics). *Replication*: syncing state across the network.
 
+## Assets & the pipeline
+
+- **Asset.** A piece of content the engine consumes — a mesh, texture, material, sound,
+  animation clip, destructible. Source assets (glTF, PNG, STL…) are what tools edit;
+  the engine only ever loads *cooked* assets.
+- **Import → cook.** *Import* parses a source format; *cooking* transforms it into the
+  engine's own binary layout (mips generated, tangents computed, data validated) so the
+  runtime does zero parsing work. Rime cooks offline in Rust (`rime-cli cook`); the C++
+  engine never contains a glTF/PNG parser (ADR-0024).
+- **Cooked container (`RMA1`).** Rime's on-disk asset format: a small versioned header
+  (magic, kind, schema hash, payload size) read field-by-field with every length checked —
+  the same trust-nothing discipline as the streaming protocol.
+- **Content hash.** A fingerprint (FNV-1a 64 here) computed from an asset's cooked bytes,
+  used as its identity: identical content ⇒ identical id, edits ⇒ a new id. Powers the
+  cook cache and duplicate detection, and survives renames.
+- **Manifest.** The plain-text index a cook emits: one line per asset mapping source path →
+  kind, asset id, cooked file. Regenerable at any time (derived data — it can't lie);
+  read by the runtime registry and, later, the editor's asset browser.
+- **Schema (type) hash.** A hash of a reflected type's field names/types/order, embedded
+  in cooked data; a mismatch at load means "the code moved on — re-cook," caught cleanly
+  instead of misreading bytes.
+
 ## Performance & threading
 
 - **Job system / task scheduler.** Splits work into many small *jobs* spread across CPU
