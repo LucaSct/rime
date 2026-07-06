@@ -48,5 +48,16 @@ Build-time / tooling dependencies (not shipped in the engine binary):
   - SPIRV-Tools, SPIRV-Headers — SPIR-V tooling (transitive build dependency of glslang).
       Copyright (c) The Khronos Group Inc. Apache License 2.0 / MIT.
 
+Rust tooling crates (under tools/, resolved by Cargo — not shipped in the engine binary):
+
+  - gltf — glTF 2.0 import (the asset pipeline's mesh importer).
+      Copyright (c) 2017 The gltf Library Developers. Apache-2.0 / MIT.
+  - clap — command-line argument parser (rime-cli).
+      Copyright (c) Individual contributors of the clap project. Apache-2.0 / MIT.
+
+  These pull further transitive crates via Cargo (base64, byteorder, serde, image, png,
+  anstyle, …); all are permissive (MIT / Apache-2.0 / BSD / Zlib / Unlicense), per the policy
+  in third_party/README.md.
+
 The Vulkan runtime loader and an ICD (a GPU driver, MoltenVK on macOS, or lavapipe in CI)
 are provided by the host environment, not by Rime.
