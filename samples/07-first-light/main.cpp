@@ -249,7 +249,7 @@ void write_ppm(const char* path,
 // A rendering app: the pieces every mode shares. Owns the GPU app, the registries, the checker, and
 // the SceneRenderer, wired so a frame draws the world into the app's graph and stashes the output.
 struct FirstLightApp {
-    app::Application app;
+    app::Application& app; // borrowed — the caller constructs it and CHECKS its device first
     render::MeshRegistry meshes;
     render::MaterialRegistry materials;
     rhi::TextureHandle checker{};
@@ -257,8 +257,12 @@ struct FirstLightApp {
     ecs::Entity camera{};
     render::RGTexture last_ldr{};
 
-    explicit FirstLightApp(const app::AppConfig& cfg)
-        : app(cfg), meshes(*app.device()), renderer(*app.device(), meshes, materials) {
+    // Precondition: `application.device() != nullptr`. The device check is deliberately the
+    // CALLER's job, not ours: the GPU resources below dereference the device in this initializer
+    // list, so a GPU-less host has to be handled BEFORE we get here — dereferencing a null device
+    // is exactly what crashed the headless run on a runner with no Vulkan driver.
+    explicit FirstLightApp(app::Application& application)
+        : app(application), meshes(*app.device()), renderer(*app.device(), meshes, materials) {
         checker = make_checker(*app.device());
         build_scene(app, meshes, materials, checker, camera);
         renderer.set_ambient(0.03f, 0.03f, 0.04f);
@@ -288,11 +292,15 @@ app::AppConfig gpu_config() {
 
 // ── --headless: render, self-check, exit code ────────────────────────────────────────────────────
 int run_headless(int frames, const char* ppm) {
-    FirstLightApp fl(gpu_config());
-    if (!fl.app.device()) {
+    // Create + device-check the app BEFORE building any GPU resources on it: on a host with no
+    // Vulkan device (a GPU-less CI runner) app.device() is null, and FirstLightApp's constructor
+    // would dereference it. Absent GPU is a skip (exit 0) unless RIME_REQUIRE_VULKAN demands one.
+    app::Application app(gpu_config());
+    if (!app.device()) {
         std::fprintf(stderr, "07-first-light: no Vulkan device (need a driver or lavapipe)\n");
         return std::getenv("RIME_REQUIRE_VULKAN") ? 1 : 0; // absent GPU: a skip, unless required
     }
+    FirstLightApp fl(app);
     std::printf("07-first-light: rendering %d frame(s) on '%s' (%ux%u)\n",
                 frames,
                 fl.app.device()->adapter().name.c_str(),
@@ -343,11 +351,14 @@ void apply_input(OrbitView& v, const stream::InputEvent& e) {
 }
 
 int run_serve(const std::string& host, std::uint16_t port, stream::Codec codec) {
-    FirstLightApp fl(gpu_config());
-    if (!fl.app.device()) {
+    // Device-check before building GPU resources (see run_headless) — no device is a hard error for
+    // the server, which exists to stream rendered frames.
+    app::Application app(gpu_config());
+    if (!app.device()) {
         std::fprintf(stderr, "07-first-light server: no Vulkan device (need lavapipe/a GPU)\n");
         return 1;
     }
+    FirstLightApp fl(app);
     auto streamer = stream::FrameStreamer::create(*fl.app.device(), {kWidth, kHeight});
     if (!streamer) {
         std::fprintf(stderr, "07-first-light server: could not create the frame streamer\n");
