@@ -325,6 +325,41 @@ textures → cooked formats; `engine/assets` loads/streams at runtime; `tools/ri
 cooks; the stable C-ABI/file **FFI boundary** stands up. *(ADR-0001.)* Skeletal-animation
 import begins.
 
+> **Status (2026-07-06): M6 begins — M6.0 landed.** [ADR-0024](adr/0024-asset-model.md)
+> settles the asset model: **Rust cooks, C++ loads, files are the boundary** (ADR-0001's
+> stance made concrete); content-hash `AssetId`s + a regenerable plain-text manifest; the
+> `RMA1` cooked container (versioned, little-endian field-by-field, validation-first — the
+> S0.4 protocol discipline on disk); **reflection type hashes** versioning cooked data;
+> RGBA8 + offline-mips texture policy v0 (BCn values reserved); attribute-flagged vertex
+> layouts so tangents/skinning extend without a format break; **deterministic, byte-stable
+> cooks** (the property M8's seeded fracture and M11's replicated destruction stand on);
+> and a content-keyed cook cache.
+
+*Bricks (planned 2026-07-06, bottom-up):* **M6.0 (done)** the asset-model decision
+(ADR-0024); *proof:* the ADR. · **M6.1** `engine/assets` is born — the RMA1 reader
+(trust-nothing decode, negative-battery tested), `AssetId`, the handle-based registry,
+synchronous mesh loads. · **M6.2** the Rust `tools/asset-pipeline` crate + **glTF mesh
+import→cook** and `rime-cli cook`/`inspect`; the cross-language golden fixture (Rust cooks
+what C++ reads in CI). · **M6.3** **textures** — PNG/JPEG decode, offline linear-space mip
+chains, sRGB-vs-linear by semantic; RHI top-up: uploading pre-generated mip data. ·
+**M6.4** **materials + the PBR texture upgrade** — cooked metallic-roughness materials;
+normal mapping (MikkTSpace tangents at import), MR/occlusion/emissive textures in the
+forward-PBR shaders (+`docs/math/tangent-space.md`). · **M6.5** **async loading** on the
+job system — IO/parse jobs, frame-point GPU-upload drain, placeholder assets, TSan-netted.
+· **M6.6** dogfood — **STL import→cook** and the ICEM viewer loading cooked meshes
+(ADR-0016 rules 3+4; the content-hash cook cache earning its keep on real multi-MB parts).
+· **M6.7** **skeletal-animation import begins** — glTF skins/skeletons/clips cooked + a
+CPU clip sampler with paper-checked poses (GPU skinning follows at M7). · **M6.8** the
+**SDK story** — CMake install/export, `find_package(rime CONFIG)`, an out-of-tree consumer
+app built in CI (arms the ICEM-migration trigger, ADR-0016 rule 5). · **M6.9** the
+**C-ABI FFI boundary stands up** — a tiny `rime_capi` shared library + a Rust FFI crate
+whose tests drive the engine's own loader; protocol message-type space reserved for the M9
+editor channel. · **M6.10** the proof — `samples/08-gltf-zoo`: cook → load → render real
+CC0 glTF models (textured, normal-mapped, mipped), `--headless` self-check in CI,
+`--serve` streamed live; docs true-up. M6.1–M6.2 land the boundary, M6.3–M6.5 make assets
+real, M6.6–M6.7 widen the funnel, M6.8–M6.9 open the SDK/FFI doors, M6.10 closes the
+milestone.
+
 **M7 — Physics (rigid bodies, multicore).** `engine/physics` behind an interface —
 bodies, collision, queries — stepped on the job system. Evaluate **integrating Jolt** vs.
 own core (its own ADR). *Inspired by: Jolt.*
