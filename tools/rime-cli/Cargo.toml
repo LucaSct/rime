@@ -15,3 +15,9 @@ description = "Command-line tools for the Rime engine"
 [[bin]]
 name = "rime"
 path = "src/main.rs"
+
+[dependencies]
+# The offline pipeline this CLI drives (cook/inspect). Path dependency within the workspace.
+asset-pipeline = { path = "../asset-pipeline" }
+# Argument parsing with derived subcommands. Apache-2.0/MIT (ship-safe).
+clap = { version = "4", features = ["derive"] }
