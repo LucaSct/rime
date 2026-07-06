@@ -12,4 +12,6 @@ if(RIME_RHI_VULKAN)
     add_subdirectory(02-textured-quad)  # M3.5: an indexed, textured quad (M3's "done when")
     add_subdirectory(03-icem-viewer)    # viewer B1: load a computed part (STL), draw it lit + depth-correct
     add_subdirectory(04-remote-view)    # Track S0.5: headless streaming server + a client (see + control)
+    add_subdirectory(06-render-graph)   # M5.8: procedural PBR scene through the graph; "adding a pass is easy"
+    add_subdirectory(07-first-light)    # M5.8: M5's "done when" — app-driven lit PBR scene (headless / --serve)
 endif()

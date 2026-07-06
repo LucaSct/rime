@@ -88,6 +88,13 @@ public:
     // creation failed (no Vulkan backend / no lavapipe). Rendering code must tolerate null.
     [[nodiscard]] rhi::Device* device() noexcept { return device_.get(); }
 
+    // The render graph the loop executes each frame, or nullptr when GPU-free. The frame's passes
+    // are declared into it (via the render callback's FrameContext) and executed by the loop; this
+    // accessor is how a capture/present/stream step reads an exported target's physical handle
+    // AFTER the frame ran (a headless self-check, an engine/stream tap). Handles from the last
+    // frame stay valid until the next frame's reset().
+    [[nodiscard]] render::RenderGraph* graph() noexcept { return graph_.get(); }
+
     // The constant a simulation tick advances the world by. Systems integrate against THIS (not a
     // frame dt) — capture it by value in a system body; it never changes for the app's lifetime.
     [[nodiscard]] double fixed_dt() const noexcept { return timestep_.fixed_dt; }

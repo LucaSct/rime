@@ -277,6 +277,13 @@ ahead of M5 to unblock the ICEM viewer — the **depth attachment** + depth test
 **push constants** (ADR-0012), and **3-D/volume textures** (ADR-0013, for field colormaps).
 The render graph adopts and extends them (multiple targets, stencil, MSAA, streamed volumes).*
 
+> **Status (2026-07-05): M5.0–M5.8 built and green on lavapipe.** The RHI top-ups (M5.1–M5.3), the
+> **render graph** (M5.4), the **scene layer** (M5.5), the **forward-PBR pipeline** (M5.6,
+> [math/pbr.md](math/pbr.md)), the **fixed-tick application loop** (M5.7, ADR-0023), and the two
+> proof samples (M5.8) are in — `07-first-light` draws M5's "done when": a lit PBR scene through
+> the graph, headless-self-checked and streamable over Track S0. Remaining: **M5.9**, the ICEM
+> viewer-frame dogfood acceptance test.
+
 *Bricks (planned 2026-07-04, bottom-up):* **M5.0** the architecture decision — a **frame-declared
 render graph** with virtual resources, declared access driving order *and* barriers, graph-owned
 transitions through a new RHI barrier API, serial single-queue v0 with the parallel seams kept

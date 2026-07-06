@@ -50,18 +50,58 @@ Entries are grouped roughly by area and kept short on purpose.
   performance and parallelism.
 - **Scene / world.** The collection of entities/components representing what currently
   exists in the game.
+- **Fixed timestep / simulation tick.** Advancing the simulation in equal-sized steps
+  (Rime's default: 60 per second) that are *decoupled* from the render frame rate — a time
+  accumulator runs whole ticks and carries the remainder. It makes the sim deterministic
+  (its state is a pure function of the tick count, not of frame pacing), which is what
+  networked play (M11) needs; the render frame interpolates between ticks. See
+  [adr/0023](adr/0023-app-fixed-tick-loop.md) (M5.7).
+- **Spiral of death.** The failure a fixed timestep must guard against: if one frame takes
+  longer to simulate than a tick, the next frame owes more ticks, which take longer still.
+  Rime clamps ticks-per-frame and drops the backlog — the sim slows rather than freezing.
 
 ## Rendering & lighting
 
 - **Render graph / frame graph.** A description of one frame as a graph of *passes* and
   the *resources* (textures/buffers) they read and write. The engine uses it to order
-  passes, reuse transient memory, and insert GPU synchronization automatically.
+  passes, reuse transient memory, and insert GPU synchronization automatically. Rime's is
+  *frame-declared* — rebuilt each frame from setup+execute lambdas (ADR-0019, M5.4).
+- **Transient resource.** A texture/buffer that lives only within a frame: a render-graph
+  pass *describes* it (extent, format), and the graph backs it with physical GPU memory
+  drawn from a cross-frame cache and recycled once no live pass needs it. You never
+  allocate or free it yourself. *Imported* resources (a swapchain image, a history buffer)
+  are the opposite — externally owned, wrapped so passes can name them.
 - **Pass.** One step of rendering (e.g. depth pre-pass, lighting pass, post-process).
+- **Depth pre-pass.** A first pass that writes *only* depth, so the expensive shading pass
+  then shades each visible pixel exactly once — its `Equal` depth test rejects everything
+  hidden — instead of shading overdrawn fragments. Optional per frame; a win only when
+  overdraw and shading cost are high enough to measure (M5.6).
 - **Pipeline (PSO).** A bundle of GPU state (shaders + fixed-function config) compiled
   ahead of time. "PSO" = Pipeline State Object.
 - **Shader.** A small program that runs on the GPU (vertex, fragment/pixel, compute…).
 - **PBR — Physically Based Rendering.** Shading that models real light/material physics
-  so surfaces look correct under any lighting.
+  so surfaces look correct under any lighting. Rime's is a forward Cook-Torrance path
+  (ADR-0022); the full derivation is [math/pbr.md](math/pbr.md).
+- **BRDF — Bidirectional Reflectance Distribution Function.** The function at the heart of
+  PBR: for an incoming and an outgoing direction, how much light the surface bounces
+  between them. Rime uses the Cook-Torrance microfacet BRDF.
+- **Cook-Torrance / microfacet model.** Treats a rough surface as countless microscopic
+  mirrors; the specular highlight is the statistics of how many face the halfway direction
+  (the GGX *distribution* D), how many are shadowed/masked by neighbours (the Smith
+  *geometry* G), and how reflective each is at this angle (the *Fresnel* F).
+- **Metallic-roughness.** The material parameterization Rime and glTF share: a base color,
+  `metallic` 0..1 (dielectric vs. metal), and `roughness` 0..1 (mirror vs. matte). Two
+  sliders span most real opaque surfaces.
+- **HDR — High Dynamic Range.** Carrying light values above 1.0 (a highlight can be many
+  times a dim wall) in a float target (RGBA16Float) instead of clamping, so the tonemap
+  can map that range down later without having thrown the bright detail away (M5.1b/M5.6).
+- **Tonemapping.** Compressing unbounded HDR radiance into the [0,1] a display shows via a
+  curve — Rime ships an ACES filmic fit: a gentle toe keeps shadow contrast, a long
+  shoulder rolls highlights off instead of clipping them to flat white.
+- **Linear vs. sRGB.** Lighting must be computed in *linear* light (2× the value = 2× the
+  photons); displays and most color textures use the perceptual *sRGB* curve. Rime samples
+  sRGB textures (the hardware decodes to linear), shades linear, and sRGB-encodes once at
+  the very end ([math/pbr.md](math/pbr.md) §display).
 - **GI — Global Illumination.** Indirect light: light that bounces off surfaces before
   reaching the eye. "Real-time GI" (Lumen-style) computes this live, without baking.
 - **Baking.** Precomputing lighting into textures offline. Fast at runtime but static.
@@ -114,6 +154,12 @@ Entries are grouped roughly by area and kept short on purpose.
   blocky/exact texels, Linear = smooth interpolation) and *addressing* (what a UV outside
   [0,1] does — repeat, clamp…). Decoupled from the image, so one texture can be read several
   ways.
+- **Mipmap.** A precomputed chain of half-size copies of a texture; the GPU samples the
+  level matching a surface's on-screen size, so a texture seen small doesn't shimmer/alias.
+  Rime generates the chain by successive GPU *blits* inside `write_texture` (M5.3).
+- **Anisotropic filtering.** Sharper texture sampling on surfaces viewed at a grazing angle
+  (a floor receding to the horizon), where an isotropic mip lookup would over-blur along
+  the stretched direction. The sampler takes a `max_anisotropy` (M5.3).
 - **Texel.** A single element of a texture ("texture pixel"); a 2×2 texture has four texels.
 - **UV / texture coordinate.** The 2-D coordinate (conventionally `u`,`v` in [0,1]) saying
   where on a texture a vertex samples; the rasterizer interpolates it across a triangle so each
