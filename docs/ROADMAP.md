@@ -277,12 +277,17 @@ ahead of M5 to unblock the ICEM viewer — the **depth attachment** + depth test
 **push constants** (ADR-0012), and **3-D/volume textures** (ADR-0013, for field colormaps).
 The render graph adopts and extends them (multiple targets, stencil, MSAA, streamed volumes).*
 
-> **Status (2026-07-05): M5.0–M5.8 built and green on lavapipe.** The RHI top-ups (M5.1–M5.3), the
-> **render graph** (M5.4), the **scene layer** (M5.5), the **forward-PBR pipeline** (M5.6,
-> [math/pbr.md](math/pbr.md)), the **fixed-tick application loop** (M5.7, ADR-0023), and the two
-> proof samples (M5.8) are in — `07-first-light` draws M5's "done when": a lit PBR scene through
-> the graph, headless-self-checked and streamable over Track S0. Remaining: **M5.9**, the ICEM
-> viewer-frame dogfood acceptance test.
+> **Status (2026-07-06): MILESTONE 5 COMPLETE — M5.0–M5.9 built and green on lavapipe.** The RHI
+> top-ups (M5.1–M5.3), the **render graph** (M5.4), the **scene layer** (M5.5), the **forward-PBR
+> pipeline** (M5.6, [math/pbr.md](math/pbr.md)), the **fixed-tick application loop** (M5.7,
+> ADR-0023), the two proof samples (M5.8) — `07-first-light` draws M5's "done when": a lit PBR scene
+> through the graph, headless-self-checked and streamable over Track S0 — and the **dogfood
+> acceptance test** (M5.9) are all in. M5.9 re-expresses the ICEM viewer's cross-section frame
+> (clip-planed lit mesh → stencil cut-mark → solid cap → alpha-tested UI overlay) as four
+> render-graph passes **sharing one colour + one D32FloatS8 depth+stencil target**, proving the
+> graph's resource model covers depth+stencil attachments and Load/keep-across-passes semantics
+> (`tests/render/viewer_frame_graph_test.cpp`, offscreen, GPU-free in CI, ADR-0016 rule 4).
+> **Next:** M6 — asset pipeline + runtime assets (import → cook → load → render a real glTF model).
 
 *Bricks (planned 2026-07-04, bottom-up):* **M5.0** the architecture decision — a **frame-declared
 render graph** with virtual resources, declared access driving order *and* barriers, graph-owned
@@ -310,10 +315,10 @@ ADR-0023) with a headless mode; *proofs:* tick determinism; a headless CI run. �
 **proof samples** — `06-render-graph` ("adding a pass is easy," demonstrated in ~10 lines) and
 `07-first-light` (M5's "done when": the lit PBR scene through the full stack; `--headless`
 self-check in CI; `--serve` streams it over Track S0 to the thin client for the first live look).
-· **M5.9** **dogfood acceptance** — the ICEM viewer's frame (mesh + stencil cap + UI overlay)
+· **M5.9 (done)** **dogfood acceptance** — the ICEM viewer's frame (mesh + stencil cap + UI overlay)
 expressed as a render graph in an offscreen test (ADR-0016 rule 4). M5.1–M5.3 make the RHI
 renderer-ready; M5.4 is the seam itself; M5.5–M5.7 build the scene and the loop; M5.8–M5.9 land
-the proofs.
+the proofs. **Milestone 5 complete.**
 
 **M6 — Asset pipeline + runtime assets.** `tools/asset-pipeline` (Rust) imports glTF +
 textures → cooked formats; `engine/assets` loads/streams at runtime; `tools/rime-cli`

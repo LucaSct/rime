@@ -10,10 +10,11 @@ someone learning how engines work, so it defines ideas as it goes. It describes 
 
 As of 2026-07 the **bottom of the layer cake is built and CI-green on Windows, Linux, and
 macOS**: `core` 🟢 and `platform` 🟢 (Milestones 0–2), `rhi` 🟡 (Milestone 3 + the M5.1–M5.3
-renderer top-ups), `ecs` 🟢 (Milestone 4), `render` 🟡 (the M5.4 render graph + the M5.5 scene
-layer + the M5.6 forward-PBR pipeline, shown by `samples/06`/`07`), `stream` 🟡 (Track S0), and
-`app` 🟡 (the M5.7 fixed-tick loop). The feature modules above are still ⚪. This document is the
-blueprint we build toward; the per-section tags below say how far each part has actually come.
+renderer top-ups), `ecs` 🟢 (Milestone 4), `render` 🟢 (**Milestone 5 complete** — the M5.4 render
+graph, M5.5 scene layer, and M5.6 forward-PBR pipeline, shown by `samples/06`/`07` and the M5.9
+dogfood test), `stream` 🟡 (Track S0), and `app` 🟡 (the M5.7 fixed-tick loop). The feature modules
+above are still ⚪. This document is the blueprint we build toward; the per-section tags below say
+how far each part has actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
 
@@ -134,7 +135,7 @@ makes UE5-class techniques tractable:
 - **Virtual shadow maps** — high-res, consistent shadows.
 - **Many lights** (MegaLights-style) — large counts of shadow-casting lights.
 We don't build all of these at once; we build the render graph *so that they fit*.
-*Built (M5.4–M5.8):* the **render graph v0** — frame-declared raster/compute passes, virtual
+*Built (M5.4–M5.9):* the **render graph v0** — frame-declared raster/compute passes, virtual
 resources with a cross-frame transient cache, declared access driving order, culling, and
 **graph-owned barriers** through the RHI's `texture_barrier` seam, with per-pass GPU timestamps
 + debug labels (ADR-0019, [design/render-graph.md](design/render-graph.md)); the **scene layer**
@@ -142,7 +143,12 @@ resources with a cross-frame transient cache, declared access driving order, cul
 reflection-registered ECS render components; and the **forward-PBR pass library** (M5.6, ADR-0022,
 [math/pbr.md](math/pbr.md)) — depth pre-pass → Cook-Torrance HDR → tonemap, plus a `SceneRenderer`
 that extracts a World into that frame. Proven on screen by `samples/06-render-graph` and
-`samples/07-first-light` (M5's "done when": a lit PBR scene, headless or streamed).
+`samples/07-first-light` (M5's "done when": a lit PBR scene, headless or streamed). **M5.9 closes
+the milestone** with a dogfood-acceptance test (ADR-0016 rule 4) that re-expresses the ICEM
+viewer's cross-section frame — clip-planed lit mesh → stencil cut-mark → solid cap → alpha-tested
+UI overlay — as four graph passes sharing one colour + one D32FloatS8 depth+stencil target,
+proving the resource model really covers depth+stencil attachments and Load/keep-across-passes
+(`tests/render/viewer_frame_graph_test.cpp`, offscreen, GPU-free in CI).
 
 ### `physics` ⚪ — *simulation, multicore-first*
 Rigid bodies, collision, queries — designed around parallel simulation and the ability
