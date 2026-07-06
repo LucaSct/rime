@@ -12,9 +12,9 @@ As of 2026-07 the **bottom of the layer cake is built and CI-green on Windows, L
 macOS**: `core` 🟢 and `platform` 🟢 (Milestones 0–2), `rhi` 🟡 (Milestone 3 + the M5.1–M5.3
 renderer top-ups), `ecs` 🟢 (Milestone 4), `render` 🟢 (**Milestone 5 complete** — the M5.4 render
 graph, M5.5 scene layer, and M5.6 forward-PBR pipeline, shown by `samples/06`/`07` and the M5.9
-dogfood test), `stream` 🟡 (Track S0), and `app` 🟡 (the M5.7 fixed-tick loop). The feature modules
-above are still ⚪. This document is the blueprint we build toward; the per-section tags below say
-how far each part has actually come.
+dogfood test), `stream` 🟡 (Track S0), and `app` 🟡 (the M5.7 fixed-tick loop). Of the feature
+modules, `assets` 🟡 has begun (the M6.1 cooked-asset reader); the rest are still ⚪. This document is
+the blueprint we build toward; the per-section tags below say how far each part has actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
 
@@ -171,9 +171,22 @@ Frostbite does it:
   debris so it scales to 64+ players. Determinism/replication is a design constraint,
   not an afterthought.
 
-### `audio` ⚪, `animation` ⚪, `assets` (runtime) ⚪, `net` ⚪
-Audio mixing/spatialization; skeletal animation & blending; runtime asset
-loading/streaming; networking/replication. Each behind its own interface.
+### `audio` ⚪, `animation` ⚪, `net` ⚪
+Audio mixing/spatialization; skeletal animation & blending; networking/replication.
+Each behind its own interface.
+
+### `assets` 🟡 — *cooked-asset loading (files are the boundary)*
+The runtime side of the asset pipeline: open cooked binary files, validate them completely, and hand
+back typed, registry-owned assets. All importing/cooking is offline in Rust (`tools/asset-pipeline`);
+the engine ships **no** source-format parser and loads only cooked files ([ADR-0024](adr/0024-asset-model.md)).
+*Built (M6.1):* the **RMA1 container reader** — a versioned header + kind-specific payload,
+little-endian field-by-field, **bounds-checked before every allocation** (cooked bytes are trusted no
+more than network bytes); the **AssetRegistry** — handle-based ownership with **content-hash
+de-duplication**; and the plain-text **cook manifest** reader. Cooked meshes carry an attribute-flags
+vertex layout so tangents (M6.4) and skinning (M6.7) extend the format without a container break, plus
+a reflection **schema hash** so a file cooked against an old layout is rejected rather than misread.
+Depends only on `core` + `platform` — the renderer consumes assets, never the reverse. Hot reload is a
+documented seam, not yet a feature. → [ADR-0024](adr/0024-asset-model.md), [design/assets.md](design/assets.md).
 
 ### `stream` 🟡 — *graphics streaming (Track S)*
 Capture a rendered frame, encode it, and ship it to a thin remote client that presents it and sends

@@ -131,3 +131,86 @@ TEST_CASE("to_debug_string names every field, recursing into nested structs") {
     CHECK(dump.find("id: 3") != std::string::npos);
     CHECK(dump.find("flags: 9") != std::string::npos);
 }
+
+// ── type_hash: the schema fingerprint cooked data (ADR-0024) versions against ────────────────────
+// Types whose serialized shape differs in each way a cooked file must detect: a reorder, a rename,
+// a retype, and a change buried in a nested struct.
+namespace rt {
+struct InnerClone { // same field names/types/order as Inner => same fingerprint
+    std::int32_t id;
+    float weight;
+};
+
+struct Reordered { // Inner's two fields, swapped
+    float weight;
+    std::int32_t id;
+};
+
+struct Renamed { // Inner with a member renamed
+    std::int32_t identifier;
+    float weight;
+};
+
+struct Retyped { // Inner's names/order, but id widened to 64-bit
+    std::int64_t id;
+    float weight;
+};
+
+struct HoldsInner {
+    Inner nested;
+};
+
+struct HoldsReordered { // same field name/kind as HoldsInner, but the nested layout differs
+    Reordered nested;
+};
+} // namespace rt
+
+RIME_REFLECT_BEGIN(rt::InnerClone)
+RIME_REFLECT_FIELD(id)
+RIME_REFLECT_FIELD(weight)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rt::Reordered)
+RIME_REFLECT_FIELD(weight)
+RIME_REFLECT_FIELD(id)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rt::Renamed)
+RIME_REFLECT_FIELD(identifier)
+RIME_REFLECT_FIELD(weight)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rt::Retyped)
+RIME_REFLECT_FIELD(id)
+RIME_REFLECT_FIELD(weight)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rt::HoldsInner)
+RIME_REFLECT_FIELD(nested)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rt::HoldsReordered)
+RIME_REFLECT_FIELD(nested)
+RIME_REFLECT_END()
+
+TEST_CASE("type_hash is layout-based, not name-based: identical shapes hash equal") {
+    CHECK(reflect<rt::Inner>().type_hash != 0);
+    CHECK(reflect<rt::InnerClone>().type_hash == reflect<rt::Inner>().type_hash);
+}
+
+TEST_CASE("type_hash flips on reorder, rename, or retype") {
+    const std::uint64_t base = reflect<rt::Inner>().type_hash;
+    CHECK(reflect<rt::Reordered>().type_hash != base);
+    CHECK(reflect<rt::Renamed>().type_hash != base);
+    CHECK(reflect<rt::Retyped>().type_hash != base);
+}
+
+TEST_CASE("type_hash propagates a change in a nested struct's layout") {
+    // Same outer field (name + Struct kind); only the nested type's layout differs — yet the outer
+    // fingerprints must diverge, or a cooked file could not detect a nested-layout change.
+    CHECK(reflect<rt::HoldsInner>().type_hash != reflect<rt::HoldsReordered>().type_hash);
+}
+
+TEST_CASE("type_hash is stable across calls") {
+    CHECK(reflect<rt::Outer>().type_hash == reflect<rt::Outer>().type_hash);
+}

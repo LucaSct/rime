@@ -220,6 +220,7 @@ add_subdirectory(engine/core)     # foundation: version (M0); memory, math, jobs
 add_subdirectory(engine/platform) # OS abstraction: window, input, files, threads (M2+)
 add_subdirectory(engine/rhi)      # Render Hardware Interface + Vulkan backend (M3)
 add_subdirectory(engine/ecs)      # the data-oriented world: entities, components, systems (M4)
+add_subdirectory(engine/assets)   # cooked-asset loading: RMA1 reader, registry, manifest (M6)
 add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
 add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
@@ -252,4 +253,4 @@ if(RIME_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_render, rime_stream, rime_hello.")
+message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_assets, rime_render, rime_stream, rime_hello.")

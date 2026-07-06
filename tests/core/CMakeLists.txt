@@ -13,6 +13,8 @@ rime_add_test(rime_core_tests
     chase_lev_deque_test.cpp
     jobs_test.cpp
     reflect_test.cpp
+    hash_test.cpp
+    byte_cursor_test.cpp
     module_test.cpp)
 
 # The work-stealing-deque test spins up real threads, so it needs the platform threads library.

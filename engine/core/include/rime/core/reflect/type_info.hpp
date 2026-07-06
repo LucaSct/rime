@@ -4,8 +4,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <type_traits>
 #include <vector>
+
+#include "rime/core/hash.hpp"
 
 // Minimal compile-time-registered reflection: a way to ask, at runtime, "what fields does this
 // struct have — their names, types, and byte offsets?" That single capability powers generic
@@ -39,11 +42,15 @@ struct Field {
     const TypeInfo* struct_type = nullptr; // non-null iff type == Struct
 };
 
-// The description of a reflected struct: its name, size, and ordered fields.
+// The description of a reflected struct: its name, size, ordered fields, and a stable 64-bit
+// fingerprint of its serialized shape (see compute_type_hash / ADR-0024). The macros fill type_hash
+// at registration; leaving it here (rather than recomputing on demand) means every consumer — the
+// serializer, cooked-asset loaders, later the editor and replication — reads the same cached value.
 struct TypeInfo {
     const char* name;
     std::size_t size;
     std::vector<Field> fields;
+    std::uint64_t type_hash = 0;
 };
 
 // Customization point specialized by the RIME_REFLECT macros (below), one per reflected type.
@@ -115,6 +122,35 @@ template <class FieldT> [[nodiscard]] Field make_field(const char* name, std::si
     return 0;
 }
 
+// A stable 64-bit fingerprint of a struct's serialized shape: fold, in declared order, each field's
+// name and type tag, recursing into a nested reflected struct by folding *its* fingerprint. Two
+// types are serialize-compatible iff their fingerprints match, so cooked data (ADR-0024) and,
+// later, editor/replication schemas embed this hash and reject a mismatch instead of misreading
+// bytes. It deliberately excludes byte offsets and sizeof: the packed serialization depends only on
+// field names, types, and order, so a struct with different padding but the same fields stays
+// compatible.
+[[nodiscard]] inline std::uint64_t compute_type_hash(const std::vector<Field>& fields) noexcept {
+    std::uint64_t h = kFnv1a64OffsetBasis;
+    for (const Field& f : fields) {
+        h = fnv1a_64(std::string_view(f.name), h); // the member name
+        h ^= static_cast<std::uint64_t>(
+            static_cast<std::uint8_t>(f.type)); // its type tag (one byte)
+        h *= kFnv1a64Prime;
+        if (f.type == FieldType::Struct && f.struct_type != nullptr) {
+            // Fold the nested type's own fingerprint, little-endian byte by byte, so the result is
+            // independent of host endianness. (The nested type is registered first, so its
+            // type_hash is already computed by the time we get here.)
+            std::uint64_t nested = f.struct_type->type_hash;
+            for (int i = 0; i < 8; ++i) {
+                h ^= (nested & 0xFFu);
+                h *= kFnv1a64Prime;
+                nested >>= 8;
+            }
+        }
+    }
+    return h;
+}
+
 } // namespace rime::core
 
 // ---- Registration macros ------------------------------------------------------------------
@@ -144,6 +180,7 @@ template <class FieldT> [[nodiscard]] Field make_field(const char* name, std::si
     t.fields.push_back(make_field<decltype(T::NAME)>(#NAME, offsetof(T, NAME)));
 
 #define RIME_REFLECT_END()                                                                         \
+    t.type_hash = compute_type_hash(t.fields);                                                     \
     return t;                                                                                      \
     }                                                                                              \
     ();                                                                                            \
