@@ -48,21 +48,30 @@ namespace {
 
 PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
     VulkanShader* vs = shaders_.get(rebrand<VulkanShader>(desc.vertex_shader));
+    // The fragment shader is optional (M5.6): a depth-only pipeline — the depth pre-pass — needs
+    // only vertex work plus the fixed-function depth test, and Vulkan explicitly supports
+    // rasterizing without a fragment stage (depth/stencil writes still happen). A default,
+    // never-assigned handle means "no fragment stage, on purpose"; a non-default handle that
+    // fails to resolve is still a caller bug.
     VulkanShader* fs = shaders_.get(rebrand<VulkanShader>(desc.fragment_shader));
-    if (!vs || !fs) {
+    if (!vs || (desc.fragment_shader.is_valid() && !fs)) {
         RIME_ERROR("rhi: create_graphics_pipeline with an invalid shader handle");
         return {};
     }
 
     VkPipelineShaderStageCreateInfo stages[2]{};
+    std::uint32_t stage_count = 1;
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = vs->module;
     stages[0].pName = vs->entry_point.c_str();
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = fs->module;
-    stages[1].pName = fs->entry_point.c_str();
+    if (fs) {
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fs->module;
+        stages[1].pName = fs->entry_point.c_str();
+        stage_count = 2;
+    }
 
     // Vertex input: one interleaved binding plus its attributes. A pipeline with no vertex layout
     // (stride 0) draws from constants/gl_VertexIndex, which is a fine path too.
@@ -154,6 +163,11 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         color_count = static_cast<std::uint32_t>(desc.color_formats.size());
         for (std::uint32_t i = 0; i < color_count; ++i)
             color_formats[i] = to_vk(desc.color_formats[i]);
+    } else if (desc.color_format == Format::Undefined) {
+        // No color attachment at all (M5.6): the depth-only pre-pass pipeline. Zero attachments
+        // is the dynamic-rendering spelling of "this pipeline writes only depth/stencil"; it must
+        // be used inside a pass that binds no color targets (RenderingInfo left color-less).
+        color_count = 0;
     } else {
         color_formats[0] = to_vk(desc.color_format);
     }
@@ -257,7 +271,7 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
 
     VkGraphicsPipelineCreateInfo pci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pci.pNext = &rendering;
-    pci.stageCount = 2;
+    pci.stageCount = stage_count;
     pci.pStages = stages;
     pci.pVertexInputState = &vin;
     pci.pInputAssemblyState = &ia;

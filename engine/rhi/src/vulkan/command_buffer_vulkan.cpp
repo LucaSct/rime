@@ -136,10 +136,19 @@ void VulkanCommandBuffer::end_debug_label() {
 }
 
 void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
-    // The attachment list: the MRT span when given, else the single `color` member (M5.1b). All
-    // targets share one extent (attachment 0's) and each is transitioned + described in turn.
+    // The attachment list: the MRT span when given, else the single `color` member (M5.1b) — or
+    // none at all (M5.6): an empty span next to a default (never-assigned) `color` target means a
+    // DEPTH-ONLY pass, the depth pre-pass's shape, rendered with zero color attachments and the
+    // render area taken from the depth target instead.
+    const bool depth_only = info.colors.empty() && !info.color.target.is_valid();
+    if (depth_only && !info.depth_stencil) {
+        RIME_ERROR("rhi: begin_rendering with neither a color nor a depth attachment");
+        return;
+    }
     const std::span<const ColorAttachment> colors =
-        !info.colors.empty() ? info.colors : std::span<const ColorAttachment>{&info.color, 1};
+        !info.colors.empty() ? info.colors
+        : depth_only         ? std::span<const ColorAttachment>{}
+                             : std::span<const ColorAttachment>{&info.color, 1};
     if (colors.size() > kMaxColorAttachments) {
         RIME_ERROR("rhi: begin_rendering with {} color targets (max {})",
                    colors.size(),
@@ -158,16 +167,25 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
         if (i == 0)
             tex0 = tex;
 
-        // Move the target into a color-attachment layout. Coming from whatever it was (UNDEFINED
-        // on first use), nothing earlier needs to complete first.
-        transition_image(cmd_,
-                         tex->image,
-                         tex->layout,
-                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                         0,
-                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        // Move the target into a color-attachment layout. On FIRST use (UNDEFINED) nothing can
+        // have touched it, so the transition waits for nothing. On REUSE — a second pass loading
+        // or overwriting the same target — this encoder cannot know what wrote it last (only a
+        // render graph has frame-global knowledge), so it orders against ALL prior writes: the
+        // conservative source is what makes back-to-back passes into one target well-defined
+        // (this is the write-after-write barrier the render graph's attachment handling counts
+        // on). Over-synchronized for a serial v0 queue that never overlaps anyway; the graph's
+        // precise per-producer masks can take over when parallel recording lands (ADR-0019). The
+        // destination includes READ because LoadOp::Load reads the attachment.
+        const bool fresh = tex->layout == VK_IMAGE_LAYOUT_UNDEFINED;
+        transition_image(
+            cmd_,
+            tex->image,
+            tex->layout,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            fresh ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            fresh ? VkAccessFlags2{0} : VK_ACCESS_2_MEMORY_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         tex->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
         VkRenderingAttachmentInfo& att = atts[i];
@@ -194,23 +212,35 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
     VkRenderingAttachmentInfo depth_att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     VkRenderingAttachmentInfo stencil_att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     bool stencil_bound = false;
+    VulkanTexture* dtex = nullptr; // hoisted: supplies the render area for a depth-only pass
     if (info.depth_stencil) {
-        VulkanTexture* dtex = device_.lookup(info.depth_stencil->target);
+        dtex = device_.lookup(info.depth_stencil->target);
         if (!dtex) {
             RIME_ERROR("rhi: begin_rendering with an invalid depth target");
         } else {
             const bool stencil = has_stencil(dtex->format);
-            const VkImageLayout layout = stencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-                                                 : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            // One depth layout for every depth(-stencil) attachment, stencil aspect or not:
+            // DEPTH_STENCIL_ATTACHMENT_OPTIMAL is valid for depth-only images (the stencil
+            // aspect's rules apply only where the aspect exists), and standardizing on it keeps
+            // the tracked layout in agreement with the ResourceState map (texture_barrier's
+            // DepthTarget), so a graph-issued barrier and this implicit path never disagree
+            // about what layout a depth image is really in. Same first-use/reuse split as the
+            // color transition above: reuse must order against prior writes — that is exactly
+            // the pre-pass -> forward-pass handoff, where the second pass LOADS the depth the
+            // first one stored (hence READ in the destination access too).
+            const VkImageLayout layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            const bool fresh = dtex->layout == VK_IMAGE_LAYOUT_UNDEFINED;
             transition_image(cmd_,
                              dtex->image,
                              dtex->layout,
                              layout,
-                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                             0,
+                             fresh ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT
+                                   : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                             fresh ? VkAccessFlags2{0} : VK_ACCESS_2_MEMORY_WRITE_BIT,
                              VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
                                  VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                              aspect_for(dtex->format));
             dtex->layout = layout;
 
@@ -227,12 +257,19 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
         }
     }
 
+    // The render area: attachment 0's extent, or the depth target's for a depth-only pass. If
+    // every lookup above failed there is nothing to render into — bail rather than dereference.
+    VulkanTexture* area_tex = tex0 ? tex0 : dtex;
+    if (!area_tex) {
+        RIME_ERROR("rhi: begin_rendering with no usable attachment");
+        return;
+    }
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea.offset = {0, 0};
-    ri.renderArea.extent = {tex0->extent.width, tex0->extent.height};
+    ri.renderArea.extent = {area_tex->extent.width, area_tex->extent.height};
     ri.layerCount = 1;
     ri.colorAttachmentCount = static_cast<std::uint32_t>(colors.size());
-    ri.pColorAttachments = atts.data();
+    ri.pColorAttachments = colors.empty() ? nullptr : atts.data();
     // imageView stays null if there was no depth attachment (or its lookup failed) → color-only
     // pass.
     if (depth_att.imageView != VK_NULL_HANDLE)

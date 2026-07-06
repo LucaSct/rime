@@ -58,6 +58,25 @@ TEST_CASE("scene layer: primitives are analytically exact (M5.5)") {
         }
         for (const std::uint32_t i : sphere.indices)
             CHECK(i < sphere.vertices.size());
+        // Winding, same criterion the cube subcase uses: every non-degenerate triangle's
+        // geometric normal (cross of its edges) must agree with its vertices' outward normals, or
+        // back-face culling shades the sphere inside-out (the M5.6 forward-PBR bug). Pole rings
+        // collapse to zero-area triangles whose cross product vanishes — skip those.
+        REQUIRE(sphere.indices.size() % 3 == 0);
+        for (std::size_t t = 0; t < sphere.indices.size(); t += 3) {
+            const MeshVertex& a = sphere.vertices[sphere.indices[t]];
+            const MeshVertex& b = sphere.vertices[sphere.indices[t + 1]];
+            const MeshVertex& c = sphere.vertices[sphere.indices[t + 2]];
+            const float e1x = b.px - a.px, e1y = b.py - a.py, e1z = b.pz - a.pz;
+            const float e2x = c.px - a.px, e2y = c.py - a.py, e2z = c.pz - a.pz;
+            const float gx = e1y * e2z - e1z * e2y;
+            const float gy = e1z * e2x - e1x * e2z;
+            const float gz = e1x * e2y - e1y * e2x;
+            // Average the three outward normals — the face this triangle approximates points that
+            // way. > -eps (not just > 0) tolerates the near-degenerate triangles next to the poles.
+            const float nx = a.nx + b.nx + c.nx, ny = a.ny + b.ny + c.ny, nz = a.nz + b.nz + c.nz;
+            CHECK(gx * nx + gy * ny + gz * nz > -1e-6f);
+        }
     }
 
     SUBCASE("cube: 24 flat axis-aligned normals, CCW-from-outside winding") {

@@ -125,8 +125,14 @@ struct StencilFace {
 // color format directly rather than a render-pass handle.
 struct GraphicsPipelineDesc {
     ShaderHandle vertex_shader;
+    // Optional since M5.6: leave it default (invalid) for a DEPTH-ONLY pipeline — rasterization
+    // without a fragment stage is valid Vulkan and exactly what a depth pre-pass wants (vertex
+    // transform + fixed-function depth test, no shading). Such a pipeline must also set
+    // `color_format = Format::Undefined` (no color attachments).
     ShaderHandle fragment_shader;
     VertexLayout vertex_layout = {};
+    // The single color attachment's format — or Format::Undefined for a depth-only pipeline
+    // (zero color attachments; pair with a color-less RenderingInfo).
     Format color_format = Format::RGBA8Unorm;
     // Multiple render targets (M5.1b): the formats of ALL color attachments this pipeline writes,
     // position-matched to RenderingInfo::colors. When non-empty it wins over `color_format`

@@ -56,6 +56,11 @@ struct DepthStencilAttachment {
 // colors[i]); it wins over `color` when non-empty, and the bound pipeline must declare matching
 // `color_formats`. All attachments share one extent. The span is read during begin_rendering
 // only (it may reference a caller-owned temporary).
+//
+// Depth-only passes (M5.6): leave `colors` empty AND `color` untouched (its default target handle
+// is invalid) while setting `depth_stencil` — the pass renders with zero color attachments, the
+// shape of a depth pre-pass. The bound pipeline must agree: `color_format = Format::Undefined`
+// (and it may omit its fragment shader entirely).
 struct RenderingInfo {
     ColorAttachment color;
     std::span<const ColorAttachment> colors = {};

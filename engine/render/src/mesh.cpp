@@ -109,10 +109,14 @@ CpuMesh make_uv_sphere(float radius, std::uint32_t rings, std::uint32_t segments
             const std::uint32_t b = a + 1;          //   |   |      φ grows rightward)
             const std::uint32_t c = a + stride;     //   c---d
             const std::uint32_t d = c + 1;
-            // CCW seen from outside: with x = sinθcosφ, z = sinθsinφ and +y up, going a→c→b (and
-            // b→c→d) winds counter-clockwise for an outside viewer. Degenerate pole triangles
-            // (zero area) are harmless and keep the loop branch-free.
-            m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
+            // Winding: a→b→c (and b→d→c) so each triangle's geometric normal (edge cross product)
+            // points the SAME way as its vertices' outward normals — "counter-clockwise seen from
+            // outside", the exact criterion make_cube uses and the scene_layer winding proof
+            // asserts. Getting this backwards makes back-face culling discard the visible surface
+            // and shade the sphere's interior (dark, inside-out) — the M5.6 bug this comment now
+            // guards against. Degenerate pole triangles (zero area) are harmless and keep the loop
+            // branch-free.
+            m.indices.insert(m.indices.end(), {a, b, c, b, d, c});
         }
     }
     return m;
