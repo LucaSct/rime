@@ -2,12 +2,13 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // Proof for the RMA1 cooked-material reader (M6.4). Files are assembled by the test-side writer
-// (material_fixture.hpp) exactly to the ADR-0024 material layout. ROUND-TRIP: a valid file decodes to
-// exactly the factors, alpha mode, and texture-reference AssetIds written, with the right content id.
-// NEGATIVE BATTERY: one crafted file per way a material file can be wrong — bad envelope, an unknown
-// alpha mode, a non-finite factor, a payload that is short or over-long — each a clean typed error and
-// never a crash (ASan/UBSan is the net). A material is a FIXED-size record, so "the payload must be
-// exactly this long" is a first-class check here. The reader trusts nothing off disk, as always.
+// (material_fixture.hpp) exactly to the ADR-0024 material layout. ROUND-TRIP: a valid file decodes
+// to exactly the factors, alpha mode, and texture-reference AssetIds written, with the right
+// content id. NEGATIVE BATTERY: one crafted file per way a material file can be wrong — bad
+// envelope, an unknown alpha mode, a non-finite factor, a payload that is short or over-long — each
+// a clean typed error and never a crash (ASan/UBSan is the net). A material is a FIXED-size record,
+// so "the payload must be exactly this long" is a first-class check here. The reader trusts nothing
+// off disk, as always.
 //
 // doctest's main() lives in cooked_mesh_test.cpp (shared across the rime_assets_tests exe).
 
@@ -20,8 +21,8 @@
 #include <span>
 #include <vector>
 
-#include "rime/assets/cooked_reader.hpp"
 #include "material_fixture.hpp"
+#include "rime/assets/cooked_reader.hpp"
 
 using namespace rime::assets;
 using rime_test::MaterialFileBuilder;
@@ -61,8 +62,8 @@ TEST_CASE("a valid cooked material round-trips to exactly the written data") {
     CHECK(mat->alpha_cutoff == doctest::Approx(0.3f));
     CHECK(mat->alpha_mode == AlphaMode::Mask);
 
-    // Texture references survive as content ids; the deliberately-zero occlusion slot round-trips as
-    // "no texture" so the loader knows to bind the white-AO fallback.
+    // Texture references survive as content ids; the deliberately-zero occlusion slot round-trips
+    // as "no texture" so the loader knows to bind the white-AO fallback.
     CHECK(mat->base_color_tex == AssetId{0x1111'1111'1111'1111ULL});
     CHECK(mat->metallic_roughness_tex == AssetId{0x2222'2222'2222'2222ULL});
     CHECK(mat->normal_tex == AssetId{0x3333'3333'3333'3333ULL});
@@ -106,10 +107,10 @@ TEST_CASE("an all-textures-absent material round-trips (every slot the fallback)
 TEST_CASE("material_schema_hash is the reflected v1 material layout: stable, non-zero, golden") {
     CHECK(material_schema_hash() != 0);
     CHECK(material_schema_hash() == material_schema_hash());
-    // Golden value: the reflection type_hash of the v1 material record. Pinned as a regression guard
-    // (a change to the record or the hashing must be deliberate) and as the exact constant the Rust
-    // cooker embeds — the cross-language golden-fixture test checks that the cooker and this reader
-    // agree on it. Distinct from the mesh and texture hashes (different records).
+    // Golden value: the reflection type_hash of the v1 material record. Pinned as a regression
+    // guard (a change to the record or the hashing must be deliberate) and as the exact constant
+    // the Rust cooker embeds — the cross-language golden-fixture test checks that the cooker and
+    // this reader agree on it. Distinct from the mesh and texture hashes (different records).
     CHECK(material_schema_hash() == 0xCA4ED4CC434C941AULL);
     CHECK(material_schema_hash() != mesh_schema_hash());
     CHECK(material_schema_hash() != texture_schema_hash());

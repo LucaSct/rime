@@ -42,14 +42,15 @@ struct TextureMipV1 {
 
 static_assert(sizeof(TextureMipV1) == 16, "v1 mip record must stay four packed u32s");
 
-// The v1 cooked-material record, reflected for the same reason MeshVertexV1 and TextureMipV1 are: so
-// the material schema fingerprint is *derived* from the field set the reader walks, not hand-picked
-// (ADR-0024, decision 4). Unlike the mesh/texture records this is the *whole* payload — a material has
-// no variable-length tail — so these fields, in this order, are the entire wire format. Add, remove,
-// reorder, or retype a field and reflect<>().type_hash changes, so a material cooked against the old
-// layout is rejected with SchemaMismatch rather than misread. compute_type_hash ignores offsets and
-// sizeof, so the padding this mixed-width struct carries is inert; the wire is written field by field
-// (decode_material below, and the Rust cooker), never as a struct memcpy, so padding never reaches it.
+// The v1 cooked-material record, reflected for the same reason MeshVertexV1 and TextureMipV1 are:
+// so the material schema fingerprint is *derived* from the field set the reader walks, not
+// hand-picked (ADR-0024, decision 4). Unlike the mesh/texture records this is the *whole* payload —
+// a material has no variable-length tail — so these fields, in this order, are the entire wire
+// format. Add, remove, reorder, or retype a field and reflect<>().type_hash changes, so a material
+// cooked against the old layout is rejected with SchemaMismatch rather than misread.
+// compute_type_hash ignores offsets and sizeof, so the padding this mixed-width struct carries is
+// inert; the wire is written field by field (decode_material below, and the Rust cooker), never as
+// a struct memcpy, so padding never reaches it.
 struct MaterialV1 {
     float base_color_r, base_color_g, base_color_b, base_color_a;
     float emissive_r, emissive_g, emissive_b;
@@ -413,9 +414,9 @@ std::optional<MaterialAsset> decode_material(std::span<const std::byte> payload,
     std::uint64_t occlusion_tex = 0;
     std::uint64_t emissive_tex = 0;
 
-    // A material is a fixed record with no variable-length tail: read every field in wire order. This
-    // order IS the format — it must match detail::MaterialV1 (which fingerprints it) and the Rust
-    // cooker (which writes it). Any short read means a truncated payload.
+    // A material is a fixed record with no variable-length tail: read every field in wire order.
+    // This order IS the format — it must match detail::MaterialV1 (which fingerprints it) and the
+    // Rust cooker (which writes it). Any short read means a truncated payload.
     if (!reader.f32(mat.base_color[0]) || !reader.f32(mat.base_color[1]) ||
         !reader.f32(mat.base_color[2]) || !reader.f32(mat.base_color[3]) ||
         !reader.f32(mat.emissive[0]) || !reader.f32(mat.emissive[1]) ||
@@ -435,17 +436,26 @@ std::optional<MaterialAsset> decode_material(std::span<const std::byte> payload,
     }
 
     // Validate before handing the material on. The alpha mode must be a known enum value, and every
-    // factor must be finite — a NaN or Inf in the bytes would otherwise flow straight into the shader
-    // as garbage (and NaN compares make downstream culling/sorting nondeterministic). Texture ids are
-    // taken verbatim: 0 = no texture, any other value is a content id the loader will try to resolve.
+    // factor must be finite — a NaN or Inf in the bytes would otherwise flow straight into the
+    // shader as garbage (and NaN compares make downstream culling/sorting nondeterministic).
+    // Texture ids are taken verbatim: 0 = no texture, any other value is a content id the loader
+    // will try to resolve.
     if (alpha_mode_raw > static_cast<std::uint32_t>(AlphaMode::Blend)) {
         out_error = AssetError::InvalidMaterial;
         return std::nullopt;
     }
-    const float factors[] = {mat.base_color[0],       mat.base_color[1], mat.base_color[2],
-                             mat.base_color[3],        mat.emissive[0],   mat.emissive[1],
-                             mat.emissive[2],          mat.metallic,      mat.roughness,
-                             mat.normal_scale,         mat.occlusion_strength, mat.alpha_cutoff};
+    const float factors[] = {mat.base_color[0],
+                             mat.base_color[1],
+                             mat.base_color[2],
+                             mat.base_color[3],
+                             mat.emissive[0],
+                             mat.emissive[1],
+                             mat.emissive[2],
+                             mat.metallic,
+                             mat.roughness,
+                             mat.normal_scale,
+                             mat.occlusion_strength,
+                             mat.alpha_cutoff};
     for (const float f : factors) {
         if (!std::isfinite(f)) {
             out_error = AssetError::InvalidMaterial;

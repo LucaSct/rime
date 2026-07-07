@@ -13,12 +13,12 @@
 #include "rime/core/byte_cursor.hpp"
 
 // A test-side writer for RMA1 cooked-material files, the sibling of texture_fixture.hpp's
-// TextureFileBuilder. It defaults to a valid, non-trivial material (every field a distinct value so a
-// round-trip test can tell them apart); a negative test overrides exactly one field to isolate the
-// failure it provokes. A material has no variable-length tail, so this is just the fixed record inside
-// the standard container envelope. The Rust cooker is the real writer from M6.4 on — the checked-in
-// golden fixture cross-checks the two languages — but a programmatic builder lets the negative battery
-// craft files no honest cooker would emit.
+// TextureFileBuilder. It defaults to a valid, non-trivial material (every field a distinct value so
+// a round-trip test can tell them apart); a negative test overrides exactly one field to isolate
+// the failure it provokes. A material has no variable-length tail, so this is just the fixed record
+// inside the standard container envelope. The Rust cooker is the real writer from M6.4 on — the
+// checked-in golden fixture cross-checks the two languages — but a programmatic builder lets the
+// negative battery craft files no honest cooker would emit.
 namespace rime_test {
 
 struct MaterialFileBuilder {
@@ -39,8 +39,8 @@ struct MaterialFileBuilder {
     float alpha_cutoff = 0.3f;
     std::uint32_t alpha_mode = static_cast<std::uint32_t>(rime::assets::AlphaMode::Mask);
 
-    // Texture-reference AssetIds. occlusion is 0 on purpose — it exercises the "no texture" slot that
-    // the loader turns into a fallback, and proves 0 round-trips as kInvalidAssetId.
+    // Texture-reference AssetIds. occlusion is 0 on purpose — it exercises the "no texture" slot
+    // that the loader turns into a fallback, and proves 0 round-trips as kInvalidAssetId.
     std::uint64_t base_color_tex = 0x1111'1111'1111'1111ULL;
     std::uint64_t metallic_roughness_tex = 0x2222'2222'2222'2222ULL;
     std::uint64_t normal_tex = 0x3333'3333'3333'3333ULL;
