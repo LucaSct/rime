@@ -24,13 +24,14 @@ struct MeshVertexV1 {
 
 static_assert(sizeof(MeshVertexV1) == 32, "v1 vertex must stay the 32-byte P/N/UV layout");
 
-// The v1 cooked-texture mip-descriptor record, reflected for the same reason MeshVertexV1 is: so the
-// texture schema fingerprint is *derived* from the layout the reader walks, not hand-picked
+// The v1 cooked-texture mip-descriptor record, reflected for the same reason MeshVertexV1 is: so
+// the texture schema fingerprint is *derived* from the layout the reader walks, not hand-picked
 // (ADR-0024, decision 4). It is the {width, height, offset, size} tuple stored once per mip level.
 // Reorder or retype a field and reflect<>().type_hash changes, so a texture cooked against the old
 // table layout is rejected with SchemaMismatch rather than misread. Only the *table record* is
-// fingerprinted, not the base-extent/format header around it: that header is container-stable, and a
-// future pixel format is an appended TextureFormat value (backward-compatible), not a layout change.
+// fingerprinted, not the base-extent/format header around it: that header is container-stable, and
+// a future pixel format is an appended TextureFormat value (backward-compatible), not a layout
+// change.
 struct TextureMipV1 {
     std::uint32_t width;
     std::uint32_t height;
@@ -272,7 +273,8 @@ std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
 
     // Validate the header before trusting any of it to size mips. v1 knows exactly two formats
     // (RGBA8 linear / sRGB); a full chain's length is fully determined by the base extent, so any
-    // other mip_count is a corrupt or foreign file — caught here rather than by walking a bad table.
+    // other mip_count is a corrupt or foreign file — caught here rather than by walking a bad
+    // table.
     if (format_raw > static_cast<std::uint32_t>(TextureFormat::Rgba8Srgb) || width == 0 ||
         height == 0 || mip_count != full_mip_count(width, height)) {
         out_error = AssetError::InvalidTexture;
@@ -285,10 +287,11 @@ std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
     tex.format = static_cast<TextureFormat>(format_raw);
     tex.mips.reserve(mip_count);
 
-    // The mip table: one {width, height, offset, size} record per level. Each field is cross-checked
-    // against what a full chain from (width, height) *must* contain — the level's halved extent, its
-    // width*height*4 byte size, and an offset that tiles the blob with no gap or overlap. `running`
-    // is 64-bit so the offsets cannot wrap; a tampered record fails here, before any pixel is read.
+    // The mip table: one {width, height, offset, size} record per level. Each field is
+    // cross-checked against what a full chain from (width, height) *must* contain — the level's
+    // halved extent, its width*height*4 byte size, and an offset that tiles the blob with no gap or
+    // overlap. `running` is 64-bit so the offsets cannot wrap; a tampered record fails here, before
+    // any pixel is read.
     std::uint64_t running = 0; // expected offset of the next level = bytes accounted for so far
     for (std::uint32_t level = 0; level < mip_count; ++level) {
         std::uint32_t mw = 0;

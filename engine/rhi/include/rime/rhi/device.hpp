@@ -82,12 +82,12 @@ public:
     // like submit_blocking); batched/streamed uploads arrive with the renderer and asset pipeline.
     virtual void write_texture(TextureHandle handle, const void* data, std::size_t size) = 0;
 
-    // Upload a full, PRE-GENERATED mip chain: `levels[i]` is the tightly-packed pixels for mip level
-    // i (level 0 = full extent; each subsequent level halved, floor 1), in the texture's format.
-    // Unlike write_texture — which fills level 0 and GPU-downsamples the rest — this copies each
-    // level's bytes verbatim: the path for cooked textures whose mips were generated offline in
-    // linear space (M6.3, ADR-0024). `levels.size()` must equal the texture's mip_levels; the image
-    // is left shader-readable. Also one-shot and blocking.
+    // Upload a full, PRE-GENERATED mip chain: `levels[i]` is the tightly-packed pixels for mip
+    // level i (level 0 = full extent; each subsequent level halved, floor 1), in the texture's
+    // format. Unlike write_texture — which fills level 0 and GPU-downsamples the rest — this copies
+    // each level's bytes verbatim: the path for cooked textures whose mips were generated offline
+    // in linear space (M6.3, ADR-0024). `levels.size()` must equal the texture's mip_levels; the
+    // image is left shader-readable. Also one-shot and blocking.
     virtual void write_texture_mips(TextureHandle handle, std::span<const MipData> levels) = 0;
 
     // ── Command submission ─────────────────────────────────────────────────────────────────

@@ -71,9 +71,10 @@ TEST_CASE("a Rust-cooked glTF mesh (quad.rmesh) loads and matches its known valu
 
 TEST_CASE("a Rust-cooked PNG texture (checker.rtex) loads with a gamma-correct mip chain") {
     // The M6.3 texture cross-language proof: a 2×2 sRGB checker cooked by the Rust pipeline (the
-    // committed checker.rtex) loads through this reader with the right extent, format, mip table, and
-    // pixels — and its 1×1 mip proves the cooker generated the chain gamma-correctly. cook_fixture.rs
-    // proves the cooker still emits these bytes; this proves the reader ingests them.
+    // committed checker.rtex) loads through this reader with the right extent, format, mip table,
+    // and pixels — and its 1×1 mip proves the cooker generated the chain gamma-correctly.
+    // cook_fixture.rs proves the cooker still emits these bytes; this proves the reader ingests
+    // them.
     const std::filesystem::path path =
         std::filesystem::path(RIME_ASSETS_FIXTURE_DIR) / "checker.rtex";
     const std::optional<std::vector<std::byte>> bytes = rime::platform::read_file(path);
@@ -94,8 +95,8 @@ TEST_CASE("a Rust-cooked PNG texture (checker.rtex) loads with a gamma-correct m
     CHECK(tex->mips[1].size == 4);
     CHECK(id.is_valid());
 
-    // Level 0 survived verbatim, top row first: the top-left texel is white. This pins the row order
-    // cross-language — a vertically-flipped cook would put black here.
+    // Level 0 survived verbatim, top row first: the top-left texel is white. This pins the row
+    // order cross-language — a vertically-flipped cook would put black here.
     REQUIRE(tex->pixels.size() == 20);
     CHECK(tex->pixels[0] == std::byte{255}); // top-left R (white)
     CHECK(tex->pixels[1] == std::byte{255});

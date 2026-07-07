@@ -99,16 +99,17 @@ struct CookedHeader {
 // The schema fingerprint the current build expects a cooked *texture* payload to match. It is the
 // reflection type_hash of the v1 mip-descriptor record (see cooked_reader.cpp) — the repeated unit
 // the reader walks to slice the pixel blob. Change that record and previously cooked textures are
-// rejected with SchemaMismatch instead of being misread. The Rust cooker embeds this same value; the
-// M6.3 texture golden-fixture test is the cross-language drift alarm (mirrors mesh_schema_hash).
+// rejected with SchemaMismatch instead of being misread. The Rust cooker embeds this same value;
+// the M6.3 texture golden-fixture test is the cross-language drift alarm (mirrors
+// mesh_schema_hash).
 [[nodiscard]] std::uint64_t texture_schema_hash() noexcept;
 
-// Decode a texture payload (the bytes after the header) into a fully validated TextureAsset. Assumes
-// the caller has confirmed the header's kind and schema hash. The base extent, format, and a full
-// mip chain are read and cross-checked: every level's extent must be the base halved to that level,
-// every level's byte size must be width*height*4, offsets must tile the blob with no gap or overlap,
-// and the blob must be exactly as long as the mip sizes sum to — so a corrupt table can never make a
-// later upload read past the pixels.
+// Decode a texture payload (the bytes after the header) into a fully validated TextureAsset.
+// Assumes the caller has confirmed the header's kind and schema hash. The base extent, format, and
+// a full mip chain are read and cross-checked: every level's extent must be the base halved to that
+// level, every level's byte size must be width*height*4, offsets must tile the blob with no gap or
+// overlap, and the blob must be exactly as long as the mip sizes sum to — so a corrupt table can
+// never make a later upload read past the pixels.
 [[nodiscard]] std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
                                                          AssetError& out_error) noexcept;
 

@@ -12,11 +12,12 @@
 #include "rime/assets/texture_asset.hpp"
 #include "rime/core/byte_cursor.hpp"
 
-// A test-side writer for RMA1 cooked-texture files, the sibling of mesh_fixture.hpp's MeshFileBuilder.
-// It defaults to a valid, full-mip-chain RGBA8 texture; a negative test overrides exactly one field
-// (or mutates one entry of `default_table()`) to isolate the failure it provokes. The Rust cooker is
-// the real writer from M6.3 on — the checked-in golden fixture cross-checks the two languages — but a
-// programmatic builder is what lets the negative battery craft files no honest cooker would emit.
+// A test-side writer for RMA1 cooked-texture files, the sibling of mesh_fixture.hpp's
+// MeshFileBuilder. It defaults to a valid, full-mip-chain RGBA8 texture; a negative test overrides
+// exactly one field (or mutates one entry of `default_table()`) to isolate the failure it provokes.
+// The Rust cooker is the real writer from M6.3 on — the checked-in golden fixture cross-checks the
+// two languages — but a programmatic builder is what lets the negative battery craft files no
+// honest cooker would emit.
 namespace rime_test {
 
 struct TextureFileBuilder {
@@ -39,10 +40,10 @@ struct TextureFileBuilder {
     std::uint32_t width = 4;
     std::uint32_t height = 2;
     std::uint32_t format = static_cast<std::uint32_t>(rime::assets::TextureFormat::Rgba8Srgb);
-    std::optional<std::uint32_t> mip_count_override;   // default: the table's length
-    std::optional<std::vector<Mip>> mip_table;         // default: default_table()
-    std::optional<std::vector<std::byte>> pixels;      // default: default_pixels(default_table())
-    std::vector<std::byte> trailing;                   // extra bytes counted into the payload
+    std::optional<std::uint32_t> mip_count_override; // default: the table's length
+    std::optional<std::vector<Mip>> mip_table;       // default: default_table()
+    std::optional<std::vector<std::byte>> pixels;    // default: default_pixels(default_table())
+    std::vector<std::byte> trailing;                 // extra bytes counted into the payload
 
     // The correct full-chain mip table for (width, height): each level's halved extent, its
     // width*height*4 byte size, and the running offset that tiles the blob.

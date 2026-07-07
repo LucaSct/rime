@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for M6.3's RHI top-up: Device::write_texture_mips uploads a PRE-GENERATED mip chain verbatim,
-// one buffer→image copy per level, instead of GPU-blitting the coarse levels from level 0 the way
-// write_texture does. Cooked textures carry gamma-correct offline mips (linear-space box filter), and
-// the engine must not throw them away and regenerate a (wrong, too-dark) chain on upload.
+// Proof for M6.3's RHI top-up: Device::write_texture_mips uploads a PRE-GENERATED mip chain
+// verbatim, one buffer→image copy per level, instead of GPU-blitting the coarse levels from level 0
+// the way write_texture does. Cooked textures carry gamma-correct offline mips (linear-space box
+// filter), and the engine must not throw them away and regenerate a (wrong, too-dark) chain on
+// upload.
 //
-// The trick is a chain whose coarse levels are DELIBERATELY TINTED to colours a box filter of level 0
-// could never produce: level 0 red, level 1 green, level 2 blue. Sampling each explicit LOD (via
-// textureLod, the M5.3 minify shader) must read back that level's tint — green at LOD 1, blue at LOD
-// 2 — which can only be true if the per-level bytes were uploaded. For contrast, a second texture
-// gets the same red level 0 through write_texture (blit generation): its LOD 1 comes back red, not
-// green, so the two upload paths visibly diverge. Off-screen + readback, GPU-free on lavapipe in CI.
-// (main() for this exe is in device_test.cpp.)
+// The trick is a chain whose coarse levels are DELIBERATELY TINTED to colours a box filter of level
+// 0 could never produce: level 0 red, level 1 green, level 2 blue. Sampling each explicit LOD (via
+// textureLod, the M5.3 minify shader) must read back that level's tint — green at LOD 1, blue at
+// LOD 2 — which can only be true if the per-level bytes were uploaded. For contrast, a second
+// texture gets the same red level 0 through write_texture (blit generation): its LOD 1 comes back
+// red, not green, so the two upload paths visibly diverge. Off-screen + readback, GPU-free on
+// lavapipe in CI. (main() for this exe is in device_test.cpp.)
 
 #include <doctest/doctest.h>
 
@@ -65,7 +66,8 @@ TEST_CASE("rhi uploads a pre-generated (cooked) mip chain verbatim (M6.3)") {
     TextureDesc td{};
     td.extent = {tex_size, tex_size};
     td.mip_levels = 3;
-    td.format = Format::RGBA8Unorm; // linear: tints pass through sampling unchanged, exact to assert
+    td.format =
+        Format::RGBA8Unorm; // linear: tints pass through sampling unchanged, exact to assert
     td.usage = TextureUsage::Sampled | TextureUsage::TransferDst;
     td.debug_name = "cooked-tinted-chain";
     const TextureHandle cooked = device->create_texture(td);
@@ -78,8 +80,8 @@ TEST_CASE("rhi uploads a pre-generated (cooked) mip chain verbatim (M6.3)") {
     };
     device->write_texture_mips(cooked, levels);
 
-    // Contrast texture: the same red level 0 through write_texture, which blit-generates the chain —
-    // every level ends up red (a downsampled solid colour is the same colour).
+    // Contrast texture: the same red level 0 through write_texture, which blit-generates the chain
+    // — every level ends up red (a downsampled solid colour is the same colour).
     td.debug_name = "blit-generated-chain";
     const TextureHandle blit = device->create_texture(td);
     device->write_texture(blit, level0.data(), level0.size());
@@ -162,7 +164,8 @@ TEST_CASE("rhi uploads a pre-generated (cooked) mip chain verbatim (M6.3)") {
         device->read_buffer(rb, px.data(), px.size(), 0);
         device->destroy(rb);
         device->destroy(target);
-        const std::size_t c = (static_cast<std::size_t>(out_size / 2) * out_size + out_size / 2) * 4;
+        const std::size_t c =
+            (static_cast<std::size_t>(out_size / 2) * out_size + out_size / 2) * 4;
         return {px[c + 0], px[c + 1], px[c + 2], px[c + 3]};
     };
 
@@ -171,14 +174,14 @@ TEST_CASE("rhi uploads a pre-generated (cooked) mip chain verbatim (M6.3)") {
         return (p[0] > 128) == r && (p[1] > 128) == g && (p[2] > 128) == b;
     };
 
-    // The cooked chain reads back each level's own tint — only possible if write_texture_mips copied
-    // the per-level bytes rather than regenerating them.
+    // The cooked chain reads back each level's own tint — only possible if write_texture_mips
+    // copied the per-level bytes rather than regenerating them.
     const auto c0 = sample_at_lod(cooked, 0.0f);
     const auto c1 = sample_at_lod(cooked, 1.0f);
     const auto c2 = sample_at_lod(cooked, 2.0f);
-    CHECK(is_rgb(c0, true, false, false));  // LOD 0 → red
-    CHECK(is_rgb(c1, false, true, false));  // LOD 1 → green (the cooked tint, not a blit of red)
-    CHECK(is_rgb(c2, false, false, true));  // LOD 2 → blue
+    CHECK(is_rgb(c0, true, false, false)); // LOD 0 → red
+    CHECK(is_rgb(c1, false, true, false)); // LOD 1 → green (the cooked tint, not a blit of red)
+    CHECK(is_rgb(c2, false, false, true)); // LOD 2 → blue
 
     // The blit path regenerates level 1 from the red level 0, so it comes back red — the two upload
     // paths diverge exactly where it matters, which is the whole point of the per-mip path.

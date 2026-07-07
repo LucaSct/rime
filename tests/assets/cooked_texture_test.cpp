@@ -104,10 +104,10 @@ TEST_CASE("a 1×1 texture is a single-level chain") {
 TEST_CASE("texture_schema_hash is the reflected v1 mip-record layout: stable, non-zero, golden") {
     CHECK(texture_schema_hash() != 0);
     CHECK(texture_schema_hash() == texture_schema_hash());
-    // Golden value: the reflection type_hash of the v1 {width,height,offset,size} mip record. Pinned
-    // as a regression guard (a change to the record or the hashing must be deliberate) and as the
-    // exact constant the Rust cooker embeds — the cross-language golden-fixture test checks that the
-    // cooker and this reader agree on it. Distinct from the mesh hash (different record).
+    // Golden value: the reflection type_hash of the v1 {width,height,offset,size} mip record.
+    // Pinned as a regression guard (a change to the record or the hashing must be deliberate) and
+    // as the exact constant the Rust cooker embeds — the cross-language golden-fixture test checks
+    // that the cooker and this reader agree on it. Distinct from the mesh hash (different record).
     CHECK(texture_schema_hash() == 0xAB8A2B884141F736ull);
     CHECK(texture_schema_hash() != mesh_schema_hash());
 }

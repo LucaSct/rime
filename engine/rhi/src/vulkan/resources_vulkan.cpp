@@ -402,9 +402,9 @@ void VulkanDevice::write_texture_mips(TextureHandle handle, std::span<const MipD
         return;
     }
 
-    // One staging buffer holds the whole chain, the levels concatenated; each level is then copied to
-    // its own mip. No blits: the cooked chain is authoritative (gamma-correct offline mips), so we
-    // upload it verbatim rather than regenerate it on the GPU the way write_texture does.
+    // One staging buffer holds the whole chain, the levels concatenated; each level is then copied
+    // to its own mip. No blits: the cooked chain is authoritative (gamma-correct offline mips), so
+    // we upload it verbatim rather than regenerate it on the GPU the way write_texture does.
     std::size_t total = 0;
     for (const MipData& level : levels) {
         total += level.pixels.size();
@@ -431,7 +431,8 @@ void VulkanDevice::write_texture_mips(TextureHandle handle, std::span<const MipD
         return;
     }
 
-    // memcpy each level into the staging buffer and record its buffer→image copy (mip level + extent).
+    // memcpy each level into the staging buffer and record its buffer→image copy (mip level +
+    // extent).
     std::vector<VkBufferImageCopy> regions;
     regions.reserve(levels.size());
     std::size_t offset = 0;
@@ -457,8 +458,8 @@ void VulkanDevice::write_texture_mips(TextureHandle handle, std::span<const MipD
     auto cmd = begin_commands();
     VkCommandBuffer vk = static_cast<VulkanCommandBuffer&>(*cmd).handle();
 
-    // Whole chain UNDEFINED -> TRANSFER_DST, copy every level, whole chain -> SHADER_READ (the default
-    // transition_image range covers all levels).
+    // Whole chain UNDEFINED -> TRANSFER_DST, copy every level, whole chain -> SHADER_READ (the
+    // default transition_image range covers all levels).
     transition_image(vk,
                      t->image,
                      VK_IMAGE_LAYOUT_UNDEFINED,
