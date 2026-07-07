@@ -14,3 +14,7 @@ description = "Rime offline asset pipeline: import source assets (glTF) and cook
 # glTF 2.0 import. Apache-2.0/MIT (ship-safe). Default features include the `import` loader and the
 # `utils` accessor readers we use to pull positions/normals/uvs/indices.
 gltf = "1.4"
+# Image decode for texture cook (M6.3). MIT/Apache-2.0 (ship-safe). default-features off so we pull
+# only the PNG and JPEG decoders v1 supports — not the whole format zoo — keeping the tree lean and
+# the cook deterministic. New source formats become new features here, not new dependencies.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

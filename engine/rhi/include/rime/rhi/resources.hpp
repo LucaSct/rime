@@ -48,6 +48,14 @@ struct TextureDesc {
     std::string_view debug_name = {};
 };
 
+// One mip level's pixels for Device::write_texture_mips: tightly packed, in the texture's format,
+// covering that level's (halved) extent. The asset pipeline generates the whole chain offline and
+// gamma-correctly (ADR-0024), so the RHI uploads each level verbatim instead of GPU-downsampling
+// from level 0 the way write_texture does.
+struct MipData {
+    std::span<const std::byte> pixels;
+};
+
 // A sampler describes *how* a shader reads a texture — the min/mag filtering and what happens for
 // UVs outside [0,1]. It is decoupled from the texture (the same image can be read different ways),
 // and is created once via Device::create_sampler then bound alongside a texture

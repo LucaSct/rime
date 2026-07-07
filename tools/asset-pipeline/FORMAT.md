@@ -14,8 +14,8 @@ All integers are **little-endian**, written **field by field** (never a struct c
 | --- | --- | --- |
 | `magic` | 4 bytes | `"RMA1"` (literal) |
 | `container_version` | u16 | `1` |
-| `asset_kind` | u16 | `1` = Mesh (append, never renumber) |
-| `type_schema_hash` | u64 | mesh: `0x198738A2DDE250AC` (see below) |
+| `asset_kind` | u16 | `1` = Mesh, `2` = Texture (append, never renumber) |
+| `type_schema_hash` | u64 | mesh: `0x198738A2DDE250AC`; texture: `0xAB8A2B884141F736` (see below) |
 | `payload_size` | u64 | length of the payload that follows |
 
 The **asset id** is the FNV-1a 64 hash of the payload bytes (identical to the engine's `content_hash`).
@@ -35,10 +35,28 @@ The **asset id** is the FNV-1a 64 hash of the payload bytes (identical to the en
 | vertices | `vertex_count` × 32 bytes | interleaved `px,py,pz, nx,ny,nz, u,v` (f32) |
 | indices | `index_count` × u32 | |
 
+## Texture payload
+
+| field | type | notes |
+| --- | --- | --- |
+| `width` | u32 | base level extent |
+| `height` | u32 | |
+| `format` | u32 | `0` = RGBA8 linear (UNORM), `1` = RGBA8 sRGB (BCn reserved) |
+| `mip_count` | u32 | a full chain: `floor(log2(max(width,height))) + 1` |
+| mip table | `mip_count` × (u32 width, u32 height, u32 offset, u32 size) | offsets tile the blob, no gap/overlap; `size = width·height·4` |
+| pixels | `Σ size` bytes | every level's RGBA8 texels, level 0 first |
+
+The chain is generated offline and **box-filtered in linear light** — for an sRGB texture the cooker
+linearises, averages, then re-encodes (so minified colour doesn't darken); linear textures are averaged
+directly, alpha always linear. sRGB is the `rime cook` default; `--linear` tags data textures. Rows are
+top-first (no vertical flip: matches the engine's uv `v=0`-at-top convention). The engine uploads each
+level verbatim via `write_texture_mips` — it never regenerates the chain.
+
 ## The schema hash
 
-`type_schema_hash` is the engine's reflection `type_hash` of the v1 vertex layout, computed and pinned
-in C++ (`engine/assets`, `mesh_schema_hash()`), and re-declared here as `cooked::MESH_SCHEMA_HASH`. The
-reader rejects a mismatch with a "re-cook" error, so a change to the vertex layout forces both sides to
-update together. If you change the layout, update the constant in both languages and regenerate the
-fixtures.
+`type_schema_hash` is the engine's reflection `type_hash` of a v1 layout record, computed and pinned in
+C++ and re-declared here. For a **mesh** it fingerprints the vertex layout (`mesh_schema_hash()` ↔
+`cooked::MESH_SCHEMA_HASH`); for a **texture** it fingerprints the `{width, height, offset, size}` mip
+record (`texture_schema_hash()` ↔ `cooked::TEXTURE_SCHEMA_HASH`). The reader rejects a mismatch with a
+"re-cook" error, so a layout change forces both sides to update together. If you change a layout, update
+the constant in both languages and regenerate the fixtures.

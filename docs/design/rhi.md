@@ -101,8 +101,15 @@ model ties them to the shader. See ADR-0010.
   bandwidth and covers meshes up to ~65k vertices.
 - **Texture upload.** `Device::write_texture(handle, data, size)` copies tightly-packed pixels into a
   device-local image **through a staging buffer**, blocking, and leaves it shader-readable — the same
-  one-shot model as `submit_blocking`. The image must carry `TransferDst` usage. Batched/streamed
-  uploads are the asset pipeline's job (M6).
+  one-shot model as `submit_blocking`. The image must carry `TransferDst` usage. It fills level 0 and
+  **blit-generates** the rest of the mip chain on the GPU (M5.3). Batched/streamed uploads are the
+  asset pipeline's job (M6).
+  `Device::write_texture_mips(handle, levels)` is its M6.3 sibling for **cooked** textures: it uploads
+  a **pre-generated** chain — one `MipData` span per level, one buffer→image copy each, no blit — so
+  the gamma-correct offline mips a cooked texture carries reach the GPU verbatim instead of being
+  regenerated (wrongly, in sRGB space) on the device. `levels.size()` must equal the texture's
+  `mip_levels`; the image is left shader-readable, same one-shot/blocking model. `tests/rhi/cooked_mip_test`
+  proves it by uploading a deliberately *tinted* chain and reading each level's tint back at an explicit LOD.
 - **Samplers.** A `Sampler` is *how* an image is read (min/mag `Filter`, `AddressMode` for out-of-range
   UVs), decoupled from the image so one texture can be sampled different ways. The vocabulary is a
   deliberate small subset (`Nearest`/`Linear`, `Repeat`/`ClampToEdge`), grown on demand.

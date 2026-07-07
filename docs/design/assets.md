@@ -22,7 +22,7 @@ Every cooked file is a fixed, versioned header followed by one kind-specific pay
 offset  size  field
 0       4     magic            = 'R','M','A','1'  (literal bytes; greppable in a hex dump)
 4       2     container_version  u16, LE           = 1
-6       2     asset_kind         u16, LE           (Mesh = 1; Texture/Material/… reserved)
+6       2     asset_kind         u16, LE           (Mesh = 1; Texture = 2; Material/… reserved)
 8       8     type_schema_hash   u64, LE           (see "Schema versioning")
 16      8     payload_size       u64, LE           (bytes of payload that follow)
 24      …     payload            payload_size bytes
@@ -56,6 +56,30 @@ it hands the renderer. The in-memory `MeshAsset` mirrors what `engine/render`'s 
 so uploading is a memcpy-and-create — the renderer owns GPU residency (wired at M6.6); `assets` never
 depends on `render`/`rhi`.
 
+### The texture payload (`asset_kind = Texture`) — M6.3
+
+```
+u32   width                  base level extent
+u32   height
+u32   format                 0 = RGBA8 linear (UNORM), 1 = RGBA8 sRGB   (BCn values reserved)
+u32   mip_count              a full chain: floor(log2(max(width,height))) + 1 levels
+      mip_count × { u32 width, u32 height, u32 offset, u32 size }   the mip table
+byte  pixels[Σ size]         every level's RGBA8 texels, level 0 first, tiled at the table's offsets
+```
+
+A cooked texture carries a **full, offline-generated mip chain**. The chain is box-filtered in
+**linear light**: for an sRGB texture the cooker linearises each texel, averages, then re-encodes, so
+minified colour surfaces don't darken (the classic gamma-wrong-mips bug — a black/white checker's
+coarse mip is sRGB ~188, *not* the too-dark 128 a naive byte average gives). Linear textures
+(normal / metallic-roughness / occlusion — data, not colour) are averaged directly; alpha is always
+linear. The colour space is the cooker's call — a material's usage picks it from M6.4, and a
+standalone `rime cook` takes `--srgb`/`--linear`. The engine uploads each level **verbatim** through
+the RHI's `write_texture_mips` (per-mip buffer→image copies, no GPU blit) — it never regenerates the
+chain, because the cooked mips are the gamma-correct ones. The reader cross-checks every level's
+extent against the base halved to that level, its `size` against `width·height·4`, and the offsets
+against a gap-free tiling of the blob, so a corrupt table can never make an upload read past the
+pixels. The in-memory `TextureAsset`'s `mips[i]` slice `pixels` directly.
+
 ## Trust nothing you read
 
 A cooked file arrives from disk exactly the way a message arrives from the network: possibly truncated,
@@ -71,9 +95,11 @@ possibly hostile. The reader therefore:
   index count is whole triangles, every index is `< vertex_count`, every submesh range is inside the
   index buffer.
 
-`tests/assets/cooked_mesh_test.cpp` drives one crafted file per failure mode — including truncation at
-*every* byte length — and the suite is ASan/UBSan-clean. This is the same posture as the S0.4 protocol
-decoder; the negative battery is the proof.
+`tests/assets/cooked_mesh_test.cpp` (and `cooked_texture_test.cpp` for the texture path: unknown
+format, a mip table inconsistent with the base extent, a short or over-long pixel blob) drives one
+crafted file per failure mode — including truncation at *every* byte length — and the suite is
+ASan/UBSan-clean. This is the same posture as the S0.4 protocol decoder; the negative battery is the
+proof.
 
 ## Identity, de-duplication, and the manifest
 
@@ -96,6 +122,12 @@ instead of being misinterpreted. The golden value is pinned in the mesh test (`0
 a change is deliberate and so the Rust cooker embeds the same constant; the M6.2 cross-language
 golden-fixture test verifies cooker and reader agree. The same fingerprint later gates M9 inspector
 compatibility and M11 replication schemas — one mechanism, three consumers.
+
+Textures use the same mechanism, fingerprinting the v1 `{width, height, offset, size}` **mip-record**
+(the repeated unit the reader walks) — pinned at `0xAB8A2B884141F736`, cross-checked by the M6.3
+`checker.rtex` golden fixture. Only the record is hashed, not the base-extent/format header around it:
+a future *pixel format* is an appended `TextureFormat` value (old files stay valid), not a layout
+change, so it needs no re-cook.
 
 ## Determinism
 

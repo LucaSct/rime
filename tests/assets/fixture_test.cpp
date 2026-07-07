@@ -68,3 +68,47 @@ TEST_CASE("a Rust-cooked glTF mesh (quad.rmesh) loads and matches its known valu
     CHECK(blob_f32(mesh->vertices, 20) == doctest::Approx(1.0f)); // nz
     CHECK(blob_f32(mesh->vertices, 24) == doctest::Approx(0.0f)); // u
 }
+
+TEST_CASE("a Rust-cooked PNG texture (checker.rtex) loads with a gamma-correct mip chain") {
+    // The M6.3 texture cross-language proof: a 2×2 sRGB checker cooked by the Rust pipeline (the
+    // committed checker.rtex) loads through this reader with the right extent, format, mip table, and
+    // pixels — and its 1×1 mip proves the cooker generated the chain gamma-correctly. cook_fixture.rs
+    // proves the cooker still emits these bytes; this proves the reader ingests them.
+    const std::filesystem::path path =
+        std::filesystem::path(RIME_ASSETS_FIXTURE_DIR) / "checker.rtex";
+    const std::optional<std::vector<std::byte>> bytes = rime::platform::read_file(path);
+    REQUIRE_MESSAGE(bytes.has_value(), "missing fixture: ", path.string());
+
+    AssetError error{};
+    AssetId id;
+    const std::optional<TextureAsset> tex = read_texture(*bytes, error, &id);
+    REQUIRE_MESSAGE(tex.has_value(), to_string(error));
+
+    CHECK(tex->width == 2);
+    CHECK(tex->height == 2);
+    CHECK(tex->format == TextureFormat::Rgba8Srgb); // sRGB is the cook default for colour
+    REQUIRE(tex->mips.size() == 2);                 // 2×2 → 1×1
+    CHECK(tex->mips[0].size == 16);
+    CHECK(tex->mips[1].width == 1);
+    CHECK(tex->mips[1].offset == 16);
+    CHECK(tex->mips[1].size == 4);
+    CHECK(id.is_valid());
+
+    // Level 0 survived verbatim, top row first: the top-left texel is white. This pins the row order
+    // cross-language — a vertically-flipped cook would put black here.
+    REQUIRE(tex->pixels.size() == 20);
+    CHECK(tex->pixels[0] == std::byte{255}); // top-left R (white)
+    CHECK(tex->pixels[1] == std::byte{255});
+    CHECK(tex->pixels[2] == std::byte{255});
+    CHECK(tex->pixels[4] == std::byte{0}); // top-right R (black)
+
+    // The 1×1 mip is the *gamma-correct* average of two black + two white texels: linear 0.5 re-
+    // encoded to sRGB 188 — proof the Rust cooker filtered in linear space, not the too-dark naive
+    // byte average (which would be 128). This is the brick's headline behaviour, checked across the
+    // language boundary from the committed file.
+    const std::size_t m1 = tex->mips[1].offset;
+    CHECK(tex->pixels[m1 + 0] == std::byte{188});
+    CHECK(tex->pixels[m1 + 1] == std::byte{188});
+    CHECK(tex->pixels[m1 + 2] == std::byte{188});
+    CHECK(tex->pixels[m1 + 3] == std::byte{255}); // alpha is linear: 255 stays 255
+}

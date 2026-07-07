@@ -11,6 +11,7 @@
 
 #include "rime/assets/asset_id.hpp"
 #include "rime/assets/mesh_asset.hpp"
+#include "rime/assets/texture_asset.hpp"
 
 // The RMA1 cooked-container reader (ADR-0024, decision 3). A cooked file is bytes off disk, and the
 // engine trusts nothing it reads: cooked data is treated exactly like network data, the discipline
@@ -49,9 +50,10 @@ enum class AssetError {
     WrongKind,          // header's asset_kind is not the kind the caller asked to load
     SchemaMismatch,  // type_schema_hash != the layout this build was compiled against ("re-cook")
     SizeMismatch,    // payload_size, or an inner length, disagrees with the bytes present
-    InvalidLayout,   // attribute flags / stride / counts are internally inconsistent
-    IndexOutOfRange, // an index references a vertex that does not exist
-    BadSubmesh,      // a submesh's [first, first+count) falls outside the index buffer
+    InvalidLayout,   // mesh: attribute flags / stride / counts are internally inconsistent
+    IndexOutOfRange, // mesh: an index references a vertex that does not exist
+    BadSubmesh,      // mesh: a submesh's [first, first+count) falls outside the index buffer
+    InvalidTexture,  // texture: unknown format, or a mip table inconsistent with the base extent
     Io,              // the file could not be opened/read (load-from-path only)
 };
 
@@ -93,5 +95,27 @@ struct CookedHeader {
 [[nodiscard]] std::optional<MeshAsset> read_mesh(std::span<const std::byte> file,
                                                  AssetError& out_error,
                                                  AssetId* out_id = nullptr) noexcept;
+
+// The schema fingerprint the current build expects a cooked *texture* payload to match. It is the
+// reflection type_hash of the v1 mip-descriptor record (see cooked_reader.cpp) — the repeated unit
+// the reader walks to slice the pixel blob. Change that record and previously cooked textures are
+// rejected with SchemaMismatch instead of being misread. The Rust cooker embeds this same value; the
+// M6.3 texture golden-fixture test is the cross-language drift alarm (mirrors mesh_schema_hash).
+[[nodiscard]] std::uint64_t texture_schema_hash() noexcept;
+
+// Decode a texture payload (the bytes after the header) into a fully validated TextureAsset. Assumes
+// the caller has confirmed the header's kind and schema hash. The base extent, format, and a full
+// mip chain are read and cross-checked: every level's extent must be the base halved to that level,
+// every level's byte size must be width*height*4, offsets must tile the blob with no gap or overlap,
+// and the blob must be exactly as long as the mip sizes sum to — so a corrupt table can never make a
+// later upload read past the pixels.
+[[nodiscard]] std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
+                                                         AssetError& out_error) noexcept;
+
+// The one-call texture path: read a whole cooked file, confirm it is a texture of the expected
+// schema, and decode it. `out_id`, if non-null, receives the payload's content-hash identity.
+[[nodiscard]] std::optional<TextureAsset> read_texture(std::span<const std::byte> file,
+                                                       AssetError& out_error,
+                                                       AssetId* out_id = nullptr) noexcept;
 
 } // namespace rime::assets

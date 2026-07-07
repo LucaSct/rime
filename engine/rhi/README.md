@@ -31,6 +31,7 @@ raw pointers.
 | M5.1b | **blending** (`BlendMode` presets: Alpha "over" / Additive) · **multiple render targets** (`color_formats` + `RenderingInfo::colors`, ≤ 8) · **`Format::RGBA16Float`** — the HDR scene target that keeps radiance > 1.0 for the tonemap pass | landed |
 | M5.2 | **compute** — `create_compute_pipeline` + `bind_compute_pipeline` + `dispatch`, storage buffers/images (`bind_storage_buffer` / `bind_storage_image`, GENERAL-layout handling), conservative post-dispatch barrier until the graph owns sync | landed (ADR-0021) |
 | M5.3 | **mipmaps** (`TextureDesc::mip_levels`, blit-generated chains) + **anisotropic sampling** (`SamplerDesc::mip_filter`/`max_anisotropy`, feature-gated) · **GPU timestamps** (`write_timestamp`/`read_timestamps`, ns) · **debug labels + object names** (`begin/end_debug_label`, `debug_name` → the driver, guarded on VK_EXT_debug_utils) | landed |
+| M6.3 | **per-mip upload** (`write_texture_mips(handle, levels)`, `MipData`) — uploads a cooked, pre-generated mip chain verbatim (one buffer→image copy per level, no blit), so gamma-correct offline mips reach the GPU unregenerated | landed |
 
 > *"landed"* = merged and green in CI on all three OSes (Linux/lavapipe with
 > `RIME_REQUIRE_VULKAN=1`; macOS/MoltenVK locally). M3 is complete — the whole seam + Vulkan

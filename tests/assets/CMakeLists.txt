@@ -6,6 +6,7 @@
 # Vulkan device. It is one executable; cooked_mesh_test.cpp supplies doctest's main().
 rime_add_test(rime_assets_tests
     cooked_mesh_test.cpp
+    cooked_texture_test.cpp
     manifest_test.cpp
     registry_test.cpp
     fixture_test.cpp)

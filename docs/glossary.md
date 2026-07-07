@@ -102,6 +102,15 @@ Entries are grouped roughly by area and kept short on purpose.
   photons); displays and most color textures use the perceptual *sRGB* curve. Rime samples
   sRGB textures (the hardware decodes to linear), shades linear, and sRGB-encodes once at
   the very end ([math/pbr.md](math/pbr.md) §display).
+- **Colour space (of a texture).** Whether a texture's bytes are perceptual *sRGB* colour
+  (baseColor, emissive) or *linear* data (normal / metallic-roughness / occlusion maps — the
+  number *is* the quantity). Cooked textures tag which (`RGBA8Srgb` / `RGBA8Unorm`), because it
+  changes two things: the GPU decodes sRGB on sampling but not linear, and **mips must be filtered
+  in linear light** either way.
+- **Gamma-correct mip generation.** Averaging sRGB-encoded bytes directly is a category error —
+  it averages perception, not light — and makes every minified colour surface too dark (the classic
+  "dark mipmaps"). The fix: linearise, average, re-encode. Rime's cooker does this offline (M6.3);
+  a black/white checker's coarse mip is sRGB ~188, not the too-dark 128 the naive average gives.
 - **GI — Global Illumination.** Indirect light: light that bounces off surfaces before
   reaching the eye. "Real-time GI" (Lumen-style) computes this live, without baking.
 - **Baking.** Precomputing lighting into textures offline. Fast at runtime but static.
@@ -154,9 +163,13 @@ Entries are grouped roughly by area and kept short on purpose.
   blocky/exact texels, Linear = smooth interpolation) and *addressing* (what a UV outside
   [0,1] does — repeat, clamp…). Decoupled from the image, so one texture can be read several
   ways.
-- **Mipmap.** A precomputed chain of half-size copies of a texture; the GPU samples the
-  level matching a surface's on-screen size, so a texture seen small doesn't shimmer/alias.
-  Rime generates the chain by successive GPU *blits* inside `write_texture` (M5.3).
+- **Mipmap / mip chain.** A precomputed chain of half-size copies of a texture (level 0 full
+  size, each level halved down to 1×1); the GPU samples the level matching a surface's on-screen
+  size, so a texture seen small doesn't shimmer/alias. Rime makes chains two ways: for runtime
+  textures, successive GPU *blits* inside `write_texture` (M5.3); for **cooked** textures, the
+  offline pipeline generates the chain gamma-correctly and the engine uploads it verbatim via
+  `write_texture_mips` (M6.3) — no on-device regeneration, so the correct (linear-filtered) mips
+  are the ones sampled.
 - **Anisotropic filtering.** Sharper texture sampling on surfaces viewed at a grazing angle
   (a floor receding to the horizon), where an isotropic mip lookup would over-blur along
   the stretched direction. The sampler takes a `max_anisotropy` (M5.3).

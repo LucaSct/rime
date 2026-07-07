@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use asset_pipeline::cooked;
+use asset_pipeline::texture::ColorSpace;
 use clap::{Parser, Subcommand};
 
 /// The tool's banner line, e.g. `"rime-cli 0.0.1"`. Kept as a small pure function so the version
@@ -27,17 +28,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Cook source assets (glTF meshes) into Rime's runtime RMA1 format.
+    /// Cook source assets (glTF meshes, PNG/JPEG textures) into Rime's runtime RMA1 format.
     Cook {
-        /// A `.gltf`/`.glb` file, or a directory of them.
+        /// A `.gltf`/`.glb`/`.png`/`.jpg` file, or a directory of them.
         input: PathBuf,
         /// Output directory for the cooked files and `manifest.txt`.
         #[arg(long)]
         out: PathBuf,
+        /// Treat texture inputs as sRGB colour (baseColor/emissive). The default.
+        #[arg(long, conflicts_with = "linear")]
+        srgb: bool,
+        /// Treat texture inputs as linear data (normal / metallic-roughness / occlusion maps).
+        #[arg(long)]
+        linear: bool,
     },
     /// Print the header of a cooked RMA1 asset file.
     Inspect {
-        /// A cooked `.rmesh` (or other RMA1) file.
+        /// A cooked `.rmesh`/`.rtex` (or other RMA1) file.
         file: PathBuf,
     },
 }
@@ -50,13 +57,27 @@ fn main() -> ExitCode {
             println!("Frost tooling online. Try `rime cook <input> --out <dir>` or `rime --help`.");
             ExitCode::SUCCESS
         }
-        Some(Command::Cook { input, out }) => run_cook(&input, &out),
+        Some(Command::Cook {
+            input,
+            out,
+            srgb: _,
+            linear,
+        }) => {
+            // sRGB is the default; --linear flips a texture cook to data (the flags conflict, so at
+            // most one is set). Meshes ignore the colour space.
+            let color_space = if linear {
+                ColorSpace::Linear
+            } else {
+                ColorSpace::Srgb
+            };
+            run_cook(&input, &out, color_space)
+        }
         Some(Command::Inspect { file }) => run_inspect(&file),
     }
 }
 
-fn run_cook(input: &Path, out: &Path) -> ExitCode {
-    match asset_pipeline::cook_path(input, out) {
+fn run_cook(input: &Path, out: &Path, color_space: ColorSpace) -> ExitCode {
+    match asset_pipeline::cook_path(input, out, color_space) {
         Ok(result) => {
             for entry in &result.manifest {
                 println!(
