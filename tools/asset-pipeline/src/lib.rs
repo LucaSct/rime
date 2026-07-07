@@ -12,6 +12,7 @@
 pub mod cooked;
 pub mod gltf_import;
 pub mod manifest;
+pub mod material;
 pub mod math;
 pub mod mesh;
 pub mod texture;

@@ -32,6 +32,8 @@ pub const CONTAINER_VERSION: u16 = 1;
 pub const ASSET_KIND_MESH: u16 = 1;
 /// `asset_kind` wire value for a texture (matches `engine/assets/asset_id.hpp`).
 pub const ASSET_KIND_TEXTURE: u16 = 2;
+/// `asset_kind` wire value for a material (matches `engine/assets/asset_id.hpp`).
+pub const ASSET_KIND_MATERIAL: u16 = 3;
 
 /// The mesh schema fingerprint: the reflection `type_hash` of the v1 position/normal/uv vertex
 /// layout, computed and pinned by the C++ engine (`engine/assets`). The cooker embeds the same
@@ -45,6 +47,13 @@ pub const MESH_SCHEMA_HASH: u64 = 0x1987_38A2_DDE2_50AC;
 /// languages agree on the cooked-texture layout by construction. Update in lockstep with the engine
 /// if the mip record ever changes (a new *pixel format* is an appended enum value, not a change here).
 pub const TEXTURE_SCHEMA_HASH: u64 = 0xAB8A_2B88_4141_F736;
+
+/// The material schema fingerprint: the reflection `type_hash` of the v1 material record (factors +
+/// five texture-reference AssetIds), computed and pinned by the C++ engine (`material_schema_hash()`).
+/// Same contract as the mesh/texture hashes — the cooker embeds it, the reader rejects a mismatch — so
+/// the two languages agree on the cooked-material layout by construction. Update in lockstep with the
+/// engine if the material record ever gains, loses, or reorders a field.
+pub const MATERIAL_SCHEMA_HASH: u64 = 0xCA4E_D4CC_434C_941A;
 
 /// A little-endian byte sink. Every multi-byte value is decomposed to its LE bytes explicitly, so
 /// the output never depends on the host's endianness — the same discipline as the reader's cursor.
