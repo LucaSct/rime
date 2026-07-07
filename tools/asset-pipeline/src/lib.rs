@@ -14,21 +14,25 @@ pub mod gltf_import;
 pub mod manifest;
 pub mod math;
 pub mod mesh;
+pub mod texture;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use manifest::ManifestEntry;
 use mesh::Mesh;
+use texture::{ColorSpace, Texture};
 
 /// Anything that can go wrong cooking an asset.
 #[derive(Debug)]
 pub enum PipelineError {
     /// The glTF importer failed (parse error, bad buffer, unsupported feature).
     Gltf(gltf::Error),
+    /// A texture failed to decode (corrupt/unsupported PNG or JPEG).
+    Image(image::ImageError),
     /// A filesystem error reading a source or writing a cooked file.
     Io(std::io::Error),
-    /// The source is valid glTF but uses something v1 does not cook (with a human message).
+    /// The source is valid but uses something v1 does not cook (with a human message).
     Unsupported(String),
 }
 
@@ -36,6 +40,7 @@ impl fmt::Display for PipelineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PipelineError::Gltf(e) => write!(f, "glTF import error: {e}"),
+            PipelineError::Image(e) => write!(f, "image decode error: {e}"),
             PipelineError::Io(e) => write!(f, "I/O error: {e}"),
             PipelineError::Unsupported(msg) => write!(f, "unsupported: {msg}"),
         }
@@ -46,6 +51,7 @@ impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             PipelineError::Gltf(e) => Some(e),
+            PipelineError::Image(e) => Some(e),
             PipelineError::Io(e) => Some(e),
             PipelineError::Unsupported(_) => None,
         }
@@ -55,6 +61,12 @@ impl std::error::Error for PipelineError {
 impl From<gltf::Error> for PipelineError {
     fn from(e: gltf::Error) -> Self {
         PipelineError::Gltf(e)
+    }
+}
+
+impl From<image::ImageError> for PipelineError {
+    fn from(e: image::ImageError) -> Self {
+        PipelineError::Image(e)
     }
 }
 
@@ -101,18 +113,89 @@ pub fn cook_gltf(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineErr
     })
 }
 
-/// Cook a single glTF file or every `.gltf`/`.glb` in a directory, then write a `manifest.txt` into
-/// `out_dir`. Directory entries are cooked in sorted order so the run is deterministic.
-pub fn cook_path(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineError> {
+/// Cook a single PNG/JPEG file into `out_dir` as `<stem>.rtex`: decode to RGBA8, generate an offline
+/// mip chain (gamma-correctly for `Srgb`), and write the RMA1 texture. Returns its path + manifest
+/// entry. `color_space` says whether the image is colour (sRGB) or data (linear) — the CLI's
+/// `--srgb`/`--linear`; from M6.4 a material's usage of the texture picks it automatically.
+pub fn cook_texture(
+    input: &Path,
+    out_dir: &Path,
+    color_space: ColorSpace,
+) -> Result<CookOutput, PipelineError> {
+    let texture = Texture::from_file(input, color_space)?;
+    let (bytes, id) = texture.cook();
+
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("texture");
+    let cooked_file = format!("{stem}.rtex");
+    std::fs::create_dir_all(out_dir)?;
+    let cooked_path = out_dir.join(&cooked_file);
+    std::fs::write(&cooked_path, &bytes)?;
+
+    Ok(CookOutput {
+        cooked_files: vec![cooked_path],
+        manifest: vec![ManifestEntry {
+            source_path: input.to_string_lossy().into_owned(),
+            kind: "texture",
+            id,
+            cooked_file,
+        }],
+    })
+}
+
+/// The kinds of source file the pipeline cooks today. Meshes are glTF; textures are PNG/JPEG.
+#[derive(Clone, Copy)]
+enum SourceKind {
+    Mesh,
+    Texture,
+}
+
+/// Classify a source file by its (lower-cased) extension, or `None` if it is not something we cook —
+/// so a directory cook skips stray files and a single-file cook of an unknown type errors cleanly.
+fn cook_kind_for(path: &Path) -> Option<SourceKind> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "gltf" | "glb" => Some(SourceKind::Mesh),
+        "png" | "jpg" | "jpeg" => Some(SourceKind::Texture),
+        _ => None,
+    }
+}
+
+/// Cook one source file, dispatching on its extension. `color_space` applies to textures only.
+fn cook_one(
+    input: &Path,
+    out_dir: &Path,
+    color_space: ColorSpace,
+) -> Result<CookOutput, PipelineError> {
+    match cook_kind_for(input) {
+        Some(SourceKind::Mesh) => cook_gltf(input, out_dir),
+        Some(SourceKind::Texture) => cook_texture(input, out_dir, color_space),
+        None => Err(PipelineError::Unsupported(format!(
+            "{}: unrecognised source extension (expected .gltf/.glb/.png/.jpg/.jpeg)",
+            input.display()
+        ))),
+    }
+}
+
+/// Cook a single source file or every cookable file in a directory, then write a `manifest.txt` into
+/// `out_dir`. Directory entries are cooked in sorted order so the run is deterministic. For textures,
+/// `color_space` (the CLI's `--srgb`/`--linear`) says whether the image is colour or data; meshes
+/// ignore it.
+pub fn cook_path(
+    input: &Path,
+    out_dir: &Path,
+    color_space: ColorSpace,
+) -> Result<CookOutput, PipelineError> {
     let mut inputs: Vec<PathBuf> = if input.is_dir() {
         std::fs::read_dir(input)?
             .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|p| {
-                matches!(
-                    p.extension().and_then(|e| e.to_str()),
-                    Some("gltf") | Some("glb")
-                )
-            })
+            .filter(|p| cook_kind_for(p).is_some())
             .collect()
     } else {
         vec![input.to_path_buf()]
@@ -121,11 +204,12 @@ pub fn cook_path(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineErr
 
     let mut combined = CookOutput::default();
     for source in &inputs {
-        let out = cook_gltf(source, out_dir)?;
+        let out = cook_one(source, out_dir, color_space)?;
         combined.cooked_files.extend(out.cooked_files);
         combined.manifest.extend(out.manifest);
     }
 
+    std::fs::create_dir_all(out_dir)?; // ensure the manifest can be written even for an empty dir
     std::fs::write(
         out_dir.join("manifest.txt"),
         manifest::render(&combined.manifest),

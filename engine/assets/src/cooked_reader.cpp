@@ -24,6 +24,23 @@ struct MeshVertexV1 {
 
 static_assert(sizeof(MeshVertexV1) == 32, "v1 vertex must stay the 32-byte P/N/UV layout");
 
+// The v1 cooked-texture mip-descriptor record, reflected for the same reason MeshVertexV1 is: so
+// the texture schema fingerprint is *derived* from the layout the reader walks, not hand-picked
+// (ADR-0024, decision 4). It is the {width, height, offset, size} tuple stored once per mip level.
+// Reorder or retype a field and reflect<>().type_hash changes, so a texture cooked against the old
+// table layout is rejected with SchemaMismatch rather than misread. Only the *table record* is
+// fingerprinted, not the base-extent/format header around it: that header is container-stable, and
+// a future pixel format is an appended TextureFormat value (backward-compatible), not a layout
+// change.
+struct TextureMipV1 {
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t offset;
+    std::uint32_t size;
+};
+
+static_assert(sizeof(TextureMipV1) == 16, "v1 mip record must stay four packed u32s");
+
 } // namespace rime::assets::detail
 
 // Registration is at global scope (the macro opens namespace rime::core to specialize its traits).
@@ -36,6 +53,13 @@ RIME_REFLECT_FIELD(ny)
 RIME_REFLECT_FIELD(nz)
 RIME_REFLECT_FIELD(u)
 RIME_REFLECT_FIELD(v)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rime::assets::detail::TextureMipV1)
+RIME_REFLECT_FIELD(width)
+RIME_REFLECT_FIELD(height)
+RIME_REFLECT_FIELD(offset)
+RIME_REFLECT_FIELD(size)
 RIME_REFLECT_END()
 
 namespace rime::assets {
@@ -60,6 +84,8 @@ std::string_view to_string(AssetError error) noexcept {
             return "index out of range";
         case AssetError::BadSubmesh:
             return "submesh range outside the index buffer";
+        case AssetError::InvalidTexture:
+            return "invalid texture (unknown format or inconsistent mip table)";
         case AssetError::Io:
             return "I/O error";
     }
@@ -224,6 +250,103 @@ read_mesh(std::span<const std::byte> file, AssetError& out_error, AssetId* out_i
         *out_id = content_hash(payload);
     }
     return decode_mesh(payload, out_error);
+}
+
+std::uint64_t texture_schema_hash() noexcept {
+    return core::reflect<detail::TextureMipV1>().type_hash;
+}
+
+std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
+                                           AssetError& out_error) noexcept {
+    core::ByteReader reader(payload);
+
+    // Fixed texture header: base extent, colour-space format tag, mip count (16 bytes).
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t format_raw = 0;
+    std::uint32_t mip_count = 0;
+    if (!reader.u32(width) || !reader.u32(height) || !reader.u32(format_raw) ||
+        !reader.u32(mip_count)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+
+    // Validate the header before trusting any of it to size mips. v1 knows exactly two formats
+    // (RGBA8 linear / sRGB); a full chain's length is fully determined by the base extent, so any
+    // other mip_count is a corrupt or foreign file — caught here rather than by walking a bad
+    // table.
+    if (format_raw > static_cast<std::uint32_t>(TextureFormat::Rgba8Srgb) || width == 0 ||
+        height == 0 || mip_count != full_mip_count(width, height)) {
+        out_error = AssetError::InvalidTexture;
+        return std::nullopt;
+    }
+
+    TextureAsset tex;
+    tex.width = width;
+    tex.height = height;
+    tex.format = static_cast<TextureFormat>(format_raw);
+    tex.mips.reserve(mip_count);
+
+    // The mip table: one {width, height, offset, size} record per level. Each field is
+    // cross-checked against what a full chain from (width, height) *must* contain — the level's
+    // halved extent, its width*height*4 byte size, and an offset that tiles the blob with no gap or
+    // overlap. `running` is 64-bit so the offsets cannot wrap; a tampered record fails here, before
+    // any pixel is read.
+    std::uint64_t running = 0; // expected offset of the next level = bytes accounted for so far
+    for (std::uint32_t level = 0; level < mip_count; ++level) {
+        std::uint32_t mw = 0;
+        std::uint32_t mh = 0;
+        std::uint32_t moffset = 0;
+        std::uint32_t msize = 0;
+        if (!reader.u32(mw) || !reader.u32(mh) || !reader.u32(moffset) || !reader.u32(msize)) {
+            out_error = AssetError::Truncated;
+            return std::nullopt;
+        }
+        const std::uint32_t ew = mip_extent(width, level);
+        const std::uint32_t eh = mip_extent(height, level);
+        const std::uint64_t esize = std::uint64_t{ew} * eh * kTextureBytesPerPixel;
+        if (mw != ew || mh != eh || msize != esize || moffset != running) {
+            out_error = AssetError::InvalidTexture;
+            return std::nullopt;
+        }
+        tex.mips.push_back(TextureMip{mw, mh, moffset, msize});
+        running += msize;
+    }
+
+    // The pixel blob must be exactly the mip sizes' sum — no missing bytes (an upload would read
+    // past them) and no trailing bytes (a corrupt or foreign file). Then copy it in one shot.
+    if (reader.remaining() != running) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+    std::span<const std::byte> blob;
+    if (!reader.bytes(blob, static_cast<std::size_t>(running))) {
+        out_error = AssetError::Truncated; // unreachable after the check above; kept for safety
+        return std::nullopt;
+    }
+    tex.pixels.assign(blob.begin(), blob.end());
+    return tex;
+}
+
+std::optional<TextureAsset>
+read_texture(std::span<const std::byte> file, AssetError& out_error, AssetId* out_id) noexcept {
+    std::span<const std::byte> payload;
+    const std::optional<CookedHeader> header = read_header(file, payload, out_error);
+    if (!header) {
+        return std::nullopt;
+    }
+    if (header->kind != AssetKind::Texture) {
+        out_error = AssetError::WrongKind;
+        return std::nullopt;
+    }
+    if (header->type_schema_hash != texture_schema_hash()) {
+        out_error = AssetError::SchemaMismatch;
+        return std::nullopt;
+    }
+    if (out_id != nullptr) {
+        *out_id = content_hash(payload);
+    }
+    return decode_texture(payload, out_error);
 }
 
 } // namespace rime::assets

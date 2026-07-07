@@ -387,4 +387,105 @@ void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::si
     vmaDestroyBuffer(allocator_, staging, staging_alloc);
 }
 
+void VulkanDevice::write_texture_mips(TextureHandle handle, std::span<const MipData> levels) {
+    auto* t = textures_.get(rebrand<VulkanTexture>(handle));
+    if (!t) {
+        RIME_ERROR("rhi: write_texture_mips on an invalid handle");
+        return;
+    }
+    // The caller must supply exactly one buffer per allocated level: a cooked chain is uploaded
+    // whole, never partially (a mismatch means the cook and the texture disagree — reject it).
+    if (levels.size() != t->mip_levels) {
+        RIME_ERROR("rhi: write_texture_mips: {} levels supplied for a {}-level texture",
+                   levels.size(),
+                   t->mip_levels);
+        return;
+    }
+
+    // One staging buffer holds the whole chain, the levels concatenated; each level is then copied
+    // to its own mip. No blits: the cooked chain is authoritative (gamma-correct offline mips), so
+    // we upload it verbatim rather than regenerate it on the GPU the way write_texture does.
+    std::size_t total = 0;
+    for (const MipData& level : levels) {
+        total += level.pixels.size();
+    }
+    if (total == 0) {
+        RIME_ERROR("rhi: write_texture_mips: no pixel data");
+        return;
+    }
+
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = total;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    aci.flags =
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VmaAllocation staging_alloc = nullptr;
+    VmaAllocationInfo staging_info{};
+    if (vmaCreateBuffer(allocator_, &bci, &aci, &staging, &staging_alloc, &staging_info) !=
+        VK_SUCCESS) {
+        RIME_ERROR("rhi: write_texture_mips staging allocation failed");
+        return;
+    }
+
+    // memcpy each level into the staging buffer and record its buffer→image copy (mip level +
+    // extent).
+    std::vector<VkBufferImageCopy> regions;
+    regions.reserve(levels.size());
+    std::size_t offset = 0;
+    auto* mapped = static_cast<std::byte*>(staging_info.pMappedData);
+    for (std::uint32_t level = 0; level < levels.size(); ++level) {
+        const std::span<const std::byte> px = levels[level].pixels;
+        std::memcpy(mapped + offset, px.data(), px.size());
+        const auto dim = [](std::uint32_t base, std::uint32_t lvl) {
+            const std::uint32_t d = base >> lvl;
+            return d == 0 ? 1u : d;
+        };
+        VkBufferImageCopy region{};
+        region.bufferOffset = offset;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = level;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {dim(t->extent.width, level), dim(t->extent.height, level), 1};
+        regions.push_back(region);
+        offset += px.size();
+    }
+    vmaFlushAllocation(allocator_, staging_alloc, 0, total);
+
+    auto cmd = begin_commands();
+    VkCommandBuffer vk = static_cast<VulkanCommandBuffer&>(*cmd).handle();
+
+    // Whole chain UNDEFINED -> TRANSFER_DST, copy every level, whole chain -> SHADER_READ (the
+    // default transition_image range covers all levels).
+    transition_image(vk,
+                     t->image,
+                     VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     0,
+                     VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vkCmdCopyBufferToImage(vk,
+                           staging,
+                           t->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<std::uint32_t>(regions.size()),
+                           regions.data());
+    transition_image(vk,
+                     t->image,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    submit_blocking(*cmd);
+    vmaDestroyBuffer(allocator_, staging, staging_alloc);
+}
+
 } // namespace rime::rhi

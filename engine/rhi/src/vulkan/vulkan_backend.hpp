@@ -110,6 +110,7 @@ public:
                       std::size_t offset) override;
     void read_buffer(BufferHandle handle, void* dst, std::size_t size, std::size_t offset) override;
     void write_texture(TextureHandle handle, const void* data, std::size_t size) override;
+    void write_texture_mips(TextureHandle handle, std::span<const MipData> levels) override;
 
     [[nodiscard]] std::unique_ptr<CommandBuffer> begin_commands() override;
     void submit_blocking(CommandBuffer& commands) override;

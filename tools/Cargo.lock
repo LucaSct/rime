@@ -63,6 +63,7 @@ name = "asset-pipeline"
 version = "0.0.1"
 dependencies = [
  "gltf",
+ "image",
 ]
 
 [[package]]

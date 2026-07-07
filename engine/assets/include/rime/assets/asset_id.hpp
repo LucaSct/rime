@@ -21,12 +21,13 @@ namespace rime::assets {
 
 // What kind of thing a cooked file holds. Stored in the container header as a u16; values are wire
 // constants — append, never renumber, so an old cooked file is never silently reinterpreted as a
-// different kind. Only Mesh is cooked in M6.1; the rest are reserved so the header format is stable
-// as later bricks add them.
+// different kind. Mesh (M6.1) and Texture (M6.3) are cooked today; the rest are reserved so the
+// header format is stable as later bricks add them.
 enum class AssetKind : std::uint16_t {
     Mesh = 1,
-    // Reserved (cooked by later bricks): Texture = 2 (M6.3), Material = 3 (M6.4),
-    // Skeleton = 4, AnimationClip = 5 (M6.7), Fracture = 6 (M8.1), MeshSdf = 7 (M10.4).
+    Texture = 2,
+    // Reserved (cooked by later bricks): Material = 3 (M6.4), Skeleton = 4,
+    // AnimationClip = 5 (M6.7), Fracture = 6 (M8.1), MeshSdf = 7 (M10.4).
 };
 
 // A content-hashed asset identity. A struct (not a bare u64) so it cannot be confused with an
