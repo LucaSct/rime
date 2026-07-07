@@ -4,6 +4,7 @@
 #include "rime/assets/cooked_reader.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/reflect.hpp"
@@ -41,6 +42,30 @@ struct TextureMipV1 {
 
 static_assert(sizeof(TextureMipV1) == 16, "v1 mip record must stay four packed u32s");
 
+// The v1 cooked-material record, reflected for the same reason MeshVertexV1 and TextureMipV1 are: so
+// the material schema fingerprint is *derived* from the field set the reader walks, not hand-picked
+// (ADR-0024, decision 4). Unlike the mesh/texture records this is the *whole* payload — a material has
+// no variable-length tail — so these fields, in this order, are the entire wire format. Add, remove,
+// reorder, or retype a field and reflect<>().type_hash changes, so a material cooked against the old
+// layout is rejected with SchemaMismatch rather than misread. compute_type_hash ignores offsets and
+// sizeof, so the padding this mixed-width struct carries is inert; the wire is written field by field
+// (decode_material below, and the Rust cooker), never as a struct memcpy, so padding never reaches it.
+struct MaterialV1 {
+    float base_color_r, base_color_g, base_color_b, base_color_a;
+    float emissive_r, emissive_g, emissive_b;
+    float metallic;
+    float roughness;
+    float normal_scale;
+    float occlusion_strength;
+    float alpha_cutoff;
+    std::uint32_t alpha_mode;
+    std::uint64_t base_color_tex;
+    std::uint64_t metallic_roughness_tex;
+    std::uint64_t normal_tex;
+    std::uint64_t occlusion_tex;
+    std::uint64_t emissive_tex;
+};
+
 } // namespace rime::assets::detail
 
 // Registration is at global scope (the macro opens namespace rime::core to specialize its traits).
@@ -60,6 +85,27 @@ RIME_REFLECT_FIELD(width)
 RIME_REFLECT_FIELD(height)
 RIME_REFLECT_FIELD(offset)
 RIME_REFLECT_FIELD(size)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rime::assets::detail::MaterialV1)
+RIME_REFLECT_FIELD(base_color_r)
+RIME_REFLECT_FIELD(base_color_g)
+RIME_REFLECT_FIELD(base_color_b)
+RIME_REFLECT_FIELD(base_color_a)
+RIME_REFLECT_FIELD(emissive_r)
+RIME_REFLECT_FIELD(emissive_g)
+RIME_REFLECT_FIELD(emissive_b)
+RIME_REFLECT_FIELD(metallic)
+RIME_REFLECT_FIELD(roughness)
+RIME_REFLECT_FIELD(normal_scale)
+RIME_REFLECT_FIELD(occlusion_strength)
+RIME_REFLECT_FIELD(alpha_cutoff)
+RIME_REFLECT_FIELD(alpha_mode)
+RIME_REFLECT_FIELD(base_color_tex)
+RIME_REFLECT_FIELD(metallic_roughness_tex)
+RIME_REFLECT_FIELD(normal_tex)
+RIME_REFLECT_FIELD(occlusion_tex)
+RIME_REFLECT_FIELD(emissive_tex)
 RIME_REFLECT_END()
 
 namespace rime::assets {
@@ -86,6 +132,8 @@ std::string_view to_string(AssetError error) noexcept {
             return "submesh range outside the index buffer";
         case AssetError::InvalidTexture:
             return "invalid texture (unknown format or inconsistent mip table)";
+        case AssetError::InvalidMaterial:
+            return "invalid material (unknown alpha mode or non-finite factor)";
         case AssetError::Io:
             return "I/O error";
     }
@@ -347,6 +395,92 @@ read_texture(std::span<const std::byte> file, AssetError& out_error, AssetId* ou
         *out_id = content_hash(payload);
     }
     return decode_texture(payload, out_error);
+}
+
+std::uint64_t material_schema_hash() noexcept {
+    return core::reflect<detail::MaterialV1>().type_hash;
+}
+
+std::optional<MaterialAsset> decode_material(std::span<const std::byte> payload,
+                                             AssetError& out_error) noexcept {
+    core::ByteReader reader(payload);
+
+    MaterialAsset mat;
+    std::uint32_t alpha_mode_raw = 0;
+    std::uint64_t base_color_tex = 0;
+    std::uint64_t metallic_roughness_tex = 0;
+    std::uint64_t normal_tex = 0;
+    std::uint64_t occlusion_tex = 0;
+    std::uint64_t emissive_tex = 0;
+
+    // A material is a fixed record with no variable-length tail: read every field in wire order. This
+    // order IS the format — it must match detail::MaterialV1 (which fingerprints it) and the Rust
+    // cooker (which writes it). Any short read means a truncated payload.
+    if (!reader.f32(mat.base_color[0]) || !reader.f32(mat.base_color[1]) ||
+        !reader.f32(mat.base_color[2]) || !reader.f32(mat.base_color[3]) ||
+        !reader.f32(mat.emissive[0]) || !reader.f32(mat.emissive[1]) ||
+        !reader.f32(mat.emissive[2]) || !reader.f32(mat.metallic) || !reader.f32(mat.roughness) ||
+        !reader.f32(mat.normal_scale) || !reader.f32(mat.occlusion_strength) ||
+        !reader.f32(mat.alpha_cutoff) || !reader.u32(alpha_mode_raw) ||
+        !reader.u64(base_color_tex) || !reader.u64(metallic_roughness_tex) ||
+        !reader.u64(normal_tex) || !reader.u64(occlusion_tex) || !reader.u64(emissive_tex)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+
+    // Fixed record ⇒ the payload must end here. Trailing bytes mean a corrupt or foreign file.
+    if (reader.remaining() != 0) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+
+    // Validate before handing the material on. The alpha mode must be a known enum value, and every
+    // factor must be finite — a NaN or Inf in the bytes would otherwise flow straight into the shader
+    // as garbage (and NaN compares make downstream culling/sorting nondeterministic). Texture ids are
+    // taken verbatim: 0 = no texture, any other value is a content id the loader will try to resolve.
+    if (alpha_mode_raw > static_cast<std::uint32_t>(AlphaMode::Blend)) {
+        out_error = AssetError::InvalidMaterial;
+        return std::nullopt;
+    }
+    const float factors[] = {mat.base_color[0],       mat.base_color[1], mat.base_color[2],
+                             mat.base_color[3],        mat.emissive[0],   mat.emissive[1],
+                             mat.emissive[2],          mat.metallic,      mat.roughness,
+                             mat.normal_scale,         mat.occlusion_strength, mat.alpha_cutoff};
+    for (const float f : factors) {
+        if (!std::isfinite(f)) {
+            out_error = AssetError::InvalidMaterial;
+            return std::nullopt;
+        }
+    }
+
+    mat.alpha_mode = static_cast<AlphaMode>(alpha_mode_raw);
+    mat.base_color_tex = AssetId{base_color_tex};
+    mat.metallic_roughness_tex = AssetId{metallic_roughness_tex};
+    mat.normal_tex = AssetId{normal_tex};
+    mat.occlusion_tex = AssetId{occlusion_tex};
+    mat.emissive_tex = AssetId{emissive_tex};
+    return mat;
+}
+
+std::optional<MaterialAsset>
+read_material(std::span<const std::byte> file, AssetError& out_error, AssetId* out_id) noexcept {
+    std::span<const std::byte> payload;
+    const std::optional<CookedHeader> header = read_header(file, payload, out_error);
+    if (!header) {
+        return std::nullopt;
+    }
+    if (header->kind != AssetKind::Material) {
+        out_error = AssetError::WrongKind;
+        return std::nullopt;
+    }
+    if (header->type_schema_hash != material_schema_hash()) {
+        out_error = AssetError::SchemaMismatch;
+        return std::nullopt;
+    }
+    if (out_id != nullptr) {
+        *out_id = content_hash(payload);
+    }
+    return decode_material(payload, out_error);
 }
 
 } // namespace rime::assets
