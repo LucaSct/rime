@@ -15,6 +15,7 @@ pub mod manifest;
 pub mod material;
 pub mod math;
 pub mod mesh;
+pub mod tangent;
 pub mod texture;
 
 use std::fmt;
