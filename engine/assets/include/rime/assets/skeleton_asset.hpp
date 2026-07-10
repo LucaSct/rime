@@ -21,6 +21,13 @@
 // "palette" the sampler produces and the GPU (later) reads.
 namespace rime::assets {
 
+// The most joints a skeleton (or a clip bound to one) may declare. Skinned-mesh vertices reference
+// joints with u16 indices, so a joint beyond 65536 could never be addressed by a vertex — the cap
+// is that natural ceiling, not an arbitrary limit. The cooked-clip reader also uses it to bound the
+// dense per-joint table it allocates from a file's declared joint count (a corrupt count can't ask
+// for a runaway allocation) before the loader has a skeleton to cross-check against.
+inline constexpr std::uint32_t kMaxJoints = 65536;
+
 // One joint (bone). Joints are stored in a **topological order** — every joint's parent has a
 // smaller index than the joint itself — so a single forward pass composes local poses into world
 // poses without recursion or a work queue. A root joint has parent == kNoParent.

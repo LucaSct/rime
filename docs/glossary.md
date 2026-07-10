@@ -248,6 +248,25 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Schema (type) hash.** A hash of a reflected type's field names/types/order, embedded
   in cooked data; a mismatch at load means "the code moved on — re-cook," caught cleanly
   instead of misreading bytes.
+- **Skeleton / joint (bone).** A *skeleton* is a hierarchy of *joints* (bones) a character
+  mesh deforms with. Each joint has a parent (or is a root) and a rest placement; Rime stores
+  joints *parent-before-child* (topological order) so animating them is one forward pass.
+- **Skinning / skin weights.** Binding mesh vertices to joints so they follow the skeleton.
+  Each vertex names up to four joints and a *weight* per joint (weights sum to 1); Rime's
+  default is **linear blend skinning (LBS)** — a vertex's position is the weighted average of
+  its position as moved by each joint. Cheap and standard; it pinches at extreme bends (the
+  known LBS artifact later dual-quaternion skinning can fix).
+- **Bind pose / inverse-bind matrix.** The *bind pose* is the skeleton's rest pose, the one
+  the mesh was authored against. A joint's *inverse-bind matrix* takes a vertex from model
+  space into that joint's rest-local frame, so that re-placing the joint (animated) moves the
+  vertex correctly. Derived in [math/skinning.md](math/skinning.md).
+- **Skinning palette.** The per-frame array of one matrix per joint (`world · inverse-bind`)
+  the skinning shader multiplies vertices by. Rime's CPU sampler produces it at M6.7; GPU
+  palette skinning (AN1) consumes the same array.
+- **Animation clip / keyframe.** A *clip* is a timed set of per-joint tracks (translation /
+  rotation / scale); a *keyframe* is one sampled value at one time. Sampling reads the
+  bracketing keys and blends them — **STEP** holds the previous key, **LINEAR** interpolates
+  (nlerp for rotations, along the shortest arc). Looping vs clamping is chosen at play time.
 
 ## Performance & threading
 

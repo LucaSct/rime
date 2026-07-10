@@ -50,9 +50,10 @@ u32   indices[index_count]
 ```
 
 v1 cooks the position/normal/uv layout (`vertex_stride = 32`), the PBR-ready minimum. The
-**attribute-flags** design is decision 6 of the ADR: tangents (M6.4) and skinning attributes (M6.7)
-are new flag bits and a wider stride, not a new container version, and the reader validates the layout
-it hands the renderer. The in-memory `MeshAsset` mirrors what `engine/render`'s mesh registry consumes,
+**attribute-flags** design is decision 6 of the ADR: tangents (M6.4, `f32×4` = +16 bytes) and skinning
+attributes (M6.7 — `Joints` `u16×4` indices into the mesh's `SkeletonAsset` + `Weights` `f32×4`,
+normalized to sum to 1, together +24 bytes, laid out after any tangent) are new flag bits and a wider
+stride, not a new container version, and the reader validates the layout it hands the renderer. The in-memory `MeshAsset` mirrors what `engine/render`'s mesh registry consumes,
 so uploading is a memcpy-and-create — the renderer owns GPU residency (wired at M6.6); `assets` never
 depends on `render`/`rhi`.
 
@@ -108,6 +109,58 @@ single shader serves every material permutation). Colours are linear (the cook c
 values); each texture's colour space follows its usage (base-color/emissive sRGB, the rest linear).
 The reader additionally rejects an unknown `alpha_mode` and any non-finite factor, so a NaN never
 reaches the shader. Materials are emitted from a glTF alongside its meshes, never cooked standalone.
+
+### The skeleton payload (`asset_kind = Skeleton`) — M6.7
+
+```
+u32   joint_count            joints in TOPOLOGICAL order (parent before child); 1 … 65536
+      joint_count × {
+        i32    parent          parent joint index, or -1 for a root (must be < this joint's index)
+        u64    name_hash       FNV-1a of the joint's name (lookup without storing strings)
+        f32×16 inverse_bind    model space → this joint's bind-local space, column-major
+        f32×3  translation     bind-pose local transform: translation …
+        f32×4  rotation         … rotation quaternion (x, y, z, w) …
+        f32×3  scale            … and scale
+      }
+```
+
+A skeleton is the joint hierarchy and bind pose a skinned mesh deforms against. Joints are stored
+**parent-before-child**, so the CPU sampler composes world poses in a single forward pass; the reader
+enforces it (a parent index ≥ the joint's own index is rejected), which is why the cooker
+**topologically reorders** glTF's arbitrarily-ordered skin-joint list — handing the mesh (`JOINTS_0`)
+and clips a remap so their joint references follow. Joint indices are `u16` in a vertex, so a skeleton
+tops out at 65536 joints; that ceiling also bounds the reader's allocation. Every bind value is checked
+finite. `inverse_bind` takes a vertex from model space into the joint's rest (bind-local) frame;
+`translation`/`rotation`/`scale` are the joint's rest pose, used wherever a clip is silent. The math is
+derived in [`docs/math/skinning.md`](../math/skinning.md).
+
+### The animation-clip payload (`asset_kind = AnimationClip`) — M6.7
+
+```
+f32   duration               clip length in seconds (finite, ≥ 0)
+u32   joint_count            the skeleton this clip animates (sizes the engine's dense track table)
+u32   channel_count          non-silent tracks that follow
+      channel_count × {                                                  the channel table
+        u32 target_joint       the joint this track drives (< joint_count)
+        u32 path               0 = translation, 1 = rotation, 2 = scale
+        u32 interp             0 = step, 1 = linear
+        u32 key_count          keyframes in this track (≥ 1)
+      }
+      per channel, in table order:                                       the keyframe blob
+        f32 times[key_count]                                             strictly increasing
+        f32 values[key_count × components]     components = 3 (T/S) or 4 (rotation quaternion)
+```
+
+A clip stores per-joint keyframed translation / rotation / scale tracks. The layout is **sparse and
+columnar**: only non-silent tracks appear (a silent joint costs nothing on the wire), and the keyframe
+blob is laid out track-by-track — all of a channel's times, then all its values — shaped for the
+sampler's inner loop, *not* for glTF's per-accessor channel/sampler form (the "glTF-shaped" trap the
+asset model warns against). The reader reconstructs the dense per-joint table `sample_clip` wants,
+validating that times are strictly increasing and finite, values finite, and the keyframe blob is
+exactly the size the channel table implies. Only **STEP** and **LINEAR** interpolation are cooked;
+CUBICSPLINE is rejected at cook time with a clear message (a quality seam a later brick can take).
+Looping vs clamping is a *sample-time* policy (`TimePolicy`), not baked into the clip. The sampler and
+the linear-blend-skinning equation it feeds are derived in [`docs/math/skinning.md`](../math/skinning.md).
 
 ## Trust nothing you read
 

@@ -8,6 +8,8 @@ rime_add_test(rime_assets_tests
     cooked_mesh_test.cpp
     cooked_texture_test.cpp
     cooked_material_test.cpp
+    cooked_skeleton_test.cpp
+    cooked_clip_test.cpp
     manifest_test.cpp
     registry_test.cpp
     fixture_test.cpp

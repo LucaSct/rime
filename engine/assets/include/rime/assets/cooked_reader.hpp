@@ -10,8 +10,10 @@
 #include <string_view>
 
 #include "rime/assets/asset_id.hpp"
+#include "rime/assets/clip_asset.hpp"
 #include "rime/assets/material_asset.hpp"
 #include "rime/assets/mesh_asset.hpp"
+#include "rime/assets/skeleton_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
 
 // The RMA1 cooked-container reader (ADR-0024, decision 3). A cooked file is bytes off disk, and the
@@ -56,6 +58,8 @@ enum class AssetError {
     BadSubmesh,      // mesh: a submesh's [first, first+count) falls outside the index buffer
     InvalidTexture,  // texture: unknown format, or a mip table inconsistent with the base extent
     InvalidMaterial, // material: unknown alpha mode, or a non-finite factor
+    InvalidSkeleton, // skeleton: joints out of topological order, or a non-finite bind value
+    InvalidClip,     // clip: bad channel path/interp, non-monotonic times, or a non-finite value
     Io,              // the file could not be opened/read (load-from-path only)
 };
 
@@ -144,5 +148,50 @@ struct CookedHeader {
 [[nodiscard]] std::optional<MaterialAsset> read_material(std::span<const std::byte> file,
                                                          AssetError& out_error,
                                                          AssetId* out_id = nullptr) noexcept;
+
+// The schema fingerprint the current build expects a cooked *skeleton* payload to match: the
+// reflection type_hash of the v1 per-joint record (parent, name hash, inverse-bind matrix,
+// bind-pose TRS — see cooked_reader.cpp), the repeated unit the reader walks. Change that record
+// and previously cooked skeletons are rejected with SchemaMismatch instead of being misread. The
+// Rust cooker embeds this same value; the cross-language fixture test is the drift alarm (mirrors
+// mesh_schema_hash).
+[[nodiscard]] std::uint64_t skeleton_schema_hash() noexcept;
+
+// Decode a skeleton payload (the bytes after the header) into a fully validated Skeleton. Assumes
+// the caller has confirmed the header's kind and schema hash. The joint count sizes a fixed-size
+// joint table whose total length must be exactly what remains; every joint's parent must be
+// kNoParent or an already-seen (smaller) index, so the topological-order invariant the sampler
+// relies on holds by construction; and every bind-pose float must be finite — so a corrupt table
+// can neither walk off the payload nor feed a NaN into the palette.
+[[nodiscard]] std::optional<Skeleton> decode_skeleton(std::span<const std::byte> payload,
+                                                      AssetError& out_error) noexcept;
+
+// The one-call skeleton path: read a whole cooked file, confirm it is a skeleton of the expected
+// schema, and decode it. `out_id`, if non-null, receives the payload's content-hash identity.
+[[nodiscard]] std::optional<Skeleton> read_skeleton(std::span<const std::byte> file,
+                                                    AssetError& out_error,
+                                                    AssetId* out_id = nullptr) noexcept;
+
+// The schema fingerprint the current build expects a cooked *animation-clip* payload to match: the
+// reflection type_hash of the v1 channel record (target joint, path, interpolation, key count — see
+// cooked_reader.cpp), the repeated unit the reader walks to slice the keyframe blob. Change that
+// record and previously cooked clips are rejected with SchemaMismatch instead of being misread. The
+// Rust cooker embeds this same value; the cross-language fixture test is the drift alarm.
+[[nodiscard]] std::uint64_t clip_schema_hash() noexcept;
+
+// Decode a clip payload (the bytes after the header) into a fully validated Clip. Assumes the
+// caller has confirmed the header's kind and schema hash. The dense per-joint table is
+// reconstructed from a sparse channel list: every channel's target joint must be in range, its
+// path/interpolation a known enum, its times strictly increasing and finite, and its values finite;
+// the keyframe blob must be exactly the length the channel table implies — so no length is trusted
+// past the bytes present.
+[[nodiscard]] std::optional<Clip> decode_clip(std::span<const std::byte> payload,
+                                              AssetError& out_error) noexcept;
+
+// The one-call clip path: read a whole cooked file, confirm it is a clip of the expected schema,
+// and decode it. `out_id`, if non-null, receives the payload's content-hash identity.
+[[nodiscard]] std::optional<Clip> read_clip(std::span<const std::byte> file,
+                                            AssetError& out_error,
+                                            AssetId* out_id = nullptr) noexcept;
 
 } // namespace rime::assets

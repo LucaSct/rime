@@ -77,6 +77,59 @@ TEST_CASE("a valid cooked mesh round-trips to exactly the written data") {
     CHECK(id.is_valid());
 }
 
+TEST_CASE("a skinned mesh (joints + weights) round-trips through the additive attribute seam") {
+    // Skinning adds two per-vertex attributes — u16×4 joint indices and f32×4 weights — exactly as
+    // tangents did (ADR-0024 decision 6): more flag bits and a wider stride, NOT a new container
+    // version or schema hash. The reader already knows these bits (they were reserved at M6.0), so
+    // a skinned mesh decodes with no reader change — this pins that. Stride is P(12)+N(12)+UV(8) +
+    // Joints(8) + Weights(16) = 56, re-derived from the flags by the reader.
+    const VertexAttribs skinned = VertexAttribs::Position | VertexAttribs::Normal |
+                                  VertexAttribs::Uv | VertexAttribs::Joints |
+                                  VertexAttribs::Weights;
+    const std::uint32_t stride = expected_vertex_stride(skinned);
+    CHECK(stride == 56);
+
+    // Three vertices whose joints/weights carry real, distinct values, so the opaque blob the
+    // reader copies back is not all zeros. Attribute order matches expected_vertex_stride: P, N,
+    // UV, then the u16 joints, then the f32 weights.
+    std::vector<std::byte> blob;
+    ByteWriter bw(blob);
+    for (int v = 0; v < 3; ++v) {
+        for (int c = 0; c < 8; ++c) { // position(3) + normal(3) + uv(2)
+            bw.f32(static_cast<float>(v * 10 + c));
+        }
+        for (int j = 0; j < 4; ++j) {
+            bw.u16(static_cast<std::uint16_t>(v * 4 + j)); // joint indices
+        }
+        bw.f32(0.5f); // weights, normalized to sum to 1
+        bw.f32(0.25f);
+        bw.f32(0.15f);
+        bw.f32(0.10f);
+    }
+    REQUIRE(blob.size() == 3 * 56);
+
+    MeshFileBuilder builder;
+    builder.attribs = static_cast<std::uint32_t>(skinned);
+    builder.stride = stride;
+    builder.vertex_count = 3;
+    builder.vertex_blob = blob;
+    builder.indices = std::vector<std::uint32_t>{0, 1, 2};
+
+    AssetError error{};
+    const std::optional<MeshAsset> mesh = read_mesh(builder.build(), error);
+    REQUIRE_MESSAGE(mesh.has_value(), to_string(error));
+    CHECK(has_attrib(mesh->attribs, VertexAttribs::Joints));
+    CHECK(has_attrib(mesh->attribs, VertexAttribs::Weights));
+    CHECK(mesh->vertex_stride == 56);
+    CHECK(mesh->vertices == blob); // the blob is opaque to the reader; skinning is AN1's concern
+
+    // A stride that disagrees with the skinned flag set is still caught (the flags are the source
+    // of truth for addressing), just as it is for a plain mesh.
+    MeshFileBuilder wrong = builder;
+    wrong.stride = 48; // the tangented stride, not the skinned one
+    expect_error(wrong.build(), AssetError::InvalidLayout);
+}
+
 TEST_CASE("mesh_schema_hash is the reflected v1 vertex layout: stable, non-zero, golden") {
     CHECK(mesh_schema_hash() != 0);
     CHECK(mesh_schema_hash() == mesh_schema_hash());

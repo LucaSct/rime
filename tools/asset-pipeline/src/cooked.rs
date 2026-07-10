@@ -41,6 +41,10 @@ pub const ASSET_KIND_MESH: u16 = 1;
 pub const ASSET_KIND_TEXTURE: u16 = 2;
 /// `asset_kind` wire value for a material (matches `engine/assets/asset_id.hpp`).
 pub const ASSET_KIND_MATERIAL: u16 = 3;
+/// `asset_kind` wire value for a skeleton (matches `engine/assets/asset_id.hpp`).
+pub const ASSET_KIND_SKELETON: u16 = 4;
+/// `asset_kind` wire value for an animation clip (matches `engine/assets/asset_id.hpp`).
+pub const ASSET_KIND_CLIP: u16 = 5;
 
 /// The mesh schema fingerprint: the reflection `type_hash` of the v1 position/normal/uv vertex
 /// layout, computed and pinned by the C++ engine (`engine/assets`). The cooker embeds the same
@@ -62,6 +66,18 @@ pub const TEXTURE_SCHEMA_HASH: u64 = 0xAB8A_2B88_4141_F736;
 /// engine if the material record ever gains, loses, or reorders a field.
 pub const MATERIAL_SCHEMA_HASH: u64 = 0xCA4E_D4CC_434C_941A;
 
+/// The skeleton schema fingerprint: the reflection `type_hash` of the v1 per-joint record (parent,
+/// name hash, inverse-bind matrix, bind-pose TRS), computed and pinned by the C++ engine
+/// (`skeleton_schema_hash()`). Same contract as the hashes above — the cooker embeds it, the reader
+/// rejects a mismatch — so the two languages agree on the cooked-skeleton layout by construction.
+pub const SKELETON_SCHEMA_HASH: u64 = 0xD90A_5CB8_EBA3_6DED;
+
+/// The clip schema fingerprint: the reflection `type_hash` of the v1 channel record (target joint,
+/// path, interpolation, key count), computed and pinned by the C++ engine (`clip_schema_hash()`).
+/// Same contract as the hashes above; update in lockstep with the engine if the channel record ever
+/// changes (a new value *type* is an appended path enum, not a record change).
+pub const CLIP_SCHEMA_HASH: u64 = 0x6C84_D2A2_AAAB_CE49;
+
 /// A little-endian byte sink. Every multi-byte value is decomposed to its LE bytes explicitly, so
 /// the output never depends on the host's endianness — the same discipline as the reader's cursor.
 #[derive(Default)]
@@ -79,6 +95,10 @@ impl ByteWriter {
     }
 
     pub fn u32(&mut self, v: u32) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn i32(&mut self, v: i32) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
 

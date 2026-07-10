@@ -13,11 +13,14 @@ use crate::cooked::{wrap_container, ByteWriter, ASSET_KIND_MESH, MESH_SCHEMA_HAS
 use crate::math;
 
 /// Vertex attribute flags (match `engine/assets/mesh_asset.hpp`). A v1 mesh always cooks
-/// position|normal|uv; a normal-mapped mesh (M6.4) adds `tangent` and a wider stride.
+/// position|normal|uv; a normal-mapped mesh (M6.4) adds `tangent`; a skinned mesh (M6.7) adds
+/// `joints` + `weights`. Each is an additive flag and a wider stride, never a new container version.
 pub const ATTR_POSITION: u32 = 1 << 0;
 pub const ATTR_NORMAL: u32 = 1 << 1;
 pub const ATTR_UV: u32 = 1 << 2;
 pub const ATTR_TANGENT: u32 = 1 << 3;
+pub const ATTR_JOINTS: u32 = 1 << 4;
+pub const ATTR_WEIGHTS: u32 = 1 << 5;
 
 /// Interleaved vertex stride without / with tangents (bytes): pos+normal+uv is 32, +tangent is 48.
 /// These mirror `expected_vertex_stride` in the engine's `mesh_asset.hpp`; the reader validates the
@@ -25,6 +28,11 @@ pub const ATTR_TANGENT: u32 = 1 << 3;
 /// the blob.
 pub const STRIDE_NO_TANGENT: u32 = 32;
 pub const STRIDE_WITH_TANGENT: u32 = 48;
+/// Extra bytes a per-vertex tangent (4×f32) and a skin binding (4×u16 joints + 4×f32 weights) add to
+/// the stride. Attributes are laid out in flag-bit order — position, normal, uv, tangent, joints,
+/// weights — so a skinned+tangented vertex is 32 + 16 + 24 = 72 bytes; skinned-only is 56.
+pub const TANGENT_BYTES: u32 = 4 * 4;
+pub const SKIN_BYTES: u32 = 4 * 2 + 4 * 4;
 
 /// The v1 vertex: position, normal, uv — 32 bytes interleaved, matching the engine's `MeshVertex`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,6 +50,33 @@ pub struct Submesh {
     pub material_slot: u32,
 }
 
+/// A mesh's per-vertex skin binding (M6.7): for each vertex, the (up to four) skeleton joints that
+/// deform it and the weight of each. `joints` indexes into the `SkeletonAsset` cooked alongside;
+/// `weights` are normalized to sum to 1. glTF supplies these as JOINTS_0 / WEIGHTS_0; influences
+/// beyond four (a second JOINTS_1 set) are dropped at import with a warning, and the surviving four
+/// renormalized — the common, cheap case AN0 targets. It rides beside `Vertex` (not inside it) for
+/// the same reason `tangents` does: it is optional and its presence is what flips the ATTR_JOINTS /
+/// ATTR_WEIGHTS flags and widens the stride.
+#[derive(Debug, Default, Clone)]
+pub struct SkinWeights {
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
+}
+
+/// Renormalize a vertex's four skin weights so they sum to 1 — the invariant a linear-blend skin
+/// assumes (Σ wᵢ = 1 keeps a rigid pose rigid; see docs/math/skinning.md). glTF authoring tools may
+/// emit weights that sum to slightly off 1 (quantization) or, after dropping a >4th influence, less
+/// than 1. A vertex with no influence at all (all zero) is pinned fully to its first joint rather
+/// than left weightless, so it follows the skeleton instead of collapsing to the origin.
+pub fn normalize_weights(w: [f32; 4]) -> [f32; 4] {
+    let sum = w[0] + w[1] + w[2] + w[3];
+    if sum > 0.0 {
+        [w[0] / sum, w[1] / sum, w[2] / sum, w[3] / sum]
+    } else {
+        [1.0, 0.0, 0.0, 0.0]
+    }
+}
+
 /// A cooked-ready mesh: interleaved vertices, a 32-bit triangle-list index buffer, and a submesh
 /// table (one entry per source primitive). `tangents`, when present, is a parallel array — one
 /// `[x, y, z, handedness]` per vertex — generated at import (M6.4, see `tangent.rs`) only for meshes
@@ -54,6 +89,8 @@ pub struct Mesh {
     pub indices: Vec<u32>,
     pub submeshes: Vec<Submesh>,
     pub tangents: Option<Vec<[f32; 4]>>,
+    /// Per-vertex skin binding, present iff the mesh is skinned (M6.7). Parallel to `vertices`.
+    pub skin: Option<SkinWeights>,
 }
 
 impl Mesh {
@@ -63,16 +100,37 @@ impl Mesh {
     /// cooked mesh with a submesh table.
     pub fn from_primitives(primitives: Vec<Primitive>) -> Self {
         let mut mesh = Mesh::default();
+        // The merged mesh is skinned iff any primitive is; a non-skinned primitive folded into a
+        // skinned mesh has its vertices pinned fully to joint 0, so every vertex has a binding and the
+        // interleaved blob stays rectangular (one stride for the whole mesh).
+        if primitives.iter().any(|p| p.skin.is_some()) {
+            mesh.skin = Some(SkinWeights::default());
+        }
         for prim in primitives {
             let base = mesh.vertices.len() as u32;
             let first_index = mesh.indices.len() as u32;
-            mesh.vertices.extend(prim.vertices);
+            let vertex_count = prim.vertices.len();
             mesh.indices.extend(prim.indices.iter().map(|&i| i + base));
             mesh.submeshes.push(Submesh {
                 first_index,
                 index_count: prim.indices.len() as u32,
                 material_slot: prim.material_slot,
             });
+            mesh.vertices.extend(prim.vertices);
+            if let Some(dst) = &mut mesh.skin {
+                match prim.skin {
+                    Some(s) => {
+                        dst.joints.extend(s.joints);
+                        dst.weights.extend(s.weights);
+                    }
+                    None => {
+                        dst.joints
+                            .extend(std::iter::repeat_n([0u16; 4], vertex_count));
+                        dst.weights
+                            .extend(std::iter::repeat_n([1.0f32, 0.0, 0.0, 0.0], vertex_count));
+                    }
+                }
+            }
         }
         mesh
     }
@@ -97,28 +155,36 @@ impl Mesh {
     /// Encode this mesh into a complete RMA1 file, returning `(bytes, asset_id)`. The layout mirrors
     /// `decode_mesh` in the engine's reader exactly.
     pub fn cook(&self) -> (Vec<u8>, u64) {
-        // Tangents are optional and additive: their presence sets one more attribute flag and widens
-        // the stride by a 4×f32 tangent, with no new container version. The declared stride and
-        // flags travel together, and the C++ reader re-derives the stride from the flags — so a
-        // tangent-bearing mesh and a plain one differ only in these two header words plus the extra
-        // per-vertex bytes.
-        let has_tangents = self.tangents.is_some();
-        let (attribs, stride) = if has_tangents {
-            (
-                ATTR_POSITION | ATTR_NORMAL | ATTR_UV | ATTR_TANGENT,
-                STRIDE_WITH_TANGENT,
-            )
-        } else {
-            (ATTR_POSITION | ATTR_NORMAL | ATTR_UV, STRIDE_NO_TANGENT)
-        };
-        // The tangent array, when present, is one-per-vertex by construction (generate_tangents sizes
-        // it to vertices.len()). Assert it, so a hand-built mesh can't cook a blob whose stride and
-        // vertex count silently disagree — the reader would reject it, but failing here names why.
+        // Optional attributes are additive: each present one sets its flag bit(s) and widens the
+        // stride, with no new container version. The declared stride and flags travel together, and
+        // the C++ reader re-derives the stride from the flags — so meshes at any attribute level
+        // differ only in these two header words plus the extra per-vertex bytes. Flag-bit order is the
+        // blob order: position, normal, uv, tangent, then the skin's joints and weights.
+        let mut attribs = ATTR_POSITION | ATTR_NORMAL | ATTR_UV;
+        let mut stride = STRIDE_NO_TANGENT;
+        if self.tangents.is_some() {
+            attribs |= ATTR_TANGENT;
+            stride += TANGENT_BYTES;
+        }
+        if self.skin.is_some() {
+            attribs |= ATTR_JOINTS | ATTR_WEIGHTS;
+            stride += SKIN_BYTES;
+        }
+        // Every optional parallel array is one-per-vertex by construction. Assert it, so a hand-built
+        // mesh can't cook a blob whose stride and vertex count silently disagree — the reader would
+        // reject it, but failing here names why.
         debug_assert!(
             self.tangents
                 .as_ref()
                 .is_none_or(|t| t.len() == self.vertices.len()),
             "tangent array must have exactly one entry per vertex"
+        );
+        debug_assert!(
+            self.skin
+                .as_ref()
+                .is_none_or(|s| s.joints.len() == self.vertices.len()
+                    && s.weights.len() == self.vertices.len()),
+            "skin joints and weights must each have exactly one entry per vertex"
         );
         let (min, max) = self.aabb();
 
@@ -149,10 +215,19 @@ impl Mesh {
             for c in v.uv {
                 p.f32(c);
             }
-            // Tangent last, matching the attribute order the reader's `expected_vertex_stride` walks.
+            // Tangent, then the skin (u16 joints, then f32 weights), matching the attribute order the
+            // reader's `expected_vertex_stride` walks.
             if let Some(tangents) = &self.tangents {
                 for c in tangents[i] {
                     p.f32(c);
+                }
+            }
+            if let Some(skin) = &self.skin {
+                for j in skin.joints[i] {
+                    p.u16(j);
+                }
+                for w in skin.weights[i] {
+                    p.f32(w);
                 }
             }
         }
@@ -171,6 +246,9 @@ pub struct Primitive {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub material_slot: u32,
+    /// Per-vertex skin binding, present iff this primitive came from a skinned node (M6.7). Parallel
+    /// to `vertices`, with weights already renormalized at import.
+    pub skin: Option<SkinWeights>,
 }
 
 /// Derive per-vertex geometric normals from the triangle list (used when a primitive has no NORMAL
@@ -271,6 +349,7 @@ mod tests {
                 material_slot: 0,
             }],
             tangents: None,
+            skin: None,
         };
         let (plain, _) = mesh.cook();
         let (_, plain_payload) = read_header(&plain).unwrap();
@@ -290,6 +369,73 @@ mod tests {
         assert_eq!(u32_at(tan_payload, 4), STRIDE_WITH_TANGENT);
         // Three vertices, each 16 bytes wider (the 4×f32 tangent), and nothing else moved.
         assert_eq!(tan_payload.len(), plain_payload.len() + 3 * 16);
+    }
+
+    #[test]
+    fn a_skin_sets_the_joint_weight_flags_and_widens_the_stride() {
+        use crate::cooked::read_header;
+        let mut mesh = Mesh {
+            vertices: vec![
+                Vertex {
+                    position: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [1.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [0.0, 1.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+            submeshes: vec![Submesh {
+                first_index: 0,
+                index_count: 3,
+                material_slot: 0,
+            }],
+            tangents: None,
+            skin: None,
+        };
+        let (plain, _) = mesh.cook();
+        let (_, plain_payload) = read_header(&plain).unwrap();
+
+        mesh.skin = Some(SkinWeights {
+            joints: vec![[0, 1, 2, 3]; 3],
+            weights: vec![[0.5, 0.25, 0.15, 0.1]; 3],
+        });
+        let (skinned, _) = mesh.cook();
+        let (_, skinned_payload) = read_header(&skinned).unwrap();
+        assert_eq!(
+            u32_at(skinned_payload, 0),
+            ATTR_POSITION | ATTR_NORMAL | ATTR_UV | ATTR_JOINTS | ATTR_WEIGHTS
+        );
+        assert_eq!(u32_at(skinned_payload, 4), STRIDE_NO_TANGENT + SKIN_BYTES); // 32 + 24 = 56
+                                                                                // Each vertex grew by 4×u16 joints + 4×f32 weights = 24 bytes; nothing else moved.
+        assert_eq!(
+            skinned_payload.len(),
+            plain_payload.len() + 3 * SKIN_BYTES as usize
+        );
+    }
+
+    #[test]
+    fn weights_renormalize_to_sum_one() {
+        // Weights that sum to 2 halve; a partial set (summing to 0.5) scales up to 1.
+        let n = normalize_weights([0.5, 0.5, 0.5, 0.5]);
+        assert!((n.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!((n[0] - 0.25).abs() < 1e-6);
+        let m = normalize_weights([0.25, 0.25, 0.0, 0.0]);
+        assert!((m.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!((m[0] - 0.5).abs() < 1e-6);
+        // A vertex with no influence is pinned fully to its first joint, not left weightless.
+        assert_eq!(
+            normalize_weights([0.0, 0.0, 0.0, 0.0]),
+            [1.0, 0.0, 0.0, 0.0]
+        );
     }
 
     fn u32_at(bytes: &[u8], offset: usize) -> u32 {

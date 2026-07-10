@@ -131,8 +131,16 @@ negative time back in), so $t$ and $t + \text{duration}$ sample identically — 
 ### Status & what part 2 adds
 
 Implemented and proven CPU-side (AN0): the palette equation §4, all of §5–§6, on a hand-computable
-2-bone fixture (`tests/assets/clip_sampler_test.cpp`). Part 2 (AN1, M7) adds: the palette uploaded and
-applied in the vertex shader (`JOINTS_0`/`WEIGHTS_0` attributes — the reserved vertex-layout bits from
+2-bone fixture (`tests/assets/clip_sampler_test.cpp`). The **import and cook** side is complete too —
+glTF skins/animations cook to `SkeletonAsset` + `ClipAsset` + a skinned mesh (`JOINTS_0`/`WEIGHTS_0`
+vertices), the C++ RMA1 readers ingest them under the trust-nothing discipline, and a cross-language
+fixture (`skinned.gltf` → committed `.rskel`/`.ranim`, read and sampled by `tests/assets/fixture_test.cpp`)
+is the drift alarm. One import subtlety the math above assumes: the cooker **topologically reorders**
+glTF's arbitrarily-ordered skin joints so §3's single forward pass is valid. The cooked byte layouts are
+[docs/design/assets.md](../design/assets.md) and [tools/asset-pipeline/FORMAT.md](../../tools/asset-pipeline/FORMAT.md).
+
+Part 2 (AN1, M7) adds: the palette uploaded and applied in the vertex shader (consuming those
+`JOINTS_0`/`WEIGHTS_0` attributes — the reserved vertex-layout bits from
 [ADR-0024](../adr/0024-asset-model.md) §6), normal skinning by the inverse-transpose, and cross-clip
 blending. The palette this file derives is unchanged by that move — it is the interface between the two
 halves.

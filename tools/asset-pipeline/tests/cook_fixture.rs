@@ -209,3 +209,51 @@ fn cook_gltf_writes_every_asset_deterministically() {
         assert_eq!(bytes_a, bytes_b, "{f} must cook deterministically");
     }
 }
+
+#[test]
+fn skinned_skeleton_and_clip_cook_to_the_committed_fixture_bytes() {
+    // The M6.7 cross-language drift alarm: the committed skinned.rskel / skinned.Spin.ranim are what
+    // the C++ fixture_test reads, so if the cooked skeleton or clip format changes, this fails until
+    // the fixtures are regenerated (`rime cook tests/assets/fixtures/skinned.gltf --out
+    // tests/assets/fixtures`).
+    let out = temp_out("skinned");
+    asset_pipeline::cook_path(&fixtures().join("skinned.gltf"), &out, ColorSpace::Srgb).unwrap();
+    for name in ["skinned.rskel", "skinned.Spin.ranim"] {
+        let cooked = std::fs::read(out.join(name)).unwrap();
+        let committed = std::fs::read(fixtures().join(name)).unwrap();
+        assert_eq!(
+            cooked, committed,
+            "{name} diverged from the committed fixture — regenerate it deliberately"
+        );
+    }
+}
+
+#[test]
+fn skinned_import_reorders_joints_parent_first_and_maps_clip_targets() {
+    use asset_pipeline::clip::ChannelPath;
+
+    // skinned.gltf lists its skin joints CHILD-FIRST; import must reorder them into topological order.
+    let imp = asset_pipeline::import_gltf_skeleton(&fixtures().join("skinned.gltf"))
+        .unwrap()
+        .expect("skinned.gltf has a skin");
+    assert_eq!(imp.skeleton.joints.len(), 2);
+    assert_eq!(imp.skeleton.joints[0].parent, -1); // root A first
+    assert_eq!(imp.skeleton.joints[1].parent, 0); // child B, parent A
+    assert_eq!(imp.skeleton.joints[0].translation, [0.0, 0.0, 0.0]); // A at the origin
+    assert_eq!(imp.skeleton.joints[1].translation, [2.0, 0.0, 0.0]); // B two units along +X
+
+    // The clip's channels resolve to the reordered joint indices: A (joint 0) slides, B (joint 1) spins.
+    let clips = asset_pipeline::import_gltf_clips(&fixtures().join("skinned.gltf")).unwrap();
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].name, "Spin");
+    assert_eq!(clips[0].joint_count, 2);
+    assert_eq!(clips[0].duration, 1.0);
+    assert!(clips[0]
+        .channels
+        .iter()
+        .any(|c| c.target_joint == 0 && c.path == ChannelPath::Translation));
+    assert!(clips[0]
+        .channels
+        .iter()
+        .any(|c| c.target_joint == 1 && c.path == ChannelPath::Rotation));
+}

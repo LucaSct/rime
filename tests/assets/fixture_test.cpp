@@ -9,6 +9,8 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -17,6 +19,8 @@
 #include <vector>
 
 #include "rime/assets/cooked_reader.hpp"
+#include "rime/core/hash.hpp"
+#include "rime/core/math/mat.hpp"
 #include "rime/platform/filesystem.hpp"
 
 using namespace rime::assets;
@@ -28,6 +32,31 @@ float blob_f32(const std::vector<std::byte>& blob, std::size_t offset) {
     float value = 0.0f;
     std::memcpy(&value, blob.data() + offset, sizeof(value));
     return value;
+}
+
+std::optional<std::vector<std::byte>> load_fixture(const char* name) {
+    return rime::platform::read_file(std::filesystem::path(RIME_ASSETS_FIXTURE_DIR) / name);
+}
+
+// A palette entry from a rigid skeleton (no scale) must be finite and have an orthonormal
+// upper-left 3×3 — the columns unit-length and mutually perpendicular. This is the structural
+// invariant the RiggedSimple-style proof checks: whatever the pose, the rotation part stays a
+// rotation. Column c, row r of the column-major matrix is m[c*4 + r].
+void check_finite_orthonormal(const rime::core::Mat4& m) {
+    for (const float v : m.m) {
+        REQUIRE(std::isfinite(v));
+    }
+    const std::array<std::array<float, 3>, 3> cols = {
+        {{m.m[0], m.m[1], m.m[2]}, {m.m[4], m.m[5], m.m[6]}, {m.m[8], m.m[9], m.m[10]}}};
+    const auto dot = [](const std::array<float, 3>& a, const std::array<float, 3>& b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    for (int i = 0; i < 3; ++i) {
+        CHECK(std::sqrt(dot(cols[i], cols[i])) == doctest::Approx(1.0f).epsilon(0.001));
+        for (int j = i + 1; j < 3; ++j) {
+            CHECK(std::abs(dot(cols[i], cols[j])) < 0.001f);
+        }
+    }
 }
 } // namespace
 
@@ -112,4 +141,89 @@ TEST_CASE("a Rust-cooked PNG texture (checker.rtex) loads with a gamma-correct m
     CHECK(tex->pixels[m1 + 1] == std::byte{188});
     CHECK(tex->pixels[m1 + 2] == std::byte{188});
     CHECK(tex->pixels[m1 + 3] == std::byte{255}); // alpha is linear: 255 stays 255
+}
+
+TEST_CASE("a Rust-cooked glTF skeleton (skinned.rskel) loads, reordered parent-first") {
+    // The M6.7 skeletal cross-language proof. The source skinned.gltf lists its skin joints
+    // CHILD-FIRST (B before its parent A) on purpose; the cooker reorders them into topological
+    // order, so the mere fact that this reader ACCEPTS the file (it rejects a non-topological one
+    // with InvalidSkeleton) is proof the reorder ran. cook_fixture.rs proves the cooker still emits
+    // these exact bytes; this proves the reader ingests them.
+    const std::optional<std::vector<std::byte>> bytes = load_fixture("skinned.rskel");
+    REQUIRE_MESSAGE(bytes.has_value(), "missing fixture: skinned.rskel");
+
+    AssetError error{};
+    AssetId id;
+    const std::optional<Skeleton> sk = read_skeleton(*bytes, error, &id);
+    REQUIRE_MESSAGE(sk.has_value(), to_string(error));
+    CHECK(id.is_valid());
+
+    REQUIRE(sk->joint_count() == 2);
+    CHECK(sk->is_topologically_ordered()); // the reorder normalized the child-first skin
+
+    // Name lookup crosses the language boundary: the cooker hashed "A"/"B" with FNV-1a, and this
+    // reader's core::fnv1a_64 of the same names finds them — so root A landed at index 0, child B
+    // at 1.
+    CHECK(sk->find(rime::core::fnv1a_64(std::string_view("A"))) == 0);
+    CHECK(sk->find(rime::core::fnv1a_64(std::string_view("B"))) == 1);
+    CHECK(sk->joints[0].parent == Joint::kNoParent); // A is the root
+    CHECK(sk->joints[1].parent == 0);                // B's parent is A
+
+    // Bind poses: A at the origin, B two units along +X; B's inverse bind undoes that (-2 on X).
+    CHECK(sk->joints[0].local_bind.translation.x == doctest::Approx(0.0f));
+    CHECK(sk->joints[1].local_bind.translation.x == doctest::Approx(2.0f));
+    CHECK(sk->joints[0].inverse_bind.m[12] == doctest::Approx(0.0f));
+    CHECK(sk->joints[1].inverse_bind.m[12] == doctest::Approx(-2.0f));
+}
+
+TEST_CASE("a Rust-cooked glTF clip (skinned.Spin.ranim) loads and samples to a valid palette") {
+    // The M6.7 clip cross-language proof: the "Spin" animation cooked from skinned.gltf loads, its
+    // channels reconstruct into the right joints, and sampling it against the skeleton yields a
+    // finite, orthonormal palette — the import→cook→load→sample path proven end to end across the
+    // boundary.
+    const std::optional<std::vector<std::byte>> skel_bytes = load_fixture("skinned.rskel");
+    const std::optional<std::vector<std::byte>> clip_bytes = load_fixture("skinned.Spin.ranim");
+    REQUIRE(skel_bytes.has_value());
+    REQUIRE_MESSAGE(clip_bytes.has_value(), "missing fixture: skinned.Spin.ranim");
+
+    AssetError error{};
+    const std::optional<Skeleton> sk = read_skeleton(*skel_bytes, error);
+    REQUIRE_MESSAGE(sk.has_value(), to_string(error));
+    const std::optional<Clip> clip = read_clip(*clip_bytes, error);
+    REQUIRE_MESSAGE(clip.has_value(), to_string(error));
+
+    CHECK(clip->duration == doctest::Approx(1.0f));
+    REQUIRE(clip->joint_count() == 2);
+    // Root A (joint 0) slides on a translation track; child B (joint 1) spins on a rotation track.
+    CHECK_FALSE(clip->joints[0].translation.empty());
+    CHECK(clip->joints[0].rotation.empty());
+    CHECK_FALSE(clip->joints[1].rotation.empty());
+    CHECK(clip->joints[1].translation.empty());
+
+    std::array<rime::core::Mat4, 2> palette{};
+
+    // At t=0 the first keys reproduce the bind pose, so the palette is identity for every joint —
+    // the same bind-pose invariant the hand-built sampler test pins, here from an imported clip.
+    REQUIRE(sample_clip(*clip, *sk, 0.0f, TimePolicy::Clamp, palette) == 2);
+    const rime::core::Mat4 identity{};
+    for (const rime::core::Mat4& m : palette) {
+        for (int i = 0; i < 16; ++i) {
+            CHECK(m.m[i] == doctest::Approx(identity.m[i]).epsilon(0.001));
+        }
+    }
+
+    // At t=1 root A has slid to +1 on Y; its palette (inverse bind is identity) is that
+    // translation.
+    REQUIRE(sample_clip(*clip, *sk, 1.0f, TimePolicy::Clamp, palette) == 2);
+    CHECK(palette[0].m[13] == doctest::Approx(1.0f)); // translation Y column
+
+    // At every sampled time each palette entry is finite with an orthonormal rotation part (the rig
+    // is rigid, so no pose can shear it) — the structural proof, checked across the mid-animation
+    // pose too.
+    for (const float t : {0.0f, 0.5f, 1.0f}) {
+        REQUIRE(sample_clip(*clip, *sk, t, TimePolicy::Clamp, palette) == 2);
+        for (const rime::core::Mat4& m : palette) {
+            check_finite_orthonormal(m);
+        }
+    }
 }

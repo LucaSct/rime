@@ -11,6 +11,7 @@
 //! the graduation of the ICEM viewer's in-process loader into the offline pipeline — proving the
 //! pipeline is not glTF-shaped: STL cooks to the very same RMA1 `MeshAsset` the engine already loads.
 
+pub mod clip;
 pub mod cook_cache;
 pub mod cooked;
 pub mod gltf_import;
@@ -19,6 +20,7 @@ pub mod manifest;
 pub mod material;
 pub mod math;
 pub mod mesh;
+pub mod skin;
 pub mod stl;
 pub mod tangent;
 pub mod texture;
@@ -107,6 +109,30 @@ pub fn import_gltf_materials(path: &Path) -> Result<gltf_material::MaterialImpor
     gltf_material::import_materials(&document, &images, stem)
 }
 
+/// Import a glTF's first skin as a skeleton (with its joint/node remaps) from a path — the path-based
+/// convenience over `skin::import_skeleton`, symmetric with `import_gltf_materials`. `Ok(None)` if the
+/// file has no skin. Handy for tools and tests that want the structured import without a full cook.
+pub fn import_gltf_skeleton(path: &Path) -> Result<Option<skin::ImportedSkeleton>, PipelineError> {
+    let (document, buffers, _images) = gltf::import(path)?;
+    skin::import_skeleton(&document, &buffers)
+}
+
+/// Import a glTF's animations as clips from a path (empty if the file has no skin or no skeletal
+/// animation). Resolves channel targets through the skin import, so the clips' joint indices match the
+/// skeleton `import_gltf_skeleton` returns for the same file.
+pub fn import_gltf_clips(path: &Path) -> Result<Vec<clip::Clip>, PipelineError> {
+    let (document, buffers, _images) = gltf::import(path)?;
+    match skin::import_skeleton(&document, &buffers)? {
+        Some(imp) => clip::import_clips(
+            &document,
+            &buffers,
+            imp.skeleton.joints.len() as u32,
+            &imp.node_to_joint,
+        ),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Cook a single glTF file into `out_dir`. All of the file's triangle primitives merge into one RMA1
 /// mesh (one submesh per primitive, tagged with a material slot) written as `<stem>.rmesh`; each
 /// material becomes a `<stem>.mat<N>.rmat`, and each unique texture a `<stem>.img<N>.<srgb|lin>.rtex`
@@ -161,6 +187,21 @@ pub fn cook_gltf(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineErr
         tangent::generate_tangents(&mut mesh);
     }
 
+    // Skeleton + clips (M6.7): a skinned glTF cooks its first skin to a skeleton and each animation to
+    // a clip. Import reorders joints into topological order, so remap the mesh's per-vertex JOINTS_0
+    // from glTF skin order into that joint order *before* cooking the mesh — the vertex bindings and
+    // the skeleton must index joints the same way.
+    let imported_skin = skin::import_skeleton(&document, &buffers)?;
+    if let Some(imp) = &imported_skin {
+        if let Some(mesh_skin) = &mut mesh.skin {
+            for joints in &mut mesh_skin.joints {
+                for j in joints.iter_mut() {
+                    *j = imp.joint_remap.get(*j as usize).copied().unwrap_or(0) as u16;
+                }
+            }
+        }
+    }
+
     let (mesh_bytes, mesh_id) = mesh.cook();
 
     std::fs::create_dir_all(out_dir)?;
@@ -197,6 +238,45 @@ pub fn cook_gltf(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineErr
             id: t.id,
             cooked_file: t.cooked_file.clone(),
         });
+    }
+
+    // The skeleton (once) and each animation clip, written alongside the mesh they deform.
+    if let Some(imp) = &imported_skin {
+        let (bytes, id) = imp.skeleton.cook();
+        let file = format!("{stem}.rskel");
+        std::fs::write(out_dir.join(&file), &bytes)?;
+        out.cooked_files.push(out_dir.join(&file));
+        out.manifest.push(ManifestEntry {
+            source_path: format!("{}#skeleton", input.display()),
+            kind: "skeleton",
+            id,
+            cooked_file: file,
+        });
+
+        let clips = clip::import_clips(
+            &document,
+            &buffers,
+            imp.skeleton.joints.len() as u32,
+            &imp.node_to_joint,
+        )?;
+        for c in &clips {
+            let (bytes, id) = c.cook();
+            // Sanitize the clip name into a filename (an animation name may hold spaces or slashes).
+            let safe_name: String = c
+                .name
+                .chars()
+                .map(|ch| if ch.is_alphanumeric() { ch } else { '_' })
+                .collect();
+            let file = format!("{stem}.{safe_name}.ranim");
+            std::fs::write(out_dir.join(&file), &bytes)?;
+            out.cooked_files.push(out_dir.join(&file));
+            out.manifest.push(ManifestEntry {
+                source_path: format!("{}#animation/{}", input.display(), c.name),
+                kind: "clip",
+                id,
+                cooked_file: file,
+            });
+        }
     }
 
     Ok(out)

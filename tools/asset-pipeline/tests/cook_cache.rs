@@ -94,5 +94,8 @@ fn a_deleted_cooked_file_forces_a_recook_even_when_the_source_is_unchanged() {
 
     let r = cook_path(&src, &out, ColorSpace::Srgb).unwrap();
     assert_eq!((r.sources_cooked, r.sources_cached), (1, 0));
-    assert!(out.join("part.rmesh").exists(), "the missing file was re-cooked");
+    assert!(
+        out.join("part.rmesh").exists(),
+        "the missing file was re-cooked"
+    );
 }
