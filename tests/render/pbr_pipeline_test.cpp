@@ -31,14 +31,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
+#include "rime/assets/asset_server.hpp"
+#include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/gpu_asset_bridge.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/render_graph.hpp"
 #include "rime/render/scene_renderer.hpp"
@@ -763,4 +767,110 @@ TEST_CASE("m6.4: tangent handedness flips under mirrored UVs, bitangent stays pu
             CHECK(std::fabs(std::fabs(v.tw) - 1.0f) < 1e-5f); // and w is a clean ±1
         }
     }
+}
+
+// ── The GPU asset bridge: cooked texture → GPU, placeholder → real on drain()
+// ──────────────────────── The M6 bridge closes the loop the AssetServer (M6.5) left open: a
+// "Ready" asset is CPU-resident, not uploaded. Here a material's base-color map is a texture the
+// bridge hands out: BEFORE the load completes it is the magenta placeholder; after wait → pump →
+// drain() it is the real cooked checker. Structural, not golden: the placeholder's albedo has ~zero
+// green, the greyscale checker's white squares have green ≈ red, so the two are cleanly separable
+// through lighting + tonemapping.
+TEST_CASE("gpu bridge: a cooked texture replaces the magenta placeholder on drain (M6)") {
+    using ecs::WorldTransform;
+
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping GPU bridge proof");
+        return;
+    }
+    constexpr std::uint32_t kSize = 128;
+
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    GpuAssetBridge bridge(*device, server);
+
+    // The committed cooked sRGB checker (2×2 white/black). Requested but not yet pumped, so the
+    // bridge still resolves its handle to the magenta placeholder.
+    const std::filesystem::path checker =
+        std::filesystem::path(RIME_ASSETS_FIXTURE_DIR) / "checker.rtex";
+    const assets::TextureAssetHandle handle = bridge.request_texture(checker);
+
+    // Render the tiled floor with whatever texture the bridge currently gives for `handle`,
+    // returning the LDR readback. Identical scene both times, so only the base-color texture
+    // differs.
+    const auto render_floor = [&](rhi::TextureHandle tex) -> std::vector<std::uint8_t> {
+        MeshRegistry meshes(*device);
+        const MeshId plane = meshes.add(make_plane(2.0f, 2.0f), "bridge-floor");
+        MaterialRegistry materials;
+        PbrMaterialDesc mat{};
+        mat.metallic = 0.0f;
+        mat.roughness = 1.0f;
+        mat.base_color_texture = tex;
+        const MaterialId floor = materials.add(mat);
+
+        ecs::World world;
+        register_render_components(world);
+        (void)world.spawn_with(WorldTransform{}, MeshRef{plane}, MaterialRef{floor});
+        core::Transform cam_tf{};
+        cam_tf.translation = {0.0f, 6.0f, 0.0f};
+        cam_tf.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -core::kHalfPi);
+        (void)world.spawn_with(WorldTransform{cam_tf}, Camera{});
+        core::Transform light_tf{};
+        light_tf.translation = {0.0f, 5.0f, 0.0f};
+        (void)world.spawn_with(WorldTransform{light_tf},
+                               PointLight{1.0f, 1.0f, 1.0f, 30.0f, 50.0f});
+
+        SceneRenderer renderer(*device, meshes, materials);
+        renderer.set_ambient(0.1f, 0.1f, 0.1f);
+        RenderGraph graph(*device);
+        graph.reset();
+        const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize}, false);
+        REQUIRE(out.ldr.is_valid());
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        return read_texture(*device, graph.physical(out.ldr), kSize, kSize, 4);
+    };
+
+    // Count magenta (R,B high, G≈0) vs greyscale (G high, ≈R) pixels — the placeholder vs the
+    // checker.
+    const auto tally = [](const std::vector<std::uint8_t>& ldr) {
+        std::uint32_t magenta = 0;
+        std::uint32_t grey = 0;
+        for (std::size_t p = 0; p + 3 < ldr.size(); p += 4) {
+            const int r = ldr[p + 0];
+            const int g = ldr[p + 1];
+            const int b = ldr[p + 2];
+            if (r > 80 && b > 80 && g < 40) {
+                ++magenta;
+            }
+            if (g > 80 && std::abs(r - g) < 40) {
+                ++grey;
+            }
+        }
+        return std::pair<std::uint32_t, std::uint32_t>{magenta, grey};
+    };
+
+    // BEFORE: still loading → the floor shows the magenta placeholder, no greyscale.
+    const auto [before_magenta, before_grey] =
+        tally(render_floor(bridge.texture_or_placeholder(handle)));
+    CHECK(before_magenta > 500);
+    CHECK(before_grey < 100);
+
+    // Drain: block for the load, pump it Ready on the main thread, upload it to the GPU.
+    server.wait_for_pending_loads();
+    server.pump();
+    CHECK(bridge.drain() == 1); // exactly one texture uploaded
+    CHECK(bridge.uploaded_count() == 1);
+    CHECK(bridge.drain() == 0); // idempotent: nothing new to upload the second time
+
+    // AFTER: the same handle now resolves to the real checker → greyscale floor, magenta gone.
+    const auto [after_magenta, after_grey] =
+        tally(render_floor(bridge.texture_or_placeholder(handle)));
+    CHECK(after_magenta < 100);
+    CHECK(after_grey > 500);
 }

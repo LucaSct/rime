@@ -20,6 +20,11 @@ target_link_libraries(rime_render_tests
 target_include_directories(rime_render_tests
     PRIVATE ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer)
 
+# The GPU asset-bridge proof loads the committed cooked checker.rtex through the AssetServer + bridge;
+# hand it the same fixtures dir the engine/assets tests use (CMake emits forward slashes on every OS).
+target_compile_definitions(rime_render_tests
+    PRIVATE RIME_ASSETS_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/assets/fixtures")
+
 rime_add_shaders(rime_render_tests
     ${CMAKE_SOURCE_DIR}/tests/rhi/shaders/pushconst.vert
     ${CMAKE_SOURCE_DIR}/tests/rhi/shaders/pushconst.frag
