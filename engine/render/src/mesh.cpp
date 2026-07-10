@@ -128,9 +128,10 @@ CpuMesh make_uv_sphere(float radius, std::uint32_t rings, std::uint32_t segments
 
 void compute_tangents(CpuMesh& mesh) {
     // Per-face tangent accumulation (Lengyel's method): each triangle contributes its constant
-    // ∂p/∂u and ∂p/∂v — solved from the position edges and their UV deltas (docs/math/tangent-space.md
-    // §2) — to its three vertices, so a shared vertex averages its faces, the same smoothing that
-    // makes vertex normals smooth. This is the procedural-mesh twin of the cooker's MikkTSpace pass.
+    // ∂p/∂u and ∂p/∂v — solved from the position edges and their UV deltas
+    // (docs/math/tangent-space.md §2) — to its three vertices, so a shared vertex averages its
+    // faces, the same smoothing that makes vertex normals smooth. This is the procedural-mesh twin
+    // of the cooker's MikkTSpace pass.
     const std::size_t n = mesh.vertices.size();
     std::vector<core::Vec3> tan_u(n, core::Vec3{0.0f, 0.0f, 0.0f}); // ∂p/∂u accumulation
     std::vector<core::Vec3> tan_v(n, core::Vec3{0.0f, 0.0f, 0.0f}); // ∂p/∂v accumulation
@@ -163,9 +164,11 @@ void compute_tangents(CpuMesh& mesh) {
     for (std::size_t i = 0; i < n; ++i) {
         MeshVertex& vert = mesh.vertices[i];
         const core::Vec3 nrm = core::normalize(core::Vec3{vert.nx, vert.ny, vert.nz});
-        core::Vec3 tangent = tan_u[i] - nrm * core::dot(nrm, tan_u[i]); // Gram-Schmidt vs. the normal
+        core::Vec3 tangent =
+            tan_u[i] - nrm * core::dot(nrm, tan_u[i]); // Gram-Schmidt vs. the normal
         // A vertex no triangle tangented (unreferenced, or fully degenerate UVs) has no meaningful
-        // ∂p/∂u; pick any axis perpendicular to the normal so the basis stays finite and orthonormal.
+        // ∂p/∂u; pick any axis perpendicular to the normal so the basis stays finite and
+        // orthonormal.
         if (core::length_squared(tangent) < 1e-12f) {
             const core::Vec3 axis =
                 std::fabs(nrm.x) < 0.9f ? core::Vec3{1, 0, 0} : core::Vec3{0, 1, 0};

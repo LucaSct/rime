@@ -20,8 +20,8 @@ namespace rime::render {
 // the bitangent as w·cross(N,T) (the glTF convention; see docs/math/tangent-space.md). One vertex
 // layout, always tangented, so a single forward pipeline serves every material permutation without
 // shader variants (M6.4); a mesh with no normal map simply binds the flat-normal fallback and the
-// tangent goes unused. Default tangent is (1,0,0,1) so a hand-built vertex still decodes to a finite
-// basis.
+// tangent goes unused. Default tangent is (1,0,0,1) so a hand-built vertex still decodes to a
+// finite basis.
 struct MeshVertex {
     float px = 0.0f, py = 0.0f, pz = 0.0f;
     float nx = 0.0f, ny = 0.0f, nz = 1.0f;
@@ -63,9 +63,9 @@ make_uv_sphere(float radius, std::uint32_t rings = 16, std::uint32_t segments = 
 // Fill every vertex's tangent from the mesh's positions, uvs, and normals — the procedural-mesh
 // counterpart to the cooker's MikkTSpace pass (tools/asset-pipeline/src/tangent.rs), using the
 // standard per-face accumulation + Gram-Schmidt orthonormalization, with the handedness sign chosen
-// so w·cross(N,T) reproduces the geometric bitangent (∂p/∂v). Derivation: docs/math/tangent-space.md.
-// The make_* primitives call this before returning; a hand-built CpuMesh (the material proofs) calls
-// it explicitly.
+// so w·cross(N,T) reproduces the geometric bitangent (∂p/∂v). Derivation:
+// docs/math/tangent-space.md. The make_* primitives call this before returning; a hand-built
+// CpuMesh (the material proofs) calls it explicitly.
 void compute_tangents(CpuMesh& mesh);
 
 // ── The GPU-side registry ─────────────────────────────────────────────────────────────────

@@ -33,14 +33,13 @@
 #include <cstring>
 #include <vector>
 
-#include "rime/render/mesh.hpp"
-
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/mesh.hpp"
 #include "rime/render/render_graph.hpp"
 #include "rime/render/scene_renderer.hpp"
 
@@ -575,9 +574,10 @@ TEST_CASE("pbr: a normal map perturbs shading under grazing light (M6.4)") {
     device->write_texture(normal_map, npx.data(), npx.size());
 
     // Render the floor once with the map, once flat (invalid handle → the renderer's flat-normal
-    // fallback). A horizontal directional light travelling −x grazes the +y floor: a FLAT floor gets
-    // n·l ≈ 0 (only ambient, uniform); the mapped floor's +x-tilted texels catch the light while −x
-    // ones stay dark — a high-contrast checker. Variance ratio proves the perturbation reached shading.
+    // fallback). A horizontal directional light travelling −x grazes the +y floor: a FLAT floor
+    // gets n·l ≈ 0 (only ambient, uniform); the mapped floor's +x-tilted texels catch the light
+    // while −x ones stay dark — a high-contrast checker. Variance ratio proves the perturbation
+    // reached shading.
     const auto render_floor = [&](rhi::TextureHandle normal_tex) -> HdrImage {
         MeshRegistry meshes(*device);
         const MeshId plane = meshes.add(make_plane(2.0f, 1.0f), "np-floor");
@@ -596,7 +596,8 @@ TEST_CASE("pbr: a normal map perturbs shading under grazing light (M6.4)") {
         cam_tf.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -core::kHalfPi);
         (void)world.spawn_with(WorldTransform{cam_tf}, Camera{});
         core::Transform light_tf{};
-        light_tf.rotation = core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, core::kHalfPi); // −z → −x
+        light_tf.rotation =
+            core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, core::kHalfPi); // −z → −x
         (void)world.spawn_with(WorldTransform{light_tf}, DirectionalLight{1.0f, 1.0f, 1.0f, 3.0f});
 
         SceneRenderer renderer(*device, meshes, materials);
@@ -608,15 +609,16 @@ TEST_CASE("pbr: a normal map perturbs shading under grazing light (M6.4)") {
         auto cmd = device->begin_commands();
         graph.execute(*cmd);
         device->submit_blocking(*cmd);
-        return decode_hdr(read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8), kSize,
-                          kSize);
+        return decode_hdr(
+            read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
     };
 
     const HdrImage bumpy = render_floor(normal_map);
     const HdrImage flat = render_floor(rhi::TextureHandle{});
     device->destroy(normal_map);
 
-    // Luminance variance over the central region (all floor — the plane fills the frame from above).
+    // Luminance variance over the central region (all floor — the plane fills the frame from
+    // above).
     const auto variance = [](const HdrImage& img) {
         double sum = 0.0, sum2 = 0.0;
         std::size_t n = 0;
@@ -634,9 +636,9 @@ TEST_CASE("pbr: a normal map perturbs shading under grazing light (M6.4)") {
     const double var_bumpy = variance(bumpy);
     const double var_flat = variance(flat);
     MESSAGE("normal-map variance: bumpy=" << var_bumpy << " flat=" << var_flat);
-    CHECK(var_bumpy > 0.002);              // the bumps really do vary the shading
-    CHECK(var_bumpy > 25.0 * var_flat);    // ≫ the near-uniform flat control
-    CHECK(var_flat < 0.0005);              // and the flat floor is essentially uniform (ambient)
+    CHECK(var_bumpy > 0.002);           // the bumps really do vary the shading
+    CHECK(var_bumpy > 25.0 * var_flat); // ≫ the near-uniform flat control
+    CHECK(var_flat < 0.0005);           // and the flat floor is essentially uniform (ambient)
 }
 
 TEST_CASE("pbr: a metallic-roughness texture drives the specular lobe (M6.4)") {
@@ -654,7 +656,8 @@ TEST_CASE("pbr: a metallic-roughness texture drives the specular lobe (M6.4)") {
     // delivered by a metallic-roughness TEXTURE (G = roughness, B = metallic). Everything geometric
     // is held fixed, so any difference in the specular peak is the map's roughness channel reaching
     // shading through binding 3. A smooth map must give a far brighter, tighter highlight than a
-    // rough one (peak GGX D ∝ 1/α²) — the same physics as the M5.6 factor proof, now texture-driven.
+    // rough one (peak GGX D ∝ 1/α²) — the same physics as the M5.6 factor proof, now
+    // texture-driven.
     const auto sphere_peak = [&](std::uint8_t rough_g) -> float {
         const std::uint8_t texel[4] = {0, rough_g, 255, 255}; // G roughness, B = 1 (metal)
         rhi::TextureDesc td{};
@@ -695,8 +698,8 @@ TEST_CASE("pbr: a metallic-roughness texture drives the specular lobe (M6.4)") {
         auto cmd = device->begin_commands();
         graph.execute(*cmd);
         device->submit_blocking(*cmd);
-        const HdrImage hdr =
-            decode_hdr(read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
+        const HdrImage hdr = decode_hdr(
+            read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
         device->destroy(mr);
 
         float peak = 0.0f;
@@ -710,23 +713,25 @@ TEST_CASE("pbr: a metallic-roughness texture drives the specular lobe (M6.4)") {
         return peak;
     };
 
-    const float smooth = sphere_peak(26);  // ≈ 0.10 roughness
-    const float rough = sphere_peak(230);  // ≈ 0.90 roughness
+    const float smooth = sphere_peak(26); // ≈ 0.10 roughness
+    const float rough = sphere_peak(230); // ≈ 0.90 roughness
     MESSAGE("MR-texture specular peak: smooth=" << smooth << " rough=" << rough);
     CHECK(smooth > 8.0f * rough); // the smooth map's mirror peak dwarfs the rough map's broad lobe
     CHECK(smooth > 1.0f);         // and it is genuinely HDR-bright (the map really reached shading)
-    CHECK(rough > 0.01f);         // the rough sphere is still lit — not a black-passes-vacuously test
+    CHECK(rough > 0.01f); // the rough sphere is still lit — not a black-passes-vacuously test
 }
 
 TEST_CASE("m6.4: tangent handedness flips under mirrored UVs, bitangent stays put") {
     // The MikkTSpace trap (docs/math/tangent-space.md §4): a mirrored UV chart must flip the stored
-    // handedness sign so the shader's B = w·cross(N,T) still reproduces the geometric bitangent ∂p/∂v.
-    // A +z-facing quad; build it once with a standard chart and once with U mirrored, and check both.
+    // handedness sign so the shader's B = w·cross(N,T) still reproduces the geometric bitangent
+    // ∂p/∂v. A +z-facing quad; build it once with a standard chart and once with U mirrored, and
+    // check both.
     const auto quad = [](bool mirror_u) {
         CpuMesh m;
         const float u0 = mirror_u ? 1.0f : 0.0f;
         const float u1 = mirror_u ? 0.0f : 1.0f;
-        // Positions in the xy-plane, normal +z; u grows with +x (or −x if mirrored), v grows with +y.
+        // Positions in the xy-plane, normal +z; u grows with +x (or −x if mirrored), v grows with
+        // +y.
         m.vertices = {
             {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, u0, 0.0f},
             {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, u1, 0.0f},
@@ -752,7 +757,7 @@ TEST_CASE("m6.4: tangent handedness flips under mirrored UVs, bitangent stays pu
             const core::Vec3 N{v.nx, v.ny, v.nz};
             const core::Vec3 T{v.tx, v.ty, v.tz};
             const core::Vec3 B = core::cross(N, T) * v.tw;
-            CHECK(B.y > 0.9f);                    // bitangent reproduces +y (∂p/∂v)
+            CHECK(B.y > 0.9f); // bitangent reproduces +y (∂p/∂v)
             CHECK(std::fabs(B.x) < 0.1f);
             CHECK(std::fabs(B.z) < 0.1f);
             CHECK(std::fabs(std::fabs(v.tw) - 1.0f) < 1e-5f); // and w is a clean ±1

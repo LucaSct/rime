@@ -27,11 +27,11 @@ struct PbrMaterialDesc {
     // `{base_color, metallic, roughness}` is used across the render tests — inserting a field ahead
     // of them would silently misassign every such call. New factors are appended, never inserted.
     float base_color[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // linear RGBA, multiplies the base-color map
-    float metallic = 0.0f;                          // 0 = dielectric, 1 = metal (multiplies MR blue)
-    float roughness = 0.5f;                         // 0 = mirror, 1 = fully diffuse (multiplies MR green)
-    float emissive[3] = {0.0f, 0.0f, 0.0f};         // linear radiance added after the BRDF (M6.4)
-    float normal_scale = 1.0f;                      // scales the normal map's tangent-plane XY (M6.4)
-    float occlusion_strength = 1.0f;                // lerps AO toward 1 (no occlusion) at 0 (M6.4)
+    float metallic = 0.0f;                  // 0 = dielectric, 1 = metal (multiplies MR blue)
+    float roughness = 0.5f;                 // 0 = mirror, 1 = fully diffuse (multiplies MR green)
+    float emissive[3] = {0.0f, 0.0f, 0.0f}; // linear radiance added after the BRDF (M6.4)
+    float normal_scale = 1.0f;              // scales the normal map's tangent-plane XY (M6.4)
+    float occlusion_strength = 1.0f;        // lerps AO toward 1 (no occlusion) at 0 (M6.4)
 
     // Optional maps, each driving / multiplied with its factor above (the glTF convention; the
     // fallback is the identity). BORROWED, not owned: the caller keeps them alive as long as any

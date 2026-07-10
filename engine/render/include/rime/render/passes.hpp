@@ -75,8 +75,11 @@ struct GpuDrawUniforms {
     core::Mat4 model;                               // world-from-object
     core::Mat4 normal_matrix;                       // inverse-transpose of model (for normals)
     float base_color[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // linear factor
-    float params[4] = {0.0f, 0.5f, 1.0f, 1.0f};     // x metallic, y roughness, z normal_scale, w AO strength
-    float emissive[4] = {0.0f, 0.0f, 0.0f, 0.0f};   // rgb = emissive factor (linear), w unused (M6.4)
+    float params[4] = {0.0f,
+                       0.5f,
+                       1.0f,
+                       1.0f}; // x metallic, y roughness, z normal_scale, w AO strength
+    float emissive[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // rgb = emissive factor (linear), w unused (M6.4)
 };
 
 static_assert(std::is_standard_layout_v<GpuFrameUniforms> && sizeof(GpuFrameUniforms) == 752 &&

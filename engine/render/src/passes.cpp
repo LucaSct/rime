@@ -45,8 +45,9 @@ void record_draws(rhi::CommandBuffer& cmd, const SceneDrawData& data, bool bind_
         cmd.bind_index_buffer(mesh.indices, rhi::IndexType::Uint32);
         cmd.bind_uniform_buffer(1, data.draw_ubo, i * kDrawUniformStride, sizeof(GpuDrawUniforms));
         if (bind_material_textures) {
-            // The five material maps (fallbacks already resolved by the SceneRenderer), bindings 2–6
-            // matching pbr_forward.frag. The depth pre-pass skips them — it has no fragment shader.
+            // The five material maps (fallbacks already resolved by the SceneRenderer), bindings
+            // 2–6 matching pbr_forward.frag. The depth pre-pass skips them — it has no fragment
+            // shader.
             cmd.bind_texture(2, data.base_color_textures[i], data.material_sampler);
             cmd.bind_texture(3, data.metallic_roughness_textures[i], data.material_sampler);
             cmd.bind_texture(4, data.normal_textures[i], data.material_sampler);

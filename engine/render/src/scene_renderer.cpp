@@ -93,11 +93,12 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
     fd.debug_name = "scene-frame-ubo";
     frame_ubo_ = device.create_buffer(fd);
 
-    // The white fallback: one white texel that decodes to 1.0. Multiplying by it is the identity, so
-    // the shader needs no "has texture?" branch — the classic dummy-texture trick. It serves FOUR
-    // slots (base-color, metallic-roughness, occlusion, emissive): 1.0 is the right identity for each
-    // (albedo×1, roughness/metallic factor×1, AO 1 = unoccluded, emissive×1), and white reads 1.0
-    // whether the view srgb-decodes or not, so one texel covers both colour and data slots.
+    // The white fallback: one white texel that decodes to 1.0. Multiplying by it is the identity,
+    // so the shader needs no "has texture?" branch — the classic dummy-texture trick. It serves
+    // FOUR slots (base-color, metallic-roughness, occlusion, emissive): 1.0 is the right identity
+    // for each (albedo×1, roughness/metallic factor×1, AO 1 = unoccluded, emissive×1), and white
+    // reads 1.0 whether the view srgb-decodes or not, so one texel covers both colour and data
+    // slots.
     rhi::TextureDesc td{};
     td.extent = {1, 1};
     td.format = rhi::Format::RGBA8Srgb;
@@ -107,9 +108,9 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
     const std::uint8_t white_px[4] = {255, 255, 255, 255};
     device.write_texture(white_, white_px, sizeof(white_px));
 
-    // The normal-slot fallback: one flat tangent-space normal (128,128,255), which decodes to +Z, so
-    // an un-mapped surface keeps its geometric normal. Unorm (linear): a normal map is DATA, so it
-    // must NOT be sRGB-decoded on sampling.
+    // The normal-slot fallback: one flat tangent-space normal (128,128,255), which decodes to +Z,
+    // so an un-mapped surface keeps its geometric normal. Unorm (linear): a normal map is DATA, so
+    // it must NOT be sRGB-decoded on sampling.
     rhi::TextureDesc nd{};
     nd.extent = {1, 1};
     nd.format = rhi::Format::RGBA8Unorm;
