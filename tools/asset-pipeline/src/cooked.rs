@@ -28,6 +28,13 @@ pub const COOKED_MAGIC: [u8; 4] = *b"RMA1";
 /// The container envelope version this cooker writes.
 pub const CONTAINER_VERSION: u16 = 1;
 
+/// The cooker version for the cook cache (ADR-0024 §8) — **not** the container version. Bump this
+/// whenever any importer or encoder could produce different output bytes from the same source (a new
+/// tangent basis, a mip-filter change, a schema-hash update), so a stale cache re-cooks instead of
+/// serving outdated bytes. Kept independent of `CARGO_PKG_VERSION`, which tracks releases, not cook
+/// semantics.
+pub const COOKER_VERSION: u32 = 1;
+
 /// `asset_kind` wire value for a mesh (matches `engine/assets/asset_id.hpp`; append, never renumber).
 pub const ASSET_KIND_MESH: u16 = 1;
 /// `asset_kind` wire value for a texture (matches `engine/assets/asset_id.hpp`).

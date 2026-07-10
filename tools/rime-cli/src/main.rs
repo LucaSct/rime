@@ -2,7 +2,8 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // The Rime command-line tool. As of Milestone 6 it drives the offline asset pipeline: `cook`
-// imports source assets (glTF meshes) and writes the engine's runtime RMA1 files; `inspect` prints
+// imports source assets (glTF or binary STL meshes, PNG/JPEG textures) and writes the engine's
+// runtime RMA1 files; `inspect` prints
 // a cooked file's header. Invoked with no subcommand it keeps the Milestone-0 stub banner. The CLI
 // reaches the engine only across stable boundaries (cooked files here); see docs/adr/0001.
 
@@ -28,9 +29,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Cook source assets (glTF meshes, PNG/JPEG textures) into Rime's runtime RMA1 format.
+    /// Cook source assets (glTF/STL meshes, PNG/JPEG textures) into Rime's runtime RMA1 format.
     Cook {
-        /// A `.gltf`/`.glb`/`.png`/`.jpg` file, or a directory of them.
+        /// A `.gltf`/`.glb`/`.stl`/`.png`/`.jpg` file, or a directory of them.
         input: PathBuf,
         /// Output directory for the cooked files and `manifest.txt`.
         #[arg(long)]
@@ -86,9 +87,11 @@ fn run_cook(input: &Path, out: &Path, color_space: ColorSpace) -> ExitCode {
                 );
             }
             println!(
-                "{} asset(s) cooked into {}",
+                "{} asset(s) into {} — {} source(s) cooked, {} from cache",
                 result.manifest.len(),
-                out.display()
+                out.display(),
+                result.sources_cooked,
+                result.sources_cached
             );
             ExitCode::SUCCESS
         }

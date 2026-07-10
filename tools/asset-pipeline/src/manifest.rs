@@ -7,7 +7,9 @@
 
 use std::fmt::Write as _;
 
-/// One asset's manifest line, before rendering.
+/// One asset's manifest line, before rendering. `Clone` so the cook cache can stash and re-emit an
+/// entry on a cache hit without re-cooking (see `cook_cache`).
+#[derive(Clone)]
 pub struct ManifestEntry {
     pub source_path: String,
     pub kind: &'static str,
