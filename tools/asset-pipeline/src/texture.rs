@@ -29,7 +29,7 @@ pub const BYTES_PER_PIXEL: usize = 4;
 
 /// How a texture's bytes relate to light, which decides how its mips are filtered. `Srgb` bytes are
 /// perceptual (must be linearised before averaging); `Linear` bytes are the quantity itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorSpace {
     Linear,
     Srgb,

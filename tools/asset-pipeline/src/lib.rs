@@ -11,6 +11,7 @@
 
 pub mod cooked;
 pub mod gltf_import;
+pub mod gltf_material;
 pub mod manifest;
 pub mod material;
 pub mod math;
@@ -85,34 +86,108 @@ pub struct CookOutput {
     pub manifest: Vec<ManifestEntry>,
 }
 
+/// Import (and cook) a glTF's materials + textures from a path — the path-based convenience over
+/// `gltf_material::import_materials`, symmetric with `gltf_import::import_primitives`. Handy for tools
+/// and tests that want the structured material import without driving the whole file cook.
+pub fn import_gltf_materials(path: &Path) -> Result<gltf_material::MaterialImport, PipelineError> {
+    let (document, _buffers, images) = gltf::import(path)?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
+    gltf_material::import_materials(&document, &images, stem)
+}
+
 /// Cook a single glTF file into `out_dir`. All of the file's triangle primitives merge into one RMA1
-/// mesh (one submesh per primitive), written as `<stem>.rmesh`. Returns its path + manifest entry.
+/// mesh (one submesh per primitive, tagged with a material slot) written as `<stem>.rmesh`; each
+/// material becomes a `<stem>.mat<N>.rmat`, and each unique texture a `<stem>.img<N>.<srgb|lin>.rtex`
+/// (M6.4). Meshes whose material carries a normal map cook tangents. Returns every cooked file plus
+/// the manifest entries describing them.
 pub fn cook_gltf(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineError> {
-    let primitives = gltf_import::import_primitives(input)?;
-    let mesh = Mesh::from_primitives(primitives);
+    // One decode of the glTF, shared by the material import (which needs the decoded images) and the
+    // geometry walk (which needs the buffers) — importing twice would re-decode every texture.
+    let (document, buffers, images) = gltf::import(input)?;
+    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
+
+    // Materials first: whether a primitive's material carries a normal map decides if the mesh needs
+    // tangents, and that has to be known before the mesh is cooked.
+    let mut mats = gltf_material::import_materials(&document, &images, stem)?;
+
+    let primitives = gltf_import::primitives_from(&document, &buffers)?;
+    let mut mesh = Mesh::from_primitives(primitives);
     if mesh.is_empty() {
         return Err(PipelineError::Unsupported(format!(
             "{} yielded no triangle mesh data",
             input.display()
         )));
     }
-    let (bytes, id) = mesh.cook();
 
-    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
-    let cooked_file = format!("{stem}.rmesh");
-    std::fs::create_dir_all(out_dir)?;
-    let cooked_path = out_dir.join(&cooked_file);
-    std::fs::write(&cooked_path, &bytes)?;
-
-    Ok(CookOutput {
-        cooked_files: vec![cooked_path],
-        manifest: vec![ManifestEntry {
-            source_path: input.to_string_lossy().into_owned(),
-            kind: "mesh",
+    // Materialize glTF's default material if any primitive used it (slot == the count of defined
+    // materials), so every submesh slot resolves to a real cooked material. A file with no materials
+    // at all (the plain quad fixture) lands here too: one default material at slot 0.
+    let default_slot = mats.materials.len() as u32;
+    if mesh
+        .submeshes
+        .iter()
+        .any(|s| s.material_slot == default_slot)
+    {
+        let default = material::Material::default();
+        let (bytes, id) = default.cook();
+        mats.materials.push(gltf_material::CookedMaterial {
             id,
-            cooked_file,
-        }],
-    })
+            bytes,
+            material: default,
+            has_normal_map: false,
+        });
+    }
+
+    // Tangent policy (M6.4): one vertex layout per mesh, so if ANY submesh's material needs a normal
+    // map, generate tangents for the whole mesh; a mesh no normal map touches stays 32-byte P/N/UV.
+    let needs_tangents = mesh.submeshes.iter().any(|s| {
+        mats.materials
+            .get(s.material_slot as usize)
+            .is_some_and(|m| m.has_normal_map)
+    });
+    if needs_tangents {
+        tangent::generate_tangents(&mut mesh);
+    }
+
+    let (mesh_bytes, mesh_id) = mesh.cook();
+
+    std::fs::create_dir_all(out_dir)?;
+    let mut out = CookOutput::default();
+
+    let mesh_file = format!("{stem}.rmesh");
+    std::fs::write(out_dir.join(&mesh_file), &mesh_bytes)?;
+    out.cooked_files.push(out_dir.join(&mesh_file));
+    out.manifest.push(ManifestEntry {
+        source_path: input.to_string_lossy().into_owned(),
+        kind: "mesh",
+        id: mesh_id,
+        cooked_file: mesh_file,
+    });
+
+    for (i, m) in mats.materials.iter().enumerate() {
+        let file = format!("{stem}.mat{i}.rmat");
+        std::fs::write(out_dir.join(&file), &m.bytes)?;
+        out.cooked_files.push(out_dir.join(&file));
+        out.manifest.push(ManifestEntry {
+            source_path: format!("{}#material{i}", input.display()),
+            kind: "material",
+            id: m.id,
+            cooked_file: file,
+        });
+    }
+
+    for t in &mats.textures {
+        std::fs::write(out_dir.join(&t.cooked_file), &t.bytes)?;
+        out.cooked_files.push(out_dir.join(&t.cooked_file));
+        out.manifest.push(ManifestEntry {
+            source_path: t.source_label.clone(),
+            kind: "texture",
+            id: t.id,
+            cooked_file: t.cooked_file.clone(),
+        });
+    }
+
+    Ok(out)
 }
 
 /// Cook a single PNG/JPEG file into `out_dir` as `<stem>.rtex`: decode to RGBA8, generate an offline

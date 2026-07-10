@@ -71,7 +71,7 @@ impl Mesh {
             mesh.submeshes.push(Submesh {
                 first_index,
                 index_count: prim.indices.len() as u32,
-                material_slot: 0,
+                material_slot: prim.material_slot,
             });
         }
         mesh
@@ -163,10 +163,14 @@ impl Mesh {
     }
 }
 
-/// One imported primitive in world space, before merging. `indices` are local to `vertices`.
+/// One imported primitive in world space, before merging. `indices` are local to `vertices`;
+/// `material_slot` is the index into the cooked model's material table this primitive shades with
+/// (M6.4), resolved at import from the glTF primitive's material — a primitive with no material maps
+/// to the appended default-material slot. It rides through `from_primitives` onto the submesh.
 pub struct Primitive {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub material_slot: u32,
 }
 
 /// Derive per-vertex geometric normals from the triangle list (used when a primitive has no NORMAL
