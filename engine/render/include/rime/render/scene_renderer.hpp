@@ -19,8 +19,8 @@
 //      passes.hpp).
 //   3. DECLARES — depth pre-pass (optional) → forward PBR → tonemap, using the pass library.
 //
-// It owns the GPU plumbing those steps need (uniform buffers, the 1x1 white fallback texture,
-// the material sampler) and the three pass objects. It does NOT own the registries — meshes and
+// It owns the GPU plumbing those steps need (uniform buffers, the 1x1 white / flat-normal fallback
+// textures, the material sampler) and the three pass objects. It does NOT own the registries — meshes and
 // materials belong to the scene/application; the renderer only reads them.
 namespace rime::render {
 
@@ -100,7 +100,8 @@ private:
     rhi::BufferHandle frame_ubo_;
     rhi::BufferHandle draw_ubo_;
     std::uint32_t draw_capacity_ = 0;
-    rhi::TextureHandle white_;            // the untextured material's base-color map
+    rhi::TextureHandle white_;            // 1x1 white: base-color / MR / occlusion / emissive fallback
+    rhi::TextureHandle flat_normal_;      // 1x1 (128,128,255): the normal-map fallback = +Z (no bump)
     rhi::SamplerHandle material_sampler_; // trilinear + a little anisotropy, Repeat
 
     float ambient_[3] = {0.02f, 0.02f, 0.02f};
@@ -110,7 +111,13 @@ private:
     // Per-frame arrays the pass lambdas' SceneDrawData spans point into — members (not locals)
     // because they must outlive render() and still be alive at graph.execute().
     std::vector<DrawItem> frame_draws_;
-    std::vector<rhi::TextureHandle> frame_textures_;
+    // Five parallel per-draw texture arrays (one slot each), fallbacks already resolved — the spans
+    // in SceneDrawData point at these, so they must outlive render() to graph.execute().
+    std::vector<rhi::TextureHandle> frame_base_color_;
+    std::vector<rhi::TextureHandle> frame_metallic_roughness_;
+    std::vector<rhi::TextureHandle> frame_normal_;
+    std::vector<rhi::TextureHandle> frame_occlusion_;
+    std::vector<rhi::TextureHandle> frame_emissive_;
     std::vector<std::uint8_t> draw_staging_;
 };
 

@@ -41,18 +41,26 @@ layout(std140, set = 0, binding = 1) uniform DrawUniforms {
     mat4 model;
     mat4 normal_matrix;
     vec4 base_color;
-    vec4 params; // x = metallic, y = roughness
+    vec4 params;   // x = metallic, y = roughness, z = normal_scale, w = occlusion_strength
+    vec4 emissive; // rgb = emissive factor (linear)
 } draw;
 
-// The base-color texture, multiplied with the base_color factor (the glTF convention). Materials
-// without one get a 1x1 white fallback bound, so this multiply is always well-defined. The image
-// is sRGB-format: the sampler hardware decodes to linear before filtering, keeping every value in
-// this shader linear.
+// The five material maps (M6.4), each multiplied with / driving its factor. Every material binds all
+// five — an untextured slot gets a 1x1 fallback (white, or flat-normal for the normal slot) — so
+// these fetches never branch and one pipeline serves every permutation. base-color and emissive are
+// sRGB-format (the sampler decodes to linear); normal / metallic-roughness / occlusion are linear
+// data sampled verbatim.
 layout(set = 0, binding = 2) uniform sampler2D base_color_tex;
+layout(set = 0, binding = 3) uniform sampler2D metallic_roughness_tex; // G = roughness, B = metallic
+layout(set = 0, binding = 4) uniform sampler2D normal_tex;             // tangent-space normal
+layout(set = 0, binding = 5) uniform sampler2D occlusion_tex;          // R = ambient occlusion
+layout(set = 0, binding = 6) uniform sampler2D emissive_tex;
 
 layout(location = 0) in vec3 v_world_pos;
 layout(location = 1) in vec3 v_world_normal;
 layout(location = 2) in vec2 v_uv;
+layout(location = 3) in vec3 v_world_tangent; // interpolated tangent (M6.4)
+layout(location = 4) in float v_tangent_w;    // handedness sign for the bitangent
 
 layout(location = 0) out vec4 out_hdr;
 
@@ -110,22 +118,43 @@ vec3 shade_light(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo, float metal
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
+// Reconstruct the world-space TBN from the interpolated tangent basis and rotate the tangent-space
+// normal out of the map. Interpolation leaves the tangent slightly off-perpendicular to the normal,
+// so re-orthonormalize with one Gram-Schmidt step; the bitangent is rebuilt from the handedness sign
+// (w·cross(N,T), the glTF convention — correct even under mirrored UVs). normal_scale (params.z)
+// flattens the tangent-plane XY. The flat-normal fallback decodes to (0,0,1), leaving N unchanged, so
+// an un-mapped surface costs only this arithmetic. Derivation: docs/math/tangent-space.md §6.
+vec3 perturb_normal(vec3 world_normal) {
+    vec3 N = normalize(world_normal);
+    vec3 T = normalize(v_world_tangent - N * dot(N, v_world_tangent));
+    vec3 B = v_tangent_w * cross(N, T);
+    vec3 c = texture(normal_tex, v_uv).xyz;
+    vec3 n_tangent = vec3((2.0 * c.xy - 1.0) * draw.params.z, 2.0 * c.z - 1.0);
+    return normalize(mat3(T, B, N) * n_tangent); // columns T,B,N: TBN·n = nx·T + ny·B + nz·N
+}
+
 void main() {
-    // Interpolated normals shrink below unit length between vertices — renormalize per pixel.
-    vec3 n = normalize(v_world_normal);
+    vec3 n = perturb_normal(v_world_normal);
     vec3 v = normalize(frame.camera_pos.xyz - v_world_pos);
     vec3 albedo = draw.base_color.rgb * texture(base_color_tex, v_uv).rgb;
-    float metallic = draw.params.x;
-    // Perceptual roughness → α, floored: α = 0 makes D a delta function, and a delta lobe under a
-    // punctual light is a single infinitely bright sample — clamping at ~0.045 (Frostbite's
-    // floor) keeps the highlight finite while staying visually mirror-like.
-    float roughness = clamp(draw.params.y, 0.045, 1.0);
+
+    // Metallic-roughness map: glTF packs roughness in G and metallic in B; each multiplies its
+    // factor (the white fallback → the factor alone). Roughness → α is floored as in M5.6: α = 0
+    // makes D a delta lobe — a single infinitely bright sample under a punctual light.
+    vec2 mr = texture(metallic_roughness_tex, v_uv).gb;
+    float metallic = draw.params.x * mr.y;
+    float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
     float alpha = roughness * roughness;
 
+    // Ambient occlusion scales the AMBIENT term ONLY — never the direct lights, which cast their own
+    // real shadows; multiplying direct light by a baked AO map double-counts and greys out lit
+    // contact edges (docs/math/pbr.md). occlusion_strength (params.w) lerps the map toward 1.
+    float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
+
     // Constant ambient: a deliberately crude stand-in for global illumination (M10) — treat
-    // `ambient` as isotropic irradiance and reflect it diffusely. Enough to keep unlit sides
-    // from going pitch black, honest about being a hack (docs/math/pbr.md §ambient).
-    vec3 out_radiance = albedo * frame.ambient.rgb;
+    // `ambient` as isotropic irradiance and reflect it diffusely, occluded by AO. Enough to keep
+    // unlit sides from going pitch black, honest about being a hack (docs/math/pbr.md §ambient).
+    vec3 out_radiance = albedo * frame.ambient.rgb * ao;
 
     for (uint i = 0u; i < frame.light_counts.x && i < 4u; ++i) {
         vec3 l = normalize(-frame.dir_lights[i].direction.xyz); // travel direction → toward-light
@@ -150,6 +179,11 @@ void main() {
         vec3 radiance = frame.point_lights[i].radiance.rgb * falloff;
         out_radiance += shade_light(n, v, l, radiance, albedo, metallic, alpha);
     }
+
+    // Emissive: the surface's own light, added AFTER the BRDF so it shows even with no light present
+    // (glowing screens, lava). Factor × map; the default-black factor with the white fallback is 0,
+    // so a non-emissive material pays nothing.
+    out_radiance += draw.emissive.rgb * texture(emissive_tex, v_uv).rgb;
 
     out_hdr = vec4(out_radiance, 1.0);
 }

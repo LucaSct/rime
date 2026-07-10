@@ -15,13 +15,18 @@
 // carries a MeshId, never buffer handles or pointers.
 namespace rime::render {
 
-// One vertex, 32 bytes, interleaved: position + normal (shading) + uv (texturing). Deliberately
-// the PBR-ready minimum — tangents (for normal mapping) arrive with the M6 importer, where real
-// meshes bring real tangent spaces.
+// One vertex, 48 bytes, interleaved: position + normal (shading) + uv (texturing) + tangent
+// (normal mapping, M6.4). The tangent is xyz + a handedness sign in w, so the shader reconstructs
+// the bitangent as w·cross(N,T) (the glTF convention; see docs/math/tangent-space.md). One vertex
+// layout, always tangented, so a single forward pipeline serves every material permutation without
+// shader variants (M6.4); a mesh with no normal map simply binds the flat-normal fallback and the
+// tangent goes unused. Default tangent is (1,0,0,1) so a hand-built vertex still decodes to a finite
+// basis.
 struct MeshVertex {
     float px = 0.0f, py = 0.0f, pz = 0.0f;
     float nx = 0.0f, ny = 0.0f, nz = 1.0f;
     float u = 0.0f, v = 0.0f;
+    float tx = 1.0f, ty = 0.0f, tz = 0.0f, tw = 1.0f;
 };
 
 // The CPU-side mesh: an indexed triangle list. Indices are 32-bit throughout — 16-bit halves the
@@ -54,6 +59,14 @@ struct CpuMesh {
 // rings collapsed to points; the seam duplicates one column so uv wraps cleanly.
 [[nodiscard]] CpuMesh
 make_uv_sphere(float radius, std::uint32_t rings = 16, std::uint32_t segments = 32);
+
+// Fill every vertex's tangent from the mesh's positions, uvs, and normals — the procedural-mesh
+// counterpart to the cooker's MikkTSpace pass (tools/asset-pipeline/src/tangent.rs), using the
+// standard per-face accumulation + Gram-Schmidt orthonormalization, with the handedness sign chosen
+// so w·cross(N,T) reproduces the geometric bitangent (∂p/∂v). Derivation: docs/math/tangent-space.md.
+// The make_* primitives call this before returning; a hand-built CpuMesh (the material proofs) calls
+// it explicitly.
+void compute_tangents(CpuMesh& mesh);
 
 // ── The GPU-side registry ─────────────────────────────────────────────────────────────────
 

@@ -75,15 +75,18 @@ struct GpuDrawUniforms {
     core::Mat4 model;                               // world-from-object
     core::Mat4 normal_matrix;                       // inverse-transpose of model (for normals)
     float base_color[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // linear factor
-    float params[4] = {0.0f, 0.5f, 0.0f, 0.0f};     // x = metallic, y = roughness
+    float params[4] = {0.0f, 0.5f, 1.0f, 1.0f};     // x metallic, y roughness, z normal_scale, w AO strength
+    float emissive[4] = {0.0f, 0.0f, 0.0f, 0.0f};   // rgb = emissive factor (linear), w unused (M6.4)
 };
 
 static_assert(std::is_standard_layout_v<GpuFrameUniforms> && sizeof(GpuFrameUniforms) == 752 &&
                   offsetof(GpuFrameUniforms, dir_lights) == 112 &&
                   offsetof(GpuFrameUniforms, point_lights) == 240,
               "GpuFrameUniforms no longer matches the std140 FrameUniforms block in the shaders");
-static_assert(std::is_standard_layout_v<GpuDrawUniforms> && sizeof(GpuDrawUniforms) == 160 &&
-                  offsetof(GpuDrawUniforms, base_color) == 128,
+static_assert(std::is_standard_layout_v<GpuDrawUniforms> && sizeof(GpuDrawUniforms) == 176 &&
+                  offsetof(GpuDrawUniforms, base_color) == 128 &&
+                  offsetof(GpuDrawUniforms, params) == 144 &&
+                  offsetof(GpuDrawUniforms, emissive) == 160,
               "GpuDrawUniforms no longer matches the std140 DrawUniforms block in the shaders");
 
 // Per-draw uniform data lives as SLICES of one buffer, re-bound at a new offset per draw
@@ -105,14 +108,18 @@ struct DrawItem {
 // Everything the geometry passes need to record their draws. The spans/pointers are BORROWED and
 // must stay alive until RenderGraph::execute() returns (pass lambdas capture this struct by
 // value, but not the arrays it points into) — the SceneRenderer keeps them as members for
-// exactly that reason. `base_color_textures` is parallel to `draws`: the per-draw texture with
-// the material's fallback already resolved (a 1x1 white for untextured materials), so recording
-// never branches. `frame_ubo` holds one GpuFrameUniforms; `draw_ubo` holds one GpuDrawUniforms
-// slice per draw at kDrawUniformStride.
+// exactly that reason. The five `*_textures` spans are each parallel to `draws`: the per-draw map
+// for that slot with the material's fallback already resolved (1x1 white, or flat-normal for the
+// normal slot), so recording never branches on "has a texture?". `frame_ubo` holds one
+// GpuFrameUniforms; `draw_ubo` holds one GpuDrawUniforms slice per draw at kDrawUniformStride.
 struct SceneDrawData {
     const MeshRegistry* meshes = nullptr;
     std::span<const DrawItem> draws = {};
     std::span<const rhi::TextureHandle> base_color_textures = {};
+    std::span<const rhi::TextureHandle> metallic_roughness_textures = {};
+    std::span<const rhi::TextureHandle> normal_textures = {};
+    std::span<const rhi::TextureHandle> occlusion_textures = {};
+    std::span<const rhi::TextureHandle> emissive_textures = {};
     rhi::BufferHandle frame_ubo;
     rhi::BufferHandle draw_ubo;
     rhi::SamplerHandle material_sampler;
