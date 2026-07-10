@@ -150,3 +150,31 @@ Rust:
 - When asked to plan, plan the *next brick* concretely; keep the milestone roadmap in
   [docs/ROADMAP.md](docs/ROADMAP.md) as the map.
 - Be honest in summaries: what's done, what's stubbed, what failed.
+
+### Verification rhythm (calibrated for cost)
+
+Verify proportionately to the change — don't re-run the whole world for every edit:
+
+- While iterating a brick, run the specific test(s) it touches. Run the full `ctest`/`cargo` suite
+  and the sanitizers (ASan/UBSan; TSan for threading) **once** at the brick boundary, before
+  commit/PR — not after every edit. A green targeted test is sufficient; trust it.
+- Match depth to risk: docs/one-liners need little; threading, buffer/vertex layouts, and FFI earn a
+  sanitizer pass. Still exercise every change end-to-end at least once.
+- GPU proofs are **structural** — properties the physics guarantees, checked with margins on
+  lavapipe — never golden images (the M5.6/M6.4 pattern in `tests/render/pbr_pipeline_test.cpp`).
+
+### Brick delivery
+
+Per-brick: own branch → build → lavapipe green → small commits → push → PR → CI (3-OS + format +
+ASan/UBSan + TSan) → merge. Stacked PRs are **pre-retargeted to `main` before parents merge**
+(`gh api repos/LucaSct/rime/pulls/<N> -X PATCH -f base=main`) — the stored token lacks `read:org`,
+so drive PRs through the REST API, not `gh pr edit`/`gh pr checks`. **Run clang-format before
+pushing** — it lives on the dev server at `~/.rime-tools/bin/clang-format` (v20.1.8, the exact
+pinned CI version): `~/.rime-tools/bin/clang-format -i $(git ls-files 'engine/*.cpp' 'engine/*.hpp'
+'tests/*.cpp' 'tests/*.hpp')`. CI's format job is the backstop, not the first line of defence —
+skipping the local run cost M6.3 and M6.4 a red-CI round-trip each.
+
+### Recording conventions
+
+When a pattern or gotcha recurs, record it without being asked — project conventions here, richer
+context in the session memory. (A cross-project working-style file lives at `~/.claude/CLAUDE.md`.)

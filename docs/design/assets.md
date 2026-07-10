@@ -173,13 +173,59 @@ stamped in the manifest. That byte-stability is what M8's seeded fracture and M1
 stand on. Cross-*machine* cook identity is not promised (float codegen may differ); cooked data is
 built on one machine and shipped as data.
 
+## Loading at runtime — the async `AssetServer` (M6.5)
+
+The M6.1 registry loads *synchronously*: read the file, validate it, keep it — all on the calling
+thread. That stalls the frame the moment content scales. The `AssetServer` (`engine/assets/
+asset_server.hpp`) makes loading **structurally asynchronous** without pushing that complexity onto
+its callers:
+
+- **`request_mesh(path)` / `request_texture(path)` return immediately** with a small
+  `AssetHandle<T>` (a dense index, phantom-typed on the asset kind so a mesh handle can't be passed
+  where a texture handle is wanted). The load — IO via `platform::read_file`, then the M6.1 reader's
+  parse+validate, which is pure — fans out as a job on the `core::JobSystem`.
+- **States move `Loading → Ready | Failed`, one way.** *Ready* means CPU-resident and fully
+  validated — **not** uploaded to the GPU. `engine/assets` depends only on `core` + `platform`
+  (never the RHI), so device residency is the render layer's job, drained on the frame thread at
+  M6.6. Keeping the seam here, not at the upload, is what keeps the asset layer device-agnostic.
+- **A not-yet-ready handle resolves to a visible placeholder** — a unit cube for meshes, a 2×2
+  magenta/black checker for textures (magenta being the universal "missing texture" tell).
+  `get_or_placeholder(handle)` *never* returns null, so the render extraction records a draw for a
+  pending asset without a branch; `get(handle)` returns `nullptr` until Ready for callers that care.
+
+Two contracts keep this both safe and simple (measure before cleverness — one mutex, not a lock-free
+maze):
+
+- **Threading.** `request_*` may be called from the main thread *or from within a running job* (the
+  JobSystem's own submit rule; arbitrary foreign threads are not allowed, per the Chase-Lev deque's
+  single-owner rule). All bookkeeping lives behind one mutex; the heavy work — file read + decode —
+  runs *outside* the lock, so loads are genuinely parallel. `pump()` and the getters are main-thread.
+  Crucially, a completed load queues its result and leaves the slot in `Loading`; **only `pump()`
+  (main thread) flips a slot to `Ready`**, so a getter and a finishing job never race over a slot's
+  payload. `wait_for_pending_loads()` drains in-flight loads (participating in the job system, so it
+  never deadlocks); the destructor calls it first, so no job outlives the queues it writes into.
+- **De-duplication.** Repeat requests for the same *path* coalesce onto the first handle — one
+  physical file read per path, whatever the request storm. `physical_load_count()` is that counter,
+  and the proof asserts *N requests over K paths ⇒ K loads*. This request-path coalescing is distinct
+  from, and composes with, the registry's *content-hash* de-dup on the decoded bytes.
+
+Proof: `tests/assets/asset_server_test.cpp` — 64 requests fanned across worker jobs coalesce to
+exactly 8 loads with every handle reaching Ready and the async bytes equal to a synchronous read
+(no mis-slotted load); placeholder-until-`pump()`; and missing/corrupt files fail cleanly while the
+placeholder persists. This is the milestone's threading brick, so it runs under the CI
+ThreadSanitizer job.
+
+**Out of scope (documented seams):** load priorities, memory budgets, eviction, hot reload,
+decompression jobs (payloads are uncompressed per ADR-0024). The `pump()`/upload split is where a
+per-frame upload *budget* will live at M6.6 — a value passed to the drain, not a later refactor.
+
 ## Seams left open (not built in M6.1)
 
 - **Hot reload.** The registry hands out generational handles, never raw pointers into relocatable
   storage. That indirection is exactly what "re-cook, swap the slot's target, bump its generation"
   needs, so hot reload can arrive later without an interface break. Nothing implements it yet.
-- **Async loading.** Loads are synchronous in M6.1; M6.5 moves them onto the `JobSystem` with
-  placeholder assets while a load is in flight. The reader is already device-free and re-entrant.
+- **Async loading.** *Built in M6.5* — see *Loading at runtime* above. Loads run on the `JobSystem`
+  behind placeholder assets; the GPU-upload half lands with the render bridge at M6.6.
 - **Packs / bundles.** One asset per file today; the standalone header admits a pack layer later.
 - **Compressed textures (BCn), KTX2/DDS.** The format enum reserves values; adopted only when a
   measured GPU-memory need appears (VISION: measure before optimize).
