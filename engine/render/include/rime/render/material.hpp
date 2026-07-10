@@ -23,17 +23,30 @@ using MaterialId = std::uint32_t;
 inline constexpr MaterialId kInvalidMaterialId = 0xFFFFFFFFu;
 
 struct PbrMaterialDesc {
-    float base_color[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // linear-space RGBA
-    float metallic = 0.0f;                          // 0 = dielectric, 1 = metal
-    float roughness = 0.5f;                         // 0 = mirror, 1 = fully diffuse
+    // The first three fields keep their M5.5 order, because positional aggregate init
+    // `{base_color, metallic, roughness}` is used across the render tests — inserting a field ahead
+    // of them would silently misassign every such call. New factors are appended, never inserted.
+    float base_color[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // linear RGBA, multiplies the base-color map
+    float metallic = 0.0f;                  // 0 = dielectric, 1 = metal (multiplies MR blue)
+    float roughness = 0.5f;                 // 0 = mirror, 1 = fully diffuse (multiplies MR green)
+    float emissive[3] = {0.0f, 0.0f, 0.0f}; // linear radiance added after the BRDF (M6.4)
+    float normal_scale = 1.0f;              // scales the normal map's tangent-plane XY (M6.4)
+    float occlusion_strength = 1.0f;        // lerps AO toward 1 (no occlusion) at 0 (M6.4)
 
-    // Optional base-color map, multiplied with the factor above (the glTF convention; a plain
-    // white texture is the identity). BORROWED, not owned: the caller keeps the texture alive as
-    // long as any material references it — ownership stays wherever the pixels came from until
-    // the M6 asset pipeline gives textures a real home. Author base-color pixels in sRGB and
-    // create the texture with an Srgb format so sampling decodes to linear (the shader assumes
-    // it). Invalid (the default) = untextured; the scene renderer binds its 1x1 white fallback.
+    // Optional maps, each driving / multiplied with its factor above (the glTF convention; the
+    // fallback is the identity). BORROWED, not owned: the caller keeps them alive as long as any
+    // material references them — ownership stays wherever the pixels came from until the M6 loader
+    // gives textures a real home. Invalid (the default) = "no map"; the scene renderer binds a 1x1
+    // fallback (white, or flat-normal for the normal slot), so ONE forward pipeline serves every
+    // material permutation without shader variants (M6.4). Colour space is by usage (M6.3): author
+    // base-color & emissive sRGB (create them Srgb so sampling decodes to linear); normal,
+    // metallic-roughness, and occlusion are linear data (Unorm). metallic_roughness packs roughness
+    // in G and metallic in B (the glTF packing); occlusion is R.
     rhi::TextureHandle base_color_texture{};
+    rhi::TextureHandle metallic_roughness_texture{};
+    rhi::TextureHandle normal_texture{};
+    rhi::TextureHandle occlusion_texture{};
+    rhi::TextureHandle emissive_texture{};
 };
 
 // A plain store: add during setup, read while building the frame. CPU data only — the PBR pass

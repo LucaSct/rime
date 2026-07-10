@@ -22,7 +22,7 @@ Every cooked file is a fixed, versioned header followed by one kind-specific pay
 offset  size  field
 0       4     magic            = 'R','M','A','1'  (literal bytes; greppable in a hex dump)
 4       2     container_version  u16, LE           = 1
-6       2     asset_kind         u16, LE           (Mesh = 1; Texture = 2; Material/… reserved)
+6       2     asset_kind         u16, LE           (Mesh = 1; Texture = 2; Material = 3; …reserved)
 8       8     type_schema_hash   u64, LE           (see "Schema versioning")
 16      8     payload_size       u64, LE           (bytes of payload that follow)
 24      …     payload            payload_size bytes
@@ -80,6 +80,35 @@ extent against the base halved to that level, its `size` against `width·height�
 against a gap-free tiling of the blob, so a corrupt table can never make an upload read past the
 pixels. The in-memory `TextureAsset`'s `mips[i]` slice `pixels` directly.
 
+### The material payload (`asset_kind = Material`) — M6.4
+
+```
+f32   base_color[4]          linear RGBA factor            (glTF default 1,1,1,1)
+f32   emissive[3]            linear RGB factor             (glTF default 0,0,0)
+f32   metallic               0 = dielectric … 1 = metal    (glTF default 1)
+f32   roughness              0 = mirror … 1 = rough        (glTF default 1)
+f32   normal_scale           scales the normal-map XY      (glTF default 1)
+f32   occlusion_strength     lerps AO toward "none"        (glTF default 1)
+f32   alpha_cutoff           the Mask threshold            (glTF default 0.5)
+u32   alpha_mode             0 = Opaque, 1 = Mask, 2 = Blend
+u64   base_color_tex         AssetId of a cooked texture   (0 = none → engine fallback)
+u64   metallic_roughness_tex AssetId                       (0 = none)
+u64   normal_tex             AssetId                       (0 = none)
+u64   occlusion_tex          AssetId                       (0 = none)
+u64   emissive_tex           AssetId                       (0 = none)
+```
+
+A material is a **fixed 92-byte record** — no variable-length tail — so the reader reads it straight
+through and requires exactly that length (no short read, no trailing bytes). It is the metallic-
+roughness parameter set (the shared vocabulary of glTF/UE/Unity/Frostbite) plus **references** to the
+textures that drive it. A texture slot is not pixels but an `AssetId` — the content hash of an already-
+cooked texture — so one GPU upload is shared across every material that names the same image, and a
+slot of `0` means "no texture" (the renderer binds a 1×1 white / flat-normal / white-AO fallback so a
+single shader serves every material permutation). Colours are linear (the cook converts sRGB authoring
+values); each texture's colour space follows its usage (base-color/emissive sRGB, the rest linear).
+The reader additionally rejects an unknown `alpha_mode` and any non-finite factor, so a NaN never
+reaches the shader. Materials are emitted from a glTF alongside its meshes, never cooked standalone.
+
 ## Trust nothing you read
 
 A cooked file arrives from disk exactly the way a message arrives from the network: possibly truncated,
@@ -128,6 +157,13 @@ Textures use the same mechanism, fingerprinting the v1 `{width, height, offset, 
 `checker.rtex` golden fixture. Only the record is hashed, not the base-extent/format header around it:
 a future *pixel format* is an appended `TextureFormat` value (old files stay valid), not a layout
 change, so it needs no re-cook.
+
+Materials use it too, and here the fingerprinted record is the **whole** payload (a material has no
+variable-length tail): the factor and texture-reference fields, pinned at `0xCA4ED4CC434C941A`. Both
+languages embed that constant, so the cooked-material format agrees across the C++ reader and the Rust
+`material.rs` cooker by construction. Adding a material property later (a new factor, a KHR-extension
+knob) changes the fingerprint — a deliberate re-cook — which is why the container leaves room for the
+kinds that will reference materials without touching this record.
 
 ## Determinism
 

@@ -6,8 +6,11 @@
 //! UVs, and indices for every triangle primitive. glTF is *an* importer, not the format: the RMA1
 //! cooked layout (ADR-0024) is the contract, and STL joins as a second importer at M6.6.
 //!
-//! Out of scope for v1 (rejected or defaulted with a clear message): non-triangle primitive modes,
-//! Draco-compressed geometry (no POSITION reachable), skins/materials/tangents (later bricks).
+//! This module imports *geometry* only. From M6.4 it also tags each primitive with its material
+//! slot (the index into the cooked model's material table), but the material *data* — factors and
+//! texture references — is imported by the sibling `gltf_material` module, and tangents are generated
+//! by `tangent`. Out of scope for v1 (rejected or defaulted with a clear message): non-triangle
+//! primitive modes, Draco-compressed geometry (no POSITION reachable), skins (a later brick).
 
 use std::path::Path;
 
@@ -16,17 +19,32 @@ use crate::mesh::{self, Primitive, Vertex};
 use crate::PipelineError;
 
 /// Import every triangle primitive in the file's default scene, each already flattened to world
-/// space. The returned order is a stable depth-first walk, so cooking is deterministic.
+/// space. A convenience wrapper that imports the glTF and delegates to `primitives_from`; the
+/// cooker's `cook_gltf` imports the document once and calls `primitives_from` directly, sharing the
+/// decode with the material import.
 pub fn import_primitives(path: &Path) -> Result<Vec<Primitive>, PipelineError> {
     let (document, buffers, _images) = gltf::import(path)?;
+    primitives_from(&document, &buffers)
+}
+
+/// Walk an already-imported document's default scene into world-space primitives. The returned order
+/// is a stable depth-first walk, so cooking is deterministic.
+pub(crate) fn primitives_from(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+) -> Result<Vec<Primitive>, PipelineError> {
     let scene = document
         .default_scene()
         .or_else(|| document.scenes().next())
         .ok_or_else(|| PipelineError::Unsupported("glTF has no scene".to_string()))?;
 
+    // A primitive with no material renders with glTF's default material, which the cooker appends
+    // just past the defined materials — so its slot is the count of defined materials (M6.4).
+    let material_count = document.materials().count() as u32;
+
     let mut out = Vec::new();
     for node in scene.nodes() {
-        walk_node(&node, math::IDENTITY, &buffers, &mut out)?;
+        walk_node(&node, math::IDENTITY, buffers, material_count, &mut out)?;
     }
     Ok(out)
 }
@@ -35,6 +53,7 @@ fn walk_node(
     node: &gltf::Node,
     parent_world: Mat4,
     buffers: &[gltf::buffer::Data],
+    material_count: u32,
     out: &mut Vec<Primitive>,
 ) -> Result<(), PipelineError> {
     // glTF gives each node's local transform as a column-major matrix; accumulate down the tree.
@@ -45,11 +64,16 @@ fn walk_node(
 
     if let Some(mesh) = node.mesh() {
         for primitive in mesh.primitives() {
-            out.push(import_primitive(&primitive, &world, buffers)?);
+            out.push(import_primitive(
+                &primitive,
+                &world,
+                buffers,
+                material_count,
+            )?);
         }
     }
     for child in node.children() {
-        walk_node(&child, world, buffers, out)?;
+        walk_node(&child, world, buffers, material_count, out)?;
     }
     Ok(())
 }
@@ -58,6 +82,7 @@ fn import_primitive(
     primitive: &gltf::Primitive,
     world: &Mat4,
     buffers: &[gltf::buffer::Data],
+    material_count: u32,
 ) -> Result<Primitive, PipelineError> {
     if primitive.mode() != gltf::mesh::Mode::Triangles {
         return Err(PipelineError::Unsupported(format!(
@@ -125,5 +150,18 @@ fn import_primitive(
         })
         .collect();
 
-    Ok(Primitive { vertices, indices })
+    // The material slot: a defined material's own index, or the appended default-material slot (just
+    // past the defined materials) when this primitive names none. The cooked bytes carry only this
+    // slot; `gltf_material` cooks the material data it points at.
+    let material_slot = primitive
+        .material()
+        .index()
+        .map(|i| i as u32)
+        .unwrap_or(material_count);
+
+    Ok(Primitive {
+        vertices,
+        indices,
+        material_slot,
+    })
 }

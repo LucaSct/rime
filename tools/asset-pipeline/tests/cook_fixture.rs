@@ -9,7 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
+use asset_pipeline::cooked::read_header;
 use asset_pipeline::gltf_import;
+use asset_pipeline::material::AlphaMode;
 use asset_pipeline::mesh::Mesh;
 use asset_pipeline::texture::{ColorSpace, Texture};
 
@@ -99,5 +101,111 @@ fn missing_normals_are_computed_from_geometry() {
             "expected +Z, got {:?}",
             v.normal
         );
+    }
+}
+
+// ── M6.4: glTF material import ────────────────────────────────────────────────────────────────────
+// material_quad.gltf is a unit quad with one material whose factors are the distinct values the
+// cross-language material round-trip uses, referencing checker.png (base color + emissive) and
+// normal.png. It exercises the whole material path: factor mapping, per-usage colour space, texture
+// dedup, and the normal-map → tangents gate.
+
+// A fresh, per-test output directory under the system temp dir (no external tempfile crate).
+fn temp_out(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rime_cook_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+fn stride_of(rmesh: &[u8]) -> u32 {
+    let (_, payload) = read_header(rmesh).unwrap();
+    u32::from_le_bytes(payload[4..8].try_into().unwrap()) // header: [attribs, stride, ...]
+}
+
+#[test]
+fn material_import_maps_the_gltf_factors() {
+    let import =
+        asset_pipeline::import_gltf_materials(&fixtures().join("material_quad.gltf")).unwrap();
+    assert_eq!(import.materials.len(), 1);
+    let m = &import.materials[0];
+    let mat = &m.material;
+    assert_eq!(mat.base_color, [0.8, 0.4, 0.2, 1.0]);
+    assert_eq!(mat.emissive, [0.1, 0.2, 0.3]);
+    assert_eq!(mat.metallic, 0.25);
+    assert_eq!(mat.roughness, 0.6);
+    assert_eq!(mat.normal_scale, 0.5); // from normalTexture.scale
+    assert_eq!(mat.occlusion_strength, 0.75); // from occlusionTexture.strength
+    assert_eq!(mat.alpha_cutoff, 0.3);
+    assert_eq!(mat.alpha_mode, AlphaMode::Mask);
+    assert!(m.has_normal_map, "the material has a normalTexture");
+}
+
+#[test]
+fn material_textures_dedup_by_image_and_color_space() {
+    let import =
+        asset_pipeline::import_gltf_materials(&fixtures().join("material_quad.gltf")).unwrap();
+    let m = &import.materials[0].material;
+    // checker.png used as base color AND emissive — both sRGB colour — is one cooked asset.
+    assert_eq!(m.base_color_tex, m.emissive_tex);
+    // checker.png used as metallic-roughness AND occlusion — both linear data — is one cooked asset
+    // (the glTF ORM-packing case).
+    assert_eq!(m.metallic_roughness_tex, m.occlusion_tex);
+    // The SAME image cooked in two colour spaces is two distinct assets (different bytes → different id).
+    assert_ne!(m.base_color_tex, m.metallic_roughness_tex);
+    // normal.png is present, linear, and distinct from the checker cooks.
+    assert_ne!(m.normal_tex, 0);
+    assert_ne!(m.normal_tex, m.base_color_tex);
+    // Two source images, one used in two colour spaces → exactly three unique cooked textures.
+    assert_eq!(import.textures.len(), 3);
+}
+
+#[test]
+fn a_normal_mapped_gltf_cooks_tangents_and_a_plain_one_does_not() {
+    // material_quad's material has a normal map → the mesh cooks with tangents (48-byte stride).
+    let out = temp_out("tangent_gate");
+    asset_pipeline::cook_path(
+        &fixtures().join("material_quad.gltf"),
+        &out,
+        ColorSpace::Srgb,
+    )
+    .unwrap();
+    assert_eq!(
+        stride_of(&std::fs::read(out.join("material_quad.rmesh")).unwrap()),
+        48,
+        "a normal-mapped mesh must carry tangents"
+    );
+
+    // quad.gltf names no material → no normal map → the mesh stays plain P/N/UV (32-byte stride).
+    let plain = temp_out("tangent_gate_plain");
+    asset_pipeline::cook_path(&fixtures().join("quad.gltf"), &plain, ColorSpace::Srgb).unwrap();
+    assert_eq!(
+        stride_of(&std::fs::read(plain.join("quad.rmesh")).unwrap()),
+        32,
+        "a mesh with no normal map must not pay for tangents"
+    );
+}
+
+#[test]
+fn cook_gltf_writes_every_asset_deterministically() {
+    let a = temp_out("mat_files_a");
+    let b = temp_out("mat_files_b");
+    asset_pipeline::cook_path(&fixtures().join("material_quad.gltf"), &a, ColorSpace::Srgb)
+        .unwrap();
+    asset_pipeline::cook_path(&fixtures().join("material_quad.gltf"), &b, ColorSpace::Srgb)
+        .unwrap();
+
+    // The cooked set: the mesh, one material, three unique textures, and the manifest — every file
+    // byte-identical across two independent cooks (no map/iteration order leaks into the output).
+    for f in [
+        "material_quad.rmesh",
+        "material_quad.mat0.rmat",
+        "material_quad.img0.srgb.rtex", // checker as base color / emissive
+        "material_quad.img0.lin.rtex",  // checker as metallic-roughness / occlusion
+        "material_quad.img1.lin.rtex",  // normal map
+        "manifest.txt",
+    ] {
+        let bytes_a = std::fs::read(a.join(f)).unwrap_or_else(|_| panic!("cook did not write {f}"));
+        let bytes_b = std::fs::read(b.join(f)).unwrap();
+        assert_eq!(bytes_a, bytes_b, "{f} must cook deterministically");
     }
 }

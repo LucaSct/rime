@@ -36,7 +36,7 @@ namespace {
 // what changes: its mesh buffers, its 256-byte slice of the draw-uniform buffer, and (for the
 // shading pass) its base-color texture. Draws run in extraction order, unsorted — sorting by
 // pipeline/material/depth is a measured optimization for when scenes are big enough to show it.
-void record_draws(rhi::CommandBuffer& cmd, const SceneDrawData& data, bool bind_material_texture) {
+void record_draws(rhi::CommandBuffer& cmd, const SceneDrawData& data, bool bind_material_textures) {
     cmd.bind_uniform_buffer(0, data.frame_ubo);
     for (std::size_t i = 0; i < data.draws.size(); ++i) {
         const DrawItem& item = data.draws[i];
@@ -44,8 +44,15 @@ void record_draws(rhi::CommandBuffer& cmd, const SceneDrawData& data, bool bind_
         cmd.bind_vertex_buffer(mesh.vertices);
         cmd.bind_index_buffer(mesh.indices, rhi::IndexType::Uint32);
         cmd.bind_uniform_buffer(1, data.draw_ubo, i * kDrawUniformStride, sizeof(GpuDrawUniforms));
-        if (bind_material_texture) {
+        if (bind_material_textures) {
+            // The five material maps (fallbacks already resolved by the SceneRenderer), bindings
+            // 2–6 matching pbr_forward.frag. The depth pre-pass skips them — it has no fragment
+            // shader.
             cmd.bind_texture(2, data.base_color_textures[i], data.material_sampler);
+            cmd.bind_texture(3, data.metallic_roughness_textures[i], data.material_sampler);
+            cmd.bind_texture(4, data.normal_textures[i], data.material_sampler);
+            cmd.bind_texture(5, data.occlusion_textures[i], data.material_sampler);
+            cmd.bind_texture(6, data.emissive_textures[i], data.material_sampler);
         }
         cmd.draw_indexed(mesh.index_count);
     }
@@ -98,7 +105,7 @@ void DepthPrepass::add(RenderGraph& graph, RGTexture depth, const SceneDrawData&
     desc.depth = &depth_att;
     graph.add_raster_pass("depth-prepass", desc, [pipe = pipeline_, data](rhi::CommandBuffer& cmd) {
         cmd.bind_pipeline(pipe);
-        record_draws(cmd, data, /*bind_material_texture=*/false);
+        record_draws(cmd, data, /*bind_material_textures=*/false);
     });
 }
 
@@ -116,10 +123,17 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
                                    sizeof(pbr_forward_frag_spv),
                                    "pbr_forward.frag");
 
+    // Bindings 0/1 = frame/draw uniforms; 2–6 = the five material maps (base-color,
+    // metallic-roughness, normal, occlusion, emissive). One layout, every permutation — untextured
+    // slots bind a 1x1 fallback rather than spawning a shader variant (M6.4).
     const rhi::BindingDesc bindings[] = {
         {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
         {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
         {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
     };
     rhi::GraphicsPipelineDesc pd{};
     pd.vertex_shader = vertex_shader_;
@@ -184,7 +198,7 @@ void ForwardPbrPass::add(RenderGraph& graph,
         depth_prepassed ? pipeline_after_prepass_ : pipeline_standalone_;
     graph.add_raster_pass("forward-pbr", desc, [pipe, data](rhi::CommandBuffer& cmd) {
         cmd.bind_pipeline(pipe);
-        record_draws(cmd, data, /*bind_material_texture=*/true);
+        record_draws(cmd, data, /*bind_material_textures=*/true);
     });
 }
 

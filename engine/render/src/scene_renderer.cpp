@@ -93,9 +93,12 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
     fd.debug_name = "scene-frame-ubo";
     frame_ubo_ = device.create_buffer(fd);
 
-    // The untextured material's base-color map: one white texel. Multiplying by it is the
-    // identity, so the shader needs no "has texture?" branch — the classic dummy-texture trick.
-    // Srgb format to match the convention real base-color maps use (white is white either way).
+    // The white fallback: one white texel that decodes to 1.0. Multiplying by it is the identity,
+    // so the shader needs no "has texture?" branch — the classic dummy-texture trick. It serves
+    // FOUR slots (base-color, metallic-roughness, occlusion, emissive): 1.0 is the right identity
+    // for each (albedo×1, roughness/metallic factor×1, AO 1 = unoccluded, emissive×1), and white
+    // reads 1.0 whether the view srgb-decodes or not, so one texel covers both colour and data
+    // slots.
     rhi::TextureDesc td{};
     td.extent = {1, 1};
     td.format = rhi::Format::RGBA8Srgb;
@@ -104,6 +107,18 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
     white_ = device.create_texture(td);
     const std::uint8_t white_px[4] = {255, 255, 255, 255};
     device.write_texture(white_, white_px, sizeof(white_px));
+
+    // The normal-slot fallback: one flat tangent-space normal (128,128,255), which decodes to +Z,
+    // so an un-mapped surface keeps its geometric normal. Unorm (linear): a normal map is DATA, so
+    // it must NOT be sRGB-decoded on sampling.
+    rhi::TextureDesc nd{};
+    nd.extent = {1, 1};
+    nd.format = rhi::Format::RGBA8Unorm;
+    nd.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    nd.debug_name = "material-fallback-flat-normal";
+    flat_normal_ = device.create_texture(nd);
+    const std::uint8_t flat_normal_px[4] = {128, 128, 255, 255};
+    device.write_texture(flat_normal_, flat_normal_px, sizeof(flat_normal_px));
 
     // One sampler for every base-color map: trilinear + a little anisotropy (silently degrades
     // where unsupported), Repeat so tiled floors tile.
@@ -119,6 +134,7 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
 
 SceneRenderer::~SceneRenderer() {
     device_.destroy(material_sampler_);
+    device_.destroy(flat_normal_);
     device_.destroy(white_);
     if (draw_ubo_.is_valid())
         device_.destroy(draw_ubo_);
@@ -197,7 +213,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     const auto draw_count = static_cast<std::uint32_t>(frame_draws_.size());
     ensure_draw_capacity(std::max(draw_count, 1u));
     draw_staging_.assign(static_cast<std::size_t>(draw_count) * kDrawUniformStride, 0);
-    frame_textures_.resize(draw_count);
+    frame_base_color_.resize(draw_count);
+    frame_metallic_roughness_.resize(draw_count);
+    frame_normal_.resize(draw_count);
+    frame_occlusion_.resize(draw_count);
+    frame_emissive_.resize(draw_count);
     for (std::uint32_t i = 0; i < draw_count; ++i) {
         const DrawItem& item = frame_draws_[i];
         // Out-of-range material ids are a caller bug, but a defensive default keeps a bad id
@@ -218,10 +238,23 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         du.base_color[3] = material.base_color[3];
         du.params[0] = material.metallic;
         du.params[1] = material.roughness;
+        du.params[2] = material.normal_scale;
+        du.params[3] = material.occlusion_strength;
+        du.emissive[0] = material.emissive[0];
+        du.emissive[1] = material.emissive[1];
+        du.emissive[2] = material.emissive[2];
         std::memcpy(
             &draw_staging_[static_cast<std::size_t>(i) * kDrawUniformStride], &du, sizeof(du));
-        frame_textures_[i] =
-            material.base_color_texture.is_valid() ? material.base_color_texture : white_;
+        // Resolve each slot to its map or the correct fallback, so record_draws never branches on
+        // presence: the normal slot falls back to the flat-normal texel, every other slot to white.
+        const auto pick = [](rhi::TextureHandle map, rhi::TextureHandle fallback) {
+            return map.is_valid() ? map : fallback;
+        };
+        frame_base_color_[i] = pick(material.base_color_texture, white_);
+        frame_metallic_roughness_[i] = pick(material.metallic_roughness_texture, white_);
+        frame_normal_[i] = pick(material.normal_texture, flat_normal_);
+        frame_occlusion_[i] = pick(material.occlusion_texture, white_);
+        frame_emissive_[i] = pick(material.emissive_texture, white_);
     }
     if (draw_count > 0)
         device_.write_buffer(draw_ubo_, draw_staging_.data(), draw_staging_.size());
@@ -230,7 +263,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     SceneDrawData data{};
     data.meshes = &meshes_;
     data.draws = frame_draws_;
-    data.base_color_textures = frame_textures_;
+    data.base_color_textures = frame_base_color_;
+    data.metallic_roughness_textures = frame_metallic_roughness_;
+    data.normal_textures = frame_normal_;
+    data.occlusion_textures = frame_occlusion_;
+    data.emissive_textures = frame_emissive_;
     data.frame_ubo = frame_ubo_;
     data.draw_ubo = draw_ubo_;
     data.material_sampler = material_sampler_;

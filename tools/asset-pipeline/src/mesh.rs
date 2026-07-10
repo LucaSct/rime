@@ -1,17 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 
-//! The cooker's in-memory mesh and its RMA1 mesh-payload encoder. The vertex layout is the v1
+//! The cooker's in-memory mesh and its RMA1 mesh-payload encoder. The base vertex layout is the v1
 //! position/normal/uv interleave (32-byte stride) that `engine/assets` and `engine/render` consume;
-//! the encoder writes exactly the byte layout the C++ reader validates (see `docs/design/assets.md`).
+//! a normal-mapped mesh (M6.4) additionally carries a per-vertex tangent, which widens the stride to
+//! 48 bytes and sets one more attribute flag — an *additive* growth (ADR-0024 decision 6), not a new
+//! container version. The encoder writes exactly the byte layout the C++ reader validates (see
+//! `docs/design/assets.md`), and the reader re-derives the stride from the flags, so neither side can
+//! disagree on where a vertex ends.
 
 use crate::cooked::{wrap_container, ByteWriter, ASSET_KIND_MESH, MESH_SCHEMA_HASH};
 use crate::math;
 
-/// Vertex attribute flags (match `engine/assets/mesh_asset.hpp`). v1 always cooks position|normal|uv.
+/// Vertex attribute flags (match `engine/assets/mesh_asset.hpp`). A v1 mesh always cooks
+/// position|normal|uv; a normal-mapped mesh (M6.4) adds `tangent` and a wider stride.
 pub const ATTR_POSITION: u32 = 1 << 0;
 pub const ATTR_NORMAL: u32 = 1 << 1;
 pub const ATTR_UV: u32 = 1 << 2;
+pub const ATTR_TANGENT: u32 = 1 << 3;
+
+/// Interleaved vertex stride without / with tangents (bytes): pos+normal+uv is 32, +tangent is 48.
+/// These mirror `expected_vertex_stride` in the engine's `mesh_asset.hpp`; the reader validates the
+/// declared stride against the attribute flags, so a corrupt stride can't walk vertex addressing off
+/// the blob.
+pub const STRIDE_NO_TANGENT: u32 = 32;
+pub const STRIDE_WITH_TANGENT: u32 = 48;
 
 /// The v1 vertex: position, normal, uv — 32 bytes interleaved, matching the engine's `MeshVertex`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -30,12 +43,17 @@ pub struct Submesh {
 }
 
 /// A cooked-ready mesh: interleaved vertices, a 32-bit triangle-list index buffer, and a submesh
-/// table (one entry per source primitive).
+/// table (one entry per source primitive). `tangents`, when present, is a parallel array — one
+/// `[x, y, z, handedness]` per vertex — generated at import (M6.4, see `tangent.rs`) only for meshes
+/// a normal map needs. It lives beside `Vertex` rather than inside it because it is optional and
+/// derived *after* primitives merge; its presence is what flips `ATTR_TANGENT` and the wider stride
+/// in `cook`.
 #[derive(Debug, Default, Clone)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub submeshes: Vec<Submesh>,
+    pub tangents: Option<Vec<[f32; 4]>>,
 }
 
 impl Mesh {
@@ -53,7 +71,7 @@ impl Mesh {
             mesh.submeshes.push(Submesh {
                 first_index,
                 index_count: prim.indices.len() as u32,
-                material_slot: 0,
+                material_slot: prim.material_slot,
             });
         }
         mesh
@@ -79,12 +97,34 @@ impl Mesh {
     /// Encode this mesh into a complete RMA1 file, returning `(bytes, asset_id)`. The layout mirrors
     /// `decode_mesh` in the engine's reader exactly.
     pub fn cook(&self) -> (Vec<u8>, u64) {
-        const STRIDE: u32 = 32;
+        // Tangents are optional and additive: their presence sets one more attribute flag and widens
+        // the stride by a 4×f32 tangent, with no new container version. The declared stride and
+        // flags travel together, and the C++ reader re-derives the stride from the flags — so a
+        // tangent-bearing mesh and a plain one differ only in these two header words plus the extra
+        // per-vertex bytes.
+        let has_tangents = self.tangents.is_some();
+        let (attribs, stride) = if has_tangents {
+            (
+                ATTR_POSITION | ATTR_NORMAL | ATTR_UV | ATTR_TANGENT,
+                STRIDE_WITH_TANGENT,
+            )
+        } else {
+            (ATTR_POSITION | ATTR_NORMAL | ATTR_UV, STRIDE_NO_TANGENT)
+        };
+        // The tangent array, when present, is one-per-vertex by construction (generate_tangents sizes
+        // it to vertices.len()). Assert it, so a hand-built mesh can't cook a blob whose stride and
+        // vertex count silently disagree — the reader would reject it, but failing here names why.
+        debug_assert!(
+            self.tangents
+                .as_ref()
+                .is_none_or(|t| t.len() == self.vertices.len()),
+            "tangent array must have exactly one entry per vertex"
+        );
         let (min, max) = self.aabb();
 
         let mut p = ByteWriter::new();
-        p.u32(ATTR_POSITION | ATTR_NORMAL | ATTR_UV);
-        p.u32(STRIDE);
+        p.u32(attribs);
+        p.u32(stride);
         p.u32(self.vertices.len() as u32);
         p.u32(self.indices.len() as u32);
         for c in min {
@@ -99,7 +139,7 @@ impl Mesh {
             p.u32(s.index_count);
             p.u32(s.material_slot);
         }
-        for v in &self.vertices {
+        for (i, v) in self.vertices.iter().enumerate() {
             for c in v.position {
                 p.f32(c);
             }
@@ -109,6 +149,12 @@ impl Mesh {
             for c in v.uv {
                 p.f32(c);
             }
+            // Tangent last, matching the attribute order the reader's `expected_vertex_stride` walks.
+            if let Some(tangents) = &self.tangents {
+                for c in tangents[i] {
+                    p.f32(c);
+                }
+            }
         }
         for &i in &self.indices {
             p.u32(i);
@@ -117,10 +163,14 @@ impl Mesh {
     }
 }
 
-/// One imported primitive in world space, before merging. `indices` are local to `vertices`.
+/// One imported primitive in world space, before merging. `indices` are local to `vertices`;
+/// `material_slot` is the index into the cooked model's material table this primitive shades with
+/// (M6.4), resolved at import from the glTF primitive's material — a primitive with no material maps
+/// to the appended default-material slot. It rides through `from_primitives` onto the submesh.
 pub struct Primitive {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub material_slot: u32,
 }
 
 /// Derive per-vertex geometric normals from the triangle list (used when a primitive has no NORMAL
@@ -188,5 +238,61 @@ mod tests {
         let (min, max) = mesh.aabb();
         assert_eq!(min, [-1.0, -2.0, 2.0]);
         assert_eq!(max, [3.0, 0.0, 5.0]);
+    }
+
+    #[test]
+    fn tangents_widen_the_stride_and_set_the_flag() {
+        use crate::cooked::read_header;
+        // One triangle, cooked twice: plain (P/N/UV) and with a tangent per vertex. The payload's
+        // first two u32 words are the attribute flags and the stride; assert they change exactly as
+        // the additive-attribute design promises, and that the blob grows by 16 bytes per vertex.
+        let mut mesh = Mesh {
+            vertices: vec![
+                Vertex {
+                    position: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [1.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [0.0, 1.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+            submeshes: vec![Submesh {
+                first_index: 0,
+                index_count: 3,
+                material_slot: 0,
+            }],
+            tangents: None,
+        };
+        let (plain, _) = mesh.cook();
+        let (_, plain_payload) = read_header(&plain).unwrap();
+        assert_eq!(
+            u32_at(plain_payload, 0),
+            ATTR_POSITION | ATTR_NORMAL | ATTR_UV
+        );
+        assert_eq!(u32_at(plain_payload, 4), STRIDE_NO_TANGENT);
+
+        mesh.tangents = Some(vec![[1.0, 0.0, 0.0, 1.0]; 3]);
+        let (tan, _) = mesh.cook();
+        let (_, tan_payload) = read_header(&tan).unwrap();
+        assert_eq!(
+            u32_at(tan_payload, 0),
+            ATTR_POSITION | ATTR_NORMAL | ATTR_UV | ATTR_TANGENT
+        );
+        assert_eq!(u32_at(tan_payload, 4), STRIDE_WITH_TANGENT);
+        // Three vertices, each 16 bytes wider (the 4×f32 tangent), and nothing else moved.
+        assert_eq!(tan_payload.len(), plain_payload.len() + 3 * 16);
+    }
+
+    fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
     }
 }

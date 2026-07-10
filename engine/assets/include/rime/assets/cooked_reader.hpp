@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "rime/assets/asset_id.hpp"
+#include "rime/assets/material_asset.hpp"
 #include "rime/assets/mesh_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
 
@@ -54,6 +55,7 @@ enum class AssetError {
     IndexOutOfRange, // mesh: an index references a vertex that does not exist
     BadSubmesh,      // mesh: a submesh's [first, first+count) falls outside the index buffer
     InvalidTexture,  // texture: unknown format, or a mip table inconsistent with the base extent
+    InvalidMaterial, // material: unknown alpha mode, or a non-finite factor
     Io,              // the file could not be opened/read (load-from-path only)
 };
 
@@ -118,5 +120,29 @@ struct CookedHeader {
 [[nodiscard]] std::optional<TextureAsset> read_texture(std::span<const std::byte> file,
                                                        AssetError& out_error,
                                                        AssetId* out_id = nullptr) noexcept;
+
+// The schema fingerprint the current build expects a cooked *material* payload to match. It is the
+// reflection type_hash of the v1 material record (see cooked_reader.cpp) — the fixed set of factor
+// and texture-reference fields the reader walks. Change that record and previously cooked materials
+// are rejected with SchemaMismatch instead of being misread. The Rust cooker embeds this same
+// value; the M6.4 material golden-fixture test is the cross-language drift alarm (mirrors
+// mesh_schema_hash).
+[[nodiscard]] std::uint64_t material_schema_hash() noexcept;
+
+// Decode a material payload (the bytes after the header) into a fully validated MaterialAsset.
+// Assumes the caller has confirmed the header's kind and schema hash. A material is a FIXED-size
+// record, so the payload must be exactly the right length (no shorter, no trailing bytes), the
+// alpha mode must be a known enum value, and every factor must be finite — a NaN/Inf slipped into
+// the bytes is rejected rather than propagated into the shader. Texture-reference AssetIds are read
+// as-is (0 = no texture); whether the referenced asset exists is the loader's concern, not the
+// decoder's.
+[[nodiscard]] std::optional<MaterialAsset> decode_material(std::span<const std::byte> payload,
+                                                           AssetError& out_error) noexcept;
+
+// The one-call material path: read a whole cooked file, confirm it is a material of the expected
+// schema, and decode it. `out_id`, if non-null, receives the payload's content-hash identity.
+[[nodiscard]] std::optional<MaterialAsset> read_material(std::span<const std::byte> file,
+                                                         AssetError& out_error,
+                                                         AssetId* out_id = nullptr) noexcept;
 
 } // namespace rime::assets

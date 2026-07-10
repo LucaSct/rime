@@ -18,3 +18,8 @@ gltf = "1.4"
 # only the PNG and JPEG decoders v1 supports — not the whole format zoo — keeping the tree lean and
 # the cook deterministic. New source formats become new features here, not new dependencies.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Tangent generation for normal mapping (M6.4). MIT/Apache-2.0 (ship-safe). The Rust port of Morten
+# Mikkelsen's MikkTSpace — the *de-facto interchange convention* glTF specifies for generating
+# tangents when a mesh omits them (ADR-0024 §5). Using it means our tangents match the basis normal
+# maps are authored against; the derivation is written up in docs/math/tangent-space.md.
+mikktspace = "0.3"

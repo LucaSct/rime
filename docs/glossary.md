@@ -111,6 +111,23 @@ Entries are grouped roughly by area and kept short on purpose.
   it averages perception, not light — and makes every minified colour surface too dark (the classic
   "dark mipmaps"). The fix: linearise, average, re-encode. Rime's cooker does this offline (M6.3);
   a black/white checker's coarse mip is sRGB ~188, not the too-dark 128 the naive average gives.
+- **Normal mapping.** Faking fine surface detail (bumps, pores) by storing a per-texel *normal* in a
+  texture and shading with it, instead of adding triangles. The stored normals live in tangent space,
+  so the same map reuses across a surface facing any direction (M6.4).
+- **Tangent space / TBN.** The per-point orthonormal frame a normal map is written in: **T**angent
+  (the direction texture `u` increases), **B**itangent (`v` increases), and the surface **N**ormal.
+  A flat texel is `(0,0,1)` = the byte triple `(128,128,255)`. Rime ships one tangent per vertex (a
+  4×f32: `xyz` + a handedness sign in `w`, so the bitangent is `w·(N×T)`); the full derivation is
+  [math/tangent-space.md](math/tangent-space.md).
+- **MikkTSpace.** The de-facto *standard* algorithm for generating per-vertex tangents (Morten
+  Mikkelsen's). Because a normal map is baked against a specific tangent basis, both baker and renderer
+  must agree on it or seams glow and lighting slides; glTF mandates MikkTSpace for meshes that omit
+  tangents, so Rime's cooker generates with it.
+- **AO — Ambient occlusion.** A texture (or computed term) darkening creases and contact points that
+  self-shadow from *ambient/indirect* light. It multiplies the indirect term only — never direct
+  lights, which have their own real shadows — or contact edges look wrong (M6.4).
+- **Emissive.** A material's own emitted light (glowing screens, lava), added after the BRDF so it
+  shows even with no light hitting the surface. Linear RGB; glTF default is black (no emission).
 - **GI — Global Illumination.** Indirect light: light that bounces off surfaces before
   reaching the eye. "Real-time GI" (Lumen-style) computes this live, without baking.
 - **Baking.** Precomputing lighting into textures offline. Fast at runtime but static.
