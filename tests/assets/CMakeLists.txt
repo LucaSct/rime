@@ -10,7 +10,8 @@ rime_add_test(rime_assets_tests
     cooked_material_test.cpp
     manifest_test.cpp
     registry_test.cpp
-    fixture_test.cpp)
+    fixture_test.cpp
+    asset_server_test.cpp)
 
 # rime::assets is the module under test. rime::platform is linked because registry_test writes a
 # temporary cooked file through platform::write_file (the registry's own file I/O is already inside
