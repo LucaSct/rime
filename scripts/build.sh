@@ -102,6 +102,17 @@ if [ "$do_rust" -eq 1 ]; then
     fi
     command -v cargo >/dev/null 2>&1 || { echo "build.sh: cargo not found — run scripts/setup.sh first" >&2; exit 1; }
 
+    # Point the rime-ffi crate (M6.9) at the freshly-built C ABI so its tests link against the
+    # current librime_capi. Only meaningful after a C++ build produced the library; on Linux/macOS
+    # an rpath baked by the crate's build.rs then makes it discoverable at runtime. Windows has no
+    # rpath, so we leave RIME_CAPI_DIR unset there and the FFI tests skip themselves (a documented v1
+    # gap — see docs/design/ffi.md). Unset => the crate builds and its tests pass by skipping.
+    capi_lib_dir="$repo_root/build/$preset/lib"
+    if [ "$do_cpp" -eq 1 ] && { [ -e "$capi_lib_dir/librime_capi.so" ] || [ -e "$capi_lib_dir/librime_capi.dylib" ]; }; then
+        export RIME_CAPI_DIR="$capi_lib_dir"
+        say "Rust: RIME_CAPI_DIR=$RIME_CAPI_DIR (rime-ffi links the C ABI)"
+    fi
+
     # rust-toolchain.toml lives in tools/, so run cargo from there (a subshell keeps cwd).
     cargo_flags=""
     [ "$preset" = "release" ] && cargo_flags="--release"
