@@ -205,6 +205,44 @@ jobs:
         run: ctest --test-dir build/dev -R 'rime_core_tests|rime_ecs_tests|rime_assets_tests'
           --output-on-failure
 
+  # The SDK proof (M6.8): the in-tree tests show the code works; this shows the *package* works —
+  # that a downstream project can install Rime, find_package(rime CONFIG), link rime::*, and build
+  # against the install alone. scripts/sdk-smoke.sh builds the engine, installs it to a throwaway
+  # prefix, then configures + builds + RUNS the out-of-tree tests/sdk_consumer against that prefix,
+  # plus two install-hygiene guards (no private/backend headers leaked, no absolute build paths in
+  # the exported config). Linux-only in v1; macOS/Windows install paths are a tracked follow-up.
+  sdk-consumer:
+    name: SDK consumer (out-of-tree install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Conan
+        run: |
+          pip install "conan>=2,<3"
+          conan profile detect --force
+
+      # The engine build configures the platform module, which hard-requires X11 + Wayland dev libs
+      # at configure time; building rime_rhi needs only the Vulkan *headers* (from Conan). The
+      # consumer runs HEADLESS (AppConfig defaults to no device), so no Vulkan runtime/lavapipe is
+      # needed here — unlike the build and ASan jobs.
+      - name: Install Linux deps (windowing, to configure)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols
+
+      - name: SDK smoke (install → out-of-tree consumer)
+        run: ./scripts/sdk-smoke.sh
+
   lint:
     name: format, lint & license
     runs-on: ubuntu-latest # style/lint are OS-independent — check once.
