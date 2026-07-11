@@ -18,6 +18,18 @@ namespace {
     if (name == "mesh") {
         return AssetKind::Mesh;
     }
+    if (name == "texture") {
+        return AssetKind::Texture;
+    }
+    if (name == "material") {
+        return AssetKind::Material;
+    }
+    if (name == "skeleton") {
+        return AssetKind::Skeleton;
+    }
+    if (name == "clip") {
+        return AssetKind::AnimationClip;
+    }
     return std::nullopt;
 }
 

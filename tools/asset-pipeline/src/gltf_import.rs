@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use crate::math::{self, Mat4};
-use crate::mesh::{self, Primitive, Vertex};
+use crate::mesh::{self, normalize_weights, Primitive, SkinWeights, Vertex};
 use crate::PipelineError;
 
 /// Import every triangle primitive in the file's default scene, each already flattened to world
@@ -63,10 +63,15 @@ fn walk_node(
     );
 
     if let Some(mesh) = node.mesh() {
+        // A node with a skin drives its mesh by the skeleton, not by its own transform: glTF requires
+        // the mesh node's transform be ignored for a skinned mesh (the joints, with their inverse
+        // binds, place every vertex). So skinned primitives import in bind space, un-flattened.
+        let is_skinned = node.skin().is_some();
         for primitive in mesh.primitives() {
             out.push(import_primitive(
                 &primitive,
                 &world,
+                is_skinned,
                 buffers,
                 material_count,
             )?);
@@ -81,6 +86,7 @@ fn walk_node(
 fn import_primitive(
     primitive: &gltf::Primitive,
     world: &Mat4,
+    is_skinned: bool,
     buffers: &[gltf::buffer::Data],
     material_count: u32,
 ) -> Result<Primitive, PipelineError> {
@@ -103,9 +109,13 @@ fn import_primitive(
         })?
         .collect();
 
+    // Static primitives flatten their node's world transform into the vertices (M6.2 keeps no runtime
+    // scene graph); skinned primitives stay in bind space (identity) so their JOINTS_0 indices and the
+    // skeleton's inverse-bind matrices line up at sample time.
+    let vertex_xform: &Mat4 = if is_skinned { &math::IDENTITY } else { world };
     let world_positions: Vec<[f32; 3]> = positions
         .iter()
-        .map(|&p| math::transform_point(world, p))
+        .map(|&p| math::transform_point(vertex_xform, p))
         .collect();
 
     // Indices: a triangle list. If the primitive is non-indexed, synthesize 0..n. u8/u16 promote to
@@ -123,7 +133,9 @@ fn import_primitive(
 
     // Normals: transform if present (covector → inverse-transpose), else derive from the geometry.
     let normals: Vec<[f32; 3]> = match reader.read_normals() {
-        Some(read) => read.map(|n| math::transform_normal(world, n)).collect(),
+        Some(read) => read
+            .map(|n| math::transform_normal(vertex_xform, n))
+            .collect(),
         None => mesh::compute_normals(&world_positions, &indices),
     };
 
@@ -159,9 +171,48 @@ fn import_primitive(
         .map(|i| i as u32)
         .unwrap_or(material_count);
 
+    // Skin binding: for a skinned primitive, the four joint indices and weights per vertex. glTF's
+    // JOINTS_0/WEIGHTS_0 hold the first (and, for v1, only) four influences — a second set (JOINTS_1)
+    // is dropped with a warning and the surviving four renormalized. The joint indices reference the
+    // node's skin joint list, which the skeleton cooker preserves, so no remapping is needed here.
+    let skin = if is_skinned {
+        if reader.read_joints(1).is_some() {
+            eprintln!(
+                "warning: primitive has more than 4 joint influences per vertex; \
+                 dropping the extras (JOINTS_1+) and renormalizing (v1 skins at most 4)"
+            );
+        }
+        let joints: Vec<[u16; 4]> = reader
+            .read_joints(0)
+            .ok_or_else(|| {
+                PipelineError::Unsupported("skinned primitive has no JOINTS_0 accessor".to_string())
+            })?
+            .into_u16()
+            .collect();
+        let weights: Vec<[f32; 4]> = reader
+            .read_weights(0)
+            .ok_or_else(|| {
+                PipelineError::Unsupported(
+                    "skinned primitive has no WEIGHTS_0 accessor".to_string(),
+                )
+            })?
+            .into_f32()
+            .map(normalize_weights)
+            .collect();
+        if joints.len() != world_positions.len() || weights.len() != world_positions.len() {
+            return Err(PipelineError::Unsupported(
+                "skin joint/weight counts disagree with the vertex count".to_string(),
+            ));
+        }
+        Some(SkinWeights { joints, weights })
+    } else {
+        None
+    };
+
     Ok(Primitive {
         vertices,
         indices,
         material_slot,
+        skin,
     })
 }

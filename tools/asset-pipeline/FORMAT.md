@@ -14,8 +14,8 @@ All integers are **little-endian**, written **field by field** (never a struct c
 | --- | --- | --- |
 | `magic` | 4 bytes | `"RMA1"` (literal) |
 | `container_version` | u16 | `1` |
-| `asset_kind` | u16 | `1` = Mesh, `2` = Texture, `3` = Material (append, never renumber) |
-| `type_schema_hash` | u64 | mesh: `0x198738A2DDE250AC`; texture: `0xAB8A2B884141F736`; material: `0xCA4ED4CC434C941A` (see below) |
+| `asset_kind` | u16 | `1` = Mesh, `2` = Texture, `3` = Material, `4` = Skeleton, `5` = AnimationClip (append, never renumber) |
+| `type_schema_hash` | u64 | mesh: `0x198738A2DDE250AC`; texture: `0xAB8A2B884141F736`; material: `0xCA4ED4CC434C941A`; skeleton: `0xD90A5CB8EBA36DED`; clip: `0x6C84D2A2AAABCE49` (see below) |
 | `payload_size` | u64 | length of the payload that follows |
 
 The **asset id** is the FNV-1a 64 hash of the payload bytes (identical to the engine's `content_hash`).
@@ -24,16 +24,21 @@ The **asset id** is the FNV-1a 64 hash of the payload bytes (identical to the en
 
 | field | type | notes |
 | --- | --- | --- |
-| `vertex_attribs` | u32 | bitfield: position(1) \| normal(2) \| uv(4); v1 = `7` |
-| `vertex_stride` | u32 | `32` for v1 (position + normal + uv, all f32) |
+| `vertex_attribs` | u32 | bitfield: position(1) \| normal(2) \| uv(4) \| tangent(8) \| joints(16) \| weights(32); v1 = `7` |
+| `vertex_stride` | u32 | `32` base; `+16` with a tangent (`f32×4`); `+24` skinned (`u16×4` joints + `f32×4` weights) |
 | `vertex_count` | u32 | |
 | `index_count` | u32 | multiple of 3 (triangle list) |
 | `aabb_min` | 3 × f32 | local-space bounds over the (world-flattened) positions |
 | `aabb_max` | 3 × f32 | |
 | `submesh_count` | u32 | one per source primitive |
 | submeshes | `submesh_count` × (u32 first_index, u32 index_count, u32 material_slot) | material_slot = 0 until M6.4 |
-| vertices | `vertex_count` × 32 bytes | interleaved `px,py,pz, nx,ny,nz, u,v` (f32) |
+| vertices | `vertex_count` × stride | interleaved in flag-bit order: `px,py,pz, nx,ny,nz, u,v` (f32), then tangent `f32×4`, then joints `u16×4`, then weights `f32×4` — each present only if its flag is set |
 | indices | `index_count` × u32 | |
+
+A **skinned** mesh (M6.7) sets the joints + weights flags: `JOINTS_0` indices reference the mesh's
+cooked `SkeletonAsset` (remapped to its topological joint order), and `WEIGHTS_0` are renormalized to
+sum to 1. Its vertices import in **bind space** (the mesh node's transform is ignored, per glTF), unlike
+a static mesh whose node transform is flattened into the vertices.
 
 ## Texture payload
 
@@ -78,12 +83,49 @@ cooked texture, and the engine resolves each to one shared GPU upload. The cook 
 colour space from its usage (base-color/emissive sRGB; normal/MR/occlusion linear). Materials are not
 standalone source files — they are emitted from a glTF alongside its meshes.
 
+## Skeleton payload
+
+A skeleton is a joint count followed by a fixed 116-byte record per joint. Joints are written in
+**topological order** (every parent before its children); the cooker reorders glTF's arbitrary
+skin-joint list to achieve that, so a JOINTS_0 index (glTF skin order) and a clip channel target (a
+glTF node) are both remapped to this order.
+
+| field | type | notes |
+| --- | --- | --- |
+| `joint_count` | u32 | `1 … 65536` (joints are `u16`-addressable from a vertex) |
+| per joint → `parent` | i32 | parent joint index, or `-1` for a root; must be `<` this joint's index |
+| `name_hash` | u64 | FNV-1a of the joint's name |
+| `inverse_bind` | 16 × f32 | model → joint bind-local, column-major |
+| `translation` | 3 × f32 | bind-pose local translation |
+| `rotation` | 4 × f32 | bind-pose local rotation quaternion (x, y, z, w) |
+| `scale` | 3 × f32 | bind-pose local scale |
+
+## Animation-clip payload
+
+A clip is a header, a sparse channel table (only non-silent tracks), then a keyframe blob laid out
+track-by-track — shaped for the sampler, not for glTF's per-accessor form. Only STEP and LINEAR
+interpolation are cooked; CUBICSPLINE is rejected with a clear message.
+
+| field | type | notes |
+| --- | --- | --- |
+| `duration` | f32 | seconds, finite, ≥ 0 (max keyframe time) |
+| `joint_count` | u32 | the skeleton this clip animates |
+| `channel_count` | u32 | non-silent tracks that follow |
+| per channel → `target_joint` | u32 | `< joint_count` |
+| `path` | u32 | `0` = translation, `1` = rotation, `2` = scale |
+| `interp` | u32 | `0` = step, `1` = linear |
+| `key_count` | u32 | keyframes in this track (≥ 1) |
+| keyframe blob | per channel, in table order | `f32 times[key_count]` (strictly increasing), then `f32 values[key_count × components]` — components = 3 (T/S) or 4 (rotation quaternion) |
+
 ## The schema hash
 
 `type_schema_hash` is the engine's reflection `type_hash` of a v1 layout record, computed and pinned in
 C++ and re-declared here. For a **mesh** it fingerprints the vertex layout (`mesh_schema_hash()` ↔
 `cooked::MESH_SCHEMA_HASH`); for a **texture** it fingerprints the `{width, height, offset, size}` mip
 record (`texture_schema_hash()` ↔ `cooked::TEXTURE_SCHEMA_HASH`); for a **material** it fingerprints the
-whole fixed material record (`material_schema_hash()` ↔ `cooked::MATERIAL_SCHEMA_HASH`). The reader
-rejects a mismatch with a "re-cook" error, so a layout change forces both sides to update together. If
-you change a layout, update the constant in both languages and regenerate the fixtures.
+whole fixed material record (`material_schema_hash()` ↔ `cooked::MATERIAL_SCHEMA_HASH`); for a
+**skeleton** it fingerprints the per-joint record (`skeleton_schema_hash()` ↔
+`cooked::SKELETON_SCHEMA_HASH`); for a **clip** it fingerprints the channel-table record
+(`clip_schema_hash()` ↔ `cooked::CLIP_SCHEMA_HASH`). The reader rejects a mismatch with a "re-cook"
+error, so a layout change forces both sides to update together. If you change a layout, update the
+constant in both languages and regenerate the fixtures.

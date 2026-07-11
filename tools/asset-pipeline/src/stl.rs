@@ -159,6 +159,7 @@ pub fn import_stl_binary(data: &[u8]) -> Result<StlImport, PipelineError> {
         vertices,
         indices,
         tangents: None,
+        skin: None, // STL has no rig; a skinned mesh comes only from glTF
     };
     Ok(StlImport {
         mesh,

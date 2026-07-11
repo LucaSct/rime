@@ -27,8 +27,9 @@ enum class AssetKind : std::uint16_t {
     Mesh = 1,
     Texture = 2,
     Material = 3,
-    // Reserved (cooked by later bricks): Skeleton = 4, AnimationClip = 5 (M6.7),
-    // Fracture = 6 (M8.1), MeshSdf = 7 (M10.4).
+    Skeleton = 4,      // joint hierarchy + bind pose (M6.7)
+    AnimationClip = 5, // keyframed TRS tracks (M6.7)
+    // Reserved (cooked by later bricks): Fracture = 6 (M8.1), MeshSdf = 7 (M10.4).
 };
 
 // A content-hashed asset identity. A struct (not a bare u64) so it cannot be confused with an
