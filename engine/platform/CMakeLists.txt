@@ -22,7 +22,8 @@ add_library(rime::platform ALIAS rime_platform)
 
 # Public headers: the OS-agnostic interface, visible to dependents and to our own backends.
 target_include_directories(rime_platform
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src) # private seam headers (platform_backend.hpp)
 
 # Depends only on the layer below (the layer cake). Threads::Threads arrives transitively
@@ -101,8 +102,13 @@ elseif(UNIX)
     add_library(rime_xdg_shell STATIC
         "${_wl_gen}/xdg-shell-protocol.c"
         "${_wl_gen}/xdg-shell-client-protocol.h")
-    target_include_directories(rime_xdg_shell PUBLIC "${_wl_gen}")
+    # The generated-header dir is a BUILD_INTERFACE include only — it must never leak into the
+    # install export as an absolute build path (and the xdg-shell glue is internal to rime_platform;
+    # no consumer includes it). SDK install (M6.8): a STATIC PRIVATE dep still contributes symbols
+    # the final consumer must link, so this archive is exported alongside the modules.
+    target_include_directories(rime_xdg_shell PUBLIC $<BUILD_INTERFACE:${_wl_gen}>)
     target_link_libraries(rime_xdg_shell PUBLIC PkgConfig::WAYLAND)
+    rime_install_support_lib(rime_xdg_shell)
 
     target_link_libraries(rime_platform
         PRIVATE rime_xdg_shell PkgConfig::WAYLAND PkgConfig::XKBCOMMON)
@@ -111,3 +117,6 @@ endif()
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.
 rime_apply_common_target_options(rime_platform)
+
+# SDK install/export (M6.8): headers + archive into the rime-targets export set.
+rime_install_module(rime_platform)

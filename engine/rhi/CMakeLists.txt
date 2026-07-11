@@ -15,7 +15,8 @@ add_library(rime::rhi ALIAS rime_rhi)
 
 # Public headers: the agnostic interface. Private src/ holds the backend's internal headers.
 target_include_directories(rime_rhi
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Depends only on the layers below (the layer cake): core for handles/log/asserts, platform for the
@@ -63,6 +64,9 @@ if(RIME_RHI_VULKAN)
     # protocol glue — it builds in its own static lib with default flags and is linked PRIVATE.
     add_library(rime_vma STATIC src/vulkan/vma_impl.cpp)
     target_link_libraries(rime_vma PRIVATE volk::volk_headers GPUOpen::VulkanMemoryAllocator)
+    # SDK install (M6.8): rime_vma is PRIVATE-linked into rime_rhi, but a STATIC dep still contributes
+    # symbols the final consumer must link, so its archive is exported alongside the modules.
+    rime_install_support_lib(rime_vma)
 
     # All Vulkan-facing deps are PRIVATE: the seam. volk::volk carries the compiled volk.c (the
     # dynamically-loaded entry points); Vulkan::Headers the types; VMA the allocator declarations.
@@ -75,6 +79,9 @@ endif()
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.
 rime_apply_common_target_options(rime_rhi)
+
+# SDK install/export (M6.8): headers + archive into the rime-targets export set.
+rime_install_module(rime_rhi)
 
 # One scoped exception to the warning set: the Vulkan struct-init idiom `VkFoo x{VK_STRUCTURE_TYPE_…}`
 # deliberately zero-initializes every other field, which is exactly what -Wmissing-field-initializers

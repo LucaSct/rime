@@ -22,7 +22,8 @@ add_library(rime_assets STATIC
 add_library(rime::assets ALIAS rime_assets)
 
 target_include_directories(rime_assets
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 target_link_libraries(rime_assets
     PUBLIC rime::core
@@ -30,3 +31,6 @@ target_link_libraries(rime_assets
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.
 rime_apply_common_target_options(rime_assets)
+
+# SDK install/export (M6.8): headers + archive into the rime-targets export set.
+rime_install_module(rime_assets)

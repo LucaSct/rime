@@ -170,9 +170,11 @@ ASan/UBSan + TSan) → merge. Stacked PRs are **pre-retargeted to `main` before 
 (`gh api repos/LucaSct/rime/pulls/<N> -X PATCH -f base=main`) — the stored token lacks `read:org`,
 so drive PRs through the REST API, not `gh pr edit`/`gh pr checks`. **Run clang-format before
 pushing** — it lives on the dev server at `~/.rime-tools/bin/clang-format` (v20.1.8, the exact
-pinned CI version): `~/.rime-tools/bin/clang-format -i $(git ls-files 'engine/*.cpp' 'engine/*.hpp'
-'tests/*.cpp' 'tests/*.hpp')`. CI's format job is the backstop, not the first line of defence —
-skipping the local run cost M6.3 and M6.4 a red-CI round-trip each.
+pinned CI version). Mirror CI's exact file set — `find`, **not** `git ls-files` (which skips
+*untracked* new files and so silently misses a brand-new source file, the trap that red-CI'd M6.8):
+`~/.rime-tools/bin/clang-format -i $(find engine tests \( -name '*.cpp' -o -name '*.hpp' -o -name
+'*.mm' \))`. CI's format job is the backstop, not the first line of defence — skipping the local run
+cost M6.3, M6.4 and M6.8 a red-CI round-trip each.
 
 ### Recording conventions
 

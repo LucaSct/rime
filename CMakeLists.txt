@@ -121,6 +121,58 @@ function(rime_apply_common_target_options target)
     endif()
 endfunction()
 
+# ── SDK install / export (M6.8, ADR-0016 rule 5) ──────────────────────────────
+# `cmake --install` lays down a usable Rime SDK: public headers + the static libs + a CMake
+# package config, so an out-of-tree app does `find_package(rime CONFIG)` +
+# `target_link_libraries(app rime::render …)` and builds. See docs/design/sdk.md and the
+# out-of-tree proof in tests/sdk_consumer/. GNUInstallDirs gives the conventional per-platform
+# lib/, include/, bin/ layout; CMakePackageConfigHelpers writes the config + version files.
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+# Where the package config + the exported targets file land in the install tree.
+set(RIME_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/rime")
+
+# rime_install_module(<target>): register one engine-module library into the shared
+# `rime-targets` export set and install its public headers. Every module funnels through here
+# exactly as it funnels through rime_apply_common_target_options() — one place that defines what
+# "install a Rime module" means. Modules must already give their PUBLIC include dir the
+# BUILD_INTERFACE/INSTALL_INTERFACE split (so a header resolves from the source tree in-build and
+# from <prefix>/include once installed — that $<INSTALL_INTERFACE:> already records the install
+# location, so we don't also pass INCLUDES DESTINATION here and duplicate it). A CMake function does
+# NOT open a new directory scope, so CMAKE_CURRENT_SOURCE_DIR here is the *calling* module's dir —
+# which is what makes the per-module header install work.
+function(rime_install_module target)
+    # The real target is `rime_core`; strip the prefix so that with the rime:: export NAMESPACE the
+    # consumer links `rime::core` — the SAME name as the in-tree add_library(rime::core ALIAS …)
+    # (aliases are not themselves exported, so without EXPORT_NAME the export would emit the raw
+    # `rime::rime_core`, and code could not move between an in-tree and an installed build unedited).
+    string(REGEX REPLACE "^rime_" "" _export_name "${target}")
+    set_target_properties(${target} PROPERTIES EXPORT_NAME ${_export_name})
+    install(TARGETS ${target}
+        EXPORT rime-targets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+endfunction()
+
+# rime_install_support_lib(<target>): register an internal, header-less static helper into the
+# same export set. These (rime_vma, rime_xdg_shell) are PRIVATE-linked into a module, but a STATIC
+# link turns even a PRIVATE dependency into a link-time requirement the final consumer executable
+# must satisfy — so the archive has to be installed and exported too, or the consumer link fails
+# with unresolved symbols. No public headers: their include dirs are BUILD_INTERFACE-only.
+function(rime_install_support_lib target)
+    # Same EXPORT_NAME de-prefixing as the modules (cosmetic here — consumers pull these in
+    # transitively via rime::rhi / rime::platform and never name them directly).
+    string(REGEX REPLACE "^rime_" "" _export_name "${target}")
+    set_target_properties(${target} PROPERTIES EXPORT_NAME ${_export_name})
+    install(TARGETS ${target}
+        EXPORT rime-targets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endfunction()
+
 # ── Offline shader compilation (GLSL -> SPIR-V at build time) ──────────────────────────
 # Rime ships no runtime shader compiler (ADR-0008): shaders are compiled during the build and
 # embedded as C arrays the consuming target #includes. rime_add_shaders is the front door; it
@@ -252,5 +304,34 @@ if(RIME_BUILD_TESTS)
     find_package(doctest REQUIRED)
     add_subdirectory(tests)
 endif()
+
+# ── Install the export set + package config (M6.8) ────────────────────────────
+# Each rime_install_module()/rime_install_support_lib() above registered its target into the
+# `rime-targets` export set; here we write that set out and generate the package config that
+# find_package(rime CONFIG) loads. The rime:: namespace on the export means a consumer sees the
+# SAME target names (rime::core, rime::render, …) as an in-tree build — code moves between the two
+# without edits. configure_package_config_file expands @PACKAGE_INIT@ and keeps the install
+# relocatable (no absolute paths baked in); the version file answers find_package(rime x.y)
+# with SameMajorVersion compatibility (pre-1.0 the semver promise is deliberately weak — a VISION
+# non-goal, spelled out in docs/design/sdk.md).
+install(EXPORT rime-targets
+    FILE rime-targets.cmake
+    NAMESPACE rime::
+    DESTINATION ${RIME_INSTALL_CMAKEDIR})
+
+configure_package_config_file(
+    "${RIME_CMAKE_DIR}/rime-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/rime-config.cmake"
+    INSTALL_DESTINATION ${RIME_INSTALL_CMAKEDIR})
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/rime-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/rime-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/rime-config-version.cmake"
+    DESTINATION ${RIME_INSTALL_CMAKEDIR})
 
 message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_assets, rime_render, rime_stream, rime_hello.")

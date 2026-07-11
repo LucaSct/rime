@@ -18,7 +18,8 @@ add_library(rime_stream STATIC
 add_library(rime::stream ALIAS rime_stream)
 
 target_include_directories(rime_stream
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 # The RHI interface gives us Device / handles / descriptors; rime::platform gives us the TCP sockets
 # the protocol streams over (protocol.hpp names platform::TcpSocket, so PUBLIC); rime::core (log,
@@ -34,3 +35,6 @@ target_link_libraries(rime_stream
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.
 rime_apply_common_target_options(rime_stream)
+
+# SDK install/export (M6.8): headers + archive into the rime-targets export set.
+rime_install_module(rime_stream)
