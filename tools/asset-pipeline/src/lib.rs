@@ -6,9 +6,12 @@
 //! `engine/assets` module is the reader. Files are the boundary (ADR-0001) — this crate never links
 //! the engine, and the engine never parses glTF.
 //!
-//! M6.2 covers glTF **mesh** import → cook (`rime-cli cook`). Textures (M6.3), materials/tangents
-//! (M6.4), and other source formats (STL at M6.6) are later bricks that reuse `cooked`/`manifest`.
+//! M6.2 covers glTF **mesh** import → cook (`rime-cli cook`); textures (M6.3) and materials/tangents
+//! (M6.4) reuse `cooked`/`manifest`. M6.6 adds binary **STL** as a second mesh source (`stl.rs`) —
+//! the graduation of the ICEM viewer's in-process loader into the offline pipeline — proving the
+//! pipeline is not glTF-shaped: STL cooks to the very same RMA1 `MeshAsset` the engine already loads.
 
+pub mod cook_cache;
 pub mod cooked;
 pub mod gltf_import;
 pub mod gltf_material;
@@ -16,12 +19,15 @@ pub mod manifest;
 pub mod material;
 pub mod math;
 pub mod mesh;
+pub mod stl;
 pub mod tangent;
 pub mod texture;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use cook_cache::CacheRecord;
 use manifest::ManifestEntry;
 use mesh::Mesh;
 use texture::{ColorSpace, Texture};
@@ -79,11 +85,17 @@ impl From<std::io::Error> for PipelineError {
     }
 }
 
-/// What a cook produced: the cooked files written and the manifest entries describing them.
+/// What a cook produced: the cooked files written and the manifest entries describing them, plus how
+/// many sources were cooked vs served from the cook cache (ADR-0024 §8) — the per-file cook functions
+/// leave the two counts at zero; `cook_path` fills them in.
 #[derive(Default)]
 pub struct CookOutput {
     pub cooked_files: Vec<PathBuf>,
     pub manifest: Vec<ManifestEntry>,
+    /// Source files actually (re)cooked this run.
+    pub sources_cooked: usize,
+    /// Source files whose unchanged bytes were served from the content-hash cache.
+    pub sources_cached: usize,
 }
 
 /// Import (and cook) a glTF's materials + textures from a path — the path-based convenience over
@@ -190,6 +202,33 @@ pub fn cook_gltf(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineErr
     Ok(out)
 }
 
+/// Cook a single binary STL file into `out_dir` as `<stem>.rmesh`. STL is geometry only — no
+/// materials, textures, or UVs — so the single submesh takes material slot 0 (the engine's default
+/// material) and there is no tangent pass. The faceted-normal import and exact-bit vertex dedup live
+/// in `stl.rs`, kept bit-faithful to the ICEM viewer's own loader so a cooked part shades identically
+/// to the live-loaded one (the M6.6 dogfood). Returns the cooked file plus its one manifest entry.
+pub fn cook_stl(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineError> {
+    let bytes = std::fs::read(input)?;
+    let import = stl::import_stl_binary(&bytes)?;
+    let (mesh_bytes, mesh_id) = import.mesh.cook();
+
+    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
+    let cooked_file = format!("{stem}.rmesh");
+    std::fs::create_dir_all(out_dir)?;
+    std::fs::write(out_dir.join(&cooked_file), &mesh_bytes)?;
+
+    Ok(CookOutput {
+        cooked_files: vec![out_dir.join(&cooked_file)],
+        manifest: vec![ManifestEntry {
+            source_path: input.to_string_lossy().into_owned(),
+            kind: "mesh",
+            id: mesh_id,
+            cooked_file,
+        }],
+        ..Default::default()
+    })
+}
+
 /// Cook a single PNG/JPEG file into `out_dir` as `<stem>.rtex`: decode to RGBA8, generate an offline
 /// mip chain (gamma-correctly for `Srgb`), and write the RMA1 texture. Returns its path + manifest
 /// entry. `color_space` says whether the image is colour (sRGB) or data (linear) — the CLI's
@@ -219,13 +258,16 @@ pub fn cook_texture(
             id,
             cooked_file,
         }],
+        ..Default::default()
     })
 }
 
-/// The kinds of source file the pipeline cooks today. Meshes are glTF; textures are PNG/JPEG.
+/// The kinds of source file the pipeline cooks today. Meshes come from glTF or binary STL (each with
+/// its own importer, both cooking to the same RMA1 mesh); textures are PNG/JPEG.
 #[derive(Clone, Copy)]
 enum SourceKind {
-    Mesh,
+    GltfMesh,
+    StlMesh,
     Texture,
 }
 
@@ -238,7 +280,8 @@ fn cook_kind_for(path: &Path) -> Option<SourceKind> {
         .to_ascii_lowercase()
         .as_str()
     {
-        "gltf" | "glb" => Some(SourceKind::Mesh),
+        "gltf" | "glb" => Some(SourceKind::GltfMesh),
+        "stl" => Some(SourceKind::StlMesh),
         "png" | "jpg" | "jpeg" => Some(SourceKind::Texture),
         _ => None,
     }
@@ -251,10 +294,11 @@ fn cook_one(
     color_space: ColorSpace,
 ) -> Result<CookOutput, PipelineError> {
     match cook_kind_for(input) {
-        Some(SourceKind::Mesh) => cook_gltf(input, out_dir),
+        Some(SourceKind::GltfMesh) => cook_gltf(input, out_dir),
+        Some(SourceKind::StlMesh) => cook_stl(input, out_dir),
         Some(SourceKind::Texture) => cook_texture(input, out_dir, color_space),
         None => Err(PipelineError::Unsupported(format!(
-            "{}: unrecognised source extension (expected .gltf/.glb/.png/.jpg/.jpeg)",
+            "{}: unrecognised source extension (expected .gltf/.glb/.stl/.png/.jpg/.jpeg)",
             input.display()
         ))),
     }
@@ -279,14 +323,59 @@ pub fn cook_path(
     };
     inputs.sort();
 
+    // The cook cache (ADR-0024 §8): a source whose bytes are unchanged since the last cook with this
+    // cooker version is served from `cook-cache.txt` instead of being re-cooked. The cache reflects
+    // *this invocation's* input set — a source no longer asked for drops out of both the cache and the
+    // manifest — so the two files never disagree, and re-cooking the same set is idempotent.
+    let prior = std::fs::read_to_string(out_dir.join("cook-cache.txt"))
+        .map(|t| cook_cache::parse(&t))
+        .unwrap_or_default();
+
     let mut combined = CookOutput::default();
+    let mut records: BTreeMap<String, CacheRecord> = BTreeMap::new();
     for source in &inputs {
+        let src_key = source.to_string_lossy().into_owned();
+        let src_hash = cooked::fnv1a_64(&std::fs::read(source)?);
+
+        // Hit: same source bytes, same cooker version, cooked files still present. Reuse the recorded
+        // manifest entries and leave the cooked files on disk untouched — no write, so it is fast and
+        // mtime-independent.
+        if let Some(rec) = prior.get(&src_key) {
+            if rec.is_fresh(src_hash, out_dir) {
+                combined.manifest.extend(rec.entries.iter().cloned());
+                combined
+                    .cooked_files
+                    .extend(rec.entries.iter().map(|e| out_dir.join(&e.cooked_file)));
+                combined.sources_cached += 1;
+                records.insert(
+                    src_key,
+                    CacheRecord {
+                        src_hash,
+                        cooker_version: cooked::COOKER_VERSION,
+                        entries: rec.entries.clone(),
+                    },
+                );
+                continue;
+            }
+        }
+
+        // Miss: cook it, and record what it produced so the next run can skip it.
         let out = cook_one(source, out_dir, color_space)?;
+        combined.sources_cooked += 1;
+        records.insert(
+            src_key,
+            CacheRecord {
+                src_hash,
+                cooker_version: cooked::COOKER_VERSION,
+                entries: out.manifest.clone(),
+            },
+        );
         combined.cooked_files.extend(out.cooked_files);
         combined.manifest.extend(out.manifest);
     }
 
-    std::fs::create_dir_all(out_dir)?; // ensure the manifest can be written even for an empty dir
+    std::fs::create_dir_all(out_dir)?; // ensure the sidecars can be written even for an empty dir
+    std::fs::write(out_dir.join("cook-cache.txt"), cook_cache::render(&records))?;
     std::fs::write(
         out_dir.join("manifest.txt"),
         manifest::render(&combined.manifest),

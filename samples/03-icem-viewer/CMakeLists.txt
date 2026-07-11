@@ -8,7 +8,7 @@
 add_executable(icem_viewer main.cpp)
 
 target_link_libraries(icem_viewer
-    PRIVATE rime::rhi rime::render rime::platform)
+    PRIVATE rime::rhi rime::render rime::platform rime::assets)
 
 rime_add_shaders(icem_viewer
     shaders/mesh.vert

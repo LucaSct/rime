@@ -18,10 +18,11 @@
 //           icem_viewer part.stl --offscreen v.ppm --clip z --field field.icef
 //           icem_viewer viscous.stl --flow velocity      # streamlines of the computed flow (D)
 //           icem_viewer viscous.stl --dvr --speed        # DVR of the speed boundary layer (D2)
-//           icem_viewer --assembly tokamak/              # many parts: colour, toggle, explode (E1)
-//           icem_viewer --engine engine/                 # geared turbofan: cut-away + Mach flow
-//           (Bview) icem_viewer                                  # no file -> a unit cube, runs
-//           anywhere
+//           icem_viewer --cooked part.rmesh              # a part the offline pipeline cooked
+//           (M6.6) icem_viewer --assembly tokamak/              # many parts: colour, toggle,
+//           explode (E1) icem_viewer --engine engine/                 # geared turbofan: cut-away +
+//           Mach flow (Bview) icem_viewer                                  # no file -> a unit
+//           cube, runs anywhere
 
 #include <algorithm>
 #include <array>
@@ -31,6 +32,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -48,6 +50,9 @@
 #include "mesh_render.hpp"
 #include "provenance.hpp"
 #include "provenance_view.hpp"
+#include "rime/assets/cooked_reader.hpp" // M6.6 dogfood: load pipeline-cooked meshes (--cooked)
+#include "rime/assets/mesh_asset.hpp"
+#include "rime/platform/filesystem.hpp" // read_file, for the cooked-mesh path
 #include "rime/platform/platform.hpp"
 #include "rime/render/orbit_camera.hpp" // graduated from the viewer at M5.5
 #include "rime/rhi/rhi.hpp"
@@ -672,6 +677,38 @@ std::string replace_extension(const std::string& path, const char* ext) {
 // The sibling computed-field file for an STL path (ICEM's `field.stl` pairs with its `field.icef`).
 std::string sibling_icef(const std::string& stl_path) {
     return replace_extension(stl_path, ".icef");
+}
+
+// Load a mesh the offline pipeline cooked (`rime cook <part>.stl`) into the viewer's CpuMesh — the
+// M6.6 dogfood path (ADR-0016 rule 4). The cooked RMA1 mesh is deduped and indexed; we index-expand
+// it back into the flat, un-indexed soup the viewer renders, reading only position + normal (STL
+// flat shading carries no UVs). The result is the SAME CpuMesh a live-loaded STL yields, so it
+// flows through the identical render path — that equivalence is what
+// tests/viewer/cooked_dogfood_test pins. This is the sole point the sample touches engine/assets:
+// files are the boundary (ADR-0001) and the engine never re-parses STL. Returns nullopt if the file
+// is missing or is not a valid cooked mesh.
+std::optional<CpuMesh> load_cooked_mesh(const std::string& path) {
+    const auto file = rime::platform::read_file(path);
+    if (!file)
+        return std::nullopt;
+    rime::assets::AssetError err{};
+    const auto cooked = rime::assets::read_mesh(*file, err);
+    if (!cooked)
+        return std::nullopt;
+
+    CpuMesh mesh;
+    mesh.vertices.reserve(cooked->indices.size());
+    for (const std::uint32_t vi : cooked->indices) {
+        const std::byte* base =
+            cooked->vertices.data() + static_cast<std::size_t>(vi) * cooked->vertex_stride;
+        float p[3];
+        float n[3];
+        std::memcpy(p, base, sizeof p);
+        std::memcpy(n, base + sizeof p, sizeof n);
+        mesh.vertices.push_back({p[0], p[1], p[2], n[0], n[1], n[2]});
+        rime::viewer::detail::expand_bounds(mesh, rime::core::Vec3{p[0], p[1], p[2]});
+    }
+    return mesh;
 }
 
 // Off-screen warped snapshot: a static peak-deformation view (gain = 25% of the part radius).
@@ -2122,7 +2159,8 @@ bool run_provenance_windowed(const rime::viewer::Provenance& prov, int max_frame
 
 int main(int argc, char** argv) {
     std::string stl_path;
-    std::string field_path; // explicit --field; else a sibling <stem>.icef is tried
+    std::string cooked_path; // --cooked <file>: view a mesh the pipeline cooked (M6.6 dogfood)
+    std::string field_path;  // explicit --field; else a sibling <stem>.icef is tried
     std::string out_path = "icem_view.ppm";
     bool offscreen = false;
     bool no_field = false;
@@ -2218,6 +2256,8 @@ int main(int argc, char** argv) {
             frames = std::atoi(argv[++i]);
         } else if (a == "--up-y") {
             world_up = {0.0f, 1.0f, 0.0f};
+        } else if (a == "--cooked" && i + 1 < argc) {
+            cooked_path = argv[++i];
         } else if (!a.empty() && a[0] != '-') {
             stl_path = a;
         }
@@ -2298,7 +2338,19 @@ int main(int argc, char** argv) {
     }
 
     CpuMesh mesh;
-    if (!stl_path.empty()) {
+    if (!cooked_path.empty()) {
+        // Dogfood: view a mesh the offline pipeline cooked, loaded through engine/assets instead of
+        // parsed here. Same render path as a live STL — that is the point (ADR-0016 rule 4).
+        auto loaded = load_cooked_mesh(cooked_path);
+        if (!loaded) {
+            std::fprintf(stderr,
+                         "icem_viewer: could not load cooked mesh '%s' "
+                         "(cook one with `rime cook <part>.stl --out <dir>`)\n",
+                         cooked_path.c_str());
+            return 1;
+        }
+        mesh = std::move(*loaded);
+    } else if (!stl_path.empty()) {
         auto loaded = rime::viewer::load_stl_binary_file(stl_path);
         if (!loaded) {
             std::fprintf(stderr, "icem_viewer: could not load binary STL '%s'\n", stl_path.c_str());
