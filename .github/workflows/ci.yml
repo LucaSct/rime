@@ -115,6 +115,13 @@ jobs:
           pip install "conan>=2,<3"
           conan profile detect --force
 
+      # The full ctest suite now includes the 08-gltf-zoo cook fixture, which shells out to
+      # `cargo run … rime cook` to produce the sample's RMA1 bytes before the ASan self-check loads
+      # them. So this job needs cargo on PATH too (the cooked producer is un-instrumented; only the
+      # gltf_zoo loader/renderer runs under ASan). Mirrors the build-&-test job's Rust setup.
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       # ASan+UBSan runs the FULL suite, including the Vulkan rhi tests on lavapipe, so it needs
       # the same windowing dev libs (to build) and Vulkan runtime (to run) as the build job.
       # RIME_REQUIRE_VULKAN=1 makes "no device" a failure rather than a silent skip.

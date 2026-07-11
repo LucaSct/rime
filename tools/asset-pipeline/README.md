@@ -19,6 +19,8 @@ cooked file's header.
 | M6.3 | **texture** import (PNG/JPEG), offline gamma-correct mip chains, sRGB/linear | landed |
 | M6.4 | metallic-roughness materials + tangent generation | landed |
 | M6.6 | binary **STL** import (a second mesh source) + content-hash cook cache; the viewer dogfood | landed |
+| M6.7 | glTF **skins / skeletons / animation clips** → `.rskel` + `.ranim`; skinned-mesh vertex attributes | landed |
+| M6.10 | the `samples/08-gltf-zoo` proof cooks through this crate end-to-end — **M6 complete** | landed |
 
 ## What the mesh cooker does (M6.2)
 
@@ -32,8 +34,9 @@ cooked file's header.
    (`<stem>.rmesh`), plus a `manifest.txt`. Output is **deterministic**: sorted traversal, no
    timestamps — the same input bytes always cook to the same output bytes.
 
-Out of scope for v1 (rejected with a clear message, or defaulted): non-triangle primitive modes,
-Draco-compressed geometry, skins, materials/tangents (M6.4), and glTF extensions.
+Materials + tangents (M6.4) and skins/skeletons/clips (M6.7) are now cooked alongside the mesh. Still
+out of scope for v1 (rejected with a clear message, or defaulted): non-triangle primitive modes,
+Draco-compressed geometry, and glTF extensions.
 
 ## What the texture cooker does (M6.3)
 

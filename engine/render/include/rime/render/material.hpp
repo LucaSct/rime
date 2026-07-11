@@ -59,6 +59,12 @@ public:
         return static_cast<MaterialId>(materials_.size() - 1);
     }
 
+    // Replace an existing material's parameters in place. The scene renderer holds a *const* ref
+    // and re-reads get(id) every frame, so mutating a desc here is seen on the next frame — which
+    // is how a material's borrowed placeholder textures get swapped for the real cooked ones as the
+    // GPU asset bridge streams them in (M6.10). No id is minted or invalidated.
+    void update(MaterialId id, const PbrMaterialDesc& desc) { materials_[id] = desc; }
+
     [[nodiscard]] const PbrMaterialDesc& get(MaterialId id) const { return materials_[id]; }
 
     [[nodiscard]] std::size_t size() const noexcept { return materials_.size(); }

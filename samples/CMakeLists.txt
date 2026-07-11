@@ -14,4 +14,5 @@ if(RIME_RHI_VULKAN)
     add_subdirectory(04-remote-view)    # Track S0.5: headless streaming server + a client (see + control)
     add_subdirectory(06-render-graph)   # M5.8: procedural PBR scene through the graph; "adding a pass is easy"
     add_subdirectory(07-first-light)    # M5.8: M5's "done when" — app-driven lit PBR scene (headless / --serve)
+    add_subdirectory(08-gltf-zoo)       # M6.10: M6's "done when" — cooked glTF gallery (import→cook→load→render)
 endif()
