@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# rime-ffi — safe Rust bindings to the Rime engine's C ABI (librime_capi, engine/capi, M6.9).
+# The FFI surface is tiny and hand-written (no bindgen dependency in v1 — see the plan).
+[package]
+name = "rime-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Safe Rust bindings to the Rime engine C ABI (librime_capi)"

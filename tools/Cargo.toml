@@ -4,7 +4,7 @@
 # [workspace.package] so every crate inherits one version / edition / license.
 [workspace]
 resolver = "2"
-members = ["rime-cli", "asset-pipeline"]
+members = ["rime-cli", "asset-pipeline", "rime-ffi"]
 
 [workspace.package]
 version = "0.0.1"

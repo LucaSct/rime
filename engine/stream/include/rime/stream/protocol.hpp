@@ -48,7 +48,23 @@ inline constexpr std::uint32_t kMaxMessageBytes = 64u * 1024u * 1024u;
 enum class MessageType : std::uint16_t {
     Frame = 0x0001, // server -> client: one encoded video frame (FrameMessage payload)
     Input = 0x0101, // client -> server: one input event (InputEvent payload)
-    Bye = 0xFFFF,   // either direction: graceful "I'm closing" (no payload)
+
+    // Reserved for the M9 editor channel (the 07-02 plan's M6 line item). The editor is a client of
+    // a live engine process (ADR-0016); its viewport/command traffic will use message types in
+    // [EditorReservedBegin, EditorReservedEnd]. M6 only RESERVES the range — no handler exists yet.
+    // These two are range markers, not messages, so a future dispatcher can test membership.
+    //
+    // Forward-compatibility rule this reservation relies on: the envelope carries the raw u16 type
+    // TRANSPARENTLY — recv_message() never rejects a type it doesn't recognize, it just hands the
+    // raw value to the caller, who ignores anything it can't handle. So reserving a range costs
+    // nothing today and breaks nothing: an old peer that receives a 0x02xx message simply drops it.
+    // When the editor channel actually lands (M9), the handshake `version:u16` is bumped so a new
+    // client only speaks 0x02xx to a new-enough server. This is pinned by a test in
+    // tests/stream/protocol_test.
+    EditorReservedBegin = 0x0200,
+    EditorReservedEnd = 0x02FF,
+
+    Bye = 0xFFFF, // either direction: graceful "I'm closing" (no payload)
 };
 
 // One encoded frame, ready for the wire. `data` is the codec's output (S0.3); `codec` + `desc` are

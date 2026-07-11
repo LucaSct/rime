@@ -25,6 +25,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)              # no compiler-specific dialects
 # Export compile_commands.json so clangd / tooling work out of the box.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Position-independent code everywhere. The C ABI (engine/capi, M6.9) is a SHARED library that links
+# the engine's STATIC module libraries, and linking a static archive into a shared object requires
+# its objects to be PIC. The runtime cost is negligible here, and it readies the engine for other
+# shared faces later. (Static linking into tests/samples/the SDK consumer is unaffected.)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# Hidden symbol visibility by default. The only symbols the rime_capi shared library exports are the
+# handful marked RIME_CAPI_API (visibility "default") in rime/capi/rime.h — the C++ innards of the
+# linked static libs stay internal to the .so, keeping the ABI surface exactly the C functions we
+# publish. Visibility does not affect STATIC linking (archive symbols still resolve into executables
+# and the installed static libs), so this is free for the rest of the build.
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+
 # Default to a sane build type for single-config generators.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "" FORCE)
@@ -36,6 +50,7 @@ endif()
 option(RIME_RHI_VULKAN "Build the Vulkan RHI backend" ON)
 option(RIME_BUILD_SAMPLES "Build example projects under samples/" ON)
 option(RIME_BUILD_TESTS "Build unit tests" ON)
+option(RIME_BUILD_CAPI "Build the rime_capi C ABI shared library (M6.9)" ON)
 option(RIME_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 
 # ── Sanitizers (Phase 0.3) ────────────────────────────────────────────────────
@@ -277,6 +292,13 @@ add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
 add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
 
+# The C ABI (M6.9): a SHARED library over a tiny extern "C" surface — the ADR-0001 boundary the Rust
+# editor/tools drive the engine through. Sits on top of app+assets; optional per the modularity
+# guardrail (the engine still builds without it).
+if(RIME_BUILD_CAPI)
+    add_subdirectory(engine/capi)
+endif()
+
 # Not yet wired — they land in later milestones/bricks (see docs/ROADMAP.md):
 #   add_subdirectory(engine/physics)     # rigid bodies, collision
 #   add_subdirectory(engine/destruction) # part-based destruction (headline system)
@@ -334,4 +356,4 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/rime-config-version.cmake"
     DESTINATION ${RIME_INSTALL_CMAKEDIR})
 
-message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_assets, rime_render, rime_stream, rime_hello.")
+message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_assets, rime_render, rime_stream, rime_app, rime_capi, rime_hello.")

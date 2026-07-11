@@ -257,6 +257,52 @@ TEST_CASE("loopback: handshake, client input, server frame, end to end") {
     CHECK(std::abs(out.px_b - expect_b) < 8);
 }
 
+TEST_CASE("a reserved editor message type transits transparently (forward-compat pin, M6.9)") {
+    // The M9 editor channel will use message types in [EditorReservedBegin, EditorReservedEnd].
+    // Reserving that range is only safe because the protocol carries an unknown type ID unmodified:
+    // a message sent with a reserved type must round-trip as its exact raw value and be distinct
+    // from every type this build handles — so today's peers ignore it, and M9 adds a handler by
+    // bumping the handshake version. Range sanity first, then the wire round-trip over loopback.
+    static_assert(static_cast<std::uint16_t>(stream::MessageType::EditorReservedBegin) == 0x0200);
+    CHECK(stream::MessageType::EditorReservedBegin != stream::MessageType::Frame);
+    CHECK(stream::MessageType::EditorReservedEnd != stream::MessageType::Bye);
+
+    auto listener = platform::TcpListener::bind(0);
+    REQUIRE(listener.has_value());
+    const std::uint16_t port = listener->local_port();
+    REQUIRE(port != 0);
+
+    const auto reserved = static_cast<stream::MessageType>(0x0200);
+    const Bytes body{std::byte{1}, std::byte{2}, std::byte{3}};
+
+    std::thread client([&] {
+        auto sock = platform::TcpSocket::connect("127.0.0.1", port);
+        if (!sock) {
+            return;
+        }
+        stream::ProtocolConnection conn(std::move(*sock));
+        if (!conn.handshake()) {
+            return;
+        }
+        (void)conn.send_message(reserved, body);
+    });
+
+    auto accepted = listener->accept();
+    REQUIRE(accepted.has_value());
+    stream::ProtocolConnection server(std::move(*accepted));
+    REQUIRE(server.handshake());
+
+    stream::MessageType type{};
+    Bytes payload;
+    REQUIRE(server.recv_message(type, payload));
+    CHECK(type == reserved);                   // the raw reserved value survived the round-trip
+    CHECK(type != stream::MessageType::Frame); // and today it reads as "unknown" to the dispatch
+    CHECK(type != stream::MessageType::Input);
+    CHECK(payload == body);
+
+    client.join();
+}
+
 TEST_CASE("handshake rejects a peer speaking gibberish") {
     auto listener = platform::TcpListener::bind(0);
     REQUIRE(listener.has_value());
