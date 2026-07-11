@@ -10,8 +10,10 @@
 //     server).
 //   client --headless: connect, script some input, receive+decode frames, and report — a GPU-free
 //     client that proves the round-trip anywhere (and writes PPMs with --ppm).
-//   client --window: the *interactive* windowed viewer — needs a display; see
-//   run_client_windowed().
+//   client --window (S0.7): the *interactive* windowed viewer — present each decoded frame as a
+//     full-window textured quad through a swapchain and forward real window key/mouse/scroll events
+//     as InputEvents. Needs a display (a real screen, or Xvfb on a headless box).
+//     run_client_windowed().
 //
 // The v0 scene is deliberately trivial: a full-screen **clear whose colour the remote input
 // steers** (drag = R,G; scroll = B; any key = reset). No pipeline, no shaders — the sample is about
@@ -19,7 +21,9 @@
 //
 // Run it (two terminals, same box or across a network):
 //   remote_view server --port 9000 --codec jpeg                 (headless; waits for a client)
-//   remote_view client --host 127.0.0.1 --port 9000 --frames 60
+//   remote_view client --host 127.0.0.1 --port 9000 --frames 60 (headless client, writes PPMs)
+//   remote_view client --window --host 127.0.0.1 --port 9000    (windowed viewer; needs a display)
+//   xvfb-run remote_view client --window --selftest --frames 30 (windowed smoke, no server/display)
 
 #include <algorithm>
 #include <atomic>
@@ -29,15 +33,22 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "rime/platform/platform.hpp" // window + event pump + input (the --window client)
 #include "rime/platform/socket.hpp"
 #include "rime/rhi/rhi.hpp"
 #include "rime/stream/frame_codec.hpp"
 #include "rime/stream/frame_streamer.hpp"
 #include "rime/stream/protocol.hpp"
+
+// Build-time-compiled SPIR-V for the present quad (rime_add_shaders → quad_{vert,frag}_spv).
+#include "quad.frag.spv.h"
+#include "quad.vert.spv.h"
 
 using namespace rime;
 
@@ -351,20 +362,447 @@ int run_client_headless(const std::string& host,
     return received > 0 ? 0 : 1;
 }
 
-int run_client_windowed() {
-    // The interactive windowed client needs a display, which this (possibly headless) build/host
-    // may not have — so it is intentionally not implemented here yet. It is small, and squarely on
-    // the roadmap (S0.5): present the decoded RGBA with the 02-textured-quad path (upload to a
-    // texture, draw a full-screen quad through a swapchain), and translate platform window
-    // key/mouse events into stream::InputEvent on the backchannel. Build and run it on a machine
-    // with a screen (macOS/MoltenVK first). See docs/design/graphics-streaming.md.
-    std::fprintf(
-        stderr,
-        "remote_view: the windowed client needs a display and isn't built yet (S0.5).\n"
-        "Use `client --headless` here (GPU-free), or implement/run the windowed viewer on a\n"
-        "machine with a screen — it reuses the 02-textured-quad present path plus a\n"
-        "window-event → stream::InputEvent mapping. See docs/design/graphics-streaming.md.\n");
-    return 2;
+// ── The windowed client (S0.7) ─────────────────────────────────────────────────────────────────
+// The interactive viewer: present each decoded frame as a full-window textured quad through a
+// swapchain, and forward the window's key/mouse events back as stream::InputEvents. It reuses the
+// 02-textured-quad present path (indexed quad + a combined image-sampler, the same quad.{vert,frag}
+// shaders) with two changes for video — the quad fills the whole window, and its sampled texture is
+// *dynamic*: re-uploaded from the freshly decoded RGBA every frame and re-created if the stream's
+// size changes. Needs a display (a real screen, or Xvfb on a headless box).
+
+// The presenter: a full-window quad whose texture we refresh each frame.
+struct VideoQuad {
+    rhi::Device& device;
+    rhi::BufferHandle vbuf{}, ibuf{};
+    rhi::SamplerHandle sampler{};
+    rhi::ShaderHandle vsh{}, fsh{};
+    rhi::PipelineHandle pipeline{};
+    rhi::TextureHandle texture{};
+    std::uint32_t tex_w = 0, tex_h = 0;
+
+    VideoQuad(rhi::Device& d, rhi::Format color_format) : device(d) {
+        using namespace rime::rhi;
+
+        struct Vertex {
+            float x, y, u, v;
+        };
+
+        // Fills the window (NDC -1..1). uv (0,0) sits at the top-left: Vulkan NDC y points down and
+        // the decoded frame is top-row-first, so v=0 must land at the top of the screen (upright).
+        static const Vertex vertices[] = {
+            {-1.0f, -1.0f, 0.0f, 0.0f},
+            {1.0f, -1.0f, 1.0f, 0.0f},
+            {1.0f, 1.0f, 1.0f, 1.0f},
+            {-1.0f, 1.0f, 0.0f, 1.0f},
+        };
+        static const std::uint16_t indices[] = {0, 1, 2, 2, 3, 0};
+
+        BufferDesc vbd{};
+        vbd.size = sizeof(vertices);
+        vbd.usage = BufferUsage::Vertex;
+        vbd.memory = MemoryUsage::CpuToGpu;
+        vbd.initial_data = vertices;
+        vbd.debug_name = "rv-quad-vertices";
+        vbuf = device.create_buffer(vbd);
+
+        BufferDesc ibd{};
+        ibd.size = sizeof(indices);
+        ibd.usage = BufferUsage::Index;
+        ibd.memory = MemoryUsage::CpuToGpu;
+        ibd.initial_data = indices;
+        ibd.debug_name = "rv-quad-indices";
+        ibuf = device.create_buffer(ibd);
+
+        SamplerDesc smd{};
+        smd.mag_filter = Filter::Linear; // smooth scaling of the frame to the window
+        smd.min_filter = Filter::Linear;
+        smd.address_mode = AddressMode::ClampToEdge;
+        smd.debug_name = "rv-quad-sampler";
+        sampler = device.create_sampler(smd);
+
+        ShaderDesc vsd{};
+        vsd.stage = ShaderStage::Vertex;
+        vsd.spirv = quad_vert_spv;
+        vsd.spirv_size_bytes = sizeof(quad_vert_spv);
+        vsd.debug_name = "rv-quad.vert";
+        vsh = device.create_shader(vsd);
+
+        ShaderDesc fsd{};
+        fsd.stage = ShaderStage::Fragment;
+        fsd.spirv = quad_frag_spv;
+        fsd.spirv_size_bytes = sizeof(quad_frag_spv);
+        fsd.debug_name = "rv-quad.frag";
+        fsh = device.create_shader(fsd);
+
+        static const VertexAttribute attrs[] = {
+            {0, Format::RG32Float, 0},
+            {1, Format::RG32Float, sizeof(float) * 2},
+        };
+        GraphicsPipelineDesc pd{};
+        pd.vertex_shader = vsh;
+        pd.fragment_shader = fsh;
+        pd.vertex_layout.stride = sizeof(Vertex);
+        pd.vertex_layout.attributes = attrs;
+        pd.color_format = color_format;
+        pd.topology = PrimitiveTopology::TriangleList;
+        pd.cull = CullMode::None;
+        pd.sampled_texture = true;
+        pd.debug_name = "rv-quad-pipeline";
+        pipeline = device.create_graphics_pipeline(pd);
+    }
+
+    ~VideoQuad() {
+        if (texture.is_valid()) {
+            device.destroy(texture);
+        }
+        device.destroy(pipeline);
+        device.destroy(fsh);
+        device.destroy(vsh);
+        device.destroy(sampler);
+        device.destroy(ibuf);
+        device.destroy(vbuf);
+    }
+
+    VideoQuad(const VideoQuad&) = delete;
+    VideoQuad& operator=(const VideoQuad&) = delete;
+
+    // (Re)create the sampled texture when the frame size changes, then upload the decoded RGBA.
+    // This is the plain per-frame write_texture path; killing the upload stall with async readback
+    // is s1.1's job — don't gold-plate it here.
+    void upload(std::uint32_t w, std::uint32_t h, const void* rgba, std::size_t bytes) {
+        if (w != tex_w || h != tex_h || !texture.is_valid()) {
+            device.wait_idle(); // the old texture may still be read by a frame in flight
+            if (texture.is_valid()) {
+                device.destroy(texture);
+            }
+            rhi::TextureDesc td{};
+            td.extent = {w, h};
+            td.format = rhi::Format::RGBA8Unorm;
+            td.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+            td.debug_name = "rv-video-texture";
+            texture = device.create_texture(td);
+            tex_w = w;
+            tex_h = h;
+        }
+        device.write_texture(texture, rgba, bytes);
+    }
+
+    void record(rhi::CommandBuffer& cmd, rhi::TextureHandle target, rhi::Extent2D extent) {
+        using namespace rime::rhi;
+        RenderingInfo ri{};
+        ri.color.target = target;
+        ri.color.load_op = LoadOp::Clear;
+        ri.color.store_op = StoreOp::Store;
+        ri.color.clear = {0.0f, 0.0f, 0.0f, 1.0f}; // letterbox any aspect mismatch in black
+        cmd.begin_rendering(ri);
+        cmd.bind_pipeline(pipeline);
+        cmd.bind_texture(0, texture, sampler);
+        cmd.bind_vertex_buffer(vbuf, 0);
+        cmd.bind_index_buffer(ibuf, IndexType::Uint16, 0);
+        Viewport vp{};
+        vp.width = static_cast<float>(extent.width);
+        vp.height = static_cast<float>(extent.height);
+        vp.max_depth = 1.0f;
+        cmd.set_viewport(vp);
+        Rect2D scissor{};
+        scissor.width = extent.width;
+        scissor.height = extent.height;
+        cmd.set_scissor(scissor);
+        cmd.draw_indexed(6);
+        cmd.end_rendering();
+    }
+};
+
+// The recv thread decodes frames into here; the present thread takes the newest. A one-slot mailbox
+// (not a queue): a slow presenter drops stale frames rather than falling behind — the right call
+// for a live view where latest-wins beats every-frame.
+struct FrameMailbox {
+    std::mutex m;
+    std::vector<std::byte> pixels;
+    std::uint32_t w = 0, h = 0;
+    bool dirty = false;
+
+    void put(std::vector<std::byte>&& px, std::uint32_t width, std::uint32_t height) {
+        std::lock_guard<std::mutex> lock(m);
+        pixels = std::move(px);
+        w = width;
+        h = height;
+        dirty = true;
+    }
+
+    // Move the newest frame out into `out` if one arrived since the last take; false otherwise.
+    bool take(std::vector<std::byte>& out, std::uint32_t& width, std::uint32_t& height) {
+        std::lock_guard<std::mutex> lock(m);
+        if (!dirty) {
+            return false;
+        }
+        out = std::move(pixels);
+        width = w;
+        height = h;
+        dirty = false;
+        return true;
+    }
+};
+
+// A moving gradient for --selftest: successive frames differ (proving the per-frame texture upload
+// + present actually cycles), no server required.
+void synthesize_frame(std::vector<std::byte>& buf, std::uint32_t w, std::uint32_t h, int frame) {
+    buf.resize(static_cast<std::size_t>(w) * h * 4);
+    const int shift = (frame * 4) & 0xff;
+    for (std::uint32_t y = 0; y < h; ++y) {
+        for (std::uint32_t x = 0; x < w; ++x) {
+            std::byte* p = &buf[(static_cast<std::size_t>(y) * w + x) * 4];
+            p[0] = static_cast<std::byte>((x * 255 / w + shift) & 0xff);
+            p[1] = static_cast<std::byte>(y * 255 / h);
+            p[2] = static_cast<std::byte>(shift);
+            p[3] = static_cast<std::byte>(255);
+        }
+    }
+}
+
+// Map a platform window event to a stream::InputEvent and send it. Pointer positions are scaled
+// from window framebuffer pixels into the *frame's* pixel space (what "client pixels" means to the
+// server: the coordinate system of the image it is sending), so a drag across the whole window
+// sweeps the server's full input range regardless of window size. Escape asks the window to close.
+void forward_input(stream::ProtocolConnection& conn,
+                   const platform::Event& e,
+                   platform::Extent2D win,
+                   std::uint32_t frame_w,
+                   std::uint32_t frame_h,
+                   platform::Window& window) {
+    using ET = platform::EventType;
+    const auto to_frame = [](float pos, std::uint32_t win_dim, std::uint32_t frame_dim) {
+        return win_dim == 0 ? 0
+                            : static_cast<std::int32_t>(pos / static_cast<float>(win_dim) *
+                                                        static_cast<float>(frame_dim));
+    };
+    stream::InputEvent ie;
+    switch (e.type) {
+        case ET::MouseMove:
+            ie.kind = stream::InputEvent::Kind::PointerMove;
+            ie.x = to_frame(e.mouse_move.x, win.width, frame_w);
+            ie.y = to_frame(e.mouse_move.y, win.height, frame_h);
+            break;
+        case ET::MouseButton:
+            ie.kind = e.button.down ? stream::InputEvent::Kind::PointerDown
+                                    : stream::InputEvent::Kind::PointerUp;
+            ie.code = static_cast<std::uint32_t>(e.button.button);
+            break;
+        case ET::MouseWheel:
+            ie.kind = stream::InputEvent::Kind::PointerScroll;
+            ie.scroll_x = e.wheel.dx;
+            ie.scroll_y = e.wheel.dy;
+            break;
+        case ET::KeyDown:
+            ie.kind = stream::InputEvent::Kind::KeyDown;
+            ie.code = static_cast<std::uint32_t>(e.key.key);
+            if (e.key.key == platform::Key::Escape) {
+                window.request_close();
+            }
+            break;
+        case ET::KeyUp:
+            ie.kind = stream::InputEvent::Kind::KeyUp;
+            ie.code = static_cast<std::uint32_t>(e.key.key);
+            break;
+        default:
+            return; // not an event we forward
+    }
+    (void)conn.send_input(ie);
+}
+
+// RAII for the platform lifetime: init() in the ctor, shutdown() in the dtor. Declaring it FIRST in
+// run_client_windowed means it is destroyed LAST — after the window — so the X11/Wayland connection
+// outlives every Window (the teardown-order the window backends require; see window_x11.cpp).
+struct PlatformSession {
+    bool ok = rime::platform::init();
+
+    ~PlatformSession() {
+        if (ok) {
+            rime::platform::shutdown();
+        }
+    }
+
+    PlatformSession() = default;
+    PlatformSession(const PlatformSession&) = delete;
+    PlatformSession& operator=(const PlatformSession&) = delete;
+};
+
+int run_client_windowed(const std::string& host,
+                        std::uint16_t port,
+                        int max_frames,
+                        bool selftest) {
+    using namespace rime::platform;
+
+    PlatformSession session; // first local ⇒ shutdown() runs last, after the window is gone
+    if (!session.ok) {
+        std::fprintf(stderr, "remote_view client --window: platform::init() failed\n");
+        return 1;
+    }
+
+    WindowDesc wd{};
+    wd.title = "Rime — remote view";
+    wd.width = 1280;
+    wd.height = 720;
+    auto window = create_window(wd);
+    if (!window) {
+        // No display (a headless box/CI with no screen and no Xvfb). Treat it as a guarded SKIP,
+        // the same way the samples skip when there is no Vulkan device — the windowed path is
+        // proven where a screen exists (Xvfb here; a real display on the Mac).
+        std::fprintf(
+            stderr,
+            "remote_view client --window: no display — skipping (run under a screen/Xvfb).\n");
+        return 0;
+    }
+    window->show();
+
+    rhi::DeviceDesc dd{};
+    dd.app_name = "04-remote-view (client)";
+    auto device = rhi::create_device(dd);
+    if (!device) {
+        std::fprintf(stderr, "remote_view client --window: no Vulkan device — skipping.\n");
+        return std::getenv("RIME_REQUIRE_VULKAN") != nullptr ? 1 : 0;
+    }
+
+    rhi::SwapchainDesc sc_desc{};
+    sc_desc.window = window->native_handle();
+    const Extent2D fb = window->framebuffer_size();
+    sc_desc.extent = {fb.width, fb.height};
+    auto swapchain = device->create_swapchain(sc_desc);
+    if (!swapchain) {
+        std::fprintf(stderr, "remote_view client --window: could not create a swapchain\n");
+        return 1;
+    }
+
+    std::optional<VideoQuad> quad;
+    quad.emplace(*device, swapchain->format());
+
+    // Connect to the server (unless self-testing): the recv thread decodes frames into the mailbox;
+    // this (main) thread presents the newest and forwards input. One sender (main: send_input) +
+    // one receiver (recv thread: recv_message) on the socket is the concurrency ProtocolConnection
+    // allows.
+    std::optional<stream::ProtocolConnection> conn;
+    std::thread recv_thread;
+    FrameMailbox mailbox;
+    std::atomic<bool> stop{false};
+    std::uint32_t frame_w = 256, frame_h = 256; // last known stream size (updates from real frames)
+
+    if (!selftest) {
+        auto sock = platform::TcpSocket::connect(host, port);
+        if (!sock) {
+            std::fprintf(stderr,
+                         "remote_view client --window: could not connect to %s:%u\n",
+                         host.c_str(),
+                         port);
+            return 1;
+        }
+        conn.emplace(std::move(*sock));
+        if (!conn->handshake()) {
+            std::fprintf(stderr, "remote_view client --window: handshake failed\n");
+            return 1;
+        }
+        std::printf("remote_view client --window: connected to %s:%u — presenting on '%s'.\n",
+                    host.c_str(),
+                    port,
+                    device->adapter().name.c_str());
+        recv_thread = std::thread([&] {
+            stream::FrameDecoder decoder;
+            stream::MessageType type{};
+            std::vector<std::byte> payload;
+            while (!stop.load()) {
+                if (!conn->recv_message(type, payload) || type == stream::MessageType::Bye) {
+                    break;
+                }
+                if (type != stream::MessageType::Frame) {
+                    continue;
+                }
+                stream::FrameMessage fm;
+                if (!fm.decode(payload)) {
+                    break;
+                }
+                std::vector<std::byte> pixels(fm.desc.byte_size());
+                if (!decoder.decode(fm.codec, fm.desc, fm.data, pixels)) {
+                    break;
+                }
+                mailbox.put(std::move(pixels), fm.desc.extent.width, fm.desc.extent.height);
+            }
+            stop.store(true); // the server went away ⇒ end the present loop too
+        });
+    } else {
+        std::printf(
+            "remote_view client --window: self-test (synthetic frames, no server) on '%s'.\n",
+            device->adapter().name.c_str());
+    }
+
+    // Present loop: pump + forward input, refresh the texture from the newest frame, draw, present.
+    std::vector<std::byte> pixels;
+    std::uint32_t pw = 0, ph = 0;
+    int presented = 0;
+    while (pump_events() && !window->should_close() && !stop.load()) {
+        if (max_frames > 0 && presented >= max_frames) {
+            break;
+        }
+
+        Event e{};
+        while (poll_event(e)) {
+            if (e.type == EventType::WindowClose) {
+                window->request_close();
+            }
+            if (conn) {
+                forward_input(*conn, e, window->framebuffer_size(), frame_w, frame_h, *window);
+            }
+        }
+
+        bool have_frame = false;
+        if (selftest) {
+            synthesize_frame(pixels, frame_w, frame_h, presented);
+            pw = frame_w;
+            ph = frame_h;
+            have_frame = true;
+        } else if (mailbox.take(pixels, pw, ph)) {
+            frame_w = pw;
+            frame_h = ph;
+            have_frame = true;
+        }
+        if (!have_frame) {
+            // Nothing new to show yet (waiting on the next server frame) — don't busy-spin.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+
+        quad->upload(pw, ph, pixels.data(), pixels.size());
+        rhi::TextureHandle target = swapchain->acquire_next_image();
+        if (!target.is_valid()) {
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+            continue;
+        }
+        auto cmd = device->begin_commands();
+        quad->record(*cmd, target, swapchain->extent());
+        if (!swapchain->present(*cmd)) {
+            const Extent2D s = window->framebuffer_size();
+            swapchain->recreate({s.width, s.height});
+        }
+        ++presented;
+    }
+
+    // Teardown: stop + say goodbye + join the recv thread BEFORE its std::thread destructs (a
+    // joinable thread's destructor calls std::terminate), then idle the GPU so the present
+    // resources (quad, swapchain) free cleanly as they go out of scope. The window is destroyed
+    // before `session` (declared first), which is what keeps the display alive across the window's
+    // destructor.
+    stop.store(true);
+    if (conn) {
+        (void)conn->send_bye();
+    }
+    if (recv_thread.joinable()) {
+        recv_thread.join();
+    }
+    device->wait_idle();
+    std::printf("remote_view client --window: presented %d frame%s.%s\n",
+                presented,
+                presented == 1 ? "" : "s",
+                selftest ? " (self-test)" : "");
+    return presented > 0 ? 0 : 1;
 }
 
 void usage() {
@@ -372,7 +810,10 @@ void usage() {
                  "usage:\n"
                  "  remote_view server [--host H] [--port N] [--codec jpeg|lz4|raw] [--size N]\n"
                  "  remote_view client [--host H] [--port N] [--frames N] [--ppm PREFIX]\n"
-                 "  remote_view client --window   (interactive; needs a display — see the note)\n");
+                 "  remote_view client --window [--host H] [--port N] [--frames N]\n"
+                 "        interactive viewer (needs a display); --frames N auto-exits after N\n"
+                 "  remote_view client --window --selftest [--frames N]\n"
+                 "        present synthetic frames with no server (the windowed smoke test)\n");
 }
 
 // Tiny flag lookup: returns the value after `name`, or `fallback` if absent.
@@ -414,7 +855,11 @@ int main(int argc, char** argv) {
     }
     if (role == "client") {
         if (has_flag(argc, argv, "--window")) {
-            return run_client_windowed();
+            // --frames 0 (the default) runs until the window is closed; a positive count auto-exits
+            // (the smoke-test path). --selftest presents synthetic frames without a server.
+            const int win_frames = std::atoi(flag(argc, argv, "--frames", "0").c_str());
+            const bool selftest = has_flag(argc, argv, "--selftest");
+            return run_client_windowed(host, port, win_frames < 0 ? 0 : win_frames, selftest);
         }
         const int frames = std::atoi(flag(argc, argv, "--frames", "60").c_str());
         return run_client_headless(
