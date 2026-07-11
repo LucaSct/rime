@@ -14,12 +14,12 @@
 
 // A test-side writer for RMA1 cooked-skeleton files, the sibling of material_fixture.hpp's
 // MaterialFileBuilder. It defaults to a valid two-joint skeleton (a root and one child, so the
-// topological-order invariant is actually exercised) with distinct values a round-trip test can tell
-// apart; a negative test overrides exactly one field to isolate the failure it provokes. A skeleton
-// is a fixed-size joint table, so this is a straight run of the standard container envelope plus the
-// joint records. The Rust cooker is the real writer from this brick on — the checked-in golden
-// fixture cross-checks the two — but a programmatic builder lets the negative battery craft files no
-// honest cooker would emit.
+// topological-order invariant is actually exercised) with distinct values a round-trip test can
+// tell apart; a negative test overrides exactly one field to isolate the failure it provokes. A
+// skeleton is a fixed-size joint table, so this is a straight run of the standard container
+// envelope plus the joint records. The Rust cooker is the real writer from this brick on — the
+// checked-in golden fixture cross-checks the two — but a programmatic builder lets the negative
+// battery craft files no honest cooker would emit.
 namespace rime_test {
 
 // One joint record in wire order: parent, name hash, the 16-float column-major inverse-bind matrix,
@@ -45,11 +45,18 @@ struct SkeletonFileBuilder {
     // inverse of that placement — distinct, non-default values throughout so a round-trip asserts
     // each landed in the right joint and field.
     std::vector<SkelJointRecord> joints = {
-        SkelJointRecord{rime::assets::Joint::kNoParent, 0xAu, {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
-                                                               0, 0, 0, 1}, {0, 0, 0}, {0, 0, 0, 1},
+        SkelJointRecord{rime::assets::Joint::kNoParent,
+                        0xAu,
+                        {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1},
+                        {0, 0, 0},
+                        {0, 0, 0, 1},
                         {1, 1, 1}},
-        SkelJointRecord{0, 0xBu, {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, 0, 0, 1}, {2, 0, 0},
-                        {0, 0, 0, 1}, {1, 1, 1}},
+        SkelJointRecord{0,
+                        0xBu,
+                        {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, 0, 0, 1},
+                        {2, 0, 0},
+                        {0, 0, 0, 1},
+                        {1, 1, 1}},
     };
     std::vector<std::byte> trailing;
 

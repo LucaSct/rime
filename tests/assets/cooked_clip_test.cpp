@@ -2,12 +2,13 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // Proof for the RMA1 cooked animation-clip reader (M6.7). Files are assembled by the test-side
-// writer (clip_fixture.hpp) exactly to the ADR-0024 clip layout. ROUND-TRIP: a valid file decodes to
-// exactly the per-joint TRS tracks written — each channel reconstructed into the right joint, path,
-// interpolation, times, and values, with silent joints left empty — and with the right content id.
-// NEGATIVE BATTERY: one crafted file per way a clip file can be wrong — bad envelope, a bad channel
-// path/interpolation, a zero-key or out-of-range channel, non-monotonic times, a non-finite value, a
-// table/blob size disagreement — each a clean typed error and never a crash (ASan/UBSan is the net).
+// writer (clip_fixture.hpp) exactly to the ADR-0024 clip layout. ROUND-TRIP: a valid file decodes
+// to exactly the per-joint TRS tracks written — each channel reconstructed into the right joint,
+// path, interpolation, times, and values, with silent joints left empty — and with the right
+// content id. NEGATIVE BATTERY: one crafted file per way a clip file can be wrong — bad envelope, a
+// bad channel path/interpolation, a zero-key or out-of-range channel, non-monotonic times, a
+// non-finite value, a table/blob size disagreement — each a clean typed error and never a crash
+// (ASan/UBSan is the net).
 //
 // doctest's main() lives in cooked_mesh_test.cpp (shared across the rime_assets_tests exe).
 
@@ -74,17 +75,18 @@ TEST_CASE("a valid cooked clip round-trips to exactly the written tracks") {
 TEST_CASE("multiple channels reconstruct into the right joint, path, and interpolation") {
     ClipFileBuilder builder;
     builder.joint_count = 2;
-    // A STEP rotation on joint 1 (four floats per quaternion key), a LINEAR scale on joint 0, and the
-    // default LINEAR translation on joint 0 — three channels spanning both joints and all three paths.
+    // A STEP rotation on joint 1 (four floats per quaternion key), a LINEAR scale on joint 0, and
+    // the default LINEAR translation on joint 0 — three channels spanning both joints and all three
+    // paths.
     ClipChannelRecord rot;
     rot.target_joint = 1;
-    rot.path = 1; // rotation
+    rot.path = 1;   // rotation
     rot.interp = 0; // step
     rot.times = {0.0f, 0.5f};
     rot.values = {0, 0, 0, 1, 0, 0, 1, 0}; // identity, then 180° about +Z (x,y,z,w)
     ClipChannelRecord scl;
     scl.target_joint = 0;
-    scl.path = 2; // scale
+    scl.path = 2;   // scale
     scl.interp = 1; // linear
     scl.times = {0.0f, 1.0f};
     scl.values = {1, 1, 1, 2, 2, 2};

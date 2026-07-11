@@ -12,12 +12,13 @@
 #include "rime/core/byte_cursor.hpp"
 
 // A test-side writer for RMA1 cooked animation-clip files, the sibling of skeleton_fixture.hpp's
-// builder. It defaults to a valid clip with one LINEAR translation channel (so a round-trip has real
-// keyframes to compare) and lets a negative test override exactly one field — a channel's path,
-// interpolation, key count, its times/values, or the envelope — to isolate the failure it provokes.
-// A clip is a header + a sparse channel table + a keyframe blob (times then values per channel, in
-// table order), so the builder writes those three parts and, deliberately, does NOT force key_count
-// to match the times/values it emits — that lets the battery craft a table/blob size disagreement.
+// builder. It defaults to a valid clip with one LINEAR translation channel (so a round-trip has
+// real keyframes to compare) and lets a negative test override exactly one field — a channel's
+// path, interpolation, key count, its times/values, or the envelope — to isolate the failure it
+// provokes. A clip is a header + a sparse channel table + a keyframe blob (times then values per
+// channel, in table order), so the builder writes those three parts and, deliberately, does NOT
+// force key_count to match the times/values it emits — that lets the battery craft a table/blob
+// size disagreement.
 namespace rime_test {
 
 // One channel in wire order. `path`: 0 = translation, 1 = rotation, 2 = scale. `interp`: 0 = step,
@@ -25,7 +26,7 @@ namespace rime_test {
 // set, is written into the table instead of times.size() (to craft a size mismatch).
 struct ClipChannelRecord {
     std::uint32_t target_joint = 0;
-    std::uint32_t path = 0;  // translation
+    std::uint32_t path = 0;   // translation
     std::uint32_t interp = 1; // linear
     std::vector<float> times = {0.0f, 1.0f};
     std::vector<float> values = {0.0f, 0.0f, 0.0f, 6.0f, 0.0f, 0.0f}; // two Vec3 keys
@@ -57,7 +58,8 @@ struct ClipFileBuilder {
         w.f32(duration);
         w.u32(joint_count_override.value_or(joint_count));
         w.u32(channel_count_override.value_or(static_cast<std::uint32_t>(channels.size())));
-        // The channel table, then the keyframe blob (times then values, per channel, in table order).
+        // The channel table, then the keyframe blob (times then values, per channel, in table
+        // order).
         for (const ClipChannelRecord& c : channels) {
             w.u32(c.target_joint);
             w.u32(c.path);
