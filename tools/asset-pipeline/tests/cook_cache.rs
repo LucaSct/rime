@@ -3,10 +3,11 @@
 
 //! Integration test for the M6.6 content-hash cook cache (ADR-0024 §8): a re-cook of an unchanged
 //! source is skipped without rewriting its cooked file, and a changed source re-cooks — both decided
-//! by the source's *content hash*, never its mtime. Exercised through the STL path, the self-contained
-//! format the cache is exact for.
+//! by the source's *content hash*, never its mtime. The skip/re-cook cases run through the STL path
+//! (the self-contained format the cache is exact for); a third case cooks a multi-asset glTF twice and
+//! asserts a cache hit reproduces the full cook's manifest verbatim — the M6.10 sub-asset regression.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use asset_pipeline::cook_path;
 use asset_pipeline::texture::ColorSpace;
@@ -15,6 +16,11 @@ fn temp_out(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rime_cache_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
+}
+
+/// The shared committed fixtures — read-only inputs we cook into a temp dir.
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/assets/fixtures")
 }
 
 /// A minimal binary STL of a unit quad (two coplanar triangles sharing a diagonal). `shift` slides it
@@ -77,6 +83,46 @@ fn unchanged_source_hits_cache_changed_source_recooks() {
         std::fs::read(&cooked).unwrap(),
         poisoned,
         "a changed source must re-cook"
+    );
+}
+
+#[test]
+fn a_cache_hit_reproduces_the_full_cook_manifest_for_sub_assets() {
+    // A source that cooks to MULTIPLE assets (a mesh + a material, whose manifest label sub-qualifies
+    // the source as `…#material0`) must yield the byte-identical manifest on a cache hit as on the full
+    // cook. The cook cache records each asset's *own* source label, not just the primary source file —
+    // the regression guard for the corruption that collapsed `#`-qualifiers (and dropped skeleton/clip
+    // entries) on the second cook, breaking `samples/08-gltf-zoo`'s link-by-source resolution.
+    let out = temp_out("subassets");
+    std::fs::create_dir_all(&out).unwrap();
+
+    // First cook: a miss (nothing cached). material_quad.gltf → a mesh + one material.
+    let r1 = cook_path(
+        &fixtures().join("material_quad.gltf"),
+        &out,
+        ColorSpace::Srgb,
+    )
+    .unwrap();
+    assert_eq!((r1.sources_cooked, r1.sources_cached), (1, 0));
+    let manifest_after_cook = std::fs::read_to_string(out.join("manifest.txt")).unwrap();
+
+    // Second cook, source unchanged: a hit. The manifest must be identical, sub-labels and all.
+    let r2 = cook_path(
+        &fixtures().join("material_quad.gltf"),
+        &out,
+        ColorSpace::Srgb,
+    )
+    .unwrap();
+    assert_eq!((r2.sources_cooked, r2.sources_cached), (0, 1));
+    let manifest_after_hit = std::fs::read_to_string(out.join("manifest.txt")).unwrap();
+
+    assert_eq!(
+        manifest_after_cook, manifest_after_hit,
+        "a cache hit must reproduce the exact manifest the full cook wrote"
+    );
+    assert!(
+        manifest_after_hit.contains("#material0"),
+        "the material's sub-qualified source label must survive a cache hit"
     );
 }
 
