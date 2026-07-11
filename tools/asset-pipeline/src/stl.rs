@@ -27,7 +27,11 @@ fn read_f32(data: &[u8], off: usize) -> f32 {
 }
 
 fn read_vec3(data: &[u8], off: usize) -> [f32; 3] {
-    [read_f32(data, off), read_f32(data, off + 4), read_f32(data, off + 8)]
+    [
+        read_f32(data, off),
+        read_f32(data, off + 4),
+        read_f32(data, off + 8),
+    ]
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -64,7 +68,7 @@ fn face_normal(v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], file_normal: [f32; 3]) 
 pub struct StlImport {
     pub mesh: Mesh,
     pub triangle_count: u32,
-    pub soup_vertex_count: u32,   // 3 * triangles — the un-indexed soup, before dedup
+    pub soup_vertex_count: u32, // 3 * triangles — the un-indexed soup, before dedup
     pub unique_vertex_count: u32, // after exact position+normal dedup
 }
 
@@ -80,7 +84,8 @@ pub fn import_stl_binary(data: &[u8]) -> Result<StlImport, PipelineError> {
     let looks_ascii = data.starts_with(b"solid");
     let ascii_err = || {
         PipelineError::Unsupported(
-            "ASCII STL is not supported (v1 cooks binary STL only) — re-export as binary STL".into(),
+            "ASCII STL is not supported (v1 cooks binary STL only) — re-export as binary STL"
+                .into(),
         )
     };
     if data.len() < STL_HEADER + 4 {
@@ -205,10 +210,19 @@ mod tests {
         assert_eq!(imp.mesh.indices.len(), 6);
         // Recomputed normal is geometric +Z, not the file's bogus -Z.
         for v in &imp.mesh.vertices {
-            assert!((v.normal[2] - 1.0).abs() < 1e-6, "normal should be +Z, got {:?}", v.normal);
+            assert!(
+                (v.normal[2] - 1.0).abs() < 1e-6,
+                "normal should be +Z, got {:?}",
+                v.normal
+            );
         }
         // The index buffer expands back to the exact original soup (positions in triangle order).
-        let soup: Vec<[f32; 3]> = imp.mesh.indices.iter().map(|&i| imp.mesh.vertices[i as usize].position).collect();
+        let soup: Vec<[f32; 3]> = imp
+            .mesh
+            .indices
+            .iter()
+            .map(|&i| imp.mesh.vertices[i as usize].position)
+            .collect();
         assert_eq!(soup, vec![a, b, c, a, c, d]);
     }
 
@@ -230,7 +244,10 @@ mod tests {
     fn ascii_stl_is_rejected_clearly() {
         let ascii = b"solid teapot\n facet normal 0 0 1\n".to_vec();
         let err = import_stl_binary(&ascii).unwrap_err();
-        assert!(matches!(err, PipelineError::Unsupported(ref m) if m.contains("ASCII")), "got {err}");
+        assert!(
+            matches!(err, PipelineError::Unsupported(ref m) if m.contains("ASCII")),
+            "got {err}"
+        );
     }
 
     #[test]
