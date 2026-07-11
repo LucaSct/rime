@@ -33,6 +33,9 @@ add_subdirectory(assets) # RMA1 reader + registry + manifest: fully GPU-free (in
 add_subdirectory(viewer) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
 add_subdirectory(stream) # codec proof is GPU-free (always built); the frame-tap proof self-guards on RIME_RHI_VULKAN
 add_subdirectory(app)    # fixed-tick loop + determinism: GPU-free; the render-loop case self-guards on a device
+if(RIME_BUILD_CAPI)
+    add_subdirectory(capi) # the C ABI (M6.9), driven through librime_capi — GPU-free
+endif()
 
 # The RHI and render-graph tests render through the Vulkan backend, so they only exist when it
 # is built.

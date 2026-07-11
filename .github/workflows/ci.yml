@@ -266,6 +266,12 @@ jobs:
       - name: C++ formatting (clang-format)
         run: find engine tests \( -name '*.cpp' -o -name '*.hpp' -o -name '*.mm' \) -exec clang-format --dry-run --Werror {} +
 
+      # The C ABI header (M6.9) must be usable from plain C, not just C++ — a downstream C or FFI host
+      # includes it directly. Compile it as C99 with the strict warning set so a C++-ism (a default
+      # argument, a cast that only C++ allows, //-less...) can't sneak in unnoticed.
+      - name: C99 header compile (rime/capi/rime.h)
+        run: cc -std=c99 -Wall -Wextra -Werror -Iengine/capi/include -fsyntax-only engine/capi/include/rime/capi/rime.h
+
       - name: Rust formatting (cargo fmt)
         working-directory: tools
         run: cargo fmt --all -- --check
