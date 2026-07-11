@@ -11,7 +11,8 @@ add_library(rime_render STATIC
     src/render_graph.cpp
     src/mesh.cpp
     src/passes.cpp
-    src/scene_renderer.cpp)
+    src/scene_renderer.cpp
+    src/gpu_asset_bridge.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
 # library, the same offline model the tests/samples use (ADR-0008). The generated headers are
@@ -32,9 +33,12 @@ target_include_directories(rime_render
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 # PUBLIC: render_graph.hpp names rhi types (handles, formats, the command-buffer interface) and
-# components.hpp names ecs::World, so consumers of rime::render need both sets of headers.
+# components.hpp names ecs::World, so consumers of rime::render need both sets of headers. rime::assets
+# is PUBLIC too: the GPU asset bridge (gpu_asset_bridge.hpp) exposes assets::AssetServer /
+# TextureAssetHandle in its interface. This is the ONE allowed assets↔render edge — render *consumes*
+# cooked assets and owns their GPU residency; assets never depends on render (ADR-0025).
 target_link_libraries(rime_render
-    PUBLIC rime::rhi rime::ecs)
+    PUBLIC rime::rhi rime::ecs rime::assets)
 
 # Project-wide build policy (C++20 + warning set + any sanitizer); defined in the top-level CMakeLists.
 rime_apply_common_target_options(rime_render)
