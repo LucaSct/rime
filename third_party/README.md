@@ -13,12 +13,14 @@ deliberate** — every dependency is code we ship, debug, and are bound by the l
   destiny; we don't pull in a library for something we should understand and own.
 - **Pin versions** and document why each dependency is here.
 
-## What we actually depend on (through M3 + Track S)
+## What we actually depend on (through M6 + Track S)
 
 Rime pulls its C++ build dependencies through **Conan** (see [`../conanfile.py`](../conanfile.py)),
 not by vendoring source into this directory — so `third_party/` currently holds no code. Each
 dependency is pinned and recorded in [`../NOTICE`](../NOTICE); all are permissive (Apache-2.0 /
-MIT / BSD), per the policy above.
+MIT / BSD), per the policy above. The Rust tooling under [`../tools`](../tools) likewise pulls its
+crates through **Cargo** (glTF/PNG import, mikktspace, clap, …), pinned in `tools/Cargo.lock` and
+recorded in the same NOTICE — again all permissive, none vendored here.
 
 | Need | Choice | Via | Notes |
 | --- | --- | --- | --- |

@@ -3,7 +3,7 @@
 `rime::assets` is the **load** half of Rime's asset model: it opens cooked binary files, validates
 them completely, and hands back typed, registry-owned assets. It is the runtime counterpart to the
 offline Rust `tools/asset-pipeline` (M6.2+), which imports source formats (glTF, PNG/JPEG, STL) and
-**cooks** them into these files. **Files are the boundary** ([ADR-0001](../../docs/adr/0001-language-and-module-boundaries.md),
+**cooks** them into these files. **Files are the boundary** ([ADR-0001](../../docs/adr/0001-cpp-core-rust-tooling.md),
 [ADR-0024](../../docs/adr/0024-asset-model.md)): the engine contains no glTF/PNG/STL parser and never
 will — all importing happens in the tools, all loading happens here.
 
@@ -18,8 +18,10 @@ one-way dependency is what keeps the whole reader unit-testable with in-memory b
 | M6.1 | **RMA1 reader** + **AssetRegistry** + **manifest reader**: cooked meshes load synchronously, content-addressed, trust-nothing | landed |
 | M6.2 | the Rust cooker (`rime-cli cook`) + glTF mesh import → a golden fixture this reader ingests in CI | landed |
 | M6.3 | **textures** (`AssetKind::Texture`, `TextureAsset`, full mip chains) → `read_texture`; the `checker.rtex` cross-language fixture | landed |
-| M6.4 | materials + tangents (new `AssetKind`, same container) | planned |
-| M6.5 | async loading on the `JobSystem` + placeholders | planned |
+| M6.4 | **materials** (`AssetKind::Material`, `read_material`) + MikkTSpace tangents in the cook; per-usage colour space | landed |
+| M6.5 | **async loading** — `AssetServer` runs IO/parse on the `JobSystem`, placeholder assets, frame-point drain (`GpuAssetBridge`, ADR-0025) | landed |
+| M6.7 | **skeletons + animation clips** (`read_skeleton`/`read_clip`) + a CPU clip sampler (GPU skinning follows at M7) | landed |
+| M6.10 | the proof: `samples/08-gltf-zoo` cooks + loads + renders three glTF models end-to-end — **M6 complete** | landed |
 
 ## The cooked container (RMA1)
 

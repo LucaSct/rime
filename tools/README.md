@@ -1,8 +1,10 @@
 # tools/ — the Rust tooling
 
 Rime's **editor**, **asset pipeline**, and **command-line tools** live here, written in
-**Rust** for memory safety and excellent tooling. It is a Cargo workspace; as of M6.2 the
-`asset-pipeline` and `rime-cli` crates have landed (glTF mesh import → cook).
+**Rust** for memory safety and excellent tooling. It is a Cargo workspace; as of M6 the
+`asset-pipeline` + `rime-cli` crates (glTF/STL import → cook; `rime cook`/`inspect`) and the
+`rime-ffi` crate (safe bindings to the engine's C ABI, M6.9) have landed. The `editor` is still to
+come (M9).
 
 Why Rust for tools (and C++ for the runtime)? See
 [../docs/adr/0001-cpp-core-rust-tooling.md](../docs/adr/0001-cpp-core-rust-tooling.md).

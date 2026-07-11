@@ -38,6 +38,9 @@ Entries are grouped roughly by area and kept short on purpose.
 - **ABI — Application Binary Interface.** The binary contract (layout, calling
   convention) two compiled modules use to interoperate. A *C ABI* is the stable lowest
   common denominator across languages.
+- **SDK — Software Development Kit.** Rime's installed, out-of-tree form: `cmake --install`
+  exports the engine libraries + headers so a *separate* project can `find_package(rime CONFIG)`
+  and link `rime::core`, `rime::assets`, … (M6.8). The C ABI ships in it as `rime::capi`.
 
 ## The world
 
@@ -232,6 +235,9 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Asset.** A piece of content the engine consumes — a mesh, texture, material, sound,
   animation clip, destructible. Source assets (glTF, PNG, STL…) are what tools edit;
   the engine only ever loads *cooked* assets.
+- **Asset id (`AssetId`).** An asset's stable identity — its content hash (below). The
+  runtime registry keys on it (so identical content loads once), and the manifest maps each
+  source path to the id of its cooked file.
 - **Import → cook.** *Import* parses a source format; *cooking* transforms it into the
   engine's own binary layout (mips generated, tangents computed, data validated) so the
   runtime does zero parsing work. Rime cooks offline in Rust (`rime-cli cook`); the C++

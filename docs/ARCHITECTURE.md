@@ -13,7 +13,11 @@ macOS**: `core` 🟢 and `platform` 🟢 (Milestones 0–2), `rhi` 🟡 (Milesto
 renderer top-ups), `ecs` 🟢 (Milestone 4), `render` 🟢 (**Milestone 5 complete** — the M5.4 render
 graph, M5.5 scene layer, and M5.6 forward-PBR pipeline, shown by `samples/06`/`07` and the M5.9
 dogfood test), `stream` 🟡 (Track S0), and `app` 🟡 (the M5.7 fixed-tick loop). Of the feature
-modules, `assets` 🟡 has begun (the M6.1 cooked-asset reader); the rest are still ⚪. This document is
+modules, `assets` 🟢 is **Milestone 6 complete** — the whole offline→runtime asset pipeline (glTF +
+STL import; textured, normal-mapped, and skinned cooks; async loading on the job system; the GPU
+asset bridge), shown end-to-end by `samples/08-gltf-zoo`; the new `capi` 🟢 C ABI (M6.9) exposes the
+runtime loader to the Rust tools, and the `tools/` layer is real (the `rime` cooker + the pipeline
+and FFI crates). The rest of the feature modules are still ⚪. This document is
 the blueprint we build toward; the per-section tags below say how far each part has actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
@@ -45,6 +49,8 @@ This is the single most important structural rule in the codebase.
         │  Games & Samples            (built ON Rime)             │
         ├───────────────────────────────────────────────────────┤
         │  Tools (Rust): Editor · Asset Pipeline · CLIs           │
+        ├───────────────────────────────────────────────────────┤
+        │  capi  (C ABI) ── the stable FFI seam the tools call    │
         ├───────────────────────────────────────────────────────┤
         │  Gameplay / Scripting layer                             │
         ├───────────────────────────────────────────────────────┤
@@ -175,18 +181,22 @@ Frostbite does it:
 Audio mixing/spatialization; skeletal animation & blending; networking/replication.
 Each behind its own interface.
 
-### `assets` 🟡 — *cooked-asset loading (files are the boundary)*
+### `assets` 🟢 — *cooked-asset loading (files are the boundary)*
 The runtime side of the asset pipeline: open cooked binary files, validate them completely, and hand
 back typed, registry-owned assets. All importing/cooking is offline in Rust (`tools/asset-pipeline`);
 the engine ships **no** source-format parser and loads only cooked files ([ADR-0024](adr/0024-asset-model.md)).
-*Built (M6.1):* the **RMA1 container reader** — a versioned header + kind-specific payload,
+*Built (M6, complete):* the **RMA1 container reader** — a versioned header + kind-specific payload,
 little-endian field-by-field, **bounds-checked before every allocation** (cooked bytes are trusted no
 more than network bytes); the **AssetRegistry** — handle-based ownership with **content-hash
-de-duplication**; and the plain-text **cook manifest** reader. Cooked meshes carry an attribute-flags
-vertex layout so tangents (M6.4) and skinning (M6.7) extend the format without a container break, plus
-a reflection **schema hash** so a file cooked against an old layout is rejected rather than misread.
-Depends only on `core` + `platform` — the renderer consumes assets, never the reverse. Hot reload is a
-documented seam, not yet a feature. → [ADR-0024](adr/0024-asset-model.md), [design/assets.md](design/assets.md).
+de-duplication**; and the plain-text **cook manifest** reader (M6.1). Meshes, textures (with their
+offline mip chains), PBR materials, and skeletons + animation clips all have readers (M6.2–M6.4, M6.7);
+cooked meshes carry an attribute-flags vertex layout so tangents and skinning extend the format without
+a container break, plus a reflection **schema hash** so a file cooked against an old layout is rejected
+rather than misread. The **AssetServer** runs IO/parse as jobs with placeholder assets and a
+frame-point drain (M6.5); the **GpuAssetBridge** uploads a cooked texture's mip chain and swaps a
+material's placeholder for the real handle (ADR-0025). Depends only on `core` + `platform` — the
+renderer consumes assets, never the reverse. Hot reload is a documented seam, not yet a feature. →
+[ADR-0024](adr/0024-asset-model.md), [design/assets.md](design/assets.md).
 
 ### `stream` 🟡 — *graphics streaming (Track S)*
 Capture a rendered frame, encode it, and ship it to a thin remote client that presents it and sends
@@ -211,6 +221,16 @@ determinism this buys is the multiplayer (M11) seam. The windowed/swapchain *pre
 documented seam (filled on a display); `rime_hello` stays the trivial M0 launcher. →
 [ADR-0023](adr/0023-app-fixed-tick-loop.md)
 
+### `capi` 🟢 — *the C ABI (the FFI seam)*
+A thin C-linkage shared library (`librime_capi`) that re-exports a hand-picked slice of the engine
+across a stable, opaque-handle boundary — the one place Rust tools (and any other language) reach the
+engine at runtime, per ADR-0001's "files and a C ABI, never internals." *Built (M6.9):* an opaque
+handle API over the asset loader that the `tools/rime-ffi` crate drives in its own tests, plus a
+reserved protocol message-type space for the M9 editor channel. This is Rime's **first shared
+library**, so it set the project-wide policy of position-independent code + hidden default visibility
+(only the annotated `RIME_CAPI` symbols are exported). Installs as `rime::capi`. →
+[design/ffi.md](design/ffi.md), [ADR-0001](adr/0001-cpp-core-rust-tooling.md).
+
 ## 4. Threading model ⚪
 
 Rime is **job-system-centric**. The frame is not a single thread doing everything in
@@ -221,13 +241,19 @@ streaming are all jobs. Consequences for everyone writing engine code:
 - Data is owned clearly so it can be touched in parallel safely.
 - Synchronization is explicit (and rare on hot paths).
 
-## 5. The Rust tooling layer (`tools/`) ⚪
+## 5. The Rust tooling layer (`tools/`) 🟡
 
 The **editor**, **asset pipeline** (importers, bakers, cookers), and **CLIs** are
 written in Rust for memory safety and modern tooling. They communicate with the C++
 engine across *stable* boundaries (a C ABI, files/formats, or a command protocol) —
 never by reaching into engine internals. Rationale and the FFI strategy:
 → [ADR-0001](adr/0001-cpp-core-rust-tooling.md).
+
+*Built (M6):* the **`asset-pipeline`** crate (glTF + STL import → RMA1 cook, content-hash cache) and
+the **`rime`** CLI (`rime cook`/`inspect`) — the offline half of the asset boundary the engine's
+`assets` module reads; and the **`rime-ffi`** crate, whose tests drive the engine through the `capi`
+C ABI. The **editor** is still ⚪ (M9). See [tools/README.md](../tools/README.md) and the per-crate
+READMEs.
 
 ## 6. Build system ⚪
 
