@@ -13,7 +13,7 @@
 #include <fstream>
 #include <vector>
 
-#include "rime/app/application.hpp"      // rime::app  → transitively rime::render/rhi/ecs/platform/core
+#include "rime/app/application.hpp" // rime::app  → transitively rime::render/rhi/ecs/platform/core
 #include "rime/assets/cooked_reader.hpp" // rime::assets
 
 int main(int argc, char** argv) {
@@ -24,8 +24,8 @@ int main(int argc, char** argv) {
     rime::app::Application app;
     app.run_frames(3);
 
-    // 2) The asset runtime. Load a cooked RMA1 mesh whose path is handed to us on argv[1] (the smoke
-    //    script ships cube.rmesh next to this binary). read_mesh() fully validates the file before
+    // 2) The asset runtime. Load a cooked RMA1 mesh whose path is on argv[1] (the smoke script
+    //    ships cube.rmesh next to this binary). read_mesh() fully validates the file before
     //    returning — a real use of rime::assets, not just a link check.
     if (argc < 2) {
         std::fprintf(stderr, "usage: %s <mesh.rmesh>\n", argv[0]);
@@ -44,12 +44,15 @@ int main(int argc, char** argv) {
     rime::assets::AssetError err{};
     const auto mesh = rime::assets::read_mesh(bytes, err);
     if (!mesh) {
-        std::fprintf(stderr, "sdk_consumer: read_mesh('%s') failed (AssetError %d)\n", argv[1],
+        std::fprintf(stderr,
+                     "sdk_consumer: read_mesh('%s') failed (AssetError %d)\n",
+                     argv[1],
                      static_cast<int>(err));
         return 4;
     }
 
     std::printf("sdk_consumer OK: ticked 3 frames, loaded mesh (%u vertices, %zu indices)\n",
-                mesh->vertex_count, mesh->indices.size());
+                mesh->vertex_count,
+                mesh->indices.size());
     return 0;
 }
