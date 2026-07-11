@@ -104,8 +104,16 @@ public:
 
     ~X11Window() override {
         g_windows().erase(window_);
-        XDestroyWindow(g_display, window_);
-        XFlush(g_display);
+        // A window may outlive platform::shutdown() (a teardown-order mistake, but the destructor
+        // must survive it, not segfault). If the X connection is already closed, XCloseDisplay
+        // freed this window's server-side resources with it — so XDestroyWindow here would both
+        // deref a null Display* and double-free. Skipping it is correct, not just defensive. This
+        // path is display-gated, so CI's off-screen proof never reached it (an Xvfb run / the S0
+        // windowed client is what surfaced the crash).
+        if (g_display != nullptr) {
+            XDestroyWindow(g_display, window_);
+            XFlush(g_display);
+        }
     }
 
     void set_title(std::string_view title) override {
