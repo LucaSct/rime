@@ -30,7 +30,8 @@ add_library(rime::core ALIAS rime_core)
 # Public headers under include/ are exposed to anything that links rime_core, so they
 # can `#include <rime/core/...>`. Private sources see them too.
 target_include_directories(rime_core
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 # The job system spins up std::thread workers, so core needs the platform threads library.
 # PUBLIC so anything linking rime::core (modules, tests, samples) also gets it.
@@ -50,3 +51,6 @@ target_compile_definitions(rime_core
 
 # Project-wide build policy (C++20 + warning set); defined in the top-level CMakeLists.
 rime_apply_common_target_options(rime_core)
+
+# SDK install/export (M6.8): headers + archive into the rime-targets export set.
+rime_install_module(rime_core)

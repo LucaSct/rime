@@ -28,7 +28,8 @@ add_library(rime::render ALIAS rime_render)
 
 # Public headers under include/ are exposed to anything that links rime_render.
 target_include_directories(rime_render
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 # PUBLIC: render_graph.hpp names rhi types (handles, formats, the command-buffer interface) and
 # components.hpp names ecs::World, so consumers of rime::render need both sets of headers.
@@ -37,3 +38,7 @@ target_link_libraries(rime_render
 
 # Project-wide build policy (C++20 + warning set + any sanitizer); defined in the top-level CMakeLists.
 rime_apply_common_target_options(rime_render)
+
+# SDK install/export (M6.8): headers + archive into the rime-targets export set. The embedded
+# shader headers stay PRIVATE (rime_add_shaders above), so no shader bytes leak into the SDK.
+rime_install_module(rime_render)

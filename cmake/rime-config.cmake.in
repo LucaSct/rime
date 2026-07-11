@@ -1,0 +1,51 @@
+@PACKAGE_INIT@
+
+# Rime package config — loaded by `find_package(rime CONFIG)` in a consumer project. See
+# docs/design/sdk.md for the SDK story and tests/sdk_consumer/ for the out-of-tree proof.
+#
+# Rime ships as STATIC libraries, so every third-party library the engine linked against becomes a
+# link-time requirement of the final consumer executable — even the ones Rime linked PRIVATE (a
+# static PRIVATE dep still contributes unresolved symbols the consumer must satisfy). So we re-find
+# each dependency here, BEFORE including rime-targets.cmake, so the imported-target names that file
+# references (fmt::fmt, volk::volk, PkgConfig::WAYLAND, …) already exist.
+#
+# v1 dependency stance: the consumer configures with the SAME Conan toolchain Rime was built with,
+# which is what makes the Conan-provided packages findable — Rime does not vendor or re-package
+# them. System deps (Threads, X11, wayland, xkbcommon) are found the same way the engine's own
+# build found them. This expectation is documented in docs/design/sdk.md; the deliberate-breakage
+# check in scripts/sdk-smoke.sh proves the error is legible when a dependency is missing.
+include(CMakeFindDependencyMacro)
+
+# PUBLIC usage requirements of rime::core — its public headers expand to fmt::format and it spins
+# std::thread workers, so both reach every consumer.
+find_dependency(fmt)
+find_dependency(Threads)
+
+# Streaming codecs — PRIVATE usage requirements of rime::stream; static, so they reach the link.
+find_dependency(libjpeg-turbo)
+find_dependency(lz4)
+
+# Vulkan RHI backend deps — only when Rime was built with the backend (the token below is
+# substituted with ON/OFF at install-config time). volk is the loader, VMA the allocator.
+if(@RIME_RHI_VULKAN@)
+    find_dependency(VulkanHeaders)
+    find_dependency(volk)
+    find_dependency(VulkanMemoryAllocator)
+endif()
+
+# Linux windowing — PRIVATE usage requirements of rime::platform (+ the rime_xdg_shell protocol
+# glue): Xlib, plus Wayland and xkbcommon located via pkg-config, recreating the same
+# PkgConfig::WAYLAND / PkgConfig::XKBCOMMON imported targets the export references. macOS and
+# Windows link their windowing from OS frameworks already baked into the archives — nothing to
+# re-find there.
+if(UNIX AND NOT APPLE)
+    find_dependency(X11)
+    find_dependency(PkgConfig)
+    pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
+    pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
+endif()
+
+# The exported targets themselves (rime::core, rime::platform, … under the rime:: namespace).
+include("${CMAKE_CURRENT_LIST_DIR}/rime-targets.cmake")
+
+check_required_components(rime)

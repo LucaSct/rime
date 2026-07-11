@@ -14,7 +14,8 @@ add_library(rime_app STATIC
 add_library(rime::app ALIAS rime_app)
 
 target_include_directories(rime_app
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 # PUBLIC because the app's public headers name these modules' types: World/Schedule (ecs), JobSystem
 # (core), Event (platform), and RenderGraph*/Device* in FrameContext (render, which brings rhi + core
@@ -24,6 +25,10 @@ target_link_libraries(rime_app
     PUBLIC rime::core rime::ecs rime::platform rime::render)
 
 rime_apply_common_target_options(rime_app)
+
+# SDK install/export (M6.8): headers + archive into the rime-targets export set. rime_hello below is
+# a demo launcher, not SDK surface, so it is deliberately NOT installed.
+rime_install_module(rime_app)
 
 # ── rime_hello — the minimal M0 launcher (kept) ──────────────────────────────────────────────────
 # Proves the engine builds, links a module (rime::core), and runs — the seed rime_app grew from.
