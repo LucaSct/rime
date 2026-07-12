@@ -28,6 +28,7 @@ endfunction()
 
 add_subdirectory(core)
 add_subdirectory(ecs)
+add_subdirectory(physics) # rigid-body core: pure-CPU, GPU-free — always built (M7)
 add_subdirectory(platform)
 add_subdirectory(assets) # RMA1 reader + registry + manifest: fully GPU-free (in-memory buffers)
 add_subdirectory(viewer) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
