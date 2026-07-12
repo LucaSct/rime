@@ -287,6 +287,7 @@ add_subdirectory(engine/core)     # foundation: version (M0); memory, math, jobs
 add_subdirectory(engine/platform) # OS abstraction: window, input, files, threads (M2+)
 add_subdirectory(engine/rhi)      # Render Hardware Interface + Vulkan backend (M3)
 add_subdirectory(engine/ecs)      # the data-oriented world: entities, components, systems (M4)
+add_subdirectory(engine/physics)  # own rigid-body core: bodies, collision, queries (M7, ADR-0026)
 add_subdirectory(engine/assets)   # cooked-asset loading: RMA1 reader, registry, manifest (M6)
 add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
