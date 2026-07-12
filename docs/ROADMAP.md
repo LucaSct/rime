@@ -131,6 +131,14 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 - **Docs:** keep ARCHITECTURE, glossary, and ADRs current as we build.
 - **Audio & animation:** feature tracks that slot in — audio *stub* at M8 (destruction
   event fan-out), real audio ~M8–M9; skeletal animation ~M6–M7.
+- **Simulation effects (Tracks FX & FL):** dedicated modules for the hardest simulation domains,
+  building on the M7 physics core's seams and the render graph. **Track FX** (`engine/vfx`) — a GPU
+  particle substrate with fire and dust/smoke as effect families (spawned from the M8 destruction event
+  fan-out; fire drives lights, smoke reads the M10 lighting data); it replaces M8.4's dust stub and
+  hard-gates M12's block. **Track FL** (`engine/fluids`) — CPU heightfield water with two-way buoyancy
+  coupling into physics; decided at M12.0. Both are cross-cutting (interleave under mainline-first), not
+  milestones; most of both is provable GPU-free/structural on lavapipe. *Inspired by: Frostbite/Niagara
+  effects; shallow-water + SPH literature.*
 - **Graphics streaming (Track S):** the engine renders → captures → encodes → transports → a thin
   client presents and sends input back. **S0** (LAN/loopback dev-stream — TCP, JPEG/LZ4, a thin
   Rime-built client) lands right after Phase 0, before M4; **S1+** (hardware codecs, QUIC/WebRTC)
@@ -367,8 +375,37 @@ real, M6.6–M6.7 widen the funnel, M6.8–M6.9 open the SDK/FFI doors, M6.10 cl
 **Milestone 6 complete.**
 
 **M7 — Physics (rigid bodies, multicore).** `engine/physics` behind an interface —
-bodies, collision, queries — stepped on the job system. Evaluate **integrating Jolt** vs.
-own core (its own ADR). *Inspired by: Jolt.*
+bodies, collision, queries — stepped on the job system. **Decision (M7.0,
+[ADR-0026](adr/0026-physics-core.md)): Rime builds its OWN rigid-body core — no Jolt** (VISION #1
+power-first, #3 code-as-textbook; the core is shaped for destruction rather than adapted to it). The
+core is the *universal simulation substrate* — destruction (M8), lighting invalidation (M10), and the
+effects/fluids tracks all build on its seams. *Inspired by: Jolt (studied, not integrated); Bullet;
+the sequential-impulse literature.*
+
+*Bricks (planned 2026-07-12, own-core, bottom-up):* **M7.0 (done)** the physics-core decision
+(ADR-0026: own core; the algorithm suite; substrate seams; same-binary determinism; the deferred
+register); *proof:* the ADR. · **M7.1** `engine/physics` born — the seam headers, the SoA `BodyPool`
+(generational ids), ECS `RigidBody`/`Collider` components + reflection, semi-implicit-Euler +
+quaternion integration (no collision yet). · **M7.2** **broadphase** — dual dynamic AABB trees, fat
+AABBs, parallel queries, the canonical pair list. · **M7.3** **narrowphase I** — GJK + EPA +
+reference-face-clipping manifolds (feature ids, warm-start cache), sphere/capsule fast paths. ·
+**M7.4** **the solver** — sequential-impulse PGS, warm starting, friction pyramid, restitution, the
+NGS position pass (+`docs/math/sequential-impulse.md`). · **M7.5** **islands + sleeping + the parallel
+step** on `core::JobSystem` — bit-identical world hash across thread counts, TSan-netted. · **M7.6**
+**fixed-tick + ECS sync + change-detection stamps** (lands ADR-0018 §4 as public `engine/ecs` surface;
+awake-only write-back). · **M7.7** **queries** — ray/overlap/shape-cast via the BVH, batched
+parallel-safe variants, filters. · **M7.8** **contact/trigger/sleep events** — point + normal +
+impulse, canonical per-tick order, double-buffered (the M8-damage input). · **M7.9** **shapes II** —
+runtime convex hull (quickhull), polyhedral mass properties, static triangle mesh + midphase, compound
+(static + dynamic). · **M7.10** **CCD** (speculative contacts) + debris-scale tuning + `WorldStats` +
+the stress harness. · **M7.11** the proof — `samples/09-physics-playground` (`--headless` self-check +
+`--serve`) + docs true-up. Track brick **an1** (skeletal-animation runtime: palettes on jobs + GPU
+skinning) interleaves after M7.4 under the mainline-first rule.
+
+**M7 non-goals (deferred, recorded in [ADR-0026](adr/0026-physics-core.md)):** joints/motors/
+character controller (m12.0) · soft bodies/cloth/fluids (own modules — water is Track FL) · TGS solver
+mode · implicit gyroscopic integration · dynamic mesh-vs-mesh (convex decomposition at M8.1) · scaled
+colliders (v1 ignores scale) · cross-platform lockstep determinism.
 
 **M8 — Destruction v1 (the headline begins).** `engine/destruction` — part-based
 destructibles + connectivity, precomputed fracture, debris as real physics bodies,
