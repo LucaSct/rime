@@ -33,7 +33,7 @@ protocol is already proven, the viewport toolkit already graduated from the ICEM
 | Frame tap (capture) | `engine/stream` — `FrameStreamer` | **S0.2 ✅** |
 | Codec | `engine/stream` — `FrameEncoder`/`FrameDecoder` | **S0.3 ✅** |
 | Versioned protocol | `engine/stream` — `ProtocolConnection` (grows editor message types at M6/M9) | **S0.4 ✅** |
-| Server endpoint + headless client | `samples/04-remote-view` (built *on* Rime) | **S0.5 ◐** (windowed client pending) |
+| Server endpoint + headless + windowed client | `samples/04-remote-view` (built *on* Rime) | **S0.5 ✅ · S0.7 ◐** (live WAN numbers pending) |
 
 `engine/stream` is a **removable** feature module that depends only on the RHI *interface* and the
 platform transport — never a graphics backend — so it captures from Vulkan today and any future
@@ -50,18 +50,25 @@ openh264 / royalty-free AV1 — never GPL x264 in the engine).
   measurement ([ADR-0017](../adr/0017-streaming-codec.md)). Detailed below.
 - **S0.4 — protocol v0 ✅.** Versioned, length-prefixed frame + input messages over TCP (the editor
   rides this at M9). Detailed below.
-- **S0.5 — the endpoint ◐.** `samples/04-remote-view`, one binary, two roles: a **headless server**
-  (render off-screen → tap → encode → stream, applying the input the client sends back) and a
-  **headless client** (`client --headless`: script input, receive + decode frames, report / write
-  PPMs). Both run without a *display* on a lavapipe box — the full see-and-control loop, verified. The
-  remaining half is the **windowed client** (`client --window`): present decoded frames via the
-  02-textured-quad path + map real window key/mouse events to `InputEvent`. It needs a display, so it
-  lands on a machine with a screen (macOS/MoltenVK first).
+- **S0.5 — the endpoint ✅.** `samples/04-remote-view`, one binary, three roles: a **headless server**
+  (render off-screen → tap → encode → stream, applying the input the client sends back), a **headless
+  client** (`client --headless`: script input, receive + decode frames, report / write PPMs), and the
+  **windowed client** (below). The first two run without a *display* on a lavapipe box — the full
+  see-and-control loop, verified.
 - **S0.6 — proof.** *Engine-side loopback ✅* — `tests/stream/loopback_stream_test.cpp` streams a
   real lavapipe-rendered frame through the whole pipe (tap → encode → protocol → decode) over
   `127.0.0.1` and checks it arrives bit-exact; runs in CI (the GPU-free codec/protocol tests join it).
-  *Remaining:* the live **cross-machine** view + control from the Mac, with glass-to-glass latency
-  measured and recorded — needs the windowed client (S0.5) and a display.
+- **S0.7 — S0 close-out ◐.** The **windowed client** (`client --window`) presents each decoded frame
+  as a full-window textured quad through a swapchain (the 02-textured-quad present path, with a
+  *dynamic* texture re-uploaded per frame) and forwards real window key/mouse/scroll events as
+  `InputEvent`s. A single-process `--selftest` presents synthetic frames — the **windowed smoke** wired
+  into CTest as `remote_view_window_smoke`, which **skips gracefully with no display** and runs for
+  real under a virtual display (the Linux CI build job starts **Xvfb** so lavapipe presents to an
+  X11 surface — closing the gap that had let the windowed path go untested, where a window-teardown
+  crash lived undetected). Verified here under Xvfb: the full **server → windowed client** loopback
+  presents live-decoded frames (ASan-clean). *Remaining (the only display-gated piece):* the live
+  **cross-machine** session from the Mac — windowed client over WAN to the server on the Linux box —
+  with glass-to-glass latency measured and recorded (720p30). That is the last unchecked S0 clause.
 
 ## The frame tap (S0.2)
 

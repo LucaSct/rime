@@ -67,8 +67,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols \
-            mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
+            mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers xvfb
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
+          # Start a virtual X display so the WINDOWED present path actually runs on this GPU-less
+          # runner: lavapipe presents to an Xvfb X11 surface (VK_KHR_xlib_surface). Off-screen CI
+          # never exercised the window path, which is exactly how a window-teardown crash lived
+          # undetected — the S0.7 remote_view --window smoke (and the 02-textured-quad windowed path)
+          # now get real coverage here. A background Xvfb on the runner VM persists to the test step;
+          # DISPLAY is carried forward via GITHUB_ENV. If it ever fails, the window tests skip (exit 0)
+          # rather than break CI.
+          Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       # One command builds + tests both halves (see scripts/build.{sh,ps1}). Running the
       # dev scripts here is what keeps them honest across all three OSes.

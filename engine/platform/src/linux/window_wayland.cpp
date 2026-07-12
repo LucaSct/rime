@@ -107,16 +107,23 @@ public:
         if (this == g_pointer_focus) {
             g_pointer_focus = nullptr;
         }
-        if (toplevel_ != nullptr) {
-            xdg_toplevel_destroy(toplevel_);
+        // If platform::shutdown() already disconnected the display, wl_display_disconnect freed
+        // every proxy (toplevel/xdg_surface/surface) with it — destroying them again is a
+        // use-after-free and wl_display_flush(nullptr) a null-deref. Guard the Wayland teardown on
+        // a live display (the same display-gated teardown-order footgun the X11 backend has; the
+        // local focus/registry bookkeeping above is process-local and always safe).
+        if (g_display != nullptr) {
+            if (toplevel_ != nullptr) {
+                xdg_toplevel_destroy(toplevel_);
+            }
+            if (xdg_surface_ != nullptr) {
+                xdg_surface_destroy(xdg_surface_);
+            }
+            if (surface_ != nullptr) {
+                wl_surface_destroy(surface_);
+            }
+            wl_display_flush(g_display);
         }
-        if (xdg_surface_ != nullptr) {
-            xdg_surface_destroy(xdg_surface_);
-        }
-        if (surface_ != nullptr) {
-            wl_surface_destroy(surface_);
-        }
-        wl_display_flush(g_display);
     }
 
     void set_title(std::string_view title) override {
