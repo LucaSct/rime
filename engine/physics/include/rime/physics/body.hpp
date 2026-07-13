@@ -35,8 +35,9 @@ enum class MotionType : std::uint8_t {
 // Everything needed to create a body. Mass is explicit; the shape supplies the inertia
 // *distribution* (via compute_mass_properties). Static/Kinematic bodies are treated as
 // infinite-mass regardless of `mass`. Damping models air drag / numerical bleed; gravity_factor
-// scales this body's gravity (0 = floats, 1 = normal). Restitution/friction are carried for the
-// M7.4 solver (unused while M7.1 only integrates).
+// scales this body's gravity (0 = floats, 1 = normal). Friction/restitution are the solver's
+// contact materials (M7.4); across a touching pair they combine as μ = √(μ_a·μ_b) and
+// e = max(e_a, e_b) — see docs/math/sequential-impulse.md.
 struct BodyDesc {
     MotionType motion = MotionType::Dynamic;
     ShapeDesc shape{};

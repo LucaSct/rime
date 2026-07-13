@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -13,11 +14,12 @@
 #include "rime/core/math/quat.hpp"
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/shape.hpp"
+#include "solver.hpp"
 
-// The M7.1/M7.2 world: a data-oriented body pool, a semi-implicit Euler integrator, and a dual
-// dynamic-AABB-tree broadphase. No narrowphase/solver yet — M7.2 proves the storage, the
-// integration math, and that the broadphase reports exactly the candidate pairs a brute-force scan
-// would.
+// The M7.1–M7.4 world: a data-oriented body pool, a semi-implicit Euler integrator, a dual
+// dynamic-AABB-tree broadphase (M7.2), a GJK/EPA/clipping narrowphase with a persistent warm-start
+// cache (M7.3), and the sequential-impulse contact solver with its NGS position pass (M7.4). One
+// step() runs the whole pipeline; islands and the parallel step arrive at M7.5.
 namespace rime::physics {
 namespace {
 
@@ -60,6 +62,8 @@ struct PhysicsWorld::Impl {
     std::vector<float> linear_damping;
     std::vector<float> angular_damping;
     std::vector<float> gravity_factor;
+    std::vector<float> friction;              // Coulomb μ (M7.4 solver material)
+    std::vector<float> restitution;           // bounciness e (M7.4 solver material)
     std::vector<ShapeDesc> shape;             // needed to recompute the world AABB after moving
     std::vector<std::int32_t> proxy;          // this body's node in its broadphase tree
     std::vector<std::uint32_t> dense_to_slot; // dense index → owning slot (for swap-remove fixup)
@@ -71,13 +75,25 @@ struct PhysicsWorld::Impl {
 
     // Persistent contact cache (M7.3): last tick's manifolds keyed by canonical pair id, so a
     // surviving contact's accumulated impulses carry forward by matching feature id (warm
-    // starting). M7.3 stores zeros (there is no solver yet); M7.4 fills the impulses in.
-    // `warm_started_last` records the last compute_contacts()'s feature-id match count — the
-    // narrowphase test's witness, and the warm-start hit rate from M7.4 on.
+    // starting). Ordering matters (M7.4): step() commits this cache from the manifolds AFTER the
+    // velocity solve wrote its converged impulses into them — committing pre-solve manifolds
+    // would persist last tick's warm-start copies forever and the solver would always start
+    // cold. The solverless public compute_contacts() commits what it warm-started (zeros on a
+    // fresh world), which keeps the narrowphase tests' cache semantics unchanged.
+    // `warm_started_last` records the last contact build's feature-id match count — the
+    // narrowphase test's witness, and from M7.4 the warm-start hit rate.
     mutable std::unordered_map<std::uint64_t, ManifoldCacheEntry> contact_cache;
     mutable std::uint32_t warm_started_last = 0;
 
     [[nodiscard]] std::size_t count() const noexcept { return position.size(); }
+
+    // The collision half of a tick, shared by step() and the public compute_contacts() (defined
+    // below, after the struct). Split in two so step() can run the solver in between: build the
+    // warm-started manifolds, solve (mutating their impulses), then commit the cache from the
+    // SOLVED manifolds.
+    void compute_pairs(std::vector<Pair>& out) const;
+    void build_contacts(std::vector<Manifold>& out) const;
+    void commit_contact_cache(const std::vector<Manifold>& manifolds) const;
 
     [[nodiscard]] AabbTree& tree_for(std::uint8_t m) noexcept {
         return is_static(m) ? static_tree : dynamic_tree;
@@ -99,6 +115,109 @@ struct PhysicsWorld::Impl {
         return s.dense;
     }
 };
+
+void PhysicsWorld::Impl::compute_pairs(std::vector<Pair>& out) const {
+    out.clear();
+
+    // Every non-static body is a "mover": query both trees with its fat box. A pair (a,b) is packed
+    // as (min_slot << 32 | max_slot) — a key that sorts by (a,b) — so sorting then de-duplicating
+    // yields the canonical, deterministic pair set. Dynamic–dynamic pairs are found twice (each end
+    // queries) and collapse to one; both-static pairs never appear because static bodies never
+    // query.
+    std::vector<std::uint64_t> keys;
+    const std::size_t n = count();
+    for (std::size_t i = 0; i < n; ++i) {
+        if (is_static(motion[i])) {
+            continue;
+        }
+        const std::uint32_t self = dense_to_slot[i];
+        const Aabb& fat = dynamic_tree.proxy_aabb(proxy[i]);
+        const auto add = [&](std::uint32_t other) {
+            if (other == self) {
+                return;
+            }
+            const std::uint32_t a = std::min(self, other);
+            const std::uint32_t b = std::max(self, other);
+            keys.push_back((static_cast<std::uint64_t>(a) << 32) | b);
+        };
+        dynamic_tree.query(fat, add);
+        static_tree.query(fat, add);
+    }
+
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+    out.reserve(keys.size());
+    for (const std::uint64_t key : keys) {
+        const auto a = static_cast<std::uint32_t>(key >> 32);
+        const auto b = static_cast<std::uint32_t>(key & 0xFFFFFFFFu);
+        out.push_back(Pair{BodyId{a, slots[a].generation}, BodyId{b, slots[b].generation}});
+    }
+}
+
+void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out) const {
+    out.clear();
+
+    // Broadphase first: the candidate pairs are canonical (a.index < b.index), deterministically
+    // sorted, and already exclude both-static pairs. A fat-AABB overlap is only a *candidate* — the
+    // narrowphase below confirms (or rejects) each with exact geometry.
+    std::vector<Pair> pairs;
+    compute_pairs(pairs);
+
+    std::uint32_t warm = 0;
+    for (const Pair& pr : pairs) {
+        const std::uint32_t da = dense_of(pr.a);
+        const std::uint32_t db = dense_of(pr.b);
+        if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
+            continue; // impossible for a pair compute_pairs just returned, but stay defensive
+        }
+
+        Manifold m;
+        m.a = pr.a;
+        m.b = pr.b;
+        // collide_shapes canonicalizes by ShapeType internally and flips the normal to match, so
+        // passing the bodies in slot order yields a normal oriented from a toward b (contact.hpp).
+        if (!collide_shapes(shape[da],
+                            position[da],
+                            orientation[da],
+                            shape[db],
+                            position[db],
+                            orientation[db],
+                            m) ||
+            m.count == 0) {
+            continue; // fat boxes overlapped but the exact shapes do not — a broadphase miss
+        }
+
+        // Warm-start from last tick's cache: match points by feature id and carry their
+        // accumulated impulses into the fresh manifold. The stored generations guard against a
+        // recycled slot inheriting a dead pair's impulses.
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
+        const auto it = contact_cache.find(key);
+        if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
+            it->second.gen_b == pr.b.generation) {
+            warm += warm_start_from(it->second, m);
+        }
+        out.push_back(m);
+    }
+    warm_started_last = warm;
+}
+
+void PhysicsWorld::Impl::commit_contact_cache(const std::vector<Manifold>& manifolds) const {
+    // Rebuild the persistent cache from this tick's manifolds — in step() they are the SOLVED
+    // manifolds, so the impulses that carry to next tick are the converged ones (the whole point
+    // of warm starting). Keyed by the broadphase pair key ((slot_a << 32) | slot_b). A flat hash
+    // map is plenty here — lookups are per-pair, nothing ever iterates it, so its unordered-ness
+    // cannot leak into simulation order (the determinism contract).
+    std::unordered_map<std::uint64_t, ManifoldCacheEntry> next;
+    next.reserve(manifolds.size());
+    for (const Manifold& m : manifolds) {
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(m.a.index) << 32) | static_cast<std::uint64_t>(m.b.index);
+        next.emplace(key, make_cache_entry(key, m.a.generation, m.b.generation, m));
+    }
+    contact_cache.swap(next);
+}
 
 PhysicsWorld::PhysicsWorld() : impl_(std::make_unique<Impl>()) {}
 
@@ -144,6 +263,8 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     p.linear_damping.push_back(d.linear_damping);
     p.angular_damping.push_back(d.angular_damping);
     p.gravity_factor.push_back(d.gravity_factor);
+    p.friction.push_back(d.friction);
+    p.restitution.push_back(d.restitution);
     p.shape.push_back(d.shape);
     p.proxy.push_back(proxy);
     p.dense_to_slot.push_back(slot);
@@ -176,6 +297,8 @@ void PhysicsWorld::destroy_body(BodyId id) {
         p.linear_damping[d] = p.linear_damping[last];
         p.angular_damping[d] = p.angular_damping[last];
         p.gravity_factor[d] = p.gravity_factor[last];
+        p.friction[d] = p.friction[last];
+        p.restitution[d] = p.restitution[last];
         p.shape[d] = p.shape[last];
         p.proxy[d] = p.proxy[last];
         const std::uint32_t moved_slot = p.dense_to_slot[last];
@@ -192,6 +315,8 @@ void PhysicsWorld::destroy_body(BodyId id) {
     p.linear_damping.pop_back();
     p.angular_damping.pop_back();
     p.gravity_factor.pop_back();
+    p.friction.pop_back();
+    p.restitution.pop_back();
     p.shape.pop_back();
     p.proxy.pop_back();
     p.dense_to_slot.pop_back();
@@ -233,81 +358,108 @@ core::Vec3 PhysicsWorld::gravity() const noexcept {
 void PhysicsWorld::step(float dt) {
     Impl& p = *impl_;
     const std::size_t n = p.count();
+    const auto is_dynamic = [&](std::size_t i) {
+        return p.motion[i] == static_cast<std::uint8_t>(MotionType::Dynamic);
+    };
 
-    // Semi-implicit (symplectic) Euler: advance velocity first, THEN position with the new
-    // velocity. Unlike explicit Euler this is energy-stable for oscillatory systems — the reason it
-    // is the standard game-physics integrator (derivation: docs/math/rigid-body-dynamics.md). Only
-    // dynamic bodies integrate; static/kinematic bodies hold still (kinematic motion is pushed in
-    // at M7.6). Iteration is in dense-index order, so the result is independent of anything but the
-    // inputs.
+    // The M7.4 tick is the classic sequential-impulse pipeline. Its one non-obvious property is
+    // WHERE the position integration sits: semi-implicit (symplectic) Euler advances velocity
+    // first, the solver then corrects exactly those velocities, and only afterwards do positions
+    // integrate — so a resting body's gravity is cancelled by its contact impulse in the same tick
+    // it was applied, and the body never accumulates downward motion it must later undo. Every
+    // loop below runs in dense-index or canonical-pair order with fixed iteration counts: the
+    // tick is a pure function of its inputs (the determinism contract, ADR-0026).
+
+    // ---- 1. Integrate velocities (not positions yet). Gravity is an acceleration
+    // (mass-independent) so it enters the velocity directly; damping is the implicit 1/(1+c·dt)
+    // form, unconditionally stable (never flips a velocity's sign for large c·dt). Static bodies
+    // hold still; kinematic motion is pushed in at M7.6. The gyroscopic term ω×Iω stays dropped
+    // in v1 (ADR-0026; explicit integration of it is famously unstable).
     for (std::size_t i = 0; i < n; ++i) {
-        if (p.motion[i] != static_cast<std::uint8_t>(MotionType::Dynamic)) {
+        if (!is_dynamic(i)) {
             continue;
         }
-
-        // Linear: gravity is an acceleration (mass-independent), so it enters the velocity
-        // directly. External forces (÷ mass) arrive at M7.3. Damping is the implicit 1/(1+c·dt)
-        // form, which is unconditionally stable (never flips the velocity's sign for large c·dt).
         core::Vec3 v = p.linear_velocity[i] + p.gravity * (p.gravity_factor[i] * dt);
         v *= 1.0f / (1.0f + p.linear_damping[i] * dt);
         p.linear_velocity[i] = v;
-        p.position[i] += v * dt;
+        p.angular_velocity[i] *= 1.0f / (1.0f + p.angular_damping[i] * dt);
+    }
 
-        // Angular: no torque in M7.1, so angular velocity only decays by damping. Integrate the
-        // orientation quaternion by q̇ = ½·ω·q (ω as the pure quaternion (ωₓ,ω_y,ω_z,0)), then
-        // renormalize to stay on the unit sphere. (Full ω̇ = I⁻¹(τ − ω×Iω) lands with the solver.)
-        core::Vec3 w = p.angular_velocity[i] * (1.0f / (1.0f + p.angular_damping[i] * dt));
-        p.angular_velocity[i] = w;
+    // ---- 2. Detect contacts: broadphase pairs → narrowphase manifolds, warm-started from last
+    // tick's cache. The cache is deliberately NOT committed here — warm starting only works if
+    // what carries forward are the SOLVED impulses, so the commit waits until after the velocity
+    // solve (stage 7).
+    std::vector<Manifold> manifolds;
+    p.build_contacts(manifolds);
+
+    // ---- 3. Prepare + warm-start the contact constraints (solver.hpp). Pairs with no dynamic
+    // participant (kinematic vs kinematic/static) are skipped — an impulse could never move
+    // either end, so there is nothing to solve.
+    SolverBodies bodies{p.position.data(),
+                        p.orientation.data(),
+                        p.linear_velocity.data(),
+                        p.angular_velocity.data(),
+                        p.inv_mass.data(),
+                        p.inv_inertia.data(),
+                        p.friction.data(),
+                        p.restitution.data()};
+    std::vector<ContactConstraint> constraints;
+    constraints.reserve(manifolds.size());
+    for (std::size_t mi = 0; mi < manifolds.size(); ++mi) {
+        const Manifold& m = manifolds[mi];
+        const std::uint32_t da = p.dense_of(m.a);
+        const std::uint32_t db = p.dense_of(m.b);
+        if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
+            continue; // defensive: build_contacts only emits live pairs
+        }
+        if (p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
+            continue; // no dynamic member — immovable pair, nothing solvable
+        }
+        constraints.push_back(
+            prepare_contact_constraint(bodies, m, da, db, static_cast<std::uint32_t>(mi)));
+    }
+    warm_start(bodies, constraints);
+
+    // ---- 4. Velocity solve: fixed sequential-impulse sweeps, then persist the converged
+    // accumulators into the manifolds (the cache commit below carries them to next tick).
+    solve_velocities(bodies, constraints, kVelocityIterations);
+    store_impulses(constraints, manifolds);
+
+    // ---- 5. Integrate positions with the POST-solve velocities (the symplectic pairing).
+    // Orientation integrates by q̇ = ½·ω·q (ω as the pure quaternion (ωₓ,ω_y,ω_z,0)) then
+    // renormalizes to stay on the unit sphere (docs/math/rigid-body-dynamics.md §3).
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!is_dynamic(i)) {
+            continue;
+        }
+        p.position[i] += p.linear_velocity[i] * dt;
+        const core::Vec3 w = p.angular_velocity[i];
         const core::Quat q = p.orientation[i];
         const core::Quat omega{w.x, w.y, w.z, 0.0f};
-        const core::Quat dq = (omega * q) * (0.5f * dt);
-        p.orientation[i] = core::normalize(q + dq);
+        p.orientation[i] = core::normalize(q + (omega * q) * (0.5f * dt));
+    }
 
-        // Keep the broadphase honest: re-bound the proxy (a no-op while the body stays inside its
-        // fat AABB, which is the common case — that is the whole point of the fat margin).
+    // ---- 6. NGS position pass: recover residual penetration by adjusting poses only — never
+    // velocities. That restriction is the load-bearing design choice (NGS, not Baumgarte): no
+    // kinetic energy enters, so deep overlaps resolve without launching anything (solver.hpp and
+    // docs/math/sequential-impulse.md carry the full argument).
+    solve_positions(bodies, constraints, kPositionIterations);
+
+    // ---- 7. Commit the contact cache from the SOLVED manifolds, and re-bound each mover's
+    // broadphase proxy around its final pose (a no-op while the body stays inside its fat AABB,
+    // which is the common case — that is the whole point of the fat margin).
+    p.commit_contact_cache(manifolds);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!is_dynamic(i)) {
+            continue;
+        }
         const Aabb tight = compute_aabb(p.shape[i], p.position[i], p.orientation[i]);
         p.dynamic_tree.move_proxy(p.proxy[i], tight);
     }
 }
 
 void PhysicsWorld::compute_pairs(std::vector<Pair>& out) const {
-    const Impl& p = *impl_;
-    out.clear();
-
-    // Every non-static body is a "mover": query both trees with its fat box. A pair (a,b) is packed
-    // as (min_slot << 32 | max_slot) — a key that sorts by (a,b) — so sorting then de-duplicating
-    // yields the canonical, deterministic pair set. Dynamic–dynamic pairs are found twice (each end
-    // queries) and collapse to one; both-static pairs never appear because static bodies never
-    // query.
-    std::vector<std::uint64_t> keys;
-    const std::size_t n = p.count();
-    for (std::size_t i = 0; i < n; ++i) {
-        if (is_static(p.motion[i])) {
-            continue;
-        }
-        const std::uint32_t self = p.dense_to_slot[i];
-        const Aabb& fat = p.dynamic_tree.proxy_aabb(p.proxy[i]);
-        const auto add = [&](std::uint32_t other) {
-            if (other == self) {
-                return;
-            }
-            const std::uint32_t a = std::min(self, other);
-            const std::uint32_t b = std::max(self, other);
-            keys.push_back((static_cast<std::uint64_t>(a) << 32) | b);
-        };
-        p.dynamic_tree.query(fat, add);
-        p.static_tree.query(fat, add);
-    }
-
-    std::sort(keys.begin(), keys.end());
-    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-
-    out.reserve(keys.size());
-    for (const std::uint64_t key : keys) {
-        const auto a = static_cast<std::uint32_t>(key >> 32);
-        const auto b = static_cast<std::uint32_t>(key & 0xFFFFFFFFu);
-        out.push_back(Pair{BodyId{a, p.slots[a].generation}, BodyId{b, p.slots[b].generation}});
-    }
+    impl_->compute_pairs(out);
 }
 
 bool PhysicsWorld::broadphase_aabb(BodyId id, Aabb& out) const {
@@ -324,59 +476,11 @@ bool PhysicsWorld::validate_broadphase() const {
 }
 
 void PhysicsWorld::compute_contacts(std::vector<Manifold>& out) const {
-    const Impl& p = *impl_;
-    out.clear();
-
-    // Broadphase first: the candidate pairs are canonical (a.index < b.index), deterministically
-    // sorted, and already exclude both-static pairs. A fat-AABB overlap is only a *candidate* — the
-    // narrowphase below confirms (or rejects) each with exact geometry.
-    std::vector<Pair> pairs;
-    compute_pairs(pairs);
-
-    // Rebuild the contact cache for this tick while warm-starting from last tick's. The key is the
-    // broadphase pair key ((slot_a << 32) | slot_b); the stored generations guard against a
-    // recycled slot inheriting a dead pair's impulses. A flat hash map is plenty here — the M7.5
-    // island builder may later fold this into its per-island contact storage.
-    std::unordered_map<std::uint64_t, ManifoldCacheEntry> next;
-    next.reserve(pairs.size());
-    std::uint32_t warm = 0;
-
-    for (const Pair& pr : pairs) {
-        const std::uint32_t da = p.dense_of(pr.a);
-        const std::uint32_t db = p.dense_of(pr.b);
-        if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
-            continue; // impossible for a pair compute_pairs just returned, but stay defensive
-        }
-
-        Manifold m;
-        m.a = pr.a;
-        m.b = pr.b;
-        // collide_shapes canonicalizes by ShapeType internally and flips the normal to match, so
-        // passing the bodies in slot order yields a normal oriented from a toward b (contact.hpp).
-        if (!collide_shapes(p.shape[da],
-                            p.position[da],
-                            p.orientation[da],
-                            p.shape[db],
-                            p.position[db],
-                            p.orientation[db],
-                            m) ||
-            m.count == 0) {
-            continue; // fat boxes overlapped but the exact shapes do not — a broadphase miss
-        }
-
-        const std::uint64_t key =
-            (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
-        const auto it = p.contact_cache.find(key);
-        if (it != p.contact_cache.end() && it->second.gen_a == pr.a.generation &&
-            it->second.gen_b == pr.b.generation) {
-            warm += warm_start_from(it->second, m);
-        }
-        next.emplace(key, make_cache_entry(key, pr.a.generation, pr.b.generation, m));
-        out.push_back(m);
-    }
-
-    p.contact_cache.swap(next);
-    p.warm_started_last = warm;
+    // The test/inspection seam: same collision path as step(), but with no solver in between the
+    // build and the commit — the cache carries forward whatever the manifolds were warm-started
+    // with (zeros on a fresh world, or the last step()'s solved impulses, unchanged either way).
+    impl_->build_contacts(out);
+    impl_->commit_contact_cache(out);
 }
 
 std::uint32_t PhysicsWorld::contacts_warm_started_last() const noexcept {

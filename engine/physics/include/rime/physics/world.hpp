@@ -45,9 +45,14 @@ public:
     void set_gravity(core::Vec3 g) noexcept;
     [[nodiscard]] core::Vec3 gravity() const noexcept;
 
-    // Advance the simulation by a fixed timestep. M7.1 integrates forces → velocities → positions
-    // (semi-implicit Euler) with no collision; broadphase/narrowphase/solve land in M7.2–M7.4.
-    // Called from inside the app's fixed tick (ADR-0023), never per render frame.
+    // Advance the simulation by a fixed timestep — the full M7.4 pipeline: integrate velocities
+    // (gravity + damping), detect contacts (broadphase M7.2 → narrowphase M7.3, warm-started from
+    // the persistent cache), resolve them with the sequential-impulse solver (PGS + friction
+    // pyramid + restitution), integrate positions, then an NGS position pass that recovers
+    // residual penetration without touching velocities (deliberately not Baumgarte — ADR-0026).
+    // The solved impulses are committed back to the contact cache for next tick's warm start.
+    // Islands + the job-system parallel step land at M7.5. Called from inside the app's fixed
+    // tick (ADR-0023), never per render frame.
     void step(float dt);
 
     // --- Broadphase (M7.2) ------------------------------------------------------------------
@@ -77,8 +82,10 @@ public:
     // Turn the broadphase candidate pairs into exact contact manifolds: analytic fast paths for
     // sphere/capsule pairs, GJK + EPA + reference-face clipping for boxes (and convex hulls at
     // M7.9). Each manifold carries feature-id-tagged points whose accumulated impulses persist
-    // across ticks (warm starting) — the input the M7.4 solver will resolve. Exposed for direct
-    // testing exactly like compute_pairs; from M7.4 the fixed-tick step calls it internally.
+    // across ticks (warm starting) — the solver's input. step() runs this same collision path
+    // internally (M7.4); this method stays exposed for direct testing/inspection exactly like
+    // compute_pairs, with one difference: no solver runs between the build and the cache commit,
+    // so the impulses it persists are whatever the cache already carried.
     //
     // Fills `out` (cleared first) with one manifold per genuinely touching pair, in the
     // broadphase's canonical pair order, so the list is deterministic run to run. Advances the
@@ -86,10 +93,10 @@ public:
     // matching feature id (generation-guarded so a recycled body slot never inherits stale state).
     void compute_contacts(std::vector<Manifold>& out) const;
 
-    // How many contact points produced by the most recent compute_contacts() matched — by feature
-    // id — a point cached from the previous call (i.e. were warm-started). 0 on a fresh world's
-    // first call. The witness the narrowphase tests use to prove feature ids are frame-stable; from
-    // M7.4 it is also the warm-start hit rate. (M7.3 has no solver, so the carried impulses are 0.)
+    // How many contact points the most recent contact build (a step() or a compute_contacts())
+    // matched — by feature id — against the previous tick's cache (i.e. were warm-started). 0 on
+    // a fresh world's first tick. The narrowphase tests' witness that feature ids are
+    // frame-stable, and from M7.4 the solver's warm-start hit rate.
     [[nodiscard]] std::uint32_t contacts_warm_started_last() const noexcept;
 
 private:

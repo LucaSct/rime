@@ -6,7 +6,8 @@ rime_add_test(rime_physics_tests
     integration_test.cpp
     components_test.cpp
     broadphase_test.cpp
-    narrowphase_test.cpp)
+    narrowphase_test.cpp
+    solver_test.cpp)
 
 target_link_libraries(rime_physics_tests
     PRIVATE rime::physics)
