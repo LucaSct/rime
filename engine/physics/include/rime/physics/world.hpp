@@ -4,8 +4,10 @@
 
 #include <cstddef>
 #include <memory>
+#include <vector>
 
 #include "rime/core/math/vec.hpp"
+#include "rime/physics/aabb.hpp"
 #include "rime/physics/body.hpp"
 
 // PhysicsWorld — the simulation container and the whole public seam of the module. Everything the
@@ -45,6 +47,29 @@ public:
     // (semi-implicit Euler) with no collision; broadphase/narrowphase/solve land in M7.2–M7.4.
     // Called from inside the app's fixed tick (ADR-0023), never per render frame.
     void step(float dt);
+
+    // --- Broadphase (M7.2) ------------------------------------------------------------------
+    // A candidate overlapping pair: the two bodies' fat AABBs overlap, so the exact narrowphase
+    // (M7.3) should test them. Reported in canonical order (a's slot < b's slot) within a list that
+    // is deterministically sorted, so replays and (from M7.5) thread-count changes see the same
+    // pairs.
+    struct Pair {
+        BodyId a;
+        BodyId b;
+    };
+
+    // Recompute the broadphase over the current body bounds and fill `out` (cleared first) with the
+    // candidate pairs. Pairs where BOTH bodies are static are never reported (neither can move).
+    // This is what M7.3's narrowphase will consume; it is exposed now so the broadphase is directly
+    // testable against a brute-force oracle.
+    void compute_pairs(std::vector<Pair>& out) const;
+
+    // A body's current broadphase (fat) bounds. Returns false (and leaves `out`) for a dead id.
+    [[nodiscard]] bool broadphase_aabb(BodyId id, Aabb& out) const;
+
+    // Test/debug hook: the broadphase trees satisfy their structural invariants (every internal
+    // node bounds its children; parent links are consistent).
+    [[nodiscard]] bool validate_broadphase() const;
 
 private:
     struct Impl;
