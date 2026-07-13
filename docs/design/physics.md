@@ -6,7 +6,7 @@ derivations live separately in [`docs/math/rigid-body-dynamics.md`](../math/rigi
 this note covers the *systems* reasoning — data layout, algorithms, and the trade-offs behind them.
 
 Current coverage: the world seam and body pool (M7.1), the broadphase (M7.2), the narrowphase
-(M7.3). The impulse solver (M7.4), islands and the parallel step (M7.5) will extend it as they ship.
+(M7.3), the impulse solver (M7.4). Islands and the parallel step (M7.5) will extend it next.
 
 ## Why an own core
 
@@ -250,3 +250,100 @@ frame-stability observed through the warm-start cache (and the cache clearing wh
 separates); run-to-run determinism through stepping; and seeded create/destroy churn that also pins
 the cache's generation guard — the pointer-heavy GJK/EPA path's UB net, run under ASan/UBSan at the
 brick boundary.
+
+## Solver (M7.4)
+
+### From manifolds to motion
+
+The narrowphase's manifolds describe *where* bodies touch; the solver decides what that touch
+*does*. From M7.4 a `PhysicsWorld::step` is the full sequential-impulse pipeline: integrate
+velocities (gravity + damping) → detect contacts (broadphase → narrowphase, warm-started from
+the persistent cache) → prepare constraints and re-apply last tick's impulses → a fixed count of
+velocity iterations → integrate positions with the *solved* velocities → a fixed count of NGS
+position iterations → commit the solved impulses back to the cache. The placement of the
+position integration is the semi-implicit pairing doing its job at the pipeline scale: gravity
+enters the velocity, the solver cancels it against the contacts in the same tick, and only then
+do positions move — a resting body never accumulates downward motion it must later undo.
+
+The mathematics — the contact constraint, effective mass, accumulate-and-clamp, the friction
+pyramid, restitution, and the NGS derivation — lives in
+[`docs/math/sequential-impulse.md`](../math/sequential-impulse.md); this section covers the
+system choices around it.
+
+### Sequential impulses over the manifolds
+
+The velocity solve is projected Gauss–Seidel in impulse space (`src/solver.hpp`): sweep every
+contact point in the manifolds' canonical broadphase order, solve each point's one-dimensional
+problem against the bodies' *current* velocities, clamp its accumulated impulse (normals never
+pull; friction lives in the pyramid |λ_t| ≤ μ·λ_n), apply the change immediately. Applying
+immediately is what propagates support up a stack within a single sweep. Iteration counts are
+fixed — **8 velocity / 2 position** (ADR-0026) — never convergence-tested, because an early-out
+would make the float-op sequence data-dependent and break bit-identical replays.
+Under-convergence with a fixed budget shows up as mild softness, and warm starting is what makes
+the budget sufficient.
+
+Materials ride the body pool as two more SoA columns (`friction`, `restitution`, from
+`BodyDesc`), combined per pair as μ = √(μ_a·μ_b) and e = max(e_a, e_b). Restitution applies only
+above a 1 m/s approach (a resting body re-approaches at g·dt every tick — reflecting that is
+permanent jitter), and the friction tangent basis is derived from the normal alone (least-aligned
+world axis), so a persistent contact re-derives the same basis every tick and the cached tangent
+impulse keeps its meaning.
+
+### Warm starting closes the loop
+
+M7.3 built the persistent manifold cache and matched points across ticks by feature id, but
+could only ever carry zeros. M7.4 closes the loop — and the closing required an ordering fix
+worth recording: the cache must be committed **after** the solve, from the solved manifolds, not
+at detection time. A cache committed at build time would forever re-persist the warm-start
+values it had just read (the solver's converged impulses would never enter it), and every tick
+would effectively start cold. `step()` therefore builds warm-started manifolds, solves (the
+iterations mutate each point's accumulated impulses), and only then commits. The public
+`compute_contacts` inspection seam keeps its M7.3 semantics — build then commit with no solve in
+between — which changes nothing observable (it re-commits the values it read) and keeps the
+narrowphase proofs valid unchanged.
+
+At rest the loop is exact: the warm start applies last tick's impulses, the pre-loaded contact
+already cancels this tick's gravity, and the iterations find nothing left to correct — the
+converged accumulators equal the applied totals, tick after tick. The proof measures exactly
+this: a resting box's persisted normal impulses sum to m·g·dt.
+
+### The NGS position pass — not Baumgarte
+
+Velocity-level contact keeps bodies from approaching further but cannot remove overlap that
+already exists (discrete detection notices a fast body up to one tick late). The rejected cure,
+Baumgarte, folds β/dt·penetration into the velocity bias — one solver, but the recovery velocity
+is *real* kinetic energy: debris pops, stacks hum, nothing ever sleeps. Rime runs a separate
+non-linear Gauss–Seidel pass over **poses only** after integration: per point, a pseudo-impulse
+in displacement units (same effective-mass machinery) moves positions and nudges orientations,
+re-measuring the true separation from body-local anchors each iteration. The velocity arrays are
+never touched — no energy can enter, by construction. Tuning: 5 mm slop is deliberately left in
+place so a resting manifold (and its warm-start cache) survives tick to tick; 20% correction per
+iteration converges without Gauss–Seidel ping-pong; a 20 cm per-point cap bounds the teleport a
+spawn-inside-a-wall can cause in one tick.
+
+### Determinism and island-readiness
+
+Every stage runs in dense-index or canonical-pair order with fixed iteration counts; the contact
+cache is consulted by keyed lookup only (nothing ever iterates the hash map in the sim path); the
+tangent basis is a pure function of the normal; no fast-math (CI keeps it out of the build).
+Same binary + same inputs ⇒ bit-identical world state, asserted through full contact scenes.
+Deliberately island-ready: every solver routine is a pure function of {one constraint, the two
+bodies' pool rows} with no cross-constraint state, so M7.5 can partition the constraint list by
+island (islands share no dynamic body) and run the identical loops per island — bit-identical
+for any thread count, which is the milestone's determinism thesis.
+
+### Proofs
+
+`tests/physics/solver_test.cpp`, all pure CPU and analytic: a dropped box rests at the closed-form
+height (ground + half-extent − slop) with bounded penetration and ~zero velocity; restitution
+e = 0 never rises above rest while e = 1 rebounds to ~the drop height (energy window, first
+apex); a box on an incline holds below the friction angle atan(μ) and slides clearly above it
+(the tangent basis puts t1 exactly along the slope, so the pyramid bound is exact there); a
+three-box stack stands without creep or sinking; the persisted normal impulses of a resting
+manifold sum to m·g·dt and `contacts_warm_started_last()` proves the cache carries them; a
+head-on equal-mass impact conserves momentum to float precision with e = 1 reflecting and e = 0
+stopping dead; the NGS discriminator — two boxes spawned deeply overlapped at rest separate with
+speeds staying *numerically zero* (the test Baumgarte cannot pass); and the full pipeline is
+bit-identical run to run over a colliding, rubbing, bouncing scene. The suite runs under
+ASan/UBSan at the brick boundary (the new SoA columns and constraint buffers are swap-remove and
+lifetime surfaces).

@@ -894,8 +894,8 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
 // ((slot_a << 32) | slot_b, slot_a < slot_b) and guarded by the ids' generations so a recycled
 // slot can never inherit a dead pair's impulses. The cache stores only what warm starting needs:
 // each point's feature id and accumulated impulses. Matching is feature-id equality — the whole
-// reason the ids exist (contact.hpp). M7.3 persists zeros (no solver writes impulses yet); the
-// machinery is exercised now so M7.4 only has to fill the floats in.
+// reason the ids exist (contact.hpp). M7.3 shipped this machinery persisting zeros; since M7.4
+// the step commits it AFTER the solve, so the floats are the solver's converged impulses.
 struct ManifoldCacheEntry {
     std::uint64_t key = 0;
     std::uint32_t gen_a = 0;

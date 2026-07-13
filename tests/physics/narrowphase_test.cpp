@@ -194,8 +194,9 @@ TEST_CASE("feature ids are frame-stable: the manifold cache warm-starts an uncha
     CHECK(ids_first.size() == 4); // four distinct points
     CHECK(ids_first == ids_second);
 
-    // Fling the upper box away (gravity up, no solver to hold it): once it separates, the pair is
-    // gone and the cache clears — nothing to warm-start.
+    // Fling the upper box away (gravity up; a contact can only push, so nothing resists the
+    // separation): once it separates, the pair is gone and the cache clears — nothing to
+    // warm-start.
     w.set_gravity({0.0f, 100.0f, 0.0f});
     for (int k = 0; k < 30; ++k) {
         w.step(1.0f / 60.0f);
@@ -207,8 +208,9 @@ TEST_CASE("feature ids are frame-stable: the manifold cache warm-starts an uncha
 }
 
 TEST_CASE("narrowphase is deterministic run to run, through stepping") {
-    // A tight cluster of overlapping bodies, stepped a few ticks (no solver, so they keep
-    // overlapping). Same binary, same inputs -> bit-for-bit the same manifolds (ids included).
+    // A tight cluster of overlapping bodies, stepped a few ticks (the deep spawn overlaps far
+    // outlast ten ticks of rate-limited NGS recovery, so manifolds persist). Same binary, same
+    // inputs -> bit-for-bit the same manifolds (ids included).
     const auto run = []() {
         physics::PhysicsWorld w;
         w.set_gravity({0.0f, -9.81f, 0.0f});
