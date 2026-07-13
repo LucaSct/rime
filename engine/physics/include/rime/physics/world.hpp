@@ -3,12 +3,14 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/body.hpp"
+#include "rime/physics/contact.hpp"
 
 // PhysicsWorld — the simulation container and the whole public seam of the module. Everything the
 // rest of the engine touches is here; the broadphase, narrowphase, solver, and body storage live
@@ -70,6 +72,25 @@ public:
     // Test/debug hook: the broadphase trees satisfy their structural invariants (every internal
     // node bounds its children; parent links are consistent).
     [[nodiscard]] bool validate_broadphase() const;
+
+    // --- Narrowphase (M7.3) -----------------------------------------------------------------
+    // Turn the broadphase candidate pairs into exact contact manifolds: analytic fast paths for
+    // sphere/capsule pairs, GJK + EPA + reference-face clipping for boxes (and convex hulls at
+    // M7.9). Each manifold carries feature-id-tagged points whose accumulated impulses persist
+    // across ticks (warm starting) — the input the M7.4 solver will resolve. Exposed for direct
+    // testing exactly like compute_pairs; from M7.4 the fixed-tick step calls it internally.
+    //
+    // Fills `out` (cleared first) with one manifold per genuinely touching pair, in the
+    // broadphase's canonical pair order, so the list is deterministic run to run. Advances the
+    // persistent manifold cache, carrying each surviving contact's warm-start impulses forward by
+    // matching feature id (generation-guarded so a recycled body slot never inherits stale state).
+    void compute_contacts(std::vector<Manifold>& out) const;
+
+    // How many contact points produced by the most recent compute_contacts() matched — by feature
+    // id — a point cached from the previous call (i.e. were warm-started). 0 on a fresh world's
+    // first call. The witness the narrowphase tests use to prove feature ids are frame-stable; from
+    // M7.4 it is also the warm-start hit rate. (M7.3 has no solver, so the carried impulses are 0.)
+    [[nodiscard]] std::uint32_t contacts_warm_started_last() const noexcept;
 
 private:
     struct Impl;
