@@ -6,10 +6,12 @@
 // for everything, or the finer-grained headers under physics/ for smaller dependencies.
 //   body.hpp       — BodyId, MotionType, BodyDesc, BodyState
 //   shape.hpp      — ShapeType, ShapeDesc, mass properties
-//   world.hpp      — PhysicsWorld (create/destroy bodies, step; queries/events land in M7.7/M7.8)
+//   world.hpp      — PhysicsWorld (create/destroy bodies, step, broadphase, narrowphase)
+//   contact.hpp    — ContactPoint, Manifold (the narrowphase output, the M7.4 solver input)
 //   components.hpp — the RigidBody/Collider ECS components (bound to bodies by the M7.6 sync
 //   system)
 #include "rime/physics/body.hpp"
 #include "rime/physics/components.hpp"
+#include "rime/physics/contact.hpp"
 #include "rime/physics/shape.hpp"
 #include "rime/physics/world.hpp"

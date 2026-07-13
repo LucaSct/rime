@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "aabb_tree.hpp"
+#include "narrowphase.hpp"
 #include "rime/core/containers/handle.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/physics/aabb.hpp"
@@ -66,6 +68,14 @@ struct PhysicsWorld::Impl {
 
     AabbTree static_tree;
     AabbTree dynamic_tree;
+
+    // Persistent contact cache (M7.3): last tick's manifolds keyed by canonical pair id, so a
+    // surviving contact's accumulated impulses carry forward by matching feature id (warm
+    // starting). M7.3 stores zeros (there is no solver yet); M7.4 fills the impulses in.
+    // `warm_started_last` records the last compute_contacts()'s feature-id match count — the
+    // narrowphase test's witness, and the warm-start hit rate from M7.4 on.
+    mutable std::unordered_map<std::uint64_t, ManifoldCacheEntry> contact_cache;
+    mutable std::uint32_t warm_started_last = 0;
 
     [[nodiscard]] std::size_t count() const noexcept { return position.size(); }
 
@@ -311,6 +321,66 @@ bool PhysicsWorld::broadphase_aabb(BodyId id, Aabb& out) const {
 
 bool PhysicsWorld::validate_broadphase() const {
     return impl_->dynamic_tree.validate() && impl_->static_tree.validate();
+}
+
+void PhysicsWorld::compute_contacts(std::vector<Manifold>& out) const {
+    const Impl& p = *impl_;
+    out.clear();
+
+    // Broadphase first: the candidate pairs are canonical (a.index < b.index), deterministically
+    // sorted, and already exclude both-static pairs. A fat-AABB overlap is only a *candidate* — the
+    // narrowphase below confirms (or rejects) each with exact geometry.
+    std::vector<Pair> pairs;
+    compute_pairs(pairs);
+
+    // Rebuild the contact cache for this tick while warm-starting from last tick's. The key is the
+    // broadphase pair key ((slot_a << 32) | slot_b); the stored generations guard against a
+    // recycled slot inheriting a dead pair's impulses. A flat hash map is plenty here — the M7.5
+    // island builder may later fold this into its per-island contact storage.
+    std::unordered_map<std::uint64_t, ManifoldCacheEntry> next;
+    next.reserve(pairs.size());
+    std::uint32_t warm = 0;
+
+    for (const Pair& pr : pairs) {
+        const std::uint32_t da = p.dense_of(pr.a);
+        const std::uint32_t db = p.dense_of(pr.b);
+        if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
+            continue; // impossible for a pair compute_pairs just returned, but stay defensive
+        }
+
+        Manifold m;
+        m.a = pr.a;
+        m.b = pr.b;
+        // collide_shapes canonicalizes by ShapeType internally and flips the normal to match, so
+        // passing the bodies in slot order yields a normal oriented from a toward b (contact.hpp).
+        if (!collide_shapes(p.shape[da],
+                            p.position[da],
+                            p.orientation[da],
+                            p.shape[db],
+                            p.position[db],
+                            p.orientation[db],
+                            m) ||
+            m.count == 0) {
+            continue; // fat boxes overlapped but the exact shapes do not — a broadphase miss
+        }
+
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
+        const auto it = p.contact_cache.find(key);
+        if (it != p.contact_cache.end() && it->second.gen_a == pr.a.generation &&
+            it->second.gen_b == pr.b.generation) {
+            warm += warm_start_from(it->second, m);
+        }
+        next.emplace(key, make_cache_entry(key, pr.a.generation, pr.b.generation, m));
+        out.push_back(m);
+    }
+
+    p.contact_cache.swap(next);
+    p.warm_started_last = warm;
+}
+
+std::uint32_t PhysicsWorld::contacts_warm_started_last() const noexcept {
+    return impl_->warm_started_last;
 }
 
 } // namespace rime::physics
