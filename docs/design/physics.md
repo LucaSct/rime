@@ -347,3 +347,86 @@ speeds staying *numerically zero* (the test Baumgarte cannot pass); and the full
 bit-identical run to run over a colliding, rubbing, bouncing scene. The suite runs under
 ASan/UBSan at the brick boundary (the new SoA columns and constraint buffers are swap-remove and
 lifetime surfaces).
+
+## Islands, sleeping & the parallel step (M7.5)
+
+The solver from M7.4 already scales *within* a contact scene. M7.5 makes it scale *across* the
+machine and stop paying for scenes that have gone still — without giving up a single bit of
+determinism. Three ideas, one data structure.
+
+### Islands: the connected components of the contact graph
+
+Picture the tick's contacts as a graph: dynamic bodies are nodes, and each contact between two
+dynamic bodies is an edge. Its connected components are the **simulation islands** — maximal sets
+of bodies that can influence each other this tick. A ball resting on a crate that rests on a second
+crate is one island; a crate on the far side of the level is another. Two islands share no dynamic
+body *by construction*, which is the property everything else here leans on.
+
+The one modelling subtlety is the world itself. Static and kinematic bodies are **not** graph
+nodes: a contact against the ground does not union the two crates resting on it. If it did, every
+object touching the floor would collapse into one giant island that could never be split across
+cores or slept piece by piece — the floor would glue the whole level together. So only a
+dynamic–dynamic contact merges components; a contact against an immovable anchor just attaches to
+its dynamic end.
+
+`src/islands.hpp` computes this with a **union-find** (disjoint-set) forest over the dynamic bodies:
+walk the constraints, union the dynamic–dynamic pairs, then read off the components. Two details buy
+determinism for free. Union *by smaller index* keeps each set rooted at its lowest dense body, and a
+first-seen scan in dense order assigns island numbers — so island 0 always holds the lowest-indexed
+body and the whole numbering is a pure function of the partition, never of iteration luck. The
+result is emitted as a **CSR** (compressed-sparse-row) pair of arrays — bodies grouped by island,
+constraints grouped by island — with members dense-sorted and constraints in their canonical
+broadphase order. The buffers are reused across ticks, so a warmed-up world does no per-step island
+allocation (the full allocator story is M7.6; this just avoids the obvious churn).
+
+### The parallel step: same math, more threads, identical answer
+
+Because islands share no dynamic body, an island's solve reads and writes only its own bodies. The
+M7.4 solver was written for exactly this — every routine is a pure function of one constraint and
+its two body rows — with one gap closed here: `apply_impulse` and the NGS pose update now *skip* the
+write to any immovable body instead of storing an unchanged `−= 0`. That is numerically a no-op, but
+it makes static and kinematic anchors strictly **read-only** during the solve, so two islands that
+rest on the same floor never touch the same memory. With that, `step()` hands the islands to the
+`core::JobSystem` — each worker solves whole islands, over-decomposed into a few chunks per thread so
+the work-stealing scheduler balances the (wildly uneven) island sizes.
+
+The payoff is the milestone's thesis: **the result is bit-identical no matter how many threads run
+it.** A single island's per-body sequence of floating-point operations is the same whether it runs
+alone or beside forty others, because nothing else writes its rows; and *which* thread runs it, or
+how the islands are chunked, changes only the timing. Running the islands one after another
+(`set_job_system(nullptr)`) and running them across four workers produce the same `world_hash()` to
+the bit. `world_hash()` — an FNV-1a fingerprint of every body's full motion state — is the witness,
+and it is the same hook networked-destruction determinism and replay validation will reuse.
+
+### Sleeping: stop integrating what has stopped moving
+
+A settled stack should cost nothing. A body is a **sleep candidate** while both its linear and
+angular speed stay under a small threshold; once *every* body in an island has been a candidate for
+half a second, the whole island **sleeps** — its velocities are zeroed and, from the next tick, it
+is skipped by integration and the solver entirely. Islands sleep as a unit because a body cannot
+safely rest while a neighbour it is stacked on is still settling.
+
+Two subtleties. First, sleepiness is judged on the **post-solve** velocity, not the post-gravity
+one: a resting body re-enters every tick carrying the `g·dt` gravity just added, which the contact
+solver then cancels — read it before the solve and nothing would ever sleep. Second, **waking is
+free**. A body that falls onto a sleeping stack is its own awake island until it lands; on contact,
+union-find merges it into the stack's island, and an island with any awake member is reactivated
+whole. Broad- and narrowphase keep running for asleep bodies precisely so that first contact is
+seen. `wake_body()` and disabling sleeping are the explicit escape hatches for game code that
+teleports or shoves a body from outside the simulation.
+
+Sleeping is decided sequentially, between the parallel regions, so it can never perturb the
+cross-thread hash — the determinism proof is run with sleeping both off (every island busy every
+tick, the hard case) and on.
+
+### Proofs
+
+`tests/physics/islands_test.cpp`, pure CPU and structural: two crates far apart on a shared floor
+are two islands while two stacked crates are one (the static-anchor rule, checked through
+`islands_last()`); a resting box sleeps well inside its budget and then holds a bit-stable
+`world_hash()` tick after tick (the "costs nothing" property); a box dropped on a sleeper wakes it
+on impact and the pair later re-sleeps; `wake_body()` and `set_sleeping_enabled(false)` both
+reactivate a sleeper. The headline is determinism: a multi-island scene (three separated stacks plus
+two fallers) stepped 300 times yields one `world_hash()` shared by the sequential path and by 1-, 2-,
+3-, and 4-worker job systems — proven with sleeping off *and* on. The whole suite is green under TSan
+(the parallel solve is the threading surface it exists to net) and ASan/UBSan at the brick boundary.

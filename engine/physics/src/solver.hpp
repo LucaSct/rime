@@ -28,10 +28,12 @@
 // a pure function of the contact normal, and no unordered container is iterated anywhere in the
 // solve. Same binary + same inputs ⇒ bit-identical impulses and motion.
 //
-// Island-readiness (M7.5): every routine below is a pure function of {one constraint, the two
-// bodies' rows in SolverBodies} — no globals, no cross-constraint state. Islands share no dynamic
-// body, so the island pass can partition the constraint list and run these exact loops per island
-// (strictly sequentially inside each) and the result stays bit-identical for any thread count.
+// Islands & the parallel step (M7.5, realized): every routine below is a pure function of {one
+// constraint, the two bodies' rows in SolverBodies} — no globals, no cross-constraint state — and
+// every write lands on a DYNAMIC body (immovable bodies are read-only; see apply_impulse). Islands
+// share no dynamic body, so islands.hpp partitions the constraint list and world.cpp runs these
+// exact loops per island (strictly sequentially inside each) on the job system: no locks, no data
+// races, and a result that stays bit-identical for any thread count (proven by world_hash()).
 //
 // Private header (under src/), invisible above the PhysicsWorld seam.
 namespace rime::physics {
@@ -158,12 +160,23 @@ inline void apply_impulse(const SolverBodies& bodies,
                           core::Vec3 r_a,
                           core::Vec3 r_b,
                           core::Vec3 p) noexcept {
-    bodies.linear_velocity[ia] -= p * bodies.inv_mass[ia];
-    bodies.angular_velocity[ia] -=
-        apply_inv_inertia(bodies.orientation[ia], bodies.inv_inertia[ia], core::cross(r_a, p));
-    bodies.linear_velocity[ib] += p * bodies.inv_mass[ib];
-    bodies.angular_velocity[ib] +=
-        apply_inv_inertia(bodies.orientation[ib], bodies.inv_inertia[ib], core::cross(r_b, p));
+    // Only a DYNAMIC body (inv_mass > 0) is written. For an immovable body the update is a
+    // multiply-by-zero — numerically a no-op — but SKIPPING the store rather than writing an
+    // unchanged value back is what makes the M7.5 parallel step safe: islands that share a static
+    // or kinematic anchor would otherwise have two worker threads writing that shared body's
+    // velocity row at once. With the guard, immovable bodies are strictly read-only during the
+    // solve, so there is no cross-island data race (TSan-clean) and every result is bit-for-bit
+    // what the unguarded code produced.
+    if (bodies.inv_mass[ia] > 0.0f) {
+        bodies.linear_velocity[ia] -= p * bodies.inv_mass[ia];
+        bodies.angular_velocity[ia] -=
+            apply_inv_inertia(bodies.orientation[ia], bodies.inv_inertia[ia], core::cross(r_a, p));
+    }
+    if (bodies.inv_mass[ib] > 0.0f) {
+        bodies.linear_velocity[ib] += p * bodies.inv_mass[ib];
+        bodies.angular_velocity[ib] +=
+            apply_inv_inertia(bodies.orientation[ib], bodies.inv_inertia[ib], core::cross(r_b, p));
+    }
 }
 
 // Build the prepared constraint for one manifold. `body_a`/`body_b` are the manifold bodies'
@@ -409,16 +422,24 @@ inline void solve_positions(const SolverBodies& bodies,
                 }
 
                 // A pseudo-impulse in displacement units: mass-weighted exactly like a real
-                // impulse (the heavier body yields less ground), but applied to POSE only.
+                // impulse (the heavier body yields less ground), but applied to POSE only. As in
+                // apply_impulse, only a body with positive inverse mass is written —
+                // rotate_orientation would otherwise renormalize an immovable body's quaternion (a
+                // store), so guarding the orientation as well as the position is what keeps the
+                // parallel NGS pass race-free where two islands share a static/kinematic anchor.
                 const core::Vec3 impulse = n * (-correction / k_n);
-                bodies.position[ia] -= impulse * ima;
-                rotate_orientation(
-                    bodies.orientation[ia],
-                    -apply_inv_inertia(qa, bodies.inv_inertia[ia], core::cross(r_a, impulse)));
-                bodies.position[ib] += impulse * imb;
-                rotate_orientation(
-                    bodies.orientation[ib],
-                    apply_inv_inertia(qb, bodies.inv_inertia[ib], core::cross(r_b, impulse)));
+                if (ima > 0.0f) {
+                    bodies.position[ia] -= impulse * ima;
+                    rotate_orientation(
+                        bodies.orientation[ia],
+                        -apply_inv_inertia(qa, bodies.inv_inertia[ia], core::cross(r_a, impulse)));
+                }
+                if (imb > 0.0f) {
+                    bodies.position[ib] += impulse * imb;
+                    rotate_orientation(
+                        bodies.orientation[ib],
+                        apply_inv_inertia(qb, bodies.inv_inertia[ib], core::cross(r_b, impulse)));
+                }
             }
         }
     }
