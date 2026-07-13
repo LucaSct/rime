@@ -3,23 +3,29 @@
 #include "rime/physics/world.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <unordered_map>
 #include <vector>
 
 #include "aabb_tree.hpp"
+#include "islands.hpp"
 #include "narrowphase.hpp"
 #include "rime/core/containers/handle.hpp"
+#include "rime/core/hash.hpp"
+#include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/shape.hpp"
 #include "solver.hpp"
 
-// The M7.1–M7.4 world: a data-oriented body pool, a semi-implicit Euler integrator, a dual
+// The M7.1–M7.5 world: a data-oriented body pool, a semi-implicit Euler integrator, a dual
 // dynamic-AABB-tree broadphase (M7.2), a GJK/EPA/clipping narrowphase with a persistent warm-start
-// cache (M7.3), and the sequential-impulse contact solver with its NGS position pass (M7.4). One
-// step() runs the whole pipeline; islands and the parallel step arrive at M7.5.
+// cache (M7.3), the sequential-impulse contact solver with its NGS position pass (M7.4), and the
+// island partition + sleeping + job-system parallel step (M7.5). One step() runs the whole
+// pipeline; it is deterministic to the bit for any worker-thread count (proven by world_hash()).
 namespace rime::physics {
 namespace {
 
@@ -62,16 +68,28 @@ struct PhysicsWorld::Impl {
     std::vector<float> linear_damping;
     std::vector<float> angular_damping;
     std::vector<float> gravity_factor;
-    std::vector<float> friction;              // Coulomb μ (M7.4 solver material)
-    std::vector<float> restitution;           // bounciness e (M7.4 solver material)
-    std::vector<ShapeDesc> shape;             // needed to recompute the world AABB after moving
-    std::vector<std::int32_t> proxy;          // this body's node in its broadphase tree
+    std::vector<float> friction;      // Coulomb μ (M7.4 solver material)
+    std::vector<float> restitution;   // bounciness e (M7.4 solver material)
+    std::vector<float> sleep_timer;   // seconds spent below the sleep thresholds (M7.5)
+    std::vector<std::uint8_t> asleep; // 1 ⇒ deactivated: skipped by integration + solve (M7.5)
+    std::vector<ShapeDesc> shape;     // needed to recompute the world AABB after moving
+    std::vector<std::int32_t> proxy;  // this body's node in its broadphase tree
     std::vector<std::uint32_t> dense_to_slot; // dense index → owning slot (for swap-remove fixup)
 
     core::Vec3 gravity{0.0f, -9.81f, 0.0f};
 
     AabbTree static_tree;
     AabbTree dynamic_tree;
+
+    // Islands + the parallel step (M7.5). `jobs` is a BORROWED job system (the engine owns it; null
+    // ⇒ solve islands sequentially — same result). `islands` is the reusable CSR partition rebuilt
+    // each step; `islands_last_count` is its size, exposed as a determinism/behaviour witness.
+    // `sleeping_enabled` gates deactivation (on by default). None of this is touched concurrently:
+    // only the per-island solve runs on worker threads, and islands share no dynamic body.
+    core::JobSystem* jobs = nullptr;
+    bool sleeping_enabled = true;
+    IslandSet islands;
+    std::size_t islands_last_count = 0;
 
     // Persistent contact cache (M7.3): last tick's manifolds keyed by canonical pair id, so a
     // surviving contact's accumulated impulses carry forward by matching feature id (warm
@@ -265,6 +283,8 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     p.gravity_factor.push_back(d.gravity_factor);
     p.friction.push_back(d.friction);
     p.restitution.push_back(d.restitution);
+    p.sleep_timer.push_back(0.0f);
+    p.asleep.push_back(0); // a freshly created body always starts awake
     p.shape.push_back(d.shape);
     p.proxy.push_back(proxy);
     p.dense_to_slot.push_back(slot);
@@ -299,6 +319,8 @@ void PhysicsWorld::destroy_body(BodyId id) {
         p.gravity_factor[d] = p.gravity_factor[last];
         p.friction[d] = p.friction[last];
         p.restitution[d] = p.restitution[last];
+        p.sleep_timer[d] = p.sleep_timer[last];
+        p.asleep[d] = p.asleep[last];
         p.shape[d] = p.shape[last];
         p.proxy[d] = p.proxy[last];
         const std::uint32_t moved_slot = p.dense_to_slot[last];
@@ -317,6 +339,8 @@ void PhysicsWorld::destroy_body(BodyId id) {
     p.gravity_factor.pop_back();
     p.friction.pop_back();
     p.restitution.pop_back();
+    p.sleep_timer.pop_back();
+    p.asleep.pop_back();
     p.shape.pop_back();
     p.proxy.pop_back();
     p.dense_to_slot.pop_back();
@@ -362,21 +386,25 @@ void PhysicsWorld::step(float dt) {
         return p.motion[i] == static_cast<std::uint8_t>(MotionType::Dynamic);
     };
 
-    // The M7.4 tick is the classic sequential-impulse pipeline. Its one non-obvious property is
-    // WHERE the position integration sits: semi-implicit (symplectic) Euler advances velocity
-    // first, the solver then corrects exactly those velocities, and only afterwards do positions
-    // integrate — so a resting body's gravity is cancelled by its contact impulse in the same tick
-    // it was applied, and the body never accumulates downward motion it must later undo. Every
-    // loop below runs in dense-index or canonical-pair order with fixed iteration counts: the
-    // tick is a pure function of its inputs (the determinism contract, ADR-0026).
+    // The M7.5 tick keeps the M7.4 sequential-impulse pipeline but wraps it in ISLANDS and
+    // SLEEPING. Its shape:
+    //   integrate velocities (awake) → detect contacts → prepare constraints → PARTITION into
+    //   islands → wake/skip islands → solve each island (job system) → update sleeping → commit the
+    //   cache + refit moved proxies.
+    // Two properties carry over from M7.4: WHERE position integration sits (symplectic — velocity
+    // first, solver corrects it, then position follows, so a resting body's gravity is cancelled in
+    // the same tick), and DETERMINISM (dense/canonical order, fixed iteration counts). M7.5 adds a
+    // stronger determinism claim: the per-island solve is the ONLY parallel region, islands share
+    // no dynamic body, and immovable bodies are read-only in the solver — so the tick is
+    // bit-identical for any worker-thread count (ADR-0026; world_hash() is the witness).
 
-    // ---- 1. Integrate velocities (not positions yet). Gravity is an acceleration
-    // (mass-independent) so it enters the velocity directly; damping is the implicit 1/(1+c·dt)
-    // form, unconditionally stable (never flips a velocity's sign for large c·dt). Static bodies
-    // hold still; kinematic motion is pushed in at M7.6. The gyroscopic term ω×Iω stays dropped
-    // in v1 (ADR-0026; explicit integration of it is famously unstable).
+    // ---- 1. Integrate velocities (not positions yet) for AWAKE dynamic bodies. Gravity is an
+    // acceleration (mass-independent) so it enters velocity directly; damping is the implicit
+    // 1/(1+c·dt) form, unconditionally stable. Asleep bodies are frozen — skipping them here is the
+    // whole point of sleeping: a resting stack costs nothing. (Kinematic push-in is M7.6; the
+    // gyroscopic ω×Iω term stays dropped, ADR-0026.)
     for (std::size_t i = 0; i < n; ++i) {
-        if (!is_dynamic(i)) {
+        if (!is_dynamic(i) || p.asleep[i] != 0) {
             continue;
         }
         core::Vec3 v = p.linear_velocity[i] + p.gravity * (p.gravity_factor[i] * dt);
@@ -386,15 +414,17 @@ void PhysicsWorld::step(float dt) {
     }
 
     // ---- 2. Detect contacts: broadphase pairs → narrowphase manifolds, warm-started from last
-    // tick's cache. The cache is deliberately NOT committed here — warm starting only works if
-    // what carries forward are the SOLVED impulses, so the commit waits until after the velocity
-    // solve (stage 7).
+    // tick's cache (committed post-solve at stage 8, so warm starts carry SOLVED impulses). Runs
+    // for ALL bodies, asleep included: a new contact between a faller and a sleeping stack is
+    // exactly how the stack learns to wake — stage 4 merges them into one island, stage 5
+    // reactivates it.
     std::vector<Manifold> manifolds;
     p.build_contacts(manifolds);
 
-    // ---- 3. Prepare + warm-start the contact constraints (solver.hpp). Pairs with no dynamic
-    // participant (kinematic vs kinematic/static) are skipped — an impulse could never move
-    // either end, so there is nothing to solve.
+    // ---- 3. Prepare the contact constraints (solver.hpp). prepare_contact_constraint reads the
+    // post-gravity velocities to fix each restitution bias, so it must precede any warm-start
+    // impulse (the M7.4 ordering, preserved). Pairs with no dynamic participant are skipped — an
+    // impulse could never move either end.
     SolverBodies bodies{p.position.data(),
                         p.orientation.data(),
                         p.linear_velocity.data(),
@@ -418,43 +448,145 @@ void PhysicsWorld::step(float dt) {
         constraints.push_back(
             prepare_contact_constraint(bodies, m, da, db, static_cast<std::uint32_t>(mi)));
     }
-    warm_start(bodies, constraints);
 
-    // ---- 4. Velocity solve: fixed sequential-impulse sweeps, then persist the converged
-    // accumulators into the manifolds (the cache commit below carries them to next tick).
-    solve_velocities(bodies, constraints, kVelocityIterations);
-    store_impulses(constraints, manifolds);
+    // ---- 4. Partition into ISLANDS (islands.hpp): connected components of the dynamic-body
+    // contact graph. Every awake dynamic body lands in exactly one island (a contactless body is a
+    // singleton); static/kinematic bodies are shared anchors, not island members.
+    build_islands(n, p.motion, constraints, p.islands);
+    p.islands_last_count = p.islands.island_count;
+    const IslandSet& isl = p.islands;
 
-    // ---- 5. Integrate positions with the POST-solve velocities (the symplectic pairing).
-    // Orientation integrates by q̇ = ½·ω·q (ω as the pure quaternion (ωₓ,ω_y,ω_z,0)) then
-    // renormalizes to stay on the unit sphere (docs/math/rigid-body-dynamics.md §3).
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!is_dynamic(i)) {
-            continue;
-        }
-        p.position[i] += p.linear_velocity[i] * dt;
-        const core::Vec3 w = p.angular_velocity[i];
-        const core::Quat q = p.orientation[i];
-        const core::Quat omega{w.x, w.y, w.z, 0.0f};
-        p.orientation[i] = core::normalize(q + (omega * q) * (0.5f * dt));
+    // Gather the constraints into island-contiguous order so each island solves a plain span (the
+    // solver stays index-free). Within-island order is preserved, so an island's solve is
+    // bit-identical to M7.4's flat solve restricted to that island's bodies — the flat solve's
+    // other constraints never touched them, so interleaving them or not cannot change the result.
+    std::vector<ContactConstraint> ordered(isl.constraints.size());
+    for (std::size_t i = 0; i < isl.constraints.size(); ++i) {
+        ordered[i] = constraints[isl.constraints[i]];
     }
 
-    // ---- 6. NGS position pass: recover residual penetration by adjusting poses only — never
-    // velocities. That restriction is the load-bearing design choice (NGS, not Baumgarte): no
-    // kinetic energy enters, so deep overlaps resolve without launching anything (solver.hpp and
-    // docs/math/sequential-impulse.md carry the full argument).
-    solve_positions(bodies, constraints, kPositionIterations);
+    // ---- 5. Decide which islands are ACTIVE this tick. An island is active unless every one of
+    // its bodies is still asleep; a single awake member (e.g. a body that just fell in and merged
+    // at stage 4) reactivates the whole island, and reactivated bodies restart their sleep timer.
+    // With sleeping disabled no body is ever asleep, so every island is active — same code path.
+    std::vector<std::uint8_t> active(isl.island_count, 1);
+    for (std::size_t k = 0; k < isl.island_count; ++k) {
+        bool any_awake = false;
+        for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
+            if (p.asleep[isl.bodies[bi]] == 0) {
+                any_awake = true;
+                break;
+            }
+        }
+        active[k] = any_awake ? std::uint8_t{1} : std::uint8_t{0};
+        if (any_awake) {
+            for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
+                const std::uint32_t b = isl.bodies[bi];
+                if (p.asleep[b] != 0) { // a neighbour is moving — rejoin the simulation
+                    p.asleep[b] = 0;
+                    p.sleep_timer[b] = 0.0f;
+                }
+            }
+        }
+    }
 
-    // ---- 7. Commit the contact cache from the SOLVED manifolds, and re-bound each mover's
-    // broadphase proxy around its final pose (a no-op while the body stays inside its fat AABB,
-    // which is the common case — that is the whole point of the fat margin).
+    // ---- 6. Solve the ACTIVE islands. Per island, the exact M7.4 sequence — warm-start, fixed
+    // velocity iterations, store impulses, integrate positions with the post-solve velocities, then
+    // the fixed NGS position iterations — runs strictly sequentially. Islands write disjoint
+    // dynamic bodies (immovable anchors are read-only), so the job system runs them in parallel
+    // with no locks and the result is identical to the sequential loop, bit for bit, at any thread
+    // count.
+    const auto solve_island = [&](std::size_t k) {
+        if (active[k] == 0) {
+            return; // wholly asleep — its bodies stay frozen
+        }
+        const std::uint32_t cb = isl.constraint_offsets[k];
+        const std::uint32_t ce = isl.constraint_offsets[k + 1];
+        const std::span<ContactConstraint> cs{ordered.data() + cb, ce - cb};
+
+        warm_start(bodies, cs);
+        solve_velocities(bodies, cs, kVelocityIterations);
+        store_impulses(cs, manifolds); // writes only this island's manifold indices — disjoint
+
+        // Integrate this island's dynamic bodies with their post-solve velocities. Orientation
+        // integrates by q̇ = ½·ω·q then renormalizes (docs/math/rigid-body-dynamics.md §3).
+        for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
+            const std::uint32_t i = isl.bodies[bi];
+            p.position[i] += p.linear_velocity[i] * dt;
+            const core::Vec3 w = p.angular_velocity[i];
+            const core::Quat q = p.orientation[i];
+            const core::Quat omega{w.x, w.y, w.z, 0.0f};
+            p.orientation[i] = core::normalize(q + (omega * q) * (0.5f * dt));
+        }
+
+        // NGS position pass: recover residual penetration by adjusting poses only — never
+        // velocities (the deliberate not-Baumgarte choice; solver.hpp, ADR-0026).
+        solve_positions(bodies, cs, kPositionIterations);
+    };
+
+    if (p.jobs != nullptr && isl.island_count > 1) {
+        // Over-decompose to ~4 chunks per participant so work-stealing balances the (wildly uneven)
+        // island sizes. Any chunking is correct — islands are independent — so the RESULT never
+        // depends on the chunk size or the worker count, only the timing does.
+        const std::size_t participants = p.jobs->participant_count();
+        const std::size_t chunk = std::max<std::size_t>(
+            1, (isl.island_count + participants * 4 - 1) / (participants * 4));
+        p.jobs->parallel_for(isl.island_count, chunk, solve_island);
+    } else {
+        for (std::size_t k = 0; k < isl.island_count; ++k) {
+            solve_island(k);
+        }
+    }
+
+    // ---- 7. Update SLEEPING, measured on the POST-solve velocities (a resting body's pre-solve
+    // velocity still holds the g·dt its contact just cancelled, so only now is it near rest). Each
+    // active island's bodies accrue sleep time while below the thresholds and reset the instant
+    // they exceed them; once EVERY member has rested past kTimeToSleep the whole island sleeps —
+    // velocities zeroed, and from next tick skipped. Sequential and deterministic, so sleeping
+    // never perturbs the cross-thread world hash.
+    if (p.sleeping_enabled) {
+        constexpr float lin2 = kLinearSleepThreshold * kLinearSleepThreshold;
+        constexpr float ang2 = kAngularSleepThreshold * kAngularSleepThreshold;
+        for (std::size_t k = 0; k < isl.island_count; ++k) {
+            if (active[k] == 0) {
+                continue;
+            }
+            bool island_can_sleep = true;
+            for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
+                const std::uint32_t i = isl.bodies[bi];
+                const bool sleepy = core::dot(p.linear_velocity[i], p.linear_velocity[i]) < lin2 &&
+                                    core::dot(p.angular_velocity[i], p.angular_velocity[i]) < ang2;
+                p.sleep_timer[i] = sleepy ? p.sleep_timer[i] + dt : 0.0f;
+                if (p.sleep_timer[i] < kTimeToSleep) {
+                    island_can_sleep = false;
+                }
+            }
+            if (island_can_sleep) {
+                for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
+                    const std::uint32_t i = isl.bodies[bi];
+                    p.asleep[i] = 1;
+                    p.linear_velocity[i] = core::Vec3{0.0f, 0.0f, 0.0f};
+                    p.angular_velocity[i] = core::Vec3{0.0f, 0.0f, 0.0f};
+                }
+            }
+        }
+    }
+
+    // ---- 8. Commit the contact cache from the SOLVED manifolds (closing the warm-start loop),
+    // then refit the broadphase proxy of every body that actually moved — the dynamic members of
+    // ACTIVE islands (which includes any body that only just went to sleep this tick). Asleep
+    // islands did not move, so their proxies and the tree are left untouched; move_proxy mutates
+    // the shared tree, so this stays sequential.
     p.commit_contact_cache(manifolds);
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!is_dynamic(i)) {
+    for (std::size_t k = 0; k < isl.island_count; ++k) {
+        if (active[k] == 0) {
             continue;
         }
-        const Aabb tight = compute_aabb(p.shape[i], p.position[i], p.orientation[i]);
-        p.dynamic_tree.move_proxy(p.proxy[i], tight);
+        for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
+            const std::uint32_t i = isl.bodies[bi];
+            const Aabb tight = compute_aabb(p.shape[i], p.position[i], p.orientation[i]);
+            p.dynamic_tree.move_proxy(p.proxy[i], tight);
+        }
     }
 }
 
@@ -485,6 +617,74 @@ void PhysicsWorld::compute_contacts(std::vector<Manifold>& out) const {
 
 std::uint32_t PhysicsWorld::contacts_warm_started_last() const noexcept {
     return impl_->warm_started_last;
+}
+
+void PhysicsWorld::set_job_system(core::JobSystem* jobs) noexcept {
+    // Borrowed, not owned — the engine constructs one job system and hands it to every subsystem.
+    // Null restores the sequential island solve (identical result, just single-threaded).
+    impl_->jobs = jobs;
+}
+
+void PhysicsWorld::set_sleeping_enabled(bool enabled) noexcept {
+    impl_->sleeping_enabled = enabled;
+    if (!enabled) {
+        // Wake everything now so step() never skips a body while sleeping is off (and a body frozen
+        // by an earlier sleep resumes integrating on the very next tick).
+        std::fill(impl_->asleep.begin(), impl_->asleep.end(), std::uint8_t{0});
+        std::fill(impl_->sleep_timer.begin(), impl_->sleep_timer.end(), 0.0f);
+    }
+}
+
+bool PhysicsWorld::is_asleep(BodyId id) const noexcept {
+    const std::uint32_t d = impl_->dense_of(id);
+    return d != core::kInvalidSlotIndex && impl_->asleep[d] != 0;
+}
+
+void PhysicsWorld::wake_body(BodyId id) noexcept {
+    const std::uint32_t d = impl_->dense_of(id);
+    if (d == core::kInvalidSlotIndex) {
+        return; // stale/unknown — safe no-op
+    }
+    impl_->asleep[d] = 0;
+    impl_->sleep_timer[d] = 0.0f;
+    // The rest of its island reactivates on the next step(): stage 5 sees an awake member and wakes
+    // the others. (Waking the whole island here would need the island partition, which step()
+    // owns.)
+}
+
+std::size_t PhysicsWorld::islands_last() const noexcept {
+    return impl_->islands_last_count;
+}
+
+std::uint64_t PhysicsWorld::world_hash() const noexcept {
+    // FNV-1a (core/hash.hpp) over the full motion state of every body, in dense order — a fast
+    // exact equality fingerprint. Dense order is reproducible run to run (bodies are appended, and
+    // only ever swap-removed by destroy_body, never reordered by a step), so two simulations that
+    // issued the same calls hash identically iff every float matches bit for bit. That is exactly
+    // the check the parallel step must pass at any worker count, and the hook netcode / replay
+    // determinism reuses. Packed into a local array so the hash never depends on Vec3/Quat
+    // alignment padding.
+    const Impl& p = *impl_;
+    std::uint64_t h = core::kFnv1a64OffsetBasis;
+    for (std::size_t i = 0; i < p.count(); ++i) {
+        const std::array<float, 13> state = {
+            p.position[i].x,
+            p.position[i].y,
+            p.position[i].z,
+            p.orientation[i].x,
+            p.orientation[i].y,
+            p.orientation[i].z,
+            p.orientation[i].w,
+            p.linear_velocity[i].x,
+            p.linear_velocity[i].y,
+            p.linear_velocity[i].z,
+            p.angular_velocity[i].x,
+            p.angular_velocity[i].y,
+            p.angular_velocity[i].z,
+        };
+        h = core::fnv1a_64(std::as_bytes(std::span<const float>{state}), h);
+    }
+    return h;
 }
 
 } // namespace rime::physics
