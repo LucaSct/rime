@@ -5,12 +5,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/body.hpp"
 #include "rime/physics/contact.hpp"
+#include "rime/physics/events.hpp"
 #include "rime/physics/query.hpp"
 
 // The job system (rime::core) is BORROWED by the M7.5 parallel step. Forward-declared here so this
@@ -169,6 +171,24 @@ public:
     // angular term).
     void apply_impulse(BodyId id, core::Vec3 impulse, core::Vec3 point) noexcept;
     void apply_central_impulse(BodyId id, core::Vec3 impulse) noexcept;
+
+    // --- Contact & sleep events (M7.9) ------------------------------------------------------
+    // The events the most recent step() produced (events.hpp), DOUBLE-BUFFERED: each accessor
+    // returns a stable view of the just-completed tick's events that remains valid until the next
+    // step(), which refills a back buffer and swaps it in. Both are empty before the first step().
+    // Read-only, and NOT safe to call concurrently with step() (which refills the buffers).
+    //
+    // contact_events(): one entry per body pair (with a dynamic participant) that is touching, or
+    // that just stopped touching, this tick — began/persisted/ended, a representative point, the
+    // a→b normal, and the total normal + friction impulse the solver exchanged over the pair. This
+    // is the M8 damage input (impulse → damage). In CANONICAL pair order (ascending a.index, then
+    // b.index), so replays and any worker-thread count observe the identical stream.
+    [[nodiscard]] std::span<const ContactEvent> contact_events() const noexcept;
+
+    // sleep_events(): one entry per body that fell asleep (Slept — the DebrisSettled basis) or was
+    // woken by the simulation (Woke) this tick. In dense body order. See events.hpp on why an
+    // explicit wake_body()/apply_impulse() wake is not reported here.
+    [[nodiscard]] std::span<const SleepEvent> sleep_events() const noexcept;
 
 private:
     struct Impl;

@@ -532,3 +532,134 @@ bodies; `max_distance` bounding a cast short; the motion-class filter picking fl
 `overlap_sphere` finding exactly the planted set in canonical order; and impulses (central ⇒ `J/m`
 with no spin; off-centre ⇒ spin about the expected axis; an impulse wakes a sleeper; a static body
 ignores one). Green under dev + ASan/UBSan + TSan.
+
+## Contact & sleep events (M7.9)
+
+A core that only *moves* bodies is half a core; gameplay has to learn what happened. Destruction
+(M8) is the archetype consumer: a wall takes damage proportional to how hard it was hit, so the sim
+must report every contact and the impulse it carried. M7.9 adds that reporting as **buffered,
+deterministic events** (`events.hpp`) — data the game reads *after* a step, not callbacks fired
+*during* one.
+
+### Data, not callbacks — and why that matters here
+
+The obvious API is a listener the solver calls on each contact (Jolt's `ContactListener`). We
+deliberately do the opposite and accumulate events into a list read after `step()` returns. Three
+reasons, all specific to this engine:
+
+- **The solve is parallel.** From M7.5 the per-island solve runs on worker threads. A callback would
+  fire from whichever worker owns the island, in nondeterministic order, into game code that would
+  then need its own locking — exactly the re-entrancy-and-ordering swamp buffering avoids.
+- **Determinism is a contract.** M11 replicates and replays destruction against a "damage → detach
+  is a pure function" promise, and damage is a function of the event stream. So the stream must be a
+  pure function of the tick — same order, same payloads, every run and every thread count. A list
+  built in canonical order in the sequential tail is; a set of thread-timed callbacks is not.
+- **Consumption is naturally deferred.** The fixed tick (ADR-0023) already separates simulation from
+  the systems that react to it. Events want the same seam: produced by the step, drained by the game
+  when it is ready. The output is **double-buffered** — the tick fills a back buffer and swaps it to
+  front — so a consumer always reads a stable snapshot of the completed tick.
+
+Everything is emitted in `step()`'s **sequential tail**, after the parallel `parallel_for` has
+joined: the events are a pure *read* of the just-solved state. Nothing there writes a body, so the
+world hash and the cross-thread determinism of M7.5 are untouched — and the event stream is itself
+bit-identical for any worker count, because it derives only from the canonical manifolds and the
+(thread-count-independent) solved impulses and sleep decisions.
+
+### Contact events: the began/persisted/ended lifecycle
+
+Each tick, every touching body pair with a dynamic member produces one `ContactEvent` carrying the
+pair (in canonical `a<b` order), a representative world point (the deepest manifold point), the
+`a→b` normal, and — the payload that matters — the **total normal and friction impulse the solver
+exchanged over the pair this tick**. Impulse is `∫F dt`; it *is* the "how hard" a damage model
+wants, and it comes straight off the solved manifold (summed over its points). A `phase` tags the
+contact `Began` (new this tick — the impact, where damage usually peaks), `Persisted` (a sustained
+or resting contact), or `Ended` (separated this tick — impulses zero, nothing was exchanged). The
+lifecycle mirrors Jolt's added/persisted/removed and PhysX/Unity's enter/stay/exit, so the familiar
+damage-on-impact / sustained-crush / released patterns map straight on.
+
+Immovable pairs (no dynamic member) are skipped entirely: they exchange no impulse, so there is
+nothing to report and no lifecycle to track.
+
+### The merge, and why no hash map
+
+Classifying a pair means asking "were these two touching last tick?" The warm-start cache already
+knows — but it is an *unordered* map and stores only feature ids and impulses, not the point/normal
+an `Ended` event wants. So the event system keeps its own witness: one record per contacting pair,
+in two vectors (`cur` this tick, `prev` last tick) kept **sorted by the pair key**. Because manifolds
+already arrive in canonical order, `cur` is built already sorted, and a single linear **merge** of
+`cur` against `prev` classifies every pair — key in both → `Persisted`, only in `cur` → `Began`, only
+in `prev` → `Ended` — and emits them in canonical order with *no hash map and no per-tick sort*. The
+two vectors swap each tick, reusing their capacity. (An `Ended` record is last tick's, so it carries
+that pair's final point and normal; a body it names may since have been destroyed — the event honestly
+reports the stale id, and a consumer can `is_alive`-check it.)
+
+### Silence when settled
+
+A settled pile should cost nothing *and say nothing*. A pair whose every dynamic member is asleep is
+recorded **present but suppressed**: it emits no event, yet it stays in `cur` so it is not falsely
+reported as `Ended` (an asleep pair never separated). The rule — "emit iff some dynamic participant
+is awake" — is exactly the solver's active-island gate, so a contact event fires precisely when the
+contact was actually solved. A box resting on the floor keeps emitting `Persisted` (with its
+`m·g·dt` support impulse) until it sleeps, then goes silent on the very tick it deactivates — the
+same tick a `Slept` event explains why.
+
+### Sleep events
+
+`SleepEvent` reports a body that deactivated (`Slept` — the basis for M8's `DebrisSettled`) or that
+the simulation reactivated (`Woke` — a faller landing on and rousing a sleeping stack). Both are
+computed by snapshotting each body's `asleep` flag at the top of `step()` and diffing at the tail,
+so exactly the transitions *this step caused* are reported, in dense body order. A wake caused by an
+explicit `wake_body()`/`apply_impulse()` between steps is deliberately **not** evented: the caller
+performed it and already knows, and reporting it would blur "the world changed on its own" with "I
+changed the world." Islands sleep as a unit (M7.5), so a settling stack emits a `Slept` for every
+member on the tick it sleeps.
+
+### What is deferred: triggers
+
+The brick's original name was "contact/**trigger**/sleep events," and the trigger third is
+deliberately left out. A trigger (sensor) is a body that *detects* overlap but generates no contact
+response — a distinct concept requiring a sensor flag on bodies, a solver branch that skips
+constraint generation for sensor pairs, and enter/exit tracking. None of that is in M7's shipped
+shape/body scope, and nothing consumes it yet: M8 damage rides **contact** events, not triggers. So
+by the same measure-first discipline ADR-0026 applies to the private AABB tree (generalize when a
+second, measured consumer appears), triggers wait for the first gameplay volume that needs one; the
+overlap machinery they will reuse (broadphase + `sphere_vs_shape`/manifold overlap) already exists.
+
+**The deferred design, pinned so the retrofit stays cheap.** The real consumer is the first system
+that needs enter/exit *lifecycle* — an M9 editor kill-zone, an m11.3 capsule mover — not a one-shot
+volume test: a blast radius or an explosion's affected set is a single-tick question that
+`overlap_sphere` already answers, and a persistent sensor body would only make it more expensive. So
+triggers are specifically the *persistent presence* tool. When that consumer lands, the shape is
+small and known: a `bool is_sensor` on `BodyDesc` (orthogonal to `MotionType`, so a *dynamic* sensor
+is legal), one SoA column, a `trigger_events()` accessor, and a `TriggerEvent { BodyId sensor;
+BodyId other; TriggerPhase phase; }` where `phase` is Entered/Stayed/Exited — presence only, no
+point/normal/impulse (a sensor reports *that* it was entered, not *how hard*). The one load-bearing
+change is at constraint prep (`step()` stage 3): a sensor pair is detected by the narrowphase exactly
+as today but generates **no constraint** — and everything else falls out for free, because islands
+are built from the constraint list, so a sensor pair never merges islands, never enters the parallel
+solve, and never keeps a body awake. The began/persisted/ended merge in the event tail is already
+enter/stay/exit; a second `cur`/`prev` record stream clones it. **The one trap to record now:** the
+contact tail's "skip a pair with no dynamic member" rule is *wrong* for triggers — a kinematic
+character walking into a **static** kill-zone has zero total inverse mass and would be silently
+dropped. The trigger inclusion rule is instead "a sensor member plus at least one **non-static**
+member." (Recorded from an M7.9 design consult; no ADR — ADR-0026's deferred register already
+carries the decision.)
+
+### Determinism, preserved
+
+Events add no shared writes to the parallel region and no unordered iteration to the sim path: they
+are built in the sequential tail from the canonical manifolds, by a merge of two key-sorted vectors,
+in dense order for sleep. `world_hash()` is unchanged by their addition, and the event stream hashes
+identically whether the islands solve sequentially or across any number of workers.
+
+### Proofs
+
+`tests/physics/events_test.cpp`, pure CPU and structural: a landing box reports `Began` then
+`Persisted` for the canonical (floor, box) pair with an upward normal, and at rest the event's total
+normal impulse equals the same `m·g·dt` the solver test reads from the cache — the payload tied to a
+closed form; a settling body emits `Slept` exactly once and the pile then goes silent (no contact or
+sleep events while asleep); launching a rested body off the ground produces an `Ended` (zero impulse)
+and no lingering events once airborne; a box dropped on a sleeper emits a `Woke` for the roused body;
+and the headline — a multi-island scene stepped 400 times yields one event-stream hash shared by the
+sequential path and by 1-, 2-, and 4-worker job systems (the test that would catch any read of the
+impulses from inside the parallel region). Green under dev + ASan/UBSan + TSan.

@@ -36,14 +36,18 @@ and replay validation build on. Scope: same-binary reproducibility, *not* cross-
 | M7.6 | **fixed-tick ECS sync** (`PhysicsSync`) + **change detection** (ADR-0018 §4); awake-only write-back | landed |
 | M7.7 | **scene queries** — raycast + `overlap_sphere` through the BVH, motion-class filters; **external impulses** (`apply_impulse`) | landed |
 | M7.8 | **the proof** — `samples/09-physics-playground` (headless self-check, M7's "done when") + the `Application` per-tick hook | landed |
+| M7.9 | **contact & sleep events** — began/persisted/ended contacts with point + normal + impulse, `Slept`/`Woke`; buffered, double-buffered, canonical per-tick order (the M8-damage input) | landed |
 
 **M7's "done when" (ROADMAP): objects fall/collide/stack; raycasts hit; runs parallel to the frame —
-met**, proven by `samples/09-physics-playground` self-checking in CI.
+met**, proven by `samples/09-physics-playground` self-checking in CI. M7.9 is the first fast-follow
+into M8's runway.
 
 ### Deferred (planned, not yet built — fast-follows into M8's runway)
 
-- **Contact/trigger/sleep events** — point + normal + impulse, canonical per-tick order,
-  double-buffered (the M8-damage input).
+- **Trigger/sensor events** — the third of the M7.9 "contact/trigger/sleep" brick, held back: a
+  sensor body (overlaps but generates no contact response) is not in M7's shipped body scope and has
+  no consumer yet (M8 damage rides contact events). Lands with the first gameplay volume; it reuses
+  the existing overlap machinery.
 - **Shapes II** — runtime convex hull, polyhedral mass properties, static triangle mesh + midphase,
   compound shapes.
 - **CCD** (speculative contacts) + debris-scale tuning + a `WorldStats`/stress harness.
@@ -59,6 +63,7 @@ engine/physics/
 │   ├── shape.hpp           #   ShapeType, ShapeDesc, analytic mass properties
 │   ├── aabb.hpp            #   Aabb + overlap / ray-slab helpers
 │   ├── contact.hpp         #   ContactPoint, Manifold (narrowphase out → solver in)
+│   ├── events.hpp          #   ContactEvent, SleepEvent — step()'s per-tick event report (M8 input)
 │   ├── query.hpp           #   Ray, RayHit, QueryFilter (scene queries)
 │   ├── components.hpp      #   RigidBody / Collider / RigidBodyHandle ECS components
 │   └── sync.hpp            #   PhysicsSync — the ECS ↔ PhysicsWorld bridge
