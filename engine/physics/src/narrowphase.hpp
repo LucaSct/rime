@@ -7,6 +7,7 @@
 
 #include "epa.hpp"
 #include "gjk.hpp"
+#include "hull.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/contact.hpp"
@@ -21,7 +22,7 @@
 //    points and segments, whose closest-point problems have closed forms that are both cheaper and
 //    more robust than any iterative method. The capsule paths use the shrunk-shape trick: collide
 //    the core segment, then inflate the answer by the radius.
-//  - Box–box (and, at M7.9, anything involving a convex hull) takes the GENERAL CONVEX path:
+//  - Box–box (and, since M7.11, anything involving a convex hull) takes the GENERAL CONVEX path:
 //    GJK for overlap (src/gjk.hpp), EPA for penetration normal/depth (src/epa.hpp), then
 //    REFERENCE-FACE CLIPPING to turn that single deepest direction into a stable multi-point
 //    manifold — a face-on-face contact needs up to four points or the stack wobbles.
@@ -54,6 +55,10 @@ inline constexpr std::uint32_t kFeatBoxCapsule = 0x42430001u;
 inline constexpr std::uint32_t kFeatBoxBox = 0x42420001u;
 inline constexpr std::uint32_t kFeatClipVertex = 0xC11B0001u;
 inline constexpr std::uint32_t kFeatSpeculative = 0x5EC00001u; // M7.10 CCD speculative contact
+inline constexpr std::uint32_t kFeatSphereHull = 0x53480001u;  // M7.11 convex hulls ('H' = 0x48)
+inline constexpr std::uint32_t kFeatBoxHull = 0x42480001u;
+inline constexpr std::uint32_t kFeatCapsuleHull = 0x43480001u;
+inline constexpr std::uint32_t kFeatHullHull = 0x48480001u;
 
 namespace narrowphase_detail {
 
@@ -303,17 +308,20 @@ struct ClipVertex {
 };
 
 // Clip a convex polygon against one half-space dot(p, n) <= off (Sutherland–Hodgman step). A
-// convex clip adds at most one vertex net, so 4 input verts through 4 planes stay <= 8; the
-// buffers are sized 12 for headroom and the guard just drops beyond that (never hit for boxes).
+// convex clip adds at most one vertex net, so 4 input verts through 4 planes stay <= 8 (boxes pass
+// buffers of 12 for headroom); hull faces carry up to kMaxHullFaceVertices vertices and as many
+// side planes, so the general convex path (M7.11) passes 32. `out_cap` is the out-buffer size —
+// the guard drops beyond it (never hit within the validated face-size caps).
 inline int clip_against_plane(const ClipVertex* in,
                               int in_count,
                               core::Vec3 n,
                               float off,
                               std::uint32_t plane_tag,
-                              ClipVertex* out) noexcept {
+                              ClipVertex* out,
+                              int out_cap) noexcept {
     int out_count = 0;
     const auto push = [&](const ClipVertex& v) {
-        if (out_count < 12) {
+        if (out_count < out_cap) {
             out[out_count++] = v;
         }
     };
@@ -414,6 +422,116 @@ inline void reduce_manifold(Manifold& m,
         add_point(
             m, verts[idx].p + mid_offset_dir * (mid_dist[idx] * 0.5f), pens[idx], verts[idx].tag);
     }
+}
+
+// ------------------------------------------------------------------- convex polyhedra ----------
+// The M7.11 generalization of the box machinery above: a POSED convex polyhedron seen only
+// through spans (vertices, outward unit face normals, CSR faces) plus a pose. Registered hulls
+// view their store-owned arrays; a box adapts itself into stack storage (make_box_poly_view) so
+// box-vs-hull runs the same general path — a box IS a hull with 8 vertices and 6 faces, and
+// having exactly one general clipping routine means one set of invariants to trust. Box-vs-box
+// keeps its specialized path above untouched (its feature-id scheme predates this brick and the
+// warm-start caches of every existing scene depend on it).
+struct PolyView {
+    std::span<const core::Vec3> verts;           // local space
+    std::span<const core::Vec3> face_normals;    // local, unit, outward
+    std::span<const std::uint32_t> face_offsets; // CSR: face f = indices[offsets[f]..offsets[f+1])
+    std::span<const std::uint32_t> face_indices;
+    core::Vec3 pos;
+    core::Quat orient;
+};
+
+// Support functor over a PolyView — the same argmax-by-vertex-scan as hull_support_local, posed.
+// Deliberately NOT the sign-trick even for the box adapter: within one collision the same support
+// answers must come from the same function, and the general path never mixes with the box path.
+struct PolySupport {
+    const PolyView* view;
+
+    [[nodiscard]] core::Vec3 operator()(core::Vec3 dir) const noexcept {
+        const core::Vec3 ld = core::rotate(core::conjugate(view->orient), dir);
+        std::size_t best = 0;
+        float best_d = core::dot(view->verts[0], ld);
+        for (std::size_t i = 1; i < view->verts.size(); ++i) {
+            const float d = core::dot(view->verts[i], ld);
+            if (d > best_d) { // strict >: first-wins ties, a pure function of stored order
+                best_d = d;
+                best = i;
+            }
+        }
+        return view->pos + core::rotate(view->orient, view->verts[best]);
+    }
+};
+
+[[nodiscard]] inline PolyView
+make_hull_poly_view(const ConvexHull& h, core::Vec3 pos, const core::Quat& q) noexcept {
+    return PolyView{h.vertices, h.face_normals, h.face_offsets, h.face_indices, pos, q};
+}
+
+// The box-as-hull tables. Corner i sits on the positive side of axis k iff bit k of i is set —
+// the SAME corner-id convention as box_face(), so a box corner means one thing everywhere. Faces
+// are listed in box face-id order (axis*2 + positive_side) and wound counter-clockwise viewed
+// from outside (Newell normal == the outward normal — verified against kBoxFaceNormals).
+inline constexpr core::Vec3 kBoxFaceNormals[6] = {{-1.0f, 0.0f, 0.0f},
+                                                  {1.0f, 0.0f, 0.0f},
+                                                  {0.0f, -1.0f, 0.0f},
+                                                  {0.0f, 1.0f, 0.0f},
+                                                  {0.0f, 0.0f, -1.0f},
+                                                  {0.0f, 0.0f, 1.0f}};
+inline constexpr std::uint32_t kBoxFaceOffsets[7] = {0, 4, 8, 12, 16, 20, 24};
+inline constexpr std::uint32_t kBoxFaceIndices[24] = {
+    0, 4, 6, 2, // -X
+    1, 3, 7, 5, // +X
+    0, 1, 5, 4, // -Y
+    2, 6, 7, 3, // +Y
+    0, 2, 3, 1, // -Z
+    4, 5, 7, 6, // +Z
+};
+
+// Stack storage for the adapter's scaled corners (the constexpr tables carry topology only).
+struct BoxPolyStorage {
+    core::Vec3 verts[8];
+};
+
+[[nodiscard]] inline PolyView make_box_poly_view(BoxPolyStorage& storage,
+                                                 const ShapeDesc& s,
+                                                 core::Vec3 pos,
+                                                 const core::Quat& q) noexcept {
+    const core::Vec3 h = s.half_extents;
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        storage.verts[i] = core::Vec3{
+            (i & 1u) != 0 ? h.x : -h.x, (i & 2u) != 0 ? h.y : -h.y, (i & 4u) != 0 ? h.z : -h.z};
+    }
+    return PolyView{{storage.verts, 8},
+                    {kBoxFaceNormals, 6},
+                    {kBoxFaceOffsets, 7},
+                    {kBoxFaceIndices, 24},
+                    pos,
+                    q};
+}
+
+// The face of a posed polyhedron most aligned with a WORLD direction — the PolyView analogue of
+// most_aligned_face(). The direction is rotated into local space once (a rotation preserves dot
+// products, so the argmax is unchanged and every face normal stays untouched). Fixed ascending
+// scan with strict '>' resolves ties to the lowest face index — same determinism discipline as
+// everywhere else. Alignments are dot(unit normal, dir), so values from two different hulls are
+// directly comparable for the reference-face choice.
+[[nodiscard]] inline std::uint32_t most_aligned_poly_face(const PolyView& v,
+                                                          core::Vec3 world_dir,
+                                                          float* alignment = nullptr) noexcept {
+    const core::Vec3 ld = core::rotate(core::conjugate(v.orient), world_dir);
+    std::size_t best = 0;
+    float best_d = core::dot(v.face_normals[0], ld);
+    for (std::size_t f = 1; f < v.face_normals.size(); ++f) {
+        const float d = core::dot(v.face_normals[f], ld);
+        if (d > best_d) {
+            best_d = d;
+            best = f;
+        }
+    }
+    if (alignment != nullptr) {
+        *alignment = best_d;
+    }
+    return static_cast<std::uint32_t>(best);
 }
 
 } // namespace narrowphase_detail
@@ -653,7 +771,7 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
 // capsule's CORE SEGMENT (both exact convex sets); a contact exists when it is under the capsule
 // radius. If the core itself penetrates the box (deep overlap), EPA on the same pair supplies
 // direction and core depth, and the radius is added on. One contact point v1: a capsule lying
-// flat on a box face would prefer two — deferred, TODO(M7.9) alongside the convex-hull work.
+// flat on a box face would prefer two — a known limitation, deferred (capsule-vs-hull shares it).
 [[nodiscard]] inline bool collide_box_capsule(const ShapeDesc& box_shape,
                                               core::Vec3 box_pos,
                                               const core::Quat& box_q,
@@ -773,8 +891,8 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
         const float off = core::dot(n_side, ref_box.center) + ref_box.half[axis];
         const std::uint32_t plane_tag =
             static_cast<std::uint32_t>(axis * 2 + (sign > 0.0f ? 1 : 0));
-        count =
-            clip_against_plane(cur, count, n_side, off, feature_combine(side_seed, plane_tag), nxt);
+        count = clip_against_plane(
+            cur, count, n_side, off, feature_combine(side_seed, plane_tag), nxt, 12);
         ClipVertex* tmp = cur;
         cur = nxt;
         nxt = tmp;
@@ -817,21 +935,294 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
     return true;
 }
 
+// ------------------------------------------------------------------- hull pair routines --------
+// Convex polyhedron A vs convex polyhedron B (M7.11) — collide_box_box's pipeline, generalized
+// from the box's six hard-wired faces to arbitrary face lists:
+//   GJK: overlap? (no -> done)   EPA: penetration direction + depth
+//   reference/incident face selection over BOTH hulls' face lists (tie biased to A, as boxes)
+//   Sutherland–Hodgman clip of the incident polygon against the reference face's SIDE planes
+//   keep below the reference plane, reduce to <= 4 spread points.
+// The one genuinely new piece is the SIDE PLANES: a box's side planes are its four adjacent
+// faces, but a general reference face only promises its own edges — so each side plane is built
+// THROUGH a reference-polygon edge, perpendicular to the reference face (normal = edge ×
+// face-normal, oriented away from the polygon's centroid). For a box-shaped hull those planes
+// coincide with the adjacent faces' planes, so this is a strict generalization. Feature ids stay
+// stable the same way the box path's do: everything is derived from registration-fixed indices —
+// reference/incident FACE indices seed the manifold, an incident VERTEX index tags an original
+// point, and a reference EDGE index tags a clip-born point. `pair_seed` keeps different shape
+// pairings (hull-hull vs box-hull) in disjoint id spaces.
+[[nodiscard]] inline bool collide_convex_convex(const narrowphase_detail::PolyView& a,
+                                                const narrowphase_detail::PolyView& b,
+                                                std::uint32_t pair_seed,
+                                                Manifold& m) {
+    using namespace narrowphase_detail;
+    constexpr int kClipBuf = static_cast<int>(2 * hull_detail::kMaxHullFaceVertices);
+
+    const PolySupport sup_a{&a};
+    const PolySupport sup_b{&b};
+    const GjkResult g = gjk(sup_a, sup_b, a.pos - b.pos);
+    if (!g.overlapping) {
+        return false;
+    }
+    const EpaResult e = epa(sup_a, sup_b, g.simplex, g.simplex_count);
+    if (!e.valid) {
+        return false; // numerically flat difference — drop this tick (documented posture)
+    }
+
+    // Reference face: the better-aligned of (A's face along the push direction, B's face against
+    // it), biased toward A on near-ties — flipping reference between frames would relabel every
+    // feature id and defeat warm starting (the box path's rule, verbatim).
+    float align_a = 0.0f;
+    float align_b = 0.0f;
+    const std::uint32_t face_a = most_aligned_poly_face(a, e.normal, &align_a);
+    const std::uint32_t face_b = most_aligned_poly_face(b, -e.normal, &align_b);
+    const bool ref_is_a = !(align_b > align_a + kFaceTieEps);
+    const PolyView& ref_view = ref_is_a ? a : b;
+    const PolyView& inc_view = ref_is_a ? b : a;
+    const std::uint32_t ref_face = ref_is_a ? face_a : face_b;
+
+    // Pose the reference polygon once; its outward normal (snapped, like the box path — EPA's
+    // polytope normal wobbles at float precision, the face is the stable representative).
+    const core::Vec3 ref_n = core::rotate(ref_view.orient, ref_view.face_normals[ref_face]);
+    const std::uint32_t ref_begin = ref_view.face_offsets[ref_face];
+    const int ref_count = static_cast<int>(ref_view.face_offsets[ref_face + 1] - ref_begin);
+    core::Vec3 refv[hull_detail::kMaxHullFaceVertices];
+    core::Vec3 ref_centroid{0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < ref_count; ++i) {
+        refv[i] = ref_view.pos + core::rotate(ref_view.orient,
+                                              ref_view.verts[ref_view.face_indices[ref_begin + i]]);
+        ref_centroid += refv[i];
+    }
+    ref_centroid = ref_centroid * (1.0f / static_cast<float>(ref_count));
+    const float ref_off = core::dot(ref_n, refv[0]);
+
+    const std::uint32_t inc_face = most_aligned_poly_face(inc_view, -ref_n);
+    m.normal = ref_is_a ? ref_n : -ref_n;
+
+    const std::uint32_t side_seed = feature_combine(
+        feature_combine(pair_seed, ref_is_a ? 0xA1u : 0xB2u), feature_combine(ref_face, inc_face));
+
+    // Incident polygon, tagged with its hull vertex indices (registration-fixed, hence stable).
+    ClipVertex poly_a[kClipBuf];
+    ClipVertex poly_b[kClipBuf];
+    const std::uint32_t inc_begin = inc_view.face_offsets[inc_face];
+    int count = static_cast<int>(inc_view.face_offsets[inc_face + 1] - inc_begin);
+    for (int k = 0; k < count; ++k) {
+        const std::uint32_t vi = inc_view.face_indices[inc_begin + k];
+        poly_a[k] =
+            ClipVertex{inc_view.pos + core::rotate(inc_view.orient, inc_view.verts[vi]), vi};
+    }
+    ClipVertex* cur = poly_a;
+    ClipVertex* nxt = poly_b;
+
+    // Clip against one side plane per reference edge. cross(edge, ref_n) is perpendicular to
+    // both, i.e. in the face plane and normal to the edge; orienting it away from the polygon
+    // centroid makes it the OUTWARD side plane whatever the authored winding direction. The
+    // orientation test compares against the centroid-to-edge distance — strictly positive for a
+    // valid convex face — so the flip is a well-conditioned pure function of the inputs.
+    for (int i = 0; i < ref_count && count > 0; ++i) {
+        const core::Vec3 v0 = refv[i];
+        const core::Vec3 v1 = refv[(i + 1) % ref_count];
+        core::Vec3 n_side = core::cross(v1 - v0, ref_n);
+        if (core::dot(n_side, ref_centroid - v0) > 0.0f) {
+            n_side = -n_side; // point away from the interior
+        }
+        const float off = core::dot(n_side, v0);
+        count = clip_against_plane(cur,
+                                   count,
+                                   n_side,
+                                   off,
+                                   feature_combine(side_seed, static_cast<std::uint32_t>(i)),
+                                   nxt,
+                                   kClipBuf);
+        ClipVertex* tmp = cur;
+        cur = nxt;
+        nxt = tmp;
+    }
+
+    // Keep only points at/below the reference face; measure depth against its plane (identical
+    // to the box path from here down).
+    ClipVertex kept[kClipBuf];
+    float pens[kClipBuf];
+    float dists[kClipBuf];
+    int kept_count = 0;
+    for (int i = 0; i < count; ++i) {
+        const float dist = core::dot(ref_n, cur[i].p) - ref_off; // <= 0 when penetrating
+        if (dist > kKeepEps) {
+            continue;
+        }
+        kept[kept_count] = cur[i];
+        kept[kept_count].tag = feature_combine(side_seed, cur[i].tag);
+        pens[kept_count] = -dist;
+        dists[kept_count] = -dist;
+        ++kept_count;
+    }
+
+    if (kept_count == 0) {
+        // Edge-edge (or clipping starved): fall back to the single EPA witness so the contact
+        // is not lost — the box path's posture.
+        add_point(m, (e.point_a + e.point_b) * 0.5f, e.depth, feature_combine(side_seed, 0xEDEEu));
+        return true;
+    }
+
+    if (kept_count <= 4) {
+        for (int i = 0; i < kept_count; ++i) {
+            add_point(m, kept[i].p + ref_n * (dists[i] * 0.5f), pens[i], kept[i].tag);
+        }
+    } else {
+        reduce_manifold(m, kept, pens, kept_count, ref_n, dists);
+    }
+    return true;
+}
+
+// Sphere A vs hull B: GJK from the centre (a point is a degenerate convex set GJK is happy
+// with) to the hull, then inflate by the radius — the same shrunk-shape trick as the capsule
+// paths. Deep case (centre inside the hull): EPA supplies the cheapest exit. The feature id is
+// the hull FACE the contact acts through (the face most anti-aligned with the push direction) —
+// stable while a sphere rests or rolls on a face, which is when warm starting pays.
+[[nodiscard]] inline bool collide_sphere_hull(core::Vec3 c,
+                                              float r,
+                                              const ConvexHull& hull,
+                                              core::Vec3 pos,
+                                              const core::Quat& q,
+                                              Manifold& m) {
+    using namespace narrowphase_detail;
+    const PolyView view = make_hull_poly_view(hull, pos, q);
+    const PolySupport sup_h{&view};
+    const SegmentSupport sup_c{c, c}; // a zero-length segment IS the point support
+    const GjkResult g = gjk(sup_c, sup_h, c - pos);
+
+    if (!g.overlapping && g.distance > kNormalEps) {
+        if (g.distance >= r) {
+            return false;
+        }
+        const core::Vec3 n = (g.point_b - g.point_a) * (1.0f / g.distance); // centre→hull = A→B
+        m.normal = n;
+        const core::Vec3 surf_a = c + n * r;
+        const core::Vec3 surf_b = g.point_b;
+        add_point(m,
+                  (surf_a + surf_b) * 0.5f,
+                  r - g.distance,
+                  feature_combine(kFeatSphereHull, most_aligned_poly_face(view, -n)));
+        return true;
+    }
+
+    // Centre inside (or touching) the hull: EPA for the exit direction and the centre's depth.
+    const EpaResult e = epa(sup_c, sup_h, g.simplex, g.simplex_count);
+    if (!e.valid) {
+        return false; // numerically flat difference — drop this tick (documented posture)
+    }
+    const core::Vec3 n = e.normal; // pushes B (the hull) away from A (the centre): A→B
+    m.normal = n;
+    const core::Vec3 surf_a = c + n * r;
+    add_point(m,
+              (surf_a + e.point_b) * 0.5f,
+              e.depth + r,
+              feature_combine(kFeatSphereHull, 64u + most_aligned_poly_face(view, -n)));
+    return true;
+}
+
+// Capsule A vs hull B — the shrunk-shape path exactly as collide_box_capsule: GJK between the
+// capsule's CORE SEGMENT and the hull, inflate the answer by the radius; EPA when the core
+// itself penetrates. One contact point v1 (a capsule lying flat on a hull face would prefer
+// two — the same known limitation as box-capsule, deferred alongside it).
+[[nodiscard]] inline bool collide_capsule_hull(core::Vec3 p0,
+                                               core::Vec3 p1,
+                                               float r,
+                                               const ConvexHull& hull,
+                                               core::Vec3 pos,
+                                               const core::Quat& q,
+                                               Manifold& m) {
+    using namespace narrowphase_detail;
+    const PolyView view = make_hull_poly_view(hull, pos, q);
+    const PolySupport sup_h{&view};
+    const SegmentSupport sup_seg{p0, p1};
+    const GjkResult g = gjk(sup_seg, sup_h, (p0 + p1) * 0.5f - pos);
+
+    if (!g.overlapping && g.distance > kNormalEps) {
+        if (g.distance >= r) {
+            return false;
+        }
+        const core::Vec3 n = (g.point_b - g.point_a) * (1.0f / g.distance); // core→hull = A→B
+        m.normal = n;
+        const core::Vec3 surf_a = g.point_a + n * r;
+        add_point(
+            m,
+            (surf_a + g.point_b) * 0.5f,
+            r - g.distance,
+            feature_combine(feature_combine(kFeatCapsuleHull, most_aligned_poly_face(view, -n)),
+                            segment_end_tag(g.point_a, p0, p1)));
+        return true;
+    }
+
+    const EpaResult e = epa(sup_seg, sup_h, g.simplex, g.simplex_count);
+    if (!e.valid) {
+        return false;
+    }
+    const core::Vec3 n = e.normal; // pushes B (the hull) away from A (the core): A→B
+    m.normal = n;
+    const core::Vec3 surf_a = e.point_a + n * r;
+    add_point(
+        m,
+        (surf_a + e.point_b) * 0.5f,
+        e.depth + r,
+        feature_combine(feature_combine(kFeatCapsuleHull, 64u + most_aligned_poly_face(view, -n)),
+                        segment_end_tag(e.point_a, p0, p1)));
+    return true;
+}
+
+// Box A vs hull B: adapt the box into an 8-vertex hull view on the stack and run the general
+// convex path. The adapter's corner/face numbering matches the box conventions, so ids are
+// coherent; they live in the kFeatBoxHull space, so they can never alias the specialized
+// box-box path's ids.
+[[nodiscard]] inline bool collide_box_hull(const ShapeDesc& box_shape,
+                                           core::Vec3 box_pos,
+                                           const core::Quat& box_q,
+                                           const ConvexHull& hull,
+                                           core::Vec3 pos,
+                                           const core::Quat& q,
+                                           Manifold& m) {
+    using namespace narrowphase_detail;
+    BoxPolyStorage storage;
+    const PolyView box_view = make_box_poly_view(storage, box_shape, box_pos, box_q);
+    const PolyView hull_view = make_hull_poly_view(hull, pos, q);
+    return collide_convex_convex(box_view, hull_view, kFeatBoxHull, m);
+}
+
+// Hull A vs hull B — the destruction workhorse (two fracture parts grinding against each other).
+[[nodiscard]] inline bool collide_hull_hull(const ConvexHull& ha,
+                                            core::Vec3 pa,
+                                            const core::Quat& qa,
+                                            const ConvexHull& hb,
+                                            core::Vec3 pb,
+                                            const core::Quat& qb,
+                                            Manifold& m) {
+    using namespace narrowphase_detail;
+    const PolyView va = make_hull_poly_view(ha, pa, qa);
+    const PolyView vb = make_hull_poly_view(hb, pb, qb);
+    return collide_convex_convex(va, vb, kFeatHullHull, m);
+}
+
 // ------------------------------------------------------------------------------ dispatch -------
 // Collide two posed shapes; fills normal/points/count (never the body ids). Pairs are
 // canonicalized by ShapeType so each unordered combination has exactly one routine; when the
 // arguments arrive in the other order the manifold is computed swapped and the normal flipped
-// (positions, penetrations and feature ids are side-symmetric already).
+// (positions, penetrations and feature ids are side-symmetric already). `hull_a`/`hull_b` are the
+// resolved store entries for ConvexHull shapes (a ShapeDesc carries only the id — ADR-0027; the
+// world resolves before dispatch) and nullptr otherwise; an unresolved hull collides as nothing
+// rather than crashing.
 [[nodiscard]] inline bool collide_shapes(const ShapeDesc& sa,
                                          core::Vec3 pa,
                                          const core::Quat& qa,
                                          const ShapeDesc& sb,
                                          core::Vec3 pb,
                                          const core::Quat& qb,
-                                         Manifold& m) {
+                                         Manifold& m,
+                                         const ConvexHull* hull_a = nullptr,
+                                         const ConvexHull* hull_b = nullptr) {
     m.count = 0;
     if (static_cast<std::uint8_t>(sa.type) > static_cast<std::uint8_t>(sb.type)) {
-        if (!collide_shapes(sb, pb, qb, sa, pa, qa, m)) {
+        if (!collide_shapes(sb, pb, qb, sa, pa, qa, m, hull_b, hull_a)) {
             return false;
         }
         m.normal = -m.normal;
@@ -862,6 +1253,9 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
                     capsule_ends(sb, pb, qb, b0, b1);
                     return collide_sphere_capsule(pa, sa.radius, b0, b1, sb.radius, m);
                 }
+                case ShapeType::ConvexHull:
+                    return hull_b != nullptr &&
+                           collide_sphere_hull(pa, sa.radius, *hull_b, pb, qb, m);
             }
             break;
         case ShapeType::Box:
@@ -874,19 +1268,38 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
                     capsule_ends(sb, pb, qb, b0, b1);
                     return collide_box_capsule(sa, pa, qa, b0, b1, sb.radius, m);
                 }
+                case ShapeType::ConvexHull:
+                    return hull_b != nullptr && collide_box_hull(sa, pa, qa, *hull_b, pb, qb, m);
                 default:
                     break;
             }
             break;
-        case ShapeType::Capsule: {
-            core::Vec3 a0;
-            core::Vec3 a1;
-            core::Vec3 b0;
-            core::Vec3 b1;
-            capsule_ends(sa, pa, qa, a0, a1);
-            capsule_ends(sb, pb, qb, b0, b1);
-            return collide_capsule_capsule(a0, a1, sa.radius, b0, b1, sb.radius, m);
-        }
+        case ShapeType::Capsule:
+            switch (sb.type) {
+                case ShapeType::Capsule: {
+                    core::Vec3 a0;
+                    core::Vec3 a1;
+                    core::Vec3 b0;
+                    core::Vec3 b1;
+                    capsule_ends(sa, pa, qa, a0, a1);
+                    capsule_ends(sb, pb, qb, b0, b1);
+                    return collide_capsule_capsule(a0, a1, sa.radius, b0, b1, sb.radius, m);
+                }
+                case ShapeType::ConvexHull: {
+                    core::Vec3 a0;
+                    core::Vec3 a1;
+                    capsule_ends(sa, pa, qa, a0, a1);
+                    return hull_b != nullptr &&
+                           collide_capsule_hull(a0, a1, sa.radius, *hull_b, pb, qb, m);
+                }
+                default:
+                    break;
+            }
+            break;
+        case ShapeType::ConvexHull:
+            // Canonical order puts the highest ShapeType second, so sb is a hull too.
+            return hull_a != nullptr && hull_b != nullptr &&
+                   collide_hull_hull(*hull_a, pa, qa, *hull_b, pb, qb, m);
     }
     return false;
 }
@@ -901,11 +1314,12 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
 // further (its speculative bias) — the body stops AT the surface instead of through it.
 //
 // Shape-agnostic by construction: it runs on GJK's closest-point witnesses (point_a/point_b, which
-// GJK already computes for a separated pair), so every convex primitive is handled by this one path
-// with no per-type code. `va`/`vb` are the bodies' LINEAR velocities; angular approach is ignored
-// on purpose (CCD for fast-SPINNING bodies is a deferred, conservative-advancement case —
-// ADR-0026). Returns false (m left empty) when the pair overlaps (the exact path owns that), is not
-// approaching, or is still too far to touch this step. `dt` must be > 0.
+// GJK already computes for a separated pair), so every convex shape — hulls included (M7.11), via
+// their support function — is handled by this one path with no per-type code. `va`/`vb` are the
+// bodies' LINEAR velocities; angular approach is ignored on purpose (CCD for fast-SPINNING bodies
+// is a deferred, conservative-advancement case — ADR-0026). Returns false (m left empty) when the
+// pair overlaps (the exact path owns that), is not approaching, or is still too far to touch this
+// step. `dt` must be > 0.
 [[nodiscard]] inline bool collide_speculative(const ShapeDesc& sa,
                                               core::Vec3 pa,
                                               const core::Quat& qa,
@@ -915,10 +1329,12 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
                                               const core::Quat& qb,
                                               core::Vec3 vb,
                                               float dt,
-                                              Manifold& m) {
+                                              Manifold& m,
+                                              const ConvexHull* hull_a = nullptr,
+                                              const ConvexHull* hull_b = nullptr) {
     m.count = 0;
-    const ShapeSupport support_a{&sa, pa, qa};
-    const ShapeSupport support_b{&sb, pb, qb};
+    const ShapeSupport support_a{&sa, pa, qa, hull_a};
+    const ShapeSupport support_b{&sb, pb, qb, hull_b};
     const GjkResult g = gjk(support_a, support_b, pa - pb);
     if (g.overlapping || g.distance <= narrowphase_detail::kNormalEps) {
         return false; // overlapping (the exact narrowphase owns it) or coincident — no gap to speak

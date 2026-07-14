@@ -4,6 +4,7 @@
 
 #include <cmath>
 
+#include "hull.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/shape.hpp"
@@ -13,8 +14,9 @@
 // The support point of a convex set S in direction d is the point of S farthest along d:
 //     support_S(d) = argmax_{p in S} dot(p, d).
 // It is the entire interface between "geometry" and "collision algorithm": GJK and EPA never see
-// vertices, faces, or radii — only this one query. That is why the same two algorithms will run
-// convex hulls (M7.9) unchanged: a hull just answers the same question by scanning its vertices.
+// vertices, faces, or radii — only this one query. That is why the same two algorithms run convex
+// hulls (M7.11) unchanged: a hull answers the same question by scanning its vertices
+// (hull_support_local in src/hull.hpp).
 //
 // Two properties the algorithms lean on:
 //  - support of a sum/offset: support_{A+t}(d) = support_A(d) + t (posing = rotate d into local
@@ -37,8 +39,11 @@ namespace rime::physics {
 }
 
 // Farthest point of a LOCAL-space shape along a LOCAL-space direction. `dir` need not be unit —
-// the argmax is scale-invariant — which saves normalizations in the GJK loop.
-[[nodiscard]] inline core::Vec3 support_local(const ShapeDesc& s, core::Vec3 dir) noexcept {
+// the argmax is scale-invariant — which saves normalizations in the GJK loop. `hull` must be the
+// resolved geometry when (and only when) s.type == ConvexHull: a ShapeDesc carries just the hull
+// id (ADR-0027), so the caller — always inside the seam, where the store lives — resolves it.
+[[nodiscard]] inline core::Vec3
+support_local(const ShapeDesc& s, core::Vec3 dir, const ConvexHull* hull = nullptr) noexcept {
     switch (s.type) {
         case ShapeType::Sphere: {
             // A sphere's support is r * dir_hat. Guard the zero direction (normalize() would
@@ -64,6 +69,10 @@ namespace rime::physics {
                 len > 1e-12f ? dir * (s.radius / len) : core::Vec3{s.radius, 0.0f, 0.0f};
             return core::Vec3{0.0f, sign_nonneg(dir.y) * s.half_height, 0.0f} + ball;
         }
+        case ShapeType::ConvexHull:
+            // Scan the registered vertices (hull.hpp). A null hull here is a caller bug (the
+            // world never dispatches an unresolved hull); return the origin rather than crash.
+            return hull != nullptr ? hull_support_local(*hull, dir) : core::Vec3{};
     }
     return core::Vec3{};
 }
@@ -71,22 +80,28 @@ namespace rime::physics {
 // Farthest point of a POSED shape along a WORLD-space direction: rotate the query into local
 // space (the inverse rotation), answer there, pose the answer back. This is the general form;
 // the GJK/EPA entry points below wrap concrete shapes so the hot loop carries no switch.
-[[nodiscard]] inline core::Vec3
-support_world(const ShapeDesc& s, core::Vec3 pos, const core::Quat& q, core::Vec3 dir) noexcept {
+[[nodiscard]] inline core::Vec3 support_world(const ShapeDesc& s,
+                                              core::Vec3 pos,
+                                              const core::Quat& q,
+                                              core::Vec3 dir,
+                                              const ConvexHull* hull = nullptr) noexcept {
     const core::Vec3 local_dir = core::rotate(core::conjugate(q), dir);
-    return pos + core::rotate(q, support_local(s, local_dir));
+    return pos + core::rotate(q, support_local(s, local_dir, hull));
 }
 
 // A posed convex shape as a support-function object — the form GJK/EPA take (templated on the
 // callable, so the compiler inlines the whole support chain into the loop; no virtual dispatch
-// on the contact hot path).
+// on the contact hot path). `hull` is the resolved geometry for a ConvexHull shape and stays
+// nullptr for primitives — added LAST so the M7.3-era three-field aggregate initializers keep
+// meaning exactly what they meant.
 struct ShapeSupport {
     const ShapeDesc* shape;
     core::Vec3 pos;
     core::Quat orient;
+    const ConvexHull* hull = nullptr;
 
     [[nodiscard]] core::Vec3 operator()(core::Vec3 dir) const noexcept {
-        return support_world(*shape, pos, orient, dir);
+        return support_world(*shape, pos, orient, dir, hull);
     }
 };
 

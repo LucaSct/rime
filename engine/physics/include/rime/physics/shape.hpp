@@ -4,20 +4,32 @@
 
 #include <cstdint>
 
+#include "rime/core/containers/handle.hpp"
 #include "rime/core/math/vec.hpp"
 
 // Collision shapes (the *description* — the backend builds runtime forms later). M7.1 needs only
-// enough to give a body its mass distribution; the convex-hull / triangle-mesh / compound shapes
-// that destruction leans on arrive at M7.9. A shape is pure data: no GPU, no allocation.
+// enough to give a body its mass distribution; convex hulls (the destruction shape) landed at
+// M7.11 (ADR-0027), with triangle mesh / compound still to come. A shape is pure data: no GPU, no
+// allocation.
 namespace rime::physics {
 
-// The primitive shapes v1. Hull/Mesh/Compound (the destruction shapes) land at M7.9; the enum is
-// left room to grow without renumbering the primitives.
+// Phantom tag so a HullId can't be confused with any other engine handle at compile time.
+struct HullTag {};
+
+// Handle to a convex hull registered with a PhysicsWorld (ADR-0027: hull geometry is WORLD-OWNED —
+// vertices/faces are registered once via PhysicsWorld::register_hull and referenced by this small
+// id, which is what keeps ShapeDesc a flat POD despite hulls being variable-length). Default
+// constructed ⇒ null (refers to no hull). Ids are only meaningful to the world that issued them.
+using HullId = core::Handle<HullTag>;
+
+// The shape set: the v1 primitives plus the convex hull (M7.11). Mesh/Compound (the remaining
+// destruction shapes) are still to land; the enum leaves room to grow without renumbering.
 enum class ShapeType : std::uint8_t {
     Sphere = 0,
     Box = 1,
     Capsule = 2,
-    // Hull, Mesh, Compound — M7.9
+    ConvexHull = 3, // geometry lives in the world's hull store; `hull` is the reference
+    // Mesh, Compound — deferred (ADR-0027 names their homes)
 };
 
 // A shape description. Only the fields relevant to `type` are read (a tagged union kept as a flat
@@ -27,11 +39,13 @@ struct ShapeDesc {
     float radius = 0.5f;                       // Sphere, Capsule
     core::Vec3 half_extents{0.5f, 0.5f, 0.5f}; // Box (half of each side)
     float half_height = 0.5f;                  // Capsule (cylinder half-height, local Y)
+    HullId hull{};                             // ConvexHull (PhysicsWorld::register_hull)
 };
 
 // Mass + the body-space principal moments of inertia (diagonal). For our symmetric primitives in
-// their local frame the inertia tensor is diagonal, so three numbers suffice; general hulls (M7.9)
-// carry a full tensor via a principal-axis rotation.
+// their local frame the inertia tensor is diagonal, so three numbers suffice; a general hull's
+// full tensor is diagonalized at registration and carried as these principal moments plus a
+// per-body principal-axis rotation inside the world (M7.11, ADR-0027) — this POD stays diagonal.
 struct MassProperties {
     float mass = 1.0f;
     core::Vec3 inertia_diagonal{1.0f, 1.0f, 1.0f};
@@ -44,7 +58,7 @@ struct MassProperties {
 //   Box    (half-extents h):      Iₓ = 1/12 · m · ((2h_y)² + (2h_z)²) = 1/3 · m · (h_y² + h_z²)
 //   Capsule ≈ cylinder v1 (axis = local Y, radius r, half-height hh):
 //                                 I_y = 1/2 · m · r²,   Iₓ = I_z = 1/12 · m · (3r² + (2hh)²)
-// The capsule's hemispherical caps are folded in at M7.9 (their parallel-axis contribution is a
+// The capsule's hemispherical caps are folded in later (their parallel-axis contribution is a
 // small correction; the cylinder body dominates); v1 documents the approximation rather than hiding
 // it.
 [[nodiscard]] inline MassProperties compute_mass_properties(const ShapeDesc& s,
@@ -71,6 +85,12 @@ struct MassProperties {
             mp.inertia_diagonal = {i_perp, i_axis, i_perp};
             break;
         }
+        case ShapeType::ConvexHull:
+            // A hull's mass properties come from geometry this shape-only helper cannot see: the
+            // world owns the hull store (ADR-0027) and computes them at register_hull() by the
+            // polyhedral integral (docs/math/polyhedral-mass-properties.md). create_body resolves
+            // the id there; this fallback (unit inertia) is only what a caller with no world gets.
+            break;
     }
     return mp;
 }

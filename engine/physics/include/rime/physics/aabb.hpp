@@ -84,6 +84,12 @@ compute_aabb(const ShapeDesc& s, core::Vec3 pos, const core::Quat& q) noexcept {
             const core::Vec3 r{s.radius, s.radius, s.radius};
             return Aabb{lo - r, hi + r};
         }
+        case ShapeType::ConvexHull:
+            // A hull's ShapeDesc is just an id (ADR-0027) — the geometry lives in the world's
+            // hull store, which this shape-only helper cannot see. PhysicsWorld bounds hulls
+            // internally by posing the stored vertices; a caller without a world gets the
+            // degenerate point bound below, honest about knowing nothing.
+            break;
     }
     return Aabb{pos, pos};
 }

@@ -38,9 +38,10 @@ and replay validation build on. Scope: same-binary reproducibility, *not* cross-
 | M7.8 | **the proof** — `samples/09-physics-playground` (headless self-check, M7's "done when") + the `Application` per-tick hook | landed |
 | M7.9 | **contact & sleep events** — began/persisted/ended contacts with point + normal + impulse, `Slept`/`Woke`; buffered, double-buffered, canonical per-tick order (the M8-damage input) | landed |
 | M7.10 | **CCD (speculative contacts)** — per-body opt-in; velocity-swept broadphase bound + GJK-distance speculative contacts + a solver gap-bias, so a fast body stops at a thin wall instead of tunnelling (no TOI rewind) | landed |
+| M7.11 | **shapes II: convex hulls** — world-owned hull store ([ADR-0027](../../docs/adr/0027-convex-hull-shapes.md)); authored+validated geometry, polyhedral mass properties → principal axes ([math note](../../docs/math/polyhedral-mass-properties.md)); hull support fn through GJK/EPA; reference-face clipping generalized to hull faces; hull raycast/overlap/CCD | landed |
 
 **M7's "done when" (ROADMAP): objects fall/collide/stack; raycasts hit; runs parallel to the frame —
-met**, proven by `samples/09-physics-playground` self-checking in CI. M7.9–M7.10 are the first
+met**, proven by `samples/09-physics-playground` self-checking in CI. M7.9–M7.11 are the first
 fast-follows into M8's runway.
 
 ### Deferred (planned, not yet built — fast-follows into M8's runway)
@@ -49,9 +50,11 @@ fast-follows into M8's runway.
   sensor body (overlaps but generates no contact response) is not in M7's shipped body scope and has
   no consumer yet (M8 damage rides contact events). Lands with the first gameplay volume; it reuses
   the existing overlap machinery.
-- **Shapes II** — runtime convex hull, polyhedral mass properties, static triangle mesh + midphase,
-  compound shapes. The biggest remaining M8 shape need (fracture parts + multi-part islands);
-  hull data does not fit the flat `ShapeDesc` POD, so it wants a shape-storage decision (ADR) first.
+- **Shapes II, the rest** — the convex hull itself landed at M7.11 (with the shape-storage ADR it
+  wanted, [ADR-0027](../../docs/adr/0027-convex-hull-shapes.md)); still to come are **compound
+  shapes** (next, built directly on `HullId` — the multi-part-island need), **static triangle mesh
+  + midphase**, and **runtime quickhull** (deliberately a cook-time concern — the M8.1 fracture
+  cook produces hull geometry; the runtime only validates what it is handed).
 - **Debris-scale tuning** + a `WorldStats`/stress harness (the CCD *machinery* landed at M7.10; the
   broad debris-scale performance pass rides the stress harness).
 
@@ -74,6 +77,7 @@ engine/physics/
     ├── world.cpp           #   the pImpl: body pool, step pipeline, queries, impulses
     ├── aabb_tree.hpp       #   the dynamic AABB tree (broadphase + ray/overlap engine)
     ├── support.hpp/gjk.hpp/epa.hpp/narrowphase.hpp   # the collision algorithm suite
+    ├── hull.hpp            #   the convex-hull store entry: validation, mass properties (M7.11)
     ├── solver.hpp          #   sequential-impulse + NGS
     ├── islands.hpp         #   union-find island partition
     └── scene_query.hpp     #   exact ray-vs-shape / sphere-vs-shape geometry

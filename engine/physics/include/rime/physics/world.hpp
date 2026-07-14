@@ -8,6 +8,7 @@
 #include <span>
 #include <vector>
 
+#include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/body.hpp"
@@ -27,6 +28,37 @@ class JobSystem;
 // bricks add queries (M7.7), events (M7.8), and a job-system/allocator-backed step (M7.5/M7.6) to
 // this same class — the seam is expected to grow across the milestone, not be frozen at M7.1.
 namespace rime::physics {
+
+// Authored convex-hull geometry for PhysicsWorld::register_hull (M7.11, ADR-0027): vertices plus
+// faces in CSR form — face f has face_counts[f] vertices, whose indices are consecutive in
+// face_indices, wound OUTWARD (counter-clockwise viewed from outside the hull). The spans are only
+// read during the register_hull call (the world copies what it keeps), so they may point at stack
+// or scratch memory. The input must already BE a convex hull: registration validates (closed,
+// convex, outward, 3..16 vertices per face, positive volume) and rejects — it never repairs, and
+// it never *constructs* a hull from a point cloud (quickhull is the M8.1 cook's job).
+struct HullDesc {
+    std::span<const core::Vec3> vertices;
+    std::span<const std::uint32_t> face_counts;  // one entry per face
+    std::span<const std::uint32_t> face_indices; // concatenated per-face vertex indices
+};
+
+// Derived physical properties of a registered hull — the read-back for tooling, tests, and render
+// alignment. Geometry itself (vertices/faces) is deliberately NOT exposed: it lives behind the
+// seam (ADR-0027), and consumers who need the render mesh already have the authored data.
+struct HullInfo {
+    float volume = 0.0f; // m³, of the authored solid
+    // Centre of mass in the AUTHORED frame. register_hull re-centres the stored geometry on it so
+    // that a body's `position` is the hull's COM (the engine-wide invariant every lever arm
+    // assumes) — place visuals at position + rotate(orientation, authored_point - centroid).
+    core::Vec3 centroid{0.0f, 0.0f, 0.0f};
+    // Principal moments of inertia for a 1 kg body of this geometry (inertia scales linearly with
+    // mass at fixed shape, so a body of mass m has moments m·inertia_per_mass), about the COM,
+    // along the principal axes.
+    core::Vec3 inertia_per_mass{1.0f, 1.0f, 1.0f};
+    // Rotation from the principal-axis frame to the hull's local frame. Identity when the authored
+    // geometry's inertia tensor was already diagonal (e.g. an axis-aligned box-shaped hull).
+    core::Quat principal_rotation = core::quat_identity();
+};
 
 class PhysicsWorld {
 public:
@@ -90,8 +122,8 @@ public:
 
     // --- Narrowphase (M7.3) -----------------------------------------------------------------
     // Turn the broadphase candidate pairs into exact contact manifolds: analytic fast paths for
-    // sphere/capsule pairs, GJK + EPA + reference-face clipping for boxes (and convex hulls at
-    // M7.9). Each manifold carries feature-id-tagged points whose accumulated impulses persist
+    // sphere/capsule pairs, GJK + EPA + reference-face clipping for boxes and convex hulls
+    // (M7.11). Each manifold carries feature-id-tagged points whose accumulated impulses persist
     // across ticks (warm starting) — the solver's input. step() runs this same collision path
     // internally (M7.4); this method stays exposed for direct testing/inspection exactly like
     // compute_pairs, with one difference: no solver runs between the build and the cache commit,
@@ -189,6 +221,21 @@ public:
     // woken by the simulation (Woke) this tick. In dense body order. See events.hpp on why an
     // explicit wake_body()/apply_impulse() wake is not reported here.
     [[nodiscard]] std::span<const SleepEvent> sleep_events() const noexcept;
+
+    // --- Convex hulls (M7.11, ADR-0027) -----------------------------------------------------
+    // Register authored convex-hull geometry with this world and get the id ShapeDesc::hull
+    // refers to. Registration is the cold path that pays for everything the hot path needs:
+    // validation, face planes, polyhedral mass properties, and the principal-axis
+    // decomposition; bodies then instantiate the hull by id (one fracture pattern, many debris
+    // bodies — the M8 shape economy). The stored geometry is re-centred on its centre of mass
+    // (see HullInfo::centroid). Returns the NULL id (HullId::is_valid() == false) if the input
+    // fails validation — see HullDesc for the rules. Hulls are immutable and live as long as
+    // the world. Not safe to call concurrently with step() (like create_body).
+    [[nodiscard]] HullId register_hull(const HullDesc& desc);
+
+    // Read back a registered hull's derived physical properties. Returns false (out untouched)
+    // for a null/unknown id.
+    [[nodiscard]] bool hull_info(HullId id, HullInfo& out) const;
 
 private:
     struct Impl;

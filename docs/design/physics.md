@@ -741,3 +741,108 @@ analytic height as a normal one, with no phantom lateral shove from the speculat
 surfaces as an **M7.9 contact event carrying the hit's impulse** (the M8 damage signal); and a CCD
 scene is **bit-identical across 1/2/4 workers** (the determinism contract, CCD live). Green under dev
 + ASan/UBSan + TSan.
+
+## Convex hulls (M7.11)
+
+Destruction (M8) fractures walls into convex parts, and every part must be a first-class collision
+shape — ADR-0026 called the convex hull a hard M8 requirement and bet on it from the start ("one
+support-function path collides every convex shape"). M7.11 collects that bet. The storage decision
+has its own ADR ([ADR-0027](../adr/0027-convex-hull-shapes.md)); this section is the systems tour.
+
+### Where a hull lives: the world-owned store
+
+A hull is *variable-length* data — N vertices, F faces — and `ShapeDesc` is a flat POD copied per
+body all over the SoA pool. Those two facts force the design: geometry is registered ONCE with the
+world (`register_hull(vertices, faces)` → a small `HullId`), and `ShapeDesc` carries only the id.
+One fracture pattern registers a handful of hulls; hundreds of debris bodies then reference them —
+geometry cost at pattern load, not at detach time (the M8 shape economy). Registration is the cold
+path that pays for everything the hot path needs: full validation (closed 2-manifold with
+consistent outward winding, convexity, planar faces of 3..16 vertices, positive volume — reject,
+never repair), face planes, and the mass properties below. There is deliberately **no runtime
+quickhull**: constructing a hull from a point cloud is the M8.1 cook's job; the runtime only
+*checks* what it is handed. Hull internals live in `src/hull.hpp`, resolved to pointers inside
+`world.cpp` — nothing above the seam ever sees a vertex (the RHI discipline, as everywhere).
+
+### Mass properties: integrate exactly, then diagonalize
+
+A uniform polyhedron's mass, centre of mass, and full inertia tensor come from closed-form
+integrals — signed tetrahedron decomposition through the origin, accumulated as a covariance
+matrix, shifted to the COM by one rank-1 update (the parallel-axis theorem in covariance form).
+The derivation is step-by-step in [`docs/math/polyhedral-mass-properties.md`](../math/polyhedral-mass-properties.md).
+Two deliberate moves:
+
+- **Stored vertices are re-centred on the COM.** The engine-wide invariant "a body's `position`
+  IS its centre of mass" stays true by construction — no COM-offset transform threaded through
+  the integrator/solver/queries for one shape type. The shift is reported via `HullInfo::centroid`
+  so visuals can be aligned; compound shapes (deferred) are the honest home for deliberate
+  offsets.
+- **The full tensor becomes a diagonal + a rotation.** A hull's inertia tensor is generally
+  non-diagonal in its body frame. Rather than teach the solver 3×3 inertia math, registration
+  diagonalizes once (fixed-sweep cyclic Jacobi — deterministic, det +1 by construction) and the
+  body pool gains one column: the principal→body quaternion (identity for primitives). Every
+  inertia application composes `q_body · q_principal` on the fly — NOT cached per tick, because
+  the NGS position pass rotates bodies mid-pass and re-reads orientation; a cached composite
+  would go stale exactly where it matters. Primitive behaviour is preserved bit-for-bit
+  (identity compose), which the unchanged M7.1–M7.10 suites witness.
+
+### Colliding hulls: the ADR-0026 bet pays off
+
+GJK/EPA never see shapes — only support functions — so a hull enters the entire collision stack
+by answering one question: *farthest vertex along a direction* (a linear scan, first-wins on
+ties). Overlap tests, EPA depth, speculative CCD contacts, and the sphere/capsule-vs-hull fast
+paths (GJK witnesses + radius inflation, exactly the box-capsule pattern) all work unchanged.
+
+The genuinely new machinery is the **manifold**: one deepest direction is not a contact patch,
+and a hull face resting on a hull face needs up to four points or it wobbles (the same reason
+boxes did, M7.3). The box path's reference-face clipping generalizes cleanly:
+
+- **Reference/incident faces** are selected over the hulls' *face lists* (most aligned with the
+  EPA normal, ties biased to A — flipping reference frame-to-frame would relabel every feature
+  id and defeat warm starting).
+- **Side planes**: a box's clip planes are its four adjacent faces; a general face only promises
+  its own edges, so each side plane is built *through a reference-polygon edge*, perpendicular
+  to the reference face (`edge × face-normal`, oriented away from the polygon centroid). For a
+  box-shaped hull these coincide with the adjacent faces' planes — a strict generalization.
+- **Sutherland–Hodgman** clips the incident polygon through those planes in fixed stack buffers
+  (faces are capped at 16 vertices at registration precisely so the contact path stays
+  allocation-free), then points at/below the reference plane are kept and reduced to ≤ 4.
+- **Feature ids** derive only from registration-fixed indices — reference/incident *face*
+  indices seed the manifold, an incident *vertex* index tags an original point, a reference
+  *edge* index tags a clip-born one — so the same physical contact reproduces the same ids every
+  tick and the warm-start cache carries impulses across frames, hulls included.
+
+Box-vs-box keeps its specialized M7.3 path untouched (existing scenes' feature-id spaces and
+caches stay valid); box-vs-hull adapts the box into an 8-vertex hull *view* on the stack and runs
+the general path. Queries came along: raycast gets the convex generalization of the slab test
+(clip the ray's parameter interval against every face half-space; the last plane entered is the
+hit face), and `overlap_sphere` asks GJK for the point-to-hull distance.
+
+### Determinism, unchanged
+
+Nothing hull-shaped perturbs the contract: hull ids are registration order, support scans and
+face selections are fixed-order first-wins, clipping is a pure function of posed geometry, and
+the store is append-only (no unordered iteration anywhere). The proof is the usual one — a mixed
+hull/primitive scene stepped 240× hashes bit-identically sequentially and on 1/2/4 workers.
+
+### Proofs
+
+`tests/physics/hull_test.cpp`, pure CPU, all through the public seam: registration **validation**
+(open mesh / reversed winding / outside vertex / bad index all rejected); **mass properties**
+pinned to closed forms (a box-shaped hull reproduces the box primitive's volume/moments with
+identity principal rotation; the regular tetrahedron's `V = 8/3`, `I/m = 0.4` isotropic); COM
+**re-centring** (an off-centre-authored cube reports its centroid and rests at the centred twin's
+height); the **principal-axis path end-to-end** (a hull authored pre-rotated responds to an
+off-COM impulse identically to the box primitive posed at that rotation — whatever eigenbasis
+Jacobi picked); **manifolds** (hull-hull and box-hull face contacts produce 4 points with
+analytic normal/depth and distinct, frame-stable feature ids — the warm-start counter is the
+witness); a hull **stack** stands still for 300 ticks; hull **raycast/overlap** at analytic
+distances; hull **CCD** (a 100 m/s hull bullet arrested at a thin wall); and the determinism
+hash across 1/2/4 workers. Green under dev + ASan/UBSan + TSan.
+
+### Deferred (ADR-0027 names the homes)
+
+Runtime quickhull → the M8.1 cook. Compound shapes → the next shapes brick, built on `HullId`.
+Static triangle mesh + midphase → the destruction world-geometry brick. Hull unregister /
+refcounting → with compound. Two-point lying-capsule manifolds (capsule-vs-hull shares
+box-vs-capsule's single-point v1) → with that path's upgrade. Hill-climbing support functions →
+measured-need (ADR-0026's register).

@@ -12,7 +12,8 @@ rime_add_test(rime_physics_tests
     sync_test.cpp
     query_test.cpp
     events_test.cpp
-    ccd_test.cpp)
+    ccd_test.cpp
+    hull_test.cpp)
 
 target_link_libraries(rime_physics_tests
     PRIVATE rime::physics)

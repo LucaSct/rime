@@ -41,7 +41,7 @@ $$ s_{A \ominus B}(\mathbf{d}) = s_A(\mathbf{d}) - s_B(-\mathbf{d}). $$
 
 To go farthest along $\mathbf{d}$ in $A \ominus B$, go farthest along $\mathbf{d}$ in $A$ and along
 $-\mathbf{d}$ in $B$. It is the *only* thing GJK and EPA ask of a shape — which is why the same two
-algorithms will run convex hulls (M7.9) unchanged. Our primitives, in their local frame (a posed
+algorithms run convex hulls (landed M7.11) unchanged. Our primitives, in their local frame (a posed
 shape rotates $\mathbf{d}$ into local space, answers, and rotates the answer back):
 
 - **Sphere**, radius $r$: $\;s(\mathbf{d}) = r\,\hat{\mathbf{d}}$.

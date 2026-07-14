@@ -27,7 +27,8 @@
 // polytope grows); degenerate GJK simplices are inflated to a tetrahedron by probing fixed axis
 // directions before expansion starts; on any numeric dead end (broken horizon, vertex/face budget)
 // EPA stops and returns the best face found so far rather than looping. Good enough for the
-// primitive-shape regime of M7.3 — re-audited when convex hulls (M7.9) widen the input space.
+// primitive-shape regime of M7.3; convex hulls (M7.11) widened the input space onto this same
+// posture — their faces are exactly the flat-difference cases the seed inflation handles.
 //
 // Private header (under src/), invisible above the PhysicsWorld seam.
 namespace rime::physics {
