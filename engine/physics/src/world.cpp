@@ -71,6 +71,7 @@ struct PhysicsWorld::Impl {
     std::vector<float> gravity_factor;
     std::vector<float> friction;      // Coulomb μ (M7.4 solver material)
     std::vector<float> restitution;   // bounciness e (M7.4 solver material)
+    std::vector<std::uint8_t> ccd;    // 1 ⇒ continuous collision: speculative contacts (M7.10)
     std::vector<float> sleep_timer;   // seconds spent below the sleep thresholds (M7.5)
     std::vector<std::uint8_t> asleep; // 1 ⇒ deactivated: skipped by integration + solve (M7.5)
     std::vector<ShapeDesc> shape;     // needed to recompute the world AABB after moving
@@ -146,7 +147,10 @@ struct PhysicsWorld::Impl {
     // warm-started manifolds, solve (mutating their impulses), then commit the cache from the
     // SOLVED manifolds.
     void compute_pairs(std::vector<Pair>& out) const;
-    void build_contacts(std::vector<Manifold>& out) const;
+    // `dt` > 0 enables M7.10 speculative CCD contacts for opted-in bodies; dt == 0 (the default,
+    // used by the compute_contacts() inspection seam) builds only exact overlaps, unchanged from
+    // M7.3.
+    void build_contacts(std::vector<Manifold>& out, float dt = 0.0f) const;
     void commit_contact_cache(const std::vector<Manifold>& manifolds) const;
 
     [[nodiscard]] AabbTree& tree_for(std::uint8_t m) noexcept {
@@ -209,7 +213,7 @@ void PhysicsWorld::Impl::compute_pairs(std::vector<Pair>& out) const {
     }
 }
 
-void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out) const {
+void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) const {
     out.clear();
 
     // Broadphase first: the candidate pairs are canonical (a.index < b.index), deterministically
@@ -231,15 +235,33 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out) const {
         m.b = pr.b;
         // collide_shapes canonicalizes by ShapeType internally and flips the normal to match, so
         // passing the bodies in slot order yields a normal oriented from a toward b (contact.hpp).
-        if (!collide_shapes(shape[da],
-                            position[da],
-                            orientation[da],
-                            shape[db],
-                            position[db],
-                            orientation[db],
-                            m) ||
-            m.count == 0) {
-            continue; // fat boxes overlapped but the exact shapes do not — a broadphase miss
+        bool touching = collide_shapes(shape[da],
+                                       position[da],
+                                       orientation[da],
+                                       shape[db],
+                                       position[db],
+                                       orientation[db],
+                                       m) &&
+                        m.count != 0;
+        if (!touching) {
+            // The exact shapes do not overlap. For a CCD pair (either body opted in) inside a real
+            // step, ask whether a fast approach will close the gap THIS tick and, if so, emit a
+            // speculative contact so the solver can arrest the body at the surface (M7.10). Passed
+            // in slot order, so the speculative normal is a → b like the exact one. dt == 0 (the
+            // inspection seam) never speculates, keeping compute_contacts at its M7.3 semantics.
+            if (dt <= 0.0f || (ccd[da] == 0 && ccd[db] == 0) ||
+                !collide_speculative(shape[da],
+                                     position[da],
+                                     orientation[da],
+                                     linear_velocity[da],
+                                     shape[db],
+                                     position[db],
+                                     orientation[db],
+                                     linear_velocity[db],
+                                     dt,
+                                     m)) {
+                continue; // a broadphase near-miss, or too far / not approaching to matter
+            }
         }
 
         // Warm-start from last tick's cache: match points by feature id and carry their
@@ -319,6 +341,7 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     p.gravity_factor.push_back(d.gravity_factor);
     p.friction.push_back(d.friction);
     p.restitution.push_back(d.restitution);
+    p.ccd.push_back(d.ccd ? std::uint8_t{1} : std::uint8_t{0});
     p.sleep_timer.push_back(0.0f);
     p.asleep.push_back(0); // a freshly created body always starts awake
     p.shape.push_back(d.shape);
@@ -355,6 +378,7 @@ void PhysicsWorld::destroy_body(BodyId id) {
         p.gravity_factor[d] = p.gravity_factor[last];
         p.friction[d] = p.friction[last];
         p.restitution[d] = p.restitution[last];
+        p.ccd[d] = p.ccd[last];
         p.sleep_timer[d] = p.sleep_timer[last];
         p.asleep[d] = p.asleep[last];
         p.shape[d] = p.shape[last];
@@ -375,6 +399,7 @@ void PhysicsWorld::destroy_body(BodyId id) {
     p.gravity_factor.pop_back();
     p.friction.pop_back();
     p.restitution.pop_back();
+    p.ccd.pop_back();
     p.sleep_timer.pop_back();
     p.asleep.pop_back();
     p.shape.pop_back();
@@ -455,13 +480,34 @@ void PhysicsWorld::step(float dt) {
         p.angular_velocity[i] *= 1.0f / (1.0f + p.angular_damping[i] * dt);
     }
 
+    // ---- 1.5 Sweep CCD proxies (M7.10). A body opted into continuous collision gets its
+    // broadphase bound expanded to enclose where it WILL be this tick (position + post-gravity
+    // velocity·dt), so the broadphase reports a thin obstacle in its path BEFORE the shapes overlap
+    // — the precondition for stage 2's speculative test to see the pair at all. Done here, ahead of
+    // the broadphase and every tick (not folded into the stage-8 refit), so a body that is fast
+    // from the moment it spawns is covered on its very first step. Sequential, before the parallel
+    // region; move_proxy adds the fat margin on top, and the stage-8 refit later restores the tight
+    // box at the body's real resting position for external queries.
+    if (dt > 0.0f) {
+        for (std::size_t i = 0; i < n; ++i) {
+            if (p.ccd[i] == 0 || !is_dynamic(i) || p.asleep[i] != 0) {
+                continue; // CCD only helps a moving, awake, dynamic body (see docs/design)
+            }
+            const Aabb tight = compute_aabb(p.shape[i], p.position[i], p.orientation[i]);
+            const core::Vec3 predicted = p.position[i] + p.linear_velocity[i] * dt;
+            const Aabb swept = merge(tight, compute_aabb(p.shape[i], predicted, p.orientation[i]));
+            p.dynamic_tree.move_proxy(p.proxy[i], swept);
+        }
+    }
+
     // ---- 2. Detect contacts: broadphase pairs → narrowphase manifolds, warm-started from last
     // tick's cache (committed post-solve at stage 8, so warm starts carry SOLVED impulses). Runs
     // for ALL bodies, asleep included: a new contact between a faller and a sleeping stack is
     // exactly how the stack learns to wake — stage 4 merges them into one island, stage 5
-    // reactivates it.
+    // reactivates it. With CCD (M7.10), dt > 0 also lets an approaching fast pair get a speculative
+    // contact from the swept bounds set just above.
     std::vector<Manifold> manifolds;
-    p.build_contacts(manifolds);
+    p.build_contacts(manifolds, dt);
 
     // ---- 3. Prepare the contact constraints (solver.hpp). prepare_contact_constraint reads the
     // post-gravity velocities to fix each restitution bias, so it must precede any warm-start
@@ -488,7 +534,7 @@ void PhysicsWorld::step(float dt) {
             continue; // no dynamic member — immovable pair, nothing solvable
         }
         constraints.push_back(
-            prepare_contact_constraint(bodies, m, da, db, static_cast<std::uint32_t>(mi)));
+            prepare_contact_constraint(bodies, m, da, db, static_cast<std::uint32_t>(mi), dt));
     }
 
     // ---- 4. Partition into ISLANDS (islands.hpp): connected components of the dynamic-body

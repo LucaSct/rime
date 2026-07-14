@@ -189,12 +189,12 @@ inline void apply_impulse(const SolverBodies& bodies,
 //     of rubber's grip).
 //   e = max(e_a, e_b) — the bouncier material wins: a rubber ball bounces on concrete even
 //     though concrete on concrete does not.
-[[nodiscard]] inline ContactConstraint
-prepare_contact_constraint(const SolverBodies& bodies,
-                           const Manifold& m,
-                           std::uint32_t body_a,
-                           std::uint32_t body_b,
-                           std::uint32_t manifold_index) noexcept {
+[[nodiscard]] inline ContactConstraint prepare_contact_constraint(const SolverBodies& bodies,
+                                                                  const Manifold& m,
+                                                                  std::uint32_t body_a,
+                                                                  std::uint32_t body_b,
+                                                                  std::uint32_t manifold_index,
+                                                                  float dt) noexcept {
     const core::Vec3 xa = bodies.position[body_a];
     const core::Vec3 xb = bodies.position[body_b];
     const core::Quat qa = bodies.orientation[body_a];
@@ -248,6 +248,16 @@ prepare_contact_constraint(const SolverBodies& bodies,
         const core::Vec3 v_rel = (vb + core::cross(wb, out.r_b)) - (va + core::cross(wa, out.r_a));
         const float vn = core::dot(v_rel, c.normal);
         out.velocity_bias = vn < -kRestitutionThreshold ? -restitution * vn : 0.0f;
+
+        // Speculative CCD (M7.10): a NEGATIVE penetration is an as-yet-unclosed gap (contact.hpp).
+        // Retarget the normal constraint to -gap/dt so the solver lets the pair approach only far
+        // enough to touch this step and no more — the anti-tunnelling bias. It REPLACES the
+        // restitution term (a not-yet-touching pair has nothing to bounce off yet); the NGS pass
+        // also leaves the point alone (its measured separation reads positive), so the two never
+        // fight.
+        if (p.penetration < 0.0f && dt > 0.0f) {
+            out.velocity_bias = p.penetration / dt;
+        }
 
         // NGS anchors: the manifold stores the MIDPOINT of the two surfaces, so the surfaces
         // themselves sit ±penetration/2 along the normal. Each surface point is stored in its own

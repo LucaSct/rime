@@ -663,3 +663,81 @@ and no lingering events once airborne; a box dropped on a sleeper emits a `Woke`
 and the headline — a multi-island scene stepped 400 times yields one event-stream hash shared by the
 sequential path and by 1-, 2-, and 4-worker job systems (the test that would catch any read of the
 impulses from inside the parallel region). Green under dev + ASan/UBSan + TSan.
+
+## Continuous collision detection (M7.10)
+
+Discrete collision detection samples the world at tick boundaries, and a body that moves farther than
+its own thickness between two ticks can be *in front of* a thin wall on one tick and *behind* it on
+the next — never sampled overlapping, so it passes clean through. A rifle round against a 5 cm panel
+is the canonical case, and it is exactly the case destruction (M8) puts under stress. M7.10 closes it
+with **speculative contacts**, the approach ADR-0026 chose over time-of-impact rewinds: no separate
+TOI queue, no mid-step re-simulation, nothing that would make the tick's float-op sequence
+data-dependent — it folds into the existing detect→solve pipeline, so same-binary determinism across
+threads survives intact.
+
+### The idea: contact the gap, not just the overlap
+
+Ordinarily the narrowphase reports a pair only once its shapes overlap. A speculative contact instead
+fires while the shapes are still *apart* but closing fast enough to meet within the step: it places a
+contact at the closest points and carries a **negative penetration** — the size of the gap still to be
+closed (`contact.hpp`). The solver then treats that gap as a ceiling on approach: the pair may close
+exactly the gap this tick and no more, so the body arrives *at* the surface with the rest of its
+motion cancelled, instead of teleporting past it. Next tick the shapes are touching and the ordinary
+contact takes over. The bullet stops at the wall, and — because it is a real solved contact — the
+stop carries an impulse, which is the M7.9 contact event M8 reads as damage. CCD and the event stream
+are the same hit seen from two sides.
+
+### Opt-in, because it is not free
+
+CCD is a per-body flag (`BodyDesc::ccd`), off by default. It costs a velocity-swept broadphase bound
+and a distance query against near pairs, and the overwhelming majority of bodies never move fast
+enough in a tick to need any of it — a resting crate paying a projectile's overhead every frame would
+be waste. Projectiles, thrown debris, and anything a game explicitly launches opt in.
+
+### Three pieces, each in its own stage
+
+- **A velocity-swept broadphase bound.** The broadphase can only offer the narrowphase a pair it
+  actually reports, and a fat AABB around a bullet's *current* position does not overlap a wall a
+  metre ahead. So before the broadphase runs, a CCD body's proxy is expanded to enclose where it
+  *will* be this tick — the union of its box now and its box at `position + velocity·dt`. That swept
+  box overlaps the obstacles in its path, so the pair reaches the narrowphase. This is done in its own
+  step stage *ahead of* the broadphase and *every* tick (not folded into the post-solve refit), so a
+  body that is already fast on the tick it spawns is covered on its very first step; the refit later
+  restores the tight box at the body's true position, which is what external raycasts and overlap
+  queries should see.
+- **A shape-agnostic speculative narrowphase.** When the exact test finds no overlap for a CCD pair,
+  one GJK distance query gives the closest points on each shape (`point_a`/`point_b` — the witnesses
+  GJK already computes when separated). If the pair is approaching (relative velocity along the gap
+  normal is closing) and the gap is within `closing·dt`, a single-point manifold is emitted with the
+  gap as a negative penetration. Because it rides GJK's support-function interface, one path serves
+  every convex primitive with no per-type code — the same generality that will absorb convex hulls.
+  Angular approach is deliberately ignored (a fast-*spinning* thin body is the conservative-advancement
+  case ADR-0026 defers); linear closing speed is what the projectile case needs.
+- **A speculative bias in the solver.** For a point with negative penetration the normal constraint's
+  target velocity becomes `−gap/dt`: the solver lets the pair approach just fast enough to close the
+  gap this tick and clamps anything faster, so the body decelerates to touch rather than tunnelling.
+  It *replaces* the restitution bias for that pre-touch tick (a pair that has not met has nothing to
+  bounce off yet), and the NGS position pass leaves the point alone because its measured separation
+  reads positive — the anti-tunnelling velocity constraint and the penetration-recovery pass never
+  fight over the same contact.
+
+### Determinism and the honest limits
+
+Nothing CCD adds perturbs the determinism contract: speculative contacts come out of the canonical
+narrowphase and a per-body flag, the swept-proxy refit is sequential (before the parallel region),
+and the solver bias is a pure function — so a CCD scene hashes bit-identically across worker counts,
+proven the same way M7.5's does. Two limits are stated rather than hidden: a body outrunning even its
+*swept* bound plus the fat margin in a single tick (pathologically high speed with no sub-stepping)
+can still slip through, and fast-spinning thin bodies are not covered — both are the deferred
+conservative-advancement territory (ADR-0026), for which the swept bound scaling with `velocity·dt` is
+the v1 answer.
+
+### Proofs
+
+`tests/physics/ccd_test.cpp`, pure CPU: the discriminator — a 100 m/s sphere (≈1.67 m/step) fired at a
+10 cm wall ends up clean on the far side with CCD **off** and is arrested at the near face with it
+**on**; CCD is **inert** for an ordinary contact (a CCD box dropped on the ground rests at the same
+analytic height as a normal one, with no phantom lateral shove from the speculative path); a CCD stop
+surfaces as an **M7.9 contact event carrying the hit's impulse** (the M8 damage signal); and a CCD
+scene is **bit-identical across 1/2/4 workers** (the determinism contract, CCD live). Green under dev
++ ASan/UBSan + TSan.

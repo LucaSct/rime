@@ -54,6 +54,13 @@ struct BodyDesc {
 
     float friction = 0.5f;    // Coulomb μ — used by the M7.4 solver
     float restitution = 0.0f; // bounciness — used by the M7.4 solver
+
+    // Continuous collision detection (M7.10): opt in so this body cannot tunnel through thin
+    // geometry in one step — a fast projectile vs a 5 cm wall. It costs a velocity-swept broadphase
+    // bound plus a distance query against near pairs, so it is off by default; most bodies never
+    // move fast enough per tick to need it. Realized as speculative contacts
+    // (docs/design/physics.md).
+    bool ccd = false;
 };
 
 // A snapshot of a body's motion state, read out of the pool.
