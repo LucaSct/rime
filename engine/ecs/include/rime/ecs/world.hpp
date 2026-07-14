@@ -123,6 +123,32 @@ public:
         return registry_.count();
     }
 
+    // ---- change detection (ADR-0018 §4) ----
+
+    // The current world change version. Writers stamp the columns they mutate with it; a consumer
+    // remembers it and later asks a query for what changed since. Starts at 1, so changed_since(0)
+    // matches everything ever written.
+    [[nodiscard]] Version version() const noexcept { return change_version_; }
+
+    // Advance the world version by one and return the new value — the tick boundary separating
+    // changes a consumer has already seen from ones it hasn't. The Schedule calls this once per
+    // run(); an app driving the world without a Schedule (a fixed physics tick, a test) calls it
+    // once per tick before that tick's writes, so those writes stamp a version later than the
+    // consumer's last checkpoint.
+    Version advance_version() noexcept { return ++change_version_; }
+
+    // Record that entity `e`'s component T was written at the current version — stamps T's column
+    // on e's chunk (ADR-0018's writer discipline). A no-op if `e` is dead or lacks T. This is how a
+    // system that mutates data through get<T>() reports the write to change detection; a
+    // change-tracking iteration (Query::for_each_changed) is the query side that then skips
+    // untouched chunks.
+    template <class T> void mark_changed(Entity e) noexcept {
+        if (!registry_.is_registered<T>()) {
+            return;
+        }
+        mark_changed_raw(e, registry_.id_of<T>());
+    }
+
     // ---- introspection (tests + later ECS layers) ----
 
     [[nodiscard]] const ComponentRegistry& components() const noexcept { return registry_; }
@@ -162,6 +188,7 @@ private:
     bool remove_component_raw(Entity e, ComponentId id);
     [[nodiscard]] void* get_component_raw(Entity e, ComponentId id) noexcept;
     [[nodiscard]] const void* get_component_raw(Entity e, ComponentId id) const noexcept;
+    void mark_changed_raw(Entity e, ComponentId id) noexcept;
 
     EntityDirectory directory_;
     ComponentRegistry registry_;
@@ -169,6 +196,7 @@ private:
     std::vector<std::unique_ptr<Archetype>> archetypes_;
     std::unordered_map<ComponentSignature, std::uint32_t> archetype_index_;
     std::uint32_t empty_archetype_ = 0;
+    Version change_version_ = 1; // ADR-0018 §4: monotonic; 0 is reserved for "before any change"
 };
 
 } // namespace rime::ecs

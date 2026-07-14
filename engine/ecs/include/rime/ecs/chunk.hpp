@@ -28,6 +28,17 @@
 // O(component count), and the moved entity is reported so its directory location can be fixed up.
 namespace rime::ecs {
 
+// A monotonic CHANGE-DETECTION version (ADR-0018 §4). The World owns a global counter that advances
+// each tick (per Schedule::run, or manually); every chunk stamps, per component column, the version
+// at which that column was last written. A consumer asks "did column C change since version V?" and
+// skips untouched chunks — the mechanism the editor's live inspector sync (M9), transform dirtying,
+// and networked-destruction deltas (M11) all ride. 64-bit so the counter never wraps in practice
+// (centuries at 60 Hz), which sidesteps the modular-comparison dance a 32-bit tick would need.
+using Version = std::uint64_t;
+
+// Returned by column lookups that find nothing.
+inline constexpr std::uint32_t kNoColumn = 0xFFFFFFFFu;
+
 // The byte offset, size, and lifecycle ops of one component column within a chunk.
 struct ColumnLayout {
     ComponentId id;
@@ -44,6 +55,10 @@ struct ChunkLayout {
 
     // The column for `id`, or nullptr if this layout has no such component.
     [[nodiscard]] const ColumnLayout* column(ComponentId id) const noexcept;
+
+    // The index of `id`'s column within `columns` — the same index a chunk uses into its parallel
+    // per-column version stamps — or kNoColumn if this layout has no such component.
+    [[nodiscard]] std::uint32_t column_index(ComponentId id) const noexcept;
 };
 
 // Compute the SoA layout of a chunk for `sig`, taking each component's size/alignment/ops from
@@ -112,10 +127,26 @@ public:
     [[nodiscard]] Entity* entities() noexcept;
     [[nodiscard]] const Entity* entities() const noexcept;
 
+    // ---- change detection (ADR-0018 §4) ----
+
+    // The version at which component `id`'s column was last written on this chunk (0 = never, or
+    // `id` isn't in this chunk). A consumer compares it against its own last-seen version to decide
+    // whether to scan the chunk at all.
+    [[nodiscard]] Version column_version(ComponentId id) const noexcept;
+
+    // Stamp component `id`'s column as written at version `v` — the writer discipline the ADR
+    // requires (a system that mutates a column records the world version on the chunks it touched).
+    // A no-op if `id` isn't in this chunk. Only advances the stamp (a later write never un-marks an
+    // earlier one within the same version).
+    void mark_changed(ComponentId id, Version v) noexcept;
+
 private:
     std::byte* buffer_;
     const ChunkLayout* layout_;
     std::uint32_t size_ = 0;
+    // Parallel to layout_->columns: the version each column was last written at (0 = never). Kept
+    // per chunk (not per row) — the ADR's change-detection grain is the chunk column.
+    std::vector<Version> column_versions_;
 };
 
 } // namespace rime::ecs

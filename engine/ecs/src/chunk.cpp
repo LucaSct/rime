@@ -27,6 +27,15 @@ const ColumnLayout* ChunkLayout::column(ComponentId id) const noexcept {
     return nullptr;
 }
 
+std::uint32_t ChunkLayout::column_index(ComponentId id) const noexcept {
+    for (std::uint32_t i = 0; i < columns.size(); ++i) {
+        if (columns[i].id == id) {
+            return i;
+        }
+    }
+    return kNoColumn;
+}
+
 ChunkLayout compute_chunk_layout(const ComponentSignature& sig,
                                  const ComponentRegistry& registry,
                                  std::size_t chunk_size) {
@@ -100,7 +109,8 @@ ChunkLayout compute_chunk_layout(const ComponentSignature& sig,
 }
 
 Chunk::Chunk(void* buffer, const ChunkLayout& layout) noexcept
-    : buffer_(static_cast<std::byte*>(buffer)), layout_(&layout) {}
+    : buffer_(static_cast<std::byte*>(buffer)), layout_(&layout),
+      column_versions_(layout.columns.size(), 0) {}
 
 Chunk::~Chunk() {
     // Destroy any still-live component objects (a no-op for M4's trivially-destructible components,
@@ -121,6 +131,20 @@ const Entity* Chunk::entities() const noexcept {
 Entity Chunk::entity_at(std::uint32_t row) const noexcept {
     RIME_ASSERT(row < size_);
     return entities()[row];
+}
+
+Version Chunk::column_version(ComponentId id) const noexcept {
+    const std::uint32_t i = layout_->column_index(id);
+    return i == kNoColumn ? Version{0} : column_versions_[i];
+}
+
+void Chunk::mark_changed(ComponentId id, Version v) noexcept {
+    const std::uint32_t i = layout_->column_index(id);
+    // Monotonic: a stamp only moves forward, so re-marking a column at an older version (or the
+    // same one, e.g. many rows written under one tick) is harmless.
+    if (i != kNoColumn && v > column_versions_[i]) {
+        column_versions_[i] = v;
+    }
 }
 
 void* Chunk::column(ComponentId id) noexcept {

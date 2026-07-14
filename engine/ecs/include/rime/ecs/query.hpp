@@ -72,6 +72,33 @@ public:
         }
     }
 
+    // Change-tracking for_each (ADR-0018 §4): visit only the entities in chunks where at least one
+    // of this query's component columns was written AFTER `since`. The "process only what moved"
+    // workhorse — e.g. re-upload to the GPU only the WorldTransforms physics stamped this tick, or
+    // sync to the editor only the components an edit touched. The grain is the chunk (that is the
+    // change-detection scope), so a chunk with any recent write is scanned in full; pass the
+    // version you remembered last time you ran, and the world will have advanced past it
+    // (World::version()).
+    template <class F> void for_each_changed(Version since, F&& f) {
+        if (!valid_) {
+            return;
+        }
+        const std::size_t archetypes = world_->archetype_count();
+        for (std::size_t ai = 0; ai < archetypes; ++ai) {
+            Archetype& arch = world_->archetype(ai);
+            if (!arch.signature().contains_all(signature_)) {
+                continue;
+            }
+            const auto chunks = static_cast<std::uint32_t>(arch.chunk_count());
+            for (std::uint32_t ci = 0; ci < chunks; ++ci) {
+                Chunk& chunk = arch.chunk(ci);
+                if (chunk_changed(chunk, since)) {
+                    visit_chunk(chunk, f, std::index_sequence_for<Ts...>{});
+                }
+            }
+        }
+    }
+
     // Parallel form of for_each: run `f` over every matching entity across all cores, on the job
     // system. The parallel GRAIN is the chunk (ADR-0018): each chunk is a separate pooled buffer,
     // so handing whole chunks to different workers guarantees that no two tasks ever write the same
@@ -115,6 +142,37 @@ public:
         });
     }
 
+    // Parallel change-tracking iteration: par_for_each restricted to chunks that changed since
+    // `since` (ADR-0018 §4). Only the surviving chunks become tasks, so a mostly-static world
+    // spends work proportional to what moved, not to its size — the payoff that pairs with M7.5
+    // sleeping (physics writes back, and stamps, only awake bodies, so this visits only awake
+    // islands' chunks).
+    template <class F>
+    void
+    par_for_each_changed(core::JobSystem& jobs, Version since, F&& f, std::uint32_t grain = 1) {
+        if (!valid_) {
+            return;
+        }
+        std::vector<Chunk*> chunks;
+        const std::size_t archetypes = world_->archetype_count();
+        for (std::size_t ai = 0; ai < archetypes; ++ai) {
+            Archetype& arch = world_->archetype(ai);
+            if (!arch.signature().contains_all(signature_)) {
+                continue;
+            }
+            const auto n = static_cast<std::uint32_t>(arch.chunk_count());
+            for (std::uint32_t ci = 0; ci < n; ++ci) {
+                Chunk& chunk = arch.chunk(ci);
+                if (chunk_changed(chunk, since)) {
+                    chunks.push_back(&chunk);
+                }
+            }
+        }
+        jobs.parallel_for(chunks.size(), grain, [this, &chunks, &f](std::size_t i) {
+            visit_chunk(*chunks[i], f, std::index_sequence_for<Ts...>{});
+        });
+    }
+
     // The number of entities the query matches.
     [[nodiscard]] std::size_t count() const {
         if (!valid_) {
@@ -151,6 +209,18 @@ private:
                 f(std::get<Is>(columns)[r]...);
             }
         }
+    }
+
+    // True iff at least one of this query's component columns on `chunk` was written after `since`
+    // — the per-chunk skip test the *_changed iterations use. "Any column" is the useful default:
+    // a query asking for what it reads-and-writes wants the chunk if any of it moved.
+    [[nodiscard]] bool chunk_changed(const Chunk& chunk, Version since) const {
+        for (const ComponentId id : ids_) {
+            if (chunk.column_version(id) > since) {
+                return true;
+            }
+        }
+        return false;
     }
 
     World* world_;

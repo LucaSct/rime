@@ -77,6 +77,17 @@ World::relocate_entity(Entity e, EntityLocation src, std::uint32_t src_idx, std:
     if (moved != kNullEntity) {
         *directory_.location(moved) = src;
     }
+
+    // Change detection (ADR-0018 §4): the entity's whole row is newly written in the destination
+    // chunk, so stamp every destination column changed — a relocated component and a freshly-added
+    // one both count as "changed here". That is exactly what a consumer replicating structural
+    // moves (M11) or re-syncing an inspector (M9) needs, and it means add_component's caller need
+    // not stamp the added column separately (it is one of these).
+    Chunk& dst_chunk = dst_arch.chunk(dst_row.chunk);
+    for (const ColumnLayout& col : dst_arch.layout().columns) {
+        dst_chunk.mark_changed(col.id, change_version_);
+    }
+
     *directory_.location(e) = EntityLocation{dst_idx, dst_row.chunk, dst_row.row};
     return dst_row;
 }
@@ -89,6 +100,9 @@ void* World::add_component_raw(Entity e, ComponentId id) {
     const EntityLocation src = *locp;
     if (archetypes_[src.archetype]->signature().contains(id)) {
         // Already present — hand back the existing slot to overwrite in place (no move).
+        // Overwriting is a write, so stamp the column changed (the caller is about to store into
+        // the slot).
+        archetypes_[src.archetype]->chunk(src.chunk).mark_changed(id, change_version_);
         return archetypes_[src.archetype]->component(Archetype::Row{src.chunk, src.row}, id);
     }
     // get_or_create_archetype may grow archetypes_, so compute the target signature first, then
@@ -98,7 +112,7 @@ void* World::add_component_raw(Entity e, ComponentId id) {
     const Archetype::Row dst_row = relocate_entity(e, src, src.archetype, dst_idx);
 
     // The added component is destination-only, so relocate_entity left its storage RAW — construct
-    // it.
+    // it. (relocate_entity already stamped every destination column changed, this one included.)
     Archetype& dst_arch = *archetypes_[dst_idx];
     void* slot = dst_arch.component(dst_row, id);
     dst_arch.layout().column(id)->ops.default_construct(slot);
@@ -142,6 +156,18 @@ const void* World::get_component_raw(Entity e, ComponentId id) const noexcept {
         return nullptr;
     }
     return a.component(Archetype::Row{locp->chunk, locp->row}, id);
+}
+
+void World::mark_changed_raw(Entity e, ComponentId id) noexcept {
+    const EntityLocation* locp = directory_.location(e);
+    if (locp == nullptr) {
+        return; // dead/unknown
+    }
+    Archetype& a = *archetypes_[locp->archetype];
+    if (!a.signature().contains(id)) {
+        return; // e doesn't carry this component
+    }
+    a.chunk(locp->chunk).mark_changed(id, change_version_);
 }
 
 const ComponentSignature& World::signature_of(Entity e) const {
