@@ -236,6 +236,37 @@ Entries are grouped roughly by area and kept short on purpose.
   consumer nothing. Canonical tick order: [design/simulation-tick.md](design/simulation-tick.md).
 - **Collision detection / query.** Finding what touches/overlaps/hits what (and
   raycasts/sweeps used by gameplay).
+- **Broadphase / narrowphase.** The two stages of collision detection. *Broadphase* quickly finds
+  pairs that *might* touch — Rime walks a **dynamic AABB tree** (a bounding-volume hierarchy) instead
+  of testing all n² pairs. *Narrowphase* then does the exact geometry test on each candidate:
+  **GJK + EPA** for general convex shapes, analytic fast paths for spheres/capsules, producing a
+  contact *manifold*. See [design/physics.md](design/physics.md), [math/gjk-epa.md](math/gjk-epa.md).
+- **Contact manifold.** The narrowphase's output for a touching pair: a shared contact normal plus up
+  to four contact points (four is enough to keep a resting box from tipping). The solver's input.
+- **Solver (sequential impulse).** The stage that turns manifolds into motion by applying *impulses*
+  at the contacts — stopping penetration, applying friction — sweeping over them repeatedly
+  (projected Gauss-Seidel) until velocities agree. A separate **NGS** pass then removes leftover
+  overlap without injecting energy (deliberately not *Baumgarte*).
+  See [math/sequential-impulse.md](math/sequential-impulse.md).
+- **Warm starting.** Seeding this tick's solver with the impulses it converged to last tick (matched
+  by a stable per-contact *feature id*), so a resting stack starts near its answer instead of from
+  zero — far fewer iterations to stay stable.
+- **Island.** A connected group of bodies that touch, directly or through a chain, solved as one
+  independent unit. Islands share no dynamic body, so they solve in **parallel with a bit-identical
+  result**, and one that comes to rest can *sleep* as a whole.
+- **Sleeping.** Deactivating a body (or whole island) that has stopped moving so it costs nothing to
+  step, until something disturbs it. A settled world does no work — and, paired with
+  [change detection](#the-world), dirties nothing for its consumers.
+- **Static / kinematic / dynamic.** A body's motion class. *Static* never moves (the level). *Dynamic*
+  is fully simulated (gravity, forces, contacts). *Kinematic* is moved directly by the game (a moving
+  platform, an animated door): it pushes dynamic bodies but is not pushed back.
+- **Raycast / scene query.** Asking the world a geometric question without stepping it: a *raycast*
+  finds the nearest body a ray hits (hitscan weapons, line-of-sight, mouse picking); an *overlap*
+  finds bodies inside a volume (an explosion radius). Both ride the broadphase tree, so they cost
+  O(log n), not a scan of every body.
+- **CCD — continuous collision detection.** Catching collisions a fast, thin body would *tunnel*
+  through in one step (a bullet through a wall) by sweeping its motion rather than testing only its
+  end pose. Planned for the physics core (speculative contacts); not yet built.
 - **Fracture.** Splitting a mesh into pieces, often precomputed, used for destruction.
 - **Part-based destruction.** Modeling a destructible as an assembly of breakable parts
   with connectivity, rather than one monolithic object (Frostbite's approach).
