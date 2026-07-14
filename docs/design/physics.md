@@ -625,6 +625,26 @@ by the same measure-first discipline ADR-0026 applies to the private AABB tree (
 second, measured consumer appears), triggers wait for the first gameplay volume that needs one; the
 overlap machinery they will reuse (broadphase + `sphere_vs_shape`/manifold overlap) already exists.
 
+**The deferred design, pinned so the retrofit stays cheap.** The real consumer is the first system
+that needs enter/exit *lifecycle* — an M9 editor kill-zone, an m11.3 capsule mover — not a one-shot
+volume test: a blast radius or an explosion's affected set is a single-tick question that
+`overlap_sphere` already answers, and a persistent sensor body would only make it more expensive. So
+triggers are specifically the *persistent presence* tool. When that consumer lands, the shape is
+small and known: a `bool is_sensor` on `BodyDesc` (orthogonal to `MotionType`, so a *dynamic* sensor
+is legal), one SoA column, a `trigger_events()` accessor, and a `TriggerEvent { BodyId sensor;
+BodyId other; TriggerPhase phase; }` where `phase` is Entered/Stayed/Exited — presence only, no
+point/normal/impulse (a sensor reports *that* it was entered, not *how hard*). The one load-bearing
+change is at constraint prep (`step()` stage 3): a sensor pair is detected by the narrowphase exactly
+as today but generates **no constraint** — and everything else falls out for free, because islands
+are built from the constraint list, so a sensor pair never merges islands, never enters the parallel
+solve, and never keeps a body awake. The began/persisted/ended merge in the event tail is already
+enter/stay/exit; a second `cur`/`prev` record stream clones it. **The one trap to record now:** the
+contact tail's "skip a pair with no dynamic member" rule is *wrong* for triggers — a kinematic
+character walking into a **static** kill-zone has zero total inverse mass and would be silently
+dropped. The trigger inclusion rule is instead "a sensor member plus at least one **non-static**
+member." (Recorded from an M7.9 design consult; no ADR — ADR-0026's deferred register already
+carries the decision.)
+
 ### Determinism, preserved
 
 Events add no shared writes to the parallel region and no unordered iteration to the sim path: they
