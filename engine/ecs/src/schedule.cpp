@@ -48,6 +48,11 @@ void Schedule::rebuild() {
 }
 
 void Schedule::run(World& world, core::JobSystem& jobs) {
+    // A run is a tick: advance the world change version once up front (ADR-0018 §4), so every
+    // component a system writes this run stamps a version strictly later than any consumer's
+    // pre-run checkpoint. Change detection is therefore per-run granular by default — a system
+    // wanting finer intra-run tracking can advance again itself.
+    world.advance_version();
     if (dirty_) {
         rebuild();
     }

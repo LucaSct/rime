@@ -14,7 +14,8 @@
 # broadphase (M7.2), narrowphase (M7.3), the solver (M7.4), the parallel step (M7.5), etc.
 
 add_library(rime_physics STATIC
-    src/world.cpp)
+    src/world.cpp
+    src/sync.cpp)
 
 # Namespaced alias so dependents link `rime::physics`, matching our C++ namespace.
 add_library(rime::physics ALIAS rime_physics)
