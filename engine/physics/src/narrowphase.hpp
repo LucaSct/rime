@@ -53,15 +53,17 @@ inline constexpr std::uint32_t kFeatCapsuleCapsule = 0x43430001u;
 inline constexpr std::uint32_t kFeatBoxCapsule = 0x42430001u;
 inline constexpr std::uint32_t kFeatBoxBox = 0x42420001u;
 inline constexpr std::uint32_t kFeatClipVertex = 0xC11B0001u;
+inline constexpr std::uint32_t kFeatSpeculative = 0x5EC00001u; // M7.10 CCD speculative contact
 
 namespace narrowphase_detail {
 
 // Geometric tolerances (metre-scale, like GJK/EPA's — see the calibration note in gjk.hpp).
-inline constexpr float kNormalEps = 1e-6f;   // below this, a direction is degenerate
-inline constexpr float kParallelEps = 1e-6f; // sin^2 of the capsule-axes "parallel" cone
-inline constexpr float kRegionEps = 1e-4f;   // box-surface feature quantization slop (metres)
-inline constexpr float kKeepEps = 1e-5f;     // clip keeps points this far above the ref face
-inline constexpr float kFaceTieEps = 1e-4f;  // reference-face tie bias (prefer A: stable ids)
+inline constexpr float kNormalEps = 1e-6f;        // below this, a direction is degenerate
+inline constexpr float kParallelEps = 1e-6f;      // sin^2 of the capsule-axes "parallel" cone
+inline constexpr float kRegionEps = 1e-4f;        // box-surface feature quantization slop (metres)
+inline constexpr float kKeepEps = 1e-5f;          // clip keeps points this far above the ref face
+inline constexpr float kFaceTieEps = 1e-4f;       // reference-face tie bias (prefer A: stable ids)
+inline constexpr float kSpeculativeSlop = 0.005f; // CCD: fp buffer on "will they touch this step?"
 
 // Append one contact point; silently drops beyond four (callers that can produce more reduce
 // first — this is only a guard).
@@ -887,6 +889,76 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
         }
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------- speculative (CCD) --
+// A SPECULATIVE contact for continuous collision detection (M7.10). The exact narrowphase above
+// only reports pairs that already overlap — so a body moving farther than its own thickness in one
+// step can pass clean through a thin obstacle, never sampled overlapping. This closes that gap
+// WITHOUT a time-of-impact rewind (ADR-0026): when two SEPARATED shapes are approaching fast enough
+// to touch within this step, emit a one-point contact carrying the NEGATIVE penetration (the gap
+// still to be closed). The solver then permits the pair to approach only far enough to touch and no
+// further (its speculative bias) — the body stops AT the surface instead of through it.
+//
+// Shape-agnostic by construction: it runs on GJK's closest-point witnesses (point_a/point_b, which
+// GJK already computes for a separated pair), so every convex primitive is handled by this one path
+// with no per-type code. `va`/`vb` are the bodies' LINEAR velocities; angular approach is ignored
+// on purpose (CCD for fast-SPINNING bodies is a deferred, conservative-advancement case —
+// ADR-0026). Returns false (m left empty) when the pair overlaps (the exact path owns that), is not
+// approaching, or is still too far to touch this step. `dt` must be > 0.
+[[nodiscard]] inline bool collide_speculative(const ShapeDesc& sa,
+                                              core::Vec3 pa,
+                                              const core::Quat& qa,
+                                              core::Vec3 va,
+                                              const ShapeDesc& sb,
+                                              core::Vec3 pb,
+                                              const core::Quat& qb,
+                                              core::Vec3 vb,
+                                              float dt,
+                                              Manifold& m) {
+    m.count = 0;
+    const ShapeSupport support_a{&sa, pa, qa};
+    const ShapeSupport support_b{&sb, pb, qb};
+    const GjkResult g = gjk(support_a, support_b, pa - pb);
+    if (g.overlapping || g.distance <= narrowphase_detail::kNormalEps) {
+        return false; // overlapping (the exact narrowphase owns it) or coincident — no gap to speak
+                      // of
+    }
+
+    // Gap direction: from A's witness toward B's — the manifold normal (a → b), matching the
+    // contact.hpp convention the exact routines also honour.
+    const core::Vec3 delta = g.point_b - g.point_a;
+    const float dlen = core::length(delta);
+    if (dlen <= narrowphase_detail::kNormalEps) {
+        return false;
+    }
+    const core::Vec3 n = delta / dlen;
+
+    // Closing speed along the normal (linear only). A - B relative velocity dotted with n > 0 means
+    // the surfaces are approaching; <= 0 means holding or separating, so no imminent contact.
+    const float closing = core::dot(va - vb, n);
+    if (closing <= 0.0f) {
+        return false;
+    }
+    // Will they meet this step? The gap closes by closing·dt; a small slop absorbs fp noise so a
+    // just-reaching contact is not missed. If still farther than that, defer — a later step (with
+    // the pair now nearer, its swept broadphase bound still reporting it) will speculate then.
+    if (g.distance > closing * dt + narrowphase_detail::kSpeculativeSlop) {
+        return false;
+    }
+
+    // One point at the midpoint of the two witnesses, carrying the gap as a NEGATIVE penetration.
+    // Written directly rather than through add_point(), which deliberately clamps penetration to >=
+    // 0 for the exact paths; the speculative gap is the one place a negative value is meaningful.
+    m.normal = n;
+    ContactPoint& p = m.points[0];
+    p.position = (g.point_a + g.point_b) * 0.5f;
+    p.penetration = -g.distance;
+    p.feature_id = kFeatSpeculative;
+    p.normal_impulse = 0.0f;
+    p.tangent_impulse = 0.0f;
+    m.count = 1;
+    return true;
 }
 
 // ------------------------------------------------------------------------ manifold cache -------

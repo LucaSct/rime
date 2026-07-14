@@ -20,10 +20,13 @@
 //    direction to push `b` (and the opposite of the direction to push `a`) to separate the pair.
 //    `a`/`b` follow the broadphase's canonical order (a's slot id < b's slot id), so the sign is
 //    reproducible run to run.
-//  - `ContactPoint::penetration` >= 0 is the overlap depth along `normal` at that point: the two
-//    surfaces would separate after translating `b` by `normal * penetration`. The narrowphase only
-//    emits overlapping points (separated pairs produce no manifold); speculative negative-distance
-//    contacts arrive with CCD at M7.10.
+//  - `ContactPoint::penetration` is the overlap depth along `normal` at that point: the two
+//    surfaces would separate after translating `b` by `normal * penetration`. It is >= 0 for a real
+//    (overlapping) contact — the exact narrowphase emits nothing for a separated pair. A
+//    SPECULATIVE CCD contact (M7.10) is the one exception: it carries a NEGATIVE penetration — the
+//    size of the gap the two surfaces have yet to close — so the solver can arrest a fast body
+//    exactly at the surface instead of letting it tunnel through in one step (see the solver's
+//    speculative bias).
 //  - `ContactPoint::position` lies on the nominal contact surface: midway between the two bodies'
 //    surfaces along `normal` (the two coincide as penetration -> 0). The midpoint is the
 //    least-biased anchor for a solver that applies equal-and-opposite impulses at the point.
@@ -40,7 +43,8 @@ namespace rime::physics {
 
 struct ContactPoint {
     core::Vec3 position{0.0f, 0.0f, 0.0f}; // midway between the two surfaces (see above)
-    float penetration = 0.0f;              // overlap depth along the manifold normal, >= 0
+    float penetration = 0.0f;              // overlap depth along the normal; >=0, or <0 for a
+                                           // speculative CCD gap (M7.10; see the convention note)
     std::uint32_t feature_id = 0;          // stable id of the generating shape features
     float normal_impulse = 0.0f;           // accumulated impulse along `normal` (M7.4 warm start)
     float tangent_impulse = 0.0f;          // accumulated friction impulse (M7.4 warm start)

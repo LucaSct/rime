@@ -37,10 +37,11 @@ and replay validation build on. Scope: same-binary reproducibility, *not* cross-
 | M7.7 | **scene queries** — raycast + `overlap_sphere` through the BVH, motion-class filters; **external impulses** (`apply_impulse`) | landed |
 | M7.8 | **the proof** — `samples/09-physics-playground` (headless self-check, M7's "done when") + the `Application` per-tick hook | landed |
 | M7.9 | **contact & sleep events** — began/persisted/ended contacts with point + normal + impulse, `Slept`/`Woke`; buffered, double-buffered, canonical per-tick order (the M8-damage input) | landed |
+| M7.10 | **CCD (speculative contacts)** — per-body opt-in; velocity-swept broadphase bound + GJK-distance speculative contacts + a solver gap-bias, so a fast body stops at a thin wall instead of tunnelling (no TOI rewind) | landed |
 
 **M7's "done when" (ROADMAP): objects fall/collide/stack; raycasts hit; runs parallel to the frame —
-met**, proven by `samples/09-physics-playground` self-checking in CI. M7.9 is the first fast-follow
-into M8's runway.
+met**, proven by `samples/09-physics-playground` self-checking in CI. M7.9–M7.10 are the first
+fast-follows into M8's runway.
 
 ### Deferred (planned, not yet built — fast-follows into M8's runway)
 
@@ -49,8 +50,10 @@ into M8's runway.
   no consumer yet (M8 damage rides contact events). Lands with the first gameplay volume; it reuses
   the existing overlap machinery.
 - **Shapes II** — runtime convex hull, polyhedral mass properties, static triangle mesh + midphase,
-  compound shapes.
-- **CCD** (speculative contacts) + debris-scale tuning + a `WorldStats`/stress harness.
+  compound shapes. The biggest remaining M8 shape need (fracture parts + multi-part islands);
+  hull data does not fit the flat `ShapeDesc` POD, so it wants a shape-storage decision (ADR) first.
+- **Debris-scale tuning** + a `WorldStats`/stress harness (the CCD *machinery* landed at M7.10; the
+  broad debris-scale performance pass rides the stress harness).
 
 ## Layout
 
