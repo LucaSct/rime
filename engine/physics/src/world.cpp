@@ -104,6 +104,41 @@ struct PhysicsWorld::Impl {
     mutable std::unordered_map<std::uint64_t, ManifoldCacheEntry> contact_cache;
     mutable std::uint32_t warm_started_last = 0;
 
+    // Simulation events (M7.9, events.hpp). step() emits contact and sleep events as a pure READ of
+    // the just-solved state, in the sequential tail — so events never write body state, never
+    // perturb the world hash, and stay clear of the parallel solve (TSan). Both are
+    // DOUBLE-BUFFERED: the tick fills the `_back` buffer, then swaps it to `_front`, so the public
+    // accessors expose a stable snapshot of the completed tick until the next step().
+    std::vector<ContactEvent> contact_events_front;
+    std::vector<ContactEvent> contact_events_back;
+    std::vector<SleepEvent> sleep_events_front;
+    std::vector<SleepEvent> sleep_events_back;
+
+    // The began/persisted/ended witness: one record per contacting pair, keyed by the broadphase
+    // pair key and kept ASCENDING by it (manifolds already arrive canonically ordered, so `cur` is
+    // built sorted). A single linear merge of this tick's `cur` against last tick's `prev`
+    // classifies every pair and emits in canonical order — no hash map, no per-tick sort. The two
+    // vectors are swapped each tick, reusing their capacity. Owning our own record (rather than
+    // reading the warm-start cache) keeps the event lifecycle independent of the solver's cache and
+    // lets an Ended event carry the pair's last point/normal, which the cache does not store.
+    struct ContactRecord {
+        std::uint64_t key = 0; // (a.index << 32) | b.index
+        BodyId a;
+        BodyId b;
+        core::Vec3 point{0.0f, 0.0f, 0.0f};
+        core::Vec3 normal{0.0f, 1.0f, 0.0f};
+        float normal_impulse = 0.0f; // summed over the manifold; meaningful for `cur` only
+        float tangent_impulse = 0.0f;
+        bool suppressed = false; // has a dynamic member but every one is asleep — present, no event
+    };
+
+    std::vector<ContactRecord> contact_cur;
+    std::vector<ContactRecord> contact_prev;
+
+    // Per-step scratch: `asleep` copied at the top of step(), diffed at the tail to find the tick's
+    // sleep/wake transitions. Dense-indexed and stable through a step (no create/destroy mid-step).
+    std::vector<std::uint8_t> asleep_snapshot;
+
     [[nodiscard]] std::size_t count() const noexcept { return position.size(); }
 
     // The collision half of a tick, shared by step() and the public compute_contacts() (defined
@@ -387,6 +422,12 @@ void PhysicsWorld::step(float dt) {
         return p.motion[i] == static_cast<std::uint8_t>(MotionType::Dynamic);
     };
 
+    // Snapshot the sleep state up front (M7.9): the tail diffs it against the post-step `asleep` to
+    // emit sleep/wake events for exactly the transitions THIS step caused. Dense indices are stable
+    // through a step (create/destroy happen only between steps), so snapshot[i] and asleep[i] name
+    // the same body at both ends.
+    p.asleep_snapshot.assign(p.asleep.begin(), p.asleep.end());
+
     // The M7.5 tick keeps the M7.4 sequential-impulse pipeline but wraps it in ISLANDS and
     // SLEEPING. Its shape:
     //   integrate velocities (awake) → detect contacts → prepare constraints → PARTITION into
@@ -572,6 +613,121 @@ void PhysicsWorld::step(float dt) {
             }
         }
     }
+
+    // ---- 7.5 Emit contact & sleep events (M7.9, events.hpp). A pure read of the state the solve
+    // just produced, in the sequential tail: the parallel_for above has joined, so the manifolds'
+    // impulses are settled and reading them is race-free; nothing here writes body state, so the
+    // world hash and cross-thread determinism are untouched. The event STREAM is itself bit-
+    // identical for any worker count — it derives only from the canonical manifolds and the
+    // (thread- count-independent) solved impulses and sleep decisions.
+
+    // Build this tick's contact records from the SOLVED manifolds, in their canonical pair order.
+    // Skip a pair with no dynamic member (an immovable pair exchanges no impulse — nothing to
+    // report). A pair that has a dynamic member but whose every dynamic member is now asleep is
+    // recorded `suppressed`: kept present (so it is not falsely reported as Ended — an asleep pair
+    // never separated) but emitting no event, which is what makes a settled pile silent.
+    p.contact_cur.clear();
+    for (const Manifold& m : manifolds) {
+        const std::uint32_t da = p.dense_of(m.a);
+        const std::uint32_t db = p.dense_of(m.b);
+        if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
+            continue; // defensive: build_contacts only emits live pairs
+        }
+        if (p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
+            continue; // no dynamic member — not an evented contact
+        }
+        // Representative point = the deepest (first max, strict >, so ties resolve
+        // deterministically); impulses = the pair's total exchanged momentum this tick.
+        std::uint8_t best = 0;
+        float normal_impulse = 0.0f;
+        float tangent_impulse = 0.0f;
+        for (std::uint8_t k = 0; k < m.count; ++k) {
+            if (m.points[k].penetration > m.points[best].penetration) {
+                best = k;
+            }
+            normal_impulse += m.points[k].normal_impulse;
+            tangent_impulse += m.points[k].tangent_impulse;
+        }
+        const bool awake_dyn_a = p.inv_mass[da] > 0.0f && p.asleep[da] == 0;
+        const bool awake_dyn_b = p.inv_mass[db] > 0.0f && p.asleep[db] == 0;
+        p.contact_cur.push_back(Impl::ContactRecord{(static_cast<std::uint64_t>(m.a.index) << 32) |
+                                                        static_cast<std::uint64_t>(m.b.index),
+                                                    m.a,
+                                                    m.b,
+                                                    m.points[best].position,
+                                                    m.normal,
+                                                    normal_impulse,
+                                                    tangent_impulse,
+                                                    /*suppressed=*/!(awake_dyn_a || awake_dyn_b)});
+    }
+
+    // Classify by a linear merge of the two key-sorted lists (cur = this tick, prev = last tick):
+    // a key only in cur is Began, only in prev is Ended, in both is Persisted. Suppressed cur
+    // records still consume their merge position (so a matching prev record is not reported Ended)
+    // but emit nothing. The result is naturally in canonical pair order.
+    p.contact_events_back.clear();
+    const auto emit_contact = [&](const Impl::ContactRecord& r, ContactPhase phase) {
+        ContactEvent e;
+        e.a = r.a;
+        e.b = r.b;
+        e.point = r.point;
+        e.normal = r.normal;
+        // An Ended pair exchanged nothing this tick; its record is last tick's, so ignore its
+        // stored impulses and report zero.
+        e.normal_impulse = phase == ContactPhase::Ended ? 0.0f : r.normal_impulse;
+        e.tangent_impulse = phase == ContactPhase::Ended ? 0.0f : r.tangent_impulse;
+        e.phase = phase;
+        p.contact_events_back.push_back(e);
+    };
+    {
+        const std::vector<Impl::ContactRecord>& cur = p.contact_cur;
+        const std::vector<Impl::ContactRecord>& prev = p.contact_prev;
+        std::size_t i = 0;
+        std::size_t j = 0;
+        while (i < cur.size() && j < prev.size()) {
+            if (cur[i].key < prev[j].key) {
+                if (!cur[i].suppressed) {
+                    emit_contact(cur[i], ContactPhase::Began);
+                }
+                ++i;
+            } else if (prev[j].key < cur[i].key) {
+                emit_contact(prev[j], ContactPhase::Ended);
+                ++j;
+            } else {
+                if (!cur[i].suppressed) {
+                    emit_contact(cur[i], ContactPhase::Persisted);
+                }
+                ++i;
+                ++j;
+            }
+        }
+        for (; i < cur.size(); ++i) {
+            if (!cur[i].suppressed) {
+                emit_contact(cur[i], ContactPhase::Began);
+            }
+        }
+        for (; j < prev.size(); ++j) {
+            emit_contact(prev[j], ContactPhase::Ended);
+        }
+    }
+    p.contact_prev.swap(p.contact_cur); // this tick becomes next tick's baseline
+
+    // Sleep/wake events: the bodies whose sleep state changed during this step, in dense order.
+    p.sleep_events_back.clear();
+    for (std::size_t i = 0; i < n; ++i) {
+        if (p.asleep_snapshot[i] == p.asleep[i]) {
+            continue;
+        }
+        SleepEvent e;
+        e.body = BodyId{p.dense_to_slot[i], p.slots[p.dense_to_slot[i]].generation};
+        e.phase = p.asleep[i] != 0 ? SleepPhase::Slept : SleepPhase::Woke;
+        p.sleep_events_back.push_back(e);
+    }
+
+    // Publish: swap the filled back buffers to front, so the accessors return this tick's events,
+    // stable until the next step() refills and swaps again (the double buffer).
+    p.contact_events_front.swap(p.contact_events_back);
+    p.sleep_events_front.swap(p.sleep_events_back);
 
     // ---- 8. Commit the contact cache from the SOLVED manifolds (closing the warm-start loop),
     // then refit the broadphase proxy of every body that actually moved — the dynamic members of
@@ -796,6 +952,14 @@ void PhysicsWorld::apply_central_impulse(BodyId id, core::Vec3 impulse) noexcept
     p.linear_velocity[d] += impulse * p.inv_mass[d]; // applied through the COM ⇒ no torque
     p.asleep[d] = 0;
     p.sleep_timer[d] = 0.0f;
+}
+
+std::span<const ContactEvent> PhysicsWorld::contact_events() const noexcept {
+    return {impl_->contact_events_front.data(), impl_->contact_events_front.size()};
+}
+
+std::span<const SleepEvent> PhysicsWorld::sleep_events() const noexcept {
+    return {impl_->sleep_events_front.data(), impl_->sleep_events_front.size()};
 }
 
 } // namespace rime::physics

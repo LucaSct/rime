@@ -9,6 +9,8 @@
 //   world.hpp      — PhysicsWorld (create/destroy bodies, step, broadphase, narrowphase, queries)
 //   query.hpp      — Ray/RayHit/QueryFilter for raycast + overlap scene queries (M7.7)
 //   contact.hpp    — ContactPoint, Manifold (the narrowphase output, the M7.4 solver input)
+//   events.hpp     — ContactEvent/SleepEvent: step()'s per-tick event report (the M8 damage input,
+//   M7.9)
 //   components.hpp — the RigidBody/Collider ECS components (bound to bodies by the M7.6 sync
 //   system)
 //   sync.hpp       — PhysicsSync, the ECS↔PhysicsWorld bridge (bind / write-back / unbind) that
@@ -16,6 +18,7 @@
 #include "rime/physics/body.hpp"
 #include "rime/physics/components.hpp"
 #include "rime/physics/contact.hpp"
+#include "rime/physics/events.hpp"
 #include "rime/physics/query.hpp"
 #include "rime/physics/shape.hpp"
 #include "rime/physics/sync.hpp"

@@ -409,10 +409,15 @@ skinning) interleaves after M7.4 under the mainline-first rule.
 external impulses)** and the **proof sample `samples/09-physics-playground`** land the milestone's
 "done when" (objects fall/collide/stack, raycasts hit, the sim runs on the job system inside the
 fixed tick; the sample self-checks headless in CI). **Reordered from the original plan to reach the
-acceptance proof sooner:** the remaining planned bricks — **contact/trigger/sleep events**, **shapes
-II** (convex hull / static mesh / compound), and **CCD + debris-scale tuning** — are **deferred as
-fast-follows** into M8's runway, since M8 destruction is their first real consumer. They remain
-tracked here; nothing about them is cancelled.
+acceptance proof sooner:** the remaining planned bricks were **deferred as fast-follows** into M8's
+runway, since M8 destruction is their first real consumer. The first of them has since landed:
+**M7.9 — contact & sleep events** (`engine/physics/events.hpp`): began/persisted/ended contact
+events carrying point + normal + impulse (the M8-damage input) plus `Slept`/`Woke` sleep events,
+buffered and double-buffered in canonical per-tick order, with the event stream proven bit-identical
+across worker counts. The **trigger/sensor** third of that brick is held back (no sensor-body concept
+in M7's scope, no consumer yet — measure-first). Still outstanding as fast-follows: **shapes II**
+(convex hull / static mesh / compound) and **CCD + debris-scale tuning**. They remain tracked here;
+nothing about them is cancelled.
 
 **M7 non-goals (deferred, recorded in [ADR-0026](adr/0026-physics-core.md)):** joints/motors/
 character controller (m12.0) · soft bodies/cloth/fluids (own modules — water is Track FL) · TGS solver
