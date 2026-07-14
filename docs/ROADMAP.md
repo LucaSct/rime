@@ -346,7 +346,10 @@ import begins.
 > `samples/08-gltf-zoo` (M6.10) runs the milestone's "done when" end-to-end: **import → cook → load →
 > render** three real glTF models (base-color-textured cube, normal-mapped metallic-roughness sphere,
 > and a CPU-posed skinned rig) through the render graph — self-checked headless in CI and streamable
-> live over Track S0. **Next:** M7 — physics (rigid bodies stepped on the job system).
+> live over Track S0. **M7 — physics (own rigid-body core) — the milestone's "done when" is met**:
+`samples/09-physics-playground` self-checks (objects fall/collide/stack, a raycast+impulse topples a
+tower, everything sleeps, two runs hash identically) headless in CI. **Next:** M8 — destruction v1
+(building on the physics core's seams), or the M7 fast-follows (contact events, shapes II, CCD).
 
 *Bricks (planned 2026-07-06, bottom-up):* **M6.0 (done)** the asset-model decision
 (ADR-0024); *proof:* the ADR. · **M6.1** `engine/assets` is born — the RMA1 reader
@@ -401,6 +404,15 @@ runtime convex hull (quickhull), polyhedral mass properties, static triangle mes
 the stress harness. · **M7.11** the proof — `samples/09-physics-playground` (`--headless` self-check +
 `--serve`) + docs true-up. Track brick **an1** (skeletal-animation runtime: palettes on jobs + GPU
 skinning) interleaves after M7.4 under the mainline-first rule.
+
+*Status (2026-07-14):* **M7.0–M7.6 shipped**, then **M7.7 (scene queries — raycast + overlap — plus
+external impulses)** and the **proof sample `samples/09-physics-playground`** land the milestone's
+"done when" (objects fall/collide/stack, raycasts hit, the sim runs on the job system inside the
+fixed tick; the sample self-checks headless in CI). **Reordered from the original plan to reach the
+acceptance proof sooner:** the remaining planned bricks — **contact/trigger/sleep events**, **shapes
+II** (convex hull / static mesh / compound), and **CCD + debris-scale tuning** — are **deferred as
+fast-follows** into M8's runway, since M8 destruction is their first real consumer. They remain
+tracked here; nothing about them is cancelled.
 
 **M7 non-goals (deferred, recorded in [ADR-0026](adr/0026-physics-core.md)):** joints/motors/
 character controller (m12.0) · soft bodies/cloth/fluids (own modules — water is Track FL) · TGS solver

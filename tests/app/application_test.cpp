@@ -88,6 +88,31 @@ TEST_CASE("app: the fixed tick drives a sim system once per tick (M5.7)") {
     CHECK(w.get<Counter>(e)->value == static_cast<int>(app.tick_count()));
 }
 
+TEST_CASE("app: the per-fixed-tick hook runs once per tick and may change structure (M7.8)") {
+    Application app(AppConfig{}); // headless, GPU-free
+    ecs::World& w = app.world();
+
+    // The hook counts ticks, checks it is handed the fixed dt, and — proving it may make STRUCTURAL
+    // changes a parallel Schedule system cannot — spawns one entity per tick (a
+    // PhysicsSync::reconcile adds/removes components exactly like this).
+    int hook_ticks = 0;
+    double seen_dt = 0.0;
+    app.on_fixed_tick([&](ecs::World& world, double dt) {
+        ++hook_ticks;
+        seen_dt = dt;
+        (void)world.spawn_with(Counter{hook_ticks});
+    });
+
+    for (int i = 0; i < 8; ++i) {
+        const auto step = app.step(app.fixed_dt());
+        CHECK(step.ticks == 1);
+    }
+    CHECK(hook_ticks == 8);
+    CHECK(hook_ticks == static_cast<int>(app.tick_count()));
+    CHECK(seen_dt == doctest::Approx(app.fixed_dt()));
+    CHECK(w.query<Counter>().count() == 8); // the per-tick structural spawns all took effect
+}
+
 TEST_CASE("app: tick determinism — pacing does not change the world (M5.7)") {
     // Build the same scene + integrate system into an app: N particles carried by their velocities,
     // one Euler step of the constant fixed_dt per tick.

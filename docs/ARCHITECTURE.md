@@ -17,7 +17,10 @@ modules, `assets` 🟢 is **Milestone 6 complete** — the whole offline→runti
 STL import; textured, normal-mapped, and skinned cooks; async loading on the job system; the GPU
 asset bridge), shown end-to-end by `samples/08-gltf-zoo`; the new `capi` 🟢 C ABI (M6.9) exposes the
 runtime loader to the Rust tools, and the `tools/` layer is real (the `rime` cooker + the pipeline
-and FFI crates). The rest of the feature modules are still ⚪. This document is
+and FFI crates). `physics` 🟢 is the **Milestone 7 core** — an own rigid-body engine (bodies,
+broadphase/narrowphase/solver, islands + sleeping, the parallel step, ECS sync, and scene queries),
+its "done when" shown by `samples/09-physics-playground`. The rest of the feature modules are still
+⚪. This document is
 the blueprint we build toward; the per-section tags below say how far each part has actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
@@ -156,11 +159,16 @@ UI overlay — as four graph passes sharing one colour + one D32FloatS8 depth+st
 proving the resource model really covers depth+stencil attachments and Load/keep-across-passes
 (`tests/render/viewer_frame_graph_test.cpp`, offscreen, GPU-free in CI).
 
-### `physics` ⚪ — *simulation, multicore-first*
-Rigid bodies, collision, queries — designed around parallel simulation and the ability
-to query/stream physics state off the main thread. We will evaluate integrating **Jolt
-Physics** (proven, multicore, open) vs. growing our own; either way the destruction
-system sits on top. → see [survey](research/engine-survey.md#physics).
+### `physics` 🟢 — *simulation, multicore-first*
+Rime's **own** rigid-body core — no Jolt ([ADR-0026](adr/0026-physics-core.md)): a SoA body pool, a
+dual-AABB-tree broadphase, a GJK/EPA narrowphase, a sequential-impulse solver with an NGS position
+pass, and **island-parallel stepping that is bit-identical across thread counts**. It steps on
+`core::JobSystem` inside the app's fixed tick, syncs to the ECS with change detection (awake bodies
+only), and answers raycast/overlap queries — all behind the `PhysicsWorld` seam, all GPU-free.
+Built as the *universal simulation substrate* the destruction system (M8) sits on. M7's "done when"
+is proven by `samples/09-physics-playground`; contact events, convex/mesh shapes, and CCD are the
+planned fast-follows. → see [design/physics.md](design/physics.md),
+[survey](research/engine-survey.md#physics).
 
 ### `destruction` ⚪ — *our headline system (Frostbite-inspired)*
 A first-class engine system, not a plugin. Core ideas, mapped from how Battlefield 6's

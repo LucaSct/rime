@@ -46,6 +46,13 @@ void Application::run_ticks(int ticks) {
     for (int i = 0; i < ticks; ++i) {
         schedule_.run(world_, jobs_);
         ecs::propagate_transforms(world_, jobs_);
+        // The per-tick hook runs last, after the hierarchy is composed: this is where a physics
+        // PhysicsSync::step reads up-to-date WorldTransforms, steps the sim, and writes poses back
+        // (stamping change detection) — structural work that a parallel Schedule system could not
+        // do. See docs/design/simulation-tick.md for the canonical order.
+        if (fixed_tick_) {
+            fixed_tick_(world_, timestep_.fixed_dt);
+        }
         ++tick_count_;
     }
 }
