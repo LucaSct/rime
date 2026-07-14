@@ -19,6 +19,7 @@
 #include "rime/core/math/quat.hpp"
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/shape.hpp"
+#include "scene_query.hpp"
 #include "solver.hpp"
 
 // The M7.1–M7.5 world: a data-oriented body pool, a semi-implicit Euler integrator, a dual
@@ -685,6 +686,116 @@ std::uint64_t PhysicsWorld::world_hash() const noexcept {
         h = core::fnv1a_64(std::as_bytes(std::span<const float>{state}), h);
     }
     return h;
+}
+
+bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filter) const {
+    const Impl& p = *impl_;
+    const float dir_len = core::length(ray.direction);
+    if (dir_len < 1e-8f) {
+        return false; // a zero-length ray hits nothing
+    }
+    const core::Vec3 dir = ray.direction / dir_len; // unit ⇒ the reported t is a world distance
+    const float tmax = ray.max_distance;
+
+    float best_t = tmax;
+    std::uint32_t best_slot = core::kInvalidSlotIndex;
+    core::Vec3 best_n{0.0f, 0.0f, 0.0f};
+
+    // A reported leaf's slot is live (it is in the tree), so slots[slot].dense is its current row.
+    // Pass the running `best_t` as the exact test's bound so a farther candidate is rejected
+    // cheaply; the nearest survivor across both trees wins.
+    const auto test = [&](std::uint32_t slot) {
+        const std::uint32_t d = p.slots[slot].dense;
+        float t = 0.0f;
+        core::Vec3 n{0.0f, 0.0f, 0.0f};
+        if (ray_vs_shape(
+                p.shape[d], p.position[d], p.orientation[d], ray.origin, dir, best_t, t, n) &&
+            t < best_t) {
+            best_t = t;
+            best_slot = slot;
+            best_n = n;
+        }
+    };
+
+    // Each tree carries exactly one filter class — the dynamic tree is dynamic+kinematic, the
+    // static tree is static — so a filter flag simply gates a whole tree; no per-leaf motion check
+    // needed.
+    if (filter.dynamics) {
+        p.dynamic_tree.query_ray(ray.origin, dir, tmax, test);
+    }
+    if (filter.statics) {
+        p.static_tree.query_ray(ray.origin, dir, tmax, test);
+    }
+
+    if (best_slot == core::kInvalidSlotIndex) {
+        return false;
+    }
+    out.body = BodyId{best_slot, p.slots[best_slot].generation};
+    out.point = ray.origin + dir * best_t;
+    out.normal = best_n;
+    out.distance = best_t;
+    return true;
+}
+
+void PhysicsWorld::overlap_sphere(core::Vec3 center,
+                                  float radius,
+                                  std::vector<BodyId>& out,
+                                  const QueryFilter& filter) const {
+    const Impl& p = *impl_;
+    out.clear();
+    const core::Vec3 r3{radius, radius, radius};
+    const Aabb box{center - r3, center + r3};
+
+    std::vector<std::uint32_t> hits;
+    const auto collect = [&](std::uint32_t slot) {
+        const std::uint32_t d = p.slots[slot].dense;
+        if (sphere_vs_shape(center, radius, p.shape[d], p.position[d], p.orientation[d])) {
+            hits.push_back(slot);
+        }
+    };
+    if (filter.dynamics) {
+        p.dynamic_tree.query(box, collect);
+    }
+    if (filter.statics) {
+        p.static_tree.query(box, collect);
+    }
+    // Sort by stable slot id so the reported set is order-deterministic run to run (a hash map /
+    // tree traversal order must never leak into a result the game or replication sees).
+    std::sort(hits.begin(), hits.end());
+    out.reserve(hits.size());
+    for (const std::uint32_t slot : hits) {
+        out.push_back(BodyId{slot, p.slots[slot].generation});
+    }
+}
+
+void PhysicsWorld::apply_impulse(BodyId id, core::Vec3 impulse, core::Vec3 point) noexcept {
+    Impl& p = *impl_;
+    const std::uint32_t d = p.dense_of(id);
+    if (d == core::kInvalidSlotIndex || p.inv_mass[d] == 0.0f) {
+        return; // stale, or immovable (static/kinematic) — an impulse cannot move it
+    }
+    p.linear_velocity[d] += impulse * p.inv_mass[d];
+    // Angular part: I⁻¹(r × J), with I⁻¹ the world-space inverse inertia — the exact same
+    // apply_inv_inertia(q, I_body⁻¹, ·) the solver uses, so an external push and a contact impulse
+    // rotate a body by identical math.
+    const core::Vec3 r = point - p.position[d];
+    p.angular_velocity[d] +=
+        apply_inv_inertia(p.orientation[d], p.inv_inertia[d], core::cross(r, impulse));
+    // A sleeping body ignores velocity until something wakes it, so an impulse must wake it (its
+    // island reactivates on the next step, exactly as wake_body documents).
+    p.asleep[d] = 0;
+    p.sleep_timer[d] = 0.0f;
+}
+
+void PhysicsWorld::apply_central_impulse(BodyId id, core::Vec3 impulse) noexcept {
+    Impl& p = *impl_;
+    const std::uint32_t d = p.dense_of(id);
+    if (d == core::kInvalidSlotIndex || p.inv_mass[d] == 0.0f) {
+        return;
+    }
+    p.linear_velocity[d] += impulse * p.inv_mass[d]; // applied through the COM ⇒ no torque
+    p.asleep[d] = 0;
+    p.sleep_timer[d] = 0.0f;
 }
 
 } // namespace rime::physics

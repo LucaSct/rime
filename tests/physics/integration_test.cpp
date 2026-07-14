@@ -19,19 +19,33 @@ using namespace rime;
 
 namespace {
 
-// Fold every body's raw state bytes into one FNV-1a hash, in id order. BodyState is
-// zero-initialized before each read so padding bytes are deterministic, which makes the hash a
-// faithful witness of the simulated state (the method M7.5 reuses to prove thread-count
-// independence, and M11 replays).
+// Fold every body's motion state into one FNV-1a hash, in id order — a faithful witness of the
+// simulated state (the method M7.5 reuses to prove thread-count independence, and M11 replays).
+// Hash the float VALUES, not the raw BodyState bytes: BodyState carries alignment padding (Quat is
+// alignas(16), so the struct is 64 bytes for 52 of data), and those padding bytes are indeterminate
+// — `BodyState{}` does NOT reliably zero them on every compiler (Apple-clang/ARM64 leaves stack
+// garbage), so hashing the raw struct makes the digest depend on the stack and differ run to run.
+// Packing the floats is exactly what PhysicsWorld::world_hash does, and for the same reason.
 std::uint64_t hash_states(const physics::PhysicsWorld& world,
                           const std::vector<physics::BodyId>& ids) {
     std::uint64_t h = core::kFnv1a64OffsetBasis;
     for (const physics::BodyId id : ids) {
         physics::BodyState s{};
         (void)world.get_body_state(id, s);
-        std::array<std::byte, sizeof(physics::BodyState)> bytes{};
-        std::memcpy(bytes.data(), &s, sizeof(s));
-        h = core::fnv1a_64(std::span<const std::byte>(bytes.data(), bytes.size()), h);
+        const std::array<float, 13> v = {s.position.x,
+                                         s.position.y,
+                                         s.position.z,
+                                         s.orientation.x,
+                                         s.orientation.y,
+                                         s.orientation.z,
+                                         s.orientation.w,
+                                         s.linear_velocity.x,
+                                         s.linear_velocity.y,
+                                         s.linear_velocity.z,
+                                         s.angular_velocity.x,
+                                         s.angular_velocity.y,
+                                         s.angular_velocity.z};
+        h = core::fnv1a_64(std::as_bytes(std::span<const float>{v}), h);
     }
     return h;
 }

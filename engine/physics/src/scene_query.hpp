@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <utility>
+
+#include "rime/core/math/quat.hpp"
+#include "rime/core/math/vec.hpp"
+#include "rime/physics/shape.hpp"
+
+// Exact ray-vs-shape and sphere-vs-shape geometry for the scene queries (M7.7). The broadphase BVH
+// (aabb_tree.hpp) narrows a query to a handful of candidate leaves; these routines are the exact
+// test each candidate then gets. All analytic — a ray against our three primitives is a quadratic
+// or a slab test — so a query costs a few dozen flops per candidate and stays GPU-free like the
+// rest of the module. This header lives under src/ (PRIVATE), invisible above the PhysicsWorld
+// seam.
+//
+// Convention: `dir` is UNIT, so the returned `t` is a world-space distance; every routine rotates
+// the ray into the shape's local frame (a rotation is an isometry, so `t` is unchanged) where the
+// shape is axis-aligned and the algebra is simplest, then rotates the surface normal back out.
+namespace rime::physics {
+
+// Ray vs sphere: solve |o + t·d − c|² = r². Nearest non-negative root in [0, tmax]; a ray starting
+// inside returns t = 0. Normal is the outward radial direction at the hit.
+[[nodiscard]] inline bool ray_vs_sphere(core::Vec3 center,
+                                        float r,
+                                        core::Vec3 o,
+                                        core::Vec3 d,
+                                        float tmax,
+                                        float& t_out,
+                                        core::Vec3& n_out) noexcept {
+    const core::Vec3 m = o - center;
+    const float b = core::dot(m, d);
+    const float c = core::dot(m, m) - r * r;
+    // Origin outside the sphere (c > 0) and the ray pointing away from it (b > 0): a clean miss.
+    if (c > 0.0f && b > 0.0f) {
+        return false;
+    }
+    const float disc = b * b - c; // d is unit ⇒ the t²-coefficient is 1
+    if (disc < 0.0f) {
+        return false;
+    }
+    float t = -b - std::sqrt(disc);
+    if (t < 0.0f) {
+        t = 0.0f; // origin inside the sphere
+    }
+    if (t > tmax) {
+        return false;
+    }
+    t_out = t;
+    n_out = core::normalize((o + d * t) - center);
+    return true;
+}
+
+// Ray vs oriented box (half-extents `half`, pose `pos`/`q`). Rotate the ray into the box's local
+// frame and run the slab test, tracking which axis-slab is entered last — that face gives the
+// normal. Returns the entry distance; a ray whose origin is already inside the box reports no
+// exterior hit (documented: pick a start point outside).
+[[nodiscard]] inline bool ray_vs_box(core::Vec3 half,
+                                     core::Vec3 pos,
+                                     const core::Quat& q,
+                                     core::Vec3 o,
+                                     core::Vec3 d,
+                                     float tmax,
+                                     float& t_out,
+                                     core::Vec3& n_out) noexcept {
+    const core::Quat qc = core::conjugate(q);
+    const core::Vec3 loV = core::rotate(qc, o - pos);
+    const core::Vec3 ldV = core::rotate(qc, d);
+    const float lo[3] = {loV.x, loV.y, loV.z};
+    const float ld[3] = {ldV.x, ldV.y, ldV.z};
+    const float h[3] = {half.x, half.y, half.z};
+
+    float tmin = 0.0f;
+    float tout = tmax;
+    int axis = -1;
+    float sign = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(ld[i]) < 1e-8f) {
+            if (lo[i] < -h[i] || lo[i] > h[i]) {
+                return false; // parallel to this slab and outside it
+            }
+            continue;
+        }
+        const float inv = 1.0f / ld[i];
+        float t1 = (-h[i] - lo[i]) * inv;
+        float t2 = (h[i] - lo[i]) * inv;
+        float s = -1.0f; // entering the −face
+        if (t1 > t2) {
+            std::swap(t1, t2);
+            s = 1.0f; // …the +face
+        }
+        if (t1 > tmin) {
+            tmin = t1;
+            axis = i;
+            sign = s;
+        }
+        tout = std::min(tout, t2);
+        if (tmin > tout) {
+            return false;
+        }
+    }
+    if (axis < 0) {
+        return false; // origin inside (no slab was entered after t=0)
+    }
+    t_out = tmin;
+    float nl[3] = {0.0f, 0.0f, 0.0f};
+    nl[axis] = sign;
+    n_out = core::rotate(q, core::Vec3{nl[0], nl[1], nl[2]});
+    return true;
+}
+
+// Ray vs capsule (radius `r`, cylinder half-height `hh` along local Y, pose `pos`/`q`). The capsule
+// surface is the cylindrical side over y ∈ [−hh, hh] plus the two hemispherical caps; test the
+// infinite cylinder (clamped to the segment) and the two end spheres (accepting only each outer
+// hemisphere), and take the nearest. This is exact — the capsule is precisely that union.
+[[nodiscard]] inline bool ray_vs_capsule(float r,
+                                         float hh,
+                                         core::Vec3 pos,
+                                         const core::Quat& q,
+                                         core::Vec3 o,
+                                         core::Vec3 d,
+                                         float tmax,
+                                         float& t_out,
+                                         core::Vec3& n_out) noexcept {
+    const core::Quat qc = core::conjugate(q);
+    const core::Vec3 lo = core::rotate(qc, o - pos);
+    const core::Vec3 ld = core::rotate(qc, d);
+
+    float best = tmax;
+    bool hit = false;
+    core::Vec3 nloc{0.0f, 0.0f, 0.0f};
+
+    // Infinite cylinder about local Y: drop the Y component and solve the 2-D circle equation. `a`
+    // is not 1 here (the xz-projection of a unit ray is not unit), so keep the full quadratic.
+    const float a = ld.x * ld.x + ld.z * ld.z;
+    if (a > 1e-12f) {
+        const float b = lo.x * ld.x + lo.z * ld.z;
+        const float c = lo.x * lo.x + lo.z * lo.z - r * r;
+        const float disc = b * b - a * c;
+        if (disc >= 0.0f) {
+            const float t = (-b - std::sqrt(disc)) / a;
+            const float y = lo.y + t * ld.y;
+            if (t >= 0.0f && t < best && y >= -hh && y <= hh) {
+                best = t;
+                hit = true;
+                nloc = core::Vec3{lo.x + t * ld.x, 0.0f, lo.z + t * ld.z};
+            }
+        }
+    }
+
+    // End caps: spheres at (0, ±hh, 0), accepting a hit only on the hemisphere beyond the segment.
+    const auto cap = [&](float cy) {
+        const core::Vec3 center{0.0f, cy, 0.0f};
+        const core::Vec3 m = lo - center;
+        const float b = core::dot(m, ld);
+        const float c = core::dot(m, m) - r * r;
+        if (c > 0.0f && b > 0.0f) {
+            return;
+        }
+        const float disc = b * b - c;
+        if (disc < 0.0f) {
+            return;
+        }
+        float t = -b - std::sqrt(disc);
+        if (t < 0.0f) {
+            t = 0.0f;
+        }
+        if (t >= best) {
+            return;
+        }
+        const float y = lo.y + t * ld.y;
+        if ((cy < 0.0f && y <= -hh) || (cy > 0.0f && y >= hh)) {
+            best = t;
+            hit = true;
+            nloc = (lo + ld * t) - center;
+        }
+    };
+    cap(-hh);
+    cap(hh);
+
+    if (!hit) {
+        return false;
+    }
+    t_out = best;
+    n_out = core::rotate(q, core::normalize(nloc));
+    return true;
+}
+
+// Dispatch a ray at any primitive. Fills (t, normal) and returns true on the nearest hit in
+// [0, tmax]; `dir` must be unit.
+[[nodiscard]] inline bool ray_vs_shape(const ShapeDesc& s,
+                                       core::Vec3 pos,
+                                       const core::Quat& q,
+                                       core::Vec3 o,
+                                       core::Vec3 dir,
+                                       float tmax,
+                                       float& t_out,
+                                       core::Vec3& n_out) noexcept {
+    switch (s.type) {
+        case ShapeType::Sphere:
+            return ray_vs_sphere(pos, s.radius, o, dir, tmax, t_out, n_out);
+        case ShapeType::Box:
+            return ray_vs_box(s.half_extents, pos, q, o, dir, tmax, t_out, n_out);
+        case ShapeType::Capsule:
+            return ray_vs_capsule(s.radius, s.half_height, pos, q, o, dir, tmax, t_out, n_out);
+    }
+    return false;
+}
+
+// Does a query sphere (center `c`, radius `sr`) overlap the posed shape? The exact test for
+// overlap_sphere: distance from the sphere centre to the shape's nearest surface point ≤ sr, done
+// in the shape's local frame (closest-point-on-box, closest-point-on-capsule-segment).
+[[nodiscard]] inline bool sphere_vs_shape(core::Vec3 c,
+                                          float sr,
+                                          const ShapeDesc& s,
+                                          core::Vec3 pos,
+                                          const core::Quat& q) noexcept {
+    switch (s.type) {
+        case ShapeType::Sphere: {
+            const float rr = sr + s.radius;
+            return core::length_squared(c - pos) <= rr * rr;
+        }
+        case ShapeType::Box: {
+            const core::Vec3 lc = core::rotate(core::conjugate(q), c - pos);
+            const core::Vec3 h = s.half_extents;
+            const core::Vec3 closest{std::clamp(lc.x, -h.x, h.x),
+                                     std::clamp(lc.y, -h.y, h.y),
+                                     std::clamp(lc.z, -h.z, h.z)};
+            return core::length_squared(lc - closest) <= sr * sr;
+        }
+        case ShapeType::Capsule: {
+            const core::Vec3 lc = core::rotate(core::conjugate(q), c - pos);
+            const float y = std::clamp(lc.y, -s.half_height, s.half_height);
+            const core::Vec3 closest{0.0f, y, 0.0f};
+            const float rr = sr + s.radius;
+            return core::length_squared(lc - closest) <= rr * rr;
+        }
+    }
+    return false;
+}
+
+} // namespace rime::physics

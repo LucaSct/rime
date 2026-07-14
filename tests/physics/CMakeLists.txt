@@ -9,7 +9,8 @@ rime_add_test(rime_physics_tests
     narrowphase_test.cpp
     solver_test.cpp
     islands_test.cpp
-    sync_test.cpp)
+    sync_test.cpp
+    query_test.cpp)
 
 target_link_libraries(rime_physics_tests
     PRIVATE rime::physics)

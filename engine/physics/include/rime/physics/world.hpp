@@ -11,6 +11,7 @@
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/body.hpp"
 #include "rime/physics/contact.hpp"
+#include "rime/physics/query.hpp"
 
 // The job system (rime::core) is BORROWED by the M7.5 parallel step. Forward-declared here so this
 // seam header stays free of core's threading headers — only world.cpp pulls them in.
@@ -141,6 +142,33 @@ public:
     // validation build on. FNV-1a (core/hash.hpp): a fast exact-equality witness, not a
     // cryptographic digest.
     [[nodiscard]] std::uint64_t world_hash() const noexcept;
+
+    // --- Scene queries & external impulses (M7.7) -------------------------------------------
+    // Cast a ray and report the NEAREST body it hits within `ray.max_distance`, or return false
+    // (out untouched) on a miss. Broadphase-accelerated: descend the ray through both BVH trees to
+    // a handful of candidate leaves (ray_hits_aabb), then an exact ray-vs-shape test per candidate;
+    // the nearest survivor wins. Read-only/const — safe to call between steps, but NOT concurrently
+    // with step() (which mutates the bodies and trees the query reads). This is the hitscan /
+    // line-of-sight / picking primitive the whole engine reaches for.
+    [[nodiscard]] bool raycast(const Ray& ray, RayHit& out, const QueryFilter& filter = {}) const;
+
+    // Collect every body whose shape overlaps the sphere (`center`, `radius`) into `out` (cleared
+    // first), in canonical slot order so the result is deterministic run to run. Broadphase-culled,
+    // then an exact shape-vs-sphere test. The "what is inside this volume" query — an explosion's
+    // affected set (M8), a trigger pre-check. Same const/threading contract as raycast().
+    void overlap_sphere(core::Vec3 center,
+                        float radius,
+                        std::vector<BodyId>& out,
+                        const QueryFilter& filter = {}) const;
+
+    // Apply an impulse J (kg·m/s) to a dynamic body at a world-space `point`: Δv = J/m and
+    // Δω = I⁻¹(r×J) with r the lever arm from the centre of mass — and WAKE the body (its island
+    // reactivates on the next step, like wake_body). A no-op for a stale id or an immovable
+    // (static/kinematic, inv_mass == 0) body. This is the gameplay push: projectile hits,
+    // explosions (M8), thrusters. `apply_central_impulse` is the through-the-COM shortcut (no
+    // angular term).
+    void apply_impulse(BodyId id, core::Vec3 impulse, core::Vec3 point) noexcept;
+    void apply_central_impulse(BodyId id, core::Vec3 impulse) noexcept;
 
 private:
     struct Impl;

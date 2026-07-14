@@ -72,6 +72,17 @@ public:
     // call from parallel query jobs once M7.5 wires them. Recursion depth is the tree height.
     template <class Fn> void query(const Aabb& aabb, Fn&& fn) const { query_node(root_, aabb, fn); }
 
+    // Invoke fn(user) for every leaf whose fat AABB the ray (origin `o`, unit direction `dir`)
+    // reaches within [0, tmax] — the broadphase half of a raycast (M7.7). Descends only the
+    // branches the ray crosses, so it visits O(log n) nodes, not all of them; the caller's exact
+    // ray-vs-shape test then confirms each reported leaf and tracks the nearest. `tmax` is the
+    // descent bound (typically Ray::max_distance); the reciprocal direction is computed once here
+    // and reused down the whole descent (see ray_hits_aabb).
+    template <class Fn> void query_ray(core::Vec3 o, core::Vec3 dir, float tmax, Fn&& fn) const {
+        const core::Vec3 inv_d{1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z};
+        query_ray_node(root_, o, inv_d, tmax, fn);
+    }
+
     // Test hook: every internal node bounds its children and the parent links are consistent.
     [[nodiscard]] bool validate() const { return root_ == kNull || validate_node(root_); }
 
@@ -223,6 +234,23 @@ private:
         } else {
             query_node(node.child1, aabb, fn);
             query_node(node.child2, aabb, fn);
+        }
+    }
+
+    template <class Fn>
+    void query_ray_node(std::int32_t n, core::Vec3 o, core::Vec3 inv_d, float tmax, Fn& fn) const {
+        if (n == kNull) {
+            return;
+        }
+        const Node& node = nodes_[n];
+        if (!ray_hits_aabb(node.aabb, o, inv_d, tmax)) {
+            return;
+        }
+        if (node.is_leaf()) {
+            fn(node.user);
+        } else {
+            query_ray_node(node.child1, o, inv_d, tmax, fn);
+            query_ray_node(node.child2, o, inv_d, tmax, fn);
         }
     }
 

@@ -485,3 +485,50 @@ gets a bit-identical `world_hash()` and identical entity transforms — the ADR-
 across the ECS seam. The ECS mechanism itself is proven separately in
 `tests/ecs/change_detection_test.cpp` (version monotonicity, per-column stamping, chunk skip,
 `Schedule::run` advancing the epoch, and `par_for_each_changed` matching the serial form).
+
+## Scene queries & external impulses (M7.7)
+
+Simulation is only half of a physics core; gameplay needs to *ask* the world what is where and to
+*push* on it. M7.7 adds both through the seam, reusing machinery already built.
+
+### Raycast: one BVH, several customers
+
+A raycast is the workhorse — hitscan weapons, line-of-sight, mouse picking (M9), AI probes, the
+"what's under the crosshair" the playground fires along. The naive version tests the ray against
+every body; instead `raycast` descends the ray through the **same dual AABB trees the broadphase
+uses** (`aabb_tree.hpp::query_ray`), visiting only the O(log n) nodes the ray's slab test reaches,
+and runs the exact ray-vs-shape test (`scene_query.hpp`) on just those candidate leaves. The nearest
+survivor across both trees wins. The exact tests are analytic per primitive: ray-vs-sphere is a
+quadratic; ray-vs-box rotates the ray into the box's local frame and runs a slab test (so an
+*oriented* box is handled without a special case — the returned normal is the entered face rotated
+back out); ray-vs-capsule is the union of an infinite cylinder clamped to the segment and two
+end-cap spheres, each accepted only on its outer hemisphere. `RayHit` reports the body, world-space
+point and outward normal, and the distance along the (normalized) direction. A `QueryFilter` selects
+by motion class, which — because the broadphase already keeps statics and movers in separate trees —
+is just "skip a whole tree," not a per-body test.
+
+`overlap_sphere` is the volume query (an explosion's affected set for M8, a trigger pre-check): a
+broadphase AABB query culls candidates, an exact sphere-vs-shape test confirms each, and the result
+is returned in **canonical slot order** so it never leaks the hash/traversal order into something the
+game or replication sees.
+
+### Impulses: the gameplay push
+
+`apply_impulse(body, J, point)` changes a dynamic body's linear velocity by `J/m` and its angular
+velocity by `I⁻¹(r×J)` — using the *exact same* world-space inverse-inertia operator
+(`apply_inv_inertia`, `R·diag(I_body⁻¹)·Rᵀ`) the contact solver applies, so an explosion's shove and
+a resting-contact impulse rotate a body by identical math. It **wakes** the body (an impulse to a
+sleeper would otherwise be ignored until the next contact), and no-ops on an immovable
+(static/kinematic, zero inverse mass) or stale id. `apply_central_impulse` is the through-the-COM
+shortcut with no angular term. This is all a projectile or a blast needs; forces/torques accumulated
+across a step are a later addition if a system needs them (noted, not built).
+
+### Proofs
+
+`tests/physics/query_test.cpp`, pure CPU on the seam: a raycast battery (sphere head-on with exact
+point/normal/distance; an axis-aligned box face; a **rotated** box proving the OBB path, not the
+AABB; a capsule side and end-cap; clean misses for "above" and "pointing away"; the nearest of two
+bodies; `max_distance` bounding a cast short; the motion-class filter picking floor vs. ball);
+`overlap_sphere` finding exactly the planted set in canonical order; and impulses (central ⇒ `J/m`
+with no spin; off-centre ⇒ spin about the expected axis; an impulse wakes a sleeper; a static body
+ignores one). Green under dev + ASan/UBSan + TSan.
