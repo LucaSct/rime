@@ -105,6 +105,17 @@ public:
 
     void on_render(RenderFn fn) { render_ = std::move(fn); }
 
+    // Set the per-FIXED-TICK callback (replacing any previous). It runs once per simulation tick,
+    // after the Schedule and transform propagation — the place per-tick work that must NOT run
+    // inside a parallel query belongs: a physics PhysicsSync::step (its reconcile adds/removes
+    // components — a structural change), a spawner draining a command queue, an authoritative
+    // integrator. It is handed the World and the fixed dt (the same constant every tick). Unlike a
+    // Schedule system it may make structural changes, because it runs on the main thread between
+    // phases, not concurrently with anything. Optional: a pure-Schedule app sets none.
+    using TickFn = std::function<void(ecs::World&, double)>;
+
+    void on_fixed_tick(TickFn fn) { fixed_tick_ = std::move(fn); }
+
     // ── Input ───────────────────────────────────────────────────────────────────────────────
     // Queue an event for the NEXT frame's snapshot. Windowed, the loop fills this from the OS
     // pump; headless, a test (or a scripted harness) injects events the same way — which is how
@@ -154,6 +165,7 @@ private:
     ecs::Schedule schedule_;
     FixedTimestep timestep_;
     RenderFn render_;
+    TickFn fixed_tick_;
 
     std::unique_ptr<rhi::Device> device_;        // owned when config.gpu
     std::unique_ptr<render::RenderGraph> graph_; // owned when a device exists
