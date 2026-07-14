@@ -430,3 +430,58 @@ reactivate a sleeper. The headline is determinism: a multi-island scene (three s
 two fallers) stepped 300 times yields one `world_hash()` shared by the sequential path and by 1-, 2-,
 3-, and 4-worker job systems — proven with sleeping off *and* on. The whole suite is green under TSan
 (the parallel solve is the threading surface it exists to net) and ASan/UBSan at the brick boundary.
+
+## Change detection & ECS sync (M7.6)
+
+The physics core simulates a pool of `BodyId`s; the game thinks in *entities* with components. M7.6
+is the seam between them, and the point where two earlier investments — the fixed tick (ADR-0023)
+and sleeping (M7.5) — cash out against a third, ECS change detection (ADR-0018 §4). The full
+per-tick order lives in [simulation-tick.md](simulation-tick.md); this section is the physics-side
+summary.
+
+### The bridge: bind, write-back, unbind
+
+`PhysicsSync` (`physics/sync.hpp`) holds the one piece of state neither side owns alone — the
+entity↔body **roster** — and does three jobs across a tick:
+
+- **Bind.** An entity carrying the intent (`RigidBody` + `Collider` + `WorldTransform`) but no body
+  yet gets one created *at its transform*, plus a `RigidBodyHandle` component linking the two. The
+  intent components stay pure authored data (reflected, serialized); the handle is transient runtime
+  bookkeeping (unreflected — a fresh bind regenerates it). This keeps "what the entity *wants*"
+  (what the M9 inspector shows) orthogonal to "which body id backs it right now."
+- **Write-back.** After `step()`, each **awake** dynamic body's position and orientation are written
+  into its entity's `WorldTransform`, and that component is stamped changed. Sleeping, static, and
+  kinematic bodies are skipped — they did not move, so they neither write nor stamp.
+- **Unbind.** A body whose entity was despawned (or dropped its `RigidBody`/`Collider`) is
+  destroyed. A despawn takes the `RigidBodyHandle` with it, so no query could rediscover the
+  orphaned body — which is exactly why the roster exists as the authoritative cleanup list. Bind and
+  unbind are structural (they add/remove components), so `reconcile()` runs between phases on the
+  main thread, never inside a query over those archetypes.
+
+Scale is left alone: a simulated body's `WorldTransform` has its translation and rotation written by
+physics, its scale untouched (physics ignores scale in v1 — a body's extents come from its
+`Collider`). Kinematic push-in (game → body) and physics → `LocalTransform` for parented bodies are
+deferred seams; v1 treats a simulated body's world pose as physics-owned.
+
+### Where sleeping meets change detection
+
+Change detection (ADR-0018 §4) stamps each chunk's component columns with a monotonic world version
+and lets a query visit *only* chunks written since a caller's checkpoint. Compose that with
+write-back skipping asleep bodies and the win is structural: **a settled world stamps nothing**, so a
+change-tracking consumer — GPU upload, editor live-sync (M9), replication (M11) — does zero work for
+it. Work tracks what *moved*, not world size. This is why the sleeping bookkeeping of M7.5 and the
+version stamps of M7.6 are really one feature seen from two modules.
+
+### Proofs
+
+`tests/physics/sync_test.cpp`, pure CPU and structural on the public seams: `reconcile()` binds an
+intent entity to a body placed at its `WorldTransform` and is idempotent; write-back moves an awake
+body's transform and a `for_each_changed` consumer sees exactly it; a static body never stamps;
+despawning an entity and dropping a `RigidBody` both unbind and destroy the body (roster cleanup).
+The headline mirrors the M7.5 sleeping proof through the bridge: a box settles and sleeps, after
+which a further tick stamps **nothing** (`for_each_changed` reports zero), and waking it brings back
+exactly its chunk. A determinism case drives the same scene through `PhysicsSync::step` twice and
+gets a bit-identical `world_hash()` and identical entity transforms — the ADR-0026 contract holding
+across the ECS seam. The ECS mechanism itself is proven separately in
+`tests/ecs/change_detection_test.cpp` (version monotonicity, per-column stamping, chunk skip,
+`Schedule::run` advancing the epoch, and `par_for_each_changed` matching the serial form).

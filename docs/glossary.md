@@ -53,6 +53,14 @@ Entries are grouped roughly by area and kept short on purpose.
   performance and parallelism.
 - **Scene / world.** The collection of entities/components representing what currently
   exists in the game.
+- **Change detection.** Tracking *what changed since when* so a consumer processes only the
+  deltas instead of re-scanning the world. Rime stamps every chunk's component *columns* with a
+  monotonic world *version* (bumped once per tick); a query's `for_each_changed(since, …)` skips
+  any chunk whose queried columns were all last written at or before `since`. The grain is the
+  chunk column — *conservative*: it never misses a change but may include unchanged neighbours
+  sharing a changed chunk. Powers GPU re-upload, editor live-sync (M9), and networked-destruction
+  deltas (M11). See [adr/0018 §4](adr/0018-ecs-storage-model.md) and
+  [design/simulation-tick.md](design/simulation-tick.md).
 - **Fixed timestep / simulation tick.** Advancing the simulation in equal-sized steps
   (Rime's default: 60 per second) that are *decoupled* from the render frame rate — a time
   accumulator runs whole ticks and carries the remainder. It makes the sim deterministic
@@ -220,6 +228,12 @@ Entries are grouped roughly by area and kept short on purpose.
 
 - **Rigid body.** A solid object that doesn't deform, simulated with position, velocity,
   mass, and collisions. Debris chunks are rigid bodies.
+- **ECS↔physics sync.** The bridge (`PhysicsSync`) that keeps game data (entities with
+  RigidBody/Collider/WorldTransform components) and the simulation (a world of rigid bodies) in
+  step each tick: *bind* new intent entities to freshly-created bodies, `step()`, then *write back*
+  each **awake** body's pose into its WorldTransform (stamping it for [change
+  detection](#the-world)). A sleeping body writes nothing, so a settled world costs a change-tracking
+  consumer nothing. Canonical tick order: [design/simulation-tick.md](design/simulation-tick.md).
 - **Collision detection / query.** Finding what touches/overlaps/hits what (and
   raycasts/sweeps used by gameplay).
 - **Fracture.** Splitting a mesh into pieces, often precomputed, used for destruction.

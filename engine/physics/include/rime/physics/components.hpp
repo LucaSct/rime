@@ -6,6 +6,7 @@
 
 #include "rime/core/reflect/type_info.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/physics/body.hpp"
 
 // The physics-facing ECS components (M7.1): how an entity says "simulate me". Trivially-copyable,
 // standard-layout PODs with flat primitive fields (the ADR-0018 storage contract + what reflection
@@ -41,11 +42,22 @@ struct Collider {
     bool sensor = false;
 };
 
+// The runtime link from an entity to its simulated body, added by the M7.6 bind system
+// (PhysicsSync) — it holds the BodyId that PhysicsWorld::create_body returned. Kept separate from
+// the intent components so RigidBody/Collider stay pure authored data; this rides alongside them.
+// Unlike the intent components it is transient runtime state (a fresh bind regenerates it), so it
+// is deliberately NOT reflected and never serialized — the M9 inspector shows what an entity
+// *wants* (RigidBody/Collider), not the id bookkeeping behind it.
+struct RigidBodyHandle {
+    BodyId body;
+};
+
 // Register the physics components with a world — id + size + reflection TypeInfo in one shot.
 // Idempotent (World::register_component is), and calling it first keeps component ids stable.
 inline void register_physics_components(ecs::World& world) {
     (void)world.register_component<RigidBody>();
     (void)world.register_component<Collider>();
+    (void)world.register_component<RigidBodyHandle>();
 }
 
 } // namespace rime::physics
