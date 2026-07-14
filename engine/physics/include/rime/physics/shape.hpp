@@ -5,11 +5,13 @@
 #include <cstdint>
 
 #include "rime/core/containers/handle.hpp"
+#include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 
 // Collision shapes (the *description* — the backend builds runtime forms later). M7.1 needs only
 // enough to give a body its mass distribution; convex hulls (the destruction shape) landed at
-// M7.11 (ADR-0027), with triangle mesh / compound still to come. A shape is pure data: no GPU, no
+// M7.11 (ADR-0027) and compounds (many convex children on one body — the intact destructible) at
+// M7.12 (ADR-0028), with the static triangle mesh still to come. A shape is pure data: no GPU, no
 // allocation.
 namespace rime::physics {
 
@@ -22,14 +24,25 @@ struct HullTag {};
 // constructed ⇒ null (refers to no hull). Ids are only meaningful to the world that issued them.
 using HullId = core::Handle<HullTag>;
 
-// The shape set: the v1 primitives plus the convex hull (M7.11). Mesh/Compound (the remaining
-// destruction shapes) are still to land; the enum leaves room to grow without renumbering.
+// Phantom tag for CompoundId — same discipline as HullTag.
+struct CompoundTag {};
+
+// Handle to a compound shape registered with a PhysicsWorld (ADR-0028: the child list is
+// WORLD-OWNED, registered once via PhysicsWorld::register_compound — the exact storage answer
+// hulls got, for the exact same reason: a compound is variable-length data and ShapeDesc is a
+// flat POD). Default constructed ⇒ null. Ids are only meaningful to the world that issued them.
+using CompoundId = core::Handle<CompoundTag>;
+
+// The shape set: the v1 primitives, the convex hull (M7.11), and the compound (M7.12). The static
+// triangle mesh (world geometry) is still to land; the enum leaves room to grow without
+// renumbering.
 enum class ShapeType : std::uint8_t {
     Sphere = 0,
     Box = 1,
     Capsule = 2,
     ConvexHull = 3, // geometry lives in the world's hull store; `hull` is the reference
-    // Mesh, Compound — deferred (ADR-0027 names their homes)
+    Compound = 4,   // child list lives in the world's compound store; `compound` is the reference
+    // Mesh — deferred (ADR-0027 names its home)
 };
 
 // A shape description. Only the fields relevant to `type` are read (a tagged union kept as a flat
@@ -40,6 +53,18 @@ struct ShapeDesc {
     core::Vec3 half_extents{0.5f, 0.5f, 0.5f}; // Box (half of each side)
     float half_height = 0.5f;                  // Capsule (cylinder half-height, local Y)
     HullId hull{};                             // ConvexHull (PhysicsWorld::register_hull)
+    CompoundId compound{};                     // Compound (PhysicsWorld::register_compound)
+};
+
+// One child of a compound shape (M7.12, ADR-0028): a convex shape — any primitive or a registered
+// hull, but NOT another compound (nesting is rejected in v1; flatten-at-register is its deferred
+// home) — posed in the compound's AUTHORED frame. Registration re-centres the stored poses on the
+// combined centre of mass, so author children wherever is natural and read the applied shift back
+// from CompoundInfo::centroid (exactly the hull re-centring contract).
+struct CompoundChildDesc {
+    ShapeDesc shape{};
+    core::Vec3 position{0.0f, 0.0f, 0.0f};
+    core::Quat orientation = core::quat_identity();
 };
 
 // Mass + the body-space principal moments of inertia (diagonal). For our symmetric primitives in
@@ -90,6 +115,12 @@ struct MassProperties {
             // world owns the hull store (ADR-0027) and computes them at register_hull() by the
             // polyhedral integral (docs/math/polyhedral-mass-properties.md). create_body resolves
             // the id there; this fallback (unit inertia) is only what a caller with no world gets.
+            break;
+        case ShapeType::Compound:
+            // Same story as the hull: the child list lives in the world's compound store
+            // (ADR-0028), which composed the combined COM/inertia at register_compound() by the
+            // parallel-axis theorem (docs/math/compound-mass-properties.md). create_body resolves
+            // the id there; a caller with no world gets the unit-inertia fallback.
             break;
     }
     return mp;

@@ -249,6 +249,16 @@ Entries are grouped roughly by area and kept short on purpose.
   them all). In Rime, hull geometry is registered once with the physics world and referenced by a small
   id ([ADR-0027](adr/0027-convex-hull-shapes.md)); *building* a hull from points (**quickhull**) is a
   cook-time job, not a runtime one.
+- **Compound shape.** One rigid body whose collision shape is *several* convex children (primitives
+  and/or convex hulls), each at a fixed local pose — how an intact destructible is one body whose
+  parts detach when it breaks. Registered once with the physics world like a hull and referenced by a
+  small id; its mass and inertia are composed from the children by the **parallel-axis theorem**, and
+  a body pair involving a compound can carry several contact manifolds — one per touching child pair
+  ([ADR-0028](adr/0028-compound-shapes.md), [math/compound-mass-properties.md](math/compound-mass-properties.md)).
+- **Parallel-axis theorem.** Moving an inertia measurement away from a body's centre of mass adds
+  `m·d²`-style terms: a mass carried at an offset is harder to spin about the distant axis. The tool
+  that lets a compound's inertia be *composed* from its children's own inertias exactly, with no new
+  integration.
 - **Sutherland–Hodgman clipping.** Cutting a polygon against a half-space by walking its edges: keep
   inside vertices, emit a new vertex where an edge crosses the boundary. Run against several planes in
   a row it trims a polygon to a region — how the narrowphase turns "these two faces touch" into the

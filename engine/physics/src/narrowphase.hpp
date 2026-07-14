@@ -59,6 +59,11 @@ inline constexpr std::uint32_t kFeatSphereHull = 0x53480001u;  // M7.11 convex h
 inline constexpr std::uint32_t kFeatBoxHull = 0x42480001u;
 inline constexpr std::uint32_t kFeatCapsuleHull = 0x43480001u;
 inline constexpr std::uint32_t kFeatHullHull = 0x48480001u;
+// M7.12 compounds ('MP'): folded — together with both child indices — over every point id of a
+// pair that involves a compound, so two children touching the same other shape through the same
+// child features still get distinct ids. Pairs with no compound never fold it, keeping every
+// pre-M7.12 id space bit-identical (the backward-compat contract, ADR-0028).
+inline constexpr std::uint32_t kFeatCompoundChild = 0x4D500001u;
 
 namespace narrowphase_detail {
 
@@ -1256,6 +1261,8 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
                 case ShapeType::ConvexHull:
                     return hull_b != nullptr &&
                            collide_sphere_hull(pa, sa.radius, *hull_b, pb, qb, m);
+                default:
+                    break; // Compound never reaches shape dispatch (see the case below)
             }
             break;
         case ShapeType::Box:
@@ -1297,9 +1304,16 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
             }
             break;
         case ShapeType::ConvexHull:
-            // Canonical order puts the highest ShapeType second, so sb is a hull too.
-            return hull_a != nullptr && hull_b != nullptr &&
+            // Canonical order puts the highest ShapeType second, so sb is a hull or a compound;
+            // only the hull is collidable here (see the Compound note below).
+            return sb.type == ShapeType::ConvexHull && hull_a != nullptr && hull_b != nullptr &&
                    collide_hull_hull(*hull_a, pa, qa, *hull_b, pb, qb, m);
+        case ShapeType::Compound:
+            // A compound never collides HERE: it is not convex, so the world's contact build
+            // enumerates its convex CHILDREN and dispatches each child pair through this same
+            // routine (M7.12, ADR-0028). Reaching this case is a caller bug — collide as nothing
+            // rather than crash, the unresolved-hull posture.
+            break;
     }
     return false;
 }
@@ -1378,12 +1392,40 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
 }
 
 // ------------------------------------------------------------------------ manifold cache -------
-// One persistent-cache entry per body pair, keyed like the broadphase pair list
-// ((slot_a << 32) | slot_b, slot_a < slot_b) and guarded by the ids' generations so a recycled
-// slot can never inherit a dead pair's impulses. The cache stores only what warm starting needs:
-// each point's feature id and accumulated impulses. Matching is feature-id equality — the whole
-// reason the ids exist (contact.hpp). M7.3 shipped this machinery persisting zeros; since M7.4
-// the step commits it AFTER the solve, so the floats are the solver's converged impulses.
+// One persistent-cache entry per CONTACT REGION: a body pair — keyed like the broadphase pair
+// list ((slot_a << 32) | slot_b, slot_a < slot_b) — plus, since M7.12, the compound child
+// sub-pair within it. A plain pair is one region (children == 0) and behaves exactly as it has
+// since M7.3; a compound resting on two feet is two regions whose warm-start impulses must never
+// pool under one key (same-id collisions across children would let one foot's points steal the
+// other's converged impulses — ADR-0028). The key is WIDENED rather than hashed together: a hash
+// collision would silently cross-wire two regions' impulses, and exactness here costs nothing.
+struct ContactCacheKey {
+    std::uint64_t bodies = 0;   // (slot_a << 32) | slot_b, canonical a < b
+    std::uint32_t children = 0; // (child_a << 16) | child_b; 0 for a non-compound pair
+
+    friend bool operator==(const ContactCacheKey&, const ContactCacheKey&) noexcept = default;
+};
+
+// Hash for the cache map. Quality only needs to avoid clustering — the map is looked up per
+// region and NEVER iterated, so neither the hash nor the bucket order can leak into simulation
+// order (the determinism contract survives unordered storage exactly as it did for the pair-keyed
+// map). A splitmix64-style finalizer mixes the two fields' bits thoroughly and cheaply.
+struct ContactCacheKeyHash {
+    [[nodiscard]] std::size_t operator()(const ContactCacheKey& k) const noexcept {
+        std::uint64_t h =
+            k.bodies ^ (static_cast<std::uint64_t>(k.children) * 0x9E3779B97F4A7C15ull);
+        h ^= h >> 33;
+        h *= 0xFF51AFD7ED558CCDull;
+        h ^= h >> 33;
+        return static_cast<std::size_t>(h);
+    }
+};
+
+// The cache payload, guarded by the ids' generations so a recycled slot can never inherit a dead
+// pair's impulses. It stores only what warm starting needs: each point's feature id and
+// accumulated impulses. Matching is feature-id equality — the whole reason the ids exist
+// (contact.hpp). M7.3 shipped this machinery persisting zeros; since M7.4 the step commits it
+// AFTER the solve, so the floats are the solver's converged impulses.
 struct ManifoldCacheEntry {
     std::uint64_t key = 0;
     std::uint32_t gen_a = 0;

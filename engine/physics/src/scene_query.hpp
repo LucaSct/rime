@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <span>
 #include <utility>
 
+#include "compound.hpp"
 #include "gjk.hpp"
 #include "hull.hpp"
 #include "rime/core/math/quat.hpp"
@@ -249,7 +251,11 @@ namespace rime::physics {
 
 // Dispatch a ray at any shape. Fills (t, normal) and returns true on the nearest hit in
 // [0, tmax]; `dir` must be unit. `hull` is the resolved store entry for a ConvexHull shape
-// (nullptr otherwise — the world resolves the id before dispatch, ADR-0027).
+// (nullptr otherwise — the world resolves the id before dispatch, ADR-0027). `compound` + `hulls`
+// are the resolved compound and the hull store span for a Compound shape (M7.12): a compound is
+// raycast child by child — nearest child hit wins, fixed ascending scan with strict '<' so an
+// exact tie keeps the lowest child index (the house determinism discipline). Children are never
+// compounds (rejected at registration), so the recursion below is exactly one level deep.
 [[nodiscard]] inline bool ray_vs_shape(const ShapeDesc& s,
                                        core::Vec3 pos,
                                        const core::Quat& q,
@@ -258,7 +264,9 @@ namespace rime::physics {
                                        float tmax,
                                        float& t_out,
                                        core::Vec3& n_out,
-                                       const ConvexHull* hull = nullptr) noexcept {
+                                       const ConvexHull* hull = nullptr,
+                                       const CompoundShape* compound = nullptr,
+                                       std::span<const ConvexHull> hulls = {}) noexcept {
     switch (s.type) {
         case ShapeType::Sphere:
             return ray_vs_sphere(pos, s.radius, o, dir, tmax, t_out, n_out);
@@ -268,6 +276,38 @@ namespace rime::physics {
             return ray_vs_capsule(s.radius, s.half_height, pos, q, o, dir, tmax, t_out, n_out);
         case ShapeType::ConvexHull:
             return hull != nullptr && ray_vs_hull(*hull, pos, q, o, dir, tmax, t_out, n_out);
+        case ShapeType::Compound: {
+            if (compound == nullptr) {
+                return false;
+            }
+            float best = tmax;
+            bool hit = false;
+            for (std::size_t i = 0; i < compound->child_count(); ++i) {
+                const core::Vec3 cp = compound_child_world_pos(*compound, i, pos, q);
+                const core::Quat cq = compound_child_world_orient(*compound, i, q);
+                float t = 0.0f;
+                core::Vec3 n{0.0f, 0.0f, 0.0f};
+                // `best` as the child's bound: a farther child is rejected inside its own test.
+                if (ray_vs_shape(compound->child_shape[i],
+                                 cp,
+                                 cq,
+                                 o,
+                                 dir,
+                                 best,
+                                 t,
+                                 n,
+                                 compound_child_hull(compound->child_shape[i], hulls)) &&
+                    t < best) {
+                    best = t;
+                    n_out = n;
+                    hit = true;
+                }
+            }
+            if (hit) {
+                t_out = best;
+            }
+            return hit;
+        }
     }
     return false;
 }
@@ -276,13 +316,17 @@ namespace rime::physics {
 // overlap_sphere: distance from the sphere centre to the shape's nearest surface point ≤ sr, done
 // in the shape's local frame (closest-point-on-box, closest-point-on-capsule-segment). A hull has
 // no closed-form closest point, so it asks GJK — point-vs-hull distance is exactly GJK's output,
-// and the query stays deterministic (GJK is a pure function of its supports).
+// and the query stays deterministic (GJK is a pure function of its supports). A compound overlaps
+// iff ANY child does (fixed ascending scan; early-out on a pure OR cannot change the answer, so
+// determinism of the result is untouched).
 [[nodiscard]] inline bool sphere_vs_shape(core::Vec3 c,
                                           float sr,
                                           const ShapeDesc& s,
                                           core::Vec3 pos,
                                           const core::Quat& q,
-                                          const ConvexHull* hull = nullptr) noexcept {
+                                          const ConvexHull* hull = nullptr,
+                                          const CompoundShape* compound = nullptr,
+                                          std::span<const ConvexHull> hulls = {}) noexcept {
     switch (s.type) {
         case ShapeType::Sphere: {
             const float rr = sr + s.radius;
@@ -311,6 +355,24 @@ namespace rime::physics {
             const SegmentSupport sup_c{c, c}; // a zero-length segment IS the point support
             const GjkResult g = gjk(sup_c, sup_h, c - pos);
             return g.overlapping || g.distance <= sr;
+        }
+        case ShapeType::Compound: {
+            if (compound == nullptr) {
+                return false;
+            }
+            for (std::size_t i = 0; i < compound->child_count(); ++i) {
+                const core::Vec3 cp = compound_child_world_pos(*compound, i, pos, q);
+                const core::Quat cq = compound_child_world_orient(*compound, i, q);
+                if (sphere_vs_shape(c,
+                                    sr,
+                                    compound->child_shape[i],
+                                    cp,
+                                    cq,
+                                    compound_child_hull(compound->child_shape[i], hulls))) {
+                    return true; // children are never compounds — one level deep, as raycast
+                }
+            }
+            return false;
         }
     }
     return false;

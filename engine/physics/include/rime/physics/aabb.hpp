@@ -90,6 +90,11 @@ compute_aabb(const ShapeDesc& s, core::Vec3 pos, const core::Quat& q) noexcept {
             // internally by posing the stored vertices; a caller without a world gets the
             // degenerate point bound below, honest about knowing nothing.
             break;
+        case ShapeType::Compound:
+            // Same as the hull: the child list lives in the world's compound store (ADR-0028).
+            // PhysicsWorld bounds compounds internally as the union of the posed children's
+            // bounds; without a world, the honest degenerate point bound below.
+            break;
     }
     return Aabb{pos, pos};
 }
