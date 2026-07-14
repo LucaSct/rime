@@ -88,4 +88,25 @@ compute_aabb(const ShapeDesc& s, core::Vec3 pos, const core::Quat& q) noexcept {
     return Aabb{pos, pos};
 }
 
+// Does the ray (origin `o`, direction whose per-component inverse is `inv_d`) reach `a` within the
+// interval [0, tmax]? The slab method: each axis pair of planes gives an entry/exit t; the ray
+// crosses the box iff the intersection of the three [t_enter, t_exit] intervals is non-empty and
+// reaches into [0, tmax]. `inv_d` is passed in (not d) so a caller casting many rays — or
+// descending a BVH — computes the reciprocal once; a component may be ±∞ for an axis-parallel ray
+// and IEEE min/max still gives the right answer (the degenerate NaN only occurs when the origin
+// lies exactly on a slab face, a measure-zero case the broadphase can over-report harmlessly). This
+// is the BVH descent test for raycast (M7.7); the exact ray-vs-shape test then confirms each leaf.
+[[nodiscard]] inline bool
+ray_hits_aabb(const Aabb& a, core::Vec3 o, core::Vec3 inv_d, float tmax) noexcept {
+    const float tx1 = (a.min.x - o.x) * inv_d.x, tx2 = (a.max.x - o.x) * inv_d.x;
+    float tmin = std::min(tx1, tx2), tout = std::max(tx1, tx2);
+    const float ty1 = (a.min.y - o.y) * inv_d.y, ty2 = (a.max.y - o.y) * inv_d.y;
+    tmin = std::max(tmin, std::min(ty1, ty2));
+    tout = std::min(tout, std::max(ty1, ty2));
+    const float tz1 = (a.min.z - o.z) * inv_d.z, tz2 = (a.max.z - o.z) * inv_d.z;
+    tmin = std::max(tmin, std::min(tz1, tz2));
+    tout = std::min(tout, std::max(tz1, tz2));
+    return tout >= std::max(tmin, 0.0f) && tmin <= tmax;
+}
+
 } // namespace rime::physics
