@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "aabb_tree.hpp"
+#include "hull.hpp"
 #include "islands.hpp"
 #include "narrowphase.hpp"
 #include "rime/core/containers/handle.hpp"
@@ -64,7 +65,11 @@ struct PhysicsWorld::Impl {
     std::vector<core::Vec3> linear_velocity;
     std::vector<core::Vec3> angular_velocity;
     std::vector<float> inv_mass;         // 0 for static/kinematic
-    std::vector<core::Vec3> inv_inertia; // body-space diagonal inverse inertia (M7.4 solver)
+    std::vector<core::Vec3> inv_inertia; // inverse principal moments (M7.4 solver)
+    // Rotation from the shape's principal-axis frame to the body frame (M7.11): identity for the
+    // primitives, a hull's registration-time eigendecomposition otherwise. Composed with the
+    // orientation wherever the inverse inertia is applied (solver.hpp).
+    std::vector<core::Quat> inertia_principal;
     std::vector<std::uint8_t> motion;
     std::vector<float> linear_damping;
     std::vector<float> angular_damping;
@@ -79,6 +84,11 @@ struct PhysicsWorld::Impl {
     std::vector<std::uint32_t> dense_to_slot; // dense index → owning slot (for swap-remove fixup)
 
     core::Vec3 gravity{0.0f, -9.81f, 0.0f};
+
+    // The hull store (M7.11, ADR-0027): geometry registered once via register_hull, referenced by
+    // HullId from any number of bodies' ShapeDescs. Append-only and immutable — ids are the
+    // registration order (deterministic), entries never move or die before the world does.
+    std::vector<ConvexHull> hulls;
 
     AabbTree static_tree;
     AabbTree dynamic_tree;
@@ -172,6 +182,28 @@ struct PhysicsWorld::Impl {
         }
         return s.dense;
     }
+
+    // Resolve a shape's hull reference to its store entry — nullptr for primitives and for an
+    // unresolvable id (null/foreign/stale; the store is append-only, so generation is always 0).
+    // This is the ONE place a HullId turns into geometry; everything under the seam takes the
+    // pointer from here (ADR-0027).
+    [[nodiscard]] const ConvexHull* hull_of(const ShapeDesc& s) const noexcept {
+        if (s.type != ShapeType::ConvexHull) {
+            return nullptr;
+        }
+        if (s.hull.index >= hulls.size() || s.hull.generation != 0) {
+            return nullptr;
+        }
+        return &hulls[s.hull.index];
+    }
+
+    // Tight world AABB of a posed shape, hull-aware: the shape-only compute_aabb (aabb.hpp) cannot
+    // see the store, so hull bounds come from posing the stored vertices.
+    [[nodiscard]] Aabb
+    aabb_of(const ShapeDesc& s, core::Vec3 pos, const core::Quat& q) const noexcept {
+        const ConvexHull* h = hull_of(s);
+        return h != nullptr ? hull_world_aabb(*h, pos, q) : compute_aabb(s, pos, q);
+    }
 };
 
 void PhysicsWorld::Impl::compute_pairs(std::vector<Pair>& out) const {
@@ -235,13 +267,18 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
         m.b = pr.b;
         // collide_shapes canonicalizes by ShapeType internally and flips the normal to match, so
         // passing the bodies in slot order yields a normal oriented from a toward b (contact.hpp).
+        // Hull ids resolve to store pointers HERE — below the seam, above the dispatch (ADR-0027).
+        const ConvexHull* ha = hull_of(shape[da]);
+        const ConvexHull* hb = hull_of(shape[db]);
         bool touching = collide_shapes(shape[da],
                                        position[da],
                                        orientation[da],
                                        shape[db],
                                        position[db],
                                        orientation[db],
-                                       m) &&
+                                       m,
+                                       ha,
+                                       hb) &&
                         m.count != 0;
         if (!touching) {
             // The exact shapes do not overlap. For a CCD pair (either body opted in) inside a real
@@ -259,7 +296,9 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
                                      orientation[db],
                                      linear_velocity[db],
                                      dt,
-                                     m)) {
+                                     m,
+                                     ha,
+                                     hb)) {
                 continue; // a broadphase near-miss, or too far / not approaching to matter
             }
         }
@@ -302,6 +341,13 @@ PhysicsWorld::~PhysicsWorld() = default;
 BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     Impl& p = *impl_;
 
+    // A hull-shaped body must reference a hull THIS world knows, or the body would have no
+    // geometry to collide, bound, or weigh. Refusing with the null id (rather than creating a
+    // ghost) keeps the failure at the call site that made it.
+    if (d.shape.type == ShapeType::ConvexHull && p.hull_of(d.shape) == nullptr) {
+        return BodyId{};
+    }
+
     // Claim a slot (reuse a freed one to keep the table compact; its generation was already
     // bumped).
     std::uint32_t slot;
@@ -314,7 +360,17 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     }
 
     const bool dynamic = d.motion == MotionType::Dynamic;
-    const MassProperties mp = compute_mass_properties(d.shape, d.mass > 0.0f ? d.mass : 1.0f);
+    const float mass = d.mass > 0.0f ? d.mass : 1.0f;
+    // Mass distribution: primitives have closed forms (shape.hpp); a hull's principal moments
+    // were integrated at registration (per unit mass — inertia scales linearly with mass at
+    // fixed geometry) and its principal-axis rotation rides along in the new SoA column, identity
+    // for every other shape.
+    MassProperties mp = compute_mass_properties(d.shape, mass);
+    core::Quat principal = core::quat_identity();
+    if (const ConvexHull* h = p.hull_of(d.shape); h != nullptr) {
+        mp.inertia_diagonal = h->inertia_per_mass * mass;
+        principal = h->principal;
+    }
     const float im = dynamic ? inv_or_zero(mp.mass) : 0.0f;
     const core::Vec3 ii = dynamic ? core::Vec3{inv_or_zero(mp.inertia_diagonal.x),
                                                inv_or_zero(mp.inertia_diagonal.y),
@@ -324,7 +380,7 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
 
     // Insert the broadphase proxy tagged with the stable slot id, so a query returns slot ids
     // directly (mappable back to a BodyId without touching the dense arrays).
-    const Aabb tight = compute_aabb(d.shape, d.position, orient);
+    const Aabb tight = p.aabb_of(d.shape, d.position, orient);
     const auto motion8 = static_cast<std::uint8_t>(d.motion);
     const std::int32_t proxy = p.tree_for(motion8).create_proxy(tight, slot);
 
@@ -335,6 +391,7 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     p.angular_velocity.push_back(d.angular_velocity);
     p.inv_mass.push_back(im);
     p.inv_inertia.push_back(ii);
+    p.inertia_principal.push_back(principal);
     p.motion.push_back(motion8);
     p.linear_damping.push_back(d.linear_damping);
     p.angular_damping.push_back(d.angular_damping);
@@ -372,6 +429,7 @@ void PhysicsWorld::destroy_body(BodyId id) {
         p.angular_velocity[d] = p.angular_velocity[last];
         p.inv_mass[d] = p.inv_mass[last];
         p.inv_inertia[d] = p.inv_inertia[last];
+        p.inertia_principal[d] = p.inertia_principal[last];
         p.motion[d] = p.motion[last];
         p.linear_damping[d] = p.linear_damping[last];
         p.angular_damping[d] = p.angular_damping[last];
@@ -393,6 +451,7 @@ void PhysicsWorld::destroy_body(BodyId id) {
     p.angular_velocity.pop_back();
     p.inv_mass.pop_back();
     p.inv_inertia.pop_back();
+    p.inertia_principal.pop_back();
     p.motion.pop_back();
     p.linear_damping.pop_back();
     p.angular_damping.pop_back();
@@ -493,9 +552,9 @@ void PhysicsWorld::step(float dt) {
             if (p.ccd[i] == 0 || !is_dynamic(i) || p.asleep[i] != 0) {
                 continue; // CCD only helps a moving, awake, dynamic body (see docs/design)
             }
-            const Aabb tight = compute_aabb(p.shape[i], p.position[i], p.orientation[i]);
+            const Aabb tight = p.aabb_of(p.shape[i], p.position[i], p.orientation[i]);
             const core::Vec3 predicted = p.position[i] + p.linear_velocity[i] * dt;
-            const Aabb swept = merge(tight, compute_aabb(p.shape[i], predicted, p.orientation[i]));
+            const Aabb swept = merge(tight, p.aabb_of(p.shape[i], predicted, p.orientation[i]));
             p.dynamic_tree.move_proxy(p.proxy[i], swept);
         }
     }
@@ -519,6 +578,7 @@ void PhysicsWorld::step(float dt) {
                         p.angular_velocity.data(),
                         p.inv_mass.data(),
                         p.inv_inertia.data(),
+                        p.inertia_principal.data(),
                         p.friction.data(),
                         p.restitution.data()};
     std::vector<ContactConstraint> constraints;
@@ -787,7 +847,7 @@ void PhysicsWorld::step(float dt) {
         }
         for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
             const std::uint32_t i = isl.bodies[bi];
-            const Aabb tight = compute_aabb(p.shape[i], p.position[i], p.orientation[i]);
+            const Aabb tight = p.aabb_of(p.shape[i], p.position[i], p.orientation[i]);
             p.dynamic_tree.move_proxy(p.proxy[i], tight);
         }
     }
@@ -910,8 +970,15 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
         const std::uint32_t d = p.slots[slot].dense;
         float t = 0.0f;
         core::Vec3 n{0.0f, 0.0f, 0.0f};
-        if (ray_vs_shape(
-                p.shape[d], p.position[d], p.orientation[d], ray.origin, dir, best_t, t, n) &&
+        if (ray_vs_shape(p.shape[d],
+                         p.position[d],
+                         p.orientation[d],
+                         ray.origin,
+                         dir,
+                         best_t,
+                         t,
+                         n,
+                         p.hull_of(p.shape[d])) &&
             t < best_t) {
             best_t = t;
             best_slot = slot;
@@ -951,7 +1018,12 @@ void PhysicsWorld::overlap_sphere(core::Vec3 center,
     std::vector<std::uint32_t> hits;
     const auto collect = [&](std::uint32_t slot) {
         const std::uint32_t d = p.slots[slot].dense;
-        if (sphere_vs_shape(center, radius, p.shape[d], p.position[d], p.orientation[d])) {
+        if (sphere_vs_shape(center,
+                            radius,
+                            p.shape[d],
+                            p.position[d],
+                            p.orientation[d],
+                            p.hull_of(p.shape[d]))) {
             hits.push_back(slot);
         }
     };
@@ -978,11 +1050,11 @@ void PhysicsWorld::apply_impulse(BodyId id, core::Vec3 impulse, core::Vec3 point
     }
     p.linear_velocity[d] += impulse * p.inv_mass[d];
     // Angular part: I⁻¹(r × J), with I⁻¹ the world-space inverse inertia — the exact same
-    // apply_inv_inertia(q, I_body⁻¹, ·) the solver uses, so an external push and a contact impulse
-    // rotate a body by identical math.
+    // composed apply_inv_inertia the solver uses (principal rotation included, M7.11), so an
+    // external push and a contact impulse rotate a body by identical math.
     const core::Vec3 r = point - p.position[d];
-    p.angular_velocity[d] +=
-        apply_inv_inertia(p.orientation[d], p.inv_inertia[d], core::cross(r, impulse));
+    p.angular_velocity[d] += apply_inv_inertia(
+        p.orientation[d], p.inertia_principal[d], p.inv_inertia[d], core::cross(r, impulse));
     // A sleeping body ignores velocity until something wakes it, so an impulse must wake it (its
     // island reactivates on the next step, exactly as wake_body documents).
     p.asleep[d] = 0;
@@ -998,6 +1070,36 @@ void PhysicsWorld::apply_central_impulse(BodyId id, core::Vec3 impulse) noexcept
     p.linear_velocity[d] += impulse * p.inv_mass[d]; // applied through the COM ⇒ no torque
     p.asleep[d] = 0;
     p.sleep_timer[d] = 0.0f;
+}
+
+HullId PhysicsWorld::register_hull(const HullDesc& desc) {
+    // Validate + derive (planes, mass properties, principal axes) in one cold pass — see
+    // build_convex_hull (src/hull.hpp) for the rules and the math. Nothing is stored on failure,
+    // so a rejected registration leaves the world bit-identical to before the call.
+    ConvexHull hull;
+    if (!build_convex_hull(desc.vertices, desc.face_counts, desc.face_indices, hull)) {
+        return HullId{}; // null id — HullId::is_valid() == false
+    }
+    Impl& p = *impl_;
+    const auto index = static_cast<std::uint32_t>(p.hulls.size());
+    p.hulls.push_back(std::move(hull));
+    // Generation 0 forever: the store is append-only in v1 (ADR-0027 defers unregister to the
+    // compound-shapes brick), so ids can go stale only across worlds — which hull_of() rejects
+    // by bounds, not generation.
+    return HullId{index, 0};
+}
+
+bool PhysicsWorld::hull_info(HullId id, HullInfo& out) const {
+    const Impl& p = *impl_;
+    if (id.index >= p.hulls.size() || id.generation != 0) {
+        return false;
+    }
+    const ConvexHull& h = p.hulls[id.index];
+    out.volume = h.volume;
+    out.centroid = h.centroid_authored;
+    out.inertia_per_mass = h.inertia_per_mass;
+    out.principal_rotation = h.principal;
+    return true;
 }
 
 std::span<const ContactEvent> PhysicsWorld::contact_events() const noexcept {

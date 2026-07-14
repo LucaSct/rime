@@ -78,15 +78,21 @@ struct SolverBodies {
     core::Vec3* linear_velocity = nullptr;
     core::Vec3* angular_velocity = nullptr;
     const float* inv_mass = nullptr;         // 0 ⇒ immovable (static/kinematic)
-    const core::Vec3* inv_inertia = nullptr; // body-space diagonal (shape principal axes)
-    const float* friction = nullptr;         // Coulomb μ per body
-    const float* restitution = nullptr;      // bounciness e per body
+    const core::Vec3* inv_inertia = nullptr; // inverse principal moments (see inertia_principal)
+    // Rotation from each shape's PRINCIPAL-AXIS frame to its body frame (M7.11): identity for the
+    // symmetric primitives (their local axes ARE principal), the registration-time
+    // eigendecomposition for a convex hull (ADR-0027). Together with the diagonal above it
+    // carries a full inertia tensor without widening the solver's storage or math to 3×3.
+    const core::Quat* inertia_principal = nullptr;
+    const float* friction = nullptr;    // Coulomb μ per body
+    const float* restitution = nullptr; // bounciness e per body
 };
 
-// I_world⁻¹·L without ever building a 3×3 matrix. The stored inverse inertia is the body-space
-// diagonal (our primitives' principal axes), and I_world⁻¹ = R·diag(i)·Rᵀ — so rotate L into body
-// space, scale per axis, rotate back. Two quaternion rotates keep us in the exact math vocabulary
-// the integrator already uses (a unit quaternion's inverse is its conjugate).
+// I_world⁻¹·L without ever building a 3×3 matrix. The stored inverse inertia is the diagonal in
+// the shape's principal frame, and I_world⁻¹ = R·diag(i)·Rᵀ with R the principal→world rotation —
+// so rotate L into that frame, scale per axis, rotate back. Two quaternion rotates keep us in the
+// exact math vocabulary the integrator already uses (a unit quaternion's inverse is its
+// conjugate).
 [[nodiscard]] inline core::Vec3
 apply_inv_inertia(const core::Quat& q, core::Vec3 inv_inertia_body, core::Vec3 l) noexcept {
     const core::Vec3 body = core::rotate(core::conjugate(q), l);
@@ -94,6 +100,20 @@ apply_inv_inertia(const core::Quat& q, core::Vec3 inv_inertia_body, core::Vec3 l
                         core::Vec3{body.x * inv_inertia_body.x,
                                    body.y * inv_inertia_body.y,
                                    body.z * inv_inertia_body.z});
+}
+
+// The full form for a shape whose principal axes are rotated within its body frame (a convex
+// hull, M7.11): I_world⁻¹ = R(q·p)·diag·R(q·p)ᵀ, because rotations compose right-to-left —
+// principal→body (p), then body→world (q). The compose costs one quaternion product per use and
+// is DELIBERATELY not cached per tick: the NGS position pass rotates bodies mid-pass and
+// re-reads their orientation (that is what "non-linear" buys), so any cached composite would go
+// stale exactly where the correction math matters. For primitives p is identity and the result
+// is the diagonal path's, unchanged.
+[[nodiscard]] inline core::Vec3 apply_inv_inertia(const core::Quat& q,
+                                                  const core::Quat& principal,
+                                                  core::Vec3 inv_inertia_body,
+                                                  core::Vec3 l) noexcept {
+    return apply_inv_inertia(q * principal, inv_inertia_body, l);
 }
 
 // A deterministic orthonormal tangent basis for a contact normal — the two friction directions.
@@ -169,13 +189,17 @@ inline void apply_impulse(const SolverBodies& bodies,
     // what the unguarded code produced.
     if (bodies.inv_mass[ia] > 0.0f) {
         bodies.linear_velocity[ia] -= p * bodies.inv_mass[ia];
-        bodies.angular_velocity[ia] -=
-            apply_inv_inertia(bodies.orientation[ia], bodies.inv_inertia[ia], core::cross(r_a, p));
+        bodies.angular_velocity[ia] -= apply_inv_inertia(bodies.orientation[ia],
+                                                         bodies.inertia_principal[ia],
+                                                         bodies.inv_inertia[ia],
+                                                         core::cross(r_a, p));
     }
     if (bodies.inv_mass[ib] > 0.0f) {
         bodies.linear_velocity[ib] += p * bodies.inv_mass[ib];
-        bodies.angular_velocity[ib] +=
-            apply_inv_inertia(bodies.orientation[ib], bodies.inv_inertia[ib], core::cross(r_b, p));
+        bodies.angular_velocity[ib] += apply_inv_inertia(bodies.orientation[ib],
+                                                         bodies.inertia_principal[ib],
+                                                         bodies.inv_inertia[ib],
+                                                         core::cross(r_b, p));
     }
 }
 
@@ -207,6 +231,8 @@ inline void apply_impulse(const SolverBodies& bodies,
     const float imb = bodies.inv_mass[body_b];
     const core::Vec3 iia = bodies.inv_inertia[body_a];
     const core::Vec3 iib = bodies.inv_inertia[body_b];
+    const core::Quat pia = bodies.inertia_principal[body_a];
+    const core::Quat pib = bodies.inertia_principal[body_b];
 
     ContactConstraint c;
     c.body_a = body_a;
@@ -222,7 +248,8 @@ inline void apply_impulse(const SolverBodies& bodies,
     for (std::uint8_t k = 0; k < m.count; ++k) {
         const ContactPoint& p = m.points[k];
         ContactPointConstraint& out = c.points[k];
-        out.r_a = p.position - xa; // positions ARE the centres of mass for the v1 primitives
+        out.r_a = p.position - xa; // positions ARE the centres of mass (primitives by symmetry,
+                                   // hulls by registration-time re-centring — ADR-0027)
         out.r_b = p.position - xb;
 
         // EFFECTIVE MASS along a direction d (sequential-impulse.md §2):
@@ -232,9 +259,9 @@ inline void apply_impulse(const SolverBodies& bodies,
         // velocity error" into an impulse with a single multiply.
         const auto effective_mass = [&](core::Vec3 d) {
             const core::Vec3 ang_a =
-                core::cross(apply_inv_inertia(qa, iia, core::cross(out.r_a, d)), out.r_a);
+                core::cross(apply_inv_inertia(qa, pia, iia, core::cross(out.r_a, d)), out.r_a);
             const core::Vec3 ang_b =
-                core::cross(apply_inv_inertia(qb, iib, core::cross(out.r_b, d)), out.r_b);
+                core::cross(apply_inv_inertia(qb, pib, iib, core::cross(out.r_b, d)), out.r_b);
             const float k_d = ima + imb + core::dot(ang_a + ang_b, d);
             return k_d > 0.0f ? 1.0f / k_d : 0.0f;
         };
@@ -422,10 +449,16 @@ inline void solve_positions(const SolverBodies& bodies,
                 const core::Vec3 mid = (pa + pb) * 0.5f;
                 const core::Vec3 r_a = mid - xa;
                 const core::Vec3 r_b = mid - xb;
-                const core::Vec3 ang_a = core::cross(
-                    apply_inv_inertia(qa, bodies.inv_inertia[ia], core::cross(r_a, n)), r_a);
-                const core::Vec3 ang_b = core::cross(
-                    apply_inv_inertia(qb, bodies.inv_inertia[ib], core::cross(r_b, n)), r_b);
+                const core::Vec3 ang_a = core::cross(apply_inv_inertia(qa,
+                                                                       bodies.inertia_principal[ia],
+                                                                       bodies.inv_inertia[ia],
+                                                                       core::cross(r_a, n)),
+                                                     r_a);
+                const core::Vec3 ang_b = core::cross(apply_inv_inertia(qb,
+                                                                       bodies.inertia_principal[ib],
+                                                                       bodies.inv_inertia[ib],
+                                                                       core::cross(r_b, n)),
+                                                     r_b);
                 const float k_n = ima + imb + core::dot(ang_a + ang_b, n);
                 if (k_n <= 0.0f) {
                     continue;
@@ -440,15 +473,19 @@ inline void solve_positions(const SolverBodies& bodies,
                 const core::Vec3 impulse = n * (-correction / k_n);
                 if (ima > 0.0f) {
                     bodies.position[ia] -= impulse * ima;
-                    rotate_orientation(
-                        bodies.orientation[ia],
-                        -apply_inv_inertia(qa, bodies.inv_inertia[ia], core::cross(r_a, impulse)));
+                    rotate_orientation(bodies.orientation[ia],
+                                       -apply_inv_inertia(qa,
+                                                          bodies.inertia_principal[ia],
+                                                          bodies.inv_inertia[ia],
+                                                          core::cross(r_a, impulse)));
                 }
                 if (imb > 0.0f) {
                     bodies.position[ib] += impulse * imb;
-                    rotate_orientation(
-                        bodies.orientation[ib],
-                        apply_inv_inertia(qb, bodies.inv_inertia[ib], core::cross(r_b, impulse)));
+                    rotate_orientation(bodies.orientation[ib],
+                                       apply_inv_inertia(qb,
+                                                         bodies.inertia_principal[ib],
+                                                         bodies.inv_inertia[ib],
+                                                         core::cross(r_b, impulse)));
                 }
             }
         }

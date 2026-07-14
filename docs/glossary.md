@@ -243,6 +243,22 @@ Entries are grouped roughly by area and kept short on purpose.
   contact *manifold*. See [design/physics.md](design/physics.md), [math/gjk-epa.md](math/gjk-epa.md).
 - **Contact manifold.** The narrowphase's output for a touching pair: a shared contact normal plus up
   to four contact points (four is enough to keep a resting box from tipping). The solver's input.
+- **Convex hull.** The smallest convex shape containing a set of points — no dents, so any two points
+  inside connect without leaving it. The collision shape of destruction: fracture tools cut walls into
+  convex pieces because convex-vs-convex collision is fast and robust (one GJK support function covers
+  them all). In Rime, hull geometry is registered once with the physics world and referenced by a small
+  id ([ADR-0027](adr/0027-convex-hull-shapes.md)); *building* a hull from points (**quickhull**) is a
+  cook-time job, not a runtime one.
+- **Sutherland–Hodgman clipping.** Cutting a polygon against a half-space by walking its edges: keep
+  inside vertices, emit a new vertex where an edge crosses the boundary. Run against several planes in
+  a row it trims a polygon to a region — how the narrowphase turns "these two faces touch" into the
+  actual overlap patch (the contact points).
+- **Inertia tensor / principal axes.** The 3×3 matrix version of "how hard is this body to spin" — it
+  can differ per axis (a plank spins easily along its length). Every solid has three perpendicular
+  **principal axes** in which that matrix is diagonal (three numbers, the *principal moments*); Rime
+  diagonalizes a hull's tensor once at registration (a **Jacobi** eigendecomposition) and stores the
+  diagonal plus the axes' rotation, so the solver keeps its cheap diagonal math for every shape. See
+  [math/polyhedral-mass-properties.md](math/polyhedral-mass-properties.md).
 - **Solver (sequential impulse).** The stage that turns manifolds into motion by applying *impulses*
   at the contacts — stopping penetration, applying friction — sweeping over them repeatedly
   (projected Gauss-Seidel) until velocities agree. A separate **NGS** pass then removes leftover

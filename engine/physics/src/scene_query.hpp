@@ -6,16 +6,20 @@
 #include <cmath>
 #include <utility>
 
+#include "gjk.hpp"
+#include "hull.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/shape.hpp"
+#include "support.hpp"
 
 // Exact ray-vs-shape and sphere-vs-shape geometry for the scene queries (M7.7). The broadphase BVH
 // (aabb_tree.hpp) narrows a query to a handful of candidate leaves; these routines are the exact
-// test each candidate then gets. All analytic — a ray against our three primitives is a quadratic
-// or a slab test — so a query costs a few dozen flops per candidate and stays GPU-free like the
-// rest of the module. This header lives under src/ (PRIVATE), invisible above the PhysicsWorld
-// seam.
+// test each candidate then gets. Analytic for the primitives — a ray against them is a quadratic
+// or a slab test — plus, since M7.11, the convex generalizations for hulls (a face-plane slab
+// test for rays, a GJK distance for the sphere overlap), so a query costs little per candidate and
+// stays GPU-free like the rest of the module. This header lives under src/ (PRIVATE), invisible
+// above the PhysicsWorld seam.
 //
 // Convention: `dir` is UNIT, so the returned `t` is a world-space distance; every routine rotates
 // the ray into the shape's local frame (a rotation is an isometry, so `t` is unchanged) where the
@@ -189,8 +193,63 @@ namespace rime::physics {
     return true;
 }
 
-// Dispatch a ray at any primitive. Fills (t, normal) and returns true on the nearest hit in
-// [0, tmax]; `dir` must be unit.
+// Ray vs convex hull (M7.11) — the slab test generalized from three axis slabs to the hull's
+// face planes: a convex polyhedron is the intersection of its faces' half-spaces, so the ray is
+// inside exactly on the intersection of the per-plane parameter intervals. Track the LATEST entry
+// (that face is where the ray pierces the surface — its normal is the hit normal) and the
+// EARLIEST exit; a miss is an empty interval. Same posture as ray_vs_box for an inside origin: no
+// entering plane ⇒ no exterior hit reported.
+[[nodiscard]] inline bool ray_vs_hull(const ConvexHull& h,
+                                      core::Vec3 pos,
+                                      const core::Quat& q,
+                                      core::Vec3 o,
+                                      core::Vec3 d,
+                                      float tmax,
+                                      float& t_out,
+                                      core::Vec3& n_out) noexcept {
+    const core::Quat qc = core::conjugate(q);
+    const core::Vec3 lo = core::rotate(qc, o - pos);
+    const core::Vec3 ld = core::rotate(qc, d);
+
+    float t_enter = 0.0f;
+    float t_exit = tmax;
+    std::ptrdiff_t enter_face = -1;
+    for (std::size_t f = 0; f < h.face_normals.size(); ++f) {
+        const core::Vec3 n = h.face_normals[f];
+        const float dist = core::dot(n, lo) - h.face_plane_d[f]; // > 0 ⇒ outside this half-space
+        const float denom = core::dot(n, ld); // rate the ray gains distance against the plane
+        if (std::fabs(denom) < 1e-8f) {
+            if (dist > 0.0f) {
+                return false; // parallel to the plane and on the outside: can never enter
+            }
+            continue; // parallel and inside: this plane never constrains the interval
+        }
+        const float t = -dist / denom;
+        if (denom < 0.0f) {
+            // Heading INTO the half-space: t is where the ray crosses in. The latest such
+            // crossing is the surface hit.
+            if (t > t_enter) {
+                t_enter = t;
+                enter_face = static_cast<std::ptrdiff_t>(f);
+            }
+        } else if (t < t_exit) {
+            t_exit = t; // heading out: the earliest crossing out closes the interval
+        }
+        if (t_enter > t_exit) {
+            return false;
+        }
+    }
+    if (enter_face < 0) {
+        return false; // origin inside the hull (no plane was entered after t = 0)
+    }
+    t_out = t_enter;
+    n_out = core::rotate(q, h.face_normals[static_cast<std::size_t>(enter_face)]);
+    return true;
+}
+
+// Dispatch a ray at any shape. Fills (t, normal) and returns true on the nearest hit in
+// [0, tmax]; `dir` must be unit. `hull` is the resolved store entry for a ConvexHull shape
+// (nullptr otherwise — the world resolves the id before dispatch, ADR-0027).
 [[nodiscard]] inline bool ray_vs_shape(const ShapeDesc& s,
                                        core::Vec3 pos,
                                        const core::Quat& q,
@@ -198,7 +257,8 @@ namespace rime::physics {
                                        core::Vec3 dir,
                                        float tmax,
                                        float& t_out,
-                                       core::Vec3& n_out) noexcept {
+                                       core::Vec3& n_out,
+                                       const ConvexHull* hull = nullptr) noexcept {
     switch (s.type) {
         case ShapeType::Sphere:
             return ray_vs_sphere(pos, s.radius, o, dir, tmax, t_out, n_out);
@@ -206,18 +266,23 @@ namespace rime::physics {
             return ray_vs_box(s.half_extents, pos, q, o, dir, tmax, t_out, n_out);
         case ShapeType::Capsule:
             return ray_vs_capsule(s.radius, s.half_height, pos, q, o, dir, tmax, t_out, n_out);
+        case ShapeType::ConvexHull:
+            return hull != nullptr && ray_vs_hull(*hull, pos, q, o, dir, tmax, t_out, n_out);
     }
     return false;
 }
 
 // Does a query sphere (center `c`, radius `sr`) overlap the posed shape? The exact test for
 // overlap_sphere: distance from the sphere centre to the shape's nearest surface point ≤ sr, done
-// in the shape's local frame (closest-point-on-box, closest-point-on-capsule-segment).
+// in the shape's local frame (closest-point-on-box, closest-point-on-capsule-segment). A hull has
+// no closed-form closest point, so it asks GJK — point-vs-hull distance is exactly GJK's output,
+// and the query stays deterministic (GJK is a pure function of its supports).
 [[nodiscard]] inline bool sphere_vs_shape(core::Vec3 c,
                                           float sr,
                                           const ShapeDesc& s,
                                           core::Vec3 pos,
-                                          const core::Quat& q) noexcept {
+                                          const core::Quat& q,
+                                          const ConvexHull* hull = nullptr) noexcept {
     switch (s.type) {
         case ShapeType::Sphere: {
             const float rr = sr + s.radius;
@@ -237,6 +302,15 @@ namespace rime::physics {
             const core::Vec3 closest{0.0f, y, 0.0f};
             const float rr = sr + s.radius;
             return core::length_squared(lc - closest) <= rr * rr;
+        }
+        case ShapeType::ConvexHull: {
+            if (hull == nullptr) {
+                return false;
+            }
+            const ShapeSupport sup_h{&s, pos, q, hull};
+            const SegmentSupport sup_c{c, c}; // a zero-length segment IS the point support
+            const GjkResult g = gjk(sup_c, sup_h, c - pos);
+            return g.overlapping || g.distance <= sr;
         }
     }
     return false;
