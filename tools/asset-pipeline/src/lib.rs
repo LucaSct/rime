@@ -14,6 +14,7 @@
 pub mod clip;
 pub mod cook_cache;
 pub mod cooked;
+pub mod fracture;
 pub mod gltf_import;
 pub mod gltf_material;
 pub mod manifest;
@@ -335,6 +336,32 @@ pub fn cook_texture(
         manifest: vec![ManifestEntry {
             source_path: input.to_string_lossy().into_owned(),
             kind: "texture",
+            id,
+            cooked_file,
+        }],
+        ..Default::default()
+    })
+}
+
+/// Cook a procedural fracture pattern (M8.1, ADR-0029): fracture a source box per `cfg` and write the
+/// Destructible as `<name>.rdest` into `out_dir`, returning it plus its one manifest entry.
+/// Procedural because v1's sources are boxes — walls, columns, slabs — not mesh files (a mesh-sourced
+/// fracture is a later brick); the source is the config, so there is no file to feed the cook cache.
+pub fn cook_fracture(
+    cfg: &fracture::FractureConfig,
+    name: &str,
+    out_dir: &Path,
+) -> Result<CookOutput, PipelineError> {
+    let destructible = fracture::fracture_box(cfg)?;
+    let (bytes, id) = destructible.cook();
+    let cooked_file = format!("{name}.rdest");
+    std::fs::create_dir_all(out_dir)?;
+    std::fs::write(out_dir.join(&cooked_file), &bytes)?;
+    Ok(CookOutput {
+        cooked_files: vec![out_dir.join(&cooked_file)],
+        manifest: vec![ManifestEntry {
+            source_path: format!("fracture:{name}"),
+            kind: "destructible",
             id,
             cooked_file,
         }],

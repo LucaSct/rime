@@ -162,6 +162,49 @@ CUBICSPLINE is rejected at cook time with a clear message (a quality seam a late
 Looping vs clamping is a *sample-time* policy (`TimePolicy`), not baked into the clip. The sampler and
 the linear-blend-skinning equation it feeds are derived in [`docs/math/skinning.md`](../math/skinning.md).
 
+### The destructible payload (`asset_kind = Destructible`) — M8.1
+
+```
+u32   part_count             convex parts that follow (≥ 1)
+u32   bond_count             shared-face bonds between parts
+u32   anchor_count           parts pinned to the world
+u32   total_verts            Σ per-part vertex_count (sizes the vertex blob)
+u32   total_face_counts      Σ per-part face_count
+u32   total_face_indices     Σ per-part face_index_count
+f32   half_extents[3]        the source box, half-extents (render / reference)
+f32   damage_threshold       impulse a part absorbs before it erodes (pattern-wide in v1)
+f32   damage_scale           damage per unit impulse above the threshold
+      part_count × {                                         the part table (DestructiblePartV1)
+        f32 com[3]             part COM in the destructible frame (the compound child translation)
+        f32 aabb_min[3]        part AABB, destructible frame (not COM-centred) — the radius-damage set
+        f32 aabb_max[3]
+        f32 volume             m³ (> 0, finite) — mass fraction under uniform density
+        u32 vertex_count       this part's COM-centred hull vertices (≥ 4)
+        u32 face_count         this part's faces (≥ 4)
+        u32 face_index_count   Σ of this part's face-vertex counts
+      }
+      the geometry blobs, concatenated in part order:
+        f32 vertices[total_verts × 3]         each part's hull vertices, COM-centred
+        u32 face_counts[total_face_counts]    vertices per face (each 3..16 — the hull face cap)
+        u32 face_indices[total_face_indices]  part-local vertex indices, outward-wound (CSR)
+      bond_count × { u32 a; u32 b; f32 strength }    a < b; strength ∝ the shared-face area
+      anchor_count × u32                              a part index (< part_count)
+```
+
+A **destructible** (ADR-0029) is a source shape pre-split into convex **parts**, with the **bond**
+graph that glues neighbours and the **anchors** that pin parts to the world — the fracture pattern the
+destruction runtime (M8.2) instances as one static compound body. Each part's geometry is exactly a
+[convex hull](../adr/0027-convex-hull-shapes.md) in CSR form (`vertices` COM-centred, `face_counts` /
+`face_indices` outward-wound), so `PhysicsWorld::register_hull` consumes a part directly and
+`register_compound` builds the intact body from all of them; the fracture cook is the offline producer,
+this reader the runtime consumer. Only the fixed **per-part record** (`DestructiblePartV1`) is
+schema-fingerprinted — the geometry blobs and the bond/anchor tables are structure the header's counts
+size, exactly as a mesh's vertices past the vertex record are not (a corrupt one is caught by the
+reader's bounds checks, and a degenerate hull by `register_hull`'s validator — which the M8.1 oracle
+test uses as the cook's real acceptance gate). The partition math (a seeded Voronoi diagram clipped to
+the box, and why every cell is convex) is derived in
+[`docs/math/voronoi-fracture.md`](../math/voronoi-fracture.md).
+
 ## Trust nothing you read
 
 A cooked file arrives from disk exactly the way a message arrives from the network: possibly truncated,

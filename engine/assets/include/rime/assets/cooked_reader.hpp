@@ -11,6 +11,7 @@
 
 #include "rime/assets/asset_id.hpp"
 #include "rime/assets/clip_asset.hpp"
+#include "rime/assets/destructible_asset.hpp"
 #include "rime/assets/material_asset.hpp"
 #include "rime/assets/mesh_asset.hpp"
 #include "rime/assets/skeleton_asset.hpp"
@@ -60,7 +61,9 @@ enum class AssetError {
     InvalidMaterial, // material: unknown alpha mode, or a non-finite factor
     InvalidSkeleton, // skeleton: joints out of topological order, or a non-finite bind value
     InvalidClip,     // clip: bad channel path/interp, non-monotonic times, or a non-finite value
-    Io,              // the file could not be opened/read (load-from-path only)
+    InvalidDestructible, // destructible: part/bond/anchor counts inconsistent, index out of range,
+                         // face-vertex count outside 3..16, or a non-finite geometry value
+    Io,                  // the file could not be opened/read (load-from-path only)
 };
 
 // A short human-readable tag for an error (logging, test messages).
@@ -193,5 +196,31 @@ struct CookedHeader {
 [[nodiscard]] std::optional<Clip> read_clip(std::span<const std::byte> file,
                                             AssetError& out_error,
                                             AssetId* out_id = nullptr) noexcept;
+
+// The schema fingerprint the current build expects a cooked *destructible* payload to match: the
+// reflection type_hash of the v1 per-part record (COM, AABB, volume, and the vertex/face/index
+// counts that slice the geometry blobs — see cooked_reader.cpp), the repeated table unit the reader
+// walks. Change that record and previously cooked destructibles are rejected with SchemaMismatch
+// instead of being misread. The Rust cooker embeds this same value (M8.1); the cross-language
+// oracle test — which registers every decoded part into a real PhysicsWorld — is the drift alarm.
+[[nodiscard]] std::uint64_t destructible_schema_hash() noexcept;
+
+// Decode a destructible payload (the bytes after the header) into a fully validated
+// DestructibleAsset. Assumes the caller has confirmed the header's kind and schema hash. Every
+// count is bounds-checked against the bytes present before an allocation is sized from it; every
+// face has 3..16 vertices and every index is in range for its part; every bond/anchor references a
+// real part; and every geometry float is finite — so a corrupt file can neither walk off the
+// payload nor feed a degenerate hull into register_hull (which would reject it anyway — this is the
+// earlier, typed gate).
+[[nodiscard]] std::optional<DestructibleAsset>
+decode_destructible(std::span<const std::byte> payload, AssetError& out_error) noexcept;
+
+// The one-call destructible path: read a whole cooked file, confirm it is a destructible of the
+// expected schema, and decode it. `out_id`, if non-null, receives the payload's content-hash
+// identity.
+[[nodiscard]] std::optional<DestructibleAsset>
+read_destructible(std::span<const std::byte> file,
+                  AssetError& out_error,
+                  AssetId* out_id = nullptr) noexcept;
 
 } // namespace rime::assets

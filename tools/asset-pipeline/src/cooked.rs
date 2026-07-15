@@ -45,6 +45,8 @@ pub const ASSET_KIND_MATERIAL: u16 = 3;
 pub const ASSET_KIND_SKELETON: u16 = 4;
 /// `asset_kind` wire value for an animation clip (matches `engine/assets/asset_id.hpp`).
 pub const ASSET_KIND_CLIP: u16 = 5;
+/// `asset_kind` wire value for a destructible / fracture pattern (matches `engine/assets/asset_id.hpp`).
+pub const ASSET_KIND_DESTRUCTIBLE: u16 = 6;
 
 /// The mesh schema fingerprint: the reflection `type_hash` of the v1 position/normal/uv vertex
 /// layout, computed and pinned by the C++ engine (`engine/assets`). The cooker embeds the same
@@ -77,6 +79,15 @@ pub const SKELETON_SCHEMA_HASH: u64 = 0xD90A_5CB8_EBA3_6DED;
 /// Same contract as the hashes above; update in lockstep with the engine if the channel record ever
 /// changes (a new value *type* is an appended path enum, not a record change).
 pub const CLIP_SCHEMA_HASH: u64 = 0x6C84_D2A2_AAAB_CE49;
+
+/// The destructible schema fingerprint: the reflection `type_hash` of the v1 per-part record (COM,
+/// AABB, volume, and the vertex/face/index counts that slice the geometry blobs), computed and pinned
+/// by the C++ engine (`destructible_schema_hash()`). Same contract as the hashes above — the cooker
+/// embeds it, the reader rejects a mismatch — so the two languages agree on the cooked-destructible
+/// layout by construction (M8.1). Update in lockstep with the engine if the per-part record changes;
+/// the bond/anchor tables and the geometry blobs are structure the header sizes, not fingerprinted
+/// (exactly as mesh vertices past the vertex record are not).
+pub const DESTRUCTIBLE_SCHEMA_HASH: u64 = 0x8F2D_17FB_F584_85E2;
 
 /// A little-endian byte sink. Every multi-byte value is decomposed to its LE bytes explicitly, so
 /// the output never depends on the host's endianness — the same discipline as the reader's cursor.

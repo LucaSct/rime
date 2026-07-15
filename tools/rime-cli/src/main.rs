@@ -43,6 +43,25 @@ enum Command {
         #[arg(long)]
         linear: bool,
     },
+    /// Fracture a source box into a Destructible (M8.1): a wall/column/slab pre-split into convex
+    /// parts with a bond/anchor graph, for the destruction runtime.
+    Fracture {
+        /// Full dimensions of the source box, in metres (X Y Z).
+        #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+        size: Vec<f32>,
+        /// Target number of parts (Voronoi cells).
+        #[arg(long)]
+        parts: u32,
+        /// PRNG seed — the same seed + size + parts always cooks the identical partition.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Output directory for the `<name>.rdest` file.
+        #[arg(long)]
+        out: PathBuf,
+        /// Output file stem (writes `<name>.rdest`).
+        #[arg(long, default_value = "wall")]
+        name: String,
+    },
     /// Print the header of a cooked RMA1 asset file.
     Inspect {
         /// A cooked `.rmesh`/`.rtex` (or other RMA1) file.
@@ -73,7 +92,35 @@ fn main() -> ExitCode {
             };
             run_cook(&input, &out, color_space)
         }
+        Some(Command::Fracture {
+            size,
+            parts,
+            seed,
+            out,
+            name,
+        }) => run_fracture(&size, parts, seed, &out, &name),
         Some(Command::Inspect { file }) => run_inspect(&file),
+    }
+}
+
+fn run_fracture(size: &[f32], parts: u32, seed: u64, out: &Path, name: &str) -> ExitCode {
+    // The CLI takes full dimensions (a 2 m wall); the fracturer works in half-extents.
+    let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+    let cfg = asset_pipeline::fracture::FractureConfig::wall(half, parts, seed);
+    match asset_pipeline::cook_fracture(&cfg, name, out) {
+        Ok(result) => {
+            for entry in &result.manifest {
+                println!(
+                    "cooked {} -> {} (id {:016x})",
+                    entry.source_path, entry.cooked_file, entry.id
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("rime fracture: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

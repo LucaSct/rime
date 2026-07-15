@@ -57,6 +57,7 @@ fn intern_kind(kind: &str) -> Option<&'static str> {
         "texture" => Some("texture"),
         "skeleton" => Some("skeleton"),
         "clip" => Some("clip"),
+        "destructible" => Some("destructible"),
         _ => None,
     }
 }
