@@ -464,7 +464,10 @@ seam · **M8.5** **lifetime** — debris budgets over `WorldStats` + the physics
 · **M8.6** the proof — `samples/10-destructible-wall` (a wall fractures on impact, debris settles, one
 event fires) headless-self-checking in CI. Two small **physics** seam additions are M8-owned:
 `RayHit::child` (M8.3) and hull/compound `unregister` (M8.5). Proofs stay structural/headless on
-lavapipe; the damage→fracture path is deterministic (the M11 replay contract).
+lavapipe; the damage→fracture path is deterministic (the M11 replay contract). *Landed so far:
+M8.0–M8.4 — the model, the cook, the runtime, the fracture body-swap, and the event fan-out
+(`core::EventChannel` + the `engine/audio` seam + the `engine/vfx` dust stub); M8.5 lifetime/budgets
+and the M8.6 sample proof remain.*
 
 **M9 — Editor v1 (Rust).** `tools/editor` — a **client of a live engine process**
 ([ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md)): the Rust shell owns docking,

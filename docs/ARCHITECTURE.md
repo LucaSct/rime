@@ -170,9 +170,12 @@ is proven by `samples/09-physics-playground`; contact events, convex/mesh shapes
 planned fast-follows. → see [design/physics.md](design/physics.md),
 [survey](research/engine-survey.md#physics).
 
-### `destruction` ⚪ — *our headline system (Frostbite-inspired)*
-A first-class engine system, not a plugin. Core ideas, mapped from how Battlefield 6's
-Frostbite does it:
+### `destruction` 🟡 — *our headline system (Frostbite-inspired)*
+*Milestone 8 underway ([ADR-0029](adr/0029-destruction-model.md)): a cooked fracture pattern stands as
+one static compound body (M8.2), damage → connectivity → the fracture body-swap detaches real debris
+(M8.3), and a canonical event stream fans out to VFX / audio / gameplay (M8.4). Lifetime/budgets
+(M8.5) and the headless sample proof (M8.6) remain.* A first-class engine system, not a plugin. Core
+ideas, mapped from how Battlefield 6's Frostbite does it:
 - **Part-based destructibles:** structures are assemblies of breakable *parts* with
   connectivity, not monolithic meshes.
 - **Health-transition hooks:** parts move through health states; transitions can spawn
@@ -185,9 +188,18 @@ Frostbite does it:
   debris so it scales to 64+ players. Determinism/replication is a design constraint,
   not an afterthought.
 
-### `audio` ⚪, `animation` ⚪, `net` ⚪
-Audio mixing/spatialization; skeletal animation & blending; networking/replication.
-Each behind its own interface.
+### `audio` 🟡 — *the sound seam*
+*The interface exists (M8.4): `AudioBackend::play(sound, position, gain)` and a `NullAudioBackend`
+that logs calls, so the destruction fan-out has a stable boundary to call and audio is testable
+headless. The real mixing/spatialization backend (track au1) swaps in behind the interface.*
+
+### `vfx` 🟡 — *the effects seam (dust stub today)*
+*A deletable CPU dust field (M8.4): destruction events bloom capped, deterministic billboard puffs. A
+stub — the real GPU-driven FX system (track fx1) replaces it; its actual draw pass lands with the M8.6
+sample.*
+
+### `animation` ⚪, `net` ⚪
+Skeletal animation & blending; networking/replication. Each behind its own interface.
 
 ### `assets` 🟢 — *cooked-asset loading (files are the boundary)*
 The runtime side of the asset pipeline: open cooked binary files, validate them completely, and hand
