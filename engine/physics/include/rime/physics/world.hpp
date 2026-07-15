@@ -89,6 +89,47 @@ struct HullInfo {
     core::Quat principal_rotation = core::quat_identity();
 };
 
+// A snapshot of what the most recent step() actually did — the simulation's instrument panel
+// (M7.13). Every field is a pure COUNT of state the tick already computed, so collecting them is
+// free (no clock, no extra pass over geometry) and, crucially, DETERMINISTIC: like world_hash() and
+// islands_last(), the whole struct is a pure function of the inputs, identical run to run and for
+// any worker-thread count. That is what makes it a measurement instrument rather than a profiler —
+// it answers "how much work, and is the scene settling?", not "how many nanoseconds" (wall-clock
+// timing is the caller's job; it is machine-dependent and would perturb the deterministic tick).
+// The debris-scale stress harness (samples/09) reads this to report solver load and convergence;
+// M8's destruction budgeting and any future load-balancer build on the same numbers.
+struct WorldStats {
+    // Body population, by motion type (a body is exactly one — the four dynamic/static/kinematic
+    // counts sum to body_count). awake/sleeping partition the DYNAMIC bodies: awake_bodies is the
+    // tick's real solve load (a sleeping pile costs nothing — the M7.5 payoff, made visible here).
+    std::uint32_t body_count = 0;
+    std::uint32_t dynamic_bodies = 0;
+    std::uint32_t static_bodies = 0;
+    std::uint32_t kinematic_bodies = 0;
+    std::uint32_t awake_bodies = 0;    // dynamic and NOT asleep
+    std::uint32_t sleeping_bodies = 0; // dynamic and asleep
+
+    // Collision load this tick. broadphase_pairs is the fat-AABB overlap candidates; manifolds is
+    // how many of those the exact narrowphase confirmed as touching contact regions (so
+    // pairs − manifolds is the broadphase's false-positive shed); contact_points sums the points
+    // across every manifold (the solver's constraint count); contacts_warm_started is how many of
+    // those points inherited last tick's impulse by feature id (the warm-start hit rate — the same
+    // number as contacts_warm_started_last()).
+    std::uint32_t broadphase_pairs = 0;
+    std::uint32_t manifolds = 0;
+    std::uint32_t contact_points = 0;
+    std::uint32_t contacts_warm_started = 0;
+
+    // Islands (the solver's unit of parallelism, M7.5). islands is every connected component of the
+    // awake-dynamic contact graph; active_islands is the subset that was actually solved this tick
+    // (an all-asleep island is skipped); largest_island is the body count of the biggest one — the
+    // serial tail of the parallel solve, so the number a load-balancer or a destruction budget
+    // watches (one 5000-body island parallelizes far worse than a hundred 50-body piles).
+    std::uint32_t islands = 0;
+    std::uint32_t active_islands = 0;
+    std::uint32_t largest_island = 0;
+};
+
 class PhysicsWorld {
 public:
     PhysicsWorld();
@@ -205,6 +246,13 @@ public:
     // validation build on. FNV-1a (core/hash.hpp): a fast exact-equality witness, not a
     // cryptographic digest.
     [[nodiscard]] std::uint64_t world_hash() const noexcept;
+
+    // The instrument-panel snapshot of the most recent step() (WorldStats, above): body population,
+    // collision load, and island structure, all as deterministic counts. Zero-initialised before
+    // the first step(). A stress harness reads this to see load and convergence; islands_last() and
+    // contacts_warm_started_last() are the same numbers as single fields (kept for the tests that
+    // predate this struct). Cheap enough to always collect — no gating flag (M7.13).
+    [[nodiscard]] WorldStats stats() const noexcept;
 
     // --- Scene queries & external impulses (M7.7) -------------------------------------------
     // Cast a ray and report the NEAREST body it hits within `ray.max_distance`, or return false

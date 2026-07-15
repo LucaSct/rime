@@ -427,10 +427,19 @@ that is the M8.1 cook), exact polyhedral mass properties diagonalized to princip
 (`docs/math/polyhedral-mass-properties.md`), the hull support function through the unchanged
 GJK/EPA path, reference-face clipping generalized from boxes to arbitrary hull faces (stable
 feature ids, warm-start-cache compatible), hull raycast/overlap/CCD, and the determinism hash
-proven across worker counts with hulls in the scene. Still outstanding as fast-follows:
-**static triangle mesh + compound** (compound builds directly on `HullId` — ADR-0027 maps both)
-and **debris-scale tuning + a `WorldStats`/stress harness**. They remain tracked here; nothing
-about them is cancelled.
+proven across worker counts with hulls in the scene. Then **M7.12 — compound shapes**
+([ADR-0028](adr/0028-compound-shapes.md), built on M7.11's store): one rigid body made of many
+convex children at local poses, parallel-axis mass composition, and a narrowphase-expansion
+multi-region contact model (per-child manifolds and per-region events — the M8 "which part was
+hit" signal); the standing dumbbell is its witness. And **M7.13 — the measure-first capstone**:
+`WorldStats` (a deterministic per-tick snapshot of body/collision/island counts via `stats()`,
+counts not clocks so the tick stays reproducible) plus `samples/09-physics-playground --stress`, a
+debris-scale load that reports peak solver load and throughput and self-checks that a 1000+-body
+pile settles and hashes identically twice — the instrument that turns the remaining optimizations
+from guesses into measurements. Still outstanding as fast-follows: the **static triangle mesh +
+midphase** (the last shape), and the **debris-scale performance pass** the harness now measures
+(its first target: the every-tick narrowphase). They remain tracked here; nothing about them is
+cancelled.
 
 **M7 non-goals (deferred, recorded in [ADR-0026](adr/0026-physics-core.md)):** joints/motors/
 character controller (m12.0) · soft bodies/cloth/fluids (own modules — water is Track FL) · TGS solver

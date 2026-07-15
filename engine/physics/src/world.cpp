@@ -108,13 +108,18 @@ struct PhysicsWorld::Impl {
 
     // Islands + the parallel step (M7.5). `jobs` is a BORROWED job system (the engine owns it; null
     // ⇒ solve islands sequentially — same result). `islands` is the reusable CSR partition rebuilt
-    // each step; `islands_last_count` is its size, exposed as a determinism/behaviour witness.
+    // each step; its size is one of the witnesses recorded into `last_stats` below (M7.13).
     // `sleeping_enabled` gates deactivation (on by default). None of this is touched concurrently:
     // only the per-island solve runs on worker threads, and islands share no dynamic body.
     core::JobSystem* jobs = nullptr;
     bool sleeping_enabled = true;
     IslandSet islands;
-    std::size_t islands_last_count = 0;
+
+    // The most recent step()'s instrument panel (M7.13, WorldStats). Populated in the sequential
+    // tail as a pure read of the just-computed tick — so, like the event emission, it never touches
+    // body state and never perturbs the world hash. islands_last() and contacts_warm_started_last()
+    // read straight out of here (the numbers they always returned are now fields of one struct).
+    WorldStats last_stats{};
 
     // Persistent contact cache (M7.3): last tick's manifolds keyed by contact REGION — the
     // canonical pair id plus, since M7.12, the compound child sub-pair (0 for plain pairs, whose
@@ -129,6 +134,10 @@ struct PhysicsWorld::Impl {
     mutable std::unordered_map<ContactCacheKey, ManifoldCacheEntry, ContactCacheKeyHash>
         contact_cache;
     mutable std::uint32_t warm_started_last = 0;
+    // The last contact build's broadphase candidate-pair count (M7.13 stats). Set alongside
+    // warm_started_last in build_contacts, so both the step() and compute_contacts() paths keep it
+    // current; step()'s tail copies it into last_stats.broadphase_pairs.
+    mutable std::uint32_t broadphase_pairs_last = 0;
 
     // Simulation events (M7.9, events.hpp). step() emits contact and sleep events as a pure READ of
     // the just-solved state, in the sequential tail — so events never write body state, never
@@ -305,6 +314,7 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
     // narrowphase below confirms (or rejects) each with exact geometry.
     std::vector<Pair> pairs;
     compute_pairs(pairs);
+    broadphase_pairs_last = static_cast<std::uint32_t>(pairs.size());
 
     std::uint32_t warm = 0;
     for (const Pair& pr : pairs) {
@@ -821,7 +831,6 @@ void PhysicsWorld::step(float dt) {
     // contact graph. Every awake dynamic body lands in exactly one island (a contactless body is a
     // singleton); static/kinematic bodies are shared anchors, not island members.
     build_islands(n, p.motion, constraints, p.islands);
-    p.islands_last_count = p.islands.island_count;
     const IslandSet& isl = p.islands;
 
     // Gather the constraints into island-contiguous order so each island solves a plain span (the
@@ -1080,6 +1089,46 @@ void PhysicsWorld::step(float dt) {
             p.dynamic_tree.move_proxy(p.proxy[i], tight);
         }
     }
+
+    // ---- 9. Collect the tick's instrument panel (M7.13, WorldStats). A pure read of the state the
+    // pipeline just produced — body population, collision load, island structure — as deterministic
+    // counts: it never touches body state, so the world hash and cross-thread determinism are
+    // untouched, and the numbers themselves are thread-count-invariant (they derive only from the
+    // canonical manifolds and the pure-function island partition). Cheap: one O(n) pass over the
+    // bodies plus the O(manifolds)/O(islands) walks the tick already made.
+    WorldStats& st = p.last_stats;
+    st = WorldStats{};
+    st.body_count = static_cast<std::uint32_t>(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        switch (static_cast<MotionType>(p.motion[i])) {
+            case MotionType::Dynamic:
+                ++st.dynamic_bodies;
+                if (p.asleep[i] != 0) {
+                    ++st.sleeping_bodies;
+                } else {
+                    ++st.awake_bodies;
+                }
+                break;
+            case MotionType::Static:
+                ++st.static_bodies;
+                break;
+            case MotionType::Kinematic:
+                ++st.kinematic_bodies;
+                break;
+        }
+    }
+    st.broadphase_pairs = p.broadphase_pairs_last;
+    st.manifolds = static_cast<std::uint32_t>(manifolds.size());
+    for (const Manifold& m : manifolds) {
+        st.contact_points += m.count;
+    }
+    st.contacts_warm_started = p.warm_started_last;
+    st.islands = static_cast<std::uint32_t>(isl.island_count);
+    for (std::size_t k = 0; k < isl.island_count; ++k) {
+        st.active_islands += (active[k] != 0) ? 1u : 0u;
+        const std::uint32_t sz = isl.body_offsets[k + 1] - isl.body_offsets[k];
+        st.largest_island = std::max(st.largest_island, sz);
+    }
 }
 
 void PhysicsWorld::compute_pairs(std::vector<Pair>& out) const {
@@ -1145,7 +1194,11 @@ void PhysicsWorld::wake_body(BodyId id) noexcept {
 }
 
 std::size_t PhysicsWorld::islands_last() const noexcept {
-    return impl_->islands_last_count;
+    return impl_->last_stats.islands;
+}
+
+WorldStats PhysicsWorld::stats() const noexcept {
+    return impl_->last_stats;
 }
 
 std::uint64_t PhysicsWorld::world_hash() const noexcept {

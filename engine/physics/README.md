@@ -39,9 +39,11 @@ and replay validation build on. Scope: same-binary reproducibility, *not* cross-
 | M7.9 | **contact & sleep events** — began/persisted/ended contacts with point + normal + impulse, `Slept`/`Woke`; buffered, double-buffered, canonical per-tick order (the M8-damage input) | landed |
 | M7.10 | **CCD (speculative contacts)** — per-body opt-in; velocity-swept broadphase bound + GJK-distance speculative contacts + a solver gap-bias, so a fast body stops at a thin wall instead of tunnelling (no TOI rewind) | landed |
 | M7.11 | **shapes II: convex hulls** — world-owned hull store ([ADR-0027](../../docs/adr/0027-convex-hull-shapes.md)); authored+validated geometry, polyhedral mass properties → principal axes ([math note](../../docs/math/polyhedral-mass-properties.md)); hull support fn through GJK/EPA; reference-face clipping generalized to hull faces; hull raycast/overlap/CCD | landed |
+| M7.12 | **compound shapes** — world-owned compound store ([ADR-0028](../../docs/adr/0028-compound-shapes.md)); one body, many convex children at local poses; parallel-axis mass composition ([math note](../../docs/math/compound-mass-properties.md)); narrowphase-expansion multi-region contacts (per-child manifolds, per-region events) | landed |
+| M7.13 | **instrumentation + stress harness** — `WorldStats` (deterministic per-tick body/collision/island counts via `stats()`); `samples/09-physics-playground --stress` debris-scale load + throughput report; the measure-first capstone | landed |
 
 **M7's "done when" (ROADMAP): objects fall/collide/stack; raycasts hit; runs parallel to the frame —
-met**, proven by `samples/09-physics-playground` self-checking in CI. M7.9–M7.11 are the first
+met**, proven by `samples/09-physics-playground` self-checking in CI. M7.9–M7.13 are the
 fast-follows into M8's runway.
 
 ### Deferred (planned, not yet built — fast-follows into M8's runway)
@@ -50,13 +52,14 @@ fast-follows into M8's runway.
   sensor body (overlaps but generates no contact response) is not in M7's shipped body scope and has
   no consumer yet (M8 damage rides contact events). Lands with the first gameplay volume; it reuses
   the existing overlap machinery.
-- **Shapes II, the rest** — the convex hull itself landed at M7.11 (with the shape-storage ADR it
-  wanted, [ADR-0027](../../docs/adr/0027-convex-hull-shapes.md)); still to come are **compound
-  shapes** (next, built directly on `HullId` — the multi-part-island need), **static triangle mesh
-  + midphase**, and **runtime quickhull** (deliberately a cook-time concern — the M8.1 fracture
-  cook produces hull geometry; the runtime only validates what it is handed).
-- **Debris-scale tuning** + a `WorldStats`/stress harness (the CCD *machinery* landed at M7.10; the
-  broad debris-scale performance pass rides the stress harness).
+- **Shapes II, the rest** — the convex hull landed at M7.11 and compound shapes at M7.12 (both on
+  the shape-storage ADRs they wanted, [0027](../../docs/adr/0027-convex-hull-shapes.md) /
+  [0028](../../docs/adr/0028-compound-shapes.md)); still to come are the **static triangle mesh +
+  midphase** and **runtime quickhull** (deliberately a cook-time concern — the M8.1 fracture cook
+  produces hull geometry; the runtime only validates what it is handed).
+- **Debris-scale performance pass** — the `WorldStats` instrument + stress harness landed at M7.13
+  and now *measures* the load; the actual optimization it points at (the every-tick narrowphase — a
+  contact midphase / cache) is the first measured M8 hot spot, not a blind pre-optimization.
 
 ## Layout
 
@@ -78,6 +81,7 @@ engine/physics/
     ├── aabb_tree.hpp       #   the dynamic AABB tree (broadphase + ray/overlap engine)
     ├── support.hpp/gjk.hpp/epa.hpp/narrowphase.hpp   # the collision algorithm suite
     ├── hull.hpp            #   the convex-hull store entry: validation, mass properties (M7.11)
+    ├── compound.hpp        #   the compound store entry: child list, composed mass props (M7.12)
     ├── solver.hpp          #   sequential-impulse + NGS
     ├── islands.hpp         #   union-find island partition
     └── scene_query.hpp     #   exact ray-vs-shape / sphere-vs-shape geometry
@@ -91,4 +95,5 @@ ASan/UBSan and TSan (the parallel step is the threading surface):
 ```bash
 ctest --preset dev -R rime_physics_tests      # the unit suite
 build/dev/bin/physics_playground --verbose    # M7's "done when" self-check, with a report
+build/dev/bin/physics_playground --stress     # M7.13 debris-scale load + WorldStats/throughput report
 ```
