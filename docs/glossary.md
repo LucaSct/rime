@@ -296,8 +296,22 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Fracture.** Splitting a mesh into pieces, often precomputed, used for destruction.
 - **Part-based destruction.** Modeling a destructible as an assembly of breakable parts
   with connectivity, rather than one monolithic object (Frostbite's approach).
+- **Fracture pattern.** The cooked recipe for one destructible: its convex **parts**, the
+  **bond** graph between them, and the **anchors** — authored/cooked once, instanced many
+  times. In Rime an intact instance is one static *compound shape* built from this pattern.
+- **Part.** One convex piece of a destructible (a fracture cell). Intact, it is a child of
+  the instance's compound body, not a simulated entity; when it detaches it becomes a real
+  physics body (a hull, or a compound if several parts detach together). See
+  [ADR-0029](adr/0029-destruction-model.md).
+- **Bond / anchor.** A *bond* is the glue between two touching parts, with a strength (from
+  the cook, roughly the shared area); an *anchor* is a part pinned to the world (a wall's
+  base). Damage removes bonds; a **connectivity solve** (union-find over the live bonds)
+  finds parts no longer connected to any anchor — those detach and fall.
 - **Health transition.** A destructible part moving between health states; transitions
   can trigger effects, debris, sound, or gameplay (Frostbite term).
+- **Debris.** A physics body spawned when part(s) detach from a destructible on fracture —
+  real dynamic geometry that falls, collides, and eventually *settles* (a sleep event) so
+  it can be budgeted or frozen.
 - **Determinism / replication.** *Determinism*: the same inputs always produce the same
   result (vital for networked physics). *Replication*: syncing state across the network.
 
