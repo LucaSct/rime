@@ -7,9 +7,9 @@ physics substrate in [ADR-0026](../adr/0026-physics-core.md)/[0027](../adr/0027-
 [0028](../adr/0028-compound-shapes.md)); this note covers the *systems* reasoning — the pipeline, the
 data, and the trade-offs — and the math derivations get their own notes as they land.
 
-Current coverage: the model (M8.0, this note's overview + ADR-0029), the fracture cook (M8.1), and the
-load/stand/bind runtime (M8.2). Damage/connectivity/fracture (M8.3), the event fan-out (M8.4),
-lifetime/budgets (M8.5), and the proof sample (M8.6) each add a section as they ship.
+Current coverage: the model (M8.0, this note's overview + ADR-0029), the fracture cook (M8.1), the
+load/stand/bind runtime (M8.2), and damage/connectivity/fracture (M8.3 — the wall breaks). The event
+fan-out (M8.4), lifetime/budgets (M8.5), and the proof sample (M8.6) each add a section as they ship.
 
 ## The model (M8.0)
 
@@ -127,8 +127,119 @@ proves the `Destructible` component reflects and registers. Green under dev + AS
 
 ## Damage, connectivity & fracture (M8.3)
 
-*(pending — the contact-impulse + explicit damage ops, the union-find support solve, the body swap,
-and the cross-worker determinism proof.)*
+M8.3 is where the wall breaks. Three systems land in `engine/destruction/src/damage.cpp`, all
+running in the **sequential tail** of the tick (`DestructionWorld::update(world)`, called once,
+after `PhysicsWorld::step` — ADR-0029 §8), plus one physics seam (`RayHit::child`, so hitscan can
+name the struck part exactly as contact events already do).
+
+### The damage pipeline: two sources, one canonical op list
+
+Damage reaches a part from two directions, and both reduce to the same normalized currency — a
+per-part *damage op* (instance, part, amount, carried impulse) — before anything is applied:
+
+- **Contact events.** `update()` drains `contact_events()`; each region's `BodyId` resolves back
+  to an instance through a sorted body→instance table (a binary-searched vector — no hash map
+  anywhere near the damage path), and `child_a`/`child_b` name the part through the instance's
+  child→part remap. Damage is `(normal_impulse − damage_threshold) · damage_scale`, the cooked
+  pattern material; the threshold is what fences the resting-support case (a standing wall's own
+  parts exchange `m·g·dt` every tick as `Persisted` events, and that must never erode them). The
+  op carries the event's impulse along the side's shove direction (`−normal` for a, `+normal` for
+  b) at the contact point.
+- **Explicit ops.** `apply_damage(instance, point, radius, amount, impulse)` queues a radius op
+  (explosions, scripted hits; hitscan = a small radius at the `RayHit::child` part). At update
+  time it expands against the cooked part AABBs carried through the instance placement, with
+  **linear falloff** (full at the centre, zero at the rim — the ratified v1 shape). Explicit
+  pushes are applied *centrally* on detach — a blast centre is usually outside the debris body,
+  and an invented lever arm there would add spin nobody asked for.
+
+The combined list is applied in ADR-0029 §3's **canonical order**: explicit ops sorted by
+(instance, part, op bytes — floats compared as raw bit patterns, a total order), then contact ops
+in the event stream's already-canonical order. One fixed sequence ⇒ the float accumulation into
+health is bit-reproducible regardless of how the inputs arrived; the determinism test feeds the
+same tick's blasts in permuted arrival orders and demands identical hashes.
+
+### The support solve: union-find from the anchors
+
+When a part's health reaches zero it is **killed** (`alive = 0`) and its instance is marked dirty;
+a killed part leaves the wall as its own debris chunk (the body swap, below). Per dirty instance, a
+**union-find**
+(disjoint-set) pass runs over the *live* bond graph — a bond holds only while both endpoints still
+stand — seeded from the still-standing anchors. Union-find is made deterministic by one rule: a
+component's representative is its **smallest part id** (unite attaches the larger root under the
+smaller), so the partition is a pure function of the alive bits and the cooked bond list. One
+ascending scan then splits the standing parts into the anchored **remainder** (ids ascending —
+which *is* the next child→part table, ADR-0029 §4) and the unsupported **islands**, grouped by
+root. The islands plus each part killed outright this tick (each a single-part group, ADR-0029 §2)
+are the **detached groups**; sorted by smallest member — they are disjoint, so that is a strict
+total order — they give the canonical debris creation order. v1 deliberately re-solves
+the whole instance rather than solving incrementally — see the numbers below for why that is the
+right trade.
+
+### The body swap, without pops
+
+A registered compound is immutable (ADR-0028), so fracture **replaces** the standing body
+(ADR-0029 §2): destroy it, `register_compound` the remainder, stand a fresh static body; each
+detached group becomes a dynamic body (one part → its hull, several → a runtime dynamic compound —
+a multi-part island keeps its shape, the Frostbite look). The placement recipe is the whole trick:
+`register_compound` re-centres child poses on the subset's combined COM, so the new body goes at
+**`placement ∘ centroid`** with children authored at their cooked COMs — which lands every part
+exactly where it stood before the swap. `spawn()` uses the same recipe for the intact body, so
+intact and post-fracture placement are one invariant, proven by raycasting the same face before
+and after a break (translated *and* rotated placements) and by checking a newborn debris body
+sits at its part's pre-break `part_placement`. Debris inherit the parent's motion at their new COM
+(`v + ω × r` — zeros for today's static walls, written generally) plus the damage impulses that
+struck their member parts, applied in canonical op order. A directly-killed part flies off as its
+own single-part chunk carrying the very impulse that felled it (ADR-0029 §2 — the struck piece
+leaves the wall); an orphaned island carries whatever ops hit its members. Either way the push is
+the accumulated applied impulse, so momentum is conserved and never doubled (an op landing on
+already-dead rubble is skipped).
+
+Dead parts must stop colliding, so the swap runs whenever the **membership changed** (any death),
+not only when an island detached — a shot hole in a wall is a real hole: the rebuilt compound no
+longer occludes there (the freed chunk, born in place, is a separate body that tumbles away).
+A tick of mere resting contacts changes nothing and swaps nothing. The old compound (and hull)
+ids are deliberately leaked: the stores are append-only until m8.5's `unregister`
+(ADR-0027/0028's recorded deferral).
+
+### Determinism: the M11 witness
+
+`state_hash()` fingerprints all destruction state field by field (never a padded struct) in one
+canonical order — every instance's body id, alive bits, health values; every debris body's
+identity and composition — and pairs with `PhysicsWorld::world_hash()`. The headline test runs a
+scripted 8-blast, 180-tick collapse of the cooked 100-part wall and demands the hash pair (plus
+the full island compositions) be **bit-identical** across: two runs, physics on 1/2/4 job-system
+workers and sequential, and permuted same-tick op arrival. That is the exact contract M11.4
+replays events against.
+
+### The numbers (Release, dev box, 16-core, single-threaded update)
+
+Worst-case single-part loss on the 100-part wall — one update() doing the full 100-part
+union-find, the death bookkeeping, and the swap that re-registers a 99-child remainder compound —
+and the bare runtime `register_compound` at that scale:
+
+| measurement | cost |
+| --- | --- |
+| `update()`: kill 1 of 100, re-solve + swap 99-child remainder | ~20 µs |
+| bare `register_compound`, 100 hull children | ~4.4 µs |
+
+(Debug builds: ~248 µs / ~30 µs.) The full re-solve + re-register at 100 parts costs ~0.1% of a
+60 Hz tick, so ADR-0029 §2's per-part-statics fallback stays unexercised and the incremental-solve
+seam stays a design note, not code. Printed by the `M8.3-COST` test tag on every run for
+drift-watching.
+
+### Deferred from this brick, honestly
+
+- **Event emission** (PartDamaged/PartDied/IslandDetached) — m8.4's `EventChannel<T>`; today the
+  break emits nothing and physics is the only listener.
+- **Damage to detached debris** — deferred entirely to m8.5 (with lifetime/budgets): debris bodies
+  are not in the body→instance table, so contacts on them are ignored. Keeping v1's deterministic
+  core small won over "single-part debris splits" from the kickoff notes.
+- **Wake-on-swap**: a *sleeping* body resting against a wall whose part is destroyed under it is not
+  explicitly woken (it would hang mid-air until touched). No M8.3 scenario hits it; the honest
+  fix (wake bodies overlapping the swapped body's bounds, in canonical order) belongs with m8.5's
+  lifetime policy.
+- **Density** is a single engine constant (1000 kg/m³) applied to cooked part volumes; it joins
+  the cooked damage material when a real material system lands.
 
 ## Event fan-out (M8.4)
 

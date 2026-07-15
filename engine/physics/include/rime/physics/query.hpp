@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <cstdint>
 #include <limits>
 
 #include "rime/core/math/vec.hpp"
@@ -45,6 +46,13 @@ struct RayHit {
     core::Vec3 point{0.0f, 0.0f, 0.0f};
     core::Vec3 normal{0.0f, 0.0f, 0.0f};
     float distance = 0.0f;
+    // Which compound child the ray pierced (M8.3, ADR-0029): the same convention as
+    // ContactEvent::child_a/child_b — the child index within the hit body's compound shape, 0 for
+    // a non-compound body. This is what lets hitscan name the destructible PART it hit (child
+    // index == part index on an intact destructible), exactly as contact events already do for
+    // impacts. On an exact tie between children the lowest index wins (the compound raycast's
+    // strict-< scan), so the answer is deterministic.
+    std::uint16_t child = 0;
 };
 
 } // namespace rime::physics

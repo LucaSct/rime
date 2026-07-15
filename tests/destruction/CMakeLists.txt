@@ -4,6 +4,7 @@
 # ASan/UBSan + TSan, no device needed.
 rime_add_test(rime_destruction_tests
     world_test.cpp
+    damage_test.cpp
     components_test.cpp)
 
 # rime::destruction PUBLIC-links core/ecs/physics/assets, so this one link brings the whole seam

@@ -169,6 +169,63 @@ TEST_CASE("M7.7 query: overlap_sphere finds exactly the planted set, in canonica
     CHECK(hits[1].index == b.index);
 }
 
+TEST_CASE("M8.3 query: RayHit::child names the compound child a ray hit") {
+    // The hitscan half of the M8 damage-to-part bridge (ADR-0029): contact events already name the
+    // struck compound child (child_a/child_b); a raycast must name it too, or a hitscan weapon
+    // cannot say WHICH part of a destructible it hit. Convention matches the events exactly —
+    // child index within the hit body's compound, 0 for a plain body.
+    physics::PhysicsWorld w;
+
+    // Two 0.5 m cube children a metre and a half apart (the compound_test dumbbell layout): child
+    // 0 at x = −0.75, child 1 at x = +0.75.
+    const physics::ShapeDesc foot = box({0.25f, 0.25f, 0.25f});
+    const std::vector<physics::CompoundChildDesc> kids = {
+        {foot, {-0.75f, 0.0f, 0.0f}, core::quat_identity()},
+        {foot, {0.75f, 0.0f, 0.0f}, core::quat_identity()},
+    };
+    const physics::CompoundId id = w.register_compound(physics::CompoundDesc{kids});
+    REQUIRE(id.is_valid());
+    physics::ShapeDesc cs;
+    cs.type = physics::ShapeType::Compound;
+    cs.compound = id;
+    const physics::BodyId body = add(w, cs, {0.0f, 0.0f, 0.0f}, physics::MotionType::Static);
+
+    SUBCASE("a ray down onto each foot reports that foot's child index") {
+        physics::RayHit hit;
+        REQUIRE(w.raycast(physics::Ray{{0.75f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}}, hit));
+        CHECK(hit.body == body);
+        CHECK(hit.child == 1);
+        REQUIRE(w.raycast(physics::Ray{{-0.75f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}}, hit));
+        CHECK(hit.child == 0);
+    }
+
+    SUBCASE("a plain (non-compound) body reports child 0") {
+        add(w, sphere(0.5f), {10.0f, 0.0f, 0.0f}, physics::MotionType::Static);
+        physics::RayHit hit;
+        REQUIRE(w.raycast(physics::Ray{{10.0f, 5.0f, 0.0f}, {0.0f, -1.0f, 0.0f}}, hit));
+        CHECK(hit.child == 0);
+    }
+
+    SUBCASE("an exact tie between children keeps the LOWEST child index") {
+        // Two identical children at the identical pose: every ray that hits one hits the other at
+        // the exact same t. The compound scan is ascending with strict '<', so the first (lowest)
+        // child wins the tie — the deterministic answer a replay can rely on.
+        const std::vector<physics::CompoundChildDesc> stacked = {
+            {foot, {0.0f, 0.0f, 0.0f}, core::quat_identity()},
+            {foot, {0.0f, 0.0f, 0.0f}, core::quat_identity()},
+        };
+        const physics::CompoundId tie = w.register_compound(physics::CompoundDesc{stacked});
+        REQUIRE(tie.is_valid());
+        physics::ShapeDesc ts;
+        ts.type = physics::ShapeType::Compound;
+        ts.compound = tie;
+        add(w, ts, {0.0f, 0.0f, 20.0f}, physics::MotionType::Static);
+        physics::RayHit hit;
+        REQUIRE(w.raycast(physics::Ray{{0.0f, 5.0f, 20.0f}, {0.0f, -1.0f, 0.0f}}, hit));
+        CHECK(hit.child == 0);
+    }
+}
+
 TEST_CASE("M7.7 impulse: a central impulse changes linear velocity by J/m, no spin") {
     physics::PhysicsWorld w;
     w.set_gravity({0.0f, 0.0f, 0.0f}); // isolate the impulse

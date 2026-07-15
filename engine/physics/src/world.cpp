@@ -1244,6 +1244,7 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
     float best_t = tmax;
     std::uint32_t best_slot = core::kInvalidSlotIndex;
     core::Vec3 best_n{0.0f, 0.0f, 0.0f};
+    std::uint16_t best_child = 0;
 
     // A reported leaf's slot is live (it is in the tree), so slots[slot].dense is its current row.
     // Pass the running `best_t` as the exact test's bound so a farther candidate is rejected
@@ -1252,6 +1253,7 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
         const std::uint32_t d = p.slots[slot].dense;
         float t = 0.0f;
         core::Vec3 n{0.0f, 0.0f, 0.0f};
+        std::uint16_t child = 0;
         if (ray_vs_shape(p.shape[d],
                          p.position[d],
                          p.orientation[d],
@@ -1262,11 +1264,13 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
                          n,
                          p.hull_of(p.shape[d]),
                          p.compound_of(p.shape[d]),
-                         p.hull_span()) &&
+                         p.hull_span(),
+                         &child) &&
             t < best_t) {
             best_t = t;
             best_slot = slot;
             best_n = n;
+            best_child = child;
         }
     };
 
@@ -1287,6 +1291,7 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
     out.point = ray.origin + dir * best_t;
     out.normal = best_n;
     out.distance = best_t;
+    out.child = best_child; // which compound child was pierced (0 for a plain body) — M8.3
     return true;
 }
 
