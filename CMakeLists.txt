@@ -290,6 +290,8 @@ add_subdirectory(engine/ecs)      # the data-oriented world: entities, component
 add_subdirectory(engine/physics)  # own rigid-body core: bodies, collision, queries (M7, ADR-0026)
 add_subdirectory(engine/assets)   # cooked-asset loading: RMA1 reader, registry, manifest (M6)
 add_subdirectory(engine/destruction) # part-based destruction: patterns, instances, fracture (M8, ADR-0029)
+add_subdirectory(engine/audio)    # audio seam: play(sound, position, gain) + null backend (M8.4)
+add_subdirectory(engine/vfx)      # destruction dust stub: CPU billboard particles (M8.4, fx1 replaces)
 add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
 add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
@@ -358,4 +360,4 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/rime-config-version.cmake"
     DESTINATION ${RIME_INSTALL_CMAKEDIR})
 
-message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_assets, rime_render, rime_stream, rime_app, rime_capi, rime_hello.")
+message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_render, rime_stream, rime_app, rime_capi, rime_hello.")
