@@ -21,7 +21,9 @@
 //! The math (why cells are convex, the bisector derivation, the polyhedral volume/COM integral) is in
 //! `docs/math/voronoi-fracture.md`.
 
-use crate::cooked::{wrap_container, ByteWriter, ASSET_KIND_DESTRUCTIBLE, DESTRUCTIBLE_SCHEMA_HASH};
+use crate::cooked::{
+    wrap_container, ByteWriter, ASSET_KIND_DESTRUCTIBLE, DESTRUCTIBLE_SCHEMA_HASH,
+};
 use crate::math::{cross, normalize};
 use crate::PipelineError;
 
@@ -211,12 +213,19 @@ fn order_face(verts: &[V3], on_plane: &[usize], n: V3) -> Vec<usize> {
         })
         .collect();
     // Sort by angle; a stable tie-break on index keeps coincident-angle points deterministic.
-    ordered.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal).then(x.1.cmp(&y.1)));
+    ordered.sort_by(|x, y| {
+        x.0.partial_cmp(&y.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(x.1.cmp(&y.1))
+    });
 
     // Drop consecutive duplicates and collinear midpoints (they would make a > actual-sided face).
     let mut loop_idx: Vec<usize> = Vec::with_capacity(ordered.len());
     for &(_, i) in &ordered {
-        if loop_idx.last().is_some_and(|&p| len(sub(verts[i], verts[p])) < EPS) {
+        if loop_idx
+            .last()
+            .is_some_and(|&p| len(sub(verts[i], verts[p])) < EPS)
+        {
             continue;
         }
         loop_idx.push(i);
@@ -243,12 +252,36 @@ struct Cell {
 fn build_cell(si: usize, sites: &[V3], half: V3) -> Option<Cell> {
     // The bounding half-spaces: six box faces, then one bisector per other site.
     let mut planes: Vec<Plane> = vec![
-        Plane { n: [1.0, 0.0, 0.0], d: half[0], source: None },
-        Plane { n: [-1.0, 0.0, 0.0], d: half[0], source: None },
-        Plane { n: [0.0, 1.0, 0.0], d: half[1], source: None },
-        Plane { n: [0.0, -1.0, 0.0], d: half[1], source: None },
-        Plane { n: [0.0, 0.0, 1.0], d: half[2], source: None },
-        Plane { n: [0.0, 0.0, -1.0], d: half[2], source: None },
+        Plane {
+            n: [1.0, 0.0, 0.0],
+            d: half[0],
+            source: None,
+        },
+        Plane {
+            n: [-1.0, 0.0, 0.0],
+            d: half[0],
+            source: None,
+        },
+        Plane {
+            n: [0.0, 1.0, 0.0],
+            d: half[1],
+            source: None,
+        },
+        Plane {
+            n: [0.0, -1.0, 0.0],
+            d: half[1],
+            source: None,
+        },
+        Plane {
+            n: [0.0, 0.0, 1.0],
+            d: half[2],
+            source: None,
+        },
+        Plane {
+            n: [0.0, 0.0, -1.0],
+            d: half[2],
+            source: None,
+        },
     ];
     let pi = sites[si];
     for (j, &pj) in sites.iter().enumerate() {
@@ -258,7 +291,11 @@ fn build_cell(si: usize, sites: &[V3], half: V3) -> Option<Cell> {
         // Bisector keeping the site-i side: |x-pi|² <= |x-pj|²  ⇔  dot(x, pj-pi) <= (|pj|²-|pi|²)/2.
         let n = normalize(sub(pj, pi));
         let mid = scale(add(pi, pj), 0.5);
-        planes.push(Plane { n, d: dot(mid, n), source: Some(j) });
+        planes.push(Plane {
+            n,
+            d: dot(mid, n),
+            source: Some(j),
+        });
     }
 
     // Vertices: every plane triple's intersection that lies inside all half-spaces, deduped.
@@ -377,11 +414,7 @@ pub fn fracture_box(cfg: &FractureConfig) -> Result<Destructible, PipelineError>
     let anorm = normalize(cfg.anchor_normal);
     // The anchor plane offset: the box face in the anchor direction, dot(x,anorm) == that face.
     let anchor_d = dot(
-        [
-            anorm[0] * half[0],
-            anorm[1] * half[1],
-            anorm[2] * half[2],
-        ],
+        [anorm[0] * half[0], anorm[1] * half[1], anorm[2] * half[2]],
         anorm,
     );
 
@@ -495,7 +528,10 @@ fn polygon_area(verts: &[V3], face: &[usize]) -> f32 {
     let v0 = verts[face[0]];
     let mut acc = [0.0f32; 3];
     for k in 1..face.len() - 1 {
-        acc = add(acc, cross(sub(verts[face[k]], v0), sub(verts[face[k + 1]], v0)));
+        acc = add(
+            acc,
+            cross(sub(verts[face[k]], v0), sub(verts[face[k + 1]], v0)),
+        );
     }
     0.5 * len(acc)
 }
@@ -568,7 +604,11 @@ impl Destructible {
             p.u32(a);
         }
 
-        wrap_container(ASSET_KIND_DESTRUCTIBLE, DESTRUCTIBLE_SCHEMA_HASH, &p.into_vec())
+        wrap_container(
+            ASSET_KIND_DESTRUCTIBLE,
+            DESTRUCTIBLE_SCHEMA_HASH,
+            &p.into_vec(),
+        )
     }
 
     /// Total volume of all parts — the volume-conservation witness (≈ the source box's volume).
@@ -600,7 +640,11 @@ mod tests {
     #[test]
     fn every_part_is_a_valid_convex_shape() {
         let d = wall();
-        assert!(d.parts.len() >= 8, "expected a real partition, got {}", d.parts.len());
+        assert!(
+            d.parts.len() >= 8,
+            "expected a real partition, got {}",
+            d.parts.len()
+        );
         for (i, q) in d.parts.iter().enumerate() {
             assert!(q.volume > 0.0, "part {i} has non-positive volume");
             assert!(q.vertices.len() >= 4, "part {i} has too few vertices");
@@ -621,8 +665,14 @@ mod tests {
     #[test]
     fn bonds_are_canonical_and_the_graph_is_connected_from_anchors() {
         let d = wall();
-        assert!(!d.bonds.is_empty(), "a partitioned wall must have shared faces");
-        assert!(!d.anchors.is_empty(), "a wall on its base must have anchored parts");
+        assert!(
+            !d.bonds.is_empty(),
+            "a partitioned wall must have shared faces"
+        );
+        assert!(
+            !d.anchors.is_empty(),
+            "a wall on its base must have anchored parts"
+        );
         // Canonical: a<b, ascending, strengths positive.
         let mut prev = (0u32, 0u32);
         for b in &d.bonds {
@@ -648,12 +698,19 @@ mod tests {
             r
         }
         for b in &d.bonds {
-            let (ra, rb) = (find(&mut parent, b.a as usize), find(&mut parent, b.b as usize));
+            let (ra, rb) = (
+                find(&mut parent, b.a as usize),
+                find(&mut parent, b.b as usize),
+            );
             parent[ra] = rb;
         }
         let anchor_root = find(&mut parent, d.anchors[0] as usize);
         for i in 0..n {
-            assert_eq!(find(&mut parent, i), anchor_root, "part {i} not connected to the anchor set");
+            assert_eq!(
+                find(&mut parent, i),
+                anchor_root,
+                "part {i} not connected to the anchor set"
+            );
         }
     }
 
