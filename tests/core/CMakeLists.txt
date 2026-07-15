@@ -10,6 +10,7 @@ rime_add_test(rime_core_tests
     quat_test.cpp
     transform_test.cpp
     slot_map_test.cpp
+    event_channel_test.cpp
     chase_lev_deque_test.cpp
     jobs_test.cpp
     reflect_test.cpp
