@@ -29,23 +29,33 @@ enum class ContactPhase : std::uint8_t {
     Ended = 2, // touched last tick, separated this tick — impulses are 0 (nothing was exchanged)
 };
 
-// One contact between two bodies this tick. Emitted only for a pair with a dynamic participant
-// (an all-immovable pair exchanges no impulse); a pair whose every dynamic member is asleep goes
+// One contact REGION between two bodies this tick. For plain (non-compound) bodies a pair is one
+// region and this is exactly "one entry per body pair", as it has been since M7.9. A compound body
+// (M7.12, ADR-0028) can touch the same other body through several of its children at once — a
+// dumbbell standing on two feet — and each touching child pair is its own region with its own
+// began/persisted/ended lifecycle. Per-region reporting is the deliberate choice for M8 damage: a
+// hit on a destructible must name WHICH part took the impulse (that is the cell fracture
+// detaches); a consumer wanting per-pair totals can sum the regions, while the reverse — naming
+// the part from an aggregate — is impossible. Emitted only for a pair with a dynamic participant
+// (an all-immovable pair exchanges no impulse); a region whose every dynamic member is asleep goes
 // silent (a settled pile costs nothing) without being reported as Ended — it never separated.
 //
 // Conventions mirror the manifold (contact.hpp) exactly, so a consumer never has to re-derive a
 // sign: `a`/`b` are in canonical broadphase order (a.index < b.index) and `normal` is unit and
-// points FROM a TOWARD b. An Ended event's bodies may already be dead (destroyed since last tick) —
+// points FROM a TOWARD b. `child_a`/`child_b` are the compound child indices of the region (0 for
+// a non-compound body). An Ended event's bodies may already be dead (destroyed since last tick) —
 // check PhysicsWorld::is_alive if it matters.
 struct ContactEvent {
     BodyId a;
     BodyId b;
     core::Vec3 point{0.0f, 0.0f, 0.0f};  // representative world point: the deepest contact point
     core::Vec3 normal{0.0f, 1.0f, 0.0f}; // unit, from a toward b
-    float normal_impulse = 0.0f;  // TOTAL normal impulse the solver exchanged over the pair this
-                                  // tick (kg·m/s, >= 0) — the M8 damage signal. 0 for Ended.
-    float tangent_impulse = 0.0f; // total friction impulse over the pair this tick. 0 for Ended.
+    float normal_impulse = 0.0f;  // TOTAL normal impulse the solver exchanged over this region
+                                  // this tick (kg·m/s, >= 0) — the M8 damage signal. 0 for Ended.
+    float tangent_impulse = 0.0f; // total friction impulse over this region this tick. 0 for Ended.
     ContactPhase phase = ContactPhase::Began;
+    std::uint16_t child_a = 0; // compound child index on each side (M7.12) — the part that was
+    std::uint16_t child_b = 0; // hit, the M8 damage-to-part mapping; 0 for a plain body
 };
 
 // A body deactivated or reactivated *as a result of a step()*. `Slept` is the basis for M8's

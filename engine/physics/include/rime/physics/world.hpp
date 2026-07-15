@@ -42,6 +42,35 @@ struct HullDesc {
     std::span<const std::uint32_t> face_indices; // concatenated per-face vertex indices
 };
 
+// Authored compound-shape children for PhysicsWorld::register_compound (M7.12, ADR-0028): each
+// child a convex ShapeDesc (primitive or registered hull — never another compound, rejected in
+// v1) posed in the compound's authored frame (shape.hpp, CompoundChildDesc). The span is only read
+// during the call (the world copies what it keeps). Registration validates — child count in
+// [1, 256], no compound children, hull ids that resolve in THIS world, non-degenerate child
+// volumes/orientations — and returns the null id on any violation; it never repairs.
+struct CompoundDesc {
+    std::span<const CompoundChildDesc> children;
+};
+
+// Derived physical properties of a registered compound — the same read-back contract as HullInfo.
+// Child shapes and poses are deliberately NOT exposed: they live behind the seam (ADR-0028), and
+// the authoring side already has the authored data.
+struct CompoundInfo {
+    float volume = 0.0f; // m³ — the children's total (uniform density is the v1 mass model)
+    // Combined centre of mass in the AUTHORED frame. register_compound re-centres the stored
+    // child poses on it so a body's `position` IS the compound's COM (the engine-wide invariant) —
+    // place visuals at position + rotate(orientation, authored_point - centroid).
+    core::Vec3 centroid{0.0f, 0.0f, 0.0f};
+    // Principal moments for a 1 kg body of this compound (I ∝ m at fixed shape), about the COM,
+    // along the principal axes — composed over the children by the parallel-axis theorem
+    // (docs/math/compound-mass-properties.md).
+    core::Vec3 inertia_per_mass{1.0f, 1.0f, 1.0f};
+    // Rotation from the principal-axis frame to the compound's local frame (identity when the
+    // composed tensor is already diagonal — e.g. an axis-aligned symmetric arrangement).
+    core::Quat principal_rotation = core::quat_identity();
+    std::uint32_t child_count = 0;
+};
+
 // Derived physical properties of a registered hull — the read-back for tooling, tests, and render
 // alignment. Geometry itself (vertices/faces) is deliberately NOT exposed: it lives behind the
 // seam (ADR-0027), and consumers who need the render mesh already have the authored data.
@@ -210,11 +239,13 @@ public:
     // step(), which refills a back buffer and swaps it in. Both are empty before the first step().
     // Read-only, and NOT safe to call concurrently with step() (which refills the buffers).
     //
-    // contact_events(): one entry per body pair (with a dynamic participant) that is touching, or
-    // that just stopped touching, this tick — began/persisted/ended, a representative point, the
-    // a→b normal, and the total normal + friction impulse the solver exchanged over the pair. This
-    // is the M8 damage input (impulse → damage). In CANONICAL pair order (ascending a.index, then
-    // b.index), so replays and any worker-thread count observe the identical stream.
+    // contact_events(): one entry per contact REGION (a body pair with a dynamic participant,
+    // plus — for compounds, M7.12 — the touching child pair within it; one region per pair for
+    // plain bodies) that is touching, or just stopped touching, this tick — began/persisted/ended,
+    // a representative point, the a→b normal, and the total normal + friction impulse the solver
+    // exchanged over the region. This is the M8 damage input (impulse → damage, per part hit). In
+    // CANONICAL order (ascending a.index, b.index, then child_a, child_b), so replays and any
+    // worker-thread count observe the identical stream.
     [[nodiscard]] std::span<const ContactEvent> contact_events() const noexcept;
 
     // sleep_events(): one entry per body that fell asleep (Slept — the DebrisSettled basis) or was
@@ -236,6 +267,23 @@ public:
     // Read back a registered hull's derived physical properties. Returns false (out untouched)
     // for a null/unknown id.
     [[nodiscard]] bool hull_info(HullId id, HullInfo& out) const;
+
+    // --- Compound shapes (M7.12, ADR-0028) --------------------------------------------------
+    // Register a compound — one rigid body's shape made of several convex children (primitives
+    // and/or registered hulls), each at a local pose — and get the id ShapeDesc::compound refers
+    // to. The M8 destructible: one intact wall is ONE compound body; on fracture its parts detach
+    // into separate hull bodies. Registration is the cold path: validation, the composed mass
+    // properties (volume-weighted COM, parallel-axis inertia, principal axes —
+    // docs/math/compound-mass-properties.md), and the COM re-centring of the stored child poses
+    // (see CompoundInfo::centroid). Returns the NULL id if the input fails validation — see
+    // CompoundDesc for the rules. Compounds are immutable and live as long as the world; both
+    // static and dynamic compound bodies are supported. Not safe to call concurrently with
+    // step() (like create_body / register_hull).
+    [[nodiscard]] CompoundId register_compound(const CompoundDesc& desc);
+
+    // Read back a registered compound's derived physical properties. Returns false (out
+    // untouched) for a null/unknown id.
+    [[nodiscard]] bool compound_info(CompoundId id, CompoundInfo& out) const;
 
 private:
     struct Impl;

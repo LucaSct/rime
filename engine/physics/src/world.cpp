@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "aabb_tree.hpp"
+#include "compound.hpp"
 #include "hull.hpp"
 #include "islands.hpp"
 #include "narrowphase.hpp"
@@ -40,6 +41,13 @@ namespace {
 [[nodiscard]] bool is_static(std::uint8_t motion) noexcept {
     return motion == static_cast<std::uint8_t>(MotionType::Static);
 }
+
+// Slop on the per-child AABB cull inside a compound pair (M7.12): a child pair is only handed to
+// the exact narrowphase if the children's tight bounds overlap within this margin. One millimetre
+// comfortably covers the NGS resting slop (5 mm keeps resting shapes genuinely overlapped, so
+// this is belt-and-braces against a kissing contact being culled by a rounding ulp) while still
+// culling essentially every genuinely separated child pair.
+constexpr float kChildCullMargin = 1e-3f;
 
 } // namespace
 
@@ -90,6 +98,11 @@ struct PhysicsWorld::Impl {
     // registration order (deterministic), entries never move or die before the world does.
     std::vector<ConvexHull> hulls;
 
+    // The compound store (M7.12, ADR-0028): the same contract as the hull store — child lists
+    // registered once via register_compound, referenced by CompoundId, append-only, immutable,
+    // ids in registration order. One fracture pattern's intact shape, many instances.
+    std::vector<CompoundShape> compounds;
+
     AabbTree static_tree;
     AabbTree dynamic_tree;
 
@@ -103,16 +116,18 @@ struct PhysicsWorld::Impl {
     IslandSet islands;
     std::size_t islands_last_count = 0;
 
-    // Persistent contact cache (M7.3): last tick's manifolds keyed by canonical pair id, so a
-    // surviving contact's accumulated impulses carry forward by matching feature id (warm
-    // starting). Ordering matters (M7.4): step() commits this cache from the manifolds AFTER the
-    // velocity solve wrote its converged impulses into them — committing pre-solve manifolds
-    // would persist last tick's warm-start copies forever and the solver would always start
-    // cold. The solverless public compute_contacts() commits what it warm-started (zeros on a
-    // fresh world), which keeps the narrowphase tests' cache semantics unchanged.
-    // `warm_started_last` records the last contact build's feature-id match count — the
-    // narrowphase test's witness, and from M7.4 the warm-start hit rate.
-    mutable std::unordered_map<std::uint64_t, ManifoldCacheEntry> contact_cache;
+    // Persistent contact cache (M7.3): last tick's manifolds keyed by contact REGION — the
+    // canonical pair id plus, since M7.12, the compound child sub-pair (0 for plain pairs, whose
+    // behaviour is unchanged) — so a surviving contact's accumulated impulses carry forward by
+    // matching feature id (warm starting). Ordering matters (M7.4): step() commits this cache
+    // from the manifolds AFTER the velocity solve wrote its converged impulses into them —
+    // committing pre-solve manifolds would persist last tick's warm-start copies forever and the
+    // solver would always start cold. The solverless public compute_contacts() commits what it
+    // warm-started (zeros on a fresh world), which keeps the narrowphase tests' cache semantics
+    // unchanged. `warm_started_last` records the last contact build's feature-id match count —
+    // the narrowphase test's witness, and from M7.4 the warm-start hit rate.
+    mutable std::unordered_map<ContactCacheKey, ManifoldCacheEntry, ContactCacheKeyHash>
+        contact_cache;
     mutable std::uint32_t warm_started_last = 0;
 
     // Simulation events (M7.9, events.hpp). step() emits contact and sleep events as a pure READ of
@@ -125,15 +140,19 @@ struct PhysicsWorld::Impl {
     std::vector<SleepEvent> sleep_events_front;
     std::vector<SleepEvent> sleep_events_back;
 
-    // The began/persisted/ended witness: one record per contacting pair, keyed by the broadphase
-    // pair key and kept ASCENDING by it (manifolds already arrive canonically ordered, so `cur` is
-    // built sorted). A single linear merge of this tick's `cur` against last tick's `prev`
-    // classifies every pair and emits in canonical order — no hash map, no per-tick sort. The two
-    // vectors are swapped each tick, reusing their capacity. Owning our own record (rather than
-    // reading the warm-start cache) keeps the event lifecycle independent of the solver's cache and
-    // lets an Ended event carry the pair's last point/normal, which the cache does not store.
+    // The began/persisted/ended witness: one record per contact REGION (pair + child sub-pair
+    // since M7.12; one region per pair for plain bodies), keyed by (broadphase pair key, packed
+    // child indices) and kept ASCENDING lexicographically by that key (manifolds already arrive
+    // canonically ordered — pairs ascending, child sub-pairs ascending within a pair — so `cur`
+    // is built sorted). A single linear merge of this tick's `cur` against last tick's `prev`
+    // classifies every region and emits in canonical order — no hash map, no per-tick sort. The
+    // two vectors are swapped each tick, reusing their capacity. Owning our own record (rather
+    // than reading the warm-start cache) keeps the event lifecycle independent of the solver's
+    // cache and lets an Ended event carry the region's last point/normal, which the cache does
+    // not store.
     struct ContactRecord {
-        std::uint64_t key = 0; // (a.index << 32) | b.index
+        std::uint64_t key = 0;      // (a.index << 32) | b.index
+        std::uint32_t children = 0; // (child_a << 16) | child_b — the region within the pair
         BodyId a;
         BodyId b;
         core::Vec3 point{0.0f, 0.0f, 0.0f};
@@ -161,6 +180,17 @@ struct PhysicsWorld::Impl {
     // used by the compute_contacts() inspection seam) builds only exact overlaps, unchanged from
     // M7.3.
     void build_contacts(std::vector<Manifold>& out, float dt = 0.0f) const;
+    // The compound arm of build_contacts (M7.12): one pair whose side(s) are compounds, expanded
+    // into child-vs-child sub-pairs, emitting one manifold per touching child pair. Defined below
+    // beside build_contacts.
+    void build_compound_contacts(const Pair& pr,
+                                 std::uint32_t da,
+                                 std::uint32_t db,
+                                 const CompoundShape* comp_a,
+                                 const CompoundShape* comp_b,
+                                 float dt,
+                                 std::vector<Manifold>& out,
+                                 std::uint32_t& warm) const;
     void commit_contact_cache(const std::vector<Manifold>& manifolds) const;
 
     [[nodiscard]] AabbTree& tree_for(std::uint8_t m) noexcept {
@@ -197,10 +227,32 @@ struct PhysicsWorld::Impl {
         return &hulls[s.hull.index];
     }
 
-    // Tight world AABB of a posed shape, hull-aware: the shape-only compute_aabb (aabb.hpp) cannot
-    // see the store, so hull bounds come from posing the stored vertices.
+    // Resolve a shape's compound reference — hull_of's twin for the compound store (ADR-0028).
+    [[nodiscard]] const CompoundShape* compound_of(const ShapeDesc& s) const noexcept {
+        if (s.type != ShapeType::Compound) {
+            return nullptr;
+        }
+        if (s.compound.index >= compounds.size() || s.compound.generation != 0) {
+            return nullptr;
+        }
+        return &compounds[s.compound.index];
+    }
+
+    // The hull store as a span — the form the compound helpers take (compound.hpp stays free of
+    // world internals; a compound's hull children resolve against exactly this store).
+    [[nodiscard]] std::span<const ConvexHull> hull_span() const noexcept {
+        return {hulls.data(), hulls.size()};
+    }
+
+    // Tight world AABB of a posed shape, store-aware: the shape-only compute_aabb (aabb.hpp)
+    // cannot see the stores, so hull bounds come from posing the stored vertices and compound
+    // bounds from the union of the posed children (the ONE broadphase bound a compound owns —
+    // model A of ADR-0028 keeps proxy↔body strictly 1:1).
     [[nodiscard]] Aabb
     aabb_of(const ShapeDesc& s, core::Vec3 pos, const core::Quat& q) const noexcept {
+        if (const CompoundShape* c = compound_of(s); c != nullptr) {
+            return compound_world_aabb(*c, hull_span(), pos, q);
+        }
         const ConvexHull* h = hull_of(s);
         return h != nullptr ? hull_world_aabb(*h, pos, q) : compute_aabb(s, pos, q);
     }
@@ -262,6 +314,16 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
             continue; // impossible for a pair compute_pairs just returned, but stay defensive
         }
 
+        // A pair with a compound on either side expands into child-vs-child sub-pairs and may
+        // emit SEVERAL manifolds — one per touching child pair (M7.12, ADR-0028). Split off so
+        // the plain-pair path below stays byte-for-byte what it was through M7.11.
+        const CompoundShape* comp_a = compound_of(shape[da]);
+        const CompoundShape* comp_b = compound_of(shape[db]);
+        if (comp_a != nullptr || comp_b != nullptr) {
+            build_compound_contacts(pr, da, db, comp_a, comp_b, dt, out, warm);
+            continue;
+        }
+
         Manifold m;
         m.a = pr.a;
         m.b = pr.b;
@@ -305,10 +367,10 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
 
         // Warm-start from last tick's cache: match points by feature id and carry their
         // accumulated impulses into the fresh manifold. The stored generations guard against a
-        // recycled slot inheriting a dead pair's impulses.
-        const std::uint64_t key =
+        // recycled slot inheriting a dead pair's impulses. A plain pair is region (0, 0).
+        const std::uint64_t pair_key =
             (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
-        const auto it = contact_cache.find(key);
+        const auto it = contact_cache.find(ContactCacheKey{pair_key, 0});
         if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
             it->second.gen_b == pr.b.generation) {
             warm += warm_start_from(it->second, m);
@@ -318,18 +380,168 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
     warm_started_last = warm;
 }
 
+void PhysicsWorld::Impl::build_compound_contacts(const Pair& pr,
+                                                 std::uint32_t da,
+                                                 std::uint32_t db,
+                                                 const CompoundShape* comp_a,
+                                                 const CompoundShape* comp_b,
+                                                 float dt,
+                                                 std::vector<Manifold>& out,
+                                                 std::uint32_t& warm) const {
+    // Model A of ADR-0028, the narrowphase expansion: the broadphase reported ONE candidate pair
+    // (compounds own a single union-bound proxy); here it fans out into child-vs-child sub-pairs.
+    // A non-compound side counts as one child — its own shape at the body pose — so all four
+    // combinations (compound-vs-primitive/hull/compound, either side) run through one loop. Every
+    // stage is in FIXED order — a's child index ascending, then b's — so the emitted manifolds
+    // extend the canonical pair order lexicographically by (child_a, child_b): determinism by
+    // construction, no sorting needed (ADR-0026).
+
+    // Pose each side's children once — O(children_a + children_b), not O(children_a·children_b) —
+    // caching pose, resolved hull, and the tight world bound the cull below reads.
+    struct PosedChild {
+        const ShapeDesc* shape;
+        const ConvexHull* hull;
+        core::Vec3 pos;
+        core::Quat orient;
+        Aabb bounds;
+    };
+
+    // CCD (M7.10 × M7.12): a compound has no single support function (it is not convex), so
+    // speculative contacts run PER CHILD — each child is convex and rides the body rigidly, so
+    // its linear velocity is the body's (angular sweep ignored, exactly M7.10's documented
+    // posture). For the cull to see a not-yet-touching-but-closing child pair at all, each side's
+    // child bounds are swept by its body's velocity — the per-child mirror of the stage-1.5
+    // proxy sweep.
+    const bool ccd_pair = dt > 0.0f && (ccd[da] != 0 || ccd[db] != 0);
+    const auto pose_side =
+        [&](std::uint32_t dense, const CompoundShape* comp, std::vector<PosedChild>& list) {
+            const core::Vec3 body_pos = position[dense];
+            const core::Quat& body_q = orientation[dense];
+            const std::size_t n = comp != nullptr ? comp->child_count() : 1;
+            list.reserve(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                PosedChild c{};
+                if (comp != nullptr) {
+                    c.shape = &comp->child_shape[i];
+                    c.pos = compound_child_world_pos(*comp, i, body_pos, body_q);
+                    c.orient = compound_child_world_orient(*comp, i, body_q);
+                } else {
+                    c.shape = &shape[dense];
+                    c.pos = body_pos;
+                    c.orient = body_q;
+                }
+                c.hull = hull_of(*c.shape);
+                c.bounds = c.hull != nullptr ? hull_world_aabb(*c.hull, c.pos, c.orient)
+                                             : compute_aabb(*c.shape, c.pos, c.orient);
+                if (ccd_pair) {
+                    const core::Vec3 sweep = linear_velocity[dense] * dt;
+                    Aabb swept = c.bounds;
+                    swept.min += sweep;
+                    swept.max += sweep;
+                    c.bounds = merge(c.bounds, swept);
+                }
+                list.push_back(c);
+            }
+        };
+    std::vector<PosedChild> side_a;
+    std::vector<PosedChild> side_b;
+    pose_side(da, comp_a, side_a);
+    pose_side(db, comp_b, side_b);
+
+    const std::uint64_t pair_key =
+        (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
+
+    for (std::size_t ia = 0; ia < side_a.size(); ++ia) {
+        for (std::size_t ib = 0; ib < side_b.size(); ++ib) {
+            const PosedChild& ca = side_a[ia];
+            const PosedChild& cb = side_b[ib];
+            // The v1 midphase: a brute-force child AABB cull, right at fracture-cell counts (a
+            // child BVH is the measured-need follow-up, ADR-0028).
+            if (!overlaps(expanded(ca.bounds, kChildCullMargin), cb.bounds)) {
+                continue;
+            }
+
+            Manifold m;
+            m.a = pr.a;
+            m.b = pr.b;
+            m.child_a = static_cast<std::uint16_t>(ia);
+            m.child_b = static_cast<std::uint16_t>(ib);
+            // The children are convex, so each sub-pair runs the EXISTING per-convex-shape
+            // routines unchanged — passed in body slot order, so the normal is a → b exactly as
+            // the plain path's (contact.hpp). The solver later applies the manifold to the PARENT
+            // bodies: contact points are world-space and lever arms come from the parent COM,
+            // which is precisely what "rigidly attached child" means.
+            bool touching = collide_shapes(*ca.shape,
+                                           ca.pos,
+                                           ca.orient,
+                                           *cb.shape,
+                                           cb.pos,
+                                           cb.orient,
+                                           m,
+                                           ca.hull,
+                                           cb.hull) &&
+                            m.count != 0;
+            if (!touching) {
+                if (!ccd_pair || !collide_speculative(*ca.shape,
+                                                      ca.pos,
+                                                      ca.orient,
+                                                      linear_velocity[da],
+                                                      *cb.shape,
+                                                      cb.pos,
+                                                      cb.orient,
+                                                      linear_velocity[db],
+                                                      dt,
+                                                      m,
+                                                      ca.hull,
+                                                      cb.hull)) {
+                    continue; // this child pair is separated and not imminently closing
+                }
+            }
+
+            // Fold the child indices into every feature id (kFeatCompoundChild): two children
+            // touching the same other shape through identical child-local features must still
+            // carry DISTINCT ids. Applied uniformly to every pair that involves a compound —
+            // and never to plain pairs, whose id spaces stay bit-identical to M7.11 (the
+            // backward-compat contract).
+            const std::uint32_t child_fold =
+                feature_combine(feature_combine(kFeatCompoundChild, static_cast<std::uint32_t>(ia)),
+                                static_cast<std::uint32_t>(ib));
+            for (std::uint8_t k = 0; k < m.count; ++k) {
+                m.points[k].feature_id = feature_combine(child_fold, m.points[k].feature_id);
+            }
+
+            // Warm-start from this REGION's own cache entry — (pair, child_a, child_b) — so one
+            // foot of a standing compound can never inherit the other foot's impulses.
+            const ContactCacheKey key{
+                pair_key, (static_cast<std::uint32_t>(ia) << 16) | static_cast<std::uint32_t>(ib)};
+            const auto it = contact_cache.find(key);
+            if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
+                it->second.gen_b == pr.b.generation) {
+                warm += warm_start_from(it->second, m);
+            }
+            out.push_back(m);
+        }
+    }
+}
+
 void PhysicsWorld::Impl::commit_contact_cache(const std::vector<Manifold>& manifolds) const {
     // Rebuild the persistent cache from this tick's manifolds — in step() they are the SOLVED
     // manifolds, so the impulses that carry to next tick are the converged ones (the whole point
-    // of warm starting). Keyed by the broadphase pair key ((slot_a << 32) | slot_b). A flat hash
-    // map is plenty here — lookups are per-pair, nothing ever iterates it, so its unordered-ness
-    // cannot leak into simulation order (the determinism contract).
-    std::unordered_map<std::uint64_t, ManifoldCacheEntry> next;
+    // of warm starting). Keyed per contact REGION: the broadphase pair key ((slot_a << 32) |
+    // slot_b) plus the packed child sub-pair (0 for plain pairs — M7.12), which is exactly why a
+    // pair carrying several compound manifolds commits several entries instead of silently
+    // keeping only the first. A flat hash map is plenty here — lookups are per-region, nothing
+    // ever iterates it, so its unordered-ness cannot leak into simulation order (the determinism
+    // contract).
+    std::unordered_map<ContactCacheKey, ManifoldCacheEntry, ContactCacheKeyHash> next;
     next.reserve(manifolds.size());
     for (const Manifold& m : manifolds) {
-        const std::uint64_t key =
+        const std::uint64_t pair_key =
             (static_cast<std::uint64_t>(m.a.index) << 32) | static_cast<std::uint64_t>(m.b.index);
-        next.emplace(key, make_cache_entry(key, m.a.generation, m.b.generation, m));
+        const ContactCacheKey key{pair_key,
+                                  (static_cast<std::uint32_t>(m.child_a) << 16) |
+                                      static_cast<std::uint32_t>(m.child_b)};
+        next.emplace(key, make_cache_entry(pair_key, m.a.generation, m.b.generation, m));
     }
     contact_cache.swap(next);
 }
@@ -341,10 +553,13 @@ PhysicsWorld::~PhysicsWorld() = default;
 BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     Impl& p = *impl_;
 
-    // A hull-shaped body must reference a hull THIS world knows, or the body would have no
-    // geometry to collide, bound, or weigh. Refusing with the null id (rather than creating a
-    // ghost) keeps the failure at the call site that made it.
+    // A hull- or compound-shaped body must reference a store entry THIS world knows, or the body
+    // would have no geometry to collide, bound, or weigh. Refusing with the null id (rather than
+    // creating a ghost) keeps the failure at the call site that made it.
     if (d.shape.type == ShapeType::ConvexHull && p.hull_of(d.shape) == nullptr) {
+        return BodyId{};
+    }
+    if (d.shape.type == ShapeType::Compound && p.compound_of(d.shape) == nullptr) {
         return BodyId{};
     }
 
@@ -363,13 +578,18 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     const float mass = d.mass > 0.0f ? d.mass : 1.0f;
     // Mass distribution: primitives have closed forms (shape.hpp); a hull's principal moments
     // were integrated at registration (per unit mass — inertia scales linearly with mass at
-    // fixed geometry) and its principal-axis rotation rides along in the new SoA column, identity
-    // for every other shape.
+    // fixed geometry) and its principal-axis rotation rides along in the SoA column, identity
+    // for every other shape. A compound's moments were COMPOSED at registration the same way
+    // (parallel-axis over the children, ADR-0028) — the body just scales them by its mass, and
+    // its `position` is the compound's COM because the store re-centred the child poses.
     MassProperties mp = compute_mass_properties(d.shape, mass);
     core::Quat principal = core::quat_identity();
     if (const ConvexHull* h = p.hull_of(d.shape); h != nullptr) {
         mp.inertia_diagonal = h->inertia_per_mass * mass;
         principal = h->principal;
+    } else if (const CompoundShape* c = p.compound_of(d.shape); c != nullptr) {
+        mp.inertia_diagonal = c->inertia_per_mass * mass;
+        principal = c->principal;
     }
     const float im = dynamic ? inv_or_zero(mp.mass) : 0.0f;
     const core::Vec3 ii = dynamic ? core::Vec3{inv_or_zero(mp.inertia_diagonal.x),
@@ -727,9 +947,10 @@ void PhysicsWorld::step(float dt) {
     // identical for any worker count — it derives only from the canonical manifolds and the
     // (thread- count-independent) solved impulses and sleep decisions.
 
-    // Build this tick's contact records from the SOLVED manifolds, in their canonical pair order.
+    // Build this tick's contact records from the SOLVED manifolds, in their canonical order —
+    // one record per contact REGION (pair + child sub-pair; plain pairs are one region, M7.12).
     // Skip a pair with no dynamic member (an immovable pair exchanges no impulse — nothing to
-    // report). A pair that has a dynamic member but whose every dynamic member is now asleep is
+    // report). A region that has a dynamic member but whose every dynamic member is now asleep is
     // recorded `suppressed`: kept present (so it is not falsely reported as Ended — an asleep pair
     // never separated) but emitting no event, which is what makes a settled pile silent.
     p.contact_cur.clear();
@@ -743,7 +964,7 @@ void PhysicsWorld::step(float dt) {
             continue; // no dynamic member — not an evented contact
         }
         // Representative point = the deepest (first max, strict >, so ties resolve
-        // deterministically); impulses = the pair's total exchanged momentum this tick.
+        // deterministically); impulses = the region's total exchanged momentum this tick.
         std::uint8_t best = 0;
         float normal_impulse = 0.0f;
         float tangent_impulse = 0.0f;
@@ -756,21 +977,24 @@ void PhysicsWorld::step(float dt) {
         }
         const bool awake_dyn_a = p.inv_mass[da] > 0.0f && p.asleep[da] == 0;
         const bool awake_dyn_b = p.inv_mass[db] > 0.0f && p.asleep[db] == 0;
-        p.contact_cur.push_back(Impl::ContactRecord{(static_cast<std::uint64_t>(m.a.index) << 32) |
-                                                        static_cast<std::uint64_t>(m.b.index),
-                                                    m.a,
-                                                    m.b,
-                                                    m.points[best].position,
-                                                    m.normal,
-                                                    normal_impulse,
-                                                    tangent_impulse,
-                                                    /*suppressed=*/!(awake_dyn_a || awake_dyn_b)});
+        p.contact_cur.push_back(Impl::ContactRecord{
+            (static_cast<std::uint64_t>(m.a.index) << 32) | static_cast<std::uint64_t>(m.b.index),
+            (static_cast<std::uint32_t>(m.child_a) << 16) | static_cast<std::uint32_t>(m.child_b),
+            m.a,
+            m.b,
+            m.points[best].position,
+            m.normal,
+            normal_impulse,
+            tangent_impulse,
+            /*suppressed=*/!(awake_dyn_a || awake_dyn_b)});
     }
 
     // Classify by a linear merge of the two key-sorted lists (cur = this tick, prev = last tick):
-    // a key only in cur is Began, only in prev is Ended, in both is Persisted. Suppressed cur
-    // records still consume their merge position (so a matching prev record is not reported Ended)
-    // but emit nothing. The result is naturally in canonical pair order.
+    // a region only in cur is Began, only in prev is Ended, in both is Persisted. The merge key is
+    // (pair key, child sub-pair) compared lexicographically — plain pairs all carry sub-pair 0,
+    // so their merge is exactly the M7.9 pair merge. Suppressed cur records still consume their
+    // merge position (so a matching prev record is not reported Ended) but emit nothing. The
+    // result is naturally in canonical region order.
     p.contact_events_back.clear();
     const auto emit_contact = [&](const Impl::ContactRecord& r, ContactPhase phase) {
         ContactEvent e;
@@ -778,12 +1002,17 @@ void PhysicsWorld::step(float dt) {
         e.b = r.b;
         e.point = r.point;
         e.normal = r.normal;
-        // An Ended pair exchanged nothing this tick; its record is last tick's, so ignore its
+        // An Ended region exchanged nothing this tick; its record is last tick's, so ignore its
         // stored impulses and report zero.
         e.normal_impulse = phase == ContactPhase::Ended ? 0.0f : r.normal_impulse;
         e.tangent_impulse = phase == ContactPhase::Ended ? 0.0f : r.tangent_impulse;
         e.phase = phase;
+        e.child_a = static_cast<std::uint16_t>(r.children >> 16);
+        e.child_b = static_cast<std::uint16_t>(r.children & 0xFFFFu);
         p.contact_events_back.push_back(e);
+    };
+    const auto record_less = [](const Impl::ContactRecord& x, const Impl::ContactRecord& y) {
+        return x.key < y.key || (x.key == y.key && x.children < y.children);
     };
     {
         const std::vector<Impl::ContactRecord>& cur = p.contact_cur;
@@ -791,12 +1020,12 @@ void PhysicsWorld::step(float dt) {
         std::size_t i = 0;
         std::size_t j = 0;
         while (i < cur.size() && j < prev.size()) {
-            if (cur[i].key < prev[j].key) {
+            if (record_less(cur[i], prev[j])) {
                 if (!cur[i].suppressed) {
                     emit_contact(cur[i], ContactPhase::Began);
                 }
                 ++i;
-            } else if (prev[j].key < cur[i].key) {
+            } else if (record_less(prev[j], cur[i])) {
                 emit_contact(prev[j], ContactPhase::Ended);
                 ++j;
             } else {
@@ -978,7 +1207,9 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
                          best_t,
                          t,
                          n,
-                         p.hull_of(p.shape[d])) &&
+                         p.hull_of(p.shape[d]),
+                         p.compound_of(p.shape[d]),
+                         p.hull_span()) &&
             t < best_t) {
             best_t = t;
             best_slot = slot;
@@ -1023,7 +1254,9 @@ void PhysicsWorld::overlap_sphere(core::Vec3 center,
                             p.shape[d],
                             p.position[d],
                             p.orientation[d],
-                            p.hull_of(p.shape[d]))) {
+                            p.hull_of(p.shape[d]),
+                            p.compound_of(p.shape[d]),
+                            p.hull_span())) {
             hits.push_back(slot);
         }
     };
@@ -1099,6 +1332,38 @@ bool PhysicsWorld::hull_info(HullId id, HullInfo& out) const {
     out.centroid = h.centroid_authored;
     out.inertia_per_mass = h.inertia_per_mass;
     out.principal_rotation = h.principal;
+    return true;
+}
+
+CompoundId PhysicsWorld::register_compound(const CompoundDesc& desc) {
+    // Validate + compose (COM, parallel-axis inertia, principal axes, re-centred child poses) in
+    // one cold pass — see build_compound (src/compound.hpp) for the rules and the math
+    // (docs/math/compound-mass-properties.md). Nothing is stored on failure, so a rejected
+    // registration leaves the world bit-identical to before the call — the register_hull posture.
+    CompoundShape compound;
+    if (!build_compound(desc.children, impl_->hull_span(), compound)) {
+        return CompoundId{}; // null id — CompoundId::is_valid() == false
+    }
+    Impl& p = *impl_;
+    const auto index = static_cast<std::uint32_t>(p.compounds.size());
+    p.compounds.push_back(std::move(compound));
+    // Generation 0 forever: the store is append-only in v1 (ADR-0028 defers unregister/refcount
+    // to the M8 pattern-lifetime brick, together with the hull's), so ids can go stale only
+    // across worlds — which compound_of() rejects by bounds, not generation.
+    return CompoundId{index, 0};
+}
+
+bool PhysicsWorld::compound_info(CompoundId id, CompoundInfo& out) const {
+    const Impl& p = *impl_;
+    if (id.index >= p.compounds.size() || id.generation != 0) {
+        return false;
+    }
+    const CompoundShape& c = p.compounds[id.index];
+    out.volume = c.volume;
+    out.centroid = c.centroid_authored;
+    out.inertia_per_mass = c.inertia_per_mass;
+    out.principal_rotation = c.principal;
+    out.child_count = static_cast<std::uint32_t>(c.child_count());
     return true;
 }
 

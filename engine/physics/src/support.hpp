@@ -73,6 +73,11 @@ support_local(const ShapeDesc& s, core::Vec3 dir, const ConvexHull* hull = nullp
             // Scan the registered vertices (hull.hpp). A null hull here is a caller bug (the
             // world never dispatches an unresolved hull); return the origin rather than crash.
             return hull != nullptr ? hull_support_local(*hull, dir) : core::Vec3{};
+        case ShapeType::Compound:
+            // A compound is NOT convex, so it has no support function and never enters GJK/EPA
+            // whole — the world always dispatches its CHILDREN (each convex) instead (M7.12,
+            // ADR-0028). Reaching here is a caller bug; return the origin rather than crash.
+            return core::Vec3{};
     }
     return core::Vec3{};
 }

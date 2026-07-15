@@ -841,8 +841,119 @@ hash across 1/2/4 workers. Green under dev + ASan/UBSan + TSan.
 
 ### Deferred (ADR-0027 names the homes)
 
-Runtime quickhull → the M8.1 cook. Compound shapes → the next shapes brick, built on `HullId`.
-Static triangle mesh + midphase → the destruction world-geometry brick. Hull unregister /
-refcounting → with compound. Two-point lying-capsule manifolds (capsule-vs-hull shares
-box-vs-capsule's single-point v1) → with that path's upgrade. Hill-climbing support functions →
-measured-need (ADR-0026's register).
+Runtime quickhull → the M8.1 cook. ~~Compound shapes → the next shapes brick, built on `HullId`~~
+(landed — M7.12, next section). Static triangle mesh + midphase → the destruction world-geometry
+brick. Hull unregister / refcounting → with the M8 pattern-lifetime brick (ADR-0028 moved it out
+of the compound brick, alongside compound unregister). Two-point lying-capsule manifolds
+(capsule-vs-hull shares box-vs-capsule's single-point v1) → with that path's upgrade.
+Hill-climbing support functions → measured-need (ADR-0026's register).
+
+## Compound shapes (M7.12)
+
+An intact destructible is ONE rigid body whose collision shape is *several* convex parts — the
+fracture cells, each a primitive or a hull at a local pose — that detach into separate bodies when
+it breaks. ADR-0026 called the compound a hard M8 requirement; ADR-0027 named it the next brick,
+built directly on `HullId`. M7.12 lands it, static and dynamic. The storage + contact-model
+decisions have their own ADR ([ADR-0028](../adr/0028-compound-shapes.md)); this section is the
+systems tour.
+
+### Storage and mass: the hull playbook, applied again
+
+A compound is variable-length data, so it gets the hull answer verbatim: register the child list
+once (`register_compound(children)` → a small `CompoundId`), reference it from `ShapeDesc` by id,
+keep the internals private (`src/compound.hpp`), append-only ids, reject-never-repair validation
+(1–256 children; no nested compounds in v1 — flatten-at-register is the deferred home; hull ids
+must resolve in this world). Mass properties come out by **composition** under uniform density
+(one material across a destructible's cells): mass fractions from child volumes, COM as their
+weighted average, and the inertia tensor as each child's own diagonal *rotated* into the compound
+frame (`R·diag·Rᵀ`, composing the hull's principal rotation for hull children) plus the
+**parallel-axis** shift `|d|²E − d·dᵀ`, summed and then diagonalized by the same fixed-sweep
+Jacobi as hulls. Two half-boxes compose to the *exact* closed form of the one big box they union
+into — the test that pins the theorem. Derivation:
+[`docs/math/compound-mass-properties.md`](../math/compound-mass-properties.md). Child poses are
+**re-centred on the combined COM** at registration, so "a body's `position` IS its COM" holds for
+compounds by construction — and because hull children were themselves re-centred at *their*
+registration (ADR-0027), a child's COM is simply its authored position. Compounds are also the
+promised honest home for deliberate COM offsets: author a single child 5 m off origin and the
+body still simulates about its true COM, with the shift reported via `CompoundInfo::centroid`.
+
+### The multi-region contact model (the hard part)
+
+Everything through M7.11 assumed **one manifold per body pair** — one ≤4-point cache entry keyed
+`(slot_a, slot_b)`, one event lifecycle per pair. A compound breaks that *physically*: a
+dumbbell-shaped compound standing on the floor touches in two places a metre apart, and no single
+4-point patch can hold both feet down — the solver would support one foot and the body would tip
+over it. The standing dumbbell is therefore the brick's headline structural proof: its COM is over
+the *gap* between its feet (no single convex box can even have that property), so it stands **iff**
+the pair carries one manifold per touching child.
+
+The model (ADR-0028 weighs the alternative): **narrowphase expansion**. The broadphase still holds
+ONE proxy per body — a compound's proxy bounds the union of its posed children, so the
+proxy↔body 1:1 model, the CCD proxy sweep, the refit, and both query descents are untouched. When
+a candidate pair involves a compound, `build_contacts` fans it out into child-vs-child sub-pairs
+(a plain body counts as one child) in **fixed lexicographic order**, culls each by the children's
+world AABBs (the v1 midphase — brute force is right at fracture-cell counts; a child BVH is the
+measured-need follow-up), and runs the *existing* per-convex-shape routine on each posed child
+pair — a child is always convex, so nothing new collides. Each touching child pair emits its own
+manifold tagged `child_a`/`child_b`, and the manifold list's canonical order simply extends
+lexicographically by those indices: determinism by construction, no sorting.
+
+Downstream, the audit of "the pair's manifold" becoming plural:
+
+- **Solver, unchanged**: a constraint references the *parent* bodies' dense indices plus
+  world-space points — a rigidly-attached child's contact just has its lever arm measured from
+  the parent COM, which is what rigid attachment *means*. Several manifolds per pair are several
+  constraints; PGS never knew pairs were unique.
+- **Islands, unchanged**: union(a, b) per constraint is idempotent — a two-region pair unions the
+  same two parent bodies twice, harmlessly.
+- **Warm-start cache, region-keyed**: the key widens to (pair, child_a, child_b) — widened, not
+  hashed together, because a hash collision would silently cross-wire two regions' impulses.
+  Plain pairs are region (0, 0) and behave bit-identically to M7.3–M7.11. Feature ids
+  additionally fold in the child indices (only for pairs involving a compound — plain id spaces
+  stay untouched), so two children touching the same shape through identical child-local features
+  still carry distinct ids.
+- **Events, per region**: `ContactEvent` gains `child_a`/`child_b` and the began/persisted/ended
+  merge keys on (pair, children). Per-region is the deliberate M8 choice: damage must name WHICH
+  part took the impulse — that is the cell fracture detaches; per-pair totals are recoverable by
+  summing, the reverse is not. A compound sliding across the floor may Begin/End individual
+  regions while the bodies stay touching — more events, each deterministic and each individually
+  meaningful to damage.
+- **CCD, per child**: a compound is not convex and has no single support function, so speculative
+  contacts run per sub-pair (child bounds swept by `v·dt` for the cull, mirroring the proxy
+  sweep). A 100 m/s bullet is arrested at a thin two-panel compound wall exactly as at a simple
+  one; M7.10's angular-sweep limits are inherited unchanged.
+- **Queries iterate children**: raycast keeps the nearest child hit (fixed scan, strict `<` —
+  ties keep the lowest child index), so a ray down the dumbbell's gap correctly misses even
+  though it pierces the union AABB; `overlap_sphere` ORs the children.
+
+### Determinism, unchanged
+
+Child enumeration, cache keys, folded feature ids, and the event merge are all pure functions of
+registration-fixed indices in fixed orders; the cache map is still never iterated. The proof is
+the usual one — a compound scene (two dumbbells, a stack, hull debris, a faller) stepped 300×
+hashes bit-identically sequentially and on 1/2/4 workers.
+
+### Proofs
+
+`tests/physics/compound_test.cpp`, pure CPU, all through the public seam: registration
+**validation** (empty list / nested compound / unresolvable hull child / volumeless child /
+degenerate orientation all rejected); **mass composition** pinned to closed form (two half-boxes
+== one big box, exactly the parallel-axis theorem at work, through both the primitive and
+hull-child branches); **COM re-centring** (a single-child compound authored 5 m off origin falls
+straight and rests at the bare primitive's height); the **standing dumbbell** (COM over the gap:
+rests upright, sleeps, and `compute_contacts` reports exactly two manifolds with distinct child
+indices — the multi-region witness); its **negative control** (an overhung compound whose COM
+clears the union footprint tips decisively — the stability proof is not the solver gluing);
+**per-region warm starting** (`contacts_warm_started_last` ≥ 4 at rest) and **island merging**
+onto a dynamic compound; **events naming the child hit** (a ball dropped on foot 1 reports
+`child_a == 1`, Began→Persisted — the M8 damage signal); **queries** at analytic distances (foot
+hit at 4.75 m, gap miss, overlap foot-vs-gap); **CCD arrest** at a compound wall; and the
+determinism hash across 1/2/4 workers. Green under dev + ASan/UBSan + TSan.
+
+### Deferred (ADR-0028 names the homes)
+
+Nested compounds → flatten-at-register, if the M8 cook wants authored nesting. Child BVH midphase
+→ the first measured compound hot spot. Compound & hull unregister/refcounting → the M8
+pattern-lifetime brick. ECS `Collider` compound field → asset-level shape identity from the M8
+cook. Per-child materials → the M8 material system. Compound CCD by conservative advancement →
+with M7.10's own deferral.

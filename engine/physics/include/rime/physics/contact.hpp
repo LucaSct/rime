@@ -39,6 +39,12 @@
 //  - `normal_impulse` / `tangent_impulse` are that warm-start storage. M7.3 zeroes them (there is
 //    no solver yet); from M7.4 they hold the impulses accumulated by the last solve, matched
 //    across frames by feature id.
+//  - Since M7.12 (compound shapes, ADR-0028) a body pair may carry SEVERAL manifolds — one per
+//    touching pair of compound children (a dumbbell-shaped compound standing on the floor touches
+//    in two places; no single 4-point patch can hold both feet down). `child_a`/`child_b` name the
+//    contact region: the index of the compound child on each side, 0 for a non-compound body. The
+//    manifold list stays canonically ordered — by pair as before, then by (child_a, child_b)
+//    within a pair — and a non-compound world still gets exactly one manifold per pair, unchanged.
 namespace rime::physics {
 
 struct ContactPoint {
@@ -55,7 +61,9 @@ struct Manifold {
     BodyId b;
     core::Vec3 normal{0.0f, 1.0f, 0.0f}; // unit, points from `a` toward `b`
     ContactPoint points[4];              // only the first `count` entries are meaningful
-    std::uint8_t count = 0; // 0 never leaves the narrowphase (no-contact = no manifold)
+    std::uint8_t count = 0;    // 0 never leaves the narrowphase (no-contact = no manifold)
+    std::uint16_t child_a = 0; // compound child index on each side (M7.12) — which part of a
+    std::uint16_t child_b = 0; // compound this contact region belongs to; 0 for a plain body
 };
 
 } // namespace rime::physics
