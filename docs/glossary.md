@@ -307,6 +307,11 @@ Entries are grouped roughly by area and kept short on purpose.
   the cook, roughly the shared area); an *anchor* is a part pinned to the world (a wall's
   base). Damage removes bonds; a **connectivity solve** (union-find over the live bonds)
   finds parts no longer connected to any anchor — those detach and fall.
+- **Body swap (fracture transition).** How a Rime destructible actually breaks (ADR-0029 §2):
+  registered compound shapes are immutable, so a damaged wall can't lose a child in place —
+  instead its body is *replaced*: destroy it, re-register the anchored remainder as a fresh
+  compound, and spawn each unsupported island as a new dynamic body. Placed by one COM recipe
+  so nothing visibly moves on the swap tick.
 - **Health transition.** A destructible part moving between health states; transitions
   can trigger effects, debris, sound, or gameplay (Frostbite term).
 - **Debris.** A physics body spawned when part(s) detach from a destructible on fracture —
