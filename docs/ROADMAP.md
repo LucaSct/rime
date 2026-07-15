@@ -452,6 +452,20 @@ destructibles + connectivity, precomputed fracture, debris as real physics bodie
 `10-destructible-wall`. *Inspired by: Frostbite (Battlefield 6) — see
 [engine-survey.md](research/engine-survey.md).*
 
+*Bricks (planned 2026-07-15, bottom-up — refreshed against the shipped M7 substrate;
+[ADR-0029](adr/0029-destruction-model.md) is the model):* **M8.0** the destruction-model ADR
+(this) · **M8.1** the **fracture cook** (Rust) — seeded Voronoi → convex part hulls + bond/anchor
+graph + render meshes, a new `Destructible` asset (quickhull lands here) · **M8.2** `engine/destruction`
+runtime — load a pattern, register it once, stand an instance as one static compound (costs ≈ static
+baseline) · **M8.3** **damage → connectivity → detach** (the hard core: contact-impulse + explicit
+damage, union-find support solve, the fracture body-swap; determinism across worker counts) · **M8.4**
+**health-transition fan-out** — a generic `EventChannel<T>` + a VFX dust stub + the `engine/audio` null
+seam · **M8.5** **lifetime** — debris budgets over `WorldStats` + the physics `unregister_hull/compound`
+· **M8.6** the proof — `samples/10-destructible-wall` (a wall fractures on impact, debris settles, one
+event fires) headless-self-checking in CI. Two small **physics** seam additions are M8-owned:
+`RayHit::child` (M8.3) and hull/compound `unregister` (M8.5). Proofs stay structural/headless on
+lavapipe; the damage→fracture path is deterministic (the M11 replay contract).
+
 **M9 — Editor v1 (Rust).** `tools/editor` — a **client of a live engine process**
 ([ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md)): the Rust shell owns docking,
 reflection-driven inspectors, and the asset browser; the **engine renders the viewport** and
