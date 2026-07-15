@@ -102,6 +102,26 @@ struct ClipChannelV1 {
 
 static_assert(sizeof(ClipChannelV1) == 16, "v1 clip channel record must stay four packed u32s");
 
+// The v1 cooked-destructible per-part record, reflected for the same reason the records above are:
+// so the destructible schema fingerprint is *derived* from the layout the reader walks (ADR-0024,
+// decision 4). It is the fixed table unit — a part's COM (the compound child translation, and the
+// pivot its hull vertices are stored relative to), its world-frame AABB, its volume, and the three
+// counts that slice the geometry blobs that follow the table (vertices, then face-counts, then
+// face-indices). Those blobs — and the bond/anchor tables — are structure the header sizes, not
+// fingerprinted (exactly as mesh vertices past the vertex record are not; a corrupt one is caught
+// by the reader's bounds checks, and a degenerate hull by register_hull). A mixed-width record like
+// SkeletonJointV1, so it carries padding — inert, because compute_type_hash ignores offsets and the
+// wire is written field by field.
+struct DestructiblePartV1 {
+    float cx, cy, cz;               // COM in the destructible frame
+    float min_x, min_y, min_z;      // AABB min (destructible frame, not COM-centred)
+    float max_x, max_y, max_z;      // AABB max
+    float volume;                   // m³
+    std::uint32_t vertex_count;     // COM-centred hull vertices for this part
+    std::uint32_t face_count;       // faces (each 3..16 verts)
+    std::uint32_t face_index_count; // concatenated face-vertex indices
+};
+
 } // namespace rime::assets::detail
 
 // Registration is at global scope (the macro opens namespace rime::core to specialize its traits).
@@ -182,6 +202,22 @@ RIME_REFLECT_FIELD(interp)
 RIME_REFLECT_FIELD(key_count)
 RIME_REFLECT_END()
 
+RIME_REFLECT_BEGIN(rime::assets::detail::DestructiblePartV1)
+RIME_REFLECT_FIELD(cx)
+RIME_REFLECT_FIELD(cy)
+RIME_REFLECT_FIELD(cz)
+RIME_REFLECT_FIELD(min_x)
+RIME_REFLECT_FIELD(min_y)
+RIME_REFLECT_FIELD(min_z)
+RIME_REFLECT_FIELD(max_x)
+RIME_REFLECT_FIELD(max_y)
+RIME_REFLECT_FIELD(max_z)
+RIME_REFLECT_FIELD(volume)
+RIME_REFLECT_FIELD(vertex_count)
+RIME_REFLECT_FIELD(face_count)
+RIME_REFLECT_FIELD(face_index_count)
+RIME_REFLECT_END()
+
 namespace rime::assets {
 
 std::string_view to_string(AssetError error) noexcept {
@@ -213,6 +249,9 @@ std::string_view to_string(AssetError error) noexcept {
         case AssetError::InvalidClip:
             return "invalid clip (bad channel path/interp, non-monotonic times, or a non-finite "
                    "value)";
+        case AssetError::InvalidDestructible:
+            return "invalid destructible (inconsistent counts, out-of-range index, bad face size, "
+                   "or a non-finite value)";
         case AssetError::Io:
             return "I/O error";
     }
@@ -845,6 +884,182 @@ read_clip(std::span<const std::byte> file, AssetError& out_error, AssetId* out_i
         *out_id = content_hash(payload);
     }
     return decode_clip(payload, out_error);
+}
+
+std::uint64_t destructible_schema_hash() noexcept {
+    return core::reflect<detail::DestructiblePartV1>().type_hash;
+}
+
+std::optional<DestructibleAsset> decode_destructible(std::span<const std::byte> payload,
+                                                     AssetError& out_error) noexcept {
+    core::ByteReader reader(payload);
+
+    std::uint32_t part_count = 0;
+    std::uint32_t bond_count = 0;
+    std::uint32_t anchor_count = 0;
+    std::uint32_t total_verts = 0;
+    std::uint32_t total_face_counts = 0;
+    std::uint32_t total_face_indices = 0;
+    if (!reader.u32(part_count) || !reader.u32(bond_count) || !reader.u32(anchor_count) ||
+        !reader.u32(total_verts) || !reader.u32(total_face_counts) ||
+        !reader.u32(total_face_indices)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+    // A destructible has at least one part; the ceiling is a corrupt-count guard (it is far above
+    // any sane fracture and well under a runaway allocation). The runtime enforces the compound
+    // child cap (ADR-0028) when it instances the pattern; the asset format itself is not
+    // artificially limited.
+    constexpr std::uint32_t kMaxParts = 65536;
+    if (part_count == 0 || part_count > kMaxParts) {
+        out_error = AssetError::InvalidDestructible;
+        return std::nullopt;
+    }
+
+    DestructibleAsset asset;
+    if (!reader.f32(asset.half_extents.x) || !reader.f32(asset.half_extents.y) ||
+        !reader.f32(asset.half_extents.z) || !reader.f32(asset.damage_threshold) ||
+        !reader.f32(asset.damage_scale)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+
+    // The remaining payload must be EXACTLY the tables + blobs the counts imply, so no count is
+    // trusted past the bytes present (the decode_mesh/skeleton discipline) before anything is
+    // sized.
+    constexpr std::uint64_t kPartRecordBytes = (3 + 3 + 3 + 1) * 4 + 3 * 4; // 52
+    const std::uint64_t expected =
+        std::uint64_t{part_count} * kPartRecordBytes + std::uint64_t{total_verts} * 12 +
+        std::uint64_t{total_face_counts} * 4 + std::uint64_t{total_face_indices} * 4 +
+        std::uint64_t{bond_count} * 12 + std::uint64_t{anchor_count} * 4;
+    if (reader.remaining() != expected) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+
+    // Part table: the fixed records, accumulating the declared blob sizes so the per-part counts
+    // can be confirmed to sum to the header totals (the blob distribution below relies on it).
+    asset.parts.resize(part_count);
+
+    struct Counts {
+        std::uint32_t v;
+        std::uint32_t fc;
+        std::uint32_t fi;
+    };
+
+    std::vector<Counts> counts(part_count);
+    std::uint64_t sum_v = 0;
+    std::uint64_t sum_fc = 0;
+    std::uint64_t sum_fi = 0;
+    for (std::uint32_t i = 0; i < part_count; ++i) {
+        DestructiblePart& part = asset.parts[i];
+        const bool r = reader.f32(part.com.x) && reader.f32(part.com.y) && reader.f32(part.com.z) &&
+                       reader.f32(part.aabb_min.x) && reader.f32(part.aabb_min.y) &&
+                       reader.f32(part.aabb_min.z) && reader.f32(part.aabb_max.x) &&
+                       reader.f32(part.aabb_max.y) && reader.f32(part.aabb_max.z) &&
+                       reader.f32(part.volume) && reader.u32(counts[i].v) &&
+                       reader.u32(counts[i].fc) && reader.u32(counts[i].fi);
+        if (!r) {
+            out_error = AssetError::Truncated; // unreachable after the size check; kept for safety
+            return std::nullopt;
+        }
+        // A part is at least a tetrahedron (≥4 verts, ≥4 faces, ≥3 indices per face) with a
+        // positive, finite volume and COM. The exact face-index sum is checked once face_counts are
+        // read below.
+        const bool finite = std::isfinite(part.volume) && std::isfinite(part.com.x) &&
+                            std::isfinite(part.com.y) && std::isfinite(part.com.z);
+        if (counts[i].v < 4 || counts[i].fc < 4 || counts[i].fi < std::uint64_t{counts[i].fc} * 3 ||
+            !finite || part.volume <= 0.0f) {
+            out_error = AssetError::InvalidDestructible;
+            return std::nullopt;
+        }
+        sum_v += counts[i].v;
+        sum_fc += counts[i].fc;
+        sum_fi += counts[i].fi;
+    }
+    if (sum_v != total_verts || sum_fc != total_face_counts || sum_fi != total_face_indices) {
+        out_error = AssetError::InvalidDestructible;
+        return std::nullopt;
+    }
+
+    // Geometry blobs, distributed into each part in the same order the cooker concatenated them:
+    // all vertices, then all face-counts, then all face-indices.
+    for (std::uint32_t i = 0; i < part_count; ++i) {
+        asset.parts[i].vertices.resize(counts[i].v);
+        for (core::Vec3& v : asset.parts[i].vertices) {
+            if (!(reader.f32(v.x) && reader.f32(v.y) && reader.f32(v.z)) || !std::isfinite(v.x) ||
+                !std::isfinite(v.y) || !std::isfinite(v.z)) {
+                out_error = AssetError::InvalidDestructible;
+                return std::nullopt;
+            }
+        }
+    }
+    for (std::uint32_t i = 0; i < part_count; ++i) {
+        asset.parts[i].face_counts.resize(counts[i].fc);
+        std::uint64_t face_index_sum = 0;
+        for (std::uint32_t& c : asset.parts[i].face_counts) {
+            if (!reader.u32(c) || c < 3 || c > 16) { // the hull face-vertex cap (register_hull)
+                out_error = AssetError::InvalidDestructible;
+                return std::nullopt;
+            }
+            face_index_sum += c;
+        }
+        if (face_index_sum != counts[i].fi) {
+            out_error = AssetError::InvalidDestructible;
+            return std::nullopt;
+        }
+    }
+    for (std::uint32_t i = 0; i < part_count; ++i) {
+        asset.parts[i].face_indices.resize(counts[i].fi);
+        for (std::uint32_t& ix : asset.parts[i].face_indices) {
+            if (!reader.u32(ix) || ix >= counts[i].v) { // an index must name a real vertex
+                out_error = AssetError::InvalidDestructible;
+                return std::nullopt;
+            }
+        }
+    }
+
+    // Bonds: a canonical a < b pair of real parts with a finite strength.
+    asset.bonds.resize(bond_count);
+    for (DestructibleBond& b : asset.bonds) {
+        if (!(reader.u32(b.a) && reader.u32(b.b) && reader.f32(b.strength)) || b.a >= b.b ||
+            b.b >= part_count || !std::isfinite(b.strength)) {
+            out_error = AssetError::InvalidDestructible;
+            return std::nullopt;
+        }
+    }
+    // Anchors: each names a real part.
+    asset.anchors.resize(anchor_count);
+    for (std::uint32_t& a : asset.anchors) {
+        if (!reader.u32(a) || a >= part_count) {
+            out_error = AssetError::InvalidDestructible;
+            return std::nullopt;
+        }
+    }
+
+    return asset;
+}
+
+std::optional<DestructibleAsset> read_destructible(std::span<const std::byte> file,
+                                                   AssetError& out_error,
+                                                   AssetId* out_id) noexcept {
+    std::span<const std::byte> payload;
+    const std::optional<CookedHeader> header = read_header(file, payload, out_error);
+    if (!header) {
+        return std::nullopt;
+    }
+    if (header->kind != AssetKind::Destructible) {
+        out_error = AssetError::WrongKind;
+        return std::nullopt;
+    }
+    if (header->type_schema_hash != destructible_schema_hash()) {
+        out_error = AssetError::SchemaMismatch;
+        return std::nullopt;
+    }
+    if (out_id != nullptr) {
+        *out_id = content_hash(payload);
+    }
+    return decode_destructible(payload, out_error);
 }
 
 } // namespace rime::assets

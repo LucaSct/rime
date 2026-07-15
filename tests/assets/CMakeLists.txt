@@ -10,6 +10,7 @@ rime_add_test(rime_assets_tests
     cooked_material_test.cpp
     cooked_skeleton_test.cpp
     cooked_clip_test.cpp
+    cooked_destructible_test.cpp
     manifest_test.cpp
     registry_test.cpp
     fixture_test.cpp
@@ -18,9 +19,12 @@ rime_add_test(rime_assets_tests
 
 # rime::assets is the module under test. rime::platform is linked because registry_test writes a
 # temporary cooked file through platform::write_file (the registry's own file I/O is already inside
-# the assets library, PRIVATE).
+# the assets library, PRIVATE). rime::physics is the M8.1 cross-language ORACLE
+# (cooked_destructible_test): every cooked fracture part is registered into a real PhysicsWorld, so
+# the runtime's hull validator gates the cook. Physics has no asset dependency, so this test-only
+# link stays one-directional (assets → physics, never the reverse).
 target_link_libraries(rime_assets_tests
-    PRIVATE rime::assets rime::platform)
+    PRIVATE rime::assets rime::platform rime::physics)
 
 # fixture_test.cpp reads the checked-in RMA1 fixture that the Rust cooker produced (the M6.2
 # cross-language proof). Hand it the fixtures directory as a string. CMake emits forward slashes even

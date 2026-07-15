@@ -257,3 +257,22 @@ fn skinned_import_reorders_joints_parent_first_and_maps_clip_targets() {
         .iter()
         .any(|c| c.target_joint == 1 && c.path == ChannelPath::Rotation));
 }
+
+#[test]
+fn wall_fractures_to_the_committed_fixture_bytes() {
+    // The M8.1 cross-language drift alarm (mirrors the mesh/skeleton ones above): the committed
+    // wall.rdest is what the C++ assets test reads — and registers, part by part, into a real
+    // PhysicsWorld. If the fracture cook's format or Voronoi partition ever changes, this fails until
+    // the fixture is regenerated deliberately (`rime fracture --size 2 1.5 0.3 --parts 16 --seed
+    // 12648430 --out tests/assets/fixtures --name wall`; 12648430 == 0xC0FFEE).
+    use asset_pipeline::fracture::{fracture_box, FractureConfig};
+    let committed = std::fs::read(fixtures().join("wall.rdest")).unwrap();
+    let cooked = fracture_box(&FractureConfig::wall([1.0, 0.75, 0.15], 16, 0xC0FFEE))
+        .unwrap()
+        .cook()
+        .0;
+    assert_eq!(
+        cooked, committed,
+        "fracture cook diverged from the committed fixture — regenerate it deliberately"
+    );
+}
