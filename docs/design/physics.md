@@ -6,7 +6,10 @@ derivations live separately in [`docs/math/rigid-body-dynamics.md`](../math/rigi
 this note covers the *systems* reasoning — data layout, algorithms, and the trade-offs behind them.
 
 Current coverage: the world seam and body pool (M7.1), the broadphase (M7.2), the narrowphase
-(M7.3), the impulse solver (M7.4). Islands and the parallel step (M7.5) will extend it next.
+(M7.3), the impulse solver (M7.4), islands + sleeping + the parallel step (M7.5), ECS change
+detection & sync (M7.6), scene queries & impulses (M7.7), contact & sleep events (M7.9),
+continuous collision (M7.10), convex hulls (M7.11), compound shapes (M7.12), and the WorldStats
+instrument panel + debris-scale stress harness (M7.13).
 
 ## Why an own core
 
@@ -957,3 +960,84 @@ Nested compounds → flatten-at-register, if the M8 cook wants authored nesting.
 pattern-lifetime brick. ECS `Collider` compound field → asset-level shape identity from the M8
 cook. Per-child materials → the M8 material system. Compound CCD by conservative advancement →
 with M7.10's own deferral.
+
+## Instrumentation & the debris-scale stress harness (M7.13)
+
+Everything through M7.12 was built *measure-first* on principle — the broadphase's private tree, the
+compound midphase, CCD's angular term — each deferred with the same clause: *until the numbers ask
+for it*. M7.13 builds the instrument that produces those numbers, and the load that exercises it.
+This is the M7 capstone: not a new capability, but the ability to **see** what the core does under
+a real destruction-scale load, so the M8 work (and any future solver optimization) is driven by
+measurement rather than guesswork.
+
+### WorldStats: the instrument panel, as deterministic counts
+
+`PhysicsWorld::stats()` returns a `WorldStats` snapshot of what the most recent `step()` did: the
+body population by motion type (and the awake/asleep split of the dynamics — the tick's *real* solve
+load, since a sleeping pile costs nothing), the collision load (broadphase candidate pairs, confirmed
+manifolds, total contact points, warm-start hits), and the island structure (count, active count,
+and the largest island — the serial tail of the parallel solve). It is filled in the sequential tail
+of `step()`, stage 9, as a **pure read** of state the tick already computed: one `O(bodies)` pass
+plus the `O(manifolds)`/`O(islands)` walks it already makes. So it costs effectively nothing and
+needs no gating flag.
+
+The deliberate choice is what WorldStats is *not*: it holds no timings. Every field is a **count**,
+a pure function of the inputs — identical run to run and, crucially, for any worker-thread count
+(the [M7.5](#islands-sleeping--the-parallel-step-m75) determinism thesis, now extended over the
+stats). Putting a clock in `step()` would break that — wall time is machine-dependent and would make
+the tick non-reproducible. Timing is the *caller's* job, measured around `step()` from outside, where
+it belongs. This is what makes WorldStats a **measurement instrument** rather than a profiler: it
+answers "how much work, and is the scene converging?", not "how many nanoseconds". `islands_last()`
+and `contacts_warm_started_last()`, the two single-value witnesses that predate the struct, now read
+straight out of it — one source of truth.
+
+### The stress harness: what a debris load actually costs
+
+`samples/09-physics-playground --stress [N]` is the load. It drops `N` unit boxes (default 1000)
+onto a floor as a grid of independent short stacks, steps the pile on the job system for a fixed
+budget, and reads WorldStats each tick to report the **peak** collision and island load alongside
+wall-clock **throughput** (body-steps/second) — the harness times the step loop itself, exactly the
+split above. It is opt-in, so the default M7 "done when" self-check stays fast for CI; the
+correctness it proves at scale is separately gated by the test suite (below).
+
+Two honest findings fell out of building it, both worth recording because both are exactly what a
+measure-first tool is for:
+
+- **Cost is dominated by the every-tick narrowphase, not the solver.** A resting pile re-runs
+  broadphase *and* the full GJK/EPA/clip narrowphase over its contacts every tick — sleeping skips
+  integration and the solve, but not collision detection. So throughput is roughly flat in the
+  awake fraction and set by the manifold count, not the iteration count. This is the number that
+  points at the first real optimization target (a contact midphase / narrowphase cache, ADR-0027's
+  deferred midphase), and now it is *measured*, not assumed.
+- **A small residual jitters below the sleep threshold.** With zero damping, ~25 stacks (a roughly
+  constant count, independent of `N`) sit in a low-energy limit cycle just above the sleep velocity
+  and never deactivate — a known sequential-impulse characteristic (finite iterations leave a hair
+  of residual energy in a tall stack). A touch of linear/angular damping on the debris — which real
+  debris has as air drag — bleeds it, and the whole pile crosses the threshold and sleeps. The
+  harness surfaced the effect; the scene models the fix rather than hiding it behind a loosened
+  check.
+
+The headline the harness *asserts*, at any scale, is the one that must never regress: two
+independent runs of the same scene hash bit-identically (`world_hash`), and every tick's WorldStats
+stream is thread-count-invariant. Determinism is not a small-scene accident — it holds at 3000
+bodies across 16 workers.
+
+### Proofs
+
+`tests/physics/stats_test.cpp`, pure CPU through the public seam: **accounting** (the motion-type
+counts partition the bodies; awake + sleeping == dynamic); **convergence** (a dropped pile ends with
+every body asleep and `active_islands == 0`, yet the resting contacts are still reported — a settled
+pile is cheap, not invisible); **load** (a stack of K is one island of K, the static floor never a
+node; resting contacts warm-start); **agreement** (`stats()` carries the same numbers as the legacy
+witnesses); and the headline — the **whole WorldStats stream is bit-identical** across sequential /
+1 / 2 / 4 workers over a 128-body multi-island pile, with the per-tick invariants checked in the act.
+The sample's `--stress` self-check adds the end-to-end proof: the pile comes to rest and two runs
+agree, reported with the live load and throughput numbers. Green under dev + ASan/UBSan + TSan.
+
+### Deferred
+
+Per-stage timing breakdown (broadphase vs narrowphase vs solve) → when the first optimization needs
+to attribute the cost; it belongs *outside* the deterministic tick, as scoped timers the harness
+reads. A confined-heap stress scene (walls, so debris piles into genuinely large connected islands
+rather than independent stacks) → when the M8 destruction load wants the large-island serial-tail
+case measured. Allocation counts in WorldStats → with the allocator-backed step (the M7.5 deferral).
