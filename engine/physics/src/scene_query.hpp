@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <span>
 #include <utility>
 
@@ -256,6 +257,10 @@ namespace rime::physics {
 // raycast child by child — nearest child hit wins, fixed ascending scan with strict '<' so an
 // exact tie keeps the lowest child index (the house determinism discipline). Children are never
 // compounds (rejected at registration), so the recursion below is exactly one level deep.
+//
+// `child_out` (M8.3, RayHit::child): on a hit, receives the compound child index the ray pierced —
+// 0 for every non-compound shape, matching the ContactEvent::child_a/child_b convention. Optional
+// so the CCD/internal callers that don't care pay nothing.
 [[nodiscard]] inline bool ray_vs_shape(const ShapeDesc& s,
                                        core::Vec3 pos,
                                        const core::Quat& q,
@@ -266,7 +271,11 @@ namespace rime::physics {
                                        core::Vec3& n_out,
                                        const ConvexHull* hull = nullptr,
                                        const CompoundShape* compound = nullptr,
-                                       std::span<const ConvexHull> hulls = {}) noexcept {
+                                       std::span<const ConvexHull> hulls = {},
+                                       std::uint16_t* child_out = nullptr) noexcept {
+    if (child_out != nullptr) {
+        *child_out = 0; // non-compound shapes ARE child 0 (the ContactEvent convention)
+    }
     switch (s.type) {
         case ShapeType::Sphere:
             return ray_vs_sphere(pos, s.radius, o, dir, tmax, t_out, n_out);
@@ -282,6 +291,7 @@ namespace rime::physics {
             }
             float best = tmax;
             bool hit = false;
+            std::size_t best_child = 0;
             for (std::size_t i = 0; i < compound->child_count(); ++i) {
                 const core::Vec3 cp = compound_child_world_pos(*compound, i, pos, q);
                 const core::Quat cq = compound_child_world_orient(*compound, i, q);
@@ -300,11 +310,17 @@ namespace rime::physics {
                     t < best) {
                     best = t;
                     n_out = n;
+                    best_child = i;
                     hit = true;
                 }
             }
             if (hit) {
                 t_out = best;
+                if (child_out != nullptr) {
+                    // Child count is capped at 256 ≪ 65536, so the index always fits the 16 bits
+                    // it travels in everywhere else (events, manifolds).
+                    *child_out = static_cast<std::uint16_t>(best_child);
+                }
             }
             return hit;
         }
