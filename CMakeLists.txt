@@ -289,6 +289,7 @@ add_subdirectory(engine/rhi)      # Render Hardware Interface + Vulkan backend (
 add_subdirectory(engine/ecs)      # the data-oriented world: entities, components, systems (M4)
 add_subdirectory(engine/physics)  # own rigid-body core: bodies, collision, queries (M7, ADR-0026)
 add_subdirectory(engine/assets)   # cooked-asset loading: RMA1 reader, registry, manifest (M6)
+add_subdirectory(engine/destruction) # part-based destruction: patterns, instances, fracture (M8, ADR-0029)
 add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
 add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
