@@ -11,7 +11,8 @@
 # is a removable feature module (guardrail 2): the engine still builds with it gone.
 
 add_library(rime_destruction STATIC
-    src/world.cpp)
+    src/world.cpp
+    src/damage.cpp)
 
 # Namespaced alias so dependents link `rime::destruction`, matching our C++ namespace.
 add_library(rime::destruction ALIAS rime_destruction)
