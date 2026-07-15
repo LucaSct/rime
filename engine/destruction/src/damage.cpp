@@ -201,28 +201,57 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
     }
     inst.child_to_part = remainder; // rows = the standing part ids, ascending (ADR-0029 §4)
 
-    // ---- Islands become dynamic debris bodies, in canonical order. One part → a hull body;
-    // several → a runtime dynamic compound (decision ratified: an island keeps its shape — the
-    // Frostbite look — rather than shattering into loose parts).
-    for (const std::vector<std::uint32_t>& island : islands) {
+    // ---- The detached groups: the unsupported ISLANDS (computed above from the standing parts),
+    // plus every part KILLED this tick — ADR-0029 §2's "the part that just died detaches as a hull
+    // body carrying the killing impulse". A killed part is already alive == 0 here (stage 2 set
+    // it), and it died THIS tick (not in a prior fracture) iff an APPLIED op of this update names
+    // it: an op only applies to a part that still stood when it ran, so a now-dead target must have
+    // fallen in this very update. Each killed part is its own single-part group. Islands and killed
+    // parts are disjoint sets of parts (killed ⇒ alive 0 and excluded from the union-find; islands
+    // are alive), so ordering the merged list by smallest member is a strict total order — the
+    // canonical debris creation order that makes the roster reproducible.
+    std::vector<std::vector<std::uint32_t>> groups = std::move(islands);
+    {
+        std::vector<std::uint8_t> killed_this_tick(n, 0);
+        for (const DamageOp& op : ops) {
+            if (op.applied && op.instance == instance_index && inst.alive[op.part] == 0) {
+                killed_this_tick[op.part] = 1;
+            }
+        }
+        for (std::uint32_t p = 0; p < n; ++p) {
+            if (killed_this_tick[p] != 0) {
+                groups.push_back({p});
+            }
+        }
+    }
+    std::sort(groups.begin(),
+              groups.end(),
+              [](const std::vector<std::uint32_t>& x,
+                 const std::vector<std::uint32_t>& y) noexcept { return x.front() < y.front(); });
+
+    // ---- Each group becomes a dynamic debris body, in that canonical order. One part → a hull
+    // body (a killed chunk, or a lone orphaned part); several → a runtime dynamic compound
+    // (decision ratified: a multi-part island keeps its shape — the Frostbite look — rather than
+    // shattering into loose parts).
+    for (const std::vector<std::uint32_t>& group : groups) {
         float volume = 0.0f;
-        for (const std::uint32_t p : island) {
-            inst.alive[p] = 0; // the part leaves the wall; its health freezes as it detaches
+        for (const std::uint32_t p : group) {
+            inst.alive[p] = 0; // the part leaves the wall (a killed part already is; harmless)
             volume += pat.part_volume[p];
         }
 
         physics::BodyDesc desc;
         desc.motion = physics::MotionType::Dynamic;
         desc.mass = kDebrisDensity * volume;
-        core::Vec3 com_local{0.0f, 0.0f, 0.0f}; // island COM in the destructible frame
-        if (island.size() == 1) {
+        core::Vec3 com_local{0.0f, 0.0f, 0.0f}; // group COM in the destructible frame
+        if (group.size() == 1) {
             desc.shape.type = physics::ShapeType::ConvexHull;
-            desc.shape.hull = pat.hulls[island[0]];
-            com_local = pat.part_com[island[0]];
+            desc.shape.hull = pat.hulls[group[0]];
+            com_local = pat.part_com[group[0]];
         } else {
             std::vector<physics::CompoundChildDesc> children;
-            children.reserve(island.size());
-            for (const std::uint32_t p : island) {
+            children.reserve(group.size());
+            for (const std::uint32_t p : group) {
                 physics::ShapeDesc shape;
                 shape.type = physics::ShapeType::ConvexHull;
                 shape.hull = pat.hulls[p];
@@ -240,7 +269,7 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
             desc.shape.compound = comp;
             com_local = info.centroid;
         }
-        // Same placement recipe as the remainder: position IS the island's COM, carried through
+        // Same placement recipe as the remainder: position IS the group's COM, carried through
         // the instance placement, so on its birth tick the debris sits exactly where its parts
         // stood — no detach-tick pop, no first-tick interpenetration.
         desc.position = core::transform_point(inst.placement, com_local);
@@ -251,15 +280,17 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
         desc.angular_velocity = parent_state.angular_velocity;
         const physics::BodyId body = world.create_body(desc);
 
-        // The damage that freed this island kicks it off: every APPLIED op whose target part is a
-        // member, applied in the canonical op order. An op whose part died outright spent itself
-        // eroding material (the killed part is rubble, not a body, in v1 — the crumble look is
-        // m8.4's VFX), so a lone killed part transfers no phantom momentum.
+        // The damage that freed this group kicks it off: every APPLIED op whose target part is a
+        // member, applied in the canonical op order. A killed part carries the very impulse that
+        // destroyed it (ADR-0029 §2 — the struck chunk flies off), and an orphaned island carries
+        // whatever ops struck its members; either way the push is the accumulated applied impulse,
+        // so momentum is conserved and never doubled (an op landing on already-dead rubble has
+        // applied == false and is skipped).
         for (const DamageOp& op : ops) {
             if (!op.applied || op.instance != instance_index) {
                 continue;
             }
-            if (!std::binary_search(island.begin(), island.end(), op.part)) {
+            if (!std::binary_search(group.begin(), group.end(), op.part)) {
                 continue;
             }
             if (op.central) {
@@ -273,8 +304,8 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
         rec.body = body;
         rec.instance = instance_index;
         rec.first_part = static_cast<std::uint32_t>(debris_part_pool.size());
-        rec.part_count = static_cast<std::uint32_t>(island.size());
-        debris_part_pool.insert(debris_part_pool.end(), island.begin(), island.end());
+        rec.part_count = static_cast<std::uint32_t>(group.size());
+        debris_part_pool.insert(debris_part_pool.end(), group.begin(), group.end());
         debris.push_back(rec);
     }
 }

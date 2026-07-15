@@ -88,8 +88,9 @@ public:
     // determinism rule). `amount` is health damage at the blast centre, fading LINEARLY to zero at
     // `radius` (v1's falloff, measured against each cooked part AABB carried through the instance
     // placement); `impulse` is the world-space push (kg·m/s, also falloff-scaled) a part carries
-    // into the debris body it detaches with — parts that stay standing, or erode entirely, absorb
-    // theirs. An unknown/stale instance is a safe no-op.
+    // into the debris body it leaves with — whether it detaches as an orphaned island or is struck
+    // dead outright (a killed part flies off as its own chunk, ADR-0029 §2); a part left standing
+    // absorbs its share. An unknown/stale instance is a safe no-op.
     void apply_damage(InstanceId instance,
                       core::Vec3 point,
                       float radius,
@@ -129,10 +130,11 @@ public:
     [[nodiscard]] std::uint32_t instance_part_count(InstanceId instance) const noexcept;
 
     // Per-part runtime state. `part_alive` means "still standing in the instance's compound":
-    // false once the part ERODED (health hit zero — the material is gone; the crumble visual is
-    // m8.4's) or DETACHED as debris (it left the wall; its identity lives on in the debris roster
-    // below, and its health freezes at the value it detached with). False / 0 for an unknown
-    // instance or part index.
+    // false once the part LEFT the wall — either struck dead (health hit zero, so it flies off as
+    // its own debris chunk carrying the killing impulse, ADR-0029 §2) or DETACHED as an orphaned
+    // island. Its identity lives on in the debris roster below; a killed part's health reads 0, a
+    // detached part's freezes at the value it left with. False / 0 for an unknown instance or part
+    // index.
     [[nodiscard]] bool part_alive(InstanceId instance, std::uint32_t part) const noexcept;
     [[nodiscard]] float part_health(InstanceId instance, std::uint32_t part) const noexcept;
 

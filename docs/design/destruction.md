@@ -160,15 +160,18 @@ same tick's blasts in permuted arrival orders and demands identical hashes.
 
 ### The support solve: union-find from the anchors
 
-When a part's health reaches zero it **erodes** (`alive = 0` — the material is gone; the crumble
-visual is m8.4's dust), and its instance is marked dirty. Per dirty instance, a **union-find**
+When a part's health reaches zero it is **killed** (`alive = 0`) and its instance is marked dirty;
+a killed part leaves the wall as its own debris chunk (the body swap, below). Per dirty instance, a
+**union-find**
 (disjoint-set) pass runs over the *live* bond graph — a bond holds only while both endpoints still
 stand — seeded from the still-standing anchors. Union-find is made deterministic by one rule: a
 component's representative is its **smallest part id** (unite attaches the larger root under the
 smaller), so the partition is a pure function of the alive bits and the cooked bond list. One
 ascending scan then splits the standing parts into the anchored **remainder** (ids ascending —
 which *is* the next child→part table, ADR-0029 §4) and the unsupported **islands**, grouped by
-root and ordered by smallest member: the canonical debris creation order. v1 deliberately re-solves
+root. The islands plus each part killed outright this tick (each a single-part group, ADR-0029 §2)
+are the **detached groups**; sorted by smallest member — they are disjoint, so that is a strict
+total order — they give the canonical debris creation order. v1 deliberately re-solves
 the whole instance rather than solving incrementally — see the numbers below for why that is the
 right trade.
 
@@ -176,8 +179,8 @@ right trade.
 
 A registered compound is immutable (ADR-0028), so fracture **replaces** the standing body
 (ADR-0029 §2): destroy it, `register_compound` the remainder, stand a fresh static body; each
-island becomes a dynamic body (one part → its hull, several → a runtime dynamic compound — islands
-keep their shape, the Frostbite look). The placement recipe is the whole trick:
+detached group becomes a dynamic body (one part → its hull, several → a runtime dynamic compound —
+a multi-part island keeps its shape, the Frostbite look). The placement recipe is the whole trick:
 `register_compound` re-centres child poses on the subset's combined COM, so the new body goes at
 **`placement ∘ centroid`** with children authored at their cooked COMs — which lands every part
 exactly where it stood before the swap. `spawn()` uses the same recipe for the intact body, so
@@ -185,12 +188,15 @@ intact and post-fracture placement are one invariant, proven by raycasting the s
 and after a break (translated *and* rotated placements) and by checking a newborn debris body
 sits at its part's pre-break `part_placement`. Debris inherit the parent's motion at their new COM
 (`v + ω × r` — zeros for today's static walls, written generally) plus the damage impulses that
-actually eroded their member parts, applied in canonical op order. An op that *killed* its part
-outright spent itself on rubble: a directly-killed part does not become a body in v1, so its
-impulse transfers no phantom momentum.
+struck their member parts, applied in canonical op order. A directly-killed part flies off as its
+own single-part chunk carrying the very impulse that felled it (ADR-0029 §2 — the struck piece
+leaves the wall); an orphaned island carries whatever ops hit its members. Either way the push is
+the accumulated applied impulse, so momentum is conserved and never doubled (an op landing on
+already-dead rubble is skipped).
 
 Dead parts must stop colliding, so the swap runs whenever the **membership changed** (any death),
-not only when an island detached — a shot hole in a wall is a real hole the next raycast misses.
+not only when an island detached — a shot hole in a wall is a real hole: the rebuilt compound no
+longer occludes there (the freed chunk, born in place, is a separate body that tumbles away).
 A tick of mere resting contacts changes nothing and swaps nothing. The old compound (and hull)
 ids are deliberately leaked: the stores are append-only until m8.5's `unregister`
 (ADR-0027/0028's recorded deferral).
@@ -228,7 +234,7 @@ drift-watching.
 - **Damage to detached debris** — deferred entirely to m8.5 (with lifetime/budgets): debris bodies
   are not in the body→instance table, so contacts on them are ignored. Keeping v1's deterministic
   core small won over "single-part debris splits" from the kickoff notes.
-- **Wake-on-swap**: a *sleeping* body resting against a wall whose part vanishes under it is not
+- **Wake-on-swap**: a *sleeping* body resting against a wall whose part is destroyed under it is not
   explicitly woken (it would hang mid-air until touched). No M8.3 scenario hits it; the honest
   fix (wake bodies overlapping the swapped body's bounds, in canonical order) belongs with m8.5's
   lifetime policy.

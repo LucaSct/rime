@@ -80,8 +80,9 @@ struct DestructionWorld::Impl {
         core::Vec3 impulse{0.0f, 0.0f, 0.0f};
         core::Vec3 point{0.0f, 0.0f, 0.0f};
         bool central = false;
-        // Set when the op actually eroded a then-standing part. Only applied ops kick debris: an
-        // op that arrived after its part was already gone spent itself on rubble.
+        // Set when the op actually damaged a then-standing part. Only applied ops kick debris (a
+        // killed part flies off with the very impulse that felled it, ADR-0029 §2); an op that
+        // landed after its part was already gone is spent, and never doubles a chunk's momentum.
         bool applied = false;
     };
 

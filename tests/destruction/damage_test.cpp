@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -130,6 +131,20 @@ debris_compositions(const destruction::DestructionWorld& dw) {
     return out;
 }
 
+// The index of the debris body whose composition contains `part`, or SIZE_MAX. Since the true-up
+// (ADR-0029 §2) a directly-killed part detaches as its own debris body alongside any orphaned
+// island, so a test that knows a part left names its piece by that part rather than by a fixed
+// roster slot — robust to the canonical-but-shifted creation order.
+std::size_t debris_with_part(const destruction::DestructionWorld& dw, std::uint32_t part) {
+    for (std::size_t i = 0; i < dw.debris_count(); ++i) {
+        const auto parts = dw.debris_parts(i);
+        if (std::find(parts.begin(), parts.end(), part) != parts.end()) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
 } // namespace
 
 TEST_CASE("M8.3 paper fixture: kill a support ⇒ exactly the expected island detaches") {
@@ -150,21 +165,25 @@ TEST_CASE("M8.3 paper fixture: kill a support ⇒ exactly the expected island de
     dw.apply_damage(inst, core::Vec3{-0.25f, 0.25f, 0.0f}, 0.2f, 10.0f, core::Vec3{});
     dw.update(pw);
 
-    // Part 0 eroded; part 2 (its dependant) detached; 1 and 3 still stand.
+    // Part 0 killed (now its own debris); part 2 (its dependant) detached as an island; 1, 3 stand.
     CHECK_FALSE(dw.part_alive(inst, 0));
-    CHECK(dw.part_health(inst, 0) == doctest::Approx(0.0f)); // eroded: health spent
+    CHECK(dw.part_health(inst, 0) == doctest::Approx(0.0f)); // killed: health spent
     CHECK_FALSE(dw.part_alive(inst, 2));
     CHECK(dw.part_health(inst, 2) == doctest::Approx(1.0f)); // detached: health frozen intact
     CHECK(dw.part_alive(inst, 1));
     CHECK(dw.part_alive(inst, 3));
 
-    // Exactly one island, and it is exactly {2} — composition, not just a count.
-    REQUIRE(dw.debris_count() == 1);
-    const auto island = dw.debris_parts(0);
-    REQUIRE(island.size() == 1);
-    CHECK(island[0] == 2);
+    // Two debris, canonical order by smallest member: the struck part 0 flew off as its own hull
+    // body (ADR-0029 §2), then its dependant 2 detached as an island. Compositions, not counts.
+    REQUIRE(dw.debris_count() == 2);
+    REQUIRE(dw.debris_parts(0).size() == 1);
+    CHECK(dw.debris_parts(0)[0] == 0);
+    REQUIRE(dw.debris_parts(1).size() == 1);
+    CHECK(dw.debris_parts(1)[0] == 2);
     CHECK(dw.debris_source(0) == inst);
+    CHECK(dw.debris_source(1) == inst);
     CHECK(pw.is_alive(dw.debris_body(0)));
+    CHECK(pw.is_alive(dw.debris_body(1)));
 
     // The body swap happened: a NEW static body stands for the remainder {1, 3}, and the child →
     // part remap is those ids in ascending order (ADR-0029 §4).
@@ -176,23 +195,23 @@ TEST_CASE("M8.3 paper fixture: kill a support ⇒ exactly the expected island de
     CHECK(dw.part_from_child(inst, 1) == 3);
     CHECK(dw.part_from_child(inst, 2) == destruction::kInvalidPartIndex);
 
-    // The island is a real dynamic body: step and it falls; the anchored remainder does not.
+    // The island {2} is a real dynamic body: step and it falls; the anchored remainder does not.
     physics::BodyState before{};
-    REQUIRE(pw.get_body_state(dw.debris_body(0), before));
+    REQUIRE(pw.get_body_state(dw.debris_body(1), before));
     for (int i = 0; i < 30; ++i) {
         pw.step(kDt);
         dw.update(pw);
     }
     physics::BodyState after{};
-    REQUIRE(pw.get_body_state(dw.debris_body(0), after));
+    REQUIRE(pw.get_body_state(dw.debris_body(1), after));
     CHECK(after.position.y < before.position.y - 0.05f); // fell
     CHECK(pw.is_alive(dw.body_of(inst)));                // the wall stump still stands
 
     CHECK(dw.state_hash() != hash_before); // the fingerprint saw all of it
 }
 
-TEST_CASE(
-    "M8.3 paper fixture: kill a non-critical part ⇒ nothing detaches (but the hole is real)") {
+TEST_CASE("M8.3 paper fixture: kill a non-critical part ⇒ only the struck chunk leaves, no island "
+          "(and the hole is real)") {
     const assets::DestructibleAsset asset = make_grid(2, 2, {0.25f, 0.25f, 0.15f}, 1000.0f, 1.0f);
     destruction::DestructionWorld dw;
     physics::PhysicsWorld pw;
@@ -208,17 +227,52 @@ TEST_CASE(
     dw.apply_damage(inst, part3_com, 0.2f, 10.0f, core::Vec3{});
     dw.update(pw);
 
-    CHECK(dw.debris_count() == 0); // nothing detached…
+    // The struck part left the wall as its OWN debris body (ADR-0029 §2) — but it stranded nobody,
+    // so there is no *island*: parts 0, 1, 2 stand untouched.
+    REQUIRE(dw.debris_count() == 1);
+    CHECK(dw.debris_parts(0).size() == 1);
+    CHECK(dw.debris_parts(0)[0] == 3);
     CHECK_FALSE(dw.part_alive(inst, 3));
     CHECK(dw.part_alive(inst, 0));
     CHECK(dw.part_alive(inst, 1));
     CHECK(dw.part_alive(inst, 2));
-    // …but the eroded part left a real hole: the same ray now sails through where 3 stood (the
-    // swap rebuilt the compound without it — a dead part must stop colliding, or every "hole" in
-    // a wall would be a ghost).
+    // …and it left a real hole in the WALL: the rebuilt remainder compound no longer occludes where
+    // part 3 stood (a departed part must stop colliding, or every "hole" would be a ghost). The
+    // freed chunk is born in place (the no-pop invariant) and — carrying no impulse — simply rests
+    // there on its old neighbour, so the ray still meets a body; but that body is the loose debris,
+    // never the standing wall.
+    const physics::BodyId wall = dw.body_of(inst);
     physics::RayHit post;
-    CHECK_FALSE(
-        pw.raycast(physics::Ray{{part3_com.x, part3_com.y, 5.0f}, {0.0f, 0.0f, -1.0f}}, post));
+    REQUIRE(pw.raycast(physics::Ray{{part3_com.x, part3_com.y, 5.0f}, {0.0f, 0.0f, -1.0f}}, post));
+    CHECK(post.body != wall);
+    CHECK(post.body == dw.debris_body(0));
+}
+
+TEST_CASE("M8.3: a directly-killed part flies off carrying its killing impulse (ADR-0029 §2)") {
+    // The true-up's core behaviour: killing a part with a push does not just erase it — the freed
+    // chunk leaves along that push. Part 3 (top-right, non-critical) is killed by an op whose
+    // impulse points +X; its debris body must depart in +X, from rest (a static wall imparts none).
+    const assets::DestructibleAsset asset = make_grid(2, 2, {0.25f, 0.25f, 0.15f}, 1000.0f, 1.0f);
+    destruction::DestructionWorld dw;
+    physics::PhysicsWorld pw;
+    const destruction::PatternId pattern = dw.register_pattern(asset, pw);
+    const destruction::InstanceId inst = dw.spawn(pattern, core::Transform{}, pw);
+
+    // A point blast at part 3's COM with a strong +X push; radius 0.2 keeps it to part 3 alone.
+    dw.apply_damage(
+        inst, core::Vec3{0.25f, 0.75f, 0.0f}, 0.2f, 10.0f, core::Vec3{500.0f, 0.0f, 0.0f});
+    dw.update(pw);
+
+    // Part 3 left as its own debris body, launched in +X by the impulse that killed it — read the
+    // birth velocity directly (no step yet, so gravity has not entered).
+    const std::size_t d3 = debris_with_part(dw, 3);
+    REQUIRE(d3 != SIZE_MAX);
+    REQUIRE(dw.debris_parts(d3).size() == 1);
+    physics::BodyState born{};
+    REQUIRE(pw.get_body_state(dw.debris_body(d3), born));
+    CHECK(born.linear_velocity.x > 5.0f); // carried the +X killing impulse, not zero
+    CHECK(std::abs(born.linear_velocity.y) < born.linear_velocity.x); // dominantly along the push
+    CHECK(std::abs(born.linear_velocity.z) < born.linear_velocity.x);
 }
 
 TEST_CASE("M8.3 paper fixture: a multi-part island detaches as ONE dynamic compound") {
@@ -233,18 +287,25 @@ TEST_CASE("M8.3 paper fixture: a multi-part island detaches as ONE dynamic compo
     dw.apply_damage(inst, core::Vec3{0.0f, 0.25f, 0.0f}, 0.2f, 10.0f, core::Vec3{});
     dw.update(pw);
 
-    REQUIRE(dw.debris_count() == 1); // one island, not two loose parts
-    const auto island = dw.debris_parts(0);
+    // Two debris (canonical order by smallest member): the killed anchor 0 as its own hull body,
+    // then {1, 2} riding off TOGETHER as one dynamic compound (the ratified decision: an island
+    // keeps its shape — the Frostbite look — not two loose parts).
+    REQUIRE(dw.debris_count() == 2);
+    CHECK(dw.debris_parts(0).size() == 1);
+    CHECK(dw.debris_parts(0)[0] == 0);
+    const auto island = dw.debris_parts(1);
     REQUIRE(island.size() == 2);
     CHECK(island[0] == 1);
     CHECK(island[1] == 2);
     CHECK_FALSE(dw.body_of(inst).is_valid()); // no anchored part left ⇒ nothing stands
     CHECK(dw.part_from_child(inst, 0) == destruction::kInvalidPartIndex);
 
-    // The two parts ride one rigid body: after a fall, their relative arrangement is intact
-    // (nothing to assert per-part without render leaves — the ONE body id is the statement).
+    // Both are real dynamic bodies; {1, 2} ride ONE rigid body (that single body id is the
+    // statement — no render leaves to assert per-part arrangement).
     CHECK(pw.is_alive(dw.debris_body(0)));
-    CHECK(pw.body_count() == 1); // the island body is the only body left standing for this wall
+    CHECK(pw.is_alive(dw.debris_body(1)));
+    CHECK(pw.body_count() ==
+          2); // the killed chunk {0} + the island compound {1, 2}; nothing stands
 }
 
 TEST_CASE("M8.3: damage on one instance never leaks to another instance of the same pattern") {
@@ -262,8 +323,9 @@ TEST_CASE("M8.3: damage on one instance never leaks to another instance of the s
     dw.apply_damage(b, core::Vec3{5.0f - 0.25f, 0.25f, 0.0f}, 0.2f, 10.0f, core::Vec3{});
     dw.update(pw);
 
-    CHECK(dw.debris_count() == 1);
+    CHECK(dw.debris_count() == 2); // the killed part 0 and the orphaned island {2}, both from b
     CHECK(dw.debris_source(0) == b);
+    CHECK(dw.debris_source(1) == b);
     for (std::uint32_t p = 0; p < 4; ++p) {
         CHECK(dw.part_alive(a, p)); // instance A untouched — per-instance state, shared pattern
     }
@@ -298,9 +360,14 @@ TEST_CASE("M8.3 no-pop: surfaces stay put across the body swap") {
         inst, place.translation + core::Vec3{0.0f, 0.75f, 0.0f}, 0.2f, 10.0f, core::Vec3{});
     dw.update(pw);
 
-    REQUIRE(dw.debris_count() == 1);
-    REQUIRE(dw.debris_parts(0).size() == 1);
-    CHECK(dw.debris_parts(0)[0] == 7);
+    // Two debris: the killed part 4 flew off, and part 7 (which it supported) detached above the
+    // hole. The {7} island's birth spot is the no-pop witness.
+    REQUIRE(dw.debris_count() == 2);
+    REQUIRE(debris_with_part(dw, 4) != SIZE_MAX); // the struck part is its own debris now
+    const std::size_t d7 = debris_with_part(dw, 7);
+    REQUIRE(d7 != SIZE_MAX);
+    REQUIRE(dw.debris_parts(d7).size() == 1);
+    CHECK(dw.debris_parts(d7)[0] == 7);
 
     // (a) The surviving wall presents the identical surface: same ray, same face height, and the
     // child → part remap still names part 6 through the NEW body.
@@ -311,19 +378,22 @@ TEST_CASE("M8.3 no-pop: surfaces stay put across the body swap") {
     CHECK(post.point.y == doctest::Approx(pre.point.y).epsilon(1e-4));
     CHECK(post.distance == doctest::Approx(pre.distance).epsilon(1e-4));
 
-    // (b) The debris body is born exactly at its part's pre-break placement (position IS the
+    // (b) The {7} debris body is born exactly at its part's pre-break placement (position IS the
     // part's COM — the hull was cooked COM-centred), with no step in between to blur it.
     physics::BodyState debris_state{};
-    REQUIRE(pw.get_body_state(dw.debris_body(0), debris_state));
+    REQUIRE(pw.get_body_state(dw.debris_body(d7), debris_state));
     CHECK(debris_state.position.x == doctest::Approx(part7_before.x).epsilon(1e-4));
     CHECK(debris_state.position.y == doctest::Approx(part7_before.y).epsilon(1e-4));
     CHECK(debris_state.position.z == doctest::Approx(part7_before.z).epsilon(1e-4));
 
-    // (c) A ray at the killed part's old spot passes clean through the hole.
+    // (c) A ray at the killed part's old spot no longer meets the WALL: the rebuilt remainder has
+    // the hole. (The freed {4} chunk, born in place with no impulse, rests there on its neighbour,
+    // so the ray still finds a body — the loose debris, never the standing wall.)
+    const core::Vec3 hole_origin = place.translation + core::Vec3{0.0f, 0.75f, 5.0f};
     physics::RayHit hole;
-    CHECK_FALSE(pw.raycast(
-        physics::Ray{place.translation + core::Vec3{0.0f, 0.75f, 5.0f}, {0.0f, 0.0f, -1.0f}},
-        hole));
+    if (pw.raycast(physics::Ray{hole_origin, {0.0f, 0.0f, -1.0f}}, hole)) {
+        CHECK(hole.body != dw.body_of(inst));
+    }
 }
 
 TEST_CASE("M8.3 no-pop under rotation: the COM recipe survives a rotated placement") {
@@ -347,11 +417,13 @@ TEST_CASE("M8.3 no-pop under rotation: the COM recipe survives a rotated placeme
                     core::Vec3{});
     dw.update(pw);
 
-    REQUIRE(dw.debris_count() == 1);
-    CHECK(dw.debris_parts(0)[0] == 7);
-    // Debris born at the rotated part placement; the standing part 6 still reports the same spot.
+    REQUIRE(dw.debris_count() == 2); // the killed part 4 and the orphaned island {7}
+    const std::size_t d7 = debris_with_part(dw, 7);
+    REQUIRE(d7 != SIZE_MAX);
+    CHECK(dw.debris_parts(d7)[0] == 7);
+    // {7} born at the rotated part placement; the standing part 6 still reports the same spot.
     physics::BodyState debris_state{};
-    REQUIRE(pw.get_body_state(dw.debris_body(0), debris_state));
+    REQUIRE(pw.get_body_state(dw.debris_body(d7), debris_state));
     CHECK(debris_state.position.x == doctest::Approx(part7_before.x).epsilon(1e-4));
     CHECK(debris_state.position.y == doctest::Approx(part7_before.y).epsilon(1e-4));
     CHECK(debris_state.position.z == doctest::Approx(part7_before.z).epsilon(1e-4));
@@ -394,10 +466,13 @@ TEST_CASE("M8.3 contact-driven: a CCD marble breaks the panel it hits — and no
         dw.update(pw);
         if (!saw_break && dw.debris_count() > 0) {
             saw_break = true;
-            // No detach-tick pop: the newborn debris sits where its part stood (the update that
-            // created it just ran; nothing has stepped it yet).
+            // No detach-tick pop: the newborn {7} island sits where its part stood (the update that
+            // created it just ran; nothing has stepped it yet). Part 4 is killed the same tick and
+            // flies off with the arrest impulse, so name the {7} piece explicitly.
+            const std::size_t d7 = debris_with_part(dw, 7);
+            REQUIRE(d7 != SIZE_MAX);
             physics::BodyState born{};
-            REQUIRE(pw.get_body_state(dw.debris_body(0), born));
+            REQUIRE(pw.get_body_state(dw.debris_body(d7), born));
             CHECK(born.position.x == doctest::Approx(part7_before.x).epsilon(1e-3));
             CHECK(born.position.y == doctest::Approx(part7_before.y).epsilon(1e-3));
             CHECK(born.position.z == doctest::Approx(part7_before.z).epsilon(1e-3));
@@ -405,31 +480,36 @@ TEST_CASE("M8.3 contact-driven: a CCD marble breaks the panel it hits — and no
     }
     REQUIRE(saw_break);
 
-    // The struck part eroded; its column-mate above detached as exactly {7}; both neighbour
-    // columns stand whole. (Part 1 — the stump under the fall — is deliberately not pinned: the
-    // slab landing on its own column may erode it further, which is physics, not leakage.)
+    // The struck part 4 was killed — now its own flying debris (ADR-0029 §2) — and its column-mate
+    // 7 detached above it; both neighbour columns stand whole. (Part 1 — the stump under the fall —
+    // is deliberately not pinned: the slab landing on its own column may erode it further, which is
+    // physics, not leakage; and further landings can spawn more debris, so debris_count is a lower
+    // bound.)
     CHECK_FALSE(dw.part_alive(inst, 4));
     CHECK(dw.part_health(inst, 4) == doctest::Approx(0.0f));
-    REQUIRE(dw.debris_count() == 1);
-    REQUIRE(dw.debris_parts(0).size() == 1);
-    CHECK(dw.debris_parts(0)[0] == 7);
+    REQUIRE(dw.debris_count() >= 2);
+    REQUIRE(debris_with_part(dw, 4) != SIZE_MAX); // the struck chunk flew off
+    REQUIRE(debris_with_part(dw, 7) != SIZE_MAX); // its dependant detached
     for (const std::uint32_t p : {0u, 2u, 3u, 5u, 6u, 8u}) {
         CHECK(dw.part_alive(inst, p));
     }
 
     // Sanity: nothing exploded — every body is still "in the room", on or above the ground. The
-    // bounds are deliberately roomy: the slab lands on the spent marble and can squirt it metres
-    // across the floor (physical slapstick, not a solver blow-up — the settle proof below is the
-    // real "nothing is diverging" statement).
+    // bounds are deliberately roomy: the killed chunk flies off with the full arrest impulse, and
+    // the slab lands on the spent marble and can squirt it metres across the floor (physical
+    // slapstick, not a solver blow-up — the settle proof below is the real "nothing is diverging"
+    // statement).
     const auto sane = [&](physics::BodyId id) {
         physics::BodyState s{};
         REQUIRE(pw.get_body_state(id, s));
         CHECK(s.position.y > -1.0f);
         CHECK(s.position.y < 10.0f);
-        CHECK(std::abs(s.position.x) < 25.0f);
-        CHECK(std::abs(s.position.z) < 25.0f);
+        CHECK(std::abs(s.position.x) < 50.0f);
+        CHECK(std::abs(s.position.z) < 50.0f);
     };
-    sane(dw.debris_body(0));
+    for (std::size_t i = 0; i < dw.debris_count(); ++i) {
+        sane(dw.debris_body(i));
+    }
     sane(bullet);
 
     // And the world settles: run until everything sleeps, then the hash is stable tick over tick
@@ -590,11 +670,11 @@ TEST_CASE("M8.3: unknown ids, dead parts, and empty updates are all safe no-ops"
     dw.apply_damage(inst, {-0.25f, 0.25f, 0.0f}, 0.2f, 1000.0f, {}); // …twice
     dw.update(pw);
     CHECK(dw.part_health(inst, 0) == doctest::Approx(0.0f)); // clamped, not −1998
-    CHECK(dw.debris_count() == 1);
+    CHECK(dw.debris_count() == 2); // the killed part 0 + its orphaned dependant {2}
     const std::uint64_t after_break = dw.state_hash();
     dw.update(pw); // nothing pending, no events
     CHECK(dw.state_hash() == after_break);
-    CHECK(dw.debris_count() == 1);
+    CHECK(dw.debris_count() == 2);
     // Damage aimed at the already-dead part: absorbed by rubble, nothing changes.
     dw.apply_damage(inst, {-0.25f, 0.25f, 0.0f}, 0.2f, 10.0f, {});
     dw.update(pw);
