@@ -15,6 +15,7 @@ rime_add_test(rime_physics_tests
     ccd_test.cpp
     hull_test.cpp
     compound_test.cpp
+    unregister_test.cpp
     stats_test.cpp)
 
 target_link_libraries(rime_physics_tests

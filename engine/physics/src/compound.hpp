@@ -65,15 +65,20 @@ struct CompoundShape {
     [[nodiscard]] std::size_t child_count() const noexcept { return child_shape.size(); }
 };
 
-// Resolve a child's hull reference against the world's hull store, passed as a span so this
-// header stays free of world internals. Mirrors world.cpp's hull_of: null for primitives and for
-// an unresolvable id (the store is append-only, so generation is always 0).
+// Resolve a child's hull reference against the world's hull store, passed as a span so this header
+// stays free of world internals. Null for a primitive child or an out-of-bounds index. Resolution
+// is by INDEX only — the generation is NOT re-checked here (M8.5): a registered compound holds a
+// reference on each of its child hulls, and register_hull's reject-if-referenced refuses to free a
+// hull a live compound still names, so a live compound's child index always points at exactly the
+// hull it was built against. register_compound validates children (generation + not-freed) up
+// front, where the store metadata lives; this hot-path resolver trusts that invariant and stays a
+// bounds check.
 [[nodiscard]] inline const ConvexHull*
 compound_child_hull(const ShapeDesc& s, std::span<const ConvexHull> hulls) noexcept {
     if (s.type != ShapeType::ConvexHull) {
         return nullptr;
     }
-    if (s.hull.index >= hulls.size() || s.hull.generation != 0) {
+    if (s.hull.index >= hulls.size()) {
         return nullptr;
     }
     return &hulls[s.hull.index];
