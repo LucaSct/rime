@@ -11,7 +11,9 @@
 
 #include "rime/core/hash.hpp"
 #include "rime/core/math/quat.hpp"
+#include "rime/destruction/events.hpp"
 #include "rime/destruction/world.hpp"
+#include "rime/physics/aabb.hpp"
 #include "rime/physics/events.hpp"
 #include "rime/physics/world.hpp"
 #include "world_impl.hpp"
@@ -38,15 +40,14 @@ constexpr float kDebrisDensity = 1000.0f; // kg/m³
     return std::bit_cast<std::uint32_t>(f);
 }
 
-// Distance from a world point to a part's world-space bounds: the cooked (destructible-frame)
-// part AABB is carried through the instance placement corner by corner and re-boxed — a
-// conservative axis-aligned bound of the rotated box, which is exactly the fidelity radius damage
-// wants (it is a gameplay falloff shape, not a collision query; the hull-exact test is named
-// polish, not built). Returns 0 for a point inside the bounds.
-[[nodiscard]] float distance_to_part_bounds(const core::Transform& placement,
+// The world-space AABB of a part: the cooked (destructible-frame) part box carried through the
+// instance placement corner by corner and re-boxed — a conservative axis-aligned bound of the
+// rotated box. This is the overlap set radius damage tests against AND the world_bounds every M8.4
+// event carries (ADR-0029 §7 / the M10-C2 hook — a consumer keys off where a break happened without
+// re-deriving it).
+[[nodiscard]] physics::Aabb part_world_aabb(const core::Transform& placement,
                                             core::Vec3 aabb_min,
-                                            core::Vec3 aabb_max,
-                                            core::Vec3 point) noexcept {
+                                            core::Vec3 aabb_max) noexcept {
     core::Vec3 lo{0.0f, 0.0f, 0.0f};
     core::Vec3 hi{0.0f, 0.0f, 0.0f};
     for (int corner = 0; corner < 8; ++corner) {
@@ -62,9 +63,20 @@ constexpr float kDebrisDensity = 1000.0f; // kg/m³
             hi = core::Vec3{std::max(hi.x, w.x), std::max(hi.y, w.y), std::max(hi.z, w.z)};
         }
     }
-    const core::Vec3 clamped{std::clamp(point.x, lo.x, hi.x),
-                             std::clamp(point.y, lo.y, hi.y),
-                             std::clamp(point.z, lo.z, hi.z)};
+    return physics::Aabb{lo, hi};
+}
+
+// Distance from a world point to a part's world-space bounds (the radius-damage falloff metric; a
+// gameplay falloff shape, not a collision query — the hull-exact test is named polish, not built).
+// Returns 0 for a point inside the bounds.
+[[nodiscard]] float distance_to_part_bounds(const core::Transform& placement,
+                                            core::Vec3 aabb_min,
+                                            core::Vec3 aabb_max,
+                                            core::Vec3 point) noexcept {
+    const physics::Aabb b = part_world_aabb(placement, aabb_min, aabb_max);
+    const core::Vec3 clamped{std::clamp(point.x, b.min.x, b.max.x),
+                             std::clamp(point.y, b.min.y, b.max.y),
+                             std::clamp(point.z, b.min.z, b.max.z)};
     return core::length(point - clamped);
 }
 
@@ -211,17 +223,15 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
     // are alive), so ordering the merged list by smallest member is a strict total order — the
     // canonical debris creation order that makes the roster reproducible.
     std::vector<std::vector<std::uint32_t>> groups = std::move(islands);
-    {
-        std::vector<std::uint8_t> killed_this_tick(n, 0);
-        for (const DamageOp& op : ops) {
-            if (op.applied && op.instance == instance_index && inst.alive[op.part] == 0) {
-                killed_this_tick[op.part] = 1;
-            }
+    std::vector<std::uint8_t> killed_this_tick(n, 0);
+    for (const DamageOp& op : ops) {
+        if (op.applied && op.instance == instance_index && inst.alive[op.part] == 0) {
+            killed_this_tick[op.part] = 1;
         }
-        for (std::uint32_t p = 0; p < n; ++p) {
-            if (killed_this_tick[p] != 0) {
-                groups.push_back({p});
-            }
+    }
+    for (std::uint32_t p = 0; p < n; ++p) {
+        if (killed_this_tick[p] != 0) {
+            groups.push_back({p});
         }
     }
     std::sort(groups.begin(),
@@ -286,6 +296,7 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
         // whatever ops struck its members; either way the push is the accumulated applied impulse,
         // so momentum is conserved and never doubled (an op landing on already-dead rubble has
         // applied == false and is skipped).
+        core::Vec3 kick{0.0f, 0.0f, 0.0f};
         for (const DamageOp& op : ops) {
             if (!op.applied || op.instance != instance_index) {
                 continue;
@@ -298,6 +309,30 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
             } else {
                 world.apply_impulse(body, op.impulse, op.point);
             }
+            kick = kick + op.impulse;
+        }
+
+        // A group of still-standing parts that lost support is an IslandDetached (ADR-0029 §7); a
+        // killed part's own chunk is NOT — that death already fired PartDied. The two are disjoint
+        // (killed groups are single dead parts; islands are alive parts), so the killed flag on the
+        // smallest member tells them apart. `world_bounds` is the island's world AABB; `magnitude`
+        // the net impulse it flew off with.
+        if (killed_this_tick[group.front()] == 0) {
+            physics::Aabb bounds = part_world_aabb(
+                inst.placement, pat.part_aabb_min[group.front()], pat.part_aabb_max[group.front()]);
+            for (std::size_t k = 1; k < group.size(); ++k) {
+                bounds = physics::merge(bounds,
+                                        part_world_aabb(inst.placement,
+                                                        pat.part_aabb_min[group[k]],
+                                                        pat.part_aabb_max[group[k]]));
+            }
+            DestructionEvent ev;
+            ev.kind = DestructionEventKind::IslandDetached;
+            ev.instance = InstanceId{instance_index, 0};
+            ev.body = body;
+            ev.world_bounds = bounds;
+            ev.magnitude = core::length(kick);
+            events.push(ev);
         }
 
         Debris rec;
@@ -326,6 +361,41 @@ void DestructionWorld::apply_damage(InstanceId instance,
 
 void DestructionWorld::update(physics::PhysicsWorld& world) {
     Impl& impl = *impl_;
+
+    // ================================================================================== stage 0
+    // DebrisSettled: a debris body that fell asleep in the step that just ran has come to rest
+    // (M7.9 `Slept` → ADR-0029 §7's settle signal, the hook m8.5's lifecycle hangs on). Match each
+    // Slept body against the debris roster, collect, sort by roster index, and emit in that order —
+    // so the settle stream is canonical regardless of sleep-event order. A linear roster scan per
+    // sleep event is fine at v1 debris counts; m8.5's lifetime table will give it a real index.
+    {
+        std::vector<std::size_t> settled;
+        for (const physics::SleepEvent& s : world.sleep_events()) {
+            if (s.phase != physics::SleepPhase::Slept) {
+                continue;
+            }
+            for (std::size_t d = 0; d < impl.debris.size(); ++d) {
+                if (impl.debris[d].body == s.body) {
+                    settled.push_back(d);
+                    break;
+                }
+            }
+        }
+        std::sort(settled.begin(), settled.end());
+        for (const std::size_t d : settled) {
+            const Impl::Debris& rec = impl.debris[d];
+            physics::BodyState st{};
+            (void)world.get_body_state(rec.body, st);
+            DestructionEvent ev;
+            ev.kind = DestructionEventKind::DebrisSettled;
+            ev.instance = InstanceId{rec.instance, 0};
+            ev.body = rec.body;
+            // v1 carries the settled position as a point bound; m8.5 refines it to the body's
+            // posed extent when it starts sizing the debris budget by volume.
+            ev.world_bounds = physics::Aabb{st.position, st.position};
+            impl.events.push(ev);
+        }
+    }
 
     // ================================================================================== stage 1
     // Gather this tick's damage ops in CANONICAL order (ADR-0029 §3): first the explicit ops,
@@ -414,22 +484,48 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
     }
 
     // ================================================================================== stage 2
-    // Apply the sequence. Health erodes op by op; a part reaching zero DIES (erodes) and dirties
-    // its instance. Ops that land after their part is gone are absorbed — overkill does not carry
-    // over, and their impulse is spent (op.applied stays false).
+    // Apply the sequence, and report each part's health transition exactly once. Health erodes op
+    // by op; a part reaching zero DIES (erodes) and dirties its instance. Ops that land after their
+    // part is gone are absorbed — overkill does not carry over, and their impulse is spent
+    // (op.applied stays false). Because `ops` is sorted by (instance, part, …), every op against
+    // one part is ADJACENT, so a single walk of the runs both applies the damage and emits one
+    // event per damaged part — PartDamaged if it survived the tick, PartDied if this run took it to
+    // zero — in canonical (instance, part) order.
     std::vector<std::uint32_t> dirty;
-    for (Impl::DamageOp& op : ops) {
-        Impl::Instance& inst = impl.instances[op.instance];
-        if (inst.alive[op.part] == 0) {
-            continue;
+    for (std::size_t i = 0; i < ops.size();) {
+        const std::uint32_t inst_idx = ops[i].instance;
+        const std::uint32_t part = ops[i].part;
+        Impl::Instance& inst = impl.instances[inst_idx];
+        const bool was_alive = inst.alive[part] != 0;
+        float applied_damage = 0.0f;
+        std::size_t j = i;
+        for (; j < ops.size() && ops[j].instance == inst_idx && ops[j].part == part; ++j) {
+            if (inst.alive[part] == 0) {
+                continue; // died earlier in this run — the rest of its ops are absorbed
+            }
+            inst.health[part] -= ops[j].amount;
+            ops[j].applied = true;
+            applied_damage += ops[j].amount;
+            if (inst.health[part] <= 0.0f) {
+                inst.health[part] = 0.0f;
+                inst.alive[part] = 0;
+                dirty.push_back(inst_idx);
+            }
         }
-        inst.health[op.part] -= op.amount;
-        op.applied = true;
-        if (inst.health[op.part] <= 0.0f) {
-            inst.health[op.part] = 0.0f;
-            inst.alive[op.part] = 0;
-            dirty.push_back(op.instance);
+        // A part that was already gone before this tick absorbs silently (applied_damage stays 0).
+        if (was_alive && applied_damage > 0.0f) {
+            const Impl::Pattern& pat = impl.patterns[inst.pattern.index];
+            DestructionEvent ev;
+            ev.kind = inst.alive[part] == 0 ? DestructionEventKind::PartDied
+                                            : DestructionEventKind::PartDamaged;
+            ev.instance = InstanceId{inst_idx, 0};
+            ev.part = part;
+            ev.world_bounds =
+                part_world_aabb(inst.placement, pat.part_aabb_min[part], pat.part_aabb_max[part]);
+            ev.magnitude = applied_damage;
+            impl.events.push(ev);
         }
+        i = j;
     }
 
     // ================================================================================ stage 3+4
@@ -444,6 +540,15 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
     }
 
     impl.pending_damage.clear();
+
+    // Close the event frame: everything pushed this tick (settles, damage, detachments) becomes the
+    // readable batch, and last tick's batch is cleared. A consumer that reads events() now sees
+    // this tick's stream; a quiet tick publishes an empty one (the "clean next tick" property).
+    impl.events.publish();
+}
+
+std::span<const DestructionEvent> DestructionWorld::events() const noexcept {
+    return impl_->events.view();
 }
 
 std::uint64_t DestructionWorld::state_hash() const noexcept {

@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "rime/core/containers/event_channel.hpp"
+#include "rime/destruction/events.hpp"
 #include "rime/destruction/world.hpp"
 #include "rime/physics/body.hpp"
 #include "rime/physics/shape.hpp"
@@ -113,6 +115,11 @@ struct DestructionWorld::Impl {
     std::vector<DamageCall> pending_damage;
     std::vector<Debris> debris;
     std::vector<std::uint32_t> debris_part_pool;
+
+    // The M8.4 event fan-out: update() pushes PartDamaged/PartDied/IslandDetached/DebrisSettled
+    // here and publish()es once, at the tick's end; consumers read events.view() until the next
+    // update(). Double-buffered so a consumer can hold the span across the whole post-tick fan-out.
+    core::EventChannel<DestructionEvent> events;
 
     // BodyId → instance index, for turning a contact event's body back into a destructible — a
     // SORTED vector (by body slot index) + binary search, not a hash map: lookups are log n, and
