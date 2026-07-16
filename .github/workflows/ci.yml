@@ -148,6 +148,13 @@ jobs:
       - name: Build & test (ASan + UBSan)
         env:
           ASAN_OPTIONS: detect_leaks=1
+          # The un-instrumented Vulkan loader leaks a few process-lifetime allocations inside
+          # vkCreateInstance on any GPU-touching test (lavapipe device bring-up); LeakSanitizer
+          # pins them on our create_instance frame. They can't be fixed in engine code and, because
+          # every GPU binary must come up clean in one run, they intermittently reddened this job.
+          # Suppress by owning module/entry point — a leak in our own frames still fails. Rationale
+          # and the captured stack: scripts/lsan-suppressions.txt.
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/lsan-suppressions.txt
           UBSAN_OPTIONS: print_stacktrace=1
         run: ./scripts/build.sh --cpp-only --sanitizer address
 

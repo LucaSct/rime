@@ -1,0 +1,29 @@
+# LeakSanitizer suppressions for Rime's AddressSanitizer runs — CI's sanitize-address job
+# and local `scripts/build.sh --sanitizer address`. Wired in via LSAN_OPTIONS=suppressions=…
+# from .github/workflows/ci.yml and scripts/build.sh.
+#
+# WHY THIS FILE EXISTS — third-party Vulkan-loader leaks, not ours.
+# Any GPU-touching test stands up a Vulkan device on the software ICD (lavapipe). The
+# un-instrumented Vulkan loader (libvulkan.so.1) makes a handful of small, process-lifetime
+# allocations inside vkCreateInstance that it never hands back, and LeakSanitizer pins them on
+# us because the nearest instrumented frame is our own VulkanDevice::create_instance. The stack
+# captured from CI (Ubuntu, libvulkan1 1.3.275, mesa lavapipe 25.2):
+#
+#   Direct leak of 128 byte(s) in 1 object(s) allocated from:
+#     ...
+#     #18 vkCreateInstance      (/lib/x86_64-linux-gnu/libvulkan.so.1+0x36fb1)
+#     #19 rime::rhi::VulkanDevice::create_instance  engine/rhi/src/vulkan/device_vulkan.cpp:255
+#   SUMMARY: AddressSanitizer: 240 byte(s) leaked in 3 allocation(s).
+#
+# All three allocations share the vkCreateInstance frame inside the loader, so nothing in engine
+# code can free them. They surface across every GPU-touching binary (rhi / render / stream / app
+# + samples); because all of those must come up leak-clean in a single ASan run, this
+# intermittently reddened the job — the standing CI-health flake. We suppress by the owning
+# MODULE and the loader ENTRY POINT, both narrow enough that a real leak in our own code still
+# fails the job (an engine leak's allocation stack passes through neither).
+#
+# Suppression syntax: `leak:<substring>` matches a function OR module name anywhere in a leak's
+# allocation stack. Keep this list minimal and specific — it is a mask over third-party code, and
+# every entry is a place a genuine leak could hide.
+leak:libvulkan
+leak:vkCreateInstance
