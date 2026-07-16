@@ -27,8 +27,8 @@ the systems reasoning and [ADR-0029](../../docs/adr/0029-destruction-model.md) f
 | M8.0 | the model — [ADR-0029](../../docs/adr/0029-destruction-model.md) | landed |
 | M8.1 | the **fracture cook** (Rust `tools/asset-pipeline`) + the `Destructible` RMA1 asset | landed |
 | M8.2 | **`DestructionWorld`** — register a pattern (hulls + compound), spawn static-compound instances, per-part state; the reflected `Destructible` component | landed |
-| M8.3 | **damage → connectivity → detach** — the fracture body-swap (the hard core) | next |
-| M8.4 | health-transition **event fan-out** + VFX dust stub + `engine/audio` seam | planned |
+| M8.3 | **damage → connectivity → detach** — the fracture body-swap (the hard core) | landed |
+| M8.4 | health-transition **event fan-out** (`core::EventChannel`) + VFX dust stub + `engine/audio` seam | landed |
 | M8.5 | **lifetime** — debris budgets (WorldStats) + hull/compound `unregister` | planned |
 | M8.6 | the **proof** — `samples/10-destructible-wall`, headless self-check in CI | planned |
 
@@ -46,11 +46,24 @@ every CI OS + the sanitizers with no GPU.
 ```
 engine/destruction/
 ├── include/rime/destruction/
-│   ├── world.hpp       # DestructionWorld: register_pattern, spawn, per-part state, queries
+│   ├── world.hpp       # DestructionWorld: register_pattern, spawn, damage/update, queries, events()
+│   ├── events.hpp      # the DestructionEvent stream (M8.4): PartDamaged/Died/IslandDetached/Settled
+│   ├── ids.hpp         # PatternId / InstanceId / kInvalidPartIndex (shared by world.hpp + events.hpp)
 │   └── components.hpp  # the reflected Destructible ECS component (authoring intent)
 └── src/
-    └── world.cpp       # the pImpl: pattern + instance tables (append-only in v1)
+    ├── world.cpp       # the pImpl: pattern + instance tables (append-only in v1); load, stand, bind
+    ├── damage.cpp      # damage → connectivity → the fracture body-swap, and the event fan-out
+    └── world_impl.hpp  # the shared internals (Pattern/Instance/Debris tables, the EventChannel)
 ```
+
+## Events (M8.4)
+
+`update()` publishes a canonical `DestructionEvent` stream through a `core::EventChannel`, read after
+the tick via `events()`: **PartDamaged / PartDied / IslandDetached / DebrisSettled**, each carrying a
+world-space AABB (the M10-C2 hook). It is the fan-out seam — the `engine/vfx` dust stub, the
+`engine/audio` null backend, and gameplay each read the one immutable span, none known to destruction
+(remove any and the others are byte-identical — guardrail 2). The dust's actual GPU draw + pixel proof
+land with the M8.6 sample; see [`docs/design/destruction.md`](../../docs/design/destruction.md).
 
 ## Building & testing
 

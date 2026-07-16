@@ -243,7 +243,77 @@ drift-watching.
 
 ## Event fan-out (M8.4)
 
-*(pending — the `EventChannel<T>`, the VFX dust stub, the `engine/audio` null seam.)*
+A break is interesting to more than the physics: it wants a puff of dust, a crack of sound, a score
+tick. M8.4 gives destruction a **data event stream** — never callbacks fired mid-solve — that any
+number of systems read *after* the tick, none of them known to destruction.
+
+### The channel
+
+`core::EventChannel<T>` (new, in `rime/core/containers/`) is the M7.9 pattern generalized: a producer
+`push()`es typed events, `publish()`es once at a tick boundary, and consumers read the published
+batch as a stable `view()` span until the next publish. It is **double-buffered** (two vectors,
+swapped on publish) so a consumer can hold the span across the whole post-tick fan-out while — in a
+later threaded world — the next tick already begins filling the other buffer; the swap keeps
+`publish()` O(1) and allocation-free once warm. The channel imposes **no ordering of its own** — it
+hands events back in `push()` order — precisely so it cannot perturb the producer's canonical one.
+Physics keeps its own private spans; this is the shared vocabulary for everyone above it (fx,
+lighting, audio will each instantiate their own `EventChannel<their-event>`).
+
+### The four events
+
+`DestructionWorld::update()` publishes a `DestructionEvent` stream (`rime/destruction/events.hpp`):
+
+- **PartDamaged** — a part took damage this tick and still stands (`magnitude` = health removed).
+- **PartDied** — a part's health hit zero this tick; it leaves as its own debris chunk (ADR-0029 §2).
+- **IslandDetached** — a group of *still-standing* parts lost support and broke free as one debris
+  body (`body` names it; `magnitude` = the impulse it flew off with). A killed part's own chunk is
+  **not** an IslandDetached — that death is already a PartDied, so the two never double-count (killed
+  parts are dead, islands are alive: disjoint sets).
+- **DebrisSettled** — a debris body came to rest, straight off a physics `Slept` event (M7.9 shipped
+  this for exactly this purpose). The hook m8.5's lifecycle (settle → linger → freeze) hangs on.
+
+Every payload carries a **world-space AABB** (`world_bounds`) — the M10-C2 hook: a lighting or
+culling consumer keys off *where* a break happened without re-deriving it from part ids and a
+placement it cannot see.
+
+### Order is canonical, so the stream is replay-stable
+
+Emission order is fixed: settle events first (from the step that just ran), then damage events per
+part in ascending id (the stage-2 op runs are already sorted by `(instance, part)`), then detachments
+per island in creation order (smallest member first). No unordered container touches the path. So the
+event stream is a pure function of the tick's inputs, exactly like the fracture it narrates — the M11
+replay contract, extended to the fan-out. A quiet tick publishes an empty frame (the channel is clean
+every tick that broke nothing).
+
+### The consumers (and why they're removable)
+
+Three listeners read the one immutable span, none aware of the others:
+
+- **VFX dust** (`engine/vfx`, `DustField`) — a small, deletable CPU particle field: a PartDied /
+  IslandDetached blooms a puff filling the event's `world_bounds`, which then drifts and fades. It is
+  a *stub* in the honest sense (track fx1 replaces the whole module); it is capped at a fixed budget
+  and fully deterministic, so it unit-tests with no device.
+- **Audio** (`engine/audio`, `AudioBackend` + `NullAudioBackend`) — the newborn audio seam: one call,
+  `play(sound, position, gain)`. v1 ships only the null backend, which *logs* calls instead of making
+  sound, so a headless test asserts the break played the right things. Track au1 swaps a real mixer in
+  behind the interface without touching a call site.
+- **Gameplay** — a score/tally, demonstrated in the test.
+
+Because each reads the same const span and destruction knows none of them, the fan-out is
+**guardrail-2 removable**: the test's *removability drill* runs a break with all three listeners, then
+again with VFX dropped, and asserts the audio + gameplay observations are byte-identical — no
+listener's output can depend on another being present.
+
+### What M8.4 defers, honestly
+
+The dust's **actual GPU draw** (an additive billboard pass after PBR, before tonemap) and its
+coverage-delta **pixel proof** land with the **M8.6 sample**, where a device and a render path exist —
+the same GPU-free discipline M8.2/M8.3 followed. What lives here is the *simulation* (spawn, drift,
+age, retire, capped, deterministic) and a CPU **coverage proxy** (Σ size²·alpha) that the m8.6 pass
+confirms on-screen: it jumps on a burst and decays to zero as the puff ages out. Keeping the stub
+GPU-free is deliberate — the plan's own risk note is "keep it deletable".
+
+## Lifetime & budgets (M8.5)
 
 ## Lifetime & budgets (M8.5)
 

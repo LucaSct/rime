@@ -314,6 +314,16 @@ Entries are grouped roughly by area and kept short on purpose.
   so nothing visibly moves on the swap tick.
 - **Health transition.** A destructible part moving between health states; transitions
   can trigger effects, debris, sound, or gameplay (Frostbite term).
+- **Destruction event.** What a break reports each tick as *data* (never a mid-solve callback),
+  published in a canonical, replay-stable order (M8.4, ADR-0029 §7). Four kinds: **PartDamaged**
+  (a part took damage and stands), **PartDied** (its health hit zero — it leaves as debris),
+  **IslandDetached** (a still-standing group lost support and broke free as one debris body), and
+  **DebrisSettled** (a debris body came to rest — off a physics *sleep* event). Each carries a
+  world-space AABB (the M10-C2 hook). One stream fans out to VFX, audio, and gameplay.
+- **EventChannel.** A generic double-buffered event queue (`core::EventChannel<T>`): a system
+  *pushes* typed events, *publishes* once at a tick boundary, and consumers read the published batch
+  as a stable span until the next publish. The M7.9 "events are data read after the step" pattern,
+  generalized for every producer above physics (destruction first).
 - **Debris.** A physics body spawned when part(s) detach from a destructible on fracture —
   real dynamic geometry that falls, collides, and eventually *settles* (a sleep event) so
   it can be budgeted or frozen.

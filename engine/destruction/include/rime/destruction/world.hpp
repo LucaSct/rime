@@ -8,8 +8,9 @@
 #include <span>
 
 #include "rime/assets/destructible_asset.hpp"
-#include "rime/core/containers/handle.hpp"
 #include "rime/core/math/transform.hpp"
+#include "rime/destruction/events.hpp"
+#include "rime/destruction/ids.hpp"
 #include "rime/physics/body.hpp"
 
 // The physics world is BORROWED — destruction registers geometry into it and creates the bodies
@@ -36,20 +37,8 @@ class PhysicsWorld;
 // removable (guardrail 2): nothing below it depends on it.
 namespace rime::destruction {
 
-// A registered fracture pattern's id — one per distinct destructible asset, the shape economy
-// (register once, spawn many). Append-only in v1 (unregister is m8.5), so the generation stays 0.
-struct PatternTag {};
-
-using PatternId = core::Handle<PatternTag>;
-
-// A standing instance's id. Append-only in v1 (despawn is m8.5).
-struct InstanceTag {};
-
-using InstanceId = core::Handle<InstanceTag>;
-
-// "No such part" — returned by part_from_child for an out-of-range child index. Real part ids are
-// cook order, always < the pattern's part count.
-inline constexpr std::uint32_t kInvalidPartIndex = 0xFFFFFFFFu;
+// The handle types (PatternId, InstanceId) and kInvalidPartIndex live in ids.hpp so the event
+// payloads can share them without a circular include; they are part of this seam's vocabulary.
 
 class DestructionWorld {
 public:
@@ -173,6 +162,16 @@ public:
     [[nodiscard]] physics::BodyId debris_body(std::size_t debris) const noexcept;
     [[nodiscard]] InstanceId debris_source(std::size_t debris) const noexcept;
     [[nodiscard]] std::span<const std::uint32_t> debris_parts(std::size_t debris) const noexcept;
+
+    // --- event fan-out (M8.4, ADR-0029 §7) ------------------------------------------------------
+
+    // The destruction events the most recent update() produced — PartDamaged / PartDied /
+    // IslandDetached / DebrisSettled — in a canonical, replay-stable order, as a span valid until
+    // the next update(). This is the fan-out seam: the VFX dust stub, the engine/audio null
+    // backend, and gameplay each read this one immutable span (remove any consumer and the others
+    // are byte-identical — guardrail 2). Empty after an update() that broke nothing (the channel is
+    // clean every quiet tick). See rime/destruction/events.hpp for the payload.
+    [[nodiscard]] std::span<const DestructionEvent> events() const noexcept;
 
     // A 64-bit fingerprint of ALL destruction state, in canonical order: every instance's body id,
     // per-part alive bits and health, and every debris body's identity + composition. The M8 half
