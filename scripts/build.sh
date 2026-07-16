@@ -96,6 +96,13 @@ if [ "$do_cpp" -eq 1 ]; then
     if [ "$sanitizer" = "address" ] && [ -z "${LSAN_OPTIONS:-}" ]; then
         export LSAN_OPTIONS="suppressions=$repo_root/scripts/lsan-suppressions.txt"
     fi
+    # That suppression covers the loader's DIRECT leak; lavapipe's rasterizer worker threads leak
+    # per-thread blocks during device bring-up that no leak: rule can name (their stacks are all
+    # <unknown module>). Run lavapipe single-threaded so those threads — and their leaks — never
+    # exist. Matches CI's sanitize-address job; a caller who already set LP_NUM_THREADS wins.
+    if [ "$sanitizer" = "address" ] && [ -z "${LP_NUM_THREADS:-}" ]; then
+        export LP_NUM_THREADS=0
+    fi
 
     if [ "$run_tests" -eq 1 ]; then
         say "C++: ctest"

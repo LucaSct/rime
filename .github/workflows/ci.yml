@@ -155,6 +155,12 @@ jobs:
           # Suppress by owning module/entry point — a leak in our own frames still fails. Rationale
           # and the captured stack: scripts/lsan-suppressions.txt.
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/lsan-suppressions.txt
+          # That suppression catches the loader's DIRECT leak, but lavapipe's rasterizer WORKER
+          # THREADS also leak small per-thread blocks during device bring-up (the indirect children).
+          # Their stacks are entirely <unknown module>, so no leak: rule can name them — instead we
+          # stop the threads from ever spawning: LP_NUM_THREADS=0 runs lavapipe single-threaded, so
+          # those allocations never happen, while engine-code leak detection stays fully on.
+          LP_NUM_THREADS: 0
           UBSAN_OPTIONS: print_stacktrace=1
         run: ./scripts/build.sh --cpp-only --sanitizer address
 

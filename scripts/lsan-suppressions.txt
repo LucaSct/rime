@@ -15,12 +15,15 @@
 #     #19 rime::rhi::VulkanDevice::create_instance  engine/rhi/src/vulkan/device_vulkan.cpp:255
 #   SUMMARY: AddressSanitizer: 240 byte(s) leaked in 3 allocation(s).
 #
-# All three allocations share the vkCreateInstance frame inside the loader, so nothing in engine
-# code can free them. They surface across every GPU-touching binary (rhi / render / stream / app
-# + samples); because all of those must come up leak-clean in a single ASan run, this
-# intermittently reddened the job — the standing CI-health flake. We suppress by the owning
-# MODULE and the loader ENTRY POINT, both narrow enough that a real leak in our own code still
-# fails the job (an engine leak's allocation stack passes through neither).
+# This file suppresses that DIRECT leak by the owning MODULE and the loader ENTRY POINT — both
+# narrow enough that a real leak in our own code still fails the job (an engine leak's allocation
+# stack passes through neither). The loader ALSO leaks INDIRECT child blocks (the "56 byte(s)"
+# entries above), but those are allocated on lavapipe's rasterizer WORKER THREADS with entirely
+# <unknown module> stacks — nothing a leak: rule can name. Those are handled separately, by running
+# lavapipe single-threaded (LP_NUM_THREADS=0, set in .github/workflows/ci.yml and scripts/build.sh),
+# so the worker threads — and their allocations — never exist. The two fixes together clear the
+# flake, which surfaces across every GPU-touching binary (rhi / render / stream / app + samples)
+# because all of them must come up leak-clean in one ASan run.
 #
 # Suppression syntax: `leak:<substring>` matches a function OR module name anywhere in a leak's
 # allocation stack. Keep this list minimal and specific — it is a mask over third-party code, and
