@@ -40,6 +40,28 @@ namespace rime::destruction {
 // The handle types (PatternId, InstanceId) and kInvalidPartIndex live in ids.hpp so the event
 // payloads can share them without a circular include; they are part of this seam's vocabulary.
 
+// Debris lifetime & budget knobs (M8.5, ADR-0029 §8). A default-constructed config is DISABLED, so
+// a DestructionWorld behaves exactly as it did through M8.4 — debris and re-registered remainder
+// compounds accumulate forever, state byte-for-byte unchanged — until a caller opts in. Enabled, it
+// reclaims settled debris after a linger and caps the live debris-body population, which is what
+// keeps the physics hull/compound/body stores BOUNDED under continuous refracture (it leans on the
+// M8.5 physics half: unregister_hull/unregister_compound). Everything it does is deterministic, so
+// two runs that share inputs AND this config reclaim the same bodies (the M11 replay contract).
+struct LifecycleConfig {
+    // The master switch. Off ⇒ nothing is ever reclaimed (the M8.3/8.4 append-only behaviour);
+    // on ⇒ bodies are destroyed and their owned compounds unregistered as debris age out.
+    bool enabled = false;
+
+    // How many update() ticks a debris lingers after coming to rest (a physics Slept) before it is
+    // frozen — its body destroyed, its record kept. At 60 Hz, 120 ≈ two seconds of settled rubble.
+    std::uint32_t freeze_delay_ticks = 120;
+
+    // The cap on LIVE (not-yet-frozen) debris bodies. When exceeded, settled debris are frozen
+    // early — largest-and-oldest first — until the population is back under the cap. A still-moving
+    // (unsettled) piece is never evicted, so under a burst the cap is briefly soft and catches up.
+    std::uint32_t max_live_debris = 128;
+};
+
 class DestructionWorld {
 public:
     DestructionWorld();
@@ -48,6 +70,12 @@ public:
     // Non-copyable: it owns a slice of a simulation (registered patterns, live instances).
     DestructionWorld(const DestructionWorld&) = delete;
     DestructionWorld& operator=(const DestructionWorld&) = delete;
+
+    // Install the debris lifetime & budget policy (M8.5, ADR-0029 §8). Off by default; turn it on
+    // to keep the physics stores bounded under sustained refracture (see LifecycleConfig). Takes
+    // effect from the next update(); changing it does not retroactively reclaim already-standing
+    // debris.
+    void configure_lifecycle(const LifecycleConfig& config);
 
     // Register a cooked pattern into `world` — the cold path that pays for everything spawning
     // needs: `register_hull` per part, then `register_compound` over the parts (each child the

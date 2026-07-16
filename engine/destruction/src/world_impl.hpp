@@ -52,6 +52,11 @@ struct DestructionWorld::Impl {
     struct Instance {
         PatternId pattern{};
         physics::BodyId body{};
+        // The compound the CURRENT standing body uses: the shared pattern compound at spawn, then a
+        // freshly re-registered remainder after each fracture swap. M8.5 reads it to free the
+        // PREVIOUS remainder on the next swap — but never the shared pattern compound (see
+        // damage.cpp).
+        physics::CompoundId compound{};
         core::Transform placement{};
         std::vector<float> health;
         std::vector<std::uint8_t> alive;
@@ -100,6 +105,12 @@ struct DestructionWorld::Impl {
                            std::span<const DamageOp> ops,
                            physics::PhysicsWorld& world);
 
+    // A debris body's lifetime phase (M8.5). Falling = live and moving; Settled = it came to rest
+    // (a physics Slept), now lingering; Frozen = reclaimed — body destroyed and any owned compound
+    // unregistered, the roster record kept so debris ids never shift. Only used when the lifecycle
+    // is enabled; a debris otherwise stays Falling forever (append-only, the M8.3/8.4 behaviour).
+    enum class DebrisPhase : std::uint8_t { Falling = 0, Settled = 1, Frozen = 2 };
+
     // One detached island, now a free dynamic body. Member part ids live in the shared CSR pool
     // `debris_part_pool` (rows [first_part, first_part + part_count), ascending) — flat storage so
     // the roster stays SoA-cheap however many islands a collapse produces.
@@ -108,6 +119,12 @@ struct DestructionWorld::Impl {
         std::uint32_t instance = 0;
         std::uint32_t first_part = 0;
         std::uint32_t part_count = 0;
+        // The runtime compound a MULTI-part island owns — freed when this debris is frozen (M8.5).
+        // Invalid for a single-part (k=1) hull debris, which shares the pattern's hull: there is
+        // nothing to free (unregistering that shared hull would dangle every sibling that uses it).
+        physics::CompoundId compound{};
+        DebrisPhase phase = DebrisPhase::Falling;
+        std::uint64_t settled_tick = 0; // the update() tick it came to rest — age = tick - this
     };
 
     std::vector<Pattern> patterns;
@@ -115,6 +132,24 @@ struct DestructionWorld::Impl {
     std::vector<DamageCall> pending_damage;
     std::vector<Debris> debris;
     std::vector<std::uint32_t> debris_part_pool;
+
+    // M8.5 lifecycle state: the budget policy (default-off ⇒ nothing is ever reclaimed, so 8.2–8.4
+    // scenes stay byte-identical) and the update() tick counter that debris age is measured in.
+    LifecycleConfig lifecycle{};
+    std::uint64_t tick = 0;
+
+    // The M8.5 debris lifetime & budget pass (lifecycle.cpp): reclaim settled debris past their
+    // linger and hold the live debris population under the cap. Runs in update()'s sequential tail,
+    // only when lifecycle.enabled — so it can never perturb the parallel step's cross-worker hash.
+    void enforce_debris_budget(physics::PhysicsWorld& world);
+    // Freeze debris #d: destroy its body, unregister its owned compound (a k>1 island only), keep
+    // the roster record. Body destroyed FIRST so the compound is unreferenced before we free it.
+    // Idempotent — freezing an already-frozen debris is a no-op.
+    void freeze_debris(std::size_t debris_index, physics::PhysicsWorld& world);
+    // How many debris bodies are still live (not yet frozen) — the quantity the cap bounds.
+    [[nodiscard]] std::size_t live_debris_count() const noexcept;
+    // A debris's size proxy for the eviction score: Σ its member parts' cooked volumes.
+    [[nodiscard]] float debris_size(const Debris& d) const noexcept;
 
     // The M8.4 event fan-out: update() pushes PartDamaged/PartDied/IslandDetached/DebrisSettled
     // here and publish()es once, at the tick's end; consumers read events.view() until the next

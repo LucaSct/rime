@@ -175,9 +175,23 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
     physics::BodyState parent_state{};
     (void)world.get_body_state(inst.body, parent_state);
 
+    // M8.5: the compound the outgoing body used. Once that body is destroyed its compound is
+    // unreferenced, so — when the lifecycle is on — reclaim it rather than leak it (a wall that
+    // fractures over and over would otherwise pile up dead remainder compounds in the store). GUARD
+    // the shared pattern compound: the FIRST swap's `compound` IS pattern.compound, which every
+    // sibling instance still stands on and every future spawn() reuses — only a remainder THIS
+    // module registered is ever freed here (reject-if-referenced backs this up, but the last
+    // instance's swap would otherwise free the shared one out from under a future spawn).
+    const physics::CompoundId old_compound = inst.compound;
+
     map_erase(inst.body);
     world.destroy_body(inst.body);
     inst.body = physics::BodyId{};
+
+    if (lifecycle.enabled && old_compound.is_valid() && !(old_compound == pat.compound)) {
+        (void)world.unregister_compound(old_compound);
+    }
+    inst.compound = physics::CompoundId{}; // set to the new remainder below if one still stands
 
     if (!remainder.empty()) {
         // Children at their cooked COMs, identity-rotated — the register_pattern recipe on the
@@ -209,6 +223,7 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
             desc.orientation = inst.placement.rotation;
             inst.body = world.create_body(desc);
             map_insert(inst.body, instance_index);
+            inst.compound = comp; // M8.5: track the standing compound for the next swap's free
         }
     }
     inst.child_to_part = remainder; // rows = the standing part ids, ascending (ADR-0029 §4)
@@ -254,6 +269,7 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
         desc.motion = physics::MotionType::Dynamic;
         desc.mass = kDebrisDensity * volume;
         core::Vec3 com_local{0.0f, 0.0f, 0.0f}; // group COM in the destructible frame
+        physics::CompoundId debris_compound{};  // a k>1 island's own compound; k=1 leaves it null
         if (group.size() == 1) {
             desc.shape.type = physics::ShapeType::ConvexHull;
             desc.shape.hull = pat.hulls[group[0]];
@@ -278,6 +294,7 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
             desc.shape.type = physics::ShapeType::Compound;
             desc.shape.compound = comp;
             com_local = info.centroid;
+            debris_compound = comp; // recorded on the roster so a freeze can unregister it (M8.5)
         }
         // Same placement recipe as the remainder: position IS the group's COM, carried through
         // the instance placement, so on its birth tick the debris sits exactly where its parts
@@ -340,6 +357,7 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
         rec.instance = instance_index;
         rec.first_part = static_cast<std::uint32_t>(debris_part_pool.size());
         rec.part_count = static_cast<std::uint32_t>(group.size());
+        rec.compound = debris_compound; // k>1 island's compound to free on freeze (else null, M8.5)
         debris_part_pool.insert(debris_part_pool.end(), group.begin(), group.end());
         debris.push_back(rec);
     }
@@ -361,6 +379,7 @@ void DestructionWorld::apply_damage(InstanceId instance,
 
 void DestructionWorld::update(physics::PhysicsWorld& world) {
     Impl& impl = *impl_;
+    ++impl.tick; // update() tick counter — debris age (the M8.5 lifecycle) is measured in these
 
     // ================================================================================== stage 0
     // DebrisSettled: a debris body that fell asleep in the step that just ran has come to rest
@@ -372,6 +391,17 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
         std::vector<std::size_t> settled;
         for (const physics::SleepEvent& s : world.sleep_events()) {
             if (s.phase != physics::SleepPhase::Slept) {
+                // M8.5: a debris the physics WOKE (its settled rubble was disturbed) is moving
+                // again — un-settle it so the budget pass never freezes a body mid-flight. Gated:
+                // an off lifecycle leaves phases inert. Non-Slept, non-Woke phases are ignored.
+                if (impl.lifecycle.enabled && s.phase == physics::SleepPhase::Woke) {
+                    for (Impl::Debris& rec : impl.debris) {
+                        if (rec.body == s.body && rec.phase == Impl::DebrisPhase::Settled) {
+                            rec.phase = Impl::DebrisPhase::Falling;
+                            break;
+                        }
+                    }
+                }
                 continue;
             }
             for (std::size_t d = 0; d < impl.debris.size(); ++d) {
@@ -383,17 +413,23 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
         }
         std::sort(settled.begin(), settled.end());
         for (const std::size_t d : settled) {
-            const Impl::Debris& rec = impl.debris[d];
+            Impl::Debris& rec = impl.debris[d];
             physics::BodyState st{};
             (void)world.get_body_state(rec.body, st);
             DestructionEvent ev;
             ev.kind = DestructionEventKind::DebrisSettled;
             ev.instance = InstanceId{rec.instance, 0};
             ev.body = rec.body;
-            // v1 carries the settled position as a point bound; m8.5 refines it to the body's
-            // posed extent when it starts sizing the debris budget by volume.
+            // v1 carries the settled position as a point bound; a later brick can refine it to the
+            // body's posed extent (the eviction score sizes debris by cooked volume, not this).
             ev.world_bounds = physics::Aabb{st.position, st.position};
             impl.events.push(ev);
+            // M8.5: record the settle so the budget pass can age it toward a freeze. Gated so an
+            // off lifecycle leaves phase/tick untouched (and the pass that reads them never runs).
+            if (impl.lifecycle.enabled && rec.phase == Impl::DebrisPhase::Falling) {
+                rec.phase = Impl::DebrisPhase::Settled;
+                rec.settled_tick = impl.tick;
+            }
         }
     }
 
@@ -545,6 +581,16 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
     // readable batch, and last tick's batch is cleared. A consumer that reads events() now sees
     // this tick's stream; a quiet tick publishes an empty one (the "clean next tick" property).
     impl.events.publish();
+
+    // ================================================================================== stage 5
+    // Debris lifetime & budgets (M8.5, ADR-0029 §8): reclaim settled debris past their linger and
+    // hold the live debris population under the cap. GATED — a default-off world reclaims nothing,
+    // so every m8.2–8.4 scene keeps byte-identical state. It runs LAST in the sequential tail
+    // because it destroys bodies and unregisters compounds — legal only outside a step, and only
+    // after every reader of this tick's bodies (the fracture swap, the settle scan) has run.
+    if (impl.lifecycle.enabled) {
+        impl.enforce_debris_budget(world);
+    }
 }
 
 std::span<const DestructionEvent> DestructionWorld::events() const noexcept {

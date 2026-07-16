@@ -12,7 +12,8 @@
 
 add_library(rime_destruction STATIC
     src/world.cpp
-    src/damage.cpp)
+    src/damage.cpp
+    src/lifecycle.cpp)
 
 # Namespaced alias so dependents link `rime::destruction`, matching our C++ namespace.
 add_library(rime::destruction ALIAS rime_destruction)

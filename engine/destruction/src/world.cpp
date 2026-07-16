@@ -22,6 +22,10 @@ DestructionWorld::DestructionWorld() : impl_(std::make_unique<Impl>()) {}
 
 DestructionWorld::~DestructionWorld() = default;
 
+void DestructionWorld::configure_lifecycle(const LifecycleConfig& config) {
+    impl_->lifecycle = config;
+}
+
 PatternId DestructionWorld::register_pattern(const assets::DestructibleAsset& asset,
                                              physics::PhysicsWorld& world) {
     Impl::Pattern pat;
@@ -109,6 +113,10 @@ InstanceId DestructionWorld::spawn(PatternId pattern,
     Impl::Instance inst;
     inst.pattern = pattern;
     inst.body = body;
+    // The standing compound is the shared pattern compound at spawn; a fracture swap replaces it
+    // with a re-registered remainder. M8.5 frees the previous remainder on each swap, guarding this
+    // shared one (every instance stands on it and every future spawn reuses it — never free it).
+    inst.compound = pat.compound;
     inst.placement = placement;
     inst.health.assign(pat.part_count, 1.0f);
     inst.alive.assign(pat.part_count, std::uint8_t{1});
