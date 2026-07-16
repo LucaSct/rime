@@ -12,12 +12,13 @@ replaces this whole module.
   them. Deterministic — a fixed SplitMix64 stream drives the scatter — so two fields fed the same
   events hold identical particles.
 - **`coverage()`** — a cheap CPU proxy (Σ size²·alpha) for how much screen the dust covers. It jumps
-  on a burst and decays to zero as the puff ages out; the M8.6 GPU pass's coverage-delta pixel test
-  confirms the same curve on-screen.
+  on a burst and decays to zero as the puff ages out; the M8.6 sample self-checks this witness (its
+  peak coverage on the break).
 
-**GPU-free by construction.** The simulation lives here; the actual additive draw pass and its pixel
-proof land with the **M8.6 sample**, where a device and a render path exist (the discipline M8.2/M8.3
-followed). The budget is a hard cap (default ~200 particles) so a demolition storm cannot unbound it —
+**GPU-free by construction.** The simulation lives here; the actual additive *draw* pass stays deferred
+to the real FX system (**fx1**). The M8.6 sample drives this field from the destruction fan-out and
+self-checks its `coverage()`, but renders the wall + debris via per-part render leaves, not the dust.
+The budget is a hard cap (default ~200 particles) so a demolition storm cannot unbound it —
 m8.5's budget discipline, in miniature.
 
 It is **not wired to destruction**: the fan-out glue (a `DestructionEvent` → `emit_burst`) lives in
