@@ -170,11 +170,14 @@ is proven by `samples/09-physics-playground`; contact events, convex/mesh shapes
 planned fast-follows. → see [design/physics.md](design/physics.md),
 [survey](research/engine-survey.md#physics).
 
-### `destruction` 🟡 — *our headline system (Frostbite-inspired)*
-*Milestone 8 underway ([ADR-0029](adr/0029-destruction-model.md)): a cooked fracture pattern stands as
+### `destruction` 🟢 — *our headline system (Frostbite-inspired)*
+*Milestone 8 COMPLETE ([ADR-0029](adr/0029-destruction-model.md)): a cooked fracture pattern stands as
 one static compound body (M8.2), damage → connectivity → the fracture body-swap detaches real debris
-(M8.3), and a canonical event stream fans out to VFX / audio / gameplay (M8.4). Lifetime/budgets
-(M8.5) and the headless sample proof (M8.6) remain.* A first-class engine system, not a plugin. Core
+(M8.3), a canonical event stream fans out to VFX / audio / gameplay (M8.4), and a debris lifecycle
+reclaims settled rubble so the physics stores stay bounded (M8.5, over the physics
+`unregister_hull`/`unregister_compound`). The `10-destructible-wall` sample (M8.6) is the proof — a
+wall breaks, an island detaches, debris settles, one event stream fans out, and per-part render leaves
+draw it PBR-lit, deterministic across worker counts.* A first-class engine system, not a plugin. Core
 ideas, mapped from how Battlefield 6's Frostbite does it:
 - **Part-based destructibles:** structures are assemblies of breakable *parts* with
   connectivity, not monolithic meshes.
@@ -195,8 +198,9 @@ headless. The real mixing/spatialization backend (track au1) swaps in behind the
 
 ### `vfx` 🟡 — *the effects seam (dust stub today)*
 *A deletable CPU dust field (M8.4): destruction events bloom capped, deterministic billboard puffs. A
-stub — the real GPU-driven FX system (track fx1) replaces it; its actual draw pass lands with the M8.6
-sample.*
+stub — the real GPU-driven FX system (track fx1) replaces it. The M8.6 sample drives it from the event
+fan-out and self-checks its `coverage()` witness on the break; the actual GPU dust DRAW pass stays
+deferred to fx1 (M8.6 renders the wall + debris via per-part render leaves, not the dust).*
 
 ### `animation` ⚪, `net` ⚪
 Skeletal animation & blending; networking/replication. Each behind its own interface.

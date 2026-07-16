@@ -315,6 +315,52 @@ GPU-free is deliberate — the plan's own risk note is "keep it deletable".
 
 ## Lifetime & budgets (M8.5)
 
-## Lifetime & budgets (M8.5)
+M8.3 left the physics stores **append-only**: every fracture registers fresh compounds and spawns
+fresh bodies, and nothing is ever freed ("the old compound id is deliberately leaked"). Under
+*continuous* refracture that is unbounded growth. M8.5 closes it in two halves.
 
-*(pending — debris lifecycle, `WorldStats`-driven budgets, hull/compound `unregister`.)*
+**The physics half** (its own PR — the ADR-0027/0028 deferral finally forced): `unregister_hull` /
+`unregister_compound`. The hull and compound stores become **generational slot tables** (parallel
+gen/live/refs/free-list vectors, LIFO reuse), so ids stay a pure function of the register/unregister
+call sequence (determinism) and the store stays bounded. Both are **reject-if-referenced**: a hull a
+live body or compound still names, or a compound a live body still uses, cannot be freed (a dangling
+reference is a bug, not a silent corruption). The hot path (`compound_child_hull`) went bounds-only —
+the refcount invariant guarantees a live compound's child hulls are never freed under it, so there is
+no per-contact generation re-check.
+
+**The destruction half** (`engine/destruction/src/lifecycle.cpp`), gated behind a default-**off**
+`LifecycleConfig` so M8.2–8.4 stay byte-identical:
+- **Freeze after a linger.** A debris body that fires a physics `Slept` becomes *settled*; after
+  `freeze_delay_ticks` it **freezes** — body destroyed, and (for a multi-part island) its runtime
+  compound `unregister_compound`'d. A single-part debris shares the pattern's hull, so there is
+  nothing to free. The roster **record** stays (append-only ⇒ debris ids never shift ⇒ `state_hash`
+  reproducible); a frozen debris just reads a null body. A `Woke` un-settles it, so a disturbed pile is
+  never frozen mid-motion.
+- **A live-body cap.** When more than `max_live_debris` bodies are still live, the least-interesting
+  *settled* debris freeze early — highest `base × size × age`, ties by roster index (a strict total
+  order; **camera distance is deliberately out** — it is per-view and would break determinism).
+- **The body-swap free.** Each fracture swap now frees the **old remainder compound** it replaced,
+  guarding the shared pattern compound (`Instance.compound` tracks the current standing one; the first
+  swap's "old" *is* the pattern, reused by every sibling and every future `spawn` — never freed).
+
+All of it runs in `update()`'s sequential tail, in canonical order, so `state_hash` + `world_hash`
+stay bit-identical across runs and worker counts. The soak (continuous refracture under a cap) is the
+witness: live body count ≤ cap, the store bounded (observable via the store's LIFO slot reuse),
+determinism stable.
+
+## The proof: `samples/10-destructible-wall` (M8.6)
+
+M8's "done when," runnable ([`samples/10-destructible-wall`](../../samples/10-destructible-wall)): a
+cooked wall stands, takes a hit, sheds a slab of debris, and fans one event stream out to a VFX dust
+puff, the null audio backend, and gameplay. It is the first brick to **build on the render path from
+day one** — the **per-part render leaves** ADR-0029 §5 named and M8.2/8.3 deferred to here: one render
+entity per part, each frame posed from the sim (a standing part rides `part_placement`; a detached part
+rides its debris body's pose composed with the part's offset inside that body).
+
+The headless self-check is the **CI-gated done-when**, and its core is **GPU-free** (so it runs on
+every OS): the destruction simulation is verified with no device, and the pixel proof runs only where a
+Vulkan device is present (lavapipe on Linux CI). It asserts, off one hit to the base seam: parts die
+and **≥ 1 island detaches**; the debris **settles** (`awake_bodies → 0`); all three fan-out consumers
+fired; the whole run is **bit-reproducible** across 1/2/4 physics workers (the M11 contract); and —
+where a device exists — the intact wall renders lit and the break visibly repaints the image. Exit 0 is
+M8 green.
