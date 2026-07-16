@@ -93,15 +93,30 @@ struct PhysicsWorld::Impl {
 
     core::Vec3 gravity{0.0f, -9.81f, 0.0f};
 
-    // The hull store (M7.11, ADR-0027): geometry registered once via register_hull, referenced by
-    // HullId from any number of bodies' ShapeDescs. Append-only and immutable — ids are the
-    // registration order (deterministic), entries never move or die before the world does.
+    // The hull store (M7.11, ADR-0027; unregister added M8.5). Geometry registered once via
+    // register_hull, referenced by HullId from bodies' ShapeDescs AND from compound children. The
+    // store is now a GENERATIONAL SLOT table (mirroring the body slots above): a freed slot bumps
+    // its generation so stale ids read dead, and register_hull reuses freed slots LIFO so ids stay
+    // a pure function of the call sequence (determinism). `hull_refs[i]` counts live references
+    // (bodies + compound children); unregister_hull refuses while it is non-zero —
+    // reject-if-referenced, so a hull a live body or compound names can never be pulled out from
+    // under it (which is exactly why compound_child_hull can resolve by index alone). Parallel
+    // arrays keep `hulls` contiguous for the hot-path span the narrowphase takes.
     std::vector<ConvexHull> hulls;
+    std::vector<std::uint32_t> hull_generation; // per slot; bumped on unregister
+    std::vector<std::uint8_t> hull_live;        // 1 = registered, 0 = freed slot awaiting reuse
+    std::vector<std::uint32_t> hull_refs;       // live references (bodies + compound children)
+    std::vector<std::uint32_t> hull_free_list;  // freed slots, LIFO — deterministic reuse
 
-    // The compound store (M7.12, ADR-0028): the same contract as the hull store — child lists
-    // registered once via register_compound, referenced by CompoundId, append-only, immutable,
-    // ids in registration order. One fracture pattern's intact shape, many instances.
+    // The compound store (M7.12, ADR-0028; unregister added M8.5): the same generational-slot
+    // contract as the hull store. `compound_refs[i]` counts live BODIES using compound i (a
+    // compound never nests another in v1); unregister_compound refuses while non-zero and, when it
+    // does free a compound, releases that compound's reference on each of its child hulls.
     std::vector<CompoundShape> compounds;
+    std::vector<std::uint32_t> compound_generation;
+    std::vector<std::uint8_t> compound_live;
+    std::vector<std::uint32_t> compound_refs;
+    std::vector<std::uint32_t> compound_free_list;
 
     AabbTree static_tree;
     AabbTree dynamic_tree;
@@ -223,14 +238,16 @@ struct PhysicsWorld::Impl {
     }
 
     // Resolve a shape's hull reference to its store entry — nullptr for primitives and for an
-    // unresolvable id (null/foreign/stale; the store is append-only, so generation is always 0).
-    // This is the ONE place a HullId turns into geometry; everything under the seam takes the
-    // pointer from here (ADR-0027).
+    // unresolvable id (null/foreign/stale/unregistered). The generation must match the slot's
+    // current one and the slot must be live (M8.5 — a freed-then-reused slot has a bumped
+    // generation, so an id from before the free reads dead). This is the ONE place a HullId turns
+    // into geometry; everything under the seam takes the pointer from here (ADR-0027).
     [[nodiscard]] const ConvexHull* hull_of(const ShapeDesc& s) const noexcept {
         if (s.type != ShapeType::ConvexHull) {
             return nullptr;
         }
-        if (s.hull.index >= hulls.size() || s.hull.generation != 0) {
+        if (s.hull.index >= hulls.size() || hull_generation[s.hull.index] != s.hull.generation ||
+            hull_live[s.hull.index] == 0) {
             return nullptr;
         }
         return &hulls[s.hull.index];
@@ -241,7 +258,9 @@ struct PhysicsWorld::Impl {
         if (s.type != ShapeType::Compound) {
             return nullptr;
         }
-        if (s.compound.index >= compounds.size() || s.compound.generation != 0) {
+        if (s.compound.index >= compounds.size() ||
+            compound_generation[s.compound.index] != s.compound.generation ||
+            compound_live[s.compound.index] == 0) {
             return nullptr;
         }
         return &compounds[s.compound.index];
@@ -573,6 +592,15 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
         return BodyId{};
     }
 
+    // The shape id is now known-valid (checked just above), and the rest of create_body cannot
+    // fail — so take the store reference here (M8.5): this body now holds hull/compound i, and
+    // unregister refuses to free geometry a live body still names. destroy_body drops it again.
+    if (d.shape.type == ShapeType::ConvexHull) {
+        ++p.hull_refs[d.shape.hull.index];
+    } else if (d.shape.type == ShapeType::Compound) {
+        ++p.compound_refs[d.shape.compound.index];
+    }
+
     // Claim a slot (reuse a freed one to keep the table compact; its generation was already
     // bumped).
     std::uint32_t slot;
@@ -646,6 +674,11 @@ void PhysicsWorld::destroy_body(BodyId id) {
         return; // stale/unknown — safe no-op
     }
 
+    // Capture the shape reference BEFORE the swap-remove below overwrites p.shape[d]; the store
+    // reference this body held is released at the end (M8.5), the mirror of create_body's
+    // increment.
+    const ShapeDesc released_shape = p.shape[d];
+
     // Drop this body's broadphase proxy first (its tree is chosen by the current motion type).
     p.tree_for(p.motion[d]).destroy_proxy(p.proxy[d]);
 
@@ -699,6 +732,19 @@ void PhysicsWorld::destroy_body(BodyId id) {
     p.slots[id.index].dense = core::kInvalidSlotIndex;
     ++p.slots[id.index].generation;
     p.free_slots.push_back(id.index);
+
+    // Release the hull/compound reference this body held (M8.5). Guarded against underflow — a
+    // primitive-shaped body holds none, and the count was incremented at create for exactly the
+    // hull/compound shapes.
+    if (released_shape.type == ShapeType::ConvexHull &&
+        released_shape.hull.index < p.hull_refs.size() &&
+        p.hull_refs[released_shape.hull.index] > 0) {
+        --p.hull_refs[released_shape.hull.index];
+    } else if (released_shape.type == ShapeType::Compound &&
+               released_shape.compound.index < p.compound_refs.size() &&
+               p.compound_refs[released_shape.compound.index] > 0) {
+        --p.compound_refs[released_shape.compound.index];
+    }
 }
 
 bool PhysicsWorld::get_body_state(BodyId id, BodyState& out) const {
@@ -1372,17 +1418,48 @@ HullId PhysicsWorld::register_hull(const HullDesc& desc) {
         return HullId{}; // null id — HullId::is_valid() == false
     }
     Impl& p = *impl_;
-    const auto index = static_cast<std::uint32_t>(p.hulls.size());
-    p.hulls.push_back(std::move(hull));
-    // Generation 0 forever: the store is append-only in v1 (ADR-0027 defers unregister to the
-    // compound-shapes brick), so ids can go stale only across worlds — which hull_of() rejects
-    // by bounds, not generation.
-    return HullId{index, 0};
+    // Reuse a freed slot if one is waiting (LIFO — a pure function of the register/unregister call
+    // sequence, so ids stay deterministic), else grow the store. A reused slot keeps the generation
+    // unregister_hull already bumped; a fresh slot starts at generation 0.
+    std::uint32_t index;
+    if (!p.hull_free_list.empty()) {
+        index = p.hull_free_list.back();
+        p.hull_free_list.pop_back();
+        p.hulls[index] = std::move(hull);
+        p.hull_live[index] = 1;
+        p.hull_refs[index] = 0;
+    } else {
+        index = static_cast<std::uint32_t>(p.hulls.size());
+        p.hulls.push_back(std::move(hull));
+        p.hull_generation.push_back(0);
+        p.hull_live.push_back(1);
+        p.hull_refs.push_back(0);
+    }
+    return HullId{index, p.hull_generation[index]};
+}
+
+bool PhysicsWorld::unregister_hull(HullId id) {
+    Impl& p = *impl_;
+    // Unknown / stale / already-freed ids are a safe no-op (return false) — never touch another
+    // slot's state. A live-but-referenced hull is refused too: some body or compound still names
+    // it, and freeing it would dangle that reference (the reject-if-referenced contract, ADR-0027).
+    if (id.index >= p.hulls.size() || p.hull_generation[id.index] != id.generation ||
+        p.hull_live[id.index] == 0) {
+        return false;
+    }
+    if (p.hull_refs[id.index] != 0) {
+        return false;
+    }
+    p.hull_live[id.index] = 0;
+    ++p.hull_generation[id.index]; // any id still holding the old generation now reads dead
+    p.hull_free_list.push_back(id.index);
+    return true;
 }
 
 bool PhysicsWorld::hull_info(HullId id, HullInfo& out) const {
     const Impl& p = *impl_;
-    if (id.index >= p.hulls.size() || id.generation != 0) {
+    if (id.index >= p.hulls.size() || p.hull_generation[id.index] != id.generation ||
+        p.hull_live[id.index] == 0) {
         return false;
     }
     const ConvexHull& h = p.hulls[id.index];
@@ -1394,26 +1471,85 @@ bool PhysicsWorld::hull_info(HullId id, HullInfo& out) const {
 }
 
 CompoundId PhysicsWorld::register_compound(const CompoundDesc& desc) {
-    // Validate + compose (COM, parallel-axis inertia, principal axes, re-centred child poses) in
-    // one cold pass — see build_compound (src/compound.hpp) for the rules and the math
+    Impl& p = *impl_;
+    // Validate each hull child against the LIVE store (generation + not-freed) BEFORE composing:
+    // build_compound resolves children by index alone (compound_child_hull is a bounds check), so a
+    // child naming a freed or stale hull slot must be caught here, where the slot metadata lives. A
+    // primitive child carries no hull id and is skipped.
+    for (const CompoundChildDesc& child : desc.children) {
+        if (child.shape.type == ShapeType::ConvexHull) {
+            const HullId h = child.shape.hull;
+            if (h.index >= p.hulls.size() || p.hull_generation[h.index] != h.generation ||
+                p.hull_live[h.index] == 0) {
+                return CompoundId{}; // a child names a hull this world does not have live
+            }
+        }
+    }
+
+    // Compose (COM, parallel-axis inertia, principal axes, re-centred child poses) in one cold pass
+    // — see build_compound (src/compound.hpp) for the rules and the math
     // (docs/math/compound-mass-properties.md). Nothing is stored on failure, so a rejected
     // registration leaves the world bit-identical to before the call — the register_hull posture.
     CompoundShape compound;
-    if (!build_compound(desc.children, impl_->hull_span(), compound)) {
+    if (!build_compound(desc.children, p.hull_span(), compound)) {
         return CompoundId{}; // null id — CompoundId::is_valid() == false
     }
+    // Reuse a freed slot LIFO (deterministic ids) or grow the store, mirroring register_hull.
+    std::uint32_t index;
+    if (!p.compound_free_list.empty()) {
+        index = p.compound_free_list.back();
+        p.compound_free_list.pop_back();
+        p.compounds[index] = std::move(compound);
+        p.compound_live[index] = 1;
+        p.compound_refs[index] = 0;
+    } else {
+        index = static_cast<std::uint32_t>(p.compounds.size());
+        p.compounds.push_back(std::move(compound));
+        p.compound_generation.push_back(0);
+        p.compound_live.push_back(1);
+        p.compound_refs.push_back(0);
+    }
+    // The compound now holds a reference on each hull child — so unregister_hull will refuse to
+    // free a hull this compound still needs. unregister_compound releases these again.
+    for (const CompoundChildDesc& child : desc.children) {
+        if (child.shape.type == ShapeType::ConvexHull) {
+            ++p.hull_refs[child.shape.hull.index];
+        }
+    }
+    return CompoundId{index, p.compound_generation[index]};
+}
+
+bool PhysicsWorld::unregister_compound(CompoundId id) {
     Impl& p = *impl_;
-    const auto index = static_cast<std::uint32_t>(p.compounds.size());
-    p.compounds.push_back(std::move(compound));
-    // Generation 0 forever: the store is append-only in v1 (ADR-0028 defers unregister/refcount
-    // to the M8 pattern-lifetime brick, together with the hull's), so ids can go stale only
-    // across worlds — which compound_of() rejects by bounds, not generation.
-    return CompoundId{index, 0};
+    // Unknown / stale / already-freed → safe no-op. A compound still used by a live body is refused
+    // (reject-if-referenced, ADR-0028).
+    if (id.index >= p.compounds.size() || p.compound_generation[id.index] != id.generation ||
+        p.compound_live[id.index] == 0) {
+        return false;
+    }
+    if (p.compound_refs[id.index] != 0) {
+        return false;
+    }
+    // Release the compound's hold on each of its child hulls (so they become unregisterable once no
+    // other reference remains) — the mirror of the increments register_compound made.
+    const CompoundShape& c = p.compounds[id.index];
+    for (std::size_t i = 0; i < c.child_count(); ++i) {
+        const ShapeDesc& cs = c.child_shape[i];
+        if (cs.type == ShapeType::ConvexHull && cs.hull.index < p.hull_refs.size() &&
+            p.hull_refs[cs.hull.index] > 0) {
+            --p.hull_refs[cs.hull.index];
+        }
+    }
+    p.compound_live[id.index] = 0;
+    ++p.compound_generation[id.index];
+    p.compound_free_list.push_back(id.index);
+    return true;
 }
 
 bool PhysicsWorld::compound_info(CompoundId id, CompoundInfo& out) const {
     const Impl& p = *impl_;
-    if (id.index >= p.compounds.size() || id.generation != 0) {
+    if (id.index >= p.compounds.size() || p.compound_generation[id.index] != id.generation ||
+        p.compound_live[id.index] == 0) {
         return false;
     }
     const CompoundShape& c = p.compounds[id.index];

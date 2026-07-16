@@ -15,12 +15,20 @@
 #     #19 rime::rhi::VulkanDevice::create_instance  engine/rhi/src/vulkan/device_vulkan.cpp:255
 #   SUMMARY: AddressSanitizer: 240 byte(s) leaked in 3 allocation(s).
 #
-# All three allocations share the vkCreateInstance frame inside the loader, so nothing in engine
-# code can free them. They surface across every GPU-touching binary (rhi / render / stream / app
-# + samples); because all of those must come up leak-clean in a single ASan run, this
-# intermittently reddened the job — the standing CI-health flake. We suppress by the owning
-# MODULE and the loader ENTRY POINT, both narrow enough that a real leak in our own code still
-# fails the job (an engine leak's allocation stack passes through neither).
+# This file suppresses that DIRECT leak by the owning MODULE and the loader ENTRY POINT — both
+# narrow enough that a real leak in our own code still fails (an engine leak's allocation stack
+# passes through neither). But the loader ALSO leaks INDIRECT child blocks (the "56 byte(s)" entries
+# above), and those are allocated on driver worker threads with entirely <unknown module> stacks —
+# nothing a `leak:` rule can name, and (verified in CI) NOT stopped by LP_NUM_THREADS=0. There is no
+# way to name-suppress them. So this file alone cannot clear the flake.
+#
+# The reliable fix lives in .github/workflows/ci.yml: the full ASan suite runs with detect_leaks=0
+# (memory errors / UB still caught over everything, including the ~10 GPU-touching binaries), and a
+# SECOND step re-runs the GPU-FREE, memory-critical suites (core / ecs / physics / assets /
+# destruction / capi) with detect_leaks=1 — where no Vulkan device loads, so LeakSanitizer is clean
+# and real leaks still fail. This file then only matters to a LOCAL `build.sh --sanitizer address`
+# full run (detect_leaks defaults on): it quiets the frequent DIRECT leak; the rare indirect one is
+# a known local-only flake (re-run).
 #
 # Suppression syntax: `leak:<substring>` matches a function OR module name anywhere in a leak's
 # allocation stack. Keep this list minimal and specific — it is a mask over third-party code, and

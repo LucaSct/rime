@@ -88,11 +88,13 @@ if [ "$do_cpp" -eq 1 ]; then
     say "C++: cmake build ($preset)"
     cmake --build --preset "$preset"
 
-    # Under AddressSanitizer on Linux, LeakSanitizer runs at exit and flags a few allocations made
-    # inside the un-instrumented Vulkan loader (vkCreateInstance) by any GPU-touching test on
+    # Under AddressSanitizer on Linux, LeakSanitizer runs at exit and flags a few allocations the
+    # un-instrumented Vulkan loader makes inside vkCreateInstance for any GPU-touching test on
     # lavapipe — third-party leaks, not ours (scripts/lsan-suppressions.txt has the captured stack).
-    # Point LSan at the shared suppression list so a local ASan run isn't reddened by them, matching
-    # CI's sanitize-address job. A caller who already exported LSAN_OPTIONS wins (we only default it).
+    # Point LSan at the shared suppression list so a local full-suite ASan run isn't reddened by that
+    # DIRECT leak. (Its indirect driver-thread children are un-suppressible — see the file; CI splits
+    # them off with detect_leaks=0 + a GPU-free leak pass, which is the reliable gate.) A caller who
+    # already exported LSAN_OPTIONS wins (we only default it).
     if [ "$sanitizer" = "address" ] && [ -z "${LSAN_OPTIONS:-}" ]; then
         export LSAN_OPTIONS="suppressions=$repo_root/scripts/lsan-suppressions.txt"
     fi

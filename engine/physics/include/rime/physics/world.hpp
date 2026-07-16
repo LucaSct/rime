@@ -313,8 +313,18 @@ public:
     [[nodiscard]] HullId register_hull(const HullDesc& desc);
 
     // Read back a registered hull's derived physical properties. Returns false (out untouched)
-    // for a null/unknown id.
+    // for a null/unknown/unregistered id.
     [[nodiscard]] bool hull_info(HullId id, HullInfo& out) const;
+
+    // Unregister a hull, freeing its store slot for reuse (M8.5, the ADR-0027 deferral — the M8
+    // destruction lifecycle needs the shape store to stay bounded under continuous refracture).
+    // REJECT-IF-REFERENCED: returns false and changes nothing if any live body OR any live compound
+    // still names this hull — freeing it then would dangle that reference; destroy those first.
+    // Also false for a null/unknown/already-freed id. On success the slot's generation is bumped so
+    // every stale HullId reads dead, and a later register_hull may reuse the slot; the id sequence
+    // stays a pure function of the register/unregister calls (determinism). Not safe to call
+    // concurrently with step().
+    [[nodiscard]] bool unregister_hull(HullId id);
 
     // --- Compound shapes (M7.12, ADR-0028) --------------------------------------------------
     // Register a compound — one rigid body's shape made of several convex children (primitives
@@ -330,8 +340,17 @@ public:
     [[nodiscard]] CompoundId register_compound(const CompoundDesc& desc);
 
     // Read back a registered compound's derived physical properties. Returns false (out
-    // untouched) for a null/unknown id.
+    // untouched) for a null/unknown/unregistered id.
     [[nodiscard]] bool compound_info(CompoundId id, CompoundInfo& out) const;
+
+    // Unregister a compound, freeing its store slot for reuse and releasing its hold on its child
+    // hulls (M8.5, the ADR-0028 deferral). REJECT-IF-REFERENCED: returns false and changes nothing
+    // if any live body still uses this compound (destroy those bodies first). Also false for a
+    // null/unknown/already-freed id. Does NOT unregister the child hulls — those are the caller's
+    // to free once nothing else references them (a shared fracture-pattern hull outlives one debris
+    // compound). Slot generation bumped on success; ids stay a pure function of the call sequence.
+    // Not safe to call concurrently with step().
+    [[nodiscard]] bool unregister_compound(CompoundId id);
 
 private:
     struct Impl;

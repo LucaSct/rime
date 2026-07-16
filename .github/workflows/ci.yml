@@ -143,20 +143,36 @@ jobs:
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
 
       # -DRIME_SANITIZER=address (via --sanitizer) turns on ASan+UBSan for every engine target.
-      # -fno-sanitize-recover=all (set in CMakeLists) makes any UBSan finding abort with a
-      # nonzero exit; ASan/LSan likewise abort on a bad access or leak — so a finding fails CI.
+      # -fno-sanitize-recover=all (set in CMakeLists) makes any UBSan finding abort with a nonzero
+      # exit; ASan likewise aborts on a bad access — so a finding fails CI.
+      #
+      # Leak detection is OFF for this FULL-suite run. Any GPU-touching test stands up a Vulkan
+      # device on lavapipe, and the un-instrumented loader + driver leak process-lifetime blocks that
+      # LeakSanitizer cannot tell from ours: a DIRECT vkCreateInstance block AND INDIRECT children
+      # allocated on driver worker threads whose stacks are entirely <unknown module> — un-nameable
+      # by any `leak:` rule, and (verified in CI) unaffected by LP_NUM_THREADS. Across the ~10
+      # GPU-touching binaries, all of which must come up clean in one run, they intermittently
+      # reddened this job — the standing CI-health flake. Memory errors / UB are still caught here
+      # over everything; real LEAKS are caught by the next step, which re-runs the GPU-FREE suites
+      # with detection ON (there the driver never loads, so LeakSanitizer is clean).
       - name: Build & test (ASan + UBSan)
         env:
-          ASAN_OPTIONS: detect_leaks=1
-          # The un-instrumented Vulkan loader leaks a few process-lifetime allocations inside
-          # vkCreateInstance on any GPU-touching test (lavapipe device bring-up); LeakSanitizer
-          # pins them on our create_instance frame. They can't be fixed in engine code and, because
-          # every GPU binary must come up clean in one run, they intermittently reddened this job.
-          # Suppress by owning module/entry point — a leak in our own frames still fails. Rationale
-          # and the captured stack: scripts/lsan-suppressions.txt.
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/lsan-suppressions.txt
+          ASAN_OPTIONS: detect_leaks=0
           UBSAN_OPTIONS: print_stacktrace=1
         run: ./scripts/build.sh --cpp-only --sanitizer address
+
+      # Leak detection over the memory-critical, GPU-FREE engine — the allocators + lock-free job
+      # system (core), the ECS, physics, assets, destruction, and the C ABI. None of these stand up
+      # a Vulkan device, so LeakSanitizer runs clean and a genuine leak here still fails CI. The
+      # binaries were built by the step above (ASan links LSan in); this just re-runs those suites
+      # with leak detection on. The suppression file is a belt-and-suspenders guard.
+      - name: Leak-check the GPU-free suites (LeakSanitizer)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/lsan-suppressions.txt
+        run: >-
+          ctest --test-dir build/dev --output-on-failure -R
+          'rime_core_tests|rime_ecs_tests|rime_physics_tests|rime_assets_tests|rime_destruction_tests|rime_capi_tests'
 
   sanitize-thread:
     name: sanitizer (TSan, Clang)
