@@ -98,6 +98,23 @@ public:
     [[nodiscard]] virtual std::unique_ptr<CommandBuffer> begin_commands() = 0;
     virtual void submit_blocking(CommandBuffer& commands) = 0;
 
+    // Asynchronous submission — the non-blocking counterpart to submit_blocking, and the seam the
+    // frame tap (engine/stream) rides to hide the glass-to-CPU readback stall (ADR-0030, s1.1).
+    // submit() hands the recorded work to the GPU and returns immediately with a SubmitTicket;
+    // unlike submit_blocking it takes OWNERSHIP of the command buffer, because the backend must
+    // keep it — and the transient descriptor pools it baked — alive until the GPU is done, which
+    // the caller's scope no longer decides. Poll the ticket with is_complete() or block with
+    // wait(); whichever first observes completion reclaims the command buffer + pools.
+    [[nodiscard]] virtual SubmitTicket submit(std::unique_ptr<CommandBuffer> commands) = 0;
+
+    // Has the work behind `ticket` finished on the GPU? Non-blocking (a fence poll). Reclaims the
+    // submission's resources on the first call that sees it complete. An invalid, unknown, or
+    // already-reclaimed ticket returns true — there is nothing left in flight.
+    [[nodiscard]] virtual bool is_complete(SubmitTicket ticket) = 0;
+
+    // Block until `ticket`'s work finishes, then reclaim it. A no-op for an invalid/unknown ticket.
+    virtual void wait(SubmitTicket ticket) = 0;
+
     // Block until the GPU is idle. Used before tearing down resources.
     virtual void wait_idle() = 0;
 

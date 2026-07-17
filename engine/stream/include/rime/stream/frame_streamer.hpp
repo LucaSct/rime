@@ -28,10 +28,9 @@ class Device;
 namespace rime::stream {
 
 // A read-only view of one captured frame's pixels: tightly packed, top row first, in `format`.
-// Lifetime: the streamer keeps two CPU buffers and alternates between them, so a view stays valid
-// across exactly **one** following capture() (the consumer can read frame N while frame N+1 is
-// captured), and is overwritten on the second following capture(). Copy the bytes out if you need
-// them longer.
+// Lifetime: the streamer keeps a small ring of CPU buffers (kSlots), so a returned view stays valid
+// until its slot is reused — the next kSlots-1 captures. Read frame N while later frames are still
+// in flight; copy the bytes out if you need them beyond that window.
 struct FrameView {
     std::span<const std::byte> pixels;
     rhi::Extent2D extent;
@@ -40,13 +39,17 @@ struct FrameView {
     std::uint64_t index = 0; // 0-based, increments once per capture()
 };
 
-// Rolling capture cost in milliseconds — this is the "measure the stall, don't pre-optimize it"
-// the S0 plan asks for. capture() is **synchronous** in v0 (it submits a copy and waits for the
-// GPU, then reads host-visible memory), so `last_ms` is the glass-to-CPU stall we later hide with
-// asynchronous readback (S1). Recording it now means the day we make it async, we can prove it.
+// Rolling capture cost in milliseconds — the "measure the stall, don't pre-optimize it" the S0 plan
+// asks for, now cashed in. The synchronous capture() submits a copy and waits for the GPU, so its
+// `last_ms` is the full glass-to-CPU stall. The asynchronous begin_capture()/try_get_frame() path
+// (ADR-0030, s1.1) hides that wait behind the kSlots-deep ring: there `last_ms` is only the time
+// begin_capture() was *forced* to block for back-pressure (≈0 in steady state), and `dropped`
+// counts frames discarded latest-wins when the consumer fell behind. `frames` counts retrieved
+// frames either way.
 struct CaptureStats {
-    std::uint64_t frames = 0;
-    double last_ms = 0.0;
+    std::uint64_t frames = 0;  // frames successfully captured / retrieved
+    std::uint64_t dropped = 0; // frames discarded under back-pressure (async path, latest-wins)
+    double last_ms = 0.0;      // last capture cost (sync: the stall; async: forced-block time, ≈0)
     double avg_ms = 0.0;
     double min_ms = 0.0;
     double max_ms = 0.0;
@@ -70,11 +73,28 @@ public:
     FrameStreamer& operator=(const FrameStreamer&) = delete;
 
     // Capture `color`: an already-rendered texture of this streamer's extent+format that carries
-    // rhi::TextureUsage::TransferSrc. Copies it to the next readback buffer, waits, reads it into
-    // CPU memory, updates stats(), and returns a view of those bytes (see FrameView lifetime). The
-    // caller renders into `color`, then hands it here — the tap is decoupled from *how* the frame
-    // was drawn.
+    // rhi::TextureUsage::TransferSrc. **Synchronous convenience** — copies it to the next readback
+    // buffer, submits and WAITS, reads it into CPU memory, updates stats(), and returns a view of
+    // those bytes (see FrameView lifetime). This is what a one-shot proof or a render-then-encode
+    // headless sample wants: give me this exact frame's pixels now. A live viewport at rate should
+    // use begin_capture()/try_get_frame() instead, which hide the wait.
     [[nodiscard]] FrameView capture(rhi::TextureHandle color);
+
+    // Asynchronous capture (ADR-0030, s1.1). begin_capture() records a copy of `color` into the
+    // next ring slot and submits it NON-BLOCKING — it does not wait for the GPU. Pair it with
+    // try_get_frame() to collect frames as they finish. If every ring slot is still in flight, the
+    // oldest is force-waited and DROPPED (latest-wins back-pressure): the newest frame always beats
+    // a backlog, keeping an interactive viewport low-latency. `color` has the same requirements as
+    // in capture(). **Lifetime:** a submitted copy references `color` until it completes, so drain
+    // the streamer (destroy/reset it, or wait_idle) before destroying a texture you captured from —
+    // freeing an image an in-flight copy still reads is a use-after-free.
+    void begin_capture(rhi::TextureHandle color);
+
+    // Return the newest capture whose GPU copy has completed, reading it into CPU memory; older
+    // completed captures are dropped (latest-wins). Returns nullopt if nothing has finished yet —
+    // the caller renders/submits more and calls again. The returned view follows FrameView's
+    // lifetime rule (valid until its slot is reused).
+    [[nodiscard]] std::optional<FrameView> try_get_frame();
 
     [[nodiscard]] rhi::Extent2D extent() const noexcept { return extent_; }
 
@@ -83,9 +103,23 @@ public:
     [[nodiscard]] const CaptureStats& stats() const noexcept { return stats_; }
 
 private:
-    void release() noexcept; // destroy the readback buffers (owner-only)
+    void release() noexcept; // drain in-flight captures + destroy the readback buffers (owner-only)
 
-    static constexpr std::uint32_t kSlots = 2; // double-buffered
+    // Ring depth: how many captures may be in flight (submitted, not yet retrieved) at once. Three
+    // gives the GPU room to work on frame N while the CPU submits N+1 and drains N-1 without the
+    // capture call blocking in steady state — one more slot than the backend's frames-in-flight.
+    // (S0's synchronous path used two.)
+    static constexpr std::uint32_t kSlots = 3;
+
+    // One ring slot: a persistent GPU->CPU readback buffer + its CPU staging, plus the in-flight
+    // submission filling it (a valid ticket == a copy is pending for this slot).
+    struct Slot {
+        rhi::BufferHandle readback;    // GPU->CPU host-visible buffer (created once)
+        std::vector<std::byte> cpu;    // CPU staging, frame_bytes_ long
+        rhi::SubmitTicket ticket;      // the copy submission in flight (invalid == idle)
+        std::uint64_t frame_index = 0; // which capture this slot holds while pending
+        bool pending = false;          // a submit is in flight for this slot
+    };
 
     rhi::Device* device_ = nullptr;
     rhi::Extent2D extent_{};
@@ -93,10 +127,9 @@ private:
     std::uint32_t bytes_per_pixel_ = 4;
     std::size_t frame_bytes_ = 0;
 
-    std::array<rhi::BufferHandle, kSlots> readback_{}; // GPU->CPU host-visible buffers
-    std::array<std::vector<std::byte>, kSlots> cpu_{}; // CPU staging, one per slot
+    std::array<Slot, kSlots> slots_{};
     std::uint32_t next_slot_ = 0;
-    std::uint64_t index_ = 0;
+    std::uint64_t index_ = 0; // monotonic capture ordinal (FrameView::index / Slot::frame_index)
     CaptureStats stats_{};
 };
 
