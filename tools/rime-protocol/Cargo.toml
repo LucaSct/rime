@@ -15,5 +15,11 @@ license.workspace = true
 authors.workspace = true
 description = "Rust implementation of the Rime streaming/editor wire protocol (mirrors engine/stream)"
 
+[dependencies]
+# LZ4 block decode for the editor's streamed viewport frames (the lossless local codec, engine/stream
+# uses liblz4's LZ4_compress_default — the same raw block format lz4_flex::block reads). Pure Rust, no
+# system lib. The editor CHANNEL stays dependency-free; only frame pixel decode needs this.
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-decode"] }
+
 [lints.clippy]
 all = "deny"

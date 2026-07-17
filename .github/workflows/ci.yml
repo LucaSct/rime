@@ -312,15 +312,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # Building rime-engine configures the platform module, which hard-requires X11 + Wayland dev
-      # libs at configure time (as in the SDK-consumer job). No Vulkan runtime: the smoke is the
-      # editor channel only, headless.
-      - name: Install Linux deps (windowing, to configure)
+      # libs at configure time (as in the SDK-consumer job). The streamed-viewport half of the smoke
+      # renders on the engine side, so this job also installs a Vulkan runtime (lavapipe via
+      # mesa-vulkan-drivers, + vulkan-tools for the vulkaninfo device probe the script gates on) — the
+      # same software ICD the build/ASan jobs use.
+      - name: Install Linux deps (windowing + Vulkan runtime)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols
+            libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools
 
-      - name: Editor smoke (editor spawns rime-engine --editor-host)
+      - name: Editor smoke (channel + streamed viewport, editor spawns rime-engine)
         run: ./scripts/editor-smoke.sh
 
   lint:

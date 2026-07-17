@@ -65,7 +65,18 @@ scene="$repo_root/samples/07-first-light/first_light.rscene"
 [ -x "$engine_bin" ] || { echo "editor-smoke.sh: missing $engine_bin" >&2; exit 1; }
 [ -x "$editor_bin" ] || { echo "editor-smoke.sh: missing $editor_bin" >&2; exit 1; }
 
-say "run editor --smoke (spawns rime-engine --editor-host)"
+say "run editor --smoke (editor channel: schema + snapshot + edit)"
 "$editor_bin" --smoke --engine "$engine_bin" --scene "$scene"
+
+# The streamed viewport: the engine renders a scene and streams it; the editor receives + LZ4-decodes
+# real frames. Needs a Vulkan device on the engine side — lavapipe (mesa) in CI. On a host with no
+# device the engine degrades to channel-only and this would time out, so it is gated on a device
+# being discoverable (vulkaninfo). Locally, run it directly if you have any Vulkan ICD.
+if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1; then
+    say "run editor --smoke --frames (streamed viewport: render → LZ4 → decode)"
+    "$editor_bin" --smoke --frames 8 --engine "$engine_bin"
+else
+    say "skip viewport smoke — no Vulkan device (vulkaninfo not usable); channel smoke covered it"
+fi
 
 say "editor smoke: PASS"

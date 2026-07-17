@@ -25,6 +25,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
 #include "rime/render/components.hpp"
+#include "rime/stream/frame_codec.hpp" // FrameEncoder (the real LZ4 frame encoder)
 #include "rime/stream/protocol.hpp"
 
 namespace fs = std::filesystem;
@@ -115,6 +116,44 @@ std::vector<std::byte> set_component_bytes() {
     return out;
 }
 
+// A known 8x8 RGBA gradient — the pixels the editor viewport must recover after an LZ4 round trip.
+std::vector<std::byte> lz4_pixels_raw() {
+    constexpr std::uint32_t w = 8;
+    constexpr std::uint32_t h = 8;
+    std::vector<std::byte> px(static_cast<std::size_t>(w) * h * 4);
+    for (std::uint32_t y = 0; y < h; ++y) {
+        for (std::uint32_t x = 0; x < w; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            px[i + 0] = static_cast<std::byte>(x * 32); // R ramps across
+            px[i + 1] = static_cast<std::byte>(y * 32); // G ramps down
+            px[i + 2] = static_cast<std::byte>(128);    // B constant
+            px[i + 3] = static_cast<std::byte>(255);    // A opaque
+        }
+    }
+    return px;
+}
+
+// A FrameMessage whose data is the gradient compressed by the REAL engine LZ4 encoder (liblz4's
+// LZ4_compress_default block) — the editor viewport's lossless local codec. The Rust crate must
+// LZ4-decompress it back to lz4_pixels_raw() exactly, the cross-language proof for pixel frames.
+std::vector<std::byte> frame_lz4_bytes() {
+    const std::vector<std::byte> raw = lz4_pixels_raw();
+    stream::ImageDesc desc;
+    desc.extent = rhi::Extent2D{8, 8};
+    desc.format = rhi::Format::RGBA8Unorm;
+    stream::FrameEncoder enc;
+    std::vector<std::byte> compressed;
+    (void)enc.encode(stream::Codec::LZ4, desc, raw, compressed);
+    stream::FrameMessage f;
+    f.sequence = 1;
+    f.codec = stream::Codec::LZ4;
+    f.desc = desc;
+    f.data = compressed;
+    std::vector<std::byte> out;
+    f.encode(out);
+    return out;
+}
+
 bool write_file(const fs::path& path, const std::vector<std::byte>& bytes) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out.write(reinterpret_cast<const char*>(bytes.data()),
@@ -149,6 +188,8 @@ std::vector<Fixture> all_fixtures() {
         {"schema.bin", schema_bytes()},
         {"snapshot.bin", snapshot_bytes()},
         {"set_component.bin", set_component_bytes()},
+        {"frame_lz4.bin", frame_lz4_bytes()},
+        {"frame_lz4_pixels.bin", lz4_pixels_raw()},
     };
 }
 
