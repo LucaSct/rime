@@ -44,7 +44,10 @@ if [ ! -f "$toolchain" ]; then
     else echo "editor-smoke.sh: conan not found — run scripts/setup.sh first" >&2; exit 1
     fi
     say "conan install ($build_type)"
-    "$conan" install . -of "$build_dir" -s build_type="$build_type" -s compiler.cppstd=20 --build=missing
+    # AV1 codecs built optimized even under Debug (see scripts/build.sh) — keeps the resolved codec
+    # packages identical to the main build (no cache thrash) and dodges their debug-only asserts.
+    "$conan" install . -of "$build_dir" -s build_type="$build_type" -s compiler.cppstd=20 \
+        -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" --build=missing
 fi
 
 say "build rime-engine ($preset)"
