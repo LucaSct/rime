@@ -9,6 +9,27 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-17) — Track S1 complete; Milestone 9 (Editor v1) kicks off.** The full S1 streaming
+> runway (s1.0–s1.4) is **merged to `main`** (PRs #63–#67, all green on Windows/Linux/macOS): the
+> streaming-v1 ADR, async readback, the AV1 codec (SVT-AV1 + dav1d), the input-v2 **latency ledger**, and
+> the **local fast path** (`LocalSocket` over AF_UNIX + a transport-generic `ProtocolConnection`) — the
+> editor viewport's wire. **M9's hard gate is satisfied, so Editor v1 begins.** **M9.0 landed
+> [ADR-0031](adr/0031-editor-v1.md)** — the editor is a **client of a live engine process**
+> ([ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md)): the editor launches the engine as a child
+> (`--editor-host`) for crash isolation; the **editor channel** is new message families in the reserved
+> 0x02xx band (schema-hash handshake, entity-tree snapshot + change-detection deltas, component get/set
+> by reflection bytes, spawn/despawn, asset manifest, scene ops, pick, gizmo, play control); the **Rust
+> UI toolkit is egui + egui_dock** (immediate-mode fits live data, MIT/Apache, docking exists — perf
+> validated in m9.3 on a display, since this build box is headless); **play = snapshot → sim → restore
+> bit-exact** (the fixed tick makes step honest); undo = a command over the mutating messages; the
+> **viewport is the s1.4 local LZ4 session**. Invariants: the editor never links engine internals,
+> inspectors are *generated* from reflection, every host behaviour is provable headless (the UI is
+> Mac-eyeballed). **M9 is decomposed into bricks m9.0–m9.8:** **m9.0** ADR-0031 (this) · **m9.1**
+> engine-side editor host (`engine/editorhost`) · **m9.2** `.rscene` scene format · **m9.3** the Rust
+> shell + live viewport · **m9.4** outliner + reflection-driven inspectors · **m9.5** asset browser ·
+> **m9.6** picking + gizmos (Fable) · **m9.7** play-in-editor (Fable) · **m9.8** the proof (build a scene,
+> tweak, hit Play). **Next:** m9.1 — the editor host.
+>
 > **Update (2026-07-17) — Milestone 8 complete; Track S1 kicks off as the M9 runway.** M8 (Destruction
 > v1) landed on `main` (through `samples/10-destructible-wall`, PR #62). M9 (Editor v1) is next, but its
 > **hard entry gate is Track S1 streaming** — the editor is a *client of the engine* over the streaming
