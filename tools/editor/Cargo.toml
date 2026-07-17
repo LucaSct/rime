@@ -15,8 +15,17 @@ description = "The Rime editor — a client of a live engine process (M9)"
 name = "editor"
 path = "src/main.rs"
 
+[features]
+# The interactive egui docking shell (eframe → egui/egui_dock + wgpu/winit). Off by default so the
+# headless `editor --smoke` — the CI-critical path — stays a light, fast build with no windowing
+# stack. Turn it on to build/run the real editor: `cargo run -p editor --features gui`.
+default = []
+gui = ["dep:eframe", "dep:egui_dock"]
+
 [dependencies]
 rime-protocol = { path = "../rime-protocol" }
+eframe = { version = "0.31", optional = true }
+egui_dock = { version = "0.16", optional = true }
 
 [lints.clippy]
 all = "deny"
