@@ -170,11 +170,33 @@ signed and float fields) and rejects truncated / unknown-codec / unknown-format 
 integration test** over `127.0.0.1` shakes hands, sends input up, streams a JPEG frame down, and
 decodes it back to pixels — codec + protocol + sockets, end to end, no device.
 
-## Later (post-M5)
+## S1 — inter-frame video, async readback, the latency ledger (in progress)
 
-**S1:** hardware encode (VAAPI/NVENC server-side, VideoToolbox decode on Mac; software fallback), real
-async readback (needs M5's GPU timestamp queries for a true latency pipeline), gamepad backchannel.
+The bridge from S0's per-frame JPEG stills to a real video stream, and the **M9 editor's runway**
+([ADR-0030](../adr/0030-streaming-v1.md)). Five bricks:
+
+- **s1.1 async readback.** S0's `capture()` is a synchronous glass-to-CPU stall (`CaptureStats::last_ms`
+  measured it). s1.1 gives the RHI a non-blocking submit + completion token (the Vulkan backend already
+  fences frames-in-flight; S0 exposed only `submit_blocking`/`wait_idle`) and turns the tap's
+  double-buffer into an N-deep readback ring with a **latest-wins drop** policy — bounded latency over a
+  backlog.
+- **s1.2 the AV1 codec.** `Codec::Av1` (appended; JPEG stays the intra fallback, LZ4 the lossless/local
+  path): **SVT-AV1** to encode, **dav1d** to decode, behind `VideoEncoder`/`VideoDecoder` seams so
+  hardware encoders (VideoToolbox / VAAPI / NVENC) slot in per-platform. AV1 because it is royalty-free
+  and ship-safe — H.264 rides the MPEG-LA patent pool, the same class of trap that ruled out GPL x264
+  ([ADR-0017](../adr/0017-streaming-codec.md)). The confirming `codec_bench` numbers land here.
+- **s1.3 input v2 + the latency ledger.** Timestamped input; per-frame stamps at seven stages
+  (capture-submit → present); one-way delay from echoed timestamps (no NTP); reported in the client HUD.
+- **s1.4 the local fast path.** UDS (POSIX) / named pipes (Windows) behind the socket seam, LZ4-lossless
+  default — **the editor viewport's transport** and the one hard M9 gate.
+
+The protocol grows (and `kProtocolVersion` bumps): codec negotiation in the handshake, a parameter-set
+message (the AV1 sequence header), and a keyframe-request message (the S2 loss-recovery seam).
+
+## Later (S2/S3)
+
 **S2:** internet-grade — QUIC or WebRTC (congestion control, FEC/NACK), session/auth, NAT traversal, a
-browser client (WebCodecs). **S3:** remote-play productization — multi-session, bitrate ladders, frame
-pacing vs. the game loop. One-to-many broadcast (Twitch-style, no backchannel) is a natural later
-*profile* of the same tap+encode stack — flagged optional, scheduled only on request.
+browser client (WebCodecs); its transport decision converges with M11.0 (one `engine/net` core, two
+consumers). **S3:** remote-play productization — multi-session, bitrate ladders, frame pacing vs. the
+game loop. One-to-many broadcast (Twitch-style, no backchannel) is a natural later *profile* of the same
+tap+encode stack — flagged optional, scheduled only on request.

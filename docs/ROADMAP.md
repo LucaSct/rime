@@ -9,6 +9,29 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-17) — Milestone 8 complete; Track S1 kicks off as the M9 runway.** M8 (Destruction
+> v1) landed on `main` (through `samples/10-destructible-wall`, PR #62). M9 (Editor v1) is next, but its
+> **hard entry gate is Track S1 streaming** — the editor is a *client of the engine* over the streaming
+> protocol ([ADR-0016](adr/0016-editor-is-a-client-of-the-engine.md)), and s1.4 is the viewport's local
+> wire. S1 had been skipped on the way here (after M6 the path ran S0.7 → M7 → M8), so the decision this
+> session (Luca): **build the full S1 track (s1.0–s1.4) before M9**, rather than shortcut the editor onto
+> the S0 TCP loopback. **S1.0 landed [ADR-0030](adr/0030-streaming-v1.md)** — the streaming-v1 decisions:
+> the inter-frame **wire codec is AV1** (SVT-AV1 encode + dav1d decode), chosen on the same ship-safe
+> licensing test that ruled out GPL x264 in ADR-0017 — AV1 is royalty-free, H.264 rides the MPEG-LA patent
+> pool; `Codec::Av1 = 3` is appended, **JPEG stays the intra fallback, LZ4 the lossless/local editor
+> path**; **async readback** kills the measured S0 capture stall and needs one new RHI primitive (a
+> non-blocking submit + completion token — the Vulkan backend already fences frames-in-flight; S0 exposed
+> only `submit_blocking`/`wait_idle`); a **seven-stage latency ledger** (no NTP — echoed-timestamp one-way
+> estimates) makes glass-to-glass honest; and the protocol grows (codec negotiation, a parameter-set
+> message, a keyframe-request seam; `kProtocolVersion` bumps). **S1 is decomposed into bricks s1.0–s1.4:**
+> **s1.0** ADR-0030 (this) · **s1.1** async readback (the RHI completion primitive + an N-deep readback
+> ring, latest-wins drop) · **s1.2** the AV1 software codec (SVT-AV1 + dav1d behind
+> `VideoEncoder`/`VideoDecoder` seams; hardware encoders slot in later; the confirming `codec_bench`
+> numbers land here) · **s1.3** input v2 + the latency ledger · **s1.4** the **local fast path**
+> (UDS/named-pipe transport + LZ4-lossless default) — **the M9 viewport's wire, the one hard M9 blocker**.
+> Proofs stay GPU-free/structural on lavapipe; the video codec serves the WAN path, off the editor's
+> LZ4-lossless critical path. **Next:** s1.1 — async readback.
+>
 > **Update (2026-07-04) — Milestone 4 merged to `main`; M5 begins.** The M4 stack landed via PRs
 > #11, #15, #13, #14 (#12 was closed by a base-branch race when #11 merged; #15 supersedes it),
 > CI-green on all three OSes + both sanitizer jobs. One first-contact find on the way in, caught
