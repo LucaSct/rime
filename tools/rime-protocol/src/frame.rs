@@ -162,4 +162,31 @@ impl FrameMessage {
             data,
         })
     }
+
+    /// Decode this frame's still-encoded `data` into raw RGBA pixels — `desc.byte_size()` bytes, top
+    /// row first, ready to upload as a viewport texture. Handles the editor viewport's codecs: `Lz4`
+    /// (the lossless block the engine compresses local frames with) and `Raw`. The lossy wire codecs
+    /// (`Jpeg`, `Av1`) belong to the remote-play path and are refused here. The output is sized from
+    /// the declared geometry and cross-checked, so a rogue length can neither over- nor under-run.
+    pub fn decode_pixels(&self) -> Result<Vec<u8>> {
+        let expected = self.desc.byte_size();
+        match self.codec {
+            Codec::Raw => {
+                if self.data.len() != expected {
+                    return Err(Error::Truncated);
+                }
+                Ok(self.data.clone())
+            }
+            Codec::Lz4 => {
+                let mut out = vec![0u8; expected];
+                let n = lz4_flex::block::decompress_into(&self.data, &mut out)
+                    .map_err(|_| Error::Truncated)?;
+                if n != expected {
+                    return Err(Error::Truncated);
+                }
+                Ok(out)
+            }
+            Codec::Jpeg | Codec::Av1 => Err(Error::BadCodec(self.codec.to_code())),
+        }
+    }
 }

@@ -3,10 +3,15 @@
 
 //! `editor --smoke` — the headless editor<->engine end-to-end check (M9.3). It launches
 //! `rime-engine --editor-host` over a fresh local socket, handshakes, pulls the component **schema**
-//! and a full-world **snapshot**, pushes one **edit** back, and shuts the session down — asserting
-//! the engine exits cleanly. This is the CI-provable heart of "the editor is a client of a live
-//! engine": no window, no GPU, just the real two processes speaking the real wire (`rime-protocol`).
-//! The streamed viewport (frames) is a later brick; this proves the world/inspector channel.
+//! and a full-world **snapshot**, and shuts the session down — asserting the engine exits cleanly.
+//! Two modes prove the two halves of "the editor is a client of a live engine", no window needed:
+//!
+//!   * **channel** (default): push one **edit** back — the world/inspector path.
+//!   * **`--frames N`**: the engine renders a scene and streams it; the smoke receives + LZ4-decodes
+//!     N **viewport frames** to RGBA (the render → capture → encode → wire → decode path). Needs a
+//!     GPU/lavapipe on the engine side.
+//!
+//! Just the real two processes speaking the real wire (`rime-protocol`).
 
 use std::process::ExitCode;
 
@@ -45,7 +50,9 @@ mod imp {
     use std::process::{Child, Command};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use rime_protocol::{Connection, EditorMessage, MessageType, Schema, SetComponent, Snapshot};
+    use rime_protocol::{
+        Connection, EditorMessage, FrameMessage, MessageType, Schema, SetComponent, Snapshot,
+    };
 
     /// Owns the spawned engine so an early failure never leaks the process: on drop (any error path)
     /// it is killed and reaped. On the happy path we `take` it out to `wait` for its real exit code.
@@ -124,24 +131,34 @@ mod imp {
             .or_else(|| std::env::var("RIME_ENGINE_BIN").ok())
             .ok_or("no engine binary — pass --engine <rime-engine> or set RIME_ENGINE_BIN")?;
         let scene = arg_value(args, "--scene");
+        let frames: u32 = arg_value(args, "--frames")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let socket = unique_socket_path();
 
-        // 1) Launch the engine host.
+        // 1) Launch the engine host. --frames drives the streamed viewport (needs a GPU/lavapipe);
+        //    otherwise it is the GPU-free editor channel over --scene (or a default world).
         let mut cmd = Command::new(&engine);
         cmd.arg("--editor-host").arg(&socket);
-        if let Some(scene) = &scene {
+        if frames > 0 {
+            cmd.arg("--viewport");
+        } else if let Some(scene) = &scene {
             cmd.arg("--scene").arg(scene);
         }
         let child = cmd.spawn().map_err(|e| format!("spawn '{engine}': {e}"))?;
         let guard = ChildGuard(Some(child));
 
-        // 2) Connect (retry until it binds) and handshake.
+        // 2) Connect (retry until it binds), then handshake. A read timeout keeps a wedged engine
+        //    from hanging the smoke forever.
         let stream = connect_retry(&socket, Duration::from_secs(10))
             .map_err(|e| format!("connect to engine socket: {e}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .map_err(|e| format!("set read timeout: {e}"))?;
         let mut conn = Connection::new(stream);
         conn.handshake().map_err(|e| format!("handshake: {e}"))?;
 
-        // 3) Receive the schema, then the world snapshot.
+        // 3) Receive the schema, then the world snapshot (both modes).
         let schema = Schema::decode(&expect_editor(&mut conn, EditorMessage::Schema)?)
             .map_err(|e| format!("decode schema: {e}"))?;
         let snapshot = Snapshot::decode(&expect_editor(&mut conn, EditorMessage::Snapshot)?)
@@ -149,27 +166,43 @@ mod imp {
         if schema.types.is_empty() {
             return Err("engine sent an empty schema".into());
         }
-        let entity = snapshot
-            .entities
-            .iter()
-            .find(|e| !e.components.is_empty())
-            .ok_or("snapshot has no inspectable entity")?;
 
-        // 4) Push an edit back: re-set the entity's first component to its own bytes — a valid
-        //    no-op edit. The editor never interprets a component blob (that is the inspector's job,
-        //    schema-driven), so this exercises the whole SetComponent path without decoding it.
-        let component = &entity.components[0];
-        let edit = SetComponent {
-            index: entity.index,
-            generation: entity.generation,
-            type_hash: component.type_hash,
-            blob: component.data.clone(),
+        let summary = if frames > 0 {
+            // Streamed-viewport mode: receive + decode N frames — the render → capture → LZ4 → wire →
+            // decode path end to end — then close.
+            let (got, w, h) = receive_frames(&mut conn, frames)?;
+            conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
+            drain_until_closed(&mut conn);
+            format!(
+                "editor <-> engine viewport OK: {} entities; {got} frames decoded to {w}x{h} RGBA; clean shutdown",
+                snapshot.entities.len()
+            )
+        } else {
+            // Editor-channel mode: push one edit back — re-set an entity's first component to its own
+            // bytes (a valid no-op edit). The editor never interprets a component blob (that is the
+            // inspector's job, schema-driven), so this exercises SetComponent without decoding it.
+            let entity = snapshot
+                .entities
+                .iter()
+                .find(|e| !e.components.is_empty())
+                .ok_or("snapshot has no inspectable entity")?;
+            let component = &entity.components[0];
+            let edit = SetComponent {
+                index: entity.index,
+                generation: entity.generation,
+                type_hash: component.type_hash,
+                blob: component.data.clone(),
+            };
+            conn.send_editor(EditorMessage::SetComponent, &edit.encode())
+                .map_err(|e| format!("send edit: {e}"))?;
+            conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
+            format!(
+                "editor <-> engine OK: {} schema types, {} entities; edit round-tripped; clean shutdown",
+                schema.types.len(),
+                snapshot.entities.len()
+            )
         };
-        conn.send_editor(EditorMessage::SetComponent, &edit.encode())
-            .map_err(|e| format!("send edit: {e}"))?;
 
-        // 5) Close the session; the engine's drain loop ends on Bye and the process exits.
-        conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
         let status = guard
             .take()
             .wait()
@@ -177,11 +210,42 @@ mod imp {
         if !status.success() {
             return Err(format!("engine exited with {status}"));
         }
+        Ok(summary)
+    }
 
-        Ok(format!(
-            "editor <-> engine OK: {} schema types, {} entities; edit round-tripped; clean shutdown",
-            schema.types.len(),
-            snapshot.entities.len()
-        ))
+    /// Receive and decode `n` viewport frames. Each must LZ4-decode to `width*height*4` RGBA bytes
+    /// and carry some variation (a uniform image would mean nothing was rendered). Editor-channel
+    /// messages arriving interleaved are ignored. Returns (frames, width, height).
+    fn receive_frames(
+        conn: &mut Connection<UnixStream>,
+        n: u32,
+    ) -> Result<(u32, u32, u32), String> {
+        let mut got = 0u32;
+        let mut dims = (0u32, 0u32);
+        while got < n {
+            let (ty, payload) = conn.recv().map_err(|e| format!("recv frame: {e}"))?;
+            if ty != MessageType::Frame {
+                continue; // an editor-channel message; not what this mode counts
+            }
+            let frame = FrameMessage::decode(&payload).map_err(|e| format!("decode frame: {e}"))?;
+            let pixels = frame
+                .decode_pixels()
+                .map_err(|e| format!("decode pixels: {e}"))?;
+            if pixels.len() != frame.desc.byte_size() {
+                return Err("frame pixel size mismatch".into());
+            }
+            if !pixels.is_empty() && pixels.iter().all(|&b| b == pixels[0]) {
+                return Err("frame decoded to a uniform image (nothing rendered?)".into());
+            }
+            dims = (frame.desc.width, frame.desc.height);
+            got += 1;
+        }
+        Ok((got, dims.0, dims.1))
+    }
+
+    /// Read and discard messages until the engine closes, so its frame-sender never blocks on a full
+    /// socket buffer once we stop consuming (which would wedge the engine's clean shutdown).
+    fn drain_until_closed(conn: &mut Connection<UnixStream>) {
+        while conn.recv().is_ok() {}
     }
 }

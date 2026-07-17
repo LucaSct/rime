@@ -66,6 +66,26 @@ fn frame_message_decodes_and_re_encodes_byte_exact() {
 }
 
 #[test]
+fn lz4_frame_decodes_to_the_pixels_cpp_compressed() {
+    // frame_lz4.bin is a FrameMessage whose data the C++ engine LZ4-compressed from an 8x8 gradient;
+    // frame_lz4_pixels.bin is that raw gradient. Rust must decompress the former back to the latter,
+    // byte-for-byte — the cross-language proof for the editor viewport's lossless frame path.
+    let frame = FrameMessage::decode(&fixture("frame_lz4.bin")).expect("decode frame");
+    assert_eq!(frame.codec, Codec::Lz4);
+    assert_eq!(frame.desc.width, 8);
+    assert_eq!(frame.desc.height, 8);
+    assert_eq!(frame.encode(), fixture("frame_lz4.bin")); // header + compressed data re-encode exact
+
+    let pixels = frame.decode_pixels().expect("lz4 decode");
+    assert_eq!(pixels.len(), frame.desc.byte_size());
+    assert_eq!(
+        pixels,
+        fixture("frame_lz4_pixels.bin"),
+        "cross-language LZ4 pixel mismatch"
+    );
+}
+
+#[test]
 fn schema_decodes_names_and_re_encodes_byte_exact() {
     let golden = fixture("schema.bin");
     let schema = Schema::decode(&golden).expect("decode schema");
