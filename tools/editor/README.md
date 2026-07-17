@@ -16,10 +16,13 @@ renders and owns the world; the editor is a thin, crash-isolated shell around it
     Vulkan device (lavapipe) on the engine side.
 
   Run both via [`scripts/editor-smoke.sh`](../../scripts/editor-smoke.sh).
-- **The interactive shell** — an egui docking layout (outliner, inspectors, asset browser) that draws
-  the streamed viewport in a panel — is the next brick. Per ADR-0031 the windowed UI is
-  *Mac-eyeballed* (not provable on a headless CI box), so it lands separately from this verifiable
-  spine.
+- **The interactive shell** (feature `gui`) — an **egui docking layout**: a **Viewport** panel drawing
+  the engine's streamed frames (with pointer input forwarded back), an **Outliner** of the world's
+  entities, an **Inspector** labelling a selected entity's components from the reflection schema, and
+  an **Assets** placeholder (the manifest browser is m9.5), over a connection status bar. The
+  windowing stack (eframe → wgpu/winit) is behind the `gui` feature so the headless smoke stays a
+  light build. Per ADR-0031 the on-screen result is **Mac-eyeballed** — CI compile-checks it but does
+  not run it (a windowed UI is not provable on a headless box).
 
 ## Try it
 
@@ -35,6 +38,9 @@ cargo build -p editor
 
 # The streamed viewport (renders on the engine; needs any Vulkan ICD / lavapipe):
 ./target/debug/editor --smoke --frames 30 --engine ../build/dev/bin/rime-engine
+
+# The interactive docking shell (needs a display + a Vulkan ICD on the engine side):
+cargo run -p editor --features gui -- --engine ../build/dev/bin/rime-engine
 ```
 
 `--engine` (or `$RIME_ENGINE_BIN`) points at the built `rime-engine`. The smoke is Unix-only for now
