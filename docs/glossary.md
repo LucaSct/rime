@@ -481,3 +481,11 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Serialization.** Turning in-memory data into a flat byte stream (and back), e.g. to
   save a scene or cook an asset. Rime's is reflection-driven: register a struct and it
   serializes for free.
+- **Scene / `.rscene`.** A saved world — which entities exist, their components, and how
+  they are placed and parented. `.rscene` is the v1 **human-diffable text** form: reflection-
+  serialized, versioned per-component by `type_hash`, entity references written as scene-local
+  ids. Loadable with or without an editor (`rime_hello --scene <file>`). See
+  [design/scene-format.md](design/scene-format.md).
+- **Scene-local id.** The ordinal (`0..N-1`) a `.rscene` gives each saved entity so a
+  reference between entities (a `Parent`) is stored position-independently and remapped to a
+  fresh runtime handle on load — never a volatile raw entity handle.
