@@ -364,8 +364,16 @@ bool InputEvent::decode(std::span<const std::byte> payload) {
 
 // ── ProtocolConnection ──────────────────────────────────────────────────────────────────────────
 
-ProtocolConnection::ProtocolConnection(platform::TcpSocket socket) noexcept
-    : socket_(std::move(socket)) {}
+// Each constructor type-erases its concrete socket into a platform::ByteStream (one small heap
+// allocation per connection — connections are rare, so this is off any hot path). The rest of the
+// class then talks only to stream_, transport-agnostic.
+ProtocolConnection::ProtocolConnection(platform::TcpSocket socket)
+    : stream_(
+          std::make_unique<platform::SocketByteStream<platform::TcpSocket>>(std::move(socket))) {}
+
+ProtocolConnection::ProtocolConnection(platform::LocalSocket socket)
+    : stream_(
+          std::make_unique<platform::SocketByteStream<platform::LocalSocket>>(std::move(socket))) {}
 
 bool ProtocolConnection::handshake() {
     // Send our Hello: [ magic:u32 ][ version:u16 ]. Both ends do this; the tiny 6-byte write never
@@ -374,13 +382,13 @@ bool ProtocolConnection::handshake() {
     ByteWriter w(hello);
     w.u32(kProtocolMagic);
     w.u16(kProtocolVersion);
-    if (!socket_.send_all(hello)) {
+    if (!stream_->send_all(hello)) {
         RIME_ERROR("protocol: failed to send handshake");
         return false;
     }
 
     std::array<std::byte, 6> buf{};
-    if (!socket_.recv_exact(buf)) {
+    if (!stream_->recv_exact(buf)) {
         RIME_ERROR("protocol: failed to read peer handshake (connection closed or error)");
         return false;
     }
@@ -413,11 +421,11 @@ bool ProtocolConnection::send_message(MessageType type, std::span<const std::byt
     ByteWriter w(scratch_);
     w.u16(static_cast<std::uint16_t>(type));
     w.u32(static_cast<std::uint32_t>(payload.size()));
-    if (!socket_.send_all(scratch_)) {
+    if (!stream_->send_all(scratch_)) {
         RIME_ERROR("protocol: failed to send message header");
         return false;
     }
-    if (!payload.empty() && !socket_.send_all(payload)) {
+    if (!payload.empty() && !stream_->send_all(payload)) {
         RIME_ERROR("protocol: failed to send message payload");
         return false;
     }
@@ -462,7 +470,7 @@ bool ProtocolConnection::recv_message(MessageType& type, std::vector<std::byte>&
     // recv_exact already turns a mid-message EOF into a failure, so a truncated header is caught
     // here.
     std::array<std::byte, 6> header{};
-    if (!socket_.recv_exact(header)) {
+    if (!stream_->recv_exact(header)) {
         return false;
     }
     ByteReader r(header);
@@ -477,7 +485,7 @@ bool ProtocolConnection::recv_message(MessageType& type, std::vector<std::byte>&
     }
     type = static_cast<MessageType>(type_raw);
     payload.resize(length);
-    if (length > 0 && !socket_.recv_exact(payload)) {
+    if (length > 0 && !stream_->recv_exact(payload)) {
         RIME_ERROR("protocol: truncated payload (connection closed or error)");
         return false;
     }

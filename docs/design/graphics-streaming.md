@@ -219,8 +219,19 @@ The bridge from S0's per-frame JPEG stills to a real video stream, and the **M9 
   seam + macOS GameController / Linux evdev backends — unverifiable on this GPU-less headless box, so
   not built blind) and the windowed-client **HUD overlay** (wants the `engine/ui` graduation the plan
   flags). `kProtocolVersion` 2→3.
-- **s1.4 the local fast path.** UDS (POSIX) / named pipes (Windows) behind the socket seam, LZ4-lossless
-  default — **the editor viewport's transport** and the one hard M9 gate.
+- **s1.4 the local fast path — landed** (the M9 gate). `platform` grows `LocalSocket`/`LocalListener`
+  (a Unix-domain socket, addressed by a filesystem path) behind the same seam as `TcpSocket`;
+  `ProtocolConnection` becomes **transport-generic** over a new `platform::ByteStream` (a
+  `SocketByteStream<T>` type-erases either socket), so the *same* protocol runs over TCP (remote) or a
+  local socket (the editor) — the TCP path is untouched (its tests unchanged). **AF_UNIX on both POSIX
+  and Windows** (Win10 1803+ ships it), so the send/recv path is shared with TCP rather than a separate
+  named-pipe API — one implementation, three OSes. Same-host sessions default to **LZ4** (lossless,
+  exact). *Deferred (small follow-up):* the `remote_view --local` sample flag + a live sustained
+  throughput number — M9.3 rides the `LocalSocket`/`ProtocolConnection` API directly, which the UDS
+  proof covers. Proof: a GPU-free ctest runs the full handshake + input + an LZ4 frame over a UDS
+  socket and asserts the frame arrives **bit-exact** (the S0.6 assertion on the new transport, CI's
+  first local-socket exercise on all 3 OSes), plus `LocalSocket` unit tests (over-long path refused,
+  missing-server clean, bind-creates/close-unlinks).
 
 The protocol grows (s1.2 bumped `kProtocolVersion` 1→2, s1.3 → 3, so an out-of-date client is refused
 at the handshake rather than mis-decoding an AV1 stream or misreading the wider ledger-bearing

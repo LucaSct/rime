@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -203,7 +204,12 @@ struct InputEvent {
 // samples/04-remote-view).
 class ProtocolConnection {
 public:
-    explicit ProtocolConnection(platform::TcpSocket socket) noexcept;
+    // Wrap a connected transport. Overloaded for each concrete socket (TcpSocket for LAN/remote,
+    // LocalSocket for the same-host editor wire, s1.4) — both are type-erased into the internal
+    // platform::ByteStream, so the protocol logic below is transport-agnostic (ADR-0016: one
+    // protocol, two transports). An empty/moved-from connection is is_open() == false.
+    explicit ProtocolConnection(platform::TcpSocket socket);
+    explicit ProtocolConnection(platform::LocalSocket socket);
 
     ProtocolConnection(ProtocolConnection&&) noexcept = default;
     ProtocolConnection& operator=(ProtocolConnection&&) noexcept = default;
@@ -234,10 +240,10 @@ public:
     // and calls FrameMessage/InputEvent::decode on `payload`.
     [[nodiscard]] bool recv_message(MessageType& type, std::vector<std::byte>& payload);
 
-    [[nodiscard]] bool is_open() const noexcept { return socket_.is_open(); }
+    [[nodiscard]] bool is_open() const noexcept { return stream_ && stream_->is_open(); }
 
 private:
-    platform::TcpSocket socket_;
+    std::unique_ptr<platform::ByteStream> stream_; // the transport (TcpSocket or LocalSocket)
     std::vector<std::byte> scratch_; // reused envelope-serialization buffer (send path)
 };
 

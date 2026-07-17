@@ -58,13 +58,35 @@ convention (`filesystem::read_file`) — and additionally **log the reason** (`e
   lazily and exactly once (`std::call_once`) and never calls `WSACleanup` — the library is wanted
   for the whole process and the OS reclaims it at exit.
 
+## Local sockets — the same-host fast path (S1.4)
+
+`LocalSocket` / `LocalListener` add a **Unix-domain** transport addressed by a filesystem path
+(instead of host:port): the low-latency, lossless wire the **M9 editor viewport** rides (ADR-0016),
+which skips TCP's network stack for a same-host connection. A connected UDS is an ordinary stream
+socket, so `send`/`recv` and the `send_all`/`recv_exact` loops are **identical to TCP's** — only how
+the endpoint is *established* differs, and the transfer loops are shared in `socket.cpp`.
+
+- **AF_UNIX on all three OSes.** Windows has shipped filesystem AF_UNIX sockets since Windows 10 1803
+  (2018), so one implementation serves POSIX and Win32 (`<afunix.h>`, `SOCKADDR_UN`) — rather than a
+  separate named-pipe API with its own `ReadFile`/`WriteFile` semantics. Less code, and the send/recv
+  path is exactly TCP's.
+- **Path lifetime.** `bind()` creates a socket *file* at the path; there is no `SO_REUSEADDR` for it,
+  so `bind()` unlinks a stale node first and `close()`/the destructor unlink the live one — a crashed
+  server never blocks a restart. Over-long paths (past `sun_path`, ~108 bytes) are **refused**, not
+  truncated to the wrong node.
+- **Transport genericity.** `stream::ProtocolConnection` now holds a `platform::ByteStream` (a
+  `SocketByteStream<T>` type-erases `TcpSocket` *or* `LocalSocket`), so the whole streaming protocol is
+  transport-agnostic — one protocol, two transports (editor = local, remote play = TCP). The TCP path
+  is untouched, asserted by its unchanged tests.
+
 ## Deliberate limitations (labeled, per CLAUDE.md)
 
 - **Blocking only.** No non-blocking/async I/O, no timeouts, no `poll`/`epoll`/IOCP. For S0 the
   bottleneck is frame readback + encode, not a socket stall (measure before optimizing) — async
   readback and non-blocking transport are S1/S2, and fold in behind this same interface.
-- **TCP only.** UDP/QUIC (loss-tolerant, congestion-controlled) is S2, when internet-grade streaming
-  needs it.
+- **TCP + same-host UDS.** UDP/QUIC (loss-tolerant, congestion-controlled) is S2, when internet-grade
+  streaming needs it; shared-memory zero-copy for the local path is a documented later seam (measure
+  UDS first).
 - **No TLS/auth.** S0 is LAN/loopback. Session/auth arrives with the internet transport (S2).
 - **No half-close / shutdown()** distinct from close, and **no explicit `Endpoint` type** yet — add
   when a caller needs them.

@@ -11,10 +11,12 @@
 #include <netinet/in.h>  // sockaddr_in / sockaddr_in6
 #include <netinet/tcp.h> // TCP_NODELAY
 #include <sys/socket.h>
-#include <unistd.h> // close
+#include <sys/un.h> // sockaddr_un (AF_UNIX, S1.4)
+#include <unistd.h> // close, unlink
 
 #include <cerrno>
-#include <cstring> // std::strerror
+#include <cstddef> // offsetof
+#include <cstring> // std::strerror, std::memcpy
 #include <string>
 
 #include "rime/core/diagnostics/log.hpp"
@@ -44,6 +46,21 @@ void suppress_sigpipe(int fd) {
 
 int as_fd(SocketHandle h) {
     return static_cast<int>(h);
+}
+
+// Fill a sockaddr_un for `path` (S1.4). AF_UNIX paths are bounded by sizeof(sun_path) (~108 on
+// Linux, 104 on macOS); an over-long path cannot be represented, so we reject it rather than
+// silently truncate — a truncated path would address the wrong node. Returns the addrlen (using the
+// exact length, not the whole struct, so it works on both OSes' conventions), or 0 if too long.
+socklen_t fill_sun(sockaddr_un& addr, std::string_view path) {
+    addr = {};
+    addr.sun_family = AF_UNIX;
+    if (path.size() >= sizeof(addr.sun_path)) {
+        return 0;
+    }
+    std::memcpy(addr.sun_path, path.data(), path.size());
+    addr.sun_path[path.size()] = '\0';
+    return static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + path.size() + 1);
 }
 
 } // namespace
@@ -185,6 +202,109 @@ void TcpListener::close() noexcept {
     if (handle_ != kInvalidSocket) {
         ::close(as_fd(handle_));
         handle_ = kInvalidSocket;
+    }
+}
+
+// ── LocalSocket / LocalListener (S1.4, AF_UNIX) ─────────────────────────────────────────
+// A connected Unix-domain socket is an ordinary stream socket, so send/recv/close are identical to
+// TcpSocket's — only the address (a path, not host:port) and the listener's unlink differ.
+std::optional<LocalSocket> LocalSocket::connect(std::string_view path) {
+    sockaddr_un addr{};
+    const socklen_t len = fill_sun(addr, path);
+    if (len == 0) {
+        RIME_WARN("local connect: path too long ({} bytes, max {})",
+                  path.size(),
+                  sizeof(addr.sun_path) - 1);
+        return std::nullopt;
+    }
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        RIME_WARN("local connect {}: socket: {}", path, std::strerror(errno));
+        return std::nullopt;
+    }
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), len) != 0) {
+        // ENOENT / ECONNREFUSED here is the common "server not up yet" — a normal, retryable case.
+        RIME_WARN("local connect {}: {}", path, std::strerror(errno));
+        ::close(fd);
+        return std::nullopt;
+    }
+    suppress_sigpipe(fd); // no TCP_NODELAY: Nagle is a TCP notion, irrelevant on AF_UNIX
+    return LocalSocket(static_cast<SocketHandle>(fd));
+}
+
+std::optional<std::size_t> LocalSocket::send(std::span<const std::byte> data) {
+    int flags = 0;
+#ifdef MSG_NOSIGNAL
+    flags = MSG_NOSIGNAL;
+#endif
+    const ssize_t n = ::send(as_fd(handle_), data.data(), data.size(), flags);
+    if (n < 0) {
+        RIME_WARN("local send: {}", std::strerror(errno));
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(n);
+}
+
+std::optional<std::size_t> LocalSocket::recv(std::span<std::byte> buffer) {
+    const ssize_t n = ::recv(as_fd(handle_), buffer.data(), buffer.size(), 0);
+    if (n < 0) {
+        RIME_WARN("local recv: {}", std::strerror(errno));
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(n); // 0 == peer closed cleanly (EOF)
+}
+
+void LocalSocket::close() noexcept {
+    if (handle_ != kInvalidSocket) {
+        ::close(as_fd(handle_));
+        handle_ = kInvalidSocket;
+    }
+}
+
+std::optional<LocalListener> LocalListener::bind(std::string_view path) {
+    sockaddr_un addr{};
+    const socklen_t len = fill_sun(addr, path);
+    if (len == 0) {
+        RIME_WARN(
+            "local bind: path too long ({} bytes, max {})", path.size(), sizeof(addr.sun_path) - 1);
+        return std::nullopt;
+    }
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        RIME_WARN("local bind {}: socket: {}", path, std::strerror(errno));
+        return std::nullopt;
+    }
+    // AF_UNIX has no SO_REUSEADDR for the path: a stale node (a crashed server, or our own prior
+    // run) makes bind fail with EADDRINUSE. Unlink it first — same-host, single-owner, so safe.
+    const std::string path_s(path);
+    ::unlink(path_s.c_str());
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), len) != 0 || ::listen(fd, SOMAXCONN) != 0) {
+        RIME_WARN("local bind {}: {}", path, std::strerror(errno));
+        ::close(fd);
+        return std::nullopt;
+    }
+    return LocalListener(static_cast<SocketHandle>(fd), path_s);
+}
+
+std::optional<LocalSocket> LocalListener::accept() {
+    const int fd = ::accept(as_fd(handle_), nullptr, nullptr);
+    if (fd < 0) {
+        RIME_WARN("local accept: {}", std::strerror(errno));
+        return std::nullopt;
+    }
+    suppress_sigpipe(fd);
+    return LocalSocket(static_cast<SocketHandle>(fd));
+}
+
+void LocalListener::close() noexcept {
+    if (handle_ != kInvalidSocket) {
+        ::close(as_fd(handle_));
+        handle_ = kInvalidSocket;
+    }
+    if (!path_.empty()) {
+        ::unlink(
+            path_.c_str()); // remove the socket file so a restart isn't blocked by a stale node
+        path_.clear();
     }
 }
 
