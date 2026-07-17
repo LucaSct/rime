@@ -215,34 +215,47 @@ int run_server(const std::string& host,
     const auto period = std::chrono::milliseconds(33); // ~30 fps
     auto next = std::chrono::steady_clock::now();
     while (!stop.load()) {
+        // Render the scene and submit its readback WITHOUT blocking (s1.1, ADR-0030): the GPU does
+        // the copy while this thread moves on. try_get_frame() hands back the freshest *completed*
+        // frame — latest-wins, so if encode/transport ever falls behind, stale frames are dropped
+        // rather than queued. In steady state at 30 fps the copy is long finished by the next tick,
+        // so frames flow 1:1 with a one-frame pipeline latency.
         render_scene(*device, color, scene.r.load(), scene.g.load(), scene.b.load());
-        const stream::FrameView view = streamer->capture(color);
-
-        stream::FrameMessage fm;
-        fm.sequence = seq;
-        fm.capture_us = now_us();
-        fm.codec = codec;
-        fm.desc = {extent, view.format};
-        if (!encoder.encode(codec, fm.desc, view.pixels, fm.data)) {
-            std::fprintf(stderr, "remote_view server: encode failed\n");
-            break;
+        streamer->begin_capture(color);
+        const std::optional<stream::FrameView> view = streamer->try_get_frame();
+        if (view) {
+            stream::FrameMessage fm;
+            fm.sequence = seq;
+            fm.capture_us = now_us();
+            fm.codec = codec;
+            fm.desc = {extent, view->format};
+            if (!encoder.encode(codec, fm.desc, view->pixels, fm.data)) {
+                std::fprintf(stderr, "remote_view server: encode failed\n");
+                break;
+            }
+            if (!conn.send_frame(fm)) {
+                std::printf("remote_view server: client disconnected after %llu frames.\n",
+                            static_cast<unsigned long long>(seq));
+                break;
+            }
+            ++seq;
         }
-        if (!conn.send_frame(fm)) {
-            std::printf("remote_view server: client disconnected after %llu frames.\n",
-                        static_cast<unsigned long long>(seq));
-            break;
-        }
-        ++seq;
         next += period;
         std::this_thread::sleep_until(next);
     }
 
     stop.store(true);
     input_thread.join();
+    // Drain the tap before freeing the texture it captured from: the last begin_capture() may still
+    // have a copy of `color` in flight, and destroying an image an unfinished command buffer
+    // references is a use-after-free the validation layer rightly rejects. Resetting the streamer
+    // waits those copies out (its destructor drains every pending ticket).
+    const std::uint64_t dropped = streamer->stats().dropped;
+    streamer.reset();
     device->destroy(color);
-    std::printf("remote_view server: done (streamed %llu frames, avg capture %.2f ms).\n",
+    std::printf("remote_view server: done (streamed %llu frames, %llu dropped latest-wins).\n",
                 static_cast<unsigned long long>(seq),
-                streamer->stats().avg_ms);
+                static_cast<unsigned long long>(dropped));
     return 0;
 }
 

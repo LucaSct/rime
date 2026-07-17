@@ -36,6 +36,17 @@ using ShaderHandle = core::Handle<Shader>;
 using PipelineHandle = core::Handle<Pipeline>;
 using SamplerHandle = core::Handle<Sampler>;
 
+// A handle to work submitted through Device::submit() — one in-flight batch of GPU commands. Unlike
+// the resource handles above it carries a monotonic id (not a generational slot): poll it with
+// Device::is_complete() (non-blocking) or block on Device::wait(). A default-constructed ticket is
+// "nothing in flight" — is_complete() reports true, wait() is a no-op. This is the async-submission
+// seam ADR-0030 (s1.1) adds so the frame tap can hide the synchronous glass-to-CPU readback stall.
+struct SubmitTicket {
+    std::uint64_t id = 0; // 0 = invalid / nothing submitted
+
+    [[nodiscard]] bool is_valid() const noexcept { return id != 0; }
+};
+
 // ── Small geometric PODs ────────────────────────────────────────────────────────────────────
 // rhi has its own Extent2D (rather than reusing platform::Extent2D) so the graphics seam owns its
 // vocabulary and does not drag a platform dependency into every consumer of a size.

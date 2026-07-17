@@ -3,8 +3,10 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "rime/core/containers/slot_map.hpp"
@@ -114,6 +116,9 @@ public:
 
     [[nodiscard]] std::unique_ptr<CommandBuffer> begin_commands() override;
     void submit_blocking(CommandBuffer& commands) override;
+    [[nodiscard]] SubmitTicket submit(std::unique_ptr<CommandBuffer> commands) override;
+    [[nodiscard]] bool is_complete(SubmitTicket ticket) override;
+    void wait(SubmitTicket ticket) override;
     void wait_idle() override;
 
     [[nodiscard]] std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
@@ -205,6 +210,23 @@ private:
     VkQueue graphics_queue_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> descriptor_pool_free_list_; // recycled transient pools
+
+    // In-flight async submissions (submit()/is_complete()/wait(), ADR-0030 s1.1). Each entry keeps
+    // its fence AND the command buffer alive until the GPU signals — the command buffer owns the
+    // VkCommandBuffer and the transient descriptor pools that must not be recycled early. Keyed by
+    // the monotonic SubmitTicket id, so a stale ticket can never alias a live submission.
+    struct InFlightSubmit {
+        VkFence fence = VK_NULL_HANDLE;
+        std::unique_ptr<CommandBuffer> commands;
+    };
+
+    std::unordered_map<std::uint64_t, InFlightSubmit> in_flight_submits_;
+    std::uint64_t next_ticket_id_ = 1;
+
+    // Free a signalled submission: recycle its descriptor pools, free its VkCommandBuffer, destroy
+    // its fence, drop the owned command buffer. Shared by is_complete()/wait() and the dtor drain.
+    void reclaim_submit(InFlightSubmit& s) noexcept;
+
     VmaAllocator allocator_ = nullptr;
     bool validation_ = false;
     bool debug_utils_ = false;          // VK_EXT_debug_utils enabled (names + labels, M5.3)

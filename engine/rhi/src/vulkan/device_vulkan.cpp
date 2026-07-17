@@ -115,6 +115,14 @@ VulkanDevice::~VulkanDevice() {
     if (device_)
         vkDeviceWaitIdle(device_);
 
+    // Drain any async submissions still in flight (submit()/wait(), ADR-0030). wait_idle above
+    // already proved the GPU is done, so we just reclaim their fences + command buffers +
+    // descriptor pools — this must happen before the command pool and descriptor free-list are
+    // destroyed below.
+    for (auto& entry : in_flight_submits_)
+        reclaim_submit(entry.second);
+    in_flight_submits_.clear();
+
     // Tear down in reverse dependency order. Resources first (some via VMA), then the allocator,
     // then the device, then instance-level objects.
     for (auto& p : pipelines_) {
@@ -543,6 +551,72 @@ void VulkanDevice::submit_blocking(CommandBuffer& commands) {
     // baked, so its pools can be reset and reused immediately (ADR-0020).
     for (VkDescriptorPool pool : vcb.release_descriptor_pools())
         recycle_descriptor_pool(pool);
+}
+
+SubmitTicket VulkanDevice::submit(std::unique_ptr<CommandBuffer> commands) {
+    // The async counterpart to submit_blocking (ADR-0030, s1.1): end + submit the command buffer,
+    // but do NOT wait. We take ownership of `commands` because its VkCommandBuffer and the
+    // transient descriptor pools it baked must outlive the submission — the fence, not the caller's
+    // scope, decides when they may be freed. is_complete()/wait() reclaim them once the fence
+    // signals.
+    auto& vcb = static_cast<VulkanCommandBuffer&>(*commands);
+    VkCommandBuffer cmd = vcb.handle();
+    VK_CHECK(vkEndCommandBuffer(cmd));
+
+    VkCommandBufferSubmitInfo csi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    csi.commandBuffer = cmd;
+    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.commandBufferInfoCount = 1;
+    si.pCommandBufferInfos = &csi;
+
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateFence(device_, &fci, nullptr, &fence));
+    VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &si, fence));
+
+    const std::uint64_t id = next_ticket_id_++;
+    in_flight_submits_.emplace(id, InFlightSubmit{fence, std::move(commands)});
+    return SubmitTicket{id};
+}
+
+bool VulkanDevice::is_complete(SubmitTicket ticket) {
+    auto it = in_flight_submits_.find(ticket.id);
+    if (it == in_flight_submits_.end())
+        return true; // invalid, unknown, or already reclaimed — nothing left in flight
+    if (vkGetFenceStatus(device_, it->second.fence) == VK_SUCCESS) {
+        reclaim_submit(it->second);
+        in_flight_submits_.erase(it);
+        return true;
+    }
+    return false; // VK_NOT_READY — still executing
+}
+
+void VulkanDevice::wait(SubmitTicket ticket) {
+    auto it = in_flight_submits_.find(ticket.id);
+    if (it == in_flight_submits_.end())
+        return; // invalid/unknown/already reclaimed
+    VK_CHECK(vkWaitForFences(device_, 1, &it->second.fence, VK_TRUE, UINT64_MAX));
+    reclaim_submit(it->second);
+    in_flight_submits_.erase(it);
+}
+
+void VulkanDevice::reclaim_submit(InFlightSubmit& s) noexcept {
+    // Mirror submit_blocking's post-wait cleanup for a signalled async submission: the GPU is
+    // provably done with this encoder's transient descriptor sets (recycle the pools, ADR-0020) and
+    // its command buffer (free it back to the pool — ~VulkanCommandBuffer never frees cmd_ itself),
+    // then drop the owned encoder object.
+    if (s.commands) {
+        auto& vcb = static_cast<VulkanCommandBuffer&>(*s.commands);
+        for (VkDescriptorPool pool : vcb.release_descriptor_pools())
+            recycle_descriptor_pool(pool);
+        VkCommandBuffer cmd = vcb.handle();
+        vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
+        s.commands.reset();
+    }
+    if (s.fence) {
+        vkDestroyFence(device_, s.fence, nullptr);
+        s.fence = VK_NULL_HANDLE;
+    }
 }
 
 void VulkanDevice::wait_idle() {

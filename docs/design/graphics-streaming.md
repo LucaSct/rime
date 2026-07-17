@@ -175,11 +175,19 @@ decodes it back to pixels — codec + protocol + sockets, end to end, no device.
 The bridge from S0's per-frame JPEG stills to a real video stream, and the **M9 editor's runway**
 ([ADR-0030](../adr/0030-streaming-v1.md)). Five bricks:
 
-- **s1.1 async readback.** S0's `capture()` is a synchronous glass-to-CPU stall (`CaptureStats::last_ms`
-  measured it). s1.1 gives the RHI a non-blocking submit + completion token (the Vulkan backend already
-  fences frames-in-flight; S0 exposed only `submit_blocking`/`wait_idle`) and turns the tap's
-  double-buffer into an N-deep readback ring with a **latest-wins drop** policy — bounded latency over a
-  backlog.
+- **s1.1 async readback — landed.** S0's `capture()` is a synchronous glass-to-CPU stall
+  (`CaptureStats::last_ms` measured it). s1.1 gives the RHI a non-blocking `submit()` returning a
+  `SubmitTicket` + `is_complete()`/`wait()` (the Vulkan backend already fences frames-in-flight; S0
+  exposed only `submit_blocking`/`wait_idle`) and turns the tap's double-buffer into a 3-slot readback
+  ring: `begin_capture()` submits without waiting, `try_get_frame()` returns the newest completed frame
+  and drops older ones (**latest-wins** — bounded latency over a backlog). *Before/after on this box
+  (lavapipe, 256×256, 200 frames): the per-frame capture hot path fell from `capture()` ≈ 0.035 ms
+  (submit + fence-wait + readback) to `begin_capture()` ≈ 0.009 ms (submit only) — ~4×, with the
+  fence-wait + copy-out moved off the frame's critical path. The absolute stall is small on lavapipe's
+  fast software copy; on real GPUs with a frame genuinely in flight the hidden wait is larger, which is
+  the win the M9 viewport and remote play actually cash.* `samples/04-remote-view --serve` now drives
+  the async pair; the contract is *drain the tap before freeing a captured-from texture* (an in-flight
+  copy still reads it).
 - **s1.2 the AV1 codec.** `Codec::Av1` (appended; JPEG stays the intra fallback, LZ4 the lossless/local
   path): **SVT-AV1** to encode, **dav1d** to decode, behind `VideoEncoder`/`VideoDecoder` seams so
   hardware encoders (VideoToolbox / VAAPI / NVENC) slot in per-platform. AV1 because it is royalty-free
