@@ -382,6 +382,41 @@ Entries are grouped roughly by area and kept short on purpose.
   bracketing keys and blends them — **STEP** holds the previous key, **LINEAR** interpolates
   (nlerp for rotations, along the shortest arc). Looping vs clamping is chosen at play time.
 
+## Streaming & codecs
+
+- **Codec.** Coder-decoder: shrinks a frame for the wire and reconstructs it. Rime's
+  streaming track (Track S) uses four, chosen by measurement: **Raw** (baseline), **LZ4**
+  (lossless/local), **JPEG** (the S0 intra wire codec), and **AV1** (the S1 inter-frame
+  wire codec). See [ADR-0017](adr/0017-streaming-codec.md), [ADR-0030](adr/0030-streaming-v1.md).
+- **Intra-frame vs inter-frame.** An *intra* codec (JPEG) compresses each frame alone. An
+  *inter-frame* codec (AV1) also encodes what *changed* since earlier frames, so a
+  mostly-static view costs a fraction of the bandwidth — the big S1 win, at the price of
+  per-stream *state*.
+- **Keyframe (I-frame) / delta frame / GOP.** A *keyframe* decodes on its own; a *delta
+  frame* (P-frame) references earlier frames, so it is small but useless without its chain.
+  A *GOP* (group of pictures) is a keyframe and the deltas that follow it. A joining or
+  recovering client can only start at a keyframe — hence the protocol's `KeyframeRequest`.
+  (Distinct from an *animation* keyframe, above.)
+- **B-frame.** A delta frame that references *future* frames too. Better compression, but
+  the encoder must wait for that future — built-in latency — so interactive streaming
+  forbids them (Rime configures the encoder *low-delay*, P-frames only).
+- **AV1.** A modern, **royalty-free** video codec (Alliance for Open Media). Rime encodes
+  with **SVT-AV1** (scalable multi-core) and decodes with **dav1d** (small, fast) — both
+  permissive, unlike patent-pool H.264/HEVC. The `VideoEncoder`/`VideoDecoder` seam lets
+  hardware encoders (VideoToolbox/VAAPI/NVENC) replace SVT-AV1 per platform later.
+- **YUV / Y′CbCr, 4:2:0 (chroma subsampling).** A colour space splitting *luma* (brightness,
+  Y) from *chroma* (colour, Cb/Cr). Because the eye resolves brightness far more finely than
+  colour, **4:2:0** stores one chroma pair per 2×2 luma block — half the samples for a loss
+  rarely seen. Video codecs work in YUV, so Rime converts RGBA↔I420 (planar 4:2:0) around
+  them.
+- **PSNR (peak signal-to-noise ratio).** A dB measure of reconstruction quality after a
+  lossy codec; higher is better (∞ = identical). ~45–50 dB reads as visually clean. The
+  codec proofs assert a PSNR floor rather than bit-exactness (lossy codecs are not
+  deterministic).
+- **Sequence header / parameter set.** The global stream parameters (resolution, profile)
+  a stateful decoder needs *before* the first frame — AV1's analog of H.264's SPS/PPS.
+  Rime ships it out-of-band in the protocol's `StreamConfig` message.
+
 ## Performance & threading
 
 - **Job system / task scheduler.** Splits work into many small *jobs* spread across CPU

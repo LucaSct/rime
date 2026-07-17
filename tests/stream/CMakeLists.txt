@@ -10,6 +10,15 @@ rime_add_test(rime_stream_codec_tests
 target_link_libraries(rime_stream_codec_tests
     PRIVATE rime::stream)
 
+# The s1.2 video-codec proof (VideoEncoder/VideoDecoder — SVT-AV1 + dav1d) is likewise GPU-free
+# CPU-buffer work: stream round-trip under a PSNR bound, one-in-one-out latency, forced-keyframe
+# join, malformed-input rejection. The codec libraries stay PRIVATE to rime::stream.
+rime_add_test(rime_stream_video_tests
+    video_codec_test.cpp)
+
+target_link_libraries(rime_stream_video_tests
+    PRIVATE rime::stream)
+
 # The protocol proof (S0.4) is also GPU-free: serialization round-trips plus a loopback integration
 # test over 127.0.0.1 (handshake + input + a JPEG frame, end to end). It needs the sockets, so it
 # links rime::platform alongside rime::stream.

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -33,8 +34,14 @@ namespace rime::stream {
 // Wire identity. The magic is ASCII "RMS1" (Rime Media Stream), so a wrong-protocol peer is
 // rejected at the handshake instead of being misread. Bump kProtocolVersion for any incompatible
 // wire change.
+//
+// Version history:
+//   1 — S0.4: handshake, Frame, Input, Bye.
+//   2 — s1.2 (ADR-0030 §4): codec negotiation (Capabilities/StreamConfig), KeyframeRequest, and
+//       Codec::Av1 on Frame messages. Incompatible because a v1 client would sit waiting for
+//       frames it cannot decode; the version field exists so it is refused at connect instead.
 inline constexpr std::uint32_t kProtocolMagic = 0x524D5331u; // 'R''M''S''1'
-inline constexpr std::uint16_t kProtocolVersion = 1;
+inline constexpr std::uint16_t kProtocolVersion = 2;
 
 // An upper bound on a single message's payload, so a corrupt or hostile length field can't make us
 // try to allocate/read gigabytes. A raw 4K RGBA frame is ~33 MiB; 64 MiB leaves headroom while
@@ -47,7 +54,21 @@ inline constexpr std::uint32_t kMaxMessageBytes = 64u * 1024u * 1024u;
 // Values are wire constants — append, never renumber.
 enum class MessageType : std::uint16_t {
     Frame = 0x0001, // server -> client: one encoded video frame (FrameMessage payload)
+    // s1.2: stream parameters, sent before the first Frame and again on any codec/resolution
+    // change. For a stateful codec (Av1) it carries the codec config a decoder needs *before*
+    // frame 0 — the AV1 sequence header, the H.264 SPS/PPS analog. (StreamConfigMessage payload)
+    StreamConfig = 0x0002,
+
     Input = 0x0101, // client -> server: one input event (InputEvent payload)
+    // s1.2: the client's half of codec negotiation — the decoders it owns, in preference order,
+    // sent once right after the handshake; the server picks (see choose_codec) and answers with
+    // StreamConfig. A message rather than a fatter handshake so the 6-byte hello stays dumb and
+    // version-gated. (CapabilitiesMessage payload)
+    Capabilities = 0x0102,
+    // s1.2: "start me a fresh delta chain" — an inter-frame decoder can only join (or recover) at
+    // a keyframe, so a client sends this on connect/reset; S2's loss recovery reuses it. The
+    // server answers by forcing an intra on its VideoEncoder. No payload.
+    KeyframeRequest = 0x0103,
 
     // Reserved for the M9 editor channel (the 07-02 plan's M6 line item). The editor is a client of
     // a live engine process (ADR-0016); its viewport/command traffic will use message types in
@@ -85,6 +106,43 @@ struct FrameMessage {
     // codec/format code — never reads past `payload`.
     [[nodiscard]] bool decode(std::span<const std::byte> payload);
 };
+
+// The client's decoder inventory, most-preferred first — its half of codec negotiation (s1.2,
+// ADR-0030 §4). Sent once, right after the handshake. Preference belongs to the *client* because
+// only it knows its situation (a WAN client prefers Av1's bandwidth; the local editor prefers
+// LZ4's losslessness); the server just picks the first entry it can encode. Payload layout:
+//   [ count:u8 ][ codec:u8 x count ]
+struct CapabilitiesMessage {
+    std::vector<Codec> decoders;
+
+    void encode(std::vector<std::byte>& out) const;
+    // Forward-compatibility: codec values *we* don't recognize are skipped, not rejected — a
+    // newer client advertising a future codec must still negotiate down to one we share. Only a
+    // truncated payload is an error.
+    [[nodiscard]] bool decode(std::span<const std::byte> payload);
+};
+
+// The server's answer: everything the client needs to stand up a decoder *before* the first
+// frame arrives. For Av1 `codec_config` carries the encoder's sequence header (see
+// VideoEncoder::sequence_header); for the stateless codecs it is empty. Re-sent whenever the
+// stream's codec or geometry changes — the client then tears down and reopens its decoder.
+// Payload layout:
+//   [ codec:u8 ][ fmt:u8 ][ w:u32 ][ h:u32 ][ codec_config... ]
+struct StreamConfigMessage {
+    Codec codec = Codec::Jpeg;
+    ImageDesc desc{};
+    std::vector<std::byte> codec_config;
+
+    void encode(std::vector<std::byte>& out) const;
+    [[nodiscard]] bool decode(std::span<const std::byte> payload);
+};
+
+// The server's pick: the first codec in the client's preference list that the server supports —
+// client preference decides *which* codec, the server list decides *whether*. Returns nullopt
+// when the lists do not intersect (the server should then say Bye; better than silently
+// streaming something the peer cannot decode).
+[[nodiscard]] std::optional<Codec> choose_codec(std::span<const Codec> client_preference,
+                                                std::span<const Codec> server_supported);
 
 // One input event on its way back to the engine. A single tagged struct (rather than a struct per
 // event) keeps the wire and the server's event-injection loop simple. Fields not relevant to a
@@ -144,6 +202,9 @@ public:
     // Convenience wrappers that serialize a typed message and send it.
     [[nodiscard]] bool send_frame(const FrameMessage& frame);
     [[nodiscard]] bool send_input(const InputEvent& event);
+    [[nodiscard]] bool send_capabilities(const CapabilitiesMessage& caps);
+    [[nodiscard]] bool send_stream_config(const StreamConfigMessage& config);
+    [[nodiscard]] bool send_keyframe_request();
     [[nodiscard]] bool send_bye();
 
     // Receive exactly one framed message: fills `type`, and `payload` (cleared then filled with the

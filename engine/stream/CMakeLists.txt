@@ -12,6 +12,7 @@
 add_library(rime_stream STATIC
     src/frame_streamer.cpp
     src/frame_codec.cpp
+    src/video_codec.cpp
     src/protocol.cpp)
 
 # Namespaced alias so dependents link rime::stream (matching the other modules).
@@ -26,12 +27,13 @@ target_include_directories(rime_stream
 # handles) comes transitively.
 #
 # The codec libraries are linked PRIVATE: frame_codec.cpp is the only place that includes
-# <turbojpeg.h>/<lz4.h> — the public header hides them behind opaque void* handles — so consumers of
-# rime::stream (e.g. the S0.5 thin client) link the codecs transitively but never see their headers.
-# Targets resolved in the root CMakeLists (…-static for our static build). See conanfile.py, ADR-0017.
+# <turbojpeg.h>/<lz4.h>, and video_codec.cpp the only place that includes <EbSvtAv1Enc.h> /
+# <dav1d/dav1d.h> (s1.2) — the public headers hide them behind opaque void* handles — so consumers
+# of rime::stream (e.g. the S0.5 thin client) link the codecs transitively but never see their
+# headers. Targets resolved in the root CMakeLists. See conanfile.py, ADR-0017, ADR-0030.
 target_link_libraries(rime_stream
     PUBLIC rime::rhi rime::platform
-    PRIVATE ${RIME_TURBOJPEG_TARGET} ${RIME_LZ4_TARGET})
+    PRIVATE ${RIME_TURBOJPEG_TARGET} ${RIME_LZ4_TARGET} ${RIME_SVTAV1_TARGET} ${RIME_DAV1D_TARGET})
 
 # Project-wide build policy (C++20 + the strong warning set), same as every module.
 rime_apply_common_target_options(rime_stream)
