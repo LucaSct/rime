@@ -32,7 +32,10 @@ if (-not $RustOnly) {
     else { throw 'conan not found — run scripts/setup.ps1 first' }
 
     Say "C++: conan install ($buildType)"
-    & $conan install . -of "build/$Preset" -s build_type=$buildType -s compiler.cppstd=20 --build=missing
+    # AV1 codecs (SVT-AV1 + dav1d) built optimized even under Debug — see scripts/build.sh for why
+    # (their debug asserts otherwise flaked macOS CI; a Release C library mixes in safely).
+    & $conan install . -of "build/$Preset" -s build_type=$buildType -s compiler.cppstd=20 `
+        -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" --build=missing
 
     Say "C++: cmake configure ($Preset)"; cmake --preset $Preset
     Say "C++: cmake build ($Preset)"; cmake --build --preset $Preset

@@ -73,8 +73,14 @@ if [ "$do_cpp" -eq 1 ]; then
     fi
 
     say "C++: conan install ($build_type)"
+    # Build the AV1 codecs (SVT-AV1 encoder + dav1d decoder) OPTIMIZED even in a Debug engine build.
+    # They are third-party C libraries we never step-debug, and their internal assert()s otherwise
+    # run under Debug — a multithreaded SVT-AV1 encoder assertion (svt_aom_get_txb_ctx) intermittently
+    # aborted the macOS CI. A Release (NDEBUG) codec compiles those out; the stable C ABI makes mixing
+    # a Release codec into a Debug engine safe, and Debug builds get faster into the bargain.
     "$conan" install . -of "build/$preset" \
-        -s build_type="$build_type" -s compiler.cppstd=20 --build=missing
+        -s build_type="$build_type" -s compiler.cppstd=20 \
+        -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" --build=missing
 
     # Extra cache var layered on top of the preset. --sanitizer maps to the RIME_SANITIZER
     # option (see /CMakeLists.txt); off is the default and adds nothing. The ${var:+…} guard

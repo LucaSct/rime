@@ -230,6 +230,7 @@ jobs:
           printf '[conf]\ntools.build:compiler_executables={"c": "clang", "cpp": "clang++"}\n' \
             >> "$(conan profile path clang)"
           conan install . -of build/dev -s build_type=Debug -s compiler.cppstd=20 \
+            -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" \
             -pr:h clang -pr:b default --build=missing
           CC=clang CXX=clang++ cmake -S . -B build/dev -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/build/dev/conan_toolchain.cmake" \
