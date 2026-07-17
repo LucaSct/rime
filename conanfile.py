@@ -69,6 +69,24 @@ class RimeRecipe(ConanFile):
         self.requires("libjpeg-turbo/3.0.4")
         self.requires("lz4/1.10.0")
 
+        # ── Inter-frame video codec (Track S / s1.2, ADR-0030) ────────────────────────
+        # S1 upgrades the wire from per-frame JPEG stills to a real video stream. The codec
+        # is AV1, decided on licensing: AV1 is royalty-free by design (Alliance for Open
+        # Media), while H.264/HEVC ride the MPEG-LA/Via patent pools — the same class of
+        # ship-safety trap that ruled out GPL x264 in ADR-0017.
+        #   - libsvtav1 (SVT-AV1): the ENCODER. Scalable multi-core software AV1 — the
+        #     reference implementation behind the VideoEncoder seam (hardware encoders
+        #     slot in per-platform later, no interface change). BSD-3-Clause + the
+        #     AOM Patent License 1.0.
+        #   - dav1d: the DECODER. Small and fast (hand-written SIMD); shipping it means
+        #     every client can decode AV1 without renting a patent-encumbered decoder.
+        #     BSD-2-Clause.
+        # Both ship (games built on Rime host streamed sessions) and both are linked
+        # PRIVATE into rime_stream behind opaque handles, the same hide-the-library
+        # discipline as the S0 codecs above.
+        self.requires("libsvtav1/2.2.1")
+        self.requires("dav1d/1.5.3")
+
         # doctest: a fast-compiling, header-only unit-test framework. Declared as a
         # *test* requirement -- it is needed to build and run our tests, but it is not
         # part of the engine we ship, so it must never leak to consumers of Rime. Conan

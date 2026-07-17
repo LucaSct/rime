@@ -38,6 +38,11 @@ Runtime / shipped dependencies:
       Guido Vollbeding (IJG). BSD-3-Clause / IJG License / zlib License.
   - lz4 — fast lossless compression; the Track S lossless streaming path.
       Copyright (c) 2011-present, Yann Collet. BSD-2-Clause License.
+  - SVT-AV1 (libsvtav1) — scalable AV1 video encoder; the Track S (s1.2) inter-frame encode path.
+      Copyright (c) 2019 Alliance for Open Media and contributors; (c) Intel Corporation.
+      BSD-3-Clause-Clear License and the Alliance for Open Media Patent License 1.0.
+  - dav1d — AV1 video decoder; the Track S (s1.2) inter-frame decode path (shipped with the client).
+      Copyright (c) 2018-2024, VideoLAN and dav1d authors. BSD-2-Clause License.
 
 Build-time / tooling dependencies (not shipped in the engine binary):
 

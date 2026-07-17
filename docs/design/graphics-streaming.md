@@ -188,18 +188,36 @@ The bridge from S0's per-frame JPEG stills to a real video stream, and the **M9 
   the win the M9 viewport and remote play actually cash.* `samples/04-remote-view --serve` now drives
   the async pair; the contract is *drain the tap before freeing a captured-from texture* (an in-flight
   copy still reads it).
-- **s1.2 the AV1 codec.** `Codec::Av1` (appended; JPEG stays the intra fallback, LZ4 the lossless/local
-  path): **SVT-AV1** to encode, **dav1d** to decode, behind `VideoEncoder`/`VideoDecoder` seams so
-  hardware encoders (VideoToolbox / VAAPI / NVENC) slot in per-platform. AV1 because it is royalty-free
-  and ship-safe — H.264 rides the MPEG-LA patent pool, the same class of trap that ruled out GPL x264
-  ([ADR-0017](../adr/0017-streaming-codec.md)). The confirming `codec_bench` numbers land here.
+- **s1.2 the AV1 codec — landed.** `Codec::Av1` (appended; JPEG stays the intra fallback, LZ4 the
+  lossless/local path): **SVT-AV1** to encode, **dav1d** to decode, behind stateful
+  `VideoEncoder`/`VideoDecoder` seams (`video_codec.hpp`) so hardware encoders (VideoToolbox / VAAPI /
+  NVENC) slot in per-platform with no interface or protocol change. AV1 because it is royalty-free and
+  ship-safe — H.264 rides the MPEG-LA patent pool, the same class of trap that ruled out GPL x264
+  ([ADR-0017](../adr/0017-streaming-codec.md)). The codec is stateful (reference pictures, keyframes),
+  so it does not fit the per-call `FrameEncoder`; one encoder/decoder pair spans a stream, configured
+  **low-delay** (no B-frames — nothing references the future, so nothing waits for it) and **one-in-one-out**
+  (a queued frame is queued latency). RGBA↔I420 (full-range BT.601, fixed-point) conversion brackets the
+  codecs, which work in YUV 4:2:0. *The confirming `codec_bench` (release, this 16-core box, moving/panned
+  content, CBR target 4000 kbps): a shaded **720p** scene encodes at **4.4 ms/frame** (preset 10) —
+  comfortably inside the 33.3 ms 30-fps budget — for **~177 kbit/s at 48.8 dB PSNR**, versus per-frame
+  JPEG's ~8 Mbit/s at 45 dB: an order-of-magnitude bandwidth cut at higher quality, the S1 headline win.
+  **1080p** scene is **9.6 ms/frame** (preset 10) — also under budget; preset 12 trades ~0.4 dB for ~30%
+  faster encode. Decode (dav1d) is ~2 ms/frame at 720p. Software AV1 clears the real-time budget here, so
+  the hardware-encoder escape hatch stays a seam, unneeded at these resolutions.* GPU-free round-trip test
+  (`tests/stream/video_codec_test.cpp`): PSNR-bounded stream, one-in-one-out, forced-keyframe standalone
+  join, malformed-input rejection; clean under ASan/UBSan/LSan.
 - **s1.3 input v2 + the latency ledger.** Timestamped input; per-frame stamps at seven stages
   (capture-submit → present); one-way delay from echoed timestamps (no NTP); reported in the client HUD.
 - **s1.4 the local fast path.** UDS (POSIX) / named pipes (Windows) behind the socket seam, LZ4-lossless
   default — **the editor viewport's transport** and the one hard M9 gate.
 
-The protocol grows (and `kProtocolVersion` bumps): codec negotiation in the handshake, a parameter-set
-message (the AV1 sequence header), and a keyframe-request message (the S2 loss-recovery seam).
+The protocol grows (s1.2 bumped `kProtocolVersion` 1→2, so an S0 client is refused at the handshake
+rather than mis-decoding an AV1 stream): a `Capabilities` message (the client advertises its decoders
+in preference order right after the handshake; the server's `choose_codec` picks the top shared one),
+a `StreamConfig` parameter-set message (carries the AV1 sequence header a stateful decoder needs
+before frame 0, re-sent on codec/resolution change), and a `KeyframeRequest` message (client→server:
+force an intra to join or recover — the S2 loss-recovery seam). All appended, never renumbered, and
+clear of the 0x0200–0x02FF editor range.
 
 ## Later (S2/S3)
 

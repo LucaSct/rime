@@ -280,6 +280,15 @@ else()
     set(RIME_LZ4_TARGET LZ4::lz4_shared)
 endif()
 
+# Inter-frame video codec (Track S / s1.2): SVT-AV1 encodes, dav1d decodes — the AV1 pair
+# ADR-0030 chose on licensing (royalty-free by design; H.264/HEVC's patent pools are the same
+# class of shipping trap as x264's GPL). Both ship, both permissive (BSD + the AOM patent
+# license), both linked PRIVATE into engine/stream behind opaque handles like the codecs above.
+find_package(libsvtav1 REQUIRED) # libsvtav1::encoder (the SvtAv1Enc component)
+find_package(dav1d REQUIRED)     # dav1d::dav1d
+set(RIME_SVTAV1_TARGET libsvtav1::encoder)
+set(RIME_DAV1D_TARGET dav1d::dav1d)
+
 # ── Modules ───────────────────────────────────────────────────────────────────
 # Added bottom-up as each is implemented. The dependency order mirrors the layer cake
 # in docs/ARCHITECTURE.md (a module may only depend on layers below it).

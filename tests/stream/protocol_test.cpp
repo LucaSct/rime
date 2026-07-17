@@ -63,6 +63,80 @@ TEST_CASE("FrameMessage round-trips through bytes") {
     CHECK(dst.data == src.data);
 }
 
+TEST_CASE("CapabilitiesMessage round-trips a decoder preference list (s1.2)") {
+    stream::CapabilitiesMessage src;
+    src.decoders = {stream::Codec::Av1, stream::Codec::Jpeg, stream::Codec::LZ4};
+    Bytes payload;
+    src.encode(payload);
+
+    stream::CapabilitiesMessage dst;
+    REQUIRE(dst.decode(payload));
+    CHECK(dst.decoders == src.decoders); // order (preference) preserved
+
+    SUBCASE("an unknown codec code is skipped, not rejected (forward-compat)") {
+        // Poke a future codec (0x7F) into the second slot: negotiation must still parse the rest.
+        payload[2] = b(0x7F);
+        stream::CapabilitiesMessage fwd;
+        REQUIRE(fwd.decode(payload));
+        CHECK(fwd.decoders.size() == 2); // the unknown entry dropped; the two known survive
+        CHECK(fwd.decoders[0] == stream::Codec::Av1);
+        CHECK(fwd.decoders[1] == stream::Codec::LZ4);
+    }
+    SUBCASE("a truncated codec list is refused") {
+        stream::CapabilitiesMessage bad;
+        Bytes truncated = {b(3), b(0), b(1)}; // claims 3 codecs, supplies 2
+        CHECK_FALSE(bad.decode(truncated));
+    }
+}
+
+TEST_CASE("StreamConfigMessage round-trips codec + geometry + AV1 sequence header (s1.2)") {
+    stream::StreamConfigMessage src;
+    src.codec = stream::Codec::Av1;
+    src.desc = {{640, 360}, rhi::Format::RGBA8Unorm};
+    src.codec_config = {b(0x0A), b(0x0B), b(0x0C), b(0xFF)}; // stand-in sequence-header bytes
+    Bytes payload;
+    src.encode(payload);
+
+    stream::StreamConfigMessage dst;
+    REQUIRE(dst.decode(payload));
+    CHECK(dst.codec == stream::Codec::Av1);
+    CHECK(dst.desc.extent.width == 640);
+    CHECK(dst.desc.extent.height == 360);
+    CHECK(dst.desc.format == rhi::Format::RGBA8Unorm);
+    CHECK(dst.codec_config == src.codec_config);
+
+    SUBCASE("truncated header is refused") {
+        stream::StreamConfigMessage bad;
+        CHECK_FALSE(bad.decode(Bytes(4))); // header needs 10 bytes
+    }
+    SUBCASE("an unknown chosen codec is refused (server picked something we can't decode)") {
+        payload[0] = b(0x7F);
+        stream::StreamConfigMessage bad;
+        CHECK_FALSE(bad.decode(payload));
+    }
+}
+
+TEST_CASE("choose_codec honours client preference within the server's support (s1.2)") {
+    const stream::Codec server[] = {stream::Codec::Av1, stream::Codec::Jpeg, stream::Codec::LZ4};
+
+    SUBCASE("client's top shared choice wins") {
+        const stream::Codec client[] = {stream::Codec::Av1, stream::Codec::Jpeg};
+        const auto picked = stream::choose_codec(client, server);
+        REQUIRE(picked.has_value());
+        CHECK(*picked == stream::Codec::Av1);
+    }
+    SUBCASE("client preference — not server order — decides among shared codecs") {
+        const stream::Codec client[] = {stream::Codec::LZ4, stream::Codec::Av1};
+        const auto picked = stream::choose_codec(client, server);
+        REQUIRE(picked.has_value());
+        CHECK(*picked == stream::Codec::LZ4); // even though the server lists Av1 first
+    }
+    SUBCASE("no intersection yields nullopt (server should then Bye)") {
+        const stream::Codec client[] = {stream::Codec::Raw};
+        CHECK_FALSE(stream::choose_codec(client, server).has_value());
+    }
+}
+
 TEST_CASE("InputEvent round-trips every field, including signed and float") {
     auto roundtrip = [](const stream::InputEvent& src) {
         Bytes payload;

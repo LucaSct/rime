@@ -149,6 +149,14 @@ bool FrameEncoder::encode(Codec codec,
             out.resize(static_cast<std::size_t>(jpeg_size));
             return true;
         }
+
+        case Codec::Av1: {
+            // AV1 is inter-frame: packets depend on encoder state (reference pictures, GOP) that
+            // this stateless per-call API cannot carry. The stateful VideoEncoder
+            // (video_codec.hpp) owns that path; asking for it here is a programming error.
+            RIME_ERROR("FrameEncoder: Av1 is stateful — use VideoEncoder (video_codec.hpp)");
+            return false;
+        }
     }
 
     RIME_ERROR("FrameEncoder: unknown codec {}", static_cast<int>(codec));
@@ -274,6 +282,13 @@ bool FrameDecoder::decode(Codec codec,
                 return false;
             }
             return true;
+        }
+
+        case Codec::Av1: {
+            // Mirror of the encode side: AV1 decode needs the stateful VideoDecoder
+            // (video_codec.hpp) fed with the stream's sequence header first.
+            RIME_ERROR("FrameDecoder: Av1 is stateful — use VideoDecoder (video_codec.hpp)");
+            return false;
         }
     }
 

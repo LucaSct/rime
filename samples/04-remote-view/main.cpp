@@ -82,6 +82,13 @@ const char* codec_name(stream::Codec c) {
             return "lz4";
         case stream::Codec::Jpeg:
             return "jpeg";
+        case stream::Codec::Av1:
+            // Av1 is the s1.2 inter-frame wire codec, but it is *stateful* — it runs through the
+            // VideoEncoder/VideoDecoder pair + the StreamConfig/KeyframeRequest handshake, not this
+            // sample's stateless FrameEncoder path. Switching this sample's server/client to the
+            // video pipe by default is its own brick (tracked for the S1 close-out); until then the
+            // `--codec` parser above never yields Av1, so this case only keeps the switch total.
+            return "av1";
     }
     return "?";
 }

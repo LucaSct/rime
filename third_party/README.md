@@ -30,11 +30,15 @@ recorded in the same NOTICE — again all permissive, none vendored here.
 | Formatting | **fmt** | Conan | logging + string formatting in `core` |
 | Streaming — lossy codec | **libjpeg-turbo** | Conan | the S0 wire codec (TurboJPEG API), SIMD JPEG; BSD-3/IJG — ship-safe (ADR-0017) |
 | Streaming — lossless codec | **lz4** | Conan | the lossless/local streaming path; BSD-2 (ADR-0017) |
+| Streaming — video encode | **SVT-AV1** | Conan | the S1 AV1 inter-frame encoder; BSD-3-Clause + AOM Patent License 1.0 — royalty-free, ship-safe (ADR-0030) |
+| Streaming — video decode | **dav1d** | Conan | the S1 AV1 decoder (shipped with the thin client); BSD-2 (ADR-0030) |
 | C++ unit tests | **doctest** | Conan | header-only; one small test exe per module |
 
-> Both streaming codecs are **shipped** (games built on Rime stream through `engine/stream`) and
-> deliberately permissive. The engine never links **GPL x264** — the license trap ADR-0016 flagged;
-> hardware encoders / openh264 / royalty-free AV1 are the S1 paths (see ADR-0017).
+> All four streaming codecs are **shipped** (games built on Rime stream through `engine/stream`) and
+> deliberately permissive. The engine never links **GPL x264** — the license trap ADR-0016 flagged —
+> nor patent-pool H.264/HEVC: the S1 inter-frame codec is **royalty-free AV1** (SVT-AV1 encode, dav1d
+> decode; ADR-0030). Hardware encoders (VideoToolbox / VAAPI / NVENC) slot in behind the same
+> `VideoEncoder`/`VideoDecoder` seam per platform, no new shipped dependency.
 
 Decisions already made that *removed* a would-be dependency (VISION principle #1 — own our
 destiny):

@@ -34,10 +34,18 @@ namespace rime::stream {
 
 // Which codec produced (and must decode) a frame's bytes. These are **wire values** — the S0.4
 // protocol header carries this as one byte — so they are fixed: append new codecs, never renumber.
+//
+// The division of labour after s1.2 (ADR-0030 §1): **Av1** is the inter-frame wire codec for
+// bandwidth-constrained (WAN) links; **Jpeg** stays the stateless intra fallback every client can
+// decode; **LZ4** stays the lossless/local path (the M9 editor viewport); **Raw** stays the
+// baseline. Av1 frames are produced/consumed by the *stateful* VideoEncoder/VideoDecoder pair
+// (video_codec.hpp), not by the stateless FrameEncoder/FrameDecoder below — inter-frame coding
+// carries reference-picture state that a per-call API cannot.
 enum class Codec : std::uint8_t {
     Raw = 0,  // no compression (memcpy) — the baseline
     LZ4 = 1,  // lossless, general-purpose
-    Jpeg = 2, // lossy DCT — the wire codec
+    Jpeg = 2, // lossy DCT — the intra-frame wire codec (S0), now the fallback
+    Av1 = 3,  // lossy inter-frame video — the S1 wire codec (see video_codec.hpp)
 };
 
 // Just enough to describe a raw frame to encode / a decode target to fill. S0 speaks only 8-bit,

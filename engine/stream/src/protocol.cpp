@@ -165,6 +165,20 @@ std::optional<rhi::Format> rhi_format_of(std::uint8_t code) {
     }
 }
 
+// Map a codec byte off the wire to the Codec enum — nullopt for values this build does not know.
+// The single place the protocol's "which codecs exist" knowledge lives, so appending a codec
+// (Av1 was s1.2's) is a one-line change here plus its enumerator.
+std::optional<Codec> known_codec(std::uint8_t code) {
+    switch (static_cast<Codec>(code)) {
+        case Codec::Raw:
+        case Codec::LZ4:
+        case Codec::Jpeg:
+        case Codec::Av1:
+            return static_cast<Codec>(code);
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 // ── FrameMessage ────────────────────────────────────────────────────────────────────────────────
@@ -199,7 +213,8 @@ bool FrameMessage::decode(std::span<const std::byte> payload) {
         RIME_ERROR("FrameMessage::decode: truncated header ({} bytes)", payload.size());
         return false;
     }
-    if (codec_byte > static_cast<std::uint8_t>(Codec::Jpeg)) {
+    const auto known = known_codec(codec_byte);
+    if (!known) {
         RIME_ERROR("FrameMessage::decode: unknown codec {}", codec_byte);
         return false;
     }
@@ -208,11 +223,105 @@ bool FrameMessage::decode(std::span<const std::byte> payload) {
         RIME_ERROR("FrameMessage::decode: unknown pixel format {}", format_byte);
         return false;
     }
-    codec = static_cast<Codec>(codec_byte);
+    codec = *known;
     desc.format = *fmt;
     desc.extent = {width, height};
     r.take_rest(data); // whatever remains is the encoded frame
     return true;
+}
+
+// ── CapabilitiesMessage / StreamConfigMessage / negotiation (s1.2, ADR-0030 §4) ─────────────────
+
+void CapabilitiesMessage::encode(std::vector<std::byte>& out) const {
+    out.clear();
+    ByteWriter w(out);
+    // A one-byte count caps the list at 255 — generous forever for codec *kinds* — and keeps the
+    // message fixed-cost to parse.
+    const auto count = static_cast<std::uint8_t>(decoders.size() > 255 ? 255 : decoders.size());
+    w.u8(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        w.u8(static_cast<std::uint8_t>(decoders[i]));
+    }
+}
+
+bool CapabilitiesMessage::decode(std::span<const std::byte> payload) {
+    decoders.clear();
+    ByteReader r(payload);
+    std::uint8_t count = 0;
+    if (!r.u8(count)) {
+        RIME_ERROR("CapabilitiesMessage::decode: truncated ({} bytes)", payload.size());
+        return false;
+    }
+    decoders.reserve(count);
+    for (std::uint8_t i = 0; i < count; ++i) {
+        std::uint8_t code = 0;
+        if (!r.u8(code)) {
+            RIME_ERROR("CapabilitiesMessage::decode: truncated codec list ({} of {})", i, count);
+            decoders.clear();
+            return false;
+        }
+        // Skip, don't reject: a codec value from the future is exactly what negotiation exists to
+        // handle — we simply cannot pick it. Preference *order* among the survivors is preserved.
+        if (const auto codec = known_codec(code)) {
+            decoders.push_back(*codec);
+        }
+    }
+    return true;
+}
+
+void StreamConfigMessage::encode(std::vector<std::byte>& out) const {
+    out.clear();
+    ByteWriter w(out);
+    w.u8(static_cast<std::uint8_t>(codec));
+    const auto wf = wire_format_of(desc.format);
+    if (!wf) {
+        RIME_ERROR("StreamConfigMessage::encode: unsupported pixel format — config malformed");
+    }
+    w.u8(wf.value_or(0));
+    w.u32(desc.extent.width);
+    w.u32(desc.extent.height);
+    w.bytes(codec_config); // variable-length tail, like FrameMessage's pixels
+}
+
+bool StreamConfigMessage::decode(std::span<const std::byte> payload) {
+    ByteReader r(payload);
+    std::uint8_t codec_byte = 0;
+    std::uint8_t format_byte = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    if (!r.u8(codec_byte) || !r.u8(format_byte) || !r.u32(width) || !r.u32(height)) {
+        RIME_ERROR("StreamConfigMessage::decode: truncated header ({} bytes)", payload.size());
+        return false;
+    }
+    // Unlike Capabilities, an unknown codec here IS an error: the server *chose* it, so a client
+    // that cannot name it can never decode the stream — fail at config, not at frame 0.
+    const auto known = known_codec(codec_byte);
+    if (!known) {
+        RIME_ERROR("StreamConfigMessage::decode: unknown codec {}", codec_byte);
+        return false;
+    }
+    const auto fmt = rhi_format_of(format_byte);
+    if (!fmt) {
+        RIME_ERROR("StreamConfigMessage::decode: unknown pixel format {}", format_byte);
+        return false;
+    }
+    codec = *known;
+    desc.format = *fmt;
+    desc.extent = {width, height};
+    r.take_rest(codec_config);
+    return true;
+}
+
+std::optional<Codec> choose_codec(std::span<const Codec> client_preference,
+                                  std::span<const Codec> server_supported) {
+    for (const Codec want : client_preference) {
+        for (const Codec have : server_supported) {
+            if (want == have) {
+                return want;
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 // ── InputEvent ──────────────────────────────────────────────────────────────────────────────────
@@ -317,6 +426,22 @@ bool ProtocolConnection::send_input(const InputEvent& event) {
     std::vector<std::byte> payload;
     event.encode(payload);
     return send_message(MessageType::Input, payload);
+}
+
+bool ProtocolConnection::send_capabilities(const CapabilitiesMessage& caps) {
+    std::vector<std::byte> payload;
+    caps.encode(payload);
+    return send_message(MessageType::Capabilities, payload);
+}
+
+bool ProtocolConnection::send_stream_config(const StreamConfigMessage& config) {
+    std::vector<std::byte> payload;
+    config.encode(payload);
+    return send_message(MessageType::StreamConfig, payload);
+}
+
+bool ProtocolConnection::send_keyframe_request() {
+    return send_message(MessageType::KeyframeRequest, {});
 }
 
 bool ProtocolConnection::send_bye() {
