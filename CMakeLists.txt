@@ -304,6 +304,7 @@ add_subdirectory(engine/vfx)      # destruction dust stub: CPU billboard particl
 add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
 add_subdirectory(engine/editorhost) # editor-as-client host: serve the world over the channel (M9, ADR-0031)
+add_subdirectory(engine/scene)    # .rscene text scene format: reflection-serialized world save/load (M9, ADR-0031)
 add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
 
 # The C ABI (M6.9): a SHARED library over a tiny extern "C" surface — the ADR-0001 boundary the Rust

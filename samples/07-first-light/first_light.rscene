@@ -1,0 +1,70 @@
+# Rime scene v1 (.rscene) — reflection-serialized world. Human-diffable; hand-edit or regenerate.
+rime_scene 1
+
+entity 0 {
+  rime::ecs::LocalTransform 0x3f5b41cbec74205d {
+    value {
+      translation { x 0 y 1.5 z 4 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::Camera 0xb847672c04ab00ec {
+    fov_y 0.9
+    z_near 0.1
+    z_far 500
+    active true
+  }
+}
+
+entity 1 {
+  rime::ecs::LocalTransform 0x3f5b41cbec74205d {
+    value {
+      translation { x 0 y 10 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::DirectionalLight 0x2904da043b88db91 {
+    color_r 1
+    color_g 0.95
+    color_b 0.9
+    intensity 3
+  }
+}
+
+entity 2 {
+  rime::ecs::LocalTransform 0x3f5b41cbec74205d {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshRef 0x47516ac80c69a4da {
+    mesh 0
+  }
+  rime::render::MaterialRef 0x54c662ba9be95306 {
+    material 0
+  }
+}
+
+entity 3 {
+  rime::ecs::LocalTransform 0x3f5b41cbec74205d {
+    value {
+      translation { x 1 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::ecs::Parent 0x02b6955a3188bd8e {
+    value @2
+  }
+  rime::render::MeshRef 0x47516ac80c69a4da {
+    mesh 1
+  }
+  rime::render::MaterialRef 0x54c662ba9be95306 {
+    material 1
+  }
+}
+

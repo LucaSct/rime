@@ -30,12 +30,15 @@ rime_apply_common_target_options(rime_app)
 # a demo launcher, not SDK surface, so it is deliberately NOT installed.
 rime_install_module(rime_app)
 
-# ── rime_hello — the minimal M0 launcher (kept) ──────────────────────────────────────────────────
-# Proves the engine builds, links a module (rime::core), and runs — the seed rime_app grew from.
+# ── rime_hello — the launcher (M0 seed, now the --scene loader) ───────────────────────────────────
+# Proves the engine builds, links its modules, and runs — the seed rime_app grew from. Since M9.2 it
+# also loads a `.rscene` via rime::scene (registering the transform + render component set a scene
+# can name), so it links ecs/scene/render too. render is always a valid link target on a backend-less
+# build (RIME_RHI_VULKAN only gates the backend inside rhi), so no GPU is required.
 add_executable(rime_hello
     main.cpp)
 
 target_link_libraries(rime_hello
-    PRIVATE rime::core fmt::fmt)
+    PRIVATE rime::core rime::ecs rime::scene rime::render fmt::fmt)
 
 rime_apply_common_target_options(rime_hello)
