@@ -171,6 +171,21 @@ public:
     // alive).
     [[nodiscard]] const ComponentSignature& signature_of(Entity e) const;
 
+    // ---- type-erased component access (the M9 editor host + reflection-driven tools) ----
+    // The typed get<T> / add_component<T> / mark_changed<T> above are sugar over these. A tool that
+    // works by ComponentId rather than a static type — the editor host (engine/editorhost) walking
+    // the world through the ComponentRegistry + reflection to (de)serialize any component — needs
+    // the raw forms directly, so they are public. Same semantics as the typed versions: get returns
+    // nullptr if `e` lacks the component; add returns a pointer to default-constructed storage
+    // (relocating the entity's archetype); remove returns false if absent; mark_changed stamps the
+    // component's column at the current world version (the change-detection ADR-0018 §4 designed
+    // for exactly this consumer).
+    [[nodiscard]] void* add_component_raw(Entity e, ComponentId id);
+    bool remove_component_raw(Entity e, ComponentId id);
+    [[nodiscard]] void* get_component_raw(Entity e, ComponentId id) noexcept;
+    [[nodiscard]] const void* get_component_raw(Entity e, ComponentId id) const noexcept;
+    void mark_changed_raw(Entity e, ComponentId id) noexcept;
+
 private:
     // Find the archetype for `sig`, creating it (and its chunk layout) on first use. Returns its
     // index. NB: may grow archetypes_, so callers must re-fetch archetype references by index
@@ -183,12 +198,6 @@ private:
     // source row. Returns e's new row in the destination archetype.
     Archetype::Row
     relocate_entity(Entity e, EntityLocation src, std::uint32_t src_idx, std::uint32_t dst_idx);
-
-    void* add_component_raw(Entity e, ComponentId id);
-    bool remove_component_raw(Entity e, ComponentId id);
-    [[nodiscard]] void* get_component_raw(Entity e, ComponentId id) noexcept;
-    [[nodiscard]] const void* get_component_raw(Entity e, ComponentId id) const noexcept;
-    void mark_changed_raw(Entity e, ComponentId id) noexcept;
 
     EntityDirectory directory_;
     ComponentRegistry registry_;
