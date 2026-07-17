@@ -69,4 +69,71 @@ TcpListener& TcpListener::operator=(TcpListener&& other) noexcept {
     return *this;
 }
 
+// ── LocalSocket lifetime (S1.4) ─────────────────────────────────────────────────────────
+// Identical to TcpSocket's: a moved-from socket owns nothing, and the transfer loops call the
+// per-OS send/recv. Duplicated (rather than shared through a base class) so TcpSocket keeps its
+// exact type — the TCP path stays untouched, its tests unchanged.
+LocalSocket::~LocalSocket() {
+    close();
+}
+
+LocalSocket::LocalSocket(LocalSocket&& other) noexcept : handle_(other.handle_) {
+    other.handle_ = kInvalidSocket;
+}
+
+LocalSocket& LocalSocket::operator=(LocalSocket&& other) noexcept {
+    if (this != &other) {
+        close();
+        handle_ = other.handle_;
+        other.handle_ = kInvalidSocket;
+    }
+    return *this;
+}
+
+bool LocalSocket::send_all(std::span<const std::byte> data) {
+    while (!data.empty()) {
+        const std::optional<std::size_t> n = send(data);
+        if (!n || *n == 0) {
+            return false;
+        }
+        data = data.subspan(*n);
+    }
+    return true;
+}
+
+bool LocalSocket::recv_exact(std::span<std::byte> buffer) {
+    while (!buffer.empty()) {
+        const std::optional<std::size_t> n = recv(buffer);
+        if (!n || *n == 0) {
+            return false;
+        }
+        buffer = buffer.subspan(*n);
+    }
+    return true;
+}
+
+// ── LocalListener lifetime (S1.4) ───────────────────────────────────────────────────────
+// Move carries the bound path, so the *destination* unlinks it on close, not the moved-from husk
+// (close() is per-OS: it both closes the socket and unlinks path_).
+LocalListener::~LocalListener() {
+    close();
+}
+
+LocalListener::LocalListener(LocalListener&& other) noexcept
+    : handle_(other.handle_), path_(std::move(other.path_)) {
+    other.handle_ = kInvalidSocket;
+    other.path_.clear();
+}
+
+LocalListener& LocalListener::operator=(LocalListener&& other) noexcept {
+    if (this != &other) {
+        close();
+        handle_ = other.handle_;
+        path_ = std::move(other.path_);
+        other.handle_ = kInvalidSocket;
+        other.path_.clear();
+    }
+    return *this;
+}
+
 } // namespace rime::platform

@@ -19,6 +19,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <random>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -38,6 +41,15 @@ std::byte b(int v) {
 
 int u8(std::byte x) {
     return static_cast<int>(std::to_integer<std::uint8_t>(x));
+}
+
+// A unique socket path in the system temp dir for a local-socket test. Random-suffixed so parallel
+// test binaries don't collide; kept short so it stays under AF_UNIX's ~108-byte sun_path limit even
+// under a longer temp dir (macOS /var/folders, Windows AppData\Local\Temp).
+std::string unique_local_path(const char* tag) {
+    std::random_device rd;
+    const std::string name = "rime-s14-" + std::string(tag) + "-" + std::to_string(rd()) + ".sock";
+    return (std::filesystem::temp_directory_path() / name).string();
 }
 } // namespace
 
@@ -351,6 +363,120 @@ TEST_CASE("loopback: handshake, client input, server frame, end to end") {
     CHECK(std::abs(out.px_r - expect_r) < 8);
     CHECK(std::abs(out.px_g - expect_g) < 8);
     CHECK(std::abs(out.px_b - expect_b) < 8);
+}
+
+// ── Local-socket transport (S1.4): the same protocol over a Unix-domain socket ──
+
+TEST_CASE("loopback over a local socket: handshake + input + an LZ4 frame, bit-exact (s1.4)") {
+    // The editor's wire: the exact same ProtocolConnection, over a LocalSocket instead of TCP. The
+    // local default is LZ4 (lossless), so the far end must match the source **byte for byte** — the
+    // S0.6 loopback assertion, now on the UDS path (CI's first exercise of the local transport).
+    const std::string path = unique_local_path("uds");
+    auto listener = platform::LocalListener::bind(path);
+    REQUIRE(listener.has_value());
+
+    struct ClientOutcome {
+        bool handshook = false, sent = false, got_frame = false, decoded = false, exact = false;
+        std::uint64_t seq = 0;
+    } out;
+
+    const stream::ImageDesc frame_desc{{32, 24}, rhi::Format::RGBA8Unorm};
+    // A gradient a lossy codec would blur — but LZ4 is lossless, so it must come back exactly.
+    Bytes src(frame_desc.byte_size());
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        src[i] = b(static_cast<int>((i * 7 + 3) & 0xFF));
+    }
+
+    std::thread client([&] {
+        auto sock = platform::LocalSocket::connect(path);
+        if (!sock) {
+            return;
+        }
+        stream::ProtocolConnection conn(std::move(*sock));
+        if (!conn.handshake()) {
+            return;
+        }
+        out.handshook = true;
+        stream::InputEvent e;
+        e.kind = stream::InputEvent::Kind::PointerMove;
+        e.x = 5;
+        e.y = 6;
+        e.seq = 1;
+        e.client_us = 12345; // s1.3 fields ride the local wire too
+        out.sent = conn.send_input(e);
+        if (!out.sent) {
+            return;
+        }
+        stream::MessageType type{};
+        Bytes payload;
+        if (!conn.recv_message(type, payload) || type != stream::MessageType::Frame) {
+            return;
+        }
+        out.got_frame = true;
+        stream::FrameMessage fm;
+        if (!fm.decode(payload)) {
+            return;
+        }
+        out.seq = fm.sequence;
+        Bytes pixels(fm.desc.byte_size());
+        stream::FrameDecoder dec;
+        if (!dec.decode(fm.codec, fm.desc, fm.data, pixels)) {
+            return;
+        }
+        out.decoded = true;
+        out.exact = (pixels == src); // lossless: every byte
+    });
+
+    auto accepted = listener->accept();
+    REQUIRE(accepted.has_value());
+    stream::ProtocolConnection server(std::move(*accepted));
+    REQUIRE(server.handshake());
+
+    stream::MessageType type{};
+    Bytes payload;
+    REQUIRE(server.recv_message(type, payload));
+    CHECK(type == stream::MessageType::Input);
+    stream::InputEvent got;
+    REQUIRE(got.decode(payload));
+    CHECK(got.seq == 1u);
+    CHECK(got.client_us == 12345u);
+
+    stream::FrameEncoder enc;
+    stream::FrameMessage fm;
+    fm.sequence = 7;
+    fm.codec = stream::Codec::LZ4; // the local/editor default: exact, not merely close
+    fm.desc = frame_desc;
+    REQUIRE(enc.encode(stream::Codec::LZ4, frame_desc, src, fm.data));
+    REQUIRE(server.send_frame(fm));
+
+    client.join();
+
+    CHECK(out.handshook);
+    CHECK(out.sent);
+    CHECK(out.got_frame);
+    CHECK(out.decoded);
+    CHECK(out.seq == 7u);
+    CHECK(out.exact); // bit-exact over the local wire
+}
+
+TEST_CASE("LocalSocket / LocalListener refuse bad paths cleanly (s1.4)") {
+    SUBCASE("an over-long path is refused, not truncated") {
+        const std::string too_long(300, 'x'); // well past AF_UNIX's ~108-byte sun_path
+        CHECK_FALSE(platform::LocalListener::bind(too_long).has_value());
+        CHECK_FALSE(platform::LocalSocket::connect(too_long).has_value());
+    }
+    SUBCASE("connecting where no server is bound fails cleanly (the common 'not up yet')") {
+        CHECK_FALSE(platform::LocalSocket::connect(unique_local_path("noserver")).has_value());
+    }
+    SUBCASE("bind creates the socket node and close() unlinks it") {
+        const std::string path = unique_local_path("unlink");
+        {
+            auto l = platform::LocalListener::bind(path);
+            REQUIRE(l.has_value());
+            CHECK(std::filesystem::exists(path)); // the bind created the node
+        } // ~LocalListener → close() unlinks
+        CHECK_FALSE(std::filesystem::exists(path));
+    }
 }
 
 TEST_CASE("a reserved editor message type transits transparently (forward-compat pin, M6.9)") {

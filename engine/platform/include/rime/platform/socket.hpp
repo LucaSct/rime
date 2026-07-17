@@ -6,7 +6,9 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
 
 // Blocking TCP sockets — the transport primitive the graphics-streaming track (Track S / S0) is
 // built on, and the seed of the future `engine/net` module (M11 grows from here).
@@ -115,6 +117,117 @@ private:
     explicit TcpListener(SocketHandle h) noexcept : handle_(h) {}
 
     SocketHandle handle_ = kInvalidSocket;
+};
+
+// ── Transport genericity (S1.4) ─────────────────────────────────────────────────────────
+// A connected, blocking, byte-ordered stream — the minimal surface a length-prefixed protocol
+// needs (send_all / recv_exact), abstracted over *which* transport carries it. A consumer can hold
+// a `ByteStream` and not care whether a LAN `TcpSocket` or a same-host `LocalSocket` is underneath:
+// the M9 editor viewport rides a local stream, remote play a TCP one, over the *same* protocol
+// (ADR-0016). This is the seam s1.4 adds so `ProtocolConnection` stops hard-owning a TcpSocket.
+class ByteStream {
+public:
+    virtual ~ByteStream() = default;
+    [[nodiscard]] virtual bool send_all(std::span<const std::byte> data) = 0;
+    [[nodiscard]] virtual bool recv_exact(std::span<std::byte> buffer) = 0;
+    [[nodiscard]] virtual bool is_open() const noexcept = 0;
+    virtual void close() noexcept = 0;
+};
+
+// Type-erase a concrete socket (TcpSocket, LocalSocket — anything with send_all/recv_exact/is_open/
+// close) into a ByteStream, so a consumer holds `unique_ptr<ByteStream>` without a transport
+// switch. It simply forwards — zero behaviour change on either transport.
+template <class Socket> class SocketByteStream final : public ByteStream {
+public:
+    explicit SocketByteStream(Socket socket) noexcept : socket_(std::move(socket)) {}
+
+    [[nodiscard]] bool send_all(std::span<const std::byte> d) override {
+        return socket_.send_all(d);
+    }
+
+    [[nodiscard]] bool recv_exact(std::span<std::byte> b) override { return socket_.recv_exact(b); }
+
+    [[nodiscard]] bool is_open() const noexcept override { return socket_.is_open(); }
+
+    void close() noexcept override { socket_.close(); }
+
+    [[nodiscard]] Socket& socket() noexcept { return socket_; }
+
+private:
+    Socket socket_;
+};
+
+// A connected **local** (same-host) endpoint: a Unix-domain socket, addressed by a filesystem path
+// rather than host:port. Its send/recv are ordinary stream-socket operations — identical to TCP's —
+// so it satisfies the same byte-stream contract; only how it is *established* differs. Same-host
+// only, so it skips TCP's network stack and its Nagle/loopback overhead: the low-latency wire the
+// editor wants (ADR-0016), and the lossless-by-default (LZ4) path (ADR-0017). Move-only / RAII.
+//
+// Portability: AF_UNIX is the backend on **both** POSIX and Windows — Windows has supported
+// filesystem AF_UNIX sockets since Windows 10 1803 (2018), so one implementation serves all three
+// OSes and the send/recv path is shared with TcpSocket, rather than a separate Win32 named-pipe API
+// with its own ReadFile/WriteFile semantics. (Abstract-namespace sockets and shared-memory
+// zero-copy are documented later seams; see docs/design/net-sockets.md.)
+class LocalSocket {
+public:
+    // Connect to the socket bound at `path` and block until connected. Returns nullopt on failure
+    // (logged) — including the common "server not up yet" (ENOENT/ECONNREFUSED). The path must fit
+    // the platform's sockaddr_un limit (~108 bytes); an over-long path is refused, not truncated.
+    [[nodiscard]] static std::optional<LocalSocket> connect(std::string_view path);
+
+    LocalSocket() = default;
+    ~LocalSocket();
+    LocalSocket(LocalSocket&&) noexcept;
+    LocalSocket& operator=(LocalSocket&&) noexcept;
+    LocalSocket(const LocalSocket&) = delete;
+    LocalSocket& operator=(const LocalSocket&) = delete;
+
+    [[nodiscard]] bool is_open() const noexcept { return handle_ != kInvalidSocket; }
+
+    [[nodiscard]] std::optional<std::size_t> send(std::span<const std::byte> data);
+    [[nodiscard]] std::optional<std::size_t> recv(std::span<std::byte> buffer);
+    [[nodiscard]] bool send_all(std::span<const std::byte> data);
+    [[nodiscard]] bool recv_exact(std::span<std::byte> buffer);
+
+    void close() noexcept;
+
+    [[nodiscard]] SocketHandle native_handle() const noexcept { return handle_; }
+
+private:
+    explicit LocalSocket(SocketHandle h) noexcept : handle_(h) {}
+    friend class LocalListener; // accept() mints connected LocalSockets
+
+    SocketHandle handle_ = kInvalidSocket;
+};
+
+// A listening Unix-domain socket: bind a filesystem path, then accept() connections. Move-only /
+// RAII. Binding creates the path as a socket file; the listener **unlinks it on close** so a
+// restart is not blocked by a stale node (AF_UNIX has no SO_REUSEADDR equivalent for the path).
+class LocalListener {
+public:
+    // Bind and listen on `path`. Any existing file at `path` is unlinked first (a stale socket from
+    // a crashed server, or the caller's own previous run). Returns nullopt on failure (logged):
+    // an over-long path, a permission error, or a path whose directory does not exist.
+    [[nodiscard]] static std::optional<LocalListener> bind(std::string_view path);
+
+    LocalListener() = default;
+    ~LocalListener();
+    LocalListener(LocalListener&&) noexcept;
+    LocalListener& operator=(LocalListener&&) noexcept;
+    LocalListener(const LocalListener&) = delete;
+    LocalListener& operator=(const LocalListener&) = delete;
+
+    [[nodiscard]] bool is_open() const noexcept { return handle_ != kInvalidSocket; }
+
+    [[nodiscard]] std::optional<LocalSocket> accept();
+
+    void close() noexcept; // closes the socket AND unlinks the bound path
+
+private:
+    LocalListener(SocketHandle h, std::string path) noexcept : handle_(h), path_(std::move(path)) {}
+
+    SocketHandle handle_ = kInvalidSocket;
+    std::string path_; // the bound path, kept so close() can unlink it
 };
 
 } // namespace rime::platform
