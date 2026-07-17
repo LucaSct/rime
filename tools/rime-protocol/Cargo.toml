@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# rime-protocol — a hand-rolled Rust implementation of the Rime streaming/editor wire protocol
+# (engine/stream, Track S + M9/ADR-0016). It mirrors the C++ reference field-by-field so the editor
+# (a client of a live engine process) can speak the exact same bytes; a cross-language conformance
+# test (tests/conformance.rs) checks that byte-for-byte against fixtures the C++ side emits.
+#
+# Deliberately dependency-free in v1: the editor channel is all fixed-layout little-endian integers,
+# which std handles. The LZ4 pixel decode for the streamed viewport (an external lz4 crate) lands with
+# the viewport panel, not here.
+[package]
+name = "rime-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Rust implementation of the Rime streaming/editor wire protocol (mirrors engine/stream)"
+
+[lints.clippy]
+all = "deny"

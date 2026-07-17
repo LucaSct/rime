@@ -3,8 +3,8 @@
 Rime's **editor**, **asset pipeline**, and **command-line tools** live here, written in
 **Rust** for memory safety and excellent tooling. It is a Cargo workspace; as of M6 the
 `asset-pipeline` + `rime-cli` crates (glTF/STL import → cook; `rime cook`/`inspect`) and the
-`rime-ffi` crate (safe bindings to the engine's C ABI, M6.9) have landed. The `editor` is still to
-come (M9).
+`rime-ffi` crate (safe bindings to the engine's C ABI, M6.9) have landed. M9.3 adds `rime-protocol`
+(the editor's Rust implementation of the engine wire protocol); the `editor` shell itself follows.
 
 Why Rust for tools (and C++ for the runtime)? See
 [../docs/adr/0001-cpp-core-rust-tooling.md](../docs/adr/0001-cpp-core-rust-tooling.md).
@@ -14,6 +14,7 @@ Why Rust for tools (and C++ for the runtime)? See
 | Crate | What it is |
 | --- | --- |
 | `editor` | the visual editor: scene/world editing, inspectors (driven by engine reflection), live preview |
+| `rime-protocol` | the editor's Rust implementation of the engine streaming/editor wire protocol (mirrors `engine/stream`; cross-language conformance-tested) |
 | `asset-pipeline` | importers, bakers, and cookers that turn source art (meshes, textures, audio) into runtime-ready engine assets |
 | `rime-cli` | command-line entry points: build/cook a project, run headless, inspect assets |
 | `ffi` | the stable boundary crate that talks to the C++ engine (C ABI / protocol) |

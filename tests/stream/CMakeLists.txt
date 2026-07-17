@@ -36,6 +36,20 @@ rime_add_test(rime_stream_protocol_tests
 target_link_libraries(rime_stream_protocol_tests
     PRIVATE rime::stream rime::platform)
 
+# Cross-language protocol conformance (M9.3): emit + guard the golden byte vectors the Rust
+# rime-protocol crate (tools/rime-protocol) must decode and re-encode byte-for-byte. A normal run
+# asserts the committed goldens still match the C++ encoders (guarding the C++ side of the contract);
+# RIME_WRITE_PROTOCOL_FIXTURES=1 regenerates them. GPU-free; it links the encoders it exercises —
+# stream (Frame/Input) + editorhost (schema/snapshot) + ecs/render (the world it snapshots).
+rime_add_test(rime_protocol_fixtures_tests
+    protocol_fixtures_test.cpp)
+
+target_link_libraries(rime_protocol_fixtures_tests
+    PRIVATE rime::stream rime::editorhost rime::ecs rime::render rime::core)
+
+target_compile_definitions(rime_protocol_fixtures_tests
+    PRIVATE RIME_PROTOCOL_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tools/rime-protocol/tests/fixtures")
+
 # The frame-tap proof (S0.2) renders off-screen and reads the pixels back, so it needs the Vulkan
 # backend and a real device — build it only when the backend is on. Set RIME_REQUIRE_VULKAN in the
 # environment (CI does) to make a missing device a failure rather than a skip.
