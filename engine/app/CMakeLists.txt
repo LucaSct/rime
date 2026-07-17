@@ -41,4 +41,20 @@ add_executable(rime_hello
 target_link_libraries(rime_hello
     PRIVATE rime::core rime::ecs rime::scene rime::render fmt::fmt)
 
+# ── rime-engine — the editor's live host process (M9.3) ───────────────────────────────────────────
+# `rime-engine --editor-host <socket>` serves the editor channel (schema + snapshot + edits) against
+# a live World over the s1.4 local socket — the process the Rust editor (tools/editor) launches and
+# connects to (ADR-0016). GPU-free v1 (the world/inspector half; the streamed viewport is a later
+# brick), so it links the editor host + scene + world + render components, no rhi/device. Not SDK
+# surface — a runnable tool, deliberately not installed.
+add_executable(rime_engine
+    editor_host_main.cpp)
+
+set_target_properties(rime_engine PROPERTIES OUTPUT_NAME rime-engine)
+
+target_link_libraries(rime_engine
+    PRIVATE rime::editorhost rime::scene rime::ecs rime::render rime::platform rime::core fmt::fmt)
+
+rime_apply_common_target_options(rime_engine)
+
 rime_apply_common_target_options(rime_hello)
