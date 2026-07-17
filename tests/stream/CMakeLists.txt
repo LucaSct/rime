@@ -19,6 +19,14 @@ rime_add_test(rime_stream_video_tests
 target_link_libraries(rime_stream_video_tests
     PRIVATE rime::stream)
 
+# The s1.3 latency-ledger proof (LatencyLedger/LatencyStats/estimate_offset) is pure CPU
+# bookkeeping — no GPU, no wire — so it runs on synthetic timelines with known delays on every OS.
+rime_add_test(rime_stream_latency_tests
+    latency_test.cpp)
+
+target_link_libraries(rime_stream_latency_tests
+    PRIVATE rime::stream)
+
 # The protocol proof (S0.4) is also GPU-free: serialization round-trips plus a loopback integration
 # test over 127.0.0.1 (handshake + input + a JPEG frame, end to end). It needs the sockets, so it
 # links rime::platform alongside rime::stream.
