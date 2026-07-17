@@ -29,8 +29,8 @@ the systems reasoning and [ADR-0029](../../docs/adr/0029-destruction-model.md) f
 | M8.2 | **`DestructionWorld`** — register a pattern (hulls + compound), spawn static-compound instances, per-part state; the reflected `Destructible` component | landed |
 | M8.3 | **damage → connectivity → detach** — the fracture body-swap (the hard core) | landed |
 | M8.4 | health-transition **event fan-out** (`core::EventChannel`) + VFX dust stub + `engine/audio` seam | landed |
-| M8.5 | **lifetime** — debris budgets (WorldStats) + hull/compound `unregister` | planned |
-| M8.6 | the **proof** — `samples/10-destructible-wall`, headless self-check in CI | planned |
+| M8.5 | **lifetime** — settled debris freeze/linger + a live-body cap (`lifecycle.cpp`) over the physics hull/compound `unregister` | landed |
+| M8.6 | the **proof** — `samples/10-destructible-wall`, headless self-check + per-part render leaves | landed |
 
 ### Scope note (M8.2)
 

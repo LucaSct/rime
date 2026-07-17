@@ -312,6 +312,14 @@ Entries are grouped roughly by area and kept short on purpose.
   instead its body is *replaced*: destroy it, re-register the anchored remainder as a fresh
   compound, and spawn each unsupported island as a new dynamic body. Placed by one COM recipe
   so nothing visibly moves on the swap tick.
+- **Debris freeze / lifecycle.** Reclaiming a settled debris body so the physics stores stay bounded
+  under continuous refracture (M8.5): once it comes to rest and lingers, its body is destroyed and any
+  runtime compound it owns is unregistered, while its roster record is kept (so debris ids never
+  shift). A live-body cap freezes the least-interesting settled debris early — deterministically, with
+  camera distance deliberately excluded.
+- **Render leaf.** A per-part render entity — one renderable per destructible part — that follows the
+  part each frame: its standing placement while intact, or its debris body's pose once it detaches
+  (M8.6, ADR-0029 §5).
 - **Health transition.** A destructible part moving between health states; transitions
   can trigger effects, debris, sound, or gameplay (Frostbite term).
 - **Destruction event.** What a break reports each tick as *data* (never a mid-solve callback),

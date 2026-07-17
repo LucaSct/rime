@@ -16,4 +16,5 @@ if(RIME_RHI_VULKAN)
     add_subdirectory(06-render-graph)   # M5.8: procedural PBR scene through the graph; "adding a pass is easy"
     add_subdirectory(07-first-light)    # M5.8: M5's "done when" — app-driven lit PBR scene (headless / --serve)
     add_subdirectory(08-gltf-zoo)       # M6.10: M6's "done when" — cooked glTF gallery (import→cook→load→render)
+    add_subdirectory(10-destructible-wall) # M8.6: M8's "done when" — a cooked wall breaks, debris flies, one event stream fans out
 endif()
