@@ -40,8 +40,11 @@ namespace rime::stream {
 //   2 — s1.2 (ADR-0030 §4): codec negotiation (Capabilities/StreamConfig), KeyframeRequest, and
 //       Codec::Av1 on Frame messages. Incompatible because a v1 client would sit waiting for
 //       frames it cannot decode; the version field exists so it is refused at connect instead.
+//   3 — s1.3 (ADR-0030 §5): the latency ledger — Frame carries the server's per-stage stamps + the
+//       echoed input seq/time, and Input carries a client stamp + sequence number. Wider payloads,
+//       so a v2 peer would misread them; refused at connect.
 inline constexpr std::uint32_t kProtocolMagic = 0x524D5331u; // 'R''M''S''1'
-inline constexpr std::uint16_t kProtocolVersion = 2;
+inline constexpr std::uint16_t kProtocolVersion = 3;
 
 // An upper bound on a single message's payload, so a corrupt or hostile length field can't make us
 // try to allocate/read gigabytes. A raw 4K RGBA frame is ~33 MiB; 64 MiB leaves headroom while
@@ -89,13 +92,24 @@ enum class MessageType : std::uint16_t {
 };
 
 // One encoded frame, ready for the wire. `data` is the codec's output (S0.3); `codec` + `desc` are
-// everything the peer needs to decode it. `sequence` counts frames (gap detection later);
-// `capture_us` is a monotonic capture timestamp for latency measurement (exact on loopback;
-// cross-machine latency needs clock sync — an S1 concern). Payload layout:
-//   [ seq:u64 ][ cap_us:u64 ][ codec:u8 ][ fmt:u8 ][ w:u32 ][ h:u32 ][ data... ]
+// everything the peer needs to decode it. `sequence` counts frames (gap detection). The remaining
+// scalars are the **server half of the latency ledger** (s1.3, ADR-0030 §5), all in the server's
+// monotonic clock: the per-stage stamps `capture_us`/`readback_us`/`encode_us`/`wire_us` — whose
+// *differences* give the server-side stage costs with no clock sync — plus the echo of the most
+// recent input the server has applied, `last_input_seq` and its client-clock send time
+// `last_input_client_us`, so the client measures input-to-photon offset-free (see latency.hpp).
+// Payload layout:
+//   [ seq:u64 ][ capture_us:u64 ][ readback_us:u64 ][ encode_us:u64 ][ wire_us:u64 ]
+//   [ last_input_seq:u32 ][ last_input_client_us:u64 ][ codec:u8 ][ fmt:u8 ][ w:u32 ][ h:u32 ][
+//   data... ]
 struct FrameMessage {
     std::uint64_t sequence = 0;
-    std::uint64_t capture_us = 0;
+    std::uint64_t capture_us = 0;     // server clock: begin_capture submitted (ledger stage 1)
+    std::uint64_t readback_us = 0;    // server clock: try_get_frame returned (stage 2)
+    std::uint64_t encode_us = 0;      // server clock: codec packet ready (stage 3)
+    std::uint64_t wire_us = 0;        // server clock: just before send (stage 4)
+    std::uint32_t last_input_seq = 0; // most recent input applied (0 = none yet)
+    std::uint64_t last_input_client_us = 0; // that input's client-clock send time (echoed back)
     Codec codec = Codec::Jpeg;
     ImageDesc desc{};
     std::vector<std::byte> data;
@@ -147,8 +161,9 @@ struct StreamConfigMessage {
 // One input event on its way back to the engine. A single tagged struct (rather than a struct per
 // event) keeps the wire and the server's event-injection loop simple. Fields not relevant to a
 // `kind` are zero. The client fills this from platform events; the server maps it back to platform
-// input (S0.5). Payload layout (fixed 25 bytes):
+// input (S0.5). Payload layout (fixed 37 bytes):
 //   [ kind:u8 ][ code:u32 ][ x:i32 ][ y:i32 ][ scroll_x:f32 ][ scroll_y:f32 ][ mods:u32 ]
+//   [ client_us:u64 ][ seq:u32 ]
 struct InputEvent {
     enum class Kind : std::uint8_t {
         KeyDown = 0,
@@ -166,6 +181,12 @@ struct InputEvent {
     float scroll_x = 0.0f;  // PointerScroll deltas
     float scroll_y = 0.0f;  //
     std::uint32_t mods = 0; // modifier-key bitmask (client-defined; carried verbatim)
+    // s1.3 (ADR-0030 §5): the input's client-clock send time + a per-client sequence number. The
+    // server echoes seq + client_us on the frame that first reflects this input, closing the
+    // offset-free input-to-photon measurement (latency.hpp). Old-style constructions leave them 0,
+    // which the server reads as "un-timed" and simply does not echo.
+    std::uint64_t client_us = 0;
+    std::uint32_t seq = 0;
 
     void encode(std::vector<std::byte>& out) const;
     [[nodiscard]] bool decode(std::span<const std::byte> payload);

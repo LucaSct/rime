@@ -188,6 +188,11 @@ void FrameMessage::encode(std::vector<std::byte>& out) const {
     ByteWriter w(out);
     w.u64(sequence);
     w.u64(capture_us);
+    w.u64(readback_us);
+    w.u64(encode_us);
+    w.u64(wire_us);
+    w.u32(last_input_seq);
+    w.u64(last_input_client_us);
     w.u8(static_cast<std::uint8_t>(codec));
     // desc.format is always a codec-supported format here (the frame came from the codec, which
     // rejects others); map it, and fail loud rather than silently mislabel if that invariant
@@ -208,8 +213,9 @@ bool FrameMessage::decode(std::span<const std::byte> payload) {
     std::uint8_t format_byte = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
-    if (!r.u64(sequence) || !r.u64(capture_us) || !r.u8(codec_byte) || !r.u8(format_byte) ||
-        !r.u32(width) || !r.u32(height)) {
+    if (!r.u64(sequence) || !r.u64(capture_us) || !r.u64(readback_us) || !r.u64(encode_us) ||
+        !r.u64(wire_us) || !r.u32(last_input_seq) || !r.u64(last_input_client_us) ||
+        !r.u8(codec_byte) || !r.u8(format_byte) || !r.u32(width) || !r.u32(height)) {
         RIME_ERROR("FrameMessage::decode: truncated header ({} bytes)", payload.size());
         return false;
     }
@@ -336,13 +342,15 @@ void InputEvent::encode(std::vector<std::byte>& out) const {
     w.f32(scroll_x);
     w.f32(scroll_y);
     w.u32(mods);
+    w.u64(client_us);
+    w.u32(seq);
 }
 
 bool InputEvent::decode(std::span<const std::byte> payload) {
     ByteReader r(payload);
     std::uint8_t kind_byte = 0;
     if (!r.u8(kind_byte) || !r.u32(code) || !r.i32(x) || !r.i32(y) || !r.f32(scroll_x) ||
-        !r.f32(scroll_y) || !r.u32(mods)) {
+        !r.f32(scroll_y) || !r.u32(mods) || !r.u64(client_us) || !r.u32(seq)) {
         RIME_ERROR("InputEvent::decode: truncated ({} bytes)", payload.size());
         return false;
     }

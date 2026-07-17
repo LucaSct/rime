@@ -44,6 +44,7 @@
 #include "rime/rhi/rhi.hpp"
 #include "rime/stream/frame_codec.hpp"
 #include "rime/stream/frame_streamer.hpp"
+#include "rime/stream/latency.hpp"
 #include "rime/stream/protocol.hpp"
 
 // Build-time-compiled SPIR-V for the present quad (rime_add_shaders → quad_{vert,frag}_spv).
@@ -189,6 +190,11 @@ int run_server(const std::string& host,
 
     SceneState scene;
     std::atomic<bool> stop{false};
+    // s1.3 latency ledger: the input thread records the identity + client-clock send time of the
+    // most recently applied input; the frame loop echoes them so the client can close the
+    // offset-free input-to-photon measurement (latency.hpp, ADR-0030 §5).
+    std::atomic<std::uint32_t> last_input_seq{0};
+    std::atomic<std::uint64_t> last_input_client_us{0};
 
     // Input thread: drain the client's InputEvents and apply them. When the client disconnects,
     // recv_message returns false (EOF), so this ends on its own and signals the frame loop to stop.
@@ -208,6 +214,8 @@ int run_server(const std::string& host,
                 stream::InputEvent e;
                 if (e.decode(payload)) {
                     apply_input(scene, e);
+                    last_input_seq.store(e.seq);
+                    last_input_client_us.store(e.client_us);
                 }
             }
         }
@@ -228,18 +236,24 @@ int run_server(const std::string& host,
         // rather than queued. In steady state at 30 fps the copy is long finished by the next tick,
         // so frames flow 1:1 with a one-frame pipeline latency.
         render_scene(*device, color, scene.r.load(), scene.g.load(), scene.b.load());
+        const std::uint64_t t_capture = now_us(); // ledger stage 1: the tap begins
         streamer->begin_capture(color);
         const std::optional<stream::FrameView> view = streamer->try_get_frame();
         if (view) {
             stream::FrameMessage fm;
             fm.sequence = seq;
-            fm.capture_us = now_us();
+            fm.capture_us = t_capture;
+            fm.readback_us = now_us(); // stage 2: pixels in hand
+            fm.last_input_seq = last_input_seq.load();
+            fm.last_input_client_us = last_input_client_us.load();
             fm.codec = codec;
             fm.desc = {extent, view->format};
             if (!encoder.encode(codec, fm.desc, view->pixels, fm.data)) {
                 std::fprintf(stderr, "remote_view server: encode failed\n");
                 break;
             }
+            fm.encode_us = now_us(); // stage 3: packet ready
+            fm.wire_us = now_us();   // stage 4: just before send
             if (!conn.send_frame(fm)) {
                 std::printf("remote_view server: client disconnected after %llu frames.\n",
                             static_cast<unsigned long long>(seq));
@@ -309,11 +323,14 @@ int run_client_headless(const std::string& host,
     // this is the "control" half proving the backchannel works end to end.
     std::atomic<bool> stop{false};
     std::thread sender([&] {
+        std::uint32_t iseq = 0;
         for (int i = 0; i <= 100 && !stop.load(); ++i) {
             stream::InputEvent e;
             e.kind = stream::InputEvent::Kind::PointerMove;
             e.x = (i * 255) / 100; // 0 → 255 sweep drives R on the server
             e.y = 128;
+            e.client_us = now_us(); // s1.3: stamp the send time + a per-client seq (the ledger echo)
+            e.seq = ++iseq;
             if (!conn.send_input(e)) {
                 break;
             }
@@ -322,6 +339,7 @@ int run_client_headless(const std::string& host,
     });
 
     stream::FrameDecoder decoder;
+    stream::LatencyStats latency; // s1.3: per-stage ledger accumulated over the received frames
     stream::MessageType type{};
     std::vector<std::byte> payload;
     int received = 0;
@@ -334,6 +352,7 @@ int run_client_headless(const std::string& host,
         if (!conn.recv_message(type, payload) || type != stream::MessageType::Frame) {
             break;
         }
+        const std::uint64_t t_recv = now_us(); // ledger stage 5: frame in hand
         stream::FrameMessage fm;
         if (!fm.decode(payload)) {
             break;
@@ -342,6 +361,7 @@ int run_client_headless(const std::string& host,
         if (!decoder.decode(fm.codec, fm.desc, fm.data, pixels)) {
             break;
         }
+        const std::uint64_t t_decode = now_us(); // stage 6: pixels decoded
         w = fm.desc.extent.width;
         h = fm.desc.extent.height;
         const std::size_t center = (static_cast<std::size_t>(h / 2) * w + w / 2) * 4;
@@ -355,6 +375,21 @@ int run_client_headless(const std::string& host,
         last_r = cr;
         last_px = std::move(pixels);
         ++received;
+
+        // Fold this frame into the ledger: the server's stamps ride in `fm`; recv/decode/present are
+        // ours; the echoed input (fm.last_input_*) closes the offset-free input-to-photon. A headless
+        // client has no display, so "present" is the moment it finishes consuming the frame.
+        stream::LatencyLedger ledger;
+        ledger.capture_us = fm.capture_us;
+        ledger.readback_us = fm.readback_us;
+        ledger.encode_us = fm.encode_us;
+        ledger.wire_us = fm.wire_us;
+        ledger.recv_us = t_recv;
+        ledger.decode_us = t_decode;
+        ledger.present_us = now_us();
+        ledger.input_seq = fm.last_input_seq;
+        ledger.input_client_us = fm.last_input_client_us;
+        latency.record(ledger);
     }
 
     stop.store(true);
@@ -371,6 +406,13 @@ int run_client_headless(const std::string& host,
         first_r,
         last_r,
         (received > 1 && last_r != first_r) ? "— scene responded to input ✓" : "");
+
+    // s1.3: the latency ledger — median/p95 per stage over the session (ADR-0030 §5). On loopback
+    // the numbers are tiny (same box, no real wire) but every stage is populated, proving the ledger
+    // flows end to end; a real WAN client is where input->photon earns its keep.
+    if (received > 0) {
+        std::printf("%s", latency.dump().c_str());
+    }
 
     if (!ppm_prefix.empty() && received > 0) {
         write_ppm(ppm_prefix + "-first.ppm", first_px, w, h);

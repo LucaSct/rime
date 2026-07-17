@@ -206,14 +206,26 @@ The bridge from S0's per-frame JPEG stills to a real video stream, and the **M9 
   the hardware-encoder escape hatch stays a seam, unneeded at these resolutions.* GPU-free round-trip test
   (`tests/stream/video_codec_test.cpp`): PSNR-bounded stream, one-in-one-out, forced-keyframe standalone
   join, malformed-input rejection; clean under ASan/UBSan/LSan.
-- **s1.3 input v2 + the latency ledger.** Timestamped input; per-frame stamps at seven stages
-  (capture-submit → present); one-way delay from echoed timestamps (no NTP); reported in the client HUD.
+- **s1.3 input v2 + the latency ledger — landed** (core). `InputEvent` carries a client-clock
+  timestamp + a per-client sequence number; `FrameMessage` carries the server's four pipeline stamps
+  (`capture`/`readback`/`encode`/`wire`, server clock) plus the echo of the last-applied input. The
+  honest hard part is **two unsynced clocks** (`latency.hpp`): within-side stage costs are exact
+  same-clock differences, and the felt **input-to-photon** is measured *offset-free* by the echo
+  (present − echoed-send, both client-clock) — never by trusting the two clocks. A midpoint
+  `estimate_offset` places server + client stamps on one timeline with an honest error bar (~½ the
+  round trip), and `LatencyStats` reports median/p95 per stage. `04-remote-view` prints it end to end
+  (loopback: readback ~90 µs, encode ~180 µs, server ~280 µs, client ~170 µs — WAN is where
+  input→photon earns its keep). *Deferred to a follow-up:* the **gamepad** backchannel (platform
+  seam + macOS GameController / Linux evdev backends — unverifiable on this GPU-less headless box, so
+  not built blind) and the windowed-client **HUD overlay** (wants the `engine/ui` graduation the plan
+  flags). `kProtocolVersion` 2→3.
 - **s1.4 the local fast path.** UDS (POSIX) / named pipes (Windows) behind the socket seam, LZ4-lossless
   default — **the editor viewport's transport** and the one hard M9 gate.
 
-The protocol grows (s1.2 bumped `kProtocolVersion` 1→2, so an S0 client is refused at the handshake
-rather than mis-decoding an AV1 stream): a `Capabilities` message (the client advertises its decoders
-in preference order right after the handshake; the server's `choose_codec` picks the top shared one),
+The protocol grows (s1.2 bumped `kProtocolVersion` 1→2, s1.3 → 3, so an out-of-date client is refused
+at the handshake rather than mis-decoding an AV1 stream or misreading the wider ledger-bearing
+messages): a `Capabilities` message (the client advertises its decoders in preference order right
+after the handshake; the server's `choose_codec` picks the top shared one),
 a `StreamConfig` parameter-set message (carries the AV1 sequence header a stateful decoder needs
 before frame 0, re-sent on codec/resolution change), and a `KeyframeRequest` message (client→server:
 force an intra to join or recover — the S2 loss-recovery seam). All appended, never renumbered, and

@@ -45,6 +45,11 @@ TEST_CASE("FrameMessage round-trips through bytes") {
     stream::FrameMessage src;
     src.sequence = 0xDEADBEEFCAFEULL;
     src.capture_us = 1234567890ULL;
+    src.readback_us = 1234567930ULL; // s1.3 ledger stamps (server clock)
+    src.encode_us = 1234567945ULL;
+    src.wire_us = 1234567950ULL;
+    src.last_input_seq = 4242;              // echoed input identity
+    src.last_input_client_us = 55500000ULL; // echoed client-clock send time
     src.codec = stream::Codec::Jpeg;
     src.desc = {{1280, 720}, rhi::Format::BGRA8Unorm};
     src.data = {b(1), b(2), b(3), b(250), b(0), b(255)}; // stand-in for encoded bytes
@@ -56,6 +61,11 @@ TEST_CASE("FrameMessage round-trips through bytes") {
     REQUIRE(dst.decode(payload));
     CHECK(dst.sequence == src.sequence);
     CHECK(dst.capture_us == src.capture_us);
+    CHECK(dst.readback_us == src.readback_us);
+    CHECK(dst.encode_us == src.encode_us);
+    CHECK(dst.wire_us == src.wire_us);
+    CHECK(dst.last_input_seq == src.last_input_seq);
+    CHECK(dst.last_input_client_us == src.last_input_client_us);
     CHECK(dst.codec == stream::Codec::Jpeg);
     CHECK(dst.desc.extent.width == 1280);
     CHECK(dst.desc.extent.height == 720);
@@ -175,16 +185,26 @@ TEST_CASE("InputEvent round-trips every field, including signed and float") {
         CHECK(dst.scroll_x == -1.5f); // powers-of-two halves are exact in binary32
         CHECK(dst.scroll_y == 0.25f);
     }
+    SUBCASE("s1.3 carries the client timestamp + sequence number") {
+        stream::InputEvent src;
+        src.kind = stream::InputEvent::Kind::PointerDown;
+        src.code = 1;
+        src.client_us = 0x0123456789ABCDEFULL;
+        src.seq = 0xCAFEBABE;
+        const auto dst = roundtrip(src);
+        CHECK(dst.client_us == src.client_us);
+        CHECK(dst.seq == src.seq);
+    }
 }
 
 TEST_CASE("decode refuses malformed payloads instead of misreading") {
     SUBCASE("truncated frame header") {
         stream::FrameMessage m;
-        CHECK_FALSE(m.decode(Bytes(4))); // header needs 26 bytes
+        CHECK_FALSE(m.decode(Bytes(4))); // header needs 62 bytes (s1.3 ledger stamps widened it)
     }
     SUBCASE("truncated input event") {
         stream::InputEvent e;
-        CHECK_FALSE(e.decode(Bytes(3))); // needs 25 bytes
+        CHECK_FALSE(e.decode(Bytes(3))); // needs 37 bytes (s1.3 client stamp + seq)
     }
     SUBCASE("frame with an unknown codec code") {
         // Valid-length header, but codec byte = 99. Build it by encoding a good frame then poking.
@@ -194,7 +214,9 @@ TEST_CASE("decode refuses malformed payloads instead of misreading") {
         good.data = Bytes(2 * 2 * 4);
         Bytes payload;
         good.encode(payload);
-        payload[16] = b(99); // codec byte sits after seq(8)+capture(8)
+        // codec byte follows
+        // seq(8)+capture(8)+readback(8)+encode(8)+wire(8)+last_seq(4)+last_us(8).
+        payload[52] = b(99);
         stream::FrameMessage m;
         CHECK_FALSE(m.decode(payload));
     }
@@ -205,7 +227,7 @@ TEST_CASE("decode refuses malformed payloads instead of misreading") {
         good.data = Bytes(2 * 2 * 4);
         Bytes payload;
         good.encode(payload);
-        payload[17] = b(200); // format byte follows the codec byte
+        payload[53] = b(200); // format byte follows the codec byte (offset 52)
         stream::FrameMessage m;
         CHECK_FALSE(m.decode(payload));
     }

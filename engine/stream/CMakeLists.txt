@@ -13,6 +13,7 @@ add_library(rime_stream STATIC
     src/frame_streamer.cpp
     src/frame_codec.cpp
     src/video_codec.cpp
+    src/latency.cpp
     src/protocol.cpp)
 
 # Namespaced alias so dependents link rime::stream (matching the other modules).
