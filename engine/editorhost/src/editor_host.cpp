@@ -282,6 +282,61 @@ std::vector<std::byte> serialize_asset_list(std::span<const AssetListEntry> asse
     return out;
 }
 
+std::vector<std::byte> serialize_viewport_camera(const ViewportCameraMsg& msg) {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    // Element by element through the f32 helper (not a memcpy of the structs): the wire is defined
+    // as a sequence of little-endian IEEE floats, and the helper is what guarantees that on every
+    // host — the same discipline every other payload here follows.
+    for (const float e : msg.view_proj) {
+        w.f32(e);
+    }
+    for (const float e : msg.inv_view_proj) {
+        w.f32(e);
+    }
+    for (const float e : msg.eye) {
+        w.f32(e);
+    }
+    w.u32(msg.width);
+    w.u32(msg.height);
+    return out;
+}
+
+bool parse_viewport_camera(std::span<const std::byte> payload, ViewportCameraMsg& out) {
+    core::ByteReader r(payload);
+    for (float& e : out.view_proj) {
+        if (!r.f32(e)) {
+            return false;
+        }
+    }
+    for (float& e : out.inv_view_proj) {
+        if (!r.f32(e)) {
+            return false;
+        }
+    }
+    for (float& e : out.eye) {
+        if (!r.f32(e)) {
+            return false;
+        }
+    }
+    return r.u32(out.width) && r.u32(out.height);
+}
+
+std::vector<std::byte> serialize_gizmo_state(const GizmoStateMsg& msg) {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    w.u32(msg.index);
+    w.u32(msg.generation);
+    w.u8(msg.mode);
+    w.u8(msg.axis);
+    return out;
+}
+
+bool parse_gizmo_state(std::span<const std::byte> payload, GizmoStateMsg& out) {
+    core::ByteReader r(payload);
+    return r.u32(out.index) && r.u32(out.generation) && r.u8(out.mode) && r.u8(out.axis);
+}
+
 bool spawn_entity_from_payload(ecs::World& world, std::span<const std::byte> payload) {
     core::ByteReader r(payload);
     std::uint16_t comp_count = 0;

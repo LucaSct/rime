@@ -43,6 +43,7 @@ enum class EditorMessage : std::uint16_t {
     Snapshot = 0x0201,     // engine -> editor: the whole world (entities + components)
     AssetList = 0x0203,    // engine -> editor: the cook manifest (browsable assets; m9.5)
     PickResult = 0x0204,   // engine -> editor: the entity under a picked viewport pixel (m9.6)
+    ViewportCamera = 0x0205, // engine -> editor: the viewport's exact render lens (m9.6 gizmos)
     SetComponent = 0x0210, // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,        // editor -> engine: spawn an empty entity
     Despawn = 0x0212,      // editor -> engine: despawn an entity
@@ -51,6 +52,7 @@ enum class EditorMessage : std::uint16_t {
     RequestSnapshot = 0x0215, // editor -> engine: resend the world (engine replies with Snapshot)
     SpawnEntity = 0x0216, // editor -> engine: spawn an entity WITH an initial component set (m9.5)
     PickRequest = 0x0217, // editor -> engine: pick the entity at a viewport pixel (m9.6)
+    GizmoState = 0x0218,  // editor -> engine: selection + gizmo mode/axis to render (m9.6 gizmos)
 };
 
 // True if `type` (as received by recv_message) is an editor-channel message (the reserved band).
@@ -124,6 +126,45 @@ struct AssetListEntry {
 // Unknown/unreflected/ malformed components are skipped (the entity still spawns). Returns false
 // only on a truncated header. Call at a tick boundary.
 [[nodiscard]] bool spawn_entity_from_payload(ecs::World& world, std::span<const std::byte> payload);
+
+// ── The gizmo channel (m9.6 Part B) ─────────────────────────────────────────────────────
+
+// The viewport's authoritative render lens for one frame — the `ViewportCamera` message the engine
+// sends alongside every streamed frame. The editor's gizmo math must project/unproject through the
+// EXACT matrices the pixels were rendered with (the same "clicks would land beside their pixels"
+// argument as the pick pass, scene_picker.cpp), so the engine ships both the clip-from-world and
+// its inverse: the editor never has to invert a matrix, and the two can never disagree. ~148 bytes
+// per frame — noise next to the LZ4 frame it rides with.
+struct ViewportCameraMsg {
+    float view_proj[16];     // clip-from-world, column-major (core::Mat4::m layout)
+    float inv_view_proj[16]; // world-from-clip: the engine-computed inverse of view_proj
+    float eye[3] = {0.0f, 0.0f, 0.0f}; // camera world position (the perspective ray origin)
+    std::uint32_t width = 0;           // the render extent the matrices target — pixel-space
+    std::uint32_t height = 0;          // coordinates in gizmo math are relative to THIS size
+};
+
+// Serialize / parse the `ViewportCamera` payload:
+//   [view_proj:16xf32][inv_view_proj:16xf32][eye:3xf32][width:u32][height:u32]  (little-endian)
+[[nodiscard]] std::vector<std::byte> serialize_viewport_camera(const ViewportCameraMsg& msg);
+[[nodiscard]] bool parse_viewport_camera(std::span<const std::byte> payload,
+                                         ViewportCameraMsg& out);
+
+// The editor's gizmo state — the `GizmoState` message: which entity is selected and which gizmo
+// (and hovered/active axis) the engine should render over the viewport. ENGINE STATE, not a world
+// edit: like PickRequest it is consumed by the viewport host's frame loop, never applied to the
+// World. `index == 0xFFFFFFFF` (the PickResult miss sentinel) means "no selection — hide the
+// gizmo". Mode/axis are plain u8 codes so the wire stays trivially forward-compatible (an unknown
+// mode renders nothing).
+struct GizmoStateMsg {
+    std::uint32_t index = 0xFFFFFFFFu; // selected entity handle (index, generation)
+    std::uint32_t generation = 0;
+    std::uint8_t mode = 0; // 0 none/hidden, 1 translate, 2 rotate, 3 scale
+    std::uint8_t axis = 0; // 0 none, 1 X, 2 Y, 3 Z — the axis to draw highlighted
+};
+
+// Serialize / parse the `GizmoState` payload: [index:u32][generation:u32][mode:u8][axis:u8].
+[[nodiscard]] std::vector<std::byte> serialize_gizmo_state(const GizmoStateMsg& msg);
+[[nodiscard]] bool parse_gizmo_state(std::span<const std::byte> payload, GizmoStateMsg& out);
 
 // ── The host over the wire ──────────────────────────────────────────────────────────────
 

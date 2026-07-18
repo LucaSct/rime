@@ -170,6 +170,49 @@ std::vector<std::byte> pick_result_bytes() {
     return out;
 }
 
+// A ViewportCamera payload (engine -> editor): the viewport's render lens (m9.6 gizmos). The
+// matrices are HAND-AUTHORED exact binary rationals, not computed through core::perspective —
+// std::tan can differ by an ULP between platforms' libm, and a fixture must be byte-identical on
+// every CI OS. The pair is still a genuine perspective-shaped matrix and its exact inverse
+// (P = [[a,0,0,0],[0,b,0,0],[0,0,c,d],[0,0,-1,0]] columns ⇒ P⁻¹ analytic), so the Rust side can
+// sanity-check vp·inv ≈ I as well as the bytes.
+std::vector<std::byte> viewport_camera_bytes() {
+    editorhost::ViewportCameraMsg m{};
+    for (float& e : m.view_proj) {
+        e = 0.0f;
+    }
+    for (float& e : m.inv_view_proj) {
+        e = 0.0f;
+    }
+    // Column-major: m[col*4 + row].
+    m.view_proj[0] = 2.0f;       // at(0,0)
+    m.view_proj[5] = -2.0f;      // at(1,1)
+    m.view_proj[10] = -1.25f;    // at(2,2)
+    m.view_proj[11] = -1.0f;     // at(3,2)
+    m.view_proj[14] = -0.25f;    // at(2,3)
+    m.inv_view_proj[0] = 0.5f;   // 1/a
+    m.inv_view_proj[5] = -0.5f;  // 1/b
+    m.inv_view_proj[11] = -4.0f; // at(3,2) = 1/d
+    m.inv_view_proj[14] = -1.0f; // at(2,3)
+    m.inv_view_proj[15] = 5.0f;  // at(3,3) = c/d
+    m.eye[0] = 1.5f;
+    m.eye[1] = -2.5f;
+    m.eye[2] = 8.0f;
+    m.width = 960;
+    m.height = 540;
+    return editorhost::serialize_viewport_camera(m);
+}
+
+// A GizmoState payload (editor -> engine): selection + mode + highlighted axis (m9.6 gizmos).
+std::vector<std::byte> gizmo_state_bytes() {
+    editorhost::GizmoStateMsg m{};
+    m.index = 7;
+    m.generation = 2;
+    m.mode = 1; // translate
+    m.axis = 3; // Z highlighted
+    return editorhost::serialize_gizmo_state(m);
+}
+
 // A known 8x8 RGBA gradient — the pixels the editor viewport must recover after an LZ4 round trip.
 std::vector<std::byte> lz4_pixels_raw() {
     constexpr std::uint32_t w = 8;
@@ -247,6 +290,8 @@ std::vector<Fixture> all_fixtures() {
         {"spawn_entity.bin", spawn_entity_bytes()},
         {"pick_request.bin", pick_request_bytes()},
         {"pick_result.bin", pick_result_bytes()},
+        {"viewport_camera.bin", viewport_camera_bytes()},
+        {"gizmo_state.bin", gizmo_state_bytes()},
         {"frame_lz4.bin", frame_lz4_bytes()},
         {"frame_lz4_pixels.bin", lz4_pixels_raw()},
     };
