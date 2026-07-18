@@ -98,6 +98,10 @@ enum class Format : std::uint32_t {
                  // pass at half the bytes of RGBA32F; color+blend support is spec-mandatory
     D32Float,    // depth (arrives when we add a depth pre-pass in M5)
     D32FloatS8,  // combined depth + 8-bit stencil (the cross-section cap, ADR-0014)
+    R32Uint,     // one 32-bit UNSIGNED INTEGER per pixel — an ID buffer, not a color. The editor's
+                 // pick pass (m9.6) rasterizes entity ids into it so "what is under this pixel?"
+                 // is answered by the depth test instead of CPU ray casting. Color-attachment
+                 // support for R32_UINT is spec-mandatory; integer targets never blend.
 };
 
 // What a buffer can be used for. Bit flags: OR them together (see RIME_RHI_FLAGS below). The

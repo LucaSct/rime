@@ -12,6 +12,7 @@ add_library(rime_render STATIC
     src/mesh.cpp
     src/passes.cpp
     src/scene_renderer.cpp
+    src/scene_picker.cpp
     src/gpu_asset_bridge.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
@@ -22,7 +23,9 @@ rime_add_shaders(rime_render
     shaders/pbr_forward.vert
     shaders/pbr_forward.frag
     shaders/fullscreen.vert
-    shaders/tonemap.frag)
+    shaders/tonemap.frag
+    shaders/pick_id.vert
+    shaders/pick_id.frag)
 
 # Namespaced alias so dependents link `rime::render`, matching our C++ namespace.
 add_library(rime::render ALIAS rime_render)
