@@ -28,7 +28,8 @@ use eframe::egui;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
 use rime_protocol::{
-    decode_value, encode_value, AssetEntry, AssetKind, Schema, SnapshotEntity, Value,
+    decode_value, encode_value, AssetEntry, AssetKind, EditorMessage, PickRequest, Schema,
+    SnapshotEntity, Value,
 };
 
 mod commands;
@@ -177,8 +178,8 @@ impl eframe::App for EditorApp {
         // as an egui image ONLY when its sequence changed — so the ~2 MB RGBA is copied once per
         // streamed frame, not once per repaint. The schema + entities are cloned so the widgets can
         // borrow them freely without holding the lock across the whole render.
-        let (connected, error, entities, schema, assets, frames, fps, frame_dims, new_image) = {
-            let s = self.shared.lock().unwrap();
+        let (connected, error, entities, schema, assets, frames, fps, frame_dims, new_image, pick) = {
+            let mut s = self.shared.lock().unwrap();
             let new_image = match &s.frame {
                 Some(f) if f.seq != self.shown_seq => Some((
                     f.seq,
@@ -189,6 +190,7 @@ impl eframe::App for EditorApp {
                 )),
                 _ => None,
             };
+            let pick = s.last_pick.take(); // consumed here: each answer moves selection once
             (
                 s.connected,
                 s.error.clone(),
@@ -199,8 +201,23 @@ impl eframe::App for EditorApp {
                 s.fps,
                 s.frame.as_ref().map(|f| (f.width, f.height)),
                 new_image,
+                pick,
             )
         };
+
+        // Click-to-select (m9.6): the engine answered a viewport click with the entity under that
+        // pixel; map its handle back to the outliner row. A miss (empty space) — or a handle the
+        // snapshot no longer contains (despawned mid-flight) — clears the selection, exactly what
+        // clicking nothing should do.
+        if let Some(pick) = pick {
+            self.selected = if pick.is_hit() {
+                entities
+                    .iter()
+                    .position(|e| (e.index, e.generation) == (pick.index, pick.generation))
+            } else {
+                None
+            };
+        }
 
         if let Some((seq, image)) = new_image {
             self.frame_tex =
@@ -542,6 +559,17 @@ fn forward_input(
                 y,
                 button: 0,
             }));
+        }
+        // A plain click — egui reports it only when the press/release pair never became a drag —
+        // asks the engine what is under the cursor (m9.6). The engine runs its ID-buffer pick pass
+        // at this pixel and answers with a PickResult a frame later; selection moves when it lands
+        // (see the pick consumption in `update`). Drags keep their existing meaning (forwarded
+        // input), so navigating never steals a selection.
+        if response.clicked() {
+            let _ = out_tx.send(Outbound::Editor {
+                msg: EditorMessage::PickRequest,
+                payload: PickRequest { x, y }.encode(),
+            });
         }
     }
 }

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rime_protocol::{
     AssetEntry, AssetList, Connection, EditorMessage, FrameMessage, InputEvent, InputKind,
-    MessageType, Schema, Snapshot, SnapshotComponent,
+    MessageType, PickResult, Schema, Snapshot, SnapshotComponent,
 };
 
 use super::protocol_input::Input;
@@ -56,6 +56,10 @@ pub struct SharedState {
     pub frame: Option<ViewportFrame>,
     pub frames_received: u64,
     pub fps: f32,
+    /// The newest un-consumed pick answer (m9.6). The UI `take()`s it each repaint and maps the
+    /// entity handle to the outliner selection; if several results land between repaints the
+    /// latest wins — each reflects a distinct click, and selection is last-click-wins anyway.
+    pub last_pick: Option<PickResult>,
     last_frame_at: Option<Instant>,
 }
 
@@ -253,6 +257,11 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
         MessageType::Other(code) if code == EditorMessage::AssetList.to_code() => {
             if let Ok(list) = AssetList::decode(payload) {
                 shared.lock().unwrap().assets = list.assets;
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::PickResult.to_code() => {
+            if let Ok(pick) = PickResult::decode(payload) {
+                shared.lock().unwrap().last_pick = Some(pick);
             }
         }
         _ => {} // an editor->engine type echoed, or something this build predates

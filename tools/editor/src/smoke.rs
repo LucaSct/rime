@@ -52,7 +52,8 @@ mod imp {
 
     use rime_protocol::{
         decode_value, encode_value, AssetKind, AssetList, Connection, EditorMessage, FrameMessage,
-        MessageType, Schema, SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, Value,
+        MessageType, PickRequest, PickResult, Schema, SetComponent, Snapshot, SnapshotComponent,
+        SnapshotEntity, Value,
     };
 
     // A tiny cook manifest the smoke hands the engine (--assets) to prove the browse path end to end:
@@ -213,6 +214,17 @@ mod imp {
         }
     }
 
+    /// Read messages until a PickResult arrives (m9.6), skipping streamed frames — in viewport mode
+    /// the engine keeps rendering while the pick pass runs, and the answer is a frame late by design.
+    fn recv_pick(conn: &mut Connection<UnixStream>) -> Result<PickResult, String> {
+        loop {
+            let (ty, payload) = conn.recv().map_err(|e| format!("recv pick result: {e}"))?;
+            if ty == MessageType::Other(EditorMessage::PickResult.to_code()) {
+                return PickResult::decode(&payload).map_err(|e| format!("decode pick: {e}"));
+            }
+        }
+    }
+
     pub fn run(args: &[String]) -> Result<String, String> {
         let engine = arg_value(args, "--engine")
             .or_else(|| std::env::var("RIME_ENGINE_BIN").ok())
@@ -275,12 +287,53 @@ mod imp {
         let summary = if frames > 0 {
             // Streamed-viewport mode: receive + decode N frames — the render → capture → LZ4 → wire →
             // decode path end to end — then close.
-            let (got, w, h) = receive_frames(&mut conn, frames)?;
+            let (got, w, h, pixels) = receive_frames(&mut conn, frames)?;
+
+            // Live pick (m9.6), self-locating so no scene coordinates are hardcoded: the brightest
+            // pixel of a decoded frame is by construction on a lit, rendered surface (the cleared
+            // background is black), so picking it MUST name a real entity — the click→PickRequest→
+            // ID-pass→PickResult loop proven against the live renderer. A corner pixel of the same
+            // frame is empty sky and must miss.
+            let (bx, by) = brightest_pixel(&pixels, w);
+            conn.send_editor(
+                EditorMessage::PickRequest,
+                &PickRequest { x: bx, y: by }.encode(),
+            )
+            .map_err(|e| format!("send pick: {e}"))?;
+            let hit = recv_pick(&mut conn)?;
+            if !hit.is_hit() {
+                return Err(format!(
+                    "picking the brightest rendered pixel ({bx},{by}) claimed empty space"
+                ));
+            }
+            if !snapshot
+                .entities
+                .iter()
+                .any(|e| (e.index, e.generation) == (hit.index, hit.generation))
+            {
+                return Err(format!(
+                    "pick answered entity {}:{} which the snapshot does not contain",
+                    hit.index, hit.generation
+                ));
+            }
+            conn.send_editor(
+                EditorMessage::PickRequest,
+                &PickRequest { x: 0, y: 0 }.encode(),
+            )
+            .map_err(|e| format!("send pick: {e}"))?;
+            let miss = recv_pick(&mut conn)?;
+            if miss.is_hit() {
+                return Err("picking the empty corner pixel claimed a hit".into());
+            }
+
             conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
             drain_until_closed(&mut conn);
             format!(
-                "editor <-> engine viewport OK: {} entities; {got} frames decoded to {w}x{h} RGBA; clean shutdown",
-                snapshot.entities.len()
+                "editor <-> engine viewport OK: {} entities; {got} frames decoded to {w}x{h} RGBA; \
+                 pick at ({bx},{by}) hit entity {}:{}, corner missed; clean shutdown",
+                snapshot.entities.len(),
+                hit.index,
+                hit.generation
             )
         } else {
             // Browse (m9.5): the engine parsed the --assets manifest and sends it after the snapshot.
@@ -339,9 +392,25 @@ mod imp {
                 ));
             }
 
+            // The pick wire on the GPU-free host (m9.6): with no renderer there is no ID buffer,
+            // so the honest answer to any pick is the "nothing" sentinel — but it must ANSWER
+            // (a request without a reply would strand a client's click forever).
+            conn.send_editor(
+                EditorMessage::PickRequest,
+                &PickRequest { x: 10, y: 10 }.encode(),
+            )
+            .map_err(|e| format!("send pick: {e}"))?;
+            let pick = recv_pick(&mut conn)?;
+            if pick.is_hit() {
+                return Err(format!(
+                    "the GPU-free host claimed a pick hit ({}:{})",
+                    pick.index, pick.generation
+                ));
+            }
+
             conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
             format!(
-                "editor <-> engine OK: {} schema types, {} entities, {} assets browsed; typed field edit {before} -> {after} applied and confirmed via snapshot; clean shutdown",
+                "editor <-> engine OK: {} schema types, {} entities, {} assets browsed; typed field edit {before} -> {after} applied and confirmed via snapshot; pick answered honestly (no viewport => miss); clean shutdown",
                 schema.types.len(),
                 snapshot.entities.len(),
                 assets.assets.len()
@@ -360,13 +429,15 @@ mod imp {
 
     /// Receive and decode `n` viewport frames. Each must LZ4-decode to `width*height*4` RGBA bytes
     /// and carry some variation (a uniform image would mean nothing was rendered). Editor-channel
-    /// messages arriving interleaved are ignored. Returns (frames, width, height).
+    /// messages arriving interleaved are ignored. Returns (frames, width, height, last frame's
+    /// RGBA) — the pixels feed the self-locating pick that follows.
     fn receive_frames(
         conn: &mut Connection<UnixStream>,
         n: u32,
-    ) -> Result<(u32, u32, u32), String> {
+    ) -> Result<(u32, u32, u32, Vec<u8>), String> {
         let mut got = 0u32;
         let mut dims = (0u32, 0u32);
+        let mut last = Vec::new();
         while got < n {
             let (ty, payload) = conn.recv().map_err(|e| format!("recv frame: {e}"))?;
             if ty != MessageType::Frame {
@@ -383,9 +454,25 @@ mod imp {
                 return Err("frame decoded to a uniform image (nothing rendered?)".into());
             }
             dims = (frame.desc.width, frame.desc.height);
+            last = pixels;
             got += 1;
         }
-        Ok((got, dims.0, dims.1))
+        Ok((got, dims.0, dims.1, last))
+    }
+
+    /// The (x, y) of the brightest pixel of an RGBA image — the most-lit spot of the rendered
+    /// scene, guaranteed to sit ON some entity (the cleared background is black). Sum of R+G+B;
+    /// ties keep the first, any of them serves.
+    fn brightest_pixel(rgba: &[u8], width: u32) -> (i32, i32) {
+        let mut best = (0usize, 0u32);
+        for (i, px) in rgba.chunks_exact(4).enumerate() {
+            let lum = px[0] as u32 + px[1] as u32 + px[2] as u32;
+            if lum > best.1 {
+                best = (i, lum);
+            }
+        }
+        let w = width.max(1) as usize;
+        ((best.0 % w) as i32, (best.0 / w) as i32)
     }
 
     /// Read and discard messages until the engine closes, so its frame-sender never blocks on a full
