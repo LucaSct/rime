@@ -42,6 +42,7 @@ enum class EditorMessage : std::uint16_t {
     Schema = 0x0200,       // engine -> editor: the reflected type registry (layout per type; m9.4)
     Snapshot = 0x0201,     // engine -> editor: the whole world (entities + components)
     AssetList = 0x0203,    // engine -> editor: the cook manifest (browsable assets; m9.5)
+    PickResult = 0x0204,   // engine -> editor: the entity under a picked viewport pixel (m9.6)
     SetComponent = 0x0210, // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,        // editor -> engine: spawn an empty entity
     Despawn = 0x0212,      // editor -> engine: despawn an entity
@@ -49,6 +50,7 @@ enum class EditorMessage : std::uint16_t {
     RemoveComponent = 0x0214, // editor -> engine: remove a component from an entity
     RequestSnapshot = 0x0215, // editor -> engine: resend the world (engine replies with Snapshot)
     SpawnEntity = 0x0216, // editor -> engine: spawn an entity WITH an initial component set (m9.5)
+    PickRequest = 0x0217, // editor -> engine: pick the entity at a viewport pixel (m9.6)
 };
 
 // True if `type` (as received by recv_message) is an editor-channel message (the reserved band).

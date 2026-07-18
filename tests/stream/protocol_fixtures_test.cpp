@@ -151,6 +151,25 @@ std::vector<std::byte> spawn_entity_bytes() {
     return out;
 }
 
+// A PickRequest payload (editor -> engine): [x:i32][y:i32] — the viewport pixel to hit-test (m9.6).
+// Values are positive, so their u32 bit pattern equals the signed encoding the Rust side reads.
+std::vector<std::byte> pick_request_bytes() {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    w.u32(120);
+    w.u32(64);
+    return out;
+}
+
+// A PickResult payload (engine -> editor): [index:u32][generation:u32] — the picked entity (m9.6).
+std::vector<std::byte> pick_result_bytes() {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    w.u32(7);
+    w.u32(2);
+    return out;
+}
+
 // A known 8x8 RGBA gradient — the pixels the editor viewport must recover after an LZ4 round trip.
 std::vector<std::byte> lz4_pixels_raw() {
     constexpr std::uint32_t w = 8;
@@ -226,6 +245,8 @@ std::vector<Fixture> all_fixtures() {
         {"component_ref.bin", component_ref_bytes()},
         {"asset_list.bin", asset_list_bytes()},
         {"spawn_entity.bin", spawn_entity_bytes()},
+        {"pick_request.bin", pick_request_bytes()},
+        {"pick_result.bin", pick_result_bytes()},
         {"frame_lz4.bin", frame_lz4_bytes()},
         {"frame_lz4_pixels.bin", lz4_pixels_raw()},
     };

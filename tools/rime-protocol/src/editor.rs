@@ -43,6 +43,8 @@ pub enum EditorMessage {
     Snapshot,
     /// engine → editor: the cook manifest — the browsable/placeable asset list (m9.5).
     AssetList,
+    /// engine → editor: the entity under a picked viewport pixel (m9.6).
+    PickResult,
     /// editor → engine: set a component's bytes on an entity.
     SetComponent,
     /// editor → engine: spawn an empty entity.
@@ -59,6 +61,8 @@ pub enum EditorMessage {
     /// editor → engine: spawn an entity **with** an initial component set (the browser's "place";
     /// m9.5).
     SpawnEntity,
+    /// editor → engine: pick the entity at a viewport pixel (m9.6).
+    PickRequest,
 }
 
 impl EditorMessage {
@@ -68,6 +72,7 @@ impl EditorMessage {
             EditorMessage::Schema => 0x0200,
             EditorMessage::Snapshot => 0x0201,
             EditorMessage::AssetList => 0x0203,
+            EditorMessage::PickResult => 0x0204,
             EditorMessage::SetComponent => 0x0210,
             EditorMessage::Spawn => 0x0211,
             EditorMessage::Despawn => 0x0212,
@@ -75,6 +80,7 @@ impl EditorMessage {
             EditorMessage::RemoveComponent => 0x0214,
             EditorMessage::RequestSnapshot => 0x0215,
             EditorMessage::SpawnEntity => 0x0216,
+            EditorMessage::PickRequest => 0x0217,
         }
     }
 
@@ -84,6 +90,7 @@ impl EditorMessage {
             0x0200 => Some(EditorMessage::Schema),
             0x0201 => Some(EditorMessage::Snapshot),
             0x0203 => Some(EditorMessage::AssetList),
+            0x0204 => Some(EditorMessage::PickResult),
             0x0210 => Some(EditorMessage::SetComponent),
             0x0211 => Some(EditorMessage::Spawn),
             0x0212 => Some(EditorMessage::Despawn),
@@ -91,6 +98,7 @@ impl EditorMessage {
             0x0214 => Some(EditorMessage::RemoveComponent),
             0x0215 => Some(EditorMessage::RequestSnapshot),
             0x0216 => Some(EditorMessage::SpawnEntity),
+            0x0217 => Some(EditorMessage::PickRequest),
             _ => None,
         }
     }
@@ -572,6 +580,72 @@ impl SpawnEntity {
             components.push((hash, blob));
         }
         Ok(SpawnEntity { components })
+    }
+}
+
+/// An editor → engine pick request: the viewport pixel to hit-test (m9.6), in the engine's
+/// rendered-frame pixel space (the same space viewport pointer input uses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickRequest {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl PickRequest {
+    /// Serialize the payload: `[x:i32][y:i32]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.i32(self.x);
+        w.i32(self.y);
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let x = r.i32()?;
+        let y = r.i32()?;
+        Ok(PickRequest { x, y })
+    }
+}
+
+/// An engine → editor pick result: the entity handle under the picked pixel, or "nothing" (the click
+/// landed on empty space). The sentinel for nothing is `index == u32::MAX` — see [`PickResult::none`]
+/// / [`PickResult::is_hit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickResult {
+    pub index: u32,
+    pub generation: u32,
+}
+
+impl PickResult {
+    /// The "nothing picked" result.
+    pub const fn none() -> Self {
+        PickResult {
+            index: u32::MAX,
+            generation: 0,
+        }
+    }
+
+    /// True if an entity was actually hit (vs. empty space).
+    pub fn is_hit(&self) -> bool {
+        self.index != u32::MAX
+    }
+
+    /// Serialize the payload: `[index:u32][generation:u32]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(self.index);
+        w.u32(self.generation);
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let index = r.u32()?;
+        let generation = r.u32()?;
+        Ok(PickResult { index, generation })
     }
 }
 

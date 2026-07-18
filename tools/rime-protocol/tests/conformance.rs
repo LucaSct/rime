@@ -13,8 +13,9 @@ use std::thread;
 
 use rime_protocol::{
     decode_value, encode_value, AssetKind, AssetList, Codec, ComponentRef, Connection,
-    EditorMessage, FieldKind, FrameMessage, InputEvent, InputKind, MessageType, PixelFormat,
-    Schema, SetComponent, Snapshot, SpawnEntity, Value, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    EditorMessage, FieldKind, FrameMessage, InputEvent, InputKind, MessageType, PickRequest,
+    PickResult, PixelFormat, Schema, SetComponent, Snapshot, SpawnEntity, Value, PROTOCOL_MAGIC,
+    PROTOCOL_VERSION,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -203,6 +204,27 @@ fn spawn_entity_decodes_and_re_encodes_byte_exact() {
     assert!(se.components[0].0 != 0); // the Camera type_hash
     assert!(!se.components[0].1.is_empty()); // the reflected Camera bytes the browser placed
     assert_eq!(se.encode(), golden);
+}
+
+#[test]
+fn pick_request_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("pick_request.bin");
+    let pr = PickRequest::decode(&golden).expect("decode pick request");
+    assert_eq!(pr.x, 120);
+    assert_eq!(pr.y, 64);
+    assert_eq!(pr.encode(), golden);
+}
+
+#[test]
+fn pick_result_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("pick_result.bin");
+    let pr = PickResult::decode(&golden).expect("decode pick result");
+    assert_eq!(pr.index, 7);
+    assert_eq!(pr.generation, 2);
+    assert!(pr.is_hit());
+    assert_eq!(pr.encode(), golden);
+    // The "nothing" sentinel is not a hit and re-encodes to the reserved bytes.
+    assert!(!PickResult::none().is_hit());
 }
 
 #[test]
