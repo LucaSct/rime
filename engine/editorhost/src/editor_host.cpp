@@ -5,6 +5,7 @@
 
 #include <span>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 #include "rime/core/byte_cursor.hpp"
@@ -25,7 +26,35 @@ namespace {
 // A snapshot/schema blob starts with this tag so a truncated or wrong-shaped buffer is rejected at
 // the first read, not mis-parsed. (Bumped only if the editor blob layout changes.)
 constexpr std::uint32_t kSnapshotMagic = 0x52534E31u; // 'R''S''N''1' — Rime SNapshot v1
-constexpr std::uint32_t kSchemaMagic = 0x52534D31u;   // 'R''S''M''1' — Rime scheMa v1
+// v2 (m9.4): the schema now carries each type's full field layout, not just its name, so the editor
+// can *generate* typed inspectors from it. The tag bump makes an old editor reject the new shape.
+constexpr std::uint32_t kSchemaMagic = 0x52534D32u; // 'R''S''M''2' — Rime scheMa v2
+
+// Write a length-prefixed name ([len:u16][utf8 bytes]); a null name writes an empty string.
+void write_name(core::ByteWriter& w, const char* name) {
+    const std::string_view s = name != nullptr ? std::string_view(name) : std::string_view{};
+    w.u16(static_cast<std::uint16_t>(s.size()));
+    w.bytes(std::as_bytes(std::span(s.data(), s.size())));
+}
+
+// Collect `ti` and every reflected type reachable through its Struct fields, in a stable discovery
+// order, deduped by type_hash. Flattening the type graph like this is what lets one schema blob
+// describe a component AND the nested value types it stores (LocalTransform → Transform →
+// Vec3/Quat), so the editor can recurse a component's packed bytes into individually editable
+// fields.
+void collect_types(const core::TypeInfo* ti,
+                   std::vector<const core::TypeInfo*>& out,
+                   std::unordered_set<std::uint64_t>& seen) {
+    if (ti == nullptr || !seen.insert(ti->type_hash).second) {
+        return; // null, or a type we already emitted (Vec3 appears in both translation and scale)
+    }
+    out.push_back(ti);
+    for (const core::Field& f : ti->fields) {
+        if (f.type == core::FieldType::Struct) {
+            collect_types(f.struct_type, out, seen);
+        }
+    }
+}
 
 // Resolve a component's stable type_hash to *this* world's registration-order ComponentId, or
 // kInvalidComponentId if no reflected component with that hash is registered. Keying the wire on
@@ -136,28 +165,45 @@ bool deserialize_world(ecs::World& dst, std::span<const std::byte> data) {
 }
 
 std::vector<std::byte> serialize_schema(const ecs::World& world) {
+    const ecs::ComponentRegistry& registry = world.components();
+
+    // 1) Gather every reflected type the editor must understand: each registered component, plus
+    // the
+    //    nested value types those components contain (recursively), deduped by type_hash. We also
+    //    remember which hashes are top-level components — the editor's "add component" menu lists
+    //    only those, never a bare Vec3.
+    std::vector<const core::TypeInfo*> types;
+    std::unordered_set<std::uint64_t> seen;
+    std::unordered_set<std::uint64_t> component_hashes;
+    for (std::size_t i = 0; i < registry.count(); ++i) {
+        const ecs::ComponentInfo& info = registry.info(static_cast<ecs::ComponentId>(i));
+        if (info.type_info != nullptr) {
+            component_hashes.insert(info.type_info->type_hash);
+            collect_types(info.type_info, types, seen);
+        }
+    }
+
+    // 2) Emit the dictionary. Per type: identity, an is-component flag, and its field layout — each
+    //    field a name, a kind byte (core::FieldType, wire-stable in declared order), and the nested
+    //    type_hash to recurse into for a Struct field (0 for a primitive). The editor pairs this
+    //    with a snapshot's opaque blob to decode/edit/re-encode typed values without any per-type
+    //    code.
     std::vector<std::byte> out;
     core::ByteWriter w(out);
     w.u32(kSchemaMagic);
-    const ecs::ComponentRegistry& registry = world.components();
-    std::uint32_t reflected = 0;
-    for (std::size_t i = 0; i < registry.count(); ++i) {
-        if (registry.info(static_cast<ecs::ComponentId>(i)).type_info != nullptr) {
-            ++reflected;
+    w.u32(static_cast<std::uint32_t>(types.size()));
+    for (const core::TypeInfo* ti : types) {
+        w.u64(ti->type_hash);
+        write_name(w, ti->name);
+        w.u8(component_hashes.count(ti->type_hash) != 0 ? 1u : 0u);
+        w.u16(static_cast<std::uint16_t>(ti->fields.size()));
+        for (const core::Field& f : ti->fields) {
+            write_name(w, f.name);
+            w.u8(static_cast<std::uint8_t>(f.type));
+            w.u64(f.type == core::FieldType::Struct && f.struct_type != nullptr
+                      ? f.struct_type->type_hash
+                      : 0ull);
         }
-    }
-    w.u32(reflected);
-    for (std::size_t i = 0; i < registry.count(); ++i) {
-        const ecs::ComponentInfo& info = registry.info(static_cast<ecs::ComponentId>(i));
-        if (info.type_info == nullptr) {
-            continue;
-        }
-        w.u64(info.type_info->type_hash);
-        const std::string_view name = info.type_info->name != nullptr
-                                          ? std::string_view(info.type_info->name)
-                                          : std::string_view{};
-        w.u16(static_cast<std::uint16_t>(name.size()));
-        w.bytes(std::as_bytes(std::span(name.data(), name.size())));
     }
     return out;
 }
@@ -185,6 +231,32 @@ bool apply_set_component(ecs::World& world,
     }
     world.mark_changed_raw(e, id);
     return true;
+}
+
+bool add_default_component(ecs::World& world, ecs::Entity e, std::uint64_t type_hash) {
+    if (!world.is_alive(e)) {
+        return false;
+    }
+    const ecs::ComponentId id = id_for_type_hash(world.components(), type_hash);
+    if (id == ecs::kInvalidComponentId || world.get_component_raw(e, id) != nullptr) {
+        return false; // unknown type, or the entity already has it
+    }
+    // add_component_raw value-initializes the new slot — the type's real C++ defaults (a zeroed
+    // blob would give, e.g., a Transform with scale 0). The editor learns the values on its next
+    // snapshot.
+    if (world.add_component_raw(e, id) == nullptr) {
+        return false;
+    }
+    world.mark_changed_raw(e, id);
+    return true;
+}
+
+bool remove_component(ecs::World& world, ecs::Entity e, std::uint64_t type_hash) {
+    const ecs::ComponentId id = id_for_type_hash(world.components(), type_hash);
+    if (id == ecs::kInvalidComponentId) {
+        return false;
+    }
+    return world.remove_component_raw(e, id);
 }
 
 // ── EditorHost ──────────────────────────────────────────────────────────────────────────
@@ -235,6 +307,34 @@ bool EditorHost::poll_one(ecs::World& world) {
             }
             return true;
         }
+        case EditorMessage::AddComponent: {
+            core::ByteReader r(payload);
+            std::uint32_t index = 0;
+            std::uint32_t generation = 0;
+            std::uint64_t hash = 0;
+            if (r.u32(index) && r.u32(generation) && r.u64(hash)) {
+                (void)add_default_component(world, ecs::Entity{index, generation}, hash);
+            }
+            return true;
+        }
+        case EditorMessage::RemoveComponent: {
+            core::ByteReader r(payload);
+            std::uint32_t index = 0;
+            std::uint32_t generation = 0;
+            std::uint64_t hash = 0;
+            if (r.u32(index) && r.u32(generation) && r.u64(hash)) {
+                (void)remove_component(world, ecs::Entity{index, generation}, hash);
+            }
+            return true;
+        }
+        case EditorMessage::RequestSnapshot:
+            // The editor asks for a fresh view (e.g. after edits, or to refresh); reply with a full
+            // snapshot on the same connection. Cheap for editor-sized worlds; a delta channel is a
+            // later optimization (nothing else mutates the world while editing — that starts at
+            // Play).
+            (void)conn_.send_message(static_cast<stream::MessageType>(EditorMessage::Snapshot),
+                                     serialize_world(world));
+            return true;
         default:
             return true; // an engine->editor or unknown type — nothing to apply
     }

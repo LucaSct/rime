@@ -51,7 +51,8 @@ mod imp {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use rime_protocol::{
-        Connection, EditorMessage, FrameMessage, MessageType, Schema, SetComponent, Snapshot,
+        decode_value, encode_value, Connection, EditorMessage, FrameMessage, MessageType, Schema,
+        SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, Value,
     };
 
     /// Owns the spawned engine so an early failure never leaks the process: on drop (any error path)
@@ -126,6 +127,85 @@ mod imp {
         }
     }
 
+    /// The first (entity, component) whose type the schema describes and whose value has an editable
+    /// scalar leaf — the field the smoke pokes to prove a reflection-typed edit round-trips.
+    fn find_editable<'a>(
+        schema: &Schema,
+        snapshot: &'a Snapshot,
+    ) -> Option<(&'a SnapshotEntity, &'a SnapshotComponent)> {
+        for e in &snapshot.entities {
+            for c in &e.components {
+                if let Ok(v) = decode_value(schema, c.type_hash, &c.data) {
+                    if read_first_scalar(&v).is_some() {
+                        return Some((e, c));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The first scalar leaf's value as f64 (recursing into structs), for a before/after comparison.
+    fn read_first_scalar(value: &Value) -> Option<f64> {
+        match value {
+            Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Value::F32(x) => Some(*x as f64),
+            Value::F64(x) => Some(*x),
+            Value::I32(x) => Some(*x as f64),
+            Value::U32(x) => Some(*x as f64),
+            Value::I64(x) => Some(*x as f64),
+            Value::U64(x) => Some(*x as f64),
+            Value::Struct(fields) => fields.iter().find_map(|(_, v)| read_first_scalar(v)),
+        }
+    }
+
+    /// Change the first scalar leaf in place (toggle a bool, +1 a number), returning its new value as
+    /// f64 — a deterministic, obviously-different edit the smoke can verify came back.
+    fn bump_first_scalar(value: &mut Value) -> Option<f64> {
+        match value {
+            Value::Bool(b) => {
+                *b = !*b;
+                Some(if *b { 1.0 } else { 0.0 })
+            }
+            Value::F32(x) => {
+                *x += 1.0;
+                Some(*x as f64)
+            }
+            Value::F64(x) => {
+                *x += 1.0;
+                Some(*x)
+            }
+            Value::I32(x) => {
+                *x += 1;
+                Some(*x as f64)
+            }
+            Value::U32(x) => {
+                *x += 1;
+                Some(*x as f64)
+            }
+            Value::I64(x) => {
+                *x += 1;
+                Some(*x as f64)
+            }
+            Value::U64(x) => {
+                *x += 1;
+                Some(*x as f64)
+            }
+            Value::Struct(fields) => fields.iter_mut().find_map(|(_, v)| bump_first_scalar(v)),
+        }
+    }
+
+    /// Read messages until the engine's snapshot reply arrives (channel mode carries nothing else, but
+    /// skip anything unexpected rather than mis-handle it).
+    fn recv_snapshot(conn: &mut Connection<UnixStream>) -> Result<Snapshot, String> {
+        loop {
+            let (ty, payload) = conn.recv().map_err(|e| format!("recv snapshot: {e}"))?;
+            if ty == MessageType::Other(EditorMessage::Snapshot.to_code()) {
+                return Snapshot::decode(&payload).map_err(|e| format!("decode snapshot: {e}"));
+            }
+        }
+    }
+
     pub fn run(args: &[String]) -> Result<String, String> {
         let engine = arg_value(args, "--engine")
             .or_else(|| std::env::var("RIME_ENGINE_BIN").ok())
@@ -178,26 +258,51 @@ mod imp {
                 snapshot.entities.len()
             )
         } else {
-            // Editor-channel mode: push one edit back — re-set an entity's first component to its own
-            // bytes (a valid no-op edit). The editor never interprets a component blob (that is the
-            // inspector's job, schema-driven), so this exercises SetComponent without decoding it.
-            let entity = snapshot
-                .entities
-                .iter()
-                .find(|e| !e.components.is_empty())
-                .ok_or("snapshot has no inspectable entity")?;
-            let component = &entity.components[0];
+            // Editor-channel mode: the m9.4 inspector path, headless. Decode a component to typed
+            // fields *through the schema* (exactly what the inspector does), edit one scalar, send the
+            // re-encoded bytes as a SetComponent, then request a fresh snapshot and confirm the field
+            // actually changed on the live engine — the whole reflection-driven edit loop, proven.
+            let (entity, component) = find_editable(&schema, &snapshot)
+                .ok_or("snapshot has no schema-describable component with an editable field")?;
+            let key = (entity.index, entity.generation);
+            let hash = component.type_hash;
+
+            let mut value =
+                decode_value(&schema, hash, &component.data).map_err(|e| format!("decode: {e}"))?;
+            let before = read_first_scalar(&value).ok_or("component has no scalar field")?;
+            let after = bump_first_scalar(&mut value).ok_or("component has no scalar to edit")?;
             let edit = SetComponent {
-                index: entity.index,
-                generation: entity.generation,
-                type_hash: component.type_hash,
-                blob: component.data.clone(),
+                index: key.0,
+                generation: key.1,
+                type_hash: hash,
+                blob: encode_value(&value),
             };
             conn.send_editor(EditorMessage::SetComponent, &edit.encode())
                 .map_err(|e| format!("send edit: {e}"))?;
+
+            // Ask for the world back and check the edited field holds the new value.
+            conn.send_editor(EditorMessage::RequestSnapshot, &[])
+                .map_err(|e| format!("send request-snapshot: {e}"))?;
+            let snap2 = recv_snapshot(&mut conn)?;
+            let comp2 = snap2
+                .entities
+                .iter()
+                .find(|e| (e.index, e.generation) == key)
+                .and_then(|e| e.components.iter().find(|c| c.type_hash == hash))
+                .ok_or("edited component vanished from the refreshed snapshot")?;
+            let got = read_first_scalar(
+                &decode_value(&schema, hash, &comp2.data).map_err(|e| format!("re-decode: {e}"))?,
+            )
+            .ok_or("no scalar after edit")?;
+            if (got - after).abs() > 1e-3 {
+                return Err(format!(
+                    "typed edit did not apply: field was {before}, set to {after}, engine reports {got}"
+                ));
+            }
+
             conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
             format!(
-                "editor <-> engine OK: {} schema types, {} entities; edit round-tripped; clean shutdown",
+                "editor <-> engine OK: {} schema types, {} entities; typed field edit {before} -> {after} applied and confirmed via snapshot; clean shutdown",
                 schema.types.len(),
                 snapshot.entities.len()
             )

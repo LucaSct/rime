@@ -7,7 +7,6 @@
 //! thread forwards viewport input. Full-duplex over one socket (the `rime-protocol` contract), the
 //! same wire the headless smoke proves — so only what appears on screen is Mac-eyeballed.
 
-use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -19,9 +18,23 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rime_protocol::{
     Connection, EditorMessage, FrameMessage, InputEvent, InputKind, MessageType, Schema, Snapshot,
+    SnapshotComponent,
 };
 
 use super::protocol_input::Input;
+
+/// Everything the UI sends to the engine over the one shared socket: high-frequency viewport input
+/// and low-frequency editor commands, multiplexed onto a single channel so one sender thread drains
+/// both in order.
+pub enum Outbound {
+    /// A viewport pointer event, forwarded as an `InputEvent`.
+    Input(Input),
+    /// An editor-channel command (a `Command::to_wire` result — set/add/remove/spawn/…).
+    Editor {
+        msg: EditorMessage,
+        payload: Vec<u8>,
+    },
+}
 
 /// The latest decoded viewport frame — RGBA, top row first, with the geometry and a sequence stamp.
 pub struct ViewportFrame {
@@ -46,13 +59,32 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    /// `type_hash → source name` from the schema, so the inspector can label a snapshot's components.
-    pub fn schema_names(&self) -> HashMap<u64, String> {
-        self.schema
-            .types
-            .iter()
-            .map(|t| (t.type_hash, t.name.clone()))
-            .collect()
+    /// Optimistically patch the mirror after an edit, so the inspector shows the new value this frame
+    /// without waiting for a snapshot round-trip. Nothing else mutates the world while editing (that
+    /// starts at Play), so the mirror stays truthful; structural changes still resync via a snapshot
+    /// request. Updates the component's bytes in place, or inserts it if the entity lacked it (the
+    /// undo-of-remove case).
+    pub fn apply_optimistic_set(&mut self, key: (u32, u32), type_hash: u64, blob: &[u8]) {
+        let Some(entity) = self
+            .snapshot
+            .entities
+            .iter_mut()
+            .find(|e| (e.index, e.generation) == key)
+        else {
+            return;
+        };
+        if let Some(comp) = entity
+            .components
+            .iter_mut()
+            .find(|c| c.type_hash == type_hash)
+        {
+            comp.data = blob.to_vec();
+        } else {
+            entity.components.push(SnapshotComponent {
+                type_hash,
+                data: blob.to_vec(),
+            });
+        }
     }
 }
 
@@ -68,7 +100,7 @@ pub struct EngineSession {
 impl EngineSession {
     /// Spawn `rime-engine --editor-host --viewport` and start driving the wire. Any failure lands in
     /// `shared.error` (the status bar shows it) rather than panicking the UI.
-    pub fn spawn(engine: String, shared: Shared, input_rx: Receiver<Input>) -> Self {
+    pub fn spawn(engine: String, shared: Shared, out_rx: Receiver<Outbound>) -> Self {
         let socket = unique_socket_path();
         let child = match Command::new(&engine)
             .arg("--editor-host")
@@ -85,7 +117,7 @@ impl EngineSession {
                 };
             }
         };
-        let recv_handle = thread::spawn(move || run_session(&socket, &shared, input_rx));
+        let recv_handle = thread::spawn(move || run_session(&socket, &shared, out_rx));
         Self {
             child: Some(child),
             recv_handle: Some(recv_handle),
@@ -135,7 +167,7 @@ fn connect_retry(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> 
 
 // Connect, handshake, then split the socket into a read half (frames) and a write half (input) — the
 // full-duplex use one sender + one receiver, which ProtocolConnection allows.
-fn run_session(socket: &Path, shared: &Shared, input_rx: Receiver<Input>) {
+fn run_session(socket: &Path, shared: &Shared, out_rx: Receiver<Outbound>) {
     let stream = match connect_retry(socket, Duration::from_secs(10)) {
         Ok(stream) => stream,
         Err(e) => {
@@ -158,8 +190,9 @@ fn run_session(socket: &Path, shared: &Shared, input_rx: Receiver<Input>) {
     };
     shared.lock().unwrap().connected = true;
 
-    // Sender thread: viewport input → InputEvents. Detached; it exits when the UI drops input_rx.
-    let _sender = thread::spawn(move || run_sender(Connection::new(write_stream), input_rx));
+    // Sender thread: viewport input + editor commands → the wire. Detached; it exits when the UI
+    // drops the outbound channel.
+    let _sender = thread::spawn(move || run_sender(Connection::new(write_stream), out_rx));
 
     let mut read_conn = Connection::new(read_stream);
     // Drive the wire until the engine disconnects (recv returns Err on close/EOF).
@@ -215,9 +248,13 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
     }
 }
 
-fn run_sender(mut conn: Connection<UnixStream>, input_rx: Receiver<Input>) {
-    while let Ok(input) = input_rx.recv() {
-        if conn.send_input(&to_input_event(input)).is_err() {
+fn run_sender(mut conn: Connection<UnixStream>, out_rx: Receiver<Outbound>) {
+    while let Ok(out) = out_rx.recv() {
+        let sent = match out {
+            Outbound::Input(input) => conn.send_input(&to_input_event(input)),
+            Outbound::Editor { msg, payload } => conn.send_editor(msg, &payload),
+        };
+        if sent.is_err() {
             break; // engine gone
         }
     }

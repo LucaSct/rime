@@ -48,6 +48,16 @@ impl Writer {
         self.u32(v.to_bits());
     }
 
+    /// A signed 64-bit value as its two's-complement bytes (C++ `bit_cast<uint64_t>` of the `int64`).
+    pub(crate) fn i64(&mut self, v: i64) {
+        self.u64(v as u64);
+    }
+
+    /// A double as its IEEE-754 bit pattern (matching C++'s `bit_cast<uint64_t>(double)`).
+    pub(crate) fn f64(&mut self, v: f64) {
+        self.u64(v.to_bits());
+    }
+
     pub(crate) fn bytes(&mut self, b: &[u8]) {
         self.buf.extend_from_slice(b);
     }
@@ -104,6 +114,14 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn f32(&mut self) -> Result<f32, Error> {
         Ok(f32::from_bits(self.u32()?))
+    }
+
+    pub(crate) fn i64(&mut self) -> Result<i64, Error> {
+        Ok(self.u64()? as i64)
+    }
+
+    pub(crate) fn f64(&mut self) -> Result<f64, Error> {
+        Ok(f64::from_bits(self.u64()?))
     }
 
     /// Read exactly `n` raw bytes (a name, a component blob, a frame's pixels).
