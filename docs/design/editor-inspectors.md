@@ -97,6 +97,26 @@ truth, including an added component's real defaults. Because snapshots are only 
 request**, an edit never races an unsolicited snapshot that would rewrite the field mid-drag — the
 classic inspector echo-loop is avoided by construction rather than by sequence-number suppression.
 
+## The asset browser (m9.5)
+
+The same editor channel carries the **cook manifest**, so the editor can browse and place cooked
+content. The engine parses its manifest (`assets::Manifest`, ADR-0024 — derived data, one line per
+asset) and sends an `AssetList` (`[magic 'RAL1'][count]` then per entry `[kind:u16][id:u64]
+[source][cooked]`). The browser lists it, filters by kind and a path/kind search, and **places** an
+asset by sending a `SpawnEntity` — an atomic "spawn an entity with these components" (the payload is a
+component set, the same `(type_hash, blob)` shape as edits). Atomic placement sidesteps the
+spawn-then-learn-the-handle-then-set dance a bare `Spawn` would force.
+
+The load-bearing subtlety is **asset identity vs. runtime handle**. The manifest keys an asset by its
+`AssetId` — the content hash of its cooked bytes (survives a rename, keys the cook cache) — but a
+renderable `MeshRef` holds a `MeshId`, a dense index into the GPU mesh registry assigned at load time.
+There is no mesh-loading path yet (the `GpuAssetBridge` is textures-only). So placement writes a new
+**authoring** component, `render::MeshAsset { asset: AssetId }`, deliberately distinct from `MeshRef`:
+it records *which asset* was placed. Resolving a `MeshAsset` into a loaded `MeshRef` + a GPU upload is
+the next mesh-loading brick; until then a placed mesh appears in the outliner/inspector (and can be
+repositioned via the m9.4 inspector) but does not yet render. Keeping "which asset" and "which loaded
+mesh" as separate components is the honest seam — they must never be conflated.
+
 ## Deliberately deferred
 
 - **Semantic annotations** (color pickers, ranges, units) need a small reflection-macro extension and
@@ -105,3 +125,6 @@ classic inspector echo-loop is avoided by construction rather than by sequence-n
   outliner is a flat list this brick.
 - **Multi-select** — single selection only (the m9.0 recommendation).
 - **A live delta channel** — unnecessary until something other than the editor moves the world.
+- **Resolving a placed `MeshAsset` to a rendered mesh** (mesh asset-loading + GPU upload), **asset
+  thumbnails**, **drag-out placement**, and **cook-staleness indicators** — the browser is
+  browse + click-to-place (meshes) in v1.

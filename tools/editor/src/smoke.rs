@@ -51,9 +51,16 @@ mod imp {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use rime_protocol::{
-        decode_value, encode_value, Connection, EditorMessage, FrameMessage, MessageType, Schema,
-        SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, Value,
+        decode_value, encode_value, AssetKind, AssetList, Connection, EditorMessage, FrameMessage,
+        MessageType, Schema, SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, Value,
     };
+
+    // A tiny cook manifest the smoke hands the engine (--assets) to prove the browse path end to end:
+    // the engine parses this file and sends it back as an AssetList. Tab-separated
+    // `source \t kind \t id-hex \t cooked` (assets::Manifest grammar), with the cooker's banner.
+    const SMOKE_MANIFEST: &str = "# rime-manifest v1 (editor smoke)\n\
+        meshes/barrel.gltf\tmesh\t00000000abcdef01\tbarrel.rmesh\n\
+        materials/rust.mat\tmaterial\t0000000000000099\trust.rmat\n";
 
     /// Owns the spawned engine so an early failure never leaks the process: on drop (any error path)
     /// it is killed and reaped. On the happy path we `take` it out to `wait` for its real exit code.
@@ -225,6 +232,24 @@ mod imp {
         } else if let Some(scene) = &scene {
             cmd.arg("--scene").arg(scene);
         }
+        // In channel mode, also hand the engine a small manifest so the smoke can prove the browse
+        // path (engine reads the file → AssetList over the live socket). The file must live until the
+        // engine reads it at connect time; the smoke deletes it once the AssetList arrives.
+        let manifest_path = if frames == 0 {
+            let p = std::env::temp_dir().join(format!(
+                "rime-editor-smoke-{}-{}.manifest",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::write(&p, SMOKE_MANIFEST).map_err(|e| format!("write manifest: {e}"))?;
+            cmd.arg("--assets").arg(&p);
+            Some(p)
+        } else {
+            None
+        };
         let child = cmd.spawn().map_err(|e| format!("spawn '{engine}': {e}"))?;
         let guard = ChildGuard(Some(child));
 
@@ -258,6 +283,20 @@ mod imp {
                 snapshot.entities.len()
             )
         } else {
+            // Browse (m9.5): the engine parsed the --assets manifest and sends it after the snapshot.
+            let assets = AssetList::decode(&expect_editor(&mut conn, EditorMessage::AssetList)?)
+                .map_err(|e| format!("decode asset list: {e}"))?;
+            if let Some(p) = &manifest_path {
+                let _ = std::fs::remove_file(p);
+            }
+            if assets.assets.len() != 2 || !assets.assets.iter().any(|a| a.kind == AssetKind::Mesh)
+            {
+                return Err(format!(
+                    "asset list did not round-trip the manifest: {:?}",
+                    assets.assets
+                ));
+            }
+
             // Editor-channel mode: the m9.4 inspector path, headless. Decode a component to typed
             // fields *through the schema* (exactly what the inspector does), edit one scalar, send the
             // re-encoded bytes as a SetComponent, then request a fresh snapshot and confirm the field
@@ -302,9 +341,10 @@ mod imp {
 
             conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
             format!(
-                "editor <-> engine OK: {} schema types, {} entities; typed field edit {before} -> {after} applied and confirmed via snapshot; clean shutdown",
+                "editor <-> engine OK: {} schema types, {} entities, {} assets browsed; typed field edit {before} -> {after} applied and confirmed via snapshot; clean shutdown",
                 schema.types.len(),
-                snapshot.entities.len()
+                snapshot.entities.len(),
+                assets.assets.len()
             )
         };
 

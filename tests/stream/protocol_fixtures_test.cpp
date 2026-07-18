@@ -13,6 +13,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -127,6 +128,29 @@ std::vector<std::byte> component_ref_bytes() {
     return out;
 }
 
+// The asset list (engine -> editor): the browser's cook manifest (m9.5). Fixed entries so the bytes
+// are deterministic across runs/platforms.
+std::vector<std::byte> asset_list_bytes() {
+    const std::array<editorhost::AssetListEntry, 2> assets{{
+        {std::uint16_t{1}, 0xABCDEF01u, "meshes/barrel.gltf", "barrel.rmesh"},
+        {std::uint16_t{3}, 0x99u, "materials/rust.mat", "rust.rmat"},
+    }};
+    return editorhost::serialize_asset_list(assets);
+}
+
+// A SpawnEntity payload (editor -> engine): [comp_count:u16] then per component
+// [hash:u64][blob_len:u32][blob]. One Camera component here — the browser's "place" shape (m9.5).
+std::vector<std::byte> spawn_entity_bytes() {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    w.u16(1);
+    w.u64(core::reflect<render::Camera>().type_hash);
+    const std::vector<std::byte> blob = core::serialize(render::Camera{0.5f, 0.2f, 300.0f, true});
+    w.u32(static_cast<std::uint32_t>(blob.size()));
+    w.bytes(blob);
+    return out;
+}
+
 // A known 8x8 RGBA gradient — the pixels the editor viewport must recover after an LZ4 round trip.
 std::vector<std::byte> lz4_pixels_raw() {
     constexpr std::uint32_t w = 8;
@@ -200,6 +224,8 @@ std::vector<Fixture> all_fixtures() {
         {"snapshot.bin", snapshot_bytes()},
         {"set_component.bin", set_component_bytes()},
         {"component_ref.bin", component_ref_bytes()},
+        {"asset_list.bin", asset_list_bytes()},
+        {"spawn_entity.bin", spawn_entity_bytes()},
         {"frame_lz4.bin", frame_lz4_bytes()},
         {"frame_lz4_pixels.bin", lz4_pixels_raw()},
     };

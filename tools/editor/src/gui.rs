@@ -27,7 +27,9 @@ use std::sync::{Arc, Mutex};
 use eframe::egui;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
-use rime_protocol::{decode_value, encode_value, Schema, SnapshotEntity, Value};
+use rime_protocol::{
+    decode_value, encode_value, AssetEntry, AssetKind, Schema, SnapshotEntity, Value,
+};
 
 mod commands;
 mod session;
@@ -43,6 +45,11 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
 
+    // Optional cook manifest to forward to the engine child, so the asset browser has content
+    // (`editor --engine <bin> --assets <manifest>`). Without it the browser is empty but everything
+    // else works.
+    let assets = arg_value(args, "--assets");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rime Editor")
@@ -52,7 +59,7 @@ pub fn run(args: &[String]) -> ExitCode {
     match eframe::run_native(
         "Rime Editor",
         options,
-        Box::new(move |_cc| Ok(Box::new(EditorApp::new(engine)))),
+        Box::new(move |_cc| Ok(Box::new(EditorApp::new(engine, assets.clone())))),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -100,13 +107,16 @@ struct EditorApp {
     selected: Option<usize>, // index into the snapshot's entities
     stack: CommandStack,
     active_edit: Option<ActiveEdit>,
+    // Asset browser (m9.5) filter state.
+    asset_search: String,
+    asset_kind_filter: Option<AssetKind>,
 }
 
 impl EditorApp {
-    fn new(engine: String) -> Self {
+    fn new(engine: String, assets: Option<String>) -> Self {
         let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
         let (out_tx, out_rx) = mpsc::channel();
-        let session = EngineSession::spawn(engine, Arc::clone(&shared), out_rx);
+        let session = EngineSession::spawn(engine, assets, Arc::clone(&shared), out_rx);
         Self {
             dock: default_layout(),
             shared,
@@ -117,6 +127,8 @@ impl EditorApp {
             selected: None,
             stack: CommandStack::default(),
             active_edit: None,
+            asset_search: String::new(),
+            asset_kind_filter: None,
         }
     }
 
@@ -165,7 +177,7 @@ impl eframe::App for EditorApp {
         // as an egui image ONLY when its sequence changed — so the ~2 MB RGBA is copied once per
         // streamed frame, not once per repaint. The schema + entities are cloned so the widgets can
         // borrow them freely without holding the lock across the whole render.
-        let (connected, error, entities, schema, frames, fps, frame_dims, new_image) = {
+        let (connected, error, entities, schema, assets, frames, fps, frame_dims, new_image) = {
             let s = self.shared.lock().unwrap();
             let new_image = match &s.frame {
                 Some(f) if f.seq != self.shown_seq => Some((
@@ -182,6 +194,7 @@ impl eframe::App for EditorApp {
                 s.error.clone(),
                 s.snapshot.entities.clone(),
                 s.schema.clone(),
+                s.assets.clone(),
                 s.frames_received,
                 s.fps,
                 s.frame.as_ref().map(|f| (f.width, f.height)),
@@ -281,12 +294,25 @@ impl eframe::App for EditorApp {
             .map(|t| (t.type_hash, t.name.clone()))
             .collect();
 
+        // The type_hash the browser's "place a mesh" writes — the authoring MeshAsset reference. None
+        // if the engine predates it (then meshes are browse-only), keeping the editor forward/back
+        // compatible with the host it launched.
+        let mesh_asset_hash = schema
+            .types
+            .iter()
+            .find(|t| t.name == "rime::render::MeshAsset")
+            .map(|t| t.type_hash);
+
         let mut viewer = EditorTabs {
             frame_tex: self.frame_tex.as_ref(),
             frame_dims,
             entities: &entities,
             schema: &schema,
             addable: &addable,
+            assets: &assets,
+            mesh_asset_hash,
+            asset_search: &mut self.asset_search,
+            asset_kind_filter: &mut self.asset_kind_filter,
             selected: &mut self.selected,
             out_tx: &self.out_tx,
             actions: &mut actions,
@@ -311,6 +337,10 @@ struct EditorTabs<'a> {
     entities: &'a [SnapshotEntity],
     schema: &'a Schema,
     addable: &'a [(u64, String)],
+    assets: &'a [AssetEntry],
+    mesh_asset_hash: Option<u64>,
+    asset_search: &'a mut String,
+    asset_kind_filter: &'a mut Option<AssetKind>,
     selected: &'a mut Option<usize>,
     out_tx: &'a Sender<Outbound>,
     actions: &'a mut Vec<Command>,
@@ -345,14 +375,107 @@ impl TabViewer for EditorTabs<'_> {
                 self.active_edit,
                 self.stack,
             ),
-            Tab::Assets => {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(24.0);
-                    ui.weak("Asset browser");
-                    ui.weak("(manifest-driven — m9.5)");
-                });
-            }
+            Tab::Assets => assets_ui(
+                ui,
+                self.assets,
+                self.mesh_asset_hash,
+                self.asset_search,
+                self.asset_kind_filter,
+                self.actions,
+            ),
         }
+    }
+}
+
+// The asset browser (m9.5): the engine's cook manifest, searchable + kind-filterable, with "place"
+// spawning an entity that references the asset. v1 places meshes (as an authoring MeshAsset ref);
+// other kinds are browse-only (a texture/material is referenced by a mesh/material, not placed as a
+// standalone entity). Thumbnails and drag-out are deferred (kind icons only).
+fn assets_ui(
+    ui: &mut egui::Ui,
+    assets: &[AssetEntry],
+    mesh_asset_hash: Option<u64>,
+    search: &mut String,
+    kind_filter: &mut Option<AssetKind>,
+    actions: &mut Vec<Command>,
+) {
+    ui.horizontal(|ui| {
+        ui.label("🔍");
+        ui.text_edit_singleline(search);
+        egui::ComboBox::from_id_salt("asset-kind-filter")
+            .selected_text(kind_filter.map_or("All kinds", AssetKind::label))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(kind_filter, None, "All kinds");
+                for k in [
+                    AssetKind::Mesh,
+                    AssetKind::Texture,
+                    AssetKind::Material,
+                    AssetKind::Skeleton,
+                    AssetKind::AnimationClip,
+                    AssetKind::Destructible,
+                ] {
+                    ui.selectable_value(kind_filter, Some(k), k.label());
+                }
+            });
+    });
+    ui.separator();
+
+    if assets.is_empty() {
+        ui.weak("(no cooked assets — launch the engine with --assets <manifest>)");
+        return;
+    }
+
+    let needle = search.to_lowercase();
+    let mut shown = 0usize;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for a in assets {
+            if kind_filter.is_some_and(|k| k != a.kind) {
+                continue;
+            }
+            if !needle.is_empty()
+                && !a.source_path.to_lowercase().contains(&needle)
+                && !a.kind.label().to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            shown += 1;
+            ui.horizontal(|ui| {
+                ui.label(kind_glyph(a.kind));
+                ui.monospace(&a.source_path);
+                // Only meshes place (as a MeshAsset authoring reference); and only if the host's
+                // schema has that component.
+                if a.kind == AssetKind::Mesh {
+                    if let Some(hash) = mesh_asset_hash {
+                        if ui.small_button("place").clicked() {
+                            // MeshAsset { asset: <content id> } — one u64 field, packed as-is.
+                            let blob = encode_value(&Value::Struct(vec![(
+                                "asset".to_string(),
+                                Value::U64(a.id),
+                            )]));
+                            actions.push(Command::SpawnEntity {
+                                components: vec![(hash, blob)],
+                            });
+                        }
+                    }
+                }
+            });
+        }
+    });
+    if shown == 0 {
+        ui.weak("(no assets match the filter)");
+    }
+}
+
+// A little glyph per asset kind — the "kind icon" v1 (real thumbnails are a backlog cook pass).
+fn kind_glyph(kind: AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Mesh => "◆",
+        AssetKind::Texture => "▦",
+        AssetKind::Material => "●",
+        AssetKind::Skeleton => "🦴",
+        AssetKind::AnimationClip => "▶",
+        AssetKind::Destructible => "✸",
+        AssetKind::Unknown(_) => "?",
     }
 }
 

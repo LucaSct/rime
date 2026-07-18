@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use std::thread;
 
 use rime_protocol::{
-    decode_value, encode_value, Codec, ComponentRef, Connection, EditorMessage, FieldKind,
-    FrameMessage, InputEvent, InputKind, MessageType, PixelFormat, Schema, SetComponent, Snapshot,
-    Value, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    decode_value, encode_value, AssetKind, AssetList, Codec, ComponentRef, Connection,
+    EditorMessage, FieldKind, FrameMessage, InputEvent, InputKind, MessageType, PixelFormat,
+    Schema, SetComponent, Snapshot, SpawnEntity, Value, PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -177,6 +177,32 @@ fn component_ref_decodes_and_re_encodes_byte_exact() {
     assert_eq!(cr.generation, 1);
     assert!(cr.type_hash != 0); // the Camera hash
     assert_eq!(cr.encode(), golden);
+}
+
+#[test]
+fn asset_list_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("asset_list.bin");
+    let list = AssetList::decode(&golden).expect("decode asset list");
+    assert_eq!(list.assets.len(), 2);
+    // The wire kind values map to the right AssetKind, and paths survive intact — what the browser
+    // lists and filters on (m9.5).
+    assert_eq!(list.assets[0].kind, AssetKind::Mesh);
+    assert_eq!(list.assets[0].id, 0xABCD_EF01);
+    assert_eq!(list.assets[0].source_path, "meshes/barrel.gltf");
+    assert_eq!(list.assets[0].cooked_file, "barrel.rmesh");
+    assert_eq!(list.assets[1].kind, AssetKind::Material);
+    assert_eq!(list.assets[1].source_path, "materials/rust.mat");
+    assert_eq!(list.encode(), golden);
+}
+
+#[test]
+fn spawn_entity_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("spawn_entity.bin");
+    let se = SpawnEntity::decode(&golden).expect("decode spawn-entity");
+    assert_eq!(se.components.len(), 1);
+    assert!(se.components[0].0 != 0); // the Camera type_hash
+    assert!(!se.components[0].1.is_empty()); // the reflected Camera bytes the browser placed
+    assert_eq!(se.encode(), golden);
 }
 
 #[test]

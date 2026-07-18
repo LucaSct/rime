@@ -25,12 +25,18 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 #include "rime/app/application.hpp"
+#include "rime/assets/asset_id.hpp"
+#include "rime/assets/manifest.hpp"
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/diagnostics/log.hpp"
 #include "rime/core/jobs/job_system.hpp"
@@ -142,19 +148,55 @@ void apply_edit(ecs::World& world, stream::MessageType type, std::span<const std
             }
             break;
         }
+        case EditorMessage::SpawnEntity:
+            (void)editorhost::spawn_entity_from_payload(world, payload);
+            break;
         default:
             break; // an engine->editor, RequestSnapshot (handled by the sender), or unknown type
     }
 }
 
-// Serve the editor channel over `conn` against `world`, GPU-free: schema + snapshot, then apply
-// edits until the client says Bye / disconnects. This is the exact editorhost::EditorHost path.
-int serve_channel(stream::ProtocolConnection conn, ecs::World& world) {
+// Load a cook manifest and send it as the browser's AssetList (m9.5). A no-op if no --assets path
+// was given; a warn (not a failure) if the file is missing/malformed — the editor just shows an
+// empty browser rather than the session refusing to start. The AssetListEntry views borrow the
+// parsed Manifest's strings, so it must outlive the send (it does — send happens before return).
+void send_asset_list(stream::ProtocolConnection& conn, std::string_view assets_path) {
+    if (assets_path.empty()) {
+        return;
+    }
+    std::ifstream in(std::filesystem::path(assets_path), std::ios::binary);
+    if (!in) {
+        RIME_WARN("rime-engine: could not open --assets manifest '{}'", assets_path);
+        return;
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::optional<assets::Manifest> manifest = assets::Manifest::parse(text);
+    if (!manifest) {
+        RIME_WARN("rime-engine: --assets manifest '{}' is malformed", assets_path);
+        return;
+    }
+    std::vector<editorhost::AssetListEntry> entries;
+    entries.reserve(manifest->entries().size());
+    for (const assets::ManifestEntry& e : manifest->entries()) {
+        entries.push_back(
+            {static_cast<std::uint16_t>(e.kind), e.id.value, e.source_path, e.cooked_file});
+    }
+    (void)conn.send_message(static_cast<stream::MessageType>(editorhost::EditorMessage::AssetList),
+                            editorhost::serialize_asset_list(entries));
+}
+
+// Serve the editor channel over `conn` against `world`, GPU-free: schema + snapshot + asset list,
+// then apply edits until the client says Bye / disconnects. This is the exact
+// editorhost::EditorHost path.
+int serve_channel(stream::ProtocolConnection conn,
+                  ecs::World& world,
+                  std::string_view assets_path) {
     editorhost::EditorHost host(std::move(conn));
     if (!host.send_hello(world)) {
         RIME_ERROR("rime-engine: failed to send schema + snapshot");
         return 1;
     }
+    send_asset_list(host.connection(), assets_path);
     while (host.poll_one(world)) {
     }
     fmt::print("rime-engine: editor session closed ({} entities)\n", world.entity_count());
@@ -214,7 +256,7 @@ void build_viewport_scene(ecs::World& world,
                            render::PointLight{1.0f, 0.94f, 0.85f, 120.0f, 30.0f});
 }
 
-int serve_viewport(std::string_view socket_path) {
+int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kViewportWidth, kViewportHeight};
@@ -238,7 +280,7 @@ int serve_viewport(std::string_view socket_path) {
             return 1;
         }
         stream::ProtocolConnection conn(std::move(*sock));
-        return conn.handshake() ? serve_channel(std::move(conn), app.world()) : 1;
+        return conn.handshake() ? serve_channel(std::move(conn), app.world(), assets_path) : 1;
     }
 
     // Build the renderable scene and wire the per-frame render into the app's graph.
@@ -289,6 +331,7 @@ int serve_viewport(std::string_view socket_path) {
         RIME_ERROR("rime-engine: failed to send schema + snapshot");
         return 1;
     }
+    send_asset_list(conn, assets_path); // the browser's manifest (m9.5), if --assets was given
 
     // Receiver thread: drain the client's edits into a queue (the render thread applies them). One
     // receiver + one sender on a full-duplex socket is the concurrency ProtocolConnection allows.
@@ -379,9 +422,12 @@ int serve_viewport(std::string_view socket_path) {
 
 // ── Entry ─────────────────────────────────────────────────────────────────────────────────
 
-int serve(std::string_view socket_path, std::string_view scene_path, bool viewport) {
+int serve(std::string_view socket_path,
+          std::string_view scene_path,
+          std::string_view assets_path,
+          bool viewport) {
     if (viewport) {
-        return serve_viewport(socket_path);
+        return serve_viewport(socket_path, assets_path);
     }
     ecs::World world;
     register_and_populate(world, scene_path);
@@ -404,7 +450,7 @@ int serve(std::string_view socket_path, std::string_view scene_path, bool viewpo
         RIME_ERROR("rime-engine: protocol handshake failed");
         return 1;
     }
-    return serve_channel(std::move(conn), world);
+    return serve_channel(std::move(conn), world, assets_path);
 }
 
 } // namespace
@@ -412,6 +458,7 @@ int serve(std::string_view socket_path, std::string_view scene_path, bool viewpo
 int main(int argc, char** argv) {
     std::string_view socket_path;
     std::string_view scene_path;
+    std::string_view assets_path;
     bool viewport = false;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -419,16 +466,18 @@ int main(int argc, char** argv) {
             socket_path = argv[++i];
         } else if (arg == "--scene" && i + 1 < argc) {
             scene_path = argv[++i];
+        } else if (arg == "--assets" && i + 1 < argc) {
+            assets_path = argv[++i];
         } else if (arg == "--viewport") {
             viewport = true;
         }
     }
 
     if (socket_path.empty()) {
-        fmt::print(
-            stderr,
-            "usage: rime-engine --editor-host <socket> [--scene <file.rscene>] [--viewport]\n");
+        fmt::print(stderr,
+                   "usage: rime-engine --editor-host <socket> [--scene <file.rscene>] "
+                   "[--assets <manifest>] [--viewport]\n");
         return 2;
     }
-    return serve(socket_path, scene_path, viewport);
+    return serve(socket_path, scene_path, assets_path, viewport);
 }
