@@ -24,11 +24,14 @@ ExtractedScene extract_scene(ecs::World& world) {
 
     // Draws: every entity wearing the full render wardrobe. Serial for_each is v0 — the loop is
     // a natural par_for_each + per-thread buckets when extraction ever shows up in a profile.
+    // The entity rides along in a parallel array so the pick pass can map "the id rasterized at
+    // this pixel" back to a live handle (see ExtractedScene::draw_entities).
     world.query<ecs::WorldTransform, MeshRef, MaterialRef>().for_each(
-        [&](ecs::WorldTransform& wt, MeshRef& mesh, MaterialRef& mat) {
+        [&](ecs::Entity e, ecs::WorldTransform& wt, MeshRef& mesh, MaterialRef& mat) {
             if (mesh.mesh == kInvalidMeshId || mat.material == kInvalidMaterialId)
                 return; // half-dressed entity: nothing sensible to draw
             scene.draws.push_back({mesh.mesh, mat.material, core::to_matrix(wt.value)});
+            scene.draw_entities.push_back(e);
         });
 
     // The FIRST active camera wins (the documented rule — deterministic because query order is

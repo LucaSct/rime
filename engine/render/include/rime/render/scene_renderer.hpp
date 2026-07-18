@@ -36,7 +36,12 @@ struct ExtractedCamera {
 };
 
 struct ExtractedScene {
-    std::vector<DrawItem> draws;                 // every {WorldTransform, MeshRef, MaterialRef}
+    std::vector<DrawItem> draws; // every {WorldTransform, MeshRef, MaterialRef}
+    // Which entity each draw came from — parallel to `draws` (draw_entities[i] produced draws[i]).
+    // A parallel array rather than a field on DrawItem, deliberately: DrawItem is the pass
+    // library's flat, ECS-free vocabulary (passes.hpp must not depend on ecs), while "who was
+    // that?" is exactly what the editor's ID-buffer pick pass (m9.6) needs to answer.
+    std::vector<ecs::Entity> draw_entities;
     ExtractedCamera camera;                      // the FIRST active camera found
     std::vector<GpuDirectionalLight> dir_lights; // already GPU-shaped (uncapped; see render())
     std::vector<GpuPointLight> point_lights;

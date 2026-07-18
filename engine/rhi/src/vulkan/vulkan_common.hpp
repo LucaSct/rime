@@ -122,6 +122,8 @@ template <class Dst, class Src>
             return VK_FORMAT_D32_SFLOAT;
         case Format::D32FloatS8:
             return VK_FORMAT_D32_SFLOAT_S8_UINT;
+        case Format::R32Uint:
+            return VK_FORMAT_R32_UINT;
     }
     return VK_FORMAT_UNDEFINED;
 }

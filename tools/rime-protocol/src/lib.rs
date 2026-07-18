@@ -33,8 +33,8 @@ pub mod input;
 pub use connection::Connection;
 pub use editor::{
     decode_value, encode_despawn, encode_value, AssetEntry, AssetKind, AssetList, ComponentRef,
-    EditorMessage, FieldDesc, FieldKind, Schema, SchemaEntry, SetComponent, Snapshot,
-    SnapshotComponent, SnapshotEntity, SpawnEntity, Value,
+    EditorMessage, FieldDesc, FieldKind, PickRequest, PickResult, Schema, SchemaEntry,
+    SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, SpawnEntity, Value,
 };
 pub use frame::{Codec, FrameMessage, ImageDesc, PixelFormat};
 pub use input::{InputEvent, InputKind};
