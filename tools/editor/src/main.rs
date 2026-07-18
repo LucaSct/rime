@@ -15,6 +15,12 @@
 
 mod smoke;
 
+// Gizmo math (m9.6b) is pure — no egui, no wire — and deliberately NOT feature-gated: its unit
+// battery (the plan's "gizmo math edge cases" fence) runs under the plain `cargo test`, GUI
+// feature or not. Only the interaction wiring in `gui` needs the windowing stack.
+#[allow(dead_code)] // consumed by the `gui` feature; headless builds keep only the tests
+mod gizmo;
+
 #[cfg(feature = "gui")]
 mod gui;
 
