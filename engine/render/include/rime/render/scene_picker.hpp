@@ -44,8 +44,9 @@ namespace rime::render {
 
 class ScenePicker {
 public:
-    // Bakes the pick pipeline and creates the persistent 1×1 targets + the 4-byte readback
-    // buffer. `meshes` is borrowed for the picker's lifetime (draws bind its buffers).
+    // Bakes the pick pipeline and creates the 4-byte readback buffer (the 1×1 render targets are
+    // graph transients, recycled across picks by the graph's cache). `meshes` is borrowed for the
+    // picker's lifetime (draws bind its buffers).
     ScenePicker(rhi::Device& device, const MeshRegistry& meshes);
     ~ScenePicker(); // drains any in-flight pick before destroying its resources (s1.1 contract)
 
@@ -79,9 +80,7 @@ private:
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
-    rhi::TextureHandle id_target_;    // 1×1 R32Uint — the picked pixel's id lands here
-    rhi::TextureHandle depth_target_; // 1×1 D32 — nearer-wins between overlapping draws
-    rhi::BufferHandle readback_;      // 4 bytes, host-visible
+    rhi::BufferHandle readback_; // 4 bytes, host-visible
 
     rhi::SubmitTicket ticket_;
     bool pending_ = false;

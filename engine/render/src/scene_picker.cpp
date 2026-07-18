@@ -65,22 +65,11 @@ ScenePicker::ScenePicker(rhi::Device& device, const MeshRegistry& meshes)
     pd.debug_name = "pick-id";
     pipeline_ = device.create_graphics_pipeline(pd);
 
-    // The persistent 1×1 targets + readback. Created once: every pick reuses them (imported into
-    // the private graph per pick), so begin_pick allocates nothing.
-    rhi::TextureDesc idd{};
-    idd.extent = {1, 1};
-    idd.format = rhi::Format::R32Uint;
-    idd.usage = rhi::TextureUsage::ColorAttachment | rhi::TextureUsage::TransferSrc;
-    idd.debug_name = "pick-id-target";
-    id_target_ = device.create_texture(idd);
-
-    rhi::TextureDesc dd{};
-    dd.extent = {1, 1};
-    dd.format = kDepthFormat;
-    dd.usage = rhi::TextureUsage::DepthStencil;
-    dd.debug_name = "pick-depth-target";
-    depth_target_ = device.create_texture(dd);
-
+    // The persistent 4-byte readback. The 1×1 render targets are NOT owned here: they are graph
+    // transients (created in begin_pick, recycled by the graph's desc-keyed cache), so the graph
+    // knows their extent — which is what its automatic viewport/scissor preset and usage
+    // accumulation key off. Only the buffer must persist, because the CPU reads it after the
+    // submission completes, past the graph's next reset.
     rhi::BufferDesc rbd{};
     rbd.size = sizeof(std::uint32_t);
     rbd.usage = rhi::BufferUsage::TransferDst;
@@ -96,8 +85,6 @@ ScenePicker::~ScenePicker() {
         device_.wait(ticket_);
     }
     device_.destroy(readback_);
-    device_.destroy(depth_target_);
-    device_.destroy(id_target_);
     device_.destroy(pipeline_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
@@ -146,12 +133,15 @@ void ScenePicker::begin_pick(ecs::World& world,
         pushes[i].id = static_cast<std::uint32_t>(i) + 1; // 0 is "nothing"
     }
 
-    // Declare the one-pass frame. The targets are imported as Undefined every pick — their old
-    // contents are dead (both attachments Clear), which also spares tracking what layout the
-    // previous pick's readback copy left the id target in.
+    // Declare the one-pass frame. The 1×1 targets are graph TRANSIENTS: the first pick allocates
+    // them, every later pick recycles them from the graph's desc-keyed cache — and because the
+    // graph knows their extent, its automatic viewport/scissor preset is well-formed (an imported
+    // raw handle has no extent the graph could preset from). Exporting the id target keeps its
+    // producer from being culled and adds TransferSrc for the readback copy below.
     graph_.reset();
-    const RGTexture id_rt = graph_.import_texture(id_target_, rhi::ResourceState::Undefined);
-    const RGTexture depth_rt = graph_.import_texture(depth_target_, rhi::ResourceState::Undefined);
+    const RGTexture id_rt = graph_.create_texture({{1, 1}, rhi::Format::R32Uint, "pick-id"});
+    const RGTexture depth_rt = graph_.create_texture({{1, 1}, kDepthFormat, "pick-depth"});
+    graph_.export_texture(id_rt);
 
     // Clear = {0,0,0,0}: all-zero bits are the same clear through the float-shaped ClearColor as
     // through a uint one (see the header), so the integer target starts at the "nothing" id.
@@ -192,9 +182,12 @@ void ScenePicker::begin_pick(ecs::World& world,
 
     // Record render + readback into one submission and hand it to the GPU WITHOUT waiting (the
     // async seam). try_resolve() polls the ticket; the host's frame loop never stalls on a click.
+    // physical() is valid for the exported target after execute(), and the cached transient it
+    // names survives until the NEXT reset() — by which time this submission has been waited out
+    // (try_resolve or the destructor), so the copy never races the texture's reuse.
     auto cmd = device_.begin_commands();
     graph_.execute(*cmd);
-    cmd->copy_texture_to_buffer(id_target_, readback_);
+    cmd->copy_texture_to_buffer(graph_.physical(id_rt), readback_);
     ticket_ = device_.submit(std::move(cmd));
     immediate_miss_ = false;
 }
