@@ -38,11 +38,14 @@ namespace rime::editorhost {
 // forward-compat rule (an old peer drops an unknown type) is what let M6.9 carve this range out
 // early. The engine->editor set is even-ish (read); editor->engine (edits) start at 0x0210.
 enum class EditorMessage : std::uint16_t {
-    Schema = 0x0200,       // engine -> editor: the component registry (type_hash, name)
+    Schema = 0x0200,       // engine -> editor: the reflected type registry (layout per type; m9.4)
     Snapshot = 0x0201,     // engine -> editor: the whole world (entities + components)
     SetComponent = 0x0210, // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,        // editor -> engine: spawn an empty entity
     Despawn = 0x0212,      // editor -> engine: despawn an entity
+    AddComponent = 0x0213, // editor -> engine: add a DEFAULT-constructed component to an entity
+    RemoveComponent = 0x0214, // editor -> engine: remove a component from an entity
+    RequestSnapshot = 0x0215, // editor -> engine: resend the world (engine replies with Snapshot)
 };
 
 // True if `type` (as received by recv_message) is an editor-channel message (the reserved band).
@@ -63,8 +66,14 @@ enum class EditorMessage : std::uint16_t {
 // machinery m9.7's play snapshot/restore and m9.2's scene load reuse.
 [[nodiscard]] bool deserialize_world(ecs::World& dst, std::span<const std::byte> data);
 
-// The schema: one entry per registered **reflected** component — `type_hash` + name — so the (Rust)
-// editor can label inspectors and gate compatibility by hash.
+// The schema: the reflected-type dictionary the editor's inspectors are *generated* from (m9.4). It
+// is not just component names any more — it is every reflected type reachable from a registered
+// component (the components **and** the nested value types they contain: Transform, Vec3, Quat,
+// Entity…), each with its full field layout: per field a name, a primitive kind, and — for a nested
+// struct — the `type_hash` of the type to recurse into. A flag marks which entries are top-level
+// components (the "add component" menu). Keyed by `type_hash` throughout, so the editor decodes a
+// snapshot's opaque component blob into typed, editable fields (and re-encodes an edit) with no
+// per-type code. See docs/design/editor-inspectors.md.
 [[nodiscard]] std::vector<std::byte> serialize_schema(const ecs::World& world);
 
 // Apply one component edit: deserialize `blob` (a reflection-serialized component of type
@@ -75,6 +84,16 @@ enum class EditorMessage : std::uint16_t {
                                        ecs::Entity e,
                                        std::uint64_t type_hash,
                                        std::span<const std::byte> blob);
+
+// Add a DEFAULT-constructed component of type `type_hash` to `e` (the honest engine defaults, not a
+// zeroed blob) and stamp it changed. No-op returning false if `e` is dead, the type is
+// unknown/unreflected, or the entity already has it. Call at a tick boundary. The editor's "add
+// component" action; shared by the channel host and the viewport host so both stay identical.
+[[nodiscard]] bool add_default_component(ecs::World& world, ecs::Entity e, std::uint64_t type_hash);
+
+// Remove the component of type `type_hash` from `e`. Returns false if the type is unknown or the
+// entity did not have it. Call at a tick boundary. The editor's "remove component" action.
+[[nodiscard]] bool remove_component(ecs::World& world, ecs::Entity e, std::uint64_t type_hash);
 
 // ── The host over the wire ──────────────────────────────────────────────────────────────
 

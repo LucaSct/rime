@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use std::thread;
 
 use rime_protocol::{
-    Codec, Connection, EditorMessage, FrameMessage, InputEvent, InputKind, MessageType,
-    PixelFormat, Schema, SetComponent, Snapshot, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    decode_value, encode_value, Codec, ComponentRef, Connection, EditorMessage, FieldKind,
+    FrameMessage, InputEvent, InputKind, MessageType, PixelFormat, Schema, SetComponent, Snapshot,
+    Value, PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -86,21 +87,96 @@ fn lz4_frame_decodes_to_the_pixels_cpp_compressed() {
 }
 
 #[test]
-fn schema_decodes_names_and_re_encodes_byte_exact() {
+fn schema_decodes_field_layout_and_re_encodes_byte_exact() {
     let golden = fixture("schema.bin");
     let schema = Schema::decode(&golden).expect("decode schema");
-    // The engine registered the render components; their names survive the wire intact.
-    assert!(schema
+
+    // Camera is a component and carries its four reflected fields in order, kinds intact — this is
+    // what the inspector is *generated* from (m9.4).
+    let camera = schema
+        .type_by_hash(
+            schema
+                .types
+                .iter()
+                .find(|t| t.name == "rime::render::Camera")
+                .expect("camera type present")
+                .type_hash,
+        )
+        .unwrap();
+    assert!(camera.is_component);
+    assert!(camera.type_hash != 0);
+    assert_eq!(camera.fields.len(), 4);
+    assert_eq!(camera.fields[0].name, "fov_y");
+    assert_eq!(camera.fields[0].kind, FieldKind::F32);
+    assert_eq!(camera.fields[3].name, "active");
+    assert_eq!(camera.fields[3].kind, FieldKind::Bool); // the bool round-trips as a kind
+
+    // MeshRef has a single u32 field.
+    let mesh = schema
         .types
         .iter()
-        .any(|t| t.name == "rime::render::Camera"));
-    assert!(schema
-        .types
-        .iter()
-        .any(|t| t.name == "rime::render::MaterialRef"));
-    // A non-zero type_hash accompanies each (the versioning key the editor gates compatibility on).
-    assert!(schema.types.iter().all(|t| t.type_hash != 0));
+        .find(|t| t.name == "rime::render::MeshRef")
+        .expect("meshref type present");
+    assert_eq!(mesh.fields.len(), 1);
+    assert_eq!(mesh.fields[0].kind, FieldKind::U32);
+
     assert_eq!(schema.encode(), golden);
+}
+
+#[test]
+fn snapshot_components_decode_to_typed_values_and_re_encode_exact() {
+    let schema = Schema::decode(&fixture("schema.bin")).expect("decode schema");
+    let snap = Snapshot::decode(&fixture("snapshot.bin")).expect("decode snapshot");
+
+    // Every snapshot component decodes to a typed tree against the schema, and re-encoding that tree
+    // reproduces the exact wire bytes — the proof the Rust value codec matches the C++ packed layout
+    // byte-for-byte (the whole basis for editing a component and sending it back).
+    let mut decoded = 0;
+    for e in &snap.entities {
+        for c in &e.components {
+            let value =
+                decode_value(&schema, c.type_hash, &c.data).expect("decode component value");
+            assert_eq!(
+                encode_value(&value),
+                c.data,
+                "value round-trip drifted for type 0x{:016x}",
+                c.type_hash
+            );
+            decoded += 1;
+        }
+    }
+    assert!(decoded > 0, "snapshot had no components to decode");
+
+    // Spot-check the Camera the C++ fixture spawned: Camera{0.9, 0.1, 500.0, true}.
+    let camera_hash = schema
+        .types
+        .iter()
+        .find(|t| t.name == "rime::render::Camera")
+        .expect("camera type")
+        .type_hash;
+    let cam = snap
+        .entities
+        .iter()
+        .flat_map(|e| &e.components)
+        .find(|c| c.type_hash == camera_hash)
+        .expect("camera component in snapshot");
+    let Value::Struct(fields) = decode_value(&schema, camera_hash, &cam.data).unwrap() else {
+        panic!("camera should decode to a struct");
+    };
+    assert_eq!(fields[0].0, "fov_y");
+    assert_eq!(fields[0].1, Value::F32(0.9));
+    assert_eq!(fields[3].0, "active");
+    assert_eq!(fields[3].1, Value::Bool(true));
+}
+
+#[test]
+fn component_ref_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("component_ref.bin");
+    let cr = ComponentRef::decode(&golden).expect("decode component ref");
+    assert_eq!(cr.index, 3);
+    assert_eq!(cr.generation, 1);
+    assert!(cr.type_hash != 0); // the Camera hash
+    assert_eq!(cr.encode(), golden);
 }
 
 #[test]

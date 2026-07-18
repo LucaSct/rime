@@ -126,8 +126,24 @@ void apply_edit(ecs::World& world, stream::MessageType type, std::span<const std
             }
             break;
         }
+        case EditorMessage::AddComponent:
+        case EditorMessage::RemoveComponent: {
+            core::ByteReader r(payload);
+            std::uint32_t index = 0;
+            std::uint32_t generation = 0;
+            std::uint64_t hash = 0;
+            if (r.u32(index) && r.u32(generation) && r.u64(hash)) {
+                const ecs::Entity e{index, generation};
+                if (static_cast<EditorMessage>(type) == EditorMessage::AddComponent) {
+                    (void)editorhost::add_default_component(world, e, hash);
+                } else {
+                    (void)editorhost::remove_component(world, e, hash);
+                }
+            }
+            break;
+        }
         default:
-            break; // an engine->editor or unknown type
+            break; // an engine->editor, RequestSnapshot (handled by the sender), or unknown type
     }
 }
 
@@ -308,12 +324,26 @@ int serve_viewport(std::string_view socket_path) {
     auto next_frame = std::chrono::steady_clock::now();
 
     while (!stop.load(std::memory_order_relaxed)) {
+        bool snapshot_requested = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             for (const Edit& e : pending) {
-                apply_edit(app.world(), e.type, e.payload);
+                // RequestSnapshot has no world effect — it asks us (the send-owning thread) to
+                // reply with a fresh snapshot. Apply all real edits first, then send one snapshot
+                // that reflects them (coalescing multiple requests in a batch).
+                if (static_cast<editorhost::EditorMessage>(e.type) ==
+                    editorhost::EditorMessage::RequestSnapshot) {
+                    snapshot_requested = true;
+                } else {
+                    apply_edit(app.world(), e.type, e.payload);
+                }
             }
             pending.clear();
+        }
+        if (snapshot_requested && !conn.send_message(static_cast<stream::MessageType>(
+                                                         editorhost::EditorMessage::Snapshot),
+                                                     editorhost::serialize_world(app.world()))) {
+            break; // client disconnected
         }
 
         app.step(app.fixed_dt()); // tick + render (executes the graph)

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <random>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +39,19 @@ struct Position {
 struct Velocity {
     float dx = 0.0f, dy = 0.0f;
 };
+
+// A nested reflected value + a component that contains it — the m9.4 schema must describe BOTH
+// (Spin as a component, Inner as a nested-only type) and mark the Struct field's link.
+struct Inner {
+    float a = 0.0f;
+    std::int32_t b = 0;
+    bool flag = false;
+};
+
+struct Spin {
+    Inner inner;
+    float rate = 1.0f;
+};
 } // namespace et
 
 RIME_REFLECT_BEGIN(et::Position)
@@ -51,11 +65,83 @@ RIME_REFLECT_FIELD(dx)
 RIME_REFLECT_FIELD(dy)
 RIME_REFLECT_END()
 
+RIME_REFLECT_BEGIN(et::Inner)
+RIME_REFLECT_FIELD(a)
+RIME_REFLECT_FIELD(b)
+RIME_REFLECT_FIELD(flag)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(et::Spin)
+RIME_REFLECT_FIELD(inner)
+RIME_REFLECT_FIELD(rate)
+RIME_REFLECT_END()
+
 namespace {
 std::string unique_local_path() {
     std::random_device rd;
     return (std::filesystem::temp_directory_path() / ("rime-m91-" + std::to_string(rd()) + ".sock"))
         .string();
+}
+
+// A parsed schema entry — enough to assert the m9.4 wire layout (RSM2) in a test.
+struct ParsedField {
+    std::string name;
+    std::uint8_t kind = 0;
+    std::uint64_t nested_hash = 0;
+};
+
+struct ParsedType {
+    std::uint64_t hash = 0;
+    std::string name;
+    bool is_component = false;
+    std::vector<ParsedField> fields;
+};
+
+// Parse a serialize_schema (RSM2) blob back into structs, mirroring the Rust decoder — so the C++
+// test guards the exact bytes the editor will read.
+std::vector<ParsedType> parse_schema(std::span<const std::byte> data) {
+    core::ByteReader r(data);
+    std::vector<ParsedType> types;
+    std::uint32_t magic = 0;
+    std::uint32_t count = 0;
+    REQUIRE(r.u32(magic));
+    REQUIRE(magic == 0x52534D32u); // 'RSM2'
+    REQUIRE(r.u32(count));
+    const auto read_name = [&r]() {
+        std::uint16_t len = 0;
+        REQUIRE(r.u16(len));
+        std::span<const std::byte> bytes;
+        REQUIRE(r.bytes(bytes, len));
+        return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    };
+    for (std::uint32_t i = 0; i < count; ++i) {
+        ParsedType t;
+        REQUIRE(r.u64(t.hash));
+        t.name = read_name();
+        std::uint8_t is_comp = 0;
+        REQUIRE(r.u8(is_comp));
+        t.is_component = is_comp != 0;
+        std::uint16_t field_count = 0;
+        REQUIRE(r.u16(field_count));
+        for (std::uint16_t f = 0; f < field_count; ++f) {
+            ParsedField pf;
+            pf.name = read_name();
+            REQUIRE(r.u8(pf.kind));
+            REQUIRE(r.u64(pf.nested_hash));
+            t.fields.push_back(std::move(pf));
+        }
+        types.push_back(std::move(t));
+    }
+    return types;
+}
+
+const ParsedType* find_type(const std::vector<ParsedType>& types, std::uint64_t hash) {
+    for (const ParsedType& t : types) {
+        if (t.hash == hash) {
+            return &t;
+        }
+    }
+    return nullptr;
 }
 } // namespace
 
@@ -217,4 +303,143 @@ TEST_CASE("editorhost: serves schema + snapshot and applies an edit over the loc
     CHECK(p->x == 5.0f); // the edit crossed the wire and applied
     CHECK(p->y == 6.0f);
     CHECK(p->z == 7.0f);
+}
+
+TEST_CASE("editorhost: schema (RSM2) describes each type's fields, recursing into nested structs") {
+    ecs::World world;
+    (void)world.register_component<et::Position>();
+    (void)world.register_component<et::Velocity>();
+    (void)world.register_component<et::Spin>();
+
+    const std::vector<ParsedType> types = parse_schema(editorhost::serialize_schema(world));
+
+    const std::uint64_t pos_h = core::reflect<et::Position>().type_hash;
+    const std::uint64_t spin_h = core::reflect<et::Spin>().type_hash;
+    const std::uint64_t inner_h = core::reflect<et::Inner>().type_hash;
+
+    // The three registered components AND the nested-only Inner (reached through Spin) are
+    // described.
+    CHECK(types.size() == 4);
+    const ParsedType* pos = find_type(types, pos_h);
+    const ParsedType* spin = find_type(types, spin_h);
+    const ParsedType* inner = find_type(types, inner_h);
+    REQUIRE(pos != nullptr);
+    REQUIRE(spin != nullptr);
+    REQUIRE(inner != nullptr);
+
+    // is_component: the registered types, yes; Inner (a nested value only), no — so it never shows
+    // up in the editor's "add component" menu.
+    CHECK(pos->is_component);
+    CHECK(spin->is_component);
+    CHECK_FALSE(inner->is_component);
+
+    // Position: three Float fields x/y/z, none nested. (FieldType::Float == 5.)
+    REQUIRE(pos->fields.size() == 3);
+    CHECK(pos->fields[0].name == "x");
+    CHECK(pos->fields[0].kind == 5);
+    CHECK(pos->fields[0].nested_hash == 0);
+
+    // Spin.inner is a Struct field linking to Inner's hash; Spin.rate is a plain Float.
+    REQUIRE(spin->fields.size() == 2);
+    CHECK(spin->fields[0].name == "inner");
+    CHECK(spin->fields[0].kind == 7); // FieldType::Struct
+    CHECK(spin->fields[0].nested_hash == inner_h);
+    CHECK(spin->fields[1].name == "rate");
+    CHECK(spin->fields[1].kind == 5);
+    CHECK(spin->fields[1].nested_hash == 0);
+
+    // Inner's primitives carry their kinds: a:Float(5), b:Int32(1), flag:Bool(0).
+    REQUIRE(inner->fields.size() == 3);
+    CHECK(inner->fields[0].kind == 5);
+    CHECK(inner->fields[1].kind == 1);
+    CHECK(inner->fields[2].kind == 0);
+}
+
+TEST_CASE("editorhost: add/remove component and request-snapshot over the local wire") {
+    const std::string path = unique_local_path();
+    auto listener = platform::LocalListener::bind(path);
+    REQUIRE(listener.has_value());
+
+    ecs::World world;
+    const ecs::Entity e = world.spawn_with(et::Position{1.0f, 2.0f, 3.0f});
+    (void)world.register_component<et::Velocity>(); // a known type, initially absent on `e`
+    const std::uint64_t vel_h = core::reflect<et::Velocity>().type_hash;
+
+    struct Outcome {
+        bool velocity_after_add = false;
+        bool velocity_gone_after_remove = false;
+    } out;
+
+    std::thread client([&] {
+        auto sock = platform::LocalSocket::connect(path);
+        if (!sock) {
+            return;
+        }
+        stream::ProtocolConnection conn(std::move(*sock));
+        if (!conn.handshake()) {
+            return;
+        }
+        stream::MessageType type{};
+        std::vector<std::byte> payload;
+        (void)conn.recv_message(type, payload); // the hello schema
+        (void)conn.recv_message(type, payload); // the hello snapshot
+
+        // An [index][generation][hash] editor→engine message (Add/Remove share this shape).
+        const auto entity_msg = [&](std::uint64_t hash) {
+            std::vector<std::byte> m;
+            core::ByteWriter w(m);
+            w.u32(e.index);
+            w.u32(e.generation);
+            w.u64(hash);
+            return m;
+        };
+        // Ask for a fresh snapshot and count how many entities carry a Velocity in it.
+        const auto velocity_count_after_request = [&]() -> int {
+            const std::vector<std::byte> empty;
+            if (!conn.send_message(
+                    static_cast<stream::MessageType>(editorhost::EditorMessage::RequestSnapshot),
+                    empty)) {
+                return -1;
+            }
+            if (!conn.recv_message(type, payload) ||
+                type != static_cast<stream::MessageType>(editorhost::EditorMessage::Snapshot)) {
+                return -1;
+            }
+            ecs::World mirror;
+            (void)mirror.register_component<et::Position>();
+            (void)mirror.register_component<et::Velocity>();
+            if (!editorhost::deserialize_world(mirror, payload)) {
+                return -1;
+            }
+            int n = 0;
+            mirror.query<et::Velocity>().for_each([&](ecs::Entity, et::Velocity&) { ++n; });
+            return n;
+        };
+
+        (void)conn.send_message(
+            static_cast<stream::MessageType>(editorhost::EditorMessage::AddComponent),
+            entity_msg(vel_h));
+        out.velocity_after_add = velocity_count_after_request() == 1;
+
+        (void)conn.send_message(
+            static_cast<stream::MessageType>(editorhost::EditorMessage::RemoveComponent),
+            entity_msg(vel_h));
+        out.velocity_gone_after_remove = velocity_count_after_request() == 0;
+
+        (void)conn.send_bye();
+    });
+
+    auto accepted = listener->accept();
+    REQUIRE(accepted.has_value());
+    stream::ProtocolConnection server_conn(std::move(*accepted));
+    REQUIRE(server_conn.handshake());
+    editorhost::EditorHost host(std::move(server_conn));
+    REQUIRE(host.send_hello(world));
+    while (host.poll_one(world)) {
+    }
+    client.join();
+
+    CHECK(out.velocity_after_add);         // AddComponent added it; RequestSnapshot showed it
+    CHECK(out.velocity_gone_after_remove); // RemoveComponent took it away
+    CHECK(world.get<et::Position>(e) != nullptr); // and never touched the entity's other components
 }

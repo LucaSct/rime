@@ -116,6 +116,17 @@ std::vector<std::byte> set_component_bytes() {
     return out;
 }
 
+// An add/remove-component payload (editor -> engine): [index][generation][hash]. AddComponent and
+// RemoveComponent share this shape (m9.4); one fixture guards both.
+std::vector<std::byte> component_ref_bytes() {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    w.u32(3);
+    w.u32(1);
+    w.u64(core::reflect<render::Camera>().type_hash);
+    return out;
+}
+
 // A known 8x8 RGBA gradient — the pixels the editor viewport must recover after an LZ4 round trip.
 std::vector<std::byte> lz4_pixels_raw() {
     constexpr std::uint32_t w = 8;
@@ -188,6 +199,7 @@ std::vector<Fixture> all_fixtures() {
         {"schema.bin", schema_bytes()},
         {"snapshot.bin", snapshot_bytes()},
         {"set_component.bin", set_component_bytes()},
+        {"component_ref.bin", component_ref_bytes()},
         {"frame_lz4.bin", frame_lz4_bytes()},
         {"frame_lz4_pixels.bin", lz4_pixels_raw()},
     };
