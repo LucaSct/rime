@@ -26,6 +26,17 @@ struct MeshRef {
     MeshId mesh = kInvalidMeshId;
 };
 
+// An **authoring** reference to a cooked mesh by its content id (assets::AssetId's u64) — what the
+// editor's asset browser places. It is deliberately distinct from MeshRef: "which asset" (a stable
+// content hash that survives a rename and keys the cook cache, ADR-0024/0025) must never be
+// confused with "which loaded mesh" (a dense registry MeshId). A later mesh-loading brick resolves
+// a MeshAsset into a MeshRef + a GPU upload (the GpuAssetBridge is textures-only today). Stored as
+// a bare u64, not assets::AssetId, so this header keeps its light dependency set and the field
+// reflects as a plain UInt64 the inspector shows.
+struct MeshAsset {
+    std::uint64_t asset = 0; // == assets::AssetId::value; 0 = unset
+};
+
 // Shade it with that registry material.
 struct MaterialRef {
     MaterialId material = kInvalidMaterialId;
@@ -65,6 +76,7 @@ struct PointLight {
 // us for).
 inline void register_render_components(ecs::World& world) {
     (void)world.register_component<MeshRef>();
+    (void)world.register_component<MeshAsset>();
     (void)world.register_component<MaterialRef>();
     (void)world.register_component<Camera>();
     (void)world.register_component<DirectionalLight>();
@@ -77,6 +89,10 @@ inline void register_render_components(ecs::World& world) {
 // the structs above; a mismatch shows up as a wrong offset in the serializer tests.
 RIME_REFLECT_BEGIN(rime::render::MeshRef)
 RIME_REFLECT_FIELD(mesh)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rime::render::MeshAsset)
+RIME_REFLECT_FIELD(asset)
 RIME_REFLECT_END()
 
 RIME_REFLECT_BEGIN(rime::render::MaterialRef)

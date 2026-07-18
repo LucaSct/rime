@@ -54,8 +54,8 @@ add_executable(rime_engine
 set_target_properties(rime_engine PROPERTIES OUTPUT_NAME rime-engine)
 
 target_link_libraries(rime_engine
-    PRIVATE rime::editorhost rime::scene rime::ecs rime::app rime::render rime::rhi rime::stream
-            rime::platform rime::core fmt::fmt)
+    PRIVATE rime::editorhost rime::scene rime::assets rime::ecs rime::app rime::render rime::rhi
+            rime::stream rime::platform rime::core fmt::fmt)
 
 rime_apply_common_target_options(rime_engine)
 

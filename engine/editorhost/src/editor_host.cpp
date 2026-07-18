@@ -259,6 +259,50 @@ bool remove_component(ecs::World& world, ecs::Entity e, std::uint64_t type_hash)
     return world.remove_component_raw(e, id);
 }
 
+// v1 (m9.5): the browser's asset list. The tag bump is per-message, independent of the schema tag.
+constexpr std::uint32_t kAssetListMagic = 0x52414C31u; // 'R''A''L''1' — Rime Asset List v1
+
+std::vector<std::byte> serialize_asset_list(std::span<const AssetListEntry> assets) {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    // A string_view is not null-terminated, so write it by length (not via write_name's const
+    // char*).
+    const auto write_sv = [&w](std::string_view s) {
+        w.u16(static_cast<std::uint16_t>(s.size()));
+        w.bytes(std::as_bytes(std::span(s.data(), s.size())));
+    };
+    w.u32(kAssetListMagic);
+    w.u32(static_cast<std::uint32_t>(assets.size()));
+    for (const AssetListEntry& a : assets) {
+        w.u16(a.kind);
+        w.u64(a.id);
+        write_sv(a.source_path);
+        write_sv(a.cooked_file);
+    }
+    return out;
+}
+
+bool spawn_entity_from_payload(ecs::World& world, std::span<const std::byte> payload) {
+    core::ByteReader r(payload);
+    std::uint16_t comp_count = 0;
+    if (!r.u16(comp_count)) {
+        return false;
+    }
+    const ecs::Entity e = world.spawn();
+    for (std::uint16_t c = 0; c < comp_count; ++c) {
+        std::uint64_t hash = 0;
+        std::uint32_t blob_len = 0;
+        std::span<const std::byte> blob;
+        if (!r.u64(hash) || !r.u32(blob_len) || !r.bytes(blob, blob_len)) {
+            break; // truncated — the entity keeps whatever components already applied
+        }
+        // Reuse the edit path: deserialize each component onto the new entity, adding it. An
+        // unknown or malformed component is skipped rather than aborting the whole placement.
+        (void)apply_set_component(world, e, hash, blob);
+    }
+    return true;
+}
+
 // ── EditorHost ──────────────────────────────────────────────────────────────────────────
 
 EditorHost::EditorHost(stream::ProtocolConnection conn) noexcept : conn_(std::move(conn)) {}
@@ -327,6 +371,9 @@ bool EditorHost::poll_one(ecs::World& world) {
             }
             return true;
         }
+        case EditorMessage::SpawnEntity:
+            (void)spawn_entity_from_payload(world, payload);
+            return true;
         case EditorMessage::RequestSnapshot:
             // The editor asks for a fresh view (e.g. after edits, or to refresh); reply with a full
             // snapshot on the same connection. Cheap for editor-sized worlds; a delta channel is a

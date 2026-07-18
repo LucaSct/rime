@@ -32,8 +32,11 @@ pub enum Command {
     AddComponent { key: EntityKey, type_hash: u64 },
     /// Remove a component from an entity.
     RemoveComponent { key: EntityKey, type_hash: u64 },
-    /// Spawn a fresh entity.
+    /// Spawn a fresh (empty) entity.
     Spawn,
+    /// Spawn an entity with an initial component set — the asset browser's "place" (m9.5). Each
+    /// component is `(type_hash, reflection-serialized bytes)`.
+    SpawnEntity { components: Vec<(u64, Vec<u8>)> },
     /// Despawn an entity.
     Despawn { key: EntityKey },
     /// Ask the engine to resend the world (after a structural change, to resync the mirror).
@@ -67,6 +70,13 @@ impl Command {
                 component_ref(*key, *type_hash).encode(),
             ),
             Command::Spawn => (EditorMessage::Spawn, Vec::new()),
+            Command::SpawnEntity { components } => (
+                EditorMessage::SpawnEntity,
+                rime_protocol::SpawnEntity {
+                    components: components.clone(),
+                }
+                .encode(),
+            ),
             Command::Despawn { key } => (EditorMessage::Despawn, encode_despawn(key.0, key.1)),
             Command::RequestSnapshot => (EditorMessage::RequestSnapshot, Vec::new()),
         }
@@ -80,6 +90,7 @@ impl Command {
             Command::AddComponent { .. }
                 | Command::RemoveComponent { .. }
                 | Command::Spawn
+                | Command::SpawnEntity { .. }
                 | Command::Despawn { .. }
         )
     }

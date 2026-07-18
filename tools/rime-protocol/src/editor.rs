@@ -31,6 +31,7 @@ use crate::{Error, Result};
 
 const SCHEMA_MAGIC: u32 = 0x5253_4D32; // 'R''S''M''2' (m9.4: now carries field layout)
 const SNAPSHOT_MAGIC: u32 = 0x5253_4E31; // 'R''S''N''1'
+const ASSET_LIST_MAGIC: u32 = 0x5241_4C31; // 'R''A''L''1' (m9.5: the browser's cook manifest)
 
 /// An editor-channel message type (the `0x02xx` band). Mirrors `editorhost::EditorMessage`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub enum EditorMessage {
     Schema,
     /// engine → editor: the whole world (entities + components).
     Snapshot,
+    /// engine → editor: the cook manifest — the browsable/placeable asset list (m9.5).
+    AssetList,
     /// editor → engine: set a component's bytes on an entity.
     SetComponent,
     /// editor → engine: spawn an empty entity.
@@ -53,6 +56,9 @@ pub enum EditorMessage {
     RemoveComponent,
     /// editor → engine: resend the world — the engine replies with a fresh [`EditorMessage::Snapshot`].
     RequestSnapshot,
+    /// editor → engine: spawn an entity **with** an initial component set (the browser's "place";
+    /// m9.5).
+    SpawnEntity,
 }
 
 impl EditorMessage {
@@ -61,12 +67,14 @@ impl EditorMessage {
         match self {
             EditorMessage::Schema => 0x0200,
             EditorMessage::Snapshot => 0x0201,
+            EditorMessage::AssetList => 0x0203,
             EditorMessage::SetComponent => 0x0210,
             EditorMessage::Spawn => 0x0211,
             EditorMessage::Despawn => 0x0212,
             EditorMessage::AddComponent => 0x0213,
             EditorMessage::RemoveComponent => 0x0214,
             EditorMessage::RequestSnapshot => 0x0215,
+            EditorMessage::SpawnEntity => 0x0216,
         }
     }
 
@@ -75,12 +83,14 @@ impl EditorMessage {
         match code {
             0x0200 => Some(EditorMessage::Schema),
             0x0201 => Some(EditorMessage::Snapshot),
+            0x0203 => Some(EditorMessage::AssetList),
             0x0210 => Some(EditorMessage::SetComponent),
             0x0211 => Some(EditorMessage::Spawn),
             0x0212 => Some(EditorMessage::Despawn),
             0x0213 => Some(EditorMessage::AddComponent),
             0x0214 => Some(EditorMessage::RemoveComponent),
             0x0215 => Some(EditorMessage::RequestSnapshot),
+            0x0216 => Some(EditorMessage::SpawnEntity),
             _ => None,
         }
     }
@@ -416,6 +426,152 @@ impl SetComponent {
             type_hash,
             blob,
         })
+    }
+}
+
+/// What kind of thing a cooked asset is — the wire mirror of the engine's `assets::AssetKind` (values
+/// are wire constants: append, never renumber). `Unknown` keeps a code this build predates so the
+/// browser degrades gracefully instead of dropping the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetKind {
+    Mesh,
+    Texture,
+    Material,
+    Skeleton,
+    AnimationClip,
+    Destructible,
+    Unknown(u16),
+}
+
+impl AssetKind {
+    /// The kind for a wire value.
+    pub fn from_u16(v: u16) -> Self {
+        match v {
+            1 => AssetKind::Mesh,
+            2 => AssetKind::Texture,
+            3 => AssetKind::Material,
+            4 => AssetKind::Skeleton,
+            5 => AssetKind::AnimationClip,
+            6 => AssetKind::Destructible,
+            other => AssetKind::Unknown(other),
+        }
+    }
+
+    /// The wire value for this kind.
+    pub fn to_u16(self) -> u16 {
+        match self {
+            AssetKind::Mesh => 1,
+            AssetKind::Texture => 2,
+            AssetKind::Material => 3,
+            AssetKind::Skeleton => 4,
+            AssetKind::AnimationClip => 5,
+            AssetKind::Destructible => 6,
+            AssetKind::Unknown(v) => v,
+        }
+    }
+
+    /// A short human label for the browser (kind column / filter).
+    pub fn label(self) -> &'static str {
+        match self {
+            AssetKind::Mesh => "Mesh",
+            AssetKind::Texture => "Texture",
+            AssetKind::Material => "Material",
+            AssetKind::Skeleton => "Skeleton",
+            AssetKind::AnimationClip => "Clip",
+            AssetKind::Destructible => "Destructible",
+            AssetKind::Unknown(_) => "Unknown",
+        }
+    }
+}
+
+/// One cooked asset the browser lists: its kind, content-hash id, source path, and cooked filename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetEntry {
+    pub kind: AssetKind,
+    pub id: u64,
+    pub source_path: String,
+    pub cooked_file: String,
+}
+
+/// The cook manifest as sent to the editor (the `AssetList` message payload).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetList {
+    pub assets: Vec<AssetEntry>,
+}
+
+impl AssetList {
+    /// Serialize the asset-list blob.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(ASSET_LIST_MAGIC);
+        w.u32(self.assets.len() as u32);
+        for a in &self.assets {
+            w.u16(a.kind.to_u16());
+            w.u64(a.id);
+            write_name(&mut w, &a.source_path);
+            write_name(&mut w, &a.cooked_file);
+        }
+        w.into_vec()
+    }
+
+    /// Parse an asset-list blob (from the engine, or [`AssetList::encode`]).
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let magic = r.u32()?;
+        if magic != ASSET_LIST_MAGIC {
+            return Err(Error::BadTag(magic));
+        }
+        let count = r.u32()?;
+        let mut assets = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let kind = AssetKind::from_u16(r.u16()?);
+            let id = r.u64()?;
+            let source_path = read_name(&mut r)?;
+            let cooked_file = read_name(&mut r)?;
+            assets.push(AssetEntry {
+                kind,
+                id,
+                source_path,
+                cooked_file,
+            });
+        }
+        Ok(AssetList { assets })
+    }
+}
+
+/// An editor → engine "spawn an entity with these components" — the `SpawnEntity` payload (the
+/// browser's atomic "place asset"). Each component is a `(type_hash, reflection-serialized bytes)`
+/// pair, the same blob shape [`SetComponent`] carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpawnEntity {
+    pub components: Vec<(u64, Vec<u8>)>,
+}
+
+impl SpawnEntity {
+    /// Serialize the payload: `[comp_count:u16]` then per component `[hash:u64][blob_len:u32][blob]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u16(self.components.len() as u16);
+        for (hash, blob) in &self.components {
+            w.u64(*hash);
+            w.u32(blob.len() as u32);
+            w.bytes(blob);
+        }
+        w.into_vec()
+    }
+
+    /// Parse a `SpawnEntity` payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let count = r.u16()?;
+        let mut components = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let hash = r.u64()?;
+            let blob_len = r.u32()? as usize;
+            let blob = r.take_bytes(blob_len)?.to_vec();
+            components.push((hash, blob));
+        }
+        Ok(SpawnEntity { components })
     }
 }
 

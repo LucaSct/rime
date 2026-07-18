@@ -52,6 +52,12 @@ struct Spin {
     Inner inner;
     float rate = 1.0f;
 };
+
+// An authoring asset reference (mirrors render::MeshAsset): a single u64 content id, so a placement
+// test can assert "the placed entity carries the expected AssetId".
+struct AssetRef {
+    std::uint64_t asset = 0;
+};
 } // namespace et
 
 RIME_REFLECT_BEGIN(et::Position)
@@ -74,6 +80,10 @@ RIME_REFLECT_END()
 RIME_REFLECT_BEGIN(et::Spin)
 RIME_REFLECT_FIELD(inner)
 RIME_REFLECT_FIELD(rate)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(et::AssetRef)
+RIME_REFLECT_FIELD(asset)
 RIME_REFLECT_END()
 
 namespace {
@@ -442,4 +452,74 @@ TEST_CASE("editorhost: add/remove component and request-snapshot over the local 
     CHECK(out.velocity_after_add);         // AddComponent added it; RequestSnapshot showed it
     CHECK(out.velocity_gone_after_remove); // RemoveComponent took it away
     CHECK(world.get<et::Position>(e) != nullptr); // and never touched the entity's other components
+}
+
+TEST_CASE("editorhost: serialize_asset_list round-trips a manifest to the browser wire (RAL1)") {
+    const std::array<editorhost::AssetListEntry, 2> assets{{
+        {static_cast<std::uint16_t>(1), 0xABCDEF01u, "meshes/barrel.gltf", "barrel.rmesh"},
+        {static_cast<std::uint16_t>(2), 0x1234u, "textures/rust.png", "rust.rtex"},
+    }};
+    const std::vector<std::byte> blob = editorhost::serialize_asset_list(assets);
+
+    // Parse it back (mirroring the Rust AssetList decoder) and check every field survives.
+    core::ByteReader r(blob);
+    std::uint32_t magic = 0;
+    std::uint32_t count = 0;
+    REQUIRE(r.u32(magic));
+    CHECK(magic == 0x52414C31u); // 'RAL1'
+    REQUIRE(r.u32(count));
+    REQUIRE(count == 2);
+    const auto read_name = [&r]() {
+        std::uint16_t len = 0;
+        REQUIRE(r.u16(len));
+        std::span<const std::byte> bytes;
+        REQUIRE(r.bytes(bytes, len));
+        return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    };
+    std::uint16_t kind = 0;
+    std::uint64_t id = 0;
+    REQUIRE(r.u16(kind));
+    REQUIRE(r.u64(id));
+    CHECK(kind == 1);
+    CHECK(id == 0xABCDEF01u);
+    CHECK(read_name() == "meshes/barrel.gltf");
+    CHECK(read_name() == "barrel.rmesh");
+    REQUIRE(r.u16(kind));
+    REQUIRE(r.u64(id));
+    CHECK(kind == 2);
+    CHECK(read_name() == "textures/rust.png");
+    CHECK(read_name() == "rust.rtex");
+}
+
+TEST_CASE("editorhost: spawn_entity_from_payload places an entity with the expected components") {
+    ecs::World world;
+    (void)world.register_component<et::AssetRef>();
+    (void)world.register_component<et::Position>();
+
+    // Build the SpawnEntity payload the browser's "place" sends: an AssetRef carrying a content id
+    // plus a Position — [comp_count:u16] then per component [hash:u64][blob_len:u32][blob].
+    const std::vector<std::byte> asset_blob = core::serialize(et::AssetRef{0xDEADBEEFCAFEULL});
+    const std::vector<std::byte> pos_blob = core::serialize(et::Position{3.0f, 4.0f, 5.0f});
+    std::vector<std::byte> payload;
+    core::ByteWriter w(payload);
+    w.u16(2);
+    w.u64(core::reflect<et::AssetRef>().type_hash);
+    w.u32(static_cast<std::uint32_t>(asset_blob.size()));
+    w.bytes(asset_blob);
+    w.u64(core::reflect<et::Position>().type_hash);
+    w.u32(static_cast<std::uint32_t>(pos_blob.size()));
+    w.bytes(pos_blob);
+
+    REQUIRE(editorhost::spawn_entity_from_payload(world, payload));
+    CHECK(world.entity_count() == 1);
+
+    int placed = 0;
+    world.query<et::AssetRef, et::Position>().for_each(
+        [&](ecs::Entity, et::AssetRef& a, et::Position& p) {
+            ++placed;
+            CHECK(a.asset == 0xDEADBEEFCAFEULL); // the expected AssetId rode across intact
+            CHECK(p.x == 3.0f);
+            CHECK(p.z == 5.0f);
+        });
+    CHECK(placed == 1);
 }

@@ -17,8 +17,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rime_protocol::{
-    Connection, EditorMessage, FrameMessage, InputEvent, InputKind, MessageType, Schema, Snapshot,
-    SnapshotComponent,
+    AssetEntry, AssetList, Connection, EditorMessage, FrameMessage, InputEvent, InputKind,
+    MessageType, Schema, Snapshot, SnapshotComponent,
 };
 
 use super::protocol_input::Input;
@@ -52,6 +52,7 @@ pub struct SharedState {
     pub error: Option<String>,
     pub schema: Schema,
     pub snapshot: Snapshot,
+    pub assets: Vec<AssetEntry>,
     pub frame: Option<ViewportFrame>,
     pub frames_received: u64,
     pub fps: f32,
@@ -98,16 +99,21 @@ pub struct EngineSession {
 }
 
 impl EngineSession {
-    /// Spawn `rime-engine --editor-host --viewport` and start driving the wire. Any failure lands in
-    /// `shared.error` (the status bar shows it) rather than panicking the UI.
-    pub fn spawn(engine: String, shared: Shared, out_rx: Receiver<Outbound>) -> Self {
+    /// Spawn `rime-engine --editor-host --viewport [--assets <manifest>]` and start driving the wire.
+    /// Any failure lands in `shared.error` (the status bar shows it) rather than panicking the UI.
+    pub fn spawn(
+        engine: String,
+        assets: Option<String>,
+        shared: Shared,
+        out_rx: Receiver<Outbound>,
+    ) -> Self {
         let socket = unique_socket_path();
-        let child = match Command::new(&engine)
-            .arg("--editor-host")
-            .arg(&socket)
-            .arg("--viewport")
-            .spawn()
-        {
+        let mut command = Command::new(&engine);
+        command.arg("--editor-host").arg(&socket).arg("--viewport");
+        if let Some(assets) = &assets {
+            command.arg("--assets").arg(assets);
+        }
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(e) => {
                 shared.lock().unwrap().error = Some(format!("spawn '{engine}': {e}"));
@@ -242,6 +248,11 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
         MessageType::Other(code) if code == EditorMessage::Snapshot.to_code() => {
             if let Ok(snapshot) = Snapshot::decode(payload) {
                 shared.lock().unwrap().snapshot = snapshot;
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::AssetList.to_code() => {
+            if let Ok(list) = AssetList::decode(payload) {
+                shared.lock().unwrap().assets = list.assets;
             }
         }
         _ => {} // an editor->engine type echoed, or something this build predates

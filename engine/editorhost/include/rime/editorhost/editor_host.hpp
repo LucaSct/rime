@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "rime/ecs/entity.hpp"
@@ -40,12 +41,14 @@ namespace rime::editorhost {
 enum class EditorMessage : std::uint16_t {
     Schema = 0x0200,       // engine -> editor: the reflected type registry (layout per type; m9.4)
     Snapshot = 0x0201,     // engine -> editor: the whole world (entities + components)
+    AssetList = 0x0203,    // engine -> editor: the cook manifest (browsable assets; m9.5)
     SetComponent = 0x0210, // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,        // editor -> engine: spawn an empty entity
     Despawn = 0x0212,      // editor -> engine: despawn an entity
     AddComponent = 0x0213, // editor -> engine: add a DEFAULT-constructed component to an entity
     RemoveComponent = 0x0214, // editor -> engine: remove a component from an entity
     RequestSnapshot = 0x0215, // editor -> engine: resend the world (engine replies with Snapshot)
+    SpawnEntity = 0x0216, // editor -> engine: spawn an entity WITH an initial component set (m9.5)
 };
 
 // True if `type` (as received by recv_message) is an editor-channel message (the reserved band).
@@ -94,6 +97,31 @@ enum class EditorMessage : std::uint16_t {
 // Remove the component of type `type_hash` from `e`. Returns false if the type is unknown or the
 // entity did not have it. Call at a tick boundary. The editor's "remove component" action.
 [[nodiscard]] bool remove_component(ecs::World& world, ecs::Entity e, std::uint64_t type_hash);
+
+// One cooked asset as the editor's browser sees it (m9.5). A flattened view of a cook-manifest line
+// (assets::ManifestEntry), kept as plain fields + views so editorhost need not depend on
+// engine/assets — the app fills these from its parsed Manifest. `kind` is the wire value of
+// assets::AssetKind; `id` is the AssetId's u64 content hash.
+struct AssetListEntry {
+    std::uint16_t kind = 0;
+    std::uint64_t id = 0;
+    std::string_view source_path;
+    std::string_view cooked_file;
+};
+
+// Serialize the asset list (the `AssetList` message payload) — the manifest the browser lists,
+// searches, and places from. Format:
+//   [magic 'RAL1':u32][count:u32] then per entry
+//   [kind:u16][id:u64][source_len:u16][source...][cooked_len:u16][cooked...]
+[[nodiscard]] std::vector<std::byte> serialize_asset_list(std::span<const AssetListEntry> assets);
+
+// Spawn one entity carrying an initial component set — the editor's "place asset" primitive (m9.5).
+// The payload is `[comp_count:u16]` then per component `[type_hash:u64][blob_len:u32][blob...]`
+// (each a reflection-serialized component, as SetComponent uses). Atomic spawn-with-components
+// avoids the editor having to spawn, learn the new handle, then set each component.
+// Unknown/unreflected/ malformed components are skipped (the entity still spawns). Returns false
+// only on a truncated header. Call at a tick boundary.
+[[nodiscard]] bool spawn_entity_from_payload(ecs::World& world, std::span<const std::byte> payload);
 
 // ── The host over the wire ──────────────────────────────────────────────────────────────
 
