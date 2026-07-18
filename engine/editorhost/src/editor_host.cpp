@@ -382,6 +382,20 @@ bool EditorHost::poll_one(ecs::World& world) {
             (void)conn_.send_message(static_cast<stream::MessageType>(EditorMessage::Snapshot),
                                      serialize_world(world));
             return true;
+        case EditorMessage::PickRequest: {
+            // This GPU-free host has no renderer, so there is no ID buffer to hit-test against —
+            // but a request left unanswered would strand the client's click. Reply honestly with
+            // the "nothing" sentinel (index 0xFFFFFFFF = ecs::kNullEntity's invalid slot index —
+            // the same bits an empty-space hit sends). Real picks are the viewport host's job
+            // (editor_host_main.cpp, m9.6).
+            std::vector<std::byte> out;
+            core::ByteWriter w(out);
+            w.u32(0xFFFFFFFFu);
+            w.u32(0);
+            (void)conn_.send_message(static_cast<stream::MessageType>(EditorMessage::PickResult),
+                                     out);
+            return true;
+        }
         default:
             return true; // an engine->editor or unknown type — nothing to apply
     }

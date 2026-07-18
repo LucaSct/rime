@@ -454,6 +454,66 @@ TEST_CASE("editorhost: add/remove component and request-snapshot over the local 
     CHECK(world.get<et::Position>(e) != nullptr); // and never touched the entity's other components
 }
 
+TEST_CASE("editorhost: a pick on the GPU-free channel answers the nothing sentinel (m9.6)") {
+    // The channel host has no renderer, so it cannot hit-test — but the protocol still owes every
+    // PickRequest exactly one PickResult, or a client's click would wait forever. The honest
+    // answer is the miss sentinel: index 0xFFFFFFFF (ecs::kNullEntity's invalid slot), gen 0.
+    const std::string path = unique_local_path();
+    auto listener = platform::LocalListener::bind(path);
+    REQUIRE(listener.has_value());
+
+    ecs::World world;
+    (void)world.spawn_with(et::Position{});
+
+    struct Outcome {
+        bool got_result = false;
+        std::uint32_t index = 0;
+        std::uint32_t generation = 1;
+    } out;
+
+    std::thread client([&] {
+        auto sock = platform::LocalSocket::connect(path);
+        if (!sock) {
+            return;
+        }
+        stream::ProtocolConnection conn(std::move(*sock));
+        if (!conn.handshake()) {
+            return;
+        }
+        stream::MessageType type{};
+        std::vector<std::byte> payload;
+        (void)conn.recv_message(type, payload); // the hello schema
+        (void)conn.recv_message(type, payload); // the hello snapshot
+
+        std::vector<std::byte> req; // [x:i32][y:i32] — any pixel; there is nothing to hit
+        core::ByteWriter w(req);
+        w.u32(120);
+        w.u32(64);
+        (void)conn.send_message(
+            static_cast<stream::MessageType>(editorhost::EditorMessage::PickRequest), req);
+        if (conn.recv_message(type, payload) &&
+            type == static_cast<stream::MessageType>(editorhost::EditorMessage::PickResult)) {
+            core::ByteReader r(payload);
+            out.got_result = r.u32(out.index) && r.u32(out.generation);
+        }
+        (void)conn.send_bye();
+    });
+
+    auto accepted = listener->accept();
+    REQUIRE(accepted.has_value());
+    stream::ProtocolConnection server_conn(std::move(*accepted));
+    REQUIRE(server_conn.handshake());
+    editorhost::EditorHost host(std::move(server_conn));
+    REQUIRE(host.send_hello(world));
+    while (host.poll_one(world)) {
+    }
+    client.join();
+
+    CHECK(out.got_result);
+    CHECK(out.index == 0xFFFFFFFFu); // "nothing" — no viewport, nothing pickable
+    CHECK(out.generation == 0);
+}
+
 TEST_CASE("editorhost: serialize_asset_list round-trips a manifest to the browser wire (RAL1)") {
     const std::array<editorhost::AssetListEntry, 2> assets{{
         {static_cast<std::uint16_t>(1), 0xABCDEF01u, "meshes/barrel.gltf", "barrel.rmesh"},

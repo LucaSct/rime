@@ -14,6 +14,8 @@
 //     render graph, capture each frame, LZ4-compress it, and send it as a Frame message — the
 //     editor draws it in its viewport panel. Edits from the channel mutate the very world being
 //     rendered, so a change shows up in the next streamed frame (the live edit→viewport loop).
+//     A viewport click arrives as a PickRequest; the ID-buffer pick pass (render::ScenePicker,
+//     m9.6) answers it with the entity under that pixel — see the pick service in the frame loop.
 //
 // The connection is full-duplex: one thread sends (schema/snapshot/frames), one receives (edits).
 // The World is touched only by the send/render thread — the receiver just queues raw edits, which
@@ -24,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -32,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "rime/app/application.hpp"
@@ -51,6 +55,7 @@
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/render_graph.hpp"
+#include "rime/render/scene_picker.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/scene/scene_format.hpp"
 #include "rime/stream/frame_codec.hpp"
@@ -283,10 +288,13 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
         return conn.handshake() ? serve_channel(std::move(conn), app.world(), assets_path) : 1;
     }
 
-    // Build the renderable scene and wire the per-frame render into the app's graph.
+    // Build the renderable scene and wire the per-frame render into the app's graph. The picker is
+    // declared after the registry it borrows (destroyed before it — its in-flight submission may
+    // still reference mesh buffers, and its destructor drains that first).
     render::MeshRegistry meshes(*app.device());
     render::MaterialRegistry materials;
     render::SceneRenderer renderer(*app.device(), meshes, materials);
+    render::ScenePicker picker(*app.device(), meshes);
     build_viewport_scene(app.world(), meshes, materials);
     renderer.set_ambient(0.03f, 0.03f, 0.04f);
     render::RGTexture last_ldr{};
@@ -366,6 +374,11 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
     const auto frame_period = std::chrono::milliseconds(33);
     auto next_frame = std::chrono::steady_clock::now();
 
+    // Pick requests waiting for the GPU. The picker serves one at a time (its 1×1 target and
+    // readback are single-slot), so requests queue here and each gets exactly one PickResult —
+    // clicks are human-rate, the queue is effectively 0–1 deep.
+    std::deque<std::pair<std::int32_t, std::int32_t>> pick_queue;
+
     while (!stop.load(std::memory_order_relaxed)) {
         bool snapshot_requested = false;
         {
@@ -373,10 +386,21 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
             for (const Edit& e : pending) {
                 // RequestSnapshot has no world effect — it asks us (the send-owning thread) to
                 // reply with a fresh snapshot. Apply all real edits first, then send one snapshot
-                // that reflects them (coalescing multiple requests in a batch).
-                if (static_cast<editorhost::EditorMessage>(e.type) ==
-                    editorhost::EditorMessage::RequestSnapshot) {
+                // that reflects them (coalescing multiple requests in a batch). PickRequest is the
+                // same shape of message — answered by this thread, not applied to the world.
+                const auto msg = static_cast<editorhost::EditorMessage>(e.type);
+                if (msg == editorhost::EditorMessage::RequestSnapshot) {
                     snapshot_requested = true;
+                } else if (msg == editorhost::EditorMessage::PickRequest) {
+                    core::ByteReader r(e.payload);
+                    std::uint32_t ux = 0;
+                    std::uint32_t uy = 0;
+                    if (r.u32(ux) && r.u32(uy)) {
+                        // The wire carries i32 pixel coords; same bytes, reinterpreted. Negative /
+                        // out-of-range values are legal input — begin_pick answers them as misses.
+                        pick_queue.emplace_back(static_cast<std::int32_t>(ux),
+                                                static_cast<std::int32_t>(uy));
+                    }
                 } else {
                     apply_edit(app.world(), e.type, e.payload);
                 }
@@ -390,6 +414,31 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
         }
 
         app.step(app.fixed_dt()); // tick + render (executes the graph)
+
+        // The pick service (m9.6): collect a finished pick and answer it, then start the next
+        // queued one against the post-tick world — the world the frame streamed below shows.
+        // try_resolve is non-blocking (the s1.1 ticket), so a click never stalls the stream; its
+        // answer simply arrives a frame later (the documented pick latency). kNullEntity's raw
+        // handle (index 0xFFFFFFFF, generation 0) IS the wire's "nothing" sentinel, so hit and
+        // miss serialize identically.
+        if (picker.pending()) {
+            if (const auto picked = picker.try_resolve()) {
+                std::vector<std::byte> out;
+                core::ByteWriter w(out);
+                w.u32(picked->index);
+                w.u32(picked->generation);
+                if (!conn.send_message(
+                        static_cast<stream::MessageType>(editorhost::EditorMessage::PickResult),
+                        out)) {
+                    break; // client disconnected
+                }
+            }
+        }
+        if (!picker.pending() && !pick_queue.empty()) {
+            const auto [px, py] = pick_queue.front();
+            pick_queue.pop_front();
+            picker.begin_pick(app.world(), cfg.render_extent, px, py);
+        }
 
         const rhi::TextureHandle ldr = app.graph()->physical(last_ldr);
         const stream::FrameView view = streamer->capture(ldr);
