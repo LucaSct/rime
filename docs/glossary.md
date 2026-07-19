@@ -489,3 +489,15 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Scene-local id.** The ordinal (`0..N-1`) a `.rscene` gives each saved entity so a
   reference between entities (a `Parent`) is stored position-independently and remapped to a
   fresh runtime handle on load — never a volatile raw entity handle.
+- **Gizmo.** The on-screen handles that move/rotate/scale a selected object by dragging —
+  translate arrows, rotate rings, scale cube-ends. In Rime the **engine renders** them as an
+  always-on-top overlay while the **editor does the drag math** (screen-ray to axis/plane), so
+  a drag is just an undoable `SetComponent` (M9.6). Derivation:
+  [math/gizmos.md](math/gizmos.md).
+- **Picking / ID buffer.** Answering "which object is under this pixel?" by re-rendering the
+  scene writing each object's **id** (not its shading) into an integer target, then reading back
+  the one texel the cursor is over — the nearest surface wins by the depth test. How a viewport
+  click selects an entity (M9.6); the physics raycast stays the gameplay path.
+- **Screen-constant size.** Drawing an overlay (a gizmo, a handle) scaled by its distance from
+  the camera so it covers a fixed fraction of the viewport at any depth — you never have to
+  approach an object to grab its gizmo. See [math/gizmos.md](math/gizmos.md).
