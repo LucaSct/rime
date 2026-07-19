@@ -45,6 +45,10 @@ pub enum EditorMessage {
     AssetList,
     /// engine → editor: the entity under a picked viewport pixel (m9.6).
     PickResult,
+    /// engine → editor: the viewport's exact render lens — view-projection, its inverse, eye,
+    /// extent — so gizmo math projects/unprojects through the same matrices the pixels were
+    /// rendered with (m9.6 gizmos).
+    ViewportCamera,
     /// editor → engine: set a component's bytes on an entity.
     SetComponent,
     /// editor → engine: spawn an empty entity.
@@ -63,6 +67,9 @@ pub enum EditorMessage {
     SpawnEntity,
     /// editor → engine: pick the entity at a viewport pixel (m9.6).
     PickRequest,
+    /// editor → engine: the current selection + gizmo mode/axis, so the engine renders the right
+    /// gizmo and highlight over the viewport. Engine state, not a world edit (m9.6 gizmos).
+    GizmoState,
 }
 
 impl EditorMessage {
@@ -73,6 +80,7 @@ impl EditorMessage {
             EditorMessage::Snapshot => 0x0201,
             EditorMessage::AssetList => 0x0203,
             EditorMessage::PickResult => 0x0204,
+            EditorMessage::ViewportCamera => 0x0205,
             EditorMessage::SetComponent => 0x0210,
             EditorMessage::Spawn => 0x0211,
             EditorMessage::Despawn => 0x0212,
@@ -81,6 +89,7 @@ impl EditorMessage {
             EditorMessage::RequestSnapshot => 0x0215,
             EditorMessage::SpawnEntity => 0x0216,
             EditorMessage::PickRequest => 0x0217,
+            EditorMessage::GizmoState => 0x0218,
         }
     }
 
@@ -91,6 +100,7 @@ impl EditorMessage {
             0x0201 => Some(EditorMessage::Snapshot),
             0x0203 => Some(EditorMessage::AssetList),
             0x0204 => Some(EditorMessage::PickResult),
+            0x0205 => Some(EditorMessage::ViewportCamera),
             0x0210 => Some(EditorMessage::SetComponent),
             0x0211 => Some(EditorMessage::Spawn),
             0x0212 => Some(EditorMessage::Despawn),
@@ -99,6 +109,7 @@ impl EditorMessage {
             0x0215 => Some(EditorMessage::RequestSnapshot),
             0x0216 => Some(EditorMessage::SpawnEntity),
             0x0217 => Some(EditorMessage::PickRequest),
+            0x0218 => Some(EditorMessage::GizmoState),
             _ => None,
         }
     }
@@ -646,6 +657,184 @@ impl PickResult {
         let index = r.u32()?;
         let generation = r.u32()?;
         Ok(PickResult { index, generation })
+    }
+}
+
+/// An engine → editor viewport-camera message: the exact render lens of the streamed frame (m9.6
+/// gizmos). Carrying BOTH the clip-from-world matrix and its inverse is deliberate: the engine has
+/// a tested 4×4 inverse and computed the projection, so shipping `inv_view_proj` means the editor
+/// never inverts a matrix — and the pair can never disagree with the pixels on screen. Matrices are
+/// column-major `[f32; 16]` (the engine's `core::Mat4::m` layout, ADR-0004).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportCamera {
+    /// Clip-from-world: `perspective * view`, exactly what the frame rendered through.
+    pub view_proj: [f32; 16],
+    /// World-from-clip — the engine-computed inverse (pixel → world-ray unprojection).
+    pub inv_view_proj: [f32; 16],
+    /// Camera world position: the origin of every unprojected perspective ray.
+    pub eye: [f32; 3],
+    /// The render extent the matrices target; gizmo pixel math is relative to this size.
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ViewportCamera {
+    /// Serialize the payload:
+    /// `[view_proj:16xf32][inv_view_proj:16xf32][eye:3xf32][width:u32][height:u32]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        for e in self.view_proj {
+            w.f32(e);
+        }
+        for e in self.inv_view_proj {
+            w.f32(e);
+        }
+        for e in self.eye {
+            w.f32(e);
+        }
+        w.u32(self.width);
+        w.u32(self.height);
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let mut view_proj = [0.0f32; 16];
+        for e in &mut view_proj {
+            *e = r.f32()?;
+        }
+        let mut inv_view_proj = [0.0f32; 16];
+        for e in &mut inv_view_proj {
+            *e = r.f32()?;
+        }
+        let mut eye = [0.0f32; 3];
+        for e in &mut eye {
+            *e = r.f32()?;
+        }
+        let width = r.u32()?;
+        let height = r.u32()?;
+        Ok(ViewportCamera {
+            view_proj,
+            inv_view_proj,
+            eye,
+            width,
+            height,
+        })
+    }
+}
+
+/// Which transform gizmo is active — the wire's `mode` byte (values are wire constants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GizmoMode {
+    /// No gizmo (hidden).
+    None,
+    Translate,
+    Rotate,
+    Scale,
+}
+
+impl GizmoMode {
+    /// The `u8` wire code.
+    pub fn to_u8(self) -> u8 {
+        match self {
+            GizmoMode::None => 0,
+            GizmoMode::Translate => 1,
+            GizmoMode::Rotate => 2,
+            GizmoMode::Scale => 3,
+        }
+    }
+
+    /// The mode for a wire code; an unknown byte reads as `None` (the engine renders nothing for
+    /// it either — forward compatibility by inertness).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => GizmoMode::Translate,
+            2 => GizmoMode::Rotate,
+            3 => GizmoMode::Scale,
+            _ => GizmoMode::None,
+        }
+    }
+}
+
+/// Which gizmo axis is hovered/active — the wire's `axis` byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GizmoAxis {
+    /// No axis highlighted.
+    None,
+    X,
+    Y,
+    Z,
+}
+
+impl GizmoAxis {
+    /// The `u8` wire code.
+    pub fn to_u8(self) -> u8 {
+        match self {
+            GizmoAxis::None => 0,
+            GizmoAxis::X => 1,
+            GizmoAxis::Y => 2,
+            GizmoAxis::Z => 3,
+        }
+    }
+
+    /// The axis for a wire code; unknown bytes read as `None`.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => GizmoAxis::X,
+            2 => GizmoAxis::Y,
+            3 => GizmoAxis::Z,
+            _ => GizmoAxis::None,
+        }
+    }
+}
+
+/// An editor → engine gizmo-state message: the selection plus which gizmo (and highlighted axis)
+/// the engine should render over the viewport (m9.6 gizmos). Engine STATE, not a world edit — the
+/// viewport host consumes it in its frame loop like a `PickRequest`. `index == u32::MAX` (the
+/// [`PickResult::none`] sentinel) means "no selection — hide the gizmo".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GizmoState {
+    pub index: u32,
+    pub generation: u32,
+    pub mode: GizmoMode,
+    pub axis: GizmoAxis,
+}
+
+impl GizmoState {
+    /// The "nothing selected / gizmo hidden" state.
+    pub const fn none() -> Self {
+        GizmoState {
+            index: u32::MAX,
+            generation: 0,
+            mode: GizmoMode::None,
+            axis: GizmoAxis::None,
+        }
+    }
+
+    /// Serialize the payload: `[index:u32][generation:u32][mode:u8][axis:u8]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(self.index);
+        w.u32(self.generation);
+        w.u8(self.mode.to_u8());
+        w.u8(self.axis.to_u8());
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let index = r.u32()?;
+        let generation = r.u32()?;
+        let mode = GizmoMode::from_u8(r.u8()?);
+        let axis = GizmoAxis::from_u8(r.u8()?);
+        Ok(GizmoState {
+            index,
+            generation,
+            mode,
+            axis,
+        })
     }
 }
 

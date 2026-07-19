@@ -28,15 +28,22 @@ use eframe::egui;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
 use rime_protocol::{
-    decode_value, encode_value, AssetEntry, AssetKind, EditorMessage, PickRequest, Schema,
-    SnapshotEntity, Value,
+    decode_value, encode_value, AssetEntry, AssetKind, EditorMessage, GizmoAxis, GizmoMode,
+    GizmoState, PickRequest, Schema, SnapshotEntity, Value, ViewportCamera,
 };
+
+use crate::gizmo::{self, DragSession, Snapping};
 
 mod commands;
 mod session;
 
 use commands::{Command, CommandStack, Edit, EntityKey};
 use session::{EngineSession, Outbound, Shared, SharedState};
+
+// Snap increments when snapping is engaged (Ctrl, or the toolbar toggle): a quarter unit and 15°,
+// the near-universal editor defaults.
+const SNAP_LINEAR: f32 = 0.25;
+const SNAP_ANGULAR_DEG: f32 = 15.0;
 
 /// Launch the docking shell. `--engine <path>` / `$RIME_ENGINE_BIN` names the engine binary to host.
 pub fn run(args: &[String]) -> ExitCode {
@@ -97,6 +104,38 @@ struct ActiveEdit {
     new_blob: Vec<u8>,
 }
 
+/// The selected entity, resolved for the gizmo: its handle, the `LocalTransform` type_hash + its
+/// current bytes (the edit target and the drag's grab-time "before"), and its world-space center
+/// (where the engine draws the gizmo, and the origin of the drag's constraint axis). Rebuilt each
+/// repaint from the snapshot mirror so it tracks live edits.
+#[derive(Clone)]
+struct GizmoTarget {
+    key: EntityKey,
+    local_hash: u64,
+    local_blob: Vec<u8>,
+    center: gizmo::Vec3,
+}
+
+/// Map the editor's local gizmo mode to the wire's `GizmoMode` (None = hidden).
+fn to_proto_mode(mode: Option<gizmo::Mode>) -> GizmoMode {
+    match mode {
+        None => GizmoMode::None,
+        Some(gizmo::Mode::Translate) => GizmoMode::Translate,
+        Some(gizmo::Mode::Rotate) => GizmoMode::Rotate,
+        Some(gizmo::Mode::Scale) => GizmoMode::Scale,
+    }
+}
+
+/// Map the hovered/active axis to the wire's `GizmoAxis` (None = no highlight).
+fn to_proto_axis(axis: Option<gizmo::Axis>) -> GizmoAxis {
+    match axis {
+        None => GizmoAxis::None,
+        Some(gizmo::Axis::X) => GizmoAxis::X,
+        Some(gizmo::Axis::Y) => GizmoAxis::Y,
+        Some(gizmo::Axis::Z) => GizmoAxis::Z,
+    }
+}
+
 struct EditorApp {
     dock: DockState<Tab>,
     shared: Shared,
@@ -111,6 +150,15 @@ struct EditorApp {
     // Asset browser (m9.5) filter state.
     asset_search: String,
     asset_kind_filter: Option<AssetKind>,
+    // Gizmo interaction state (m9.6b). `gizmo_mode` None = hidden. `gizmo_hover` is the axis the
+    // cursor is over (drives the engine highlight); `gizmo_drag` is the live drag, if any;
+    // `gizmo_snap` is the toolbar snap toggle (Ctrl also snaps per-drag). `last_gizmo_state` is
+    // the last state pushed to the engine, so we send only on change, not every repaint.
+    gizmo_mode: Option<gizmo::Mode>,
+    gizmo_hover: Option<gizmo::Axis>,
+    gizmo_drag: Option<DragSession>,
+    gizmo_snap: bool,
+    last_gizmo_state: Option<GizmoState>,
 }
 
 impl EditorApp {
@@ -130,6 +178,11 @@ impl EditorApp {
             active_edit: None,
             asset_search: String::new(),
             asset_kind_filter: None,
+            gizmo_mode: None,
+            gizmo_hover: None,
+            gizmo_drag: None,
+            gizmo_snap: false,
+            last_gizmo_state: None,
         }
     }
 
@@ -178,7 +231,19 @@ impl eframe::App for EditorApp {
         // as an egui image ONLY when its sequence changed — so the ~2 MB RGBA is copied once per
         // streamed frame, not once per repaint. The schema + entities are cloned so the widgets can
         // borrow them freely without holding the lock across the whole render.
-        let (connected, error, entities, schema, assets, frames, fps, frame_dims, new_image, pick) = {
+        let (
+            connected,
+            error,
+            entities,
+            schema,
+            assets,
+            frames,
+            fps,
+            frame_dims,
+            new_image,
+            pick,
+            camera,
+        ) = {
             let mut s = self.shared.lock().unwrap();
             let new_image = match &s.frame {
                 Some(f) if f.seq != self.shown_seq => Some((
@@ -202,6 +267,7 @@ impl eframe::App for EditorApp {
                 s.frame.as_ref().map(|f| (f.width, f.height)),
                 new_image,
                 pick,
+                s.camera, // Copy: the newest render lens (gizmo math reads it, never consumes)
             )
         };
 
@@ -244,8 +310,36 @@ impl eframe::App for EditorApp {
             }
         });
 
+        // Gizmo-mode hotkeys (W translate / E rotate / R scale; Q or Esc = none) — the Maya/Blender
+        // muscle memory. Gated on `wants_keyboard_input` so typing a value into an inspector field
+        // never flips the gizmo out from under the drag.
+        if !ctx.wants_keyboard_input() {
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::W) {
+                    self.gizmo_mode = Some(gizmo::Mode::Translate);
+                }
+                if i.key_pressed(egui::Key::E) {
+                    self.gizmo_mode = Some(gizmo::Mode::Rotate);
+                }
+                if i.key_pressed(egui::Key::R) {
+                    self.gizmo_mode = Some(gizmo::Mode::Scale);
+                }
+                if i.key_pressed(egui::Key::Q) || i.key_pressed(egui::Key::Escape) {
+                    self.gizmo_mode = None;
+                }
+            });
+        }
+        // A dropped mode leaves no handle to hover — clear it so the engine stops highlighting.
+        if self.gizmo_mode.is_none() {
+            self.gizmo_hover = None;
+        }
+
         let can_undo = self.stack.can_undo();
         let can_redo = self.stack.can_redo();
+        // Mirror into locals the menu-bar closure mutates, then write back (the closure borrows
+        // these, not `self`, keeping the panel body free of a self-borrow tangle).
+        let mut gizmo_mode = self.gizmo_mode;
+        let mut gizmo_snap = self.gizmo_snap;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.label(egui::RichText::new("Rime Editor").strong());
@@ -268,8 +362,27 @@ impl eframe::App for EditorApp {
                     }
                 });
                 ui.label("View");
+                ui.separator();
+                // Gizmo toolbar: the mode selector (mirrors the W/E/R hotkeys) + the snap toggle.
+                ui.label("Gizmo:");
+                for (mode, label) in [
+                    (None, "Off (Q)"),
+                    (Some(gizmo::Mode::Translate), "Move (W)"),
+                    (Some(gizmo::Mode::Rotate), "Rotate (E)"),
+                    (Some(gizmo::Mode::Scale), "Scale (R)"),
+                ] {
+                    if ui.selectable_label(gizmo_mode == mode, label).clicked() {
+                        gizmo_mode = mode;
+                    }
+                }
+                ui.checkbox(&mut gizmo_snap, "Snap");
             });
         });
+        self.gizmo_mode = gizmo_mode;
+        self.gizmo_snap = gizmo_snap;
+        if self.gizmo_mode.is_none() {
+            self.gizmo_hover = None;
+        }
         if do_undo {
             if let Some(cmd) = self.stack.undo() {
                 actions.push(cmd);
@@ -320,6 +433,41 @@ impl eframe::App for EditorApp {
             .find(|t| t.name == "rime::render::MeshAsset")
             .map(|t| t.type_hash);
 
+        // Resolve the selected entity into a gizmo target: its LocalTransform bytes (the edit
+        // target) and world-space center (where handles project). The gizmo edits LocalTransform —
+        // the same component the inspector edits and the tick propagates to the WorldTransform the
+        // renderer reads — so a drag moves the streamed object. Center prefers WorldTransform (the
+        // engine draws the gizmo there); for the flat viewport scene local == world, so either
+        // agrees. (A parented scene would resolve world from the chain — a documented v1 limit.)
+        let local_hash = schema
+            .types
+            .iter()
+            .find(|t| t.name == "rime::ecs::LocalTransform")
+            .map(|t| t.type_hash);
+        let world_hash = schema
+            .types
+            .iter()
+            .find(|t| t.name == "rime::ecs::WorldTransform")
+            .map(|t| t.type_hash);
+        let gizmo_target = self
+            .selected
+            .and_then(|idx| entities.get(idx))
+            .and_then(|e| {
+                let lh = local_hash?;
+                let local = e.components.iter().find(|c| c.type_hash == lh)?;
+                let center = world_hash
+                    .and_then(|wh| e.components.iter().find(|c| c.type_hash == wh))
+                    .and_then(|c| gizmo::decode_trs_blob(&c.data))
+                    .or_else(|| gizmo::decode_trs_blob(&local.data))
+                    .map(|t| t.translation)?;
+                Some(GizmoTarget {
+                    key: (e.index, e.generation),
+                    local_hash: lh,
+                    local_blob: local.data.clone(),
+                    center,
+                })
+            });
+
         let mut viewer = EditorTabs {
             frame_tex: self.frame_tex.as_ref(),
             frame_dims,
@@ -335,12 +483,38 @@ impl eframe::App for EditorApp {
             actions: &mut actions,
             active_edit: &mut self.active_edit,
             stack: &mut self.stack,
+            gizmo_mode: self.gizmo_mode,
+            gizmo_camera: camera,
+            gizmo_target: gizmo_target.clone(),
+            gizmo_snap: self.gizmo_snap,
+            gizmo_hover: &mut self.gizmo_hover,
+            gizmo_drag: &mut self.gizmo_drag,
         };
         DockArea::new(&mut self.dock)
             .style(Style::from_egui(ctx.style().as_ref()))
             .show(ctx, &mut viewer);
 
         self.dispatch(actions);
+
+        // Tell the engine which gizmo to render (selection + mode + the now-updated hovered axis).
+        // Sent only when it changes: the message is tiny, but this runs every repaint, and the
+        // engine only needs the transitions (a new selection, a mode switch, a hover move).
+        let desired = match (self.gizmo_mode, gizmo_target.as_ref()) {
+            (Some(mode), Some(target)) => GizmoState {
+                index: target.key.0,
+                generation: target.key.1,
+                mode: to_proto_mode(Some(mode)),
+                axis: to_proto_axis(self.gizmo_hover),
+            },
+            _ => GizmoState::none(),
+        };
+        if self.last_gizmo_state != Some(desired) {
+            let _ = self.out_tx.send(Outbound::Editor {
+                msg: EditorMessage::GizmoState,
+                payload: desired.encode(),
+            });
+            self.last_gizmo_state = Some(desired);
+        }
 
         // Keep animating while a session is live so streamed frames flow smoothly.
         ctx.request_repaint();
@@ -363,6 +537,27 @@ struct EditorTabs<'a> {
     actions: &'a mut Vec<Command>,
     active_edit: &'a mut Option<ActiveEdit>,
     stack: &'a mut CommandStack,
+    // Gizmo interaction (m9.6b): read-only mode/camera/target + snap, and the two mutable pieces
+    // the viewport drives — the hovered axis (out to the engine highlight) and the live drag.
+    gizmo_mode: Option<gizmo::Mode>,
+    gizmo_camera: Option<ViewportCamera>,
+    gizmo_target: Option<GizmoTarget>,
+    gizmo_snap: bool,
+    gizmo_hover: &'a mut Option<gizmo::Axis>,
+    gizmo_drag: &'a mut Option<DragSession>,
+}
+
+/// The viewport's gizmo view, bundled so `viewport_ui` takes one argument instead of eight. Borrows
+/// the interaction state from `EditorTabs` for the duration of the viewport panel's draw.
+struct GizmoView<'a> {
+    mode: Option<gizmo::Mode>,
+    camera: Option<ViewportCamera>,
+    target: Option<GizmoTarget>,
+    snap: bool,
+    hover: &'a mut Option<gizmo::Axis>,
+    drag: &'a mut Option<DragSession>,
+    actions: &'a mut Vec<Command>,
+    stack: &'a mut CommandStack,
 }
 
 impl TabViewer for EditorTabs<'_> {
@@ -380,7 +575,19 @@ impl TabViewer for EditorTabs<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         match tab {
-            Tab::Viewport => viewport_ui(ui, self.frame_tex, self.frame_dims, self.out_tx),
+            Tab::Viewport => {
+                let mut gz = GizmoView {
+                    mode: self.gizmo_mode,
+                    camera: self.gizmo_camera,
+                    target: self.gizmo_target.clone(),
+                    snap: self.gizmo_snap,
+                    hover: &mut *self.gizmo_hover,
+                    drag: &mut *self.gizmo_drag,
+                    actions: &mut *self.actions,
+                    stack: &mut *self.stack,
+                };
+                viewport_ui(ui, self.frame_tex, self.frame_dims, self.out_tx, &mut gz);
+            }
             Tab::Outliner => outliner_ui(ui, self.entities, self.selected, self.actions),
             Tab::Inspector => inspector_ui(
                 ui,
@@ -501,6 +708,7 @@ fn viewport_ui(
     frame_tex: Option<&egui::TextureHandle>,
     frame_dims: Option<(u32, u32)>,
     out_tx: &Sender<Outbound>,
+    gz: &mut GizmoView,
 ) {
     let avail = ui.available_size();
     let (rect, response) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
@@ -511,7 +719,7 @@ fn viewport_ui(
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
-        forward_input(out_tx, &response, rect, frame_dims);
+        viewport_input(out_tx, &response, rect, frame_dims, gz);
     } else {
         ui.painter()
             .rect_filled(rect, 0.0, egui::Color32::from_gray(20));
@@ -525,47 +733,145 @@ fn viewport_ui(
     }
 }
 
-// Translate egui pointer input over the viewport into engine InputEvents (viewport-relative pixels).
-// A minimal set for v1 — move / press / release; the engine maps them back to platform input.
-fn forward_input(
+// The viewport's pointer handling (m9.6b): hover-highlight a gizmo axis, grab-and-drag a handle
+// (constrained by the engine-shipped lens), and otherwise pick/forward as before. The gizmo owns a
+// drag ONLY once it grabs a handle; every other press is a plain click (pick) or a camera drag, so
+// selecting and navigating never fight the gizmo.
+fn viewport_input(
     out_tx: &Sender<Outbound>,
     response: &egui::Response,
     rect: egui::Rect,
     frame_dims: Option<(u32, u32)>,
+    gz: &mut GizmoView,
 ) {
     let Some((w, h)) = frame_dims else {
         return;
     };
-    let to_pixels = |p: egui::Pos2| -> (i32, i32) {
+    // The gizmo math works in the engine's render-extent pixel space (what the lens targets); when
+    // there is a camera use its extent exactly, else fall back to the frame's.
+    let ext = gz
+        .camera
+        .map(|c| (c.width as f32, c.height as f32))
+        .unwrap_or((w as f32, h as f32));
+    let to_px = |p: egui::Pos2| -> (f32, f32) {
         let u = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
         let v = ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-        ((u * w as f32) as i32, (v * h as f32) as i32)
+        (u * ext.0, v * ext.1)
     };
-    if let Some(pos) = response.hover_pos() {
-        let (x, y) = to_pixels(pos);
-        if response.dragged() || response.hovered() {
-            let _ = out_tx.send(Outbound::Input(protocol_input::Input::PointerMove { x, y }));
+    let cursor = response.hover_pos().map(to_px);
+
+    // Hover: while idle, which handle is under the cursor? Drives the engine's axis highlight, and
+    // decides whether a press grabs the gizmo or picks. Instant (this frame's lens), never a
+    // frame-late engine round trip — the reason the engine ships the camera.
+    if gz.drag.is_none() {
+        *gz.hover = match (gz.mode, gz.camera, gz.target.as_ref()) {
+            (Some(mode), Some(cam), Some(target)) => cursor.and_then(|px| {
+                let eye = gizmo::Vec3::new(cam.eye[0], cam.eye[1], cam.eye[2]);
+                let size = gizmo::gizmo_world_size(&cam.view_proj, eye, target.center);
+                gizmo::hover_axis(mode, &cam.view_proj, ext, target.center, size, px)
+            }),
+            _ => None,
+        };
+    }
+
+    let snapping = if gz.snap {
+        Snapping {
+            linear: Some(SNAP_LINEAR),
+            angular: Some(SNAP_ANGULAR_DEG.to_radians()),
         }
-        if response.drag_started() || response.clicked() {
+    } else {
+        Snapping::default()
+    };
+    let ray_at = |px: (f32, f32), cam: &ViewportCamera| {
+        let eye = gizmo::Vec3::new(cam.eye[0], cam.eye[1], cam.eye[2]);
+        gizmo::ray_from_pixel(&cam.inv_view_proj, eye, px, ext)
+    };
+
+    // Press → grab a handle (begin the drag) or fall through to camera input.
+    if response.drag_started() {
+        let grabbed = match (cursor, gz.mode, gz.camera, gz.target.as_ref(), *gz.hover) {
+            (Some(px), Some(mode), Some(cam), Some(target), Some(axis)) => DragSession::begin(
+                mode,
+                axis,
+                &target.local_blob,
+                target.center,
+                &ray_at(px, &cam),
+            ),
+            _ => None,
+        };
+        if let Some(session) = grabbed {
+            *gz.drag = Some(session);
+        } else if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
             let _ = out_tx.send(Outbound::Input(protocol_input::Input::PointerDown {
                 x,
                 y,
                 button: 0,
             }));
         }
-        if response.drag_stopped() {
+    }
+
+    // Drag → a live gizmo edit (SetComponent every frame, optimistically mirror-patched by
+    // `dispatch`), or a forwarded camera move.
+    if response.dragged() {
+        if gz.drag.is_some() {
+            if let (Some(px), Some(cam), Some(target)) = (cursor, gz.camera, gz.target.clone()) {
+                let blob = gz
+                    .drag
+                    .as_ref()
+                    .unwrap()
+                    .update(&ray_at(px, &cam), snapping);
+                gz.actions.push(Command::SetComponent {
+                    key: target.key,
+                    type_hash: target.local_hash,
+                    blob,
+                });
+            }
+        } else if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
+            let _ = out_tx.send(Outbound::Input(protocol_input::Input::PointerMove { x, y }));
+        }
+    }
+
+    // Release → fold the whole drag into ONE undo Edit (grab bytes → final bytes), or camera up.
+    if response.drag_stopped() {
+        if let Some(session) = gz.drag.take() {
+            if let (Some(px), Some(cam), Some(target)) = (cursor, gz.camera, gz.target.clone()) {
+                let after = session.update(&ray_at(px, &cam), snapping);
+                // Only record if the drag actually moved the bytes — a grab that never left the
+                // handle should not litter the undo history (mirrors the inspector's gesture rule).
+                if session.old_blob() != after.as_slice() {
+                    gz.actions.push(Command::SetComponent {
+                        key: target.key,
+                        type_hash: target.local_hash,
+                        blob: after.clone(),
+                    });
+                    gz.stack.push(Edit {
+                        forward: Command::SetComponent {
+                            key: target.key,
+                            type_hash: target.local_hash,
+                            blob: after,
+                        },
+                        inverse: Command::SetComponent {
+                            key: target.key,
+                            type_hash: target.local_hash,
+                            blob: session.old_blob().to_vec(),
+                        },
+                    });
+                }
+            }
+        } else if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
             let _ = out_tx.send(Outbound::Input(protocol_input::Input::PointerUp {
                 x,
                 y,
                 button: 0,
             }));
         }
-        // A plain click — egui reports it only when the press/release pair never became a drag —
-        // asks the engine what is under the cursor (m9.6). The engine runs its ID-buffer pick pass
-        // at this pixel and answers with a PickResult a frame later; selection moves when it lands
-        // (see the pick consumption in `update`). Drags keep their existing meaning (forwarded
-        // input), so navigating never steals a selection.
-        if response.clicked() {
+    }
+
+    // A plain click (never became a drag) picks — UNLESS it landed on a handle (hover set), which
+    // is a mis-grab, not a re-selection. The engine answers a PickRequest a frame later and
+    // selection moves when it lands (the pick consumption in `update`).
+    if response.clicked() && gz.hover.is_none() {
+        if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
             let _ = out_tx.send(Outbound::Editor {
                 msg: EditorMessage::PickRequest,
                 payload: PickRequest { x, y }.encode(),

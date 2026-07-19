@@ -13,9 +13,9 @@ use std::thread;
 
 use rime_protocol::{
     decode_value, encode_value, AssetKind, AssetList, Codec, ComponentRef, Connection,
-    EditorMessage, FieldKind, FrameMessage, InputEvent, InputKind, MessageType, PickRequest,
-    PickResult, PixelFormat, Schema, SetComponent, Snapshot, SpawnEntity, Value, PROTOCOL_MAGIC,
-    PROTOCOL_VERSION,
+    EditorMessage, FieldKind, FrameMessage, GizmoAxis, GizmoMode, GizmoState, InputEvent,
+    InputKind, MessageType, PickRequest, PickResult, PixelFormat, Schema, SetComponent, Snapshot,
+    SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -228,6 +228,57 @@ fn pick_result_decodes_and_re_encodes_byte_exact() {
 }
 
 #[test]
+fn viewport_camera_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("viewport_camera.bin");
+    let vc = ViewportCamera::decode(&golden).expect("decode viewport camera");
+    // Spot-check the hand-authored lens (column-major: index = col*4 + row).
+    assert_eq!(vc.view_proj[0].to_bits(), 2.0f32.to_bits());
+    assert_eq!(vc.view_proj[5].to_bits(), (-2.0f32).to_bits());
+    assert_eq!(vc.view_proj[11].to_bits(), (-1.0f32).to_bits());
+    assert_eq!(vc.inv_view_proj[0].to_bits(), 0.5f32.to_bits());
+    assert_eq!(vc.inv_view_proj[15].to_bits(), 5.0f32.to_bits());
+    assert_eq!(vc.eye, [1.5, -2.5, 8.0]);
+    assert_eq!((vc.width, vc.height), (960, 540));
+    // The pair is a matrix and its true inverse — multiply and expect identity. This is the
+    // semantic half of the conformance: the editor's unprojection trusts inv_view_proj blindly, so
+    // the fixture proves the engine ships a genuine inverse, not just 128 well-ordered bytes.
+    let mut product = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            let mut sum = 0.0f32;
+            for k in 0..4 {
+                sum += vc.view_proj[k * 4 + row] * vc.inv_view_proj[col * 4 + k];
+            }
+            product[col * 4 + row] = sum;
+        }
+    }
+    for col in 0..4 {
+        for row in 0..4 {
+            let expect = if col == row { 1.0 } else { 0.0 };
+            assert!(
+                (product[col * 4 + row] - expect).abs() < 1e-6,
+                "vp * inv_vp is not identity at ({row},{col})"
+            );
+        }
+    }
+    assert_eq!(vc.encode(), golden);
+}
+
+#[test]
+fn gizmo_state_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("gizmo_state.bin");
+    let gs = GizmoState::decode(&golden).expect("decode gizmo state");
+    assert_eq!(gs.index, 7);
+    assert_eq!(gs.generation, 2);
+    assert_eq!(gs.mode, GizmoMode::Translate);
+    assert_eq!(gs.axis, GizmoAxis::Z);
+    assert_eq!(gs.encode(), golden);
+    // The hidden sentinel mirrors PickResult::none() — index u32::MAX.
+    assert_eq!(GizmoState::none().index, u32::MAX);
+    assert_eq!(GizmoState::none().mode, GizmoMode::None);
+}
+
+#[test]
 fn snapshot_decodes_structure_and_re_encodes_byte_exact() {
     let golden = fixture("snapshot.bin");
     let snap = Snapshot::decode(&golden).expect("decode snapshot");
@@ -262,9 +313,15 @@ fn message_type_and_editor_codes_are_stable() {
     assert!(MessageType::is_editor(0x0210));
     assert!(!MessageType::is_editor(0x0001));
     assert_eq!(EditorMessage::SetComponent.to_code(), 0x0210);
+    assert_eq!(EditorMessage::ViewportCamera.to_code(), 0x0205);
+    assert_eq!(EditorMessage::GizmoState.to_code(), 0x0218);
     assert_eq!(
         EditorMessage::from_code(0x0200),
         Some(EditorMessage::Schema)
+    );
+    assert_eq!(
+        EditorMessage::from_code(0x0218),
+        Some(EditorMessage::GizmoState)
     );
     assert_eq!(EditorMessage::from_code(0x0001), None);
 }

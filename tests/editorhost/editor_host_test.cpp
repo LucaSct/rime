@@ -583,3 +583,54 @@ TEST_CASE("editorhost: spawn_entity_from_payload places an entity with the expec
         });
     CHECK(placed == 1);
 }
+
+TEST_CASE("editorhost: ViewportCamera and GizmoState round-trip their wire payloads (m9.6b)") {
+    // The gizmo channel's two payloads, serialized and parsed back bit-exactly. GPU-free — the
+    // messages are pure state; their live behaviour (the engine rendering a gizmo, the editor
+    // unprojecting through the lens) is proven by tests/render/gizmo_test.cpp and the editor's
+    // gizmo-math tests. Floats compare bitwise: the wire carries IEEE bit patterns, so equality is
+    // the honest assertion (no epsilon needed for a byte round-trip).
+    editorhost::ViewportCameraMsg cam{};
+    for (int i = 0; i < 16; ++i) {
+        cam.view_proj[i] = static_cast<float>(i) * 0.25f;    // distinct per slot: an element
+        cam.inv_view_proj[i] = 8.0f - static_cast<float>(i); // swap/skew shows immediately
+    }
+    cam.eye[0] = 1.0f;
+    cam.eye[1] = -2.0f;
+    cam.eye[2] = 3.5f;
+    cam.width = 960;
+    cam.height = 540;
+
+    const std::vector<std::byte> cam_bytes = editorhost::serialize_viewport_camera(cam);
+    CHECK(cam_bytes.size() == 16 * 4 + 16 * 4 + 3 * 4 + 4 + 4); // the documented 148-byte payload
+    editorhost::ViewportCameraMsg cam_back{};
+    REQUIRE(editorhost::parse_viewport_camera(cam_bytes, cam_back));
+    for (int i = 0; i < 16; ++i) {
+        CHECK(cam_back.view_proj[i] == cam.view_proj[i]);
+        CHECK(cam_back.inv_view_proj[i] == cam.inv_view_proj[i]);
+    }
+    CHECK(cam_back.eye[2] == 3.5f);
+    CHECK(cam_back.width == 960);
+    CHECK(cam_back.height == 540);
+    // A truncated payload is rejected (the bounds-checked reader), never mis-parsed.
+    editorhost::ViewportCameraMsg trunc{};
+    CHECK_FALSE(editorhost::parse_viewport_camera(
+        std::span<const std::byte>(cam_bytes.data(), cam_bytes.size() - 1), trunc));
+
+    editorhost::GizmoStateMsg gs{};
+    gs.index = 42;
+    gs.generation = 7;
+    gs.mode = 2; // rotate
+    gs.axis = 1; // X highlighted
+    const std::vector<std::byte> gs_bytes = editorhost::serialize_gizmo_state(gs);
+    CHECK(gs_bytes.size() == 4 + 4 + 1 + 1);
+    editorhost::GizmoStateMsg gs_back{};
+    REQUIRE(editorhost::parse_gizmo_state(gs_bytes, gs_back));
+    CHECK(gs_back.index == 42);
+    CHECK(gs_back.generation == 7);
+    CHECK(gs_back.mode == 2);
+    CHECK(gs_back.axis == 1);
+    // The default-constructed state is the hidden sentinel (index == u32 max, mode none).
+    CHECK(editorhost::GizmoStateMsg{}.index == 0xFFFFFFFFu);
+    CHECK(editorhost::GizmoStateMsg{}.mode == 0);
+}

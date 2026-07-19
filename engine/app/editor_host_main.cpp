@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -52,6 +53,7 @@
 #include "rime/editorhost/editor_host.hpp"
 #include "rime/platform/socket.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/gizmo_renderer.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/render_graph.hpp"
@@ -211,18 +213,33 @@ int serve_channel(stream::ProtocolConnection conn,
 // ── Streamed viewport (needs a GPU) ───────────────────────────────────────────────────────
 
 // A compact, lit scene to render into the viewport: a row of metallic spheres of rising roughness
-// over a floor, a point light, and a camera framing them. Uses WorldTransform directly (a flat
-// scene) — the same components the editor snapshots and edits, so moving a sphere from the
-// inspector changes what the next frame renders.
+// over a floor, a point light, and a camera framing them. Every posed entity carries BOTH
+// LocalTransform (the authored placement the inspector and the gizmo edit) and WorldTransform (the
+// derived placement the renderer reads): the app's tick already runs propagate_transforms, which
+// recomputes world = local for these flat roots, so an edit to LocalTransform moves the rendered
+// object next frame. This uniformity is the m9.6b fix — previously the scene authored
+// WorldTransform directly, which made LocalTransform edits (the component every OTHER scene path
+// edits) dead here.
 void build_viewport_scene(ecs::World& world,
                           render::MeshRegistry& meshes,
                           render::MaterialRegistry& materials) {
+    using ecs::LocalTransform;
     using ecs::WorldTransform;
     ecs::register_transform_components(world);
+    // WorldTransform is not in the default set (it is derived state, deliberately not persisted —
+    // reflect.hpp); the viewport host registers it so the renderer can read it AND so the editor's
+    // snapshot shows the derived pose (the gizmo projects handles at the world position).
+    (void)world.register_component<WorldTransform>();
     render::register_render_components(world);
 
     const render::MeshId sphere = meshes.add(render::make_uv_sphere(0.8f, 32, 64), "sphere");
     const render::MeshId floor = meshes.add(render::make_plane(10.0f, 4.0f), "floor");
+
+    const auto place = [&world](const core::Transform& tf, auto&&... comps) {
+        // local == world at spawn (flat scene, no Parent); propagate keeps them equal thereafter.
+        (void)world.spawn_with(
+            LocalTransform{tf}, WorldTransform{tf}, std::forward<decltype(comps)>(comps)...);
+    };
 
     for (int c = 0; c < 4; ++c) {
         const float rough = 0.08f + 0.85f * static_cast<float>(c) / 3.0f;
@@ -234,8 +251,7 @@ void build_viewport_scene(ecs::World& world,
         m.roughness = rough;
         core::Transform tf{};
         tf.translation = {(static_cast<float>(c) - 1.5f) * 2.0f, 0.0f, 0.0f};
-        (void)world.spawn_with(
-            WorldTransform{tf}, render::MeshRef{sphere}, render::MaterialRef{materials.add(m)});
+        place(tf, render::MeshRef{sphere}, render::MaterialRef{materials.add(m)});
     }
 
     render::PbrMaterialDesc floor_mat{};
@@ -246,19 +262,16 @@ void build_viewport_scene(ecs::World& world,
     floor_mat.roughness = 0.8f;
     core::Transform floor_tf{};
     floor_tf.translation = {0.0f, -1.6f, 0.0f};
-    (void)world.spawn_with(WorldTransform{floor_tf},
-                           render::MeshRef{floor},
-                           render::MaterialRef{materials.add(floor_mat)});
+    place(floor_tf, render::MeshRef{floor}, render::MaterialRef{materials.add(floor_mat)});
 
     core::Transform cam{};
     cam.translation = {0.0f, 1.2f, 8.0f};
     cam.rotation = core::quat_from_axis_angle(core::Vec3{1.0f, 0.0f, 0.0f}, -0.12f); // pitch down
-    (void)world.spawn_with(WorldTransform{cam}, render::Camera{});
+    place(cam, render::Camera{});
 
     core::Transform light{};
     light.translation = {3.0f, 4.0f, 4.0f};
-    (void)world.spawn_with(WorldTransform{light},
-                           render::PointLight{1.0f, 0.94f, 0.85f, 120.0f, 30.0f});
+    place(light, render::PointLight{1.0f, 0.94f, 0.85f, 120.0f, 30.0f});
 }
 
 int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
@@ -295,11 +308,28 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
     render::MaterialRegistry materials;
     render::SceneRenderer renderer(*app.device(), meshes, materials);
     render::ScenePicker picker(*app.device(), meshes);
+    render::GizmoRenderer gizmos(*app.device(), meshes);
     build_viewport_scene(app.world(), meshes, materials);
     renderer.set_ambient(0.03f, 0.03f, 0.04f);
+
+    // The editor's gizmo state (selection + mode + hovered axis), updated by the drain below and
+    // read by the render callback. Main-thread only, like the pick queue — the receiver never
+    // touches it.
+    render::GizmoSelection gizmo_sel{};
+    // The lens the frame was rendered with — captured in the render callback, sent to the editor
+    // as ViewportCamera after the frame (so the message always matches the streamed pixels).
+    render::CameraLens frame_lens{};
+
     render::RGTexture last_ldr{};
     app.on_render([&](app::FrameContext& ctx) {
         last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
+        // One lens per frame, shared by the gizmo pass and the ViewportCamera message — computed
+        // AFTER the tick (the callback runs post-tick), so it sees the same WorldTransforms the
+        // frame renders.
+        frame_lens = render::compute_camera_lens(ctx.world, ctx.extent);
+        // The overlay draws over the finished LDR before capture/stream: the editor sees the
+        // gizmo composited into the same frame its drag math targets.
+        gizmos.declare(*ctx.graph, ctx.world, last_ldr, frame_lens, gizmo_sel);
     });
 
     auto streamer = stream::FrameStreamer::create(*app.device(), cfg.render_extent);
@@ -401,6 +431,19 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
                         pick_queue.emplace_back(static_cast<std::int32_t>(ux),
                                                 static_cast<std::int32_t>(uy));
                     }
+                } else if (msg == editorhost::EditorMessage::GizmoState) {
+                    // Engine state, not a world edit (m9.6b): remember what gizmo to render.
+                    // Latest wins within a batch — each message is a complete state, so replaying
+                    // stale ones would only draw frames the editor has already moved past.
+                    editorhost::GizmoStateMsg gs{};
+                    if (editorhost::parse_gizmo_state(e.payload, gs)) {
+                        gizmo_sel.entity = ecs::Entity{gs.index, gs.generation};
+                        gizmo_sel.mode =
+                            gs.index == 0xFFFFFFFFu
+                                ? render::GizmoMode::None
+                                : static_cast<render::GizmoMode>(gs.mode <= 3 ? gs.mode : 0);
+                        gizmo_sel.axis = static_cast<render::GizmoAxis>(gs.axis <= 3 ? gs.axis : 0);
+                    }
                 } else {
                     apply_edit(app.world(), e.type, e.payload);
                 }
@@ -438,6 +481,26 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
             const auto [px, py] = pick_queue.front();
             pick_queue.pop_front();
             picker.begin_pick(app.world(), cfg.render_extent, px, py);
+        }
+
+        // Ship the frame's exact lens (m9.6b): the editor's gizmo hover/drag math unprojects
+        // through THESE matrices, so they must be the ones the pixels below were rendered with —
+        // sent every frame (~148 B, noise next to the LZ4 frame) rather than on-change, because
+        // an inspector edit to the camera must reflect in the very next lens the editor holds.
+        if (frame_lens.found) {
+            editorhost::ViewportCameraMsg cam{};
+            std::memcpy(cam.view_proj, frame_lens.view_proj.m, sizeof(cam.view_proj));
+            std::memcpy(cam.inv_view_proj, frame_lens.inv_view_proj.m, sizeof(cam.inv_view_proj));
+            cam.eye[0] = frame_lens.eye.x;
+            cam.eye[1] = frame_lens.eye.y;
+            cam.eye[2] = frame_lens.eye.z;
+            cam.width = cfg.render_extent.width;
+            cam.height = cfg.render_extent.height;
+            if (!conn.send_message(
+                    static_cast<stream::MessageType>(editorhost::EditorMessage::ViewportCamera),
+                    editorhost::serialize_viewport_camera(cam))) {
+                break; // client disconnected
+            }
         }
 
         const rhi::TextureHandle ldr = app.graph()->physical(last_ldr);
