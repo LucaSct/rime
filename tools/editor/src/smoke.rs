@@ -52,8 +52,8 @@ mod imp {
 
     use rime_protocol::{
         decode_value, encode_value, AssetKind, AssetList, Connection, EditorMessage, FrameMessage,
-        MessageType, PickRequest, PickResult, Schema, SetComponent, Snapshot, SnapshotComponent,
-        SnapshotEntity, Value,
+        GizmoAxis, GizmoMode, GizmoState, MessageType, PickRequest, PickResult, Schema,
+        SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, Value, ViewportCamera,
     };
 
     // A tiny cook manifest the smoke hands the engine (--assets) to prove the browse path end to end:
@@ -225,6 +225,38 @@ mod imp {
         }
     }
 
+    /// Read messages until a ViewportCamera arrives (m9.6b) — the engine sends the frame's exact
+    /// render lens alongside every frame; the gizmo's hover/drag math unprojects through it.
+    fn recv_viewport_camera(conn: &mut Connection<UnixStream>) -> Result<ViewportCamera, String> {
+        loop {
+            let (ty, payload) = conn
+                .recv()
+                .map_err(|e| format!("recv viewport camera: {e}"))?;
+            if ty == MessageType::Other(EditorMessage::ViewportCamera.to_code()) {
+                return ViewportCamera::decode(&payload)
+                    .map_err(|e| format!("decode viewport camera: {e}"));
+            }
+        }
+    }
+
+    /// The largest off-diagonal-or-error term of `view_proj · inv_view_proj` — 0 for a true inverse
+    /// pair. The editor's unprojection trusts the engine-shipped inverse blindly, so this is the
+    /// smoke's proof the live engine really ships one (not just 128 well-ordered bytes).
+    fn identity_error(vp: &[f32; 16], inv: &[f32; 16]) -> f32 {
+        let mut worst = 0.0f32;
+        for col in 0..4 {
+            for row in 0..4 {
+                let mut sum = 0.0f32;
+                for k in 0..4 {
+                    sum += vp[k * 4 + row] * inv[col * 4 + k];
+                }
+                let expect = if col == row { 1.0 } else { 0.0 };
+                worst = worst.max((sum - expect).abs());
+            }
+        }
+        worst
+    }
+
     pub fn run(args: &[String]) -> Result<String, String> {
         let engine = arg_value(args, "--engine")
             .or_else(|| std::env::var("RIME_ENGINE_BIN").ok())
@@ -326,11 +358,94 @@ mod imp {
                 return Err("picking the empty corner pixel claimed a hit".into());
             }
 
+            // Gizmo channel (m9.6b), end to end over the live wire. First: the engine ships the
+            // frame's exact render lens — assert it targets the render extent and carries a GENUINE
+            // inverse (vp·inv ≈ I), the matrix the editor's drag math unprojects through.
+            let cam = recv_viewport_camera(&mut conn)?;
+            if (cam.width, cam.height) != (w, h) {
+                return Err(format!(
+                    "viewport camera extent {}x{} != frame {w}x{h}",
+                    cam.width, cam.height
+                ));
+            }
+            let id_err = identity_error(&cam.view_proj, &cam.inv_view_proj);
+            if id_err > 1e-3 {
+                return Err(format!(
+                    "engine shipped a non-inverse lens: max |vp*inv - I| = {id_err}"
+                ));
+            }
+
+            // Then drive a gizmo edit exactly as a drag does: select the picked entity in translate
+            // mode (GizmoState is consumed as engine state — it makes the engine render a gizmo, no
+            // reply), then move the entity by editing its LocalTransform and confirm the change took
+            // on a fresh snapshot while the stream keeps flowing.
+            let local_hash = schema
+                .types
+                .iter()
+                .find(|t| t.name == "rime::ecs::LocalTransform")
+                .map(|t| t.type_hash)
+                .ok_or("schema has no LocalTransform to gizmo-edit")?;
+            conn.send_editor(
+                EditorMessage::GizmoState,
+                &GizmoState {
+                    index: hit.index,
+                    generation: hit.generation,
+                    mode: GizmoMode::Translate,
+                    axis: GizmoAxis::X,
+                }
+                .encode(),
+            )
+            .map_err(|e| format!("send gizmo state: {e}"))?;
+
+            let local = snapshot
+                .entities
+                .iter()
+                .find(|e| (e.index, e.generation) == (hit.index, hit.generation))
+                .and_then(|e| e.components.iter().find(|c| c.type_hash == local_hash))
+                .ok_or("picked entity has no LocalTransform (gizmo needs one to move)")?;
+            let mut tf = decode_value(&schema, local_hash, &local.data)
+                .map_err(|e| format!("decode local transform: {e}"))?;
+            let tx_before = read_first_scalar(&tf).ok_or("local transform has no scalar")?;
+            // Bump the first scalar (translation.x) — the byte-level effect of a +1 X translate drag.
+            let tx_after = bump_first_scalar(&mut tf).ok_or("local transform has no scalar")?;
+            conn.send_editor(
+                EditorMessage::SetComponent,
+                &SetComponent {
+                    index: hit.index,
+                    generation: hit.generation,
+                    type_hash: local_hash,
+                    blob: encode_value(&tf),
+                }
+                .encode(),
+            )
+            .map_err(|e| format!("send gizmo set-component: {e}"))?;
+            conn.send_editor(EditorMessage::RequestSnapshot, &[])
+                .map_err(|e| format!("send request-snapshot: {e}"))?;
+            let snap2 = recv_snapshot(&mut conn)?;
+            let moved = snap2
+                .entities
+                .iter()
+                .find(|e| (e.index, e.generation) == (hit.index, hit.generation))
+                .and_then(|e| e.components.iter().find(|c| c.type_hash == local_hash))
+                .ok_or("gizmo-edited entity vanished from the refreshed snapshot")?;
+            let tx_got = read_first_scalar(
+                &decode_value(&schema, local_hash, &moved.data)
+                    .map_err(|e| format!("re-decode local transform: {e}"))?,
+            )
+            .ok_or("no scalar after gizmo edit")?;
+            if (tx_got - tx_after).abs() > 1e-3 {
+                return Err(format!(
+                    "gizmo translate did not apply: x was {tx_before}, set to {tx_after}, engine reports {tx_got}"
+                ));
+            }
+
             conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
             drain_until_closed(&mut conn);
             format!(
                 "editor <-> engine viewport OK: {} entities; {got} frames decoded to {w}x{h} RGBA; \
-                 pick at ({bx},{by}) hit entity {}:{}, corner missed; clean shutdown",
+                 pick at ({bx},{by}) hit entity {}:{}, corner missed; viewport-camera lens verified \
+                 (vp*inv=I, err {id_err:.1e}); gizmo translate {tx_before} -> {tx_after} applied; \
+                 clean shutdown",
                 snapshot.entities.len(),
                 hit.index,
                 hit.generation

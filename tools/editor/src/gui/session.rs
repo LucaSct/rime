@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rime_protocol::{
     AssetEntry, AssetList, Connection, EditorMessage, FrameMessage, InputEvent, InputKind,
-    MessageType, PickResult, Schema, Snapshot, SnapshotComponent,
+    MessageType, PickResult, Schema, Snapshot, SnapshotComponent, ViewportCamera,
 };
 
 use super::protocol_input::Input;
@@ -60,6 +60,10 @@ pub struct SharedState {
     /// entity handle to the outliner selection; if several results land between repaints the
     /// latest wins — each reflects a distinct click, and selection is last-click-wins anyway.
     pub last_pick: Option<PickResult>,
+    /// The engine's latest render lens (m9.6b), refreshed with every streamed frame. The gizmo's
+    /// hover/drag math reads it each repaint — latest wins, no consumption: unlike a pick it is
+    /// continuous state, not an answer to a request.
+    pub camera: Option<ViewportCamera>,
     last_frame_at: Option<Instant>,
 }
 
@@ -262,6 +266,14 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
         MessageType::Other(code) if code == EditorMessage::PickResult.to_code() => {
             if let Ok(pick) = PickResult::decode(payload) {
                 shared.lock().unwrap().last_pick = Some(pick);
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::ViewportCamera.to_code() => {
+            // The frame's exact render lens (m9.6b). Overwrite (not accumulate): the gizmo math
+            // wants only the newest, and it arrives once per streamed frame in lockstep with the
+            // pixels it describes.
+            if let Ok(camera) = ViewportCamera::decode(payload) {
+                shared.lock().unwrap().camera = Some(camera);
             }
         }
         _ => {} // an editor->engine type echoed, or something this build predates
