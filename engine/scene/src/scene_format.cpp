@@ -5,11 +5,14 @@
 
 #include <fmt/core.h>
 
+#include <cerrno>
 #include <charconv>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -101,7 +104,7 @@ void append_primitive(std::string& out, core::FieldType type, const std::byte* p
             float v = 0.0f;
             std::memcpy(&v, p, sizeof(v));
             // fmt's default float format is the SHORTEST decimal that round-trips — the property
-            // the reader's std::from_chars<float> relies on to recover the exact same bits.
+            // the reader's strtof relies on to recover the exact same bits.
             fmt::format_to(it, "{}", v);
             break;
         }
@@ -250,12 +253,41 @@ std::vector<std::string_view> tokenize(std::string_view text) {
 }
 
 // Parse an unsigned/signed/float token in full (the whole token must be consumed, else it's a bad
-// value). Locale-independent and round-trip-exact via std::from_chars.
+// value). Integers go through std::from_chars: bounded, locale-independent, round-trip-exact.
+//
+// Floating point CANNOT take that path. std::from_chars for float/double is an *optional* library
+// feature, and libc++ (Apple Clang) ships it explicitly `= delete`d on the SDKs we target — so a
+// `from_chars<float>` call fails to COMPILE on macOS even though it builds fine against libstdc++.
+// We route floats through strtod/strtof instead. They are also correctly-rounded, so the exact-bits
+// round-trip with the writer's shortest-decimal (fmt) output is preserved; and because the engine
+// never installs a global C locale (checked: no setlocale/std::locale::global anywhere), the '.'
+// decimal the writer emits is parsed locale-independently in practice. Using strtod on every
+// platform (not just macOS) keeps the parse identical everywhere rather than forking on the
+// toolchain.
 template <class T> bool parse_number(std::string_view tok, T& out) {
-    const char* first = tok.data();
-    const char* last = tok.data() + tok.size();
-    const auto [ptr, ec] = std::from_chars(first, last, out);
-    return ec == std::errc{} && ptr == last;
+    if constexpr (std::is_integral_v<T>) {
+        const char* first = tok.data();
+        const char* last = tok.data() + tok.size();
+        const auto [ptr, ec] = std::from_chars(first, last, out);
+        return ec == std::errc{} && ptr == last;
+    } else {
+        static_assert(std::is_floating_point_v<T>);
+        if (tok.empty()) {
+            return false;
+        }
+        // strtod/strtof want a NUL-terminated string and scan an unbounded C string, so copy the
+        // bounded token out first; the endptr check then proves the WHOLE token was the number.
+        const std::string buf(tok);
+        const char* const c = buf.c_str();
+        char* end = nullptr;
+        errno = 0;
+        if constexpr (std::is_same_v<T, float>) {
+            out = std::strtof(c, &end);
+        } else {
+            out = std::strtod(c, &end);
+        }
+        return errno == 0 && end == c + buf.size();
+    }
 }
 
 bool parse_hash(std::string_view tok, std::uint64_t& out) {
