@@ -41,8 +41,8 @@ namespace rime::render {
 // editor's drag math would fight the pixels it drags over; the pick pass makes the same argument
 // in scene_picker.cpp).
 struct CameraLens {
-    bool found = false;      // false: no active camera (or degenerate extent) — render no gizmo
-    core::Mat4 view_proj;    // perspective(fov, aspect, near, far) * camera view
+    bool found = false;       // false: no active camera (or degenerate extent) — render no gizmo
+    core::Mat4 view_proj;     // perspective(fov, aspect, near, far) * camera view
     core::Mat4 inv_view_proj; // the true inverse (core::inverse), clip -> world
     core::Vec3 eye{0.0f, 0.0f, 0.0f}; // camera world position
     float fov_y = 0.0f;               // vertical field of view (radians) — screen-constant scaling

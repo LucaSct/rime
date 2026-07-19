@@ -84,11 +84,9 @@ CameraLens compute_camera_lens(ecs::World& world, rhi::Extent2D extent) {
         return lens;
     }
     const float aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
-    lens.view_proj = core::perspective(scene.camera.fov_y,
-                                       aspect,
-                                       scene.camera.z_near,
-                                       scene.camera.z_far) *
-                     scene.camera.view;
+    lens.view_proj =
+        core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far) *
+        scene.camera.view;
     lens.inv_view_proj = core::inverse(lens.view_proj);
     lens.eye = {scene.camera.position[0], scene.camera.position[1], scene.camera.position[2]};
     lens.fov_y = scene.camera.fov_y;
@@ -240,8 +238,7 @@ void GizmoRenderer::declare(RenderGraph& graph,
     // ANY distance (docs/math/gizmos.md). The floor guards the eye-on-entity degenerate case.
     const core::Vec3 pos = wt->value.translation;
     const float dist = core::length(pos - lens.eye);
-    const float s =
-        std::max(dist * std::tan(lens.fov_y * 0.5f) * kGizmoScreenFraction, 1.0e-4f);
+    const float s = std::max(dist * std::tan(lens.fov_y * 0.5f) * kGizmoScreenFraction, 1.0e-4f);
 
     // World-aligned handles: translation + uniform scale only, never the entity's rotation (v1's
     // "global space" choice — the header's rationale).
@@ -283,12 +280,14 @@ void GizmoRenderer::declare(RenderGraph& graph,
     const RGColorAttachment colors[] = {{target, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
+
     struct DrawData { // captured by value: the λ must not reference dead locals
         GizmoPush pushes[4];
         Range ranges[3];
         GpuMesh mesh;
         bool tint;
     } data{};
+
     std::memcpy(data.pushes, pushes, sizeof(pushes));
     std::memcpy(data.ranges, axis_ranges, sizeof(axis_ranges));
     data.mesh = tint_mesh;

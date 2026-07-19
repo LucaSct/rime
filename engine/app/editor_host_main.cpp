@@ -237,9 +237,8 @@ void build_viewport_scene(ecs::World& world,
 
     const auto place = [&world](const core::Transform& tf, auto&&... comps) {
         // local == world at spawn (flat scene, no Parent); propagate keeps them equal thereafter.
-        (void)world.spawn_with(LocalTransform{tf},
-                               WorldTransform{tf},
-                               std::forward<decltype(comps)>(comps)...);
+        (void)world.spawn_with(
+            LocalTransform{tf}, WorldTransform{tf}, std::forward<decltype(comps)>(comps)...);
     };
 
     for (int c = 0; c < 4; ++c) {
@@ -439,12 +438,11 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
                     editorhost::GizmoStateMsg gs{};
                     if (editorhost::parse_gizmo_state(e.payload, gs)) {
                         gizmo_sel.entity = ecs::Entity{gs.index, gs.generation};
-                        gizmo_sel.mode = gs.index == 0xFFFFFFFFu
-                                             ? render::GizmoMode::None
-                                             : static_cast<render::GizmoMode>(
-                                                   gs.mode <= 3 ? gs.mode : 0);
-                        gizmo_sel.axis =
-                            static_cast<render::GizmoAxis>(gs.axis <= 3 ? gs.axis : 0);
+                        gizmo_sel.mode =
+                            gs.index == 0xFFFFFFFFu
+                                ? render::GizmoMode::None
+                                : static_cast<render::GizmoMode>(gs.mode <= 3 ? gs.mode : 0);
+                        gizmo_sel.axis = static_cast<render::GizmoAxis>(gs.axis <= 3 ? gs.axis : 0);
                     }
                 } else {
                     apply_edit(app.world(), e.type, e.payload);
@@ -492,9 +490,7 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
         if (frame_lens.found) {
             editorhost::ViewportCameraMsg cam{};
             std::memcpy(cam.view_proj, frame_lens.view_proj.m, sizeof(cam.view_proj));
-            std::memcpy(cam.inv_view_proj,
-                        frame_lens.inv_view_proj.m,
-                        sizeof(cam.inv_view_proj));
+            std::memcpy(cam.inv_view_proj, frame_lens.inv_view_proj.m, sizeof(cam.inv_view_proj));
             cam.eye[0] = frame_lens.eye.x;
             cam.eye[1] = frame_lens.eye.y;
             cam.eye[2] = frame_lens.eye.z;

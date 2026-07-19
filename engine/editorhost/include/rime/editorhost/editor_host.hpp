@@ -39,15 +39,15 @@ namespace rime::editorhost {
 // forward-compat rule (an old peer drops an unknown type) is what let M6.9 carve this range out
 // early. The engine->editor set is even-ish (read); editor->engine (edits) start at 0x0210.
 enum class EditorMessage : std::uint16_t {
-    Schema = 0x0200,       // engine -> editor: the reflected type registry (layout per type; m9.4)
-    Snapshot = 0x0201,     // engine -> editor: the whole world (entities + components)
-    AssetList = 0x0203,    // engine -> editor: the cook manifest (browsable assets; m9.5)
-    PickResult = 0x0204,   // engine -> editor: the entity under a picked viewport pixel (m9.6)
-    ViewportCamera = 0x0205, // engine -> editor: the viewport's exact render lens (m9.6 gizmos)
-    SetComponent = 0x0210, // editor -> engine: set a component's bytes on an entity
-    Spawn = 0x0211,        // editor -> engine: spawn an empty entity
-    Despawn = 0x0212,      // editor -> engine: despawn an entity
-    AddComponent = 0x0213, // editor -> engine: add a DEFAULT-constructed component to an entity
+    Schema = 0x0200,     // engine -> editor: the reflected type registry (layout per type; m9.4)
+    Snapshot = 0x0201,   // engine -> editor: the whole world (entities + components)
+    AssetList = 0x0203,  // engine -> editor: the cook manifest (browsable assets; m9.5)
+    PickResult = 0x0204, // engine -> editor: the entity under a picked viewport pixel (m9.6)
+    ViewportCamera = 0x0205,  // engine -> editor: the viewport's exact render lens (m9.6 gizmos)
+    SetComponent = 0x0210,    // editor -> engine: set a component's bytes on an entity
+    Spawn = 0x0211,           // editor -> engine: spawn an empty entity
+    Despawn = 0x0212,         // editor -> engine: despawn an entity
+    AddComponent = 0x0213,    // editor -> engine: add a DEFAULT-constructed component to an entity
     RemoveComponent = 0x0214, // editor -> engine: remove a component from an entity
     RequestSnapshot = 0x0215, // editor -> engine: resend the world (engine replies with Snapshot)
     SpawnEntity = 0x0216, // editor -> engine: spawn an entity WITH an initial component set (m9.5)
@@ -136,8 +136,8 @@ struct AssetListEntry {
 // its inverse: the editor never has to invert a matrix, and the two can never disagree. ~148 bytes
 // per frame — noise next to the LZ4 frame it rides with.
 struct ViewportCameraMsg {
-    float view_proj[16];     // clip-from-world, column-major (core::Mat4::m layout)
-    float inv_view_proj[16]; // world-from-clip: the engine-computed inverse of view_proj
+    float view_proj[16];               // clip-from-world, column-major (core::Mat4::m layout)
+    float inv_view_proj[16];           // world-from-clip: the engine-computed inverse of view_proj
     float eye[3] = {0.0f, 0.0f, 0.0f}; // camera world position (the perspective ray origin)
     std::uint32_t width = 0;           // the render extent the matrices target — pixel-space
     std::uint32_t height = 0;          // coordinates in gizmo math are relative to THIS size

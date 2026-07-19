@@ -592,8 +592,8 @@ TEST_CASE("editorhost: ViewportCamera and GizmoState round-trip their wire paylo
     // the honest assertion (no epsilon needed for a byte round-trip).
     editorhost::ViewportCameraMsg cam{};
     for (int i = 0; i < 16; ++i) {
-        cam.view_proj[i] = static_cast<float>(i) * 0.25f;        // distinct per slot: an element
-        cam.inv_view_proj[i] = 8.0f - static_cast<float>(i);     // swap/skew shows immediately
+        cam.view_proj[i] = static_cast<float>(i) * 0.25f;    // distinct per slot: an element
+        cam.inv_view_proj[i] = 8.0f - static_cast<float>(i); // swap/skew shows immediately
     }
     cam.eye[0] = 1.0f;
     cam.eye[1] = -2.0f;

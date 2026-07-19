@@ -56,9 +56,8 @@ struct PixelI {
 
 PixelI project_px(const core::Mat4& view_proj, core::Vec3 world) {
     const core::Vec4 clip = view_proj * core::Vec4{world.x, world.y, world.z, 1.0f};
-    return {
-        static_cast<std::int32_t>((clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(kSize)),
-        static_cast<std::int32_t>((clip.y / clip.w * 0.5f + 0.5f) * static_cast<float>(kSize))};
+    return {static_cast<std::int32_t>((clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(kSize)),
+            static_cast<std::int32_t>((clip.y / clip.w * 0.5f + 0.5f) * static_cast<float>(kSize))};
 }
 
 // RGBA8 access into a read-back LDR frame.
