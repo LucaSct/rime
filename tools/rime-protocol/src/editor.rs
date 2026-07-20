@@ -49,6 +49,8 @@ pub enum EditorMessage {
     /// extent — so gizmo math projects/unprojects through the same matrices the pixels were
     /// rendered with (m9.6 gizmos).
     ViewportCamera,
+    /// engine → editor: the play/edit phase plus how many fixed ticks have run (m9.7).
+    PlayState,
     /// editor → engine: set a component's bytes on an entity.
     SetComponent,
     /// editor → engine: spawn an empty entity.
@@ -70,6 +72,14 @@ pub enum EditorMessage {
     /// editor → engine: the current selection + gizmo mode/axis, so the engine renders the right
     /// gizmo and highlight over the viewport. Engine state, not a world edit (m9.6 gizmos).
     GizmoState,
+    /// editor → engine: begin (from Edit) or resume (from Paused) the simulation (m9.7).
+    Play,
+    /// editor → engine: stop ticking; the viewport keeps rendering (m9.7).
+    Pause,
+    /// editor → engine: run exactly one fixed tick, then stay Paused (m9.7).
+    Step,
+    /// editor → engine: restore the pre-play snapshot; back to Edit (m9.7).
+    Stop,
 }
 
 impl EditorMessage {
@@ -81,6 +91,7 @@ impl EditorMessage {
             EditorMessage::AssetList => 0x0203,
             EditorMessage::PickResult => 0x0204,
             EditorMessage::ViewportCamera => 0x0205,
+            EditorMessage::PlayState => 0x0206,
             EditorMessage::SetComponent => 0x0210,
             EditorMessage::Spawn => 0x0211,
             EditorMessage::Despawn => 0x0212,
@@ -90,6 +101,10 @@ impl EditorMessage {
             EditorMessage::SpawnEntity => 0x0216,
             EditorMessage::PickRequest => 0x0217,
             EditorMessage::GizmoState => 0x0218,
+            EditorMessage::Play => 0x0219,
+            EditorMessage::Pause => 0x021A,
+            EditorMessage::Step => 0x021B,
+            EditorMessage::Stop => 0x021C,
         }
     }
 
@@ -101,6 +116,7 @@ impl EditorMessage {
             0x0203 => Some(EditorMessage::AssetList),
             0x0204 => Some(EditorMessage::PickResult),
             0x0205 => Some(EditorMessage::ViewportCamera),
+            0x0206 => Some(EditorMessage::PlayState),
             0x0210 => Some(EditorMessage::SetComponent),
             0x0211 => Some(EditorMessage::Spawn),
             0x0212 => Some(EditorMessage::Despawn),
@@ -110,6 +126,10 @@ impl EditorMessage {
             0x0216 => Some(EditorMessage::SpawnEntity),
             0x0217 => Some(EditorMessage::PickRequest),
             0x0218 => Some(EditorMessage::GizmoState),
+            0x0219 => Some(EditorMessage::Play),
+            0x021A => Some(EditorMessage::Pause),
+            0x021B => Some(EditorMessage::Step),
+            0x021C => Some(EditorMessage::Stop),
             _ => None,
         }
     }
@@ -835,6 +855,67 @@ impl GizmoState {
             mode,
             axis,
         })
+    }
+}
+
+/// The editor's play/edit phase — the wire's `phase` byte (values are wire constants), mirroring
+/// `editorhost::PlayPhase` (m9.7, ADR-0031 §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlayPhase {
+    /// The sim schedule is paused; edits apply directly (m9.0 §4).
+    #[default]
+    Edit,
+    /// Ticking live, one fixed step per tick the engine runs.
+    Playing,
+    /// A session exists (a snapshot was taken) but ticking is halted; the viewport keeps rendering.
+    Paused,
+}
+
+impl PlayPhase {
+    /// The `u8` wire code.
+    pub fn to_u8(self) -> u8 {
+        match self {
+            PlayPhase::Edit => 0,
+            PlayPhase::Playing => 1,
+            PlayPhase::Paused => 2,
+        }
+    }
+
+    /// The phase for a wire code; an unknown byte reads as `Edit` (the safest default — a stale or
+    /// misread status should never make the UI claim the sim is running when it might not be).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => PlayPhase::Playing,
+            2 => PlayPhase::Paused,
+            _ => PlayPhase::Edit,
+        }
+    }
+}
+
+/// An engine → editor play-state message: the current phase plus how many fixed ticks have run
+/// since the session began (m9.7). Sent every viewport frame, like [`ViewportCamera`] — a handful
+/// of bytes — driving the editor's tick counter and state-coloured viewport border live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlayState {
+    pub phase: PlayPhase,
+    pub tick_count: u64,
+}
+
+impl PlayState {
+    /// Serialize the payload: `[phase:u8][tick_count:u64]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(self.phase.to_u8());
+        w.u64(self.tick_count);
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let phase = PlayPhase::from_u8(r.u8()?);
+        let tick_count = r.u64()?;
+        Ok(PlayState { phase, tick_count })
     }
 }
 
