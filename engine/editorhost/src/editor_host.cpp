@@ -104,6 +104,41 @@ bool is_editor_message(stream::MessageType type) noexcept {
            v <= static_cast<std::uint16_t>(stream::MessageType::EditorReservedEnd);
 }
 
+bool message_affects_frame(EditorMessage msg) noexcept {
+    switch (msg) {
+        // World edits (the camera is a world entity, so a camera move is a SetComponent), the gizmo
+        // overlay (composited into the frame), and the play-state transitions all change the next
+        // streamed frame — so the render/capture/encode/send pipeline must run this iteration.
+        case EditorMessage::SetComponent:
+        case EditorMessage::Spawn:
+        case EditorMessage::Despawn:
+        case EditorMessage::AddComponent:
+        case EditorMessage::RemoveComponent:
+        case EditorMessage::SpawnEntity:
+        case EditorMessage::GizmoState:
+        case EditorMessage::Play:
+        case EditorMessage::Pause:
+        case EditorMessage::Step:
+        case EditorMessage::Stop:
+            return true;
+        // Not frame-affecting. RequestSnapshot is answered with a Snapshot (world bytes, not a
+        // frame); PickRequest is served by the independent 1×1 pick pass. The engine->editor kinds
+        // are never received here, but a total switch classifies them for completeness.
+        case EditorMessage::RequestSnapshot:
+        case EditorMessage::PickRequest:
+        case EditorMessage::Schema:
+        case EditorMessage::Snapshot:
+        case EditorMessage::AssetList:
+        case EditorMessage::PickResult:
+        case EditorMessage::ViewportCamera:
+        case EditorMessage::PlayState:
+            return false;
+    }
+    // A value outside the enumerator set (an out-of-band cast) — the receiver already drops unknown
+    // types, so treat it as no-op rather than waking the pipeline.
+    return false;
+}
+
 std::vector<std::byte> serialize_world(const ecs::World& world) {
     std::vector<std::byte> out;
     core::ByteWriter w(out);

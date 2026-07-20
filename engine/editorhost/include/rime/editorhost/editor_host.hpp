@@ -63,6 +63,16 @@ enum class EditorMessage : std::uint16_t {
 // True if `type` (as received by recv_message) is an editor-channel message (the reserved band).
 [[nodiscard]] bool is_editor_message(stream::MessageType type) noexcept;
 
+// True if receiving `msg` (editor -> engine) changes what the viewport *renders*, so the frame must
+// be re-rendered and re-streamed. This is the classifier the editor host's idle-skip is keyed off
+// (m10.0-perf, ADR-0032 §11 — "idle work is a bug"): an idle editor renders nothing until an edit,
+// a gizmo change, or a play-state transition arrives. Deliberately NOT frame-affecting: a snapshot
+// request (answered with world bytes, not a frame) and a pick request (served by the independent
+// 1×1 pick pass, which never touches the streamed frame). Camera moves count — the camera is a
+// world entity, so they arrive as `SetComponent`. A total switch (no default) makes any future
+// message type a compile error until it is consciously classified.
+[[nodiscard]] bool message_affects_frame(EditorMessage msg) noexcept;
+
 // ── The reusable reflection core (no wire) ──────────────────────────────────────────────
 
 // Serialize every live entity and its **reflected** components into a self-describing blob: each

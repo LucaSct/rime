@@ -553,7 +553,23 @@ int serve_viewport(std::string_view socket_path,
     // clicks are human-rate, the queue is effectively 0–1 deep.
     std::deque<std::pair<std::int32_t, std::int32_t>> pick_queue;
 
+    // m10.0-perf (ADR-0032 §11 — "idle work is a bug"): an idle editor must cost ≈0% CPU. The
+    // render/stream pipeline below (render → GPU readback → LZ4 → send) is the expensive part, and
+    // it runs only when something *observable* changed — an applied edit, a gizmo change, a
+    // play-state transition, an advancing sim (Playing/Step), or a low-rate keepalive. Otherwise
+    // the loop just drains input at the poll rate and sleeps: a stationary editor in Edit/Paused
+    // streams nothing (its last frame is byte-identical). The keepalive re-sends a frame ~once a
+    // second as insurance (a freshly-attached client, a dropped frame) so the stream is never fully
+    // silent — bounding idle cost to ~1 fps of pipeline work instead of 30. The pick service and
+    // snapshot replies stay unconditional: both are cheap and independent of the streamed frame.
+    auto last_render = std::chrono::steady_clock::now();
+    const auto keepalive_period = std::chrono::milliseconds(1000);
+    bool first_frame = true;
+
     while (!stop.load(std::memory_order_relaxed)) {
+        bool needs_render =
+            first_frame; // always render the very first frame (the viewport is blank)
+        first_frame = false;
         bool snapshot_requested = false;
         // Armed by a Step message below, consumed once by frame_dt right after this drain — exactly
         // one extra fixed tick THIS iteration (m9.7's "step = exactly one tick").
@@ -566,6 +582,12 @@ int serve_viewport(std::string_view socket_path,
                 // that reflects them (coalescing multiple requests in a batch). PickRequest is the
                 // same shape of message — answered by this thread, not applied to the world.
                 const auto msg = static_cast<editorhost::EditorMessage>(e.type);
+                // m10.0-perf: does this message change the streamed frame? (Edits, gizmo, play
+                // control do; a snapshot/pick request does not.) One classifier, tested in
+                // isolation.
+                if (editorhost::message_affects_frame(msg)) {
+                    needs_render = true;
+                }
                 if (msg == editorhost::EditorMessage::RequestSnapshot) {
                     snapshot_requested = true;
                 } else if (msg == editorhost::EditorMessage::PickRequest) {
@@ -639,46 +661,92 @@ int serve_viewport(std::string_view socket_path,
             break; // client disconnected
         }
 
-        // Tick policy (m9.7, ADR-0031 §4): Playing ticks every iteration; a Step message arms
-        // exactly one extra tick THIS iteration then falls back to render-only; Edit/Paused render
-        // every iteration too (the viewport must stay live and responsive) but advance nothing —
-        // frame_dt of exactly 0 means Application::step's accumulator gains no time (its own
-        // non-positive-dt guard), so zero ticks run.
-        const double frame_dt =
-            (play_session.phase() == editorhost::PlayPhase::Playing || pending_step)
-                ? app.fixed_dt()
-                : 0.0;
-        // m9.7's tick policy renders Edit/Paused frames without a tick (frame_dt == 0) — but the
-        // tick (Application::run_ticks) is where propagate_transforms composes a LocalTransform
-        // edit into the WorldTransform the renderer, and the engine's gizmo pass, read. So on a
-        // non-ticking frame, derive it here; otherwise a gizmo/inspector edit does not move the
-        // streamed object until Play starts the ticks (the m9.6b live-edit invariant m9.7 silently
-        // deferred — the "gizmo does nothing until I press ▶" bug). A ticking frame (Playing/Step)
-        // skips this: run_ticks composes it, and physics write_back then owns the pose.
-        if (frame_dt == 0.0) {
-            ecs::propagate_transforms(app.world(), app.jobs());
+        // m10.0-perf: finalize the render decision with the reasons that aren't a per-message flag
+        // — the sim is advancing (Playing every iteration, or an armed Step), or the keepalive is
+        // due. `needs_render` was already set by the drain for any frame-affecting message above.
+        const bool playing = play_session.phase() == editorhost::PlayPhase::Playing;
+        const auto now = std::chrono::steady_clock::now();
+        if (playing || pending_step || (now - last_render) >= keepalive_period) {
+            needs_render = true;
         }
-        app.step(frame_dt); // tick (0 or 1, per frame_dt above) + render (executes the graph)
 
-        // The play state + tick count (m9.7) — sent every iteration like ViewportCamera: a handful
-        // of bytes, and the editor's tick counter / state-coloured border must track it live.
-        {
-            editorhost::PlayStateMsg pstate{};
-            pstate.phase = play_session.phase();
-            pstate.tick_count = play_session.tick_count();
-            if (!conn.send_message(
-                    static_cast<stream::MessageType>(editorhost::EditorMessage::PlayState),
-                    editorhost::serialize_play_state(pstate))) {
+        if (needs_render) {
+            // Tick policy (m9.7, ADR-0031 §4): Playing ticks every iteration; a Step message arms
+            // exactly one extra tick THIS iteration then falls back to render-only; Edit/Paused
+            // render without advancing — frame_dt of exactly 0 means Application::step's
+            // accumulator gains no time (its own non-positive-dt guard), so zero ticks run.
+            const double frame_dt = (playing || pending_step) ? app.fixed_dt() : 0.0;
+            // m9.7's tick policy renders Edit/Paused frames without a tick (frame_dt == 0) — but
+            // the tick (Application::run_ticks) is where propagate_transforms composes a
+            // LocalTransform edit into the WorldTransform the renderer, and the engine's gizmo
+            // pass, read. So on a non-ticking frame, derive it here; otherwise a gizmo/inspector
+            // edit does not move the streamed object until Play starts the ticks (the m9.6b
+            // live-edit invariant m9.7 silently deferred — the "gizmo does nothing until I press ▶"
+            // bug). A ticking frame (Playing/Step) skips this: run_ticks composes it, and physics
+            // write_back owns the pose.
+            if (frame_dt == 0.0) {
+                ecs::propagate_transforms(app.world(), app.jobs());
+            }
+            app.step(frame_dt); // tick (0 or 1, per frame_dt above) + render (executes the graph)
+
+            // The play state + tick count (m9.7): the editor's tick counter / state-coloured border
+            // tracks it live. Only meaningful on a rendered frame — when idle-skipped, neither the
+            // phase nor the tick count has moved since the last one we sent.
+            {
+                editorhost::PlayStateMsg pstate{};
+                pstate.phase = play_session.phase();
+                pstate.tick_count = play_session.tick_count();
+                if (!conn.send_message(
+                        static_cast<stream::MessageType>(editorhost::EditorMessage::PlayState),
+                        editorhost::serialize_play_state(pstate))) {
+                    break; // client disconnected
+                }
+            }
+
+            // Ship the frame's exact lens (m9.6b): the editor's gizmo hover/drag math unprojects
+            // through THESE matrices, so they must be the ones the pixels below were rendered with.
+            // Sent with the frame it matches (~148 B, noise next to the LZ4 frame); a camera edit
+            // is itself frame-affecting, so the new lens always rides its own render.
+            if (frame_lens.found) {
+                editorhost::ViewportCameraMsg cam{};
+                std::memcpy(cam.view_proj, frame_lens.view_proj.m, sizeof(cam.view_proj));
+                std::memcpy(
+                    cam.inv_view_proj, frame_lens.inv_view_proj.m, sizeof(cam.inv_view_proj));
+                cam.eye[0] = frame_lens.eye.x;
+                cam.eye[1] = frame_lens.eye.y;
+                cam.eye[2] = frame_lens.eye.z;
+                cam.width = cfg.render_extent.width;
+                cam.height = cfg.render_extent.height;
+                if (!conn.send_message(
+                        static_cast<stream::MessageType>(editorhost::EditorMessage::ViewportCamera),
+                        editorhost::serialize_viewport_camera(cam))) {
+                    break; // client disconnected
+                }
+            }
+
+            const rhi::TextureHandle ldr = app.graph()->physical(last_ldr);
+            const stream::FrameView view = streamer->capture(ldr);
+            stream::FrameMessage frame;
+            frame.sequence = sequence++;
+            frame.codec = stream::Codec::LZ4;
+            frame.desc = frame_desc;
+            if (!encoder.encode(stream::Codec::LZ4, frame_desc, view.pixels, frame.data)) {
+                RIME_ERROR("rime-engine: frame encode failed");
+                break;
+            }
+            if (!conn.send_frame(frame)) {
                 break; // client disconnected
             }
+            last_render = now;
         }
 
-        // The pick service (m9.6): collect a finished pick and answer it, then start the next
-        // queued one against the post-tick world — the world the frame streamed below shows.
-        // try_resolve is non-blocking (the s1.1 ticket), so a click never stalls the stream; its
-        // answer simply arrives a frame later (the documented pick latency). kNullEntity's raw
-        // handle (index 0xFFFFFFFF, generation 0) IS the wire's "nothing" sentinel, so hit and
-        // miss serialize identically.
+        // The pick service (m9.6) runs every iteration regardless of the idle-skip above: it has
+        // its own 1×1 pick pass + async readback (the s1.1 ticket), independent of the streamed
+        // frame, so a click is answered even while the main frame is idle-skipped (the world it
+        // picks against is unchanged when idle). try_resolve is non-blocking, so a click never
+        // stalls the loop; its answer arrives a frame later (the documented pick latency).
+        // kNullEntity's raw handle (index 0xFFFFFFFF, generation 0) IS the wire's "nothing"
+        // sentinel, so hit and miss serialize identically.
         if (picker.pending()) {
             if (const auto picked = picker.try_resolve()) {
                 std::vector<std::byte> out;
@@ -696,40 +764,6 @@ int serve_viewport(std::string_view socket_path,
             const auto [px, py] = pick_queue.front();
             pick_queue.pop_front();
             picker.begin_pick(app.world(), cfg.render_extent, px, py);
-        }
-
-        // Ship the frame's exact lens (m9.6b): the editor's gizmo hover/drag math unprojects
-        // through THESE matrices, so they must be the ones the pixels below were rendered with —
-        // sent every frame (~148 B, noise next to the LZ4 frame) rather than on-change, because
-        // an inspector edit to the camera must reflect in the very next lens the editor holds.
-        if (frame_lens.found) {
-            editorhost::ViewportCameraMsg cam{};
-            std::memcpy(cam.view_proj, frame_lens.view_proj.m, sizeof(cam.view_proj));
-            std::memcpy(cam.inv_view_proj, frame_lens.inv_view_proj.m, sizeof(cam.inv_view_proj));
-            cam.eye[0] = frame_lens.eye.x;
-            cam.eye[1] = frame_lens.eye.y;
-            cam.eye[2] = frame_lens.eye.z;
-            cam.width = cfg.render_extent.width;
-            cam.height = cfg.render_extent.height;
-            if (!conn.send_message(
-                    static_cast<stream::MessageType>(editorhost::EditorMessage::ViewportCamera),
-                    editorhost::serialize_viewport_camera(cam))) {
-                break; // client disconnected
-            }
-        }
-
-        const rhi::TextureHandle ldr = app.graph()->physical(last_ldr);
-        const stream::FrameView view = streamer->capture(ldr);
-        stream::FrameMessage frame;
-        frame.sequence = sequence++;
-        frame.codec = stream::Codec::LZ4;
-        frame.desc = frame_desc;
-        if (!encoder.encode(stream::Codec::LZ4, frame_desc, view.pixels, frame.data)) {
-            RIME_ERROR("rime-engine: frame encode failed");
-            break;
-        }
-        if (!conn.send_frame(frame)) {
-            break; // client disconnected
         }
 
         next_frame += frame_period;
