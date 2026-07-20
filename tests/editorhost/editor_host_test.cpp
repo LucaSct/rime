@@ -21,8 +21,11 @@
 #include <vector>
 
 #include "rime/core/byte_cursor.hpp"
+#include "rime/core/math/transform.hpp"
 #include "rime/core/reflect.hpp"
 #include "rime/ecs/query.hpp"
+#include "rime/ecs/reflect.hpp"
+#include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
 #include "rime/platform/socket.hpp"
@@ -313,6 +316,41 @@ TEST_CASE("editorhost: serves schema + snapshot and applies an edit over the loc
     CHECK(p->x == 5.0f); // the edit crossed the wire and applied
     CHECK(p->y == 6.0f);
     CHECK(p->z == 7.0f);
+}
+
+TEST_CASE(
+    "editorhost: WorldTransform is derived (unreflected) — an entity carrying it snapshots as "
+    "ONE component") {
+    // Every editor-viewport entity carries BOTH LocalTransform and WorldTransform
+    // (build_viewport_scene's flat-root pattern). They are structurally identical, so they share a
+    // reflection type_hash; were WorldTransform reflected, serialize_world would emit two same-hash
+    // components for the entity and the inspector would render two identical "LocalTransform"
+    // panels with colliding egui widget IDs (the m9.6b viewport bug). WorldTransform is
+    // deliberately UNREFLECTED (reflect.hpp), so the snapshot carries exactly the one editable
+    // placement.
+    ecs::World world;
+    ecs::register_transform_components(world);             // LocalTransform (reflected) + Parent
+    (void)world.register_component<ecs::WorldTransform>(); // renderer reads it; must be unreflected
+    core::Transform tf{};
+    tf.translation = {1.0f, 2.0f, 3.0f};
+    (void)world.spawn_with(ecs::LocalTransform{tf}, ecs::WorldTransform{tf});
+
+    const std::vector<std::byte> snap = editorhost::serialize_world(world);
+    core::ByteReader r(snap);
+    std::uint32_t magic = 0;
+    std::uint32_t entity_count = 0;
+    REQUIRE(r.u32(magic)); // snapshot magic (its value is asserted by the round-trip test above)
+    REQUIRE(r.u32(entity_count));
+    REQUIRE(entity_count == 1u);
+    std::uint32_t index = 0;
+    std::uint32_t generation = 0;
+    std::uint16_t comp_count = 0;
+    REQUIRE(r.u32(index));
+    REQUIRE(r.u32(generation));
+    REQUIRE(r.u16(comp_count));
+    // ONLY LocalTransform — WorldTransform is unreflected and never serialized (was 2 before the
+    // fix).
+    CHECK(comp_count == 1u);
 }
 
 TEST_CASE("editorhost: schema (RSM2) describes each type's fields, recursing into nested structs") {
