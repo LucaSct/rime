@@ -44,6 +44,7 @@ enum class EditorMessage : std::uint16_t {
     AssetList = 0x0203,  // engine -> editor: the cook manifest (browsable assets; m9.5)
     PickResult = 0x0204, // engine -> editor: the entity under a picked viewport pixel (m9.6)
     ViewportCamera = 0x0205,  // engine -> editor: the viewport's exact render lens (m9.6 gizmos)
+    PlayState = 0x0206,       // engine -> editor: the play/edit phase + tick count (m9.7)
     SetComponent = 0x0210,    // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,           // editor -> engine: spawn an empty entity
     Despawn = 0x0212,         // editor -> engine: despawn an entity
@@ -53,6 +54,10 @@ enum class EditorMessage : std::uint16_t {
     SpawnEntity = 0x0216, // editor -> engine: spawn an entity WITH an initial component set (m9.5)
     PickRequest = 0x0217, // editor -> engine: pick the entity at a viewport pixel (m9.6)
     GizmoState = 0x0218,  // editor -> engine: selection + gizmo mode/axis to render (m9.6 gizmos)
+    Play = 0x0219,  // editor -> engine: begin (from Edit) or resume (from Paused) the sim (m9.7)
+    Pause = 0x021A, // editor -> engine: stop ticking; the viewport keeps rendering (m9.7)
+    Step = 0x021B,  // editor -> engine: run exactly one fixed tick, then stay Paused (m9.7)
+    Stop = 0x021C,  // editor -> engine: restore the pre-play snapshot; back to Edit (m9.7)
 };
 
 // True if `type` (as received by recv_message) is an editor-channel message (the reserved band).
@@ -72,6 +77,18 @@ enum class EditorMessage : std::uint16_t {
 // false (logged) on a truncated blob or a `type_hash` the destination does not know. This is the
 // machinery m9.7's play snapshot/restore and m9.2's scene load reuse.
 [[nodiscard]] bool deserialize_world(ecs::World& dst, std::span<const std::byte> data);
+
+// A content fingerprint of every reflected component `world` holds — FNV-1a, in the same
+// archetype/chunk/row order serialize_world walks, over each entity's (type_hash, blob) pairs but
+// deliberately EXCLUDING the entity's own (index, generation). m9.7's play/stop restore despawns
+// every entity and respawns fresh ones (deserialize_world always mints new handles, never reuses
+// the source ids — see its comment above), and ecs::EntityDirectory unconditionally bumps a slot's
+// generation on every despawn (the safety invariant that makes a stale Entity handle detectable) —
+// so even a flawless restore never reproduces the exact pre-play (index, generation) pairs. This is
+// therefore the identity-independent "did the DATA come back exactly" witness the play/stop restore
+// proof wants (tests/app/editor_play_test.cpp), the same FNV-1a-over-flat-serialized-bytes
+// discipline as PhysicsWorld::world_hash / DestructionWorld::state_hash.
+[[nodiscard]] std::uint64_t world_content_hash(const ecs::World& world);
 
 // The schema: the reflected-type dictionary the editor's inspectors are *generated* from (m9.4). It
 // is not just component names any more — it is every reflected type reachable from a registered
@@ -165,6 +182,90 @@ struct GizmoStateMsg {
 // Serialize / parse the `GizmoState` payload: [index:u32][generation:u32][mode:u8][axis:u8].
 [[nodiscard]] std::vector<std::byte> serialize_gizmo_state(const GizmoStateMsg& msg);
 [[nodiscard]] bool parse_gizmo_state(std::span<const std::byte> payload, GizmoStateMsg& out);
+
+// ── Play/edit state machine (m9.7, ADR-0031 §4) ─────────────────────────────────────────
+
+// Edit -> Playing/Paused -> Edit, driven by the Play/Pause/Step/Stop editor messages. `PlaySession`
+// (below) owns only a phase, a memory snapshot (serialize_world's bytes — m9.2's reflection
+// machinery, to MEMORY not disk), and a tick counter, so it is provable in isolation exactly like
+// serialize_world/deserialize_world (tests/editorhost). It is deliberately silent on HOW a tick is
+// produced: the caller (editor_host_main.cpp's serve_viewport) decides, each loop iteration,
+// whether to advance the sim — phase() == Playing, or a one-shot armed Step — and reports back
+// afterward via record_tick(), which keeps this class free of an rime::app or rime::physics
+// dependency (module boundaries) while remaining the single source of truth the PlayState status
+// message reports from.
+//
+// THE ENGINEERING RISK this brick exists to resolve (ADR-0031 §4): engine SIDE-TABLES — physics
+// bodies, the M8 destruction SoA — must be "reconstructible from components" on restore.
+// PlaySession::stop() only touches the ECS (despawn everything, reconstruct from the snapshot); a
+// side-table itself is the CALLER's job to rebuild from the now-restored components. The two
+// side-tables this ADR names, and what was found/decided at kickoff:
+//   * PHYSICS already satisfies the rule BY CONSTRUCTION (physics::PhysicsSync::reconcile, M7.6):
+//     it binds every RigidBody+Collider+WorldTransform entity that lacks a body and destroys any
+//     body whose entity is gone, so recreating a fresh PhysicsWorld/PhysicsSync and reconciling
+//     against the restored world (editor_host_main.cpp does exactly this) rebuilds physics state
+//     from nothing but components — no new engine code needed, just wiring the existing seam in.
+//   * DESTRUCTION has no such path today, and none was built here: `destruction::DestructionWorld`
+//     takes no `ecs::World` anywhere in its API (ADR-0029 §5/§6 — destructible parts are not
+//     simulated entities, and destruction bypasses PhysicsSync on purpose, owning its bodies
+//     directly), and the editor host never constructs a DestructionWorld — the M9 viewport scenes
+//     carry no destructibles. There is therefore no component-level representation to reconstruct
+//     FROM yet; inventing one here, with no consumer to exercise it, would be exactly the kind of
+//     unasked-for infrastructure the project's "measure, don't guess" discipline warns against.
+//     Wiring destructibles into the editor (an ECS-authored destructible-instance component plus a
+//     reconcile step over it) is ADR-0029 §6's own named graduation trigger — left for the brick
+//     that actually authors destructibles in the editor, not fabricated against no consumer here.
+enum class PlayPhase : std::uint8_t {
+    Edit = 0,    // the sim schedule is paused; edits apply directly (m9.0 §4)
+    Playing = 1, // ticking live, one fixed step per call the caller makes
+    Paused = 2,  // a session exists (a snapshot was taken) but ticking is halted; render continues
+};
+
+// The `PlayState` payload: the phase plus how many fixed ticks have run since play()/pause() first
+// left Edit (reset to 0 by stop()). Sent every viewport frame, like ViewportCamera — a handful of
+// bytes — so it is what drives the editor's tick counter and state-coloured viewport border live.
+struct PlayStateMsg {
+    PlayPhase phase = PlayPhase::Edit;
+    std::uint64_t tick_count = 0;
+};
+
+// Serialize / parse the `PlayState` payload: [phase:u8][tick_count:u64].
+[[nodiscard]] std::vector<std::byte> serialize_play_state(const PlayStateMsg& msg);
+[[nodiscard]] bool parse_play_state(std::span<const std::byte> payload, PlayStateMsg& out);
+
+class PlaySession {
+public:
+    // Begin (from Edit: snapshot `world` first) or resume (from Paused — keeping the ORIGINAL
+    // snapshot, so a later Stop still restores the true pre-play state, not the paused mid-play
+    // one) the simulation. Idempotent while already Playing.
+    void play(const ecs::World& world);
+
+    // Ensure a session exists — snapshotting `world` on a first call from Edit, exactly like
+    // play() — but leave the steady-state phase at Paused. Used by the Pause message (Playing ->
+    // Paused) and by a Step requested straight from Edit, which must still end up with a snapshot
+    // to eventually Stop back to.
+    void pause(const ecs::World& world);
+
+    // Restore `world` from the pre-play snapshot: despawn every entity currently in `world`, then
+    // reconstruct every entity from the snapshot's component data (never handles —
+    // deserialize_world always mints fresh entity ids; see its doc comment). Returns to Edit and
+    // clears the snapshot and tick counter. No-op returning false if already Edit — nothing was
+    // playing to restore.
+    bool stop(ecs::World& world);
+
+    // The caller's single source-of-truth call: exactly once per fixed tick it actually ran (a
+    // continuous Play tick or an armed Step), so tick_count() always matches ticks really taken.
+    void record_tick() noexcept { ++tick_count_; }
+
+    [[nodiscard]] PlayPhase phase() const noexcept { return phase_; }
+
+    [[nodiscard]] std::uint64_t tick_count() const noexcept { return tick_count_; }
+
+private:
+    PlayPhase phase_ = PlayPhase::Edit;
+    std::vector<std::byte> snapshot_;
+    std::uint64_t tick_count_ = 0;
+};
 
 // ── The host over the wire ──────────────────────────────────────────────────────────────
 

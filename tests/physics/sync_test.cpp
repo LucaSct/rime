@@ -121,6 +121,60 @@ TEST_CASE("M7.6 sync: write-back moves an awake body's transform and stamps it c
     CHECK(w.get<ecs::WorldTransform>(e)->value.translation.y == doctest::Approx(s.position.y));
 }
 
+TEST_CASE(
+    "m9.7 sync: write-back mirrors the pose into LocalTransform too, when the entity has one") {
+    // Play/Stop (m9.7, engine/editorhost) restores a world from a reflection-driven snapshot, which
+    // cannot carry WorldTransform (derived state, deliberately unreflected — reflect.hpp).
+    // Mirroring write-back's pose into LocalTransform too — when the entity carries one — is what
+    // gives a physics body's placement a component the snapshot CAN restore; it also keeps
+    // ecs::propagate_transforms' every-tick WorldTransform = LocalTransform reset harmless (a
+    // no-op) instead of a corruption once the body sleeps and write-back stops touching it.
+    ecs::World w;
+    physics::PhysicsWorld phys;
+    physics::PhysicsSync sync;
+    phys.set_gravity({0.0f, -10.0f, 0.0f});
+
+    SUBCASE("an entity WITH a LocalTransform gets it kept in step with WorldTransform") {
+        const ecs::Entity e =
+            spawn_box(w, {0.0f, 5.0f, 0.0f}, physics::MotionType::Dynamic, {0.5f, 0.5f, 0.5f});
+        (void)w.add_component<ecs::LocalTransform>(e, ecs::LocalTransform{});
+
+        const ecs::Version checkpoint = w.version();
+        w.advance_version();
+        sync.step(w, phys, kDt);
+
+        const ecs::WorldTransform* wt = w.get<ecs::WorldTransform>(e);
+        const ecs::LocalTransform* lt = w.get<ecs::LocalTransform>(e);
+        REQUIRE(wt != nullptr);
+        REQUIRE(lt != nullptr);
+        CHECK(wt->value.translation.y < 5.0f); // moved (the body fell)
+        // Bit-exact, not approximate: write_back assigns lt->value = wt->value directly.
+        CHECK(lt->value.translation.x == wt->value.translation.x);
+        CHECK(lt->value.translation.y == wt->value.translation.y);
+        CHECK(lt->value.translation.z == wt->value.translation.z);
+        CHECK(lt->value.rotation.x == wt->value.rotation.x);
+        CHECK(lt->value.rotation.w == wt->value.rotation.w);
+
+        // And the stamp reaches LocalTransform too — a change-tracking consumer (the editor's
+        // delta sync, a future brick) must see it moved, not just WorldTransform.
+        std::vector<ecs::Entity> changed;
+        w.query<ecs::LocalTransform>().for_each_changed(
+            checkpoint, [&](ecs::Entity ent, ecs::LocalTransform&) { changed.push_back(ent); });
+        REQUIRE(changed.size() == 1);
+        CHECK(changed[0] == e);
+    }
+
+    SUBCASE("an entity WITHOUT a LocalTransform is untouched — none is spuriously added") {
+        // spawn_box (this file's helper) never adds one — the existing M7 physics suite's shape,
+        // unchanged since before this brick. write-back must not start adding components no caller
+        // asked for.
+        const ecs::Entity e =
+            spawn_box(w, {0.0f, 5.0f, 0.0f}, physics::MotionType::Dynamic, {0.5f, 0.5f, 0.5f});
+        sync.step(w, phys, kDt);
+        CHECK_FALSE(w.has<ecs::LocalTransform>(e));
+    }
+}
+
 TEST_CASE("M7.6 sync: a static body is never written back, so it never stamps") {
     ecs::World w;
     physics::PhysicsWorld phys;

@@ -41,6 +41,14 @@ pub enum Command {
     Despawn { key: EntityKey },
     /// Ask the engine to resend the world (after a structural change, to resync the mirror).
     RequestSnapshot,
+    /// Begin (from Edit) or resume (from Paused) the simulation (m9.7).
+    Play,
+    /// Stop ticking; the viewport keeps rendering (m9.7).
+    Pause,
+    /// Run exactly one fixed tick, then stay Paused (m9.7).
+    Step,
+    /// Restore the pre-play snapshot; back to Edit (m9.7).
+    Stop,
 }
 
 impl Command {
@@ -79,11 +87,22 @@ impl Command {
             ),
             Command::Despawn { key } => (EditorMessage::Despawn, encode_despawn(key.0, key.1)),
             Command::RequestSnapshot => (EditorMessage::RequestSnapshot, Vec::new()),
+            Command::Play => (EditorMessage::Play, Vec::new()),
+            Command::Pause => (EditorMessage::Pause, Vec::new()),
+            Command::Step => (EditorMessage::Step, Vec::new()),
+            Command::Stop => (EditorMessage::Stop, Vec::new()),
         }
     }
 
     /// True for commands that change the world's *structure* (which entities/components exist), so the
     /// caller knows to request a fresh snapshot rather than trust an optimistic value patch.
+    ///
+    /// `Stop` counts: it restores the pre-play world wholesale (m9.7), so the mirror's entity
+    /// handles are all stale the instant it lands and must be re-fetched. `Play`/`Pause`/`Step` do
+    /// NOT — a tick moves component values (WorldTransform) on entities that already exist, which
+    /// is exactly what an optimistic-patch model does not chase; the state-coloured viewport border
+    /// (gui.rs) is the honest v1 signal that the inspector's numbers are not live during Play,
+    /// rather than polling a snapshot every tick.
     pub fn is_structural(&self) -> bool {
         matches!(
             self,
@@ -92,6 +111,7 @@ impl Command {
                 | Command::Spawn
                 | Command::SpawnEntity { .. }
                 | Command::Despawn { .. }
+                | Command::Stop
         )
     }
 }

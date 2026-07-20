@@ -14,8 +14,8 @@ use std::thread;
 use rime_protocol::{
     decode_value, encode_value, AssetKind, AssetList, Codec, ComponentRef, Connection,
     EditorMessage, FieldKind, FrameMessage, GizmoAxis, GizmoMode, GizmoState, InputEvent,
-    InputKind, MessageType, PickRequest, PickResult, PixelFormat, Schema, SetComponent, Snapshot,
-    SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    InputKind, MessageType, PickRequest, PickResult, PixelFormat, PlayPhase, PlayState, Schema,
+    SetComponent, Snapshot, SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -279,6 +279,20 @@ fn gizmo_state_decodes_and_re_encodes_byte_exact() {
 }
 
 #[test]
+fn play_state_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("play_state.bin");
+    let ps = PlayState::decode(&golden).expect("decode play state");
+    assert_eq!(ps.phase, PlayPhase::Paused);
+    assert_eq!(ps.tick_count, 123_456_789);
+    assert_eq!(ps.encode(), golden);
+    // The default (unset) state is Edit / tick 0 — what a fresh session reports before any Play.
+    assert_eq!(PlayState::default().phase, PlayPhase::Edit);
+    assert_eq!(PlayState::default().tick_count, 0);
+    // An unknown phase byte reads as Edit (the forward-compat / fail-safe default), never a panic.
+    assert_eq!(PlayPhase::from_u8(0xFF), PlayPhase::Edit);
+}
+
+#[test]
 fn snapshot_decodes_structure_and_re_encodes_byte_exact() {
     let golden = fixture("snapshot.bin");
     let snap = Snapshot::decode(&golden).expect("decode snapshot");
@@ -315,6 +329,11 @@ fn message_type_and_editor_codes_are_stable() {
     assert_eq!(EditorMessage::SetComponent.to_code(), 0x0210);
     assert_eq!(EditorMessage::ViewportCamera.to_code(), 0x0205);
     assert_eq!(EditorMessage::GizmoState.to_code(), 0x0218);
+    assert_eq!(EditorMessage::PlayState.to_code(), 0x0206);
+    assert_eq!(EditorMessage::Play.to_code(), 0x0219);
+    assert_eq!(EditorMessage::Pause.to_code(), 0x021A);
+    assert_eq!(EditorMessage::Step.to_code(), 0x021B);
+    assert_eq!(EditorMessage::Stop.to_code(), 0x021C);
     assert_eq!(
         EditorMessage::from_code(0x0200),
         Some(EditorMessage::Schema)
@@ -323,6 +342,7 @@ fn message_type_and_editor_codes_are_stable() {
         EditorMessage::from_code(0x0218),
         Some(EditorMessage::GizmoState)
     );
+    assert_eq!(EditorMessage::from_code(0x021C), Some(EditorMessage::Stop));
     assert_eq!(EditorMessage::from_code(0x0001), None);
 }
 

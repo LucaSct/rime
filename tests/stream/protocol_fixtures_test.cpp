@@ -213,6 +213,14 @@ std::vector<std::byte> gizmo_state_bytes() {
     return editorhost::serialize_gizmo_state(m);
 }
 
+// A PlayState payload (engine -> editor): the play/edit phase + tick count (m9.7).
+std::vector<std::byte> play_state_bytes() {
+    editorhost::PlayStateMsg m{};
+    m.phase = editorhost::PlayPhase::Paused;
+    m.tick_count = 123456789ull;
+    return editorhost::serialize_play_state(m);
+}
+
 // A known 8x8 RGBA gradient — the pixels the editor viewport must recover after an LZ4 round trip.
 std::vector<std::byte> lz4_pixels_raw() {
     constexpr std::uint32_t w = 8;
@@ -292,6 +300,7 @@ std::vector<Fixture> all_fixtures() {
         {"pick_result.bin", pick_result_bytes()},
         {"viewport_camera.bin", viewport_camera_bytes()},
         {"gizmo_state.bin", gizmo_state_bytes()},
+        {"play_state.bin", play_state_bytes()},
         {"frame_lz4.bin", frame_lz4_bytes()},
         {"frame_lz4_pixels.bin", lz4_pixels_raw()},
     };

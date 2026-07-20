@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rime_protocol::{
     AssetEntry, AssetList, Connection, EditorMessage, FrameMessage, InputEvent, InputKind,
-    MessageType, PickResult, Schema, Snapshot, SnapshotComponent, ViewportCamera,
+    MessageType, PickResult, PlayState, Schema, Snapshot, SnapshotComponent, ViewportCamera,
 };
 
 use super::protocol_input::Input;
@@ -64,6 +64,10 @@ pub struct SharedState {
     /// hover/drag math reads it each repaint — latest wins, no consumption: unlike a pick it is
     /// continuous state, not an answer to a request.
     pub camera: Option<ViewportCamera>,
+    /// The engine's play/edit phase + tick count (m9.7), refreshed with every viewport frame like
+    /// `camera` above — continuous state the toolbar/border/tick-counter read each repaint, never
+    /// consumed. Defaults to `PlayState::default()` (Edit, tick 0) before the engine's first frame.
+    pub play_state: PlayState,
     last_frame_at: Option<Instant>,
 }
 
@@ -335,6 +339,13 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
             // pixels it describes.
             if let Ok(camera) = ViewportCamera::decode(payload) {
                 shared.lock().unwrap().camera = Some(camera);
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::PlayState.to_code() => {
+            // The play/edit phase + tick count (m9.7), like ViewportCamera above: overwrite with
+            // the newest, sent every viewport frame.
+            if let Ok(play_state) = PlayState::decode(payload) {
+                shared.lock().unwrap().play_state = play_state;
             }
         }
         _ => {} // an editor->engine type echoed, or something this build predates

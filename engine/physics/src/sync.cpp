@@ -100,6 +100,31 @@ void PhysicsSync::write_back(ecs::World& world, PhysicsWorld& physics) {
         wt->value.translation = s.position;
         wt->value.rotation = s.orientation; // scale is the game's; physics never touches it
         world.mark_changed<ecs::WorldTransform>(b.entity);
+
+        // m9.7 (editor Play/Stop): mirror the pose into LocalTransform too, for any entity that
+        // carries one. v1 PhysicsSync only ever binds ROOT bodies (a parented body's sync is a
+        // documented seam this bridge does not fill yet — the class comment above), so
+        // local == world already holds for every body it can move; this just keeps that identity
+        // true in BOTH components instead of only WorldTransform. Two things ride on it:
+        //   (1) WorldTransform is derived state and deliberately UNREFLECTED (reflect.hpp) — it
+        //       cannot appear in a reflection-driven snapshot at all — so a physics body's
+        //       placement had no component-level source of truth an editor Play/Stop restore could
+        //       recover. LocalTransform IS reflected; mirroring into it is what makes
+        //       "reconstructible from components" (ADR-0031 §4) literally true for physics-owned
+        //       placement.
+        //   (2) It fixes a real clobbering bug the m9.7 restore proof caught:
+        //   ecs::propagate_transforms
+        //       unconditionally recomposes WorldTransform = LocalTransform for any entity that has
+        //       a LocalTransform, every tick, BEFORE this write-back runs. While a body is awake
+        //       that was harmless (write-back overwrote the reset every tick); the instant a body
+        //       SLEPT, write-back stopped touching it (M7.5's "a settled world writes back
+        //       nothing"), but propagate_transforms kept resetting WorldTransform to the STALE
+        //       LocalTransform every tick after — a settled body silently snapped back to its spawn
+        //       pose. Keeping LocalTransform current makes that reset a no-op.
+        if (ecs::LocalTransform* lt = world.get<ecs::LocalTransform>(b.entity)) {
+            lt->value = wt->value;
+            world.mark_changed<ecs::LocalTransform>(b.entity);
+        }
     }
 }
 

@@ -10,6 +10,7 @@
 
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/diagnostics/log.hpp"
+#include "rime/core/hash.hpp"
 #include "rime/core/reflect/serialize.hpp"
 #include "rime/ecs/archetype.hpp"
 #include "rime/ecs/chunk.hpp"
@@ -69,6 +70,30 @@ ecs::ComponentId id_for_type_hash(const ecs::ComponentRegistry& registry, std::u
         }
     }
     return ecs::kInvalidComponentId;
+}
+
+// Despawn every entity currently in `world` — the wipe PlaySession::stop needs before
+// deserialize_world, which only ADDS entities (its own doc comment: "Spawns a fresh entity per
+// record"); it never clears what is already there. Entities are collected into a vector FIRST: a
+// despawn swap-compacts its archetype/chunk (the vacated row is filled by the last one), which
+// would skip or re-visit rows if we despawned while walking them directly — the same
+// collect-then-mutate discipline editor_host_main.cpp's derive_world_transforms uses for
+// add_component.
+void despawn_all(ecs::World& world) {
+    std::vector<ecs::Entity> alive;
+    alive.reserve(world.entity_count());
+    for (std::size_t ai = 0; ai < world.archetype_count(); ++ai) {
+        const ecs::Archetype& arch = world.archetype(ai);
+        for (std::uint32_t ci = 0; ci < arch.chunk_count(); ++ci) {
+            const ecs::Chunk& chunk = arch.chunk(ci);
+            for (std::uint32_t row = 0; row < chunk.size(); ++row) {
+                alive.push_back(chunk.entity_at(row));
+            }
+        }
+    }
+    for (const ecs::Entity e : alive) {
+        world.despawn(e);
+    }
 }
 
 } // namespace
@@ -162,6 +187,37 @@ bool deserialize_world(ecs::World& dst, std::span<const std::byte> data) {
         }
     }
     return true;
+}
+
+std::uint64_t world_content_hash(const ecs::World& world) {
+    // Same archetype/chunk/row walk as serialize_world, and the same per-component
+    // (type_hash, blob) pairs — but folded straight into an FNV-1a running hash rather than a
+    // byte buffer, and with NO entity index/generation mixed in (see the header comment: a
+    // despawn-everything-then-respawn restore can never reproduce those, by the entity directory's
+    // own safety design, so they are not part of "did the data come back exactly").
+    const ecs::ComponentRegistry& registry = world.components();
+    std::uint64_t h = core::kFnv1a64OffsetBasis;
+    for (std::size_t ai = 0; ai < world.archetype_count(); ++ai) {
+        const ecs::Archetype& arch = world.archetype(ai);
+        const std::vector<ecs::ComponentId>& ids = arch.signature().ids();
+        for (std::uint32_t ci = 0; ci < arch.chunk_count(); ++ci) {
+            const ecs::Chunk& chunk = arch.chunk(ci);
+            for (std::uint32_t row = 0; row < chunk.size(); ++row) {
+                for (const ecs::ComponentId id : ids) {
+                    const ecs::ComponentInfo& info = registry.info(id);
+                    if (info.type_info == nullptr) {
+                        continue; // unreflected (e.g. RigidBodyHandle) — not part of the data
+                    }
+                    const std::uint64_t type_hash = info.type_info->type_hash;
+                    h = core::fnv1a_64(std::as_bytes(std::span{&type_hash, 1}), h);
+                    const std::vector<std::byte> blob =
+                        core::serialize(*info.type_info, chunk.component(id, row));
+                    h = core::fnv1a_64(blob, h);
+                }
+            }
+        }
+    }
+    return h;
 }
 
 std::vector<std::byte> serialize_schema(const ecs::World& world) {
@@ -335,6 +391,58 @@ std::vector<std::byte> serialize_gizmo_state(const GizmoStateMsg& msg) {
 bool parse_gizmo_state(std::span<const std::byte> payload, GizmoStateMsg& out) {
     core::ByteReader r(payload);
     return r.u32(out.index) && r.u32(out.generation) && r.u8(out.mode) && r.u8(out.axis);
+}
+
+std::vector<std::byte> serialize_play_state(const PlayStateMsg& msg) {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    w.u8(static_cast<std::uint8_t>(msg.phase));
+    w.u64(msg.tick_count);
+    return out;
+}
+
+bool parse_play_state(std::span<const std::byte> payload, PlayStateMsg& out) {
+    core::ByteReader r(payload);
+    std::uint8_t phase = 0;
+    if (!r.u8(phase) || !r.u64(out.tick_count)) {
+        return false;
+    }
+    out.phase = static_cast<PlayPhase>(phase);
+    return true;
+}
+
+void PlaySession::play(const ecs::World& world) {
+    if (phase_ == PlayPhase::Edit) {
+        snapshot_ = serialize_world(world);
+        tick_count_ = 0;
+    }
+    phase_ = PlayPhase::Playing;
+}
+
+void PlaySession::pause(const ecs::World& world) {
+    if (phase_ == PlayPhase::Edit) {
+        snapshot_ = serialize_world(world);
+        tick_count_ = 0;
+    }
+    phase_ = PlayPhase::Paused;
+}
+
+bool PlaySession::stop(ecs::World& world) {
+    if (phase_ == PlayPhase::Edit) {
+        return false; // nothing was playing — no snapshot to restore
+    }
+    despawn_all(world);
+    if (!deserialize_world(world, snapshot_)) {
+        // snapshot_ is this session's own serialize_world output, against this same world's
+        // registered types, so this should be unreachable; log rather than silently leave `world`
+        // however deserialize_world got partway through before the failure.
+        RIME_ERROR("editorhost: play-session restore failed to deserialize its own snapshot");
+    }
+    phase_ = PlayPhase::Edit;
+    snapshot_.clear();
+    snapshot_.shrink_to_fit();
+    tick_count_ = 0;
+    return true;
 }
 
 bool spawn_entity_from_payload(ecs::World& world, std::span<const std::byte> payload) {

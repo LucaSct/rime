@@ -29,7 +29,7 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
 use rime_protocol::{
     decode_value, encode_value, AssetEntry, AssetKind, EditorMessage, GizmoAxis, GizmoMode,
-    GizmoState, PickRequest, Schema, SnapshotEntity, Value, ViewportCamera,
+    GizmoState, PickRequest, PlayPhase, Schema, SnapshotEntity, Value, ViewportCamera,
 };
 
 use crate::gizmo::{self, DragSession, Snapping};
@@ -255,6 +255,7 @@ impl eframe::App for EditorApp {
             new_image,
             pick,
             camera,
+            play_state,
         ) = {
             let mut s = self.shared.lock().unwrap();
             let new_image = match &s.frame {
@@ -280,6 +281,7 @@ impl eframe::App for EditorApp {
                 new_image,
                 pick,
                 s.camera, // Copy: the newest render lens (gizmo math reads it, never consumes)
+                s.play_state, // Copy: the newest play phase + tick count (m9.7), never consumed
             )
         };
 
@@ -388,6 +390,44 @@ impl eframe::App for EditorApp {
                     }
                 }
                 ui.checkbox(&mut gizmo_snap, "Snap");
+                ui.separator();
+                // Play/Pause/Step/Stop (m9.7, ADR-0031 §4) — the same wire the headless
+                // play/restore proof drives (tests/app/editor_play_test.cpp); each button just
+                // pushes the matching zero-payload Command onto the same `actions` dispatch every
+                // other edit uses. Play is disabled once already Playing (a single play/resume
+                // button, not a redundant re-send); Pause only while actually Playing; Stop only
+                // once there is something to restore; Step is always live — it is meaningful (and
+                // safe) from Edit, Playing, or Paused alike (the engine pauses-then-steps).
+                let phase = play_state.phase;
+                if ui
+                    .add_enabled(phase != PlayPhase::Playing, egui::Button::new("▶"))
+                    .on_hover_text("Play")
+                    .clicked()
+                {
+                    actions.push(Command::Play);
+                }
+                if ui
+                    .add_enabled(phase == PlayPhase::Playing, egui::Button::new("⏸"))
+                    .on_hover_text("Pause")
+                    .clicked()
+                {
+                    actions.push(Command::Pause);
+                }
+                if ui.button("⏭").on_hover_text("Step one tick").clicked() {
+                    actions.push(Command::Step);
+                }
+                if ui
+                    .add_enabled(phase != PlayPhase::Edit, egui::Button::new("⏹"))
+                    .on_hover_text("Stop (restore the pre-play world)")
+                    .clicked()
+                {
+                    actions.push(Command::Stop);
+                }
+                ui.label(match phase {
+                    PlayPhase::Edit => "Edit".to_owned(),
+                    PlayPhase::Playing => format!("▶ Playing · tick {}", play_state.tick_count),
+                    PlayPhase::Paused => format!("⏸ Paused · tick {}", play_state.tick_count),
+                });
             });
         });
         self.gizmo_mode = gizmo_mode;
@@ -483,6 +523,7 @@ impl eframe::App for EditorApp {
         let mut viewer = EditorTabs {
             frame_tex: self.frame_tex.as_ref(),
             frame_dims,
+            play_phase: play_state.phase,
             entities: &entities,
             schema: &schema,
             addable: &addable,
@@ -537,6 +578,8 @@ impl eframe::App for EditorApp {
 struct EditorTabs<'a> {
     frame_tex: Option<&'a egui::TextureHandle>,
     frame_dims: Option<(u32, u32)>,
+    // The engine's play/edit phase (m9.7) — the viewport border's state colour.
+    play_phase: PlayPhase,
     entities: &'a [SnapshotEntity],
     schema: &'a Schema,
     addable: &'a [(u64, String)],
@@ -598,7 +641,14 @@ impl TabViewer for EditorTabs<'_> {
                     actions: &mut *self.actions,
                     stack: &mut *self.stack,
                 };
-                viewport_ui(ui, self.frame_tex, self.frame_dims, self.out_tx, &mut gz);
+                viewport_ui(
+                    ui,
+                    self.frame_tex,
+                    self.frame_dims,
+                    self.play_phase,
+                    self.out_tx,
+                    &mut gz,
+                );
             }
             Tab::Outliner => outliner_ui(ui, self.entities, self.selected, self.actions),
             Tab::Inspector => inspector_ui(
@@ -719,6 +769,7 @@ fn viewport_ui(
     ui: &mut egui::Ui,
     frame_tex: Option<&egui::TextureHandle>,
     frame_dims: Option<(u32, u32)>,
+    play_phase: PlayPhase,
     out_tx: &Sender<Outbound>,
     gz: &mut GizmoView,
 ) {
@@ -742,6 +793,30 @@ fn viewport_ui(
             egui::FontId::proportional(16.0),
             egui::Color32::from_gray(140),
         );
+    }
+    // The state-coloured border (m9.7): Edit is neutral (no border — the common, default-most-of-
+    // the-time state should not add visual noise), Playing green, Paused amber — the same
+    // at-a-glance vocabulary a video editor's transport uses, so "is this live right now" never
+    // depends on reading the toolbar label.
+    if let Some(color) = phase_border_color(play_phase) {
+        // Inside: the stroke stays within the panel's own rect rather than bleeding a pixel or two
+        // into whatever dock tab sits next to it.
+        ui.painter().rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(3.0_f32, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// The viewport border colour for a play phase, or `None` for Edit (no border drawn). Reuses the
+/// status bar's connected/connecting palette so the two indicators speak the same visual language.
+fn phase_border_color(phase: PlayPhase) -> Option<egui::Color32> {
+    match phase {
+        PlayPhase::Edit => None,
+        PlayPhase::Playing => Some(egui::Color32::from_rgb(90, 200, 120)),
+        PlayPhase::Paused => Some(egui::Color32::from_rgb(220, 190, 90)),
     }
 }
 

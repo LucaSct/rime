@@ -52,6 +52,7 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
+#include "rime/physics/physics.hpp" // umbrella: body/shape/world/components/sync (m9.7 Play)
 #include "rime/platform/socket.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/gizmo_renderer.hpp"
@@ -106,6 +107,27 @@ void register_and_populate(ecs::World& world, std::string_view scene_path) {
             RIME_ERROR("rime-engine: scene load failed ({}): {}", scene_path, report.error);
         }
     }
+}
+
+// A reflection-driven restore (a .rscene load, or m9.7's play-session PlaySession::stop) only ever
+// carries LocalTransform — WorldTransform is derived state and deliberately unreflected
+// (reflect.hpp), so it cannot ride a snapshot at all. After such a restore, give every
+// LocalTransform holder that lacks one a default WorldTransform, then propagate_transforms composes
+// the (possibly parented) local chain into it — the same two-step "load then derive" every
+// reflection-driven world reconstruction needs. Collect-then-add because add_component relocates an
+// entity between archetypes (the "archetype move"), which would invalidate a query mid-iteration.
+void derive_world_transforms(ecs::World& world) {
+    std::vector<ecs::Entity> posed;
+    world.query<ecs::LocalTransform>().for_each([&](ecs::Entity e, ecs::LocalTransform&) {
+        if (!world.has<ecs::WorldTransform>(e)) {
+            posed.push_back(e);
+        }
+    });
+    for (const ecs::Entity e : posed) {
+        (void)world.add_component<ecs::WorldTransform>(e, ecs::WorldTransform{});
+    }
+    core::JobSystem jobs;
+    ecs::propagate_transforms(world, jobs);
 }
 
 // Apply one editor->engine edit to `world`. Mirrors editorhost::EditorHost::poll_one's dispatch,
@@ -232,12 +254,22 @@ void build_viewport_scene(ecs::World& world,
     // snapshot shows the derived pose (the gizmo projects handles at the world position).
     (void)world.register_component<WorldTransform>();
     render::register_render_components(world);
+    // RigidBody/Collider (m9.7 Play): registered even though only the ball below carries them at
+    // spawn, so the schema advertises them in the inspector's "+ add component" menu from the
+    // start — the same reasoning WorldTransform gets pre-registered above.
+    physics::register_physics_components(world);
 
     const render::MeshId sphere = meshes.add(render::make_uv_sphere(0.8f, 32, 64), "sphere");
     const render::MeshId floor = meshes.add(render::make_plane(10.0f, 4.0f), "floor");
 
     const auto place = [&world](const core::Transform& tf, auto&&... comps) {
         // local == world at spawn (flat scene, no Parent); propagate keeps them equal thereafter.
+        // Physics-bound entities (the ball/floor below) stay in this same invariant across a tick
+        // too: PhysicsSync::write_back (m9.7) mirrors its pose into LocalTransform as well as
+        // WorldTransform for any entity that carries one, so a physics body's placement is both
+        // gizmo-editable and — the point of giving it a LocalTransform at all — RESTORABLE, since
+        // WorldTransform is derived state and deliberately unreflected (reflect.hpp) while
+        // LocalTransform is reflected and rides the editor's Play/Stop snapshot.
         (void)world.spawn_with(
             LocalTransform{tf}, WorldTransform{tf}, std::forward<decltype(comps)>(comps)...);
     };
@@ -252,7 +284,24 @@ void build_viewport_scene(ecs::World& world,
         m.roughness = rough;
         core::Transform tf{};
         tf.translation = {(static_cast<float>(c) - 1.5f) * 2.0f, 0.0f, 0.0f};
-        place(tf, render::MeshRef{sphere}, render::MaterialRef{materials.add(m)});
+        if (c == 0) {
+            // The one ball Play actually drops (m9.7's Mac checklist: "the ball drops on click of
+            // ▶, rewinds on ■") — a dynamic body raised above the floor for visible fall distance.
+            // The other three stay pure render decoration, exactly as before this brick.
+            tf.translation.y = 3.0f;
+            physics::RigidBody ball_rb;
+            ball_rb.motion = static_cast<std::uint32_t>(physics::MotionType::Dynamic);
+            physics::Collider ball_col;
+            ball_col.shape_type = static_cast<std::uint32_t>(physics::ShapeType::Sphere);
+            ball_col.radius = 0.8f; // matches make_uv_sphere(0.8f, ...) below
+            place(tf,
+                  render::MeshRef{sphere},
+                  render::MaterialRef{materials.add(m)},
+                  ball_rb,
+                  ball_col);
+        } else {
+            place(tf, render::MeshRef{sphere}, render::MaterialRef{materials.add(m)});
+        }
     }
 
     render::PbrMaterialDesc floor_mat{};
@@ -263,7 +312,20 @@ void build_viewport_scene(ecs::World& world,
     floor_mat.roughness = 0.8f;
     core::Transform floor_tf{};
     floor_tf.translation = {0.0f, -1.6f, 0.0f};
-    place(floor_tf, render::MeshRef{floor}, render::MaterialRef{materials.add(floor_mat)});
+    // A thin static box under the visual plane (10x4, ADR-... M5.5 shape) so the ball has
+    // something to land on; half-extents match make_plane's width/depth below.
+    physics::RigidBody floor_rb;
+    floor_rb.motion = static_cast<std::uint32_t>(physics::MotionType::Static);
+    physics::Collider floor_col;
+    floor_col.shape_type = static_cast<std::uint32_t>(physics::ShapeType::Box);
+    floor_col.half_x = 5.0f;
+    floor_col.half_y = 0.1f;
+    floor_col.half_z = 2.0f;
+    place(floor_tf,
+          render::MeshRef{floor},
+          render::MaterialRef{materials.add(floor_mat)},
+          floor_rb,
+          floor_col);
 
     core::Transform cam{};
     cam.translation = {0.0f, 1.2f, 8.0f};
@@ -273,26 +335,6 @@ void build_viewport_scene(ecs::World& world,
     core::Transform light{};
     light.translation = {3.0f, 4.0f, 4.0f};
     place(light, render::PointLight{1.0f, 0.94f, 0.85f, 120.0f, 30.0f});
-}
-
-// A .rscene authors LocalTransform but never WorldTransform — derived state is deliberately not
-// persisted (reflect.hpp). The viewport renderer and the gizmo both read WorldTransform, so after a
-// scene load the host derives one for every posed entity: give each LocalTransform holder a default
-// WorldTransform, then propagate_transforms composes the (possibly parented) local chain into it.
-// Collect-then-add because add_component relocates an entity between archetypes — the "archetype
-// move" — which would invalidate the query mid-iteration.
-void derive_world_transforms(ecs::World& world) {
-    std::vector<ecs::Entity> posed;
-    world.query<ecs::LocalTransform>().for_each([&](ecs::Entity e, ecs::LocalTransform&) {
-        if (!world.has<ecs::WorldTransform>(e)) {
-            posed.push_back(e);
-        }
-    });
-    for (const ecs::Entity e : posed) {
-        (void)world.add_component<ecs::WorldTransform>(e, ecs::WorldTransform{});
-    }
-    core::JobSystem jobs;
-    ecs::propagate_transforms(world, jobs);
 }
 
 // The `--scene` viewport path: load a .rscene into the world so the editor hosts a REAL saved scene
@@ -395,6 +437,30 @@ int serve_viewport(std::string_view socket_path,
     // as ViewportCamera after the frame (so the message always matches the streamed pixels).
     render::CameraLens frame_lens{};
 
+    // The play/edit state machine (m9.7, ADR-0031 §4) — Edit while the editor is authoring,
+    // Playing/Paused while the sim runs live. physics_world/physics_sync exist ONLY while a play
+    // session is live: created fresh on the Edit -> Playing/Paused transition, destroyed wholesale
+    // on Stop. A clean slate every Play is the simplest, most legible proof that physics state is
+    // "reconstructible from components" (see PlaySession's header comment for the full risk
+    // write-up) — physics::PhysicsSync::reconcile (M7.6) already binds every
+    // RigidBody+Collider+WorldTransform entity that lacks a body, so handing it the just-restored
+    // world IS the whole rebuild; nothing new was needed for physics to satisfy the ADR's rule.
+    editorhost::PlaySession play_session;
+    std::unique_ptr<physics::PhysicsWorld> physics_world;
+    physics::PhysicsSync physics_sync;
+
+    // The one place a fixed tick advances physics: Application's per-tick hook (ADR-0023), which
+    // runs on the main thread between the Schedule and the render — exactly where PhysicsSync's
+    // reconcile is allowed to add/remove RigidBodyHandle components (a structural change). This
+    // only fires when the loop below actually asks for a tick (Playing, or an armed Step — see
+    // frame_dt), so an Edit/Paused iteration renders without ever touching physics_world.
+    app.on_fixed_tick([&](ecs::World& w, double dt) {
+        if (physics_world) {
+            physics_sync.step(w, *physics_world, static_cast<float>(dt));
+        }
+        play_session.record_tick();
+    });
+
     render::RGTexture last_ldr{};
     app.on_render([&](app::FrameContext& ctx) {
         last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
@@ -486,6 +552,9 @@ int serve_viewport(std::string_view socket_path,
 
     while (!stop.load(std::memory_order_relaxed)) {
         bool snapshot_requested = false;
+        // Armed by a Step message below, consumed once by frame_dt right after this drain — exactly
+        // one extra fixed tick THIS iteration (m9.7's "step = exactly one tick").
+        bool pending_step = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             for (const Edit& e : pending) {
@@ -519,6 +588,42 @@ int serve_viewport(std::string_view socket_path,
                                 : static_cast<render::GizmoMode>(gs.mode <= 3 ? gs.mode : 0);
                         gizmo_sel.axis = static_cast<render::GizmoAxis>(gs.axis <= 3 ? gs.axis : 0);
                     }
+                } else if (msg == editorhost::EditorMessage::Play) {
+                    // Begin (Edit) or resume (Paused) — play() snapshots only on the FIRST call out
+                    // of Edit, so a resume after Pause keeps restoring the true pre-play state, not
+                    // whatever the world looked like when Pause was pressed.
+                    const bool was_edit = play_session.phase() == editorhost::PlayPhase::Edit;
+                    play_session.play(app.world());
+                    if (was_edit) {
+                        physics_world = std::make_unique<physics::PhysicsWorld>();
+                        physics_sync = physics::PhysicsSync{};
+                    }
+                    app.timestep().reset(); // m9.7: no leftover accumulator across a state change
+                } else if (msg == editorhost::EditorMessage::Pause) {
+                    play_session.pause(app.world());
+                    app.timestep().reset();
+                } else if (msg == editorhost::EditorMessage::Step) {
+                    const bool was_edit = play_session.phase() == editorhost::PlayPhase::Edit;
+                    play_session.pause(app.world()); // ensure a snapshot + a Paused steady state
+                    if (was_edit) {
+                        physics_world = std::make_unique<physics::PhysicsWorld>();
+                        physics_sync = physics::PhysicsSync{};
+                    }
+                    app.timestep().reset();
+                    pending_step = true;
+                } else if (msg == editorhost::EditorMessage::Stop) {
+                    if (play_session.stop(app.world())) {
+                        // The restore only reconstructed reflected components (LocalTransform among
+                        // them); WorldTransform is derived and must be recomputed, exactly like a
+                        // fresh .rscene load — see derive_world_transforms's comment.
+                        derive_world_transforms(app.world());
+                        // Discard the play session's bodies wholesale — the next Play rebuilds them
+                        // from the just-restored components (PhysicsSync::reconcile), never from
+                        // whatever the old roster remembered.
+                        physics_world.reset();
+                        physics_sync = physics::PhysicsSync{};
+                    }
+                    app.timestep().reset();
                 } else {
                     apply_edit(app.world(), e.type, e.payload);
                 }
@@ -531,7 +636,29 @@ int serve_viewport(std::string_view socket_path,
             break; // client disconnected
         }
 
-        app.step(app.fixed_dt()); // tick + render (executes the graph)
+        // Tick policy (m9.7, ADR-0031 §4): Playing ticks every iteration; a Step message arms
+        // exactly one extra tick THIS iteration then falls back to render-only; Edit/Paused render
+        // every iteration too (the viewport must stay live and responsive) but advance nothing —
+        // frame_dt of exactly 0 means Application::step's accumulator gains no time (its own
+        // non-positive-dt guard), so zero ticks run.
+        const double frame_dt =
+            (play_session.phase() == editorhost::PlayPhase::Playing || pending_step)
+                ? app.fixed_dt()
+                : 0.0;
+        app.step(frame_dt); // tick (0 or 1, per frame_dt above) + render (executes the graph)
+
+        // The play state + tick count (m9.7) — sent every iteration like ViewportCamera: a handful
+        // of bytes, and the editor's tick counter / state-coloured border must track it live.
+        {
+            editorhost::PlayStateMsg pstate{};
+            pstate.phase = play_session.phase();
+            pstate.tick_count = play_session.tick_count();
+            if (!conn.send_message(
+                    static_cast<stream::MessageType>(editorhost::EditorMessage::PlayState),
+                    editorhost::serialize_play_state(pstate))) {
+                break; // client disconnected
+            }
+        }
 
         // The pick service (m9.6): collect a finished pick and answer it, then start the next
         // queued one against the post-tick world — the world the frame streamed below shows.
