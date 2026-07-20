@@ -31,6 +31,15 @@ struct FixedTimestep {
         return ts;
     }
 
+    // Discard any unspent accumulated time. In this engine's actual calling discipline the
+    // accumulator is already exactly 0 between calls (a caller advances it by exactly `fixed_dt` or
+    // not at all — see advance()'s non-positive-dt guard — so a whole tick is always fully spent);
+    // this makes that invariant EXPLICIT at a state boundary rather than relying on it implicitly.
+    // The editor's Play/Pause/Step/Stop state machine (m9.7) calls this on every transition — the
+    // documented defence against accumulator leakage letting a later advance() report a tick it
+    // should not (e.g. a Step landing exactly on a threshold it did not earn).
+    void reset() noexcept { accumulator = 0.0; }
+
     // What one frame's worth of elapsed real time turns into.
     struct Step {
         int ticks = 0;        // fixed ticks to run this frame (0 .. max_ticks_per_frame)

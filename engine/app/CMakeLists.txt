@@ -47,15 +47,18 @@ target_link_libraries(rime_hello
 # launches and connects to (ADR-0016). The channel half is GPU-free; `--viewport` additionally renders
 # the scene through the render graph (rime::app + rime::render + rime::rhi), captures each frame
 # (rime::stream), LZ4-compresses it, and streams it. On a GPU-less host it degrades to channel-only.
-# Not SDK surface — a runnable tool, deliberately not installed.
+# rime::physics is the m9.7 Play feature's side-table (a PhysicsWorld/PhysicsSync the viewport host
+# owns for the duration of a play session) — deliberately linked HERE, not into the rime_app library,
+# so rime::app itself stays physics-agnostic (guardrail #2: a sim-only Application still builds with
+# physics removed). Not SDK surface — a runnable tool, deliberately not installed.
 add_executable(rime_engine
     editor_host_main.cpp)
 
 set_target_properties(rime_engine PROPERTIES OUTPUT_NAME rime-engine)
 
 target_link_libraries(rime_engine
-    PRIVATE rime::editorhost rime::scene rime::assets rime::ecs rime::app rime::render rime::rhi
-            rime::stream rime::platform rime::core fmt::fmt)
+    PRIVATE rime::editorhost rime::scene rime::assets rime::ecs rime::app rime::physics rime::render
+            rime::rhi rime::stream rime::platform rime::core fmt::fmt)
 
 rime_apply_common_target_options(rime_engine)
 
