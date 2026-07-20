@@ -43,6 +43,19 @@ struct TextureDesc {
     // to one-per-pixel (pair with SamplerDesc::mip_filter). Clamped to the chain length the
     // extent supports; 2-D only for now (a mip-mapped volume has no consumer yet).
     std::uint32_t mip_levels = 1;
+    // Array layers (m10.1a, ADR-0032 §10). 1 (the default) is a single-layer image. >1 makes a
+    // *layered* 2-D image — an array of same-sized slices sampled with `sampler2DArray`, and
+    // rendered into one layer at a time (ColorAttachment::layer / DepthStencilAttachment::layer).
+    // This is how cascaded shadow maps store their N cascades, and how any layered-render technique
+    // (cube-face shadows, probe capture, VSM) stores its slices. Distinct from `depth`: an array is
+    // N independent 2-D images with no inter-layer filtering, a 3-D volume is ONE image trilinearly
+    // sampled across w — the two are mutually exclusive (array_layers > 1 ⇒ depth == 1).
+    std::uint32_t array_layers = 1;
+    // Cube map (m10.1a): view the layers as the 6 faces of a cube (+X,−X,+Y,−Y,+Z,−Z), sampled with
+    // `samplerCube` by direction — how a point light stores its omnidirectional shadow. Requires
+    // `array_layers` to be a positive multiple of 6 (6 for one cube, 6·N for a cube array). Each
+    // face is still rendered into as its own layer.
+    bool cube = false;
     Format format = Format::RGBA8Unorm;
     TextureUsage usage = TextureUsage::None;
     std::string_view debug_name = {};
@@ -74,6 +87,15 @@ struct SamplerDesc {
     // the device lacks the feature (a documented degrade, not an error).
     float max_anisotropy = 0.0f;
     AddressMode address_mode = AddressMode::Repeat;
+    // Depth-compare sampling (m10.1a, ADR-0032 §10). When enabled the sampler compares each fetched
+    // depth texel against a reference the shader supplies — a `sampler2DShadow`/`samplerCubeShadow`
+    // read — and returns the (bilinearly-filtered) fraction that passed, i.e. hardware PCF, instead
+    // of the raw depth. `compare_op` is that test: LessEqual (the default) means "lit if the
+    // surface is at or nearer than the recorded occluder", the shadow-map convention under our
+    // 0=near..1=far depth. Ignored by ordinary sampled reads; reuses the CompareOp enum the depth
+    // test speaks.
+    bool compare_enable = false;
+    CompareOp compare_op = CompareOp::LessEqual;
     std::string_view debug_name = {};
 };
 

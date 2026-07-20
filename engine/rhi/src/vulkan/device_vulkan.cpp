@@ -146,6 +146,10 @@ VulkanDevice::~VulkanDevice() {
         // destructor (which runs first, before the device). Skip them here so we never double-free.
         if (t.from_swapchain)
             continue;
+        for (VkImageView v : t.layer_views) { // per-layer render views (m10.1a), if any
+            if (v)
+                vkDestroyImageView(device_, v, nullptr);
+        }
         if (t.view)
             vkDestroyImageView(device_, t.view, nullptr);
         if (t.image)

@@ -32,7 +32,8 @@ rime_add_test(rime_rhi_tests
     blend_mrt_test.cpp
     compute_test.cpp
     mip_timestamp_test.cpp
-    cooked_mip_test.cpp)
+    cooked_mip_test.cpp
+    texture_array_test.cpp)
 
 target_link_libraries(rime_rhi_tests
     PRIVATE rime::rhi rime::render) # render: the orbit camera graduated there at M5.5

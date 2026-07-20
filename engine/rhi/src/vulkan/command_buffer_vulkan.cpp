@@ -190,7 +190,11 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
 
         VkRenderingAttachmentInfo& att = atts[i];
         att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        att.imageView = tex->view;
+        // A layered target renders into one layer through its per-layer view (m10.1a); a plain
+        // single-layer image has no layer views and uses its whole-image view.
+        att.imageView = colors[i].layer < tex->layer_views.size()
+                            ? tex->layer_views[colors[i].layer]
+                            : tex->view;
         att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         att.loadOp = to_vk(colors[i].load_op);
         att.storeOp = to_vk(colors[i].store_op);
@@ -244,7 +248,11 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
                              aspect_for(dtex->format));
             dtex->layout = layout;
 
-            depth_att.imageView = dtex->view;
+            // One cascade / cube face renders through its per-layer view (m10.1a); a plain depth
+            // image uses its whole-image view.
+            depth_att.imageView = info.depth_stencil->layer < dtex->layer_views.size()
+                                      ? dtex->layer_views[info.depth_stencil->layer]
+                                      : dtex->view;
             depth_att.imageLayout = layout;
             depth_att.loadOp = to_vk(info.depth_stencil->load_op);
             depth_att.storeOp = to_vk(info.depth_stencil->store_op);
@@ -662,7 +670,9 @@ void VulkanCommandBuffer::draw_indexed(std::uint32_t index_count,
     vkCmdDrawIndexed(cmd_, index_count, instance_count, first_index, vertex_offset, first_instance);
 }
 
-void VulkanCommandBuffer::copy_texture_to_buffer(TextureHandle src, BufferHandle dst) {
+void VulkanCommandBuffer::copy_texture_to_buffer(TextureHandle src,
+                                                 BufferHandle dst,
+                                                 std::uint32_t base_layer) {
     VulkanTexture* tex = device_.lookup(src);
     VulkanBuffer* buf = device_.lookup(dst);
     if (!tex || !buf) {
@@ -688,7 +698,7 @@ void VulkanCommandBuffer::copy_texture_to_buffer(TextureHandle src, BufferHandle
     region.bufferImageHeight = 0;
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.baseArrayLayer = base_layer; // which cascade / cube face (m10.1a)
     region.imageSubresource.layerCount = 1;
     region.imageOffset = {0, 0, 0};
     region.imageExtent = {tex->extent.width, tex->extent.height, 1};
