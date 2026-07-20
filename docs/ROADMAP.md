@@ -9,6 +9,26 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-20) — Milestone 9 COMPLETE; Milestone 10 (Advanced lighting) kicks off.** M9's
+> close-out landed on `main`: **m9.8 docs true-up (#84)** and the **gizmo/inspector Edit-mode fix
+> (#83)** are merged, so Editor v1 is done — *build a scene, tweak components, hit Play* works. **M10
+> begins** with **[ADR-0032](adr/0032-lighting-v2.md) (Accepted)** — lighting v2: SDF-traced **DDGI**
+> global illumination, **cascaded + local shadow maps**, **clustered-forward** many-lights, **SSR**
+> reflections, and the **destruction-coupling contracts (C1–C6)** that make the milestone's thesis —
+> *break a wall, the shadow moves and the bounced light updates* — provable. Three lead rulings are
+> baked into the ADR: (1) **build the real array/cube texture RHI** for cascade/cube-face storage
+> rather than atlas-hack around it; (2) **`Application` grows an ordered sim stage** so the per-tick
+> lighting hook has a home in a generic app, not just a sample's `main.cpp`; (3) **debris gets a
+> bounded visual-retirement stage** that emits a world-bounds event, so lighting caches can't leak
+> over a long session. **Confirmed brick ladder:** **m10.0** ADR-0032 + SDF-trace spike + this ladder ·
+> **m10.0-perf** editor idle-frame skip (an idle editor must cost ≈0% CPU before M10 piles on GPU work) ·
+> **m10.1a** RHI top-up (array/cube textures + depth-compare sampler) · **m10.1** directional CSM ·
+> **m10.2** local-light shadows + destructibility-aware shadow cache · **m10.3** clustered forward
+> (+`RGBuffer`) · **m10.4** SDF clipmap · **m10.5a/b** DDGI probes · **m10.6** GI integration + the
+> walls-fall proof · **m10.7** SSR reflections · **m10.8** milestone proof + docs; **m10.i**
+> (virtualized geometry) floats as interleave filler. CI stays lavapipe — **no hardware RT, no mesh
+> shaders**; absolute frame budgets wait for real hardware at m12.0.
+>
 > **Update (2026-07-20) — Milestone 9 (Editor v1) nearly complete; closing out at m9.8.** Bricks
 > **m9.0–m9.7 are all merged to `main`** (PRs #68–#82): the editor-architecture ADR, the engine-side
 > editor host (`engine/editorhost`), the `.rscene` scene format, the Rust shell + streamed viewport, the
@@ -540,9 +560,13 @@ reflection-described component data. The viewport toolkit graduates from the ICE
 protocol is already proven by Track S, so M9 becomes assembly, not invention. Play-in-editor.
 *Inspired by: Frostbite's FrostEd (editor-as-client) + Unity/UE iteration.*
 
-**M10 — Advanced lighting (the Unreal-class push).** Each its own sub-effort + ADR:
-dynamic GI + reflections (Lumen-style), virtual shadow maps, many-lights
-(MegaLights-style), virtualized geometry (Nanite-style). *Inspired by: UE5.*
+**M10 — Advanced lighting (the Unreal-class push).** Each its own sub-effort + ADR
+([ADR-0032](adr/0032-lighting-v2.md) sets the architecture + brick ladder):
+SDF-traced DDGI GI + SSR reflections (Lumen-style), cascaded + local shadow maps
+(virtual shadow maps deferred), clustered-forward many-lights (MegaLights-style),
+virtualized geometry (Nanite-style, floats as m10.i). The through-line: lighting
+**couples to destruction through data seams only** so *when walls fall, the light
+updates*. *Inspired by: UE5.*
 
 **M11 — Networking & networked destruction.** `engine/net` — client-server, replication,
 and **prioritization + culling** of part-destruction/debris; determinism where required.

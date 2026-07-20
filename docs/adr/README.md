@@ -49,3 +49,11 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0022](0022-forward-pbr.md) — forward PBR (depth pre-pass → Cook–Torrance into HDR → tonemap; reusable graph passes)
 - [ADR-0023](0023-app-fixed-tick-loop.md) — the application framework (a fixed simulation tick decoupled from the render frame; the M11 seam)
 - [ADR-0024](0024-asset-model.md) — the asset model (content-hash identity, the RMA1 cooked container, Rust-cooks/C++-loads, schema hashes, deterministic cooks)
+- [ADR-0025](0025-gpu-asset-bridge.md) — the GPU asset bridge (cooked mesh/texture → GPU resources on demand; no separate asset_gpu module)
+- [ADR-0026](0026-physics-core.md) — the physics core (own rigid-body solver, no Jolt; determinism via a world hash)
+- [ADR-0027](0027-convex-hull-shapes.md) — convex hull collision shapes
+- [ADR-0028](0028-compound-shapes.md) — compound collision shapes (multi-shape bodies)
+- [ADR-0029](0029-destruction-model.md) — the destruction model (cooked fracture pattern → static compound; damage = contact impulse; fracture = a body swap; the C2 event channel with world-space bounds)
+- [ADR-0030](0030-streaming-v1.md) — streaming v1 (the S1 protocol; SVT-AV1 video on the wire, LZ4 local fast path)
+- [ADR-0031](0031-editor-v1.md) — the editor v1 architecture (a Rust shell that is a client of a live engine)
+- [ADR-0032](0032-lighting-v2.md) — lighting v2 (SDF-probe DDGI GI, cascaded + local shadows, clustered-forward many-lights, SSR; the destruction-coupling contracts C1–C6)
