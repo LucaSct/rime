@@ -47,6 +47,7 @@
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
+#include "rime/ecs/query.hpp" // Query::for_each — deriving WorldTransform over the loaded scene
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
@@ -274,7 +275,75 @@ void build_viewport_scene(ecs::World& world,
     place(light, render::PointLight{1.0f, 0.94f, 0.85f, 120.0f, 30.0f});
 }
 
-int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
+// A .rscene authors LocalTransform but never WorldTransform — derived state is deliberately not
+// persisted (reflect.hpp). The viewport renderer and the gizmo both read WorldTransform, so after a
+// scene load the host derives one for every posed entity: give each LocalTransform holder a default
+// WorldTransform, then propagate_transforms composes the (possibly parented) local chain into it.
+// Collect-then-add because add_component relocates an entity between archetypes — the "archetype
+// move" — which would invalidate the query mid-iteration.
+void derive_world_transforms(ecs::World& world) {
+    std::vector<ecs::Entity> posed;
+    world.query<ecs::LocalTransform>().for_each([&](ecs::Entity e, ecs::LocalTransform&) {
+        if (!world.has<ecs::WorldTransform>(e)) {
+            posed.push_back(e);
+        }
+    });
+    for (const ecs::Entity e : posed) {
+        (void)world.add_component<ecs::WorldTransform>(e, ecs::WorldTransform{});
+    }
+    core::JobSystem jobs;
+    ecs::propagate_transforms(world, jobs);
+}
+
+// The `--scene` viewport path: load a .rscene into the world so the editor hosts a REAL saved scene
+// (the m9.5 owed passthrough) instead of the built-in sphere row. The outliner, inspector, picking,
+// and gizmos then operate on the loaded entities. Rendering resolves the scene's
+// MeshRef/MaterialRef — which are indices into these registries — against a small standard
+// primitive set (sphere→0, floor→1, a neutral material→0), so a scene authored in that vocabulary
+// (the samples/07-first-light shape) renders. A scene referencing meshes/materials this viewport
+// has not registered still loads and is fully editable; those entities simply do not draw —
+// resolving arbitrary *cooked assets* into the live viewport registry is the asset-bridge brick,
+// deliberately out of scope here.
+void load_viewport_scene(ecs::World& world,
+                         render::MeshRegistry& meshes,
+                         render::MaterialRegistry& materials,
+                         std::string_view scene_path) {
+    ecs::register_transform_components(world);
+    // WorldTransform is not in the default set (derived state — reflect.hpp); register it so the
+    // renderer can read it and the editor snapshot exposes the derived pose to the gizmo.
+    (void)world.register_component<ecs::WorldTransform>();
+    render::register_render_components(world);
+
+    (void)meshes.add(render::make_uv_sphere(0.8f, 32, 64), "sphere"); // MeshRef 0
+    (void)meshes.add(render::make_plane(10.0f, 4.0f), "floor");       // MeshRef 1
+    render::PbrMaterialDesc neutral{};
+    neutral.base_color[0] = 0.80f;
+    neutral.base_color[1] = 0.80f;
+    neutral.base_color[2] = 0.82f;
+    neutral.metallic = 0.1f;
+    neutral.roughness = 0.6f;
+    (void)materials.add(neutral); // MaterialRef 0
+    render::PbrMaterialDesc floor_mat{};
+    floor_mat.base_color[0] = 0.30f;
+    floor_mat.base_color[1] = 0.30f;
+    floor_mat.base_color[2] = 0.33f;
+    floor_mat.metallic = 0.0f;
+    floor_mat.roughness = 0.8f;
+    (void)materials.add(floor_mat); // MaterialRef 1
+
+    const scene::LoadReport report =
+        scene::load_scene_file(world, std::filesystem::path(scene_path));
+    if (!report.ok) {
+        RIME_ERROR("rime-engine: viewport scene load failed ({}): {}", scene_path, report.error);
+        // Leave the world as whatever loaded; the editor still connects and shows an empty/partial
+        // outliner rather than the host crashing on a bad path.
+    }
+    derive_world_transforms(world);
+}
+
+int serve_viewport(std::string_view socket_path,
+                   std::string_view scene_path,
+                   std::string_view assets_path) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kViewportWidth, kViewportHeight};
@@ -309,7 +378,13 @@ int serve_viewport(std::string_view socket_path, std::string_view assets_path) {
     render::SceneRenderer renderer(*app.device(), meshes, materials);
     render::ScenePicker picker(*app.device(), meshes);
     render::GizmoRenderer gizmos(*app.device(), meshes);
-    build_viewport_scene(app.world(), meshes, materials);
+    // `--scene` hosts a real saved world; without it, the built-in sphere row (the m9.6 gizmo/pick
+    // demo). Either way the registries above are populated so MeshRef/MaterialRef indices resolve.
+    if (scene_path.empty()) {
+        build_viewport_scene(app.world(), meshes, materials);
+    } else {
+        load_viewport_scene(app.world(), meshes, materials, scene_path);
+    }
     renderer.set_ambient(0.03f, 0.03f, 0.04f);
 
     // The editor's gizmo state (selection + mode + hovered axis), updated by the drain below and
@@ -539,7 +614,7 @@ int serve(std::string_view socket_path,
           std::string_view assets_path,
           bool viewport) {
     if (viewport) {
-        return serve_viewport(socket_path, assets_path);
+        return serve_viewport(socket_path, scene_path, assets_path);
     }
     ecs::World world;
     register_and_populate(world, scene_path);

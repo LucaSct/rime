@@ -45,7 +45,9 @@ use session::{EngineSession, Outbound, Shared, SharedState};
 const SNAP_LINEAR: f32 = 0.25;
 const SNAP_ANGULAR_DEG: f32 = 15.0;
 
-/// Launch the docking shell. `--engine <path>` / `$RIME_ENGINE_BIN` names the engine binary to host.
+/// Launch the docking shell. `--engine <path>` / `$RIME_ENGINE_BIN` names the engine binary to host;
+/// `--scene <file.rscene>` names the world to load (else the built-in demo scene); `--assets
+/// <manifest>` feeds the asset browser.
 pub fn run(args: &[String]) -> ExitCode {
     let engine = arg_value(args, "--engine").or_else(|| std::env::var("RIME_ENGINE_BIN").ok());
     let Some(engine) = engine else {
@@ -58,6 +60,10 @@ pub fn run(args: &[String]) -> ExitCode {
     // else works.
     let assets = arg_value(args, "--assets");
 
+    // Optional scene to open. Forwarded to the engine child, which loads it into the viewport world
+    // (the m9.5 passthrough); without it the engine builds its built-in demo scene.
+    let scene = arg_value(args, "--scene");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rime Editor")
@@ -67,7 +73,13 @@ pub fn run(args: &[String]) -> ExitCode {
     match eframe::run_native(
         "Rime Editor",
         options,
-        Box::new(move |_cc| Ok(Box::new(EditorApp::new(engine, assets.clone())))),
+        Box::new(move |_cc| {
+            Ok(Box::new(EditorApp::new(
+                engine,
+                assets.clone(),
+                scene.clone(),
+            )))
+        }),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -162,10 +174,10 @@ struct EditorApp {
 }
 
 impl EditorApp {
-    fn new(engine: String, assets: Option<String>) -> Self {
+    fn new(engine: String, assets: Option<String>, scene: Option<String>) -> Self {
         let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
         let (out_tx, out_rx) = mpsc::channel();
-        let session = EngineSession::spawn(engine, assets, Arc::clone(&shared), out_rx);
+        let session = EngineSession::spawn(engine, assets, scene, Arc::clone(&shared), out_rx);
         Self {
             dock: default_layout(),
             shared,

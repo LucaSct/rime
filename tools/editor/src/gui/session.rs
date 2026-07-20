@@ -107,20 +107,24 @@ pub struct EngineSession {
 }
 
 impl EngineSession {
-    /// Spawn `rime-engine --editor-host --viewport [--assets <manifest>]` and start driving the wire.
-    /// Any failure lands in `shared.error` (the status bar shows it) rather than panicking the UI.
+    /// Spawn `rime-engine --editor-host <socket> --viewport [--assets <manifest>] [--scene <file>]`
+    /// and start driving the wire. Any failure lands in `shared.error` (the status bar shows it)
+    /// rather than panicking the UI.
     pub fn spawn(
         engine: String,
         assets: Option<String>,
+        scene: Option<String>,
         shared: Shared,
         out_rx: Receiver<Outbound>,
     ) -> Self {
         let socket = unique_socket_path();
+        let args = engine_args(
+            &socket.to_string_lossy(),
+            assets.as_deref(),
+            scene.as_deref(),
+        );
         let mut command = Command::new(&engine);
-        command.arg("--editor-host").arg(&socket).arg("--viewport");
-        if let Some(assets) = &assets {
-            command.arg("--assets").arg(assets);
-        }
+        command.args(&args);
         let child = match command.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -151,6 +155,28 @@ impl Drop for EngineSession {
     }
 }
 
+/// Build the argv for the hosted engine child. Pure and owned so it is unit-testable without spawning
+/// a process (the socket is a string here; `spawn` passes the real path). `--viewport` is always
+/// present — the docking shell always hosts the streamed viewport; `--assets` feeds the browser
+/// (m9.5) and `--scene` names the world to load (m9.5's owed passthrough), each forwarded only when
+/// the launcher was given one.
+fn engine_args(socket: &str, assets: Option<&str>, scene: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "--editor-host".to_string(),
+        socket.to_string(),
+        "--viewport".to_string(),
+    ];
+    if let Some(assets) = assets {
+        args.push("--assets".to_string());
+        args.push(assets.to_string());
+    }
+    if let Some(scene) = scene {
+        args.push("--scene".to_string());
+        args.push(scene.to_string());
+    }
+    args
+}
+
 fn unique_socket_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -161,6 +187,41 @@ fn unique_socket_path() -> PathBuf {
         std::process::id(),
         nanos
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::engine_args;
+
+    #[test]
+    fn forwards_assets_and_scene_when_present() {
+        let args = engine_args("/tmp/s.sock", Some("m.manifest"), Some("world.rscene"));
+        assert_eq!(
+            args,
+            [
+                "--editor-host",
+                "/tmp/s.sock",
+                "--viewport",
+                "--assets",
+                "m.manifest",
+                "--scene",
+                "world.rscene",
+            ]
+        );
+    }
+
+    #[test]
+    fn omits_optional_flags_when_absent() {
+        let args = engine_args("/tmp/s.sock", None, None);
+        assert_eq!(args, ["--editor-host", "/tmp/s.sock", "--viewport"]);
+    }
+
+    #[test]
+    fn scene_is_independent_of_assets() {
+        let args = engine_args("/tmp/s.sock", None, Some("world.rscene"));
+        assert!(args.windows(2).any(|w| w == ["--scene", "world.rscene"]));
+        assert!(!args.iter().any(|a| a == "--assets"));
+    }
 }
 
 fn connect_retry(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {

@@ -268,12 +268,14 @@ mod imp {
         let socket = unique_socket_path();
 
         // 1) Launch the engine host. --frames drives the streamed viewport (needs a GPU/lavapipe);
-        //    otherwise it is the GPU-free editor channel over --scene (or a default world).
+        //    otherwise it is the GPU-free editor channel. --scene loads a real world in either mode
+        //    (else a default world / the built-in demo scene).
         let mut cmd = Command::new(&engine);
         cmd.arg("--editor-host").arg(&socket);
         if frames > 0 {
             cmd.arg("--viewport");
-        } else if let Some(scene) = &scene {
+        }
+        if let Some(scene) = &scene {
             cmd.arg("--scene").arg(scene);
         }
         // In channel mode, also hand the engine a small manifest so the smoke can prove the browse
