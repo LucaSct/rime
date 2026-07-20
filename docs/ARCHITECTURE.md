@@ -19,8 +19,13 @@ asset bridge), shown end-to-end by `samples/08-gltf-zoo`; the new `capi` 🟢 C 
 runtime loader to the Rust tools, and the `tools/` layer is real (the `rime` cooker + the pipeline
 and FFI crates). `physics` 🟢 is the **Milestone 7 core** — an own rigid-body engine (bodies,
 broadphase/narrowphase/solver, islands + sleeping, the parallel step, ECS sync, and scene queries),
-its "done when" shown by `samples/09-physics-playground`. The rest of the feature modules are still
-⚪. This document is
+its "done when" shown by `samples/09-physics-playground`. `destruction` 🟢 is **Milestone 8** —
+cooked fracture patterns, damage-driven body-swap, and debris budgets, shown by
+`samples/10-destructible-wall`. The `tools/` **editor** is **Milestone 9 (Editor v1)** — a Rust,
+editor-as-client shell (`tools/editor`) that drives the engine over the streaming wire, with the new
+engine-side `editorhost` and `scene` modules behind it (the reflection schema/snapshot/edit channel
+and the `.rscene` format); Track S's `stream` grew the S1 local fast path that carries the viewport.
+The remaining feature modules (`audio`, `vfx`) are still ⚪. This document is
 the blueprint we build toward; the per-section tags below say how far each part has actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
@@ -276,8 +281,12 @@ never by reaching into engine internals. Rationale and the FFI strategy:
 *Built (M6):* the **`asset-pipeline`** crate (glTF + STL import → RMA1 cook, content-hash cache) and
 the **`rime`** CLI (`rime cook`/`inspect`) — the offline half of the asset boundary the engine's
 `assets` module reads; and the **`rime-ffi`** crate, whose tests drive the engine through the `capi`
-C ABI. The **editor** is still ⚪ (M9). See [tools/README.md](../tools/README.md) and the per-crate
-READMEs.
+C ABI. *Built (M9):* the **`editor`** — the editor-as-client shell (docking UI, reflection
+inspectors, asset browser, viewport picking + gizmos, play-in-editor) — and **`rime-protocol`**, the
+hand-rolled Rust mirror of the editor wire (schema/snapshot/edits/frames/picks/gizmos/play control),
+kept byte-exact against C++-emitted fixtures by a cross-language conformance suite. See
+[tools/README.md](../tools/README.md), [tools/editor/README.md](../tools/editor/README.md), and the
+per-crate READMEs.
 
 ## 6. Build system ⚪
 

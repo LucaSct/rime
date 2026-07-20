@@ -489,6 +489,19 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Scene-local id.** The ordinal (`0..N-1`) a `.rscene` gives each saved entity so a
   reference between entities (a `Parent`) is stored position-independently and remapped to a
   fresh runtime handle on load — never a volatile raw entity handle.
+- **Editor-as-client / editor host.** Rime's editor is not the engine — it is a separate (Rust)
+  process that launches the engine as a child (`rime-engine --editor-host`) and drives it over a
+  versioned socket, so an editor crash can't take the engine's world with it and the editor never
+  links engine internals (ADR-0016). The engine side is the **editorhost** module
+  (`engine/editorhost`): it serves the reflection **schema** + a world **snapshot** and applies the
+  client's typed edits. See [design/editor-inspectors.md](design/editor-inspectors.md).
+- **Outliner.** The editor panel listing the world's entities — where you select, spawn, and
+  despawn. Selection is shared with the viewport, so a viewport pick and an outliner click are the
+  same selection.
+- **Inspector.** The editor panel showing the selected entity's components as **editable fields**,
+  generated entirely from the reflection schema (no per-component UI code): edit a scalar or struct
+  field, add or remove a component, with undo/redo. Edits travel back as `SetComponent` reflection
+  bytes — the same path a `.rscene` load uses.
 - **Gizmo.** The on-screen handles that move/rotate/scale a selected object by dragging —
   translate arrows, rotate rings, scale cube-ends. In Rime the **engine renders** them as an
   always-on-top overlay while the **editor does the drag math** (screen-ray to axis/plane), so

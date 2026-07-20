@@ -9,6 +9,22 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-20) — Milestone 9 (Editor v1) nearly complete; closing out at m9.8.** Bricks
+> **m9.0–m9.7 are all merged to `main`** (PRs #68–#82): the editor-architecture ADR, the engine-side
+> editor host (`engine/editorhost`), the `.rscene` scene format, the Rust shell + streamed viewport, the
+> reflection-driven **inspectors with undo/redo** (m9.4), the **asset browser + placement** (m9.5),
+> **viewport picking + transform gizmos** (m9.6, Fable), and **play-in-editor** (Edit ↔ Playing/Paused,
+> snapshot → sim → bit-exact restore — m9.7, Fable). The **s1.4 local socket** carries all of it. So the
+> M9 "done when" — *build a small scene, tweak components, hit Play* — is functionally reachable today.
+> **m9.8 (this brick) closes the milestone:** the docs true-up (this file, ARCHITECTURE, the glossary,
+> the editor README's "first five minutes"), a headless **scripted-story** CI proof, and the hand-driven
+> **Mac human proof** with an honest editor-UX backlog. **A fast-follow fix (#83)** made gizmo/inspector
+> edits move the object live in Edit mode — m9.7's tick policy had deferred the `LocalTransform` →
+> `WorldTransform` compose to Play — and dropped a duplicate transform row from the inspector. **Not yet
+> in the editor (documented, not faked):** a destruction cameo in play-in-editor — `DestructionWorld`
+> isn't editor-bound yet (ADR-0029 §6), so the Play proof is physics-only for now. **Next:** m9.8 close,
+> then Milestone 10.
+>
 > **Update (2026-07-17) — Track S1 complete; Milestone 9 (Editor v1) kicks off.** The full S1 streaming
 > runway (s1.0–s1.4) is **merged to `main`** (PRs #63–#67, all green on Windows/Linux/macOS): the
 > streaming-v1 ADR, async readback, the AV1 codec (SVT-AV1 + dav1d), the input-v2 **latency ledger**, and
