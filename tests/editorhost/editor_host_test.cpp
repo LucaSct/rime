@@ -790,3 +790,42 @@ TEST_CASE("editorhost: world_content_hash ignores entity identity but not compon
     (void)c.spawn_with(et::Position{1.0f, 2.0f, 3.5f}); // one field differs
     CHECK(editorhost::world_content_hash(a) != editorhost::world_content_hash(c));
 }
+
+TEST_CASE("editorhost: message_affects_frame classifies the idle-skip triggers (m10.0-perf)") {
+    // The editor host renders + streams a frame only when something observable changed
+    // (ADR-0032 §11 — "idle work is a bug"). message_affects_frame is that classifier; pin it so a
+    // future message type forces a conscious yes/no here rather than silently defaulting.
+    using editorhost::EditorMessage;
+    using editorhost::message_affects_frame;
+
+    // Frame-affecting: every world edit (the camera is a world entity, so a camera move arrives as
+    // SetComponent), the gizmo overlay, and the play-state transitions.
+    CHECK(message_affects_frame(EditorMessage::SetComponent));
+    CHECK(message_affects_frame(EditorMessage::Spawn));
+    CHECK(message_affects_frame(EditorMessage::Despawn));
+    CHECK(message_affects_frame(EditorMessage::AddComponent));
+    CHECK(message_affects_frame(EditorMessage::RemoveComponent));
+    CHECK(message_affects_frame(EditorMessage::SpawnEntity));
+    CHECK(message_affects_frame(EditorMessage::GizmoState));
+    CHECK(message_affects_frame(EditorMessage::Play));
+    CHECK(message_affects_frame(EditorMessage::Pause));
+    CHECK(message_affects_frame(EditorMessage::Step));
+    CHECK(message_affects_frame(EditorMessage::Stop));
+
+    // NOT frame-affecting: a snapshot request (answered with world bytes, not a frame) and a pick
+    // request (served by the independent 1×1 pick pass, which never touches the streamed frame).
+    CHECK_FALSE(message_affects_frame(EditorMessage::RequestSnapshot));
+    CHECK_FALSE(message_affects_frame(EditorMessage::PickRequest));
+
+    // The engine->editor kinds are never received by the host loop; classified false for a total
+    // switch. (Listed so this test breaks loudly if one is ever mis-promoted to a wake trigger.)
+    CHECK_FALSE(message_affects_frame(EditorMessage::Schema));
+    CHECK_FALSE(message_affects_frame(EditorMessage::Snapshot));
+    CHECK_FALSE(message_affects_frame(EditorMessage::AssetList));
+    CHECK_FALSE(message_affects_frame(EditorMessage::PickResult));
+    CHECK_FALSE(message_affects_frame(EditorMessage::ViewportCamera));
+    CHECK_FALSE(message_affects_frame(EditorMessage::PlayState));
+
+    // An out-of-band value (a cast the receiver would drop) does not wake the pipeline.
+    CHECK_FALSE(message_affects_frame(static_cast<EditorMessage>(0x02F0)));
+}
