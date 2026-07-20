@@ -326,12 +326,14 @@ jobs:
       - name: Editor smoke (channel + streamed viewport, editor spawns rime-engine)
         run: ./scripts/editor-smoke.sh
 
-      # Compile-check the egui docking shell (feature-gated off by default, so the smoke build above
-      # skips its heavy eframe/wgpu/winit stack). The windowed UI itself is Mac-eyeballed per ADR-0031
-      # — not run here — but building it on every push keeps the shell from bit-rotting. The windowing
-      # dev libs installed above are exactly what winit needs to build.
-      - name: Editor GUI compile-check (--features gui)
-        run: cd tools && cargo build -p editor --features gui
+      # Build the egui docking shell (feature-gated off by default, so the smoke build above skips its
+      # heavy eframe/wgpu/winit stack) AND run its bin unit tests. The windowed UI itself is
+      # Mac-eyeballed per ADR-0031 — not run here — but `--bins` runs the headless unit tests compiled
+      # into the shell (e.g. the engine-child argv builder that forwards --scene/--assets), which is
+      # otherwise a gui-gated blind spot, while still compile-checking the whole stack on every push.
+      # The windowing dev libs installed above are exactly what winit needs to build.
+      - name: Editor GUI build + unit tests (--features gui)
+        run: cd tools && cargo test -p editor --bins --features gui
 
   lint:
     name: format, lint & license

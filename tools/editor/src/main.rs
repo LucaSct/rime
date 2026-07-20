@@ -58,13 +58,16 @@ fn launch(_args: &[String]) -> ExitCode {
 
 fn print_usage() {
     eprintln!("usage:");
-    eprintln!("  editor                       launch the docking shell (needs --features gui)");
+    eprintln!(
+        "  editor [--engine <rime-engine>] [--scene <file.rscene>] [--assets <manifest>]\n\
+         \x20                              launch the docking shell (needs --features gui)"
+    );
     eprintln!("  editor --smoke [--frames N] [--engine <rime-engine>] [--scene <file.rscene>]");
     eprintln!(
         "      --frames N   receive+decode N streamed viewport frames (else the editor channel)"
     );
     eprintln!("      --engine P   the rime-engine binary to launch (else $RIME_ENGINE_BIN)");
     eprintln!(
-        "      --scene  P   a .rscene for the engine to load (channel mode; else a default world)"
+        "      --scene  P   a .rscene for the engine to load into the world (else a default scene)"
     );
 }

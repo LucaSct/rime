@@ -75,6 +75,14 @@ say "run editor --smoke (editor channel: schema + snapshot + edit)"
 if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1; then
     say "run editor --smoke --frames (streamed viewport: render → LZ4 → decode)"
     "$editor_bin" --smoke --frames 8 --engine "$engine_bin"
+
+    # Same streamed-viewport path, but hosting a real --scene rather than the built-in demo (m9.5
+    # passthrough): the engine loads first_light.rscene into the viewport world, renders it, and the
+    # smoke picks a lit pixel + gizmo-edits an entity — proving serve_viewport honours --scene end to
+    # end. (serve_viewport silently ignored --scene before this brick; without a test that path is a
+    # CI blind spot.)
+    say "run editor --smoke --frames --scene (streamed viewport hosts a loaded .rscene)"
+    "$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$scene"
 else
     say "skip viewport smoke — no Vulkan device (vulkaninfo not usable); channel smoke covered it"
 fi
