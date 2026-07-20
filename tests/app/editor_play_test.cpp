@@ -181,9 +181,62 @@ struct PlayHarness {
         app.timestep().reset();
         return did;
     }
+
+    // An Edit/Paused viewport frame: serve_viewport renders these WITHOUT a tick (frame_dt == 0),
+    // but first recomposes world = local so a gizmo/inspector LocalTransform edit shows in the very
+    // next frame instead of being deferred to Play. Mirrors the fixed serve_viewport loop's
+    // `if (frame_dt == 0) propagate_transforms(...)` step exactly.
+    void render_edit_frame() {
+        ecs::propagate_transforms(app.world(), app.jobs());
+        app.step(0.0); // frame_dt == 0: render only (GPU-free here), zero ticks
+    }
 };
 
 } // namespace
+
+TEST_CASE(
+    "m9.6b/m9.7 edit-mode: a LocalTransform edit reaches WorldTransform before any Play tick") {
+    // The user-facing bug this guards: in Edit mode the gizmo/inspector writes LocalTransform, but
+    // m9.7's tick policy runs NO tick in Edit — so without the viewport loop's explicit non-ticking
+    // derive, WorldTransform (what the renderer draws) stays at the spawn pose and the object only
+    // jumps once Play starts the ticks ("the gizmo does nothing until I press ▶").
+    // render_edit_frame() mirrors the fixed loop; this asserts the edit lands in WorldTransform
+    // with the sim untouched.
+    PlayHarness h;
+    build_ball_scene(h.app.world());
+    REQUIRE(h.session.phase() == editorhost::PlayPhase::Edit);
+
+    // Find the dynamic ball and edit its LocalTransform — exactly what a gizmo drag / inspector
+    // does.
+    ecs::Entity ball{};
+    bool found = false;
+    h.app.world().query<physics::RigidBody, ecs::LocalTransform>().for_each(
+        [&](ecs::Entity e, physics::RigidBody& rb, ecs::LocalTransform&) {
+            if (rb.motion == static_cast<std::uint32_t>(physics::MotionType::Dynamic)) {
+                ball = e;
+                found = true;
+            }
+        });
+    REQUIRE(found);
+    const core::Vec3 moved{2.0f, 5.0f, -1.0f};
+    ecs::LocalTransform* lt = h.app.world().get<ecs::LocalTransform>(ball);
+    REQUIRE(lt != nullptr);
+    lt->value.translation = moved;
+
+    // One Edit-mode viewport frame (no Play): WorldTransform must now equal the edited
+    // LocalTransform.
+    h.render_edit_frame();
+
+    const ecs::WorldTransform* wt = h.app.world().get<ecs::WorldTransform>(ball);
+    REQUIRE(wt != nullptr);
+    CHECK(wt->value.translation.x == doctest::Approx(moved.x));
+    CHECK(wt->value.translation.y == doctest::Approx(moved.y));
+    CHECK(wt->value.translation.z == doctest::Approx(moved.z));
+
+    // The sim never advanced — an Edit frame renders, it does not tick.
+    CHECK(h.session.phase() == editorhost::PlayPhase::Edit);
+    CHECK(h.session.tick_count() == 0);
+}
 
 TEST_CASE("m9.7 play: 100 ticks then stop restores the pre-play world's content exactly") {
     PlayHarness h;

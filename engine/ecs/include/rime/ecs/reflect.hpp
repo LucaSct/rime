@@ -45,9 +45,17 @@ RIME_REFLECT_BEGIN(rime::ecs::LocalTransform)
 RIME_REFLECT_FIELD(value)
 RIME_REFLECT_END()
 
-RIME_REFLECT_BEGIN(rime::ecs::WorldTransform)
-RIME_REFLECT_FIELD(value)
-RIME_REFLECT_END()
+// WorldTransform is deliberately NOT reflected — do not add a RIME_REFLECT block for it. It is
+// DERIVED state (propagate_transforms recomputes it from the LocalTransform chain every tick), so
+// it is never persisted to a scene, never rides an editor snapshot, and never enters
+// world_content_hash — exactly like physics::RigidBodyHandle. Register it as a live component where
+// a renderer needs to query it; it simply won't be serialized. Reflecting it is also actively
+// harmful: WorldTransform is structurally identical to LocalTransform (`{ core::Transform value;
+// }`), and compute_type_hash fingerprints a struct's FIELDS, not its name (type_info.hpp) — so the
+// two share one type_hash. An entity carrying both (every editor-viewport entity does) would then
+// serialize two indistinguishable same-hash components, which the inspector renders as two
+// identical "LocalTransform" panels with colliding egui widget IDs. Keeping it unreflected is what
+// makes the snapshot carry exactly the one editable placement.
 
 RIME_REFLECT_BEGIN(rime::ecs::Parent)
 RIME_REFLECT_FIELD(value)

@@ -238,9 +238,10 @@ int serve_channel(stream::ProtocolConnection conn,
 // A compact, lit scene to render into the viewport: a row of metallic spheres of rising roughness
 // over a floor, a point light, and a camera framing them. Every posed entity carries BOTH
 // LocalTransform (the authored placement the inspector and the gizmo edit) and WorldTransform (the
-// derived placement the renderer reads): the app's tick already runs propagate_transforms, which
-// recomputes world = local for these flat roots, so an edit to LocalTransform moves the rendered
-// object next frame. This uniformity is the m9.6b fix — previously the scene authored
+// derived placement the renderer reads). The viewport loop recomposes world = local every frame —
+// inside the tick while Playing, and explicitly on the non-ticking Edit/Paused frames (see the
+// frame_dt == 0 branch in serve_viewport) — so an edit to LocalTransform moves the rendered object
+// the very next frame in ANY mode. This uniformity is the m9.6b fix: previously the scene authored
 // WorldTransform directly, which made LocalTransform edits (the component every OTHER scene path
 // edits) dead here.
 void build_viewport_scene(ecs::World& world,
@@ -249,9 +250,11 @@ void build_viewport_scene(ecs::World& world,
     using ecs::LocalTransform;
     using ecs::WorldTransform;
     ecs::register_transform_components(world);
-    // WorldTransform is not in the default set (it is derived state, deliberately not persisted —
-    // reflect.hpp); the viewport host registers it so the renderer can read it AND so the editor's
-    // snapshot shows the derived pose (the gizmo projects handles at the world position).
+    // WorldTransform is derived state, deliberately unreflected (reflect.hpp), so it never enters a
+    // scene or the editor snapshot. Register it here anyway so the renderer and the engine's gizmo
+    // pass can query it as a live component; being unreflected is what keeps it OUT of the
+    // inspector, where it would otherwise collide with LocalTransform's structural type_hash (see
+    // reflect.hpp).
     (void)world.register_component<WorldTransform>();
     render::register_render_components(world);
     // RigidBody/Collider (m9.7 Play): registered even though only the ball below carries them at
@@ -351,8 +354,8 @@ void load_viewport_scene(ecs::World& world,
                          render::MaterialRegistry& materials,
                          std::string_view scene_path) {
     ecs::register_transform_components(world);
-    // WorldTransform is not in the default set (derived state — reflect.hpp); register it so the
-    // renderer can read it and the editor snapshot exposes the derived pose to the gizmo.
+    // WorldTransform is derived state, deliberately unreflected (reflect.hpp) — register it so the
+    // renderer and the gizmo pass can query it live; it stays out of the scene and the snapshot.
     (void)world.register_component<ecs::WorldTransform>();
     render::register_render_components(world);
 
@@ -645,6 +648,16 @@ int serve_viewport(std::string_view socket_path,
             (play_session.phase() == editorhost::PlayPhase::Playing || pending_step)
                 ? app.fixed_dt()
                 : 0.0;
+        // m9.7's tick policy renders Edit/Paused frames without a tick (frame_dt == 0) — but the
+        // tick (Application::run_ticks) is where propagate_transforms composes a LocalTransform
+        // edit into the WorldTransform the renderer, and the engine's gizmo pass, read. So on a
+        // non-ticking frame, derive it here; otherwise a gizmo/inspector edit does not move the
+        // streamed object until Play starts the ticks (the m9.6b live-edit invariant m9.7 silently
+        // deferred — the "gizmo does nothing until I press ▶" bug). A ticking frame (Playing/Step)
+        // skips this: run_ticks composes it, and physics write_back then owns the pose.
+        if (frame_dt == 0.0) {
+            ecs::propagate_transforms(app.world(), app.jobs());
+        }
         app.step(frame_dt); // tick (0 or 1, per frame_dt above) + render (executes the graph)
 
         // The play state + tick count (m9.7) — sent every iteration like ViewportCamera: a handful
