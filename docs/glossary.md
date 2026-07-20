@@ -501,3 +501,13 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Screen-constant size.** Drawing an overlay (a gizmo, a handle) scaled by its distance from
   the camera so it covers a fixed fraction of the viewport at any depth — you never have to
   approach an object to grab its gizmo. See [math/gizmos.md](math/gizmos.md).
+- **Play-in-editor (PIE).** Running the simulation live inside the editor session — Edit ↔
+  Playing ↔ Paused — instead of launching a separate game process. Rime's v1 (M9.7) runs it
+  **in-process**: the sim ticks the very `World` the editor is showing, snapshotted first so Stop
+  can restore it bit-exactly; a separate PIE *process* (crash-isolated from the editor, closer to
+  Unreal's model) is a documented seam for M11, not built yet.
+- **Side-table.** Engine state that shadows the ECS instead of living in components on it — a
+  physics `PhysicsWorld` keyed by `BodyId`, the M8 destruction SoA keyed by `InstanceId`. Fast
+  for the system that owns it, but invisible to anything that only walks components (reflection,
+  a `.rscene` save, a PIE snapshot) unless that system also exposes a **reconstructible-from-
+  components** path — M9.7's restore proof is exactly that check, brick by brick.
