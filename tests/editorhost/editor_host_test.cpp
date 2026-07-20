@@ -634,3 +634,121 @@ TEST_CASE("editorhost: ViewportCamera and GizmoState round-trip their wire paylo
     CHECK(editorhost::GizmoStateMsg{}.index == 0xFFFFFFFFu);
     CHECK(editorhost::GizmoStateMsg{}.mode == 0);
 }
+
+TEST_CASE("editorhost: PlayState round-trips its wire payload (m9.7)") {
+    editorhost::PlayStateMsg msg{};
+    msg.phase = editorhost::PlayPhase::Paused;
+    msg.tick_count = 123456789ull;
+    const std::vector<std::byte> bytes = editorhost::serialize_play_state(msg);
+    CHECK(bytes.size() == 1 + 8); // [phase:u8][tick_count:u64]
+
+    editorhost::PlayStateMsg back{};
+    REQUIRE(editorhost::parse_play_state(bytes, back));
+    CHECK(back.phase == editorhost::PlayPhase::Paused);
+    CHECK(back.tick_count == 123456789ull);
+
+    // A truncated payload is rejected, never mis-parsed.
+    editorhost::PlayStateMsg trunc{};
+    CHECK_FALSE(editorhost::parse_play_state(
+        std::span<const std::byte>(bytes.data(), bytes.size() - 1), trunc));
+
+    // The default state is Edit / tick 0 — what a fresh session reports before any Play.
+    CHECK(editorhost::PlayStateMsg{}.phase == editorhost::PlayPhase::Edit);
+    CHECK(editorhost::PlayStateMsg{}.tick_count == 0);
+}
+
+TEST_CASE("editorhost: PlaySession — play/pause/stop is a pure ECS state machine (m9.7)") {
+    // Pure ECS proof, deliberately physics-free (physics + the restore-fidelity/content-hash/
+    // accumulator proofs live in tests/app/editor_play_test.cpp, which can link rime::physics;
+    // this module cannot — see engine/editorhost/CMakeLists.txt). What belongs here is the
+    // state-machine contract PlaySession itself owns: phase transitions, snapshot capture on the
+    // Edit->Playing/Paused edge only, and a bit-exact ECS restore.
+    ecs::World w;
+    const ecs::Entity e = w.spawn_with(et::Position{1.0f, 2.0f, 3.0f});
+    editorhost::PlaySession session;
+    CHECK(session.phase() == editorhost::PlayPhase::Edit);
+
+    SUBCASE("play then stop restores the entity's pre-play component values") {
+        session.play(w);
+        CHECK(session.phase() == editorhost::PlayPhase::Playing);
+
+        // A live "edit" while playing (m9.0 §4 allows edits during Play; they must not survive
+        // Stop) — mutate Position directly, exactly what a SetComponent apply would do.
+        w.get<et::Position>(e)->x = 99.0f;
+        (void)w.spawn(); // and a structural edit: a bare extra entity
+        CHECK(w.entity_count() == 2);
+
+        REQUIRE(session.stop(w));
+        CHECK(session.phase() == editorhost::PlayPhase::Edit);
+        CHECK(session.tick_count() == 0);
+        CHECK(w.entity_count() == 1); // the extra spawn did not survive
+
+        // The original entity's data came back — a DIFFERENT handle (deserialize_world always
+        // mints fresh ids), so re-find it by its restored Position rather than by `e`.
+        bool found = false;
+        w.query<et::Position>().for_each([&](ecs::Entity, et::Position& p) {
+            found = true;
+            CHECK(p.x == 1.0f); // NOT 99 — the mid-play edit was discarded
+            CHECK(p.y == 2.0f);
+            CHECK(p.z == 3.0f);
+        });
+        CHECK(found);
+    }
+
+    SUBCASE(
+        "resume after pause keeps the ORIGINAL pre-play snapshot, not the paused mid-play state") {
+        session.play(w);
+        w.get<et::Position>(e)->x = 42.0f; // moved while Playing
+        session.pause(w);                  // Playing -> Paused: must NOT re-snapshot here
+        CHECK(session.phase() == editorhost::PlayPhase::Paused);
+        session.play(w); // resume: Paused -> Playing, still the ORIGINAL snapshot
+        CHECK(session.phase() == editorhost::PlayPhase::Playing);
+
+        REQUIRE(session.stop(w));
+        w.query<et::Position>().for_each(
+            [&](ecs::Entity, et::Position& p) { CHECK(p.x == 1.0f); }); // the pre-play value
+    }
+
+    SUBCASE("a Step straight from Edit still snapshots, so Stop has something to restore") {
+        session.pause(w); // mirrors editor_host_main.cpp's Step handler: Edit -> Paused directly
+        CHECK(session.phase() == editorhost::PlayPhase::Paused);
+        w.get<et::Position>(e)->x = 7.0f;
+        REQUIRE(session.stop(w));
+        w.query<et::Position>().for_each([&](ecs::Entity, et::Position& p) { CHECK(p.x == 1.0f); });
+    }
+
+    SUBCASE("stop is a no-op from Edit — nothing was playing") {
+        CHECK_FALSE(session.stop(w));
+        CHECK(session.phase() == editorhost::PlayPhase::Edit);
+        CHECK(w.entity_count() == 1); // untouched
+    }
+
+    SUBCASE("record_tick accumulates and resets with the session") {
+        session.play(w);
+        session.record_tick();
+        session.record_tick();
+        CHECK(session.tick_count() == 2);
+        REQUIRE(session.stop(w));
+        CHECK(session.tick_count() == 0);
+    }
+}
+
+TEST_CASE("editorhost: world_content_hash ignores entity identity but not component data (m9.7)") {
+    // The property world_content_hash exists for: two worlds holding the SAME component data but
+    // DIFFERENT entity handles (exactly what a despawn-everything-then-respawn restore produces,
+    // per ecs::EntityDirectory's LIFO-recycling + unconditional generation bump) still hash equal;
+    // any actual data difference still hashes different.
+    ecs::World a;
+    (void)a.spawn(); // burn index 0 so `b`'s matching entity lands on a DIFFERENT index/generation
+    const ecs::Entity ea = a.spawn_with(et::Position{1.0f, 2.0f, 3.0f});
+    (void)ea;
+
+    ecs::World b;
+    (void)b.spawn_with(et::Position{1.0f, 2.0f, 3.0f}); // same data, index 0 (no entity burned)
+
+    CHECK(editorhost::world_content_hash(a) == editorhost::world_content_hash(b));
+
+    ecs::World c;
+    (void)c.spawn_with(et::Position{1.0f, 2.0f, 3.5f}); // one field differs
+    CHECK(editorhost::world_content_hash(a) != editorhost::world_content_hash(c));
+}
