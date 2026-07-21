@@ -247,6 +247,13 @@ Entries are grouped roughly by area and kept short on purpose.
   (Installable Client Driver) is an actual implementation it dispatches to — a GPU driver,
   **MoltenVK** (Vulkan-on-Metal, for macOS), or **lavapipe** (Mesa's CPU/software Vulkan,
   used to run Rime's render proof on GPU-less CI machines).
+- **Portability subset.** `VK_KHR_portability_subset`: the extension a *non-conformant*
+  Vulkan implementation (one layered over another API — MoltenVK over Metal) must expose,
+  listing the capabilities it may lack. It is not a flag but a feature struct, and like
+  every Vulkan feature struct each capability starts **off**: enabling the extension
+  without asking for its features accepts the restrictions and forfeits the capabilities.
+  Rime queries what the device reports and enables exactly that
+  (`VulkanDevice::create_logical_device`).
 
 ## Physics & destruction
 

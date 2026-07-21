@@ -369,8 +369,9 @@ bool VulkanDevice::create_logical_device() {
 
     std::vector<const char*> enabled_exts;
     // The spec *requires* enabling portability_subset whenever a device exposes it (MoltenVK does).
-    if (has_ext(exts, "VK_KHR_portability_subset")) {
-        enabled_exts.push_back("VK_KHR_portability_subset");
+    const bool portability = has_ext(exts, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    if (portability) {
+        enabled_exts.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     }
     // VK_KHR_swapchain (M3.4): the device-level half of presentation. Enabled when present so a
     // Swapchain can be created; absent on a headless software ICD, where we never present.
@@ -383,6 +384,34 @@ bool VulkanDevice::create_logical_device() {
     f13.synchronization2 = VK_TRUE;
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     f2.pNext = &f13;
+
+    // Enabling VK_KHR_portability_subset is only half the contract. The extension is a list of
+    // capabilities a Metal/D3D translation layer may or may not have, and — like every Vulkan
+    // feature struct — each one starts OFF and must be *asked for* at device creation. Naming the
+    // extension without chaining its feature struct therefore opts into the restrictions while
+    // opting out of the capabilities: everything in that list becomes undefined behaviour to use.
+    // We hand back exactly what the device reported it can do (enabling a supported capability is
+    // always legal), which is the only future-proof answer as the list grows.
+    //
+    // The one that bit us was `mutableComparisonSamplers`. Metal can only give a depth-compare
+    // sampler a real MTLSamplerState if the driver is told to; otherwise MoltenVK assumes the
+    // sampler is *immutable* and baked into the shader as a `constexpr sampler`, and our ordinary
+    // runtime-bound one degrades to compare_func::never — every sampler2DArrayShadow fetch returns
+    // 0. Nothing errors; the shadow maps are correct; the scene just renders FULLY SHADOWED, on
+    // macOS only. That is the m10.1/m10.2 shadow tests collapsing to ambient on a real Mac while
+    // lavapipe (not a portability driver, so none of this applies) stayed green.
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR portability_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR, nullptr};
+    if (portability) {
+        VkPhysicalDeviceFeatures2 probe{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        probe.pNext = &portability_features;
+        vkGetPhysicalDeviceFeatures2(physical_, &probe);
+        portability_features.pNext = nullptr; // re-link: query chain -> create chain
+        f13.pNext = &portability_features;
+        depth_compare_supported_ = portability_features.mutableComparisonSamplers == VK_TRUE;
+        RIME_INFO("rhi: portability device — depth-compare samplers {}",
+                  depth_compare_supported_ ? "enabled" : "UNAVAILABLE (shadows will be wrong)");
+    }
 
     // Optional features/limits the sampler + timing paths use (M5.3). Anisotropic filtering is a
     // feature we must *enable* (near-universal, but portability-class devices may lack it — then

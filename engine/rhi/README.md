@@ -59,3 +59,13 @@ src/vulkan/         # the Vulkan backend — the only code that includes Vulkan 
 Vulkan **1.3**, using **dynamic rendering** + **synchronization2** (no `VkRenderPass`/`VkFramebuffer`
 objects), **volk** as the loader, and **VMA** for memory. The runtime loader + an ICD (a real GPU
 driver, MoltenVK on macOS, or lavapipe in CI) come from the environment, not the build. See ADR-0007.
+
+**Portability implementations.** When a device exposes `VK_KHR_portability_subset` (MoltenVK does),
+`create_logical_device` queries `VkPhysicalDevicePortabilitySubsetFeaturesKHR` and enables back every
+capability the device reported. This is not optional politeness: the extension's features start off
+like any other, so naming the extension alone opts into its *restrictions* while leaving its
+*capabilities* disabled — and using a disabled one is undefined behaviour that no validation layer
+flags. `mutableComparisonSamplers` is the sharp edge (depth-compare/shadow samplers); without it
+MoltenVK degrades every `sampler2DShadow` fetch to `compare_func::never`, so shadow maps silently
+read as *fully occluded* on macOS while lavapipe — not a portability driver, so none of this applies
+— stays green. Lesson: **CI's software ICD cannot test the portability path at all.**

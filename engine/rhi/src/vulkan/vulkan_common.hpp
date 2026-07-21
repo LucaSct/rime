@@ -31,6 +31,38 @@
 #undef Success
 #endif
 
+// VK_KHR_portability_subset (the MoltenVK/Metal capability opt-in — see
+// VulkanDevice::create_logical_device) is a *provisional* extension in the Vulkan headers: its
+// declarations only exist when VK_ENABLE_BETA_EXTENSIONS is defined, which would also switch on
+// every other provisional API in the SDK. Rather than pay that, we declare the one struct we
+// need. The layout and sType are frozen by the published extension (spec version 1), so this is
+// safe; the guard defers to the real headers on any build that does define the macro.
+#if !defined(VK_KHR_portability_subset)
+#define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR                          \
+    static_cast<VkStructureType>(1000163000)
+
+struct VkPhysicalDevicePortabilitySubsetFeaturesKHR {
+    VkStructureType sType;
+    void* pNext;
+    VkBool32 constantAlphaColorBlendFactors;
+    VkBool32 events;
+    VkBool32 imageViewFormatReinterpretation;
+    VkBool32 imageViewFormatSwizzle;
+    VkBool32 imageView2DOn3DImage;
+    VkBool32 multisampleArrayImage;
+    VkBool32 mutableComparisonSamplers;
+    VkBool32 pointPolygons;
+    VkBool32 samplerMipLodBias;
+    VkBool32 separateStencilMaskRef;
+    VkBool32 shaderSampleRateInterpolationFunctions;
+    VkBool32 tessellationIsolines;
+    VkBool32 tessellationPointMode;
+    VkBool32 triangleFans;
+    VkBool32 vertexAttributeAccessBeyondStride;
+};
+#endif
+
 #include <cstdint>
 
 #include "rime/core/containers/handle.hpp"
