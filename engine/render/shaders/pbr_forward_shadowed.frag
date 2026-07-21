@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Forward-PBR fragment shader WITH directional cascaded shadow maps (m10.1, ADR-0032 §3). This is
-// pbr_forward.frag verbatim — same Cook-Torrance BRDF, same everything (see that file / docs/math/
-// pbr.md for the shading derivation) — plus one addition: the PRIMARY directional light's
-// contribution is modulated by a shadow factor sampled from the cascaded shadow map. It is a
-// SEPARATE shader from pbr_forward.frag on purpose: with shadows off the renderer binds the
-// unmodified pbr_forward pipeline and is byte-identical to the M5.6 baseline (ADR-0032 §11). The
-// shared BRDF is duplicated here rather than #included because the offline shader compile has no
-// include path configured yet; factoring a common lighting_data.glsl is the C5 follow-up.
+// The M10 forward-PBR fragment shader: pbr_forward.frag's Cook-Torrance BRDF (see that file /
+// docs/math/pbr.md for the shading derivation) plus the lighting features ADR-0032 adds —
 //
-// The shadow test itself (why "render depth from the light, compare from the camera" answers "is
-// this point occluded", the cascade selection, PCF, and bias) is derived in
-// docs/math/shadow-mapping.md.
+//   * m10.1: the PRIMARY directional light is modulated by a cascaded shadow map;
+//   * m10.2: each spot light is modulated by its own cached perspective shadow map;
+//   * m10.3: point lights come from clustered per-froxel light lists instead of a fixed uniform
+//     block, lifting ADR-0022's cap of 16.
+//
+// It is a SEPARATE shader from pbr_forward.frag on purpose: with every M10 feature off the
+// renderer binds the unmodified pbr_forward pipeline and is byte-identical to the M5.6 baseline
+// (ADR-0032 §11). Each feature is then gated *inside* here by a count or flag in its uniform
+// block, so one pipeline covers every combination. The shared BRDF is duplicated from
+// pbr_forward.frag rather than #included because the offline shader compile has no include path
+// configured yet; factoring a common lighting_data.glsl is the C5 follow-up.
+//
+// The techniques are derived in docs/math/shadow-mapping.md (the shadow test, cascade selection,
+// PCF and bias) and docs/math/clustered-shading.md (the froxel grid and its log-z partition).
 #version 450
 
 struct DirLight {
@@ -77,6 +82,34 @@ layout(std140, set = 0, binding = 10) uniform LocalShadowUniforms {
     vec4 texel;             // x = 1 / local-shadow resolution
 } local;
 
+// ── Clustered forward (m10.3) ────────────────────────────────────────────────────────────────
+// The point-light half of this shader has two implementations: the ADR-0022 uniform-block loop
+// (≤16 lights, every one evaluated at every pixel) and the clustered loop, which reads only the
+// lights the cull dispatch found in THIS pixel's froxel. `cluster.counts.y` picks between them, so
+// the two paths are a toggle apart on one frame — which is exactly how the equivalence proof
+// compares them.
+struct ClusterLight {
+    vec4 position; // xyz = world position, w = falloff radius
+    vec4 radiance; // rgb = colour × intensity
+};
+
+layout(std430, set = 0, binding = 11) readonly buffer Lights {
+    ClusterLight lights[];
+} light_buffer;
+
+layout(std430, set = 0, binding = 12) readonly buffer ClusterLists {
+    uint data[]; // per-froxel runs of [count, index…]
+} lists;
+
+layout(std140, set = 0, binding = 13) uniform ClusterUniforms {
+    mat4 view;    // world → view (the fragment's depth slice needs it)
+    uvec4 grid;   // x,y,z = froxel grid dims, w = max lights per froxel
+    uvec4 counts; // x = light count, y = clustered enabled
+    vec4 depth;   // x = z_near, y = z_far, z = log(z_far / z_near)
+    vec4 screen;  // x,y = render-target size in pixels
+    vec4 proj;    // x,y = the projection's x/y scale terms
+} cluster;
+
 layout(location = 0) in vec3 v_world_pos;
 layout(location = 1) in vec3 v_world_normal;
 layout(location = 2) in vec2 v_uv;
@@ -122,6 +155,37 @@ vec3 shade_light(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo, float metal
     vec3 diffuse = kd * albedo / kPi;
 
     return (diffuse + specular) * radiance * n_dot_l;
+}
+
+// One point light's contribution. Factored out (m10.3) so the uniform-block loop and the clustered
+// loop are provably the same shading maths — only the source of the light data differs. The
+// windowed inverse-square falloff is ADR-0022's, unchanged: 1/d² physical falloff multiplied by a
+// window that reaches exactly zero at the light's radius, so a light has finite reach without the
+// discontinuity a hard cut-off would leave.
+vec3 point_contrib(vec3 n, vec3 v, vec3 world_pos, vec3 light_pos, float radius, vec3 radiance,
+                   vec3 albedo, float metallic, float alpha) {
+    vec3 to_light = light_pos - world_pos;
+    float dist2 = max(dot(to_light, to_light), 1e-4);
+    float dist = sqrt(dist2);
+    vec3 l = to_light / dist;
+    float r = max(radius, 1e-3);
+    float q = dist / r;
+    float q4 = q * q * q * q;
+    float window = clamp(1.0 - q4, 0.0, 1.0);
+    float falloff = window * window / dist2;
+    return shade_light(n, v, l, radiance * falloff, albedo, metallic, alpha);
+}
+
+// Which froxel this fragment is in. Screen tile from gl_FragCoord (pixels, y-down — the same
+// orientation as our y-down NDC, so no flip), depth slice from the log-z partition. This is the
+// mirror of cluster_depth_slice()/cluster_index() in lighting/clustered.hpp.
+uint fragment_cluster(vec3 world_pos) {
+    uvec2 tile = uvec2(gl_FragCoord.xy / cluster.screen.xy * vec2(cluster.grid.xy));
+    tile = min(tile, cluster.grid.xy - 1u); // a fragment exactly on the right/bottom edge
+    float view_depth = -(cluster.view * vec4(world_pos, 1.0)).z;
+    float t = log(max(view_depth, cluster.depth.x) / cluster.depth.x) / cluster.depth.z;
+    uint slice = uint(clamp(t * float(cluster.grid.z), 0.0, float(cluster.grid.z - 1u)));
+    return (slice * cluster.grid.y + tile.y) * cluster.grid.x + tile.x;
 }
 
 vec3 perturb_normal(vec3 world_normal) {
@@ -213,18 +277,25 @@ void main() {
         out_radiance += (i == 0u) ? contrib * sun_factor : contrib;
     }
 
-    for (uint i = 0u; i < frame.light_counts.y && i < 16u; ++i) {
-        vec3 to_light = frame.point_lights[i].position.xyz - v_world_pos;
-        float dist2 = max(dot(to_light, to_light), 1e-4);
-        float dist = sqrt(dist2);
-        vec3 l = to_light / dist;
-        float r = max(frame.point_lights[i].position.w, 1e-3);
-        float q = dist / r;
-        float q4 = q * q * q * q;
-        float window = clamp(1.0 - q4, 0.0, 1.0);
-        float falloff = window * window / dist2;
-        vec3 radiance = frame.point_lights[i].radiance.rgb * falloff;
-        out_radiance += shade_light(n, v, l, radiance, albedo, metallic, alpha);
+    // Point lights, from whichever source is active (m10.3). Clustered: this pixel's froxel names
+    // a handful of lights out of possibly hundreds — the loop bound is what the cull pass found
+    // here, not the size of the scene. Unclustered: ADR-0022's fixed uniform block.
+    if (cluster.counts.y != 0u) {
+        uint stride = cluster.grid.w + 1u;
+        uint base = fragment_cluster(v_world_pos) * stride;
+        uint count = min(lists.data[base], cluster.grid.w);
+        for (uint i = 0u; i < count; ++i) {
+            ClusterLight cl = light_buffer.lights[lists.data[base + 1u + i]];
+            out_radiance += point_contrib(n, v, v_world_pos, cl.position.xyz, cl.position.w,
+                                          cl.radiance.rgb, albedo, metallic, alpha);
+        }
+    } else {
+        for (uint i = 0u; i < frame.light_counts.y && i < 16u; ++i) {
+            out_radiance += point_contrib(n, v, v_world_pos, frame.point_lights[i].position.xyz,
+                                          frame.point_lights[i].position.w,
+                                          frame.point_lights[i].radiance.rgb, albedo, metallic,
+                                          alpha);
+        }
     }
 
     // Spot lights (m10.2): a point light with a cone, each casting a real shadow through its own

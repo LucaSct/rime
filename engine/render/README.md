@@ -16,17 +16,22 @@ this graph, not as a renderer rewrite.
 | --- | --- | --- |
 | M5.4 | **RenderGraph v0** — frame-declared raster/compute passes, virtual resources (`RGTexture`), `import`/`export`, compile (versioning → edges → topo order → cull), the transient cache, graph-owned barriers, per-pass GPU ms | landed |
 | M5.5 | the **scene layer** — `OrbitCamera` graduated from the viewer (ADR-0016 rule 3, the first parallel-path promotion), procedural primitives (plane/cube/uv-sphere, analytically exact) + `MeshRegistry`/`MaterialRegistry` behind dense ids, reflection-registered ECS render components (`MeshRef`, `MaterialRef`, `Camera`, lights) | landed |
-| M5.6 | the PBR forward pass library (depth pre-pass → HDR forward → tonemap) + `docs/math/pbr.md` | planned |
+| M5.6 | the PBR forward pass library (depth pre-pass → HDR forward → tonemap) + `docs/math/pbr.md` | landed |
+| m10.1 | **directional cascaded shadow maps** — cascade fit, layered depth array, hardware-PCF compare + `docs/math/shadow-mapping.md` | landed |
+| m10.2 | **local (spot) shadows with a destructibility-aware cache** — a slot re-renders only when its light moves or a destruction event's AABB touches its frustum | landed |
+| m10.3 | **clustered forward shading** — froxel light culling in compute + `RGBuffer` + `docs/math/clustered-shading.md` | landed |
 
 Deliberate v0 bounds (ADR-0019 records why): serial recording on one queue (pass boundaries keep
-the parallel-recording and async-compute seams open), no transient aliasing (measure first),
-graph resources are textures (buffers join with their first GPU-driven consumer).
+the parallel-recording and async-compute seams open) and no transient aliasing (measure first).
+Buffers joined the graph as first-class resources at m10.3, with clustered forward's light lists as
+the first GPU-driven consumer ADR-0019 predicted.
 
 ## Layout
 
 ```
 include/rime/render/   # public interface
-  render_graph.hpp     #   RenderGraph, RGTexture, pass descriptors
+  render_graph.hpp     #   RenderGraph, RGTexture, RGBuffer, pass descriptors
+  lighting/            #   the M10 lighting techniques (shadows, clustered, …)
 src/                   # the compiler + executor
 ```
 

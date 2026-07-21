@@ -113,7 +113,7 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MeshRegistry& meshes,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
-      forward_(device), tonemap_(device), csm_(device), local_shadows_(device) {
+      forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device) {
     rhi::BufferDesc fd{};
     fd.size = sizeof(GpuFrameUniforms);
     fd.usage = rhi::BufferUsage::Uniform;
@@ -242,7 +242,10 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         std::min<std::size_t>(scene.dir_lights.size(), kMaxDirectionalLights));
     const auto npoint = static_cast<std::uint32_t>(
         std::min<std::size_t>(scene.point_lights.size(), kMaxPointLights));
-    if ((scene.dir_lights.size() > ndir || scene.point_lights.size() > npoint) && !warned_lights_) {
+    // The point-light cap only bites on the unclustered path — with m10.3 on, every point light
+    // reaches the shader through the froxel lists and the uniform block is ignored.
+    const bool point_overflow = !lighting_.clustered_enabled && scene.point_lights.size() > npoint;
+    if ((scene.dir_lights.size() > ndir || point_overflow) && !warned_lights_) {
         RIME_WARN("render: scene exceeds the light caps ({} dir / {} point) — extra lights are "
                   "dropped until per-view light culling exists (M10)",
                   kMaxDirectionalLights,
@@ -326,16 +329,20 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     RGTexture ldr = graph.create_texture({extent, kLdrFormat, "scene-ldr"});
     if (use_depth_prepass)
         depth_prepass_.add(graph, depth, data);
-    // M10 shadows (ADR-0032 §11 regression bridge): the shadowed forward path runs only when
-    // shadows are enabled AND the scene has something to shadow — a directional light (m10.1
-    // cascades) and/or spot lights with local shadows on (m10.2). Otherwise the byte-identical M5.6
-    // forward path.
-    const bool has_local = lighting_.local_shadows_enabled && !scene.spot_lights.empty();
-    if (lighting_.shadows_enabled && (ndir > 0 || has_local)) {
+    // The M10 forward path (ADR-0032 §11 regression bridge) runs only when a feature actually has
+    // something to do: shadows enabled with a directional light (m10.1 cascades) and/or spot lights
+    // (m10.2), or clustering enabled with point lights to cull (m10.3). Otherwise the
+    // byte-identical M5.6 forward path.
+    const bool has_sun = lighting_.shadows_enabled && ndir > 0;
+    // Spot shadows ride the shadowed shader, so they need the shadow gate too (m10.2).
+    const bool has_local =
+        lighting_.shadows_enabled && lighting_.local_shadows_enabled && !scene.spot_lights.empty();
+    const bool has_clusters = lighting_.clustered_enabled && !scene.point_lights.empty();
+    if (has_sun || has_local || has_clusters) {
         // The cascade binding: the real fit when there is a sun, else a valid count-0 placeholder
         // so the shadowed pipeline's binding 7/8 is always satisfied (a spot-only scene).
         ShadowBinding shadow;
-        if (ndir > 0) {
+        if (has_sun) {
             CascadeInputs ci{};
             ci.camera_view = scene.camera.view;
             ci.fov_y = scene.camera.fov_y;
@@ -354,7 +361,22 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             has_local
                 ? local_shadows_.add(graph, depth_prepass_, data, scene.spot_lights, lighting_)
                 : local_shadows_.empty_binding(graph, dummy_shadow_array_);
-        forward_.add_shadowed(graph, hdr, depth, use_depth_prepass, data, shadow, local);
+        // The clustered binding (m10.3): the froxel light lists, else the flag-0 placeholder that
+        // sends the shader back to the uniform-block light loop.
+        ClusterBinding clusters;
+        if (has_clusters) {
+            ClusterInputs cin{};
+            cin.view = scene.camera.view;
+            cin.fov_y = scene.camera.fov_y;
+            cin.aspect = aspect;
+            cin.z_near = scene.camera.z_near;
+            cin.z_far = scene.camera.z_far;
+            cin.extent = extent;
+            clusters = clustered_.add(graph, scene.point_lights, cin);
+        } else {
+            clusters = clustered_.empty_binding(graph);
+        }
+        forward_.add_shadowed(graph, hdr, depth, use_depth_prepass, data, shadow, local, clusters);
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }

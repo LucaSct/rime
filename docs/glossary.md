@@ -151,6 +151,15 @@ Entries are grouped roughly by area and kept short on purpose.
   consistent resolution efficiently.
 - **Many-lights (MegaLights-style).** Techniques to render very large numbers of
   dynamic, shadow-casting lights affordably.
+- **Clustered forward shading.** Rime's many-lights answer: once per frame a compute pass
+  works out which lights reach which part of the view, and the shading pass then loops
+  only the lights on its own short list instead of every light in the scene. Lifts the
+  fixed per-frame light cap a uniform block would impose. See
+  [math/clustered-shading.md](math/clustered-shading.md).
+- **Froxel (frustum voxel).** One cell of the 3-D grid clustered shading lays over the
+  *camera frustum* — two axes are screen tiles, the third is a depth range. Rime uses
+  16×9×24 of them, with depth sliced logarithmically so froxels stay roughly cube-shaped
+  from the near plane to the horizon.
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
   render graph automates them. Vulkan's modern form is *synchronization2*

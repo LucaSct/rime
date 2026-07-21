@@ -195,7 +195,13 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
         {8, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // ShadowUniforms
         {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // local (spot) map
         {10, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment}, // LocalShadowUniforms
+        {11, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // clustered lights (m10.3)
+        {12, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // per-froxel light lists
+        {13, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment}, // ClusterUniforms
     };
+    // 14 of the RHI's 16 descriptor slots (rhi::kMaxBindings) are now spoken for. The next
+    // technique that wants its own buffers — GI probes (m10.5), SSR (m10.7) — is the trigger for a
+    // second descriptor set or a bindless table rather than a 15th binding.
     pd.fragment_shader = shadowed_fragment_shader_;
     pd.bindings = shadowed_bindings;
     pd.depth_write = false;
@@ -258,7 +264,8 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   bool depth_prepassed,
                                   const SceneDrawData& data,
                                   const ShadowBinding& shadow,
-                                  const LocalShadowBinding& local) const {
+                                  const LocalShadowBinding& local,
+                                  const ClusterBinding& clusters) const {
     const RGColorAttachment colors[] = {
         {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
     RGDepthAttachment depth_att{};
@@ -276,24 +283,33 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // the depth passes that wrote them and transition both to ShaderRead (m10.1 cascades, m10.2
     // spots).
     const RGTexture sampled[] = {shadow.map, local.map};
+    // Declaring the two cluster buffers is what orders this pass after the cull dispatch that
+    // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
+    const RGBuffer buffers[] = {clusters.lights, clusters.lists};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.depth = &depth_att;
     desc.sampled = sampled;
+    desc.buffer_reads = buffers;
     const rhi::PipelineHandle pipe =
         depth_prepassed ? pipeline_shadowed_after_prepass_ : pipeline_shadowed_standalone_;
-    graph.add_raster_pass(
-        "forward-pbr shadowed", desc, [pipe, data, shadow, local, &graph](rhi::CommandBuffer& cmd) {
-            cmd.bind_pipeline(pipe);
-            // Bindings 7–10 are attached once (they persist across draws — ADR-0020); record_draws
-            // re-binds only per-draw state on top. The maps' physical handles resolve now
-            // (assign_physicals has run), the same late-resolve the tonemap pass uses.
-            cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
-            cmd.bind_uniform_buffer(8, shadow.ubo);
-            cmd.bind_texture(9, graph.physical(local.map), local.sampler);
-            cmd.bind_uniform_buffer(10, local.ubo);
-            record_draws(cmd, data, /*bind_material_textures=*/true);
-        });
+    graph.add_raster_pass("forward-pbr shadowed",
+                          desc,
+                          [pipe, data, shadow, local, clusters, &graph](rhi::CommandBuffer& cmd) {
+                              cmd.bind_pipeline(pipe);
+                              // Bindings 7–13 are attached once (they persist across draws —
+                              // ADR-0020); record_draws re-binds only per-draw state on top. The
+                              // resources' physical handles resolve now (assign_physicals has run),
+                              // the same late-resolve the tonemap pass uses.
+                              cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
+                              cmd.bind_uniform_buffer(8, shadow.ubo);
+                              cmd.bind_texture(9, graph.physical(local.map), local.sampler);
+                              cmd.bind_uniform_buffer(10, local.ubo);
+                              cmd.bind_storage_buffer(11, graph.physical_buffer(clusters.lights));
+                              cmd.bind_storage_buffer(12, graph.physical_buffer(clusters.lists));
+                              cmd.bind_uniform_buffer(13, clusters.ubo);
+                              record_draws(cmd, data, /*bind_material_textures=*/true);
+                          });
 }
 
 // ── TonemapPass ───────────────────────────────────────────────────────────────────────────────

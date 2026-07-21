@@ -24,6 +24,28 @@ inline constexpr std::uint32_t kMaxCascades = 4;
 // the m10.2 fast-follow). 8 is generous for the scenes M10 targets and keeps the array small.
 inline constexpr std::uint32_t kMaxLocalShadows = 8;
 
+// ── Clustered forward (m10.3) ─────────────────────────────────────────────────────────────────
+// The froxel grid: the camera frustum diced into a 3-D grid of "frustum voxels" (froxels), one
+// light list per cell. 16×9 across the screen matches a 16:9 view at ~120×120-pixel tiles at 1080p
+// — small enough that a light rarely covers many tiles, large enough that 3456 cells stay cheap to
+// cull and to store. 24 depth slices is the Doom-2016 number and the one the log-z partition in
+// docs/math/clustered-shading.md §2 is derived against.
+//
+// These are compile-time constants, not settings: the grid dimensions size the list buffer, the
+// dispatch, and the shader's cluster lookup, and a mismatch between any two of those is a silent
+// corruption rather than an error. Tunable-at-runtime froxels would need all three to re-derive
+// from one uniform — worth doing when a profile asks, not before.
+inline constexpr std::uint32_t kClusterGridX = 16;
+inline constexpr std::uint32_t kClusterGridY = 9;
+inline constexpr std::uint32_t kClusterGridZ = 24;
+inline constexpr std::uint32_t kClusterCount = kClusterGridX * kClusterGridY * kClusterGridZ;
+
+// The most lights one froxel's list can hold. Past this the cull pass CLAMPS (drops the extra
+// lights for that cell only, warns once through the overflow counter) — never writes out of
+// bounds. 64 is far above what a sane scene puts in one 120-pixel-wide, one-slice-deep cell; a
+// scene that hits it is telling you its lights are piled up, which the overflow stat reports.
+inline constexpr std::uint32_t kMaxLightsPerCluster = 64;
+
 struct LightingSettings {
     // Directional cascaded shadow maps (m10.1). Off by default: a caller opts in, and until it does
     // the frame is the byte-identical pre-M10 baseline (the regression bridge). The editor host and
@@ -68,6 +90,17 @@ struct LightingSettings {
     // Per-spot shadow-map resolution (square). One layer of the local-shadow array is this × this;
     // local maps are usually smaller than cascades (a spot lights a room, not the whole view).
     std::uint32_t local_shadow_resolution = 1024;
+
+    // ── Clustered forward shading (m10.3) ───────────────────────────────────────────────────────
+    // A third independent gate. On: point lights are culled into per-froxel lists by a compute
+    // pass and the forward shader loops only its own froxel's list — the ADR-0022 cap of 16 point
+    // lights in a uniform block is gone, and hundreds of dynamic lights cost what the lit pixels
+    // actually touch. Off (the default): the M5.6 uniform-block loop, byte-identical baseline.
+    //
+    // Independent of the shadow gates, but note both M10 forward paths share ONE shader — turning
+    // this on with shadows off runs the shadowed shader with zero cascades and zero spots, which
+    // is arithmetically the baseline (a count-0 shadow loop returns "lit").
+    bool clustered_enabled = false;
 };
 
 } // namespace rime::render

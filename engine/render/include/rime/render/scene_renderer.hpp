@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "rime/ecs/world.hpp"
+#include "rime/render/lighting/clustered.hpp"
 #include "rime/render/lighting/local_shadows.hpp"
 #include "rime/render/lighting/settings.hpp"
 #include "rime/render/lighting/shadows.hpp"
@@ -97,8 +98,9 @@ public:
 
     // Lighting features (M10, ADR-0032). Default is everything off ⇒ the byte-identical M5.6
     // baseline. `shadows_enabled` makes the primary directional light cast a cascaded shadow map
-    // (m10.1); `local_shadows_enabled` makes spot lights cast cached local shadows (m10.2). The
-    // editor host and the M10 samples set these; the M5.6/M6.4 proofs leave them default.
+    // (m10.1); `local_shadows_enabled` makes spot lights cast cached local shadows (m10.2);
+    // `clustered_enabled` culls point lights into froxel lists so the 16-light cap lifts (m10.3).
+    // The editor host and the M10 samples set these; the M5.6/M6.4 proofs leave them default.
     void set_lighting(const LightingSettings& lighting) { lighting_ = lighting; }
 
     [[nodiscard]] const LightingSettings& lighting() const noexcept { return lighting_; }
@@ -127,6 +129,7 @@ private:
     TonemapPass tonemap_;
     CascadedShadowMap csm_; // m10.1: directional shadow cascades (only declared when enabled)
     LocalShadowMap local_shadows_; // m10.2: cached spot-light shadows (only declared when enabled)
+    ClusteredLights clustered_;    // m10.3: froxel light culling (only declared when enabled)
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
 

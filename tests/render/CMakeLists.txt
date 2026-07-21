@@ -16,6 +16,7 @@ rime_add_test(rime_render_tests
     gizmo_test.cpp
     shadow_test.cpp
     local_shadow_test.cpp
+    clustered_test.cpp
     viewer_frame_graph_test.cpp)
 
 target_link_libraries(rime_render_tests
