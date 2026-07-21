@@ -88,7 +88,7 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MeshRegistry& meshes,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
-      forward_(device), tonemap_(device) {
+      forward_(device), tonemap_(device), csm_(device) {
     rhi::BufferDesc fd{};
     fd.size = sizeof(GpuFrameUniforms);
     fd.usage = rhi::BufferUsage::Uniform;
@@ -280,7 +280,24 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     RGTexture ldr = graph.create_texture({extent, kLdrFormat, "scene-ldr"});
     if (use_depth_prepass)
         depth_prepass_.add(graph, depth, data);
-    forward_.add(graph, hdr, depth, use_depth_prepass, data);
+    // m10.1: the sun (the first directional light) casts a cascaded shadow map when shadows are
+    // enabled AND the scene actually has a directional light. Otherwise the byte-identical M5.6
+    // forward path (ADR-0032 §11 regression bridge).
+    if (lighting_.shadows_enabled && ndir > 0) {
+        CascadeInputs ci{};
+        ci.camera_view = scene.camera.view;
+        ci.fov_y = scene.camera.fov_y;
+        ci.aspect = aspect;
+        ci.z_near = scene.camera.z_near;
+        ci.z_far = scene.camera.z_far;
+        ci.light_dir = core::Vec3{fu.dir_lights[0].direction[0],
+                                  fu.dir_lights[0].direction[1],
+                                  fu.dir_lights[0].direction[2]};
+        const ShadowBinding shadow = csm_.add(graph, depth_prepass_, data, ci, lighting_);
+        forward_.add_shadowed(graph, hdr, depth, use_depth_prepass, data, shadow);
+    } else {
+        forward_.add(graph, hdr, depth, use_depth_prepass, data);
+    }
     tonemap_.add(graph, hdr, ldr);
     graph.export_texture(ldr); // the frame output; hdr is exportable by the caller when needed
     return {hdr, ldr};

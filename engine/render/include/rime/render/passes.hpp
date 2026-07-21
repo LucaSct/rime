@@ -124,8 +124,22 @@ struct SceneDrawData {
     std::span<const rhi::TextureHandle> occlusion_textures = {};
     std::span<const rhi::TextureHandle> emissive_textures = {};
     rhi::BufferHandle frame_ubo;
+    // Byte offset into `frame_ubo` for the binding-0 (FrameUniforms) attach (m10.1). 0 for the
+    // camera pass; a CSM cascade points it at that cascade's 256-byte light-view_proj slice, so the
+    // one shared draw loop renders the scene from any view without a bespoke pass.
+    std::uint32_t frame_ubo_offset = 0;
     rhi::BufferHandle draw_ubo;
     rhi::SamplerHandle material_sampler;
+};
+
+// m10.1: what the shadowed forward pass samples — the cascade depth array (a sampler2DArrayShadow
+// at binding 7), the ShadowUniforms block (binding 8), and the depth-compare sampler. Produced by
+// CascadedShadowMap::add (lighting/shadows.hpp) and handed to ForwardPbrPass::add_shadowed. Kept
+// here (not in shadows.hpp) so passes.hpp stays free of any lighting-technique dependency.
+struct ShadowBinding {
+    RGTexture map;              // the cascade depth array (a graph transient this frame)
+    rhi::BufferHandle ubo;      // GpuShadowUniforms
+    rhi::SamplerHandle sampler; // the depth-compare sampler
 };
 
 // ── Depth pre-pass ────────────────────────────────────────────────────────────────────────────
@@ -141,8 +155,14 @@ public:
     DepthPrepass(const DepthPrepass&) = delete;
     DepthPrepass& operator=(const DepthPrepass&) = delete;
 
-    // Declare the pass: clears `depth` and fills it with the scene's nearest surfaces.
-    void add(RenderGraph& graph, RGTexture depth, const SceneDrawData& data) const;
+    // Declare the pass: clears `depth` and fills it with the scene's nearest surfaces. `layer`
+    // selects which array layer of a layered depth target to render into (m10.1: a CSM reuses this
+    // once per cascade, layer = cascade index); 0 (default) is an ordinary single-layer depth
+    // image.
+    void add(RenderGraph& graph,
+             RGTexture depth,
+             const SceneDrawData& data,
+             std::uint32_t layer = 0) const;
 
 private:
     rhi::Device& device_;
@@ -169,12 +189,26 @@ public:
              bool depth_prepassed,
              const SceneDrawData& data) const;
 
+    // The shadowed variant (m10.1): the same forward shading, but the primary directional light is
+    // modulated by a cascaded shadow map sampled from `shadow`. A SEPARATE shader + pipelines from
+    // add() above, so with shadows off the renderer runs the byte-identical M5.6 baseline (the
+    // ADR-0032 §11 regression bridge) — this path only exists when a caller opts shadows in.
+    void add_shadowed(RenderGraph& graph,
+                      RGTexture hdr,
+                      RGTexture depth,
+                      bool depth_prepassed,
+                      const SceneDrawData& data,
+                      const ShadowBinding& shadow) const;
+
 private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
-    rhi::PipelineHandle pipeline_after_prepass_; // depth Load + Equal + no write
-    rhi::PipelineHandle pipeline_standalone_;    // depth Clear + Less + write
+    rhi::ShaderHandle shadowed_fragment_shader_;          // pbr_forward_shadowed.frag (m10.1)
+    rhi::PipelineHandle pipeline_after_prepass_;          // depth Load + Equal + no write
+    rhi::PipelineHandle pipeline_standalone_;             // depth Clear + Less + write
+    rhi::PipelineHandle pipeline_shadowed_after_prepass_; // + shadow bindings (m10.1)
+    rhi::PipelineHandle pipeline_shadowed_standalone_;
 };
 
 // ── Tonemap pass ──────────────────────────────────────────────────────────────────────────────

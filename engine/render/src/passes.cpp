@@ -12,6 +12,7 @@
 #include "fullscreen.vert.spv.h"
 #include "pbr_forward.frag.spv.h"
 #include "pbr_forward.vert.spv.h"
+#include "pbr_forward_shadowed.frag.spv.h"
 #include "tonemap.frag.spv.h"
 
 namespace rime::render {
@@ -37,7 +38,10 @@ namespace {
 // shading pass) its base-color texture. Draws run in extraction order, unsorted — sorting by
 // pipeline/material/depth is a measured optimization for when scenes are big enough to show it.
 void record_draws(rhi::CommandBuffer& cmd, const SceneDrawData& data, bool bind_material_textures) {
-    cmd.bind_uniform_buffer(0, data.frame_ubo);
+    // Binding 0 is FrameUniforms at data.frame_ubo_offset — 0 for the camera pass, cascade c's
+    // 256-byte view_proj slice for a CSM depth pass (m10.1). depth_only.vert / the forward shaders
+    // read only the leading members of whatever block sits there, so one loop serves every view.
+    cmd.bind_uniform_buffer(0, data.frame_ubo, data.frame_ubo_offset);
     for (std::size_t i = 0; i < data.draws.size(); ++i) {
         const DrawItem& item = data.draws[i];
         const GpuMesh& mesh = data.meshes->get(item.mesh);
@@ -96,11 +100,19 @@ DepthPrepass::~DepthPrepass() {
     device_.destroy(vertex_shader_);
 }
 
-void DepthPrepass::add(RenderGraph& graph, RGTexture depth, const SceneDrawData& data) const {
-    // Clear to the far plane, STORE the result — the whole point is that the forward pass loads
-    // this depth back. (RGDepthAttachment's default store is DontCare; not here.)
-    const RGDepthAttachment depth_att{
-        depth, rhi::LoadOp::Clear, rhi::StoreOp::Store, 1.0f, 0, false};
+void DepthPrepass::add(RenderGraph& graph,
+                       RGTexture depth,
+                       const SceneDrawData& data,
+                       std::uint32_t layer) const {
+    // Clear to the far plane, STORE the result — the whole point is that the forward pass (or, for
+    // a CSM cascade, the shadow sample) loads this depth back. `layer` aims the pass at one cascade
+    // of a layered depth target (m10.1); 0 is the ordinary single-layer case.
+    RGDepthAttachment depth_att{};
+    depth_att.texture = depth;
+    depth_att.load = rhi::LoadOp::Clear;
+    depth_att.store = rhi::StoreOp::Store;
+    depth_att.clear_depth = 1.0f;
+    depth_att.layer = layer;
     RenderGraph::RasterPassDesc desc{};
     desc.depth = &depth_att;
     graph.add_raster_pass("depth-prepass", desc, [pipe = pipeline_, data](rhi::CommandBuffer& cmd) {
@@ -122,6 +134,11 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
                                    pbr_forward_frag_spv,
                                    sizeof(pbr_forward_frag_spv),
                                    "pbr_forward.frag");
+    shadowed_fragment_shader_ = make_shader(device,
+                                            rhi::ShaderStage::Fragment,
+                                            pbr_forward_shadowed_frag_spv,
+                                            sizeof(pbr_forward_shadowed_frag_spv),
+                                            "pbr_forward_shadowed.frag");
 
     // Bindings 0/1 = frame/draw uniforms; 2–6 = the five material maps (base-color,
     // metallic-roughness, normal, occlusion, emissive). One layout, every permutation — untextured
@@ -160,11 +177,41 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     pd.depth_compare = rhi::CompareOp::Less;
     pd.debug_name = "forward-pbr (standalone)";
     pipeline_standalone_ = device.create_graphics_pipeline(pd);
+
+    // The shadowed variants (m10.1): the same two depth disciplines, but the shadowed fragment
+    // shader and two extra bindings — 7 = the cascade depth array (sampler2DArrayShadow), 8 = the
+    // ShadowUniforms block. A separate pipeline so the shadow-off path is the byte-identical
+    // baseline above (ADR-0032 §11); it is only ever bound when a caller opts shadows in.
+    const rhi::BindingDesc shadowed_bindings[] = {
+        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // shadow map
+        {8, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // ShadowUniforms
+    };
+    pd.fragment_shader = shadowed_fragment_shader_;
+    pd.bindings = shadowed_bindings;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.debug_name = "forward-pbr shadowed (after prepass)";
+    pipeline_shadowed_after_prepass_ = device.create_graphics_pipeline(pd);
+
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.debug_name = "forward-pbr shadowed (standalone)";
+    pipeline_shadowed_standalone_ = device.create_graphics_pipeline(pd);
 }
 
 ForwardPbrPass::~ForwardPbrPass() {
+    device_.destroy(pipeline_shadowed_standalone_);
+    device_.destroy(pipeline_shadowed_after_prepass_);
     device_.destroy(pipeline_standalone_);
     device_.destroy(pipeline_after_prepass_);
+    device_.destroy(shadowed_fragment_shader_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
 }
@@ -200,6 +247,46 @@ void ForwardPbrPass::add(RenderGraph& graph,
         cmd.bind_pipeline(pipe);
         record_draws(cmd, data, /*bind_material_textures=*/true);
     });
+}
+
+void ForwardPbrPass::add_shadowed(RenderGraph& graph,
+                                  RGTexture hdr,
+                                  RGTexture depth,
+                                  bool depth_prepassed,
+                                  const SceneDrawData& data,
+                                  const ShadowBinding& shadow) const {
+    const RGColorAttachment colors[] = {
+        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
+    RGDepthAttachment depth_att{};
+    depth_att.texture = depth;
+    if (depth_prepassed) {
+        depth_att.load = rhi::LoadOp::Load;
+        depth_att.store = rhi::StoreOp::DontCare;
+        depth_att.read_only = true;
+    } else {
+        depth_att.load = rhi::LoadOp::Clear;
+        depth_att.store = rhi::StoreOp::DontCare;
+        depth_att.read_only = false;
+    }
+    // The cascade array is SAMPLED here — declaring it makes the graph order this pass after the
+    // cascade depth passes wrote it and transition it to ShaderRead (m10.1).
+    const RGTexture sampled[] = {shadow.map};
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.depth = &depth_att;
+    desc.sampled = sampled;
+    const rhi::PipelineHandle pipe =
+        depth_prepassed ? pipeline_shadowed_after_prepass_ : pipeline_shadowed_standalone_;
+    graph.add_raster_pass(
+        "forward-pbr shadowed", desc, [pipe, data, shadow, &graph](rhi::CommandBuffer& cmd) {
+            cmd.bind_pipeline(pipe);
+            // Bindings 7/8 are attached once (they persist across draws — ADR-0020); record_draws
+            // re-binds only per-draw state on top. The shadow map's physical handle resolves now
+            // (assign_physicals has run), the same late-resolve the tonemap pass uses.
+            cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
+            cmd.bind_uniform_buffer(8, shadow.ubo);
+            record_draws(cmd, data, /*bind_material_textures=*/true);
+        });
 }
 
 // ── TonemapPass ───────────────────────────────────────────────────────────────────────────────

@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "rime/ecs/world.hpp"
+#include "rime/render/lighting/settings.hpp"
+#include "rime/render/lighting/shadows.hpp"
 #include "rime/render/passes.hpp"
 
 // The scene renderer (M5.6, ADR-0022): the bridge from "a World full of entities" to "passes
@@ -91,6 +93,14 @@ public:
         ambient_[2] = b;
     }
 
+    // Lighting features (M10, ADR-0032). Default is everything off ⇒ the byte-identical M5.6
+    // baseline. Turning on `shadows_enabled` makes the primary directional light cast a cascaded
+    // shadow map (m10.1); the editor host and the M10 samples set this, the M5.6/M6.4 proofs leave
+    // it default and are unaffected.
+    void set_lighting(const LightingSettings& lighting) { lighting_ = lighting; }
+
+    [[nodiscard]] const LightingSettings& lighting() const noexcept { return lighting_; }
+
 private:
     void ensure_draw_capacity(std::uint32_t draw_count);
 
@@ -101,6 +111,9 @@ private:
     DepthPrepass depth_prepass_;
     ForwardPbrPass forward_;
     TonemapPass tonemap_;
+    CascadedShadowMap csm_; // m10.1: directional shadow cascades (only declared when enabled)
+
+    LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
 
     rhi::BufferHandle frame_ubo_;
     rhi::BufferHandle draw_ubo_;
