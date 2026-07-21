@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The 3-D storage-image spike (ADR-0032 §10, m10.4): "verify depth > 1 + TextureUsage::Storage +
+// compute imageStore composes on lavapipe. Primitives exist; the *combination* is untested." Each
+// invocation imageStore()s one texel of an rgba8 3-D storage image (an image3D, not image2D) with
+// a value derived from its own (x,y,z) coordinate, so the CPU can verify every voxel exactly —
+// this is `pattern.comp` (the M5.2 compute proof) generalized to the extra dimension a 3-D volume
+// adds. R/G/B each encode one coordinate (x,y,z < 256 so /255 is exact in UNORM8); the SDF clipmap
+// itself uses R16Snorm, not rgba8 — this shader isolates the pure "3-D + Storage + imageStore"
+// question from the separate "narrow/normalized storage format" question the clipmap's own
+// compose-pass tests exercise for real (see engine/render/shaders/sdf_compose.comp).
+#version 450
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image3D vol;
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID.xyz);
+    if (any(greaterThanEqual(p, imageSize(vol)))) {
+        return; // partial workgroups on non-multiple sizes write nothing
+    }
+    imageStore(vol, p, vec4(float(p.x) / 255.0, float(p.y) / 255.0, float(p.z) / 255.0, 1.0));
+}

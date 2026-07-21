@@ -33,7 +33,8 @@ rime_add_test(rime_rhi_tests
     compute_test.cpp
     mip_timestamp_test.cpp
     cooked_mip_test.cpp
-    texture_array_test.cpp)
+    texture_array_test.cpp
+    volume_storage_test.cpp)
 
 target_link_libraries(rime_rhi_tests
     PRIVATE rime::rhi rime::render) # render: the orbit camera graduated there at M5.5
@@ -63,6 +64,7 @@ rime_add_shaders(rime_rhi_tests
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/mesh.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volume.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volume.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/volume_stamp.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/stencil_mark.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/stencil_solid.frag
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/capmark.frag
