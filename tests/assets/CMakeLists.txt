@@ -11,6 +11,7 @@ rime_add_test(rime_assets_tests
     cooked_skeleton_test.cpp
     cooked_clip_test.cpp
     cooked_destructible_test.cpp
+    cooked_mesh_sdf_test.cpp
     manifest_test.cpp
     registry_test.cpp
     fixture_test.cpp

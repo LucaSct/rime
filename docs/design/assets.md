@@ -205,6 +205,63 @@ test uses as the cook's real acceptance gate). The partition math (a seeded Voro
 the box, and why every cell is convex) is derived in
 [`docs/math/voronoi-fracture.md`](../math/voronoi-fracture.md).
 
+### The mesh-SDF payload (`asset_kind = MeshSdf`) — M10.4a
+
+```
+f32×3 local_aabb_min        the SOURCE mesh's own (unpadded) local-space AABB — for placement
+f32×3 local_aabb_max
+f32×3 grid_origin           local-space corner of voxel (0,0,0) — the PADDED, voxel-quantized volume
+f32   voxel_size            uniform edge length of one (cubic) voxel
+u32   resolution_x          voxel counts along x, y, z
+u32   resolution_y
+u32   resolution_z
+u32   encoding               0 = f32 signed distance, local-space units  (reserved values: later,
+                              possibly-compressed encodings — the m10.4b clipmap has its OWN,
+                              separate R16Snorm format; this field never has to become that one)
+f32   max_abs_distance       the largest |distance| anywhere in the volume
+f32   distances[resolution_x × resolution_y × resolution_z]
+      row-major, x fastest then y then z: index(i,j,k) = i + resolution_x·(j + resolution_y·k).
+      distances[index(i,j,k)] is the signed distance from voxel (i,j,k)'s CENTRE —
+      grid_origin + (i+0.5, j+0.5, k+0.5)·voxel_size — to the nearest point on the source mesh's
+      surface. Negative = inside, positive = outside.
+```
+
+A **mesh SDF** (M10.4a, [ADR-0032](../adr/0032-lighting-v2.md) §2) is a per-mesh (or, for a
+destructible, per-*part*) sampled signed-distance volume: the traceable proxy the SDF-traced DDGI
+probes (m10.5) sphere-trace their rays through, and what the runtime clipmap (m10.4b, out of this
+brick's scope) composes from. Only the **header record** — everything above the `distances` blob —
+is schema-fingerprinted. This is a deliberate departure from Mesh/Texture/Skeleton/Clip (which each
+fingerprint a *repeated table record* — a vertex, a mip descriptor, a joint, a channel) and instead
+mirrors Material: the header **is** the entire structured part of the payload. The trailing blob is
+bare `f32` scalars with no per-element record shape of its own to protect — exactly like a mesh's
+raw `u32` index array, which is sized by the header but never separately fingerprinted. Change any
+header field and a previously cooked SDF is rejected with `SchemaMismatch` instead of misread.
+
+**Resolution policy** (derived once per mesh, not hand-tuned): `voxel_size` is fixed so that
+`target_resolution` voxels span the mesh's own **longest** unpadded AABB axis — a single scalar, so
+every voxel is a cube, not an independently-stretched box. Every axis's voxel *count* is then derived
+from the AABB **padded** by a configurable margin (so the field stays defined a little past the
+surface — the m10.4b compose pass and any sphere-trace both want to sample past the boundary) and
+clamped to a configured `[min, max]`. Two presets ship: a normal mesh (`target_resolution = 32`,
+clamped to 4..64, 2 voxels of padding) and a destructible **part** (`target_resolution = 8`, clamped
+to 4..16, 1 voxel of padding) — deliberately coarser, because parts are small and a destructible can
+have dozens of them; per-part granularity (rather than one SDF per whole destructible) is what lets a
+*partially broken* wall's distance field respond to individual surviving pieces. The cook **warns**
+(a diagnostic, not a hard error) when a mesh's thinnest AABB axis spans fewer voxels than a configured
+minimum — the thin-wall-vs-voxel-size risk the m10.4 plan flagged by name. The full derivation,
+including the sign problem and the resolution/feature-size relationship, is in
+[`docs/math/sdf.md`](../math/sdf.md).
+
+**Format v1 is plain `f32`,** not a compressed/quantized encoding: the cook is not the
+memory-constrained side of this pipeline (a single mesh's volume is at most 64³ floats ≈ 1 MiB) — the
+*runtime clipmap* is (three cascades around the camera, budgeted, per ADR-0032 §10's `R16Snorm` line
+item) — so v1 keeps the cooked payload simple and exact, and leaves compression as a later seam:
+`encoding` already reserves room for a future value without a container-version bump, and
+`max_abs_distance` (recorded for free alongside the sampling loop, since it is already a running max
+over the same values) is exactly the scale factor a normalized encoding would need to reconstruct
+from — computed and validated here specifically so m10.4b does not have to re-scan a volume it
+receives to discover it.
+
 ## Trust nothing you read
 
 A cooked file arrives from disk exactly the way a message arrives from the network: possibly truncated,

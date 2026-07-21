@@ -122,6 +122,27 @@ struct DestructiblePartV1 {
     std::uint32_t face_index_count; // concatenated face-vertex indices
 };
 
+// The v1 cooked-mesh-SDF header record, reflected for the same reason MaterialV1 is: it is the
+// entire *structured* part of the payload (the trailing distances blob is bare f32 scalars with no
+// record shape of its own — like a mesh's raw index array, it needs no fingerprint). This is the
+// source mesh's own AABB, where the sampled grid sits (its origin + uniform voxel size + per-axis
+// resolution), the encoding tag, and the recorded max |distance|. Reorder, retype, add, or remove a
+// field and reflect<>().type_hash changes, so an SDF cooked against the old layout is rejected with
+// SchemaMismatch rather than misread. A mixed-width record like SkeletonJointV1/DestructiblePartV1,
+// so it carries padding — inert, because compute_type_hash ignores offsets/sizeof and the wire is
+// written field by field (decode_mesh_sdf below, and the Rust cooker), never as a struct memcpy.
+struct MeshSdfHeaderV1 {
+    float amin_x, amin_y, amin_z;      // local_bounds.min — the source mesh's own (unpadded) AABB
+    float amax_x, amax_y, amax_z;      // local_bounds.max
+    float ox, oy, oz;                  // grid_origin — local-space corner of voxel (0,0,0)
+    float voxel_size;                  // uniform cubic voxel edge length
+    std::uint32_t res_x, res_y, res_z; // voxel counts along x, y, z
+    std::uint32_t encoding;            // SdfEncoding (0 = Float32 in v1)
+    float max_abs_distance;            // largest |distance| anywhere in the volume
+};
+
+static_assert(sizeof(MeshSdfHeaderV1) == 60, "v1 SDF header must stay 11 floats + 4 packed u32s");
+
 } // namespace rime::assets::detail
 
 // Registration is at global scope (the macro opens namespace rime::core to specialize its traits).
@@ -218,6 +239,24 @@ RIME_REFLECT_FIELD(face_count)
 RIME_REFLECT_FIELD(face_index_count)
 RIME_REFLECT_END()
 
+RIME_REFLECT_BEGIN(rime::assets::detail::MeshSdfHeaderV1)
+RIME_REFLECT_FIELD(amin_x)
+RIME_REFLECT_FIELD(amin_y)
+RIME_REFLECT_FIELD(amin_z)
+RIME_REFLECT_FIELD(amax_x)
+RIME_REFLECT_FIELD(amax_y)
+RIME_REFLECT_FIELD(amax_z)
+RIME_REFLECT_FIELD(ox)
+RIME_REFLECT_FIELD(oy)
+RIME_REFLECT_FIELD(oz)
+RIME_REFLECT_FIELD(voxel_size)
+RIME_REFLECT_FIELD(res_x)
+RIME_REFLECT_FIELD(res_y)
+RIME_REFLECT_FIELD(res_z)
+RIME_REFLECT_FIELD(encoding)
+RIME_REFLECT_FIELD(max_abs_distance)
+RIME_REFLECT_END()
+
 namespace rime::assets {
 
 std::string_view to_string(AssetError error) noexcept {
@@ -252,6 +291,9 @@ std::string_view to_string(AssetError error) noexcept {
         case AssetError::InvalidDestructible:
             return "invalid destructible (inconsistent counts, out-of-range index, bad face size, "
                    "or a non-finite value)";
+        case AssetError::InvalidMeshSdf:
+            return "invalid mesh SDF (unknown encoding, a non-finite/non-positive header value, "
+                   "resolution outside the sanity ceiling, or a sample exceeding max_abs_distance)";
         case AssetError::Io:
             return "I/O error";
     }
@@ -1060,6 +1102,127 @@ std::optional<DestructibleAsset> read_destructible(std::span<const std::byte> fi
         *out_id = content_hash(payload);
     }
     return decode_destructible(payload, out_error);
+}
+
+std::uint64_t sdf_schema_hash() noexcept {
+    return core::reflect<detail::MeshSdfHeaderV1>().type_hash;
+}
+
+namespace {
+
+// Sanity ceilings for a corrupt/hostile mesh-SDF file — comfortably above anything the cook
+// itself ever produces (the cooker's own resolution clamp tops out at 64 per axis for a whole
+// mesh, m10.4a's SdfCookConfig::for_mesh), small enough that a crafted-huge count cannot size a
+// multi-gigabyte allocation before the exact-length check below even runs. The per-axis ceiling
+// alone is not enough (e.g. 1024^3 passes it but is 4 GiB of f32s), so the total voxel count is
+// checked too.
+constexpr std::uint32_t kMaxSdfResolutionPerAxis = 1024;
+constexpr std::uint64_t kMaxSdfVoxelCount =
+    std::uint64_t{64} * 1024 * 1024; // 64 Mi (256 MiB of f32)
+
+} // namespace
+
+std::optional<MeshSdfAsset> decode_mesh_sdf(std::span<const std::byte> payload,
+                                            AssetError& out_error) noexcept {
+    core::ByteReader reader(payload);
+
+    MeshSdfAsset sdf;
+    std::uint32_t res_x = 0;
+    std::uint32_t res_y = 0;
+    std::uint32_t res_z = 0;
+    std::uint32_t encoding_raw = 0;
+    // The fixed 60-byte header, read in exactly the order detail::MeshSdfHeaderV1 fingerprints —
+    // this order IS the format, matching the Rust cooker field for field.
+    if (!reader.f32(sdf.local_bounds.min.x) || !reader.f32(sdf.local_bounds.min.y) ||
+        !reader.f32(sdf.local_bounds.min.z) || !reader.f32(sdf.local_bounds.max.x) ||
+        !reader.f32(sdf.local_bounds.max.y) || !reader.f32(sdf.local_bounds.max.z) ||
+        !reader.f32(sdf.grid_origin.x) || !reader.f32(sdf.grid_origin.y) ||
+        !reader.f32(sdf.grid_origin.z) || !reader.f32(sdf.voxel_size) || !reader.u32(res_x) ||
+        !reader.u32(res_y) || !reader.u32(res_z) || !reader.u32(encoding_raw) ||
+        !reader.f32(sdf.max_abs_distance)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+
+    // Validate the header before trusting any of it to size the volume: every float finite, the
+    // local bounds a real (non-inverted) box, voxel size positive, every resolution axis positive
+    // and within the sanity ceiling, the encoding a value this build knows, and max_abs_distance a
+    // finite, non-negative bound.
+    const bool bounds_finite =
+        std::isfinite(sdf.local_bounds.min.x) && std::isfinite(sdf.local_bounds.min.y) &&
+        std::isfinite(sdf.local_bounds.min.z) && std::isfinite(sdf.local_bounds.max.x) &&
+        std::isfinite(sdf.local_bounds.max.y) && std::isfinite(sdf.local_bounds.max.z);
+    const bool bounds_ordered = sdf.local_bounds.min.x <= sdf.local_bounds.max.x &&
+                                sdf.local_bounds.min.y <= sdf.local_bounds.max.y &&
+                                sdf.local_bounds.min.z <= sdf.local_bounds.max.z;
+    const bool origin_finite = std::isfinite(sdf.grid_origin.x) &&
+                               std::isfinite(sdf.grid_origin.y) && std::isfinite(sdf.grid_origin.z);
+    if (!bounds_finite || !bounds_ordered || !origin_finite || !std::isfinite(sdf.voxel_size) ||
+        sdf.voxel_size <= 0.0f || res_x == 0 || res_y == 0 || res_z == 0 ||
+        res_x > kMaxSdfResolutionPerAxis || res_y > kMaxSdfResolutionPerAxis ||
+        res_z > kMaxSdfResolutionPerAxis ||
+        encoding_raw > static_cast<std::uint32_t>(SdfEncoding::Float32) ||
+        !std::isfinite(sdf.max_abs_distance) || sdf.max_abs_distance < 0.0f) {
+        out_error = AssetError::InvalidMeshSdf;
+        return std::nullopt;
+    }
+    sdf.resolution = {res_x, res_y, res_z};
+    sdf.encoding = static_cast<SdfEncoding>(encoding_raw);
+
+    // The trailing blob's size is fully determined by the header's resolution: reject an overall
+    // voxel count above the sanity ceiling even though every axis individually passed it (a
+    // 1024^3 file would clear the per-axis check alone), then require the blob to be EXACTLY that
+    // many f32s — no shorter, no trailing bytes — before sizing the allocation from it.
+    const std::uint64_t voxel_count =
+        std::uint64_t{res_x} * std::uint64_t{res_y} * std::uint64_t{res_z};
+    if (voxel_count > kMaxSdfVoxelCount) {
+        out_error = AssetError::InvalidMeshSdf;
+        return std::nullopt;
+    }
+    if (reader.remaining() != voxel_count * sizeof(float)) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+
+    sdf.distances.resize(static_cast<std::size_t>(voxel_count));
+    for (float& d : sdf.distances) {
+        if (!reader.f32(d)) {
+            out_error = AssetError::Truncated; // unreachable after the size check; kept for safety
+            return std::nullopt;
+        }
+        // Every sample must be finite and within the header's own recorded bound. This costs
+        // nothing extra (the loop already visits every value) and is an EXACT check, not an
+        // approximate one: the cooker computes max_abs_distance as a running max over these same
+        // values — a comparison-only reduction that introduces no rounding of its own — so a
+        // corrupt file smuggling an oversized sample under a small recorded bound is caught here.
+        if (!std::isfinite(d) || std::fabs(d) > sdf.max_abs_distance) {
+            out_error = AssetError::InvalidMeshSdf;
+            return std::nullopt;
+        }
+    }
+
+    return sdf;
+}
+
+std::optional<MeshSdfAsset>
+read_mesh_sdf(std::span<const std::byte> file, AssetError& out_error, AssetId* out_id) noexcept {
+    std::span<const std::byte> payload;
+    const std::optional<CookedHeader> header = read_header(file, payload, out_error);
+    if (!header) {
+        return std::nullopt;
+    }
+    if (header->kind != AssetKind::MeshSdf) {
+        out_error = AssetError::WrongKind;
+        return std::nullopt;
+    }
+    if (header->type_schema_hash != sdf_schema_hash()) {
+        out_error = AssetError::SchemaMismatch;
+        return std::nullopt;
+    }
+    if (out_id != nullptr) {
+        *out_id = content_hash(payload);
+    }
+    return decode_mesh_sdf(payload, out_error);
 }
 
 } // namespace rime::assets

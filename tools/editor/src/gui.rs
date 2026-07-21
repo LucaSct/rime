@@ -699,6 +699,7 @@ fn assets_ui(
                     AssetKind::Skeleton,
                     AssetKind::AnimationClip,
                     AssetKind::Destructible,
+                    AssetKind::MeshSdf,
                 ] {
                     ui.selectable_value(kind_filter, Some(k), k.label());
                 }
@@ -761,6 +762,7 @@ fn kind_glyph(kind: AssetKind) -> &'static str {
         AssetKind::Skeleton => "🦴",
         AssetKind::AnimationClip => "▶",
         AssetKind::Destructible => "✸",
+        AssetKind::MeshSdf => "◌",
         AssetKind::Unknown(_) => "?",
     }
 }

@@ -160,6 +160,21 @@ Entries are grouped roughly by area and kept short on purpose.
   *camera frustum* — two axes are screen tiles, the third is a depth range. Rime uses
   16×9×24 of them, with depth sliced logarithmically so froxels stay roughly cube-shaped
   from the near plane to the horizon.
+- **SDF — Signed Distance Field.** A scalar field whose value at a point is the distance to the
+  nearest surface, negative inside it and positive outside. Rime cooks one per mesh (or per
+  destructible part) offline (M10.4a) and composes many into a runtime clipmap the GI probes
+  *sphere-trace* through — stepping by the field's own value, which is always a safe distance to
+  advance. See [math/sdf.md](math/sdf.md).
+- **BVH — Bounding Volume Hierarchy.** A tree of nested bounding boxes over a set of triangles (or
+  other primitives) used to prune "which of these could possibly be nearest/hit" queries from
+  O(n) down to roughly O(log n). Rime's SDF cooker builds its own (no dependency) for the
+  nearest-point-on-mesh query every voxel needs.
+- **Pseudonormal (angle-weighted).** The "generalized surface normal" at a mesh vertex or edge —
+  needed because a flat face normal is only well-defined *inside* one triangle, not at a feature
+  several triangles share. A vertex's pseudonormal averages its incident faces' normals weighted
+  by the angle each face subtends there (not by area), which is what makes an SDF's *sign* come
+  out right near edges and corners instead of depending on which triangle a naive check happened
+  to pick. See [math/sdf.md](math/sdf.md) §3 for the worked counterexample.
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
   render graph automates them. Vulkan's modern form is *synchronization2*

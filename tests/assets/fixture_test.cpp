@@ -227,3 +227,47 @@ TEST_CASE("a Rust-cooked glTF clip (skinned.Spin.ranim) loads and samples to a v
         }
     }
 }
+
+TEST_CASE("a Rust-cooked mesh SDF (cube.rsdf) loads and samples like a unit-cube box SDF") {
+    // The M10.4a cross-language proof: cube.rsdf is the SAME cube.stl the M6.6 STL fixture uses
+    // (2x2x2, centred at the origin — samples/03-icem-viewer/stl.hpp's make_unit_cube()), cooked to
+    // an SDF. cook_fixture.rs proves the Rust cooker still emits these exact bytes; this proves the
+    // C++ reader ingests them AND that sample_mesh_sdf reproduces the analytic box distance
+    // (Inigo Quilez's standard formula, derived in docs/math/sdf.md §5) at points chosen to avoid
+    // the cube's hard (vertex-split) edges — see docs/math/sdf.md §5's worked numbers for exactly
+    // why these values were chosen and what they equal.
+    const std::optional<std::vector<std::byte>> bytes = load_fixture("cube.rsdf");
+    REQUIRE_MESSAGE(bytes.has_value(), "missing fixture: cube.rsdf");
+
+    AssetError error{};
+    AssetId id;
+    const std::optional<MeshSdfAsset> sdf = read_mesh_sdf(*bytes, error, &id);
+    REQUIRE_MESSAGE(sdf.has_value(), to_string(error));
+    CHECK(id.is_valid());
+
+    // Header: a unit cube's own AABB is exactly [-1,-1,-1]..[1,1,1]; the cooker padded the sampled
+    // grid two voxels past it on every side (SdfCookConfig::for_mesh's default padding).
+    CHECK(sdf->local_bounds.min.x == doctest::Approx(-1.0f));
+    CHECK(sdf->local_bounds.min.y == doctest::Approx(-1.0f));
+    CHECK(sdf->local_bounds.min.z == doctest::Approx(-1.0f));
+    CHECK(sdf->local_bounds.max.x == doctest::Approx(1.0f));
+    CHECK(sdf->resolution[0] == 36); // 32 target + 2*2 padding voxels, from a 2m cube
+    CHECK(sdf->resolution[1] == 36);
+    CHECK(sdf->resolution[2] == 36);
+    CHECK(sdf->voxel_size == doctest::Approx(0.0625f)); // 2m / 32 target resolution
+    CHECK(sdf->encoding == SdfEncoding::Float32);
+
+    // Sampled values, checked against the analytic box SDF (docs/math/sdf.md §5):
+    // d(p) = |max(|p|-h, 0)| + min(max((|p|-h).x, .y, .z), 0), h = (1,1,1).
+    const float tol = 0.02f; // well under one voxel (0.0625) — these points are all face-interior
+    CHECK(sample_mesh_sdf(*sdf, {0.5f, 0.0f, 0.0f}) == doctest::Approx(-0.5f).epsilon(tol));
+    CHECK(sample_mesh_sdf(*sdf, {0.0f, 0.5f, 0.0f}) == doctest::Approx(-0.5f).epsilon(tol));
+    CHECK(sample_mesh_sdf(*sdf, {0.0f, 0.0f, 0.5f}) == doctest::Approx(-0.5f).epsilon(tol));
+    CHECK(sample_mesh_sdf(*sdf, {0.9f, 0.0f, 0.0f}) == doctest::Approx(-0.1f).epsilon(tol));
+    CHECK(sample_mesh_sdf(*sdf, {1.05f, 0.0f, 0.0f}) == doctest::Approx(0.05f).epsilon(tol));
+    CHECK(sample_mesh_sdf(*sdf, {-1.05f, 0.0f, 0.0f}) == doctest::Approx(0.05f).epsilon(tol));
+    // The exact geometric centre sits on the box's medial axis (all six faces equidistant) — a
+    // non-smooth point no discretized grid represents exactly, so this checks a looser tolerance
+    // (still comfortably inside 1 voxel) rather than the tight one the face-interior points get.
+    CHECK(sample_mesh_sdf(*sdf, {0.0f, 0.0f, 0.0f}) == doctest::Approx(-1.0f).epsilon(0.06));
+}

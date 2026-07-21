@@ -14,6 +14,7 @@
 #include "rime/assets/destructible_asset.hpp"
 #include "rime/assets/material_asset.hpp"
 #include "rime/assets/mesh_asset.hpp"
+#include "rime/assets/sdf_asset.hpp"
 #include "rime/assets/skeleton_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
 
@@ -63,7 +64,9 @@ enum class AssetError {
     InvalidClip,     // clip: bad channel path/interp, non-monotonic times, or a non-finite value
     InvalidDestructible, // destructible: part/bond/anchor counts inconsistent, index out of range,
                          // face-vertex count outside 3..16, or a non-finite geometry value
-    Io,                  // the file could not be opened/read (load-from-path only)
+    InvalidMeshSdf, // sdf: unknown encoding, a non-finite/non-positive header value, a resolution
+                    // outside the sanity ceiling, or a distance sample exceeding max_abs_distance
+    Io,             // the file could not be opened/read (load-from-path only)
 };
 
 // A short human-readable tag for an error (logging, test messages).
@@ -222,5 +225,33 @@ decode_destructible(std::span<const std::byte> payload, AssetError& out_error) n
 read_destructible(std::span<const std::byte> file,
                   AssetError& out_error,
                   AssetId* out_id = nullptr) noexcept;
+
+// The schema fingerprint the current build expects a cooked *mesh SDF* payload to match: the
+// reflection type_hash of the v1 fixed header record (local bounds, grid placement, voxel size,
+// resolution, encoding, max_abs_distance — see cooked_reader.cpp). Unlike
+// Mesh/Texture/Skeleton/Clip (which fingerprint a REPEATED table record) this mirrors Material: the
+// header IS the whole *structured* part of the payload — the trailing distances blob is bare f32
+// scalars with no per-element layout of its own to protect (exactly like a mesh's raw index array,
+// which also needs no fingerprint). Change any header field and previously cooked SDFs are rejected
+// with SchemaMismatch instead of being misread. The Rust cooker embeds this same value (M10.4a);
+// the cross-language fixture test is the drift alarm.
+[[nodiscard]] std::uint64_t sdf_schema_hash() noexcept;
+
+// Decode a mesh-SDF payload (the bytes after the header) into a fully validated MeshSdfAsset.
+// Assumes the caller has confirmed the header's kind and schema hash. Every header float is checked
+// finite, voxel_size and every resolution axis must be positive (resolution additionally capped by
+// a generous sanity ceiling — see cooked_reader.cpp — so a corrupt file cannot size a
+// multi-gigabyte allocation), the encoding must be a known value, and the trailing blob must be
+// EXACTLY resolution.x*y*z f32 values — no shorter, no trailing bytes. Every sample is checked
+// finite and bounded by max_abs_distance (an integrity check the cooker's own max-reduction makes
+// exact, not approximate — see docs/design/assets.md).
+[[nodiscard]] std::optional<MeshSdfAsset> decode_mesh_sdf(std::span<const std::byte> payload,
+                                                          AssetError& out_error) noexcept;
+
+// The one-call mesh-SDF path: read a whole cooked file, confirm it is a MeshSdf of the expected
+// schema, and decode it. `out_id`, if non-null, receives the payload's content-hash identity.
+[[nodiscard]] std::optional<MeshSdfAsset> read_mesh_sdf(std::span<const std::byte> file,
+                                                        AssetError& out_error,
+                                                        AssetId* out_id = nullptr) noexcept;
 
 } // namespace rime::assets
