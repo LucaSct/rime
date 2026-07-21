@@ -276,3 +276,63 @@ fn wall_fractures_to_the_committed_fixture_bytes() {
         "fracture cook diverged from the committed fixture — regenerate it deliberately"
     );
 }
+
+#[test]
+fn cube_sdf_cooks_to_the_committed_fixture_bytes() {
+    // The M10.4a cross-language drift alarm (mirrors the mesh/skeleton/destructible ones above):
+    // the committed cube.rsdf is what the C++ assets test reads and samples. cube.stl is the SAME
+    // hand-authored, hard-edge-shaded cube the M6.6 STL fixture already uses (its README explains
+    // the corner/winding convention) — reusing it here means the SDF fixture needs no new source
+    // geometry. If the SDF cook's format, resolution policy, or algorithm ever changes, this fails
+    // until the fixture is regenerated deliberately (`rime sdf tests/assets/fixtures/cube.stl --out
+    // tests/assets/fixtures --name cube`).
+    use asset_pipeline::sdf::{compute_sdf, SdfCookConfig};
+    use asset_pipeline::stl::import_stl_binary;
+
+    let committed = std::fs::read(fixtures().join("cube.rsdf")).unwrap();
+    let bytes = std::fs::read(fixtures().join("cube.stl")).unwrap();
+    let mesh = import_stl_binary(&bytes).unwrap().mesh;
+    let vertices: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+    let triangles: Vec<[u32; 3]> = mesh
+        .indices
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let cooked = compute_sdf(&vertices, &triangles, &SdfCookConfig::for_mesh())
+        .unwrap()
+        .volume
+        .cook()
+        .0;
+    assert_eq!(
+        cooked, committed,
+        "SDF cook diverged from the committed fixture — regenerate it deliberately"
+    );
+}
+
+#[test]
+fn cube_sdf_cook_is_byte_stable() {
+    use asset_pipeline::sdf::{compute_sdf, SdfCookConfig};
+    use asset_pipeline::stl::import_stl_binary;
+
+    let bytes = std::fs::read(fixtures().join("cube.stl")).unwrap();
+    let mesh = import_stl_binary(&bytes).unwrap().mesh;
+    let vertices: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+    let triangles: Vec<[u32; 3]> = mesh
+        .indices
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let a = compute_sdf(&vertices, &triangles, &SdfCookConfig::for_mesh())
+        .unwrap()
+        .volume
+        .cook();
+    let b = compute_sdf(&vertices, &triangles, &SdfCookConfig::for_mesh())
+        .unwrap()
+        .volume
+        .cook();
+    assert_eq!(
+        a.0, b.0,
+        "cooking the same source twice must be byte-identical"
+    );
+    assert_eq!(a.1, b.1);
+}

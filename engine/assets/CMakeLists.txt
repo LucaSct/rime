@@ -16,7 +16,8 @@ add_library(rime_assets STATIC
     src/registry.cpp
     src/manifest.cpp
     src/asset_server.cpp
-    src/clip_sampler.cpp)
+    src/clip_sampler.cpp
+    src/sdf_sampler.cpp)
 
 # Namespaced alias so dependents link rime::assets (matching the other modules).
 add_library(rime::assets ALIAS rime_assets)

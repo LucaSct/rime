@@ -30,6 +30,9 @@ namespace {
     if (name == "clip") {
         return AssetKind::AnimationClip;
     }
+    if (name == "mesh_sdf") {
+        return AssetKind::MeshSdf;
+    }
     return std::nullopt;
 }
 

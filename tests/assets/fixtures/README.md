@@ -29,6 +29,16 @@ Small, self-contained assets used by the M6 asset-pipeline and `engine/assets` t
   `tests/viewer/cooked_dogfood_test.cpp` loads both and asserts the cooked mesh index-expands to the
   exact soup the viewer's live STL loader builds (positions bit-exact, normals to a sub-ULP margin),
   with dedup collapsing the 36 soup vertices → 24 unique corners.
+- `cube.rsdf` — `cube.stl` **cooked to a signed-distance field** (M10.4a, ADR-0032 §2): the SDF
+  cross-language proof. `tools/asset-pipeline/tests/cook_fixture.rs` asserts the cooker still
+  produces these bytes; `tests/assets/fixture_test.cpp` asserts the C++ reader ingests them and that
+  `sample_mesh_sdf` reproduces the analytic unit-box distance (docs/math/sdf.md §5) at several
+  face-interior points. Because `cube.stl`'s vertices are split per face (flat/hard-edge shading —
+  see above), the cook reports "not watertight" edges at every hard edge (each edge's two endpoint
+  positions are duplicated with a different normal per adjacent face, so they are distinct *vertex
+  indices* even though they are the same *point*); this is the cooker degrading honestly exactly as
+  designed (docs/math/sdf.md §3/§5), and is why the fixture's own sample points deliberately avoid
+  the cube's edges/corners.
 - `skinned.gltf` — the M6.7 skeletal fixture: a 2-bone rig (root `A` at the origin, child `B` two
   units along `+X`) skinning a quad, plus one animation `Spin` (A slides `+Y`, B rotates 90° about
   `+Z`, both LINEAR). Its skin deliberately lists joints **child-first** (`B` before `A`), so cooking
@@ -58,6 +68,10 @@ cargo run --manifest-path tools/Cargo.toml --bin rime -- \
 # cube.rmesh: cook to a temp dir and copy the .rmesh back, to avoid the byproduct files here.
 cargo run --manifest-path tools/Cargo.toml --bin rime -- \
     cook tests/assets/fixtures/cube.stl --out /tmp/rime-cook && cp /tmp/rime-cook/cube.rmesh tests/assets/fixtures/
+# cube.rsdf: same source, the `sdf` subcommand instead of `cook` (writes only the one file, no
+# manifest/cache byproducts here since `sdf` — like `fracture` — is not routed through cook_path).
+cargo run --manifest-path tools/Cargo.toml --bin rime -- \
+    sdf tests/assets/fixtures/cube.stl --out tests/assets/fixtures --name cube
 # skinned.rskel / skinned.Spin.ranim: same temp-dir-and-copy (the cook also writes the .rmesh + .rmat).
 cargo run --manifest-path tools/Cargo.toml --bin rime -- \
     cook tests/assets/fixtures/skinned.gltf --out /tmp/rime-cook && \

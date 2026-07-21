@@ -47,6 +47,9 @@ pub const ASSET_KIND_SKELETON: u16 = 4;
 pub const ASSET_KIND_CLIP: u16 = 5;
 /// `asset_kind` wire value for a destructible / fracture pattern (matches `engine/assets/asset_id.hpp`).
 pub const ASSET_KIND_DESTRUCTIBLE: u16 = 6;
+/// `asset_kind` wire value for a cooked mesh signed-distance field (matches
+/// `engine/assets/asset_id.hpp`; M10.4a, ADR-0032 §2).
+pub const ASSET_KIND_MESH_SDF: u16 = 7;
 
 /// The mesh schema fingerprint: the reflection `type_hash` of the v1 position/normal/uv vertex
 /// layout, computed and pinned by the C++ engine (`engine/assets`). The cooker embeds the same
@@ -88,6 +91,15 @@ pub const CLIP_SCHEMA_HASH: u64 = 0x6C84_D2A2_AAAB_CE49;
 /// the bond/anchor tables and the geometry blobs are structure the header sizes, not fingerprinted
 /// (exactly as mesh vertices past the vertex record are not).
 pub const DESTRUCTIBLE_SCHEMA_HASH: u64 = 0x8F2D_17FB_F584_85E2;
+
+/// The mesh-SDF schema fingerprint: the reflection `type_hash` of the v1 fixed header record (local
+/// bounds, grid placement, voxel size, resolution, encoding, max_abs_distance), computed and pinned
+/// by the C++ engine (`sdf_schema_hash()`). Same contract as the hashes above — the cooker embeds it,
+/// the reader rejects a mismatch — so the two languages agree on the cooked-SDF layout by
+/// construction (M10.4a). Unlike Mesh/Texture/Skeleton/Clip (which fingerprint a REPEATED table
+/// record), this mirrors Material: the header IS the whole structured part of the payload — the
+/// trailing distances blob is bare f32 scalars with no per-element layout of its own to protect.
+pub const MESH_SDF_SCHEMA_HASH: u64 = 0x6EFF_A981_1903_3990;
 
 /// A little-endian byte sink. Every multi-byte value is decomposed to its LE bytes explicitly, so
 /// the output never depends on the host's endianness — the same discipline as the reader's cursor.

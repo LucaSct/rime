@@ -479,6 +479,7 @@ pub enum AssetKind {
     Skeleton,
     AnimationClip,
     Destructible,
+    MeshSdf,
     Unknown(u16),
 }
 
@@ -492,6 +493,7 @@ impl AssetKind {
             4 => AssetKind::Skeleton,
             5 => AssetKind::AnimationClip,
             6 => AssetKind::Destructible,
+            7 => AssetKind::MeshSdf,
             other => AssetKind::Unknown(other),
         }
     }
@@ -505,6 +507,7 @@ impl AssetKind {
             AssetKind::Skeleton => 4,
             AssetKind::AnimationClip => 5,
             AssetKind::Destructible => 6,
+            AssetKind::MeshSdf => 7,
             AssetKind::Unknown(v) => v,
         }
     }
@@ -518,6 +521,7 @@ impl AssetKind {
             AssetKind::Skeleton => "Skeleton",
             AssetKind::AnimationClip => "Clip",
             AssetKind::Destructible => "Destructible",
+            AssetKind::MeshSdf => "SDF",
             AssetKind::Unknown(_) => "Unknown",
         }
     }

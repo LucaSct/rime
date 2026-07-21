@@ -62,6 +62,23 @@ enum Command {
         #[arg(long, default_value = "wall")]
         name: String,
     },
+    /// Cook a triangle mesh's signed-distance field (M10.4a, ADR-0032 §2): the offline, cook-side
+    /// half of the SDF-traced GI pipeline. Reads geometry from a glTF/GLB or binary STL source (no
+    /// materials/textures — an SDF is geometry only) and writes `<name>.rsdf`.
+    Sdf {
+        /// A `.gltf`/`.glb`/`.stl` mesh source to build a signed-distance field from.
+        input: PathBuf,
+        /// Output directory for the `<name>.rsdf` file.
+        #[arg(long)]
+        out: PathBuf,
+        /// Output file stem (writes `<name>.rsdf`). Defaults to the input file's stem.
+        #[arg(long)]
+        name: Option<String>,
+        /// Cook at the coarse, per-destructible-part resolution preset instead of the default
+        /// whole-mesh preset (a lower target resolution — see `SdfCookConfig::for_destructible_part`).
+        #[arg(long)]
+        coarse: bool,
+    },
     /// Print the header of a cooked RMA1 asset file.
     Inspect {
         /// A cooked `.rmesh`/`.rtex` (or other RMA1) file.
@@ -99,6 +116,12 @@ fn main() -> ExitCode {
             out,
             name,
         }) => run_fracture(&size, parts, seed, &out, &name),
+        Some(Command::Sdf {
+            input,
+            out,
+            name,
+            coarse,
+        }) => run_sdf(&input, &out, name.as_deref(), coarse),
         Some(Command::Inspect { file }) => run_inspect(&file),
     }
 }
@@ -119,6 +142,78 @@ fn run_fracture(size: &[f32], parts: u32, seed: u64, out: &Path, name: &str) -> 
         }
         Err(e) => {
             eprintln!("rime fracture: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Flat triangle-soup geometry: positions plus index triples, the shape the SDF cooker speaks.
+type SoupGeometry = (Vec<[f32; 3]>, Vec<[u32; 3]>);
+
+/// Import a mesh source's raw geometry as flat `(vertices, triangles)` — the shape the SDF cooker
+/// speaks (plain triangle soup), distinct from the cooker's own interleaved P/N/UV `Mesh` vertex
+/// layout that `run_cook` produces. An SDF is geometry only, so this skips materials/tangents/skin
+/// entirely, whichever of glTF or STL the extension names.
+fn mesh_geometry_for_sdf(input: &Path) -> Result<SoupGeometry, asset_pipeline::PipelineError> {
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mesh = match ext.as_str() {
+        "gltf" | "glb" => {
+            let primitives = asset_pipeline::gltf_import::import_primitives(input)?;
+            asset_pipeline::mesh::Mesh::from_primitives(primitives)
+        }
+        "stl" => asset_pipeline::stl::import_stl_binary(&std::fs::read(input)?)?.mesh,
+        _ => {
+            return Err(asset_pipeline::PipelineError::Unsupported(format!(
+                "{}: expected a .gltf/.glb/.stl mesh source",
+                input.display()
+            )))
+        }
+    };
+    let vertices: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+    let triangles: Vec<[u32; 3]> = mesh
+        .indices
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    Ok((vertices, triangles))
+}
+
+fn run_sdf(input: &Path, out: &Path, name: Option<&str>, coarse: bool) -> ExitCode {
+    let (vertices, triangles) = match mesh_geometry_for_sdf(input) {
+        Ok(geometry) => geometry,
+        Err(e) => {
+            eprintln!("rime sdf: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cfg = if coarse {
+        asset_pipeline::sdf::SdfCookConfig::for_destructible_part()
+    } else {
+        asset_pipeline::sdf::SdfCookConfig::for_mesh()
+    };
+    let stem = name.map(str::to_string).unwrap_or_else(|| {
+        input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mesh")
+            .to_string()
+    });
+    match asset_pipeline::sdf::cook_mesh_sdf(&vertices, &triangles, &cfg, &stem, out) {
+        Ok(result) => {
+            for entry in &result.manifest {
+                println!(
+                    "cooked {} -> {} (id {:016x})",
+                    entry.source_path, entry.cooked_file, entry.id
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("rime sdf: {e}");
             ExitCode::FAILURE
         }
     }
