@@ -21,6 +21,7 @@ this graph, not as a renderer rewrite.
 | m10.2 | **local (spot) shadows with a destructibility-aware cache** — a slot re-renders only when its light moves or a destruction event's AABB touches its frustum | landed |
 | m10.3 | **clustered forward shading** — froxel light culling in compute + `RGBuffer` + `docs/math/clustered-shading.md` | landed |
 | m10.4b | **the runtime SDF clipmap** — 3 nested 64³ R16Snorm levels composed from m10.4a's cooked per-mesh/part fields by a min-blending compute pass, camera-centred with per-level texel-snapping, dirty-tracked via C1 (instance move/add/remove) and C2 (destruction events) so a static scene settles to zero work and one broken wall recomposes only its own neighbourhood + `docs/math/sdf.md` §6–10. Not yet sampled by anything (m10.5's DDGI probes are the first consumer); gated off by default. | landed |
+| m10.4c | **the GI feasibility spike** — ADR-0032 §2's named unknown, measured: sphere-trace cost at DDGI probe-grid scale, and what it fixes about m10.5's probe count / rays-per-probe / update policy. Findings and the recommended starting configuration in [`docs/design/gi-spike.md`](../../docs/design/gi-spike.md); the sweep itself is a shape-only test case in `tests/render/sdf_clipmap_test.cpp`, so it re-measures on real hardware at m12.0. | landed |
 
 Deliberate v0 bounds (ADR-0019 records why): serial recording on one queue (pass boundaries keep
 the parallel-recording and async-compute seams open) and no transient aliasing (measure first).

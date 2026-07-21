@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -210,7 +211,13 @@ public:
     ProbeTracer(const ProbeTracer&) = delete;
     ProbeTracer& operator=(const ProbeTracer&) = delete;
 
-    std::vector<float> trace(const SdfClipmap& clipmap, const std::vector<GpuRay>& rays) {
+    // `out_trace_ms`, when given, receives the GPU time of the dispatch ALONE — bracketed by
+    // timestamps rather than wall-clocked around submit_blocking, so buffer creation, the upload
+    // and the readback stay out of the number. That isolation is the whole point for the GI spike
+    // below: what it needs to know is the cost of the sphere-marching itself.
+    std::vector<float> trace(const SdfClipmap& clipmap,
+                             const std::vector<GpuRay>& rays,
+                             double* out_trace_ms = nullptr) {
         rhi::BufferDesc lb{};
         lb.size = sizeof(GpuSdfClipmapLevels);
         lb.usage = rhi::BufferUsage::Uniform;
@@ -243,8 +250,17 @@ public:
         cmd->bind_uniform_buffer(3, levels_ubo);
         cmd->bind_storage_buffer(4, rays_buf);
         cmd->bind_storage_buffer(5, hits_buf);
+        cmd->write_timestamp(0);
         cmd->dispatch(static_cast<std::uint32_t>((rays.size() + 31) / 32), 1, 1);
+        cmd->write_timestamp(1);
         device_.submit_blocking(*cmd);
+
+        if (out_trace_ms != nullptr) {
+            std::array<std::uint64_t, 2> stamps{};
+            *out_trace_ms = cmd->read_timestamps(stamps)
+                                ? static_cast<double>(stamps[1] - stamps[0]) / 1e6
+                                : 0.0;
+        }
 
         std::vector<float> hits(rays.size());
         device_.read_buffer(hits_buf, hits.data(), hits.size() * sizeof(float), 0);
@@ -471,4 +487,184 @@ TEST_CASE("sdf clipmap: texel-snapping — sub-voxel motion recomposes nothing, 
     const SdfClipmapStats jumped = step(*device, clipmap, core::Vec3{20.0f, 0.0f, 0.0f});
     CHECK(jumped.levels_recomposed >= 1);
     CHECK(clipmap.level(0).origin.x != before_jump0_x);
+}
+
+// ── The GI feasibility spike (ADR-0032 §2) ───────────────────────────────────────────────────────
+// The ADR names one critical unknown for the GI half of M10 and refuses to guess at it: "rays per
+// second at probe-grid scale on lavapipe. It cannot be answered by reading code; it must be
+// measured." This is that measurement. It runs here rather than in a throwaway harness so the
+// numbers are reproducible by anyone running the suite, and so they get re-measured for free on
+// real hardware at m12.0 — where the same sweep becomes the actual budget rather than a shape.
+//
+// What it must inform is m10.5's SCOPE, not its architecture: how many probes, how many rays each,
+// and whether a full-grid update per frame is affordable or the probes must be cycled over several
+// frames (the standard DDGI amortization). Per ADR-0032 §11 the conclusion is expressed as a
+// RELATIVE fence — cost against an already-measured pass — because lavapipe runs compute on the CPU
+// and its absolute milliseconds mean nothing for a shipping frame.
+//
+// The interesting variable is not ray count. It is how far a ray MARCHES: a sphere trace that hits
+// something close converges in a handful of steps, while one that escapes into open space burns
+// every one of its 128 iterations. So the sweep measures both populations, and the honest cost
+// model for m10.5 is driven by the miss case.
+namespace {
+
+// A small room — floor, four walls, and three pillars — sized to sit inside clipmap level 0's own
+// 8 m extent, so every probe and every ray stays in the finest level. That is deliberately the
+// EXPENSIVE case to sample (level 0 is where the field is most informative and the marching
+// converges tightest); a coarser level would fetch identically but step further per iteration.
+void compose_spike_room(SdfClipmap& clipmap) {
+    std::uint64_t id = 1;
+    const auto place = [&](core::Vec3 half, core::Vec3 at) {
+        clipmap.update_instance(id++, build_box_sdf(half, 20), core::mat4_translation(at));
+    };
+    place({3.5f, 0.2f, 3.5f}, {0.0f, -2.0f, 0.0f}); // floor
+    place({3.5f, 2.0f, 0.2f}, {0.0f, 0.0f, -3.5f}); // walls
+    place({3.5f, 2.0f, 0.2f}, {0.0f, 0.0f, 3.5f});
+    place({0.2f, 2.0f, 3.5f}, {-3.5f, 0.0f, 0.0f});
+    place({0.2f, 2.0f, 3.5f}, {3.5f, 0.0f, 0.0f});
+    place({0.35f, 1.8f, 0.35f}, {-1.6f, 0.0f, -1.2f}); // pillars
+    place({0.35f, 1.8f, 0.35f}, {1.7f, 0.0f, 0.9f});
+    place({0.35f, 1.8f, 0.35f}, {0.2f, 0.0f, 2.2f});
+}
+
+// Spherical Fibonacci: N directions spread near-uniformly over the sphere with no clustering at the
+// poles, from a closed form rather than a rejection loop. This is the standard DDGI ray
+// distribution (a real implementation also rotates the set per frame so successive frames sample
+// different directions — irrelevant to cost, which is what this measures).
+core::Vec3 fibonacci_direction(std::uint32_t i, std::uint32_t n) {
+    const float golden = 3.14159265358979f * (3.0f - std::sqrt(5.0f));
+    const float y = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / static_cast<float>(n);
+    const float r = std::sqrt(std::max(0.0f, 1.0f - y * y));
+    const float theta = golden * static_cast<float>(i);
+    return {std::cos(theta) * r, y, std::sin(theta) * r};
+}
+
+// One DDGI update's worth of rays: `side`³ probes on a lattice through the room, each casting
+// `rays_per_probe` Fibonacci-distributed rays out to `max_dist`.
+std::vector<GpuRay>
+probe_grid_rays(std::uint32_t side, std::uint32_t rays_per_probe, float max_dist) {
+    std::vector<GpuRay> rays;
+    rays.reserve(static_cast<std::size_t>(side) * side * side * rays_per_probe);
+    const float step_xz = 6.0f / static_cast<float>(side + 1);
+    const float step_y = 3.0f / static_cast<float>(side + 1);
+    for (std::uint32_t z = 0; z < side; ++z) {
+        for (std::uint32_t y = 0; y < side; ++y) {
+            for (std::uint32_t x = 0; x < side; ++x) {
+                const core::Vec3 p{-3.0f + step_xz * static_cast<float>(x + 1),
+                                   -1.5f + step_y * static_cast<float>(y + 1),
+                                   -3.0f + step_xz * static_cast<float>(z + 1)};
+                for (std::uint32_t r = 0; r < rays_per_probe; ++r) {
+                    const core::Vec3 d = fibonacci_direction(r, rays_per_probe);
+                    GpuRay ray;
+                    ray.origin_maxdist[0] = p.x;
+                    ray.origin_maxdist[1] = p.y;
+                    ray.origin_maxdist[2] = p.z;
+                    ray.origin_maxdist[3] = max_dist;
+                    ray.dir_pad[0] = d.x;
+                    ray.dir_pad[1] = d.y;
+                    ray.dir_pad[2] = d.z;
+                    rays.push_back(ray);
+                }
+            }
+        }
+    }
+    return rays;
+}
+
+} // namespace
+
+TEST_CASE("gi spike: sphere-trace cost at DDGI probe-grid scale (ADR-0032 §2, shape only)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the GI feasibility spike");
+        return;
+    }
+
+    constexpr std::uint32_t kRaysPerProbe = 64; // the DDGI norm
+    constexpr float kMaxDist = 8.0f;            // level 0's full extent
+
+    SdfClipmap clipmap(*device);
+    ProbeTracer tracer(*device);
+    compose_spike_room(clipmap);
+    (void)step(*device, clipmap, core::Vec3{0.0f, 0.0f, 0.0f});
+
+    // Warm up before measuring anything. The FIRST dispatch through a freshly created compute
+    // pipeline pays lavapipe's shader JIT, which showed up as the smallest grid appearing 40x
+    // dearer per ray than the largest — a measurement artefact, not a cost curve.
+    (void)tracer.trace(clipmap, probe_grid_rays(2, 8, kMaxDist));
+
+    // (a) A furnished room: the realistic population, where most rays terminate on a wall.
+    //
+    // Two clocks, on purpose. `trace_ms` is the GPU timestamp pair around the dispatch alone;
+    // `wall_ms` is CPU time across the whole submit. A spike that trusts a single clock is how you
+    // publish a number that is off by an order of magnitude — the two should bracket each other
+    // (wall > GPU, by the buffer create/upload/readback this measurement deliberately excludes).
+    for (const std::uint32_t side : {4u, 6u, 8u}) {
+        const std::uint32_t probes = side * side * side;
+        const std::vector<GpuRay> rays = probe_grid_rays(side, kRaysPerProbe, kMaxDist);
+        double trace_ms = 0.0;
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::vector<float> hits = tracer.trace(clipmap, rays, &trace_ms);
+        const double wall_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count();
+        const auto misses = static_cast<std::size_t>(
+            std::count_if(hits.begin(), hits.end(), [](float t) { return t < 0.0f; }));
+        const double ns_per_ray = trace_ms * 1e6 / static_cast<double>(rays.size());
+        MESSAGE(probes << " probes x " << kRaysPerProbe << " rays = " << rays.size()
+                       << " rays: " << trace_ms << " ms gpu / " << wall_ms << " ms wall ("
+                       << ns_per_ray << " ns/ray), " << misses << " escaped ("
+                       << 100.0 * static_cast<double>(misses) / static_cast<double>(hits.size())
+                       << "%)");
+        CHECK(misses < hits.size()); // an enclosed room: rays must mostly terminate
+    }
+
+    // (b) The same grid against an EMPTY field — every ray exhausts its step budget. This is the
+    //     worst case a scene can present, and therefore the number m10.5's budget must be built on:
+    //     an open sky, a probe grid outdoors, or the instant after a wall is destroyed all look
+    //     like this.
+    SdfClipmap empty(*device);
+    (void)step(*device, empty, core::Vec3{0.0f, 0.0f, 0.0f});
+    const std::vector<GpuRay> rays = probe_grid_rays(8, kRaysPerProbe, kMaxDist);
+    double empty_ms = 0.0;
+    const std::vector<float> empty_hits = tracer.trace(empty, rays, &empty_ms);
+    CHECK(std::all_of(empty_hits.begin(), empty_hits.end(), [](float t) { return t < 0.0f; }));
+    MESSAGE("empty field, " << rays.size() << " rays: " << empty_ms << " ms ("
+                            << empty_ms * 1e6 / static_cast<double>(rays.size())
+                            << " ns/ray, every ray marches to max_dist)");
+
+    // (c) GRAZING rays — the actual worst case, and not the one you would guess. An empty field is
+    //     cheap because the narrow band puts a FLOOR under the step size: every sample out in open
+    //     space reads the saturated value and advances a full `band` (4 voxels = 0.5 m at level 0),
+    //     so an 8 m trace through nothing costs ~16 steps, not 128. What actually burns the step
+    //     budget is a ray running parallel to a surface and just above it: the field stays small,
+    //     so every step is small, and the march runs to its iteration cap without ever converging.
+    //     This is the number m10.5's budget has to be built on — it is the ceiling, and unlike the
+    //     other two it is a property of the trace, not of how full the scene happens to be.
+    std::vector<GpuRay> grazing;
+    grazing.reserve(rays.size());
+    for (std::size_t i = 0; i < rays.size(); ++i) {
+        const float u = static_cast<float>(i) / static_cast<float>(rays.size());
+        GpuRay g;
+        g.origin_maxdist[0] = -3.0f;
+        g.origin_maxdist[1] = -1.75f + 0.02f * std::sin(u * 40.0f); // a hair above the floor slab
+        g.origin_maxdist[2] = -3.0f + 6.0f * u;
+        g.origin_maxdist[3] = kMaxDist;
+        g.dir_pad[0] = 1.0f;
+        g.dir_pad[1] = 0.004f; // very slightly off-parallel: skims without ever quite hitting
+        grazing.push_back(g);
+    }
+    double grazing_ms = 0.0;
+    const std::vector<float> grazing_hits = tracer.trace(clipmap, grazing, &grazing_ms);
+    const auto grazing_misses = static_cast<std::size_t>(
+        std::count_if(grazing_hits.begin(), grazing_hits.end(), [](float t) { return t < 0.0f; }));
+    MESSAGE("grazing rays, " << grazing.size() << " rays: " << grazing_ms << " ms ("
+                             << grazing_ms * 1e6 / static_cast<double>(grazing.size())
+                             << " ns/ray), " << grazing_misses << " ran out of steps");
+    // The population really is pathological — otherwise this measures nothing interesting and the
+    // "3.5x" conclusion in docs/design/gi-spike.md is measuring the wrong thing.
+    CHECK(grazing_misses > 0);
 }
