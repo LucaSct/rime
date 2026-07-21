@@ -175,6 +175,23 @@ Entries are grouped roughly by area and kept short on purpose.
   by the angle each face subtends there (not by area), which is what makes an SDF's *sign* come
   out right near edges and corners instead of depending on which triangle a naive check happened
   to pick. See [math/sdf.md](math/sdf.md) §3 for the worked counterexample.
+- **Clipmap.** A handful of same-resolution volumes nested at successively coarser voxel sizes,
+  all roughly centred on the viewer — fine detail near the camera, coarse (but still bounded-size)
+  coverage far away, instead of one uniformly-resolved volume that is either too coarse up close or
+  unaffordably large overall. The same idea a mipmap chain applies to *texture resolution*, applied
+  to *world space*. Rime's runtime SDF field (M10.4b) is one: 3 levels, 64³ voxels each, 8 m/32 m/
+  128 m of coverage. See [math/sdf.md](math/sdf.md) §6.
+- **Narrow band.** Storing a signed distance only up to some bounded magnitude (the *band*) and
+  clamping anything farther as "at least this far, direction unknown," rather than the true
+  (unbounded) distance everywhere. Trades a little conservatism far from any surface — a
+  sphere-trace through a saturated reading must step by the band, not the (unknowable) true
+  distance — for a compact, quantized encoding (R16Snorm) that loses nothing where it matters: near
+  the surface, where the tracing actually happens. See [math/sdf.md](math/sdf.md) §7.
+- **Sphere tracing.** Marching a ray forward by an SDF's OWN value at each step rather than a fixed
+  increment (Hart, 1996) — safe because that value is a guaranteed lower bound on how close the
+  nearest surface can be, so the ray can never step through thin geometry. Converges in few steps
+  near a surface; a *narrow-band*-saturated field just means several bigger, still-safe steps
+  before anything informative is read. See [math/sdf.md](math/sdf.md) §10.
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
   render graph automates them. Vulkan's modern form is *synchronization2*

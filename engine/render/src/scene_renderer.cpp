@@ -113,7 +113,8 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MeshRegistry& meshes,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
-      forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device) {
+      forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device),
+      sdf_clipmap_(device) {
     rhi::BufferDesc fd{};
     fd.size = sizeof(GpuFrameUniforms);
     fd.usage = rhi::BufferUsage::Uniform;
@@ -310,6 +311,20 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     }
     if (draw_count > 0)
         device_.write_buffer(draw_ubo_, draw_staging_.data(), draw_staging_.size());
+
+    // The runtime SDF clipmap (m10.4b): a fourth, independent gate. Off by default — nothing below
+    // reads its textures yet (m10.5's DDGI probes are the first consumer), so this recentres and
+    // recomposes the field only when a caller has opted in, exactly the ADR-0032 §11 discipline
+    // every other M10 technique follows. Instance registration (which meshes compose into it) is
+    // not wired to extract_scene() yet — see sdf_clipmap()'s header comment — so an empty registry
+    // still recomposes (cheaply: clears only, no stamps) whenever the camera crosses a level's own
+    // voxel boundary, and settles to zero passes the rest of the time.
+    if (lighting_.sdf_clipmap_enabled) {
+        sdf_clipmap_.add(graph,
+                         core::Vec3{scene.camera.position[0],
+                                    scene.camera.position[1],
+                                    scene.camera.position[2]});
+    }
 
     // ── Declare the frame ─────────────────────────────────────────────────────────────────
     SceneDrawData data{};

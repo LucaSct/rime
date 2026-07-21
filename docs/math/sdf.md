@@ -1,12 +1,13 @@
-# Signed distance fields — the cook, the sign problem, and how coarse is too coarse
+# Signed distance fields — the cook, the runtime clipmap, and how coarse is too coarse
 
-Companion to the SDF cooker (`tools/asset-pipeline/src/sdf.rs`, M10.4a) and
-[ADR-0032](../adr/0032-lighting-v2.md) §2. This is **the cook half only**: it builds a per-mesh (or
-per-destructible-*part*) sampled signed-distance volume offline. The runtime clipmap that composes
-many of these into one traceable field around the camera, the compute pass that stamps them in, and
-the re-stamping that responds to destruction are **m10.4b**, a separate brick — nothing here touches
-the RHI or a device. The byte layout the cook writes and `engine/assets` reads is in
-[`docs/design/assets.md`](../design/assets.md)'s "mesh-SDF payload" section.
+Companion to the SDF cooker (`tools/asset-pipeline/src/sdf.rs`, M10.4a) and the runtime clipmap
+(`engine/render/{include/rime/render/lighting/sdf_clipmap.hpp, src/lighting/sdf_clipmap.cpp,
+shaders/sdf_compose.comp}`, M10.4b) — [ADR-0032](../adr/0032-lighting-v2.md) §2 and §10. §§1–5
+below are **the cook**: building a per-mesh (or per-destructible-*part*) sampled signed-distance
+volume offline. §§6–10 are **the runtime clipmap**: composing many cooked volumes into one
+traceable field around the camera, incrementally, as the world moves and breaks. The byte layout
+the cook writes and `engine/assets` reads is in [`docs/design/assets.md`](../design/assets.md)'s
+"mesh-SDF payload" section; the clipmap touches the RHI and a device (the cook half never does).
 
 ## 1. What a signed distance field is, and why it is the trace medium
 
@@ -229,16 +230,205 @@ silently underneath a green test suite.
   simple and exact rather than prematurely compressing data a later, different-purpose format will
   reprocess anyway. `max_abs_distance` is recorded (free, alongside the sampling loop's own running
   max) specifically as the scale factor that *later* compressed encoding will need.
-- **The runtime clipmap, its compose pass, and destruction-driven dirty-region re-stamping are m10.4b**
-  — this brick produces the cooked volumes that composition will consume; it does not build the
-  compositor.
+- **The runtime clipmap, its compose pass, and destruction-driven dirty-region re-stamping are
+  m10.4b** (§§6–10 below) — this cook produces the volumes that composition consumes.
 - **Per-part destructible SDFs are cooked (`cook_destructible_part_sdf`, fan-triangulating a part's
   convex-hull CSR faces) but wiring "cook a destructible ⇒ automatically cook all its part SDFs" into
-  the fracture cook's own output is deliberately deferred** — nothing downstream consumes a per-part
-  SDF yet (that is m10.4b's compose pass), so automatically paying that cook cost today would have no
-  consumer. The capability is built and tested; the automatic wiring is not.
+  the fracture cook's own output remains deliberately deferred** — the runtime clipmap (§6) can
+  compose a per-part field the moment one is cooked and registered (`SdfClipmap::update_instance`
+  takes any `MeshSdfAsset`, mesh or part alike), but nothing yet calls `cook_destructible_part_sdf`
+  automatically when a destructible is cooked, nor registers the results with a clipmap when a wall
+  breaks — that ECS/asset-loading wiring (which entity's part owns which cooked SDF) is m10.5's job,
+  alongside the DDGI probes that are the field's first real consumer. The cook capability, the
+  compose capability, and the C1/C2 dirty-tracking seams are all built and tested *today*; only the
+  glue that discovers "this destructible's parts have cooked SDFs, register them" is not.
 
-## Verification pins (what the tests check)
+## 6. The runtime clipmap — composing many cooked fields into one traceable volume
+
+A single cooked field (§1–5) only covers one mesh's local space. The GI probes (m10.5) need to
+sphere-trace through the WHOLE scene near the camera — every wall, floor, and piece of debris,
+composed into one field, in world space, updated as things move and break. A **clipmap** is the
+standard answer to "I need a lot of world coverage but only fine detail near the viewer, and I
+can't afford either infinite resolution or infinite memory": nest a handful of same-resolution
+volumes at successively coarser voxel sizes, each centred (approximately — see §8) on the camera,
+so memory is spent where it is most useful — dense right around the viewer, sparse far away —
+rather than uniformly across a scene that is mostly not being looked at closely. This is the same
+idea a mipmap chain applies to *texture resolution*; a clipmap applies it to *world space*.
+
+Rime's clipmap (ADR-0032 §10, pre-decided) is **3 levels, 64³ voxels each, stored as R16Snorm**
+(§7). Level $i$'s voxel size is $4^i$ times level 0's:
+
+$$ v_0 = 0.125\text{ m}, \quad v_i = 4^i \, v_0 \ \Rightarrow \ v_0, v_1, v_2 = 0.125, 0.5, 2.0 \text{ m}. $$
+
+A level's world-space coverage is $64 \, v_i$, giving $8\text{ m} / 32\text{ m} / 128\text{ m}$ for
+levels 0/1/2. Level 0's voxel size matches the m10.4a destructible-**part** cook preset's own
+target resolution (8 voxels across a part's longest axis) closely enough that a typical fractured
+chunk is represented by several voxels across its thinnest dimension at the finest clipmap level —
+the level a probe near a wall actually samples from. The $\times 4$ step (rather than, say,
+$\times 2$) is chosen so that **3 levels comfortably span "a room" to "a city block"** without
+needing a 4th: doubling would need one more level to reach the same 128 m outer radius, for a
+technique whose entire cost model (§9) already scales with instance count × levels touched.
+128 m is deliberately generous for the "a destructible urban block" headline scene (VISION.md §5);
+a scene meaningfully larger than that in one direction is honestly outside what level 2 alone can
+resolve, and is future work (either a 4th level or a coarser fallback) if a real scene ever
+needs it — recorded here rather than silently assumed away.
+
+## 7. The narrow-band encoding — why R16Snorm loses nothing this use needed
+
+A cooked field (§1–5) stores exact `f32` distances because the cook is not memory-constrained. The
+*composed* clipmap is: three 64³ volumes is only 3 MiB at 2 bytes/voxel (R16Snorm) but 6 MiB at 4
+(f32) — and the field is only ever consumed one way here: a sphere-trace reads "how far can I step
+without risk," for which a **bounded, quantized** answer is exactly as useful as an exact one,
+*provided the bound is chosen honestly*.
+
+Each level defines a **band** — the largest distance magnitude worth storing exactly:
+
+$$ \text{band}_i = 4 \, v_i \quad (\Rightarrow 0.5\text{ m} / 2.0\text{ m} / 8.0\text{ m}\text{ for levels }0,1,2). $$
+
+A voxel stores $\mathrm{clamp}(d / \text{band}, -1, 1)$; the GPU's R16Snorm decode
+(`texel / 32767`, clamped) hands back that same $[-1,1]$ ratio, so reconstruction is
+$d_{\text{reconstructed}} = \text{snorm} \times \text{band}$. Two honest consequences fall out of
+this immediately:
+
+- **Anything farther than `band` away is indistinguishable from anything farther still.** A voxel
+  reading exactly $+1$ means "at least `band` away, direction unknown" — not "exactly `band` away."
+  A sphere-trace (§10) that reads a saturated value must therefore step by exactly `band` (never
+  more, since the truth could be exactly `band`; never *claiming* to know more, since it can't) —
+  a **conservative, safe** step, just not the largest one a perfect oracle could take. This is
+  exactly why the ray-marching literature calls this a *narrow-band* representation: precision is
+  spent only near the surface, where it is needed, and the field degrades gracefully (never
+  wrongly) farther out.
+- **Quantization error is a fixed fraction of the band, not of the true distance.** The worst-case
+  rounding error is $\text{band} / 32767$ — for level 0's $0.5\text{ m}$ band that is $\approx
+  15\ \mu\text{m}$, utterly negligible next to the $0.125\text{ m}$ voxel size itself (§9's
+  tolerance budget is dominated by voxel/trilinear error, not this).
+
+Each cooked instance's OWN field (§1–5) is quantized the same way for upload — normalized by its
+own `max_abs_distance` (a *different* number from any clipmap level's band, since an instance's
+extent has nothing to do with which clipmap level currently contains it) — so a small object and a
+128 m-wide level share one format and one hardware sampling path (`sampler3D`, trilinear, free
+interpolation between the cook's voxel centres) without a second RHI format ever entering the
+picture. See ADR-0032 §10's ledger entry for why this needed a genuine RHI top-up
+(`shaderStorageImageExtendedFormats` — Vulkan's mandatory storage-image format list does not
+include narrow/normalized single-channel formats without it) and `tests/rhi/volume_storage_test.cpp`
+for the adjacent, separately-verified claim (a 3-D image + `Storage` + compute `imageStore`
+composes at all on lavapipe) the clipmap's own compose pass depends on just as much.
+
+## 8. Texel-snapping — the same anti-shimmer trick as the cascades, one level at a time
+
+A clipmap level is "centred on the camera," but centring it EXACTLY (recomputing its origin from
+the camera's continuously-moving position every frame) would mean every voxel's world position
+drifts by a sub-voxel amount every frame too — and since the field is a quantized, discretely
+sampled thing, a drifting sample grid reads as shimmer, exactly the translation-shimmer problem
+`compute_cascades` (`engine/render/src/lighting/shadows.cpp`, docs/math/shadow-mapping.md §3)
+already solved for cascaded shadow maps. The fix is the same idea, applied per level: snap the
+level's origin — the world-space corner of voxel $(0,0,0)$ — to a whole multiple of **that level's
+own** voxel size,
+
+$$ \text{origin}_i = \left\lfloor \frac{\text{camera} - \tfrac12 \cdot 64 v_i}{v_i} \right\rfloor v_i, $$
+
+so voxel centres sit on a fixed world-space lattice that never moves except in whole-voxel jumps.
+Three consequences, all load-bearing for the dirty-tracking story in §9:
+
+- **Sub-voxel camera motion causes the SAME floor result** — the snapped origin is bit-identical
+  frame to frame, so nothing needs to recompose. This is the "zero recomposition" half of the
+  brick's snap-stability test.
+- **Each level snaps INDEPENDENTLY.** Because $v_0 < v_1 < v_2$, a camera move can cross a level-0
+  voxel boundary while staying within the same level-1 (and level-2) voxel — the finer level
+  recomposes, the coarser ones do not. This is a genuinely useful property (moving normally around
+  a scene mostly perturbs only the near, cheap-to-recompose level), not just an implementation
+  detail — see the `sdf_clipmap_test.cpp` "texel-snapping" proof for a hand-verified worked
+  example.
+- **A big move (past a level's own 64-voxel extent) necessarily changes that level's origin, and
+  the v1 policy is: any origin change forces that level's ENTIRE volume to recompose** — not just
+  the newly-exposed band at the leading edge, the way a scrolling/toroidal-addressed clipmap would.
+  This is a deliberate simplification: correctness (a moved level always ends up fully, correctly
+  populated) over the scroll optimization real-time GI implementations often use to avoid paying
+  for the whole volume on every boundary crossing. It costs more while the camera is moving
+  continuously through fine geometry (level 0's 0.125 m voxels mean almost any walking speed
+  crosses one every frame or two) — measured, not hidden, and the natural follow-up if a profile
+  ever asks for it.
+
+## 9. Why min-blend composes — and what it costs
+
+Composing $N$ instances' fields into one clipmap level is, at every voxel, "the distance to
+whichever instance's surface is nearest" — the pointwise minimum of every instance's own (signed)
+distance at that point (§ ADR-0032's decision 2: "a global field built from many local ones is
+just the pointwise minimum of unsigned distances… no boolean/CSG machinery needed"). `min` is
+commutative ($\min(a,b) = \min(b,a)$) and associative
+($\min(\min(a,b),c) = \min(a,\min(b,c))$), so folding instances into a voxel one at a time, in
+ANY order, across ANY number of separate dispatches, over ANY number of frames, gives the
+identical result a from-scratch recompose of every live instance would. This single algebraic fact
+is *why* the whole brick's incremental-recomposition story is sound: re-stamping only the
+instances that changed, whenever invalidation happens to drain them, still converges to "the
+closest surface any live instance puts here" — never a stale answer, never an order-dependent one.
+
+**The cost.** The RHI has no bindless texture array (a deliberate M10.4b non-goal — inventing one
+is its own brick), so each instance's cooked field is a separate `sampler3D` binding, and Rime's
+descriptor model binds resources per dispatch (ADR-0020) — there is no way to hand a single
+compute invocation "N textures, pick one by index" without one. The consequence, stated plainly
+rather than hidden behind an abstraction: **composing $N$ instances into a dirty region costs $N$
+compute dispatches**, one per (level, dirty-region, overlapping-instance) triple, plus one "clear
+to +band" dispatch per (level, dirty-region) pair that runs first (so a re-stamp never inherits a
+neighbour's stale minimum — see `sdf_compose.comp`'s header). Each dispatch's own *voxel* count is
+bounded to (dirty region) ∩ (that instance's own cooked-grid extent in world space), not the whole
+level, so the GPU-side cost of a small, localized change is small; the dispatch-COUNT cost is what
+scales with how many separate instances happen to overlap a large simultaneous change (a big
+camera jump forcing a full-level recompose, §8, is the worst case: every instance touching that
+level, once). `SdfClipmapStats` (`stamps`/`clears`/`dirty_regions`/`levels_recomposed`) exists
+specifically so this cost is a number a test (or a future profiling HUD) can read, not a guess.
+
+**Dirty-region correctness — an EXACT bound, not merely a conservative one.** An instance's
+"world bounds," for the purpose of deciding what to recompose when it moves, appears/disappears
+or is explicitly invalidated, is the transform of its OWN cooked grid's extent
+(`MeshSdfAsset::grid_origin`/`resolution`/`voxel_size` — the padded box the cook actually sampled,
+not the tighter source-mesh AABB). This is exact, not conservative, *because* the compose shader
+never writes a voxel whose local-space position falls outside that same box (it would otherwise
+have to trust a sampler's `ClampToEdge` extrapolation at the edge, which is honest-but-meaningless
+data — see `sdf_compose.comp`'s own comment on why it skips instead). An instance therefore
+cannot have influenced any voxel outside its own grid extent, so recomposing exactly that box on
+removal/move/invalidate is provably sufficient — no extra safety padding by a level's band or
+anything else is needed, unlike, say, `LocalShadowMap`'s frustum-overlap test, which genuinely does
+pad conservatively because a shadow frustum's influence is not so crisply bounded.
+
+One further simplification, honestly conservative rather than exact: when SEVERAL unrelated
+regions are dirty in the same level in the same frame, the CPU side clears+re-stamps their
+BOUNDING BOX as one region, not each individually — guaranteeing a level's one clear dispatch can
+never land between two of that frame's own stamps and erase one (see `SdfClipmap::add`'s comment).
+The cost is occasionally recomposing a few voxels between two unrelated changes that, in
+isolation, did not need it; paid only when multiple such changes coincide in one frame, which is
+the uncommon case the "destroy one object, everything else is untouched" proof is not exercising.
+
+## 10. Sphere tracing through the composed field
+
+Sphere tracing (Hart, 1996) is the whole reason an SDF is worth tracing at all rather than a plain
+occupancy/voxel grid: at any point $\mathbf p$ along a ray, the field value $f(\mathbf p)$ is a
+lower bound on how far the ray can advance without risking passing through a surface — advance by
+$f(\mathbf p)$, re-sample, repeat, until the value drops below a small stopping epsilon (a hit) or
+the ray's budget runs out (a miss). Marching through the CLIPMAP specifically means, at each step,
+picking the finest level whose current (snapped, §8) volume contains the sample point and
+trilinearly sampling THAT level's texture (`sdf_sample` in
+`tests/render/shaders/sdf_probe_trace.comp` — the reference m10.5 lifts verbatim; there is no
+shader-include mechanism in this engine yet, see `sdf_compose.comp`'s own note, so this is written
+out where it is first exercised rather than in a shared file that does not exist). Falling through
+to a coarser level only when a point is outside the finer one's volume is a hard select at the
+level boundary (no cross-level blend) — simple, and the boundary itself only matters many metres
+out, where a probe's own footprint is already coarse. A step taken while the sample reads a
+SATURATED value (§7) is a `band`-sized conservative step, not a wrong one — several such steps
+happen while far from any surface, and the march converges quickly once it enters a level's
+unsaturated (informative) range.
+
+**The proof's tolerance.** `tests/render/sdf_clipmap_test.cpp`'s analytic-agreement test compares a
+sphere-traced hit distance against the one-line analytic formula for a sphere/box centred at the
+origin, within `2 × (finest level's voxel size) + 0.05 × (its band)`. The $2v$ term is the same
+discretization/trilinear-interpolation margin the m10.4a cook's own analytic tests use
+(`tools/asset-pipeline/src/sdf.rs`); the small band-relative term absorbs the march's own stopping
+epsilon and any residual roughness right at a saturation boundary. Measured results sit well inside
+this budget (a few millimetres of error against a several-centimetre tolerance at level 0's
+0.125 m voxel size) — the margin is honest headroom, not a number chosen to make a shaky result
+pass.
+
+## Verification pins — the cook (what tools/asset-pipeline/src/sdf.rs's tests check)
 
 - **Analytic correctness.** A box mesh's cooked field matches the standard box SDF,
   $d(\mathbf p)=\lVert\max(|\mathbf p|-\mathbf h,\,0)\rVert + \min\!\big(\max((|\mathbf p|-\mathbf
@@ -260,3 +450,28 @@ silently underneath a green test suite.
 - **Cross-language fixture.** `cube.rsdf` (cooked from the existing `cube.stl`) round-trips: the Rust
   cooker still produces these exact bytes, and the C++ reader decodes them and samples them to the
   same analytic box values documented above.
+
+## Verification pins — the runtime clipmap (what tests/render/sdf_clipmap_test.cpp checks)
+
+- **Analytic agreement.** A composed sphere and box sphere-trace to their one-line analytic hit
+  distance within the §10 tolerance — proof the compose (§6–7) and sample (§10) math is right, not
+  merely that it runs.
+- **The re-stamp proof (the headline).** A ray hits a box. Remove the instance and `invalidate()`
+  its region (the C2 destruction hook). Recompose. The same ray now passes through
+  (`sdf_sphere_trace` returns $-1$) — "break a wall, the light gets through" as an assertion, not a
+  screenshot.
+- **Dirty economy (ADR-0032 §11).** 16 non-overlapping instances fully recompose once (48 stamps:
+  16 instances × 3 levels, 3 clears: one per level), then settle to EXACTLY zero stamps/clears on
+  an unchanged camera with nothing invalidated. Destroying one of the 16 recomposes only its own
+  (empty, once it's gone) neighbourhood — zero stamps, a bounded few clears — never touching the
+  other 15.
+- **Snap stability.** A sub-voxel camera nudge leaves every level's snapped origin bit-identical
+  (§8) and declares zero passes. A move past level 0's own voxel (but, from a hand-verified
+  starting point, not past level 1's or level 2's) recomposes level 0 alone — each level really
+  does snap to its own grid independently, not as a group. A move past a level's whole extent
+  forces (at least) that level fully.
+- **The RHI spike (`tests/rhi/volume_storage_test.cpp`).** A compute dispatch `imageStore`s into
+  every voxel of a genuine 3-D (`depth > 1`) storage image and reads every voxel back exactly —
+  isolating "does this combination even work" from the clipmap's own R16Snorm-specific proof
+  above, and the fix it found (`copy_texture_to_buffer` truncating a volume readback to its z=0
+  slice) along with it.

@@ -736,7 +736,12 @@ void VulkanCommandBuffer::copy_texture_to_buffer(TextureHandle src,
     region.imageSubresource.baseArrayLayer = base_layer; // which cascade / cube face (m10.1a)
     region.imageSubresource.layerCount = 1;
     region.imageOffset = {0, 0, 0};
-    region.imageExtent = {tex->extent.width, tex->extent.height, 1};
+    // depth (m10.4 spike, ADR-0032 §10): a 3-D (volume) texture has array_layers == 1 always (M3's
+    // create_texture rejects depth>1 combined with array_layers>1), so base_layer/layerCount above
+    // are already correct for it unchanged — the one thing that was WRONG here was hardcoding the
+    // extent's depth to 1, silently truncating a volume readback to its z=0 slice. Every ordinary
+    // 2-D texture keeps tex->depth == 1, so this is a pure bugfix, not a behavior change for them.
+    region.imageExtent = {tex->extent.width, tex->extent.height, tex->depth};
     vkCmdCopyImageToBuffer(
         cmd_, tex->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf->buffer, 1, &region);
 

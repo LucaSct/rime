@@ -102,6 +102,17 @@ enum class Format : std::uint32_t {
                  // pick pass (m9.6) rasterizes entity ids into it so "what is under this pixel?"
                  // is answered by the depth test instead of CPU ray casting. Color-attachment
                  // support for R32_UINT is spec-mandatory; integer targets never blend.
+    // One 16-bit SIGNED-NORMALIZED channel: the GPU decodes the stored int16 as
+    // clamp(int16 / 32767, -1, 1) on sample/imageLoad and encodes the inverse on imageStore. This
+    // is the SDF clipmap's narrow-band storage (m10.4b, ADR-0032 §10) — a signed distance there is
+    // always bounded (clamped to a per-level band before storing), so a normalized 2-byte channel
+    // loses nothing a raw f32 would have kept *for that use*, at a quarter the bytes. Using it as
+    // a STORAGE image (imageStore/imageLoad, not just sampling) needs the
+    // `shaderStorageImageExtendedFormats` device feature — see the Vulkan backend's device setup.
+    R16Snorm,
+    R8Snorm, // the 8-bit sibling of R16Snorm (int8 / 127). Reserved for a coarser/cheaper
+             // clipmap level or a lower-precision instance field if profiling ever asks for
+             // one; m10.4b ships every level as R16Snorm and does not use this yet.
 };
 
 // What a buffer can be used for. Bit flags: OR them together (see RIME_RHI_FLAGS below). The

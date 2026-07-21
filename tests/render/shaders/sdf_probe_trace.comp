@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The GPU half of the m10.4b proof (tests/render/sdf_clipmap_test.cpp): sphere-trace a batch of
+// rays through a composed SdfClipmap and report each ray's hit distance (or -1 for a miss). This
+// is also where the "sampling helpers for m10.5/m10.7" the m10.4b brief calls for actually live —
+// `sdf_sample`/`sdf_sphere_trace` below are exactly what a DDGI probe's ray-tracing pass will need,
+// written out here because no shader-include mechanism exists yet in this engine (see
+// pbr_forward_shadowed.frag's own header note, and sdf_compose.comp's, which needs none of this
+// multi-level machinery — it only ever point-samples ONE instance's own field). m10.5 lifts these
+// two functions verbatim into its own probe shader; folding both call sites into a shared
+// `sdf.glsl` is the follow-up once the include path lands.
+//
+// The clipmap's three levels are three SEPARATE sampler3D bindings (no bindless array — the same
+// "no bindless yet" constraint sdf_compose.comp's one-dispatch-per-instance design lives with), so
+// `sample_level` below is the one place a per-level index has to become a static branch instead of
+// an array subscript; `Levels.info[i]`, by contrast, is ordinary data inside ONE bound uniform
+// buffer and indexes by `i` exactly like any other array member.
+#version 450
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) uniform sampler3D level0;
+layout(set = 0, binding = 1) uniform sampler3D level1;
+layout(set = 0, binding = 2) uniform sampler3D level2;
+
+// Mirrors GpuSdfLevel / GpuSdfClipmapLevels (lighting/sdf_clipmap.hpp) exactly — the test uploads
+// SdfClipmap::gpu_levels() directly into this block, no repacking.
+struct LevelInfo {
+    vec4 origin_extent; // xyz = world origin (voxel (0,0,0)'s corner), w = world extent
+    vec4 band_voxel;    // x = band, y = voxel size, z/w unused
+};
+layout(std140, set = 0, binding = 3) uniform Levels {
+    LevelInfo info[3];
+} clipmap;
+
+struct Ray {
+    vec4 origin_maxdist; // xyz = ray origin (world), w = max trace distance
+    vec4 dir_pad;         // xyz = (not necessarily normalized) direction, w unused
+};
+layout(std430, set = 0, binding = 4) readonly buffer Rays { Ray rays[]; } in_rays;
+layout(std430, set = 0, binding = 5) writeonly buffer Hits { float t[]; } out_hits;
+
+float sample_level(int i, vec3 uvw) {
+    if (i == 0) return texture(level0, uvw).r;
+    if (i == 1) return texture(level1, uvw).r;
+    return texture(level2, uvw).r;
+}
+
+// Pick the FINEST level whose current volume contains `world_pos` and trilinearly sample it,
+// decoding the R16Snorm texel back into a true distance via that level's own band
+// (distance = snorm * band — the narrow-band decode, docs/math/sdf.md). Levels are nested and
+// roughly camera-centred, so the finest level containing a point is also the most accurate one
+// available for it; falling through to a coarser level only when a point is outside the previous
+// one is a HARD SELECT at the boundary (no cross-level blend) — simple, and the boundary itself
+// only ever matters many metres from the camera where a probe's own footprint is already coarse.
+// A point outside even the coarsest (level 2) volume clamps into it rather than reading
+// out-of-bounds; ClampToEdge addressing on the sampler already guarantees the texture fetch itself
+// never goes out of bounds, but is the honest answer for a REALLY distant point too — the field is
+// only ever defined this densely near the camera by construction.
+float sdf_sample(vec3 world_pos) {
+    for (int i = 0; i < 3; ++i) {
+        vec4 oe = clipmap.info[i].origin_extent;
+        vec3 uvw = (world_pos - oe.xyz) / oe.w;
+        if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)))) {
+            return sample_level(i, uvw) * clipmap.info[i].band_voxel.x;
+        }
+    }
+    vec4 oe2 = clipmap.info[2].origin_extent;
+    vec3 uvw2 = clamp((world_pos - oe2.xyz) / oe2.w, 0.0, 1.0);
+    return sample_level(2, uvw2) * clipmap.info[2].band_voxel.x;
+}
+
+// Sphere tracing (Hart 1996): march by the field's OWN value each step, because that value is
+// always a safe distance to advance without piercing the nearest surface. A SATURATED reading
+// (the field clamped to ±1 before storing — docs/math/sdf.md's narrow-band encoding) still means
+// "at least `band` away, direction unknown", so stepping by exactly that value is still safe, just
+// conservative — the march takes several fixed-size steps while far from anything, then converges
+// quickly once it enters a level's unsaturated (informative) range. Returns the hit distance, or
+// -1 if `max_dist` is exhausted first (the ray passes through, or nothing is close enough within
+// range for the whole march to matter).
+float sdf_sphere_trace(vec3 origin, vec3 dir, float max_dist) {
+    float t = 0.0;
+    const float kHitEpsilon = 0.001;
+    const int kMaxSteps = 128;
+    for (int i = 0; i < kMaxSteps; ++i) {
+        if (t >= max_dist) {
+            break;
+        }
+        float d = sdf_sample(origin + dir * t);
+        if (d < kHitEpsilon) {
+            return t;
+        }
+        t += max(d, kHitEpsilon);
+    }
+    return -1.0;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= in_rays.rays.length()) {
+        return;
+    }
+    Ray r = in_rays.rays[i];
+    out_hits.t[i] = sdf_sphere_trace(r.origin_maxdist.xyz, normalize(r.dir_pad.xyz), r.origin_maxdist.w);
+}

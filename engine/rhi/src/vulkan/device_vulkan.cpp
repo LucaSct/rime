@@ -422,6 +422,19 @@ bool VulkanDevice::create_logical_device() {
     anisotropy_supported_ = supported.samplerAnisotropy == VK_TRUE;
     f2.features.samplerAnisotropy = supported.samplerAnisotropy;
 
+    // Storage images in NARROW/NORMALIZED formats (m10.4b's SDF clipmap: imageStore/imageLoad on
+    // an image3D<r16_snorm>) need this feature. Vulkan's mandatory storage-image format list
+    // (the spec's "Required Format Support" table) covers only the wide formats (R32_*,
+    // R16G16B16A16_*, R8G8B8A8_*, ...); a single-channel *normalized* format like R16_SNORM is
+    // outside that guaranteed set and needs shaderStorageImageExtendedFormats for a shader's
+    // OpTypeImage/imageStore to target it at all. This is a different Vulkan capability axis from
+    // anisotropy above (a device feature bit, not a per-format query) but the same shape: query
+    // what the device actually supports and enable exactly that, so a device lacking it degrades
+    // to a loud Vulkan validation/creation error instead of a silently wrong pixel — never assume.
+    // Real GPU drivers and lavapipe (this engine's only CI target, ADR-0032) both support it in
+    // practice; the m10.4b RHI spike (tests/rhi) is what actually proves that on this box.
+    f2.features.shaderStorageImageExtendedFormats = supported.shaderStorageImageExtendedFormats;
+
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physical_, &props);
     max_anisotropy_limit_ = props.limits.maxSamplerAnisotropy;

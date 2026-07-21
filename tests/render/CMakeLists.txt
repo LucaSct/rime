@@ -17,6 +17,7 @@ rime_add_test(rime_render_tests
     shadow_test.cpp
     local_shadow_test.cpp
     clustered_test.cpp
+    sdf_clipmap_test.cpp
     viewer_frame_graph_test.cpp)
 
 target_link_libraries(rime_render_tests
@@ -43,4 +44,5 @@ rime_add_shaders(rime_render_tests
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/cap.vert
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/cap.frag
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/ui.vert
-    ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/ui.frag)
+    ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/ui.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sdf_probe_trace.comp)

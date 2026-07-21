@@ -8,6 +8,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/render/lighting/clustered.hpp"
 #include "rime/render/lighting/local_shadows.hpp"
+#include "rime/render/lighting/sdf_clipmap.hpp"
 #include "rime/render/lighting/settings.hpp"
 #include "rime/render/lighting/shadows.hpp"
 #include "rime/render/passes.hpp"
@@ -117,6 +118,21 @@ public:
         return local_shadows_.stats();
     }
 
+    // The C2 destruction hook for the SDF clipmap (m10.4b) — the WorldAabb twin of
+    // invalidate_shadow_region above. An app/sample bridges the same destruction event stream to
+    // both calls (a broken wall's shadow AND its contribution to the traceable field both need to
+    // know). A no-op while sdf_clipmap_enabled is off (nothing ever reads the accumulated regions).
+    void invalidate_sdf_region(const WorldAabb& region) { sdf_clipmap_.invalidate(region); }
+
+    // Direct access to the clipmap for registering/removing composed instances
+    // (SdfClipmap::update_instance/remove_instance) and reading its stats/level textures — this
+    // brick does not (yet) extract "which entities have a cooked SDF asset" from the World the way
+    // extract_scene() gathers meshes/lights, so a caller drives instance registration directly
+    // until that extraction exists (m10.5's job, alongside the DDGI probes that consume it).
+    [[nodiscard]] SdfClipmap& sdf_clipmap() noexcept { return sdf_clipmap_; }
+
+    [[nodiscard]] const SdfClipmap& sdf_clipmap() const noexcept { return sdf_clipmap_; }
+
 private:
     void ensure_draw_capacity(std::uint32_t draw_count);
 
@@ -130,6 +146,7 @@ private:
     CascadedShadowMap csm_; // m10.1: directional shadow cascades (only declared when enabled)
     LocalShadowMap local_shadows_; // m10.2: cached spot-light shadows (only declared when enabled)
     ClusteredLights clustered_;    // m10.3: froxel light culling (only declared when enabled)
+    SdfClipmap sdf_clipmap_;       // m10.4b: the traceable field (only stepped when enabled)
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
 
