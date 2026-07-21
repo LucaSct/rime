@@ -247,6 +247,14 @@ SamplerHandle VulkanDevice::create_sampler(const SamplerDesc& desc) {
     if (desc.compare_enable) {
         sci.compareEnable = VK_TRUE;
         sci.compareOp = to_vk(desc.compare_op);
+        // A portability driver without mutableComparisonSamplers still *creates* this sampler
+        // happily and then quietly compares against nothing (see create_logical_device). Say so
+        // here rather than let it surface as an all-black shadow term three layers up.
+        if (!depth_compare_supported_) {
+            RIME_ERROR("rhi: create_sampler('{}') asks for depth-compare, which this driver does "
+                       "not support — every shadow lookup will read as fully occluded",
+                       desc.debug_name);
+        }
     }
 
     VulkanSampler s;

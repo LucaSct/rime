@@ -239,6 +239,10 @@ private:
     float max_anisotropy_limit_ = 1.0f; // limits.maxSamplerAnisotropy
     bool timestamps_supported_ = false; // graphics queue timestampValidBits > 0
     float timestamp_period_ns_ = 0.0f;  // nanoseconds per GPU timestamp tick
+    // Depth-compare ("shadow") samplers. Universally available on native drivers; on a portability
+    // implementation it is the opt-in mutableComparisonSamplers capability — see
+    // create_logical_device() for why a false here silently renders every shadow fully occluded.
+    bool depth_compare_supported_ = true;
 
     AdapterInfo adapter_{};
 
