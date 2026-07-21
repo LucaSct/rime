@@ -8,6 +8,7 @@
 #include "rime/render/scene_renderer.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 
@@ -114,7 +115,7 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
       forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device),
-      sdf_clipmap_(device) {
+      sdf_clipmap_(device), ddgi_(device) {
     rhi::BufferDesc fd{};
     fd.size = sizeof(GpuFrameUniforms);
     fd.usage = rhi::BufferUsage::Uniform;
@@ -209,6 +210,39 @@ void SceneRenderer::ensure_draw_capacity(std::uint32_t draw_count) {
     bd.debug_name = "scene-draw-ubo";
     draw_ubo_ = device_.create_buffer(bd);
     draw_capacity_ = capacity;
+}
+
+void SceneRenderer::sync_sdf_instances(ecs::World& world) {
+    // Pass 1 (cheap, full walk): who currently carries a live SdfRef? This component is worn only
+    // by GI-relevant geometry (sparse), so walking every match every frame just to notice a
+    // despawn/un-ref costs little — the EXPENSIVE half (the GPU-texture-recreating
+    // update_instance call) is what pass 2 change-detection-gates.
+    std::unordered_set<std::uint64_t> current_keys;
+    current_keys.reserve(tracked_sdf_entities_.size());
+    world.query<ecs::WorldTransform, SdfRef>().for_each(
+        [&](ecs::Entity e, ecs::WorldTransform&, SdfRef& ref) {
+            if (ref.source == kInvalidSdfSourceId)
+                return; // not registered yet — nothing to feed the clipmap
+            current_keys.insert(std::bit_cast<std::uint64_t>(e));
+        });
+    for (std::uint64_t key : tracked_sdf_entities_) {
+        if (current_keys.find(key) == current_keys.end())
+            sdf_clipmap_.remove_instance(key); // despawned, or its SdfRef went away/invalid
+    }
+    tracked_sdf_entities_ = std::move(current_keys);
+
+    // Pass 2 (the C1 seam, ADR-0032): only entities whose WorldTransform or SdfRef actually
+    // changed since the last call re-upload — a settled scene costs nothing after its first frame,
+    // exactly the discipline SdfClipmap::update_instance's own doc comment asks its caller for.
+    world.query<ecs::WorldTransform, SdfRef>().for_each_changed(
+        sdf_instances_since_, [&](ecs::Entity e, ecs::WorldTransform& wt, SdfRef& ref) {
+            if (ref.source == kInvalidSdfSourceId || ref.source >= sdf_sources_.size())
+                return;
+            sdf_clipmap_.update_instance(std::bit_cast<std::uint64_t>(e),
+                                         sdf_sources_[ref.source],
+                                         core::to_matrix(wt.value));
+        });
+    sdf_instances_since_ = world.version();
 }
 
 SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
@@ -312,18 +346,38 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     if (draw_count > 0)
         device_.write_buffer(draw_ubo_, draw_staging_.data(), draw_staging_.size());
 
-    // The runtime SDF clipmap (m10.4b): a fourth, independent gate. Off by default — nothing below
-    // reads its textures yet (m10.5's DDGI probes are the first consumer), so this recentres and
-    // recomposes the field only when a caller has opted in, exactly the ADR-0032 §11 discipline
-    // every other M10 technique follows. Instance registration (which meshes compose into it) is
-    // not wired to extract_scene() yet — see sdf_clipmap()'s header comment — so an empty registry
-    // still recomposes (cheaply: clears only, no stamps) whenever the camera crosses a level's own
-    // voxel boundary, and settles to zero passes the rest of the time.
+    // The runtime SDF clipmap (m10.4b): a fourth, independent gate. `sync_sdf_instances` (m10.5a)
+    // closes the gap this brick's own comment used to name here: every entity carrying
+    // (WorldTransform, SdfRef) is now change-detection-fed into the clipmap automatically, so an
+    // empty scene (no SdfRef entities) still recomposes cheaply (clears only) whenever the camera
+    // crosses a level's own voxel boundary, and settles to zero passes the rest of the time —
+    // exactly the ADR-0032 §11 discipline every other M10 technique follows.
+    const core::Vec3 camera_pos{
+        scene.camera.position[0], scene.camera.position[1], scene.camera.position[2]};
     if (lighting_.sdf_clipmap_enabled) {
-        sdf_clipmap_.add(graph,
-                         core::Vec3{scene.camera.position[0],
-                                    scene.camera.position[1],
-                                    scene.camera.position[2]});
+        sync_sdf_instances(world);
+        sdf_clipmap_.add(graph, camera_pos);
+
+        // DDGI probes (m10.5a): a fifth, independent gate, NESTED inside sdf_clipmap_enabled —
+        // DDGI sphere-traces the SAME field this block just stepped, so it structurally cannot run
+        // against a clipmap nobody is updating (settings.hpp's "requires sdf_clipmap_enabled",
+        // made a code fact rather than only a documented expectation).
+        if (lighting_.ddgi_enabled) {
+            DdgiLightingInputs ddgi_inputs{};
+            ddgi_inputs.has_sun = ndir > 0;
+            if (ndir > 0) {
+                ddgi_inputs.sun_direction = core::Vec3{fu.dir_lights[0].direction[0],
+                                                       fu.dir_lights[0].direction[1],
+                                                       fu.dir_lights[0].direction[2]};
+                ddgi_inputs.sun_radiance[0] = fu.dir_lights[0].radiance[0];
+                ddgi_inputs.sun_radiance[1] = fu.dir_lights[0].radiance[1];
+                ddgi_inputs.sun_radiance[2] = fu.dir_lights[0].radiance[2];
+            }
+            ddgi_inputs.sky_radiance[0] = ambient_[0];
+            ddgi_inputs.sky_radiance[1] = ambient_[1];
+            ddgi_inputs.sky_radiance[2] = ambient_[2];
+            ddgi_.add(graph, sdf_clipmap_, camera_pos, ddgi_inputs, lighting_);
+        }
     }
 
     // ── Declare the frame ─────────────────────────────────────────────────────────────────

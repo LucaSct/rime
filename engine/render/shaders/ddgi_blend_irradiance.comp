@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// DDGI probes, the irradiance-blend half (m10.5a, ADR-0032 §2). One WORKGROUP per probe scheduled
+// this update, one INVOCATION per physical texel of that probe's octahedral irradiance tile
+// (interior + a 1-texel border on every side, lighting/ddgi.hpp). Each invocation decodes its own
+// texel's DIRECTION, gathers this update's rays weighted by cosine similarity to that direction (a
+// Lambertian-irradiance Monte-Carlo estimator — docs/math/ddgi.md §4 derives the weighting and the
+// pi-normalization that lets a consumer later multiply by albedo directly, no extra constant), and
+// temporally blends the result into the persistent atlas.
+//
+// THE BORDER (docs/math/ddgi.md §3 — "the classic bug"). Hardware bilinear filtering samples up to
+// half a texel past a UV; without a border, sampling near a probe's tile edge blends with WHATEVER
+// texel the atlas happens to place next to it (a different probe entirely) instead of the texel the
+// octahedral mapping actually wraps to there. The fix here is NOT a separate copy pass: every
+// invocation — border or interior — first FOLDS its own (possibly out-of-[-1,1]) UV back into
+// range using the exact identity the decode function's domain implies (see oct_decode_folded
+// below), then runs the IDENTICAL gather any interior texel runs. A border texel and the interior
+// texel it must agree with are thus never in a read-after-write race with each other (each writes
+// only its own physical texel) and are PROVABLY equal by construction — same formula, same inputs.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in; // 6 interior + 2 border, one probe/workgroup
+
+struct DdgiRay {
+    vec4 direction_dist; // xyz = unit ray direction, w = hit distance (unused here)
+    vec4 radiance_pad;   // rgb = shaded radiance, w unused
+};
+layout(std430, set = 0, binding = 0) readonly buffer Rays { DdgiRay r[]; } in_rays;
+
+// Mirrors GpuDdgiBlendParams (lighting/ddgi.hpp) exactly.
+layout(std140, set = 0, binding = 1) uniform DdgiBlendParams {
+    uvec4 base_total_perrow_rays; // x round-robin base, y total_probes, z atlas_probes_per_row, w rays_per_probe
+} params;
+
+layout(std430, set = 0, binding = 2) readonly buffer Hysteresis { float h[]; } hysteresis;
+
+layout(rgba16f, set = 0, binding = 3) uniform image2D irradiance_atlas;
+
+const int kTileInterior = 6;
+const int kTilePhysical = 8; // kTileInterior + 2*border
+
+vec2 sign_not_zero(vec2 v) {
+    return vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+
+// Cigolle/Meyer et al. octahedral decode (docs/math/ddgi.md §3) — mirrors ddgi_oct_decode
+// (lighting/ddgi.cpp) exactly.
+vec3 oct_decode(vec2 e) {
+    vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) {
+        vec2 nxy = (1.0 - abs(v.yx)) * sign_not_zero(v.xy);
+        v.x = nxy.x;
+        v.y = nxy.y;
+    }
+    return normalize(v);
+}
+
+// Fold a UV that may lie up to one texel outside [-1,1] (a border texel) back into range before
+// decoding. All four corners of the octahedral square map to the SAME point (plug u=v=+-1 into
+// oct_decode's fold branch: the result is (0,0,-1) regardless of sign), so continuing past one
+// edge is not a plain wrap — it is a REFLECTION that also flips the other axis. At most one axis
+// is ever out of range for a 1-texel border, so applying the x-fold then the y-fold in sequence
+// (each flips the OTHER axis) correctly handles an edge (one fold fires) or a corner (both fire,
+// in sequence) with the same four lines.
+vec3 oct_decode_folded(vec2 e) {
+    if (e.x < -1.0) { e.x = -2.0 - e.x; e.y = -e.y; }
+    else if (e.x > 1.0) { e.x = 2.0 - e.x; e.y = -e.y; }
+    if (e.y < -1.0) { e.y = -2.0 - e.y; e.x = -e.x; }
+    else if (e.y > 1.0) { e.y = 2.0 - e.y; e.x = -e.x; }
+    return oct_decode(e);
+}
+
+void main() {
+    uint probe_local = gl_WorkGroupID.z;
+    uint total_probes = max(params.base_total_perrow_rays.y, 1u);
+    uint global_probe = (params.base_total_perrow_rays.x + probe_local) % total_probes;
+    uint probes_per_row = max(params.base_total_perrow_rays.z, 1u);
+
+    ivec2 px = ivec2(gl_LocalInvocationID.xy); // physical tile coordinate, [0, kTilePhysical-1]
+    ivec2 tile_origin =
+        ivec2(int(global_probe % probes_per_row), int(global_probe / probes_per_row)) *
+        kTilePhysical;
+    ivec2 atlas_xy = tile_origin + px;
+
+    // Texel-centre UV: interior texels (px in [1,kTileInterior]) land in (-1,1); the border ring
+    // (px == 0 or kTilePhysical-1) lands exactly one texel-width beyond it, which is exactly what
+    // oct_decode_folded expects.
+    vec2 uv = (vec2(px) - 1.0 + 0.5) / float(kTileInterior) * 2.0 - 1.0;
+    vec3 texel_dir = oct_decode_folded(uv);
+
+    uint rays_per_probe = params.base_total_perrow_rays.w;
+    uint ray_base = probe_local * rays_per_probe;
+
+    vec3 accum = vec3(0.0);
+    float weight_sum = 0.0;
+    for (uint i = 0; i < rays_per_probe; ++i) {
+        DdgiRay ray = in_rays.r[ray_base + i];
+        float w = max(dot(texel_dir, ray.direction_dist.xyz), 0.0);
+        accum += ray.radiance_pad.rgb * w;
+        weight_sum += w;
+    }
+
+    vec3 old_value = imageLoad(irradiance_atlas, atlas_xy).rgb;
+    const float kMinWeight = 1.0e-4;
+    vec3 stored;
+    if (weight_sum > kMinWeight) {
+        vec3 new_estimate = accum / weight_sum;
+        // stored = hysteresis*old + (1-hysteresis)*new — GLSL's mix(a,b,t) = a*(1-t) + b*t, so
+        // mix(new, old, h) is exactly that (h=0 snaps straight to new_estimate for a probe's
+        // first-ever update; h close to 1 barely moves per frame — docs/math/ddgi.md §5).
+        float h = hysteresis.h[probe_local];
+        stored = mix(new_estimate, old_value, h);
+    } else {
+        // No ray this update had useful weight for this direction (astronomically unlikely with a
+        // real ray population, but not provably impossible) — keep whatever was already stored
+        // rather than blend toward a divide-by-near-zero estimate.
+        stored = old_value;
+    }
+    imageStore(irradiance_atlas, atlas_xy, vec4(stored, 0.0));
+}

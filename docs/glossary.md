@@ -192,6 +192,27 @@ Entries are grouped roughly by area and kept short on purpose.
   nearest surface can be, so the ray can never step through thin geometry. Converges in few steps
   near a surface; a *narrow-band*-saturated field just means several bigger, still-safe steps
   before anything informative is read. See [math/sdf.md](math/sdf.md) §10.
+- **DDGI — Dynamic Diffuse Global Illumination.** Rime's real-time GI technique (Majercik et al.,
+  2019, m10.5): a lattice of *irradiance probes* sphere-traced through the SDF clipmap every
+  frame, each accumulating "what does the bounced light look like from here?" with no baking and
+  no hardware ray tracing. The mechanism the walls-fall thesis's *second* half ("the bounced light
+  updates") rides on — the shadow moving is m10.1/m10.2's job. See [math/ddgi.md](math/ddgi.md).
+- **Irradiance probe.** One point in a DDGI lattice storing incoming light as a function of
+  direction (an *octahedral*-mapped image, not one number), updated a little every frame by
+  casting a fresh batch of rays and blending the result in with *hysteresis*. See
+  [math/ddgi.md](math/ddgi.md) §2–§6.
+- **Octahedral mapping.** A bijection between the unit sphere and a small square image (Cigolle et
+  al., 2014) — one flat 2-D tile stores a function over every direction, no cube-map's six faces or
+  a lat-long image's pole singularities. Bilinear filtering right at a tile's edge needs a
+  duplicated *border* ring holding the correctly wrapped neighbouring value, or sampling near the
+  seam blends with an unrelated probe's data — the classic bug the mapping is known for. See
+  [math/ddgi.md](math/ddgi.md) §6.
+- **Hysteresis (temporal blending).** Folding a new, noisy sample into a persisted value slowly —
+  `stored = h·old + (1−h)·new` — so many frames' noise averages toward the truth instead of
+  shimmering. The cost is latency: a *genuine* change takes roughly `1/(1−h)` frames to become
+  visible (≈33 frames at DDGI's own h=0.97 default), which is why a destruction event should lower
+  it locally rather than let every changed probe wait out the default. See
+  [math/ddgi.md](math/ddgi.md) §8.
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
   render graph automates them. Vulkan's modern form is *synchronization2*

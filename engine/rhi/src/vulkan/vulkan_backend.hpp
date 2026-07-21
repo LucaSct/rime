@@ -332,8 +332,13 @@ private:
     };
 
     // The highest set-0 binding index a pipeline may declare. A deliberate small bound — a
-    // fixed array keeps flush allocation-free; raise it when a real shader outgrows it.
-    static constexpr std::uint32_t kMaxBindings = 16;
+    // fixed array keeps flush allocation-free; raise it when a real shader outgrows it. Raised
+    // 16 -> 24 for m10.5 (DDGI): the widest single DDGI shader (the trace pass: 3 clipmap
+    // samplers + 2 uniform buffers + 1 storage buffer) only needs 6, but the headroom is for
+    // whatever wires a shadow-cascade sampler into a lighting compute pass next — still safe on
+    // MoltenVK at 24 (Metal's per-stage floors are ~16 samplers / ~31 buffers; a shadowed forward
+    // shader sits at ~9 samplers / ~8 buffers, comfortably under both).
+    static constexpr std::uint32_t kMaxBindings = 24;
 
     // Bake the pending bindings into one transient descriptor set and bind it (ADR-0020).
     // Called by draw/draw_indexed when `bindings_dirty_`; no-op for pipelines with no layout.

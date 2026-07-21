@@ -1,0 +1,100 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// DDGI probes, the visibility-blend half (m10.5a, ADR-0032 §2). The exact twin of
+// ddgi_blend_irradiance.comp — same octahedral tile, same border fold, same cosine-weighted
+// gather over this update's rays — but accumulating (hit distance, hit distance^2) instead of
+// shaded radiance, into a separate RG32Float atlas with a LARGER tile (14x14 interior vs
+// irradiance's 6x6): visibility is consumed later (m10.5b) by a Chebyshev one-sided variance test
+// that needs sharper directionality than a smooth irradiance lobe does — the Majercik-paper norm.
+// See docs/math/ddgi.md §3/§4/§7 for the tile-size choice and the Chebyshev test itself (which m10.5b
+// builds; this brick only stores the two moments it needs).
+//
+// A MISSED ray (ddgi_trace.comp) stores `hit_distance = max_trace_distance` — the "no occluder
+// found within range" sentinel a Chebyshev test reads as "nothing to occlude against nearby".
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in; // 14 interior + 2 border
+
+struct DdgiRay {
+    vec4 direction_dist; // xyz = unit ray direction, w = hit distance
+    vec4 radiance_pad;   // rgb = shaded radiance (unused here), w unused
+};
+layout(std430, set = 0, binding = 0) readonly buffer Rays { DdgiRay r[]; } in_rays;
+
+layout(std140, set = 0, binding = 1) uniform DdgiBlendParams {
+    uvec4 base_total_perrow_rays; // x round-robin base, y total_probes, z atlas_probes_per_row, w rays_per_probe
+} params;
+
+layout(std430, set = 0, binding = 2) readonly buffer Hysteresis { float h[]; } hysteresis;
+
+layout(rg32f, set = 0, binding = 3) uniform image2D visibility_atlas;
+
+const int kTileInterior = 14;
+const int kTilePhysical = 16; // kTileInterior + 2*border
+
+vec2 sign_not_zero(vec2 v) {
+    return vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+
+vec3 oct_decode(vec2 e) {
+    vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) {
+        vec2 nxy = (1.0 - abs(v.yx)) * sign_not_zero(v.xy);
+        v.x = nxy.x;
+        v.y = nxy.y;
+    }
+    return normalize(v);
+}
+
+// See ddgi_blend_irradiance.comp's identical function for the derivation.
+vec3 oct_decode_folded(vec2 e) {
+    if (e.x < -1.0) { e.x = -2.0 - e.x; e.y = -e.y; }
+    else if (e.x > 1.0) { e.x = 2.0 - e.x; e.y = -e.y; }
+    if (e.y < -1.0) { e.y = -2.0 - e.y; e.x = -e.x; }
+    else if (e.y > 1.0) { e.y = 2.0 - e.y; e.x = -e.x; }
+    return oct_decode(e);
+}
+
+void main() {
+    uint probe_local = gl_WorkGroupID.z;
+    uint total_probes = max(params.base_total_perrow_rays.y, 1u);
+    uint global_probe = (params.base_total_perrow_rays.x + probe_local) % total_probes;
+    uint probes_per_row = max(params.base_total_perrow_rays.z, 1u);
+
+    ivec2 px = ivec2(gl_LocalInvocationID.xy);
+    ivec2 tile_origin =
+        ivec2(int(global_probe % probes_per_row), int(global_probe / probes_per_row)) *
+        kTilePhysical;
+    ivec2 atlas_xy = tile_origin + px;
+
+    vec2 uv = (vec2(px) - 1.0 + 0.5) / float(kTileInterior) * 2.0 - 1.0;
+    vec3 texel_dir = oct_decode_folded(uv);
+
+    uint rays_per_probe = params.base_total_perrow_rays.w;
+    uint ray_base = probe_local * rays_per_probe;
+
+    float accum_d = 0.0;
+    float accum_d2 = 0.0;
+    float weight_sum = 0.0;
+    for (uint i = 0; i < rays_per_probe; ++i) {
+        DdgiRay ray = in_rays.r[ray_base + i];
+        float w = max(dot(texel_dir, ray.direction_dist.xyz), 0.0);
+        float d = ray.direction_dist.w;
+        accum_d += d * w;
+        accum_d2 += d * d * w;
+        weight_sum += w;
+    }
+
+    vec2 old_value = imageLoad(visibility_atlas, atlas_xy).rg;
+    const float kMinWeight = 1.0e-4;
+    vec2 stored;
+    if (weight_sum > kMinWeight) {
+        vec2 new_estimate = vec2(accum_d, accum_d2) / weight_sum;
+        float h = hysteresis.h[probe_local];
+        stored = mix(new_estimate, old_value, h);
+    } else {
+        stored = old_value;
+    }
+    imageStore(visibility_atlas, atlas_xy, vec4(stored, 0.0, 0.0));
+}
