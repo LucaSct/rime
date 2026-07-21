@@ -51,6 +51,26 @@ struct RGTexture {
     [[nodiscard]] bool is_valid() const noexcept { return index != kInvalidIndex; }
 };
 
+// A VIRTUAL storage BUFFER (m10.3), the exact analogue of RGTexture for bulk shader data: an index
+// into this frame's resource table, physical only after execute(). Buffers earn a place in the
+// graph for the same reason textures did — a compute pass that fills one and a later pass that
+// reads it are a producer/consumer pair, and the graph is what turns that pair into an execution
+// edge, a liveness fact ("this dispatch is not dead"), and the memory barrier between them.
+// Clustered forward (m10.3) is the forcing case: without a declared buffer the light-culling
+// dispatch writes nothing the graph can see, and culling would delete it.
+struct RGBuffer {
+    std::uint32_t index = kInvalidIndex;
+
+    [[nodiscard]] bool is_valid() const noexcept { return index != kInvalidIndex; }
+};
+
+// What create_buffer needs. Like RGTextureDesc there is no usage field — a transient buffer is a
+// storage buffer by construction (that is the only thing a pass can declare it as).
+struct RGBufferDesc {
+    std::uint64_t size_bytes = 0;
+    std::string_view debug_name = {}; // copied; stamped onto the physical for captures
+};
+
 // What create_texture needs: extent + format. Usage flags are deliberately ABSENT — the graph
 // accumulates them from how passes actually declare the texture (a Sampled read adds Sampled, a
 // color attachment adds ColorAttachment, …), so a declaration can never disagree with usage.
@@ -123,13 +143,31 @@ public:
                                            rhi::Format format = rhi::Format::Undefined,
                                            std::uint32_t array_layers = 1);
 
+    // Declare a transient storage buffer (m10.3). No GPU memory yet — see RGBuffer. Satisfied at
+    // execute() from a size-keyed cache, so a per-frame list buffer allocates once and recycles.
+    [[nodiscard]] RGBuffer create_buffer(const RGBufferDesc& desc);
+
+    // Wrap an externally owned buffer so passes can declare against it — the buffer twin of
+    // import_texture. The clustered light list is the motivating case: the CPU packs it every
+    // frame into a persistently-owned buffer, and the cull dispatch must still be ordered against
+    // that. `state` is what it is in right now (ShaderRead for a buffer the host just wrote:
+    // Vulkan's submission guarantee already makes host writes visible to the submitted work).
+    [[nodiscard]] RGBuffer import_buffer(rhi::BufferHandle handle, rhi::ResourceState state);
+
     // Mark a created texture as a frame OUTPUT: its producer chain survives culling and its
     // physical handle is queryable after execute() (for a readback copy, a streamer tap, …).
     void export_texture(RGTexture texture);
 
+    // The buffer twin: keep this buffer's producers alive and its contents readable after
+    // execute() (a test reading back what a dispatch computed).
+    void export_buffer(RGBuffer buffer);
+
     // The physical rhi handle behind a virtual texture. Valid after execute() for exported and
     // imported textures (transients may be recycled the moment the next frame compiles).
     [[nodiscard]] rhi::TextureHandle physical(RGTexture texture) const;
+
+    // The physical rhi handle behind a virtual buffer (same validity rules as physical()).
+    [[nodiscard]] rhi::BufferHandle physical_buffer(RGBuffer buffer) const;
 
     // The recorded body of a pass: bind pipelines/resources and draw/dispatch. Everything the
     // pass DECLARED is already true when it runs — attachments bound (raster passes run inside
@@ -143,6 +181,11 @@ public:
         const RGDepthAttachment* depth = nullptr;  // optional
         std::span<const RGTexture> sampled = {};   // textures this pass reads via bind_texture
         std::span<const RGTexture> storage = {};   // storage images read/written by its shaders
+        // Storage buffers this pass READS (m10.3) — the clustered forward pass reading the light
+        // lists a dispatch filled. Read-only on purpose: no raster pass in the engine writes a
+        // buffer yet, and leaving the write set out keeps the "who produced this?" question
+        // answerable by looking only at compute passes.
+        std::span<const RGBuffer> buffer_reads = {};
     };
 
     void add_raster_pass(std::string_view name, const RasterPassDesc& desc, ExecuteFn fn);
@@ -151,6 +194,8 @@ public:
         std::span<const RGTexture> sampled = {};       // read via bind_texture
         std::span<const RGTexture> storage_read = {};  // imageLoad only
         std::span<const RGTexture> storage_write = {}; // imageStore (or both) — the write set
+        std::span<const RGBuffer> buffer_reads = {};   // storage buffers read (m10.3)
+        std::span<const RGBuffer> buffer_writes = {};  // storage buffers written — the write set
     };
 
     void add_compute_pass(std::string_view name, const ComputePassDesc& desc, ExecuteFn fn);
@@ -205,16 +250,26 @@ private:
         bool culled = false;
     };
 
+    // Textures and buffers share ONE resource table (and therefore one index space, one versioning
+    // walk, one liveness flood, one barrier walk): every question the compiler asks — who wrote
+    // this last, does anything observable depend on it — is identical for both kinds, and only the
+    // last step (allocate it / transition it) differs. RGTexture and RGBuffer are distinct C++
+    // types so a mix-up is a compile error, not a runtime surprise.
+    enum class ResourceKind : std::uint8_t { Texture, Buffer };
+
     struct Resource {
+        ResourceKind kind = ResourceKind::Texture;
         rhi::Extent2D extent{};
         rhi::Format format = rhi::Format::Undefined;
         std::uint32_t array_layers = 1; // >1 → a layered transient (m10.1 CSM cascade array)
+        std::uint64_t size_bytes = 0;   // buffers only
         std::string debug_name;
         bool imported = false;
         bool exported = false;
         rhi::TextureUsage usage = rhi::TextureUsage::None;        // accumulated from accesses
         rhi::ResourceState state = rhi::ResourceState::Undefined; // tracked while recording
         rhi::TextureHandle physical{}; // imported handle, or cache-assigned at execute()
+        rhi::BufferHandle buffer{};    // the buffer twin of `physical` (kind == Buffer)
     };
 
     // The cross-frame physical cache: the one thing reset() keeps. A transient costs a real
@@ -231,6 +286,15 @@ private:
         bool in_use = false; // claimed by a resource this frame
     };
 
+    // The same cache for transient buffers, keyed by size alone (usage is always Storage —
+    // TransferSrc is added for exported ones, so that rides in the key too).
+    struct CachedBuffer {
+        std::uint64_t size_bytes = 0;
+        rhi::BufferUsage usage = rhi::BufferUsage::None;
+        rhi::BufferHandle handle{};
+        bool in_use = false;
+    };
+
     void add_pass_common(std::string_view name, bool is_raster, ExecuteFn fn);
     void declare_access(std::uint32_t resource, rhi::ResourceState state, bool write);
     void compile();
@@ -241,6 +305,7 @@ private:
     std::vector<Resource> resources_;
     std::vector<std::uint32_t> order_; // live passes, execution order (built by compile())
     std::vector<CachedTexture> cache_;
+    std::vector<CachedBuffer> buffer_cache_;
     std::uint32_t timed_passes_ = 0; // how many passes got a timestamp pair this frame
     bool timing_overflow_warned_ = false;
 };

@@ -21,6 +21,9 @@ RenderGraph::~RenderGraph() {
     for (const CachedTexture& c : cache_) {
         device_.destroy(c.handle);
     }
+    for (const CachedBuffer& b : buffer_cache_) {
+        device_.destroy(b.handle);
+    }
 }
 
 void RenderGraph::reset() {
@@ -30,6 +33,9 @@ void RenderGraph::reset() {
     timed_passes_ = 0;
     for (CachedTexture& c : cache_) {
         c.in_use = false; // last frame's transients become this frame's free list
+    }
+    for (CachedBuffer& b : buffer_cache_) {
+        b.in_use = false;
     }
 }
 
@@ -59,12 +65,39 @@ RGTexture RenderGraph::import_texture(rhi::TextureHandle handle,
     return RGTexture{static_cast<std::uint32_t>(resources_.size() - 1)};
 }
 
+RGBuffer RenderGraph::create_buffer(const RGBufferDesc& desc) {
+    Resource r;
+    r.kind = ResourceKind::Buffer;
+    r.size_bytes = desc.size_bytes;
+    r.debug_name.assign(desc.debug_name);
+    resources_.push_back(std::move(r));
+    return RGBuffer{static_cast<std::uint32_t>(resources_.size() - 1)};
+}
+
+RGBuffer RenderGraph::import_buffer(rhi::BufferHandle handle, rhi::ResourceState state) {
+    Resource r;
+    r.kind = ResourceKind::Buffer;
+    r.imported = true;
+    r.buffer = handle;
+    r.state = state;
+    resources_.push_back(std::move(r));
+    return RGBuffer{static_cast<std::uint32_t>(resources_.size() - 1)};
+}
+
 void RenderGraph::export_texture(RGTexture texture) {
     if (!texture.is_valid() || texture.index >= resources_.size()) {
         RIME_ERROR("render: export_texture with an invalid RGTexture");
         return;
     }
     resources_[texture.index].exported = true;
+}
+
+void RenderGraph::export_buffer(RGBuffer buffer) {
+    if (!buffer.is_valid() || buffer.index >= resources_.size()) {
+        RIME_ERROR("render: export_buffer with an invalid RGBuffer");
+        return;
+    }
+    resources_[buffer.index].exported = true;
 }
 
 rhi::TextureHandle RenderGraph::physical(RGTexture texture) const {
@@ -75,16 +108,27 @@ rhi::TextureHandle RenderGraph::physical(RGTexture texture) const {
     return resources_[texture.index].physical;
 }
 
+rhi::BufferHandle RenderGraph::physical_buffer(RGBuffer buffer) const {
+    if (!buffer.is_valid() || buffer.index >= resources_.size()) {
+        RIME_ERROR("render: physical_buffer() with an invalid RGBuffer");
+        return {};
+    }
+    return resources_[buffer.index].buffer;
+}
+
 void RenderGraph::declare_access(std::uint32_t resource, rhi::ResourceState state, bool write) {
     if (resource >= resources_.size()) {
-        RIME_ERROR("render: pass '{}' declares an invalid RGTexture", passes_.back().name);
+        RIME_ERROR("render: pass '{}' declares an invalid resource handle", passes_.back().name);
         return;
     }
     passes_.back().accesses.push_back({resource, state, write});
 
     // Usage accumulates from declarations, so a created texture's flags can never disagree with
-    // how it is actually used (RGTextureDesc deliberately has no usage field).
+    // how it is actually used (RGTextureDesc deliberately has no usage field). Buffers need no
+    // such accumulation — every declarable buffer access is a storage access.
     Resource& r = resources_[resource];
+    if (r.kind == ResourceKind::Buffer)
+        return;
     switch (state) {
         case rhi::ResourceState::ColorTarget:
             r.usage |= rhi::TextureUsage::ColorAttachment;
@@ -152,6 +196,13 @@ void RenderGraph::add_raster_pass(std::string_view name, const RasterPassDesc& d
     for (const RGTexture& t : desc.storage) {
         declare_access(t.index, rhi::ResourceState::StorageReadWrite, true);
     }
+    // A read-only buffer access is ShaderRead, not StorageReadWrite (m10.3). The distinction is
+    // load-bearing rather than cosmetic: the barrier walk emits a transition when the *state*
+    // changes, so spelling a read differently from a write is what makes the compute-writes →
+    // fragment-reads hazard visible at all.
+    for (const RGBuffer& b : desc.buffer_reads) {
+        declare_access(b.index, rhi::ResourceState::ShaderRead, false);
+    }
 }
 
 void RenderGraph::add_compute_pass(std::string_view name,
@@ -166,6 +217,12 @@ void RenderGraph::add_compute_pass(std::string_view name,
     }
     for (const RGTexture& t : desc.storage_write) {
         declare_access(t.index, rhi::ResourceState::StorageReadWrite, true);
+    }
+    for (const RGBuffer& b : desc.buffer_reads) {
+        declare_access(b.index, rhi::ResourceState::ShaderRead, false);
+    }
+    for (const RGBuffer& b : desc.buffer_writes) {
+        declare_access(b.index, rhi::ResourceState::StorageReadWrite, true);
     }
 }
 
@@ -280,7 +337,7 @@ void RenderGraph::compile() {
 
 void RenderGraph::assign_physicals() {
     for (Resource& r : resources_) {
-        if (r.imported || r.physical.is_valid())
+        if (r.imported || r.physical.is_valid() || r.buffer.is_valid())
             continue;
         bool used = false; // untouched virtuals (declared, never accessed) get no memory
         for (const std::uint32_t pi : order_) {
@@ -295,6 +352,38 @@ void RenderGraph::assign_physicals() {
         }
         if (!used)
             continue;
+
+        // ── Transient buffers (m10.3): the same cache-or-create dance, keyed by size + usage ──
+        if (r.kind == ResourceKind::Buffer) {
+            rhi::BufferUsage usage = rhi::BufferUsage::Storage;
+            if (r.exported)
+                usage |= rhi::BufferUsage::TransferSrc; // exported == someone reads it back
+            CachedBuffer* hit = nullptr;
+            for (CachedBuffer& c : buffer_cache_) {
+                if (!c.in_use && c.size_bytes == r.size_bytes && c.usage == usage) {
+                    hit = &c;
+                    break;
+                }
+            }
+            if (hit == nullptr) {
+                rhi::BufferDesc bd{};
+                bd.size = r.size_bytes;
+                bd.usage = usage;
+                bd.memory = rhi::MemoryUsage::GpuOnly;
+                bd.debug_name = r.debug_name;
+                const rhi::BufferHandle handle = device_.create_buffer(bd);
+                if (!handle.is_valid()) {
+                    RIME_ERROR("render: transient buffer allocation failed for '{}'", r.debug_name);
+                    continue;
+                }
+                buffer_cache_.push_back({r.size_bytes, usage, handle, false});
+                hit = &buffer_cache_.back();
+            }
+            hit->in_use = true;
+            r.buffer = hit->handle;
+            r.state = rhi::ResourceState::Undefined; // recycled — contents are garbage
+            continue;
+        }
 
         // Exported textures exist to be consumed outside the graph — a readback copy or a
         // streamer tap — so they get TransferSrc whether or not a pass declared it.
@@ -365,6 +454,15 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
         // knowledge: frame-global read hazards here, attachment mechanics in the backend.
         for (const Access& a : passes_[pi].accesses) {
             Resource& r = resources_[a.resource];
+            if (r.kind == ResourceKind::Buffer) {
+                // Buffers have no layout and no implicit-transition path to delegate to, so the
+                // rule is simply "state changed ⇒ dependency" (m10.3).
+                if (r.state != a.state) {
+                    cmd.buffer_barrier(r.buffer, r.state, a.state);
+                    r.state = a.state;
+                }
+                continue;
+            }
             const bool attachment = a.state == rhi::ResourceState::ColorTarget ||
                                     a.state == rhi::ResourceState::DepthTarget;
             if (attachment) {
