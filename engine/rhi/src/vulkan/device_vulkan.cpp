@@ -370,6 +370,7 @@ bool VulkanDevice::create_logical_device() {
     std::vector<const char*> enabled_exts;
     // The spec *requires* enabling portability_subset whenever a device exposes it (MoltenVK does).
     const bool portability = has_ext(exts, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    adapter_.portability = portability; // surfaced to callers via adapter() (see AdapterInfo)
     if (portability) {
         enabled_exts.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     }

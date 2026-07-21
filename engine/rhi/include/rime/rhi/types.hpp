@@ -268,6 +268,11 @@ struct AdapterInfo {
     std::uint32_t device_id = 0;
     DeviceType type = DeviceType::Other;
     std::uint32_t api_version = 0; // packed Vulkan version; format with rhi version helpers/logging
+    // A "portability" implementation (VK_KHR_portability_subset — MoltenVK/Metal, D3D translation
+    // layers) rather than a native Vulkan driver. Such drivers only guarantee a subset of Vulkan
+    // and have translation-specific sharp edges; callers that hit one (e.g. GPU tests) can gate on
+    // this.
+    bool portability = false;
 };
 
 // ── Bit-flag operators ──────────────────────────────────────────────────────────────────────
