@@ -122,14 +122,21 @@ ClusteredLights::ClusteredLights(rhi::Device& device) : device_(device) {
     ub.debug_name = "cluster-uniforms";
     uniforms_ = device.create_buffer(ub);
 
-    // The off-path placeholder: one froxel's worth of list storage so binding 12 always points at
-    // a real buffer. Never read (the shader's `enabled` flag gates it), never written.
+    // The off-path placeholder: one froxel's worth of list storage so binding 12 always points at a
+    // real buffer. The shader's `enabled` flag means it is never read — but it is ZEROED anyway, so
+    // that even if it were, froxel 0's count reads 0 and the light loop runs zero iterations.
+    // Uninitialized storage that is "never read" is exactly the assumption that stops being true
+    // the first time a driver treats a uniform branch as non-uniform; a 260-byte upload at startup
+    // buys the invariant outright. empty_binding() completes the pair by describing a 1×1×1 grid,
+    // so the froxel index can only ever be 0.
     rhi::BufferDesc eb{};
     eb.size = kClusterListStride * sizeof(std::uint32_t);
     eb.usage = rhi::BufferUsage::Storage;
-    eb.memory = rhi::MemoryUsage::GpuOnly;
+    eb.memory = rhi::MemoryUsage::CpuToGpu;
     eb.debug_name = "cluster-lists-empty";
     empty_lists_ = device.create_buffer(eb);
+    const std::vector<std::uint32_t> zeros(kClusterListStride, 0u);
+    device.write_buffer(empty_lists_, zeros.data(), zeros.size() * sizeof(std::uint32_t));
 
     ensure_light_capacity(kInitialLightCapacity);
 }
@@ -220,9 +227,12 @@ ClusterBinding ClusteredLights::add(RenderGraph& graph,
 
 ClusterBinding ClusteredLights::empty_binding(RenderGraph& graph) {
     last_light_count_ = 0;
-    // Everything zero but the grid dims — counts[1] (the enabled flag) staying 0 is what sends the
-    // forward shader down the M5.6 uniform-block light loop.
+    // counts[1] (the enabled flag) staying 0 is what sends the forward shader down the M5.6
+    // uniform-block light loop. The 1×1×1 grid is the other half of the placeholder's safety
+    // invariant (see the constructor): with one froxel, every fragment's cluster index clamps to 0,
+    // which is the only run the 260-byte placeholder buffer actually has.
     GpuClusterUniforms cu{};
+    cu.grid[0] = cu.grid[1] = cu.grid[2] = 1;
     device_.write_buffer(uniforms_, &cu, sizeof(cu));
     return {graph.import_buffer(light_buffer_, rhi::ResourceState::ShaderRead),
             graph.import_buffer(empty_lists_, rhi::ResourceState::ShaderRead),
