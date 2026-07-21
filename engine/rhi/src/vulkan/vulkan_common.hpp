@@ -377,6 +377,39 @@ struct StateInfo {
     return {VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0};
 }
 
+// The same idea for BUFFERS (m10.3). A buffer has no layout, so only the stage/access halves
+// matter — but the access bits differ from the image ones: a shader reading an SSBO or a UBO does
+// SHADER_STORAGE_READ / UNIFORM_READ, never SAMPLED_READ. Hence a separate map rather than reusing
+// to_vk(ResourceState) (whose ShaderRead is deliberately the *image* spelling, and whose access
+// bits must stay layout-compatible for image barriers).
+struct BufferStateInfo {
+    VkPipelineStageFlags2 stages;
+    VkAccessFlags2 access;
+};
+
+[[nodiscard]] inline BufferStateInfo to_vk_buffer(ResourceState s) noexcept {
+    switch (s) {
+        case ResourceState::ShaderRead:
+            return {VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_UNIFORM_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT};
+        case ResourceState::StorageReadWrite:
+            return {VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+        case ResourceState::TransferSrc:
+            return {VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT};
+        case ResourceState::TransferDst:
+            return {VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT};
+        default:
+            // Undefined (first use this frame) and the image-only states: wait for nothing /
+            // block nothing. A fresh transient's contents are garbage by definition.
+            return {VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+    }
+}
+
 [[nodiscard]] inline VkSamplerMipmapMode to_vk_mipmap(Filter f) noexcept {
     return f == Filter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
 }

@@ -160,6 +160,13 @@ public:
     virtual void
     copy_texture_to_buffer(TextureHandle src, BufferHandle dst, std::uint32_t base_layer = 0) = 0;
 
+    // Copy `size` bytes between two buffers (m10.3) — the buffer twin of the readback above, and
+    // the only way to get a GpuOnly buffer's contents (a compute pass's output) onto the host:
+    // dispatch into device memory, copy into a GpuToCpu buffer, read_buffer it. `size` 0 copies
+    // the smaller of the two sizes. Waits for prior shader writes and makes the result visible to
+    // host reads, so the caller needs no barriers of its own.
+    virtual void copy_buffer(BufferHandle src, BufferHandle dst, std::uint64_t size = 0) = 0;
+
     // ── Compute (M5.2, ADR-0021) ───────────────────────────────────────────────────────────
     // Bind a compute pipeline (created with create_compute_pipeline). Compute has its own bind
     // call because Vulkan keeps graphics and compute bind points separate on one command buffer;
@@ -205,6 +212,20 @@ public:
     // layout, so the pre-existing implicit transitions (begin_rendering & friends) stay
     // consistent for code that doesn't use a graph. Call outside begin/end_rendering.
     virtual void texture_barrier(TextureHandle texture, ResourceState from, ResourceState to) = 0;
+
+    // The buffer twin of texture_barrier (m10.3): order one shader's access to a buffer against
+    // the next's. Buffers have no layout, so this is purely an execution + memory dependency —
+    // "the writes of everything doing `from` are visible to everything doing `to`". The render
+    // graph emits it between a compute pass that FILLS a storage buffer and the pass that READS
+    // it (clustered forward's froxel light lists are the forcing case). Meaningful states here are
+    // StorageReadWrite (an SSBO a shader writes), ShaderRead (a read-only SSBO/UBO access) and the
+    // Transfer pair; the layout half of ResourceState is simply unused.
+    //
+    // Note the overlap with dispatch()'s v0 blanket barrier, which already makes every dispatch's
+    // writes visible to everything after it: today that blanket alone would keep the clustered
+    // frame correct. This call is what lets the blanket be *removed* — precise, declared-access
+    // barriers owned by the one component with frame-global knowledge (ADR-0019).
+    virtual void buffer_barrier(BufferHandle buffer, ResourceState from, ResourceState to) = 0;
 
 protected:
     CommandBuffer() = default; // obtained only from Device::begin_commands()
