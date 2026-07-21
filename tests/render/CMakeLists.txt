@@ -14,6 +14,7 @@ rime_add_test(rime_render_tests
     pbr_pipeline_test.cpp
     pick_test.cpp
     gizmo_test.cpp
+    shadow_test.cpp
     viewer_frame_graph_test.cpp)
 
 target_link_libraries(rime_render_tests

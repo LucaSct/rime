@@ -14,7 +14,8 @@ add_library(rime_render STATIC
     src/scene_renderer.cpp
     src/scene_picker.cpp
     src/gizmo_renderer.cpp
-    src/gpu_asset_bridge.cpp)
+    src/gpu_asset_bridge.cpp
+    src/lighting/shadows.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
 # library, the same offline model the tests/samples use (ADR-0008). The generated headers are
@@ -23,6 +24,7 @@ rime_add_shaders(rime_render
     shaders/depth_only.vert
     shaders/pbr_forward.vert
     shaders/pbr_forward.frag
+    shaders/pbr_forward_shadowed.frag
     shaders/fullscreen.vert
     shaders/tonemap.frag
     shaders/pick_id.vert

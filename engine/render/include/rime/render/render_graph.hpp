@@ -58,6 +58,11 @@ struct RGTextureDesc {
     rhi::Extent2D extent{};
     rhi::Format format = rhi::Format::RGBA8Unorm;
     std::string_view debug_name = {}; // copied; also stamped onto the physical for captures
+    // Array layers (m10.1): >1 makes a layered transient — a cascaded shadow map's N-cascade depth
+    // array, rendered one layer per pass (RGDepthAttachment::layer). 1 (default) is an ordinary 2-D
+    // texture. Part of the transient-cache key, so a layered and a flat texture never alias. Placed
+    // last so the common positional `{extent, format, name}` call sites are unaffected.
+    std::uint32_t array_layers = 1;
 };
 
 // One declared color attachment of a raster pass. Mirrors rhi::ColorAttachment but names a
@@ -80,6 +85,10 @@ struct RGDepthAttachment {
     float clear_depth = 1.0f;
     std::uint32_t clear_stencil = 0;
     bool read_only = false;
+    // Which array layer of a layered depth target to render into (m10.1) — one cascade of a CSM.
+    // 0 (default) for an ordinary depth texture. Requires `texture` created with array_layers >
+    // layer.
+    std::uint32_t layer = 0;
 };
 
 class RenderGraph {
@@ -192,6 +201,7 @@ private:
     struct Resource {
         rhi::Extent2D extent{};
         rhi::Format format = rhi::Format::Undefined;
+        std::uint32_t array_layers = 1; // >1 → a layered transient (m10.1 CSM cascade array)
         std::string debug_name;
         bool imported = false;
         bool exported = false;
@@ -208,6 +218,8 @@ private:
         rhi::Extent2D extent{};
         rhi::Format format = rhi::Format::Undefined;
         rhi::TextureUsage usage = rhi::TextureUsage::None;
+        std::uint32_t array_layers =
+            1; // part of the key (m10.1): a layered target never aliases a flat one
         rhi::TextureHandle handle{};
         bool in_use = false; // claimed by a resource this frame
     };
