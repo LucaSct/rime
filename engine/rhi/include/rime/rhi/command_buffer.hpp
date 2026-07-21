@@ -28,6 +28,11 @@ struct ColorAttachment {
     LoadOp load_op = LoadOp::Clear;
     StoreOp store_op = StoreOp::Store;
     ClearColor clear = {};
+    // Which array layer of `target` to render into (m10.1a) — a cube face, a probe slice. 0 (the
+    // default) is the sole layer of an ordinary image; for a layered image
+    // (TextureDesc::array_layers > 1) the pass renders into exactly this one layer. Must be < the
+    // target's layer count.
+    std::uint32_t layer = 0;
 };
 
 // The depth(-stencil) attachment for a dynamic-rendering pass: the depth texture to test/write
@@ -42,6 +47,10 @@ struct DepthStencilAttachment {
     StoreOp store_op = StoreOp::DontCare; // depth is usually transient; Store only if sampled later
     float clear_depth = 1.0f;
     std::uint32_t clear_stencil = 0;
+    // Which array layer of `target` to render into (m10.1a) — one cascade of a cascaded shadow map,
+    // one face of a point light's depth cube. 0 (the default) is the sole layer of an ordinary
+    // depth image. Must be < the target's layer count.
+    std::uint32_t layer = 0;
 };
 
 // Describes a dynamic-rendering scope. The render area defaults to the full target extent (the
@@ -145,8 +154,11 @@ public:
 
     // Copy a (TransferSrc) texture's pixels into a (TransferDst, host-visible) buffer, tightly
     // packed. This is how the M3 proof gets rendered pixels back to the CPU to verify them. The
-    // backend transitions the texture to a transfer-source layout first.
-    virtual void copy_texture_to_buffer(TextureHandle src, BufferHandle dst) = 0;
+    // backend transitions the texture to a transfer-source layout first. `base_layer` picks which
+    // array layer to copy (m10.1a) — 0 (the default) for an ordinary image, or a specific cascade /
+    // cube face of a layered one; the copy always covers exactly one layer at mip 0.
+    virtual void
+    copy_texture_to_buffer(TextureHandle src, BufferHandle dst, std::uint32_t base_layer = 0) = 0;
 
     // ── Compute (M5.2, ADR-0021) ───────────────────────────────────────────────────────────
     // Bind a compute pipeline (created with create_compute_pipeline). Compute has its own bind

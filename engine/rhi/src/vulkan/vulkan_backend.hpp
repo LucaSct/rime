@@ -35,11 +35,16 @@ struct VulkanBuffer {
 
 struct VulkanTexture {
     VkImage image = VK_NULL_HANDLE;
-    VkImageView view = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE; // whole-image view for sampling (2D / 2D_ARRAY / CUBE / 3D)
+    // Per-layer single-layer 2-D views (m10.1a): one per array layer, populated only for a layered
+    // render target (array_layers > 1 with a color/depth usage). begin_rendering attaches
+    // layer_views[layer] so a pass renders into exactly one cascade / cube face. Empty otherwise.
+    std::vector<VkImageView> layer_views;
     VmaAllocation allocation = nullptr;
     Extent2D extent{};
-    std::uint32_t depth = 1;      // >1 → a 3-D (volume) image; 1 → ordinary 2-D
-    std::uint32_t mip_levels = 1; // full chain length allocated for this image (M5.3)
+    std::uint32_t depth = 1;        // >1 → a 3-D (volume) image; 1 → ordinary 2-D
+    std::uint32_t array_layers = 1; // >1 → a layered (array/cube) image; 1 → single layer (m10.1a)
+    std::uint32_t mip_levels = 1;   // full chain length allocated for this image (M5.3)
     VkFormat format = VK_FORMAT_UNDEFINED;
     TextureUsage usage = TextureUsage::None;
     // The image's current layout, tracked so the command encoder can insert the right transition.
@@ -288,7 +293,8 @@ public:
                       std::uint32_t first_index,
                       std::int32_t vertex_offset,
                       std::uint32_t first_instance) override;
-    void copy_texture_to_buffer(TextureHandle src, BufferHandle dst) override;
+    void
+    copy_texture_to_buffer(TextureHandle src, BufferHandle dst, std::uint32_t base_layer) override;
 
     [[nodiscard]] VkCommandBuffer handle() const noexcept { return cmd_; }
 

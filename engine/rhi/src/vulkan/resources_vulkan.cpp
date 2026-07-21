@@ -70,6 +70,25 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
     // extent's depth differ (ADR-0013).
     const bool is_3d = desc.depth > 1;
 
+    // Array/cube layers (m10.1a, ADR-0032 §10). A layered image is N same-sized 2-D slices (a
+    // cascaded shadow map, probe capture); a cube is 6 (or 6·N) of them viewed as faces. Mutually
+    // exclusive with a 3-D volume — an array of volumes has no consumer — so asking for both keeps
+    // the array and warns. A malformed cube (layer count not a multiple of 6) is a hard error.
+    std::uint32_t layers = desc.array_layers == 0 ? 1u : desc.array_layers;
+    if (is_3d && layers > 1) {
+        RIME_ERROR("rhi: create_texture('{}'): array_layers>1 and depth>1 are mutually exclusive "
+                   "(ignoring array_layers)",
+                   desc.debug_name);
+        layers = 1;
+    }
+    if (desc.cube && (layers == 0 || layers % 6 != 0)) {
+        RIME_ERROR("rhi: create_texture('{}'): a cube needs array_layers a positive multiple of 6 "
+                   "(got {})",
+                   desc.debug_name,
+                   layers);
+        return {};
+    }
+
     // Mip chain length (M5.3): what the caller asked for, clamped to what the extent supports
     // (each level halves until 1×1 — floor(log2(max_dim)) + 1 levels). Volumes stay single-level
     // (no consumer yet), loudly rather than silently.
@@ -94,7 +113,11 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
     ici.format = to_vk(desc.format);
     ici.extent = {desc.extent.width, desc.extent.height, desc.depth};
     ici.mipLevels = mips;
-    ici.arrayLayers = 1;
+    ici.arrayLayers = layers;
+    // A cube-compatible image lets a samplerCube view address its 6 faces by direction (m10.1a).
+    if (desc.cube) {
+        ici.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    }
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = to_vk(desc.usage);
@@ -110,6 +133,7 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
     VulkanTexture t;
     t.extent = desc.extent;
     t.depth = desc.depth;
+    t.array_layers = layers;
     t.mip_levels = mips;
     t.format = ici.format;
     t.usage = desc.usage;
@@ -123,14 +147,20 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
 
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = t.image;
-    vci.viewType = is_3d ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
+    // The whole-image (sampling) view type follows the image shape: a 3-D volume, a cube (or cube
+    // array) when the caller asked for one, an array when it has >1 layer, else a plain 2-D image.
+    vci.viewType = is_3d ? VK_IMAGE_VIEW_TYPE_3D
+                   : desc.cube
+                       ? (layers > 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE)
+                   : layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                : VK_IMAGE_VIEW_TYPE_2D;
     vci.format = ici.format;
     // A depth image is viewed through its depth aspect, a color image through its color aspect.
     vci.subresourceRange.aspectMask = aspect_for(ici.format);
     vci.subresourceRange.baseMipLevel = 0;
     vci.subresourceRange.levelCount = mips; // the sampled view spans the whole chain
     vci.subresourceRange.baseArrayLayer = 0;
-    vci.subresourceRange.layerCount = 1;
+    vci.subresourceRange.layerCount = layers; // the sampled view spans every layer/face
 
     r = vkCreateImageView(device_, &vci, nullptr, &t.view);
     if (r != VK_SUCCESS) {
@@ -138,8 +168,45 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
         vmaDestroyImage(allocator_, t.image, t.allocation);
         return {};
     }
+
+    // Per-layer render views (m10.1a): a single-layer 2-D view of each layer, so begin_rendering
+    // can aim a pass at exactly one cascade / cube face (the whole-image view above cannot be a
+    // single-layer render target). Only a *layered render target* needs them — a sampled-only array
+    // is read through the whole-image view.
+    const bool is_render_target = has(desc.usage, TextureUsage::ColorAttachment) ||
+                                  has(desc.usage, TextureUsage::DepthStencil);
+    if (layers > 1 && is_render_target) {
+        t.layer_views.assign(layers, VK_NULL_HANDLE);
+        for (std::uint32_t layer = 0; layer < layers; ++layer) {
+            VkImageViewCreateInfo lvci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            lvci.image = t.image;
+            lvci.viewType = VK_IMAGE_VIEW_TYPE_2D; // one layer, rendered as a plain 2-D target
+            lvci.format = ici.format;
+            lvci.subresourceRange.aspectMask = aspect_for(ici.format);
+            lvci.subresourceRange.baseMipLevel = 0;
+            lvci.subresourceRange.levelCount = mips;
+            lvci.subresourceRange.baseArrayLayer = layer;
+            lvci.subresourceRange.layerCount = 1;
+            const VkResult lr = vkCreateImageView(device_, &lvci, nullptr, &t.layer_views[layer]);
+            if (lr != VK_SUCCESS) {
+                RIME_ERROR("rhi: vkCreateImageView(layer {} of '{}') failed: {}",
+                           layer,
+                           desc.debug_name,
+                           result_string(lr));
+                for (VkImageView v : t.layer_views) {
+                    if (v) {
+                        vkDestroyImageView(device_, v, nullptr);
+                    }
+                }
+                vkDestroyImageView(device_, t.view, nullptr);
+                vmaDestroyImage(allocator_, t.image, t.allocation);
+                return {};
+            }
+        }
+    }
+
     set_debug_name(VK_OBJECT_TYPE_IMAGE, reinterpret_cast<std::uint64_t>(t.image), desc.debug_name);
-    return rebrand<Texture>(textures_.insert(t));
+    return rebrand<Texture>(textures_.insert(std::move(t)));
 }
 
 ShaderHandle VulkanDevice::create_shader(const ShaderDesc& desc) {
@@ -174,6 +241,13 @@ SamplerHandle VulkanDevice::create_sampler(const SamplerDesc& desc) {
         sci.maxAnisotropy = desc.max_anisotropy < max_anisotropy_limit_ ? desc.max_anisotropy
                                                                         : max_anisotropy_limit_;
     }
+    // Depth-compare sampling (m10.1a): a sampler2DShadow/samplerCubeShadow read returns the PCF
+    // pass fraction of (reference <compare_op> fetched_depth) instead of the raw texel — hardware
+    // shadow filtering. Off for ordinary sampling; reuses the CompareOp→VkCompareOp translation.
+    if (desc.compare_enable) {
+        sci.compareEnable = VK_TRUE;
+        sci.compareOp = to_vk(desc.compare_op);
+    }
 
     VulkanSampler s;
     const VkResult r = vkCreateSampler(device_, &sci, nullptr, &s.sampler);
@@ -197,6 +271,10 @@ void VulkanDevice::destroy(BufferHandle handle) {
 void VulkanDevice::destroy(TextureHandle handle) {
     const auto h = rebrand<VulkanTexture>(handle);
     if (auto* t = textures_.get(h)) {
+        for (VkImageView v : t->layer_views) { // per-layer render views (m10.1a), if any
+            if (v)
+                vkDestroyImageView(device_, v, nullptr);
+        }
         if (t->view)
             vkDestroyImageView(device_, t->view, nullptr);
         vmaDestroyImage(allocator_, t->image, t->allocation);

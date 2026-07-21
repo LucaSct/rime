@@ -437,7 +437,10 @@ inline void transition_image(VkCommandBuffer cmd,
     barrier.subresourceRange.baseMipLevel = base_mip;
     barrier.subresourceRange.levelCount = level_count;
     barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
+    // Cover every array layer (m10.1a): REMAINING is exactly 1 for the single-layer majority (so
+    // this is unchanged for them) and all N faces/cascades of a layered image, whose layout we
+    // track per-image, not per-layer — one transition moves the whole thing.
+    barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dep.imageMemoryBarrierCount = 1;
