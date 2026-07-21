@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// DDGI probes, the trace half (m10.5a, ADR-0032 §2). One invocation per (probe, ray): pick this
+// update's probe's world position, cast one spherical-Fibonacci ray (rotated by this frame's
+// random rotation), sphere-trace it through the SDF clipmap, and shade what it hit — or, on a
+// miss, hand back the sky term. Writes one GpuDdgiRay per invocation (lighting/ddgi.hpp); the
+// blend passes (ddgi_blend_irradiance.comp / ddgi_blend_visibility.comp) gather these into the
+// octahedral atlases. Derivation: docs/math/ddgi.md.
+//
+// `sdf_sample`/`sdf_sphere_trace` below are LIFTED VERBATIM from tests/render/sdf_probe_trace.comp
+// (that file's own header says m10.5 would — no shader-include mechanism exists yet in this
+// engine, the same constraint sdf_compose.comp lives with, so every consumer of this math carries
+// its own copy rather than #including one).
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform sampler3D level0;
+layout(set = 0, binding = 1) uniform sampler3D level1;
+layout(set = 0, binding = 2) uniform sampler3D level2;
+
+struct LevelInfo {
+    vec4 origin_extent; // xyz = world origin (voxel (0,0,0)'s corner), w = world extent
+    vec4 band_voxel;    // x = band, y = voxel size, z/w unused
+};
+layout(std140, set = 0, binding = 3) uniform Levels {
+    LevelInfo info[3];
+} clipmap;
+
+// Mirrors GpuDdgiTraceParams (lighting/ddgi.hpp) exactly.
+layout(std140, set = 0, binding = 4) uniform DdgiParams {
+    mat4 ray_rotation;          // this frame's random rotation (upper-left 3x3 meaningful)
+    vec4 grid_origin_spacing;   // xyz snapped lattice origin, w spacing
+    uvec4 grid_dims_base;       // xyz probe counts, w round-robin base (global index of local 0)
+    uvec4 probes_rays_total;    // x probes_this_update, y rays_per_probe, z total_probes
+    vec4 sun_dir_maxdist;       // xyz sun TRAVEL direction, w max trace distance
+    vec4 sun_radiance_albedo;   // rgb sun radiance, w grey-world albedo
+    vec4 sky_radiance_pad;      // rgb sky/ambient radiance (a miss), w unused
+} params;
+
+struct DdgiRay {
+    vec4 direction_dist; // xyz = unit ray direction (post-rotation), w = hit distance
+    vec4 radiance_pad;   // rgb = shaded radiance, w unused
+};
+layout(std430, set = 0, binding = 5) writeonly buffer Rays { DdgiRay r[]; } out_rays;
+
+// ── Sphere-trace helpers (lifted from tests/render/sdf_probe_trace.comp — see that file's own
+// derivation comments for why each piece is shaped this way; not repeated here). ─────────────────
+float sample_level(int i, vec3 uvw) {
+    if (i == 0) return texture(level0, uvw).r;
+    if (i == 1) return texture(level1, uvw).r;
+    return texture(level2, uvw).r;
+}
+
+float sdf_sample(vec3 world_pos) {
+    for (int i = 0; i < 3; ++i) {
+        vec4 oe = clipmap.info[i].origin_extent;
+        vec3 uvw = (world_pos - oe.xyz) / oe.w;
+        if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)))) {
+            return sample_level(i, uvw) * clipmap.info[i].band_voxel.x;
+        }
+    }
+    vec4 oe2 = clipmap.info[2].origin_extent;
+    vec3 uvw2 = clamp((world_pos - oe2.xyz) / oe2.w, 0.0, 1.0);
+    return sample_level(2, uvw2) * clipmap.info[2].band_voxel.x;
+}
+
+float sdf_sphere_trace(vec3 origin, vec3 dir, float max_dist) {
+    float t = 0.0;
+    const float kHitEpsilon = 0.001;
+    const int kMaxSteps = 128;
+    for (int i = 0; i < kMaxSteps; ++i) {
+        if (t >= max_dist) {
+            break;
+        }
+        float d = sdf_sample(origin + dir * t);
+        if (d < kHitEpsilon) {
+            return t;
+        }
+        t += max(d, kHitEpsilon);
+    }
+    return -1.0;
+}
+
+// The field's gradient by central differences, normalized — the standard way to recover a surface
+// NORMAL from an SDF (the field has no separate normal channel; its own shape IS the geometry).
+// `eps` is half the FINEST clipmap level's voxel size: fine enough to resolve real surface detail
+// at the level actually doing the tracing, coarse enough to stay well above the field's own
+// quantization noise (docs/math/sdf.md's narrow-band error).
+vec3 sdf_normal(vec3 p, float eps) {
+    vec3 d;
+    d.x = sdf_sample(p + vec3(eps, 0.0, 0.0)) - sdf_sample(p - vec3(eps, 0.0, 0.0));
+    d.y = sdf_sample(p + vec3(0.0, eps, 0.0)) - sdf_sample(p - vec3(0.0, eps, 0.0));
+    d.z = sdf_sample(p + vec3(0.0, 0.0, eps)) - sdf_sample(p - vec3(0.0, 0.0, eps));
+    return normalize(d);
+}
+
+// Spherical Fibonacci direction i of n — mirrors ddgi_fibonacci_direction (lighting/ddgi.cpp)
+// exactly, which is itself the same formula the m10.4c spike measured
+// (tests/render/sdf_clipmap_test.cpp's `fibonacci_direction`).
+vec3 fibonacci_direction(uint i, uint n) {
+    const float kPi = 3.14159265358979;
+    float golden = kPi * (3.0 - sqrt(5.0));
+    float y = 1.0 - 2.0 * (float(i) + 0.5) / float(n);
+    float r = sqrt(max(0.0, 1.0 - y * y));
+    float theta = golden * float(i);
+    return vec3(cos(theta) * r, y, sin(theta) * r);
+}
+
+void main() {
+    uint rays_per_probe = params.probes_rays_total.y;
+    uint total = params.probes_rays_total.x * rays_per_probe;
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= total) {
+        return;
+    }
+    uint probe_local = gid / rays_per_probe;
+    uint ray_idx = gid % rays_per_probe;
+
+    // This probe's WORLD position: decode its GLOBAL lattice index (wrapping the round-robin
+    // window past the end of the lattice) into (x,y,z), x fastest — mirrors ddgi_probe_position /
+    // ddgi_probe_coord (lighting/ddgi.cpp) exactly.
+    uint total_probes = params.probes_rays_total.z;
+    uint global_probe = (params.grid_dims_base.w + probe_local) % max(total_probes, 1u);
+    uvec3 dims = params.grid_dims_base.xyz;
+    uint px = global_probe % dims.x;
+    uint py = (global_probe / dims.x) % dims.y;
+    uint pz = global_probe / (dims.x * dims.y);
+    vec3 probe_pos = params.grid_origin_spacing.xyz +
+                     vec3(float(px), float(py), float(pz)) * params.grid_origin_spacing.w;
+
+    vec3 dir = mat3(params.ray_rotation) * fibonacci_direction(ray_idx, rays_per_probe);
+    float max_dist = params.sun_dir_maxdist.w;
+    float t = sdf_sphere_trace(probe_pos, dir, max_dist);
+
+    vec3 radiance;
+    float dist_out;
+    if (t < 0.0) {
+        // Escaped: the sky/ambient term. Not multiplied by albedo — this is not a reflection off
+        // a surface, it is literally "the ray flew off into the sky", so it carries the sky's own
+        // radiance directly (SceneRenderer's flat ambient constant, until a real sky model exists).
+        radiance = params.sky_radiance_pad.rgb;
+        dist_out = max_dist;
+    } else {
+        vec3 hit_pos = probe_pos + dir * t;
+        // Half the finest level's voxel size: the gradient step AND the self-shadow ray's
+        // surface-offset bias (pushing the second trace's origin off the surface so it does not
+        // immediately re-hit the very voxel it started in).
+        float eps = clipmap.info[0].band_voxel.y * 0.5;
+        vec3 n = sdf_normal(hit_pos, eps);
+
+        // Direct lighting: the v1 grey-world-albedo model (docs/math/ddgi.md §4 — an SDF gives a
+        // position and a normal, never a material colour; real per-surface albedo is a named
+        // follow-up, not built here). `to_sun` follows pbr_forward.frag's own convention
+        // (`direction` is the TRAVEL direction, so the vector TOWARD the light is its negation).
+        vec3 to_sun = -params.sun_dir_maxdist.xyz;
+        float ndotl = max(dot(n, to_sun), 0.0);
+
+        // Self-shadow: a SECOND sphere-trace, through the SAME clipmap, toward the sun. This is
+        // what makes "a probe sealed inside a closed box stays dark" physically true rather than a
+        // property of the test scene: without it, an inner wall whose normal geometrically faces
+        // "sunward" would light up as if the sun could reach it, regardless of what encloses it.
+        // Reusing sdf_sphere_trace here (rather than wiring CascadedShadowMap's cascade array +
+        // per-cascade matrices + PCF into a compute pass built around a different binding shape
+        // entirely) is the brief's own suggested cheap alternative — see ddgi.hpp's header note.
+        vec3 shadow_origin = hit_pos + n * (eps * 2.0);
+        float shadow_t = sdf_sphere_trace(shadow_origin, to_sun, max_dist);
+        float lit = shadow_t < 0.0 ? 1.0 : 0.0;
+
+        radiance = params.sun_radiance_albedo.rgb * params.sun_radiance_albedo.w * ndotl * lit;
+        dist_out = t;
+    }
+
+    out_rays.r[gid].direction_dist = vec4(dir, dist_out);
+    out_rays.r[gid].radiance_pad = vec4(radiance, 0.0);
+}

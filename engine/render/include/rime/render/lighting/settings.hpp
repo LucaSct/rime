@@ -110,6 +110,54 @@ struct LightingSettings {
     // clipmap yet (m10.5 is the first consumer; this flag exists so that consumer has an on/off
     // switch to gate against from day one, matching every other M10 technique's discipline).
     bool sdf_clipmap_enabled = false;
+
+    // ── DDGI global-illumination probes (m10.5a) ────────────────────────────────────────────────
+    // A fifth independent gate. On: SceneRenderer steps its DdgiProbes every frame, sphere-tracing
+    // a round-robin batch through the SdfClipmap and updating their octahedral irradiance/
+    // visibility atlases (lighting/ddgi.hpp). Off (the default): zero GPU work, byte-identical
+    // pre-M10 baseline. REQUIRES sdf_clipmap_enabled — DDGI traces the SAME field m10.4b composes,
+    // the same "requires the gate underneath it" discipline local_shadows_enabled already follows
+    // for shadows_enabled. Nothing SAMPLES these atlases yet (m10.5b is the first consumer,
+    // matching sdf_clipmap_enabled's own "first consumer is a later brick" note).
+    bool ddgi_enabled = false;
+
+    // Probes per axis of the camera-centred lattice (clamped to >= 1). The ADR-0032 §2 / m10.4c
+    // spike's measured full-grid-every-frame budget is 8x8x8=512 (~1.0-1.5x the m10.3 cluster
+    // cull); a larger lattice cycles through kMaxDdgiProbesPerUpdate probes per frame instead of
+    // growing per-frame cost (lighting/ddgi.hpp's round-robin).
+    std::uint32_t ddgi_probe_count_x = 8;
+    std::uint32_t ddgi_probe_count_y = 8;
+    std::uint32_t ddgi_probe_count_z = 8;
+
+    // World-space spacing between adjacent probes (metres). The lattice spans (count-1)*spacing
+    // per axis, camera-centred and texel-snapped to this spacing exactly as the SDF clipmap's
+    // levels snap to their own voxel size (lighting/ddgi.hpp) — sub-spacing camera motion must not
+    // reshuffle which probe sits where.
+    float ddgi_probe_spacing = 1.0f;
+
+    // Rays per probe per update (the DDGI norm, and comfortably inside the m10.4c spike's linear-
+    // cost region). Every scheduled probe casts this many spherical-Fibonacci rays, rotated by a
+    // fresh per-frame random rotation so temporal accumulation converges to the true integral
+    // instead of a fixed low-discrepancy bias.
+    std::uint32_t ddgi_rays_per_probe = 64;
+
+    // How far a probe ray sphere-traces before being treated as a miss (the sky term). 8 m matches
+    // the SDF clipmap's level-0 extent (lighting/sdf_clipmap.hpp) — past it level 0 has nothing
+    // more accurate to offer a probe anyway.
+    float ddgi_max_trace_distance = 8.0f;
+
+    // Temporal blend factor: stored = hysteresis*old + (1-hysteresis)*new each update. 0.97 is the
+    // Majercik-et-al. DDGI-paper norm — slow enough that per-frame ray noise averages out, fast
+    // enough that a genuine change is visible within a couple of seconds at 60 Hz. A probe's
+    // FIRST-EVER update always uses 0 instead (a clean snap to that update's own estimate, never
+    // blended with the atlas's initial zero) — DdgiProbes' own "primed" bookkeeping, not a setting.
+    float ddgi_hysteresis = 0.97f;
+
+    // The v1 grey-world albedo every SDF hit bounces (ADR-0032's pre-decided answer,
+    // docs/math/ddgi.md §4): an SDF hit gives a position and a normal, never a material colour, so
+    // real per-surface colour bleeding is a named follow-up (a surface cache), not built here. 0.6
+    // is a plausible average indoor-surface albedo (matte paint / plaster).
+    float ddgi_albedo = 0.6f;
 };
 
 } // namespace rime::render

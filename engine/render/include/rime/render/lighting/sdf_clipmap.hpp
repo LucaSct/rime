@@ -163,6 +163,29 @@ public:
         return levels_[index].info;
     }
 
+    // The level's CURRENT resource state — what m10.5's DdgiProbes (the first sampler of this
+    // clipmap) must import() the level texture as before binding it. Exposed rather than assumed
+    // because a consumer outside this class cannot otherwise know whether a level has ever been
+    // touched (Undefined) or holds a live compose result (StorageReadWrite).
+    [[nodiscard]] rhi::ResourceState level_state(std::uint32_t index) const noexcept {
+        return levels_[index].texture_state;
+    }
+
+    // Tell the clipmap what state a CONSUMER (m10.5's DdgiProbes) left a level's texture in after
+    // its own pass touched it — the write half of the level_state()/note_level_state() pair, and
+    // the reason both exist: this class is the texture's OWNER, so it is the one place a "current
+    // state" query can be answered authoritatively, but the moment a second system (DDGI) also
+    // reads the SAME texture, this class's own bookkeeping goes stale the instant that read
+    // finishes unless the reader reports back. Without this, SdfClipmap's OWN next add() call
+    // would import a level it recomposes using a STALE claimed state (whatever ITS last compose
+    // pass left it in), which no longer matches the REAL layout DDGI's sampled read moved it to —
+    // not a correctness bug (the RHI backend's own tracked-layout fallback still emits a correct
+    // barrier — see command_buffer_vulkan.cpp's texture_barrier), but a validation-noise smell
+    // that means two systems independently guessed at shared state instead of one owning it.
+    void note_level_state(std::uint32_t index, rhi::ResourceState state) noexcept {
+        levels_[index].texture_state = state;
+    }
+
     // The GPU-ready packed form of every level's origin/extent/band — what a probe-tracing shader
     // uploads once per frame to walk the clipmap finest-to-coarsest (see GpuSdfClipmapLevels).
     [[nodiscard]] GpuSdfClipmapLevels gpu_levels() const noexcept;

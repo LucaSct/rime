@@ -86,6 +86,29 @@ struct SpotLight {
     float outer_angle = 0.6108652f; // 35° — falls to zero by here; the shadow map's FOV = 2×this
 };
 
+// A dense key into SceneRenderer's small CPU-side SDF source table (register_sdf_source) — the
+// SdfRef/SdfSourceId pair mirrors MeshRef/MeshId's own shape exactly, for the same reason: "which
+// entity feeds the SDF clipmap" (a small integer) must stay orthogonal to "what the field actually
+// is" (the decoded assets::MeshSdfAsset a source id resolves to). It is deliberately NOT a content-
+// addressed assets::AssetId the way the editor-authoring MeshAsset component is: closing m10.4b's
+// "nothing tells SceneRenderer which entities have a cooked SDF" gap needs a caller-populated
+// registry today (there is no runtime asset-id -> file-path resolver yet — MeshAsset's own doc
+// comment admits the identical gap for meshes), not a bigger asset-streaming brick. A future brick
+// can grow register_sdf_source into a real async load without touching this component's shape.
+using SdfSourceId = std::uint32_t;
+inline constexpr SdfSourceId kInvalidSdfSourceId = 0xFFFFFFFFu;
+
+// Feed this entity's WorldTransform + a registered SDF source into the runtime SDF clipmap
+// (lighting/sdf_clipmap.hpp), so m10.5's DDGI probes can sphere-trace through it (m10.4b's own
+// "nothing extracts this yet" gap, closed by m10.5a). `source` names an entry SceneRenderer's
+// register_sdf_source returned; kInvalidSdfSourceId (the default) means "not registered yet" and
+// the entity is skipped. An entity typically carries this ALONGSIDE MeshRef/MaterialRef (same
+// geometry, two representations) but the two are independent — a purely-visual prop with no SDF
+// simply omits this component and never touches the clipmap.
+struct SdfRef {
+    SdfSourceId source = kInvalidSdfSourceId;
+};
+
 // Register every render component with a world — id + size + reflection TypeInfo in one shot
 // (World::register_component is idempotent, so calling this after spawning is harmless; calling
 // it FIRST keeps component ids stable across worlds, which serialization will eventually thank
@@ -98,6 +121,7 @@ inline void register_render_components(ecs::World& world) {
     (void)world.register_component<DirectionalLight>();
     (void)world.register_component<PointLight>();
     (void)world.register_component<SpotLight>();
+    (void)world.register_component<SdfRef>();
 }
 
 } // namespace rime::render
@@ -146,4 +170,8 @@ RIME_REFLECT_FIELD(intensity)
 RIME_REFLECT_FIELD(range)
 RIME_REFLECT_FIELD(inner_angle)
 RIME_REFLECT_FIELD(outer_angle)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rime::render::SdfRef)
+RIME_REFLECT_FIELD(source)
 RIME_REFLECT_END()

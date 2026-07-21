@@ -3,10 +3,14 @@
 #pragma once
 
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
+#include "rime/assets/sdf_asset.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/render/components.hpp"
 #include "rime/render/lighting/clustered.hpp"
+#include "rime/render/lighting/ddgi.hpp"
 #include "rime/render/lighting/local_shadows.hpp"
 #include "rime/render/lighting/sdf_clipmap.hpp"
 #include "rime/render/lighting/settings.hpp"
@@ -124,17 +128,48 @@ public:
     // know). A no-op while sdf_clipmap_enabled is off (nothing ever reads the accumulated regions).
     void invalidate_sdf_region(const WorldAabb& region) { sdf_clipmap_.invalidate(region); }
 
-    // Direct access to the clipmap for registering/removing composed instances
-    // (SdfClipmap::update_instance/remove_instance) and reading its stats/level textures — this
-    // brick does not (yet) extract "which entities have a cooked SDF asset" from the World the way
-    // extract_scene() gathers meshes/lights, so a caller drives instance registration directly
-    // until that extraction exists (m10.5's job, alongside the DDGI probes that consume it).
+    // Direct access to the clipmap for reading its stats/level textures, or for registering a
+    // composed instance BY HAND (SdfClipmap::update_instance/remove_instance) outside the ECS
+    // entirely (a decal, a procedural volume — anything that is not an entity). Ordinary entities
+    // register through `SdfRef` + register_sdf_source below instead (m10.5a closed the
+    // "extraction doesn't exist yet" gap this comment used to describe); calling update_instance
+    // directly here for an entity ALSO carrying SdfRef would race sync_sdf_instances's own C1
+    // bookkeeping, so don't mix the two for the same id.
     [[nodiscard]] SdfClipmap& sdf_clipmap() noexcept { return sdf_clipmap_; }
 
     [[nodiscard]] const SdfClipmap& sdf_clipmap() const noexcept { return sdf_clipmap_; }
 
+    // Register a decoded SDF source (the m10.4b gap, closed by m10.5a): entities carrying an
+    // `SdfRef{source}` component are fed into the clipmap automatically each render() while
+    // sdf_clipmap_enabled is on. Mirrors MeshRegistry/MaterialRegistry's own "add returns a dense
+    // id, entities name it" shape rather than resolving a content-addressed asset id from disk —
+    // there is no runtime id -> file-path resolver yet (MeshAsset's own doc comment admits the
+    // identical gap for meshes); the caller decodes the cooked .rsdf however it already does
+    // (read_mesh_sdf, tools/asset-pipeline, a test's hand-built field — the SAME data
+    // SdfClipmap::update_instance always took directly) and hands the result over once.
+    [[nodiscard]] SdfSourceId register_sdf_source(assets::MeshSdfAsset sdf) {
+        sdf_sources_.push_back(std::move(sdf));
+        return static_cast<SdfSourceId>(sdf_sources_.size() - 1);
+    }
+
+    // Direct access to the DDGI probes (m10.5a) — stats and the atlas textures/extents a consumer
+    // (m10.5b, a debug view, a test driving SceneRenderer end-to-end) reads back.
+    [[nodiscard]] DdgiProbes& ddgi() noexcept { return ddgi_; }
+
+    [[nodiscard]] const DdgiProbes& ddgi() const noexcept { return ddgi_; }
+
+    [[nodiscard]] const DdgiStats& ddgi_stats() const noexcept { return ddgi_.stats(); }
+
 private:
     void ensure_draw_capacity(std::uint32_t draw_count);
+
+    // Feed every (WorldTransform, SdfRef) entity into sdf_clipmap_ — the m10.4b extraction gap.
+    // Two passes for two different costs: a full (but cheap — this component is sparse, worn only
+    // by GI-relevant geometry) walk maintains `tracked_sdf_entities_` so a despawned/un-SdfRef'd
+    // entity's instance is removed, while the actual GPU-texture-recreating
+    // SdfClipmap::update_instance call is change-detection-gated (ADR-0032 C1) so a settled entity
+    // costs nothing after its first frame. Called from render() only while sdf_clipmap_enabled.
+    void sync_sdf_instances(ecs::World& world);
 
     rhi::Device& device_;
     const MeshRegistry& meshes_;
@@ -147,6 +182,14 @@ private:
     LocalShadowMap local_shadows_; // m10.2: cached spot-light shadows (only declared when enabled)
     ClusteredLights clustered_;    // m10.3: froxel light culling (only declared when enabled)
     SdfClipmap sdf_clipmap_;       // m10.4b: the traceable field (only stepped when enabled)
+    DdgiProbes ddgi_; // m10.5a: irradiance/visibility probes (only stepped when enabled)
+
+    // The m10.4b/m10.5a extraction bridge: which SdfRef entities are currently registered with
+    // sdf_clipmap_, and the change-detection watermark sync_sdf_instances reads from.
+    std::vector<assets::MeshSdfAsset> sdf_sources_; // register_sdf_source's backing store
+    std::unordered_set<std::uint64_t>
+        tracked_sdf_entities_; // entity keys currently in sdf_clipmap_
+    ecs::Version sdf_instances_since_ = 0;
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
 
