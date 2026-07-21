@@ -85,6 +85,12 @@ public:
                                     const CascadeInputs& inputs,
                                     const LightingSettings& settings);
 
+    // The valid-but-empty cascade binding for a shadowed frame with NO directional light (a
+    // spot-only scene, m10.2): the shadowed pipeline's binding 7/8 must still point at a real
+    // 2-D-array depth image + a count-0 uniform block. `dummy` is the SceneRenderer's shared
+    // placeholder array.
+    [[nodiscard]] ShadowBinding empty_binding(RenderGraph& graph, rhi::TextureHandle dummy);
+
 private:
     rhi::Device& device_;
     rhi::SamplerHandle compare_sampler_; // sampler2DArrayShadow: LessEqual hardware PCF

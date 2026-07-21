@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "rime/ecs/world.hpp"
+#include "rime/render/lighting/local_shadows.hpp"
 #include "rime/render/lighting/settings.hpp"
 #include "rime/render/lighting/shadows.hpp"
 #include "rime/render/passes.hpp"
@@ -47,6 +48,7 @@ struct ExtractedScene {
     ExtractedCamera camera;                      // the FIRST active camera found
     std::vector<GpuDirectionalLight> dir_lights; // already GPU-shaped (uncapped; see render())
     std::vector<GpuPointLight> point_lights;
+    std::vector<SpotLightData> spot_lights; // m10.2: CPU-shaped (the shadow fit needs pos/dir/cone)
 };
 
 // Pull the renderable view of a World: draws, the active camera, lights. Reads WorldTransform —
@@ -94,12 +96,24 @@ public:
     }
 
     // Lighting features (M10, ADR-0032). Default is everything off ⇒ the byte-identical M5.6
-    // baseline. Turning on `shadows_enabled` makes the primary directional light cast a cascaded
-    // shadow map (m10.1); the editor host and the M10 samples set this, the M5.6/M6.4 proofs leave
-    // it default and are unaffected.
+    // baseline. `shadows_enabled` makes the primary directional light cast a cascaded shadow map
+    // (m10.1); `local_shadows_enabled` makes spot lights cast cached local shadows (m10.2). The
+    // editor host and the M10 samples set these; the M5.6/M6.4 proofs leave them default.
     void set_lighting(const LightingSettings& lighting) { lighting_ = lighting; }
 
     [[nodiscard]] const LightingSettings& lighting() const noexcept { return lighting_; }
+
+    // The C2 destruction hook (m10.2): tell the local-shadow cache that geometry in `region` (a
+    // destruction event's world_bounds) changed, so any spot whose shadow frustum it touches
+    // re-renders next frame. An app/sample bridges the destruction event stream to this call. Cheap
+    // and idempotent — call it once per event as the stream drains.
+    void invalidate_shadow_region(const WorldAabb& region) { local_shadows_.invalidate(region); }
+
+    // Local-shadow cache stats from the most recent render() — how many spot maps were re-rendered
+    // vs served from cache (the ≈100%-reuse property a static scene holds after warmup).
+    [[nodiscard]] const LocalShadowStats& local_shadow_stats() const noexcept {
+        return local_shadows_.stats();
+    }
 
 private:
     void ensure_draw_capacity(std::uint32_t draw_count);
@@ -112,6 +126,7 @@ private:
     ForwardPbrPass forward_;
     TonemapPass tonemap_;
     CascadedShadowMap csm_; // m10.1: directional shadow cascades (only declared when enabled)
+    LocalShadowMap local_shadows_; // m10.2: cached spot-light shadows (only declared when enabled)
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
 
@@ -121,6 +136,10 @@ private:
     rhi::TextureHandle white_;       // 1x1 white: base-color / MR / occlusion / emissive fallback
     rhi::TextureHandle flat_normal_; // 1x1 (128,128,255): the normal-map fallback = +Z (no bump)
     rhi::SamplerHandle material_sampler_; // trilinear + a little anisotropy, Repeat
+    // A 1×1, 2-layer depth array that stands in at the shadowed pipeline's binding 7/9 when a
+    // shadow type is absent (no sun, or no spots) — the descriptors must be valid even when
+    // unsampled (m10.2). 2 layers so it gets a 2-D-ARRAY view compatible with sampler2DArrayShadow.
+    rhi::TextureHandle dummy_shadow_array_;
 
     float ambient_[3] = {0.02f, 0.02f, 0.02f};
     bool warned_lights_ = false;

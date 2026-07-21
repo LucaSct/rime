@@ -59,6 +59,24 @@ layout(std140, set = 0, binding = 8) uniform ShadowUniforms {
     vec4 texel;                // x = 1 / shadow-map resolution
 } shadow;
 
+// The local-light (spot) shadow maps (m10.2): one depth-array layer per shadowing spot, sampled with
+// the same hardware depth-compare as the cascades. Bound from LocalShadowMap::add — a persistent,
+// destruction-invalidated array, but from the shader's side it is just another sampler2DArrayShadow.
+layout(set = 0, binding = 9) uniform sampler2DArrayShadow local_shadow_map;
+
+struct SpotShadow {
+    mat4 view_proj;         // light clip-from-world (perspective)
+    vec4 pos_range;         // xyz world position, w = range
+    vec4 dir_cos_inner;     // xyz unit travel direction, w = cos(inner cone half-angle)
+    vec4 radiance_cos_outer; // rgb color*intensity, w = cos(outer cone half-angle)
+};
+
+layout(std140, set = 0, binding = 10) uniform LocalShadowUniforms {
+    SpotShadow spots[8];    // kMaxLocalShadows
+    vec4 params;            // x = spot count, y = PCF radius (texels), z = depth bias, w = normal bias
+    vec4 texel;             // x = 1 / local-shadow resolution
+} local;
+
 layout(location = 0) in vec3 v_world_pos;
 layout(location = 1) in vec3 v_world_normal;
 layout(location = 2) in vec2 v_uv;
@@ -149,6 +167,29 @@ float sun_shadow(vec3 world_pos, vec3 N) {
     return 1.0; // past the last cascade — treat as lit rather than pop to hard shadow
 }
 
+// A spot light's shadow factor at this fragment: 1 = lit, 0 = shadowed. The spot is a perspective
+// shadow map (its own array layer `idx`), so unlike the ortho cascades the projection is a real
+// perspective divide. Same normal + depth bias and 3×3 hardware PCF as the sun (docs/math/shadow-
+// mapping.md §6). A fragment outside the spot's map is lit (the cone falloff, not the map, bounds it).
+float spot_shadow(uint idx, vec3 world_pos, vec3 N) {
+    vec3 biased = world_pos + N * local.params.w;
+    vec4 lc = local.spots[idx].view_proj * vec4(biased, 1.0);
+    vec3 p = lc.xyz / lc.w;      // perspective divide (w ≠ 1 here)
+    vec2 uv = p.xy * 0.5 + 0.5;  // clip [-1,1] → texture [0,1] (both y-down, Vulkan)
+    if (any(lessThan(uv, vec2(0.001))) || any(greaterThan(uv, vec2(0.999))) || p.z < 0.0 || p.z > 1.0)
+        return 1.0;
+    float ref = p.z - local.params.z;
+    float step = local.params.y * local.texel.x;
+    float sum = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            vec2 o = vec2(float(dx), float(dy)) * step;
+            sum += texture(local_shadow_map, vec4(uv + o, float(idx), ref));
+        }
+    }
+    return sum / 9.0;
+}
+
 void main() {
     vec3 n = perturb_normal(v_world_normal);
     vec3 v = normalize(frame.camera_pos.xyz - v_world_pos);
@@ -184,6 +225,31 @@ void main() {
         float falloff = window * window / dist2;
         vec3 radiance = frame.point_lights[i].radiance.rgb * falloff;
         out_radiance += shade_light(n, v, l, radiance, albedo, metallic, alpha);
+    }
+
+    // Spot lights (m10.2): a point light with a cone, each casting a real shadow through its own
+    // perspective shadow map. Distance falloff is the point-light window; the cone falloff runs from
+    // full inside the inner half-angle to zero at the outer one (smoothstep on the cosines).
+    uint spot_count = uint(local.params.x);
+    for (uint i = 0u; i < spot_count && i < 8u; ++i) {
+        vec3 to_light = local.spots[i].pos_range.xyz - v_world_pos;
+        float dist2 = max(dot(to_light, to_light), 1e-4);
+        float dist = sqrt(dist2);
+        vec3 l = to_light / dist;
+        float r = max(local.spots[i].pos_range.w, 1e-3);
+        float q = dist / r;
+        float q4 = q * q * q * q;
+        float window = clamp(1.0 - q4, 0.0, 1.0);
+        float dist_falloff = window * window / dist2;
+        // Cone: cos of the angle between the light's axis and the light→fragment ray.
+        float cos_theta = dot(local.spots[i].dir_cos_inner.xyz, -l);
+        float cone = smoothstep(local.spots[i].radiance_cos_outer.w, local.spots[i].dir_cos_inner.w,
+                                cos_theta);
+        if (cone <= 0.0)
+            continue;
+        vec3 radiance = local.spots[i].radiance_cos_outer.rgb * dist_falloff * cone;
+        vec3 contrib = shade_light(n, v, l, radiance, albedo, metallic, alpha);
+        out_radiance += contrib * spot_shadow(i, v_world_pos, normalize(v_world_normal));
     }
 
     out_radiance += draw.emissive.rgb * texture(emissive_tex, v_uv).rgb;

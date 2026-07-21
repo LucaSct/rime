@@ -229,20 +229,78 @@ shadowed, and the fractional values along the edge are the penumbra.
 
 ---
 
-## 6. The regression bridge, and what stays out of v1
+## 6. Local (spot) shadows — the same test, a perspective light (m10.2)
+
+A **spot light** is a point light with a cone, and it casts a real shadow through its own shadow map.
+Everything from §1 carries over unchanged *except the projection*: where the sun is orthographic
+(parallel rays), a spot is **perspective** — its rays fan out from the light's position — so its light
+matrix is `perspective(fov, 1, near, range) · look_at(pos, pos + dir, up)`, with the FOV set to the
+full outer cone angle and the far plane at the light's range. This is exactly why §1 keeps the
+perspective divide the ortho cascade path did not strictly need: the shader's `p = lc.xyz / lc.w` is
+correct for both, so `sun_shadow` and `spot_shadow` are the same code modulo which matrix and which
+layer they read.
+
+Two facts make a spot *simpler* than the sun, not harder:
+
+- **No cascades.** The sun's frustum is unbounded (it lights the whole visible world), which is the
+  entire reason for the cascade split of §2. A spot's frustum is bounded by its own cone and range, so
+  **one map covers it** — a spot is a single perspective shadow map, stored in one layer of the same
+  depth array the cascades use (`sampler2DArrayShadow`, sampled at the spot's layer index).
+- **The cone and the shadow are orthogonal.** The cone shapes *where the light goes* — a distance
+  window ($1 - (d/r)^4$, clamped, squared over $d^2$, the point-light falloff) times an angular
+  `smoothstep` between the inner and outer cone cosines. The shadow map answers *what blocks it*. A
+  fragment is lit iff it is inside the cone **and** the shadow test passes; a fragment outside the map
+  is left to the cone to bound, never force-shadowed. Bias (§4) and PCF (§5) are identical.
+
+## 7. The destructibility-aware cache — the milestone's thesis (m10.2)
+
+A local light's shadow is expensive and, usually, *static*: a street lamp over a courtyard re-renders
+byte-identical depth every frame for nothing. So Rime **caches** it. The spot's depth array is a
+**persistent** texture — held across frames and *imported* into each frame's render graph rather than
+allocated as a transient the graph recycles — and a slot is re-rendered only when it is **invalidated**:
+
+$$\text{re-render slot } i \iff \underbrace{\neg\,\text{rendered}_i}_{\text{first sight}}
+  \ \lor\ \underbrace{\text{light}_i \neq \text{cached}_i}_{\text{the lamp moved}}
+  \ \lor\ \underbrace{\text{dirty}_i}_{\text{invalidated}}.$$
+
+The first two the cache can see for itself. The third is the load-bearing one, and the reason this
+brick exists: **a light-parameter check alone cannot detect that the geometry changed.** Move a wall
+out from under a stationary lamp and the lamp's parameters are byte-identical — the cache would happily
+serve the old, wall-shaped shadow forever. Something must *push* the news that the world changed, and
+that something is the **C2 destruction channel** (ADR-0032): every destruction event carries a
+world-space AABB, and `LocalShadowMap::invalidate(region)` marks every slot whose shadow frustum that
+region overlaps as dirty. Break the wall → a `PartDied` event with the wall's bounds → the lamp's slot
+re-renders next frame → the shadow it cast lifts. *That* is the milestone's thesis made mechanical, and
+the money test proves all three states: shadowed (wall up), **stale** (wall gone but not invalidated —
+the cache faithfully serving last frame's depth), and lit (invalidated → re-rendered).
+
+The frustum a region is tested against is the world AABB of the spot's eight unprojected frustum
+corners; overlap is the ordinary AABB–AABB test. It is deliberately **conservative** — the box
+over-covers the cone, so a break *near* the frustum re-renders even if it cast no shadow (ADR-0032's
+"err broad": a redundant re-render is cheap, a stale shadow is a visible bug). The cross-frame
+mechanics fall out of the render graph: the array lives in `ShaderRead` between frames; a dirty slot's
+depth pass transitions the image to depth-write and the forward sample takes it back, and because a
+per-layer clear touches only its own layer, the *clean* slots keep their cached depth untouched. A
+frame in which nothing invalidated declares **no shadow passes at all** — the cache hit costs a buffer
+upload and nothing more.
+
+## 8. The regression bridge, and what stays out of v1
 
 Shadows are a **feature gate**. With `shadows_enabled = false` (the default), the renderer binds the
 *unmodified* `pbr_forward` pipeline — not this shader — and is byte-identical to the M5.6 baseline
 (ADR-0032 §11). That is why the shadowed shading lives in a separate `pbr_forward_shadowed.frag`
 rather than behind a branch in the base shader: the off path must not carry a single extra
-instruction. The shadow proof asserts this bridge directly — with shadows off, the occluder box
-darkens nothing (test case (b)).
+instruction. Spot lights ride this shadowed path (they read the same shader's binding 9/10), so a scene
+with lighting *off* has no spots at all — which is exactly the baseline, since the baseline never had
+them. The directional proof asserts the bridge directly (shadows off ⇒ the box darkens nothing); the
+local proof asserts the cache (invalidate ⇒ the floor lifts).
 
-Only the **primary** directional light (light 0, the sun) casts in v1; the remaining directional
-lights are treated as unshadowed fill (a common and cheap simplification — fill light rarely reads as
-casting). Local (point/spot) shadows are **m10.2**, and they reuse this exact machinery: a spot light
-is a perspective light matrix into the same depth-render-then-compare test (which is why §1 keeps the
-perspective divide the ortho path does not strictly need); a point light is six such maps on a cube.
-Contact-hardening / variable penumbra (PCSS), and filtering schemes beyond fixed PCF (VSM/ESM), are
-deliberately out — this brick buys *correct, stable, soft-enough* sun shadows, and the later bricks
-sharpen from there.
+What stays out, by choice: only the **primary** directional light casts (fill suns are unshadowed —
+fill light rarely reads as casting); at most `kMaxLocalShadows` spots cast, the rest fall back to
+unshadowed (a **priority atlas** that keeps the brightest, largest-on-screen lights is the fast-follow
+— honest degradation, not a silent cap). **Point-light cube shadows** — six faces of a cube image, the
+one local case §6's single map does not cover — are the other fast-follow; the cube RHI (m10.1a) is
+already built for them, and §1's perspective divide already handles a per-face perspective matrix.
+Contact-hardening / variable penumbra (PCSS) and filtering schemes beyond fixed PCF (VSM/ESM) are out
+entirely — this milestone buys *correct, stable, soft-enough, and cheap-when-static* shadows, and the
+later bricks sharpen from there.

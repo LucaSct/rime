@@ -185,4 +185,17 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
     return ShadowBinding{cascades, shadow_ubo_, compare_sampler_};
 }
 
+ShadowBinding CascadedShadowMap::empty_binding(RenderGraph& graph, rhi::TextureHandle dummy) {
+    // No sun: a count-0 ShadowUniforms so sun_shadow() short-circuits to "lit", and the shared
+    // dummy depth array so binding 7 still points at a real 2-D-array image. Import at Undefined —
+    // never sampled, so the graph may discard whatever layout it was in.
+    GpuShadowUniforms su{}; // params[0] (cascade count) defaults to 0
+    device_.write_buffer(shadow_ubo_, &su, sizeof(su));
+    // The dummy sits permanently in ShaderRead (the SceneRenderer transitions it once) — import it
+    // there so the graph's barrier bookkeeping matches the backend's tracked layout.
+    const RGTexture map =
+        graph.import_texture(dummy, rhi::ResourceState::ShaderRead, {1, 1}, kDepthFormat, 2);
+    return ShadowBinding{map, shadow_ubo_, compare_sampler_};
+}
+
 } // namespace rime::render

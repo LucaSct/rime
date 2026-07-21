@@ -142,6 +142,17 @@ struct ShadowBinding {
     rhi::SamplerHandle sampler; // the depth-compare sampler
 };
 
+// m10.2: the spot-light equivalent — the local-shadow depth array (a sampler2DArrayShadow at
+// binding 9, one layer per shadowing spot), the LocalShadowUniforms block (binding 10), and the
+// same depth-compare sampler. Produced by LocalShadowMap::add (lighting/local_shadows.hpp). Unlike
+// the cascade map this is an IMPORTED persistent texture (the cache holds it across frames), but
+// the pass treats it identically — an RGTexture is an RGTexture.
+struct LocalShadowBinding {
+    RGTexture map;              // the persistent per-spot depth array (imported into the graph)
+    rhi::BufferHandle ubo;      // GpuLocalShadows
+    rhi::SamplerHandle sampler; // the depth-compare sampler (shared with the cascades)
+};
+
 // ── Depth pre-pass ────────────────────────────────────────────────────────────────────────────
 // Rasterize every opaque draw with NO fragment shader and NO color attachment, writing only
 // depth. The forward pass then depth-tests with CompareOp::Equal and shades each pixel exactly
@@ -189,16 +200,20 @@ public:
              bool depth_prepassed,
              const SceneDrawData& data) const;
 
-    // The shadowed variant (m10.1): the same forward shading, but the primary directional light is
-    // modulated by a cascaded shadow map sampled from `shadow`. A SEPARATE shader + pipelines from
-    // add() above, so with shadows off the renderer runs the byte-identical M5.6 baseline (the
-    // ADR-0032 §11 regression bridge) — this path only exists when a caller opts shadows in.
+    // The shadowed variant (m10.1 + m10.2): the same forward shading, but the primary directional
+    // light is modulated by a cascaded shadow map (`shadow`) and every spot light by its local
+    // shadow map (`local`). A SEPARATE shader + pipelines from add() above, so with shadows off the
+    // renderer runs the byte-identical M5.6 baseline (the ADR-0032 §11 regression bridge) — this
+    // path only exists when a caller opts shadows in. Both bindings are always valid (an
+    // empty_binding stands in for an absent shadow type), because the shadowed pipeline's
+    // descriptor layout is fixed.
     void add_shadowed(RenderGraph& graph,
                       RGTexture hdr,
                       RGTexture depth,
                       bool depth_prepassed,
                       const SceneDrawData& data,
-                      const ShadowBinding& shadow) const;
+                      const ShadowBinding& shadow,
+                      const LocalShadowBinding& local) const;
 
 private:
     rhi::Device& device_;
