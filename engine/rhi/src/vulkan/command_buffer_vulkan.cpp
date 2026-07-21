@@ -6,6 +6,8 @@
 // synchronization2 — the Vulkan 1.3 barrier model (VkImageMemoryBarrier2/VkDependencyInfo), which
 // expresses src/dst stage+access in one place and is what ADR-0007 standardizes on.
 
+#include <algorithm>
+
 #include "vulkan/vulkan_backend.hpp"
 
 namespace rime::rhi {
@@ -127,6 +129,39 @@ void VulkanCommandBuffer::texture_barrier(TextureHandle texture,
                      dst.access,
                      aspect_for(tex->format));
     tex->layout = dst.layout;
+}
+
+void VulkanCommandBuffer::buffer_barrier(BufferHandle buffer,
+                                         ResourceState from,
+                                         ResourceState to) {
+    if (in_rendering_) {
+        RIME_ERROR("rhi: buffer_barrier inside begin/end_rendering — transition between passes");
+        return;
+    }
+    VulkanBuffer* buf = device_.lookup(buffer);
+    if (!buf) {
+        RIME_ERROR("rhi: buffer_barrier with an invalid buffer handle");
+        return;
+    }
+    // No layout to reconcile (that whole class of bug is an image-only problem), so unlike
+    // texture_barrier this trusts the caller's `from` outright — the render graph is the only
+    // caller and it tracks state per resource per frame.
+    const BufferStateInfo src = to_vk_buffer(from);
+    const BufferStateInfo dst = to_vk_buffer(to);
+    VkBufferMemoryBarrier2 bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+    bb.srcStageMask = src.stages;
+    bb.srcAccessMask = src.access;
+    bb.dstStageMask = dst.stages;
+    bb.dstAccessMask = dst.access;
+    bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb.buffer = buf->buffer;
+    bb.offset = 0;
+    bb.size = VK_WHOLE_SIZE;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.bufferMemoryBarrierCount = 1;
+    dep.pBufferMemoryBarriers = &bb;
+    vkCmdPipelineBarrier2(cmd_, &dep);
 }
 
 void VulkanCommandBuffer::end_debug_label() {
@@ -716,6 +751,59 @@ void VulkanCommandBuffer::copy_texture_to_buffer(TextureHandle src,
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers = &mb;
     vkCmdPipelineBarrier2(cmd_, &dep);
+}
+
+void VulkanCommandBuffer::copy_buffer(BufferHandle src, BufferHandle dst, std::uint64_t size) {
+    VulkanBuffer* s = device_.lookup(src);
+    VulkanBuffer* d = device_.lookup(dst);
+    if (!s || !d) {
+        RIME_ERROR("rhi: copy_buffer with an invalid handle");
+        return;
+    }
+    if (in_rendering_) {
+        RIME_ERROR("rhi: copy_buffer inside begin/end_rendering — copies run between passes");
+        return;
+    }
+    const VkDeviceSize bytes =
+        size != 0 ? static_cast<VkDeviceSize>(size) : std::min(s->size, d->size);
+    if (bytes > s->size || bytes > d->size) {
+        RIME_ERROR("rhi: copy_buffer of {} bytes exceeds the source ({}) or destination ({})",
+                   bytes,
+                   s->size,
+                   d->size);
+        return;
+    }
+
+    // Whatever shader wrote the source must be finished and its writes available before the copy
+    // reads them. Conservative on purpose: a readback is never a hot path, and the alternative is
+    // making every caller reason about which stage last touched the buffer.
+    VkMemoryBarrier2 pre{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    pre.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    pre.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    pre.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    pre.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    VkDependencyInfo pre_dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    pre_dep.memoryBarrierCount = 1;
+    pre_dep.pMemoryBarriers = &pre;
+    vkCmdPipelineBarrier2(cmd_, &pre_dep);
+
+    VkBufferCopy region{};
+    region.srcOffset = 0;
+    region.dstOffset = 0;
+    region.size = bytes;
+    vkCmdCopyBuffer(cmd_, s->buffer, d->buffer, 1, &region);
+
+    // …and make the copy visible to host reads, exactly as copy_texture_to_buffer does (paired
+    // with read_buffer's invalidate).
+    VkMemoryBarrier2 post{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    post.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    post.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    post.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+    post.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    VkDependencyInfo post_dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    post_dep.memoryBarrierCount = 1;
+    post_dep.pMemoryBarriers = &post;
+    vkCmdPipelineBarrier2(cmd_, &post_dep);
 }
 
 } // namespace rime::rhi

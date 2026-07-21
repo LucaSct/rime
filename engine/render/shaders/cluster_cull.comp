@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// Froxel light culling (m10.3, ADR-0032 §4): the compute half of clustered forward shading. One
+// invocation per froxel; each builds the list of lights whose sphere of influence touches it.
+//
+//   for each froxel:            (16 × 9 × 24 = 3456 of them)
+//       bounds = its view-space AABB
+//       for each light:
+//           if sphere(light) touches bounds: append its index to the froxel's list
+//
+// The froxel math here MIRRORS the CPU spelling in lighting/clustered.hpp line for line —
+// cluster_bounds() and sphere_touches_cluster() are the same two functions written twice. The
+// tests exploit that: they predict every froxel's list on the CPU and assert this shader agrees,
+// so a divergence between the two is a test failure rather than a subtle lighting artifact.
+// Derivation: docs/math/clustered-shading.md.
+//
+// The one non-obvious optimization is the shared-memory batching: rather than have all 64
+// invocations of a workgroup each pull the same light out of device memory, they cooperatively
+// stage 64 lights into workgroup-shared memory and then test against that. It is the standard
+// clustered-culling structure (Doom 2016's), and it is why the loop below is written as
+// "batch, barrier, test, barrier" instead of the obvious single loop.
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct Light {
+    vec4 position; // xyz = world position, w = falloff radius (the sphere this pass culls with)
+    vec4 radiance; // rgb = colour × intensity (unused here; the shading half reads it)
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Lights {
+    Light lights[];
+} light_buffer;
+
+// Per-froxel runs of (1 + max_per_cluster) uints: [count, index, index, …].
+layout(std430, set = 0, binding = 1) writeonly buffer ClusterLists {
+    uint data[];
+} lists;
+
+layout(std140, set = 0, binding = 2) uniform ClusterUniforms {
+    mat4 view;    // world → view
+    uvec4 grid;   // x,y,z = froxel grid dims, w = max lights per froxel
+    uvec4 counts; // x = light count, y = clustered enabled (unused here — we only run when on)
+    vec4 depth;   // x = z_near, y = z_far, z = log(z_far / z_near)
+    vec4 screen;  // x,y = render-target size in pixels
+    vec4 proj;    // x,y = the projection's x/y scale terms (p00, p11)
+} cluster;
+
+// Staging area for one batch of lights, shared by the workgroup (see the header comment).
+shared vec4 batch_position[64];
+
+// A froxel's view-space AABB. Screen tiles are ranges in NDC x/y; a depth slice is a range in
+// view-space distance (log-z partitioned). A point at NDC (nx, ny) and distance d sits at view
+// position (nx·d/p00, ny·d/p11, −d) — invert the projection, no matrix needed. The AABB of the
+// eight corners bounds the slab conservatively (docs/math/clustered-shading.md §3).
+void froxel_bounds(uvec3 coord, out vec3 lo, out vec3 hi) {
+    vec2 ndc_min = vec2(coord.xy) / vec2(cluster.grid.xy) * 2.0 - 1.0;
+    vec2 ndc_max = (vec2(coord.xy) + 1.0) / vec2(cluster.grid.xy) * 2.0 - 1.0;
+
+    // Log-z slice bounds: near · (far/near)^(k/K) = near · exp(k/K · log(far/near)).
+    float k0 = float(coord.z) / float(cluster.grid.z);
+    float k1 = float(coord.z + 1u) / float(cluster.grid.z);
+    float d0 = cluster.depth.x * exp(k0 * cluster.depth.z);
+    float d1 = cluster.depth.x * exp(k1 * cluster.depth.z);
+
+    // Four NDC corners × two depths. x scales with depth through p00; y likewise through p11
+    // (which is NEGATIVE — Vulkan's y-down clip space), so taking min/max over all eight corners
+    // rather than assuming an ordering is what keeps this sign-agnostic.
+    lo = vec3(1e30);
+    hi = vec3(-1e30);
+    for (int i = 0; i < 8; ++i) {
+        float nx = (i & 1) == 0 ? ndc_min.x : ndc_max.x;
+        float ny = (i & 2) == 0 ? ndc_min.y : ndc_max.y;
+        float d = (i & 4) == 0 ? d0 : d1;
+        vec3 p = vec3(nx * d / cluster.proj.x, ny * d / cluster.proj.y, -d);
+        lo = min(lo, p);
+        hi = max(hi, p);
+    }
+}
+
+// Sphere vs AABB: clamp the centre into the box and measure what is left over. If that residual is
+// shorter than the radius the sphere reaches inside.
+bool sphere_touches(vec3 lo, vec3 hi, vec3 center, float radius) {
+    vec3 closest = clamp(center, lo, hi);
+    vec3 d = center - closest;
+    return dot(d, d) <= radius * radius;
+}
+
+void main() {
+    uint cluster_id = gl_GlobalInvocationID.x;
+    uint cluster_total = cluster.grid.x * cluster.grid.y * cluster.grid.z;
+    // NOTE: no early return for out-of-range invocations. Every invocation of the workgroup must
+    // reach every barrier() below — that is a hard rule of GLSL's execution model, and bailing out
+    // of the tail workgroup would be undefined behaviour. Instead the extra invocations do the
+    // work and simply never write.
+    bool writes = cluster_id < cluster_total;
+
+    uvec3 coord = uvec3(cluster_id % cluster.grid.x,
+                        (cluster_id / cluster.grid.x) % cluster.grid.y,
+                        cluster_id / (cluster.grid.x * cluster.grid.y));
+    vec3 lo, hi;
+    froxel_bounds(coord, lo, hi);
+
+    uint stride = cluster.grid.w + 1u; // [count, indices…]
+    uint base = cluster_id * stride;
+    uint written = 0u;
+
+    uint light_count = cluster.counts.x;
+    for (uint batch = 0u; batch < light_count; batch += 64u) {
+        // Stage up to 64 lights cooperatively: invocation i fetches light (batch + i) once, and
+        // all 64 invocations then read it out of fast shared memory.
+        uint fetch = batch + gl_LocalInvocationID.x;
+        if (fetch < light_count) {
+            vec4 p = light_buffer.lights[fetch].position;
+            batch_position[gl_LocalInvocationID.x] = vec4((cluster.view * vec4(p.xyz, 1.0)).xyz, p.w);
+        }
+        barrier();
+
+        uint batch_size = min(64u, light_count - batch);
+        for (uint i = 0u; i < batch_size; ++i) {
+            vec4 lp = batch_position[i];
+            if (!sphere_touches(lo, hi, lp.xyz, lp.w))
+                continue;
+            // Overflow policy: CLAMP. A froxel that somehow gathers more than the cap keeps the
+            // first `cap` lights and silently drops the rest — over-bright piles of lights degrade
+            // instead of corrupting memory past the end of this froxel's run.
+            if (written < cluster.grid.w) {
+                if (writes)
+                    lists.data[base + 1u + written] = batch + i;
+                ++written;
+            }
+        }
+        barrier(); // the next batch overwrites the staging area — not before everyone has read it
+    }
+
+    if (writes)
+        lists.data[base] = written;
+}

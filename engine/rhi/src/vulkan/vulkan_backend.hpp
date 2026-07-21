@@ -281,6 +281,7 @@ public:
     void begin_debug_label(std::string_view name) override;
     void end_debug_label() override;
     void texture_barrier(TextureHandle texture, ResourceState from, ResourceState to) override;
+    void buffer_barrier(BufferHandle buffer, ResourceState from, ResourceState to) override;
     void push_constants(const void* data, std::uint32_t size, std::uint32_t offset) override;
     void set_viewport(const Viewport& viewport) override;
     void set_scissor(const Rect2D& scissor) override;
@@ -295,6 +296,7 @@ public:
                       std::uint32_t first_instance) override;
     void
     copy_texture_to_buffer(TextureHandle src, BufferHandle dst, std::uint32_t base_layer) override;
+    void copy_buffer(BufferHandle src, BufferHandle dst, std::uint64_t size) override;
 
     [[nodiscard]] VkCommandBuffer handle() const noexcept { return cmd_; }
 

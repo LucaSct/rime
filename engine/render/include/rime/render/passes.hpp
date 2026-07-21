@@ -153,6 +153,17 @@ struct LocalShadowBinding {
     rhi::SamplerHandle sampler; // the depth-compare sampler (shared with the cascades)
 };
 
+// m10.3: what the clustered forward pass reads — the packed light array (a storage buffer at
+// binding 11), the per-froxel light lists the cull dispatch filled (binding 12), and the
+// ClusterUniforms block describing the grid (binding 13). Produced by ClusteredLights::add
+// (lighting/clustered.hpp). Both storage buffers are RGBuffers, which is what puts the cull
+// dispatch and this pass in a producer/consumer relationship the graph can see and order.
+struct ClusterBinding {
+    RGBuffer lights;       // packed GpuPointLight array (uncapped — that is the point)
+    RGBuffer lists;        // per-froxel [count, index…] runs
+    rhi::BufferHandle ubo; // GpuClusterUniforms; its `enabled` flag picks the shader's light path
+};
+
 // ── Depth pre-pass ────────────────────────────────────────────────────────────────────────────
 // Rasterize every opaque draw with NO fragment shader and NO color attachment, writing only
 // depth. The forward pass then depth-tests with CompareOp::Equal and shades each pixel exactly
@@ -200,20 +211,23 @@ public:
              bool depth_prepassed,
              const SceneDrawData& data) const;
 
-    // The shadowed variant (m10.1 + m10.2): the same forward shading, but the primary directional
-    // light is modulated by a cascaded shadow map (`shadow`) and every spot light by its local
-    // shadow map (`local`). A SEPARATE shader + pipelines from add() above, so with shadows off the
-    // renderer runs the byte-identical M5.6 baseline (the ADR-0032 §11 regression bridge) — this
-    // path only exists when a caller opts shadows in. Both bindings are always valid (an
-    // empty_binding stands in for an absent shadow type), because the shadowed pipeline's
-    // descriptor layout is fixed.
+    // The M10 variant (m10.1 + m10.2 + m10.3): the same forward shading, but the primary
+    // directional light is modulated by a cascaded shadow map (`shadow`), every spot light by its
+    // local shadow map (`local`), and point lights optionally come from clustered light lists
+    // rather than the uniform block (`clusters`). A SEPARATE shader + pipelines from add() above,
+    // so with every M10 feature off the renderer runs the byte-identical M5.6 baseline (the
+    // ADR-0032 §11 regression bridge) — this path only exists when a caller opts in. All three
+    // bindings are always valid (an empty_binding stands in for an absent feature), because the
+    // pipeline's descriptor layout is fixed; which features are actually ON is carried by counts
+    // and flags inside the uniform blocks.
     void add_shadowed(RenderGraph& graph,
                       RGTexture hdr,
                       RGTexture depth,
                       bool depth_prepassed,
                       const SceneDrawData& data,
                       const ShadowBinding& shadow,
-                      const LocalShadowBinding& local) const;
+                      const LocalShadowBinding& local,
+                      const ClusterBinding& clusters) const;
 
 private:
     rhi::Device& device_;

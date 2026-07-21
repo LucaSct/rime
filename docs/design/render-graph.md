@@ -104,6 +104,26 @@ both measured before changed: no **aliasing** (two transients with disjoint life
 memory; ADR-0019 defers this until a real workload shows the win) and no **eviction** (the cache
 grows to the high-water mark of distinct keys).
 
+## Buffers are resources too (`RGBuffer`, m10.3)
+
+Textures were the graph's only resource kind until clustered forward shading needed a compute pass
+to *fill a light list* that a later raster pass *reads*. `RGBuffer` / `create_buffer` /
+`import_buffer` make that pair visible to the compiler, and the payoff is not one feature but
+three, all of which fall out of the existing machinery for free:
+
+- **Ordering.** The cull dispatch writes the lists; the forward pass declares them read; the
+  versioning walk turns that into an edge.
+- **Liveness.** A dispatch that wrote nothing declared would be *culled as dead* — which is exactly
+  what happened before the buffer was declarable. Declaring the write is what keeps it alive (and
+  `export_buffer` is how a test that reads the lists back keeps its producer alive with no
+  consumer pass at all).
+- **Barriers.** A buffer read is declared `ShaderRead` and a write `StorageReadWrite`, so the
+  state-change rule that already emitted texture transitions emits `buffer_barrier` between them.
+
+Textures and buffers share one resource table, one index space, and every compiler step; only
+allocation (a size-keyed buffer cache alongside the texture one) and the final transition differ.
+`RGTexture` and `RGBuffer` stay distinct C++ types, so mixing them up is a compile error.
+
 ## Measured overhead (M5.4, this repo's dev server)
 
 A synthetic worst case — a 100-pass chain, each pass sampling its predecessor's output (maximal
