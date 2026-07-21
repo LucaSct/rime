@@ -81,6 +81,31 @@ ExtractedScene extract_scene(ecs::World& world) {
             scene.point_lights.push_back(g);
         });
 
+    // Spot lights (m10.2): a point light with a cone. Position is the entity's world translation;
+    // the cone axis is its −z (the DirectionalLight/Camera "aim it like a camera" convention). The
+    // cone half-angles are pre-cosined here so the shadow fit + shader never call trig. Radiance =
+    // color × intensity, folded once. These carry the CPU shape the shadow fit needs
+    // (pos/dir/cone), not a GPU struct — LocalShadowMap turns each into a perspective view_proj +
+    // the GPU record.
+    world.query<ecs::WorldTransform, SpotLight>().for_each(
+        [&](ecs::WorldTransform& wt, SpotLight& l) {
+            SpotLightData s{};
+            s.position = wt.value.translation;
+            s.direction = core::normalize(core::transform_vector(wt.value, {0.0f, 0.0f, -1.0f}));
+            s.range = l.range;
+            // Guard the cone: outer ≥ inner, both in (0, ~90°), so cos_inner ≥ cos_outer and the
+            // shadow FOV (2×outer) never degenerates.
+            const float outer = std::clamp(l.outer_angle, 0.01f, 1.5533f);
+            const float inner = std::clamp(l.inner_angle, 0.0f, outer);
+            s.outer_angle = outer;
+            s.cos_inner = std::cos(inner);
+            s.cos_outer = std::cos(outer);
+            s.radiance[0] = l.color_r * l.intensity;
+            s.radiance[1] = l.color_g * l.intensity;
+            s.radiance[2] = l.color_b * l.intensity;
+            scene.spot_lights.push_back(s);
+        });
+
     return scene;
 }
 
@@ -88,7 +113,7 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MeshRegistry& meshes,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
-      forward_(device), tonemap_(device), csm_(device) {
+      forward_(device), tonemap_(device), csm_(device), local_shadows_(device) {
     rhi::BufferDesc fd{};
     fd.size = sizeof(GpuFrameUniforms);
     fd.usage = rhi::BufferUsage::Uniform;
@@ -133,9 +158,30 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
     sd.address_mode = rhi::AddressMode::Repeat;
     sd.debug_name = "material-sampler";
     material_sampler_ = device.create_sampler(sd);
+
+    // The placeholder depth array bound where a shadow type is absent (m10.2): 1×1 and 2 layers, so
+    // it takes a 2-D-ARRAY view that satisfies the shadowed pipeline's sampler2DArrayShadow
+    // bindings even in the sun-only or spot-only case. Never rendered into or sampled (the count-0
+    // uniform gates it) — it exists purely so every descriptor points at a valid image.
+    rhi::TextureDesc dd{};
+    dd.extent = {1, 1};
+    dd.array_layers = 2;
+    dd.format = kDepthFormat;
+    dd.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::Sampled;
+    dd.debug_name = "shadow-dummy-array";
+    dummy_shadow_array_ = device.create_texture(dd);
+    // Park it in ShaderRead once. It is never written, so it stays there forever, and the shadow
+    // systems' empty_binding imports it at ShaderRead — no per-frame layout-bookkeeping mismatch.
+    {
+        auto cmd = device.begin_commands();
+        cmd->texture_barrier(
+            dummy_shadow_array_, rhi::ResourceState::Undefined, rhi::ResourceState::ShaderRead);
+        device.submit_blocking(*cmd);
+    }
 }
 
 SceneRenderer::~SceneRenderer() {
+    device_.destroy(dummy_shadow_array_);
     device_.destroy(material_sampler_);
     device_.destroy(flat_normal_);
     device_.destroy(white_);
@@ -280,21 +326,35 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     RGTexture ldr = graph.create_texture({extent, kLdrFormat, "scene-ldr"});
     if (use_depth_prepass)
         depth_prepass_.add(graph, depth, data);
-    // m10.1: the sun (the first directional light) casts a cascaded shadow map when shadows are
-    // enabled AND the scene actually has a directional light. Otherwise the byte-identical M5.6
-    // forward path (ADR-0032 §11 regression bridge).
-    if (lighting_.shadows_enabled && ndir > 0) {
-        CascadeInputs ci{};
-        ci.camera_view = scene.camera.view;
-        ci.fov_y = scene.camera.fov_y;
-        ci.aspect = aspect;
-        ci.z_near = scene.camera.z_near;
-        ci.z_far = scene.camera.z_far;
-        ci.light_dir = core::Vec3{fu.dir_lights[0].direction[0],
-                                  fu.dir_lights[0].direction[1],
-                                  fu.dir_lights[0].direction[2]};
-        const ShadowBinding shadow = csm_.add(graph, depth_prepass_, data, ci, lighting_);
-        forward_.add_shadowed(graph, hdr, depth, use_depth_prepass, data, shadow);
+    // M10 shadows (ADR-0032 §11 regression bridge): the shadowed forward path runs only when
+    // shadows are enabled AND the scene has something to shadow — a directional light (m10.1
+    // cascades) and/or spot lights with local shadows on (m10.2). Otherwise the byte-identical M5.6
+    // forward path.
+    const bool has_local = lighting_.local_shadows_enabled && !scene.spot_lights.empty();
+    if (lighting_.shadows_enabled && (ndir > 0 || has_local)) {
+        // The cascade binding: the real fit when there is a sun, else a valid count-0 placeholder
+        // so the shadowed pipeline's binding 7/8 is always satisfied (a spot-only scene).
+        ShadowBinding shadow;
+        if (ndir > 0) {
+            CascadeInputs ci{};
+            ci.camera_view = scene.camera.view;
+            ci.fov_y = scene.camera.fov_y;
+            ci.aspect = aspect;
+            ci.z_near = scene.camera.z_near;
+            ci.z_far = scene.camera.z_far;
+            ci.light_dir = core::Vec3{fu.dir_lights[0].direction[0],
+                                      fu.dir_lights[0].direction[1],
+                                      fu.dir_lights[0].direction[2]};
+            shadow = csm_.add(graph, depth_prepass_, data, ci, lighting_);
+        } else {
+            shadow = csm_.empty_binding(graph, dummy_shadow_array_);
+        }
+        // The local (spot) binding: the cached spot maps, else the same count-0 placeholder.
+        const LocalShadowBinding local =
+            has_local
+                ? local_shadows_.add(graph, depth_prepass_, data, scene.spot_lights, lighting_)
+                : local_shadows_.empty_binding(graph, dummy_shadow_array_);
+        forward_.add_shadowed(graph, hdr, depth, use_depth_prepass, data, shadow, local);
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }

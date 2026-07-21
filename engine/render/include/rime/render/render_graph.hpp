@@ -110,11 +110,18 @@ public:
     [[nodiscard]] RGTexture create_texture(const RGTextureDesc& desc);
 
     // Wrap an externally owned texture (a swapchain backbuffer, a streamed-capture target, a
-    // persistent history buffer) so passes can declare against it. `state` is what the texture
-    // is in RIGHT NOW (ResourceState::Undefined when freshly created / contents irrelevant).
-    // Imported textures are never culled roots' victims: writes to them always survive culling —
-    // the outside world can see them.
-    [[nodiscard]] RGTexture import_texture(rhi::TextureHandle handle, rhi::ResourceState state);
+    // persistent history buffer — or m10.2's cached shadow array) so passes can declare against it.
+    // `state` is what the texture is in RIGHT NOW (ResourceState::Undefined when freshly created /
+    // contents irrelevant). Pass `extent`/`format`/`array_layers` when a pass will RENDER INTO the
+    // imported texture — the graph derives the pass viewport + layer target from them (they may
+    // stay default for a sample-only import, which never becomes an attachment). Imported textures
+    // are never culled roots' victims: writes to them always survive culling — the outside world
+    // sees them.
+    [[nodiscard]] RGTexture import_texture(rhi::TextureHandle handle,
+                                           rhi::ResourceState state,
+                                           rhi::Extent2D extent = {},
+                                           rhi::Format format = rhi::Format::Undefined,
+                                           std::uint32_t array_layers = 1);
 
     // Mark a created texture as a frame OUTPUT: its producer chain survives culling and its
     // physical handle is queryable after execute() (for a readback copy, a streamer tap, …).

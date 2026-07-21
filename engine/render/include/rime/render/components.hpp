@@ -70,6 +70,22 @@ struct PointLight {
     float radius = 10.0f;
 };
 
+// A spot light (m10.2): a point light with a cone. It sits at the entity's WorldTransform
+// translation and shines along its forward axis (WorldTransform rotation applied to −z — the same
+// "aim it like a camera" convention as DirectionalLight and Camera). Distance falls off to zero at
+// `range`; angular falloff runs from full inside the `inner_angle` cone to zero at the
+// `outer_angle` cone edge (angles are the half-angle from the axis, in radians). Spot lights are
+// the local shadow casters M10 introduces — with lighting shadows on, a spot casts a real shadow
+// through its own perspective shadow map (lighting/local_shadows.hpp); with lighting off it does
+// not exist (spots ride the shadowed forward path), keeping the M5.6 baseline byte-identical.
+struct SpotLight {
+    float color_r = 1.0f, color_g = 1.0f, color_b = 1.0f;
+    float intensity = 1.0f;
+    float range = 20.0f;
+    float inner_angle = 0.4363323f; // 25° — full brightness inside this half-angle cone
+    float outer_angle = 0.6108652f; // 35° — falls to zero by here; the shadow map's FOV = 2×this
+};
+
 // Register every render component with a world — id + size + reflection TypeInfo in one shot
 // (World::register_component is idempotent, so calling this after spawning is harmless; calling
 // it FIRST keeps component ids stable across worlds, which serialization will eventually thank
@@ -81,6 +97,7 @@ inline void register_render_components(ecs::World& world) {
     (void)world.register_component<Camera>();
     (void)world.register_component<DirectionalLight>();
     (void)world.register_component<PointLight>();
+    (void)world.register_component<SpotLight>();
 }
 
 } // namespace rime::render
@@ -119,4 +136,14 @@ RIME_REFLECT_FIELD(color_g)
 RIME_REFLECT_FIELD(color_b)
 RIME_REFLECT_FIELD(intensity)
 RIME_REFLECT_FIELD(radius)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rime::render::SpotLight)
+RIME_REFLECT_FIELD(color_r)
+RIME_REFLECT_FIELD(color_g)
+RIME_REFLECT_FIELD(color_b)
+RIME_REFLECT_FIELD(intensity)
+RIME_REFLECT_FIELD(range)
+RIME_REFLECT_FIELD(inner_angle)
+RIME_REFLECT_FIELD(outer_angle)
 RIME_REFLECT_END()

@@ -178,10 +178,11 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     pd.debug_name = "forward-pbr (standalone)";
     pipeline_standalone_ = device.create_graphics_pipeline(pd);
 
-    // The shadowed variants (m10.1): the same two depth disciplines, but the shadowed fragment
-    // shader and two extra bindings — 7 = the cascade depth array (sampler2DArrayShadow), 8 = the
-    // ShadowUniforms block. A separate pipeline so the shadow-off path is the byte-identical
-    // baseline above (ADR-0032 §11); it is only ever bound when a caller opts shadows in.
+    // The shadowed variants (m10.1 + m10.2): the same two depth disciplines, but the shadowed
+    // fragment shader and four extra bindings — 7 = the cascade depth array (sampler2DArrayShadow),
+    // 8 = the ShadowUniforms block, 9 = the local (spot) depth array, 10 = the LocalShadowUniforms
+    // block. A separate pipeline so the shadow-off path is the byte-identical baseline above
+    // (ADR-0032 §11); it is only ever bound when a caller opts shadows in.
     const rhi::BindingDesc shadowed_bindings[] = {
         {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
         {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
@@ -190,8 +191,10 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
         {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
         {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
         {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
-        {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // shadow map
+        {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // cascade map
         {8, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // ShadowUniforms
+        {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // local (spot) map
+        {10, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment}, // LocalShadowUniforms
     };
     pd.fragment_shader = shadowed_fragment_shader_;
     pd.bindings = shadowed_bindings;
@@ -254,7 +257,8 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   RGTexture depth,
                                   bool depth_prepassed,
                                   const SceneDrawData& data,
-                                  const ShadowBinding& shadow) const {
+                                  const ShadowBinding& shadow,
+                                  const LocalShadowBinding& local) const {
     const RGColorAttachment colors[] = {
         {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
     RGDepthAttachment depth_att{};
@@ -268,9 +272,10 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
         depth_att.store = rhi::StoreOp::DontCare;
         depth_att.read_only = false;
     }
-    // The cascade array is SAMPLED here — declaring it makes the graph order this pass after the
-    // cascade depth passes wrote it and transition it to ShaderRead (m10.1).
-    const RGTexture sampled[] = {shadow.map};
+    // Both shadow arrays are SAMPLED here — declaring them makes the graph order this pass after
+    // the depth passes that wrote them and transition both to ShaderRead (m10.1 cascades, m10.2
+    // spots).
+    const RGTexture sampled[] = {shadow.map, local.map};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.depth = &depth_att;
@@ -278,13 +283,15 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     const rhi::PipelineHandle pipe =
         depth_prepassed ? pipeline_shadowed_after_prepass_ : pipeline_shadowed_standalone_;
     graph.add_raster_pass(
-        "forward-pbr shadowed", desc, [pipe, data, shadow, &graph](rhi::CommandBuffer& cmd) {
+        "forward-pbr shadowed", desc, [pipe, data, shadow, local, &graph](rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipe);
-            // Bindings 7/8 are attached once (they persist across draws — ADR-0020); record_draws
-            // re-binds only per-draw state on top. The shadow map's physical handle resolves now
+            // Bindings 7–10 are attached once (they persist across draws — ADR-0020); record_draws
+            // re-binds only per-draw state on top. The maps' physical handles resolve now
             // (assign_physicals has run), the same late-resolve the tonemap pass uses.
             cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
             cmd.bind_uniform_buffer(8, shadow.ubo);
+            cmd.bind_texture(9, graph.physical(local.map), local.sampler);
+            cmd.bind_uniform_buffer(10, local.ubo);
             record_draws(cmd, data, /*bind_material_textures=*/true);
         });
 }

@@ -18,6 +18,12 @@ namespace rime::render {
 // the cascade array texture are both sized by this.
 inline constexpr std::uint32_t kMaxCascades = 4;
 
+// The most local (spot) lights that can cast a shadow in one frame (m10.2). Each takes one layer of
+// the local-shadow depth array and one slot in the local-shadow uniform block; spots past this cap
+// render UNSHADOWED (honest degradation — a priority atlas that evicts by intensity × coverage is
+// the m10.2 fast-follow). 8 is generous for the scenes M10 targets and keeps the array small.
+inline constexpr std::uint32_t kMaxLocalShadows = 8;
+
 struct LightingSettings {
     // Directional cascaded shadow maps (m10.1). Off by default: a caller opts in, and until it does
     // the frame is the byte-identical pre-M10 baseline (the regression bridge). The editor host and
@@ -46,8 +52,22 @@ struct LightingSettings {
 
     // PCF filter radius in shadow-map texels: the half-width of the box the hardware-compare
     // samples are averaged over (a 3×3 grid stepped by this many texels). Bigger = softer edges,
-    // more taps.
+    // more taps. Shared by the directional and local shadows.
     float shadow_pcf_radius = 1.0f;
+
+    // ── Local-light (spot) shadows (m10.2) ──────────────────────────────────────────────────────
+    // A second, independent gate: spot lights cast shadows through their own perspective shadow map
+    // (one array layer each), sampled in the same forward pass as the sun's cascades. Off by
+    // default — a scene with spot lights but this off renders them as unshadowed cones. Requires
+    // shadows_enabled (spot shading rides the shadowed forward shader). The distinguishing feature
+    // is the DESTRUCTIBILITY-AWARE CACHE: a spot's map is re-rendered only when its light moves or
+    // a destruction event (ADR-0032 C2) invalidates the region its frustum covers — see
+    // lighting/local_shadows.hpp and docs/math/shadow-mapping.md §7.
+    bool local_shadows_enabled = false;
+
+    // Per-spot shadow-map resolution (square). One layer of the local-shadow array is this × this;
+    // local maps are usually smaller than cascades (a spot lights a room, not the whole view).
+    std::uint32_t local_shadow_resolution = 1024;
 };
 
 } // namespace rime::render

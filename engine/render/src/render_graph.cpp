@@ -43,11 +43,18 @@ RGTexture RenderGraph::create_texture(const RGTextureDesc& desc) {
     return RGTexture{static_cast<std::uint32_t>(resources_.size() - 1)};
 }
 
-RGTexture RenderGraph::import_texture(rhi::TextureHandle handle, rhi::ResourceState state) {
+RGTexture RenderGraph::import_texture(rhi::TextureHandle handle,
+                                      rhi::ResourceState state,
+                                      rhi::Extent2D extent,
+                                      rhi::Format format,
+                                      std::uint32_t array_layers) {
     Resource r;
     r.imported = true;
     r.physical = handle;
     r.state = state;
+    r.extent = extent; // needed for the viewport/scissor when a pass renders into this
+    r.format = format; // (m10.2's cached shadow array); harmless for a sample-only import
+    r.array_layers = array_layers; // >1 → a layered import (per-layer render targets)
     resources_.push_back(std::move(r));
     return RGTexture{static_cast<std::uint32_t>(resources_.size() - 1)};
 }
