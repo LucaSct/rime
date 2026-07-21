@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The SDF clipmap compose pass (m10.4b, ADR-0032 §2 + §10): stamps ONE instance's cooked
+// signed-distance field into ONE clipmap level's storage image over ONE dirty voxel region, or
+// (in "clear" mode) resets a region to "nothing here yet" before any instance re-stamps it. The
+// CPU side (lighting/sdf_clipmap.cpp) issues one dispatch per (level, dirty-region, instance)
+// triple plus one clear dispatch per (level, dirty-region) — see its header comment for why that
+// granularity (the RHI has no bindless texture array, so N instances really is N dispatches; the
+// cost is measured, not hidden, in docs/math/sdf.md).
+//
+// MIN-BLEND, and why stamp order never matters: `min(a, b)` is commutative (min(a,b) == min(b,a))
+// and associative (min(min(a,b),c) == min(a,min(b,c))), so folding N instances into one field by
+// repeatedly taking the pointwise minimum gives the SAME result no matter what order they arrive
+// in, or whether they arrive across many small dispatches over many frames rather than one big
+// one. That is the property this whole brick's incremental recomposition rests on: re-stamping
+// only the instances that changed, in whatever order invalidation happens to drain them, still
+// converges to "the closest surface any live instance puts at this voxel" — exactly the same
+// answer a from-scratch recompose of every instance would give.
+//
+// Every stored value is R16Snorm: the field is only ever consumed as clamp(distance / band, -1,
+// 1) (docs/math/sdf.md's narrow-band encoding), so a compact, hardware-trilinear-filterable 2-byte
+// channel loses nothing this use needed to keep. Reading AND writing that format through a
+// STORAGE image (not just sampling) is why the RHI needed `shaderStorageImageExtendedFormats`
+// enabled (engine/rhi/src/vulkan/device_vulkan.cpp) — a separate, adjacent question from the
+// depth>1 + Storage + imageStore *combination* the m10.4 spike (tests/rhi/volume_storage_test.cpp)
+// verifies in isolation.
+//
+// No shader-include mechanism exists yet in this engine (see pbr_forward_shadowed.frag's header
+// note), so this pass's own trilinear point-sample is written out in full below rather than
+// calling a shared helper. The MULTI-level sampling + sphere-tracing helpers m10.5/m10.7 will
+// need (sdf_sample/sdf_sphere_trace, walking all three levels) are a different, larger piece of
+// GLSL that this pass does not need (it only ever samples ONE instance's own field, once, at
+// full resolution) — those live in tests/render/shaders/sdf_probe_trace.comp, the shader that
+// actually needs them today (this brick's own analytic proof), with a note for m10.5 to lift them
+// verbatim, and to fold both call sites into a shared sdf.glsl once the include path lands.
+#version 450
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+// The target clipmap level, bound in the GENERAL layout (m10.4 spike): read via imageLoad for the
+// min-blend, written via imageStore. Both directions on a KNOWN-format image (r16_snorm, not
+// `Unknown`) need no additional shader capability beyond the extended-storage-formats one the
+// format itself already requires.
+layout(r16_snorm, set = 0, binding = 0) uniform image3D clipmap;
+
+// The instance's own cooked field (m10.4a), hardware-trilinearly sampled — this is the ONE thing a
+// combined-image-sampler buys over a second storage image: free interpolation between the cook's
+// voxel centres, at the cost of never being writable. In "clear" mode this is bound to a 1x1x1
+// placeholder and never sampled (see the mode branch below); the binding must still be valid
+// (some value attached) because the pipeline's descriptor layout requires every declared binding
+// to be attached before a dispatch, whether or not this invocation's code path reads it.
+layout(set = 0, binding = 1) uniform sampler3D instance_sdf;
+
+// One dispatch's parameters. Mirrors GpuComposeJob in lighting/sdf_clipmap.cpp exactly (256-byte
+// strided slices of one growable buffer — the same per-dispatch-slice pattern
+// CascadedShadowMap/LocalShadowMap use for their per-cascade/per-spot view_proj buffers).
+layout(std140, set = 0, binding = 2) uniform ComposeJob {
+    mat4 local_from_world;       // world position -> this instance's local space (STAMP only)
+    vec4 inst_origin_voxel;      // xyz = instance grid_origin, w = instance voxel_size
+    uvec4 inst_resolution_mode;  // xyz = instance grid resolution, w = 0 clear / 1 stamp
+    vec4 level_origin_voxel;     // xyz = this level's CURRENT world origin, w = its voxel_size
+    ivec4 voxel_offset;          // xyz = this dispatch's base voxel coord within the 64^3 level
+    ivec4 region_size;           // xyz = this dispatch's voxel-range extent (bounds the group)
+    vec4 params;                 // x = level band, y = instance uniform scale, z = instance
+                                  // max_abs_distance (its own decode scale), w unused
+} job;
+
+void main() {
+    // Dispatch groups are rounded UP to whole workgroups (ceil(region_size / 4)), so the tail
+    // group's extra invocations must do nothing rather than touch a voxel past this dispatch's own
+    // range — the same "partial workgroup" guard every storage-image shader in this engine uses
+    // (pattern.comp, volume_stamp.comp).
+    ivec3 local_id = ivec3(gl_GlobalInvocationID.xyz);
+    if (any(greaterThanEqual(local_id, job.region_size.xyz))) {
+        return;
+    }
+    ivec3 voxel = job.voxel_offset.xyz + local_id; // this level's voxel coordinate
+
+    if (job.inst_resolution_mode.w == 0u) {
+        // CLEAR: reset to the saturated (+band) "nothing here yet" value. Recomposing a region
+        // always clears it first (CPU side orders this dispatch before every stamp that touches
+        // the same region) so a voxel no live instance reaches this frame reads as "far away"
+        // rather than keeping a stale minimum from an instance that just left.
+        imageStore(clipmap, voxel, vec4(1.0));
+        return;
+    }
+
+    // STAMP: where in the WORLD is this voxel's centre, and where does that land in the
+    // instance's own local space and then its cooked field's own normalized [0,1]^3 lookup?
+    vec3 world_pos = job.level_origin_voxel.xyz + (vec3(voxel) + 0.5) * job.level_origin_voxel.w;
+    vec3 local_pos = (job.local_from_world * vec4(world_pos, 1.0)).xyz;
+    vec3 uvw = (local_pos - job.inst_origin_voxel.xyz) /
+               (vec3(job.inst_resolution_mode.xyz) * job.inst_origin_voxel.w);
+
+    // Outside the instance's own cooked grid entirely: the CPU side already sized this dispatch to
+    // (dirty region) ∩ (this instance's world bounds, which IS the transform of this same grid —
+    // see SdfClipmap::TrackedInstance's comment), so this should be rare — a voxel right at the
+    // dispatch's own edge, past the box by less than a texel from float rounding. Skipping rather
+    // than letting the sampler's ClampToEdge address mode extrapolate a false "close" reading from
+    // whatever the nearest edge texel holds is the same "err by doing nothing" discipline
+    // LocalShadowMap's frustum-overlap test uses: leaving the clipmap unchanged here is always
+    // safe (some other stamp, or the clear, already established a value), silently trusting an
+    // extrapolated edge value would not be.
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
+        return;
+    }
+
+    // Decode the instance's own sample (its R16Snorm is scaled by ITS OWN max_abs_distance, set at
+    // cook time — a different number from this level's band), then carry it from the instance's
+    // local-space distance into a WORLD-space one. A uniform scale multiplies distances by exactly
+    // that scale factor (SdfClipmap::update_instance rejects anything else outright), so this is
+    // the one and only place scale enters the compose math.
+    float inst_local_dist = texture(instance_sdf, uvw).r * job.params.z;
+    float inst_world_dist = inst_local_dist * job.params.y;
+
+    // Re-encode into THIS level's band, then MIN-BLEND against whatever is already there.
+    float encoded = clamp(inst_world_dist / job.params.x, -1.0, 1.0);
+    float existing = imageLoad(clipmap, voxel).r;
+    imageStore(clipmap, voxel, vec4(min(existing, encoded)));
+}

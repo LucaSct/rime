@@ -101,6 +101,15 @@ struct LightingSettings {
     // this on with shadows off runs the shadowed shader with zero cascades and zero spots, which
     // is arithmetically the baseline (a count-0 shadow loop returns "lit").
     bool clustered_enabled = false;
+
+    // ── The runtime SDF clipmap (m10.4b) ────────────────────────────────────────────────────────
+    // A fourth independent gate. On: SceneRenderer steps its SdfClipmap every frame (recentring it
+    // on the camera and recomposing whatever changed) — the field m10.5's DDGI probes will
+    // sphere-trace through. Off (the default): SceneRenderer never touches it at all, so this
+    // brick adds zero GPU work and the frame is exactly the pre-M10 baseline — nothing samples the
+    // clipmap yet (m10.5 is the first consumer; this flag exists so that consumer has an on/off
+    // switch to gate against from day one, matching every other M10 technique's discipline).
+    bool sdf_clipmap_enabled = false;
 };
 
 } // namespace rime::render
