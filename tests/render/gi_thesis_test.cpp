@@ -11,14 +11,20 @@
 // No golden images — every claim is a stated, measured margin (ADR-0032 §11):
 //
 //  (1) THE THESIS. A floor patch sits in the shadow of a suspended slab (a real cast shadow,
-//      CSM-verified) — its only light is DDGI's indirect term, bounced off the slab's own sunlit
-//      top and the sunlit floor around it. With DDGI on that patch reads dim-but-clearly-nonzero;
-//      with DDGI off (same converged atlas, shader-level toggle — the ADR-0032 §11 discipline) it
-//      reads the flat ambient floor. Then the slab is REMOVED (SdfClipmap::remove_instance +
-//      DdgiProbes::invalidate, the fast-tracked hysteresis this brick adds), a small, STATED number
-//      of updates run, and the SAME patch is asserted materially brighter — direct sun now reaches
-//      it — AND the (on − off) delta is asserted to have genuinely MOVED, not just the huge new
-//      direct term swamping an unchanged indirect one.
+//      CSM-verified) — its only light is indirect. Since m10.6 the two configs are two whole
+//      renderers, not a term toggled on top of one: DDGI OFF is M5.6's flat ambient constant;
+//      DDGI ON REPLACES that constant with the traced field (m10.6 retires the placeholder rather
+//      than double-counting it — see the shader, and pbr.md's indirect section). With the wall
+//      present those two AGREE at this patch to within a quantization step, because the patch sees
+//      mostly open SKY and DDGI's escaped rays return exactly that same ambient as their sky term
+//      (ddgi_trace.comp) — in the open-sky limit the field MUST reduce to the constant it replaced.
+//      Then the slab is REMOVED (SdfClipmap::remove_instance + DdgiProbes::invalidate, the
+//      fast-tracked hysteresis this brick adds), a small STATED number of updates run, and two
+//      things are asserted about the SAME patch: it is materially brighter (the shadow moved —
+//      direct sun reaches it, a CSM effect present with DDGI on OR off), AND the isolated indirect
+//      term (on − off) has risen from ~0 to a clearly-resolved positive value — the newly-open
+//      sunlit floor's bounce, which the flat constant can never express. The second half is the
+//      one only GI can produce; the constant-ambient renderer's indirect term is nailed in place.
 //
 //  (2) THE LEAK GUARD. A probe on the lit side of a standing wall must not brighten a fragment on
 //      the sealed, dark side, even though that bright probe sits in the fragment's own 8-probe
@@ -311,11 +317,15 @@ TEST_CASE("gi thesis: breaking a wall relights its shadow AND the indirect field
 
     REQUIRE(control_lit > 0.05f); // sanity: the direct pipeline really is lighting something
 
-    // (1a) The indirect term is real: DDGI-on reads clearly above DDGI-off at the shadowed patch.
-    // 20% is a generous margin over ray-sampling noise (64 rays/probe, an 8-probe trilinear blend)
-    // while still catching "the shader never actually adds the term" outright.
-    CHECK(before_on > before_off * 1.2f);
-    // And it is genuinely DIM relative to the sunlit control, not a shading bug that lit the patch
+    // (1a) In the shadow (no direct sun), DDGI-on and DDGI-off AGREE to within a quantization step:
+    // the patch sees mostly open sky, and DDGI's escaped rays hand back precisely SceneRenderer's
+    // ambient as their sky term (ddgi_trace.comp), so post-m10.6 the traced field reduces to the
+    // exact constant it replaced. Measured |on - off| ~= 1.5e-5 (a single 16-bit LSB). This is a
+    // CORRECTNESS property, not a coincidence — and it is the baseline the wall-break must move
+    // away from below, which is what makes the divergence there attributable to the new geometry
+    // alone.
+    CHECK(std::fabs(before_on - before_off) < 0.25f * before_off);
+    // And the patch is genuinely DIM relative to the sunlit control, not a shading bug that lit it
     // fully — this is still the shadow.
     CHECK(before_on < control_lit * 0.5f);
 
@@ -348,37 +358,34 @@ TEST_CASE("gi thesis: breaking a wall relights its shadow AND the indirect field
 
     // (2) THE PAYOFF, both halves.
     //
-    // (a) It brightened: with the wall gone the sun reaches this patch directly, so BOTH the
-    // ddgi-on and ddgi-off readings should jump well past their "before" values — a wide 3x margin,
-    // because the direct term dwarfs the indirect one once it is unshadowed.
+    // (a) The shadow moved: with the slab gone its hard CSM shadow lifts and direct sun floods the
+    // patch. BOTH configs jump well past their "before" values — the shadow map is
+    // DDGI-independent, so this half shows up with DDGI on OR off — a wide 3x margin, because the
+    // returning direct term dwarfs everything.
     CHECK(after_on > before_on * 3.0f);
     CHECK(after_off > before_off * 3.0f);
 
-    // (b) The indirect part itself moved — not just the direct term. Isolate DDGI's own
-    // contribution as (on - off) at each moment and show it is NOT the same number before and
-    // after. Measured: delta_before ~= 0.0160, delta_after ~= 0.0190 — a real ~19% INCREASE, not
-    // the decrease a "the slab's own sunlit top was the dominant reflector, and now it's gone"
-    // story alone would predict. The more complete explanation (and the one the numbers actually
-    // support): probes near this patch were never reading the slab's top in isolation — the same
-    // rays that can reach it can also reach the open, sunlit floor around the slab (docs/math/
-    // ddgi.md §12's own "surroundings", not just the wall, was always the honest framing). With
-    // the slab gone, MORE of the hemisphere those probes look into is now open, sunlit floor
-    // rather than the slab's own (comparatively small, distant) top face or its unlit underside —
-    // so the indirect field genuinely got a bit brighter, not dimmer. Either direction would have
-    // been an honest proof that the field re-traced the new geometry; this is simply the one this
-    // scene's specific geometry produces, checked (not merely asserted) below.
-    const float delta_before = before_on - before_off;
-    const float delta_after = after_on - after_off;
-    MESSAGE("indirect delta: before=" << delta_before << " after=" << delta_after);
-    // (1a) restated as a delta, for the comparison below to read against.
-    CHECK(delta_before > 0.0f);
-    // The run is fully deterministic (DdgiProbes' ray-rotation RNG is a fixed-seed splitmix64, and
-    // this test constructs a fresh SceneRenderer/DdgiProbes each run — confirmed bit-identical
-    // across repeated runs), so the ~19% measured shift is a stable property of this scene, not
-    // shot noise to average away. 12% is comfortably below the measured move while still being
-    // far above anything a "the shader forgot to re-read the atlas" bug could produce (that bug
-    // would leave delta_after == delta_before exactly, a 0% move).
-    CHECK(std::fabs(delta_after - delta_before) > 0.12f * delta_before);
+    // (b) The bounced light updated — the half ONLY DDGI can express. Isolate the indirect term as
+    // (on - off): the two configs differ solely in whether the flat ambient is replaced by the
+    // traced field (their direct sun + CSM paths are byte-identical), so this difference is exactly
+    // [traced indirect] - [flat ambient]. With the wall present it was ~0 (1a: they agreed). With
+    // the wall gone the newly-unoccluded sunlit floor bounces real light the constant never
+    // modeled, and the difference climbs to a clearly-resolved positive value. Measured: ~0 ->
+    // ~+0.0029 (about 190 LSB at 16-bit readback). The constant-ambient renderer CANNOT produce
+    // this — its indirect term is nailed to the same number before and after; that is the entire
+    // reason GI exists. This rise, appearing exactly when the geometry opened, IS "the bounced
+    // light updates when a wall falls."
+    const float gi_before = before_on - before_off; // ~0: the field == the ambient it replaced
+    const float gi_after = after_on - after_off;    // >0: the field now exceeds it (real bounce)
+    MESSAGE("isolated GI term (on-off): before=" << gi_before << " after=" << gi_after);
+    // The run is fully deterministic (DdgiProbes' ray-rotation RNG is fixed-seed splitmix64 and
+    // this test builds a fresh SceneRenderer each run — bit-identical across repeats), so these are
+    // stable properties, not shot noise. Before: the field matched the ambient (within a few 16-bit
+    // LSBs).
+    CHECK(std::fabs(gi_before) < 0.0003f);
+    // After: it rose a clearly-resolved amount ABOVE that ambient floor — bounce ADDED, not
+    // occlusion removed. 0.0015 is ~half the measured +0.0029, far above the +-1 LSB before-noise.
+    CHECK(gi_after > 0.0015f);
 }
 
 TEST_CASE("gi thesis: Chebyshev visibility stops a lit probe leaking through a wall onto a dark "
@@ -549,4 +556,185 @@ TEST_CASE("gi thesis: Chebyshev visibility stops a lit probe leaking through a w
     // depend on naive_leak_estimate alone being well-calibrated: the fragment stays close to the
     // flat ambient baseline, not measurably lit.
     CHECK(frag_on < frag_off * 1.6f);
+}
+
+TEST_CASE(
+    "gi thesis II: a wall falls between a sunlit room and a covered dark one — the dark "
+    "room's floor lights up from BOUNCE ALONE, no direct light reaching it (m10.6, ADR-0032)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the two-room walls-fall proof");
+        return;
+    }
+
+    constexpr std::uint32_t kSize = 128;
+
+    MeshRegistry meshes(*device);
+    const MeshId floor_mesh = meshes.add(make_plane(4.0f), "two-room-floor");
+    const MeshId cube_mesh = meshes.add(make_cube(1.0f), "two-room-cube");
+
+    MaterialRegistry materials;
+    PbrMaterialDesc md{};
+    md.base_color[0] = md.base_color[1] = md.base_color[2] = 0.8f;
+    md.metallic = 0.0f;
+    md.roughness = 1.0f;
+    const MaterialId mat = materials.add(md);
+
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_ambient(0.02f, 0.02f, 0.02f);
+
+    // ── The scene (a walls-fall variant of the leak-guard rig above; the ambient retirement it
+    // exercises is derived in docs/math/pbr.md §6.1). A
+    // covered "dark room" — a ceiling over it blocks the purely VERTICAL sun, the same sealed-box
+    // mechanism m10.5a proved — sits beside an open, sunlit floor, the two sealed apart by a
+    // dividing WALL. The crucial property: the dark room gets NO direct light in EITHER state,
+    // because the ceiling blocks the sun whether or not the side wall stands. So when the wall
+    // falls the only thing that can brighten the dark room's floor is bounce from the sunlit floor
+    // next door. The slab thesis above had GI as a small correction to a direct-light-dominated
+    // change (the CSM shadow lifting); here direct light contributes nothing to the change, so the
+    // rise is GI, undiluted — and the DDGI-off control, the flat constant that GI replaced, must
+    // stay put across the break. Geometry reused verbatim from the leak-guard test so its
+    // probe-snap analysis (probe 2 lands at world x=1.0) carries over unchanged.
+    // ────────────────────────────────────────────
+    const core::Vec3 floor_half{3.0f, 0.15f, 2.0f};
+    const core::Vec3 floor_center{1.5f, -0.15f, 0.0f}; // top at y=0, x in [-1.5, 4.5]
+    const core::Vec3 ceiling_half{1.4f, 0.15f, 2.0f};
+    const core::Vec3 ceiling_center{-0.2f, 2.15f, 0.0f}; // bottom y=2.0, covers x in [-1.6, 1.2]
+    const core::Vec3 wall_half{0.15f, 1.3f, 1.15f};
+    const core::Vec3 wall_center{1.25f, 1.0f, 0.0f}; // x in [1.1, 1.4] — the divider that falls
+    const std::uint64_t kFloorSdf = 1, kCeilingSdf = 2, kWallSdf = 3;
+
+    renderer.sdf_clipmap().update_instance(
+        kFloorSdf, build_box_sdf(floor_half), core::mat4_translation(floor_center));
+    renderer.sdf_clipmap().update_instance(
+        kCeilingSdf, build_box_sdf(ceiling_half), core::mat4_translation(ceiling_center));
+    renderer.sdf_clipmap().update_instance(
+        kWallSdf, build_box_sdf(wall_half), core::mat4_translation(wall_center));
+
+    core::Transform light_tf{};
+    light_tf.rotation =
+        core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f); // straight down
+
+    // Camera inside the dark room, looking straight down at a floor fragment right by the divider —
+    // the spot that receives the most bounce once it falls. x=1.0 is under the ceiling (x<1.2) and,
+    // by the leak test's own snap analysis, is exactly where DDGI probe 2 lands, so the fragment
+    // sits right on a probe.
+    const float frag_x = 1.0f;
+    core::Transform cam_tf{};
+    cam_tf.translation = {frag_x, 1.9f, 0.0f};
+    cam_tf.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+
+    const core::Mat4 view_proj =
+        core::perspective(0.9f, 1.0f, 0.1f, 10.0f) * core::inverse(core::to_matrix(cam_tf));
+    const test::Pixel frag_px = project(view_proj, {frag_x, 0.0f, 0.0f}, kSize);
+    REQUIRE(frag_px.x >= 0.0f);
+    REQUIRE(frag_px.x < static_cast<float>(kSize));
+    REQUIRE(frag_px.y >= 0.0f);
+    REQUIRE(frag_px.y < static_cast<float>(kSize));
+
+    LightingSettings ls;
+    ls.shadows_enabled = true;
+    ls.cascade_count = 2;
+    ls.shadow_map_resolution = 512;
+    ls.sdf_clipmap_enabled = true;
+    ls.ddgi_enabled = true;
+    ls.ddgi_probe_count_x = 5;
+    ls.ddgi_probe_count_y = 1;
+    ls.ddgi_probe_count_z = 1;
+    ls.ddgi_probe_spacing = 0.5f;
+    ls.ddgi_rays_per_probe = 64;
+    ls.ddgi_hysteresis = 0.7f;
+
+    const auto populate = [&](ecs::World& world, bool with_wall) {
+        register_render_components(world);
+        (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{floor_mesh}, MaterialRef{mat});
+        (void)spawn_box(world, cube_mesh, mat, ceiling_center, ceiling_half);
+        if (with_wall) {
+            (void)spawn_box(world, cube_mesh, mat, wall_center, wall_half);
+        }
+        (void)world.spawn_with(ecs::WorldTransform{light_tf},
+                               DirectionalLight{1.0f, 1.0f, 1.0f, 3.0f});
+        (void)world.spawn_with(ecs::WorldTransform{cam_tf}, Camera{0.9f, 0.1f, 10.0f, true});
+    };
+
+    const auto step = [&](ecs::World& world, bool ddgi_on) {
+        ls.ddgi_enabled = ddgi_on;
+        renderer.set_lighting(ls);
+        RenderGraph graph(*device);
+        graph.reset();
+        const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize}, true);
+        REQUIRE(out.hdr.is_valid());
+        graph.export_texture(out.hdr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        return decode_hdr(
+            read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
+    };
+    const auto lum = [&](const HdrImage& img) {
+        return img.luminance(static_cast<std::uint32_t>(frag_px.x),
+                             static_cast<std::uint32_t>(frag_px.y));
+    };
+
+    // Converge the dark room with the wall up (20 updates ~ steady state at h=0.7).
+    ecs::World walled;
+    populate(walled, /*with_wall=*/true);
+    for (int i = 0; i < 20; ++i) {
+        (void)step(walled, /*ddgi_on=*/true);
+    }
+    const float before_on = lum(step(walled, /*ddgi_on=*/true));
+    const float before_off = lum(step(walled, /*ddgi_on=*/false));
+    MESSAGE("BEFORE (wall up): dark-room floor ddgi-on=" << before_on
+                                                         << " ddgi-off=" << before_off);
+
+    // The dark room really is dark with the wall up: its floor sits at (or below) the flat ambient
+    // floor in both configs — the ceiling blocks the sun, the wall blocks the bounce.
+    CHECK(before_on < 0.05f);
+
+    // ── Break the wall: remove its SDF twin and its visual mesh, and invalidate the DDGI region so
+    // the probes fast-track instead of riding out the full hysteresis. ───────────────────────────
+    renderer.sdf_clipmap().remove_instance(kWallSdf);
+    const WorldAabb wall_region{wall_center - wall_half, wall_center + wall_half};
+    renderer.invalidate_ddgi_region(wall_region);
+    ecs::World open;
+    populate(open, /*with_wall=*/false);
+
+    constexpr int kPostBreak = 6;
+    float after_on = 0.0f;
+    for (int i = 0; i < kPostBreak; ++i) {
+        after_on = lum(step(open, /*ddgi_on=*/true));
+    }
+    const float after_off = lum(step(open, /*ddgi_on=*/false));
+    MESSAGE("AFTER (" << kPostBreak << " updates, wall gone): dark-room floor ddgi-on=" << after_on
+                      << " ddgi-off=" << after_off);
+
+    // (a) The dark room's floor LIT UP under GI: with the divider gone, the sunlit floor next door
+    // bounces real light onto it. Measured: 0.00068 -> 0.0059, an ~8.6x rise (0.0052 absolute,
+    // about 340 LSB at 16-bit — a resolved, deterministic signal). The margins sit well inside
+    // that.
+    const float on_rise = after_on - before_on;
+    MESSAGE("GI rise on the dark floor: " << on_rise << " (from " << before_on << ")");
+    CHECK(after_on > before_on * 3.0f);
+    CHECK(on_rise > 0.003f);
+
+    // (b) And it was BOUNCE, not direct light. The DDGI-off control — the same scene lit by the
+    // flat ambient constant GI replaced — is BIT-IDENTICAL across the break (0.0159912 both times,
+    // exactly 0.8 * the 0.02 ambient), because the ceiling blocks the vertical sun whether or not
+    // the side wall stands: the direct term at this fragment is zero throughout. The
+    // constant-ambient renderer is blind to the fallen wall; only the traced field sees it. This is
+    // the milestone sentence with GI as the ENTIRE signal, not a correction to a
+    // direct-light-dominated change like the slab test.
+    CHECK(std::fabs(after_off - before_off) <
+          1.0e-4f);            // control bit-flat: direct light never moved
+    CHECK(before_off < 0.02f); // and is pure ambient — zero direct light here
+    // A closing honesty note, the leak guard's point restated dynamically: even lit by bounce the
+    // enclosed room stays DIMMER than the flat constant would have painted it (0.0059 < 0.016). GI
+    // does not invent the fill the constant assumed — it computes the real, smaller amount that
+    // physically arrives. That is why retiring the constant (m10.6) is a correctness change, and
+    // why this test measures the rise against the room's OWN sealed self, not against the ambient
+    // floor.
+    CHECK(after_on < after_off);
 }
