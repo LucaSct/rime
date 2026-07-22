@@ -357,27 +357,35 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     if (lighting_.sdf_clipmap_enabled) {
         sync_sdf_instances(world);
         sdf_clipmap_.add(graph, camera_pos);
+    }
 
-        // DDGI probes (m10.5a): a fifth, independent gate, NESTED inside sdf_clipmap_enabled —
-        // DDGI sphere-traces the SAME field this block just stepped, so it structurally cannot run
-        // against a clipmap nobody is updating (settings.hpp's "requires sdf_clipmap_enabled",
-        // made a code fact rather than only a documented expectation).
-        if (lighting_.ddgi_enabled) {
-            DdgiLightingInputs ddgi_inputs{};
-            ddgi_inputs.has_sun = ndir > 0;
-            if (ndir > 0) {
-                ddgi_inputs.sun_direction = core::Vec3{fu.dir_lights[0].direction[0],
-                                                       fu.dir_lights[0].direction[1],
-                                                       fu.dir_lights[0].direction[2]};
-                ddgi_inputs.sun_radiance[0] = fu.dir_lights[0].radiance[0];
-                ddgi_inputs.sun_radiance[1] = fu.dir_lights[0].radiance[1];
-                ddgi_inputs.sun_radiance[2] = fu.dir_lights[0].radiance[2];
-            }
-            ddgi_inputs.sky_radiance[0] = ambient_[0];
-            ddgi_inputs.sky_radiance[1] = ambient_[1];
-            ddgi_inputs.sky_radiance[2] = ambient_[2];
-            ddgi_.add(graph, sdf_clipmap_, camera_pos, ddgi_inputs, lighting_);
+    // DDGI probes (m10.5a trace-and-store, m10.5b consume): a fifth, independent gate, NESTED
+    // inside sdf_clipmap_enabled — DDGI sphere-traces the SAME field the block above steps, so it
+    // structurally cannot run against a clipmap nobody is updating (settings.hpp's "requires
+    // sdf_clipmap_enabled", made a code fact rather than only a documented expectation). Either
+    // way, a DdgiBinding always comes out the other side (the real one, or empty_binding's DDGI-off
+    // placeholder) — the shadowed pipeline's binding 14/15/16 must be valid regardless of whether
+    // DDGI is actually running this frame, exactly the shadow/local/cluster bindings' own
+    // discipline.
+    const bool has_ddgi = lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled;
+    DdgiBinding ddgi_binding;
+    if (has_ddgi) {
+        DdgiLightingInputs ddgi_inputs{};
+        ddgi_inputs.has_sun = ndir > 0;
+        if (ndir > 0) {
+            ddgi_inputs.sun_direction = core::Vec3{fu.dir_lights[0].direction[0],
+                                                   fu.dir_lights[0].direction[1],
+                                                   fu.dir_lights[0].direction[2]};
+            ddgi_inputs.sun_radiance[0] = fu.dir_lights[0].radiance[0];
+            ddgi_inputs.sun_radiance[1] = fu.dir_lights[0].radiance[1];
+            ddgi_inputs.sun_radiance[2] = fu.dir_lights[0].radiance[2];
         }
+        ddgi_inputs.sky_radiance[0] = ambient_[0];
+        ddgi_inputs.sky_radiance[1] = ambient_[1];
+        ddgi_inputs.sky_radiance[2] = ambient_[2];
+        ddgi_binding = ddgi_.add(graph, sdf_clipmap_, camera_pos, ddgi_inputs, lighting_);
+    } else {
+        ddgi_binding = ddgi_.empty_binding(graph);
     }
 
     // ── Declare the frame ─────────────────────────────────────────────────────────────────
@@ -400,14 +408,16 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         depth_prepass_.add(graph, depth, data);
     // The M10 forward path (ADR-0032 §11 regression bridge) runs only when a feature actually has
     // something to do: shadows enabled with a directional light (m10.1 cascades) and/or spot lights
-    // (m10.2), or clustering enabled with point lights to cull (m10.3). Otherwise the
+    // (m10.2), clustering enabled with point lights to cull (m10.3), or DDGI actually running
+    // (m10.5b) — a scene with DDGI on but no shadows/clusters still needs the shadowed shader,
+    // since that is the only pipeline that samples the atlases at all. Otherwise the
     // byte-identical M5.6 forward path.
     const bool has_sun = lighting_.shadows_enabled && ndir > 0;
     // Spot shadows ride the shadowed shader, so they need the shadow gate too (m10.2).
     const bool has_local =
         lighting_.shadows_enabled && lighting_.local_shadows_enabled && !scene.spot_lights.empty();
     const bool has_clusters = lighting_.clustered_enabled && !scene.point_lights.empty();
-    if (has_sun || has_local || has_clusters) {
+    if (has_sun || has_local || has_clusters || has_ddgi) {
         // The cascade binding: the real fit when there is a sun, else a valid count-0 placeholder
         // so the shadowed pipeline's binding 7/8 is always satisfied (a spot-only scene).
         ShadowBinding shadow;
@@ -445,7 +455,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         } else {
             clusters = clustered_.empty_binding(graph);
         }
-        forward_.add_shadowed(graph, hdr, depth, use_depth_prepass, data, shadow, local, clusters);
+        forward_.add_shadowed(
+            graph, hdr, depth, use_depth_prepass, data, shadow, local, clusters, ddgi_binding);
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }

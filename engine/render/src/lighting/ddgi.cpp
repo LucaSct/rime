@@ -29,6 +29,20 @@ constexpr float kPi = 3.14159265358979f;
 // cluster_cull.comp — spelled out here rather than left as a bare number at the call site).
 constexpr std::uint32_t kTraceGroupSize = 64;
 
+// ── Destruction-reactive hysteresis (m10.5b, docs/math/ddgi.md §8/§11) ──────────────────────────
+// A probe invalidate() has touched rides this MUCH lower hysteresis for its next few updates
+// instead of the steady-state settings.ddgi_hysteresis (0.97 by default). Halving the stored
+// value's remaining influence every update (rather than keeping ~97% of it) is what turns a
+// ~30-frame time constant into a handful of frames: after kFastTrackUpdates updates, the
+// pre-invalidation history's weight has decayed to kFastTrackHysteresis^kFastTrackUpdates ≈
+// 0.5^5 ≈ 3% of its original value — "materially converged," not merely "started to move." Both
+// numbers are deliberately conservative (a bigger drop, or more updates, converges faster still)
+// rather than tuned to a razor's edge; docs/math/ddgi.md §8 derives the decay this predicts and
+// tests/render/ddgi_test.cpp checks it against that prediction the same way m10.5a's own
+// convergence test does.
+constexpr float kFastTrackHysteresis = 0.5f;
+constexpr std::uint32_t kFastTrackUpdates = 5;
+
 float sign_not_zero(float v) noexcept {
     return v >= 0.0f ? 1.0f : -1.0f;
 }
@@ -172,6 +186,43 @@ DdgiProbes::DdgiProbes(rhi::Device& device) : device_(device) {
     smd.debug_name = "ddgi-clipmap-sampler";
     clipmap_sampler_ = device.create_sampler(smd);
 
+    // m10.5b: the forward pass's own sampler for BOTH atlases — Linear is what makes the border
+    // ring (ddgi.hpp's kDdgiTileBorder) actually fix the octahedral seam for a sampled fragment,
+    // exactly as it does for the trace pass's clipmap_sampler_ above. Confirmed on lavapipe that
+    // RG32Float (the visibility atlas's format) reports FILTER_LINEAR support identically to
+    // RGBA16Float — not a given for a 32-bit-per-channel format on real hardware, but true here.
+    rhi::SamplerDesc asd{};
+    asd.mag_filter = rhi::Filter::Linear;
+    asd.min_filter = rhi::Filter::Linear;
+    asd.address_mode = rhi::AddressMode::ClampToEdge;
+    asd.debug_name = "ddgi-atlas-sampler";
+    atlas_sampler_ = device.create_sampler(asd);
+
+    // The DDGI-off placeholder pair: 1x1, format-matched to the real atlases so the shadowed
+    // pipeline's fixed sampler2D bindings are always satisfied regardless of whether DDGI ever
+    // ran. Zero-initialized and left in ShaderRead by write_texture's own post-condition (the same
+    // reasoning ensure_atlases uses below for the real atlases' first clear) — never sampled for
+    // real content (the shader's `enabled` flag gates that), so their exact value never matters.
+    {
+        rhi::TextureDesc did{};
+        did.extent = {1, 1};
+        did.format = rhi::Format::RGBA16Float;
+        did.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+        did.debug_name = "ddgi-dummy-irradiance";
+        dummy_irradiance_ = device.create_texture(did);
+        const std::uint16_t zero_half4[4] = {0, 0, 0, 0};
+        device.write_texture(dummy_irradiance_, zero_half4, sizeof(zero_half4));
+
+        rhi::TextureDesc dvd{};
+        dvd.extent = {1, 1};
+        dvd.format = rhi::Format::RG32Float;
+        dvd.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+        dvd.debug_name = "ddgi-dummy-visibility";
+        dummy_visibility_ = device.create_texture(dvd);
+        const float zero_float2[2] = {0.0f, 0.0f};
+        device.write_texture(dummy_visibility_, zero_float2, sizeof(zero_float2));
+    }
+
     rhi::BufferDesc lb{};
     lb.size = sizeof(GpuSdfClipmapLevels);
     lb.usage = rhi::BufferUsage::Uniform;
@@ -202,19 +253,33 @@ DdgiProbes::DdgiProbes(rhi::Device& device) : device_(device) {
     hb.memory = rhi::MemoryUsage::CpuToGpu;
     hb.debug_name = "ddgi-hysteresis";
     hysteresis_buffer_ = device.create_buffer(hb);
+
+    // m10.5b: the forward pass's sample-time uniform block (GpuDdgiSampleParams) — written by
+    // BOTH add() (the real lattice + enabled=1) and empty_binding() (enabled=0), so it needs to
+    // exist before either can run.
+    rhi::BufferDesc spd{};
+    spd.size = sizeof(GpuDdgiSampleParams);
+    spd.usage = rhi::BufferUsage::Uniform;
+    spd.memory = rhi::MemoryUsage::CpuToGpu;
+    spd.debug_name = "ddgi-sample-params";
+    sample_params_ubo_ = device.create_buffer(spd);
 }
 
 DdgiProbes::~DdgiProbes() {
+    device_.destroy(sample_params_ubo_);
     if (ray_buffer_.is_valid())
         device_.destroy(ray_buffer_);
     device_.destroy(hysteresis_buffer_);
     device_.destroy(blend_params_ubo_);
     device_.destroy(trace_params_ubo_);
     device_.destroy(clipmap_levels_ubo_);
+    device_.destroy(dummy_visibility_);
+    device_.destroy(dummy_irradiance_);
     if (visibility_atlas_.is_valid())
         device_.destroy(visibility_atlas_);
     if (irradiance_atlas_.is_valid())
         device_.destroy(irradiance_atlas_);
+    device_.destroy(atlas_sampler_);
     device_.destroy(clipmap_sampler_);
     device_.destroy(blend_visibility_pipeline_);
     device_.destroy(blend_visibility_shader_);
@@ -325,11 +390,11 @@ core::Mat4 DdgiProbes::next_ray_rotation() noexcept {
     return core::to_mat4(core::quat_from_axis_angle(axis, angle));
 }
 
-void DdgiProbes::add(RenderGraph& graph,
-                     SdfClipmap& clipmap,
-                     core::Vec3 camera_pos,
-                     const DdgiLightingInputs& lighting,
-                     const LightingSettings& settings) {
+DdgiBinding DdgiProbes::add(RenderGraph& graph,
+                            SdfClipmap& clipmap,
+                            core::Vec3 camera_pos,
+                            const DdgiLightingInputs& lighting,
+                            const LightingSettings& settings) {
     stats_ = DdgiStats{};
 
     const std::uint32_t count_x = std::max<std::uint32_t>(settings.ddgi_probe_count_x, 1u);
@@ -368,10 +433,40 @@ void DdgiProbes::add(RenderGraph& graph,
         // history for probes that land at the same world position across the shift is the natural
         // follow-up optimization, deferred until a profile asks for it (docs/math/ddgi.md §6).
         primed_.assign(total_probes, false);
+        // m10.5b: a shifted lattice's indices no longer name the same world-space probes, so any
+        // pending fast-track (indexed by the OLD lattice) would fast-track the wrong points in
+        // space — drop it along with the primed history it is paired with.
+        fast_track_remaining_.assign(total_probes, 0);
         round_robin_cursor_ = 0;
         stats_.grid_shifted = true;
     } else if (primed_.size() != total_probes) {
         primed_.assign(total_probes, false); // defensive: dims changed without origin moving
+        fast_track_remaining_.assign(total_probes, 0);
+    }
+
+    // ── Destruction-reactive hysteresis (m10.5b, C2) — drain invalidate()'s queue ────────────
+    // Every pending region marks any probe within one lattice SPACING of it (an "err broad"
+    // expansion, the same conservatism LocalShadowMap's frustum-AABB test uses for its own
+    // invalidate()): a probe sits AT a lattice point, not a cell centre, so a destruction event's
+    // AABB landing anywhere inside the cell between two probes must still catch BOTH of that
+    // cell's corners, not just whichever corner the event's own (typically tight) box happens to
+    // overlap. This is deferred to here (not done inside invalidate() itself) because add() is the
+    // first place the CURRENT lattice shape (origin_, spacing, counts) is actually known —
+    // invalidate() may be called before the lattice has ever been placed at all.
+    if (!pending_regions_.empty()) {
+        const core::Vec3 pad{spacing, spacing, spacing};
+        for (const WorldAabb& region : pending_regions_) {
+            const core::Vec3 lo = region.min - pad;
+            const core::Vec3 hi = region.max + pad;
+            for (std::uint32_t i = 0; i < total_probes; ++i) {
+                const core::Vec3 p = ddgi_probe_position(i, origin_, spacing, count_x, count_y);
+                if (p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y && p.z >= lo.z &&
+                    p.z <= hi.z) {
+                    fast_track_remaining_[i] = kFastTrackUpdates;
+                }
+            }
+        }
+        pending_regions_.clear();
     }
 
     const std::uint32_t probes_per_row = count_x * count_y;
@@ -387,17 +482,30 @@ void DdgiProbes::add(RenderGraph& graph,
 
     // Per-probe effective hysteresis this update: 0 snaps straight to this frame's estimate (a
     // probe's first-ever update, never blended with the atlas's initial zero — see the header's
-    // "newly_primed" note); otherwise the configured steady-state value.
+    // "newly_primed" note); a probe invalidate() touched uses kFastTrackHysteresis for its next
+    // kFastTrackUpdates updates (m10.5b); otherwise the configured steady-state value.
     std::vector<float> hysteresis(probes_this_update);
+    std::uint32_t fast_tracked_this_update = 0;
     for (std::uint32_t i = 0; i < probes_this_update; ++i) {
         const std::uint32_t global = (round_robin_base + i) % total_probes;
         const bool was_primed = primed_[global];
-        hysteresis[i] = was_primed ? settings.ddgi_hysteresis : 0.0f;
         if (!was_primed) {
+            hysteresis[i] = 0.0f;
             ++stats_.newly_primed;
             primed_[global] = true;
+            // A first-ever update already snaps straight to this update's own estimate — there is
+            // no stale history left for a fast-track to shake off, so any pending budget for a
+            // probe that got primed and invalidated in the same stretch is spent, not saved.
+            fast_track_remaining_[global] = 0;
+        } else if (fast_track_remaining_[global] > 0) {
+            hysteresis[i] = kFastTrackHysteresis;
+            --fast_track_remaining_[global];
+            ++fast_tracked_this_update;
+        } else {
+            hysteresis[i] = settings.ddgi_hysteresis;
         }
     }
+    stats_.fast_tracked = fast_tracked_this_update;
     device_.write_buffer(hysteresis_buffer_, hysteresis.data(), hysteresis.size() * sizeof(float));
 
     const GpuSdfClipmapLevels levels = clipmap.gpu_levels();
@@ -537,6 +645,46 @@ void DdgiProbes::add(RenderGraph& graph,
 
     stats_.probes_updated = probes_this_update;
     stats_.rays_traced = ray_count;
+
+    // ── m10.5b: the sample-time binding the forward pass consumes ────────────────────────────
+    // `irradiance_rg`/`visibility_rg` are THIS frame's graph handles for the same two atlases the
+    // blend passes above just wrote (imported once, above) — reusing them (rather than importing
+    // a SECOND time) is what gives the forward pass's sampled-read a real dependency edge on those
+    // writes, so the graph orders it after them and the fragment shader sees THIS update's data.
+    GpuDdgiSampleParams sp{};
+    sp.grid_origin_spacing[0] = origin_.x;
+    sp.grid_origin_spacing[1] = origin_.y;
+    sp.grid_origin_spacing[2] = origin_.z;
+    sp.grid_origin_spacing[3] = spacing;
+    sp.grid_dims_perrow[0] = count_x;
+    sp.grid_dims_perrow[1] = count_y;
+    sp.grid_dims_perrow[2] = count_z;
+    sp.grid_dims_perrow[3] = probes_per_row;
+    sp.enabled_pad[0] = 1u;
+    device_.write_buffer(sample_params_ubo_, &sp, sizeof(sp));
+
+    return DdgiBinding{irradiance_rg, visibility_rg, sample_params_ubo_, atlas_sampler_};
+}
+
+DdgiBinding DdgiProbes::empty_binding(RenderGraph& graph) {
+    // enabled=0 is the ONLY thing that matters here (ADR-0032 §11): the shader's own `if (enabled)`
+    // gate is what makes DDGI-off byte-identical to the M5.6 baseline, not whatever the dummy
+    // atlases happen to contain. The rest of the block is left zeroed — a shader that (incorrectly)
+    // read it anyway would at worst index atlas texel (0,0) of a 1x1 dummy, never out of bounds.
+    GpuDdgiSampleParams sp{};
+    sp.enabled_pad[0] = 0u;
+    device_.write_buffer(sample_params_ubo_, &sp, sizeof(sp));
+    // Both dummies sit permanently in ShaderRead (write_texture's own post-condition at
+    // construction, never touched again) — import at that state, exactly the dummy_shadow_array_
+    // pattern SceneRenderer's own shadow empty_binding()s already use.
+    return DdgiBinding{graph.import_texture(dummy_irradiance_, rhi::ResourceState::ShaderRead),
+                       graph.import_texture(dummy_visibility_, rhi::ResourceState::ShaderRead),
+                       sample_params_ubo_,
+                       atlas_sampler_};
+}
+
+void DdgiProbes::invalidate(const WorldAabb& region) {
+    pending_regions_.push_back(region);
 }
 
 rhi::Extent2D DdgiProbes::irradiance_atlas_extent() const noexcept {

@@ -7,24 +7,40 @@
 
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
+#include "rime/render/lighting/local_shadows.hpp" // WorldAabb
 #include "rime/render/lighting/sdf_clipmap.hpp"
 #include "rime/render/lighting/settings.hpp"
+#include "rime/render/passes.hpp" // DdgiBinding
 #include "rime/render/render_graph.hpp"
 
-// DDGI probes — the trace-and-store half (m10.5a, ADR-0032 §2). This is the second half of M10's
-// thesis: m10.1-m10.2 made the SHADOW move when a wall breaks; this (plus m10.4b's clipmap) is what
-// makes the BOUNCED LIGHT update too. The technique is Dynamic Diffuse Global Illumination
-// (Majercik, Gallo, Falcao, Kirchhefer, Krajcevski, "Dynamic Diffuse Global Illumination with
-// Ray-Traced Irradiance Fields", HPG/JCGT 2019): a lattice of PROBES, each storing an irradiance
-// field over the sphere of directions, updated every frame by casting a batch of rays from the
-// probe and shading what they hit. The paper traces against real geometry with hardware RT; Rime
-// has no hardware RT (ADR-0032's platform floor) and instead SPHERE-TRACES through the SDF
-// clipmap m10.4b already builds — the m10.4c spike measured that this is affordable at
-// 8³=512 probes x 64 rays every frame.
+// DDGI probes — trace-and-store (m10.5a) PLUS consume-and-react (m10.5b, ADR-0032 §2). This is the
+// second half of M10's thesis: m10.1-m10.2 made the SHADOW move when a wall breaks; this (plus
+// m10.4b's clipmap) is what makes the BOUNCED LIGHT update too — and, as of m10.5b, actually
+// arrive at a lit pixel. The technique is Dynamic Diffuse Global Illumination (Majercik, Gallo,
+// Falcao, Kirchhefer, Krajcevski, "Dynamic Diffuse Global Illumination with Ray-Traced Irradiance
+// Fields", HPG/JCGT 2019): a lattice of PROBES, each storing an irradiance field over the sphere of
+// directions, updated every frame by casting a batch of rays from the probe and shading what they
+// hit. The paper traces against real geometry with hardware RT; Rime has no hardware RT
+// (ADR-0032's platform floor) and instead SPHERE-TRACES through the SDF clipmap m10.4b already
+// builds — the m10.4c spike measured that this is affordable at 8³=512 probes x 64 rays every
+// frame.
+//
+// m10.5b adds two things to m10.5a's trace-and-store half:
+//   - CONSUMPTION: `add()` now returns a DdgiBinding (the two atlases + a sample-time uniform
+//     block) that `pbr_forward_shadowed.frag` samples — 8-probe trilinear irradiance, weighted by
+//     the visibility atlas's Chebyshev test so a probe on the wrong side of a wall cannot leak
+//     light through it. `empty_binding()` is the DDGI-off placeholder (a 1x1 dummy atlas pair,
+//     ADR-0032 §11's byte-identical-when-off discipline), mirroring ShadowBinding/ClusterBinding.
+//   - REACTIVITY: `invalidate(region)` — the C2 destruction hook m10.5a's own header used to name
+//     as a gap (see below). It does not force an immediate re-trace (every scheduled probe
+//     re-traces from whatever the clipmap currently holds regardless); it shortens how long the
+//     STORED, hysteresis-blended value takes to catch up once that re-trace happens, from the
+//     default ~30-frame time constant down to a handful of updates.
 //
 // The full derivation — spherical Fibonacci sampling, the octahedral atlas encoding and its
-// border (the classic bug), Chebyshev visibility, and what temporal hysteresis costs in latency —
-// lives in docs/math/ddgi.md; this header cites, the doc explains.
+// border (the classic bug), Chebyshev visibility and the leak it prevents, and what temporal
+// hysteresis (and its destruction-reactive override) cost in latency — lives in docs/math/ddgi.md;
+// this header cites, the doc explains.
 //
 // What this brick does NOT do (the honest, named gaps — docs/math/ddgi.md restates these):
 //   - No per-surface albedo. An SDF hit gives a position and a normal (the field's own gradient),
@@ -42,11 +58,6 @@
 //   - No multi-bounce. A hit that is not directly sun-lit contributes exactly zero this frame —
 //     single-bounce DDGI's honest limit. Probes sampling probes (indirect-of-indirect) is a named
 //     follow-up.
-//   - No C2 destruction hook of its own. Unlike SdfClipmap/LocalShadowMap, DdgiProbes keeps no
-//     dirty-region bookkeeping: every update re-traces from whatever the clipmap CURRENTLY holds,
-//     so a change becomes visible the next time that probe's round-robin turn comes up (worst
-//     case: total_probes/kMaxDdgiProbesPerUpdate frames later). m10.5b's job is to shorten that by
-//     lowering hysteresis (or bumping priority) inside a C2-invalidated region — see add()'s note.
 namespace rime::render {
 
 // ── The octahedral atlas shape (pre-decided sizes, docs/math/ddgi.md §3) ────────────────────────
@@ -176,6 +187,25 @@ struct GpuDdgiBlendParams {
 
 static_assert(sizeof(GpuDdgiBlendParams) == 16, "GpuDdgiBlendParams must be one tight vec4");
 
+// std140 mirror of DdgiSampleParams in pbr_forward_shadowed.frag (m10.5b) — the flat bookkeeping a
+// SHADING pass needs to turn a world-space position into "which 8 probes bracket it" and a probe's
+// flat index into "where is its tile in the atlas": the grid's origin/spacing/dims (the identical
+// fields GpuDdgiTraceParams carries, so the shader's lattice math agrees with the trace pass's by
+// construction) plus the atlas's own row stride and an `enabled` flag (ADR-0032 §11 — with DDGI off
+// this is the ONLY thing that has to say so; the atlas textures the pass binds are 1x1 dummies
+// either way, see DdgiProbes::empty_binding).
+struct GpuDdgiSampleParams {
+    float grid_origin_spacing[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // xyz snapped origin, w spacing
+    std::uint32_t grid_dims_perrow[4] = {0, 0, 0, 0};        // xyz probe counts, w probes/row
+    std::uint32_t enabled_pad[4] = {0, 0, 0, 0};             // x enabled (0/1), yzw unused
+};
+
+static_assert(sizeof(GpuDdgiSampleParams) == 48 &&
+                  offsetof(GpuDdgiSampleParams, grid_dims_perrow) == 16 &&
+                  offsetof(GpuDdgiSampleParams, enabled_pad) == 32,
+              "GpuDdgiSampleParams no longer matches the std140 DdgiSampleParams block in "
+              "pbr_forward_shadowed.frag");
+
 // What the last add() did — read directly by the tests (ADR-0032 §11's "state what happened"
 // discipline, though note DDGI's own steady state is CONTINUOUS updating, not zero passes: unlike
 // SdfClipmap/LocalShadowMap, a settled scene still re-traces every scheduled probe every frame
@@ -188,6 +218,11 @@ struct DdgiStats {
     std::uint32_t newly_primed = 0;   // of probes_updated, how many were on their FIRST-EVER update
     bool grid_shifted = false;        // the lattice origin (or its dimensions) changed this call —
                                       // every probe's "primed" history was reset
+    // m10.5b: of probes_updated, how many used the FAST-TRACKED hysteresis (kFastTrackHysteresis,
+    // ddgi.cpp) rather than the steady-state settings.ddgi_hysteresis, because invalidate() marked
+    // their lattice point since their last update. What a test reads to confirm a destruction event
+    // actually reached the probes it should have (docs/math/ddgi.md §8/§11).
+    std::uint32_t fast_tracked = 0;
 };
 
 // The lighting inputs DDGI's direct-light term needs — the CPU shape of ExtractedScene's first
@@ -204,9 +239,10 @@ struct DdgiLightingInputs {
 // Owns the DDGI GPU resources — the trace/blend-irradiance/blend-visibility pipelines, the two
 // persistent octahedral atlases (imported, not transient: they hold TEMPORAL state across frames,
 // exactly like LocalShadowMap's cached depth array), the per-frame ray-result buffer, and the
-// per-probe "ever updated" bookkeeping the temporal hysteresis needs. One per SceneRenderer, gated
-// by LightingSettings::ddgi_enabled (default false — off is the byte-identical M5.6/ADR-0022
-// baseline, ADR-0032 §11). Requires sdf_clipmap_enabled (it traces THAT field); see settings.hpp.
+// per-probe "ever updated" / "fast-tracked" bookkeeping the temporal hysteresis needs. One per
+// SceneRenderer, gated by LightingSettings::ddgi_enabled (default false — off is the byte-identical
+// M5.6/ADR-0022 baseline, ADR-0032 §11). Requires sdf_clipmap_enabled (it traces THAT field); see
+// settings.hpp.
 class DdgiProbes {
 public:
     explicit DdgiProbes(rhi::Device& device);
@@ -218,22 +254,41 @@ public:
     // Recentre the lattice on `camera_pos` (texel-snapping to `settings.ddgi_probe_spacing`,
     // exactly as SdfClipmap's levels snap to their own voxel size — sub-spacing camera motion must
     // not reshuffle which probe sits where), pick this frame's round-robin batch, draw a fresh
-    // random ray-rotation, and declare the trace + both blend compute passes into `graph`.
+    // random ray-rotation, declare the trace + both blend compute passes into `graph`, and return
+    // what the forward pass samples (m10.5b): the two atlases (imported into `graph` THIS frame, so
+    // they carry a real dependency edge from the blend passes just declared) plus the sample-time
+    // uniform block. Also drains any invalidate() calls since the last add() into a few updates of
+    // lowered hysteresis for the probes they touched (see invalidate()'s own comment).
     //
-    // m10.5b's job, noted here because this is where it hooks in: when a C2 destruction event's
-    // world-bounds overlaps a probe's own footprint, that probe's NEXT update should use a lower
-    // hysteresis (or jump the round-robin queue) so the bounced light updates in a couple of
-    // frames instead of the ~30 the default 0.97 would take (docs/math/ddgi.md §5) — DdgiProbes
-    // keeps no such bookkeeping itself (see the header's "what this does not do").
     // Takes `clipmap` by NON-const reference: DdgiProbes is a second reader of the clipmap's level
     // textures (m10.4b's SdfClipmap::add() is the first writer), and it reports back what state its
     // own sampled read left them in (SdfClipmap::note_level_state) so the clipmap's OWN next-frame
     // recompose still imports with an accurate claimed state — see note_level_state's own comment.
-    void add(RenderGraph& graph,
-             SdfClipmap& clipmap,
-             core::Vec3 camera_pos,
-             const DdgiLightingInputs& lighting,
-             const LightingSettings& settings);
+    [[nodiscard]] DdgiBinding add(RenderGraph& graph,
+                                  SdfClipmap& clipmap,
+                                  core::Vec3 camera_pos,
+                                  const DdgiLightingInputs& lighting,
+                                  const LightingSettings& settings);
+
+    // The valid-but-empty binding for a frame that shades WITHOUT DDGI (ddgi_enabled off, or its
+    // gate sdf_clipmap_enabled off): a 1x1 dummy atlas pair (so the shadowed pipeline's fixed
+    // binding 14/15 always points at a real sampler2D) and a count-`enabled=0` uniform block, which
+    // is the only thing that actually needs to say "off" — the shader's own `if (enabled)` gate
+    // (ADR-0032 §11) is what makes this the byte-identical M5.6 baseline, not the dummy texture's
+    // contents. Mirrors ShadowBinding/ClusterBinding's own empty_binding shape exactly.
+    [[nodiscard]] DdgiBinding empty_binding(RenderGraph& graph);
+
+    // The C2 destruction hook (m10.5b) — the DdgiProbes twin of SdfClipmap::invalidate /
+    // LocalShadowMap::invalidate: queue `region` so the NEXT add() call marks every probe whose
+    // lattice point falls within one lattice spacing of it (an "err broad" expansion — the same
+    // conservatism LocalShadowMap's own frustum-AABB test uses) for `kFastTrackUpdates` further
+    // updates of a much lower hysteresis. This does NOT force an immediate re-trace — every
+    // scheduled probe already re-traces from whatever the clipmap currently holds every update
+    // regardless — it only shortens how long the STORED, hysteresis-blended value takes to catch up
+    // once that re-trace happens: from the default ~30-frame time constant (1/(1-0.97)) down to a
+    // handful of frames (docs/math/ddgi.md §8 derives the exact decay). Idempotent; safe to call
+    // many times per frame as a destruction event stream drains.
+    void invalidate(const WorldAabb& region);
 
     [[nodiscard]] const DdgiStats& stats() const noexcept { return stats_; }
 
@@ -266,6 +321,11 @@ private:
     rhi::PipelineHandle blend_visibility_pipeline_;
 
     rhi::SamplerHandle clipmap_sampler_; // linear + ClampToEdge, for the 3 clipmap levels
+    // m10.5b: linear + ClampToEdge for BOTH atlases (confirmed on lavapipe: RG32Float — the
+    // visibility atlas's format — reports FILTER_LINEAR same as the RGBA16Float irradiance atlas,
+    // so one sampler serves both bindings). Linear is what makes the border ring (ddgi.md §3)
+    // actually fix the octahedral seam — a nearest-filter sample would never straddle it at all.
+    rhi::SamplerHandle atlas_sampler_;
 
     // Persistent (imported, not transient) — they hold TEMPORAL state across frames.
     rhi::TextureHandle irradiance_atlas_;                                 // RGBA16Float
@@ -275,6 +335,12 @@ private:
     std::uint32_t atlas_probes_per_row_ = 0; // sizes the atlases; part of "did the grid change?"
     std::uint32_t atlas_total_probes_ = 0;
 
+    // The DDGI-off placeholder pair (m10.5b) — 1x1, matching each atlas's own format, parked in
+    // ShaderRead once (like SceneRenderer's dummy_shadow_array_) so empty_binding() never has to
+    // transition anything, only import at the state it already permanently sits in.
+    rhi::TextureHandle dummy_irradiance_;
+    rhi::TextureHandle dummy_visibility_;
+
     rhi::BufferHandle
         clipmap_levels_ubo_; // this frame's clipmap.gpu_levels(), re-uploaded each add()
     rhi::BufferHandle trace_params_ubo_;  // GpuDdgiTraceParams
@@ -283,6 +349,8 @@ private:
     rhi::BufferHandle ray_buffer_;        // this frame's GpuDdgiRay[probes_this_update*rays]
     rhi::ResourceState ray_buffer_state_ = rhi::ResourceState::Undefined; // carried across frames
     std::uint32_t ray_capacity_ = 0;
+    rhi::BufferHandle sample_params_ubo_; // GpuDdgiSampleParams (m10.5b), re-uploaded each add()/
+                                          // empty_binding()
 
     // The lattice snap state (mirrors SdfClipmap::Level exactly).
     core::Vec3 origin_{0.0f, 0.0f, 0.0f};
@@ -292,6 +360,17 @@ private:
     // Round-robin + per-probe temporal bookkeeping.
     std::uint32_t round_robin_cursor_ = 0;
     std::vector<bool> primed_; // has probe i ever completed an update?
+    // m10.5b: how many MORE updates probe i should use the fast-tracked hysteresis for (0 = ride
+    // the steady-state settings.ddgi_hysteresis like normal). Parallel to `primed_` — same size,
+    // same indexing, reset alongside it on a grid shift (a shifted lattice's indices no longer name
+    // the same world-space probes, so any pending fast-track loses its meaning). Decremented one
+    // update at a time in add(); see invalidate()'s own comment for what sets it.
+    std::vector<std::uint32_t> fast_track_remaining_;
+    // Regions queued by invalidate() since the last add() drained them — the identical
+    // accumulate-then-drain shape SdfClipmap::pending_regions_ uses, deferred to add() because
+    // that is the first place the CURRENT lattice shape (origin_/spacing/counts) is known, and
+    // invalidate() itself may be called before the lattice has ever been placed.
+    std::vector<WorldAabb> pending_regions_;
 
     std::uint64_t rng_state_ = 0x9E3779B97F4A7C15ull; // splitmix64 state (see next_ray_rotation)
 

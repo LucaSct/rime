@@ -198,10 +198,13 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
         {11, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // clustered lights (m10.3)
         {12, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // per-froxel light lists
         {13, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment}, // ClusterUniforms
+        {14, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
+        {15, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
+        {16, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
     };
-    // 14 of the RHI's 16 descriptor slots (rhi::kMaxBindings) are now spoken for. The next
-    // technique that wants its own buffers — GI probes (m10.5), SSR (m10.7) — is the trigger for a
-    // second descriptor set or a bindless table rather than a 15th binding.
+    // 17 of the RHI's 24 descriptor slots (rhi::kMaxBindings) are now spoken for. The next
+    // technique that wants its own buffers — SSR (m10.7) — is the trigger for a second descriptor
+    // set or a bindless table rather than an 18th binding.
     pd.fragment_shader = shadowed_fragment_shader_;
     pd.bindings = shadowed_bindings;
     pd.depth_write = false;
@@ -265,7 +268,8 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   const SceneDrawData& data,
                                   const ShadowBinding& shadow,
                                   const LocalShadowBinding& local,
-                                  const ClusterBinding& clusters) const {
+                                  const ClusterBinding& clusters,
+                                  const DdgiBinding& ddgi) const {
     const RGColorAttachment colors[] = {
         {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
     RGDepthAttachment depth_att{};
@@ -279,10 +283,10 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
         depth_att.store = rhi::StoreOp::DontCare;
         depth_att.read_only = false;
     }
-    // Both shadow arrays are SAMPLED here — declaring them makes the graph order this pass after
-    // the depth passes that wrote them and transition both to ShaderRead (m10.1 cascades, m10.2
-    // spots).
-    const RGTexture sampled[] = {shadow.map, local.map};
+    // Both shadow arrays AND both DDGI atlases are SAMPLED here — declaring them makes the graph
+    // order this pass after whatever last wrote each (m10.1 cascades, m10.2 spots, m10.5b's own
+    // blend-irradiance/blend-visibility compute passes) and transition all four to ShaderRead.
+    const RGTexture sampled[] = {shadow.map, local.map, ddgi.irradiance, ddgi.visibility};
     // Declaring the two cluster buffers is what orders this pass after the cull dispatch that
     // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
     const RGBuffer buffers[] = {clusters.lights, clusters.lists};
@@ -293,23 +297,26 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     desc.buffer_reads = buffers;
     const rhi::PipelineHandle pipe =
         depth_prepassed ? pipeline_shadowed_after_prepass_ : pipeline_shadowed_standalone_;
-    graph.add_raster_pass("forward-pbr shadowed",
-                          desc,
-                          [pipe, data, shadow, local, clusters, &graph](rhi::CommandBuffer& cmd) {
-                              cmd.bind_pipeline(pipe);
-                              // Bindings 7–13 are attached once (they persist across draws —
-                              // ADR-0020); record_draws re-binds only per-draw state on top. The
-                              // resources' physical handles resolve now (assign_physicals has run),
-                              // the same late-resolve the tonemap pass uses.
-                              cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
-                              cmd.bind_uniform_buffer(8, shadow.ubo);
-                              cmd.bind_texture(9, graph.physical(local.map), local.sampler);
-                              cmd.bind_uniform_buffer(10, local.ubo);
-                              cmd.bind_storage_buffer(11, graph.physical_buffer(clusters.lights));
-                              cmd.bind_storage_buffer(12, graph.physical_buffer(clusters.lists));
-                              cmd.bind_uniform_buffer(13, clusters.ubo);
-                              record_draws(cmd, data, /*bind_material_textures=*/true);
-                          });
+    graph.add_raster_pass(
+        "forward-pbr shadowed",
+        desc,
+        [pipe, data, shadow, local, clusters, ddgi, &graph](rhi::CommandBuffer& cmd) {
+            cmd.bind_pipeline(pipe);
+            // Bindings 7–16 are attached once (they persist across draws — ADR-0020);
+            // record_draws re-binds only per-draw state on top. The resources' physical handles
+            // resolve now (assign_physicals has run), the same late-resolve the tonemap pass uses.
+            cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
+            cmd.bind_uniform_buffer(8, shadow.ubo);
+            cmd.bind_texture(9, graph.physical(local.map), local.sampler);
+            cmd.bind_uniform_buffer(10, local.ubo);
+            cmd.bind_storage_buffer(11, graph.physical_buffer(clusters.lights));
+            cmd.bind_storage_buffer(12, graph.physical_buffer(clusters.lists));
+            cmd.bind_uniform_buffer(13, clusters.ubo);
+            cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
+            cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
+            cmd.bind_uniform_buffer(16, ddgi.ubo);
+            record_draws(cmd, data, /*bind_material_textures=*/true);
+        });
 }
 
 // ── TonemapPass ───────────────────────────────────────────────────────────────────────────────
