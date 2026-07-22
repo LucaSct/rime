@@ -142,12 +142,17 @@ proven by 200k entities stepping at ≈10× on 16 cores (`samples/05-ecs-playgro
 A high-level renderer built on a **render graph** (a.k.a. frame graph): each frame is
 described as a graph of passes and the resources they read/write; the graph schedules
 them, manages transient memory, and inserts barriers. This structure is precisely what
-makes UE5-class techniques tractable:
-- **Virtualized geometry** (Nanite-style) — render massive detail by streaming/culling
-  at fine granularity.
-- **Global illumination & reflections** (Lumen-style) — dynamic, no baking.
-- **Virtual shadow maps** — high-res, consistent shadows.
-- **Many lights** (MegaLights-style) — large counts of shadow-casting lights.
+makes UE5-class techniques tractable — **Milestone 10 delivered the first version of most of them**
+([ADR-0032](adr/0032-lighting-v2.md)):
+- 🔴 **Virtualized geometry** (Nanite-style) — render massive detail by streaming/culling
+  at fine granularity. *Not started* — the floating `m10.i` research brick.
+- 🟢 **Global illumination & reflections** (Lumen-style) — dynamic, no baking. *v1 built:*
+  SDF-traced **DDGI** diffuse GI (m10.4/5) + **SSR** with a DDGI-probe fallback (m10.7). Grey-world
+  albedo (no colour bleed) and a true pre-filtered specular probe are named follow-ups.
+- 🟢 **Shadows** — *v1 built:* directional **cascaded shadow maps** (m10.1) and cached **local spot
+  shadows** (m10.2). Full **virtual shadow maps** and point-light cube shadows are 🟡 deferred.
+- 🟢 **Many lights** (MegaLights-style) — *v1 built:* **clustered-forward** froxel culling (m10.3)
+  lifts the ADR-0022 fixed light cap; per-light shadowing at scale is the VSM follow-up.
 We don't build all of these at once; we build the render graph *so that they fit*.
 *Built (M5.4–M5.9):* the **render graph v0** — frame-declared raster/compute passes, virtual
 resources with a cross-frame transient cache, declared access driving order, culling, and
@@ -163,6 +168,19 @@ viewer's cross-section frame — clip-planed lit mesh → stencil cut-mark → s
 UI overlay — as four graph passes sharing one colour + one D32FloatS8 depth+stencil target,
 proving the resource model really covers depth+stencil attachments and Load/keep-across-passes
 (`tests/render/viewer_frame_graph_test.cpp`, offscreen, GPU-free in CI).
+*Built (M10, [ADR-0032](adr/0032-lighting-v2.md), lighting v2):* the **advanced-lighting stack**, all
+inside `render` (data seams, not a separate module) and each gated behind `LightingSettings` so that
+**off is the byte-identical M5.6 baseline** — directional **CSM** + cached **local spot shadows**
+([math/shadow-mapping.md](math/shadow-mapping.md)), **clustered-forward** many-lights (a froxel-cull
+compute pass + `RGBuffer`, [math/clustered-shading.md](math/clustered-shading.md)), an **SDF clipmap**
+composed from cooked per-part SDFs ([math/sdf.md](math/sdf.md)) that **SDF-traced DDGI** probes bounce
+light through ([math/ddgi.md](math/ddgi.md)), and **SSR** reflections with a DDGI-probe fallback
+([math/ssr.md](math/ssr.md)). The through-line is M10's thesis — *break a wall and the shadow moves
+**and** the bounced light updates* — wired on the destruction↔lighting seam (`invalidate_*` cache
+hooks off the ADR-0029 event channel) and proven in `tests/render/gi_thesis_test.cpp`; the whole stack
+runs together in `samples/11-lit-rooms` (M10's "done when"). Absolute frame budgets wait for real
+hardware (m12.0) — the lavapipe CI floor renders on the CPU, so the proofs are **structural**, never
+golden images.
 
 ### `physics` 🟢 — *simulation, multicore-first*
 Rime's **own** rigid-body core — no Jolt ([ADR-0026](adr/0026-physics-core.md)): a SoA body pool, a

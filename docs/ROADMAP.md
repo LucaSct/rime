@@ -9,6 +9,26 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-22) — Milestone 10 (Advanced lighting) COMPLETE.** The whole [ADR-0032](adr/0032-lighting-v2.md)
+> stack landed on `main`, brick by brick, every technique gated behind `LightingSettings` so **off is
+> the byte-identical M5.6 baseline**: **m10.1a** RHI array/cube textures + depth-compare sampler ·
+> **m10.1** directional **CSM** · **m10.2** cached **local spot shadows** (destructibility-aware) ·
+> **m10.3** **clustered-forward** many-lights (+`RGBuffer`) · **m10.4a/b** cooked-SDF **clipmap** ·
+> **m10.5a/b** **DDGI** probes (trace-and-store, then consume with Chebyshev visibility + a
+> destruction-reactive hysteresis) · **m10.6** retire the ambient hack when GI is on · **m10.7a/b/c**
+> **SSR** (thin G-buffer → linear-march resolve → DDGI-probe fallback + roughness cone) · **m10.8**
+> the milestone proof + this docs true-up. **The thesis is proven executable** — *break a wall and the
+> shadow moves **and** the bounced light updates* — in `tests/render/gi_thesis_test.cpp` (the isolated
+> GI-in-HDR rise, the leak guard, the reactivity), and the **whole stack runs together in the new
+> [`samples/11-lit-rooms`](../samples/11-lit-rooms)** (M10's "done when": all six gates on, break the
+> divider, the shadowed floor floods with light — self-checked in CI on lavapipe). **Honest gaps,
+> named not hidden:** grey-world GI albedo (no colour bleed) + a true pre-filtered specular probe +
+> point-light cube shadows + full virtual shadow maps are follow-ups; **m10.i** (virtualized geometry,
+> Nanite-class) never started and floats; the **hi-Z SSR march** waits for m12.0 (pure perf,
+> unmeasurable on lavapipe's CPU-rendered depth). Absolute frame budgets wait for real hardware at
+> **m12.0** — CI stays lavapipe, so the proofs are **structural**, never golden images. **Next:** M11
+> (networking/replay) or the FX·FL·AI forward tracks — re-plan at the boundary.
+>
 > **Update (2026-07-20) — Milestone 9 COMPLETE; Milestone 10 (Advanced lighting) kicks off.** M9's
 > close-out landed on `main`: **m9.8 docs true-up (#84)** and the **gizmo/inspector Edit-mode fix
 > (#83)** are merged, so Editor v1 is done — *build a scene, tweak components, hit Play* works. **M10
