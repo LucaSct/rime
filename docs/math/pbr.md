@@ -232,7 +232,50 @@ $$
 ignores $\mathbf n$, occlusion, and the specular response entirely — but it keeps unlit surfaces
 readable and, at a dim default ($L_a = 0.02$), stays an order of magnitude below any directly lit
 pixel, so the M5.6 lit-vs-unlit proof can still tell them apart. Being visibly a hack is the point:
-the day GI lands, this line and this section go away together.
+the day GI lands, this line retires to a fallback — see §6.1.
+
+### 6.1 Retiring the hack, when GI is on {#ambient-retired}
+
+M10 is that day, for the shadowed forward path. `pbr_forward_shadowed.frag` now branches:
+
+```glsl
+if (ddgi.enabled) out_radiance = ddgi_indirect(world_pos, n) * albedo * ao;  // the traced field
+else              out_radiance = albedo * frame.ambient.rgb * ao;            // the M5.6 hack
+```
+
+The field **replaces** the constant; it does not add to it. That is the entire integration step
+(m10.6), and getting it wrong is a real energy bug. The constant $L_a$ stood in for *all* indirect
+light, skylight included — and DDGI already carries the skylight: a probe ray that escapes the SDF
+without hitting anything returns exactly `frame.ambient` as its sky term (`ddgi_trace.comp`), so that
+same constant is already folded into the probe irradiance over the escaped fraction of every probe's
+hemisphere. Summing the flat constant *on top* of the field would count the sky twice — the classic
+"ambient + GI" wash-out that flattens contact shadows and lifts every crevice off its floor. So once
+the field exists, the placeholder retires.
+
+Two consequences the tests pin (`gi_thesis_test.cpp`):
+
+- **In the open-sky limit the two agree.** A surface that sees mostly unobstructed sky receives, from
+  DDGI, almost exactly what the flat constant gave it — because DDGI's sky term *is* that constant
+  (measured agreement: one 16-bit LSB). The retirement is invisible where the hack was already right;
+  it only bites where the hack was wrong.
+- **Where the hack was wrong, GI is honestly darker or brighter.** An enclosed room the constant
+  painted at $0.8\,L_a$ reads *dimmer* under GI (the sky it assumed is occluded); a patch catching
+  fresh bounce off a newly-sunlit neighbour reads *brighter*. Both are the field seeing an occlusion
+  or a bounce the constant is blind to — and neither can create energy: the trace is single-bounce
+  with a grey-world albedo $<1$ and no probe-feeds-probe feedback, so stored irradiance is bounded by
+  its brightest visible source (the m10.5a open-floor pin, $\approx 1.66$, is that finite ceiling;
+  the enclosed-room-stays-below-ambient check is the dynamic witness that no free energy appears when
+  a wall falls).
+
+The `else` branch is byte-for-byte the M5.6 line above, so with DDGI off — every M10 feature off — the
+frame is identical to the pre-GI renderer (ADR-0032 §11). The hack didn't leave; it retired to a
+fallback.
+
+**Still deferred** (grey-world albedo, ddgi.md §5): the bounce carries no *colour* yet — a white floor
+beside a red wall does not redden, because the SDF hit returns a grey albedo, not the wall's. Coloured
+bleed needs a surface-albedo cache and is m10's named GI follow-up; the *specular* half of indirect
+(reflections) is m10.7; a probe-sphere / indirect-only **debug view** waits on the view-mode plumbing
+m10.3's cluster heatmap also wanted (m10.8).
 
 ## 7. Display: HDR → tonemap → sRGB {#display}
 
