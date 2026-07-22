@@ -115,7 +115,7 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
       forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device),
-      sdf_clipmap_(device), ddgi_(device) {
+      sdf_clipmap_(device), ddgi_(device), ssr_(device) {
     rhi::BufferDesc fd{};
     fd.size = sizeof(GpuFrameUniforms);
     fd.usage = rhi::BufferUsage::Uniform;
@@ -477,9 +477,38 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }
-    tonemap_.add(graph, hdr, ldr);
+
+    // SSR resolve (m10.7b): reflect the frame off itself into a second HDR target the tonemap then
+    // reads. Runs only when ssr_enabled (which is also what allocated the G-buffer above), so
+    // otherwise the tonemap reads the raw HDR and the frame is byte-identical (ADR-0032 §11).
+    RGTexture tonemap_src = hdr;
+    if (has_ssr && gbuffer.is_valid()) {
+        SsrInputs si{};
+        si.view = scene.camera.view;
+        si.proj =
+            core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far);
+        si.z_near = scene.camera.z_near;
+        si.z_far = scene.camera.z_far;
+        si.extent = extent;
+        si.ambient[0] = ambient_[0];
+        si.ambient[1] = ambient_[1];
+        si.ambient[2] = ambient_[2];
+        si.max_distance = lighting_.ssr_max_distance;
+        si.thickness = lighting_.ssr_thickness;
+        si.max_steps = lighting_.ssr_max_steps;
+        // A second HDR target the resolve draws into (scene_color + reflection); the tonemap reads
+        // this instead of the raw HDR.
+        const RGTexture hdr_ssr = graph.create_texture({extent, kHdrFormat, "scene-hdr-ssr"});
+        ssr_.add(graph, hdr, gbuffer, depth, hdr_ssr, si);
+        tonemap_src = hdr_ssr;
+    }
+    tonemap_.add(graph, tonemap_src, ldr);
     graph.export_texture(ldr); // the frame output; hdr is exportable by the caller when needed
-    return {hdr, ldr, gbuffer};
+    // Report the HDR the tonemap actually consumed as `hdr`: with SSR on that is the resolved,
+    // reflection-added target (tonemap_src); with SSR off it is the raw forward HDR, unchanged.
+    // This is what a caller wanting the scene's HDR colour should read (and what the GPU proofs
+    // assert on, like the DDGI thesis test — never the tonemapped LDR through the pass chain).
+    return {tonemap_src, ldr, gbuffer};
 }
 
 } // namespace rime::render

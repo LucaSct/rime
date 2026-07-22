@@ -19,7 +19,8 @@ add_library(rime_render STATIC
     src/lighting/local_shadows.cpp
     src/lighting/clustered.cpp
     src/lighting/sdf_clipmap.cpp
-    src/lighting/ddgi.cpp)
+    src/lighting/ddgi.cpp
+    src/lighting/ssr.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
 # library, the same offline model the tests/samples use (ADR-0008). The generated headers are
@@ -34,6 +35,7 @@ rime_add_shaders(rime_render
     shaders/ddgi_trace.comp
     shaders/ddgi_blend_irradiance.comp
     shaders/ddgi_blend_visibility.comp
+    shaders/ssr_resolve.frag
     shaders/fullscreen.vert
     shaders/tonemap.frag
     shaders/pick_id.vert
