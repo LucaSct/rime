@@ -15,6 +15,7 @@
 #include "rime/render/lighting/sdf_clipmap.hpp"
 #include "rime/render/lighting/settings.hpp"
 #include "rime/render/lighting/shadows.hpp"
+#include "rime/render/lighting/ssr.hpp"
 #include "rime/render/passes.hpp"
 
 // The scene renderer (M5.6, ADR-0022): the bridge from "a World full of entities" to "passes
@@ -194,6 +195,7 @@ private:
     ClusteredLights clustered_;    // m10.3: froxel light culling (only declared when enabled)
     SdfClipmap sdf_clipmap_;       // m10.4b: the traceable field (only stepped when enabled)
     DdgiProbes ddgi_; // m10.5a: irradiance/visibility probes (only stepped when enabled)
+    SsrPass ssr_;     // m10.7b: screen-space reflections resolve (only added when enabled)
 
     // The m10.4b/m10.5a extraction bridge: which SdfRef entities are currently registered with
     // sdf_clipmap_, and the change-detection watermark sync_sdf_instances reads from.

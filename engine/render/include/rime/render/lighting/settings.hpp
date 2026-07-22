@@ -169,6 +169,15 @@ struct LightingSettings {
     // (count-0 shadow loops return "lit"). m10.7a produces and tests the G-buffer; the SSR march
     // that consumes it (and its own march/fallback/roughness settings) is m10.7b.
     bool ssr_enabled = false;
+
+    // SSR march tuning (m10.7b). The reflection ray takes `ssr_max_steps` fixed steps out to
+    // `ssr_max_distance` view-space units; a step is a hit when it crosses behind a depth sample by
+    // less than `ssr_thickness` — too small misses thin geometry, too large lets a ray tunnel
+    // through and reflect a wall far behind it. Defaults tuned on lavapipe's exact depth; a real
+    // GPU and a hi-Z march (m10.7c) will re-tune them.
+    float ssr_max_distance = 8.0f;
+    float ssr_thickness = 0.5f;
+    std::uint32_t ssr_max_steps = 48;
 };
 
 } // namespace rime::render
