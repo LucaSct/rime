@@ -36,6 +36,11 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
         {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // G-buffer (m10.7a)
         {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene depth
         {3, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // SsrParams
+        // m10.7c probe fallback: the DDGI atlases + sample-params the miss/rough path reads. Always
+        // bound (empty_binding's 1x1 dummies when DDGI is off) — the pipeline layout is fixed.
+        {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
+        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
+        {6, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
     };
     rhi::GraphicsPipelineDesc pd{};
     pd.vertex_shader = vertex_shader_;
@@ -76,13 +81,20 @@ void SsrPass::add(RenderGraph& graph,
                   RGTexture gbuffer,
                   RGTexture depth,
                   RGTexture out_hdr,
-                  const SsrInputs& inputs) {
+                  const SsrInputs& inputs,
+                  RGTexture ddgi_irradiance,
+                  RGTexture ddgi_visibility,
+                  rhi::BufferHandle ddgi_params,
+                  rhi::SamplerHandle ddgi_sampler) {
     // The inverse projection is what turns a uv + depth back into a view-space position — computed
     // once here, on the CPU, rather than every one of the march's steps re-inverting it on the GPU.
+    // inv_view (m10.7c) does the same job for the probe fallback: view space back to the WORLD the
+    // DDGI lattice is expressed in.
     GpuSsrUniforms u{};
     u.proj = inputs.proj;
     u.inv_proj = core::inverse(inputs.proj);
     u.view = inputs.view;
+    u.inv_view = core::inverse(inputs.view);
     u.extent_near_far[0] = static_cast<float>(inputs.extent.width);
     u.extent_near_far[1] = static_cast<float>(inputs.extent.height);
     u.extent_near_far[2] = inputs.z_near;
@@ -96,26 +108,40 @@ void SsrPass::add(RenderGraph& graph,
     device_.write_buffer(uniforms_, &u, sizeof(u));
 
     // out_hdr is the colour attachment (DontCare load: the fullscreen triangle writes every pixel);
-    // declaring the three sampled reads orders this pass after the forward pass that wrote them
-    // (and gets depth transitioned DepthAttachment → ShaderRead). The tonemap then samples out_hdr
-    // through the ordinary colour-attachment → sampled path.
+    // declaring the sampled reads orders this pass after the passes that wrote them — the forward
+    // pass (scene_color, gbuffer, depth; depth transitioned DepthAttachment → ShaderRead) and the
+    // DDGI blend passes (the two atlases). The tonemap then samples out_hdr through the ordinary
+    // colour-attachment → sampled path. The DDGI atlases carry their own linear sampler (the one
+    // that makes the octahedral border ring do its job, ddgi.md §3), distinct from SSR's own
+    // point+clamp; depth/colour must not interpolate, the atlases must.
     const RGColorAttachment colors[] = {{out_hdr, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
-    const RGTexture sampled[] = {scene_color, gbuffer, depth};
+    const RGTexture sampled[] = {scene_color, gbuffer, depth, ddgi_irradiance, ddgi_visibility};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.sampled = sampled;
-    graph.add_raster_pass(
-        "ssr-resolve",
-        desc,
-        [pipe = pipeline_, ubo = uniforms_, smp = sampler_, scene_color, gbuffer, depth, &graph](
-            rhi::CommandBuffer& cmd) {
-            cmd.bind_pipeline(pipe);
-            cmd.bind_texture(0, graph.physical(scene_color), smp);
-            cmd.bind_texture(1, graph.physical(gbuffer), smp);
-            cmd.bind_texture(2, graph.physical(depth), smp);
-            cmd.bind_uniform_buffer(3, ubo);
-            cmd.draw(3);
-        });
+    graph.add_raster_pass("ssr-resolve",
+                          desc,
+                          [pipe = pipeline_,
+                           ubo = uniforms_,
+                           smp = sampler_,
+                           scene_color,
+                           gbuffer,
+                           depth,
+                           ddgi_irradiance,
+                           ddgi_visibility,
+                           ddgi_params,
+                           ddgi_sampler,
+                           &graph](rhi::CommandBuffer& cmd) {
+                              cmd.bind_pipeline(pipe);
+                              cmd.bind_texture(0, graph.physical(scene_color), smp);
+                              cmd.bind_texture(1, graph.physical(gbuffer), smp);
+                              cmd.bind_texture(2, graph.physical(depth), smp);
+                              cmd.bind_uniform_buffer(3, ubo);
+                              cmd.bind_texture(4, graph.physical(ddgi_irradiance), ddgi_sampler);
+                              cmd.bind_texture(5, graph.physical(ddgi_visibility), ddgi_sampler);
+                              cmd.bind_uniform_buffer(6, ddgi_params);
+                              cmd.draw(3);
+                          });
 }
 
 } // namespace rime::render

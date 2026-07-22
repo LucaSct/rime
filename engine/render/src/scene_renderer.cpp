@@ -499,7 +499,21 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         // A second HDR target the resolve draws into (scene_color + reflection); the tonemap reads
         // this instead of the raw HDR.
         const RGTexture hdr_ssr = graph.create_texture({extent, kHdrFormat, "scene-hdr-ssr"});
-        ssr_.add(graph, hdr, gbuffer, depth, hdr_ssr, si);
+        // The DDGI binding computed above is the SSR probe fallback (m10.7c): a ray the screen
+        // march misses samples this field in its reflection direction instead of returning flat
+        // ambient. It is the SAME binding the forward pass consumed (the real atlases with DDGI on,
+        // the enabled=0 empty_binding otherwise) — the two passes are just two readers of one
+        // field.
+        ssr_.add(graph,
+                 hdr,
+                 gbuffer,
+                 depth,
+                 hdr_ssr,
+                 si,
+                 ddgi_binding.irradiance,
+                 ddgi_binding.visibility,
+                 ddgi_binding.ubo,
+                 ddgi_binding.sampler);
         tonemap_src = hdr_ssr;
     }
     tonemap_.add(graph, tonemap_src, ldr);
