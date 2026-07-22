@@ -21,6 +21,7 @@ rime_add_test(rime_render_tests
     ddgi_test.cpp
     gi_thesis_test.cpp
     gbuffer_test.cpp
+    ssr_test.cpp
     viewer_frame_graph_test.cpp)
 
 target_link_libraries(rime_render_tests
