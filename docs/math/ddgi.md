@@ -1,12 +1,18 @@
 # DDGI — dynamic diffuse global illumination, traced against a signed-distance field
 
-m10.5a's derivation: the irradiance-field idea, spherical Fibonacci sampling, the octahedral atlas
-and its border (the classic bug), Chebyshev visibility, temporal hysteresis and what it costs in
-latency, and the v1 grey-world albedo limitation. Code: `engine/render/include/rime/render/lighting/ddgi.hpp`,
+m10.5a's derivation (§1–§8): the irradiance-field idea, spherical Fibonacci sampling, the
+octahedral atlas and its border (the classic bug), temporal hysteresis and what it costs in
+latency, and the v1 grey-world albedo limitation. m10.5b's derivation (§9–§13, ADR-0032 §11's
+"consumption + reactivity" half): how a SHADING pass samples the two atlases back out (the
+probe-cage trilinear blend, and the octahedral ENCODE that is §6's decode run backwards), the
+Chebyshev visibility weight that stops a probe leaking light through solid geometry, and
+`invalidate()` — the destruction-reactive override that turns §8's ~30-frame hysteresis latency
+into a handful of frames. Code: `engine/render/include/rime/render/lighting/ddgi.hpp`,
 `engine/render/src/lighting/ddgi.cpp`, `engine/render/shaders/ddgi_trace.comp`,
-`ddgi_blend_irradiance.comp`, `ddgi_blend_visibility.comp`. Reference: Majercik, Gallo, Falcao,
-Kirchhefer, Krajcevski, "Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields",
-*JCGT* 8(2), 2019 (the HPG talk of the same title; also *Ray Tracing Gems* ch. 25). ADR-0032 §2.
+`ddgi_blend_irradiance.comp`, `ddgi_blend_visibility.comp`, `pbr_forward_shadowed.frag` (the
+consumer). Reference: Majercik, Gallo, Falcao, Kirchhefer, Krajcevski, "Dynamic Diffuse Global
+Illumination with Ray-Traced Irradiance Fields", *JCGT* 8(2), 2019 (the HPG talk of the same
+title; also *Ray Tracing Gems* ch. 25). ADR-0032 §2.
 
 ## 1. The idea: a lattice of "what does the light look like from here?" probes
 
@@ -249,19 +255,153 @@ fed constant-variance noise reaches a steady-state JITTER, not silence — a rea
 recurrence, not a bug, and the reason the test in §9 measures a deliberate step CHANGE (the light
 disappearing) rather than the ongoing noise floor.
 
-## 9. Visibility and Chebyshev — stored now, consumed by m10.5b
+## 9. Visibility and Chebyshev — the two moments, and what they will be used for
 
 A second atlas (`ddgi_blend_visibility.comp`, RG32Float, the same octahedral tile shape at 14×14
 interior) accumulates, with the identical cosine weighting, the two moments a **Chebyshev
 one-sided variance bound** needs: `mean = Σ(d·w)/Σw` and `mean2 = Σ(d²·w)/Σw`, where `d` is each
-ray's hit distance (or `max_trace_distance` for a miss — "nothing found nearby"). Later, a shading
-pass can test "is this probe's stored irradiance actually visible from HERE" by comparing a real
+ray's hit distance (or `max_trace_distance` for a miss — "nothing found nearby"). A shading pass
+can test "is this probe's stored irradiance actually visible from HERE" by comparing a real
 surface's distance to the probe against `mean`/`mean2` (variance `= mean2 − mean²`), softening light
 leaking through thin geometry the octahedral MAP alone cannot detect (only the DISTANCE data can).
-This brick stores the two moments correctly (with the same border-fold, same per-probe temporal
-hysteresis); the test itself is m10.5b's.
+m10.5a stores the two moments (with the same border-fold, same per-probe temporal hysteresis);
+§11 below is where m10.5b actually uses them.
 
-## 10. Limits, and what comes next
+## 10. Consuming the atlases: the probe cage, and octahedral ENCODE
+
+`pbr_forward_shadowed.frag`'s `ddgi_sample_irradiance(world_pos, n)` is the mirror image of
+everything §2–§7 built: instead of a compute invocation deciding "which direction am I, and what do
+I write", a shading invocation decides "which probes are near me, and what do I read".
+
+**The 8-probe cage.** A fragment's position, expressed in LATTICE units, is
+`rel = (world_pos − grid_origin) / spacing`. Flooring `rel` gives the lattice coordinate of the
+cage's "low" corner; the fractional remainder is exactly the trilinear weight along each axis
+(`frac.x` toward the "high" corner, `1 − frac.x` toward the "low" one, and likewise for y/z) — the
+ordinary trilinear-interpolation formula, applied to a scattered lattice of probes instead of a
+dense 3-D texture.
+
+**CLAMP, don't extrapolate.** `rel` is clamped to `[0, dims−1]` per axis before flooring — the
+identical CLAMP_TO_EDGE a texture sampler applies at an image's border, done here by hand because
+there is no hardware address mode for a hand-rolled lattice. This is not a defensive nicety; it is
+load-bearing. A surface sitting at a "round" world height — a floor at y = 0 is the norm, and 0 is
+a multiple of *every* possible probe spacing — will, more often than a designer expects, land its
+fragments EXACTLY on the lattice's own lowest grid line. Unclamped, the bracketing corner on the
+far side of that line is correctly dropped (out of range), but the NEAR corner's own trilinear
+weight is then the fragment's fractional distance INTO a cell that does not exist below the
+lattice — exactly zero. Every one of the 8 corners can end up excluded or zero-weighted
+simultaneously: `weight_sum` stays at (or under) its epsilon floor, and the function silently
+returns black — not a crash, not a validation warning, just a shading pass that looks like it is
+doing nothing. (This is not a hypothetical: m10.5b's own first working draft of this function hit
+exactly this, with a floor patch reading pure ambient one cell away from a probe the atlas readback
+confirmed was fully lit — see the fix's own comment in the shader.) Clamping first means the
+lowest/highest lattice layer on each axis always carries full weight for anything beyond it,
+instead of the interpolation quietly degenerating to nothing.
+
+**Octahedral ENCODE.** For a candidate probe and a direction `n` (the fragment's own world normal —
+see §11 for why the *geometric*, not normal-mapped, normal), `ddgi_oct_encode(n)` is §6's `encode`
+formula run forward — the inverse of `ddgi_blend_irradiance.comp`'s `oct_decode_folded`. Encode and
+decode must agree on the SAME mapping, or a probe's stored data reads back as an unrelated
+direction's value; because C++, GLSL-for-compute, and GLSL-for-fragment are three separate
+compilations with no shared header (the constraint `sdf_compose.comp`/`ddgi_trace.comp` already
+live with), this is three hand-synchronized copies of one formula, not one — the reason §6's own
+derivation is written out in enough detail to re-derive, not just to copy.
+
+Locating a probe's own texel then inverts the tile-indexing math ITSELF: `ddgi_blend_irradiance.comp`
+places physical texel `px` (an integer, border included) at octahedral coordinate
+`(px − 1 + 0.5) / interior · 2 − 1`; solving that for `px` given a continuous encoded coordinate
+gives `px = interior·(u+1)/2 + 0.5` — a value in "texel index, integer = that texel's own centre"
+units (checked against the compute shader's own numbers: interior = 6 puts the mapping's edge,
+`u = −1`, at `px = 0.5`, exactly between the border texel and the first interior one, which is
+where the seam physically sits). Adding the tile's own integer offset within the atlas and then
+applying the ordinary "texel index → normalized UV" conversion (`(index + 0.5) / atlas_size`,
+using `textureSize()` so this can never disagree with the texture actually bound) is what lets
+hardware BILINEAR filtering do the rest — including, at last, actually crossing the border ring §6
+built for exactly this sampling operation.
+
+## 11. The Chebyshev visibility weight, the wrap weight, and re-normalization
+
+Each of the (up to) 8 candidate probes contributes three multiplied weights before its irradiance
+counts at all:
+
+- **Trilinear** (§10) — how close the fragment sits to this particular corner.
+- **Wrap** — `(dot(n, normalize(probe_pos − world_pos)) + 1) / 2`, Majercik et al.'s own
+  adaptive-backface term in its simplest linear form: a probe roughly ahead of the surface (along
+  its normal) counts fully, one roughly behind fades toward (not quite) zero. A probe embedded in
+  or behind the surface it is meant to be lighting is a poor source for that surface's own
+  irradiance regardless of what its data says.
+- **Chebyshev visibility** — the one this brick adds meaning to. From the VISIBILITY atlas (§9),
+  sampled at probe → fragment direction, `(mean, mean2)` describe what that probe's own rays
+  typically found in roughly this direction. If the fragment sits no farther than `mean`, nothing in
+  the probe's own data suggests anything is in the way — full weight. Farther than `mean`, the
+  one-sided bound
+  ```
+  variance = max(mean2 − mean², 0)
+  weight   = variance / (variance + (dist − mean)²)
+  ```
+  fades toward zero as `dist` outgrows `mean` by more than the probe's own measured spread. THE LEAK
+  THIS STOPS: a probe standing on the sunlit face of a wall has, in the direction facing the wall's
+  DARK side, rays that almost all stop tight against the wall itself — a small `mean`, a small
+  `variance`. A fragment on the dark side, one interpolation cell away, sits at a `dist` far past
+  that `mean` — `weight` collapses toward 0, and that probe's (otherwise bright) irradiance is
+  excluded from the blend, exactly as if it had never been a candidate. Without this term, an
+  ordinary trilinear blend has no idea a wall is in the way at all — geometry between two probes is
+  invisible to a scheme that only ever asks "how far apart are you," never "what's between you."
+
+**Re-normalization.** The three weights multiply into one `total` per corner; `accum` sums
+`irradiance · total`, `weight_sum` sums `total`, and the function returns `accum / weight_sum` (or
+exactly `0` if `weight_sum` never clears a small epsilon — the "every corner occluded, clamped, or
+behind the surface" case, ADR-0032 §11's discipline that idle/degenerate work fails safe rather than
+dividing by zero). Re-normalizing by the weight ACTUALLY applied — not a flat `1/8` — is what keeps
+a partially-occluded cell honest: a corner the Chebyshev test excludes does not merely go missing
+from the sum, it also stops diluting the corners that remain, so a cell with (say) 2 of 8 probes
+visible reads as "what those 2 see," not "a quarter of what all 8 would average to."
+
+## 12. Destruction reactivity: `invalidate()`, and what it buys
+
+§8 already named the cost the walls-fall thesis has to pay somewhere: a genuine change takes
+`~1/(1 − hysteresis)` updates to become visible — about 33 at the 0.97 default. `DdgiProbes::
+invalidate(region)` is where that cost gets paid down, mirroring `SdfClipmap::invalidate`/
+`LocalShadowMap::invalidate`'s own C2 contract exactly: queue `region`; the NEXT `add()` call marks
+every probe whose lattice point falls within one probe SPACING of it (an "err broad" expansion —
+the identical conservatism `LocalShadowMap`'s own frustum-AABB test already uses for the same
+reason: a probe sits at a lattice POINT, not a cell, so an event's AABB landing anywhere inside the
+cell between two probes must still catch both of that cell's corners, not just whichever one the
+event's own, typically tight, box happens to overlap) for `kFastTrackUpdates` (5) further updates of
+a much lower hysteresis, `kFastTrackHysteresis` (0.5), instead of the steady-state value.
+
+**What this does NOT do.** It does not force an immediate re-trace — every scheduled probe already
+re-traces from whatever the clipmap currently holds, every update, regardless (m10.5a's own
+"no C2 hook of its own" note, now half-obsolete: the re-trace was never the missing piece, only how
+slowly the STORED value could catch up to it). `invalidate()` only changes the BLEND coefficient the
+next few updates use.
+
+**What it buys, exactly.** Unrolling the hysteresis recurrence (§8) makes the first sample's
+influence decay as `hⁿ` regardless of `h`. At the fast-tracked `h = 0.5`, 5 updates leave
+`0.5⁵ ≈ 3.1%` of the pre-invalidation value's influence — materially gone. At the untouched default
+`h = 0.97`, the SAME 5 updates leave `0.97⁵ ≈ 85.9%` — barely moved. Both numbers are exact
+predictions of the recurrence, not estimates, and `tests/render/ddgi_test.cpp`'s own invalidate()
+test measures both directly (≈3.2% and ≈85.8% observed against a starting value, within a percent
+of each closed-form prediction — the residual is fp16 atlas-storage rounding compounding over 5
+successive `mix()` writes, the same slack m10.5a's own convergence test budgets) — the two are not
+"somewhat different," they are two different closed-form curves from the identical starting point
+and the identical (lit → dark) transition.
+
+**What it costs.** A fast-tracked probe's estimate is now a blend of only ~5 frames' worth of the
+usual 64-rays-per-update sampling instead of dozens — a genuinely NOISIER estimate, the same
+noise/latency trade §8 describes, just deliberately tipped toward latency for the handful of
+updates right after a change. `kFastTrackHysteresis`/`kFastTrackUpdates` are deliberately
+conservative round numbers (a bigger drop, or more updates, converges faster still) rather than
+tuned to a razor's edge — there is no claim here that 0.5/5 is an optimum, only that it is a large,
+well-understood improvement over doing nothing.
+
+A shifted lattice (§2) resets `fast_track_remaining_` alongside `primed_` — a shifted lattice's
+indices no longer name the same world-space probes, so a pending fast-track budget keyed to the OLD
+indexing would mislabel whichever probe now happens to occupy that slot. A probe that is fast-
+tracked AND newly primed in the same stretch spends its fast-track budget for nothing extra: priming
+already snaps straight to the fresh estimate (hysteresis 0), so there is no stale history left for a
+lowered hysteresis to shake off.
+
+## 13. Limits, and what comes next
 
 - **Round-robin, not per-frame growth.** `kMaxDdgiProbesPerUpdate = 512` (the m10.4c spike's
   measured full-frame budget — 8³ probes × 64 rays, ≈1.0–1.5× the m10.3 cluster cull) bounds a
@@ -270,19 +410,22 @@ hysteresis); the test itself is m10.5b's.
   `total_probes / kMaxDdgiProbesPerUpdate` frames.
 - **A whole-lattice shift resets every probe's temporal history** (`DdgiStats::grid_shifted`) — the
   same "changed at all ⇒ start over" simplification `SdfClipmap` makes for its own compose state,
-  applied here to "who is primed" instead of "which voxels are stamped". A toroidal remap that
-  PRESERVES history for probes landing at the same world position across a shift is the natural
-  follow-up; v1 keeps the simpler, always-correct rule.
-- **No C2 destruction hook of its own.** Unlike `SdfClipmap`/`LocalShadowMap`, `DdgiProbes` keeps no
-  dirty-region bookkeeping — every update re-traces from whatever the clipmap currently holds, so a
-  change becomes visible the next time that probe's round-robin turn comes up. §8 already covers the
-  latency this implies and where the fix belongs.
+  applied here to "who is primed" (and, as of m10.5b, "who is fast-tracked") instead of "which
+  voxels are stamped". A toroidal remap that PRESERVES history for probes landing at the same world
+  position across a shift is the natural follow-up; v1 keeps the simpler, always-correct rule.
 - **No shadow-cascade sampling** (§4) — self-shadowing via a second SDF trace instead.
-- **No per-surface albedo, no multi-bounce** (§5).
+- **No per-surface albedo, no multi-bounce** (§5) — a limitation the m10.5b thesis test's own
+  numbers are honest about: the measured indirect signal moves because the SAME grey-world bounce
+  now reaches from different, newly-unoccluded geometry, not because any surface's own colour is
+  visible in it.
+- **`kFastTrackHysteresis`/`kFastTrackUpdates` are fixed constants, not `LightingSettings` fields**
+  (§12) — a profile or a specific game's pacing needs is the trigger for exposing them, not before.
 
-## Verification pins — what `tests/render/ddgi_test.cpp` checks
+## Verification pins — what the tests check
 
-No golden images; every claim is a stated, justified margin:
+No golden images; every claim is a stated, justified margin.
+
+`tests/render/ddgi_test.cpp` (m10.5a's own storage-side proofs, plus m10.5b's `invalidate()` proof):
 
 1. **Physical sanity.** An open, sunlit floor's brightest texel reads clearly above the sky floor
    (measured ≈1.66, sky ≈0.02); a probe sealed inside a 6-slab box (generous corner overlap, no
@@ -302,3 +445,36 @@ No golden images; every claim is a stated, justified margin:
    origin bit-identical; a jump past the lattice's own extent shifts it and re-primes every probe —
    the same anti-shimmer property `sdf_clipmap_test.cpp` already proves for the SDF clipmap's own
    voxel grid, applied to the probe lattice.
+5. **`invalidate()`'s fast-track (m10.5b), §12.** Two identical single-probe rigs, primed
+   identically, then the light disappears — one rig is `invalidate()`'d at that exact moment, the
+   other is not. After 5 updates (`kFastTrackUpdates`): the untouched rig retains ≈85.8% of its
+   initial brightness (predicted 85.9%); the invalidated one retains ≈3.2% (predicted 3.1%) — both
+   within a percent of their exact closed-form prediction, the residual being fp16 atlas-storage
+   rounding compounding over 5 successive `mix()` writes. `DdgiStats::fast_tracked` is checked
+   directly (exactly 1 on every one of the 5 updates for the invalidated rig, exactly 0 for the
+   other) so the test does not rely on the brightness numbers alone to prove the mechanism engaged.
+
+`tests/render/gi_thesis_test.cpp` (m10.5b's own end-to-end proofs, driven through `SceneRenderer`,
+not the raw compute passes — the claim is about a rendered pixel):
+
+6. **The thesis itself.** A floor patch in a suspended slab's cast shadow (CSM-verified: shadows on
+   vs. off at that exact pixel) reads dim but clearly above ambient with DDGI on (measured
+   ×2.00 over DDGI off — a hair over the ×1.2 margin the test states, both comfortably outside
+   fp16/ray-noise) and well below (< 5%) a fully sunlit control. The slab is then removed
+   (`SdfClipmap::remove_instance` + `DdgiProbes::invalidate`) and, after `N = 6`
+   (`kFastTrackUpdates` + 1 margin update) fast-tracked updates, the SAME patch reads ≥3× brighter
+   with DDGI either on or off (the direct term, now unshadowed, dominates) — and the isolated
+   indirect contribution (on − off) itself moves by ≈19%, a fully deterministic (fixed-seed RNG,
+   confirmed bit-identical across repeated runs) and physically sensible shift: with the slab gone,
+   nearby probes see MORE open, sunlit floor in the relevant hemisphere, not less, so the indirect
+   term gets slightly BRIGHTER after the break, not dimmer — proof the field re-traced the new
+   geometry rather than merely fading toward whatever it already held.
+7. **The leak guard.** A probe 0.5 m inside a sealed (ceiling-shadowed) room reads dark (measured
+   peak 0.0095, comparable to the sealed-box proof above); a probe 0.5 m past the room's only wall,
+   in the open, reads clearly lit (measured peak 0.77). A floor fragment deep in the room but right
+   against the wall's inner face sits 90%/10% between those two probes in the trilinear cage — a
+   NAIVE (Chebyshev-free) blend would leak roughly 10% of the bright probe's own value onto it
+   (≈0.077 by the measured peak); the actual rendered fragment's own indirect contribution measures
+   ≈0.0018 — under 3% of that naive estimate, comfortably inside the test's 40% ceiling — because
+   the bright probe's own visibility data shows its rays stopping at the wall a few tens of
+   centimetres away, far short of the fragment's actual distance.

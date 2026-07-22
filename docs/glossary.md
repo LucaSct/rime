@@ -210,9 +210,19 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Hysteresis (temporal blending).** Folding a new, noisy sample into a persisted value slowly —
   `stored = h·old + (1−h)·new` — so many frames' noise averages toward the truth instead of
   shimmering. The cost is latency: a *genuine* change takes roughly `1/(1−h)` frames to become
-  visible (≈33 frames at DDGI's own h=0.97 default), which is why a destruction event should lower
-  it locally rather than let every changed probe wait out the default. See
-  [math/ddgi.md](math/ddgi.md) §8.
+  visible (≈33 frames at DDGI's own h=0.97 default). `DdgiProbes::invalidate` (m10.5b) is the
+  destruction-reactive lever this predicts the need for: it drops a touched probe's hysteresis to
+  0.5 for its next 5 updates, so a genuine change converges in a handful of frames instead of
+  riding out the default. See [math/ddgi.md](math/ddgi.md) §8, §12.
+- **Chebyshev visibility test.** The one-sided variance bound (a Variance Shadow Map, applied to a
+  DDGI probe's stored hit-DISTANCE moments instead of a light's depth buffer) that decides whether a
+  probe can see a given point at all before trusting its stored irradiance there: from a probe's
+  stored `(mean, mean2)` hit-distance moments toward that point (`mean2` the mean of the *squared*
+  distance, so `variance = mean2 − mean²`), a point farther than `mean` is weighted down by
+  `variance / (variance + (dist−mean)²)` — a probe whose rays mostly stopped at a nearby wall reads
+  a point on the wall's far side as strongly occluded. This is what stops a bright probe on the lit
+  side of a wall leaking its irradiance onto a fragment on the dark side through an ordinary
+  (occlusion-blind) trilinear blend. See [math/ddgi.md](math/ddgi.md) §9, §11.
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
   render graph automates them. Vulkan's modern form is *synchronization2*
