@@ -404,6 +404,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     RGTexture depth = graph.create_texture({extent, kDepthFormat, "scene-depth"});
     RGTexture hdr = graph.create_texture({extent, kHdrFormat, "scene-hdr"});
     RGTexture ldr = graph.create_texture({extent, kLdrFormat, "scene-ldr"});
+    // SSR G-buffer (m10.7a): allocated ONLY when SSR is on, so the shadowed pass below stays
+    // single-attachment and the pre-SSR frame is untouched otherwise. m10.7b's march reads it.
+    RGTexture gbuffer;
+    if (lighting_.ssr_enabled)
+        gbuffer = graph.create_texture({extent, kGbufferFormat, "scene-gbuffer"});
     if (use_depth_prepass)
         depth_prepass_.add(graph, depth, data);
     // The M10 forward path (ADR-0032 §11 regression bridge) runs only when a feature actually has
@@ -417,7 +422,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     const bool has_local =
         lighting_.shadows_enabled && lighting_.local_shadows_enabled && !scene.spot_lights.empty();
     const bool has_clusters = lighting_.clustered_enabled && !scene.point_lights.empty();
-    if (has_sun || has_local || has_clusters || has_ddgi) {
+    // SSR (m10.7a) needs only the G-buffer written, which any draw produces — so it pulls the frame
+    // onto the shadowed shader on its own, no light required (an empty scene => empty, valid
+    // G-buffer). The march that consumes it is m10.7b.
+    const bool has_ssr = lighting_.ssr_enabled;
+    if (has_sun || has_local || has_clusters || has_ddgi || has_ssr) {
         // The cascade binding: the real fit when there is a sun, else a valid count-0 placeholder
         // so the shadowed pipeline's binding 7/8 is always satisfied (a spot-only scene).
         ShadowBinding shadow;
@@ -455,14 +464,22 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         } else {
             clusters = clustered_.empty_binding(graph);
         }
-        forward_.add_shadowed(
-            graph, hdr, depth, use_depth_prepass, data, shadow, local, clusters, ddgi_binding);
+        forward_.add_shadowed(graph,
+                              hdr,
+                              depth,
+                              use_depth_prepass,
+                              data,
+                              shadow,
+                              local,
+                              clusters,
+                              ddgi_binding,
+                              gbuffer);
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }
     tonemap_.add(graph, hdr, ldr);
     graph.export_texture(ldr); // the frame output; hdr is exportable by the caller when needed
-    return {hdr, ldr};
+    return {hdr, ldr, gbuffer};
 }
 
 } // namespace rime::render

@@ -41,6 +41,12 @@ rime_add_shaders(rime_render
     shaders/gizmo.vert
     shaders/gizmo.frag)
 
+# The SSR G-buffer variant (m10.7a): the shadowed shader compiled a second time with -DWRITE_GBUFFER
+# so it emits the thin normal+roughness G-buffer into a second attachment. One source, two modules —
+# the baseline shadowed shader stays free of the unused second output.
+rime_add_shader_variant(rime_render
+    shaders/pbr_forward_shadowed.frag WRITE_GBUFFER pbr_forward_shadowed_gbuffer.frag)
+
 # Namespaced alias so dependents link `rime::render`, matching our C++ namespace.
 add_library(rime::render ALIAS rime_render)
 

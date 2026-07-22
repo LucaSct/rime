@@ -13,6 +13,7 @@
 #include "pbr_forward.frag.spv.h"
 #include "pbr_forward.vert.spv.h"
 #include "pbr_forward_shadowed.frag.spv.h"
+#include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
 #include "tonemap.frag.spv.h"
 
 namespace rime::render {
@@ -139,6 +140,11 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
                                             pbr_forward_shadowed_frag_spv,
                                             sizeof(pbr_forward_shadowed_frag_spv),
                                             "pbr_forward_shadowed.frag");
+    shadowed_gbuffer_fragment_shader_ = make_shader(device,
+                                                    rhi::ShaderStage::Fragment,
+                                                    pbr_forward_shadowed_gbuffer_frag_spv,
+                                                    sizeof(pbr_forward_shadowed_gbuffer_frag_spv),
+                                                    "pbr_forward_shadowed_gbuffer.frag");
 
     // Bindings 0/1 = frame/draw uniforms; 2–6 = the five material maps (base-color,
     // metallic-roughness, normal, occlusion, emissive). One layout, every permutation — untextured
@@ -216,13 +222,34 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     pd.depth_compare = rhi::CompareOp::Less;
     pd.debug_name = "forward-pbr shadowed (standalone)";
     pipeline_shadowed_standalone_ = device.create_graphics_pipeline(pd);
+
+    // The SSR G-buffer variants (m10.7a): the SAME shadowed shader and bindings, plus a second
+    // colour attachment. The shader always writes location=1; only these pipelines give that write
+    // somewhere to land (the baseline pair above declares one attachment, so the hardware discards
+    // it there). color_formats wins over the single color_format when non-empty
+    // (rhi::GraphicsPipelineDesc), which is what makes these two MRT.
+    const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat};
+    pd.color_formats = gbuffer_formats;
+    pd.fragment_shader = shadowed_gbuffer_fragment_shader_; // the -DWRITE_GBUFFER twin
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.debug_name = "forward-pbr shadowed+gbuffer (after prepass)";
+    pipeline_shadowed_gbuffer_after_prepass_ = device.create_graphics_pipeline(pd);
+
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.debug_name = "forward-pbr shadowed+gbuffer (standalone)";
+    pipeline_shadowed_gbuffer_standalone_ = device.create_graphics_pipeline(pd);
 }
 
 ForwardPbrPass::~ForwardPbrPass() {
+    device_.destroy(pipeline_shadowed_gbuffer_standalone_);
+    device_.destroy(pipeline_shadowed_gbuffer_after_prepass_);
     device_.destroy(pipeline_shadowed_standalone_);
     device_.destroy(pipeline_shadowed_after_prepass_);
     device_.destroy(pipeline_standalone_);
     device_.destroy(pipeline_after_prepass_);
+    device_.destroy(shadowed_gbuffer_fragment_shader_);
     device_.destroy(shadowed_fragment_shader_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
@@ -269,9 +296,15 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   const ShadowBinding& shadow,
                                   const LocalShadowBinding& local,
                                   const ClusterBinding& clusters,
-                                  const DdgiBinding& ddgi) const {
+                                  const DdgiBinding& ddgi,
+                                  RGTexture gbuffer) const {
+    // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
+    // is the "no geometry" the shader overwrites with 1 where it shades), rendered by the matching
+    // MRT pipeline variant. Invalid = the one-attachment baseline, byte-for-byte the pre-SSR path.
+    const bool write_gbuffer = gbuffer.is_valid();
     const RGColorAttachment colors[] = {
-        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
+        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {gbuffer, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
     RGDepthAttachment depth_att{};
     depth_att.texture = depth;
     if (depth_prepassed) {
@@ -291,12 +324,16 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
     const RGBuffer buffers[] = {clusters.lights, clusters.lists};
     RenderGraph::RasterPassDesc desc{};
-    desc.colors = colors;
+    desc.colors = write_gbuffer ? std::span<const RGColorAttachment>{colors, 2}
+                                : std::span<const RGColorAttachment>{colors, 1};
     desc.depth = &depth_att;
     desc.sampled = sampled;
     desc.buffer_reads = buffers;
     const rhi::PipelineHandle pipe =
-        depth_prepassed ? pipeline_shadowed_after_prepass_ : pipeline_shadowed_standalone_;
+        write_gbuffer
+            ? (depth_prepassed ? pipeline_shadowed_gbuffer_after_prepass_
+                               : pipeline_shadowed_gbuffer_standalone_)
+            : (depth_prepassed ? pipeline_shadowed_after_prepass_ : pipeline_shadowed_standalone_);
     graph.add_raster_pass(
         "forward-pbr shadowed",
         desc,
