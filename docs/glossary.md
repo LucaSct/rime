@@ -223,6 +223,19 @@ Entries are grouped roughly by area and kept short on purpose.
   a point on the wall's far side as strongly occluded. This is what stops a bright probe on the lit
   side of a wall leaking its irradiance onto a fragment on the dark side through an ordinary
   (occlusion-blind) trilinear blend. See [math/ddgi.md](math/ddgi.md) §9, §11.
+- **CSM — Cascaded shadow maps.** The standard answer to shadowing a whole scene from one *directional*
+  light (the sun): split the view frustum into a few depth *cascades* (near/mid/far) and render a
+  separate shadow map fit tightly around each, so the near field gets most of the texels and the far
+  field stays covered — one map for the whole range would be either too coarse up close or
+  unaffordably large. Rime's (m10.1) reuses the depth pre-pass per cascade, and texel-snaps each fit
+  so shadow edges don't shimmer as the camera moves. See [math/shadow-mapping.md](math/shadow-mapping.md).
+- **SSR — Screen-space reflections.** Reflections computed from the frame the renderer just drew: at
+  each surface, reflect the view ray about the normal and *march* it through the depth buffer until it
+  crosses behind a recorded surface — a hit samples the frame's own colour there. Cheap and dynamic,
+  but limited to what is on screen; Rime (m10.7) falls back to the DDGI probe field for rays that leave
+  the frame or belong to rough surfaces, and fades reflections at the screen edge. A screen-space
+  *approximation*, not a solution — the reflection of anything off-screen is genuinely absent (the
+  probe fallback fills, but does not perfectly reconstruct, the gap). See [math/ssr.md](math/ssr.md).
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
   render graph automates them. Vulkan's modern form is *synchronization2*
