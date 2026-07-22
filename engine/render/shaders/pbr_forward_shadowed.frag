@@ -431,19 +431,32 @@ void main() {
     float alpha = roughness * roughness;
 
     float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
-    vec3 out_radiance = albedo * frame.ambient.rgb * ao;
 
-    // Indirect diffuse (m10.5b): DDGI's bounced-light term joins the flat ambient constant above —
-    // it must never touch the direct sun/spot/point paths below. Gated so DDGI-off leaves this
-    // shader byte-identical to the pre-m10.5b shadowed baseline (ADR-0032 §11), verified by
-    // tests/render/shadow_test.cpp / local_shadow_test.cpp / clustered_test.cpp still passing
-    // unmodified. The GEOMETRIC normal, not the normal-mapped `n` — DDGI is a coarse, sparsely-
-    // sampled volumetric field; a surface's micro-detail bump cannot change which hemisphere of it
-    // a handful of metres-apart probes are even sampling (the same reasoning sun_shadow/spot_shadow
-    // already use their own un-perturbed normal for, just above).
+    // Ambient / indirect diffuse — two mutually exclusive sources of the low-frequency "everything
+    // else" light, and picking exactly one is the m10.6 integration step:
+    //
+    //   • DDGI off  → M5.6's flat ambient constant (`frame.ambient`), the placeholder that has stood
+    //                 in for all indirect light since the first PBR frame. This branch is
+    //                 byte-identical to the pre-m10.5b shadowed baseline (ADR-0032 §11), so
+    //                 shadow_test / local_shadow_test / clustered_test keep passing unmodified — the
+    //                 regression bridge.
+    //   • DDGI on   → the measured bounced-light term REPLACES that constant rather than adding to
+    //                 it. Summing both would double-count the low-frequency indirect the placeholder
+    //                 was always a stand-in for (the classic ambient-plus-GI wash-out): m10.5b added
+    //                 them to prove the term was live, m10.6 retires the placeholder now that a real
+    //                 field exists. This is why the two-room proof pits GI-reacts against
+    //                 ambient-stays-put, not against ambient-plus-GI.
+    //
+    // Either way this indirect term must never touch the direct sun/spot/point paths below. DDGI uses
+    // the GEOMETRIC normal, not the normal-mapped `n` — it is a coarse, sparsely-sampled volumetric
+    // field, so a surface's micro-detail bump cannot change which hemisphere a handful of metres-apart
+    // probes are sampling (the same reasoning sun_shadow/spot_shadow use their own un-perturbed normal).
+    vec3 out_radiance;
     if (ddgi.enabled_pad.x != 0u) {
         vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal));
-        out_radiance += indirect * albedo * ao;
+        out_radiance = indirect * albedo * ao;
+    } else {
+        out_radiance = albedo * frame.ambient.rgb * ao;
     }
 
     // The sun (light 0) is the shadow caster; its contribution is scaled by the cascade shadow

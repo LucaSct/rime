@@ -457,18 +457,19 @@ No golden images; every claim is a stated, justified margin.
 `tests/render/gi_thesis_test.cpp` (m10.5b's own end-to-end proofs, driven through `SceneRenderer`,
 not the raw compute passes — the claim is about a rendered pixel):
 
-6. **The thesis itself.** A floor patch in a suspended slab's cast shadow (CSM-verified: shadows on
-   vs. off at that exact pixel) reads dim but clearly above ambient with DDGI on (measured
-   ×2.00 over DDGI off — a hair over the ×1.2 margin the test states, both comfortably outside
-   fp16/ray-noise) and well below (< 5%) a fully sunlit control. The slab is then removed
-   (`SdfClipmap::remove_instance` + `DdgiProbes::invalidate`) and, after `N = 6`
-   (`kFastTrackUpdates` + 1 margin update) fast-tracked updates, the SAME patch reads ≥3× brighter
-   with DDGI either on or off (the direct term, now unshadowed, dominates) — and the isolated
-   indirect contribution (on − off) itself moves by ≈19%, a fully deterministic (fixed-seed RNG,
-   confirmed bit-identical across repeated runs) and physically sensible shift: with the slab gone,
-   nearby probes see MORE open, sunlit floor in the relevant hemisphere, not less, so the indirect
-   term gets slightly BRIGHTER after the break, not dimmer — proof the field re-traced the new
-   geometry rather than merely fading toward whatever it already held.
+6. **The thesis itself, and the retired ambient (m10.6).** A floor patch in a suspended slab's cast
+   shadow (CSM-verified: shadows on vs. off at that exact pixel) is lit only indirectly. Since m10.6
+   the traced field REPLACES the flat ambient rather than adding to it (pbr.md §6.1), so DDGI-on and
+   DDGI-off are two whole renderers. With the slab present the patch sees mostly open sky, and the
+   two AGREE to a single 16-bit LSB — DDGI's escaped-ray sky term *is* that ambient constant, so in
+   the open-sky limit the field reduces to exactly what it replaced (a correctness property, and the
+   flat baseline the break must move away from) — while both stay well below (< 50%) a sunlit
+   control. The slab is then removed (`SdfClipmap::remove_instance` + `DdgiProbes::invalidate`) and,
+   after `N = 6` (`kFastTrackUpdates` + 1 margin) fast-tracked updates, two things hold: the patch
+   reads ≥3× brighter with DDGI either on or off (the now-unshadowed direct term — a CSM effect —
+   dominates), AND the isolated indirect contribution (on − off) rises from ≈0 to ≈+0.0029 (~190
+   16-bit LSB), the newly-unoccluded sunlit floor's bounce the flat constant cannot express. Fully
+   deterministic (fixed-seed RNG, bit-identical across runs).
 7. **The leak guard.** A probe 0.5 m inside a sealed (ceiling-shadowed) room reads dark (measured
    peak 0.0095, comparable to the sealed-box proof above); a probe 0.5 m past the room's only wall,
    in the open, reads clearly lit (measured peak 0.77). A floor fragment deep in the room but right
@@ -478,3 +479,16 @@ not the raw compute passes — the claim is about a rendered pixel):
    ≈0.0018 — under 3% of that naive estimate, comfortably inside the test's 40% ceiling — because
    the bright probe's own visibility data shows its rays stopping at the wall a few tens of
    centimetres away, far short of the fragment's actual distance.
+8. **The two-room walls-fall (m10.6) — GI as the entire signal.** The leak-guard scene, but the wall
+   FALLS. A covered dark room (a ceiling blocks the vertical sun — the sealed-box mechanism) beside
+   an open sunlit floor, divided by a wall; the dark room's floor gets NO direct light in either
+   state, because the ceiling shadows it whether or not the side wall stands. So when the wall is
+   removed (`remove_instance` + `invalidate`) the only thing that can brighten the dark floor is
+   bounce. Measured: the DDGI-on floor rises 0.00068 → 0.0059 (≈8.6×, a 0.0052 resolved signal)
+   while the DDGI-off control is BIT-IDENTICAL across the break (0.0159912 = 0.8·ambient — zero
+   direct light throughout, confirming the ceiling seals the sun). Where the slab test (pin 6) has
+   direct light dominating the change and GI as a small correction, here GI is the *whole* change —
+   the constant-ambient renderer is blind to the fallen wall. And even lit by bounce the enclosed
+   room stays DIMMER than the flat constant would have painted it (0.0059 < 0.016): occlusion
+   honesty, and the dynamic no-free-energy witness — single-bounce GI can only ever compute *less*
+   fill than the constant assumed, never invent more (pbr.md §6.1).
