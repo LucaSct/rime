@@ -19,6 +19,7 @@ rime_add_test(rime_render_tests
     clustered_test.cpp
     sdf_clipmap_test.cpp
     ddgi_test.cpp
+    gi_thesis_test.cpp
     viewer_frame_graph_test.cpp)
 
 target_link_libraries(rime_render_tests

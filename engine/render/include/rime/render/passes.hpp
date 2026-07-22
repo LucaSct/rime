@@ -164,6 +164,21 @@ struct ClusterBinding {
     rhi::BufferHandle ubo; // GpuClusterUniforms; its `enabled` flag picks the shader's light path
 };
 
+// m10.5b: what the forward pass samples for the DDGI indirect-diffuse term — the octahedral
+// irradiance atlas (binding 14) and visibility atlas (binding 15), each a sampler2D over the WHOLE
+// atlas (one probe's tile is a small sub-rectangle of it; DdgiSampleParams in the shader is what
+// locates a probe's tile), and the DdgiSampleParams block (binding 16) describing the probe
+// lattice's shape plus the `enabled` flag that picks the shader's indirect-lit-or-not path.
+// Produced by DdgiProbes::add (lighting/ddgi.hpp) — or DdgiProbes::empty_binding for the DDGI-off
+// placeholder. Both atlases share ONE sampler (linear + ClampToEdge; the sampler IS the thing that
+// makes the octahedral border ring do its job, docs/math/ddgi.md §3).
+struct DdgiBinding {
+    RGTexture irradiance;       // octahedral irradiance atlas (RGBA16Float)
+    RGTexture visibility;       // octahedral visibility atlas (RG32Float; the Chebyshev moments)
+    rhi::BufferHandle ubo;      // GpuDdgiSampleParams
+    rhi::SamplerHandle sampler; // shared linear + ClampToEdge sampler for both atlases
+};
+
 // ── Depth pre-pass ────────────────────────────────────────────────────────────────────────────
 // Rasterize every opaque draw with NO fragment shader and NO color attachment, writing only
 // depth. The forward pass then depth-tests with CompareOp::Equal and shades each pixel exactly
@@ -211,15 +226,16 @@ public:
              bool depth_prepassed,
              const SceneDrawData& data) const;
 
-    // The M10 variant (m10.1 + m10.2 + m10.3): the same forward shading, but the primary
+    // The M10 variant (m10.1 + m10.2 + m10.3 + m10.5b): the same forward shading, but the primary
     // directional light is modulated by a cascaded shadow map (`shadow`), every spot light by its
-    // local shadow map (`local`), and point lights optionally come from clustered light lists
-    // rather than the uniform block (`clusters`). A SEPARATE shader + pipelines from add() above,
-    // so with every M10 feature off the renderer runs the byte-identical M5.6 baseline (the
-    // ADR-0032 §11 regression bridge) — this path only exists when a caller opts in. All three
-    // bindings are always valid (an empty_binding stands in for an absent feature), because the
-    // pipeline's descriptor layout is fixed; which features are actually ON is carried by counts
-    // and flags inside the uniform blocks.
+    // local shadow map (`local`), point lights optionally come from clustered light lists rather
+    // than the uniform block (`clusters`), and an indirect-diffuse term samples the DDGI probe
+    // atlases (`ddgi`). A SEPARATE shader + pipelines from add() above, so with every M10 feature
+    // off the renderer runs the byte-identical M5.6 baseline (the ADR-0032 §11 regression bridge)
+    // — this path only exists when a caller opts in. All four bindings are always valid (an
+    // empty_binding stands in for an absent feature), because the pipeline's descriptor layout is
+    // fixed; which features are actually ON is carried by counts and flags inside the uniform
+    // blocks.
     void add_shadowed(RenderGraph& graph,
                       RGTexture hdr,
                       RGTexture depth,
@@ -227,7 +243,8 @@ public:
                       const SceneDrawData& data,
                       const ShadowBinding& shadow,
                       const LocalShadowBinding& local,
-                      const ClusterBinding& clusters) const;
+                      const ClusterBinding& clusters,
+                      const DdgiBinding& ddgi) const;
 
 private:
     rhi::Device& device_;

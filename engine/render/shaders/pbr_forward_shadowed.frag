@@ -110,6 +110,21 @@ layout(std140, set = 0, binding = 13) uniform ClusterUniforms {
     vec4 proj;    // x,y = the projection's x/y scale terms
 } cluster;
 
+// ── DDGI probes (m10.5b, ADR-0032 §2) ────────────────────────────────────────────────────────
+// The octahedral irradiance/visibility atlases DdgiProbes (lighting/ddgi.hpp) maintains, sampled
+// here to add the SECOND half of M10's walls-fall thesis: m10.1/m10.2 already made the shadow
+// move when a wall breaks; this is what makes the BOUNCED light move too. Each is a sampler2D over
+// the WHOLE atlas — one probe's octahedral tile is a small sub-rectangle of it, and
+// DdgiSampleParams (mirroring GpuDdgiTraceParams field-for-field, m10.5a) is what locates it.
+layout(set = 0, binding = 14) uniform sampler2D ddgi_irradiance_atlas;
+layout(set = 0, binding = 15) uniform sampler2D ddgi_visibility_atlas;
+
+layout(std140, set = 0, binding = 16) uniform DdgiSampleParams {
+    vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
+    uvec4 grid_dims_perrow;   // xyz probe counts, w atlas probes-per-row
+    uvec4 enabled_pad;        // x enabled (0/1), yzw unused
+} ddgi;
+
 layout(location = 0) in vec3 v_world_pos;
 layout(location = 1) in vec3 v_world_normal;
 layout(location = 2) in vec2 v_uv;
@@ -254,6 +269,157 @@ float spot_shadow(uint idx, vec3 world_pos, vec3 N) {
     return sum / 9.0;
 }
 
+// ── DDGI sampling (m10.5b, docs/math/ddgi.md §12) ────────────────────────────────────────────
+// The tile shape (lighting/ddgi.hpp's kDdgiIrradianceTileInterior/kDdgiVisibilityTileInterior +
+// kDdgiTileBorder) as plain constants — no shader-include mechanism exists yet (the same
+// constraint sdf_compose.comp/ddgi_trace.comp already live with), so these are a COPY, not a
+// shared header; the octahedral encode two paragraphs down is the same story.
+const float kDdgiIrradianceInterior = 6.0;
+const float kDdgiIrradiancePhysical = 8.0;
+const float kDdgiVisibilityInterior = 14.0;
+const float kDdgiVisibilityPhysical = 16.0;
+
+// Octahedral encode — mirrors ddgi_oct_encode (lighting/ddgi.cpp) EXACTLY. Encode and decode must
+// agree bit-for-bit in SPIRIT (not literally, C++ and GLSL are different compilers) or a probe's
+// stored data reads back as an unrelated direction's value; ddgi.hpp's own header comment makes
+// the same point about the three existing copies of the sibling Fibonacci-direction formula.
+vec2 ddgi_oct_encode(vec3 dir) {
+    float denom = abs(dir.x) + abs(dir.y) + abs(dir.z);
+    vec2 p = dir.xy / max(denom, 1.0e-8);
+    if (dir.z <= 0.0) {
+        vec2 s = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+        p = vec2((1.0 - abs(p.y)) * s.x, (1.0 - abs(p.x)) * s.y);
+    }
+    return p;
+}
+
+// Sample atlas `tex` at probe `global_index`'s texel for direction `dir`. This is the INVERSE of
+// ddgi_blend_irradiance.comp / ddgi_blend_visibility.comp's own per-texel formula
+// `uv = (px - 1 + 0.5) / interior * 2 - 1` (px an INTEGER physical-tile coordinate there): solving
+// that for px given a continuous `uv` in [-1,1] gives `px = interior*(uv+1)/2 + 0.5`, a value in
+// "texel index, integer = that texel's own centre" units — verified against the compute shader's
+// own numbers: interior=6 puts oct=-1 (the mapping's own edge) at px=0.5 (exactly between the
+// border texel 0 and the first interior texel 1, where the seam physically sits), and the first/
+// last interior texel CENTRES at px=1.0/6.0 exactly. `tile_origin` (in the SAME physical-texel
+// units, the tile's own (0,0) texel's index within the full atlas) then just adds on, and the
+// final `+0.5` is the ordinary "texel index -> normalized UV" conversion applied once, at the end,
+// to the combined coordinate — not a second copy of the tile-internal one two lines up.
+vec4 ddgi_sample_tile(sampler2D tex, uint global_index, vec3 dir, float interior) {
+    uint probes_per_row = max(ddgi.grid_dims_perrow.w, 1u);
+    vec2 physical = vec2(interior + 2.0); // + the 1-texel border on each side
+    vec2 tile_origin = vec2(float(global_index % probes_per_row), float(global_index / probes_per_row)) *
+                       physical;
+    vec2 oct = ddgi_oct_encode(dir);
+    vec2 texel_in_tile = (oct + 1.0) * 0.5 * interior + 0.5;
+    vec2 atlas_texel = tile_origin + texel_in_tile;
+    vec2 atlas_size = vec2(textureSize(tex, 0));
+    return texture(tex, (atlas_texel + 0.5) / atlas_size);
+}
+
+// The Chebyshev one-sided variance test (Majercik et al. 2019, the classic variance-shadow-map
+// bound applied to a probe's stored hit-distance moments instead of a light's depth buffer): from
+// this probe's rays toward the fragment's OWN direction, `mean` is about how far they typically
+// travelled before hitting something, `mean2` their mean squared distance, so
+// `variance = mean2 - mean^2`. If the fragment sits no farther than `mean`, nothing in the probe's
+// own data says anything is in the way — fully visible. Farther than `mean`, the one-sided bound
+// `variance / (variance + (dist-mean)^2)` fades toward 0 as `dist` outgrows `mean` by more than the
+// probe's own measured spread: a probe on the LIT face of a wall, whose rays toward the DARK side
+// all stopped tight against the wall (small mean, small variance), reads a fragment well past that
+// wall as strongly occluded — which is exactly the leak this test exists to stop (docs/math/ddgi.md
+// §12 walks the box-and-two-rooms case this proof pins).
+float ddgi_chebyshev_weight(float mean, float mean2, float dist) {
+    if (dist <= mean) {
+        return 1.0;
+    }
+    float variance = max(mean2 - mean * mean, 0.0);
+    float diff = dist - mean;
+    return variance / (variance + diff * diff);
+}
+
+// The indirect-diffuse irradiance a surface at `world_pos` with normal `n` receives from the DDGI
+// lattice (docs/math/ddgi.md §12): the 8 probes of the lattice cell containing `world_pos`,
+// trilinearly weighted by where inside that cell it sits, each ALSO weighted by (a) the Chebyshev
+// visibility test above (stops a probe on the wrong side of a wall leaking light through it) and
+// (b) the standard "wrap" weight — a probe roughly in front of the surface (along its normal)
+// counts fully, one roughly behind fades toward 0 (Majercik et al.'s own adaptive-backface term, in
+// its simplest linear form). Re-normalized by the weight actually applied, not a flat 1/8, so a
+// cell where several corners are occluded fades toward the corners that AREN'T rather than just
+// going dark from the ones that are missing (the same reason the reference implementation does
+// this) — `weight_sum`'s own small-epsilon floor is what keeps a FULLY occluded cell from dividing
+// by zero.
+//
+// CLAMPED to the grid's own volume before bracketing (clamp(rel, 0, dims-1), the CLAMP_TO_EDGE a
+// texture sampler applies, done here by hand): probes never extend past the lattice's own extent
+// on any axis, so an ordinary floor sitting at a "round" world height (y=0, almost always an EXACT
+// multiple of any probe spacing, since 0 is a multiple of everything) would otherwise land its
+// fragments EXACTLY on the lattice's own lowest grid line — one bracketing corner past the edge
+// (dropped, correctly), the other exactly AT the fragment's own height, so its trilinear weight
+// (a fractional-distance-into-the-cell term) is EXACTLY zero. Left unclamped, that is a silent
+// all-8-corners-contribute-nothing failure, not a visible bug — this is the fix, not a cosmetic
+// tidy-up (m10.5b's own first attempt at this function hit exactly this: a floor patch reading
+// pure ambient with a fully-lit probe one cell away, because DIVIDE was correct and EVERY weight
+// was nonetheless zero).
+vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) {
+    float spacing = max(ddgi.grid_origin_spacing.w, 1.0e-4);
+    ivec3 dims = ivec3(ddgi.grid_dims_perrow.xyz);
+    vec3 rel = (world_pos - ddgi.grid_origin_spacing.xyz) / spacing;
+    vec3 rel_clamped = clamp(rel, vec3(0.0), vec3(dims) - vec3(1.0));
+    ivec3 base = ivec3(floor(rel_clamped));
+    vec3 frac = rel_clamped - vec3(base);
+
+    vec3 accum = vec3(0.0);
+    float weight_sum = 0.0;
+    for (int dz = 0; dz < 2; ++dz) {
+        for (int dy = 0; dy < 2; ++dy) {
+            for (int dx = 0; dx < 2; ++dx) {
+                ivec3 coord = base + ivec3(dx, dy, dz);
+                // Still checked (not just asserted by the clamp above): a 1-probe-deep axis (dims
+                // == 1, e.g. the leak test's single Y/Z layer) clamps rel to exactly 0 but a corner
+                // at coord 1 on that axis is still one past the ONLY layer that exists.
+                if (any(lessThan(coord, ivec3(0))) || any(greaterThanEqual(coord, dims)))
+                    continue; // past the lattice's own edge: no probe sits here
+
+                float wx = dx == 1 ? frac.x : 1.0 - frac.x;
+                float wy = dy == 1 ? frac.y : 1.0 - frac.y;
+                float wz = dz == 1 ? frac.z : 1.0 - frac.z;
+                float trilinear = wx * wy * wz;
+                if (trilinear <= 1.0e-6)
+                    continue;
+
+                uint global = uint(coord.x) + uint(coord.y) * uint(dims.x) +
+                             uint(coord.z) * uint(dims.x) * uint(dims.y);
+                vec3 probe_pos = ddgi.grid_origin_spacing.xyz + vec3(coord) * spacing;
+
+                vec3 to_probe = probe_pos - world_pos;
+                float dist = length(to_probe);
+                vec3 frag_to_probe = to_probe / max(dist, 1.0e-5);
+
+                float wrap = clamp((dot(n, frag_to_probe) + 1.0) * 0.5, 0.0, 1.0);
+                if (wrap <= 1.0e-6)
+                    continue;
+
+                // The visibility lookup direction is FROM THE PROBE TOWARD THE FRAGMENT (the
+                // probe's own stored data is a function of directions shot OUT from itself) —
+                // the negation of frag_to_probe, which points the other way.
+                vec2 vis = ddgi_sample_tile(
+                               ddgi_visibility_atlas, global, -frag_to_probe, kDdgiVisibilityInterior)
+                               .rg;
+                float visibility = ddgi_chebyshev_weight(vis.x, vis.y, dist);
+
+                float total = trilinear * wrap * visibility;
+                if (total <= 1.0e-6)
+                    continue;
+
+                vec3 irradiance =
+                    ddgi_sample_tile(ddgi_irradiance_atlas, global, n, kDdgiIrradianceInterior).rgb;
+                accum += irradiance * total;
+                weight_sum += total;
+            }
+        }
+    }
+    return weight_sum > 1.0e-6 ? accum / weight_sum : vec3(0.0);
+}
+
 void main() {
     vec3 n = perturb_normal(v_world_normal);
     vec3 v = normalize(frame.camera_pos.xyz - v_world_pos);
@@ -266,6 +432,19 @@ void main() {
 
     float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
     vec3 out_radiance = albedo * frame.ambient.rgb * ao;
+
+    // Indirect diffuse (m10.5b): DDGI's bounced-light term joins the flat ambient constant above —
+    // it must never touch the direct sun/spot/point paths below. Gated so DDGI-off leaves this
+    // shader byte-identical to the pre-m10.5b shadowed baseline (ADR-0032 §11), verified by
+    // tests/render/shadow_test.cpp / local_shadow_test.cpp / clustered_test.cpp still passing
+    // unmodified. The GEOMETRIC normal, not the normal-mapped `n` — DDGI is a coarse, sparsely-
+    // sampled volumetric field; a surface's micro-detail bump cannot change which hemisphere of it
+    // a handful of metres-apart probes are even sampling (the same reasoning sun_shadow/spot_shadow
+    // already use their own un-perturbed normal for, just above).
+    if (ddgi.enabled_pad.x != 0u) {
+        vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal));
+        out_radiance += indirect * albedo * ao;
+    }
 
     // The sun (light 0) is the shadow caster; its contribution is scaled by the cascade shadow
     // factor. The remaining directional lights (fill lights) are unshadowed in v1.

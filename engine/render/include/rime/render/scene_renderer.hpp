@@ -128,6 +128,13 @@ public:
     // know). A no-op while sdf_clipmap_enabled is off (nothing ever reads the accumulated regions).
     void invalidate_sdf_region(const WorldAabb& region) { sdf_clipmap_.invalidate(region); }
 
+    // The C2 destruction hook for DDGI's temporal hysteresis (m10.5b) — the third twin, alongside
+    // invalidate_shadow_region/invalidate_sdf_region: an app/sample bridging one destruction event
+    // into all three calls is what makes the FULL thesis true (the shadow moves, the field
+    // recomposes, AND the bounced light catches up quickly rather than riding out ~30 frames of
+    // default hysteresis — docs/math/ddgi.md §8/§11). A no-op while ddgi_enabled is off.
+    void invalidate_ddgi_region(const WorldAabb& region) { ddgi_.invalidate(region); }
+
     // Direct access to the clipmap for reading its stats/level textures, or for registering a
     // composed instance BY HAND (SdfClipmap::update_instance/remove_instance) outside the ECS
     // entirely (a decal, a procedural volume — anything that is not an entity). Ordinary entities
