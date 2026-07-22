@@ -132,6 +132,14 @@ layout(location = 3) in vec3 v_world_tangent;
 layout(location = 4) in float v_tangent_w;
 
 layout(location = 0) out vec4 out_hdr;
+// The thin G-buffer for SSR (m10.7a) — compiled ONLY into the -DWRITE_GBUFFER variant of this
+// shader (pbr_forward_shadowed_gbuffer.frag, built by the engine's rime_add_shader_variant), which
+// the two SSR pipelines bind. The baseline shadowed shader has no second output at all, so binding
+// it to a single-attachment pipeline stays validation-clean (no "unused output" warning). One
+// source, two SPIR-V modules — no duplicated GLSL. docs/math/ssr.md (m10.7b) is what marches it.
+#ifdef WRITE_GBUFFER
+layout(location = 1) out vec4 out_gbuffer;
+#endif
 
 const float kPi = 3.14159265358979;
 
@@ -517,4 +525,13 @@ void main() {
 
     out_radiance += draw.emissive.rgb * texture(emissive_tex, v_uv).rgb;
     out_hdr = vec4(out_radiance, 1.0);
+
+#ifdef WRITE_GBUFFER
+    // Thin G-buffer for SSR (m10.7a): the shading normal `n` (already normal-mapped, world-space)
+    // octahedral-encoded into RG (the exact ddgi_oct_encode used for probe directions — one encode
+    // in the module, one decode to match in gbuffer_test.cpp), the perceptual `roughness` into B,
+    // and A = 1.0 as a "geometry is here" mask so the SSR march (m10.7b) can distinguish a shaded
+    // fragment from cleared background (which stays A = 0).
+    out_gbuffer = vec4(ddgi_oct_encode(n), roughness, 1.0);
+#endif
 }

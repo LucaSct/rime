@@ -37,6 +37,10 @@ namespace rime::render {
 inline constexpr rhi::Format kHdrFormat = rhi::Format::RGBA16Float;
 inline constexpr rhi::Format kDepthFormat = rhi::Format::D32Float;
 inline constexpr rhi::Format kLdrFormat = rhi::Format::RGBA8Unorm;
+// The thin SSR G-buffer (m10.7a): RG = octahedral world normal, B = perceptual roughness, A = a
+// geometry mask (1 where shaded, 0 where cleared). RGBA16Float so the signed [-1,1] octahedral
+// pair and the [0,1] roughness all keep full precision — thin means two attachments, not narrow.
+inline constexpr rhi::Format kGbufferFormat = rhi::Format::RGBA16Float;
 
 // Fixed light budgets for the per-frame uniform block. Uniform blocks are statically sized, so
 // the caps are compile-time; 4 suns and 16 point lights are generous for M5 scenes. Past these,
@@ -244,17 +248,27 @@ public:
                       const ShadowBinding& shadow,
                       const LocalShadowBinding& local,
                       const ClusterBinding& clusters,
-                      const DdgiBinding& ddgi) const;
+                      const DdgiBinding& ddgi,
+                      // The thin SSR G-buffer (m10.7a). Invalid (the default) = the baseline
+                      // single-attachment path. Valid = a second colour attachment the shadowed
+                      // shader writes world-normal + roughness into, using a pipeline variant that
+                      // differs from the baseline shadowed pipeline ONLY in attachment count.
+                      RGTexture gbuffer = {}) const;
 
 private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::ShaderHandle shadowed_fragment_shader_;          // pbr_forward_shadowed.frag (m10.1)
+    rhi::ShaderHandle shadowed_gbuffer_fragment_shader_;  // same, -DWRITE_GBUFFER (m10.7a)
     rhi::PipelineHandle pipeline_after_prepass_;          // depth Load + Equal + no write
     rhi::PipelineHandle pipeline_standalone_;             // depth Clear + Less + write
     rhi::PipelineHandle pipeline_shadowed_after_prepass_; // + shadow bindings (m10.1)
     rhi::PipelineHandle pipeline_shadowed_standalone_;
+    // SSR G-buffer variants (m10.7a): identical to the two above but with a second colour
+    // attachment (kGbufferFormat). Bound only when a caller passes a valid gbuffer target.
+    rhi::PipelineHandle pipeline_shadowed_gbuffer_after_prepass_;
+    rhi::PipelineHandle pipeline_shadowed_gbuffer_standalone_;
 };
 
 // ── Tonemap pass ──────────────────────────────────────────────────────────────────────────────

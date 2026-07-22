@@ -81,6 +81,10 @@ public:
     struct Output {
         RGTexture hdr;
         RGTexture ldr;
+        // The thin SSR G-buffer (m10.7a), valid only when LightingSettings::ssr_enabled — export it
+        // to read it back, or feed it to the SSR march (m10.7b). Invalid otherwise (no allocation,
+        // no write): the pre-SSR frame is untouched.
+        RGTexture gbuffer;
     };
 
     // Extract → upload → declare into `graph` (which the caller later executes). Returns invalid

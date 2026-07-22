@@ -158,6 +158,17 @@ struct LightingSettings {
     // real per-surface colour bleeding is a named follow-up (a surface cache), not built here. 0.6
     // is a plausible average indoor-surface albedo (matte paint / plaster).
     float ddgi_albedo = 0.6f;
+
+    // ── Screen-space reflections (m10.7) ────────────────────────────────────────────────────────
+    // A sixth independent gate. On: the shadowed forward pass ALSO writes a thin G-buffer (world
+    // normal + perceptual roughness) that m10.7b's SSR compute pass marches against the depth
+    // buffer. Off (the default): no G-buffer is allocated or written — byte-identical pre-M10
+    // baseline. The G-buffer rides the SHADOWED forward shader, where the normal and roughness are
+    // already computed, so — like clustered/local shading — turning SSR on pulls the frame onto the
+    // shadowed path; with every other feature off that shader is arithmetically the baseline
+    // (count-0 shadow loops return "lit"). m10.7a produces and tests the G-buffer; the SSR march
+    // that consumes it (and its own march/fallback/roughness settings) is m10.7b.
+    bool ssr_enabled = false;
 };
 
 } // namespace rime::render

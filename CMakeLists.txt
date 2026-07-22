@@ -242,6 +242,46 @@ function(rime_add_shaders target)
     target_include_directories(${target} PRIVATE "${_gen}")
 endfunction()
 
+# rime_add_shader_variant(target <src> <DEFINE> <out_name>): compile ONE GLSL source a second time
+# with an extra preprocessor -D<DEFINE>, embedded under a DISTINCT symbol (derived from <out_name>).
+# For MRT / permutation variants that share a source rather than duplicating it — m10.7a compiles
+# pbr_forward_shadowed.frag with -DWRITE_GBUFFER into its G-buffer-writing twin, so the baseline
+# module carries no unused second output. Mirrors rime_add_shaders' single-source path.
+function(rime_add_shader_variant target src define out_name)
+    if(NOT RIME_GLSL_COMPILER)
+        find_program(RIME_GLSL_COMPILER NAMES glslangValidator glslang)
+    endif()
+    if(NOT RIME_GLSL_COMPILER)
+        message(FATAL_ERROR "rime_add_shader_variant: no GLSL->SPIR-V compiler found.")
+    endif()
+    set(_gen "${CMAKE_CURRENT_BINARY_DIR}/shaders")
+    file(MAKE_DIRECTORY "${_gen}")
+    if(IS_ABSOLUTE "${src}")
+        set(_srcpath "${src}")
+    else()
+        set(_srcpath "${CMAKE_CURRENT_SOURCE_DIR}/${src}")
+    endif()
+    string(MAKE_C_IDENTIFIER "${out_name}" _ident)
+    set(_spv "${_gen}/${out_name}.spv")
+    set(_hdr "${_gen}/${out_name}.spv.h")
+    add_custom_command(
+        OUTPUT "${_spv}"
+        COMMAND "${RIME_GLSL_COMPILER}" -V --target-env vulkan1.3 "-D${define}" -o "${_spv}"
+                "${_srcpath}"
+        DEPENDS "${_srcpath}"
+        COMMENT "glsl -> spirv: ${out_name} (-D${define})"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${_hdr}"
+        COMMAND ${CMAKE_COMMAND} -DSPV=${_spv} -DHDR=${_hdr} -DSYM=${_ident}_spv
+                -P "${RIME_CMAKE_DIR}/embed_spirv.cmake"
+        DEPENDS "${_spv}" "${RIME_CMAKE_DIR}/embed_spirv.cmake"
+        COMMENT "embed spirv: ${out_name}.spv.h"
+        VERBATIM)
+    target_sources(${target} PRIVATE "${_hdr}")
+    target_include_directories(${target} PRIVATE "${_gen}")
+endfunction()
+
 # ── Third-party dependencies ────────────────────────────────────────────────────
 # Resolved by Conan (see /conanfile.py) and located here via the CMakeDeps config files
 # it generates. We find them once, at the top level, so the imported targets (e.g.
