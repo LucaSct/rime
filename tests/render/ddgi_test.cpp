@@ -131,7 +131,9 @@ DdgiStats step(rhi::Device& device,
     RenderGraph graph(device);
     graph.reset();
     clipmap.add(graph, camera_pos);
-    ddgi.add(graph, clipmap, camera_pos, lighting, settings);
+    (void)ddgi.add(graph, clipmap, camera_pos, lighting, settings); // m10.5b: now returns a
+                                                                    // DdgiBinding these
+                                                                    // compute-only tests don't need
     auto cmd = device.begin_commands();
     graph.execute(*cmd);
     device.submit_blocking(*cmd);
@@ -448,4 +450,106 @@ TEST_CASE("ddgi: sub-spacing camera motion does not reshuffle the lattice (m10.5
     CHECK(jumped.grid_shifted);
     CHECK(jumped.newly_primed == 64);
     CHECK(ddgi.origin().x != origin0.x);
+}
+
+TEST_CASE("ddgi: invalidate() fast-tracks a probe's hysteresis after a destruction event, "
+          "converging in a handful of updates instead of riding out the default (m10.5b)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the DDGI invalidate() fast-track proof");
+        return;
+    }
+
+    // Reuses test 3's own clean instrument (a light that goes away, so every subsequent
+    // new_estimate is EXACTLY 0 — no ray-sampling noise to obscure the decay rate at all) but now
+    // runs TWO independent single-probe rigs side by side, identical in every way except that only
+    // one of them gets invalidate()'d when the light disappears — the direct A/B this brief asks
+    // for. `settings.ddgi_hysteresis` is left at the real default (0.97, NOT test 3's faster 0.8):
+    // the whole point is contrasting the fast-track against exactly what a caller who never
+    // touches invalidate() actually gets.
+    LightingSettings settings{};
+    settings.ddgi_probe_count_x = settings.ddgi_probe_count_y = settings.ddgi_probe_count_z = 1;
+    settings.ddgi_rays_per_probe = 64;
+    settings.ddgi_hysteresis = 0.97f;
+    settings.ddgi_albedo = 0.6f;
+
+    DdgiLightingInputs lit_on{};
+    lit_on.has_sun = true;
+    lit_on.sun_direction = {0.0f, -1.0f, 0.0f};
+    lit_on.sun_radiance[0] = lit_on.sun_radiance[1] = lit_on.sun_radiance[2] = 3.0f;
+    lit_on.sky_radiance[0] = lit_on.sky_radiance[1] = lit_on.sky_radiance[2] = 0.02f;
+    DdgiLightingInputs lit_off{}; // has_sun false AND sky zeroed — every ray contributes exactly 0.
+
+    SdfClipmap clipmap_fast(*device);
+    SdfClipmap clipmap_plain(*device);
+    DdgiProbes ddgi_fast(*device);
+    DdgiProbes ddgi_plain(*device);
+    compose_open_floor(clipmap_fast);
+    compose_open_floor(clipmap_plain);
+
+    const auto read_peak = [&](rhi::Device& dev, const DdgiProbes& probes) {
+        const test::HdrImage img = read_irradiance(dev, probes);
+        float peak = 0.0f;
+        for (std::uint32_t y = 0; y < img.height; ++y)
+            for (std::uint32_t x = 0; x < img.width; ++x)
+                peak = std::max(peak, img.luminance(x, y));
+        return peak;
+    };
+
+    // Prime both identically (a single (1,1,1)-grid probe at the origin, camera_pos = origin —
+    // see compose_open_floor's own comment for why this is 1 m above a large sunlit slab).
+    for (int i = 0; i < 10; ++i) {
+        (void)step(*device, clipmap_fast, ddgi_fast, {0.0f, 0.0f, 0.0f}, lit_on, settings);
+        (void)step(*device, clipmap_plain, ddgi_plain, {0.0f, 0.0f, 0.0f}, lit_on, settings);
+    }
+    const float initial_fast = read_peak(*device, ddgi_fast);
+    const float initial_plain = read_peak(*device, ddgi_plain);
+    MESSAGE("initial (lit) peaks: fast-rig=" << initial_fast << " plain-rig=" << initial_plain);
+    REQUIRE(initial_fast > 0.05f);
+    REQUIRE(initial_plain > 0.05f);
+
+    // The light goes away — AND, only for the "fast" rig, a destruction event's world-bounds
+    // happens to cover this probe's own lattice point (the origin): a generous box comfortably
+    // containing it, mirroring how an app forwards a real C2 event's AABB. invalidate() itself
+    // does not touch the atlas or force a re-trace; it only marks the probe for the next add()s.
+    ddgi_fast.invalidate(WorldAabb{{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}});
+
+    // kFastTrackUpdates (ddgi.cpp) — the exact number of updates the fast-track budget lasts.
+    constexpr int kUpdates = 5;
+    for (int i = 0; i < kUpdates; ++i) {
+        const DdgiStats sf =
+            step(*device, clipmap_fast, ddgi_fast, {0.0f, 0.0f, 0.0f}, lit_off, settings);
+        const DdgiStats sp =
+            step(*device, clipmap_plain, ddgi_plain, {0.0f, 0.0f, 0.0f}, lit_off, settings);
+        REQUIRE(sf.newly_primed == 0); // still the same primed probe throughout
+        REQUIRE(sp.newly_primed == 0);
+        // The one probe there is must be fast-tracked on EVERY one of these kUpdates calls (the
+        // budget is exactly kUpdates long) — and the untouched rig must never be.
+        CHECK(sf.fast_tracked == 1);
+        CHECK(sp.fast_tracked == 0);
+    }
+
+    const float after_fast = read_peak(*device, ddgi_fast);
+    const float after_plain = read_peak(*device, ddgi_plain);
+    MESSAGE("after " << kUpdates << " dark updates: fast-rig=" << after_fast << " (initial "
+                     << initial_fast << "), plain-rig=" << after_plain << " (initial "
+                     << initial_plain << ")");
+
+    // The plain rig rides the real default: stored_n = 0.97^5 * stored_0 ~= 0.859 * stored_0 —
+    // barely moved. 0.7 is a generous floor well below that prediction (fp16 + the image-wide-max
+    // possibly hopping between near-tied texels as they decay in lockstep, the same slack m10.5a's
+    // own convergence test budgets) while still clearly separating "barely moved" from "gone".
+    CHECK(after_plain > initial_plain * 0.7f);
+    // The fast rig: stored_n = 0.5^5 * stored_0 ~= 0.03125 * stored_0 — materially converged. 0.15
+    // is generous slack above that prediction for the identical reasons, while still being far
+    // below the plain rig's own 0.7 floor — the two rigs are NOT just both "somewhat lower", they
+    // are qualitatively different outcomes from the identical starting point and the identical
+    // (lit -> dark) event.
+    CHECK(after_fast < initial_fast * 0.15f);
+    // State the contrast directly, not just each against its own initial value: the fast rig ends
+    // up markedly darker than the plain rig, from the SAME starting brightness.
+    CHECK(after_fast < after_plain * 0.3f);
 }
