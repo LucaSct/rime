@@ -9,6 +9,24 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-28) — Milestone 11 (Networking + networked destruction) kicks off.**
+> **M11.0 landed [ADR-0033](adr/0033-networking-v1.md) (Accepted)** — the networking-v1 decisions:
+> **dedicated-server authority** (a listen server is a degenerate embedding, not a design; lockstep
+> stays rejected per ADR-0026's cross-platform non-goal); the **hybrid replication model** —
+> destruction *topology* replicates as **reliable-ordered events** that each client replays through
+> M8's deterministic damage → detach function (the ADR-0029 event-replay contract, at last), while
+> dynamic *state* (debris, bodies, players) rides **unreliable-sequenced snapshots** off the server
+> as the drift-correcting authority; **our own UDP transport** — a `platform::UdpSocket` plus a thin,
+> teachable reliability layer (sequence/ack/resend; reliable-ordered + unreliable-sequenced channels)
+> over a scripted-loss deterministic `Link` seam, so every networking proof stays GPU-free and
+> reproducible in CI while the S0/S1 TCP/UDS tools wire is untouched; **server-assigned `NetId`s**
+> with **reflection-generated, schema-hash-checked snapshot serialization**; and **relevancy v1** —
+> destruction events are never culled, debris transforms are distance-budgeted per client. M11 is
+> decomposed into bricks **m11.0–m11.7** (see the M11 detail below): transport → sessions →
+> replication core → networked destruction → relevancy/budgets → interpolation/input → the proof,
+> `samples/12-networked-destruction` (a dedicated headless server + two clients seeing the same wall
+> break at scale, hash-verified in CI). **Next:** m11.1 — transport v2.
+>
 > **Update (2026-07-22) — Milestone 10 (Advanced lighting) COMPLETE.** The whole [ADR-0032](adr/0032-lighting-v2.md)
 > stack landed on `main`, brick by brick, every technique gated behind `LightingSettings` so **off is
 > the byte-identical M5.6 baseline**: **m10.1a** RHI array/cube textures + depth-compare sampler ·
@@ -591,6 +609,25 @@ updates*. *Inspired by: UE5.*
 **M11 — Networking & networked destruction.** `engine/net` — client-server, replication,
 and **prioritization + culling** of part-destruction/debris; determinism where required.
 *Inspired by: Frostbite's networked destruction at 64 players.*
+
+*Bricks (planned 2026-07-28; [ADR-0033](adr/0033-networking-v1.md) is the model — server authority,
+hybrid event-replay/snapshot replication, own UDP transport):* **m11.0** ADR-0033 + this ladder (the
+decision brick — no code) · **m11.1** **transport v2** — `platform::UdpSocket` (POSIX-shared + Win32,
+non-blocking) and the `engine/net` reliability layer (sequence/ack/resend; reliable-ordered +
+unreliable-sequenced channels) over a scripted-loss deterministic `Link` seam · **m11.2** **sessions**
+— `NetDriver`/`Session`, schema-hash handshake, heartbeat/timeout, two-process loopback + LAN smoke ·
+**m11.3** **replication core** — server-assigned `NetId`s, reflection-generated snapshot
+writers/readers, spawn/despawn + ack-baseline delta replication · **m11.4** **networked destruction**
+— server-authoritative damage events replayed deterministically on clients (the ADR-0029 addressing),
+debris bodies on m11.3 snapshots as the corrective authority · **m11.5** **relevancy + budgets** —
+per-client interest, distance culling for debris transforms, nearest-first priority, per-tick byte
+budget · **m11.6** **interpolation + input** — snapshot interpolation on the ADR-0023 prev/current
+seam, tick-tagged client inputs, the prediction *interface* (implementation deferred) · **m11.7** the
+proof — `samples/12-networked-destruction`: a dedicated headless server + two clients over loopback
+see the same wall break at meaningful scale, hash-verified in CI. Proofs stay GPU-free and
+deterministic (scripted loss, never environment luck). Deferred fast-follows: late-join baseline
+snapshots, dev-server scale run, transform quantization, player-controller prediction, lag
+compensation.
 
 **M12 — The vision demo: "The Block."** Sample `99-the-block` — destruction + dynamic
 lighting + scale, together, at a playable frame rate. The thesis, demonstrated.
