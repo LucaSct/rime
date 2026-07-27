@@ -228,3 +228,70 @@ retrofitted — which was the point of sequencing M11 before M12.
 - **ENet / yojimbo / a QUIC stack.** Rejected for v1: the reliability layer is ~small, core to the
   engine's teaching mission (VISION #3), and QUIC belongs to the S2 internet-transport decision, which
   this ADR deliberately does not make.
+
+---
+
+## Amendment (2026-07-28, post-m11.1 review): ground-truth corrections the later bricks need
+
+An independent codebase survey after m11.1 found that several bricks above assumed APIs and
+properties that do not exist yet. ADRs are append-only, so rather than rewriting §2/§4/§6, this
+amendment corrects the record and adjusts the ladder. Each item was verified against the code.
+
+### A1. The replicated destruction unit is the committed damage-OP stream, not `apply_damage` calls
+
+§2 says clients "replay the deterministic damage → detach function." The survey found a hole in
+replaying *commands*: half the damage stream is **emergent, not commanded** — the runtime converts
+the local solver's contact impulses into damage ops each tick (`damage.cpp`, the
+`world.contact_events()` drain). A client replaying only explicit `apply_damage` calls would
+diverge from the server the first time a debris pile erodes a part by resting on it. The
+correction: the replication unit is the **committed, canonically-ordered damage-op list** (already
+the deterministic unit ADR-0029 §"canonical order" defines) — the server runs the full
+contact→damage conversion, commits the sorted op list, and replicates *that*; clients apply ops
+and never run their own contact→damage conversion for replicated instances. The determinism
+contract is unchanged (the op list was always the deterministic function's input); what changes is
+naming precisely which artifact crosses the wire. m11.4 owns the op-list serialization.
+
+### A2. `compute_type_hash` collides across types with identical field lists — fix before §4's handshake
+
+The survey found a live collision in-tree today: `render::MeshAsset{uint64 asset}` and
+`destruction::Destructible{uint64 asset}` hash identically because `compute_type_hash`
+(`core/reflect/type_info.hpp`) folds field names/types/order but **not the type's own name** —
+and both current resolvers take the first match. The §4 schema-hash handshake would inherit this:
+two unrelated components with the same shape could be silently substituted. Fix (a pre-m11.3
+micro-brick, owned by the replication work that depends on it): fold the type's registered name
+into the fingerprint. This changes existing embedded hashes (cooked assets, `.rscene` files carry
+them), so the brick must bump the affected format versions in the same commit.
+
+### A3. Destruction/physics have no state-application API — m11.4 grows one
+
+`grep set_body_state|spawn_at|allocate_at` over `engine/` returns nothing: `apply_damage` is the
+only mutator on the destruction path. A client that joins late, or that the server must correct,
+cannot be handed *state* ("these parts are gone, this debris is here") — only the event stream.
+m11.4 therefore includes a **state-application seam**: apply a server-authoritative detach set
+(topology correction, replaying the same body-swap code path) and set debris body states
+(kinematics of last resort when snapshots and local sim disagree). It is used by late-join and by
+drift correction; the common path stays event replay.
+
+### A4. Interpolation is BUILT at m11.6, not reused
+
+§6/§"interpolation" claimed ADR-0023 "already keeps previous/current snapshots." ADR-0023 says the
+opposite: the previous-transform history buffer is explicitly a *documented, unbuilt seam* and the
+interpolation alpha has no consumer. m11.6's scope grows accordingly: build the per-component
+previous-tick history and the alpha-blended consume path, then wire snapshot interpolation onto
+it. (This also un-blocks M12's render-side interpolation, so the cost was always coming.)
+
+### A5. `Application` grows the ordered sim stage before net code needs it
+
+ADR-0032 ruled that `Application` gains an *ordered* sim stage; today `on_fixed_tick` is a single
+replacing slot. Networking needs an ordered place in the tick (poll inputs → apply remote ops →
+sim → publish snapshots), so the ordered stage lands as part of **m11.2** (small, and the session
+layer is its first multi-hook customer).
+
+### A6. m11.7's shooter is a deterministic server-side script, not a player controller
+
+There is no character controller, player, or weapon in `engine/`, and `post_input`/`frame_input`
+have no production callers. The milestone proof does not need one: `samples/12-networked-
+destruction` scripts its damage source **server-side** (a deterministic scripted match — timed
+shots at named parts, so the whole run is hash-verifiable in CI), with clients as camera
+observers whose input rides the m11.6 path for proof-of-flow. A real player controller + weapon
+is M12 scope, where it always was. The ROADMAP's M11 ladder is updated to match A1–A6.

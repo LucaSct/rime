@@ -225,8 +225,14 @@ stub — the real GPU-driven FX system (track fx1) replaces it. The M8.6 sample 
 fan-out and self-checks its `coverage()` witness on the break; the actual GPU dust DRAW pass stays
 deferred to fx1 (M8.6 renders the wall + debris via per-part render leaves, not the dust).*
 
-### `animation` ⚪, `net` ⚪
-Skeletal animation & blending; networking/replication. Each behind its own interface.
+### `animation` ⚪, `net` 🟡
+Skeletal animation & blending — planned. Networking — *the module is born (m11.1,
+[ADR-0033](adr/0033-networking-v1.md)): the `Link` datagram seam (`UdpLink` over
+`platform::UdpSocket`, plus the deterministic `ScriptedNetwork` proof harness) and the
+`ReliableChannel` reliability layer — reliable-ordered + unreliable-sequenced over one socket,
+frontier-anchored acks, driver-routed so one socket serves N peers
+([design/reliability.md](design/reliability.md)). Sessions (m11.2), replication (m11.3), and
+networked destruction (m11.4) build on it.* Each behind its own interface.
 
 ### `assets` 🟢 — *cooked-asset loading (files are the boundary)*
 The runtime side of the asset pipeline: open cooked binary files, validate them completely, and hand

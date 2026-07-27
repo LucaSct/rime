@@ -81,15 +81,17 @@ the endpoint is *established* differs, and the transfer loops are shared in `soc
 
 ## Deliberate limitations (labeled, per CLAUDE.md)
 
-- **Blocking only.** No non-blocking/async I/O, no timeouts, no `poll`/`epoll`/IOCP. For S0 the
-  bottleneck is frame readback + encode, not a socket stall (measure before optimizing) — async
-  readback and non-blocking transport are S1/S2, and fold in behind this same interface.
-- **TCP + same-host UDS.** UDP/QUIC (loss-tolerant, congestion-controlled) is S2, when internet-grade
-  streaming needs it; shared-memory zero-copy for the local path is a documented later seam (measure
-  UDS first).
-- **No TLS/auth.** S0 is LAN/loopback. Session/auth arrives with the internet transport (S2).
-- **No half-close / shutdown()** distinct from close, and **no explicit `Endpoint` type** yet — add
-  when a caller needs them.
+- **TCP + same-host UDS for streams; UDP for datagrams (m11.1).** The stream sockets stay
+  **blocking only** — no non-blocking/async I/O, no timeouts, no `poll`/`epoll`/IOCP — which is
+  right for the tools/editor paths they serve. The **datagram** path arrived with M11
+  (ADR-0033): `UdpSocket` + the IPv4 `Endpoint` type, non-blocking `recv_from`, shared POSIX
+  backend + Win32 — the game-state transport (see [reliability.md](reliability.md) for the layer
+  above it). QUIC (loss-tolerant, congestion-controlled internet transport) stays an S2
+  conversation, folding in behind `engine/net`'s `Link` seam.
+- **No TLS/auth.** S0/M11-v1 are LAN/loopback. Session/auth arrives with the internet
+  transport (S2).
+- **No half-close / shutdown()** distinct from close. An explicit `Endpoint` type **now exists**
+  (m11.1, IPv4-only by scoping; widening to IPv6 is an additive change).
 
 ## Proof
 
