@@ -309,4 +309,110 @@ void LocalListener::close() noexcept {
     }
 }
 
+// ── UdpSocket (m11.1, ADR-0033) ─────────────────────────────────────────────────────────
+// SOCK_DGRAM over Winsock: connectionless, message-oriented. recv_from is non-blocking (the game
+// loop polls per tick), set once at bind with FIONBIO — the Winsock counterpart of O_NONBLOCK.
+std::optional<UdpSocket> UdpSocket::bind(std::uint16_t port, std::string_view host) {
+    ensure_wsa_started();
+
+    addrinfo hints{};
+    hints.ai_family = AF_INET; // v1 is IPv4-only (see socket.hpp's Endpoint note)
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+    const std::string host_s(host);
+    const std::string port_s = std::to_string(port);
+
+    addrinfo* results = nullptr;
+    const char* node = host_s.empty() ? nullptr : host_s.c_str();
+    if (const int gai = ::getaddrinfo(node, port_s.c_str(), &hints, &results); gai != 0) {
+        RIME_WARN("udp bind {}:{}: getaddrinfo: WSA error {}", host, port, gai);
+        return std::nullopt;
+    }
+
+    SOCKET s = INVALID_SOCKET;
+    for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
+        s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == INVALID_SOCKET) {
+            continue;
+        }
+        const BOOL yes = TRUE;
+        ::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
+        if (::bind(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) {
+            break;
+        }
+        ::closesocket(s);
+        s = INVALID_SOCKET;
+    }
+    ::freeaddrinfo(results);
+
+    if (s == INVALID_SOCKET) {
+        RIME_WARN("udp bind {}:{}: WSA error {}", host, port, ::WSAGetLastError());
+        return std::nullopt;
+    }
+    // Non-blocking from birth: recv_from polls and returns nullopt when nothing waits.
+    u_long mode = 1;
+    if (::ioctlsocket(s, FIONBIO, &mode) != 0) {
+        RIME_WARN("udp bind: FIONBIO: WSA error {}", ::WSAGetLastError());
+        ::closesocket(s);
+        return std::nullopt;
+    }
+    return UdpSocket(static_cast<SocketHandle>(s));
+}
+
+std::optional<std::size_t> UdpSocket::send_to(const Endpoint& to, std::span<const std::byte> data) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(to.address);
+    addr.sin_port = htons(to.port);
+    const int n = ::sendto(as_sock(handle_),
+                           reinterpret_cast<const char*>(data.data()),
+                           clamp_len(data.size()),
+                           0,
+                           reinterpret_cast<const sockaddr*>(&addr),
+                           static_cast<int>(sizeof(addr)));
+    if (n == SOCKET_ERROR) {
+        RIME_WARN(
+            "udp send_to {}:{}: WSA error {}", to.address_string(), to.port, ::WSAGetLastError());
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(n);
+}
+
+std::optional<std::size_t> UdpSocket::recv_from(Endpoint& from, std::span<std::byte> buffer) {
+    sockaddr_in addr{};
+    int len = static_cast<int>(sizeof(addr));
+    const int n = ::recvfrom(as_sock(handle_),
+                             reinterpret_cast<char*>(buffer.data()),
+                             clamp_len(buffer.size()),
+                             0,
+                             reinterpret_cast<sockaddr*>(&addr),
+                             &len);
+    if (n == SOCKET_ERROR) {
+        // WSAEWOULDBLOCK is the normal "no datagram waiting" poll result — stay silent.
+        if (const int err = ::WSAGetLastError(); err != WSAEWOULDBLOCK) {
+            RIME_WARN("udp recv_from: WSA error {}", err);
+        }
+        return std::nullopt;
+    }
+    from.address = ntohl(addr.sin_addr.s_addr);
+    from.port = ntohs(addr.sin_port);
+    return static_cast<std::size_t>(n);
+}
+
+std::uint16_t UdpSocket::local_port() const noexcept {
+    sockaddr_in addr{};
+    int len = static_cast<int>(sizeof(addr));
+    if (::getsockname(as_sock(handle_), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        return 0;
+    }
+    return ntohs(addr.sin_port);
+}
+
+void UdpSocket::close() noexcept {
+    if (handle_ != kInvalidSocket) {
+        ::closesocket(as_sock(handle_));
+        handle_ = kInvalidSocket;
+    }
+}
+
 } // namespace rime::platform

@@ -7,6 +7,7 @@
 // in the portable src/socket.cpp. See rime/platform/socket.hpp for the contract.
 
 #include <arpa/inet.h>
+#include <fcntl.h>       // fcntl (O_NONBLOCK, m11.1 UDP)
 #include <netdb.h>       // getaddrinfo
 #include <netinet/in.h>  // sockaddr_in / sockaddr_in6
 #include <netinet/tcp.h> // TCP_NODELAY
@@ -305,6 +306,107 @@ void LocalListener::close() noexcept {
         ::unlink(
             path_.c_str()); // remove the socket file so a restart isn't blocked by a stale node
         path_.clear();
+    }
+}
+
+// ── UdpSocket (m11.1, ADR-0033) ─────────────────────────────────────────────────────────
+// SOCK_DGRAM: connectionless, message-oriented. The one behavioural difference from the TCP
+// backend is non-blocking receive — the game loop polls per tick and must never stall — set once
+// at bind with O_NONBLOCK. SIGPIPE does not exist for unconnected UDP sends, so no suppression.
+std::optional<UdpSocket> UdpSocket::bind(std::uint16_t port, std::string_view host) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET; // v1 is IPv4-only (see socket.hpp's Endpoint note)
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+    const std::string host_s(host);
+    const std::string port_s = std::to_string(port);
+
+    addrinfo* results = nullptr;
+    const char* node = host_s.empty() ? nullptr : host_s.c_str();
+    if (const int gai = ::getaddrinfo(node, port_s.c_str(), &hints, &results); gai != 0) {
+        RIME_WARN("udp bind {}:{}: getaddrinfo: {}", host, port, ::gai_strerror(gai));
+        return std::nullopt;
+    }
+
+    int fd = -1;
+    for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
+        fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) {
+            continue;
+        }
+        const int yes = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+            break;
+        }
+        ::close(fd);
+        fd = -1;
+    }
+    ::freeaddrinfo(results);
+
+    if (fd < 0) {
+        RIME_WARN("udp bind {}:{}: {}", host, port, std::strerror(errno));
+        return std::nullopt;
+    }
+    // Non-blocking from birth: recv_from polls and returns nullopt when nothing waits.
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        RIME_WARN("udp bind: fcntl O_NONBLOCK: {}", std::strerror(errno));
+        ::close(fd);
+        return std::nullopt;
+    }
+    return UdpSocket(static_cast<SocketHandle>(fd));
+}
+
+std::optional<std::size_t> UdpSocket::send_to(const Endpoint& to, std::span<const std::byte> data) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(to.address);
+    addr.sin_port = htons(to.port);
+    const ssize_t n = ::sendto(as_fd(handle_),
+                               data.data(),
+                               data.size(),
+                               0,
+                               reinterpret_cast<const sockaddr*>(&addr),
+                               sizeof(addr));
+    if (n < 0) {
+        RIME_WARN("udp send_to {}:{}: {}", to.address_string(), to.port, std::strerror(errno));
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(n);
+}
+
+std::optional<std::size_t> UdpSocket::recv_from(Endpoint& from, std::span<std::byte> buffer) {
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+    const ssize_t n = ::recvfrom(
+        as_fd(handle_), buffer.data(), buffer.size(), 0, reinterpret_cast<sockaddr*>(&addr), &len);
+    if (n < 0) {
+        // EAGAIN/EWOULDBLOCK is the normal "no datagram waiting" poll result — stay silent.
+        // Anything else is a real error worth a line in the log.
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            RIME_WARN("udp recv_from: {}", std::strerror(errno));
+        }
+        return std::nullopt;
+    }
+    from.address = ntohl(addr.sin_addr.s_addr);
+    from.port = ntohs(addr.sin_port);
+    return static_cast<std::size_t>(n);
+}
+
+std::uint16_t UdpSocket::local_port() const noexcept {
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+    if (::getsockname(as_fd(handle_), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        return 0;
+    }
+    return ntohs(addr.sin_port);
+}
+
+void UdpSocket::close() noexcept {
+    if (handle_ != kInvalidSocket) {
+        ::close(as_fd(handle_));
+        handle_ = kInvalidSocket;
     }
 }
 

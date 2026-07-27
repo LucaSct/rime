@@ -230,4 +230,78 @@ private:
     std::string path_; // the bound path, kept so close() can unlink it
 };
 
+// ── UDP (m11.1, ADR-0033) ───────────────────────────────────────────────────────────────
+// UDP is the *game-state* transport: real-time sync cannot ride TCP, whose head-of-line blocking
+// stalls newer, more correct state behind one lost segment. A datagram socket is connectionless
+// and message-oriented — each send_to is one self-contained packet that arrives whole or not at
+// all — which is exactly the freshness-over-completeness contract state sync wants. Reliability
+// where it IS wanted (events, spawn/despawn) is layered on top in engine/net, not in the kernel.
+
+// An IPv4 endpoint: a host-order address + port identifying one datagram peer. v1 is IPv4-only by
+// deliberate scoping (the proof is LAN/loopback; the type is a plain 6-byte POD so it can be
+// memcpy'd into packets and used as a map key). Widening to IPv6 later means growing this struct
+// (or a sockaddr_storage sibling) — an additive change, as with the rest of this seam.
+struct Endpoint {
+    std::uint32_t address = 0; // IPv4 in host byte order: 127.0.0.1 == 0x7F000001
+    std::uint16_t port = 0;    // host byte order
+
+    // "a.b.c.d" + port → Endpoint; nullopt on a malformed address. `address` is the dotted-quad
+    // string form; loopback is Endpoint::from_string("127.0.0.1", port).
+    [[nodiscard]] static std::optional<Endpoint> from_string(std::string_view address,
+                                                             std::uint16_t port);
+
+    // The dotted-quad string form of the address ("127.0.0.1"), for logs and diagnostics.
+    [[nodiscard]] std::string address_string() const;
+
+    friend bool operator==(const Endpoint&, const Endpoint&) = default;
+};
+
+// A UDP datagram socket: bind a local port, then send_to / recv_from explicit endpoints. Unlike
+// TcpSocket there is no connection and no listener — one socket talks to any peer. recv_from is
+// **non-blocking** (the game loop polls it each tick and must never stall): it returns nullopt
+// when no datagram is waiting (the normal case) or on error (which is logged; the two are
+// indistinguishable to the caller on purpose — both mean "nothing to process this poll").
+// Move-only / RAII, same discipline as TcpSocket.
+class UdpSocket {
+public:
+    // Bind host:port for receiving. `host` defaults to loopback; pass "0.0.0.0" to receive on
+    // every interface (a dedicated server). A `port` of 0 asks the OS for an ephemeral port, read
+    // back with local_port() — how tests avoid racing a hard-coded port. SO_REUSEADDR is set so a
+    // quick restart isn't blocked. Returns nullopt on failure (logged).
+    [[nodiscard]] static std::optional<UdpSocket> bind(std::uint16_t port,
+                                                       std::string_view host = "127.0.0.1");
+
+    UdpSocket() = default;
+    ~UdpSocket();
+    UdpSocket(UdpSocket&&) noexcept;
+    UdpSocket& operator=(UdpSocket&&) noexcept;
+    UdpSocket(const UdpSocket&) = delete;
+    UdpSocket& operator=(const UdpSocket&) = delete;
+
+    [[nodiscard]] bool is_open() const noexcept { return handle_ != kInvalidSocket; }
+
+    // Send one datagram to `to`. Returns the bytes sent (the full payload, or the datagram was not
+    // sent at all — UDP never fragments at this API level); nullopt on error (logged). Delivery is
+    // *not* guaranteed: that is the point of UDP, and the reliability layer above owns retries.
+    [[nodiscard]] std::optional<std::size_t> send_to(const Endpoint& to,
+                                                     std::span<const std::byte> data);
+
+    // Poll for one datagram. On success returns the byte count and sets `from` to the sender;
+    // a datagram larger than `buffer` is truncated to fit (the rest is discarded — size your
+    // buffers to the protocol's max packet). nullopt = nothing waiting right now, or error.
+    [[nodiscard]] std::optional<std::size_t> recv_from(Endpoint& from, std::span<std::byte> buffer);
+
+    // The port actually bound (resolve it after binding to port 0). 0 if closed or unknown.
+    [[nodiscard]] std::uint16_t local_port() const noexcept;
+
+    void close() noexcept;
+
+    [[nodiscard]] SocketHandle native_handle() const noexcept { return handle_; }
+
+private:
+    explicit UdpSocket(SocketHandle h) noexcept : handle_(h) {}
+
+    SocketHandle handle_ = kInvalidSocket;
+};
+
 } // namespace rime::platform
