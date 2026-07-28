@@ -60,3 +60,26 @@ rejection *with no server-side allocation*, retry until someone is listening, re
 replacing a stale session, graceful close, a bounded session table, garbage that poisons nothing,
 and **peer death detected by timeout** — the milestone's proof. Plus one real-socket loopback case,
 because the scripted harness proves the algorithm and something must prove the socket path.
+
+`rime_net_smoke` is the **two-process** proof — the milestone's sentence ("two processes connect,
+exchange hello, detect peer death") across a real process boundary. CI runs one mode:
+
+```bash
+ctest -R rime_net_smoke        # `duo`: binds an ephemeral port, re-executes itself as the client
+```
+
+`duo` needs no port argument and no startup ordering — the client retries its `ConnectRequest` for
+~20 s, so it does not care that the server may not be listening yet. The client then **hard-exits
+without calling `disconnect()`**, so the only thing that can reap it server-side is the timeout;
+that is the point, since a crash, a pulled cable, and a killed process all look like silence.
+
+The same binary runs a **manual LAN check** on two machines. This is deliberately *not* a CI test —
+CI is a single headless box, and calling a loopback run a LAN proof would misrepresent what was
+verified:
+
+```bash
+# on the server machine
+./build/dev/bin/rime_net_smoke server --host 0.0.0.0 --port 7777
+# on the client machine
+./build/dev/bin/rime_net_smoke client --host <server-ip> --port 7777
+```
