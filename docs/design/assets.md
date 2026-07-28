@@ -300,19 +300,19 @@ can never lie, unlike a hand-authored database.
 it is the reflection `type_hash` of the v1 vertex layout — a stable 64-bit fingerprint over a reflected
 type's field names, types, and order ([`core/reflect/type_info.hpp`](../../engine/core/include/rime/core/reflect/type_info.hpp)).
 Change the layout and the fingerprint changes, so old files are rejected with a clean "re-cook" error
-instead of being misinterpreted. The golden value is pinned in the mesh test (`0x198738A2DDE250AC`) so
+instead of being misinterpreted. The golden value is pinned in the mesh test (`0x8CB1F15706ADA851`) so
 a change is deliberate and so the Rust cooker embeds the same constant; the M6.2 cross-language
 golden-fixture test verifies cooker and reader agree. The same fingerprint later gates M9 inspector
 compatibility and M11 replication schemas — one mechanism, three consumers.
 
 Textures use the same mechanism, fingerprinting the v1 `{width, height, offset, size}` **mip-record**
-(the repeated unit the reader walks) — pinned at `0xAB8A2B884141F736`, cross-checked by the M6.3
+(the repeated unit the reader walks) — pinned at `0x3728A3AA75B7B335`, cross-checked by the M6.3
 `checker.rtex` golden fixture. Only the record is hashed, not the base-extent/format header around it:
 a future *pixel format* is an appended `TextureFormat` value (old files stay valid), not a layout
 change, so it needs no re-cook.
 
 Materials use it too, and here the fingerprinted record is the **whole** payload (a material has no
-variable-length tail): the factor and texture-reference fields, pinned at `0xCA4ED4CC434C941A`. Both
+variable-length tail): the factor and texture-reference fields, pinned at `0x8436DE4E4E0FE575`. Both
 languages embed that constant, so the cooked-material format agrees across the C++ reader and the Rust
 `material.rs` cooker by construction. Adding a material property later (a new factor, a KHR-extension
 knob) changes the fingerprint — a deliberate re-cook — which is why the container leaves room for the

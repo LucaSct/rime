@@ -15,7 +15,7 @@ All integers are **little-endian**, written **field by field** (never a struct c
 | `magic` | 4 bytes | `"RMA1"` (literal) |
 | `container_version` | u16 | `1` |
 | `asset_kind` | u16 | `1` = Mesh, `2` = Texture, `3` = Material, `4` = Skeleton, `5` = AnimationClip (append, never renumber) |
-| `type_schema_hash` | u64 | mesh: `0x198738A2DDE250AC`; texture: `0xAB8A2B884141F736`; material: `0xCA4ED4CC434C941A`; skeleton: `0xD90A5CB8EBA36DED`; clip: `0x6C84D2A2AAABCE49` (see below) |
+| `type_schema_hash` | u64 | mesh: `0x8CB1F15706ADA851`; texture: `0x3728A3AA75B7B335`; material: `0x8436DE4E4E0FE575`; skeleton: `0xF3FA5E762E617040`; clip: `0x0CD243E2A5630B54` (see below) |
 | `payload_size` | u64 | length of the payload that follows |
 
 The **asset id** is the FNV-1a 64 hash of the payload bytes (identical to the engine's `content_hash`).

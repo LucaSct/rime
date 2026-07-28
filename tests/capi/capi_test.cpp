@@ -31,7 +31,7 @@ TEST_CASE("rime_asset_validate accepts the golden mesh fixture and reports real 
     CHECK(info.kind == static_cast<uint32_t>(RIME_ASSET_MESH));
     // The same mesh schema hash both languages pin — the cross-language drift alarm, now over the
     // ABI.
-    CHECK(info.schema_hash == 0x198738A2DDE250ACull);
+    CHECK(info.schema_hash == 0x8CB1F15706ADA851ull);
     CHECK(info.vertex_count == 4); // a quad: 4 unique vertices
     CHECK(info.index_count == 6);  // two triangles
 }

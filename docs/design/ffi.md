@@ -20,7 +20,7 @@ engine API (which stays C++).
 
 `rime_asset_validate` is the boundary's first real job, and a pointed one: the Rust *cooker*'s output
 verified by the very C++ *loader* that consumes it at runtime — cross-language honesty about the
-cooked format, with the same `mesh_schema_hash` (`0x198738A2DDE250AC`) asserted on both sides.
+cooked format, with the same `mesh_schema_hash` (`0x8CB1F15706ADA851`) asserted on both sides.
 
 ## The rules that keep it safe
 

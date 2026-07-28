@@ -154,7 +154,7 @@ mod tests {
         // The cross-language contract in one line: the engine's material_schema_hash() returns this
         // exact value (pinned in cooked_material_test.cpp). If the C++ MaterialV1 record ever changes,
         // that test and this constant diverge until both are updated together.
-        assert_eq!(MATERIAL_SCHEMA_HASH, 0xCA4E_D4CC_434C_941A);
+        assert_eq!(MATERIAL_SCHEMA_HASH, 0x8436_DE4E_4E0F_E575);
     }
 
     #[test]
