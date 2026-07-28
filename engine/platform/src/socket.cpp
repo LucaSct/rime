@@ -136,4 +136,68 @@ LocalListener& LocalListener::operator=(LocalListener&& other) noexcept {
     return *this;
 }
 
+// ── Endpoint (m11.1) ────────────────────────────────────────────────────────────────────
+// Parsing/formatting is portable (host-order integers); the per-OS backends only convert to and
+// from sockaddr_in at the syscall boundary.
+std::optional<Endpoint> Endpoint::from_string(std::string_view address, std::uint16_t port) {
+    Endpoint ep;
+    ep.port = port;
+    std::uint32_t octets[4] = {0, 0, 0, 0};
+    std::size_t part = 0;
+    std::size_t digits = 0; // digits seen in the current octet — empty octets are malformed
+    for (const char c : address) {
+        if (c == '.') {
+            if (digits == 0 || ++part > 3) {
+                return std::nullopt; // empty octet ("1..2.3", ".1.2.3") or too many
+            }
+            digits = 0;
+            continue;
+        }
+        if (c < '0' || c > '9') {
+            return std::nullopt; // not a dotted quad (names resolve elsewhere, deliberately)
+        }
+        octets[part] = octets[part] * 10 + static_cast<std::uint32_t>(c - '0');
+        if (octets[part] > 255) {
+            return std::nullopt;
+        }
+        ++digits;
+    }
+    if (part != 3 || digits == 0) {
+        return std::nullopt; // fewer than four octets, or a trailing dot ("1.2.3.")
+    }
+    ep.address = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+    return ep;
+}
+
+std::string Endpoint::address_string() const {
+    std::string out;
+    out.reserve(15); // "255.255.255.255"
+    for (int i = 3; i >= 0; --i) {
+        out += std::to_string((address >> (i * 8)) & 0xFF);
+        if (i > 0) {
+            out += '.';
+        }
+    }
+    return out;
+}
+
+// ── UdpSocket lifetime (m11.1) ──────────────────────────────────────────────────────────
+// Identical to TcpSocket's: a moved-from socket owns nothing.
+UdpSocket::~UdpSocket() {
+    close();
+}
+
+UdpSocket::UdpSocket(UdpSocket&& other) noexcept : handle_(other.handle_) {
+    other.handle_ = kInvalidSocket;
+}
+
+UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
+    if (this != &other) {
+        close();
+        handle_ = other.handle_;
+        other.handle_ = kInvalidSocket;
+    }
+    return *this;
+}
+
 } // namespace rime::platform

@@ -616,3 +616,30 @@ Entries are grouped roughly by area and kept short on purpose.
   for the system that owns it, but invisible to anything that only walks components (reflection,
   a `.rscene` save, a PIE snapshot) unless that system also exposes a **reconstructible-from-
   components** path — M9.7's restore proof is exactly that check, brick by brick.
+- **NetId.** A server-assigned, session-stable integer id for a replicated entity (M11,
+  ADR-0033). Each side maps `NetId` ↔ its local generational ECS handle (`NetIdMap`); the wire
+  only ever names `NetId`s. Destruction *parts* need none — their ids are derivable from the
+  cooked pattern identically on all sides (the ADR-0029 addressing); only dynamic debris *bodies*
+  and player entities get `NetId`s.
+- **Snapshot (netcode).** The server's periodic publish of dynamic world state — transforms,
+  velocities — to clients, sent on the **unreliable-sequenced** channel: a lost or late snapshot
+  is simply superseded by the next, never resent. Sent as **deltas against the last baseline the
+  client acked** (the reliability layer's ack bitfield doubles as the baseline tracker). Clients
+  render an *interpolation buffer* a couple of snapshots in the past, on the fixed tick's
+  previous/current snapshot seam (ADR-0023).
+- **Event replay (networked destruction).** Replicating a *decision* instead of its *results*:
+  the server sends "damage event D at tick T" (a few bytes, reliable-ordered) and every client
+  re-runs the deterministic damage → detach function locally (ADR-0029's replay contract),
+  arriving at bit-identical fracture topology without streaming one byte of rubble transforms.
+  The reason M8 was built as a pure, canonically-ordered function (ADR-0033 §2).
+- **Relevancy / interest management.** Deciding, per client, which replicated state is worth
+  bandwidth this tick. Rime's v1: destruction *events* are world-relevant (never culled —
+  everyone's wall breaks); debris/body transform updates are distance-culled, nearest-first,
+  under a hard per-tick byte budget. The seam 64-player scaling lives behind.
+- **Reliable-ordered vs unreliable-sequenced.** The two channel classes of M11's reliability
+  layer over UDP (ADR-0033 §3): reliable-ordered = everything arrives, exactly once, in send
+  order (events, spawn/despawn — resent until acked); unreliable-sequenced = freshness over
+  completeness (snapshots — a newer packet makes an older one garbage, so drop, never resend).
+- **Tick-tagging.** Stamping a message (an input, an event) with the simulation-tick number it
+  belongs to, so both sides apply it at the same tick and the deterministic replay stays honest —
+  the fixed tick (ADR-0023) is what makes "the same tick" mean something.

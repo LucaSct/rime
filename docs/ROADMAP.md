@@ -9,6 +9,42 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-07-28) — Milestone 11 (Networking + networked destruction) kicks off.**
+> **M11.0 landed [ADR-0033](adr/0033-networking-v1.md) (Accepted)** — the networking-v1 decisions:
+> **dedicated-server authority** (a listen server is a degenerate embedding, not a design; lockstep
+> stays rejected per ADR-0026's cross-platform non-goal); the **hybrid replication model** —
+> destruction *topology* replicates as **reliable-ordered events** that each client replays through
+> M8's deterministic damage → detach function (the ADR-0029 event-replay contract, at last), while
+> dynamic *state* (debris, bodies, players) rides **unreliable-sequenced snapshots** off the server
+> as the drift-correcting authority; **our own UDP transport** — a `platform::UdpSocket` plus a thin,
+> teachable reliability layer (sequence/ack/resend; reliable-ordered + unreliable-sequenced channels)
+> over a scripted-loss deterministic `Link` seam, so every networking proof stays GPU-free and
+> reproducible in CI while the S0/S1 TCP/UDS tools wire is untouched; **server-assigned `NetId`s**
+> with **reflection-generated, schema-hash-checked snapshot serialization**; and **relevancy v1** —
+> destruction events are never culled, debris transforms are distance-budgeted per client. M11 is
+> decomposed into bricks **m11.0–m11.7** (see the M11 detail below): transport → sessions →
+> replication core → networked destruction → relevancy/budgets → interpolation/input → the proof,
+> `samples/12-networked-destruction` (a dedicated headless server + two clients seeing the same wall
+> break at scale, hash-verified in CI). **Next:** m11.1 — transport v2.
+>
+> **Update (2026-07-28, evening) — m11.1 (transport v2) + the ADR-0033 amendment.** The transport
+> foundation landed: `platform::UdpSocket` (POSIX-shared + Win32, non-blocking, IPv4 `Endpoint`)
+> and **`engine/net` born** — the `Link` datagram seam (`UdpLink` + the deterministic
+> `ScriptedNetwork`: scripted loss/latency/reorder/duplicate on a virtual clock, xorshift-seeded so
+> traces are bit-reproducible) and the `ReliableChannel` reliability layer. A post-implementation
+> adversarial review caught two critical ack bugs the first design shared with the classic
+> "newest + backward-bitfield" scheme (the seq-0 false-ack deadlock; the unreportable late
+> recovery), so the shipped design **anchors the ack at the delivery frontier with a
+> forward-looking bitfield** — proven by regression tests — plus a sender-side in-flight window,
+> a driver-routed `process_packet` (one socket, N peers), `ByteWriter`/`ByteReader` wire parsing,
+> and 9 GPU-free proofs incl. 30%-loss exact-order delivery and a real-socket UdpLink loopback.
+> The same review produced the **ADR-0033 amendment (A1–A6)**: the replicated destruction unit is
+> the committed damage-OP list (contact-derived damage included), `compute_type_hash` needs
+> name-folding (a live collision exists in-tree), destruction grows a state-application seam,
+> m11.6 BUILDS interpolation (ADR-0023's buffer is an unbuilt seam), `Application` grows the
+> ordered sim stage at m11.2, and m11.7's shooter is a deterministic server-side script. The
+> ladder is updated to match. **Next:** m11.2 — sessions + the ordered sim stage.
+>
 > **Update (2026-07-22) — Milestone 10 (Advanced lighting) COMPLETE.** The whole [ADR-0032](adr/0032-lighting-v2.md)
 > stack landed on `main`, brick by brick, every technique gated behind `LightingSettings` so **off is
 > the byte-identical M5.6 baseline**: **m10.1a** RHI array/cube textures + depth-compare sampler ·
@@ -591,6 +627,35 @@ updates*. *Inspired by: UE5.*
 **M11 — Networking & networked destruction.** `engine/net` — client-server, replication,
 and **prioritization + culling** of part-destruction/debris; determinism where required.
 *Inspired by: Frostbite's networked destruction at 64 players.*
+
+*Bricks (planned 2026-07-28; [ADR-0033](adr/0033-networking-v1.md) is the model — server authority,
+hybrid event-replay/snapshot replication, own UDP transport — **plus its 2026-07-28 amendment
+A1–A6**, a post-m11.1 ground-truth pass over the later bricks' assumptions):* **m11.0** ADR-0033 +
+this ladder (the decision brick — no code) · **m11.1** **transport v2** — `platform::UdpSocket`
+(POSIX-shared + Win32, non-blocking) and the `engine/net` reliability layer (frontier-anchored
+ack + forward bitfield, send window, resend; reliable-ordered + unreliable-sequenced channels) over
+a scripted-loss deterministic `Link` seam, with a driver-routed `process_packet` so one socket
+serves N peers · **m11.2** **sessions** — `NetDriver`/`Session` (the driver that owns the Link and
+routes by endpoint), schema-hash handshake, heartbeat/timeout, and the **`Application` ordered sim
+stage** the net tick needs (amendment A5); two-process loopback + LAN smoke · **m11.3** **replication
+core** — server-assigned `NetId`s, reflection-generated snapshot writers/readers, spawn/despawn +
+ack-baseline delta replication — **preceded by the `compute_type_hash` name-folding micro-brick +
+format-version bump** (amendment A2: identical-shape components collide today) · **m11.4**
+**networked destruction** — the server commits the canonical **damage-op list** (including
+contact-derived ops; amendment A1) onto the reliable-ordered channel, clients apply ops at the same
+tick (never their own contact→damage conversion for replicated instances), debris bodies ride m11.3
+snapshots, plus the **state-application seam** for late-join/drift correction (amendment A3) ·
+**m11.5** **relevancy + budgets** — per-client interest, distance culling for debris transforms,
+nearest-first priority, per-tick byte budget · **m11.6** **interpolation + input** — BUILD the
+previous-tick transform history + alpha consume path (amendment A4: ADR-0023's buffer is an unbuilt
+seam), snapshot interpolation on top, tick-tagged client inputs on the `post_input`/`frame_input`
+path, the prediction *interface* (implementation deferred) · **m11.7** the proof —
+`samples/12-networked-destruction`: a dedicated headless server with a **deterministic server-side
+scripted shooter** (amendment A6 — no player controller exists; that is M12 scope) + two clients
+over loopback see the same wall break at meaningful scale, hash-verified in CI. Proofs stay GPU-free
+and deterministic (scripted loss, never environment luck). Deferred fast-follows: late-join baseline
+snapshots, dev-server scale run, transform quantization, player-controller prediction, lag
+compensation.
 
 **M12 — The vision demo: "The Block."** Sample `99-the-block` — destruction + dynamic
 lighting + scale, together, at a playable frame rate. The thesis, demonstrated.

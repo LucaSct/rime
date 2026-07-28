@@ -57,3 +57,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0030](0030-streaming-v1.md) — streaming v1 (the S1 protocol; SVT-AV1 video on the wire, LZ4 local fast path)
 - [ADR-0031](0031-editor-v1.md) — the editor v1 architecture (a Rust shell that is a client of a live engine)
 - [ADR-0032](0032-lighting-v2.md) — lighting v2 (SDF-probe DDGI GI, cascaded + local shadows, clustered-forward many-lights, SSR; the destruction-coupling contracts C1–C6)
+- [ADR-0033](0033-networking-v1.md) — networking v1 (server authority; destruction as event-replay + state as snapshots; own UDP transport + reliability layer)
