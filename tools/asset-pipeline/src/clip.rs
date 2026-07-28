@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn schema_hash_is_the_constant_the_engine_pins() {
-        assert_eq!(CLIP_SCHEMA_HASH, 0x6C84_D2A2_AAAB_CE49);
+        assert_eq!(CLIP_SCHEMA_HASH, 0x0CD2_43E2_A563_0B54);
     }
 
     #[test]

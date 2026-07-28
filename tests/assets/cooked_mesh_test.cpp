@@ -137,7 +137,7 @@ TEST_CASE("mesh_schema_hash is the reflected v1 vertex layout: stable, non-zero,
     // a regression guard (a change to the layout or to the hashing must be deliberate) and as the
     // exact constant the Rust cooker embeds at M6.2 — the cross-language golden-fixture test checks
     // that the cooker and this reader agree on it.
-    CHECK(mesh_schema_hash() == 0x198738A2DDE250ACull);
+    CHECK(mesh_schema_hash() == 0x8CB1F15706ADA851ull);
 }
 
 TEST_CASE("negative battery: envelope errors") {

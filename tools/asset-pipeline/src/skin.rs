@@ -242,6 +242,6 @@ mod tests {
 
     #[test]
     fn schema_hash_is_the_constant_the_engine_pins() {
-        assert_eq!(SKELETON_SCHEMA_HASH, 0xD90A_5CB8_EBA3_6DED);
+        assert_eq!(SKELETON_SCHEMA_HASH, 0xF3FA_5E76_2E61_7040);
     }
 }

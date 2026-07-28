@@ -178,7 +178,7 @@ mod tests {
         "/../../tests/assets/fixtures/quad.rmesh"
     );
     #[cfg(capi_available)]
-    const MESH_SCHEMA_HASH: u64 = 0x198738A2DDE250AC; // pinned in engine/assets + the Rust cooker
+    const MESH_SCHEMA_HASH: u64 = 0x8CB1F15706ADA851; // pinned in engine/assets + the Rust cooker
 
     macro_rules! skip_if_unavailable {
         () => {

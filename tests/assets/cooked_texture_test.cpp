@@ -108,7 +108,7 @@ TEST_CASE("texture_schema_hash is the reflected v1 mip-record layout: stable, no
     // Pinned as a regression guard (a change to the record or the hashing must be deliberate) and
     // as the exact constant the Rust cooker embeds — the cross-language golden-fixture test checks
     // that the cooker and this reader agree on it. Distinct from the mesh hash (different record).
-    CHECK(texture_schema_hash() == 0xAB8A2B884141F736ull);
+    CHECK(texture_schema_hash() == 0x3728A3AA75B7B335ull);
     CHECK(texture_schema_hash() != mesh_schema_hash());
 }
 

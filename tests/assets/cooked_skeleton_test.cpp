@@ -78,7 +78,7 @@ TEST_CASE("skeleton_schema_hash is the reflected v1 joint layout: stable, non-ze
     // inverse-bind matrix, bind-pose TRS). Pinned as a regression guard and as the exact constant
     // the Rust cooker embeds — the cross-language fixture test checks that the cooker and this
     // reader agree on it. Distinct from every other kind's hash.
-    CHECK(skeleton_schema_hash() == 0xD90A5CB8EBA36DEDull);
+    CHECK(skeleton_schema_hash() == 0xF3FA5E762E617040ull);
     CHECK(skeleton_schema_hash() != mesh_schema_hash());
     CHECK(skeleton_schema_hash() != material_schema_hash());
     CHECK(skeleton_schema_hash() != clip_schema_hash());

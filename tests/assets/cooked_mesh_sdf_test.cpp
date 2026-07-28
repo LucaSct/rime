@@ -130,7 +130,7 @@ TEST_CASE("sdf_schema_hash is the reflected v1 header layout: stable, non-zero, 
     // Golden value: the reflection type_hash of the v1 SDF header record. Pinned as a regression
     // guard and as the exact constant the Rust cooker embeds (MESH_SDF_SCHEMA_HASH) — the fixture
     // round-trip in fixture_test.cpp is the cross-language check that both agree on it.
-    CHECK(sdf_schema_hash() == 0x6EFFA98119033990ull);
+    CHECK(sdf_schema_hash() == 0x18728B40F4DC4FA3ull);
     CHECK(sdf_schema_hash() != mesh_schema_hash());
     CHECK(sdf_schema_hash() != texture_schema_hash());
     CHECK(sdf_schema_hash() != material_schema_hash());

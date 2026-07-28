@@ -193,9 +193,13 @@ RIME_REFLECT_BEGIN(rt::HoldsReordered)
 RIME_REFLECT_FIELD(nested)
 RIME_REFLECT_END()
 
-TEST_CASE("type_hash is layout-based, not name-based: identical shapes hash equal") {
+// Inverted by ADR-0033 amendment A2. The hash used to fold only the fields, so two structurally
+// identical types shared one fingerprint — which meant a lookup keyed by type_hash could hand back
+// the wrong type's schema, and an entity carrying two colliding components serialized two
+// indistinguishable records. The type name is folded in now, so identity separates them.
+TEST_CASE("type_hash separates identically-shaped types by name") {
     CHECK(reflect<rt::Inner>().type_hash != 0);
-    CHECK(reflect<rt::InnerClone>().type_hash == reflect<rt::Inner>().type_hash);
+    CHECK(reflect<rt::InnerClone>().type_hash != reflect<rt::Inner>().type_hash);
 }
 
 TEST_CASE("type_hash flips on reorder, rename, or retype") {

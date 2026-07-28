@@ -115,7 +115,7 @@ TEST_CASE("clip_schema_hash is the reflected v1 channel record: stable, non-zero
     CHECK(clip_schema_hash() == clip_schema_hash());
     // Golden value: the reflection type_hash of the v1 channel record (target joint, path, interp,
     // key count). Pinned as a regression guard and as the exact constant the Rust cooker embeds.
-    CHECK(clip_schema_hash() == 0x6C84D2A2AAABCE49ull);
+    CHECK(clip_schema_hash() == 0x0CD243E2A5630B54ull);
     CHECK(clip_schema_hash() != mesh_schema_hash());
     CHECK(clip_schema_hash() != skeleton_schema_hash());
 }

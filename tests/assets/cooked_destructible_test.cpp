@@ -164,7 +164,7 @@ TEST_CASE("destructible_schema_hash is the reflected v1 part layout: stable, non
     // Golden value: the reflection type_hash of the v1 per-part record. Pinned as a regression
     // guard and as the exact constant the Rust cooker embeds (DESTRUCTIBLE_SCHEMA_HASH) — the
     // fixture round-trip below is the cross-language check that both agree on it.
-    CHECK(destructible_schema_hash() == 0x8F2D17FBF58485E2ull);
+    CHECK(destructible_schema_hash() == 0xC6C56F5B9A22D179ull);
     CHECK(destructible_schema_hash() != mesh_schema_hash());
     CHECK(destructible_schema_hash() != texture_schema_hash());
     CHECK(destructible_schema_hash() != material_schema_hash());

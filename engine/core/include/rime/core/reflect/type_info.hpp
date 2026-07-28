@@ -122,15 +122,25 @@ template <class FieldT> [[nodiscard]] Field make_field(const char* name, std::si
     return 0;
 }
 
-// A stable 64-bit fingerprint of a struct's serialized shape: fold, in declared order, each field's
-// name and type tag, recursing into a nested reflected struct by folding *its* fingerprint. Two
-// types are serialize-compatible iff their fingerprints match, so cooked data (ADR-0024) and,
-// later, editor/replication schemas embed this hash and reject a mismatch instead of misreading
-// bytes. It deliberately excludes byte offsets and sizeof: the packed serialization depends only on
-// field names, types, and order, so a struct with different padding but the same fields stays
-// compatible.
-[[nodiscard]] inline std::uint64_t compute_type_hash(const std::vector<Field>& fields) noexcept {
-    std::uint64_t h = kFnv1a64OffsetBasis;
+// A stable 64-bit fingerprint of a type's IDENTITY and serialized shape: fold the type's own name,
+// then, in declared order, each field's name and type tag, recursing into a nested reflected struct
+// by folding *its* fingerprint. Two types are interchangeable iff their fingerprints match, so
+// cooked data (ADR-0024) and the editor/replication schemas embed this hash and reject a mismatch
+// instead of misreading bytes.
+//
+// The type name is folded in for a reason (ADR-0033 amendment A2). Hashing the shape alone made
+// every structurally identical type collide: `render::MeshAsset { uint64 asset }` and
+// `destruction::Destructible { uint64 asset }` shared one hash, as did `ecs::LocalTransform` and
+// `ecs::WorldTransform`. That is not a theoretical clash — a lookup keyed by type_hash would hand
+// back the wrong type's schema, and an entity carrying two colliding components would serialize
+// two indistinguishable records. Identity, not just layout, is what the hash has to pin.
+//
+// It still deliberately excludes byte offsets and sizeof: the packed serialization depends only on
+// field names, types, and order, so a struct with different padding but the same fields and name
+// stays compatible.
+[[nodiscard]] inline std::uint64_t compute_type_hash(std::string_view name,
+                                                     const std::vector<Field>& fields) noexcept {
+    std::uint64_t h = fnv1a_64(name, kFnv1a64OffsetBasis);
     for (const Field& f : fields) {
         h = fnv1a_64(std::string_view(f.name), h); // the member name
         h ^= static_cast<std::uint64_t>(
@@ -180,7 +190,7 @@ template <class FieldT> [[nodiscard]] Field make_field(const char* name, std::si
     t.fields.push_back(make_field<decltype(T::NAME)>(#NAME, offsetof(T, NAME)));
 
 #define RIME_REFLECT_END()                                                                         \
-    t.type_hash = compute_type_hash(t.fields);                                                     \
+    t.type_hash = compute_type_hash(t.name, t.fields);                                             \
     return t;                                                                                      \
     }                                                                                              \
     ();                                                                                            \

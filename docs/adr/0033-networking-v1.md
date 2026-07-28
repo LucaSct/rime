@@ -262,6 +262,16 @@ micro-brick, owned by the replication work that depends on it): fold the type's 
 into the fingerprint. This changes existing embedded hashes (cooked assets, `.rscene` files carry
 them), so the brick must bump the affected format versions in the same commit.
 
+> **Implemented 2026-07-29.** `compute_type_hash` now folds the registered type name; the seven
+> cooked schema hashes and every checked-in fixture (`.rmesh`, `.rtex`, `.rsdf`, `.rskel`,
+> `.rdest`, `.ranim`, `.rscene`) were regenerated, and `reflect_test`'s "identical shapes hash
+> equal" case inverted. One deviation from the plan above: the **container/scene format versions
+> were deliberately not bumped**. The hash *is* the compatibility gate, and a stale file already
+> fails with a precise, actionable diagnostic — `schema hash mismatch (re-cook needed)` and
+> `component '<name>' schema drift: file hash …, engine … — re-save the scene`. A version bump
+> would replace those with a blunter `UnsupportedVersion` and would also reject files whose
+> container framing never changed. Revisit only if the container layout itself changes.
+
 ### A3. Destruction/physics have no state-application API — m11.4 grows one
 
 `grep set_body_state|spawn_at|allocate_at` over `engine/` returns nothing: `apply_damage` is the

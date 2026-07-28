@@ -55,33 +55,33 @@ pub const ASSET_KIND_MESH_SDF: u16 = 7;
 /// layout, computed and pinned by the C++ engine (`engine/assets`). The cooker embeds the same
 /// constant; the reader rejects a mismatch, so both languages agree on the mesh format by
 /// construction. If the vertex layout ever changes, update this in lockstep with the engine.
-pub const MESH_SCHEMA_HASH: u64 = 0x1987_38A2_DDE2_50AC;
+pub const MESH_SCHEMA_HASH: u64 = 0x8CB1_F157_06AD_A851;
 
 /// The texture schema fingerprint: the reflection `type_hash` of the v1 `{width, height, offset,
 /// size}` mip-descriptor record, computed and pinned by the C++ engine (`texture_schema_hash()`).
 /// Same contract as the mesh hash — the cooker embeds it, the reader rejects a mismatch — so the two
 /// languages agree on the cooked-texture layout by construction. Update in lockstep with the engine
 /// if the mip record ever changes (a new *pixel format* is an appended enum value, not a change here).
-pub const TEXTURE_SCHEMA_HASH: u64 = 0xAB8A_2B88_4141_F736;
+pub const TEXTURE_SCHEMA_HASH: u64 = 0x3728_A3AA_75B7_B335;
 
 /// The material schema fingerprint: the reflection `type_hash` of the v1 material record (factors +
 /// five texture-reference AssetIds), computed and pinned by the C++ engine (`material_schema_hash()`).
 /// Same contract as the mesh/texture hashes — the cooker embeds it, the reader rejects a mismatch — so
 /// the two languages agree on the cooked-material layout by construction. Update in lockstep with the
 /// engine if the material record ever gains, loses, or reorders a field.
-pub const MATERIAL_SCHEMA_HASH: u64 = 0xCA4E_D4CC_434C_941A;
+pub const MATERIAL_SCHEMA_HASH: u64 = 0x8436_DE4E_4E0F_E575;
 
 /// The skeleton schema fingerprint: the reflection `type_hash` of the v1 per-joint record (parent,
 /// name hash, inverse-bind matrix, bind-pose TRS), computed and pinned by the C++ engine
 /// (`skeleton_schema_hash()`). Same contract as the hashes above — the cooker embeds it, the reader
 /// rejects a mismatch — so the two languages agree on the cooked-skeleton layout by construction.
-pub const SKELETON_SCHEMA_HASH: u64 = 0xD90A_5CB8_EBA3_6DED;
+pub const SKELETON_SCHEMA_HASH: u64 = 0xF3FA_5E76_2E61_7040;
 
 /// The clip schema fingerprint: the reflection `type_hash` of the v1 channel record (target joint,
 /// path, interpolation, key count), computed and pinned by the C++ engine (`clip_schema_hash()`).
 /// Same contract as the hashes above; update in lockstep with the engine if the channel record ever
 /// changes (a new value *type* is an appended path enum, not a record change).
-pub const CLIP_SCHEMA_HASH: u64 = 0x6C84_D2A2_AAAB_CE49;
+pub const CLIP_SCHEMA_HASH: u64 = 0x0CD2_43E2_A563_0B54;
 
 /// The destructible schema fingerprint: the reflection `type_hash` of the v1 per-part record (COM,
 /// AABB, volume, and the vertex/face/index counts that slice the geometry blobs), computed and pinned
@@ -90,7 +90,7 @@ pub const CLIP_SCHEMA_HASH: u64 = 0x6C84_D2A2_AAAB_CE49;
 /// layout by construction (M8.1). Update in lockstep with the engine if the per-part record changes;
 /// the bond/anchor tables and the geometry blobs are structure the header sizes, not fingerprinted
 /// (exactly as mesh vertices past the vertex record are not).
-pub const DESTRUCTIBLE_SCHEMA_HASH: u64 = 0x8F2D_17FB_F584_85E2;
+pub const DESTRUCTIBLE_SCHEMA_HASH: u64 = 0xC6C5_6F5B_9A22_D179;
 
 /// The mesh-SDF schema fingerprint: the reflection `type_hash` of the v1 fixed header record (local
 /// bounds, grid placement, voxel size, resolution, encoding, max_abs_distance), computed and pinned
@@ -99,7 +99,7 @@ pub const DESTRUCTIBLE_SCHEMA_HASH: u64 = 0x8F2D_17FB_F584_85E2;
 /// construction (M10.4a). Unlike Mesh/Texture/Skeleton/Clip (which fingerprint a REPEATED table
 /// record), this mirrors Material: the header IS the whole structured part of the payload — the
 /// trailing distances blob is bare f32 scalars with no per-element layout of its own to protect.
-pub const MESH_SDF_SCHEMA_HASH: u64 = 0x6EFF_A981_1903_3990;
+pub const MESH_SDF_SCHEMA_HASH: u64 = 0x1872_8B40_F4DC_4FA3;
 
 /// A little-endian byte sink. Every multi-byte value is decomposed to its LE bytes explicitly, so
 /// the output never depends on the host's endianness — the same discipline as the reader's cursor.
