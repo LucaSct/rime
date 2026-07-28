@@ -10,7 +10,10 @@
 
 add_library(rime_net STATIC
     src/link.cpp
-    src/reliable_channel.cpp)
+    src/reliable_channel.cpp
+    src/control_packets.cpp
+    src/session.cpp
+    src/net_driver.cpp)
 
 # Namespaced alias so dependents link `rime::net`, matching our C++ namespace.
 add_library(rime::net ALIAS rime_net)

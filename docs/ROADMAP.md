@@ -45,6 +45,28 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > ordered sim stage at m11.2, and m11.7's shooter is a deterministic server-side script. The
 > ladder is updated to match. **Next:** m11.2 — sessions + the ordered sim stage.
 >
+> **Update (2026-07-29) — m11.2 (sessions) + the `Application` ordered sim stage.** The session
+> layer landed: **`NetDriver`** (owns the endpoint→session routing table, polls the shared `Link`
+> once per tick, runs the handshake, reaps dead peers — role-agnostic, so `listen()` makes it a
+> server and `connect()` a client) and **`Session`** (one peer relationship: its channel, its
+> Connecting→Connected→Closing state, its liveness timers, its inbox). The **handshake is
+> connectionless** — a `ReliableChannel` is a conversation with an *established* peer, and
+> allocating one on first sight of an endpoint is precisely the DoS the handshake must prevent — and
+> is **validated before it can allocate**: protocol version, app id, and schema hash travel as
+> separate fields, compared separately, so a rejection names exactly what to fix. The schema number
+> comes from the new **`ecs::component_schema_hash`** (a *sorted* fold of registered components'
+> `type_hash`es — registration order is not a contract), which `engine/net` only ever sees as an
+> opaque `u64`, so the module keeps its core+platform-only dependency. Design review produced
+> **ADR-0033 amendment A7**: every session datagram now carries a **4-byte incarnation salt**,
+> because a peer reconnecting from the same address gets a channel whose sequence spaces restart at
+> 0, so its *old* incarnation's in-flight packets would be buffered into the new stream as
+> legitimate early traffic. The same salt is how a reincarnated client is told from a duplicate
+> request. **`Application` grew the ordered sim stage** (A5/A8): `PreSim → [Schedule] →
+> [propagate_transforms] → PostSim → Publish`, with `on_fixed_tick` preserved exactly as sugar for
+> its one `PostSim` entry. 17 GPU-free proofs incl. schema rejection *with no server-side
+> allocation*, reincarnation, a bounded session table, garbage that poisons nothing, **peer death by
+> timeout**, and a real-socket loopback case. **Next:** m11.3 — replication core.
+>
 > **Update (2026-07-22) — Milestone 10 (Advanced lighting) COMPLETE.** The whole [ADR-0032](adr/0032-lighting-v2.md)
 > stack landed on `main`, brick by brick, every technique gated behind `LightingSettings` so **off is
 > the byte-identical M5.6 baseline**: **m10.1a** RHI array/cube textures + depth-compare sampler ·

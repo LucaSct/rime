@@ -2,6 +2,8 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -114,7 +116,39 @@ public:
     // phases, not concurrently with anything. Optional: a pure-Schedule app sets none.
     using TickFn = std::function<void(ecs::World&, double)>;
 
-    void on_fixed_tick(TickFn fn) { fixed_tick_ = std::move(fn); }
+    void on_fixed_tick(TickFn fn);
+
+    // ── The ordered sim stage (ADR-0032 §8, pulled forward by ADR-0033 A5) ──────────────────
+    // The single replacing hook above, generalized into named hook points in the canonical
+    // per-tick order (docs/design/simulation-tick.md). The phases are the GAPS around the two
+    // steps the loop already owns, because those steps — the Schedule and transform propagation —
+    // are neither optional nor hooks:
+    //
+    //     PreSim → [Schedule] → [propagate_transforms] → PostSim → Publish
+    //
+    //   PreSim  — before any system runs: poll the network, apply remote ops, route input. Like
+    //             every stage it runs on the main thread between phases, so structural world
+    //             changes are legal here (the same rule the single hook always had).
+    //   PostSim — after the hierarchy is composed and WorldTransforms are current. This is where
+    //             the physics bridge (physics::PhysicsSync::step — reconcile, step, write-back)
+    //             belongs, and it is the EXACT position on_fixed_tick has always occupied, so
+    //             existing callers neither move nor change. Named for the tick, not for physics:
+    //             `app` deliberately does not depend on `physics` (simulation-tick.md §1).
+    //   Publish — after everything the tick will mutate has mutated: drain change sets
+    //             (for_each_changed), publish snapshots, run a change-tracker. A consumer here
+    //             sees the tick's FINAL state, which is the whole reason it is a separate phase.
+    //
+    // Networking is the first customer that needs two of these at once: poll and apply remote ops
+    // in PreSim, publish snapshots in Publish, with the sim in between (ADR-0033 A5).
+    enum class SimStage : std::uint8_t { PreSim = 0, PostSim = 1, Publish = 2 };
+
+    static constexpr std::size_t kSimStageCount = 3;
+
+    // Add a per-tick step at `stage`. Steps within a stage run in REGISTRATION ORDER — stable and
+    // documented, so the order an app wires its modules is the order they observe the tick. Steps
+    // are never removed (v1: teardown is process exit; an unregister seam is additive if a real
+    // customer appears). Zero-cost when unused: an empty vector per stage is one branch per tick.
+    void add_sim_stage(SimStage stage, TickFn fn);
 
     // ── Input ───────────────────────────────────────────────────────────────────────────────
     // Queue an event for the NEXT frame's snapshot. Windowed, the loop fills this from the OS
@@ -155,6 +189,7 @@ public:
     [[nodiscard]] std::uint64_t tick_count() const noexcept { return tick_count_; }
 
 private:
+    void run_stage(SimStage stage);  // run every step registered at one phase, in order
     void run_ticks(int ticks);       // run `ticks` simulation steps
     void render_frame(double alpha); // build + execute the render frame (if a callback/GPU exist)
     void run_one_frame(double frame_dt);
@@ -165,7 +200,12 @@ private:
     ecs::Schedule schedule_;
     FixedTimestep timestep_;
     RenderFn render_;
-    TickFn fixed_tick_;
+    std::array<std::vector<TickFn>, kSimStageCount> stages_;
+    // Where on_fixed_tick's entry lives inside stages_[PostSim], or -1 if it was never set. Keeping
+    // the index is what preserves the old REPLACING semantics on top of a list: a second
+    // on_fixed_tick overwrites that one entry in place rather than appending a duplicate, and it
+    // holds its original position relative to anything added around it. One mechanism, not two.
+    std::ptrdiff_t legacy_tick_index_ = -1;
 
     std::unique_ptr<rhi::Device> device_;        // owned when config.gpu
     std::unique_ptr<render::RenderGraph> graph_; // owned when a device exists
