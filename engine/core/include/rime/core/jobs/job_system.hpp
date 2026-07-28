@@ -83,6 +83,17 @@ public:
 
     [[nodiscard]] unsigned participant_count() const noexcept { return num_workers_ + 1; }
 
+    // Slots per segment of the per-thread job ring — i.e. how far the allocation head travels
+    // before it laps. The ring grows a segment at a time, so this is not a limit on jobs in
+    // flight; it is exposed so tests can sit exactly on the lap boundary instead of hard-coding
+    // the constant.
+    [[nodiscard]] static std::size_t job_segment_size() noexcept;
+
+    // How many segments the *calling thread's* job ring currently holds. Diagnostic only: it
+    // exists so tests can prove that repeated fork/join groups reuse retired slots instead of
+    // growing without bound.
+    [[nodiscard]] static std::size_t job_segment_count() noexcept;
+
 private:
     Job* get_job(int queue_index) noexcept; // pop own, else steal a random other
     void execute(Job* job);

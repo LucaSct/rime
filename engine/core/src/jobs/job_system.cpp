@@ -2,9 +2,13 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #include "rime/core/jobs/job_system.hpp"
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <vector>
 
 #include "rime/core/diagnostics/assert.hpp"
 
@@ -12,37 +16,123 @@ namespace rime::core {
 
 // A job is just the work plus the group counter to drop when it finishes. The Chase-Lev deques
 // hold Job* (trivially copyable); the Job objects themselves live in a per-thread ring (below).
-struct Job {
+//
+// `live` is the ring's reuse interlock. It is set when the slot is handed out and cleared by
+// whichever thread finishes the job — which is generally NOT the thread that allocated it, since
+// jobs get stolen. So "is this slot free again?" is inherently a cross-thread question, and the
+// flag has to be an atomic rather than a plain bool.
+//
+// One slot per cache line. Without the alignment two adjacent slots share a line, so retiring a
+// job — a store to `live` by whichever worker ran it — invalidates the line a *different* worker
+// may be reading a neighbouring job's callable from. That is false sharing directly on the retire
+// path, which every single job pays. Ring slots are the one place in this system where unrelated
+// threads touch neighbouring objects by construction, so the alignment is bought deliberately
+// rather than deferred: the cost is rounding each slot up to 64 bytes, i.e. ~1 MiB per 16384-slot
+// segment.
+struct alignas(64) Job {
     std::function<void()> fn;
     JobSystem::Counter* counter = nullptr;
+    std::atomic<bool> live{false};
 };
 
 namespace {
 
-// Each thread that submits jobs owns a fixed ring of Job storage, so allocating a job is a
-// pointer bump with no heap traffic on the hot path. A slot is safe to reuse once the job that
-// lived there has finished; callers join (wait) before the head wraps, so as long as a single
-// fork/join group stays under kJobRingSize jobs, no in-flight job is overwritten. (A growable or
-// generation-checked pool is a later refinement; this is the classic ring used by game job
-// systems.)
-constexpr std::size_t kJobRingSize = 1u << 14; // 16384 jobs in flight per thread
+// Job storage: a SEGMENTED RING with a per-slot reclamation handshake.
+//
+// Each thread that submits jobs owns a ring of Job storage, so allocating a job is a pointer bump
+// with no heap traffic on the hot path. The subtle part is when a slot may be handed out AGAIN.
+// The deques hold raw Job* into this storage, so reusing a slot whose job is still queued or
+// still running corrupts a live job in place: the assignment to `fn` races with the call to it,
+// and the overwritten job's work is silently dropped while its counter increment stands (so the
+// replacement runs twice and wait() can hang or return early). That reuse rule used to be an
+// unchecked assumption — "callers join before the head wraps" — which a single fork/join group
+// larger than the ring quietly violates.
+//
+// Two ideas make it safe, and both are load-bearing:
+//
+//   1. A per-slot `live` flag. Note that a count of completed jobs cannot substitute: jobs finish
+//      out of order (own-deque pops are LIFO, steals are FIFO), so "fewer than N outstanding"
+//      does not prove that the *specific* slot the head landed on is one of the finished ones.
+//      The check has to be per-slot.
+//   2. GROW rather than wait when the head lands on a live slot. Blocking until the slot frees is
+//      the tempting alternative and it deadlocks: because jobs are stolen, two threads can each
+//      be executing a job that occupies a slot in the OTHER thread's ring, and if both wrap and
+//      wait, each waits for a job only the other can finish. Helping cannot break the cycle —
+//      the slot occupants are executing, not stealable. Growing is wait-free, so nested run()
+//      from inside a running job stays trivially re-entrant.
+//
+// Segments give growth stable addresses: bodies are heap-allocated once and never move, so a Job*
+// already sitting in a deque stays valid for the life of the owning thread. Growth appends;
+// nothing is relocated. Capacity therefore settles at the thread's high-water mark of
+// simultaneously in-flight jobs and is reused from then on — steady-state frame code allocates
+// nothing. (This is the classic arena/segmented-ring pattern, with the single `live` bit playing
+// the role of deferred reclamation.)
+//
+// Memory ordering — one protocol, three accesses to `live`:
+//   claim  — store(true, relaxed) by the owner. Only the owner ever stores true, and push()'s
+//            release fence orders it before the pointer is published, so the claim precedes any
+//            retire in the modification order and a retire can never be lost.
+//   retire — store(false, release) by whichever thread executed the job, after fn() returns and
+//            after `counter` has been copied out. It runs BEFORE the group-counter decrement, so
+//            wait() observing zero implies every slot in the group is already reusable.
+//   reuse  — load(acquire) by the owner, which synchronizes-with that release: the executor's
+//            accesses happen-before the owner overwrites `fn`. The pair lives on the slot itself
+//            rather than a bare fence so ThreadSanitizer can follow the edge — the same
+//            reasoning the deque's slot ordering is written up with.
+constexpr std::size_t kJobSegmentSize = 1u << 14; // 16384 jobs per segment (power of two)
+// Growth is legitimate — a burst above the high-water mark. UNBOUNDED growth is not: it means
+// run() without a matching wait(), i.e. a submission leak. Trip well past any sane frame so the
+// engine bug is caught in checked builds, while unchecked builds degrade to memory pressure
+// rather than corruption.
+constexpr std::size_t kMaxJobSegments = 256; // 4M jobs in flight from one thread
 
 // Which deque this thread owns: a worker's index, or num_workers for the submitting thread.
 // -1 means "not a participant" — submitting from such a thread is a contract violation.
+//
+// KNOWN LIMITATION (pre-existing, not introduced by the segmented ring): this is per-thread, not
+// per-JobSystem, and the constructor overwrites it. So if two JobSystems are alive on one thread,
+// the second construction repoints the first one's submitting thread at the wrong deque index —
+// run() would then push to one of that system's WORKER deques, breaking the Chase-Lev
+// single-owner rule. run() bounds-checks the index, which catches the out-of-range subset of this
+// but not the in-range-yet-wrong case. Fixing it properly means making the index per-system
+// (a small map, or a submit token handed out by the constructor). Sufficient for a main-loop
+// engine that builds one pool; revisit before anything nests pools.
 thread_local int t_queue_index = -1;
-thread_local std::vector<Job> t_ring;
-thread_local std::size_t t_ring_head = 0;
+// Segment bodies are unique_ptr-owned arrays: Job holds an atomic, so it is neither copyable nor
+// movable, which rules out a flat std::vector<Job> (resize needs MoveInsertable) — and a flat
+// vector could not grow anyway without invalidating every Job* already in a deque.
+thread_local std::vector<std::unique_ptr<std::array<Job, kJobSegmentSize>>> t_segments;
+thread_local std::size_t t_head = 0;     // circular index into [0, t_capacity)
+thread_local std::size_t t_capacity = 0; // t_segments.size() * kJobSegmentSize
 thread_local std::uint64_t t_rng = 0;
 
+// Power-of-two segment size, so the compiler turns these into a shift and a mask.
+Job& slot_at(std::size_t index) {
+    return (*t_segments[index / kJobSegmentSize])[index % kJobSegmentSize];
+}
+
+// Append a segment and point the head at its first slot, which is always free. Existing slots keep
+// their addresses; slots the redirect skips are picked up on the head's next lap.
+void grow_ring() {
+    t_head = t_capacity;
+    t_segments.push_back(std::make_unique<std::array<Job, kJobSegmentSize>>());
+    t_capacity += kJobSegmentSize;
+    RIME_ASSERT(t_segments.size() <= kMaxJobSegments); // submission leak if this ever fires
+}
+
 Job* allocate_job(std::function<void()> fn, JobSystem::Counter* counter) {
-    if (t_ring.empty()) {
-        t_ring.resize(kJobRingSize);
+    if (t_head == t_capacity) {
+        t_head = 0; // lap the ring (also the first-call case, where head == capacity == 0)
     }
-    Job* job = &t_ring[t_ring_head];
-    t_ring_head = (t_ring_head + 1) & (kJobRingSize - 1); // power-of-two wrap
-    job->fn = std::move(fn);
-    job->counter = counter;
-    return job;
+    if (t_capacity == 0 || slot_at(t_head).live.load(std::memory_order_acquire)) {
+        grow_ring(); // still queued or executing somewhere: never overwrite live work
+    }
+    Job& job = slot_at(t_head);
+    ++t_head;
+    job.fn = std::move(fn);
+    job.counter = counter;
+    job.live.store(true, std::memory_order_relaxed); // ordered by push()'s release fence
+    return &job;
 }
 
 // Pick a random victim queue to steal from, never ourselves. Randomization spreads steal traffic
@@ -63,6 +153,14 @@ int pick_victim(int self, int num_queues) noexcept {
 }
 
 } // namespace
+
+std::size_t JobSystem::job_segment_size() noexcept {
+    return kJobSegmentSize;
+}
+
+std::size_t JobSystem::job_segment_count() noexcept {
+    return t_segments.size();
+}
 
 JobSystem::JobSystem(unsigned num_workers) {
     unsigned hardware = std::thread::hardware_concurrency();
@@ -99,12 +197,17 @@ JobSystem::~JobSystem() {
 
 void JobSystem::run(std::function<void()> task, Counter* counter) {
     RIME_ASSERT(t_queue_index >= 0); // submit from the main thread or from within a running job
+    RIME_ASSERT(t_queue_index < static_cast<int>(queues_.size()));
+    Job* job = allocate_job(std::move(task), counter);
     if (counter != nullptr) {
-        // Bump before publishing the job. In a fork/join group all run() calls happen-before the
-        // wait() on the same thread, so a relaxed increment is correctly ordered.
+        // Bump AFTER allocating but BEFORE the push that makes the job visible. Allocation can now
+        // grow the ring, and growing allocates — so incrementing first would strand the increment
+        // if that ever threw, leaving wait() to spin on a counter no job will ever pay back.
+        // Nothing can decrement in the gap, because no executor can see the job until it is pushed.
+        // In a fork/join group all run() calls happen-before the wait() on the same thread, so a
+        // relaxed increment is correctly ordered.
         counter->fetch_add(1, std::memory_order_relaxed);
     }
-    Job* job = allocate_job(std::move(task), counter);
     queues_[static_cast<std::size_t>(t_queue_index)]->push(job);
 }
 
@@ -143,10 +246,17 @@ Job* JobSystem::get_job(int queue_index) noexcept {
 
 void JobSystem::execute(Job* job) {
     job->fn();
-    if (job->counter != nullptr) {
+    Counter* counter = job->counter; // copy out BEFORE publishing the slot as free
+    // Retire the ring slot: the release store orders fn() and the counter read ahead of the
+    // "free" signal, so the owning thread's acquire-load makes them happen-before its overwrite.
+    // Past this point the slot may already have been reused — do not touch `job` again. Retiring
+    // before the counter decrement means wait() seeing zero implies every slot in the group is
+    // reusable.
+    job->live.store(false, std::memory_order_release);
+    if (counter != nullptr) {
         // acq_rel so the chain of decrements carries every job's writes through to the waiter's
         // acquire-load of zero (see docs/design/job-system.md, "visibility").
-        job->counter->fetch_sub(1, std::memory_order_acq_rel);
+        counter->fetch_sub(1, std::memory_order_acq_rel);
     }
 }
 

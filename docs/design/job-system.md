@@ -61,16 +61,70 @@ of **all** the jobs, and the waiter's acquire-load of zero synchronizes with it.
 `relaxed`: in a fork/join group all `run()` calls are sequenced-before the `wait()` on the same
 thread, so nothing stronger is needed.
 
-## Job allocation — a per-thread ring
+## Job allocation — a segmented per-thread ring
 
 Allocating a job must be cheap (it happens thousands of times per frame), so each submitting thread
-keeps a fixed **ring** of `Job` storage (`kJobRingSize = 16384`); allocating is a pointer bump and
-a wrap. A ring slot is safe to reuse once the job that lived there has finished — and callers
-`wait()` (drain) before the head wraps around — so as long as a single fork/join group has fewer
-than `kJobRingSize` jobs in flight, no live job is ever overwritten. The `Job` itself holds a
-`std::function` (the work) and the group counter; the deques only ever store `Job*`, which is
-trivially copyable as the deque requires. Publication is safe across threads because the deque's
-release/acquire pair orders the job's fields (written before `push`) ahead of a thief's read.
+keeps a **ring** of `Job` storage (`kJobSegmentSize = 16384` slots per segment); allocating is a
+pointer bump and a lap. The `Job` itself holds a `std::function` (the work), the group counter, and
+a `live` flag; the deques only ever store `Job*`, which is trivially copyable as the deque
+requires. Publication is safe across threads because the deque's release/acquire pair orders the
+job's fields (written before `push`) ahead of a thief's read.
+
+The subtle part is when a slot may be handed out **again**. Because the deques hold raw `Job*`,
+reusing a slot whose job is still queued or still running corrupts a live job in place: the
+assignment to `fn` races with the call to it, and the overwritten job's work is silently dropped
+while its counter increment stands — so the replacement runs twice and `wait()` can hang or return
+early. This was originally left as an unchecked *assumption* ("callers join before the head wraps"),
+which any single fork/join group larger than the ring quietly violates. Two ideas make it safe, and
+both are load-bearing:
+
+1. **A per-slot `live` flag**, set on claim and cleared by whichever thread *executes* the job.
+   Because jobs are stolen, "is this slot free again?" is inherently a cross-thread question. A
+   count of completed jobs cannot substitute for the per-slot check: jobs finish out of order
+   (own-deque pops are LIFO, steals are FIFO), so "fewer than N outstanding" does not prove that
+   the *specific* slot the head landed on is one of the finished ones.
+2. **Grow rather than wait** when the head lands on a live slot. Blocking until the slot frees is
+   the tempting alternative and it deadlocks: two threads can each be executing a job that occupies
+   a slot in the *other* thread's ring, and if both lap and wait, each waits for a job only the
+   other can finish. Helping cannot break the cycle, because the slot occupants are executing, not
+   stealable. Growing is wait-free, so nested `run()` from inside a running job stays trivially
+   re-entrant.
+
+Segments give growth **stable addresses**: segment bodies are heap-allocated once and never move,
+so a `Job*` already sitting in a deque stays valid for the life of the owning thread. Growth
+appends; nothing is relocated (a flat `std::vector<Job>` could not grow at all here — reallocation
+would invalidate every outstanding pointer). Capacity settles at the thread's high-water mark of
+simultaneously in-flight jobs and is reused from then on, so steady-state frame code allocates
+nothing.
+
+### The ordering protocol
+
+Three accesses to `live`, and the retire/reuse pair is what makes reuse safe:
+
+- **claim** — `store(true, relaxed)` by the owner. Only the owner ever stores `true`, and `push()`'s
+  release fence orders it before the pointer is published, so the claim precedes any retire in the
+  modification order and a retire can never be lost.
+- **retire** — `store(false, release)` by whichever thread executed the job, *after* `fn()` returns
+  and *after* `counter` has been copied into a local (past the store the slot may already have been
+  reused, so the `Job` must not be touched again). It runs **before** the group-counter decrement,
+  which buys a useful invariant: `wait()` observing zero implies every slot in that group is already
+  reusable.
+- **reuse** — `load(acquire)` by the owner, which synchronizes-with that release, so the executor's
+  accesses happen-before the owner overwrites `fn`. The pair lives on the slot itself rather than a
+  bare fence so ThreadSanitizer can follow the edge — the same reasoning
+  [work-stealing-deque.md](work-stealing-deque.md) gives for its slot ordering.
+
+Slots are `alignas(64)` — one per cache line. Ring slots are the one place in this system where
+unrelated threads touch neighbouring objects by construction: retiring a job stores to `live` from
+whichever worker ran it, and without the alignment that store invalidates the line a *different*
+worker may be reading the next slot's callable from. That is false sharing directly on the retire
+path, paid once per job, so the alignment is bought rather than deferred; it costs ~1 MiB per
+16384-slot segment.
+
+Unbounded growth is a different bug from a legitimate burst: it means `run()` without a matching
+`wait()`, a submission leak. `kMaxJobSegments` (256 segments ≈ 4M in-flight jobs from one thread)
+trips a `RIME_ASSERT` well past any sane frame, so the engine bug is caught in checked builds while
+unchecked builds degrade to memory pressure rather than corruption.
 
 ## Deliberate limitations (labeled, per CLAUDE.md)
 
@@ -84,8 +138,15 @@ release/acquire pair orders the job's fields (written before `push`) ahead of a 
 - **One submitting thread.** Submit from the creating thread or from within a job. Arbitrary
   external threads submitting would need their own deques (or an MPMC intake queue). Sufficient for
   a main-loop engine; revisit if needed.
-- **Bounded in-flight jobs per thread** (`kJobRingSize`). A growable/generation-checked job pool is
-  the refinement if a single group ever needs more.
+- **Job-ring memory is high-water-mark, never returned.** The segmented ring grows to the largest
+  number of jobs a thread ever had in flight at once and keeps that memory for the thread's
+  lifetime. That is the right trade for frame code (no allocation in steady state), but a tool that
+  submits one enormous batch and then idles holds the segments anyway. Returning segments would
+  need a quiescent point to prove no `Job*` is outstanding; not worth it until a workload asks.
+- **Growth is per-segment, not per-slot.** If the head lands on a live slot the ring appends a whole
+  16384-slot segment rather than hunting for the next free slot, so a thread that stays near
+  saturation can hold more slots than its true peak. Scanning for a free slot would be a
+  micro-optimization on a cold path; measure before adding it.
 
 ## The proof (M1.6 "done when")
 
