@@ -69,3 +69,13 @@ flags. `mutableComparisonSamplers` is the sharp edge (depth-compare/shadow sampl
 MoltenVK degrades every `sampler2DShadow` fetch to `compare_func::never`, so shadow maps silently
 read as *fully occluded* on macOS while lavapipe — not a portability driver, so none of this applies
 — stays green. Lesson: **CI's software ICD cannot test the portability path at all.**
+
+Enabling that capability was necessary but, on *some* Metal devices (e.g. Intel Iris/macOS 13),
+**not sufficient**: the m10.1/m10.2 shadow maps render depth into a *layered* depth array and sample
+it back in the forward pass, and there the sampled depth reads 0 regardless of the compare — hardware
+`sampler2DArrayShadow` *and* a manual `sampler2DArray` raw-depth read both come back fully occluded,
+even though every Vulkan detail (2D-array sample view, per-layer render views, depth aspect, layouts,
+usage) is correct and identical to the green lavapipe/native path. This is a driver limitation in the
+dynamic-rendering-depth-then-sample path, not an engine bug. Until the macOS shadow path is reworked
+(a Metal-sampleable target is the likely fix), `AdapterInfo::portability` is surfaced so the GPU
+shadow proofs skip on portability devices rather than fail — the shadow maths stays proven on CI.

@@ -101,6 +101,14 @@ TEST_CASE("shadows: the sun casts a shadow, gated by LightingSettings (m10.1)") 
         MESSAGE("no Vulkan device available — skipping the shadow proof");
         return;
     }
+    if (test::shadow_depth_sampling_unsupported(*device)) {
+        // MoltenVK/Metal: sampling the layered shadow-depth map reads 0 → fully occluded. Skip
+        // (even under RIME_REQUIRE_VULKAN); the maths is proven on lavapipe/native CI. See the
+        // helper.
+        MESSAGE("portability (MoltenVK) device — layered shadow-depth sampling unsupported; "
+                "skipping the directional shadow proof");
+        return;
+    }
 
     constexpr std::uint32_t kSize = 256;
 
