@@ -5,3 +5,11 @@ rime_add_test(rime_net_tests
 
 target_link_libraries(rime_net_tests
     PRIVATE rime::net)
+
+# Its own executable rather than a second file in the one above: each doctest binary owns exactly
+# one main(), and separate targets keep `ctest -R` able to run the session proofs alone.
+rime_add_test(rime_net_session_tests
+    session_test.cpp)
+
+target_link_libraries(rime_net_session_tests
+    PRIVATE rime::net)

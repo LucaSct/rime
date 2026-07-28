@@ -38,21 +38,55 @@ Application::Application(const AppConfig& config)
 // here (their unique_ptr destructors need the full definition — the pimpl rule).
 Application::~Application() = default;
 
+void Application::on_fixed_tick(TickFn fn) {
+    // Sugar over the ordered stage: the historical single hook is simply the one PostSim entry this
+    // function owns. Replacing it in place (rather than appending) is what keeps the documented
+    // "replacing slot" behaviour every existing caller was written against.
+    auto& post_sim = stages_[static_cast<std::size_t>(SimStage::PostSim)];
+    if (legacy_tick_index_ >= 0) {
+        post_sim[static_cast<std::size_t>(legacy_tick_index_)] = std::move(fn);
+        return;
+    }
+    legacy_tick_index_ = static_cast<std::ptrdiff_t>(post_sim.size());
+    post_sim.push_back(std::move(fn));
+}
+
+void Application::add_sim_stage(SimStage stage, TickFn fn) {
+    stages_[static_cast<std::size_t>(stage)].push_back(std::move(fn));
+}
+
+void Application::run_stage(SimStage stage) {
+    // Indexed by value rather than iterated by reference on purpose: a step is allowed to register
+    // another step (a spawner wiring up a subsystem mid-tick), which can reallocate the vector out
+    // from under a held iterator. Steps added during a tick run on the NEXT one, never this one.
+    auto& steps = stages_[static_cast<std::size_t>(stage)];
+    for (std::size_t i = 0, n = steps.size(); i < n; ++i) {
+        if (steps[i]) {
+            steps[i](world_, timestep_.fixed_dt);
+        }
+    }
+}
+
 void Application::run_ticks(int ticks) {
-    // One tick = one deterministic step of the world: run the scheduled systems, then compose the
-    // transform hierarchy so a tick leaves WorldTransforms consistent for the render that follows.
-    // Every tick advances the sim by exactly fixed_dt() — the invariant the determinism proof and
-    // M11 netcode both rest on (ADR-0023 §1). Systems read that constant dt by capturing it.
+    // One tick = one deterministic step of the world, in the canonical order
+    // (docs/design/simulation-tick.md): pre-sim hooks, the scheduled systems, then the transform
+    // hierarchy composed so a tick leaves WorldTransforms consistent for the render that follows,
+    // then the post-sim and publish hooks. Every tick advances the sim by exactly fixed_dt() — the
+    // invariant the determinism proof and M11 netcode both rest on (ADR-0023 §1). Systems read that
+    // constant dt by capturing it.
     for (int i = 0; i < ticks; ++i) {
+        // Before anything reads the world: poll the network, apply remote ops, route input
+        // (ADR-0033 A5). Structural changes are legal — this is the main thread between phases.
+        run_stage(SimStage::PreSim);
         schedule_.run(world_, jobs_);
         ecs::propagate_transforms(world_, jobs_);
-        // The per-tick hook runs last, after the hierarchy is composed: this is where a physics
-        // PhysicsSync::step reads up-to-date WorldTransforms, steps the sim, and writes poses back
-        // (stamping change detection) — structural work that a parallel Schedule system could not
-        // do. See docs/design/simulation-tick.md for the canonical order.
-        if (fixed_tick_) {
-            fixed_tick_(world_, timestep_.fixed_dt);
-        }
+        // After the hierarchy is composed: where a physics PhysicsSync::step reads up-to-date
+        // WorldTransforms, steps the sim, and writes poses back (stamping change detection) —
+        // structural work that a parallel Schedule system could not do. This is exactly where the
+        // old single on_fixed_tick hook ran, and it still does.
+        run_stage(SimStage::PostSim);
+        // Last: everything this tick will change has changed, so a consumer here sees final state.
+        run_stage(SimStage::Publish);
         ++tick_count_;
     }
 }

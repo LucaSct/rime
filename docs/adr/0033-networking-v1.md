@@ -305,3 +305,70 @@ destruction` scripts its damage source **server-side** (a deterministic scripted
 shots at named parts, so the whole run is hash-verifiable in CI), with clients as camera
 observers whose input rides the m11.6 path for proof-of-flow. A real player controller + weapon
 is M12 scope, where it always was. The ROADMAP's M11 ladder is updated to match A1–A6.
+
+---
+
+## Amendment (2026-07-29, m11.2): the session wire, and where the handshake actually lives
+
+Two corrections the m11.2 implementation forced. Both change bytes on the wire, so m11.3 inherits
+them and they belong in the record rather than in a code comment.
+
+### A7. The handshake is connectionless, and every datagram carries an incarnation salt
+
+**§3 is wrong where it lists the handshake as riding the reliable-ordered channel** ("events,
+spawn/despawn, handshake — the destruction events of §2 live here"). A `ReliableChannel` is a
+conversation with an *established* peer: sequence spaces, ack state, resend queues, a 256-message
+backlog budget. None of that means anything before both sides agree a conversation exists, and
+allocating one on first sight of an endpoint is precisely the unbounded-map DoS the handshake must
+prevent — a single spoofed datagram would mint the heaviest object in the module.
+
+The handshake, heartbeat, and disconnect are therefore **connectionless control packets** with their
+own retry/timeout, and a channel is allocated **only on acceptance**. The validate-before-allocate
+order is: frame parse → salt → identity triple (protocol version, app id, schema hash). A
+wrong-build or wrong-game peer costs the server exactly one reply datagram and no state. Control
+packets are discriminated from channel traffic by the high bit of the first payload byte (control
+tags are ≥ 0x80; the m11.1 channel enum is 0..2), so the channel path is byte-identical to m11.1 and
+`ReliableChannel` was not modified at all.
+
+**The session wire gains a 4-byte incarnation salt on every datagram**, control and channel alike:
+
+```
+[salt:u32][payload...]        # channel traffic is therefore 17 header bytes, not 13
+```
+
+The hole it closes could not be seen at m11.1, because it only exists once sessions do. When a peer
+dies and reconnects from the same address, its **old incarnation's packets may still be in flight**,
+and the fresh `ReliableChannel` starts every sequence space at 0 — so a stale `seq 5` is
+indistinguishable from legitimate early traffic and gets *buffered into the new stream*, silently
+corrupting it. The salt (the client's and server's random halves, FNV-folded — not xor'd, since xor
+maps equal salts to the reserved 0) stamps the incarnation on every datagram, and stale bytes are
+dropped at the driver before they reach channel state. Reincarnation is detected by the same value:
+a `ConnectRequest` from a known endpoint carrying the *same* client salt is a duplicate attempt (the
+accept is idempotently re-sent, allocating nothing), while a *different* one means the peer re-rolled
+it — only a fresh `connect()` does that — so the old session is reaped as `Replaced`.
+
+One consequence worth stating: **reincarnation detection is only as good as the salt seed.** Salts
+come from `NetDriver::Config::salt_seed`; a game that hardcodes it makes a restarted client
+indistinguishable from a duplicate request. Seed from OS entropy at startup.
+
+Not needed after all: `platform::Endpoint` does **not** grow `std::hash`/`operator<=>`. The routing
+table is a linear scan over the slot vector — the same call `ScriptedNetwork` already makes for its
+node table, and at `max_sessions` ≤ 64 it is noise next to the syscall that delivered the packet.
+
+### A8. A5's ordered sim stage landed as three phases: `PreSim` / `PostSim` / `Publish`
+
+`Application`'s single replacing `on_fixed_tick` slot is now the ordered stage ADR-0032 §8 ruled on:
+
+```
+PreSim → [Schedule] → [propagate_transforms] → PostSim → Publish
+```
+
+The phases are the *gaps around* the two steps the loop already owns, because those steps are
+neither optional nor hooks. Networking is the first customer needing two at once (poll and apply
+remote ops in `PreSim`, publish snapshots in `Publish`). Steps within a phase run in registration
+order; `on_fixed_tick` survives unchanged as sugar for the one `PostSim` entry it owns, replaced in
+place so its position among later-registered steps is stable — every existing caller is untouched.
+
+The phase is deliberately named `PostSim`, not `PostPhysics`: it *is* where the physics bridge runs,
+but `app` does not depend on `physics` (simulation-tick.md §1), and a stage must not be named after
+a module its own module cannot see.
