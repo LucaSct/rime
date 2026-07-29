@@ -84,7 +84,12 @@ class RimeRecipe(ConanFile):
         # Both ship (games built on Rime host streamed sessions) and both are linked
         # PRIVATE into rime_stream behind opaque handles, the same hide-the-library
         # discipline as the S0 codecs above.
-        self.requires("libsvtav1/2.2.1")
+        # libsvtav1 is pinned to 4.2.0 and comes from our OWN recipe in
+        # third_party/conan-recipes/libsvtav1 — Conan Center stops at 2.2.1, and 4.x carries the
+        # rate-control and entropy-coding race fixes we need (ADR-0034). The recipe must be
+        # exported into the local cache before `conan install`; scripts/build.sh does that for
+        # you. Drop the local recipe and this note once Conan Center ships a 4.x.
+        self.requires("libsvtav1/4.2.0")
         self.requires("dav1d/1.5.3")
 
         # doctest: a fast-compiling, header-only unit-test framework. Declared as a

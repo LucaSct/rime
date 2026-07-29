@@ -44,6 +44,8 @@ if [ ! -f "$toolchain" ]; then
     elif [ -x "$HOME/.rime-tools/bin/conan" ]; then conan="$HOME/.rime-tools/bin/conan"
     else echo "sdk-smoke.sh: conan not found — run scripts/setup.sh first" >&2; exit 1
     fi
+    # libsvtav1/4.2.0 is our own recipe; it must be in the cache before install resolves it.
+    "$(dirname "$0")/conan-export-local.sh" "$conan"
     say "conan install ($build_type)"
     # AV1 codecs built optimized even under Debug (see scripts/build.sh) — keeps the resolved codec
     # packages identical to the main build (no cache thrash) and dodges their debug-only asserts.

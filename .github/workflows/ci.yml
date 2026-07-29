@@ -229,6 +229,10 @@ jobs:
           # command-line option -stdlib=libstdc++"). Build-context tools (glslang) stay on gcc.
           printf '[conf]\ntools.build:compiler_executables={"c": "clang", "cpp": "clang++"}\n' \
             >> "$(conan profile path clang)"
+          # libsvtav1/4.2.0 lives in third_party/conan-recipes (Conan Center has no 4.x), so it
+          # must be exported into the cache before install can resolve it. This job drives Conan
+          # directly rather than through scripts/build.sh, so it needs the export explicitly.
+          scripts/conan-export-local.sh conan
           conan install . -of build/dev -s build_type=Debug -s compiler.cppstd=20 \
             -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" \
             -pr:h clang -pr:b default --build=missing

@@ -72,6 +72,10 @@ if [ "$do_cpp" -eq 1 ]; then
         echo "build.sh: conan not found — run scripts/setup.sh first" >&2; exit 1
     fi
 
+    # Our own recipes (libsvtav1/4.2.0) must reach the Conan cache before install can resolve
+    # them — Conan Center has no 4.x. See scripts/conan-export-local.sh.
+    "$(dirname "$0")/conan-export-local.sh" "$conan"
+
     say "C++: conan install ($build_type)"
     # Build the AV1 codecs (SVT-AV1 encoder + dav1d decoder) OPTIMIZED even in a Debug engine build.
     # They are third-party C libraries we never step-debug, and their internal assert()s otherwise

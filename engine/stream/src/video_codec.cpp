@@ -7,9 +7,7 @@
 #include <EbSvtAv1Enc.h>
 
 #include <cerrno>
-#include <chrono>
 #include <cstring>
-#include <thread>
 #include <utility>
 
 #include "rime/core/diagnostics/log.hpp"
@@ -25,8 +23,9 @@
 //   2. **The encoder state machine.** SVT-AV1 is configured for interactive streaming:
 //      low-delay prediction (no B-frames — nothing ever references the future, so nothing ever
 //      waits for it), CBR rate control, keyframes only on demand. Its pipeline is asynchronous
-//      (worker threads), so encode() polls the output queue until this frame's packet emerges —
-//      one-in-one-out, the property the tests pin.
+//      (worker threads), but in low delay the library enforces picture-in/picture-out: encode()
+//      hands over one frame and makes one blocking call for its packet — one-in-one-out, the
+//      property the tests pin.
 //   3. **The decoder loop.** dav1d's canonical send-data/get-picture loop, run to completion per
 //      packet with max_frame_delay=1, so a fed frame comes straight back out.
 namespace rime::stream {
@@ -137,11 +136,6 @@ void i420_to_interleaved(const std::uint8_t* y_plane,
     }
 }
 
-// How long encode() will poll for the frame's packet before declaring the encoder wedged. The
-// wait is normally the encode time itself (a frame at a real-time preset is milliseconds); the
-// ceiling only exists so a library bug fails loudly instead of hanging a stream thread forever.
-constexpr std::chrono::seconds kEncodePollTimeout{10};
-
 } // namespace
 
 // ── VideoEncoder ────────────────────────────────────────────────────────────────────────────────
@@ -231,7 +225,9 @@ bool VideoEncoder::open(const Config& config) {
 
     auto* impl = new VideoEncoderImpl();
     // STEP 1: create the handle; SVT fills `params` with library defaults we then override.
-    if (svt_av1_enc_init_handle(&impl->handle, nullptr, &impl->params) != EB_ErrorNone) {
+    // (SVT-AV1 4.x dropped init_handle's middle `void* p_app_data` parameter — it was only ever
+    // echoed back to callers who used the private-data field, which we never did.)
+    if (svt_av1_enc_init_handle(&impl->handle, &impl->params) != EB_ErrorNone) {
         RIME_ERROR("VideoEncoder: svt_av1_enc_init_handle failed");
         destroy_encoder_impl(impl);
         return false;
@@ -252,7 +248,10 @@ bool VideoEncoder::open(const Config& config) {
     // the default) uses B-frames that reference future frames — better compression, but the
     // encoder must buffer until that future arrives, which is built-in latency an interactive
     // stream cannot pay. This is also what makes encode() one-in-one-out.
-    p.pred_structure = SVT_AV1_PRED_LOW_DELAY_B;
+    // SVT-AV1 4.x renamed the enum: SvtAv1PredStructure's SVT_AV1_PRED_LOW_DELAY_B became
+    // PredStructure's LOW_DELAY (same value, 1 — the wire behaviour is unchanged; the old
+    // LOW_DELAY_P variant had already been inactive for years and was deleted with the rename).
+    p.pred_structure = LOW_DELAY;
     // No lookahead for the same reason: lookahead trades delay for smarter rate decisions.
     p.look_ahead_distance = 0;
     // CBR at a fixed target: a steady, plannable wire rate (ADR-0030 §4 — fixed bitrate +
@@ -271,7 +270,9 @@ bool VideoEncoder::open(const Config& config) {
     p.color_range = EB_CR_FULL_RANGE;
     p.matrix_coefficients = EB_CICP_MC_BT_601;
     if (config.parallelism != 0) {
-        p.logical_processors = config.parallelism;
+        // Renamed in SVT-AV1 4.x: logical_processors -> level_of_parallelism (same meaning — the
+        // cap on worker threads SVT spawns; 0 leaves the library to size itself to the machine).
+        p.level_of_parallelism = config.parallelism;
     }
     if (svt_av1_enc_set_parameter(impl->handle, &p) != EB_ErrorNone) {
         RIME_ERROR("VideoEncoder: svt_av1_enc_set_parameter rejected the configuration");
@@ -309,8 +310,10 @@ bool VideoEncoder::open(const Config& config) {
     impl->io.y_stride = w;
     impl->io.cb_stride = w / 2;
     impl->io.cr_stride = w / 2;
-    impl->io.width = w;
-    impl->io.height = h;
+    // NOTE: SVT-AV1 4.x removed EbSvtIOFormat's `width`/`height`. They were redundant — and a
+    // trap, because a mismatch against the configured source_width/source_height was undefined.
+    // The picture's dimensions now come solely from the configuration set above, which is also
+    // the only place we ever set them.
     impl->input.size = sizeof(EbBufferHeaderType);
     impl->input.p_buffer = reinterpret_cast<std::uint8_t*>(&impl->io);
     impl->input.n_alloc_len = static_cast<std::uint32_t>(impl->yuv.size());
@@ -366,41 +369,38 @@ bool VideoEncoder::encode(std::span<const std::byte> pixels, std::vector<VideoPa
         return false;
     }
 
-    // SVT's pipeline is asynchronous — worker threads carry the picture through its stages, and
-    // the only wait primitive is polling the output queue. Low-delay + no-lookahead guarantees
-    // this frame's packet needs no future input, so polling until it emerges cannot deadlock; the
-    // wait *is* the encode time. We then keep draining without sleeping in case a frame ever
-    // yields more than one packet (it does not in low-delay, but the wire contract allows it).
-    const auto deadline = std::chrono::steady_clock::now() + kEncodePollTimeout;
-    bool got_packet = false;
-    for (;;) {
-        EbBufferHeaderType* packet = nullptr;
-        const EbErrorType rc = svt_av1_enc_get_packet(impl->handle, &packet, 0);
-        if (rc == EB_NoErrorEmptyQueue) {
-            if (got_packet) {
-                break; // this frame's packet(s) are all out
-            }
-            if (std::chrono::steady_clock::now() >= deadline) {
-                RIME_ERROR("VideoEncoder: no packet within {}s — encoder wedged?",
-                           kEncodePollTimeout.count());
-                return false;
-            }
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
-            continue;
-        }
-        if (rc != EB_ErrorNone || packet == nullptr) {
-            RIME_ERROR("VideoEncoder: svt_av1_enc_get_packet failed ({})",
-                       static_cast<std::int32_t>(rc));
-            return false;
-        }
-        VideoPacket& vp = out.emplace_back();
-        const auto* data = reinterpret_cast<const std::byte*>(packet->p_buffer);
-        vp.data.assign(data, data + packet->n_filled_len);
-        vp.pts = static_cast<std::uint64_t>(packet->pts);
-        vp.keyframe = packet->pic_type == EB_AV1_KEY_PICTURE;
-        svt_av1_enc_release_out_buffer(&packet);
-        got_packet = true;
+    // Exactly ONE get_packet call per sent picture — and this is a load-bearing "exactly one".
+    //
+    // SVT's pipeline is asynchronous (worker threads carry the picture through its stages), but
+    // since SVT-AV1 2.3.0 the library *enforces* a picture-in/picture-out model in low delay:
+    // get_packet takes its blocking path whenever `pred_structure == LOW_DELAY`, regardless of
+    // the pic_send_done argument we pass. So this call waits for our frame's packet — the wait
+    // *is* the encode time — and then returns it.
+    //
+    // The consequence is that draining "until EB_NoErrorEmptyQueue" is no longer possible: with
+    // no further input pending, a second call would block forever, because EmptyQueue is only
+    // reachable after end-of-stream. (That loop is what this code used to do against 2.2.1,
+    // where the same call was non-blocking. It is a deadlock on 4.x, not a compile error, which
+    // is why the version bump had to touch this function — see ADR-0034.)
+    //
+    // We lose the old poll deadline with it: the wait now happens inside SVT, where we cannot
+    // time it out without standing up a watchdog thread. The bound is the library's contract
+    // rather than our clock, and a genuinely wedged encoder now hangs the calling stream thread
+    // instead of returning false. That is the trade the upstream API forces; low-delay's
+    // one-in-one-out guarantee is what makes it acceptable.
+    EbBufferHeaderType* packet = nullptr;
+    const EbErrorType rc = svt_av1_enc_get_packet(impl->handle, &packet, 0);
+    if (rc != EB_ErrorNone || packet == nullptr) {
+        RIME_ERROR("VideoEncoder: svt_av1_enc_get_packet failed ({})",
+                   static_cast<std::int32_t>(rc));
+        return false;
     }
+    VideoPacket& vp = out.emplace_back();
+    const auto* data = reinterpret_cast<const std::byte*>(packet->p_buffer);
+    vp.data.assign(data, data + packet->n_filled_len);
+    vp.pts = static_cast<std::uint64_t>(packet->pts);
+    vp.keyframe = packet->pic_type == EB_AV1_KEY_PICTURE;
+    svt_av1_enc_release_out_buffer(&packet);
     return true;
 }
 

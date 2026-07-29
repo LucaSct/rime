@@ -16,7 +16,12 @@ deliberate** — every dependency is code we ship, debug, and are bound by the l
 ## What we actually depend on (through M6 + Track S)
 
 Rime pulls its C++ build dependencies through **Conan** (see [`../conanfile.py`](../conanfile.py)),
-not by vendoring source into this directory — so `third_party/` currently holds no code. Each
+not by vendoring source into this directory — so `third_party/` vendors no dependency *source*. It
+does hold one thing: [`conan-recipes/`](conan-recipes), the Conan recipes we maintain ourselves for
+dependencies Conan Center has not packaged at the version we need (currently SVT-AV1 4.x — see
+[ADR-0034](../docs/adr/0034-svt-av1-4x-bump.md)). A recipe is build metadata, not vendored code: the
+source is still fetched and checksummed at build time. **This directory should trend back to empty**
+— when Conan Center ships the version we pin, the local recipe gets deleted. Each
 dependency is pinned and recorded in [`../NOTICE`](../NOTICE); all are permissive (Apache-2.0 /
 MIT / BSD), per the policy above. The Rust tooling under [`../tools`](../tools) likewise pulls its
 crates through **Cargo** (glTF/PNG import, mikktspace, clap, …), pinned in `tools/Cargo.lock` and
@@ -30,7 +35,7 @@ recorded in the same NOTICE — again all permissive, none vendored here.
 | Formatting | **fmt** | Conan | logging + string formatting in `core` |
 | Streaming — lossy codec | **libjpeg-turbo** | Conan | the S0 wire codec (TurboJPEG API), SIMD JPEG; BSD-3/IJG — ship-safe (ADR-0017) |
 | Streaming — lossless codec | **lz4** | Conan | the lossless/local streaming path; BSD-2 (ADR-0017) |
-| Streaming — video encode | **SVT-AV1** | Conan | the S1 AV1 inter-frame encoder; BSD-3-Clause + AOM Patent License 1.0 — royalty-free, ship-safe (ADR-0030) |
+| Streaming — video encode | **SVT-AV1** | Conan (**local recipe**, [`conan-recipes/libsvtav1`](conan-recipes/libsvtav1)) | the S1 AV1 inter-frame encoder; BSD-3-Clause + AOM Patent License 1.0 — royalty-free, ship-safe (ADR-0030). Pinned to 4.2.0; Conan Center stops at 2.2.1 (ADR-0034) |
 | Streaming — video decode | **dav1d** | Conan | the S1 AV1 decoder (shipped with the thin client); BSD-2 (ADR-0030) |
 | C++ unit tests | **doctest** | Conan | header-only; one small test exe per module |
 
