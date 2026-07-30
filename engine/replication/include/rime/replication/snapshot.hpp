@@ -138,12 +138,12 @@ inline constexpr ecs::Version kStaleBaselineTicks = 600;
 // A SECOND DOOR INTO THE SAME BUG, found by m11.4a and closed in ClientReplicator::on_delta
 // (ADR-0033 A13). This class guards "did every part of the tick ARRIVE". It cannot see the other
 // half: a packet that arrives whole and parses cleanly, but every record of which is DISCARDED
-// because its NetId does not resolve yet (the deliberate cross-channel race of §3 — a reliable Spawn
-// can land after the unreliable Delta that first names an entity). The bytes arrived; the state did
-// not. A baseline is a promise about the second, so the caller must not `observe` such a packet —
-// and the failure it prevents is the same permanent, silent divergence described above, for any
-// entity that stops changing before its Spawn lands. That is not exotic: it is every static prop and
-// every destructible wall standing quietly until someone shoots it.
+// because its NetId does not resolve yet (the deliberate cross-channel race of §3 — a reliable
+// Spawn can land after the unreliable Delta that first names an entity). The bytes arrived; the
+// state did not. A baseline is a promise about the second, so the caller must not `observe` such a
+// packet — and the failure it prevents is the same permanent, silent divergence described above,
+// for any entity that stops changing before its Spawn lands. That is not exotic: it is every static
+// prop and every destructible wall standing quietly until someone shoots it.
 class AckTracker {
 public:
     // Record that part `part_index` of `tick` arrived, out of `part_count` total.
