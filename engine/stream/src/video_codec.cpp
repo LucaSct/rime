@@ -254,6 +254,16 @@ bool VideoEncoder::open(const Config& config) {
     p.pred_structure = LOW_DELAY;
     // No lookahead for the same reason: lookahead trades delay for smarter rate decisions.
     p.look_ahead_distance = 0;
+    // Overlays OFF, set explicitly even though false is already the library default — because this
+    // is the *second* precondition of encode()'s one-in-one-out contract, and the one that is easy
+    // to lose. With overlays on, SVT emits a hidden ALT_REF picture *in addition to* the displayed
+    // frame, so a single send_picture yields TWO packets (upstream's own CLI loops
+    // `while (is_alt_ref)` over get_packet for exactly this reason — app_process_cmd.c). Our
+    // encode() makes exactly one get_packet call per picture, so a second packet would not be
+    // dropped, it would be *deferred*: this call returns the hidden ALT_REF frame, the real frame
+    // waits in the queue, and every later call is one packet behind forever. That failure is silent
+    // and unrecoverable, which is worth four lines of comment and one line of code to foreclose.
+    p.enable_overlays = false;
     // CBR at a fixed target: a steady, plannable wire rate (ADR-0030 §4 — fixed bitrate +
     // keyframe-on-request is the whole v1 rate story; adaptive control is S2).
     p.rate_control_mode = SVT_AV1_RC_MODE_CBR;
@@ -393,6 +403,18 @@ bool VideoEncoder::encode(std::span<const std::byte> pixels, std::vector<VideoPa
     if (rc != EB_ErrorNone || packet == nullptr) {
         RIME_ERROR("VideoEncoder: svt_av1_enc_get_packet failed ({})",
                    static_cast<std::int32_t>(rc));
+        return false;
+    }
+    // The one-in-one-out contract, actually checked rather than merely assumed. An ALT_REF packet
+    // is a *hidden* frame that comes in addition to the displayed one, so seeing this flag means a
+    // picture produced two packets and every subsequent call is now one behind — see the
+    // enable_overlays note in open(). It cannot happen with the configuration we set, which is
+    // exactly why an assumption here would rot unnoticed if a future config change broke it.
+    // Cheap to test (one bit), and it converts a silent permanent desync into a named failure.
+    if ((packet->flags & EB_BUFFERFLAG_IS_ALT_REF) != 0) {
+        RIME_ERROR("VideoEncoder: encoder emitted a hidden ALT_REF packet — the one-in-one-out "
+                   "contract is broken (is enable_overlays set?)");
+        svt_av1_enc_release_out_buffer(&packet);
         return false;
     }
     VideoPacket& vp = out.emplace_back();
