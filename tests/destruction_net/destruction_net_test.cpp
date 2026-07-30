@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -947,4 +948,222 @@ TEST_CASE("debris bind to the chunks the client derived, and corrections pull dr
     // accidentally satisfy.
     CHECK(drift_late < drift_early * 1.5f + 0.5f);
     CHECK(drift_late < 3.0f); // and bounded in absolute terms, not merely non-increasing
+}
+
+TEST_CASE("destruction events survive a client whose relevancy and budget withhold everything") {
+    // THE ROADMAP'S m11.5 RULE, PROVEN: "destruction events are never culled, debris transforms are
+    // distance-budgeted per client." You can budget a CORRECTION; you can never budget an EVENT.
+    //
+    // The two travel by different roads on purpose. Damage ops go straight to `send_reliable` on
+    // every connected session, untouched by ServerReplicator's relevancy filter or byte budget.
+    // Transforms ride m11.3's snapshot delta, which both of those throttle. So a wall on the far
+    // side of the map still BREAKS correctly for a client that is being sent none of its rubble's
+    // motion — the client derives the break itself from the op stream, and only the trajectory
+    // afterwards is a thing the server pays to correct.
+    //
+    // This is the structural argument turned into a test: the relevancy policy here scores
+    // EVERYTHING irrelevant and the budget is one byte, which is as hostile as the snapshot path
+    // can be made, and the cross-peer destruction witness must still match bit for bit.
+    net::ScriptedNetwork network{0xC0FFEEull,
+                                 {/*loss_rate=*/0.10f,
+                                  /*duplicate_rate=*/0.0f,
+                                  /*min_latency_ms=*/5,
+                                  /*max_latency_ms=*/40}};
+    const net::Endpoint server_endpoint{0x7F000001u, kServerPort};
+    const net::Endpoint client_endpoint{0x7F000001u, kClientPort};
+
+    const assets::DestructibleAsset asset = load_asset("wall.rdest");
+    constexpr std::uint64_t kAssetId = 0xABCDull;
+
+    Peer server_peer;
+    Peer client_peer;
+    server_peer.register_components();
+    client_peer.register_components();
+    server_peer.register_pattern(asset, kAssetId);
+    client_peer.register_pattern(asset, kAssetId);
+
+    net::Link& server_link = network.add_node(server_endpoint);
+    net::Link& client_link = network.add_node(client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(server_peer.world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(client_peer.world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator state_server{server_peer.world};
+    replication::ClientReplicator state_client{client_peer.world};
+    destruction_net::DestructionServer destruction_server;
+    destruction_net::DestructionClient destruction_client;
+
+    constexpr int kWalls = 3;
+    for (int i = 0; i < kWalls; ++i) {
+        core::Transform placement;
+        placement.translation.x = static_cast<float>(i) * 50.0f;
+        const ecs::Entity e = server_peer.world.spawn_with(ecs::LocalTransform{placement},
+                                                           destruction::Destructible{kAssetId});
+        (void)state_server.replicate(e);
+    }
+
+    REQUIRE(client_driver.connect(server_endpoint, kTickMs).has_value());
+
+    std::uint64_t now_ms = 0;
+    std::uint64_t tick_index = 0;
+    std::vector<net::SessionEvent> events;
+    std::vector<net::Received> inbox;
+
+    const auto tick = [&](bool damage) {
+        now_ms += kTickMs;
+        ++tick_index;
+        network.advance_time(now_ms);
+
+        events.clear();
+        server_driver.update(now_ms, events);
+        state_server.on_session_events(events);
+        (void)state_server.apply_inbound(server_driver);
+
+        events.clear();
+        client_driver.update(now_ms, events);
+        for (const net::SessionId id : client_driver.session_ids()) {
+            net::Session* session = client_driver.session(id);
+            if (session == nullptr) {
+                continue;
+            }
+            inbox.clear();
+            (void)session->drain_received(inbox);
+            state_client.apply_messages(inbox);
+            destruction_client.apply_messages(inbox, state_client.map(), client_peer.world);
+        }
+
+        (void)destruction::bind_destructibles(server_peer.world,
+                                              server_peer.destruction,
+                                              server_peer.physics,
+                                              server_peer.resolver(),
+                                              destruction::Authority::Local);
+        (void)destruction::bind_destructibles(client_peer.world,
+                                              client_peer.destruction,
+                                              client_peer.physics,
+                                              client_peer.resolver(),
+                                              destruction::Authority::Remote);
+
+        server_peer.world.advance_version();
+        if (damage) {
+            std::vector<ecs::Entity> bound;
+            destruction::build_instance_entity_table(server_peer.world, bound);
+            for (std::uint32_t i = 0; i < bound.size(); ++i) {
+                if (!bound[i].is_valid()) {
+                    continue;
+                }
+                server_peer.destruction.apply_damage(
+                    destruction::InstanceId{i, 0},
+                    core::Vec3{static_cast<float>(i) * 50.0f, 0.4f, 0.0f},
+                    0.30f,
+                    0.34f,
+                    core::Vec3{0.0f, 0.0f, 4.0f});
+            }
+        }
+        server_peer.physics.step(kDt);
+        server_peer.destruction.update(server_peer.physics);
+
+        do {
+            (void)destruction_client.apply_next_batch(
+                client_peer.world, state_client.map(), client_peer.destruction);
+            client_peer.physics.step(kDt);
+            client_peer.destruction.update(client_peer.physics);
+        } while (destruction_client.pending_batches() > 0);
+
+        // PostSim: the debris↔entity bridge. Without it no debris entity ever exists, and a proof
+        // that transforms were withheld would be withholding nothing.
+        destruction_server.sync_debris(
+            server_peer.world,
+            server_peer.destruction,
+            server_peer.physics,
+            state_server.map(),
+            [&](ecs::Entity e) { (void)state_server.replicate(e); },
+            [&](ecs::Entity e) { state_server.despawn(e); });
+        destruction_client.sync_debris(
+            client_peer.world, state_client.map(), client_peer.destruction, client_peer.physics);
+
+        destruction_server.publish(server_driver,
+                                   state_server.map(),
+                                   server_peer.world,
+                                   server_peer.destruction,
+                                   tick_index,
+                                   now_ms);
+        state_server.publish(server_driver, now_ms);
+        state_client.send_ack(client_driver, now_ms);
+    };
+
+    // Settle with the snapshot path OPEN. The walls' `Destructible{asset}` component is ordinary
+    // replicated state, so it has to arrive before the client can bind them — an op addressed to an
+    // entity the client never learned about is unaddressable, which would prove the wrong thing.
+    // Relevancy throttles the correction stream, not the client's ability to exist.
+    for (int i = 0; i < 40; ++i) {
+        tick(false);
+    }
+    REQUIRE(server_peer.destruction.instance_count() == kWalls);
+    REQUIRE(client_peer.destruction.instance_count() == kWalls);
+
+    const std::uint64_t hash_before_damage =
+        shared_destruction_hash(client_peer.world, state_client.map(), client_peer.destruction);
+
+    // NOW slam the snapshot path shut: nothing is relevant to anyone, and the budget is one byte.
+    state_server.set_relevancy(
+        [](net::SessionId, std::span<const ecs::Entity> candidates, std::span<float> priorities) {
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                (void)candidates;
+                priorities[i] = 0.0f;
+            }
+        });
+    replication::Budget starved;
+    starved.max_bytes_per_tick = 1;
+    state_server.set_budget(starved);
+
+    const std::uint64_t culled_before = state_server.entities_culled_irrelevant();
+
+    for (int i = 0; i < 6; ++i) {
+        tick(true);
+    }
+    for (int i = 0; i < 60; ++i) {
+        tick(false);
+    }
+
+    // ── Non-vacuousness: the throttle really was throttling, and the event path really fired. ──
+    CHECK(state_server.entities_culled_irrelevant() > culled_before);
+    CHECK(destruction_server.ops_sent() > 0);
+    CHECK(destruction_client.ops_applied() == destruction_server.ops_sent());
+    CHECK(destruction_server.ops_unaddressable() == 0);
+    CHECK(destruction_client.malformed_messages() == 0);
+    CHECK(destruction_client.pending_batches() == 0);
+    CHECK(network.packets_dropped() > 0);
+
+    // Debris really were created, so "transforms were withheld" is a claim about something that
+    // existed to be withheld.
+    CHECK(destruction_server.debris_entities_spawned() > 0);
+
+    bool any_part_down = false;
+    for (std::uint32_t i = 0; i < kWalls; ++i) {
+        const destruction::InstanceId inst{i, 0};
+        for (std::uint32_t p = 0; p < server_peer.destruction.instance_part_count(inst); ++p) {
+            any_part_down = any_part_down || !server_peer.destruction.part_alive(inst, p);
+        }
+    }
+    CHECK(any_part_down);
+
+    // ── The proof: alive bits, health and debris COMPOSITION agree bit for bit, with the entire
+    // snapshot path closed. Every one of those facts was derived by the client from the op stream
+    // rather than sent to it as state — which is the whole reason destruction can be budgeted at
+    // all. (Transforms are deliberately outside this witness; see composition.hpp.)
+    const std::uint64_t server_hash =
+        shared_destruction_hash(server_peer.world, state_server.map(), server_peer.destruction);
+    const std::uint64_t client_hash =
+        shared_destruction_hash(client_peer.world, state_client.map(), client_peer.destruction);
+    CHECK(server_hash == client_hash);
+    CHECK(client_hash != hash_before_damage);
 }
