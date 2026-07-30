@@ -253,6 +253,17 @@ A note on why this is easy to hit by accident: the reflection system has no arra
 and nested structs, so an oversized component does not look oversized. Thirty-two transforms is 1280
 bytes and reads as four fields.
 
+**A consequence worth writing down, because it looks like missing test coverage and is not.** With
+that guard in place, `Session::send_unreliable` can no longer fail from `publish_delta`: it refuses on
+a non-Connected session (already filtered by `publish`) or a payload over
+`ReliableChannel::kMaxPayload`, and every part is capped at `kMaxReplicationPayload`, which sits under
+it with a deliberate reserve. A link-level failure cannot surface either — `ReliableChannel::transmit`
+ignores `Link::send`'s result, which is right for an unreliable channel (a refused datagram is
+indistinguishable from a lost one) but means the replicator never learns of it. The refused-part
+handling is therefore honest handling of a documented contract that the current constants make
+unreachable, not a gap wanting a `ScriptedNetwork` "refuse on demand" capability. Spend that reserve
+and it becomes live and already correct.
+
 ---
 
 ## The entry pass — how newly-relevant entities are sent

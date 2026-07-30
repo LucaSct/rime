@@ -748,8 +748,22 @@ void ServerReplicator::publish_delta(net::Session& session,
             credit_sent(parts[p].first, parts[p].second);
         } else {
             // Refused by the channel. These records did not reach the wire, so they age exactly
-            // like budget-dropped ones — the rule is "a record that was not delivered is owed",
-            // and it must not depend on WHICH stage declined to carry it.
+            // like budget-dropped ones and the tick is not complete — the rule is "a record that
+            // was not delivered is owed", and it must not depend on WHICH stage declined to carry
+            // it.
+            //
+            // UNREACHABLE AS THE CODE STANDS, and deliberately kept anyway. `send_unreliable`
+            // refuses on a non-Connected session (publish() already filtered those) or a payload
+            // over ReliableChannel::kMaxPayload — and every part built above is at most
+            // kMaxReplicationPayload, which is held under kMaxPayload with a deliberate reserve,
+            // with the single-record case covered by `record_fits`. A link-level failure cannot
+            // surface here either: ReliableChannel::transmit ignores Link::send's result, which is
+            // the right call for an unreliable channel (a refused datagram is indistinguishable
+            // from a lost one) but does mean this branch cannot see it.
+            //
+            // So this is not an untested path to go build harness machinery for; it is the honest
+            // handling of a contract the channel documents and the current constants happen to make
+            // unreachable. If that reserve is ever spent, it becomes live and correct at once.
             bump_starvation(parts[p].first, parts[p].second);
             every_part_sent = false;
         }
