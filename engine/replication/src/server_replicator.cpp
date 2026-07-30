@@ -65,6 +65,11 @@ void ServerReplicator::despawn(ecs::Entity entity) {
             if (state.in_use && id->index < state.was_relevant.size()) {
                 state.was_relevant[id->index] = 0;
             }
+            // Same rule, same reason: a recycled slot must not inherit the dead entity's
+            // accumulated starvation and jump the queue on its behalf.
+            if (state.in_use && id->index < state.starved_ticks.size()) {
+                state.starved_ticks[id->index] = 0;
+            }
         }
     }
     (void)world_->despawn(entity);
@@ -104,13 +109,23 @@ ServerReplicator::ClientState& ServerReplicator::client_for(net::SessionId id) {
     if (ClientState* existing = find_client(id)) {
         return *existing;
     }
+    // Reset by assigning a default-constructed state rather than a positional aggregate. Every
+    // per-client field must start clean when a slot is reused — a stale one is inherited by a
+    // different peer entirely — and a positional list silently stops covering new members as they
+    // are added, which is the same "a record outlived its subject" hazard one level up.
+    const auto fresh = [id]() {
+        ClientState state{};
+        state.id = id;
+        state.in_use = true;
+        return state;
+    };
     for (ClientState& state : clients_) {
         if (!state.in_use) {
-            state = ClientState{id, true, 0, 0, 0, {}, {}};
+            state = fresh();
             return state;
         }
     }
-    clients_.push_back(ClientState{id, true, 0, 0, 0, {}, {}});
+    clients_.push_back(fresh());
     return clients_.back();
 }
 
@@ -334,6 +349,7 @@ void ServerReplicator::publish_delta(net::Session& session,
         }
     }
     state.was_relevant.resize(slot_count, 0);
+    state.starved_ticks.resize(slot_count, 0);
 
     ++delta_ticks_;
 
@@ -373,8 +389,30 @@ void ServerReplicator::publish_delta(net::Session& session,
             if (slot < state.was_relevant.size()) {
                 state.was_relevant[slot] = 1;
             }
+            if (slot < state.starved_ticks.size()) {
+                state.starved_ticks[slot] = 0; // paid
+            }
             if (record_entry_[i] != 0) {
                 ++entities_entered_;
+            }
+        }
+    };
+
+    // The ordering key: the policy's priority plus what this client is owed. See
+    // Budget::starvation_gain — being passed over is itself a claim on the next tick's budget,
+    // which is what stops a strict ordering from becoming a starvation machine.
+    const auto aged_priority = [&](std::size_t slot, float priority) {
+        const std::uint32_t age =
+            slot < state.starved_ticks.size() ? state.starved_ticks[slot] : 0u;
+        return priority + budget_.starvation_gain * static_cast<float>(age);
+    };
+
+    // Record that a built record did NOT go out, so it outranks its peers next tick.
+    const auto bump_starvation = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end && i < record_slot_.size(); ++i) {
+            const std::uint32_t slot = record_slot_[i];
+            if (slot < state.starved_ticks.size()) {
+                ++state.starved_ticks[slot];
             }
         }
     };
@@ -460,7 +498,7 @@ void ServerReplicator::publish_delta(net::Session& session,
             writer.bytes(bytes);
         }
         records_.push_back(scratch_);
-        record_priority_.push_back(priority_by_index_[slot]);
+        record_priority_.push_back(aged_priority(slot, priority_by_index_[slot]));
         record_slot_.push_back(static_cast<std::uint32_t>(slot));
         record_entry_.push_back(1);
         produced_record_[slot] = 1;
@@ -547,7 +585,7 @@ void ServerReplicator::publish_delta(net::Session& session,
                     writer.bytes(bytes);
                 }
                 records_.push_back(scratch_);
-                record_priority_.push_back(priority);
+                record_priority_.push_back(aged_priority(slot, priority));
                 record_slot_.push_back(slot);
                 // Never an entry: by the time this walk runs, every entering slot has already been
                 // emitted above and is skipped here.
@@ -630,6 +668,7 @@ void ServerReplicator::publish_delta(net::Session& session,
         if (kept < records_.size()) {
             dropped_by_bytes = records_.size() - kept;
             entities_over_budget_ += dropped_by_bytes;
+            bump_starvation(kept, records_.size()); // before the trim discards their slots
             records_.resize(kept);
             record_slot_.resize(kept);
             record_entry_.resize(kept);
@@ -690,6 +729,10 @@ void ServerReplicator::publish_delta(net::Session& session,
             // "we tried to send it", which is the weaker-correlated event the invariant names.
             credit_sent(parts[p].first, parts[p].second);
         } else {
+            // Refused by the channel. These records did not reach the wire, so they age exactly
+            // like budget-dropped ones — the rule is "a record that was not delivered is owed",
+            // and it must not depend on WHICH stage declined to carry it.
+            bump_starvation(parts[p].first, parts[p].second);
             every_part_sent = false;
         }
     }
@@ -706,6 +749,7 @@ void ServerReplicator::publish_delta(net::Session& session,
         // packet-count remainder is added here, or a record refused by both budgets would be
         // counted twice.
         entities_over_budget_ += records_.size() - covered;
+        bump_starvation(covered, records_.size());
         state.cursor += covered;
     } else {
         // Everything owed was sent AND every part was accepted, so this tick may advance the
