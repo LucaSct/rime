@@ -13,6 +13,8 @@
 #include "rime/destruction/bind.hpp"
 #include "rime/destruction/components.hpp"
 #include "rime/destruction/world.hpp"
+#include "rime/destruction_net/components.hpp"
+#include "rime/destruction_net/composition.hpp"
 #include "rime/destruction_net/destruction_client.hpp"
 #include "rime/destruction_net/destruction_server.hpp"
 #include "rime/ecs/query.hpp"
@@ -70,51 +72,15 @@ assets::DestructibleAsset load_asset(const std::string& name) {
     return std::move(*asset);
 }
 
-// The cross-peer destruction witness (see the file header). FNV-1a, field by field, never over a
-// padded struct.
+// The cross-peer witness now lives in the ENGINE (`destruction_net::shared_state_hash`), not here.
+// It was test-local when m11.4a first needed it, which was the wrong home: m11.7 hash-verifies a
+// scripted match in CI, a dedicated server compares it to spot a diverged client, and a sample
+// prints it to show two windows agree — three callers each re-deriving it privately would be three
+// subtly different answers to one question. This alias just keeps the call sites short.
 std::uint64_t shared_destruction_hash(const ecs::World& world,
                                       const replication::NetIdMap& map,
                                       const destruction::DestructionWorld& destruction) {
-    std::uint64_t hash = 0xcbf29ce484222325ull;
-    const auto fold = [&hash](std::uint64_t value) {
-        for (int shift = 56; shift >= 0; shift -= 8) {
-            hash ^= (value >> shift) & 0xFFull;
-            hash *= 0x100000001b3ull;
-        }
-    };
-
-    map.for_each([&](replication::NetId net_id, ecs::Entity entity) {
-        const auto* ref = world.get<destruction::DestructibleInstanceRef>(entity);
-        if (ref == nullptr || ref->instance == destruction::kUnboundInstance) {
-            return; // not a bound destructible — nothing of ours to say about it
-        }
-        const destruction::InstanceId instance{ref->instance, 0};
-        fold(
-            net_id.index); // the shared name leads, so a differing SET of walls differs in the hash
-        const std::uint32_t parts = destruction.instance_part_count(instance);
-        fold(parts);
-        for (std::uint32_t p = 0; p < parts; ++p) {
-            fold(destruction.part_alive(instance, p) ? 1u : 0u);
-            // Health as its exact bit pattern: the whole point is bit-identity, and comparing
-            // floats through a tolerance here would hide precisely the drift being tested for.
-            float h = destruction.part_health(instance, p);
-            std::uint32_t bits = 0;
-            std::memcpy(&bits, &h, sizeof(bits));
-            fold(bits);
-        }
-    });
-
-    // Debris COMPOSITION — which parts left together, in creation order. Not their transforms:
-    // those are m11.4b's, and the bodies are simulated independently on each peer until then.
-    fold(destruction.debris_count());
-    for (std::size_t d = 0; d < destruction.debris_count(); ++d) {
-        const std::span<const std::uint32_t> members = destruction.debris_parts(d);
-        fold(members.size());
-        for (const std::uint32_t p : members) {
-            fold(p);
-        }
-    }
-    return hash;
+    return destruction_net::shared_state_hash(world, map, destruction);
 }
 
 // One peer: an ECS world, a physics world, a destruction world, and the pattern registration both
@@ -129,6 +95,7 @@ struct Peer {
     void register_components() {
         ecs::register_transform_components(world);
         destruction::register_destruction_components(world);
+        destruction_net::register_destruction_net_components(world);
     }
 
     void register_pattern(const assets::DestructibleAsset& asset, std::uint64_t id) {
@@ -707,4 +674,268 @@ TEST_CASE("the debris half of the state-application seam moves a body and wakes 
 
     // Out-of-range and frozen debris are safe no-ops, not crashes.
     peer.destruction.set_debris_state(peer.destruction.debris_count() + 99, target, peer.physics);
+}
+
+// ── m11.4b: debris ──────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("the composition hash discriminates the divergence it exists to catch") {
+    // A unit check on the fingerprint itself, before leaning on it across a link. The failure it
+    // guards is ADR-0033 A12's: the same ten parts leaving as one island rather than as two. If the
+    // hash cannot tell those apart it is decoration, and every proof built on it is vacuous.
+    const assets::DestructibleAsset asset = load_asset("wall.rdest");
+
+    Peer two_waves;
+    Peer one_wave;
+    two_waves.register_components();
+    one_wave.register_components();
+    two_waves.register_pattern(asset, 0xABCDull);
+    one_wave.register_pattern(asset, 0xABCDull);
+
+    const destruction::InstanceId a =
+        two_waves.destruction.spawn(two_waves.pattern, core::Transform{}, two_waves.physics);
+    const destruction::InstanceId b =
+        one_wave.destruction.spawn(one_wave.pattern, core::Transform{}, one_wave.physics);
+    REQUIRE(a.is_valid());
+    REQUIRE(b.is_valid());
+
+    // Identical damage, delivered as two separate ticks on one peer and merged into a single tick
+    // on the other — precisely the merge A12 forbids.
+    const auto blast = [](destruction::DestructionWorld& d, destruction::InstanceId i, float y) {
+        d.apply_damage(i, core::Vec3{0.0f, y, 0.0f}, 0.45f, 3.0f, core::Vec3{0.0f, 0.0f, 4.0f});
+    };
+
+    blast(two_waves.destruction, a, 0.4f);
+    two_waves.physics.step(kDt);
+    two_waves.destruction.update(two_waves.physics);
+    blast(two_waves.destruction, a, -0.4f);
+    two_waves.physics.step(kDt);
+    two_waves.destruction.update(two_waves.physics);
+
+    blast(one_wave.destruction, b, 0.4f);
+    blast(one_wave.destruction, b, -0.4f);
+    one_wave.physics.step(kDt);
+    one_wave.destruction.update(one_wave.physics);
+
+    const std::uint64_t h_two = destruction_net::debris_composition_hash(two_waves.destruction, a);
+    const std::uint64_t h_one = destruction_net::debris_composition_hash(one_wave.destruction, b);
+
+    // Non-vacuousness: both really did produce rubble, and it really was grouped differently.
+    REQUIRE(two_waves.destruction.debris_count() > 0);
+    REQUIRE(one_wave.destruction.debris_count() > 0);
+    REQUIRE(two_waves.destruction.debris_count() != one_wave.destruction.debris_count());
+    CHECK(h_two != h_one);
+
+    // And it is stable: the same state hashes the same way twice.
+    CHECK(h_two == destruction_net::debris_composition_hash(two_waves.destruction, a));
+}
+
+TEST_CASE("debris bind to the chunks the client derived, and corrections pull drift back") {
+    // The m11.4b proof. Two halves, because they test opposite things:
+    //   1. With both peers simulating faithfully, the mirrors must BIND — every chunk's
+    //   DebrisOrigin
+    //      ordinal must resolve to the same chunk on the client — and the composition fingerprints
+    //      must match. This is the addressing proof.
+    //   2. With the client's physics deliberately wrong, corrections must FIRE and pull the rubble
+    //      back to the authority. This is the correction proof, and it needs a genuinely divergent
+    //      client — two identical simulations staying identical would exercise nothing.
+    net::ScriptedNetwork network{0xBEEFull,
+                                 {/*loss_rate=*/0.10f,
+                                  /*duplicate_rate=*/0.0f,
+                                  /*min_latency_ms=*/5,
+                                  /*max_latency_ms=*/25}};
+    const net::Endpoint server_endpoint{0x7F000001u, kServerPort};
+    const net::Endpoint client_endpoint{0x7F000001u, kClientPort};
+
+    const assets::DestructibleAsset asset = load_asset("wall.rdest");
+    constexpr std::uint64_t kAssetId = 0xABCDull;
+
+    Peer server_peer;
+    Peer client_peer;
+    server_peer.register_components();
+    client_peer.register_components();
+    server_peer.register_pattern(asset, kAssetId);
+    client_peer.register_pattern(asset, kAssetId);
+
+    net::Link& server_link = network.add_node(server_endpoint);
+    net::Link& client_link = network.add_node(client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(server_peer.world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(client_peer.world);
+    client_config.salt_seed = 0x2222ull;
+    REQUIRE(server_config.schema_hash == client_config.schema_hash);
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator state_server{server_peer.world};
+    replication::ClientReplicator state_client{client_peer.world};
+    destruction_net::DestructionServer destruction_server;
+    destruction_net::DestructionClient destruction_client;
+
+    const ecs::Entity wall =
+        server_peer.world.spawn_with(ecs::LocalTransform{}, destruction::Destructible{kAssetId});
+    (void)state_server.replicate(wall);
+
+    REQUIRE(client_driver.connect(server_endpoint, kTickMs).has_value());
+
+    std::uint64_t now_ms = 0;
+    std::uint64_t tick_index = 0;
+    std::vector<net::SessionEvent> events;
+    std::vector<net::Received> inbox;
+
+    const auto tick = [&](bool damage) {
+        now_ms += kTickMs;
+        ++tick_index;
+        network.advance_time(now_ms);
+
+        events.clear();
+        server_driver.update(now_ms, events);
+        state_server.on_session_events(events);
+        (void)state_server.apply_inbound(server_driver);
+
+        events.clear();
+        client_driver.update(now_ms, events);
+        for (const net::SessionId id : client_driver.session_ids()) {
+            net::Session* session = client_driver.session(id);
+            if (session == nullptr) {
+                continue;
+            }
+            inbox.clear();
+            (void)session->drain_received(inbox);
+            state_client.apply_messages(inbox);
+            destruction_client.apply_messages(inbox, state_client.map(), client_peer.world);
+        }
+
+        (void)destruction::bind_destructibles(server_peer.world,
+                                              server_peer.destruction,
+                                              server_peer.physics,
+                                              server_peer.resolver(),
+                                              destruction::Authority::Local);
+        (void)destruction::bind_destructibles(client_peer.world,
+                                              client_peer.destruction,
+                                              client_peer.physics,
+                                              client_peer.resolver(),
+                                              destruction::Authority::Remote);
+
+        server_peer.world.advance_version();
+        if (damage) {
+            std::vector<ecs::Entity> bound;
+            destruction::build_instance_entity_table(server_peer.world, bound);
+            for (std::uint32_t i = 0; i < bound.size(); ++i) {
+                if (bound[i].is_valid()) {
+                    server_peer.destruction.apply_damage(destruction::InstanceId{i, 0},
+                                                         core::Vec3{0.0f, 0.4f, 0.0f},
+                                                         0.45f,
+                                                         3.0f,
+                                                         core::Vec3{0.0f, 0.0f, 6.0f});
+                }
+            }
+        }
+        server_peer.physics.step(kDt);
+        server_peer.destruction.update(server_peer.physics);
+
+        do {
+            (void)destruction_client.apply_next_batch(client_peer.destruction);
+            client_peer.physics.step(kDt);
+            client_peer.destruction.update(client_peer.physics);
+        } while (destruction_client.pending_batches() > 0);
+
+        // PostSim: keep the debris↔entity bridge in step, then bind/correct on the client.
+        destruction_server.sync_debris(
+            server_peer.world,
+            server_peer.destruction,
+            server_peer.physics,
+            state_server.map(),
+            [&](ecs::Entity e) { (void)state_server.replicate(e); },
+            [&](ecs::Entity e) { state_server.despawn(e); });
+        destruction_client.sync_debris(
+            client_peer.world, state_client.map(), client_peer.destruction, client_peer.physics);
+
+        destruction_server.publish(server_driver,
+                                   state_server.map(),
+                                   server_peer.world,
+                                   server_peer.destruction,
+                                   tick_index,
+                                   now_ms);
+        state_server.publish(server_driver, now_ms);
+        state_client.send_ack(client_driver, now_ms);
+    };
+
+    for (int i = 0; i < 40; ++i) {
+        tick(false);
+    }
+    REQUIRE(server_peer.destruction.instance_count() == 1);
+    REQUIRE(client_peer.destruction.instance_count() == 1);
+
+    for (int i = 0; i < 3; ++i) {
+        tick(true);
+    }
+    for (int i = 0; i < 60; ++i) {
+        tick(false);
+    }
+
+    // ── Half 1: the addressing proof. ──
+    REQUIRE(server_peer.destruction.debris_count() > 0);
+    CHECK(server_peer.destruction.debris_count() == client_peer.destruction.debris_count());
+    CHECK(destruction_server.debris_entities_spawned() > 0);
+    CHECK(destruction_server.debris_unaddressable() == 0);
+    CHECK(destruction_server.composition_checks_sent() > 0);
+    CHECK(destruction_client.debris_bound() > 0);
+
+    // Every chunk the authority described was the chunk the client had. This is the assertion the
+    // whole ordinal-addressing scheme rests on.
+    CHECK(destruction_client.composition_matches() > 0);
+    CHECK(destruction_client.composition_mismatches() == 0);
+
+    // ── Half 2: the correction proof. Make the client's simulation genuinely wrong, so its rubble
+    // parts company with the authority's and the correction path has something to do. ──
+    const std::uint64_t corrections_before = destruction_client.debris_corrections();
+    client_peer.physics.set_gravity(core::Vec3{4.0f, -3.0f, 0.0f}); // sideways, and weaker
+
+    // The largest gap between the authority's rubble and ours, chunk by chunk in roster order —
+    // an order half 1 just proved both peers agree on.
+    const auto worst_drift = [&]() {
+        float worst = 0.0f;
+        std::size_t compared = 0;
+        for (std::size_t d = 0; d < server_peer.destruction.debris_count(); ++d) {
+            physics::BodyState s{};
+            physics::BodyState c{};
+            if (!server_peer.physics.get_body_state(server_peer.destruction.debris_body(d), s) ||
+                !client_peer.physics.get_body_state(client_peer.destruction.debris_body(d), c)) {
+                continue;
+            }
+            worst = std::max(worst, core::length(s.position - c.position));
+            ++compared;
+        }
+        CHECK(compared > 0); // a measurement over nothing measures nothing
+        return worst;
+    };
+
+    for (int i = 0; i < 90; ++i) {
+        tick(false);
+    }
+    const float drift_early = worst_drift();
+
+    for (int i = 0; i < 180; ++i) {
+        tick(false);
+    }
+    const float drift_late = worst_drift();
+
+    CHECK(destruction_client.debris_corrections() > corrections_before); // the path really fired
+    CHECK(destruction_client.composition_mismatches() == 0); // wrong physics is not wrong shape
+
+    // THE ASSERTION THAT MATTERS, and why it is not "drift < some constant". A client simulating at
+    // the wrong gravity diverges without bound: at 4 m/s² sideways, three seconds of unchecked
+    // drift is already ~18 m and growing quadratically. What the correction buys is not a small
+    // number, it is a BOUNDED one — the rubble is pinned to the authority's version however long
+    // the wrong simulation runs. So the test triples the elapsed time and asserts the gap did not
+    // grow with it, which is a property no magic constant can express and no runaway can
+    // accidentally satisfy.
+    CHECK(drift_late < drift_early * 1.5f + 0.5f);
+    CHECK(drift_late < 3.0f); // and bounded in absolute terms, not merely non-increasing
 }

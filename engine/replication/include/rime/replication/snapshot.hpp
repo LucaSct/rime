@@ -135,15 +135,31 @@ inline constexpr ecs::Version kStaleBaselineTicks = 600;
 // divergence returns. Under the deliberately-high loss the scripted-loss harness runs, that is the
 // regime the proof actually exercises, so exactness is worth two bytes per packet.)
 //
-// A SECOND DOOR INTO THE SAME BUG, found by m11.4a and closed in ClientReplicator::on_delta
-// (ADR-0033 A13). This class guards "did every part of the tick ARRIVE". It cannot see the other
-// half: a packet that arrives whole and parses cleanly, but every record of which is DISCARDED
-// because its NetId does not resolve yet (the deliberate cross-channel race of §3 — a reliable
-// Spawn can land after the unreliable Delta that first names an entity). The bytes arrived; the
-// state did not. A baseline is a promise about the second, so the caller must not `observe` such a
-// packet — and the failure it prevents is the same permanent, silent divergence described above,
-// for any entity that stops changing before its Spawn lands. That is not exotic: it is every static
-// prop and every destructible wall standing quietly until someone shoots it.
+// A SECOND DOOR INTO THE SAME BUG, found by m11.4a (ADR-0033 A13). This class guards "did every
+// part of the tick ARRIVE". It cannot see the other half: a packet that arrives whole and parses
+// cleanly, but whose records cannot be APPLIED because their NetIds do not resolve yet — the
+// deliberate cross-channel race of §3, where a reliable Spawn lands after the unreliable Delta that
+// first names an entity. The bytes arrived; the state did not. A baseline is a promise about the
+// second, so acknowledging on the strength of the first re-creates the permanent, silent divergence
+// described above for any entity that stops changing before its Spawn lands — every static prop and
+// every destructible wall standing quietly until someone shoots it.
+//
+// A13's answer was to withhold the acknowledgement so the server keeps re-offering. m11.4b replaced
+// it with a better one (A14): HOLD the bytes and replay them the moment the Spawn binds the id.
+// Nothing is lost, so the tick is honestly complete and can be acknowledged — which matters,
+// because the A13 rule made acknowledgement hostage to spawn traffic and stalled the baseline for
+// as long as entities kept arriving. Withholding survives only as the overflow fallback below.
+
+// How many out-of-order component writes a client will hold while waiting for their Spawn. Sized
+// for a spawn burst — a few hundred entities streaming in at once, each with a handful of
+// components — and BOUNDED because the ids that key it are chosen by the peer, and an unbounded
+// buffer a peer can grow is a denial of service wearing a resilience feature's clothes.
+//
+// Overflow is not silent: the oldest record is evicted, counted, and the tick carrying the eviction
+// is left unacknowledged, which falls back to exactly the re-offer behaviour A13 shipped. So the
+// buffer is an optimization over a correct-but-slower path, never load-bearing for correctness.
+inline constexpr std::size_t kMaxDeferredRecords = 512;
+
 class AckTracker {
 public:
     // Record that part `part_index` of `tick` arrived, out of `part_count` total.

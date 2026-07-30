@@ -523,3 +523,65 @@ as one subsystem silently never receiving its mail. The registry now lives in
 `replication/snapshot.hpp`: `0x01–0x3F` replication, `0x40–0x7F` destruction_net, the rest
 unallocated. A module ignores tags outside its own block, and subsystems sharing a session read one
 drained span (`apply_messages`) rather than each draining for themselves.
+
+---
+
+## Amendment (2026-07-30, m11.4b): debris, and a better answer to A13
+
+### A14. Unresolvable delta records are HELD, not discarded — which supersedes A13's rule
+
+A13 fixed a real bug (a delta whose records were discarded was still acknowledged, stranding any
+entity that stopped changing) but fixed it by withholding the acknowledgement so the server keeps
+re-offering. That is correct and it is what m11.4a shipped. It is also the wrong trade at scale, and
+the ROADMAP recorded the cost honestly at the time: while entities are streaming in, nearly every
+delta packet contains at least one record whose reliable `Spawn` has not landed, so the baseline sits
+still and the server re-sends the entire delta every tick. A world that streams continuously — which
+is the world this engine is for — would pay that permanently rather than transiently.
+
+The better answer costs a bounded buffer. **Hold the record's bytes** and replay them the instant the
+`Spawn` binds its id. The `Spawn` is reliable, so it is certain to arrive; nothing is lost, the tick
+is honestly complete, and it can be acknowledged. Records for one id replay in arrival order, so two
+writes to the same component still resolve to the newer one.
+
+The buffer is bounded (`kMaxDeferredRecords`), because the ids that key it are chosen by the peer and
+an unbounded peer-controlled allocation is a denial of service wearing a resilience feature's
+clothes. On overflow the oldest record is evicted, counted, and the tick carrying the eviction is
+left unacknowledged — falling back to exactly A13's behaviour. So A13 is not deleted; it is demoted
+from the common path to the exhaustion path, which an honest peer never reaches.
+
+### A15. Debris: composition is derived, transforms are replicated, and the ordinal is the address
+
+m11.4b's shape, recorded because the split is not obvious and the wrong half is easy to send.
+
+Determinism gives both peers the same debris SET, in the same creation order, with the same initial
+transforms and impulses — the fracture path is a pure function of the alive bits and the cooked bond
+graph, and m11.4a proves the two rosters agree index for index. So identity and composition are
+derived and never transmitted. What determinism does **not** give is the trajectory afterwards: the
+peers are not in lockstep, their physics worlds hold different body populations (more so once m11.5's
+relevancy lands), and same-binary determinism is not cross-platform determinism. So transforms are
+replicated. That is precisely the split the ROADMAP's "destruction events are never culled, debris
+transforms are distance-budgeted per client" already assumed — you can budget a correction, never an
+event.
+
+The association crosses as **data, not as a message**: a reflected `DebrisOrigin{source NetId,
+ordinal}` rides m11.3's ordinary snapshot path, so there is no new tag, no new framing, and no new
+completeness rule to get wrong. The ordinal is only safe because A12 makes the rosters agree; the
+`CompositionCheck` message exists to verify that rather than trust it, because when ordinal
+addressing fails it does not fail loudly — it resolves to a *different* chunk, and the client then
+corrects the wrong rubble toward another piece's position.
+
+Corrections apply on a **tolerance**, not every tick. Both peers usually agree, and snapping a
+continuously-simulated body every tick would replace smooth tumbling rubble with a stutter. The
+replicated transform is authority for where a chunk ends up, not a per-tick puppet string. Until
+m11.6 a correction is a hard snap; smoothing it is interpolation's job, not something to fake here.
+
+### Also: the cross-peer witness belongs in the engine
+
+`DestructionWorld::state_hash()` folds physics body ids, which are allocation-order artifacts of one
+process — it is the M8 REPLAY witness and cannot answer "do these two peers agree". m11.4a's proof
+therefore computed its own NetId-ordered hash inside the test file. That was the wrong home:
+m11.7 hash-verifies a scripted match in CI, a dedicated server compares the same number to spot a
+diverged client, and a sample prints it to show two windows agree. Three callers each re-deriving it
+privately are three subtly different answers to one question, and a witness that different callers
+compute differently is not a witness. It now ships as
+`destruction_net::shared_state_hash(world, map, destruction)`.

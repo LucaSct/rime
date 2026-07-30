@@ -10,10 +10,15 @@
 #include "rime/core/byte_cursor.hpp"
 #include "rime/destruction/damage_op.hpp"
 #include "rime/destruction/world.hpp"
+#include "rime/destruction_net/components.hpp"
 #include "rime/destruction_net/wire.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/net/net_driver.hpp"
 #include "rime/replication/net_id.hpp"
+
+namespace rime::physics {
+class PhysicsWorld;
+}
 
 // DestructionClient (m11.4a) — the mirror half: decode the authority's damage-op batches, translate
 // them into local instance ids, and hand them to the DestructionWorld.
@@ -84,6 +89,53 @@ public:
     // this client is behind the authority by that many destruction ticks.
     [[nodiscard]] std::size_t pending_batches() const noexcept { return ready_.size(); }
 
+    // Bind arriving debris mirrors to the chunks this client DERIVED for itself, and correct those
+    // whose local simulation has drifted past `tolerance_m` from the authority's transform
+    // (m11.4b). Call from PostSim, after the destruction update that may have created chunks.
+    //
+    // WHY A TOLERANCE RATHER THAN AN UNCONDITIONAL SNAP. Both peers derive the same chunks with the
+    // same initial conditions, so the client's own physics is usually right and its motion is
+    // continuous — which snapping every tick would destroy, replacing smooth tumbling rubble with a
+    // stutter at exactly the moment the player is looking at it. The replicated transform is
+    // authority for where a chunk ENDS UP, not a per-tick puppet string. Correct when the two have
+    // actually parted company; otherwise let the local solver run.
+    //
+    // (Until m11.6 builds interpolation, a correction is a hard snap. That is the honest v1: the
+    // tolerance keeps them rare, and smoothing them is interpolation's job, not something to fake
+    // here with an ad-hoc lerp that would then have to be unpicked.)
+    void sync_debris(const ecs::World& world,
+                     const replication::NetIdMap& map,
+                     destruction::DestructionWorld& destruction,
+                     physics::PhysicsWorld& physics,
+                     float tolerance_m = 0.25f);
+
+    // How many of the authority's composition fingerprints this client's own rubble matched, and
+    // how many it did not. A mismatch means the two peers' derivations have genuinely parted
+    // company — the ordinal m11.4b addresses chunks by now names a DIFFERENT chunk, so a correction
+    // would move the wrong rubble. Detection only in v1; see composition.hpp on why repair waits
+    // for the late-join machinery rather than being guessed at here.
+    [[nodiscard]] std::uint64_t composition_matches() const noexcept {
+        return composition_matches_;
+    }
+
+    [[nodiscard]] std::uint64_t composition_mismatches() const noexcept {
+        return composition_mismatches_;
+    }
+
+    // Debris mirrors successfully bound to a locally-derived chunk.
+    [[nodiscard]] std::uint64_t debris_bound() const noexcept { return debris_bound_; }
+
+    // Chunks snapped to the authority's transform because local simulation had drifted past the
+    // tolerance. A proof asserts on this: zero corrections means the correction path was never
+    // exercised, and the test proved only that two identical simulations stayed identical.
+    [[nodiscard]] std::uint64_t debris_corrections() const noexcept { return debris_corrections_; }
+
+    // Debris mirrors whose `DebrisOrigin` named a chunk this client does not have. Expected to be
+    // transient — the source destructible's own mirror, or the op batch that produced the chunk,
+    // can still be in flight. Persistently non-zero means the two rosters have genuinely diverged,
+    // which is what the composition hash is for.
+    [[nodiscard]] std::uint64_t debris_unresolved() const noexcept { return debris_unresolved_; }
+
     // Counters — a loss/reorder proof in which nothing was ever deferred or dropped proves nothing
     // (the m11.1 harness discipline).
     [[nodiscard]] std::uint64_t ticks_applied() const noexcept { return ticks_applied_; }
@@ -108,12 +160,31 @@ private:
                        const replication::NetIdMap& map,
                        const ecs::World& world);
 
+    void on_composition_check(core::ByteReader& reader);
+
+    // Compare the authority's fingerprints against our own rubble. Called from sync_debris, which
+    // is the point in the tick where the comparison is meaningful.
+    void verify_composition(const ecs::World& world,
+                            const replication::NetIdMap& map,
+                            const destruction::DestructionWorld& destruction);
+
     void flush();
 
-    // One completed tick, waiting for its own update().
+    // One destructible's expected debris shape, as the authority left it after a given batch.
+    struct ExpectedComposition {
+        replication::NetId source{};
+        std::uint64_t hash = 0;
+    };
+
+    // One completed tick, waiting for its own update(), and the fingerprints that describe the
+    // state it should leave behind. The check travels WITH its batch rather than in a single slot
+    // on the client, because one drained span routinely carries several ticks: a lone slot would
+    // keep only the newest, silently discarding the checks for every batch still queued behind it —
+    // and those are exactly the batches most likely to be the ones that went wrong.
     struct Batch {
         std::uint64_t tick = 0;
         std::vector<destruction::DamageOp> ops;
+        std::vector<ExpectedComposition> expected;
     };
 
     // The tick currently being ACCUMULATED, and the ops gathered for it so far. Only ONE tick is
@@ -140,6 +211,15 @@ private:
     std::uint64_t multipart_ticks_ = 0;
     std::uint64_t dropped_unmapped_ = 0;
     std::uint64_t malformed_ = 0;
+    std::uint64_t debris_bound_ = 0;
+    std::uint64_t debris_corrections_ = 0;
+    std::uint64_t debris_unresolved_ = 0;
+    std::uint64_t composition_matches_ = 0;
+    std::uint64_t composition_mismatches_ = 0;
+
+    // The fingerprints belonging to the batch most recently released by apply_next_batch, awaiting
+    // the fracture boundary that makes them comparable.
+    std::vector<ExpectedComposition> pending_verify_;
 };
 
 } // namespace rime::destruction_net

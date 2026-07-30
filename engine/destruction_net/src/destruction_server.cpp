@@ -7,6 +7,10 @@
 
 #include "rime/core/byte_cursor.hpp"
 #include "rime/destruction/bind.hpp"
+#include "rime/destruction_net/composition.hpp"
+#include "rime/ecs/query.hpp"
+#include "rime/ecs/reflect.hpp"
+#include "rime/physics/world.hpp"
 
 namespace rime::destruction_net {
 
@@ -75,6 +79,21 @@ void DestructionServer::publish(net::NetDriver& driver,
         ++multipart_ticks_;
     }
 
+    // One composition fingerprint per destructible this batch touched, computed once for every
+    // client. Deduplicated by NetId: a wall taking twenty ops in a tick is still one instance whose
+    // rubble has one shape.
+    std::vector<std::pair<replication::NetId, std::uint64_t>> checked;
+    for (const auto& entry : addressed) {
+        const replication::NetId net_id = entry.first;
+        const bool seen = std::any_of(checked.begin(), checked.end(), [net_id](const auto& e) {
+            return e.first.index == net_id.index && e.first.generation == net_id.generation;
+        });
+        if (!seen) {
+            checked.emplace_back(net_id,
+                                 debris_composition_hash(destruction, entry.second->instance));
+        }
+    }
+
     for (const net::SessionId id : driver.session_ids()) {
         net::Session* session = driver.session(id);
         if (session == nullptr || session->state() != net::SessionState::Connected) {
@@ -104,6 +123,107 @@ void DestructionServer::publish(net::NetDriver& driver,
             // retried or queued here — a peer that cannot keep up with destruction is a peer the
             // game should decide about (session->disconnect()), and silently growing an unbounded
             // shadow queue behind a channel that already has one is how a memory leak gets built.
+        }
+
+        // The composition check for this tick, after its ops (m11.4b). Ordered delivery is what
+        // makes "after" mean anything: the client can compare the instant it lands, because every
+        // op it describes has already been applied.
+        if (!checked.empty()) {
+            scratch_.clear();
+            core::ByteWriter w{scratch_};
+            w.u8(static_cast<std::uint8_t>(MessageTag::CompositionCheck));
+            w.u64(tick);
+            w.u16(static_cast<std::uint16_t>(checked.size()));
+            for (const auto& entry : checked) {
+                w.u32(entry.first.index);
+                w.u32(entry.first.generation);
+                w.u64(entry.second);
+            }
+            if (session->send_reliable(scratch_, now_ms)) {
+                ++composition_checks_sent_;
+            }
+        }
+    }
+}
+
+void DestructionServer::sync_debris(ecs::World& world,
+                                    const destruction::DestructionWorld& destruction,
+                                    const physics::PhysicsWorld& physics,
+                                    const replication::NetIdMap& map,
+                                    const std::function<void(ecs::Entity)>& replicate,
+                                    const std::function<void(ecs::Entity)>& despawn) {
+    const std::size_t roster = destruction.debris_count();
+    debris_to_entity_.resize(roster, ecs::kNullEntity);
+
+    // The ordinal of each chunk among its OWN instance's debris, in roster order. Recomputed each
+    // tick rather than cached, because it is the receiver's only handle on which chunk this is and
+    // a cache that drifted from the roster would mislabel rubble rather than fail loudly. One pass
+    // over an append-only roster; the counters are a small map keyed by instance index.
+    destruction::build_instance_entity_table(world, instance_to_entity_);
+    std::vector<std::uint32_t> next_ordinal(instance_to_entity_.size(), 0);
+
+    for (std::size_t d = 0; d < roster; ++d) {
+        const destruction::InstanceId source = destruction.debris_source(d);
+        const std::uint32_t src = source.index;
+        if (src >= next_ordinal.size()) {
+            continue; // a chunk whose source instance is not in the bind table at all
+        }
+        const std::uint32_t ordinal = next_ordinal[src]++;
+
+        const physics::BodyId body = destruction.debris_body(d);
+        const bool live = physics.is_alive(body);
+
+        // Reclaimed by the M8.5 lifecycle: retract the mirror rather than leaving a phantom chunk
+        // frozen mid-air on every client with nothing that ever repairs it.
+        if (!live) {
+            if (debris_to_entity_[d].is_valid()) {
+                despawn(debris_to_entity_[d]);
+                debris_to_entity_[d] = ecs::kNullEntity;
+                ++debris_retracted_;
+            }
+            continue;
+        }
+
+        physics::BodyState state{};
+        if (!physics.get_body_state(body, state)) {
+            continue;
+        }
+        core::Transform placement;
+        placement.translation = state.position;
+        placement.rotation = state.orientation;
+
+        if (!debris_to_entity_[d].is_valid()) {
+            // A chunk the receiver cannot be told the origin of is not replicated at all. Sending
+            // it under an unresolvable name would put rubble on the client that nothing ever moves
+            // or removes — worse than the chunk the client derives for itself and simulates
+            // locally.
+            const ecs::Entity source_entity = instance_to_entity_[src];
+            if (!source_entity.is_valid()) {
+                ++debris_unaddressable_;
+                continue;
+            }
+            const std::optional<replication::NetId> source_id = map.net_id_of(source_entity);
+            if (!source_id.has_value()) {
+                ++debris_unaddressable_;
+                continue;
+            }
+            const ecs::Entity e =
+                world.spawn_with(ecs::LocalTransform{placement},
+                                 DebrisOrigin{source_id->index, source_id->generation, ordinal});
+            debris_to_entity_[d] = e;
+            replicate(e);
+            ++debris_spawned_;
+            continue; // the transform it was just spawned with IS this tick's
+        }
+
+        // Refresh the transform and stamp it changed, so the server's own change detection — the
+        // per-column chunk versions m11.3's delta pass compares — actually sees the write. A silent
+        // in-place edit would be replicated once at spawn and then never again, which is the same
+        // class of bug as A13 and just as quiet.
+        const ecs::Entity e = debris_to_entity_[d];
+        if (auto* transform = world.get<ecs::LocalTransform>(e)) {
+            transform->value = placement;
+            world.mark_changed<ecs::LocalTransform>(e);
         }
     }
 }

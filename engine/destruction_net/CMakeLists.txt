@@ -16,7 +16,8 @@
 
 add_library(rime_destruction_net STATIC
     src/destruction_server.cpp
-    src/destruction_client.cpp)
+    src/destruction_client.cpp
+    src/composition.cpp)
 
 # Namespaced alias so dependents link `rime::destruction_net`, matching our C++ namespace.
 add_library(rime::destruction_net ALIAS rime_destruction_net)

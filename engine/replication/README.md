@@ -111,13 +111,9 @@ which whichever module drained first consumed and misparsed the other's traffic.
   with entities that did gets re-sent. Bounded by chunk occupancy; the mitigation is a content
   discipline (keep movers out of static-dominated archetypes), worth measuring before m11.4's debris
   makes it urgent.
-- **A spawn burst stalls the baseline.** Since m11.4a (ADR-0033 A13) a delta packet containing any
-  record the client cannot resolve does not advance the watermark — necessary, because acking one
-  would abandon that entity's state permanently. The cost is that while spawns are landing, packets
-  routinely contain an unresolved record, so the baseline sits still and the server keeps re-offering
-  the same deltas. It is transient (bounded by the reliable channel's RTO for the `Spawn`) and
-  self-limiting (`kStaleBaselineTicks` re-seeds a client that stays behind), but a sustained
-  spawn-heavy scene pays real bandwidth for it. The finer fix — acking per-record rather than
-  per-packet — needs the server to track which entities a client actually holds, which is per-client
-  state this design deliberately does not keep. Revisit alongside m11.5's relevancy, which introduces
-  that bookkeeping anyway.
+- **Out-of-order state is held, and the buffer is bounded.** A delta record whose `Spawn` has not
+  landed is kept and replayed when it does (ADR-0033 A14), so nothing is lost and the tick can still
+  be acknowledged. The buffer is capped at `kMaxDeferredRecords` because the ids keying it come from
+  the peer; on overflow the oldest record is evicted and that tick goes unacknowledged, falling back
+  to the server re-offering it. An honest peer never reaches that, but a scene spawning more than the
+  cap in a single burst will briefly pay the slower path.
