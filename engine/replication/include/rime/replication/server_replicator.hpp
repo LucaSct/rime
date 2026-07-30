@@ -131,6 +131,15 @@ public:
 
     [[nodiscard]] std::uint64_t full_reseeds() const noexcept { return full_reseeds_; }
 
+    // Entity records deferred to a later tick because they did not fit — counting BOTH budgets, the
+    // per-tick byte ceiling and the per-tick packet-count ceiling. "Dropped" names what happened to
+    // the record, not to the state: the deferred entity stays in the candidate set and the rotation
+    // cursor resumes there, so this is a latency measure, not a loss one. It reading zero under a
+    // tight budget means the budget is not binding, which is the thing a proof most wants to know.
+    //
+    // The byte-budget half of this went uncounted until m11.5's close-out, which is how it hid a
+    // watermark bug for a whole brick: the trim happened, nothing recorded it, and the tick then
+    // looked complete to everything downstream.
     [[nodiscard]] std::uint64_t entities_dropped_over_budget() const noexcept {
         return entities_over_budget_;
     }

@@ -373,11 +373,16 @@ void ServerReplicator::publish_delta(net::Session& session,
     //   relevant, record dropped       → unchanged. An entry stays 0 and retries next tick; an
     //                                    ordinary change stays 1, because the client still holds
     //                                    the older value and the clamped baseline will re-offer it.
-    // Credit one packet's worth of records as held. Called per PART, and only for a part the
-    // session actually accepted — `send_unreliable` refuses on a non-Connected session or a channel
-    // that will not take the datagram, and a refused part is bytes that never existed. Crediting a
-    // whole prefix regardless would strengthen the record on "we tried", which is the
-    // weaker-correlated event corollary 1 names by that exact phrase.
+    //
+    // Split across two helpers because the evidence arrives at two different moments. `credit_sent`
+    // runs per PART as each one is accepted; `settle_relevancy` runs once afterwards and handles
+    // everything no packet spoke for.
+
+    // The "record actually sent" case. Called per part, and only for a part the session ACCEPTED —
+    // `send_unreliable` refuses on a non-Connected session or a channel that will not take the
+    // datagram, and a refused part is bytes that never existed. Crediting the whole prefix
+    // regardless would strengthen the record on "we tried to send it", which is the
+    // weaker-correlated event the invariant names by that exact phrase.
     const auto credit_sent = [&](std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end && i < record_slot_.size(); ++i) {
             const std::uint32_t slot = record_slot_[i];
@@ -390,6 +395,10 @@ void ServerReplicator::publish_delta(net::Session& session,
         }
     };
 
+    // The other two cases: anything irrelevant is cleared, and anything relevant that produced no
+    // record at all is marked held — vacuously, because nothing was owed. Run at every exit from
+    // this function, including the early ones, or an entity with nothing to send never gets its bit
+    // and reads as eternally entering.
     const auto settle_relevancy = [&]() {
         for (std::size_t slot = 0; slot < slot_count; ++slot) {
             if (!(priority_by_index_[slot] > 0.0f)) {
