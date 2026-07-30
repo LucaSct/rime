@@ -63,6 +63,29 @@ struct Budget {
     // ordering, so what survives a tight budget is what the policy said mattered most — the
     // difference between a budget that degrades gracefully and one that truncates arbitrarily.
     std::size_t max_bytes_per_tick = 0;
+
+    // Priority an entity gains for each tick it was owed to a client and not sent. Reset the moment
+    // it is delivered.
+    //
+    // WITHOUT THIS, PRIORITY SILENTLY MEANS "SOME ENTITIES ARE NEVER SENT". A strict ordering plus
+    // a budget that cannot cover the world is a starvation machine: the same highest-priority
+    // prefix goes out every tick and everything below the cut-off is never delivered at all. Not
+    // late — never. That is not a graceful degradation, it is a permanently wrong client, and it is
+    // the exact liveness bug the rotation cursor was built to prevent on the un-prioritized path.
+    //
+    // Aging fixes it without giving up what priority is FOR. The ordering is still nearest-first
+    // among entities equally owed; what changes is that being passed over is itself a claim on the
+    // next tick's budget, so the tail rises rather than sinking. It also degrades in the right
+    // direction: with a budget that comfortably covers the world nothing is ever starved, every age
+    // is zero, and the ordering is exactly what the policy asked for.
+    //
+    // The gain sets how long a maximally-unimportant entity can be held back. Priorities from
+    // `distance_relevancy` land in (0, 1] (2.0 for unpositioned), so at the default an entity
+    // overtakes the most important thing in the world after ~40 ticks — well under a second at 60
+    // Hz. Raise it to favour fairness over locality, lower it for the reverse. Zero disables aging
+    // and restores strict priority, which is a defensible choice only if the budget is known to
+    // cover the working set.
+    float starvation_gain = 0.05f;
 };
 
 class ServerReplicator {
@@ -208,6 +231,17 @@ private:
         // bookkeeping m11.5 was always going to need, and it is why relevancy could not be a pure
         // filter.
         std::vector<std::uint8_t> was_relevant;
+
+        // Indexed by NetId::index: how many consecutive ticks this client has had a record built
+        // for this entity that was then dropped by a budget. Reset to 0 the moment one is actually
+        // sent. This is what `Budget::starvation_gain` multiplies.
+        //
+        // It is a per-item record keyed by a RECYCLABLE index, so it lives under the same rule as
+        // `was_relevant` and is cleared in despawn() for the same reason — a recycled slot must not
+        // inherit the dead entity's grievance and jump the queue on its behalf. Note this one is a
+        // claim about what WE OWE rather than about what the peer holds, so it is not corollary 2
+        // proper; the recycle hazard is identical regardless of which direction the claim points.
+        std::vector<std::uint32_t> starved_ticks;
         // Indexed by NetId::index: the generation this client has been told about, or 0 for "never
         // announced". Diffing this against the allocator each tick is what makes spawn/despawn
         // announcements self-healing — a client that missed an announcement is simply re-diffed
