@@ -303,9 +303,14 @@ stays 1 as the world grows, which is the whole claim.
 ## Transform history (m11.6a) — built, and the two traps it hid
 
 `PreviousTransform` + `interpolated_transform` in `replication/interpolation.hpp` are the buffer
-ADR-0023 §3 left as a seam. Built to rules 1–3 below: a **component** rather than a `NetId`-keyed side
-table, rotated on the **apply** rather than on a tick boundary, with an explicit `valid` flag so a
-first appearance snaps instead of blending out of the world origin.
+ADR-0023 §3 left as a seam. Three rules shaped it: a **component** rather than a `NetId`-keyed side
+table (a despawn+respawn recycle then gets fresh state from the ECS's own generation safety, instead
+of inheriting corollary 2's risk — stale history from a dead incarnation bleeding into the entity
+that reused its slot); rotated on the **apply** rather than on a tick boundary (`replay_deferred`
+applies records many ticks after arrival, and a rotation keyed to the tick counter would back-date or
+skip exactly those); and an explicit `valid` flag so a first appearance **snaps** instead of blending
+out of the world origin — structurally the same case as the relevancy-entry send, solved the same
+way rather than reinvented.
 
 Two defects surfaced while proving it, both worth keeping because neither was visible by reading:
 
@@ -321,26 +326,76 @@ matched, and the guard became a no-op that still compiled and still looked right
 struct with padding to decide whether a value changed**; compare fields, or compare the packed
 serialization.
 
-Still to build: the renderer consuming the blend (it touches `WorldTransform` / `propagate_transforms`
-and wants its own design pass) and the whole client→server input half.
+---
+
+## Drawing the blend (m11.6b) — and the bug the consumer exposed in the producer
+
+m11.6a computed a blend nothing could read. Three things stood between it and the screen, and only
+the first was expected.
+
+**`render` cannot call `replication`, and must not learn how.** `rime::render` links rhi/ecs/assets;
+`rime::replication` links ecs/net. Neither depends on the other and neither should — a renderer that
+knew about netcode is a layering mistake paid for at every future backend. They meet on the one
+module below both: **`ecs::RenderTransform`**, a new unreflected component meaning *the pose to draw
+this frame*. `replication::update_render_transforms(world, alpha)` deposits it once per frame from
+the render callback; `extract_scene` prefers it over `WorldTransform` where present and falls back
+where not, which costs a world that never replicates one null check.
+
+The split is also what keeps the blend out of the simulation. `WorldTransform` stays the simulated
+truth that physics and gameplay read; `alpha` is wall-clock-derived, so a tick that could see it
+would stop being deterministic, and the m11.7 cross-peer proof rests on ticks being deterministic.
+`Application` hands `alpha` out through exactly one channel (`FrameContext`), so the pass can only
+be reached from the one place it is safe to reach it from — a sim stage could not call it correctly
+even by mistake, because the parameter is not in a `TickFn`'s signature.
+
+**A replicated entity was undrawable.** Not badly drawn — invisible. A mirror is spawned bare;
+`WorldTransform` is unreflected so it never crosses the wire; and `propagate_transforms` only
+touches entities that already have *both* transforms. So nothing ever gave a mirror a world pose and
+every renderer query skipped it in silence. The replicator now adds one on the first transform
+write, **seeded from that write** rather than left default: `bind_destructibles` prefers
+`WorldTransform` over `LocalTransform` (`bind.cpp`'s `placement_of`), so a default would stand a
+destructible at the world origin for any bind running before that tick's `propagate_transforms`. The
+fallback that comment describes stops covering you the moment the component exists.
+
+**`valid` also has to be turned OFF, and m11.6a never did.** This is the real find. `alpha` sweeps
+0→1 every tick period on the frame clock's own schedule, whether or not a given entity received
+anything. So a previous/current pair left valid after the motion stopped replays its last step
+forever — the mirror snaps back and slides forward, once per tick, for as long as it stands still.
+Debris coming to rest is the most common event in a destruction engine, so that is the steady state,
+not a corner. `ClientReplicator::settle_transform_history()`, called once per tick from Publish,
+expires history that the tick did not renew.
+
+The subtlety is **what counts as renewal**. The server re-sends an unacked value for a round trip,
+so records keep arriving for an entity that is standing still; keying the settle to "a record was
+applied" would hold the blend open for the whole re-send window and produce the same sawtooth, just
+bounded. It keys to a **genuinely different value** — the distinction m11.6a's re-send guard already
+draws, inherited rather than re-derived. Expiring one tick later is safe precisely because the blend
+it drove has already run to alpha≈1 over that tick's frames.
+
+Why m11.6a could not see any of this: its proof drove the entity for 20 straight ticks and then
+despawned it. "Moves forever" and "moves, then rests" are the two behaviours the history exists to
+tell apart, and only one of them was ever run. The same shape as every other entry in this document
+— *the scenario where the mechanism is described, not the one where the two behaviours diverge*.
+
+**Known limitation, named rather than hidden.** The blend always spans exactly one tick period. When
+relevancy or the byte budget defers an entity's record for several ticks — which m11.5 makes routine
+by design — its motion replays at several times speed over one tick and then holds. That is judder,
+not the rewind above, and fixing it properly means interpolating over the *interval a value actually
+covers*: the delta header already carries the server `tick`, so the seam is there, and this is the
+"snapshot interpolation on top" the roadmap sequences after the alpha consume path.
+
+Deferred with it: two or more *blending* replicated entities parented to each other, which would
+need `propagate_transforms`-style depth ordering. Unreachable today rather than untested —
+`WireSchema::is_replicable` refuses any type carrying an `Entity` field, so `Parent` cannot cross the
+wire at all, and a single replicated parent is already impossible. The one-level composition is
+built and proven by direct construction, the same standard the refused-part branch is held to.
 
 ---
 
-## For m11.6 (interpolation) — build it to the rule the first time
+## For the input half of m11.6 — build it to the rule the first time
 
-1. **Store the previous/current pair as a component**, not a side-table keyed by `NetId::index`.
-   A despawn+respawn recycle then gets fresh state for free from the ECS's own generation safety; a
-   slot-keyed side table inherits corollary 2's risk directly — stale history from a dead incarnation
-   bleeding into the entity that reused its slot.
-2. **Drive the previous→current rotation off the same `mark_changed` signal the delta path uses**, not
-   off "the tick counter advanced". `replay_deferred` marks a component changed at *replay* time,
-   which can be many ticks after the packet nominally arrived; a rotation keyed to arrival would
-   back-date or skip exactly those records.
-3. **A newly-appearing entity must snap, not blend** — there is no previous. Structurally the same
-   case as the relevancy-entry fix, so use the same pattern (an explicit "do I have a valid previous"
-   flag) rather than reinventing it.
-4. **The client→server input watermark is a fresh instance of corollary 1**, not a special case.
-   Consumed ≠ arrived, consumed ≠ latest-received. If buffered input bursts ever need multi-part
-   framing, re-derive the completeness discipline deliberately rather than assuming a small message
-   never needs it — that assumption is what made the original baseline bug look like a non-issue
-   until a wall that stops changing gave it a case where it mattered.
+**The client→server input watermark is a fresh instance of corollary 1**, not a special case.
+Consumed ≠ arrived, consumed ≠ latest-received. If buffered input bursts ever need multi-part
+framing, re-derive the completeness discipline deliberately rather than assuming a small message
+never needs it — that assumption is what made the original baseline bug look like a non-issue
+until a wall that stops changing gave it a case where it mattered.
