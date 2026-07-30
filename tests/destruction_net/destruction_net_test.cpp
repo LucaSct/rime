@@ -889,8 +889,14 @@ TEST_CASE("debris bind to the chunks the client derived, and corrections pull dr
 
     // Every chunk the authority described was the chunk the client had. This is the assertion the
     // whole ordinal-addressing scheme rests on.
+    // Every fingerprint the authority sent was actually compared — matches + mismatches + orphans
+    // must account for all of them. Without this the proof could pass while verifying a handful of
+    // ticks and silently skipping the rest, which is exactly what an orphaned check causes.
     CHECK(destruction_client.composition_matches() > 0);
     CHECK(destruction_client.composition_mismatches() == 0);
+    CHECK(destruction_client.composition_matches() + destruction_client.composition_mismatches() +
+              destruction_client.composition_checks_unverified() ==
+          destruction_server.composition_checks_sent());
 
     // ── Half 2: the correction proof. Make the client's simulation genuinely wrong, so its rubble
     // parts company with the authority's and the correction path has something to do. ──

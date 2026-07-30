@@ -180,6 +180,12 @@ void DestructionClient::on_composition_check(core::ByteReader& reader) {
         }
     }
     if (batch == nullptr) {
+        // The batch this describes has already been applied, so the state it attests to is gone —
+        // later batches have been applied on top of it. Counted rather than ignored: this is the
+        // one path in this module that could silently reduce how much the composition check
+        // actually checks, and a proof asserting "matches > 0" would still pass while verifying
+        // almost nothing.
+        ++composition_unverified_;
         return;
     }
     batch->expected.clear();
@@ -201,10 +207,15 @@ void DestructionClient::verify_composition(const ecs::World& world,
     for (const ExpectedComposition& e : pending_verify_) {
         const ecs::Entity entity = map.resolve(e.source);
         if (!entity.is_valid()) {
-            continue; // the wall's own mirror has not landed; nothing to compare against yet
+            // The wall's own mirror has not landed, so there is nothing to compare against — and by
+            // the time it does, this batch's state will have been built over. Counted, for the same
+            // reason the orphan case is: an uncounted skip makes the check quietly check less.
+            ++composition_unverified_;
+            continue;
         }
         const auto* ref = world.get<destruction::DestructibleInstanceRef>(entity);
         if (ref == nullptr || ref->instance == destruction::kUnboundInstance) {
+            ++composition_unverified_; // arrived but not standing yet — same story
             continue;
         }
         const std::uint64_t local =
@@ -236,6 +247,17 @@ bool DestructionClient::apply_next_batch(destruction::DestructionWorld& destruct
         return false;
     }
     Batch& batch = ready_.front();
+    // A batch released while the PREVIOUS one's fingerprints are still awaiting comparison. That
+    // happens whenever a client catches up by pumping several batches in a tick: verification runs
+    // once, at sync_debris, so only the last batch's expectations can still be checked against a
+    // state that matches them. The earlier ones describe states already built over.
+    //
+    // Counted rather than dropped. Verifying each batch at its own fracture boundary would need the
+    // verification to move inside the catch-up step (it needs the world and the NetIdMap, which
+    // this call does not take) — a real improvement, and a named follow-up rather than something to
+    // half-do here. Until then this is visible instead of invisible.
+    composition_unverified_ += pending_verify_.size();
+
     destruction.apply_remote_ops(batch.ops);
     ops_applied_ += batch.ops.size();
     ++ticks_applied_;

@@ -122,6 +122,22 @@ public:
         return composition_mismatches_;
     }
 
+    // Composition fingerprints that could not be compared against anything. Three causes, all
+    // unavoidable and all previously SILENT:
+    //   - the batch they describe had already been applied (the check packet was lost and
+    //     retransmitted while the ops it follows sailed through), so the state they attest to has
+    //     been built over;
+    //   - the source wall's own mirror has not arrived yet;
+    //   - the mirror arrived but is not standing yet.
+    //
+    // None is a fault. What matters is that they are COUNTED. Every other skip in this module has a
+    // counter, and a verification that quietly stops verifying is worth strictly less than no
+    // verification at all — it still reads as a passing proof. `matches + mismatches + unverified`
+    // must equal the fingerprints the authority sent, and the m11.4b proof asserts exactly that.
+    [[nodiscard]] std::uint64_t composition_checks_unverified() const noexcept {
+        return composition_unverified_;
+    }
+
     // Debris mirrors successfully bound to a locally-derived chunk.
     [[nodiscard]] std::uint64_t debris_bound() const noexcept { return debris_bound_; }
 
@@ -216,6 +232,7 @@ private:
     std::uint64_t debris_unresolved_ = 0;
     std::uint64_t composition_matches_ = 0;
     std::uint64_t composition_mismatches_ = 0;
+    std::uint64_t composition_unverified_ = 0;
 
     // The fingerprints belonging to the batch most recently released by apply_next_batch, awaiting
     // the fracture boundary that makes them comparable.

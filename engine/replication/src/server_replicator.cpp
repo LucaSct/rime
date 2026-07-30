@@ -180,8 +180,11 @@ void ServerReplicator::publish_structure(net::Session& session,
     const std::size_t slots = std::max(state.announced.size(), allocator_.slot_count());
     state.announced.resize(slots, 0);
 
-    std::vector<NetId> to_spawn;
-    std::vector<NetId> to_despawn;
+    // Each entry carries the value `announced[index]` held BEFORE this tick's diff touched it. The
+    // rollback below restores that, rather than a constant chosen from the message kind — see there
+    // for the bug that distinction fixes.
+    std::vector<std::pair<NetId, std::uint32_t>> to_spawn;
+    std::vector<std::pair<NetId, std::uint32_t>> to_despawn;
     for (std::size_t i = 0; i < slots; ++i) {
         const auto index = static_cast<std::uint32_t>(i);
         const std::uint32_t announced = state.announced[i];
@@ -192,19 +195,19 @@ void ServerReplicator::publish_structure(net::Session& session,
                 // The index was recycled without this client hearing about the death. Retract the
                 // old incarnation before announcing the new one, or the client would rebind an
                 // index it still thinks holds something else.
-                to_despawn.push_back(NetId{index, announced});
+                to_despawn.emplace_back(NetId{index, announced}, announced);
             }
-            to_spawn.push_back(live);
+            to_spawn.emplace_back(live, announced);
             state.announced[i] = live.generation;
         } else if (!live.is_valid() && announced != 0) {
-            to_despawn.push_back(NetId{index, announced});
+            to_despawn.emplace_back(NetId{index, announced}, announced);
             state.announced[i] = 0;
         }
     }
 
     // Despawns before spawns: within one tick an index can legitimately do both (recycled), and the
     // client must drop the old mirror before binding the new one to the same slot.
-    const auto flush = [&](std::vector<NetId>& ids, MessageTag tag) {
+    const auto flush = [&](std::vector<std::pair<NetId, std::uint32_t>>& ids, MessageTag tag) {
         std::size_t sent = 0;
         while (sent < ids.size()) {
             // 9 bytes of header, 8 per id — pack as many as the payload allows.
@@ -215,15 +218,32 @@ void ServerReplicator::publish_structure(net::Session& session,
             writer.u8(static_cast<std::uint8_t>(tag));
             writer.u16(static_cast<std::uint16_t>(n));
             for (std::size_t i = 0; i < n; ++i) {
-                write_net_id(writer, ids[sent + i]);
+                write_net_id(writer, ids[sent + i].first);
             }
             if (!session.send_reliable(scratch_, now_ms)) {
-                // Backpressure (the peer is drowning, or the 256-message backlog is full). Stop —
-                // the ids we did not send stay un-announced in `state.announced`… except we
-                // already marked them. Roll the unsent ones back so next tick's diff re-emits them.
+                // Backpressure (the peer is drowning, or the 256-message backlog is full). Stop,
+                // and roll the unsent entries back so next tick's diff re-emits them.
+                //
+                // RESTORE THE PRE-TICK VALUE, not a constant derived from the message kind. A
+                // RECYCLED index appears in BOTH lists in one tick — {idx, old_gen} to despawn and
+                // {idx, new_gen} to spawn, the case the comment above this lambda calls out. The
+                // two flushes run back to back with no chance for the channel's backlog to drain
+                // between them, so once the despawn flush hits backpressure the spawn flush is
+                // certain to as well. A kind-derived rollback then has the spawn's `= 0` overwrite
+                // the despawn's correctly-restored `old_gen`, and next tick's diff reads announced
+                // == 0, takes the `announced != 0` branch as false, and NEVER RE-EMITS THE DESPAWN.
+                // The server has permanently forgotten it owes one: the client rebinds the index to
+                // the new incarnation and its old mirror entity is orphaned in the ECS world
+                // forever, which is precisely the phantom this class's despawn() doc says it exists
+                // to prevent.
+                //
+                // The pre-tick value is ground truth and is correct however the two flushes fail.
+                // It can re-emit a despawn the client already applied — harmless, since a despawn
+                // for an unbound id is a no-op — which is the self-healing direction this whole
+                // diff is built on.
                 for (std::size_t i = sent; i < ids.size(); ++i) {
-                    const auto idx = static_cast<std::size_t>(ids[i].index);
-                    state.announced[idx] = tag == MessageTag::Spawn ? 0 : ids[i].generation;
+                    const auto idx = static_cast<std::size_t>(ids[i].first.index);
+                    state.announced[idx] = ids[i].second;
                 }
                 return;
             }

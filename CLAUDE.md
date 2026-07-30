@@ -121,6 +121,12 @@ paragraph over a cryptic one-liner. Do not delete explanatory comments to "clean
    When in doubt, leave the seam.
 4. **Threading:** assume a job-system / data-parallel world. Don't bake in
    single-threaded assumptions (global mutable singletons, hidden ordering deps).
+5. **Any per-peer "what they have" fact may only strengthen on confirmed *holding*** — never on
+   "we sent it", "it arrived", or a proxy that has a blind spot. This has been the same bug five
+   times across m11.3–m11.5 (watermarks, baselines, per-item announced/relevant arrays). Read
+   [docs/design/replication.md](docs/design/replication.md) before touching replication state, and
+   give every skip/drop/defer path a counter — a proof that cannot see what it skipped still reads
+   as passing.
 
 ## Decisions & docs
 
