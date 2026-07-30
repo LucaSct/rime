@@ -41,6 +41,7 @@ add_subdirectory(scene)  # .rscene text format: round-trip, hierarchy remap, han
 add_subdirectory(app)    # fixed-tick loop + determinism: GPU-free; the render-loop case self-guards on a device
 add_subdirectory(net)    # Link + reliability layer over the scripted-loss harness — GPU-free, deterministic (M11)
 add_subdirectory(replication) # NetIds + snapshot delta replication: convergence under injected loss (M11.3)
+add_subdirectory(destruction_net) # the damage-op stream: two peers break the same wall (M11.4a)
 if(RIME_BUILD_CAPI)
     add_subdirectory(capi) # the C ABI (M6.9), driven through librime_capi — GPU-free
 endif()

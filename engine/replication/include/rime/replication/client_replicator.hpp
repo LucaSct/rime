@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "rime/core/byte_cursor.hpp"
@@ -37,7 +38,19 @@ public:
 
     // Apply everything the server has sent: spawns, despawns, and state. Call from PreSim, after
     // NetDriver::update, so the local tick runs against corrected state rather than a tick behind.
+    //
+    // This convenience form DRAINS the sessions, which means it takes sole ownership of the mail.
+    // Use it only when replication is the single tenant of the session. The moment another module
+    // also has messages to read — m11.4's damage-op stream is the first — the app must drain once
+    // itself and hand the same span to each subsystem via apply_messages below, because
+    // drain_received moves messages out and the second caller would find an empty inbox.
     void apply_inbound(net::NetDriver& driver);
+
+    // Apply the replication messages out of an already-drained batch, leaving everything else
+    // untouched for whoever else is reading the same span. Tags outside replication's block of the
+    // shared registry (snapshot.hpp) are counted as `foreign` and otherwise ignored — deliberately
+    // NOT as malformed, since another module's perfectly well-formed message is not an error.
+    void apply_messages(std::span<const net::Received> messages);
 
     // Report the newest COMPLETE tick we hold. Call from Publish. Cheap enough to send every tick
     // (9 bytes), and sending it unconditionally is what keeps the server's baseline from drifting
@@ -65,6 +78,11 @@ public:
 
     [[nodiscard]] std::uint64_t malformed_messages() const noexcept { return malformed_; }
 
+    // Messages belonging to another module's tag block that we passed over. Non-zero the moment a
+    // session carries more than replication, and the counter a proof asserts on to show the two
+    // streams really are sharing one session rather than one having quietly starved the other.
+    [[nodiscard]] std::uint64_t foreign_messages() const noexcept { return foreign_; }
+
 private:
     void on_spawn(core::ByteReader& reader);
     void on_despawn(core::ByteReader& reader);
@@ -84,6 +102,7 @@ private:
     std::uint64_t deltas_applied_ = 0;
     std::uint64_t records_dropped_unmapped_ = 0;
     std::uint64_t malformed_ = 0;
+    std::uint64_t foreign_ = 0;
 };
 
 } // namespace rime::replication

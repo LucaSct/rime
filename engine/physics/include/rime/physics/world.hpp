@@ -148,6 +148,28 @@ public:
     // Read a body's motion state. Returns false (and leaves `out` untouched) for a dead/unknown id.
     [[nodiscard]] bool get_body_state(BodyId id, BodyState& out) const;
 
+    // Overwrite a body's motion state — the TELEPORT, added by m11.4 for the ADR-0033 A3
+    // state-application seam (a networked client being corrected toward the authority, or a
+    // late-join being handed a world that has already moved). Returns false for a dead/unknown id.
+    //
+    // It is not merely four field writes, and the difference is the whole reason this lives here
+    // rather than in the caller:
+    //   - The broadphase proxy is refit to the new pose. The step only refits bodies in ACTIVE
+    //     islands, so a sleeping body moved from outside would otherwise keep a proxy describing
+    //     where it used to be — and a stale proxy does not report the pairs it should, which shows
+    //     up much later as a chunk falling through a floor it never got a manifold against.
+    //   - The body is WOKEN. A body that was asleep was asleep at its old pose; leaving it asleep
+    //     at a new one asserts it is resting somewhere it has never been, and nothing would
+    //     re-examine that until something else happened to touch it.
+    // The persistent contact cache is deliberately NOT purged: its entries are keyed by pair and
+    // feature, so the manifolds that no longer exist simply fail to re-form next tick and age out
+    // as ordinary Ended contacts, which is exactly what did happen from the contact stream's point
+    // of view.
+    //
+    // Not safe to call during step() — it mutates the body pool and the broadphase tree, the same
+    // rule create_body/destroy_body already carry.
+    bool set_body_state(BodyId id, const BodyState& state);
+
     // Whether `id` still refers to a live body.
     [[nodiscard]] bool is_alive(BodyId id) const noexcept;
 

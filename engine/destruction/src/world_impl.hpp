@@ -61,6 +61,10 @@ struct DestructionWorld::Impl {
         std::vector<float> health;
         std::vector<std::uint8_t> alive;
         std::vector<std::uint32_t> child_to_part;
+        // Who owns this instance (m11.4). Local instances take damage from both sources; a Remote
+        // mirror takes it only from apply_remote_ops — see Authority in world.hpp for why the
+        // contact half of that suppression is the one that matters.
+        Authority authority = Authority::Local;
     };
 
     // One queued apply_damage call, exactly as the caller passed it. Arrival order is deliberately
@@ -73,14 +77,17 @@ struct DestructionWorld::Impl {
         core::Vec3 impulse{0.0f, 0.0f, 0.0f};
     };
 
-    // One damage operation against one part — the normalized currency both damage sources
-    // (explicit apply_damage calls and contact events) reduce to before anything is applied.
-    // `impulse` is the world-space push the op carries into whatever debris body its part detaches
-    // with; contact ops push at their contact `point` (the real surface point — the lever arm is
-    // part of the look), explicit ops push through the COM (`central` — a blast centre is usually
-    // outside the body, and an invented lever arm there would add spin the caller never asked
-    // for).
-    struct DamageOp {
+    // The IN-FLIGHT form of a damage op: the public `destruction::DamageOp` (damage_op.hpp — see
+    // there for what the fields mean and why the type is a wire contract) with two changes for
+    // internal use. The instance is a raw table INDEX rather than an InstanceId, because every
+    // consumer here is about to index `instances` with it; and `applied` is carried alongside,
+    // which the public type deliberately does not have — it is an OUTPUT of applying the list, not
+    // part of the list.
+    //
+    // Named apart from the public type on purpose. They are two views of the same idea, and a
+    // single name shadowed inside Impl would read fine and mean something different depending on
+    // where you stood.
+    struct PendingOp {
         std::uint32_t instance = 0;
         std::uint32_t part = 0;
         float amount = 0.0f;
@@ -95,15 +102,27 @@ struct DestructionWorld::Impl {
 
     // The canonical sort key for EXPLICIT ops (ADR-0029 §3: "sorted by (instance, part, op
     // bytes)") — defined in damage.cpp with the rest of the damage path.
-    [[nodiscard]] static std::array<std::uint32_t, 9> op_key(const DamageOp& o) noexcept;
+    [[nodiscard]] static std::array<std::uint32_t, 9> op_key(const PendingOp& o) noexcept;
 
     // The support solve + the fracture body swap for ONE damaged instance (ADR-0029 §2) — the
     // heart of M8.3, defined in damage.cpp. Called only when the instance's membership changed
     // this tick (a part died). `ops` is the tick's full applied-op sequence, already canonical —
     // islands read their kick-off impulses from it.
+    //
+    // The two trailing knobs exist so the m11.4 state-application seam (ADR-0033 A3) can reach the
+    // same state by the SAME path rather than by a parallel corrective mutator that would drift out
+    // of step with this one:
+    //   `forced_killed` — parts to treat as having died this tick even though no op names them.
+    //     A correction is handed the authority's dead set directly, and a killed part must still
+    //     become its own debris chunk or the roster (and therefore every debris index m11.4b
+    //     addresses transforms by) diverges from the authority's.
+    //   `emit_events`  — off for corrections. A late-join replaying a wall that fell before it
+    //     connected must not fire that wall's dust and audio now.
     void fracture_instance(std::uint32_t instance_index,
-                           std::span<const DamageOp> ops,
-                           physics::PhysicsWorld& world);
+                           std::span<const PendingOp> ops,
+                           physics::PhysicsWorld& world,
+                           std::span<const std::uint32_t> forced_killed = {},
+                           bool emit_events = true);
 
     // A debris body's lifetime phase (M8.5). Falling = live and moving; Settled = it came to rest
     // (a physics Slept), now lingering; Frozen = reclaimed — body destroyed and any owned compound
@@ -132,6 +151,15 @@ struct DestructionWorld::Impl {
     std::vector<DamageCall> pending_damage;
     std::vector<Debris> debris;
     std::vector<std::uint32_t> debris_part_pool;
+
+    // m11.4 replication state. `pending_remote_ops` is what apply_remote_ops queued for the next
+    // update(); `committed_ops` is the public snapshot of the op list that update() actually
+    // assembled, published for the server to replicate (ADR-0033 A1). Both are the public DamageOp
+    // — the impl's own op carries an `applied` flag that is an OUTPUT of applying the list, not
+    // part of the list, and shipping it would invite a receiver to trust the sender's verdict about
+    // state the receiver holds itself.
+    std::vector<DamageOp> pending_remote_ops;
+    std::vector<DamageOp> committed_ops;
 
     // M8.5 lifecycle state: the budget policy (default-off ⇒ nothing is ever reclaimed, so 8.2–8.4
     // scenes stay byte-identical) and the update() tick counter that debris age is measured in.

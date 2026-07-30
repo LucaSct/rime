@@ -348,6 +348,7 @@ add_subdirectory(engine/scene)    # .rscene text scene format: reflection-serial
 add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
 add_subdirectory(engine/net)      # networking: Link seam + reliability layer (M11, ADR-0033)
 add_subdirectory(engine/replication) # ECS state replication over net: NetIds, snapshots (M11.3)
+add_subdirectory(engine/destruction_net) # networked destruction: the damage-op stream (M11.4)
 
 # The C ABI (M6.9): a SHARED library over a tiny extern "C" surface — the ADR-0001 boundary the Rust
 # editor/tools drive the engine through. Sits on top of app+assets; optional per the modularity
@@ -413,4 +414,4 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/rime-config-version.cmake"
     DESTINATION ${RIME_INSTALL_CMAKEDIR})
 
-message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_render, rime_stream, rime_app, rime_capi, rime_hello.")
+message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_render, rime_stream, rime_editorhost, rime_scene, rime_app, rime_net, rime_replication, rime_destruction_net, rime_capi, rime_hello.")

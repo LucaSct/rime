@@ -95,6 +95,37 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > interpolation (m11.6), entity-reference fields do not replicate, and change detection is
 > chunk-grain so it over-includes. **Next:** m11.4 — networked destruction.
 >
+> **Update (2026-07-30) — m11.4a (networked destruction: the events half) + ADR-0033 A11/A12/A13.**
+> The brick grew a prerequisite on contact with the code: naming a destructible on the wire needs the
+> **ECS bind path** M8.2 deferred (`DestructibleInstanceRef` was declared and written by nothing), so
+> that landed first. It is what makes the addressing honest — an op names the destructible ENTITY's
+> **NetId**, never an `InstanceId`, because that is a local table position two peers agree on only if
+> they happened to spawn in the same order, which late-join breaks on its first tick. `DamageOp` is
+> now public and a wire contract, ops are replicated **expanded per-part with the falloff already
+> resolved** (so that float math runs on exactly one machine), and mirrors are `Authority::Remote` —
+> one early return in the contact drain, deliberately not a forked update path. The code lives in a
+> **new `engine/destruction_net` module above both `destruction` and `replication`**, the same
+> guardrail-2 argument A10 used to create `engine/replication`. **Three findings, all from making it
+> run rather than from reading it:** (A11) "clients apply ops at the same tick" cannot mean a local
+> tick index — reliable delivery is ordered but never timely, so the tag is an ordering/identity key
+> and clients apply on arrival; (A12) two of the server's ticks arriving in one of the client's must
+> NOT be merged into one `update()` — alive bits and healths still converge, but **debris composition
+> diverges** (measured: two islands became one), and m11.4b addresses debris by roster index, so that
+> is a wrong address rather than a cosmetic difference; (A13) a **live m11.3 bug** the first
+> end-to-end proof walked into — a delta packet whose records were all *discarded* as unresolvable was
+> still acknowledged, so the server advanced the baseline past writes the client never applied, and an
+> entity that then stops changing stays wrong **forever**. That is precisely the case m11.4 replicates
+> (a wall standing quietly until shot); m11.3's own proof missed it because every entity there moved
+> every tick. Also: the payload tag space is **shared** per session and nothing said so — both modules'
+> enums would have started at 1, and `drain_received` moves messages out, so one subsystem would have
+> silently never received its mail. A registry now lives in `replication/snapshot.hpp`. Proofs are
+> GPU-free on the scripted-loss harness: convergence of a **NetId-ordered per-part alive/health +
+> debris-composition hash** under 20% loss with reordering (with a negative control), multi-packet
+> ticks exercised on both ends, and the A3 seam proven to reach the same tables — including the debris
+> roster — as a peer that watched the whole collapse. Named gaps: debris transforms do not replicate
+> yet (m11.4b), and `DestructionWorld::state_hash()` is a same-process replay witness only — it folds
+> physics body ids, which two independently-built worlds never agree on. **Next:** m11.4b — debris.
+>
 > **Update (2026-07-22) — Milestone 10 (Advanced lighting) COMPLETE.** The whole [ADR-0032](adr/0032-lighting-v2.md)
 > stack landed on `main`, brick by brick, every technique gated behind `LightingSettings` so **off is
 > the byte-identical M5.6 baseline**: **m10.1a** RHI array/cube textures + depth-compare sampler ·
@@ -694,10 +725,15 @@ baseline ack as **replication-layer traffic**, the reliability layer having none
 channel (amendment A9) — **preceded by the `compute_type_hash` name-folding micro-brick** (amendment
 A2: identical-shape components collided; **landed 2026-07-29**, deliberately *without* the
 format-version bump the plan first called for — A2's implementation note says why) · **m11.4**
-**networked destruction** — the server commits the canonical **damage-op list** (including
-contact-derived ops; amendment A1) onto the reliable-ordered channel, clients apply ops at the same
-tick (never their own contact→damage conversion for replicated instances), debris bodies ride m11.3
-snapshots, plus the **state-application seam** for late-join/drift correction (amendment A3) ·
+**networked destruction**, split in two at build time because the bind path it needed turned it into
+the largest brick in the milestone: **m11.4a** *the events half* — the server commits the canonical
+**damage-op list** (including contact-derived ops; amendment A1) onto the reliable-ordered channel,
+addressed by NetId through the **destructible bind path** M8.2 deferred; clients apply each batch as
+it arrives and never run their own contact→damage conversion for replicated instances (amendment
+A11: "the same tick" is a position in the op sequence, not a local tick index — a client is not in
+lockstep), plus the **state-application seam** for late-join/drift correction (amendment A3) ·
+**m11.4b** *the bodies half* — debris ride m11.3 snapshots through a debris↔entity bridge, with
+composition-hash drift detection ·
 **m11.5** **relevancy + budgets** — per-client interest, distance culling for debris transforms,
 nearest-first priority, per-tick byte budget · **m11.6** **interpolation + input** — BUILD the
 previous-tick transform history + alpha consume path (amendment A4: ADR-0023's buffer is an unbuilt
