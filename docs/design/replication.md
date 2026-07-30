@@ -71,6 +71,7 @@ not get over-applied to something that was never a cross-peer correctness questi
 | Rotation `cursor` | `replication/src/server_replicator.cpp` | 1 (liveness half) — the clamp makes the ack correct; this makes delivery actually happen |
 | `was_relevant[]` + forced send on entry | `replication/src/server_replicator.cpp` | 2 — a version delta cannot see "never sent because filtered" |
 | Pre-tick value in the `announced[]` rollback | `replication/src/server_replicator.cpp` | 2 — a kind-keyed rollback clobbers a recycled index's other entry |
+| Per-batch verification in `apply_next_batch` | `destruction_net/src/destruction_client.cpp` | 2 — a fingerprint must be compared at ITS OWN fracture boundary, not against whatever state a catch-up burst ended on |
 | `composition_checks_unverified()` | `destruction_net/src/destruction_client.cpp` | neither — but see the counting rule below |
 
 ---
@@ -88,8 +89,11 @@ verifying almost nothing, because the skips were invisible. Adding the counter a
 matches + mismatches + unverified == checks_sent
 ```
 
-immediately exposed **three further uncounted skip paths** that had been there all along, including
-one where a catch-up loop silently discarded every batch's expectations but the last.
+immediately exposed **three further uncounted skip paths** that had been there all along. Two were
+genuinely unverifiable and are now counted; the third — a catch-up loop discarding every batch's
+expectations but the last — turned out to be fixable rather than merely countable, by verifying each
+batch at the start of the *next* `apply_next_batch`, which is precisely the moment its own `update()`
+has run. Counting it first is what made it visible enough to fix.
 
 A proof that cannot see how much it skipped is not a weaker proof; it is a **misleading** one, because
 it still reads as passing. When adding a counter feels like noise, that is the moment it is most
@@ -102,10 +106,6 @@ worth adding.
 - **The relevancy call still walks every replicated entity per client.** The policy can be cheap per
   entity, but nothing narrows the span yet, so the O(clients × entities) pass stands. Narrowing it
   needs a spatial index over replicated entities — its own brick.
-- **Composition checks are not verified per batch during catch-up.** Verification runs once per tick,
-  so a client pumping several batches to catch up can only check the last one. Moving verification
-  into the catch-up step would fix it (it needs the world and the `NetIdMap`, which
-  `apply_next_batch` does not currently take). Counted meanwhile.
 - **Composition mismatch is detected, not repaired.** Repair needs a client→server request path or a
   periodic authoritative broadcast — late-join machinery.
 - **Debris velocity is not replicated**, only transforms. The local solver's velocity is kept, which

@@ -75,15 +75,23 @@ public:
     // nothing was queued. Call once per `DestructionWorld::update()` — see the header note on why
     // never twice without an update() in between.
     //
-    //   destruction_client.apply_next_batch(destruction);   // PreSim
+    //   destruction_client.apply_next_batch(world, map, destruction);  // PreSim
     //   physics.step(dt);
-    //   destruction.update(physics);                        // the fracture boundary this batch
-    //   owns
+    //   destruction.update(physics);          // the fracture boundary this batch owns
     //
     // A client catching up after a stall loops that whole sequence while `pending_batches()`
     // remains high, which replays the authority's ticks one at a time, in order, at whatever rate
     // it can afford.
-    bool apply_next_batch(destruction::DestructionWorld& destruction);
+    //
+    // It also VERIFIES the previous batch's composition fingerprints before releasing the next one,
+    // which is why it needs the world and the map. That timing is the whole point: by the time this
+    // is called again, the previous batch's `update()` has run, so its fingerprints describe
+    // exactly the state that now exists. Verifying anywhere else during a catch-up compares against
+    // a state several fractures further on — which is why an earlier version could only ever check
+    // the last batch of a burst and silently dropped the rest.
+    bool apply_next_batch(const ecs::World& world,
+                          const replication::NetIdMap& map,
+                          destruction::DestructionWorld& destruction);
 
     // Complete ticks decoded but not yet handed over. Steady state is 0 or 1; a larger number means
     // this client is behind the authority by that many destruction ticks.

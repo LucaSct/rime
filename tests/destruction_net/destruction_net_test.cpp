@@ -311,7 +311,8 @@ TEST_CASE("a wall broken on the server breaks identically on a client across a l
         // fracture boundary between them (see destruction_client.hpp). A backlog is drained by
         // running extra whole update cycles, so the authority's ticks are replayed one at a time.
         do {
-            (void)destruction_client.apply_next_batch(client_peer.destruction);
+            (void)destruction_client.apply_next_batch(
+                client_peer.world, state_client.map(), client_peer.destruction);
             client_peer.physics.step(kDt);
             client_peer.destruction.update(client_peer.physics);
         } while (destruction_client.pending_batches() > 0);
@@ -500,7 +501,8 @@ TEST_CASE("a tick that splits across packets is applied whole or not at all") {
         // fracture boundary between them (see destruction_client.hpp). A backlog is drained by
         // running extra whole update cycles, so the authority's ticks are replayed one at a time.
         do {
-            (void)destruction_client.apply_next_batch(client_peer.destruction);
+            (void)destruction_client.apply_next_batch(
+                client_peer.world, state_client.map(), client_peer.destruction);
             client_peer.physics.step(kDt);
             client_peer.destruction.update(client_peer.physics);
         } while (destruction_client.pending_batches() > 0);
@@ -840,7 +842,8 @@ TEST_CASE("debris bind to the chunks the client derived, and corrections pull dr
         server_peer.destruction.update(server_peer.physics);
 
         do {
-            (void)destruction_client.apply_next_batch(client_peer.destruction);
+            (void)destruction_client.apply_next_batch(
+                client_peer.world, state_client.map(), client_peer.destruction);
             client_peer.physics.step(kDt);
             client_peer.destruction.update(client_peer.physics);
         } while (destruction_client.pending_batches() > 0);

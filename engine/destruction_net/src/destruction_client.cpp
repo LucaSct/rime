@@ -242,22 +242,19 @@ void DestructionClient::flush() {
     pending_count_ = 0;
 }
 
-bool DestructionClient::apply_next_batch(destruction::DestructionWorld& destruction) {
+bool DestructionClient::apply_next_batch(const ecs::World& world,
+                                         const replication::NetIdMap& map,
+                                         destruction::DestructionWorld& destruction) {
+    // Verify the PREVIOUS batch before releasing this one. By now its update() has run, so its
+    // fingerprints describe the state that actually exists — which is true here and nowhere else
+    // during a catch-up burst. Verifying only at the end of the tick could check the burst's last
+    // batch and silently discarded every earlier one.
+    verify_composition(world, map, destruction);
+
     if (ready_.empty()) {
         return false;
     }
     Batch& batch = ready_.front();
-    // A batch released while the PREVIOUS one's fingerprints are still awaiting comparison. That
-    // happens whenever a client catches up by pumping several batches in a tick: verification runs
-    // once, at sync_debris, so only the last batch's expectations can still be checked against a
-    // state that matches them. The earlier ones describe states already built over.
-    //
-    // Counted rather than dropped. Verifying each batch at its own fracture boundary would need the
-    // verification to move inside the catch-up step (it needs the world and the NetIdMap, which
-    // this call does not take) — a real improvement, and a named follow-up rather than something to
-    // half-do here. Until then this is visible instead of invisible.
-    composition_unverified_ += pending_verify_.size();
-
     destruction.apply_remote_ops(batch.ops);
     ops_applied_ += batch.ops.size();
     ++ticks_applied_;
