@@ -86,8 +86,43 @@ void ClientReplicator::on_spawn(core::ByteReader& reader) {
         const ecs::Entity local = world_->spawn();
         (void)world_->add_component_raw(local, replicated_id_);
         map_.bind(id, local);
+        // Anything that arrived for this id before it existed lands now, in arrival order.
+        replay_deferred(id, local);
         ++spawns_applied_;
     }
+}
+
+void ClientReplicator::replay_deferred(NetId id, ecs::Entity local) {
+    // Stable partition by hand rather than remove_if + a second pass: the held records for one id
+    // must be applied in the order they arrived, because two writes to the same component are a
+    // sequence and the last one is the current state.
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < deferred_.size(); ++read) {
+        DeferredRecord& record = deferred_[read];
+        if (record.id.index != id.index || record.id.generation != id.generation) {
+            if (write != read) {
+                deferred_[write] = std::move(record);
+            }
+            ++write;
+            continue;
+        }
+        const core::TypeInfo* type = nullptr;
+        ecs::ComponentId unused{};
+        std::size_t packed = 0;
+        if (schema_.lookup(schema_.wire_id_of(record.component), unused, type, packed) &&
+            type != nullptr) {
+            void* slot = world_->get_component_raw(local, record.component);
+            if (slot == nullptr) {
+                slot = world_->add_component_raw(local, record.component);
+            }
+            if (slot != nullptr && core::deserialize(*type, slot, record.bytes)) {
+                world_->mark_changed_raw(local, record.component);
+                ++deltas_applied_;
+                ++records_replayed_;
+            }
+        }
+    }
+    deferred_.resize(write);
 }
 
 void ClientReplicator::on_despawn(core::ByteReader& reader) {
@@ -138,10 +173,9 @@ void ClientReplicator::on_delta(core::ByteReader& reader) {
         // header) — we must still CONSUME this record's bytes, or the reader desynchronizes and
         // every later record in the packet is garbage.
         const ecs::Entity local = map_.resolve(id);
-        bool resolved = local.is_valid();
+        const bool resolved = local.is_valid();
         if (!resolved) {
             ++records_dropped_unmapped_;
-            dropped_here = true;
         }
 
         for (std::uint8_t c = 0; c < component_count; ++c) {
@@ -167,7 +201,22 @@ void ClientReplicator::on_delta(core::ByteReader& reader) {
                 return;
             }
             if (!resolved) {
-                continue; // bytes consumed, deliberately discarded
+                // HELD, not discarded (ADR-0033 A14). The Spawn is reliable and therefore certain
+                // to arrive; keeping the bytes until it does means this tick lost nothing and can
+                // be honestly acknowledged, instead of stalling the baseline for the whole spawn
+                // burst.
+                if (deferred_.size() >= kMaxDeferredRecords) {
+                    deferred_.erase(deferred_.begin());
+                    ++records_evicted_;
+                    dropped_here = true; // fall back to the re-offer path for this tick only
+                }
+                DeferredRecord record;
+                record.id = id;
+                record.component = local_id;
+                record.bytes.assign(bytes.begin(), bytes.end());
+                deferred_.push_back(std::move(record));
+                ++records_deferred_;
+                continue;
             }
             void* slot = world_->get_component_raw(local, local_id);
             if (slot == nullptr) {

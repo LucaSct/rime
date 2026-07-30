@@ -356,3 +356,96 @@ TEST_CASE("a despawn removes the mirror, and a recycled NetId does not alias it"
     CHECK(client.map().size() == 1);
     CHECK(client.despawns_applied() >= 1);
 }
+
+TEST_CASE("state arriving before its Spawn is held and replayed, not dropped") {
+    // ADR-0033 A14. The cross-channel race is deliberate (§3): a reliable Spawn can land after the
+    // unreliable Delta that first names an entity. What the client does with that Delta decides
+    // whether a wall that is written once and then stands still ever appears on the client at all.
+    //
+    // This proof drives the case that broke the two earlier answers: entities that are written ONCE
+    // and then never again. Under the original m11.3 rule their state was discarded and never
+    // re-offered; under A13's rule it arrived, but only after the baseline had stalled for the
+    // whole burst. A14 holds the bytes, so neither happens.
+    Fixture fx({/*loss_rate=*/0.20f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/5,
+                /*max_latency_ms=*/40});
+
+    net::Link& server_link = fx.network.add_node(fx.server_endpoint);
+    net::Link& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    // Written once at spawn, never touched again — the static prop / standing wall case.
+    constexpr int kStatics = 80;
+    std::vector<ecs::Entity> statics;
+    for (int i = 0; i < kStatics; ++i) {
+        ecs::LocalTransform t{};
+        t.value.translation.x = static_cast<float>(i);
+        const ecs::Entity e = fx.server_world.spawn_with(t);
+        (void)server.replicate(e);
+        statics.push_back(e);
+    }
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    const auto tick = [&]() {
+        fx.now_ms += kTickMs;
+        fx.network.advance_time(fx.now_ms);
+
+        fx.events.clear();
+        server_driver.update(fx.now_ms, fx.events);
+        server.on_session_events(fx.events);
+        (void)server.apply_inbound(server_driver);
+
+        fx.events.clear();
+        client_driver.update(fx.now_ms, fx.events);
+        client.apply_inbound(client_driver);
+
+        fx.server_world.advance_version(); // ticks pass; the statics are never rewritten
+        server.publish(server_driver, fx.now_ms);
+        client.send_ack(client_driver, fx.now_ms);
+    };
+
+    for (int i = 0; i < 120; ++i) {
+        tick();
+    }
+
+    // Non-vacuousness: the race really happened, and the hold path really ran. A run in which every
+    // Spawn beat its Delta would prove nothing about either.
+    CHECK(client.records_deferred() > 0);
+    CHECK(client.records_replayed() > 0);
+    CHECK(client.records_evicted() == 0); // an honest peer never exhausts the buffer
+    CHECK(fx.network.packets_dropped() > 0);
+
+    // Every static's state arrived, despite never being rewritten after the tick it was spawned on.
+    // This is the assertion the original m11.3 code fails.
+    int mirrored = 0;
+    client.map().for_each([&](replication::NetId, ecs::Entity mirror) {
+        if (fx.client_world.get<ecs::LocalTransform>(mirror) != nullptr) {
+            ++mirrored;
+        }
+    });
+    CHECK(mirrored == kStatics);
+
+    // And the baseline is live rather than pinned at zero — the cost A13 paid and A14 does not.
+    CHECK(client.watermark() > 0);
+    CHECK(server.acked_baseline(*server_driver.session_ids().begin()) > 0);
+
+    // Bit-identical convergence, the same standard as the moving-world proof.
+    CHECK(replicated_state_hash(fx.server_world, server.map()) ==
+          replicated_state_hash(fx.client_world, client.map()));
+}

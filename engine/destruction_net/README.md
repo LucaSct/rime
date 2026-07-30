@@ -54,24 +54,51 @@ one island. m11.4b addresses debris by roster index, so that is a wrong address,
 difference. One batch per update; a client behind the authority catches up by running extra whole
 update cycles.
 
+## Debris (m11.4b)
+
+Determinism gives both peers the same chunks in the same order with the same initial conditions — so
+**composition is derived and never sent**. It does not give the trajectory afterwards (the peers are
+not in lockstep, their physics worlds differ, and same-binary determinism is not cross-platform), so
+**transforms are replicated**. The association crosses as *data*: a reflected
+`DebrisOrigin{source NetId, ordinal}` rides m11.3's snapshot path, needing no new message.
+
+Corrections apply on a **tolerance**, not every tick — the replicated transform is authority for
+where a chunk ends up, not a per-tick puppet string, and snapping a continuously-simulated body every
+frame would replace tumbling rubble with a stutter.
+
+The ordinal is only a safe address because m11.4a's A12 fix makes both rosters agree index for index.
+`CompositionCheck` verifies that rather than trusting it, because ordinal addressing fails silently:
+it resolves to a *different* chunk, and the client then corrects the wrong rubble.
+
+## The cross-peer witness
+
+`destruction_net::shared_state_hash(world, map, destruction)` is the one number two peers must agree
+on — per-part alive bits and health plus debris composition, walked in NetId order. Use it, not
+`DestructionWorld::state_hash()`, which folds physics body ids and is a same-process replay witness
+only: across a wire it mismatches every tick, which reads as a broken engine rather than as the wrong
+question.
+
 ## Status
 
 | brick | what | state |
 |-------|------|-------|
 | M11.4a | the **damage-op stream** — bind path, wire format, client apply, contact suppression, the A3 state-application seam | landed |
-| M11.4b | **debris** — the debris↔entity bridge, transform replication, composition-hash drift detection | next |
+| M11.4b | **debris** — the debris↔entity bridge, transform replication, composition-hash drift detection | landed |
 
 ## Layout
 
 ```
 engine/destruction_net/
 ├── include/rime/destruction_net/
-│   ├── wire.hpp                 # MessageTag (0x40 block), the DamageOps layout, packing limits
-│   ├── destruction_server.hpp   # publish the committed op list, addressed by NetId
-│   └── destruction_client.hpp   # decode, translate, queue one batch per fracture boundary
+│   ├── wire.hpp                 # MessageTag (0x40 block), the DamageOps/CompositionCheck layouts
+│   ├── components.hpp           # DebrisOrigin (replicated) / DebrisRef (local) — the debris bridge
+│   ├── composition.hpp          # the composition fingerprint + the CROSS-PEER state witness
+│   ├── destruction_server.hpp   # publish the committed op list; keep the debris↔entity bridge
+│   └── destruction_client.hpp   # decode, queue one batch per fracture boundary, bind + correct debris
 └── src/
     ├── destruction_server.cpp
-    └── destruction_client.cpp
+    ├── destruction_client.cpp
+    └── composition.cpp
 ```
 
 ## Sharing a session

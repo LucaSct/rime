@@ -40,7 +40,8 @@ namespace rime::destruction_net {
 // collided with replication's Spawn, and since draining a session MOVES messages out, the collision
 // would have shown up as one subsystem silently never receiving its mail.
 enum class MessageTag : std::uint8_t {
-    DamageOps = 0x40, // reliable-ordered: server→client, one tick's committed damage-op list
+    DamageOps = 0x40,        // reliable-ordered: server→client, one tick's committed damage-op list
+    CompositionCheck = 0x41, // reliable-ordered: server→client, the post-batch debris fingerprint
 };
 
 inline constexpr std::uint8_t kTagBlockFirst = 0x40;
@@ -73,6 +74,19 @@ inline constexpr std::uint8_t kTagBlockLast = 0x7F;
 //     and cannot be disagreed about; replicating the call instead would re-run a distance query and
 //     a falloff multiply on every client, on a different compiler, which is how sub-ULP drift gets
 //     in.
+//   CompositionCheck  [tag:1][tick:8][count:2]
+//                     then count × [net_index:4][net_generation:4][composition_hash:8]
+//
+//     Sent immediately AFTER the DamageOps parts for the same tick, on the same reliable-ordered
+//     channel — so ordered delivery alone guarantees it arrives once every op of that tick has,
+//     with no completeness rule of its own to get wrong. One entry per destructible the batch
+//     touched, carrying that instance's debris composition as the authority left it
+//     (composition.hpp).
+//
+//     A separate message rather than a trailer on DamageOps, deliberately. A trailer would have to
+//     live in exactly one part of a multi-part tick, which means the packer computing part sizes
+//     around a payload that is not ops — the kind of coupling that is fine until the day a tick
+//     splits differently than expected. Ordering already gives us everything the trailer would.
 inline constexpr std::uint8_t kFlagCentral = 0x01;
 
 // Fixed sizes, so the packer can compute how many ops fit without trial serialization.

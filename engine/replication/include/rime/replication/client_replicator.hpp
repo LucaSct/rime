@@ -24,9 +24,25 @@
 // ORDER IS NOT GUARANTEED ACROSS CHANNELS, and this class is where that is absorbed. Spawns arrive
 // reliably-ordered; deltas arrive unreliably-sequenced; ADR-0033 §3 gives the two no ordering
 // relative to one another *by design*, because the whole point of the split is that state never
-// waits behind a resend. So a delta can name a NetId whose Spawn is still in flight. That is not an
-// error and is not logged as one — `NetIdMap::resolve` returns null, the record is dropped, and the
-// entity simply catches up on the next delta after its Spawn lands.
+// waits behind a resend. So a delta can name a NetId whose Spawn is still in flight.
+//
+// That record is HELD, not dropped (ADR-0033 A14), and replayed the moment the Spawn binds its id.
+// The two weaker answers were both tried first and are worth recording, because the second looked
+// right for a while:
+//
+//   Discard it and wait for the next delta. Correct only for an entity that keeps changing. A wall
+//   that is written once and then stands still is never re-offered, so its mirror stays empty
+//   forever — the original m11.3 bug.
+//
+//   Discard it, and refuse to acknowledge the tick so the server re-offers. Correct, and it is what
+//   A13 shipped. But it makes acknowledgement hostage to spawn traffic: while entities are
+//   arriving, nearly every packet contains an unresolved record, the baseline sits still, and the
+//   server re-sends the whole delta every tick. A scene that streams in continuously — which is the
+//   scene this engine is for — would pay that permanently.
+//
+// Holding the bytes costs a bounded buffer and makes the question go away: nothing is lost, so the
+// tick is honestly complete and can be acknowledged. The only case that still suppresses an
+// acknowledgement is buffer exhaustion, which an honest peer never reaches.
 namespace rime::replication {
 
 class ClientReplicator {
@@ -78,6 +94,17 @@ public:
 
     [[nodiscard]] std::uint64_t malformed_messages() const noexcept { return malformed_; }
 
+    // Records held because their Spawn had not landed yet, and later applied when it did. This is
+    // the healthy path, not an error: it is what lets a tick be acknowledged even though part of it
+    // could not be applied on arrival.
+    [[nodiscard]] std::uint64_t records_deferred() const noexcept { return records_deferred_; }
+
+    [[nodiscard]] std::uint64_t records_replayed() const noexcept { return records_replayed_; }
+
+    // Deferred records evicted because the buffer was full — the only case that still suppresses an
+    // acknowledgement. Should be zero against an honest peer.
+    [[nodiscard]] std::uint64_t records_evicted() const noexcept { return records_evicted_; }
+
     // Messages belonging to another module's tag block that we passed over. Non-zero the moment a
     // session carries more than replication, and the counter a proof asserts on to show the two
     // streams really are sharing one session rather than one having quietly starved the other.
@@ -85,6 +112,19 @@ public:
 
 private:
     void on_spawn(core::ByteReader& reader);
+
+    // Apply every record held for `id`, oldest first, and drop them. Called the moment a Spawn
+    // binds the id — arrival order is preserved, so the newest state still wins.
+    void replay_deferred(NetId id, ecs::Entity local);
+
+    // One component write that arrived before the entity it belongs to. The bytes are COPIED: the
+    // reader's span points into a datagram buffer that is reused the moment this call returns.
+    struct DeferredRecord {
+        NetId id{};
+        ecs::ComponentId component{};
+        std::vector<std::byte> bytes;
+    };
+
     void on_despawn(core::ByteReader& reader);
     void on_delta(core::ByteReader& reader);
 
@@ -103,6 +143,14 @@ private:
     std::uint64_t records_dropped_unmapped_ = 0;
     std::uint64_t malformed_ = 0;
     std::uint64_t foreign_ = 0;
+    std::uint64_t records_deferred_ = 0;
+    std::uint64_t records_replayed_ = 0;
+    std::uint64_t records_evicted_ = 0;
+
+    // Records waiting for their Spawn, in arrival order. Bounded (see kMaxDeferredRecords): an
+    // unbounded buffer keyed by ids a peer chooses is a peer-controlled allocation, which is the
+    // shape of a denial-of-service rather than of a resilience feature.
+    std::vector<DeferredRecord> deferred_;
 };
 
 } // namespace rime::replication

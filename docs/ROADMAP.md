@@ -126,6 +126,39 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > yet (m11.4b), and `DestructionWorld::state_hash()` is a same-process replay witness only — it folds
 > physics body ids, which two independently-built worlds never agree on. **Next:** m11.4b — debris.
 >
+> **Update (2026-07-30) — m11.4b (debris) + ADR-0033 A14/A15.** The split that makes debris cheap:
+> determinism already gives both peers the **same chunks in the same order with the same initial
+> conditions** (m11.4a proves the rosters agree index for index), so **composition is derived and
+> never sent**; what it does not give is the trajectory afterwards — the peers are not in lockstep,
+> their physics worlds hold different body populations, and same-binary determinism is not
+> cross-platform — so **transforms are replicated**. That is exactly the split "debris transforms are
+> distance-budgeted per client" always assumed: you can budget a correction, never an event. The
+> association crosses as **data rather than as a message** — a reflected `DebrisOrigin{source NetId,
+> ordinal}` rides m11.3's snapshot path, so there is no new tag, no new framing and no new
+> completeness rule. Corrections apply on a **tolerance**, not every tick: the replicated transform is
+> authority for where a chunk ends up, not a per-tick puppet string, and snapping a
+> continuously-simulated body every frame would replace tumbling rubble with a stutter (smoothing is
+> m11.6's job, not an ad-hoc lerp here). The ordinal is only a safe address because A12 holds, so a
+> `CompositionCheck` message verifies it rather than trusting it — ordinal addressing fails *silently*,
+> resolving to a **different** chunk, after which the client corrects the wrong rubble. **A14 replaces
+> A13's rule with a better one:** rather than withholding an acknowledgement when a delta record's
+> `Spawn` has not landed (which made acking hostage to spawn traffic and stalled the baseline for the
+> whole burst — the cost m11.4a recorded honestly), the client now **holds the bytes and replays them**
+> when the `Spawn` binds the id. Nothing is lost, so the tick is honestly complete; the buffer is
+> bounded because the ids keying it come from the peer, and overflow falls back to exactly A13's
+> behaviour. Also: the **cross-peer witness moved out of the test and into the engine** as
+> `destruction_net::shared_state_hash` — m11.7 hash-verifies it in CI, a dedicated server compares it
+> to spot a diverged client, and a sample prints it, and three callers re-deriving it privately would
+> be three subtly different answers to one question. Proofs stay GPU-free on the scripted-loss
+> harness: debris mirrors bind to the chunks the client derived, compositions match with zero
+> mismatches, and under a **deliberately wrong client gravity** the corrections fire and the gap stays
+> **bounded** as the run triples in length — a property no magic tolerance constant can express and no
+> runaway can accidentally satisfy. Named gaps: debris **velocity** is not replicated (the local
+> solver's is kept, which is a good estimate precisely because both peers started the chunk from the
+> same impulse), and composition mismatch is **detected but not repaired** — repair needs a
+> client→server path or a periodic state broadcast, which is late-join machinery. **Next:** m11.5 —
+> relevancy + budgets.
+>
 > **Update (2026-07-22) — Milestone 10 (Advanced lighting) COMPLETE.** The whole [ADR-0032](adr/0032-lighting-v2.md)
 > stack landed on `main`, brick by brick, every technique gated behind `LightingSettings` so **off is
 > the byte-identical M5.6 baseline**: **m10.1a** RHI array/cube textures + depth-compare sampler ·
