@@ -449,3 +449,83 @@ TEST_CASE("state arriving before its Spawn is held and replayed, not dropped") {
     CHECK(replicated_state_hash(fx.server_world, server.map()) ==
           replicated_state_hash(fx.client_world, client.map()));
 }
+
+TEST_CASE("entities withheld over the packet budget are still delivered eventually") {
+    // The claim m11.3 made about its own over-budget path — "the baseline mechanism re-offers it
+    // next tick, so this is latency, never loss" — is false for an entity that stops changing, and
+    // m11.5 turns that path from an overflow case into the normal one (relevancy withholds
+    // deliberately, every tick). So it has to be true before relevancy can be built on it.
+    //
+    // The failure it guards: tick T exceeds the packet budget, so entity E is not sent. Every
+    // packet that WAS sent arrives, so the client completes tick T and acks it. The server advances
+    // the baseline to T — past E's write, which happened at or before T. E never changes again, so
+    // it is never re-offered, and the client's mirror of it stays empty forever.
+    Fixture fx({/*loss_rate=*/0.0f, // no loss: this is about the SERVER withholding, not the link
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::Link& server_link = fx.network.add_node(fx.server_endpoint);
+    net::Link& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    // Comfortably past the per-tick ceiling: a LocalTransform record is ~51 bytes, ~22 fit a
+    // packet, and a tick may use at most kMaxDeltaPartsPerTick packets — so ~176 entities fit and
+    // the rest must be withheld. All written once, at spawn, and never touched again.
+    constexpr int kEntities = 400;
+    for (int i = 0; i < kEntities; ++i) {
+        ecs::LocalTransform t{};
+        t.value.translation.x = static_cast<float>(i);
+        (void)server.replicate(fx.server_world.spawn_with(t));
+    }
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    for (int i = 0; i < 200; ++i) {
+        fx.now_ms += kTickMs;
+        fx.network.advance_time(fx.now_ms);
+
+        fx.events.clear();
+        server_driver.update(fx.now_ms, fx.events);
+        server.on_session_events(fx.events);
+        (void)server.apply_inbound(server_driver);
+
+        fx.events.clear();
+        client_driver.update(fx.now_ms, fx.events);
+        client.apply_inbound(client_driver);
+
+        fx.server_world.advance_version(); // time passes; nothing is ever rewritten
+        server.publish(server_driver, fx.now_ms);
+        client.send_ack(client_driver, fx.now_ms);
+    }
+
+    // Non-vacuousness: the budget really was exceeded, or this proves nothing about the path.
+    CHECK(server.entities_dropped_over_budget() > 0);
+
+    // 200 ticks is far more than the ~3 the backlog needs to drain at ~176 entities a tick. Every
+    // entity must have arrived with its state.
+    int mirrored = 0;
+    client.map().for_each([&](replication::NetId, ecs::Entity mirror) {
+        if (fx.client_world.get<ecs::LocalTransform>(mirror) != nullptr) {
+            ++mirrored;
+        }
+    });
+    CHECK(mirrored == kEntities);
+
+    CHECK(replicated_state_hash(fx.server_world, server.map()) ==
+          replicated_state_hash(fx.client_world, client.map()));
+}

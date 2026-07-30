@@ -86,12 +86,21 @@ ServerReplicator::ClientState& ServerReplicator::client_for(net::SessionId id) {
     }
     for (ClientState& state : clients_) {
         if (!state.in_use) {
-            state = ClientState{id, true, 0, {}};
+            state = ClientState{id, true, 0, 0, 0, {}};
             return state;
         }
     }
-    clients_.push_back(ClientState{id, true, 0, {}});
+    clients_.push_back(ClientState{id, true, 0, 0, 0, {}});
     return clients_.back();
+}
+
+ecs::Version ServerReplicator::complete_through(net::SessionId id) const noexcept {
+    for (const ClientState& state : clients_) {
+        if (state.in_use && state.id == id) {
+            return state.complete_through;
+        }
+    }
+    return 0;
 }
 
 ecs::Version ServerReplicator::acked_baseline(net::SessionId id) const noexcept {
@@ -229,7 +238,20 @@ void ServerReplicator::publish_delta(net::Session& session,
         state.acked_baseline = 0;
         ++full_reseeds_;
     }
-    const ecs::Version baseline = state.acked_baseline;
+    // THE EFFECTIVE BASELINE, and why it is not simply what the client acked.
+    //
+    // The client's acknowledgement is honest: it received and applied every part the server sent.
+    // But the server may deliberately have sent only part of what the tick owed — over the packet
+    // budget here, and once m11.5's relevancy lands, on purpose and every tick. Trusting the ack
+    // alone advances the baseline past writes that were never transmitted, and an entity that then
+    // stops changing is never re-offered: it stays wrong on that client forever. Measured before
+    // the fix: 400 entities written once, 176 delivered, 224 permanently missing over a LOSSLESS
+    // link.
+    //
+    // So the baseline is clamped to the newest tick this client was actually sent in full. Same
+    // rule as the client's AckTracker, applied at the other end of the wire: only a COMPLETE tick
+    // may advance a watermark.
+    const ecs::Version baseline = std::min(state.acked_baseline, state.complete_through);
 
     // ── Collect one record per entity with at least one changed replicable component ────────────
     records_.clear();
@@ -300,6 +322,20 @@ void ServerReplicator::publish_delta(net::Session& session,
         return;
     }
 
+    // Resume where the last tick stopped. A world permanently over budget otherwise re-sends the
+    // same prefix of an identically-ordered candidate list every tick, and everything past the
+    // cut-off is never delivered at all — the baseline clamp above makes the ACK honest, and this
+    // makes DELIVERY happen. Rotating the list rather than tracking an offset through the packing
+    // loop keeps the loop itself unchanged, and the cost is a move per record on a path that is
+    // already allocating them.
+    if (state.cursor != 0 && state.cursor < records_.size()) {
+        std::rotate(records_.begin(),
+                    records_.begin() + static_cast<std::ptrdiff_t>(state.cursor),
+                    records_.end());
+    } else {
+        state.cursor = 0;
+    }
+
     // ── Pack records into independently-complete packets ────────────────────────────────────────
     //
     // Not fragments of one logical packet — full packets, each valid on its own. Losing one costs
@@ -332,11 +368,17 @@ void ServerReplicator::publish_delta(net::Session& session,
 
     const std::size_t covered = parts.back().second;
     if (covered < records_.size()) {
-        // Over the per-tick packet budget. The remainder is simply not sent: the baseline mechanism
-        // re-offers it next tick, so this is latency, never loss. It is also the signal that the
-        // world has outgrown unprioritized broadcast — which is exactly what m11.5 exists to fix,
-        // and deliberately not something to solve here with an ad-hoc priority heuristic.
+        // Over the per-tick packet budget. The remainder waits — and genuinely does arrive, because
+        // the baseline clamp above keeps it in the candidate set and the cursor below makes the
+        // next tick resume here rather than restart. Latency, not loss; the two mechanisms are what
+        // earn that claim, which the code made without them until m11.5 checked it.
         entities_over_budget_ += records_.size() - covered;
+        state.cursor += covered;
+    } else {
+        // Everything owed was sent, so this tick may advance the delivery watermark — and the next
+        // one starts from the top again.
+        state.complete_through = now_version;
+        state.cursor = 0;
     }
 
     const auto part_count = static_cast<std::uint8_t>(parts.size());

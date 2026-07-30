@@ -86,6 +86,11 @@ public:
     // COMPLETE snapshot of. Returns 0 for an unknown session or one that has never acked.
     [[nodiscard]] ecs::Version acked_baseline(net::SessionId id) const noexcept;
 
+    // Per-client delivery watermark, for tests and diagnostics: the newest tick this client was
+    // sent everything it was owed. Lags `acked_baseline` whenever relevancy or the byte budget is
+    // withholding, and that gap is the honest measure of how far behind a client is being kept.
+    [[nodiscard]] ecs::Version complete_through(net::SessionId id) const noexcept;
+
     // Counters, so a proof can assert the mechanism actually fired rather than that nothing broke.
     [[nodiscard]] std::uint64_t delta_packets_sent() const noexcept { return delta_packets_sent_; }
 
@@ -102,6 +107,21 @@ private:
         net::SessionId id{};
         bool in_use = false;
         ecs::Version acked_baseline = 0; // 0 = nothing confirmed; every column stamp beats it
+
+        // The newest tick at which this client was sent EVERYTHING it was owed. The effective
+        // baseline is min(acked_baseline, complete_through), and that clamp is what makes
+        // withholding safe (see publish_delta).
+        //
+        // Symmetric with the client's AckTracker watermark, and for the same reason: an
+        // acknowledgement is a promise about state APPLIED, and a tick the server deliberately sent
+        // only part of cannot be allowed to satisfy it — however honestly the client acked what it
+        // actually received.
+        ecs::Version complete_through = 0;
+
+        // Where in the candidate list to resume packing. Without it, a world permanently over
+        // budget sends the same prefix every tick and the tail is never delivered at all — the
+        // baseline clamp alone gives correctness of the ack but not LIVENESS of delivery.
+        std::size_t cursor = 0;
         // Indexed by NetId::index: the generation this client has been told about, or 0 for "never
         // announced". Diffing this against the allocator each tick is what makes spawn/despawn
         // announcements self-healing — a client that missed an announcement is simply re-diffed
