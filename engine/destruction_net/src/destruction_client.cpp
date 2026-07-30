@@ -180,6 +180,12 @@ void DestructionClient::on_composition_check(core::ByteReader& reader) {
         }
     }
     if (batch == nullptr) {
+        // The batch this describes has already been applied, so the state it attests to is gone —
+        // later batches have been applied on top of it. Counted rather than ignored: this is the
+        // one path in this module that could silently reduce how much the composition check
+        // actually checks, and a proof asserting "matches > 0" would still pass while verifying
+        // almost nothing.
+        ++composition_unverified_;
         return;
     }
     batch->expected.clear();
@@ -201,10 +207,15 @@ void DestructionClient::verify_composition(const ecs::World& world,
     for (const ExpectedComposition& e : pending_verify_) {
         const ecs::Entity entity = map.resolve(e.source);
         if (!entity.is_valid()) {
-            continue; // the wall's own mirror has not landed; nothing to compare against yet
+            // The wall's own mirror has not landed, so there is nothing to compare against — and by
+            // the time it does, this batch's state will have been built over. Counted, for the same
+            // reason the orphan case is: an uncounted skip makes the check quietly check less.
+            ++composition_unverified_;
+            continue;
         }
         const auto* ref = world.get<destruction::DestructibleInstanceRef>(entity);
         if (ref == nullptr || ref->instance == destruction::kUnboundInstance) {
+            ++composition_unverified_; // arrived but not standing yet — same story
             continue;
         }
         const std::uint64_t local =
@@ -231,7 +242,15 @@ void DestructionClient::flush() {
     pending_count_ = 0;
 }
 
-bool DestructionClient::apply_next_batch(destruction::DestructionWorld& destruction) {
+bool DestructionClient::apply_next_batch(const ecs::World& world,
+                                         const replication::NetIdMap& map,
+                                         destruction::DestructionWorld& destruction) {
+    // Verify the PREVIOUS batch before releasing this one. By now its update() has run, so its
+    // fingerprints describe the state that actually exists — which is true here and nowhere else
+    // during a catch-up burst. Verifying only at the end of the tick could check the burst's last
+    // batch and silently discarded every earlier one.
+    verify_composition(world, map, destruction);
+
     if (ready_.empty()) {
         return false;
     }
