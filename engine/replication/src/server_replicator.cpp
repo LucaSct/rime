@@ -47,6 +47,25 @@ void ServerReplicator::despawn(ecs::Entity entity) {
         // its generation, which is what makes a recycled index safe (net_id.hpp).
         map_.unbind(*id);
         allocator_.free(*id);
+
+        // Forget every client's relevancy bit for this slot. The slot will be recycled with a
+        // bumped generation, and `was_relevant` is a per-item record keyed by INDEX alone — so
+        // without this the next tenant inherits the dead entity's "this client already has it", and
+        // the entry send that a newly-relevant entity depends on is skipped for an entity that was
+        // never sent.
+        //
+        // Corollary 2 of docs/design/replication.md: a per-peer record of what a client holds may
+        // only ever strengthen on confirmed holding. Inheriting a bit across a recycle is
+        // strengthening on nothing at all. Today the mistake is masked — a freshly spawned entity
+        // always has a fresh column write, so it rides out on the ordinary changed-since-baseline
+        // path rather than needing the entry path — but that is a coincidence of spawn order, not a
+        // guarantee, and it is exactly the kind of coincidence the previous five instances relied
+        // on.
+        for (ClientState& state : clients_) {
+            if (state.in_use && id->index < state.was_relevant.size()) {
+                state.was_relevant[id->index] = 0;
+            }
+        }
     }
     (void)world_->despawn(entity);
 }
@@ -287,8 +306,20 @@ void ServerReplicator::publish_delta(net::Session& session,
     // The result is splayed into `priority_by_index_` so the record walk below can answer "does
     // this client care, and how much" with an array read instead of a call. With no policy
     // installed every entity scores 1.0, which is the m11.3/11.4 behaviour exactly.
+    // A slot that names no live entity scores 0 — NOT the 1.0 default a live unscored entity gets.
+    // The allocator's slot vector never shrinks, so after any despawn it holds indices that name
+    // nothing, and `map_.for_each` (and therefore the policy) never visits them. Defaulting those
+    // to "relevant" made them read as entities eternally about to enter, which pinned the full-walk
+    // trigger below on forever: a permanent, silent, per-client cost with byte-identical output.
+    // Debris are culled and despawned continuously, so distance relevancy makes that the steady
+    // state rather than an edge case. Measured before the fix: 30 full walks in 30 quiet ticks.
     const std::size_t slot_count = allocator_.slot_count();
-    priority_by_index_.assign(slot_count, 1.0f);
+    priority_by_index_.assign(slot_count, 0.0f);
+    map_.for_each([this](NetId id, ecs::Entity) {
+        if (id.index < priority_by_index_.size()) {
+            priority_by_index_[id.index] = 1.0f;
+        }
+    });
     if (relevancy_) {
         candidates_.clear();
         map_.for_each([this](NetId, ecs::Entity entity) { candidates_.push_back(entity); });
@@ -316,6 +347,10 @@ void ServerReplicator::publish_delta(net::Session& session,
             any_entering = true;
             break;
         }
+    }
+    ++delta_ticks_;
+    if (any_entering) {
+        ++full_walk_ticks_;
     }
 
     // ── Collect one record per entity with at least one changed replicable component ────────────

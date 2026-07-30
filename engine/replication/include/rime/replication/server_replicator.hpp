@@ -148,6 +148,21 @@ public:
         return entities_entered_;
     }
 
+    // (client, tick) pairs on which something entered relevance and the per-chunk "changed since
+    // baseline" skip was therefore given up — see the `any_entering` block in publish_delta.
+    //
+    // This is the counter for a SKIP THAT STOPPED HAPPENING, which is the easiest kind to leave
+    // unmeasured: giving up the optimization is invisible from the outside, because the output is
+    // byte-for-byte identical and only the cost changes. Without it, a defect that pins the full
+    // walk on forever degrades every tick for every client and no test can see it. Expect this to
+    // be a small fraction of (clients × ticks) in a steady state; if it approaches 1.0, relevancy
+    // is thrashing and the entry burst is no longer a burst.
+    [[nodiscard]] std::uint64_t full_walk_ticks() const noexcept { return full_walk_ticks_; }
+
+    // Publishes that ran the delta path at all, so `full_walk_ticks` has a denominator. Counted per
+    // (client, tick) on the same footing, including ticks that produced no records.
+    [[nodiscard]] std::uint64_t delta_ticks() const noexcept { return delta_ticks_; }
+
 private:
     struct ClientState {
         net::SessionId id{};
@@ -211,6 +226,8 @@ private:
     std::uint64_t entities_over_budget_ = 0;
     std::uint64_t entities_culled_ = 0;
     std::uint64_t entities_entered_ = 0;
+    std::uint64_t full_walk_ticks_ = 0;
+    std::uint64_t delta_ticks_ = 0;
 
     RelevancyFn relevancy_;
     Budget budget_;

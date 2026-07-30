@@ -3,7 +3,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "rime/core/reflect/serialize.hpp"
@@ -626,6 +628,127 @@ TEST_CASE("an entity entering the relevant set is sent even though it never chan
 
     CHECK(server.entities_sent_on_entry() > entered_before);
     CHECK(mirrored_with_state() == kNear + kFar);
+    CHECK(replicated_state_hash(fx.server_world, server.map()) ==
+          replicated_state_hash(fx.client_world, client.map()));
+}
+
+TEST_CASE("a despawned entity's slot does not pin the full-walk optimization off forever") {
+    // THE DEFECT THIS PINS DOWN. `publish_delta` gives up the per-chunk "changed since baseline"
+    // skip on any tick where something ENTERS a client's relevant set, because an entering entity
+    // is by definition one that has NOT changed and the skip would step straight over it. That
+    // trade is only cheap if entries are rare.
+    //
+    // The entry test reads two slot-indexed arrays: `priority_by_index_`, which defaults every slot
+    // to RELEVANT (1.0), and `was_relevant`, which the cull path clears to 0. The policy only ever
+    // overwrites priorities for slots the NetIdMap still holds. So a slot whose entity was culled
+    // (was_relevant = 0) and then DESPAWNED (no longer a candidate, priority stuck at the 1.0
+    // default) reads forever after as "relevant, and was not relevant last tick" — an entity
+    // eternally entering, which no longer exists.
+    //
+    // Nothing observable changes: the bytes on the wire are identical and the state still
+    // converges. Only the cost changes, permanently, for every client. That is exactly why this
+    // needs a counter rather than an eyeball — and why m11.5's distance culling is what makes it
+    // urgent, since debris are culled and despawned continuously by design.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::ScriptedLink& server_link = fx.network.add_node(fx.server_endpoint);
+    net::ScriptedLink& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    // One entity that stays relevant forever, and one that will be culled and then despawned.
+    ecs::LocalTransform t{};
+    const ecs::Entity keeper = fx.server_world.spawn_with(t);
+    t.value.translation.x = 1.0f;
+    const ecs::Entity doomed = fx.server_world.spawn_with(t);
+    (void)server.replicate(keeper);
+    (void)server.replicate(doomed);
+
+    bool cull_doomed = false;
+    server.set_relevancy(
+        [&](net::SessionId, std::span<const ecs::Entity> candidates, std::span<float> priorities) {
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                priorities[i] = (cull_doomed && candidates[i] == doomed) ? 0.0f : 1.0f;
+            }
+        });
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    // The keeper MOVES every tick. That is not decoration: the cull bookkeeping lives inside the
+    // per-chunk row walk, so a world in which nothing ever changes skips the chunk entirely and
+    // never observes that anything became irrelevant. A relevancy defect only has teeth in a world
+    // with motion in it, so the proof has to supply some.
+    float keeper_x = 0.0f;
+    bool keeper_moving = true;
+    const auto run = [&](int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            fx.now_ms += kTickMs;
+            fx.network.advance_time(fx.now_ms);
+            fx.events.clear();
+            server_driver.update(fx.now_ms, fx.events);
+            server.on_session_events(fx.events);
+            (void)server.apply_inbound(server_driver);
+            fx.events.clear();
+            client_driver.update(fx.now_ms, fx.events);
+            client.apply_inbound(client_driver);
+            fx.server_world.advance_version();
+            if (keeper_moving) {
+                keeper_x += 1.0f;
+                if (auto* transform = fx.server_world.get<ecs::LocalTransform>(keeper)) {
+                    transform->value.translation.x = keeper_x;
+                    fx.server_world.mark_changed<ecs::LocalTransform>(keeper);
+                }
+            }
+            server.publish(server_driver, fx.now_ms);
+            client.send_ack(client_driver, fx.now_ms);
+        }
+    };
+
+    // Settle: everything relevant, everything delivered and acked.
+    run(20);
+
+    // Cull it, let the cull register, then despawn it through the replicator (which retracts the
+    // NetId before destroying the entity, freeing the slot for reuse).
+    cull_doomed = true;
+    run(5);
+    REQUIRE(server.entities_culled_irrelevant() > 0);
+    server.despawn(doomed);
+    run(10);
+
+    // The world is now quiet and stable: one entity, permanently relevant, never rewritten. No
+    // entity can legitimately be entering relevance any more, so the full walk must stop.
+    const std::uint64_t walks_before = server.full_walk_ticks();
+    const std::uint64_t ticks_before = server.delta_ticks();
+    run(30);
+    const std::uint64_t walks_added = server.full_walk_ticks() - walks_before;
+    const std::uint64_t ticks_added = server.delta_ticks() - ticks_before;
+
+    // Non-vacuousness: the delta path really did run on those ticks.
+    REQUIRE(ticks_added > 0);
+    CHECK(walks_added == 0);
+
+    // And the surviving entity is still correctly mirrored — the fix must not buy its cheapness by
+    // dropping the entry that matters. Let the keeper come to rest first: it has been moving every
+    // tick, so a hash taken mid-flight compares the server's now against the client's now-minus-RTT
+    // and would fail on a perfectly healthy link.
+    keeper_moving = false;
+    run(10);
     CHECK(replicated_state_hash(fx.server_world, server.map()) ==
           replicated_state_hash(fx.client_world, client.map()));
 }
