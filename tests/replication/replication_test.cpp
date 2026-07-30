@@ -15,6 +15,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/net/net_driver.hpp"
 #include "rime/replication/client_replicator.hpp"
+#include "rime/replication/interpolation.hpp"
 #include "rime/replication/relevancy.hpp"
 #include "rime/replication/server_replicator.hpp"
 
@@ -1367,4 +1368,123 @@ TEST_CASE("an entity too big for one packet is dropped loudly, not retried forev
         }
     });
     CHECK(mirrored == kNormal);
+}
+
+TEST_CASE("transform history rolls forward on the APPLY, and a first appearance snaps") {
+    // m11.6's foundation: the previous/current pair ADR-0023 §3 left as a documented seam. The
+    // alpha has been computed and handed to the render callback since M2; this is the state to
+    // blend it against. Three properties, each a rule from docs/design/replication.md:
+    //
+    //   1. History is a COMPONENT, not a table keyed by NetId::index. A slot-keyed record outlives
+    //      its entity and the next tenant inherits it — here that would be a fresh spawn blending
+    //      out of a dead entity's last position, a visible smear from a bug with no wrong state.
+    //   2. The rotation is driven by the WRITE, not by a tick boundary. Replicated writes do not
+    //      land when the packet nominally arrived: replay_deferred applies records whose Spawn had
+    //      not yet bound, potentially many ticks later.
+    //   3. A first appearance has no previous and must SNAP, not blend from the origin.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::ScriptedLink& server_link = fx.network.add_node(fx.server_endpoint);
+    net::ScriptedLink& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    // The handshake must still match: PreviousTransform is registered on the CLIENT only, and stays
+    // out of the schema hash by being unreflected. If that ever stopped holding, this is where it
+    // would show up rather than as a mysterious connection failure.
+    REQUIRE(ecs::component_schema_hash(fx.server_world) ==
+            ecs::component_schema_hash(fx.client_world));
+
+    ecs::LocalTransform t{};
+    const ecs::Entity moving = fx.server_world.spawn_with(t);
+    (void)server.replicate(moving);
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    float x = 0.0f;
+    bool advance = false;
+    const auto run = [&](int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            fx.now_ms += kTickMs;
+            fx.network.advance_time(fx.now_ms);
+            fx.events.clear();
+            server_driver.update(fx.now_ms, fx.events);
+            server.on_session_events(fx.events);
+            (void)server.apply_inbound(server_driver);
+            fx.events.clear();
+            client_driver.update(fx.now_ms, fx.events);
+            client.apply_inbound(client_driver);
+            fx.server_world.advance_version();
+            if (advance) {
+                x += 10.0f;
+                if (auto* tf = fx.server_world.get<ecs::LocalTransform>(moving)) {
+                    tf->value.translation.x = x;
+                    fx.server_world.mark_changed<ecs::LocalTransform>(moving);
+                }
+            }
+            server.publish(server_driver, fx.now_ms);
+            client.send_ack(client_driver, fx.now_ms);
+        }
+    };
+
+    const auto mirror_of = [&]() {
+        ecs::Entity found = ecs::kNullEntity;
+        client.map().for_each([&](replication::NetId, ecs::Entity m) { found = m; });
+        return found;
+    };
+
+    // ── 3. First appearance: state has arrived, but there is no previous, so sampling at any alpha
+    // returns the current value exactly. A default-constructed previous would drag it toward the
+    // origin — which at alpha 0.5 would read as half of x, a plausible-looking wrong answer.
+    run(20);
+    const ecs::Entity mirror = mirror_of();
+    REQUIRE(mirror.is_valid());
+    REQUIRE(fx.client_world.get<ecs::LocalTransform>(mirror) != nullptr);
+    const auto* history = fx.client_world.get<replication::PreviousTransform>(mirror);
+    CHECK((history == nullptr || !history->valid)); // no previous was invented
+    CHECK(replication::interpolated_transform(fx.client_world, mirror, 0.5f).translation.x ==
+          doctest::Approx(0.0f));
+
+    // ── 2. Now it moves. Each applied write rotates the history, so previous is the value this
+    // client actually held before the newest one — one 10-unit step behind.
+    advance = true;
+    run(20);
+
+    const auto* moved_history = fx.client_world.get<replication::PreviousTransform>(mirror);
+    REQUIRE(moved_history != nullptr);
+    REQUIRE(moved_history->valid);
+    const float current_x = fx.client_world.get<ecs::LocalTransform>(mirror)->value.translation.x;
+    const float previous_x = moved_history->value.translation.x;
+    CHECK(previous_x < current_x);                           // it really rolled forward
+    CHECK(current_x - previous_x == doctest::Approx(10.0f)); // by exactly one applied step
+
+    // And the blend lands between them, at the fraction asked for.
+    CHECK(replication::interpolated_transform(fx.client_world, mirror, 0.0f).translation.x ==
+          doctest::Approx(previous_x));
+    CHECK(replication::interpolated_transform(fx.client_world, mirror, 1.0f).translation.x ==
+          doctest::Approx(current_x));
+    CHECK(replication::interpolated_transform(fx.client_world, mirror, 0.5f).translation.x ==
+          doctest::Approx((previous_x + current_x) * 0.5f));
+
+    // ── 1. The history dies with its entity. A slot-keyed side table would hand this position to
+    // whatever entity next occupied the slot; a component cannot, and this pins that.
+    server.despawn(moving);
+    run(20);
+    CHECK(!fx.client_world.is_alive(mirror));
 }

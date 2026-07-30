@@ -300,6 +300,32 @@ stays 1 as the world grows, which is the whole claim.
 
 ---
 
+## Transform history (m11.6a) — built, and the two traps it hid
+
+`PreviousTransform` + `interpolated_transform` in `replication/interpolation.hpp` are the buffer
+ADR-0023 §3 left as a seam. Built to rules 1–3 below: a **component** rather than a `NetId`-keyed side
+table, rotated on the **apply** rather than on a tick boundary, with an explicit `valid` flag so a
+first appearance snaps instead of blending out of the world origin.
+
+Two defects surfaced while proving it, both worth keeping because neither was visible by reading:
+
+**A redundant re-send collapsed the blend.** The server re-sends until the baseline advances — a
+round trip — so the same value routinely lands two ticks running. Rotating on those set
+`previous := current` and destroyed a genuine gap, making the client snap through exactly the motion
+interpolation exists to smooth. The rotation now fires only when the incoming value actually differs.
+
+**The first version of that guard did nothing, silently.** It compared with `memcmp` over
+`ecs::LocalTransform`. `core::Quat` is over-aligned, so `sizeof(Transform)` exceeds the 40 bytes it
+packs into and the remainder is padding whose contents nothing defines — the comparison read it, never
+matched, and the guard became a no-op that still compiled and still looked right. **Never `memcmp` a
+struct with padding to decide whether a value changed**; compare fields, or compare the packed
+serialization.
+
+Still to build: the renderer consuming the blend (it touches `WorldTransform` / `propagate_transforms`
+and wants its own design pass) and the whole client→server input half.
+
+---
+
 ## For m11.6 (interpolation) — build it to the rule the first time
 
 1. **Store the previous/current pair as a component**, not a side-table keyed by `NetId::index`.
