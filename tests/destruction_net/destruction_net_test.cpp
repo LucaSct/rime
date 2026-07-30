@@ -26,6 +26,7 @@
 #include "rime/net/net_driver.hpp"
 #include "rime/physics/physics.hpp"
 #include "rime/replication/client_replicator.hpp"
+#include "rime/replication/relevancy.hpp"
 #include "rime/replication/server_replicator.hpp"
 
 // m11.4a's proof: a wall broken on the server breaks the SAME WAY on a client, over a link that
@@ -1166,4 +1167,205 @@ TEST_CASE("destruction events survive a client whose relevancy and budget withho
         shared_destruction_hash(client_peer.world, state_client.map(), client_peer.destruction);
     CHECK(server_hash == client_hash);
     CHECK(client_hash != hash_before_damage);
+}
+
+TEST_CASE(
+    "distance relevancy culls far debris transforms while the break itself still replicates") {
+    // The other half of the m11.5 roadmap line, with the REAL policy rather than a test lambda:
+    // "debris transforms are distance-budgeted per client". Three walls, 50 units apart, and a
+    // viewpoint parked on the nearest one with a radius that excludes the other two.
+    //
+    // What must happen: the far walls' rubble stops consuming this client's bandwidth, while the
+    // cross-peer destruction witness — alive bits, health, debris composition — still agrees bit
+    // for bit for every wall, near and far. The client derives the far breaks from the op stream
+    // and simply is not told where the resulting chunks ended up.
+    net::ScriptedNetwork network{0xC0FFEEull,
+                                 {/*loss_rate=*/0.0f,
+                                  /*duplicate_rate=*/0.0f,
+                                  /*min_latency_ms=*/5,
+                                  /*max_latency_ms=*/20}};
+    const net::Endpoint server_endpoint{0x7F000001u, kServerPort};
+    const net::Endpoint client_endpoint{0x7F000001u, kClientPort};
+
+    const assets::DestructibleAsset asset = load_asset("wall.rdest");
+    constexpr std::uint64_t kAssetId = 0xABCDull;
+
+    Peer server_peer;
+    Peer client_peer;
+    server_peer.register_components();
+    client_peer.register_components();
+    server_peer.register_pattern(asset, kAssetId);
+    client_peer.register_pattern(asset, kAssetId);
+
+    net::Link& server_link = network.add_node(server_endpoint);
+    net::Link& client_link = network.add_node(client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(server_peer.world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(client_peer.world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator state_server{server_peer.world};
+    replication::ClientReplicator state_client{client_peer.world};
+    destruction_net::DestructionServer destruction_server;
+    destruction_net::DestructionClient destruction_client;
+
+    constexpr int kWalls = 3;
+    for (int i = 0; i < kWalls; ++i) {
+        core::Transform placement;
+        placement.translation.x = static_cast<float>(i) * 50.0f;
+        const ecs::Entity e = server_peer.world.spawn_with(ecs::LocalTransform{placement},
+                                                           destruction::Destructible{kAssetId});
+        (void)state_server.replicate(e);
+    }
+
+    REQUIRE(client_driver.connect(server_endpoint, kTickMs).has_value());
+
+    std::uint64_t now_ms = 0;
+    std::uint64_t tick_index = 0;
+    std::vector<net::SessionEvent> events;
+    std::vector<net::Received> inbox;
+
+    const auto tick = [&](bool damage) {
+        now_ms += kTickMs;
+        ++tick_index;
+        network.advance_time(now_ms);
+
+        events.clear();
+        server_driver.update(now_ms, events);
+        state_server.on_session_events(events);
+        (void)state_server.apply_inbound(server_driver);
+
+        events.clear();
+        client_driver.update(now_ms, events);
+        for (const net::SessionId id : client_driver.session_ids()) {
+            net::Session* session = client_driver.session(id);
+            if (session == nullptr) {
+                continue;
+            }
+            inbox.clear();
+            (void)session->drain_received(inbox);
+            state_client.apply_messages(inbox);
+            destruction_client.apply_messages(inbox, state_client.map(), client_peer.world);
+        }
+
+        (void)destruction::bind_destructibles(server_peer.world,
+                                              server_peer.destruction,
+                                              server_peer.physics,
+                                              server_peer.resolver(),
+                                              destruction::Authority::Local);
+        (void)destruction::bind_destructibles(client_peer.world,
+                                              client_peer.destruction,
+                                              client_peer.physics,
+                                              client_peer.resolver(),
+                                              destruction::Authority::Remote);
+
+        server_peer.world.advance_version();
+        if (damage) {
+            std::vector<ecs::Entity> bound;
+            destruction::build_instance_entity_table(server_peer.world, bound);
+            for (std::uint32_t i = 0; i < bound.size(); ++i) {
+                if (!bound[i].is_valid()) {
+                    continue;
+                }
+                server_peer.destruction.apply_damage(
+                    destruction::InstanceId{i, 0},
+                    core::Vec3{static_cast<float>(i) * 50.0f, 0.4f, 0.0f},
+                    0.30f,
+                    0.34f,
+                    core::Vec3{0.0f, 0.0f, 4.0f});
+            }
+        }
+        server_peer.physics.step(kDt);
+        server_peer.destruction.update(server_peer.physics);
+
+        do {
+            (void)destruction_client.apply_next_batch(
+                client_peer.world, state_client.map(), client_peer.destruction);
+            client_peer.physics.step(kDt);
+            client_peer.destruction.update(client_peer.physics);
+        } while (destruction_client.pending_batches() > 0);
+
+        destruction_server.sync_debris(
+            server_peer.world,
+            server_peer.destruction,
+            server_peer.physics,
+            state_server.map(),
+            [&](ecs::Entity e) { (void)state_server.replicate(e); },
+            [&](ecs::Entity e) { state_server.despawn(e); });
+        destruction_client.sync_debris(
+            client_peer.world, state_client.map(), client_peer.destruction, client_peer.physics);
+
+        destruction_server.publish(server_driver,
+                                   state_server.map(),
+                                   server_peer.world,
+                                   server_peer.destruction,
+                                   tick_index,
+                                   now_ms);
+        state_server.publish(server_driver, now_ms);
+        state_client.send_ack(client_driver, now_ms);
+    };
+
+    // Settle with everything relevant, so the walls replicate and bind on both sides.
+    for (int i = 0; i < 40; ++i) {
+        tick(false);
+    }
+    REQUIRE(client_peer.destruction.instance_count() == kWalls);
+
+    // Viewpoint on wall 0, radius 25 — walls 1 and 2 (at x=50 and x=100) and all their rubble are
+    // out of range. The walls themselves are already mirrored and bound; what gets culled from here
+    // on is their ongoing transform traffic.
+    replication::DistanceRelevancy config;
+    config.radius = 25.0f;
+    config.hysteresis = 0.1f;
+    config.viewpoint = [](net::SessionId, core::Vec3& out) {
+        out = core::Vec3{0.0f, 0.0f, 0.0f};
+        return true;
+    };
+    state_server.set_relevancy(replication::distance_relevancy(server_peer.world, config));
+
+    const std::uint64_t culled_before = state_server.entities_culled_irrelevant();
+
+    for (int i = 0; i < 6; ++i) {
+        tick(true);
+    }
+    for (int i = 0; i < 60; ++i) {
+        tick(false);
+    }
+
+    // ── Non-vacuousness ──
+    CHECK(destruction_server.debris_entities_spawned() > 0);          // there was rubble to cull
+    CHECK(state_server.entities_culled_irrelevant() > culled_before); // and it was culled
+    CHECK(destruction_server.ops_sent() > 0);
+    CHECK(destruction_client.ops_applied() == destruction_server.ops_sent());
+    CHECK(destruction_client.pending_batches() == 0);
+
+    // The relevancy thrash guard: with a hysteresis band and a stationary viewpoint, the steady
+    // state must not be re-entering every tick. If this ratio ever approaches 1.0, the per-chunk
+    // delta skip has stopped applying and m11.5's optimization is off (see
+    // docs/design/replication.md).
+    CHECK(state_server.full_walk_ticks() < state_server.delta_ticks());
+
+    bool any_part_down = false;
+    for (std::uint32_t i = 0; i < kWalls; ++i) {
+        const destruction::InstanceId inst{i, 0};
+        for (std::uint32_t p = 0; p < server_peer.destruction.instance_part_count(inst); ++p) {
+            any_part_down = any_part_down || !server_peer.destruction.part_alive(inst, p);
+        }
+    }
+    CHECK(any_part_down);
+
+    // ── The proof: every wall, near AND far, broke identically. Transforms are outside this
+    // witness by design (composition.hpp) — which is precisely what makes them safe to budget.
+    CHECK(destruction_net::shared_state_hash(
+              server_peer.world, state_server.map(), server_peer.destruction) ==
+          destruction_net::shared_state_hash(
+              client_peer.world, state_client.map(), client_peer.destruction));
 }

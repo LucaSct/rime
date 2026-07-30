@@ -68,12 +68,23 @@ inline constexpr float kUnpositionedPriority = 2.0f;
 // `ServerReplicator::set_relevancy`.
 //
 // THE POSITION SOURCE, AND THE ONE DECISION IN HERE THAT IS NOT OBVIOUS. An entity's position is
-// read from `WorldTransform` if it has one, otherwise from `LocalTransform`. World first because it
-// is the absolute placement and the only correct answer for a parented entity; Local as the
-// fallback because a root's local placement IS its world placement, and debris — the single largest
-// population this policy exists to cull — are spawned as roots carrying only a `LocalTransform`
-// (destruction_net/src/destruction_server.cpp). A policy that insisted on `WorldTransform` would
+// read from `WorldTransform` if it has one; otherwise from `LocalTransform` **only if the entity is
+// a root** (no `Parent`, or `Parent{kNullEntity}`); otherwise it is unmeasurable.
+//
+// World first because it is the absolute placement. The root-only fallback because a root's local
+// placement IS its world placement, and debris — the single largest population this policy exists
+// to cull — are spawned as roots carrying only a `LocalTransform`
+// (destruction_net/src/destruction_server.cpp). A policy insisting on `WorldTransform` would
 // silently fail to locate the exact entities it was built for.
+//
+// The root condition is the easy half to omit and the wrong half to omit. `LocalTransform` on a
+// CHILD is relative to its parent, so reading it as a world position is not an approximation but a
+// coordinate-space error: a child sitting right beside its parent scores as though it were at its
+// parent-relative offset from the world origin. Walking the parent chain here would fix it and
+// would re-implement `propagate_transforms` one entity at a time, per client, per tick — against
+// the very O(clients x entities) cost this brick exists to contain. So it refuses to guess, and
+// such an entity falls into the always-relevant case below. The real fix is to give it a
+// `WorldTransform`.
 //
 // AN ENTITY WITH NEITHER IS ALWAYS RELEVANT, at `kUnpositionedPriority`. This is the
 // safety-critical default and it is worth being explicit about why, because the convenient answer
@@ -84,12 +95,18 @@ inline constexpr float kUnpositionedPriority = 2.0f;
 // open costs bandwidth; failing closed costs correctness, and costs it quietly. When a policy
 // cannot answer a question, it must not pretend the answer was "no".
 //
-// THE CURVE. Priority is `radius / (radius + distance)`: 1.0 at the viewpoint, 0.5 at the radius,
-// strictly decreasing, and never zero. That last property matters more than it looks. The relevance
-// DECISION is a separate comparison against the radius, not "did the priority reach zero" — so
-// nothing lands on the `<= 0 means irrelevant` boundary by arithmetic accident, and an entity
-// sitting exactly at the radius has a well-defined, comfortably positive priority rather than a
-// float that flickers around zero as the last bit wobbles.
+// THE CURVE. Priority is `r² / (r² + d²)`: 1.0 at the viewpoint, 0.5 at the radius, strictly
+// decreasing, and never zero. That last property matters more than it looks. The relevance DECISION
+// is a separate comparison against the radius, not "did the priority reach zero" — so nothing lands
+// on the `<= 0 means irrelevant` boundary by arithmetic accident, and an entity sitting exactly at
+// the radius has a well-defined, comfortably positive priority rather than a float flickering
+// around zero as the last bit wobbles. Writing it as a ratio of positive sums rather than a
+// difference like `radius - distance` also means there is nothing to cancel: that form loses its
+// significant digits precisely at large radii and large distances, which is where the far entities
+// are, and can round an entity that is genuinely inside the radius down to exactly 0.0f.
+//
+// It is computed in SQUARED distance and never takes a sqrt: a priority only has to be monotonic in
+// distance, and nothing downstream reads it as a metric.
 [[nodiscard]] RelevancyFn distance_relevancy(const ecs::World& world, DistanceRelevancy config);
 
 } // namespace rime::replication

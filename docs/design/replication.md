@@ -166,10 +166,68 @@ rare transition common.
 - **The relevancy call still walks every replicated entity per client.** The policy can be cheap per
   entity, but nothing narrows the span yet, so the O(clients × entities) pass stands. Narrowing it
   needs a spatial index over replicated entities — its own brick.
+- **`any_entering` is a global gate, and at scale it is expected to be stuck open.** This is the
+  most important known cost in the module, so it gets its own section below.
+- **A parented entity with no `WorldTransform` cannot be located** by `distance_relevancy`, so it is
+  treated as unmeasurable and always relevant. Resolving it would mean re-implementing
+  `propagate_transforms` one entity at a time inside the policy. Give such an entity a
+  `WorldTransform` instead.
 - **Composition mismatch is detected, not repaired.** Repair needs a client→server request path or a
   periodic authoritative broadcast — late-join machinery.
 - **Debris velocity is not replicated**, only transforms. The local solver's velocity is kept, which
   is a good estimate precisely because both peers launched the chunk from the same impulse.
+
+---
+
+## The `any_entering` gate — a known cost, with the replacement already designed
+
+`publish_delta` computes one boolean per (client, tick): did anything enter this client's relevant
+set? When true, it gives up the per-chunk "changed since baseline" test for **the whole world**, not
+just for the entering entity — every column of every chunk of every replicated archetype is
+re-examined. The mechanism's cost is proportional to the size of the entire replicated world, and it
+is triggered by a *single* transition anywhere in it.
+
+The comment defending that trade says transitions are "rare and bursty". **Under the workload m11.5
+exists for, that is not defensible.** At the ADR's target — 64 clients, ~1000 debris, debris moving,
+viewpoints moving — the probability that *some* (client, entity) pair crosses *some* radius on a
+given tick approaches 1. `any_entering` then reads true essentially every tick for essentially every
+client, and the chunk-version skip — "the whole reason this design needs no history buffer", per the
+module header — is effectively off whenever distance culling is on. A fully static 10,000-entity
+level would be walked in full every tick because of debris churn that has nothing to do with it.
+
+Two things currently hold the line, and neither is a fix:
+
+1. **Hysteresis** in `distance_relevancy` removes the *thrash* case — an entity loitering on the
+   boundary no longer re-enters every other tick. It does nothing about genuine entries, which at
+   scale are enough on their own.
+2. **`full_walk_ticks()` / `delta_ticks()`** make the problem *visible*. That ratio is the tripwire;
+   today it is a live measurement of an accepted cost.
+
+**The replacement, when this is built:** stop gating the chunk walk at all. Treat entering as its own
+targeted emission pass.
+
+- The existing `candidates_`/`priorities_` loop already visits every live candidate for this client
+  every tick. Classify each there: culled, entering, or ordinary — no new traversal.
+- For **entering** candidates only, build the record directly, without the chunk walk:
+  `world_->signature_of(entity)` intersected with the wire schema's replicable set gives the columns,
+  then `get_component_raw` + `core::serialize` exactly as the row loop already does. Push into the
+  same `records_` / `record_priority_` / `record_slot_` / `record_entry_` arrays — everything
+  downstream (sort, rotate, budget, packetize, `credit_sent`) is agnostic about which pass produced a
+  record, so none of it changes.
+- Delete `any_entering`. `dirty` reverts to `chunk.column_version(local) > baseline`; `chunk_changed`
+  becomes redundant with `!dirty.empty()`; the per-row entering check disappears, because by the time
+  the chunk walk runs every entering slot has already been handled.
+- Skip rows in the chunk walk whose slot the entry pass already emitted, so nothing is sent twice.
+
+Cost becomes O(what changed) + O(what is entering for this client), decoupled from how much of the
+rest of the world exists — which makes the "rare and bursty" assumption *unnecessary* rather than
+merely better-founded. `full_walk_ticks()` then becomes a permanent regression tripwire that should
+read 0 forever, which is a better fate for a counter than being a live measurement.
+
+A cheaper middle ground, if a brick cannot take the restructure: scope `any_entering` **per
+archetype** rather than globally, so unrelated static archetypes stay cheap. It still walks a
+transitioning archetype's clean chunks, and it leaves a "did I remember the middle ground too" risk
+behind, so prefer the full version.
 
 ---
 

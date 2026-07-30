@@ -11,16 +11,34 @@
 namespace rime::replication {
 namespace {
 
-// World placement first, local as the fallback — see the header for why insisting on WorldTransform
-// would have failed to locate debris, which are the population this policy mainly exists to cull.
+// World placement first, local as the fallback FOR ROOTS ONLY — see the header for why insisting on
+// WorldTransform would have failed to locate debris, which are the population this policy mainly
+// exists to cull.
+//
+// The root check is the part that is easy to leave out and wrong to leave out. `LocalTransform` is
+// placement relative to the PARENT (ecs/transform.hpp). For a root those are the same thing, which
+// is why the fallback is sound at all; for a child they are not, and using it anyway would not be a
+// small inaccuracy but a coordinate-space error — a child sitting right beside its parent reads as
+// being whatever its parent-relative offset happens to say, which for a child near its parent's
+// origin is "at the world origin". That entity would be scored relevant or culled based on a
+// position it has never occupied.
+//
+// Resolving it properly would mean walking the parent chain here, per candidate, per client, per
+// tick — re-implementing `propagate_transforms` one entity at a time, against the very
+// O(clients x entities) cost this brick is trying to contain. So this refuses to guess instead: an
+// unresolvable position returns false and the entity is treated as unmeasurable, which fails open.
+// The real fix for such an entity is to give it a `WorldTransform`.
 bool position_of(const ecs::World& world, ecs::Entity entity, core::Vec3& out) {
     if (const auto* world_transform = world.get<ecs::WorldTransform>(entity)) {
         out = world_transform->value.translation;
         return true;
     }
     if (const auto* local = world.get<ecs::LocalTransform>(entity)) {
-        out = local->value.translation;
-        return true;
+        const auto* parent = world.get<ecs::Parent>(entity);
+        if (parent == nullptr || parent->value == ecs::kNullEntity) {
+            out = local->value.translation;
+            return true;
+        }
     }
     return false;
 }
@@ -111,9 +129,15 @@ RelevancyFn distance_relevancy(const ecs::World& world, DistanceRelevancy config
             const bool was_inside =
                 entity.index < inside.size() && inside[entity.index] == entity.generation + 1u;
             const float threshold = was_inside ? exit_radius : enter_radius;
-            const float distance = core::length(position - eye);
 
-            if (distance > threshold) {
+            // Squared throughout, never a sqrt. A priority only has to be MONOTONIC in distance —
+            // nothing downstream reads it as a metric, only compares it against other priorities —
+            // and squared distance is monotonic in distance for distance >= 0. This loop runs
+            // (clients x candidates) times per tick, which is exactly the cost this brick is trying
+            // to contain, so a transcendental per pair for a number nobody measures is pure waste.
+            const float distance_sq = core::length_squared(position - eye);
+
+            if (distance_sq > threshold * threshold) {
                 priorities[i] = 0.0f;
                 if (entity.index < inside.size()) {
                     inside[entity.index] = 0;
@@ -121,9 +145,12 @@ RelevancyFn distance_relevancy(const ecs::World& world, DistanceRelevancy config
                 continue;
             }
 
-            // Strictly decreasing, 1.0 at the viewpoint, 0.5 at the radius, never zero — the
-            // relevance decision was the comparison above, so nothing rides on this reaching 0.
-            priorities[i] = enter_radius / (enter_radius + distance);
+            // Strictly decreasing in distance, 1.0 at the viewpoint, never zero — the relevance
+            // decision was the comparison above, so nothing rides on this reaching 0. Written as a
+            // ratio of positive sums rather than a difference, so there is no cancellation to lose
+            // precision to out at the boundary, where the far entities live.
+            priorities[i] =
+                (enter_radius * enter_radius) / (enter_radius * enter_radius + distance_sq);
             if (entity.index >= inside.size()) {
                 inside.resize(static_cast<std::size_t>(entity.index) + 1, 0u);
             }

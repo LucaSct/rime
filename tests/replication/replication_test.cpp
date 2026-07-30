@@ -813,10 +813,23 @@ TEST_CASE("distance_relevancy culls by range, admits on approach, and does not t
     // scores it relevant rather than culling it.
     const ecs::Entity placeless = fx.server_world.spawn_with(ecs::Parent{ecs::kNullEntity});
 
+    // The sharper unmeasurable case: a CHILD with a LocalTransform but no WorldTransform. Its local
+    // translation is relative to its parent, so reading it as a world position would be a
+    // coordinate-space error, not a rounding one — here the parent is 900 units away while the
+    // child's own local offset is 1.0, so a policy that fell back unconditionally would score it as
+    // sitting essentially on top of the viewpoint. It must be treated as unmeasurable instead.
+    ecs::LocalTransform parent_t{};
+    parent_t.value.translation.x = 900.0f;
+    const ecs::Entity distant_parent = fx.server_world.spawn_with(parent_t);
+    ecs::LocalTransform child_t{};
+    child_t.value.translation.x = 1.0f;
+    const ecs::Entity child = fx.server_world.spawn_with(child_t, ecs::Parent{distant_parent});
+
     (void)server.replicate(near_entity);
     (void)server.replicate(far_entity);
     (void)server.replicate(edge_entity);
     (void)server.replicate(placeless);
+    (void)server.replicate(child);
 
     core::Vec3 eye{0.0f, 0.0f, 0.0f};
     replication::DistanceRelevancy config;
@@ -882,9 +895,12 @@ TEST_CASE("distance_relevancy culls by range, admits on approach, and does not t
     CHECK(has_state(near_entity));
     CHECK(!has_state(far_entity));
 
-    // ── 2. The unmeasurable entity was never culled. It is announced and bound on the client even
-    // though it carries no replicable state — the policy scored it relevant, which is the claim.
+    // ── 2. The unmeasurable entities were never culled. Announced and bound on the client, and in
+    // the child's case its state actually delivered — even though the viewpoint is 900 units from
+    // the parent it hangs off, and its own LocalTransform (1.0) would have read as near if the
+    // policy had wrongly used it as a world position.
     CHECK(mirror_of(placeless).is_valid());
+    CHECK(has_state(child));
 
     // ── 3. Approach: the far entity comes into range WITHOUT EVER BEING WRITTEN AGAIN. ──
     const std::uint64_t entered_before = server.entities_sent_on_entry();
@@ -892,6 +908,23 @@ TEST_CASE("distance_relevancy culls by range, admits on approach, and does not t
     run(40);
     CHECK(server.entities_sent_on_entry() > entered_before);
     CHECK(has_state(far_entity));
+
+    // ── 3b. And with the viewpoint 450 away, the CHILD must still be getting updates. This is the
+    // assertion that actually discriminates the root check: an unconditional LocalTransform
+    // fallback reads the child as x = 1.0, which is inside the radius while the eye sits at the
+    // origin — so the earlier check passes either way. Only once the eye has moved far from the
+    // child's own local offset do the two behaviours separate: unmeasurable means always relevant
+    // and still updating, whereas the coordinate-space error means culled and silently stale.
+    if (auto* t = fx.server_world.get<ecs::LocalTransform>(child)) {
+        t->value.translation.z = 7.0f;
+        fx.server_world.mark_changed<ecs::LocalTransform>(child);
+    }
+    run(20);
+    const ecs::Entity child_mirror = mirror_of(child);
+    REQUIRE(child_mirror.is_valid());
+    const auto* child_state = fx.client_world.get<ecs::LocalTransform>(child_mirror);
+    REQUIRE(child_state != nullptr);
+    CHECK(child_state->value.translation.z == doctest::Approx(7.0f));
 
     // ── 4. Hysteresis: park the viewpoint at the origin and let the edge entity oscillate across
     // the radius. Once inside, it must stay inside — it never reaches the 110 exit radius — so no

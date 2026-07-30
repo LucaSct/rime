@@ -373,8 +373,13 @@ void ServerReplicator::publish_delta(net::Session& session,
     //   relevant, record dropped       → unchanged. An entry stays 0 and retries next tick; an
     //                                    ordinary change stays 1, because the client still holds
     //                                    the older value and the clamped baseline will re-offer it.
-    const auto settle_relevancy = [&](std::size_t sent_records) {
-        for (std::size_t i = 0; i < sent_records && i < record_slot_.size(); ++i) {
+    // Credit one packet's worth of records as held. Called per PART, and only for a part the
+    // session actually accepted — `send_unreliable` refuses on a non-Connected session or a channel
+    // that will not take the datagram, and a refused part is bytes that never existed. Crediting a
+    // whole prefix regardless would strengthen the record on "we tried", which is the
+    // weaker-correlated event corollary 1 names by that exact phrase.
+    const auto credit_sent = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end && i < record_slot_.size(); ++i) {
             const std::uint32_t slot = record_slot_[i];
             if (slot < state.was_relevant.size()) {
                 state.was_relevant[slot] = 1;
@@ -383,6 +388,9 @@ void ServerReplicator::publish_delta(net::Session& session,
                 ++entities_entered_;
             }
         }
+    };
+
+    const auto settle_relevancy = [&]() {
         for (std::size_t slot = 0; slot < slot_count; ++slot) {
             if (!(priority_by_index_[slot] > 0.0f)) {
                 state.was_relevant[slot] = 0;
@@ -498,7 +506,7 @@ void ServerReplicator::publish_delta(net::Session& session,
     }
 
     if (records_.empty()) {
-        settle_relevancy(0);
+        settle_relevancy();
         return;
     }
 
@@ -601,33 +609,15 @@ void ServerReplicator::publish_delta(net::Session& session,
         parts.emplace_back(begin, records_.size());
     }
     if (parts.empty()) {
-        settle_relevancy(0);
+        settle_relevancy();
         return;
-    }
-
-    const std::size_t covered = parts.back().second;
-    if (covered < records_.size() || dropped_by_bytes > 0) {
-        // Over one of the two budgets. The remainder waits — and genuinely does arrive, because the
-        // baseline clamp above keeps it in the candidate set and the cursor below makes the next
-        // tick resume here rather than restart. Latency, not loss; the two mechanisms are what earn
-        // that claim, which the code made without them until m11.5 checked it.
-        //
-        // Note the byte-budget drops were already counted where they happened; only the
-        // packet-count remainder is added here, or a record refused by both budgets would be
-        // counted twice.
-        entities_over_budget_ += records_.size() - covered;
-        state.cursor += covered;
-    } else {
-        // Everything owed was sent, so this tick may advance the delivery watermark — and the next
-        // one starts from the top again.
-        state.complete_through = now_version;
-        state.cursor = 0;
     }
 
     const auto part_count = static_cast<std::uint8_t>(parts.size());
     if (part_count > 1) {
         ++multipart_ticks_;
     }
+    bool every_part_sent = true;
     for (std::size_t p = 0; p < parts.size(); ++p) {
         scratch_.clear();
         core::ByteWriter writer{scratch_};
@@ -641,12 +631,35 @@ void ServerReplicator::publish_delta(net::Session& session,
         }
         if (session.send_unreliable(scratch_, now_ms)) {
             ++delta_packets_sent_;
+            // Credited HERE, per part, and only on acceptance. A refused part is bytes that never
+            // existed; crediting the whole prefix regardless would strengthen a per-item record on
+            // "we tried to send it", which is the weaker-correlated event the invariant names.
+            credit_sent(parts[p].first, parts[p].second);
+        } else {
+            every_part_sent = false;
         }
     }
+    settle_relevancy();
 
-    // Only now, with the packets actually handed to the session, is there evidence that these
-    // entities were sent. `covered` is the exact count that made it into a part.
-    settle_relevancy(covered);
+    const std::size_t covered = parts.back().second;
+    if (covered < records_.size() || dropped_by_bytes > 0 || !every_part_sent) {
+        // Over one of the two budgets. The remainder waits — and genuinely does arrive, because the
+        // baseline clamp above keeps it in the candidate set and the cursor below makes the next
+        // tick resume here rather than restart. Latency, not loss; the two mechanisms are what earn
+        // that claim, which the code made without them until m11.5 checked it.
+        //
+        // Note the byte-budget drops were already counted where they happened; only the
+        // packet-count remainder is added here, or a record refused by both budgets would be
+        // counted twice.
+        entities_over_budget_ += records_.size() - covered;
+        state.cursor += covered;
+    } else {
+        // Everything owed was sent AND every part was accepted, so this tick may advance the
+        // delivery watermark — and the next one starts from the top again. A refused part makes the
+        // tick partial in exactly the sense corollary 1 cares about, however healthy the link is.
+        state.complete_through = now_version;
+        state.cursor = 0;
+    }
 }
 
 } // namespace rime::replication
