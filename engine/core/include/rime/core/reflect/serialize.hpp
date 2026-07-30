@@ -24,6 +24,17 @@ namespace rime::core {
 // `data` is shorter than the type requires. `object` must point at storage of the matching type.
 [[nodiscard]] bool deserialize(const TypeInfo& type, void* object, std::span<const std::byte> data);
 
+// How many bytes serialize() writes for `type` — the PACKED length, which is emphatically not
+// `TypeInfo::size`. sizeof() includes whatever padding the compiler inserted between members;
+// the packed stream has none, because serialize_into visits fields one at a time and never copies
+// the struct wholesale. For `struct { bool a; std::uint64_t b; }` the two numbers differ by seven.
+//
+// A reader needs this whenever the stream does not carry an explicit length: given a TypeInfo both
+// ends agree on, it says exactly how far to advance. That is the case for replication (M11.3),
+// where a component's bytes are framed only by its type — using sizeof there would desynchronize
+// the reader on the first padded component and misread everything after it.
+[[nodiscard]] std::size_t packed_size(const TypeInfo& type);
+
 // Human-readable dump built from the field names + values, e.g.
 //   Outer { active: true, count: 7, value: 1.5, inner: Inner { id: 3, weight: 0.25 }, flags: 9 }
 [[nodiscard]] std::string to_debug_string(const TypeInfo& type, const void* object);

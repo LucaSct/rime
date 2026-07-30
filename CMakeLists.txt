@@ -347,6 +347,7 @@ add_subdirectory(engine/editorhost) # editor-as-client host: serve the world ove
 add_subdirectory(engine/scene)    # .rscene text scene format: reflection-serialized world save/load (M9, ADR-0031)
 add_subdirectory(engine/app)      # launcher stub (M0) → application framework (later)
 add_subdirectory(engine/net)      # networking: Link seam + reliability layer (M11, ADR-0033)
+add_subdirectory(engine/replication) # ECS state replication over net: NetIds, snapshots (M11.3)
 
 # The C ABI (M6.9): a SHARED library over a tiny extern "C" surface — the ADR-0001 boundary the Rust
 # editor/tools drive the engine through. Sits on top of app+assets; optional per the modularity
