@@ -87,7 +87,7 @@ constexpr float kDebrisDensity = 1000.0f; // kg/m³
 // the arrival order of same-tick apply_damage calls cannot influence the applied sequence. Floats
 // are compared as raw bit patterns: not numerically meaningful, but that is the point — stable,
 // platform-independent, and total (no NaN traps).
-std::array<std::uint32_t, 9> DestructionWorld::Impl::op_key(const DamageOp& o) noexcept {
+std::array<std::uint32_t, 9> DestructionWorld::Impl::op_key(const PendingOp& o) noexcept {
     return {o.instance,
             o.part,
             float_bits(o.amount),
@@ -100,8 +100,10 @@ std::array<std::uint32_t, 9> DestructionWorld::Impl::op_key(const DamageOp& o) n
 }
 
 void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
-                                               std::span<const DamageOp> ops,
-                                               physics::PhysicsWorld& world) {
+                                               std::span<const PendingOp> ops,
+                                               physics::PhysicsWorld& world,
+                                               std::span<const std::uint32_t> forced_killed,
+                                               bool emit_events) {
     Instance& inst = instances[instance_index];
     const Pattern& pat = patterns[inst.pattern.index];
     const std::uint32_t n = pat.part_count;
@@ -239,9 +241,17 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
     // canonical debris creation order that makes the roster reproducible.
     std::vector<std::vector<std::uint32_t>> groups = std::move(islands);
     std::vector<std::uint8_t> killed_this_tick(n, 0);
-    for (const DamageOp& op : ops) {
+    for (const PendingOp& op : ops) {
         if (op.applied && op.instance == instance_index && inst.alive[op.part] == 0) {
             killed_this_tick[op.part] = 1;
+        }
+    }
+    // The corrective path's dead set (ADR-0033 A3) joins the op-derived one. Same rule: a part only
+    // counts as killed if it is actually down, so a caller naming a part that still stands cannot
+    // conjure a chunk out of a live wall.
+    for (const std::uint32_t p : forced_killed) {
+        if (p < n && inst.alive[p] == 0) {
+            killed_this_tick[p] = 1;
         }
     }
     for (std::uint32_t p = 0; p < n; ++p) {
@@ -314,7 +324,7 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
         // so momentum is conserved and never doubled (an op landing on already-dead rubble has
         // applied == false and is skipped).
         core::Vec3 kick{0.0f, 0.0f, 0.0f};
-        for (const DamageOp& op : ops) {
+        for (const PendingOp& op : ops) {
             if (!op.applied || op.instance != instance_index) {
                 continue;
             }
@@ -334,7 +344,7 @@ void DestructionWorld::Impl::fracture_instance(std::uint32_t instance_index,
         // (killed groups are single dead parts; islands are alive parts), so the killed flag on the
         // smallest member tells them apart. `world_bounds` is the island's world AABB; `magnitude`
         // the net impulse it flew off with.
-        if (killed_this_tick[group.front()] == 0) {
+        if (emit_events && killed_this_tick[group.front()] == 0) {
             physics::Aabb bounds = part_world_aabb(
                 inst.placement, pat.part_aabb_min[group.front()], pat.part_aabb_max[group.front()]);
             for (std::size_t k = 1; k < group.size(); ++k) {
@@ -373,8 +383,40 @@ void DestructionWorld::apply_damage(InstanceId instance,
     if (instance.index >= impl_->instances.size() || instance.generation != 0) {
         return;
     }
+    if (impl_->instances[instance.index].authority == Authority::Remote) {
+        // m11.4: authoring damage against a mirror is meaningless — this peer does not decide what
+        // happens to it, and the op would never reach the authority to be reconciled. Dropped
+        // rather than asserted: gameplay code that damages "whatever the trace hit" should not have
+        // to know which instances happen to be replicated this frame.
+        return;
+    }
     impl_->pending_damage.push_back(
         Impl::DamageCall{instance.index, point, std::max(radius, 0.0f), amount, impulse});
+}
+
+void DestructionWorld::set_authority(InstanceId instance, Authority authority) {
+    if (instance.index >= impl_->instances.size() || instance.generation != 0) {
+        return;
+    }
+    impl_->instances[instance.index].authority = authority;
+}
+
+Authority DestructionWorld::authority_of(InstanceId instance) const noexcept {
+    if (instance.index >= impl_->instances.size() || instance.generation != 0) {
+        return Authority::Local;
+    }
+    return impl_->instances[instance.index].authority;
+}
+
+std::span<const DamageOp> DestructionWorld::committed_ops() const noexcept {
+    return impl_->committed_ops;
+}
+
+void DestructionWorld::apply_remote_ops(std::span<const DamageOp> ops) {
+    // Validation is deferred to update()'s stage 1, which is where the drops are documented and
+    // where the instance table is about to be walked anyway. Queuing is deliberately dumb so that
+    // the ORDER the authority committed survives untouched to the point of application.
+    impl_->pending_remote_ops.insert(impl_->pending_remote_ops.end(), ops.begin(), ops.end());
 }
 
 void DestructionWorld::update(physics::PhysicsWorld& world) {
@@ -440,7 +482,40 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
     // worker count. The one fixed sequence is what makes the float accumulation below — and hence
     // every health value, every death, every island — bit-reproducible no matter how the inputs
     // arrived.
-    std::vector<Impl::DamageOp> ops;
+    std::vector<Impl::PendingOp> ops;
+
+    // Server-authoritative ops (m11.4) lead the list, in exactly the order the authority committed
+    // them. Their position relative to the locally-sourced ops below is arithmetically free: health
+    // accumulates per (instance, part) run, and an instance is either Local or Remote, so a remote
+    // op and a local one can never land in the same run. Leading is simply the honest reading — on
+    // a pure client every op in the tick is one of these, and the list is then byte-for-byte the
+    // server's own.
+    for (const DamageOp& remote : impl.pending_remote_ops) {
+        const std::uint32_t idx = remote.instance.index;
+        if (!remote.instance.is_valid() || idx >= impl.instances.size()) {
+            continue; // an instance this peer does not have (yet) — the op is dropped, and the
+                      // state-application seam is what repairs a mirror that missed structure
+        }
+        if (impl.instances[idx].authority != Authority::Remote) {
+            continue; // caller bug: nobody upstream owns this instance (see apply_remote_ops)
+        }
+        Impl::PendingOp op;
+        op.instance = idx;
+        op.part = remote.part;
+        op.amount = remote.amount;
+        op.impulse = remote.impulse;
+        op.point = remote.point;
+        op.central = remote.central;
+        ops.push_back(op);
+    }
+    impl.pending_remote_ops.clear();
+
+    // Where the LOCAL explicit ops begin. The canonical sort below must cover exactly this block:
+    // the remote ops ahead of it are already in the authority's committed order, and that order is
+    // not reproducible from the op fields (the server's list ends with contact ops, which are
+    // canonical by contact-event order rather than by op key). Re-sorting them here would quietly
+    // rewrite the sequence the whole determinism contract rests on.
+    const std::size_t explicit_begin = ops.size();
 
     for (const Impl::DamageCall& call : impl.pending_damage) {
         const Impl::Instance& inst = impl.instances[call.instance];
@@ -461,7 +536,7 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
             if (!(amount > 0.0f)) {
                 continue; // rim-exact or non-positive: no health change, no push to carry
             }
-            Impl::DamageOp op;
+            Impl::PendingOp op;
             op.instance = call.instance;
             op.part = p;
             op.amount = amount;
@@ -470,10 +545,11 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
             ops.push_back(op);
         }
     }
-    std::sort(
-        ops.begin(), ops.end(), [](const Impl::DamageOp& a, const Impl::DamageOp& b) noexcept {
-            return Impl::op_key(a) < Impl::op_key(b);
-        });
+    std::sort(ops.begin() + static_cast<std::ptrdiff_t>(explicit_begin),
+              ops.end(),
+              [](const Impl::PendingOp& a, const Impl::PendingOp& b) noexcept {
+                  return Impl::op_key(a) < Impl::op_key(b);
+              });
 
     // Contact-derived ops. Each event region names the struck child on both sides; a side that
     // resolves to a live destructible instance takes damage on child→part (the ADR-0029 §4 remap —
@@ -491,6 +567,13 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
             return; // not a destructible's standing body (ground, marble, debris, stale id)
         }
         const Impl::Instance& inst = impl.instances[instance_index];
+        if (inst.authority == Authority::Remote) {
+            // m11.4: some other peer owns this instance and has already converted ITS solver's
+            // impulses into the ops we were sent. Converting ours too would erode the part twice.
+            // This one early return is the whole suppression — deliberately not a forked update
+            // path, because two damage pipelines that are supposed to stay equivalent will not.
+            return;
+        }
         const Impl::Pattern& pat = impl.patterns[inst.pattern.index];
         const std::uint16_t child = side_a ? e.child_a : e.child_b;
         if (child >= inst.child_to_part.size()) {
@@ -502,7 +585,7 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
         if (!(damage > 0.0f)) {
             return; // below the material threshold: absorbed (the resting m·g·dt case)
         }
-        Impl::DamageOp op;
+        Impl::PendingOp op;
         op.instance = instance_index;
         op.part = part;
         op.amount = damage;
@@ -517,6 +600,23 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
         }
         drain_side(e, true);
         drain_side(e, false);
+    }
+
+    // The op list is now COMPLETE and canonical — the input to everything below, and the artifact
+    // ADR-0033 A1 replicates. Snapshot it for committed_ops() here, BEFORE stage 2 applies it: what
+    // a receiver needs is the list, not this peer's verdict about which entries mattered (`applied`
+    // is decided by the state each op lands against, and the receiver holds its own).
+    impl.committed_ops.clear();
+    impl.committed_ops.reserve(ops.size());
+    for (const Impl::PendingOp& op : ops) {
+        DamageOp pub;
+        pub.instance = InstanceId{op.instance, 0};
+        pub.part = op.part;
+        pub.amount = op.amount;
+        pub.impulse = op.impulse;
+        pub.point = op.point;
+        pub.central = op.central;
+        impl.committed_ops.push_back(pub);
     }
 
     // ================================================================================== stage 2
@@ -591,6 +691,57 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
     if (impl.lifecycle.enabled) {
         impl.enforce_debris_budget(world);
     }
+}
+
+void DestructionWorld::apply_detach_set(InstanceId instance,
+                                        std::span<const std::uint32_t> dead_parts,
+                                        std::span<const float> healths,
+                                        physics::PhysicsWorld& world) {
+    Impl& impl = *impl_;
+    if (instance.index >= impl.instances.size() || instance.generation != 0) {
+        return;
+    }
+    Impl::Instance& inst = impl.instances[instance.index];
+    const std::uint32_t n = impl.patterns[inst.pattern.index].part_count;
+
+    // Bring the alive/health tables to the authority's version. Parts already down are skipped, so
+    // re-applying the same detach set is a no-op — which matters, because a late-join correction
+    // and the ordinary op stream can legitimately describe overlapping destruction, and the second
+    // one to arrive must not re-fracture a wall that is already in the right shape.
+    std::vector<std::uint32_t> newly_dead;
+    for (std::size_t i = 0; i < dead_parts.size(); ++i) {
+        const std::uint32_t p = dead_parts[i];
+        if (p >= n || inst.alive[p] == 0) {
+            continue;
+        }
+        inst.alive[p] = 0;
+        inst.health[p] = i < healths.size() ? healths[i] : 0.0f;
+        newly_dead.push_back(p);
+    }
+    if (newly_dead.empty()) {
+        return; // nothing changed ⇒ no body swap; the compound in place is already correct
+    }
+
+    // Replay the ordinary body swap over the corrected alive bits — deliberately the same function
+    // the damage path calls, with no ops (a correction carries no impulses: where the debris goes
+    // is the authority's to say, through the replicated transforms, not something to re-derive from
+    // a kick we were never told about) and with the event fan-out silenced.
+    impl.fracture_instance(instance.index, {}, world, newly_dead, /*emit_events=*/false);
+}
+
+void DestructionWorld::set_debris_state(std::size_t debris,
+                                        const physics::BodyState& state,
+                                        physics::PhysicsWorld& world) {
+    Impl& impl = *impl_;
+    if (debris >= impl.debris.size()) {
+        return;
+    }
+    const Impl::Debris& rec = impl.debris[debris];
+    if (rec.phase == Impl::DebrisPhase::Frozen) {
+        return; // reclaimed (M8.5): its body is gone, and re-creating one here would put a chunk
+                // back into a world whose budget had already decided to let it go
+    }
+    world.set_body_state(rec.body, state);
 }
 
 std::span<const DestructionEvent> DestructionWorld::events() const noexcept {

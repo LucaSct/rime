@@ -77,6 +77,27 @@ Opt an entity in with `server.replicate(entity)`. **Despawn it with `server.desp
 a documented discipline today, not something the type system enforces; a checked-build backstop is a
 named follow-up.
 
+### Sharing a session with another module
+
+`apply_inbound` **drains** the sessions, which means it takes sole ownership of the mail —
+`Session::drain_received` moves messages out. That is fine while replication is the only tenant. The
+moment another module also reads (m11.4's damage-op stream is the first), the app must drain once
+itself and hand the same span to each subsystem:
+
+```cpp
+inbox.clear();
+(void)session->drain_received(inbox);
+state_client.apply_messages(inbox);                     // replication's tags
+destruction_client.apply_messages(inbox, map, world);   // destruction_net's tags
+```
+
+The first payload byte is a **shared tag registry**, documented at the top of `snapshot.hpp`:
+`0x01–0x3F` replication, `0x40–0x7F` `destruction_net`, the rest unallocated. Each module ignores
+tags outside its own block — counted as `foreign_messages()`, not as malformed, because another
+module's well-formed message is not an error. Before m11.4 nothing said the space was shared, and
+the next module would naturally have started its own enum at 1: a silent collision with `Spawn`, in
+which whichever module drained first consumed and misparsed the other's traffic.
+
 ## Named limits
 
 - **Entity-reference fields do not replicate.** A component containing an `ecs::Entity` (e.g.
@@ -90,3 +111,13 @@ named follow-up.
   with entities that did gets re-sent. Bounded by chunk occupancy; the mitigation is a content
   discipline (keep movers out of static-dominated archetypes), worth measuring before m11.4's debris
   makes it urgent.
+- **A spawn burst stalls the baseline.** Since m11.4a (ADR-0033 A13) a delta packet containing any
+  record the client cannot resolve does not advance the watermark — necessary, because acking one
+  would abandon that entity's state permanently. The cost is that while spawns are landing, packets
+  routinely contain an unresolved record, so the baseline sits still and the server keeps re-offering
+  the same deltas. It is transient (bounded by the reliable channel's RTO for the `Spawn`) and
+  self-limiting (`kStaleBaselineTicks` re-seeds a client that stays behind), but a sustained
+  spawn-heavy scene pays real bandwidth for it. The finer fix — acking per-record rather than
+  per-packet — needs the server to track which entities a client actually holds, which is per-client
+  state this design deliberately does not keep. Revisit alongside m11.5's relevancy, which introduces
+  that bookkeeping anyway.

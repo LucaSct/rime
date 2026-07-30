@@ -31,6 +31,7 @@ the systems reasoning and [ADR-0029](../../docs/adr/0029-destruction-model.md) f
 | M8.4 | health-transition **event fan-out** (`core::EventChannel`) + VFX dust stub + `engine/audio` seam | landed |
 | M8.5 | **lifetime** — settled debris freeze/linger + a live-body cap (`lifecycle.cpp`) over the physics hull/compound `unregister` | landed |
 | M8.6 | the **proof** — `samples/10-destructible-wall`, headless self-check + per-part render leaves | landed |
+| M11.4a | the **bind path** (`bind.hpp` — the system M8.2 deferred), the public `DamageOp` + `committed_ops`/`apply_remote_ops`, `Authority`, and the state-application seam | landed |
 
 ### Scope note (M8.2)
 
@@ -49,12 +50,35 @@ engine/destruction/
 │   ├── world.hpp       # DestructionWorld: register_pattern, spawn, damage/update, queries, events()
 │   ├── events.hpp      # the DestructionEvent stream (M8.4): PartDamaged/Died/IslandDetached/Settled
 │   ├── ids.hpp         # PatternId / InstanceId / kInvalidPartIndex (shared by world.hpp + events.hpp)
+│   ├── damage_op.hpp   # the public DamageOp (M11.4) — the replicated unit, ADR-0033 A1
+│   ├── bind.hpp        # the ECS bind system (M11.4): a Destructible entity becomes an instance
 │   └── components.hpp  # the reflected Destructible ECS component (authoring intent)
 └── src/
     ├── world.cpp       # the pImpl: pattern + instance tables (append-only in v1); load, stand, bind
     ├── damage.cpp      # damage → connectivity → the fracture body-swap, and the event fan-out
+    ├── bind.cpp        # the bind pass + the instance→entity table the networking layer needs
     └── world_impl.hpp  # the shared internals (Pattern/Instance/Debris tables, the EventChannel)
 ```
+
+## Networked destruction (M11.4)
+
+Destruction knows nothing about networking — `rime::destruction_net` sits above both this module and
+`rime::replication` — but three seams here exist for it, and they are worth knowing about:
+
+- **`bind.hpp`** turns an entity carrying `Destructible{asset}` into a standing instance and records
+  the link in `DestructibleInstanceRef`. This is the M8.2 "full ECS bind system" that was deferred to
+  the sample; replication is what finally needed it, because the ENTITY (and so its NetId) is the
+  only name for a destructible two peers can share. `DestructibleInstanceRef` stays **unreflected**
+  for the same reason: it is a local table position, and replicating it would hand a client the
+  server's index for its own.
+- **`committed_ops()` / `apply_remote_ops()`** expose and accept the canonical damage-op list — the
+  deterministic function's input (ADR-0029 §3), and therefore the thing that crosses the wire rather
+  than the `apply_damage` calls that produced it (ADR-0033 A1).
+- **`Authority` and the state-application seam** (`apply_detach_set`, `set_debris_state`): a mirror
+  refuses locally-authored damage and skips the contact→damage drain, and a late-join or a drifted
+  client can be handed *state* rather than only the events that produced it (ADR-0033 A3). The
+  correction replays the ordinary body swap, so it reaches the same alive bits, the same remainder
+  compound, and the same debris roster a peer that watched the collapse would have.
 
 ## Events (M8.4)
 

@@ -33,27 +33,36 @@ void ClientReplicator::apply_inbound(net::NetDriver& driver) {
         }
         inbox_.clear();
         (void)session->drain_received(inbox_);
-        for (const net::Received& message : inbox_) {
-            core::ByteReader reader{message.bytes};
-            std::uint8_t tag = 0;
-            if (!reader.u8(tag)) {
-                ++malformed_;
-                continue;
-            }
-            switch (static_cast<MessageTag>(tag)) {
-                case MessageTag::Spawn:
-                    on_spawn(reader);
-                    break;
-                case MessageTag::Despawn:
-                    on_despawn(reader);
-                    break;
-                case MessageTag::Delta:
-                    on_delta(reader);
-                    break;
-                default:
-                    ++malformed_; // BaselineAck is client→server; anything else is not ours
-                    break;
-            }
+        apply_messages(inbox_);
+    }
+}
+
+void ClientReplicator::apply_messages(std::span<const net::Received> messages) {
+    for (const net::Received& message : messages) {
+        core::ByteReader reader{message.bytes};
+        std::uint8_t tag = 0;
+        if (!reader.u8(tag)) {
+            ++malformed_;
+            continue;
+        }
+        if (!owns_tag(tag)) {
+            ++foreign_; // another module's block of the shared registry — not ours, not an error
+            continue;
+        }
+        switch (static_cast<MessageTag>(tag)) {
+            case MessageTag::Spawn:
+                on_spawn(reader);
+                break;
+            case MessageTag::Despawn:
+                on_despawn(reader);
+                break;
+            case MessageTag::Delta:
+                on_delta(reader);
+                break;
+            default:
+                ++malformed_; // in OUR block but not a server→client message: BaselineAck travels
+                              // the other way, and the rest of the block is unassigned
+                break;
         }
     }
 }
@@ -114,6 +123,10 @@ void ClientReplicator::on_delta(core::ByteReader& reader) {
         return;
     }
 
+    // Whether any record in this packet was parsed but THROWN AWAY because its NetId does not
+    // resolve yet. See the acknowledgement rule at the bottom of this function.
+    bool dropped_here = false;
+
     for (std::uint16_t i = 0; i < entity_count; ++i) {
         NetId id{};
         std::uint8_t component_count = 0;
@@ -128,6 +141,7 @@ void ClientReplicator::on_delta(core::ByteReader& reader) {
         bool resolved = local.is_valid();
         if (!resolved) {
             ++records_dropped_unmapped_;
+            dropped_here = true;
         }
 
         for (std::uint8_t c = 0; c < component_count; ++c) {
@@ -173,9 +187,32 @@ void ClientReplicator::on_delta(core::ByteReader& reader) {
         }
     }
 
-    // Only after the whole packet parsed cleanly: a torn or malformed packet must not count toward
-    // a tick's completeness, or the watermark could advance past a tick we never fully applied.
-    acks_.observe(tick, part_index, part_count);
+    // Only after the whole packet parsed cleanly AND every record in it actually landed.
+    //
+    // The parsed-cleanly half was always here: a torn packet must not count toward a tick's
+    // completeness, or the watermark advances past a tick we never fully applied. The second half
+    // closes a hole that m11.4's first end-to-end proof walked straight into, and it is worth
+    // spelling out because the failure is invisible and permanent.
+    //
+    // A record whose NetId does not resolve is dropped — the ordinary cross-channel race, since the
+    // reliable Spawn can land after the unreliable Delta that first mentions the entity. The packet
+    // itself is intact, so the old code acked the tick. But "the packet arrived" and "the state in
+    // it was applied" are different claims, and the baseline is a promise about the SECOND. The
+    // server, believing the client holds tick T, computes every later delta as "changed since T" —
+    // and the entity's write happened at or before T. If that entity then never changes again, it
+    // is never re-offered: the mirror stays empty forever, silently.
+    //
+    // That "never changes again" is not a corner case. It is a static prop, a piece of level
+    // geometry, a destructible wall standing quietly until someone shoots it — the very thing
+    // m11.4 replicates. m11.3's own proof missed it because every entity there moved every tick, so
+    // a dropped record was re-offered a tick later no matter what the ack said.
+    //
+    // Not acking is the conservative direction and needs no new machinery: the tick simply never
+    // completes, the watermark stays below it, and the server keeps re-offering those writes until
+    // a delta lands whose records ALL resolve — which is exactly the tick after the Spawn arrives.
+    if (!dropped_here) {
+        acks_.observe(tick, part_index, part_count);
+    }
 }
 
 void ClientReplicator::send_ack(net::NetDriver& driver, std::uint64_t now_ms) {

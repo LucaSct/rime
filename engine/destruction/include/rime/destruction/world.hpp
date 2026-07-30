@@ -9,6 +9,7 @@
 
 #include "rime/assets/destructible_asset.hpp"
 #include "rime/core/math/transform.hpp"
+#include "rime/destruction/damage_op.hpp"
 #include "rime/destruction/events.hpp"
 #include "rime/destruction/ids.hpp"
 #include "rime/physics/body.hpp"
@@ -61,6 +62,22 @@ struct LifecycleConfig {
     // (unsettled) piece is never evicted, so under a burst the cap is briefly soft and catches up.
     std::uint32_t max_live_debris = 128;
 };
+
+// Who decides what happens to an instance (m11.4, ADR-0033 §1 + A1).
+//
+// `Local` is the M8 behaviour and the default: this peer owns the instance, so both damage sources
+// feed it — explicit `apply_damage` calls and the contact→damage conversion drained from the
+// solver's own impulses.
+//
+// `Remote` marks a MIRROR of an instance some other peer is authoritative for. Its state changes
+// only through `apply_remote_ops` (and the state-application seam below). Both local damage sources
+// are refused for it: `apply_damage` becomes a no-op, and the contact drain skips it. That second
+// half is the one that matters and the one that is easy to get wrong — a mirror's debris still
+// rests against it, still generates real contact impulses in the client's own solver, and
+// converting those locally would erode the part a second time, on top of the server's
+// already-replicated erosion. The divergence would be silent, cumulative, and worst exactly where
+// the destruction is most interesting.
+enum class Authority : std::uint8_t { Local = 0, Remote = 1 };
 
 class DestructionWorld {
 public:
@@ -132,6 +149,73 @@ public:
     // Consumes the pending damage queue and this tick's contact events (calling it twice per step
     // would count the same events twice — don't).
     void update(physics::PhysicsWorld& world);
+
+    // --- replication (m11.4, ADR-0033 A1/A3) -----------------------------------------------------
+
+    // Declare who owns `instance` (see Authority above). Default `Local`; an unknown id is a safe
+    // no-op. Set this BEFORE the instance takes any damage — flipping it mid-life is legal but only
+    // changes what happens from the next update() on, and does not retroactively un-apply anything.
+    void set_authority(InstanceId instance, Authority authority);
+
+    [[nodiscard]] Authority authority_of(InstanceId instance) const noexcept;
+
+    // The damage ops the most recent update() COMMITTED, in the canonical order they were applied —
+    // explicit ops (already expanded per-part, falloff resolved) followed by contact-derived ops.
+    // This is the artifact ADR-0033 A1 replicates: the server publishes this span, clients feed it
+    // back through apply_remote_ops. Valid until the next update(), like events().
+    //
+    // It is the FULL committed list, including ops that landed on an already-dead part and were
+    // absorbed. Filtering those out here would be a false economy: whether an op is absorbed
+    // depends on the state it lands against, so a receiver that was told only about the ops that
+    // "mattered" on the sender could not reproduce the sender's accumulation. The op list is the
+    // input to the deterministic function, and inputs are replicated whole.
+    [[nodiscard]] std::span<const DamageOp> committed_ops() const noexcept;
+
+    // Queue server-authoritative ops for the next update(). Applied in the order given, ahead of
+    // any locally-sourced ops — position is arithmetically free, because health accumulates per
+    // (instance, part) and a given instance is either Local or Remote, never both, so remote and
+    // local ops can never interleave within one part's run.
+    //
+    // Ops naming an unknown instance are dropped. Ops naming a Local instance are dropped too: that
+    // is a caller bug (the server does not own this instance), and applying them would let a
+    // mirror's damage bleed into state this peer is itself authoritative for.
+    void apply_remote_ops(std::span<const DamageOp> ops);
+
+    // --- the state-application seam (ADR-0033 A3) ------------------------------------------------
+    //
+    // Before m11.4 `apply_damage` was the ONLY mutator on this path, so a client that joined late —
+    // or that the server had to correct — could be handed the event stream but never the state it
+    // implies ("these parts are gone, this debris is here"). These two calls close that hole. They
+    // are the uncommon path: ordinary play replays ops, and these run on late-join and on detected
+    // drift.
+
+    // Force `dead_parts` out of `instance` and replay the ordinary fracture body-swap over the
+    // result — the SAME code path a natural fracture takes, deliberately, so the alive bits, the
+    // re-registered remainder compound, the debris roster and its canonical creation order all end
+    // up exactly as they would have. A correction that reached the same visible state by a
+    // different route would leave the two peers agreeing on what you can see and disagreeing on the
+    // tables underneath it, which is worse than not correcting at all.
+    //
+    // `healths` is parallel to `dead_parts` and carries the health each part should freeze at (a
+    // struck-dead part reads 0; a part that merely detached with an island keeps what it left
+    // with). Pass an empty span to zero them all. Parts already dead are skipped, so this is
+    // idempotent — applying the same detach set twice does nothing the second time. Out-of-range
+    // part ids and unknown instances are dropped. Emits no events: this is a correction, not a
+    // thing that happened, and firing dust and audio for a late-join's worth of already-old
+    // destruction is exactly the artifact that would give the correction away.
+    void apply_detach_set(InstanceId instance,
+                          std::span<const std::uint32_t> dead_parts,
+                          std::span<const float> healths,
+                          physics::PhysicsWorld& world);
+
+    // Overwrite debris #d's motion state — the kinematics of last resort, for when the replicated
+    // transform and the local sim have drifted past what interpolation can hide. A frozen or
+    // out-of-range debris is a safe no-op. Deliberately narrow: it moves a body, it never changes
+    // the roster, because debris IDENTITY and composition are derived from the op stream and must
+    // stay that way (m11.4b replicates the transforms; it does not get to invent a chunk).
+    void set_debris_state(std::size_t debris,
+                          const physics::BodyState& state,
+                          physics::PhysicsWorld& world);
 
     // --- read-back -------------------------------------------------------------------------------
     [[nodiscard]] std::size_t pattern_count() const noexcept;

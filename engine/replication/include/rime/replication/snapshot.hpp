@@ -31,6 +31,33 @@
 //                      valuable message on the wire crowding out one of the most (ADR-0033 A9).
 namespace rime::replication {
 
+// ── THE SHARED PAYLOAD TAG SPACE ────────────────────────────────────────────────────────────────
+//
+// There is ONE session per peer pair, and every module that wants to say something sends it down
+// that same session. The first payload byte is therefore a tag space SHARED between modules, not
+// replication's private property — and until m11.4 nothing said so, because replication was the
+// only tenant. It was a latent collision: the next module to define a message would naturally have
+// started its own enum at 1, and a `DamageOps{1}` is indistinguishable on the wire from a
+// `Spawn{1}`. Whichever module drained the session first would have consumed and misparsed the
+// other's traffic, and `drain_received` MOVES messages out, so the loser would simply never see its
+// own mail.
+//
+// The registry, allocated in blocks so a module can add messages without renegotiating:
+//
+//   0x01 – 0x3F   rime::replication   (m11.3 — this file)
+//   0x40 – 0x7F   rime::destruction_net (m11.4 — the damage-op stream)
+//   0x80 – 0xFF   unallocated
+//
+// A module MUST ignore tags outside its own block rather than treat them as errors, and MUST NOT
+// consume them from a shared inbox — see ClientReplicator::apply_messages for the shape that makes
+// both peers' subsystems able to read the same drained span.
+inline constexpr std::uint8_t kTagBlockFirst = 0x01;
+inline constexpr std::uint8_t kTagBlockLast = 0x3F;
+
+[[nodiscard]] inline constexpr bool owns_tag(std::uint8_t tag) noexcept {
+    return tag >= kTagBlockFirst && tag <= kTagBlockLast;
+}
+
 // Message discriminator, first byte of every replication payload.
 enum class MessageTag : std::uint8_t {
     Spawn = 1,       // reliable:   server→client, a batch of NetIds to create mirrors for
@@ -107,6 +134,16 @@ inline constexpr ecs::Version kStaleBaselineTicks = 600;
 // and is simpler, but it is *probabilistic* — lose the same part `margin` times running and the
 // divergence returns. Under the deliberately-high loss the scripted-loss harness runs, that is the
 // regime the proof actually exercises, so exactness is worth two bytes per packet.)
+//
+// A SECOND DOOR INTO THE SAME BUG, found by m11.4a and closed in ClientReplicator::on_delta
+// (ADR-0033 A13). This class guards "did every part of the tick ARRIVE". It cannot see the other
+// half: a packet that arrives whole and parses cleanly, but every record of which is DISCARDED
+// because its NetId does not resolve yet (the deliberate cross-channel race of §3 — a reliable
+// Spawn can land after the unreliable Delta that first names an entity). The bytes arrived; the
+// state did not. A baseline is a promise about the second, so the caller must not `observe` such a
+// packet — and the failure it prevents is the same permanent, silent divergence described above,
+// for any entity that stops changing before its Spawn lands. That is not exotic: it is every static
+// prop and every destructible wall standing quietly until someone shoots it.
 class AckTracker {
 public:
     // Record that part `part_index` of `tick` arrived, out of `part_count` total.

@@ -442,3 +442,84 @@ produces a precise diagnostic, where a version bump would replace it with a blun
 `UnsupportedVersion` and reject files whose container framing never changed. The ROADMAP line is
 updated to match the decision that was actually taken, so m11.3 does not begin by hunting for a
 prerequisite that was consciously declined.
+
+---
+
+## Amendment (2026-07-30, m11.4a): what "apply at the same tick" can actually mean
+
+Building the damage-op stream turned up three things the earlier text either says loosely or does
+not say at all. Each was found by making the thing run, not by reading, and each is recorded here
+because the code now depends on the answer.
+
+### A11. Clients apply the op stream at the same POSITION, not at the same tick index
+
+§2 and the ROADMAP's m11.4 line both say clients "apply ops at the same tick". Read literally that
+describes lockstep: the client stalls its destruction until its own tick counter reads T, then
+applies batch T. That is not the architecture this ADR chose, and it is not achievable on the
+transport it chose either — the reliable channel is *ordered and exactly-once, but never timely*, so
+a batch for tick T routinely arrives while the client's simulation is already at T+3. Under a
+literal reading the client would have to either stall the whole simulation behind the network (a
+lockstep engine, with all its failure modes) or run destruction on a delay pipeline that does not
+exist until m11.6.
+
+The correction: **the tick tag is an ordering and identity key, not a schedule.** What must match
+between the two peers is each batch's POSITION in the op sequence and the state it lands against —
+not agreement about a clock. Clients apply each batch as it arrives, in the authority's order. The
+tag is used for four things, none of which is stalling: naming the batch, associating m11.4b's
+debris with the tick that produced them, checking drift, and (at m11.6) scheduling when the break
+becomes *visible*. The break lands a few ticks late; because debris transforms are replicated, that
+is a fixed presentation delay rather than an error that accumulates, and m11.6's interpolation is
+the thing that removes it properly.
+
+### A12. "Against the same prior state" forbids merging two ticks into one update
+
+A direct consequence of A11 that is worth stating separately, because the first implementation got
+it wrong and the proof caught it.
+
+If two of the authority's ticks arrive in one of the client's — routine after a retransmit stall —
+the obvious thing is to hand both op lists to the next `DestructionWorld::update()`. That merges
+them, and the support solve and body swap that belonged *between* them never runs. Every alive bit
+and every health value still converges, because the ops are identical and in order; what diverges is
+the **debris composition**. Parts that the authority detached in two waves leave as one island on
+the client. Measured, not theorised: the authority produced islands `{2,3,9,10,14}` then
+`{5,6,7,11,13}`, and the client produced `{2,3,5,6,7,9,10,11,13,14}`.
+
+That is visible on screen, and it is an addressing bug rather than a cosmetic one: m11.4b addresses
+debris transforms by roster index, so two peers whose rosters were built differently are not
+disagreeing about where a chunk is — they are talking about different chunks. **One batch per
+destruction update**, therefore; a client that has fallen behind catches up by running extra whole
+update cycles, replaying the authority's ticks one at a time, never by merging them.
+
+### A13. A delta whose records were DISCARDED must not be acknowledged
+
+Found in m11.3's shipped code by m11.4a's first end-to-end proof, and fixed there.
+
+`AckTracker` was built to stop a client acknowledging a tick it had only partly received — §"the bug
+this exists to avoid" in `snapshot.hpp` sets that out precisely. It guarded the wrong door. A delta
+packet that arrives whole and parses cleanly, but every one of whose records names a NetId the
+client cannot resolve yet, was acknowledged: the packet did arrive. But a baseline is a promise
+about state APPLIED, not about bytes received. The server then computes all later deltas as "changed
+since T", and the discarded entity's write happened at or before T. If that entity never changes
+again, it is never re-offered — the mirror stays empty, permanently and silently.
+
+Unresolvable records are not an edge case: the reliable `Spawn` can legitimately land after the
+unreliable `Delta` that first mentions an entity (§3 gives the channels no ordering by design). And
+"never changes again" is the common case for exactly what m11.4 replicates — a destructible wall
+standing quietly until someone shoots it. m11.3's own proof missed it because every entity there
+moved every tick, so a dropped record was re-offered a tick later regardless of what the ack said.
+
+The fix needs no new machinery and errs in the same conservative direction the class already had:
+if any record in a packet was dropped as unresolvable, the packet does not count toward its tick's
+completeness. The watermark stays put, the server keeps re-offering, and the client catches up on
+the first delta after the `Spawn` lands.
+
+### Also recorded: the shared payload tag space
+
+There is one session per peer pair, so the first payload byte is a tag space shared by every module
+that sends on it — not replication's private property, which is what it looked like while
+replication was the only tenant. m11.4 would naturally have started its own enum at 1 and collided
+with `Spawn`; since `Session::drain_received` MOVES messages out, the collision would have surfaced
+as one subsystem silently never receiving its mail. The registry now lives in
+`replication/snapshot.hpp`: `0x01–0x3F` replication, `0x40–0x7F` destruction_net, the rest
+unallocated. A module ignores tags outside its own block, and subsystems sharing a session read one
+drained span (`apply_messages`) rather than each draining for themselves.

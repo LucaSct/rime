@@ -759,6 +759,30 @@ bool PhysicsWorld::get_body_state(BodyId id, BodyState& out) const {
     return true;
 }
 
+bool PhysicsWorld::set_body_state(BodyId id, const BodyState& state) {
+    Impl& p = *impl_;
+    const std::uint32_t d = p.dense_of(id);
+    if (d == core::kInvalidSlotIndex) {
+        return false;
+    }
+    p.position[d] = state.position;
+    p.orientation[d] = core::normalize(state.orientation);
+    p.linear_velocity[d] = state.linear_velocity;
+    p.angular_velocity[d] = state.angular_velocity;
+
+    // Wake it: an asleep body is asserting it has come to rest where it stands, which a teleport
+    // has just made false. Clearing the timer too, so it has to earn sleep again from scratch.
+    p.asleep[d] = 0;
+    p.sleep_timer[d] = 0.0f;
+
+    // Refit the proxy to where the body actually is now. step()'s stage-8 refit only covers active
+    // islands, so without this a body moved while asleep keeps a proxy at its old pose (see the
+    // header for why that failure surfaces far from its cause).
+    p.tree_for(p.motion[d])
+        .move_proxy(p.proxy[d], p.aabb_of(p.shape[d], p.position[d], p.orientation[d]));
+    return true;
+}
+
 bool PhysicsWorld::is_alive(BodyId id) const noexcept {
     return impl_->dense_of(id) != core::kInvalidSlotIndex;
 }

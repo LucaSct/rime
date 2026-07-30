@@ -23,11 +23,20 @@ struct Destructible {
     std::uint64_t asset = 0;
 };
 
+// "This entity is not standing as an instance" — the DestructibleInstanceRef null. Also what the
+// bind pass (bind.hpp) tests to decide whether an entity still needs standing up.
+inline constexpr std::uint32_t kUnboundInstance = 0xFFFFFFFFu;
+
 // The runtime link from an entity to its spawned DestructionWorld instance — the RigidBodyHandle
 // analogue. Transient (a fresh bind regenerates it), so deliberately NOT reflected: the inspector
 // shows what an entity *is* (Destructible), not the instance-index bookkeeping behind it.
+//
+// Staying unreflected is load-bearing for m11.4 and not merely tidy: this index is a LOCAL table
+// position, and the two peers' tables are unrelated. Were it reflected it would replicate, and a
+// client would then be handed the server's instance index for its own — silently naming a different
+// wall, or none. The entity's NetId is the shared name; this is each peer's private answer to it.
 struct DestructibleInstanceRef {
-    std::uint32_t instance = 0xFFFFFFFFu; // an InstanceId index; 0xFFFFFFFF = unbound
+    std::uint32_t instance = kUnboundInstance; // an InstanceId index; kUnboundInstance = unbound
 };
 
 // Register the destruction components with a world — id + size + reflection TypeInfo in one shot.

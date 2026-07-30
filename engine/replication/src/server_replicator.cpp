@@ -112,22 +112,30 @@ std::size_t ServerReplicator::apply_inbound(net::NetDriver& driver) {
         }
         inbox_.clear();
         (void)session->drain_received(inbox_);
-        for (const net::Received& message : inbox_) {
-            core::ByteReader reader{message.bytes};
-            std::uint8_t tag = 0;
-            std::uint64_t watermark = 0;
-            if (!reader.u8(tag) || tag != static_cast<std::uint8_t>(MessageTag::BaselineAck) ||
-                !reader.u64(watermark)) {
-                continue; // not ours, or truncated — the bounds-checked reader made it harmless
-            }
-            ClientState& state = client_for(id);
-            // Monotonic only. An ack can arrive reordered behind a newer one (they ride the
-            // unreliable channel), and letting the baseline go BACKWARDS would re-send state the
-            // client already has — wasteful, but worse, it would make the baseline stop being a
-            // watermark and start being "whatever arrived last".
-            state.acked_baseline = std::max(state.acked_baseline, watermark);
-            ++acks;
+        acks += apply_messages(id, inbox_);
+    }
+    return acks;
+}
+
+std::size_t ServerReplicator::apply_messages(net::SessionId id,
+                                             std::span<const net::Received> messages) {
+    std::size_t acks = 0;
+    for (const net::Received& message : messages) {
+        core::ByteReader reader{message.bytes};
+        std::uint8_t tag = 0;
+        std::uint64_t watermark = 0;
+        if (!reader.u8(tag) || tag != static_cast<std::uint8_t>(MessageTag::BaselineAck) ||
+            !reader.u64(watermark)) {
+            continue; // another module's tag, or truncated — the bounds-checked reader made it
+                      // harmless either way
         }
+        ClientState& state = client_for(id);
+        // Monotonic only. An ack can arrive reordered behind a newer one (they ride the
+        // unreliable channel), and letting the baseline go BACKWARDS would re-send state the
+        // client already has — wasteful, but worse, it would make the baseline stop being a
+        // watermark and start being "whatever arrived last".
+        state.acked_baseline = std::max(state.acked_baseline, watermark);
+        ++acks;
     }
     return acks;
 }

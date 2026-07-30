@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "rime/ecs/world.hpp"
@@ -62,7 +63,15 @@ public:
 
     // Drain client→server replication traffic (today: BaselineAck). Call from PreSim, after
     // NetDriver::update. Returns how many acks were consumed.
+    //
+    // Like the client's, this form takes sole ownership of the mail: drain_received moves messages
+    // out. Once anything else on this peer also reads client→server traffic, drain once in the app
+    // and fan the span out through apply_messages instead.
     std::size_t apply_inbound(net::NetDriver& driver);
+
+    // Apply the replication messages in an already-drained batch from session `id`, leaving the
+    // rest of the span for other readers. Returns how many acks were consumed.
+    std::size_t apply_messages(net::SessionId id, std::span<const net::Received> messages);
 
     // Announce structure and publish state to every connected client. Call from Publish — after
     // everything the tick will mutate has mutated, so the state described is the tick's final
