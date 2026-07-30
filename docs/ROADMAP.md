@@ -661,8 +661,11 @@ serves N peers · **m11.2** **sessions** — `NetDriver`/`Session` (the driver t
 routes by endpoint), schema-hash handshake, heartbeat/timeout, and the **`Application` ordered sim
 stage** the net tick needs (amendment A5); two-process loopback + LAN smoke · **m11.3** **replication
 core** — server-assigned `NetId`s, reflection-generated snapshot writers/readers, spawn/despawn +
-ack-baseline delta replication — **preceded by the `compute_type_hash` name-folding micro-brick +
-format-version bump** (amendment A2: identical-shape components collide today) · **m11.4**
+ack-baseline delta replication, in its **own module above `net` and `ecs`** (amendment A10) with the
+baseline ack as **replication-layer traffic**, the reliability layer having none for the snapshot
+channel (amendment A9) — **preceded by the `compute_type_hash` name-folding micro-brick** (amendment
+A2: identical-shape components collided; **landed 2026-07-29**, deliberately *without* the
+format-version bump the plan first called for — A2's implementation note says why) · **m11.4**
 **networked destruction** — the server commits the canonical **damage-op list** (including
 contact-derived ops; amendment A1) onto the reliable-ordered channel, clients apply ops at the same
 tick (never their own contact→damage conversion for replicated instances), debris bodies ride m11.3

@@ -624,7 +624,9 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Snapshot (netcode).** The server's periodic publish of dynamic world state — transforms,
   velocities — to clients, sent on the **unreliable-sequenced** channel: a lost or late snapshot
   is simply superseded by the next, never resent. Sent as **deltas against the last baseline the
-  client acked** (the reliability layer's ack bitfield doubles as the baseline tracker). Clients
+  client acked** — where that acknowledgement is a *replication-layer* message travelling back up
+  the client→server unreliable-sequenced channel, **not** the reliability layer's ack bitfield,
+  which serves only the reliable-ordered stream (ADR-0033 amendment A9). Clients
   render an *interpolation buffer* a couple of snapshots in the past, on the fixed tick's
   previous/current snapshot seam (ADR-0023).
 - **Event replay (networked destruction).** Replicating a *decision* instead of its *results*:
