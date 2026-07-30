@@ -82,7 +82,9 @@ not get over-applied to something that was never a cross-peer correctness questi
 | `was_relevant[]` cleared in `despawn()` | `replication/src/server_replicator.cpp` | 2 — a per-item bit may not outlive the item and be inherited by the slot's next tenant |
 | Dead slots score 0, not the live default | `replication/src/server_replicator.cpp` | 2 — "no policy scored it" must not read as "relevant"; see instance six |
 | `composition_checks_unverified()` | `destruction_net/src/destruction_client.cpp` | neither — but see the counting rule below |
-| `full_walk_ticks()` / `delta_ticks()` | `replication/src/server_replicator.cpp` | neither — the counting rule applied to a skip that stops happening |
+| `credit_sent` per accepted part | `replication/src/server_replicator.cpp` | 2 — a refused `send_unreliable` is not evidence of holding |
+| Byte-budget drops block `complete_through` | `replication/src/server_replicator.cpp` | 1 — a trimmed tick is partial, however complete it looks to the packer |
+| `entry_pass_records()` / `delta_ticks()` | `replication/src/server_replicator.cpp` | neither — the counting rule, applied to relevancy churn |
 
 ---
 
@@ -116,11 +118,17 @@ silently stops applying — and that one is worse, because there is no wrong out
 on the wire are identical, the state still converges, every test still passes, and only the cost
 moves.
 
-`full_walk_ticks()` exists for exactly that. `publish_delta` gives up the per-chunk "changed since
-baseline" skip on any tick where something enters a client's relevant set; the counter reports how
-often that happened, and `delta_ticks()` gives it a denominator. A steady state should keep the ratio
-near zero. **If it approaches 1.0, relevancy is thrashing and the "entries are rare and bursty"
-assumption the trade rests on has stopped being true.**
+This is where `full_walk_ticks()` came from. `publish_delta` used to give up the per-chunk "changed
+since baseline" skip on any tick where something entered a client's relevant set, and that counter
+reported how often. It earned its keep immediately — it read **30 out of 30** on a quiet world and
+exposed instance six — and then it earned its keep a second way, by making the cost visible enough to
+argue about, which is what led to the [entry pass](#the-entry-pass--how-newly-relevant-entities-are-sent)
+removing the gate entirely.
+
+The counter did not survive that, and should not have: with no gate left there is no widening to be
+stuck. `entry_pass_records()` replaces it and counts the **real work** instead of the disabled
+optimization. That is the better end state — a counter that measures something the code actually
+does, rather than one watching for a flag to jam.
 
 Generalize it: when code takes a fast path *conditionally*, the condition going permanently false is
 a defect that no correctness test can see. Count the condition, not just the work.
@@ -163,11 +171,28 @@ rare transition common.
 
 ## Deliberate limitations
 
+- **The rotation cursor does not apply when a relevancy policy is installed — the low-priority tail
+  can starve forever.** This one is a live defect, not a cost. `publish_delta` chooses between two
+  orderings: sort by priority *or* rotate by the resume cursor. The sort branch's own comment says
+  the stable sort is "what lets the rotation cursor below still make progress", but the rotation is
+  in the `else` branch and therefore never runs on the relevancy path at all. In a world that is
+  permanently over the per-tick packet allowance, the same highest-priority prefix is sent every
+  tick and everything below the cut-off is never delivered — the exact liveness bug the m11.5
+  foundation commit fixed for the no-policy path, still present on the path m11.5 actually turns on.
+  Measured while writing the entry-pass proof: 501 entities, ~190 delivered per tick, ~310 re-entering
+  every tick forever, and the state hashes never converged.
+
+  It needs a deliberate decision rather than a quick patch, because the two obvious fixes trade
+  against each other. Rotating the sorted list guarantees delivery but abandons strict nearest-first.
+  Keeping strict priority preserves the policy's meaning but means "priority" silently also means
+  "some entities are never sent", which is not what the byte budget promises. The likely right answer
+  is neither: **age the priority** — boost an entity by how long this client has been owed it — so
+  the ordering stays semantically nearest-first while the tail is guaranteed to surface. That needs
+  per-(client, entity) state, so it inherits corollary 2 and should be keyed on the full generational
+  handle from the start.
 - **The relevancy call still walks every replicated entity per client.** The policy can be cheap per
   entity, but nothing narrows the span yet, so the O(clients × entities) pass stands. Narrowing it
   needs a spatial index over replicated entities — its own brick.
-- **`any_entering` is a global gate, and at scale it is expected to be stuck open.** This is the
-  most important known cost in the module, so it gets its own section below.
 - **A parented entity with no `WorldTransform` cannot be located** by `distance_relevancy`, so it is
   treated as unmeasurable and always relevant. Resolving it would mean re-implementing
   `propagate_transforms` one entity at a time inside the policy. Give such an entity a
@@ -179,55 +204,37 @@ rare transition common.
 
 ---
 
-## The `any_entering` gate — a known cost, with the replacement already designed
+## The entry pass — how newly-relevant entities are sent
 
-`publish_delta` computes one boolean per (client, tick): did anything enter this client's relevant
-set? When true, it gives up the per-chunk "changed since baseline" test for **the whole world**, not
-just for the entering entity — every column of every chunk of every replicated archetype is
-re-examined. The mechanism's cost is proportional to the size of the entire replicated world, and it
-is triggered by a *single* transition anywhere in it.
+An entity ENTERING a client's relevant set has, by definition, not changed since that client's
+baseline. The chunk walk's "changed since baseline" test therefore cannot see it, and something has
+to send it anyway.
 
-The comment defending that trade says transitions are "rare and bursty". **Under the workload m11.5
-exists for, that is not defensible.** At the ADR's target — 64 clients, ~1000 debris, debris moving,
-viewpoints moving — the probability that *some* (client, entity) pair crosses *some* radius on a
-given tick approaches 1. `any_entering` then reads true essentially every tick for essentially every
-client, and the chunk-version skip — "the whole reason this design needs no history buffer", per the
-module header — is effectively off whenever distance culling is on. A fully static 10,000-entity
-level would be walked in full every tick because of debris churn that has nothing to do with it.
+**The design this replaced** gated the whole chunk walk on one global boolean: if anything anywhere
+was entering, every column of every chunk of every replicated archetype was re-examined for that
+client. Its cost was proportional to the size of the entire replicated world and it was triggered by
+a single transition anywhere in it — a static 10,000-entity level walked in full because one distant
+chunk of rubble drifted into range. The comment defending it claimed transitions are "rare and
+bursty"; at the ADR's target (64 clients, ~1000 debris, debris and viewpoints both moving) the
+chance that *some* pair crosses *some* radius on a tick approaches 1, so the flag was effectively
+stuck on and the chunk-version skip — which the module header calls the whole reason this design
+needs no history buffer — was off whenever relevancy was on.
 
-Two things currently hold the line, and neither is a fix:
+**What is built instead:** a targeted pass over the candidates already being iterated for relevancy,
+which serializes the full state of exactly those entities that are entering and pushes into the same
+record arrays. Everything downstream (sort, budget, packetize, `credit_sent`) is agnostic about which
+pass produced a record. The chunk walk goes back to being an unconditional version delta, and skips
+any row the entry pass already emitted in full.
 
-1. **Hysteresis** in `distance_relevancy` removes the *thrash* case — an entity loitering on the
-   boundary no longer re-enters every other tick. It does nothing about genuine entries, which at
-   scale are enough on their own.
-2. **`full_walk_ticks()` / `delta_ticks()`** make the problem *visible*. That ratio is the tripwire;
-   today it is a live measurement of an accepted cost.
+Cost is now O(what changed) + O(what is entering for this client), with no coupling to how much of
+the rest of the world exists — which makes the "rare and bursty" assumption **unnecessary** rather
+than better-founded. `entry_pass_records()` counts the real work; a settled world with a stationary
+viewpoint holds it at zero, and a churning policy shows up as records rather than as a silently
+disabled optimization.
 
-**The replacement, when this is built:** stop gating the chunk walk at all. Treat entering as its own
-targeted emission pass.
-
-- The existing `candidates_`/`priorities_` loop already visits every live candidate for this client
-  every tick. Classify each there: culled, entering, or ordinary — no new traversal.
-- For **entering** candidates only, build the record directly, without the chunk walk:
-  `world_->signature_of(entity)` intersected with the wire schema's replicable set gives the columns,
-  then `get_component_raw` + `core::serialize` exactly as the row loop already does. Push into the
-  same `records_` / `record_priority_` / `record_slot_` / `record_entry_` arrays — everything
-  downstream (sort, rotate, budget, packetize, `credit_sent`) is agnostic about which pass produced a
-  record, so none of it changes.
-- Delete `any_entering`. `dirty` reverts to `chunk.column_version(local) > baseline`; `chunk_changed`
-  becomes redundant with `!dirty.empty()`; the per-row entering check disappears, because by the time
-  the chunk walk runs every entering slot has already been handled.
-- Skip rows in the chunk walk whose slot the entry pass already emitted, so nothing is sent twice.
-
-Cost becomes O(what changed) + O(what is entering for this client), decoupled from how much of the
-rest of the world exists — which makes the "rare and bursty" assumption *unnecessary* rather than
-merely better-founded. `full_walk_ticks()` then becomes a permanent regression tripwire that should
-read 0 forever, which is a better fate for a counter than being a live measurement.
-
-A cheaper middle ground, if a brick cannot take the restructure: scope `any_entering` **per
-archetype** rather than globally, so unrelated static archetypes stay cheap. It still walks a
-transitioning archetype's clean chunks, and it leaves a "did I remember the middle ground too" risk
-behind, so prefer the full version.
+The proof is `"entry work is proportional to what entered, not to how big the world is"`: a settled,
+quiet 121-entity world, one entity brought into range, and **exactly one** entry record. That number
+stays 1 as the world grows, which is the whole claim.
 
 ---
 
