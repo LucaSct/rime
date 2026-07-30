@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -73,6 +74,21 @@ public:
     // stale during a quiet stretch when nothing else is flowing.
     void send_ack(net::NetDriver& driver, std::uint64_t now_ms);
 
+    // Expire transform history that this tick did not renew, and return how many mirrors settled.
+    //
+    // CALL IT ONCE PER TICK, FROM PUBLISH, UNCONDITIONALLY — including ticks on which nothing
+    // arrived, which is precisely when it does its work. Skipping it is not a missing optimization
+    // but a rendering bug: a mirror that moves once and then holds still keeps a valid
+    // previous/current pair forever, and since `alpha` sweeps 0→1 every tick period regardless of
+    // whether this entity received anything, the renderer replays that last step over and over —
+    // the mirror snaps back and slides forward, once per tick, for as long as it stands still.
+    // Debris settling is the single most common event in a destruction engine, so this is the
+    // steady state, not an edge case.
+    //
+    // It is separate from send_ack rather than folded into it because it mutates the world and that
+    // does not belong hidden inside a function whose job is to put a packet on the wire.
+    std::size_t settle_transform_history();
+
     [[nodiscard]] const NetIdMap& map() const noexcept { return map_; }
 
     [[nodiscard]] ecs::Version watermark() const noexcept { return acks_.watermark(); }
@@ -101,6 +117,12 @@ public:
 
     [[nodiscard]] std::uint64_t records_replayed() const noexcept { return records_replayed_; }
 
+    // Mirrors whose transform history has expired because a tick passed without renewing it — the
+    // proof surface for settle_transform_history(). A world that is visibly moving reads zero here
+    // while it moves and non-zero once it comes to rest; a run that stays zero throughout means the
+    // pass never fired, which is indistinguishable by eye from it having fired correctly.
+    [[nodiscard]] std::uint64_t histories_settled() const noexcept { return histories_settled_; }
+
     // Deferred records evicted because the buffer was full — the only case that still suppresses an
     // acknowledgement. Should be zero against an honest peer.
     [[nodiscard]] std::uint64_t records_evicted() const noexcept { return records_evicted_; }
@@ -117,6 +139,31 @@ private:
     // binds the id — arrival order is preserved, so the newest state still wins.
     void replay_deferred(NetId id, ecs::Entity local);
 
+    // Everything that must happen to a mirror BEFORE a replicated LocalTransform is written over
+    // it. The one funnel both apply paths (on_delta and replay_deferred) pass through, which is why
+    // it is one function rather than two helpers someone could call only one of.
+    //
+    // It gives the mirror a WorldTransform if it has none — without one it is invisible, since
+    // propagate_transforms only touches entities that already have both, so every renderer query
+    // skips it — and it rolls the previous/current history forward.
+    //
+    // The rotation is driven off the apply, not off a tick boundary, and that is the whole
+    // subtlety. A replicated write does not land when the packet nominally arrived:
+    // `replay_deferred` applies records whose Spawn had not yet bound, which can be many ticks
+    // later. A rotation keyed to "the tick counter advanced" would capture a previous that was
+    // never on screen for those records, or skip them entirely. Keying it to the write itself makes
+    // "previous" mean exactly what a renderer needs — the last value this client actually held.
+    // `incoming` is the value about to be written, so an unchanged re-send can be told apart from a
+    // real move. That distinction is not cosmetic: the server re-sends until the baseline advances,
+    // which takes a round trip, so the SAME value routinely lands two ticks running. Rotating on
+    // those would set previous := current and collapse a genuine gap — the client would snap
+    // through exactly the motion interpolation exists to smooth. It is also what
+    // settle_transform_history() keys off, so that a re-send window is not mistaken for motion.
+    void prepare_transform_write(ecs::Entity local,
+                                 ecs::ComponentId component,
+                                 const core::TypeInfo& type,
+                                 std::span<const std::byte> incoming);
+
     // One component write that arrived before the entity it belongs to. The bytes are COPIED: the
     // reader's span points into a datagram buffer that is reused the moment this call returns.
     struct DeferredRecord {
@@ -132,6 +179,10 @@ private:
     WireSchema schema_;
     NetIdMap map_;
     ecs::ComponentId replicated_id_{};
+    ecs::ComponentId local_transform_id_{};
+    ecs::ComponentId previous_transform_id_{};
+    ecs::ComponentId world_transform_id_{};
+    ecs::ComponentId render_transform_id_{};
     AckTracker acks_;
 
     std::vector<net::Received> inbox_;
@@ -146,6 +197,7 @@ private:
     std::uint64_t records_deferred_ = 0;
     std::uint64_t records_replayed_ = 0;
     std::uint64_t records_evicted_ = 0;
+    std::uint64_t histories_settled_ = 0;
 
     // Records waiting for their Spawn, in arrival order. Bounded (see kMaxDeferredRecords): an
     // unbounded buffer keyed by ids a peer chooses is a peer-controlled allocation, which is the

@@ -15,10 +15,33 @@
 #include "rime/core/diagnostics/log.hpp"
 #include "rime/core/math/transform.hpp"
 #include "rime/ecs/query.hpp"
+#include "rime/ecs/render_transform.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/render/components.hpp"
 
 namespace rime::render {
+
+namespace {
+
+// Which pose to DRAW an entity at: its presentation override when something produced one this
+// frame, otherwise the simulated pose. See ecs/render_transform.hpp for the contract; the short
+// version is that a fixed tick and a free-running frame do not line up, so a producer of smoothed
+// motion (m11.6's network interpolation is the first) deposits a per-frame blend that the sim
+// itself must never see.
+//
+// Costs an entity that never blends one null check: RenderTransform is absent on essentially
+// everything, and World::get returns null outright for a component that was never even registered —
+// which is every world that does not run a client replicator.
+[[nodiscard]] const core::Transform& pose_to_draw(const ecs::World& world,
+                                                  ecs::Entity e,
+                                                  const ecs::WorldTransform& simulated) noexcept {
+    if (const auto* presented = world.get<ecs::RenderTransform>(e)) {
+        return presented->value;
+    }
+    return simulated.value;
+}
+
+} // namespace
 
 ExtractedScene extract_scene(ecs::World& world) {
     ExtractedScene scene;
@@ -31,35 +54,38 @@ ExtractedScene extract_scene(ecs::World& world) {
         [&](ecs::Entity e, ecs::WorldTransform& wt, MeshRef& mesh, MaterialRef& mat) {
             if (mesh.mesh == kInvalidMeshId || mat.material == kInvalidMaterialId)
                 return; // half-dressed entity: nothing sensible to draw
-            scene.draws.push_back({mesh.mesh, mat.material, core::to_matrix(wt.value)});
+            scene.draws.push_back(
+                {mesh.mesh, mat.material, core::to_matrix(pose_to_draw(world, e, wt))});
             scene.draw_entities.push_back(e);
         });
 
     // The FIRST active camera wins (the documented rule — deterministic because query order is
     // archetype order, and good enough until a real multi-view story exists). A camera looks
     // down its entity's local −z, so its view matrix is just the inverse of its world matrix.
-    world.query<ecs::WorldTransform, Camera>().for_each([&](ecs::WorldTransform& wt, Camera& cam) {
-        if (scene.camera.found || !cam.active)
-            return;
-        scene.camera.found = true;
-        scene.camera.view = core::inverse(core::to_matrix(wt.value));
-        scene.camera.position[0] = wt.value.translation.x;
-        scene.camera.position[1] = wt.value.translation.y;
-        scene.camera.position[2] = wt.value.translation.z;
-        scene.camera.fov_y = cam.fov_y;
-        scene.camera.z_near = cam.z_near;
-        scene.camera.z_far = cam.z_far;
-    });
+    world.query<ecs::WorldTransform, Camera>().for_each(
+        [&](ecs::Entity e, ecs::WorldTransform& wt, Camera& cam) {
+            if (scene.camera.found || !cam.active)
+                return;
+            const core::Transform& pose = pose_to_draw(world, e, wt);
+            scene.camera.found = true;
+            scene.camera.view = core::inverse(core::to_matrix(pose));
+            scene.camera.position[0] = pose.translation.x;
+            scene.camera.position[1] = pose.translation.y;
+            scene.camera.position[2] = pose.translation.z;
+            scene.camera.fov_y = cam.fov_y;
+            scene.camera.z_near = cam.z_near;
+            scene.camera.z_far = cam.z_far;
+        });
 
     // Lights, already GPU-shaped. A directional light travels along its entity's −z (the camera
     // convention — aim a light exactly like a camera); transform_vector then normalize keeps it
     // unit under any (positive) scale. Radiance = color × intensity, folded here so the shader
     // never multiplies.
     world.query<ecs::WorldTransform, DirectionalLight>().for_each(
-        [&](ecs::WorldTransform& wt, DirectionalLight& l) {
+        [&](ecs::Entity e, ecs::WorldTransform& wt, DirectionalLight& l) {
             GpuDirectionalLight g{};
-            const core::Vec3 dir =
-                core::normalize(core::transform_vector(wt.value, {0.0f, 0.0f, -1.0f}));
+            const core::Vec3 dir = core::normalize(
+                core::transform_vector(pose_to_draw(world, e, wt), {0.0f, 0.0f, -1.0f}));
             g.direction[0] = dir.x;
             g.direction[1] = dir.y;
             g.direction[2] = dir.z;
@@ -70,11 +96,12 @@ ExtractedScene extract_scene(ecs::World& world) {
         });
 
     world.query<ecs::WorldTransform, PointLight>().for_each(
-        [&](ecs::WorldTransform& wt, PointLight& l) {
+        [&](ecs::Entity e, ecs::WorldTransform& wt, PointLight& l) {
             GpuPointLight g{};
-            g.position[0] = wt.value.translation.x;
-            g.position[1] = wt.value.translation.y;
-            g.position[2] = wt.value.translation.z;
+            const core::Transform& pose = pose_to_draw(world, e, wt);
+            g.position[0] = pose.translation.x;
+            g.position[1] = pose.translation.y;
+            g.position[2] = pose.translation.z;
             g.position[3] = l.radius;
             g.radiance[0] = l.color_r * l.intensity;
             g.radiance[1] = l.color_g * l.intensity;
@@ -89,10 +116,11 @@ ExtractedScene extract_scene(ecs::World& world) {
     // (pos/dir/cone), not a GPU struct — LocalShadowMap turns each into a perspective view_proj +
     // the GPU record.
     world.query<ecs::WorldTransform, SpotLight>().for_each(
-        [&](ecs::WorldTransform& wt, SpotLight& l) {
+        [&](ecs::Entity e, ecs::WorldTransform& wt, SpotLight& l) {
             SpotLightData s{};
-            s.position = wt.value.translation;
-            s.direction = core::normalize(core::transform_vector(wt.value, {0.0f, 0.0f, -1.0f}));
+            const core::Transform& pose = pose_to_draw(world, e, wt);
+            s.position = pose.translation;
+            s.direction = core::normalize(core::transform_vector(pose, {0.0f, 0.0f, -1.0f}));
             s.range = l.range;
             // Guard the cone: outer ≥ inner, both in (0, ~90°), so cos_inner ≥ cos_outer and the
             // shadow FOV (2×outer) never degenerates.

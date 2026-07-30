@@ -4,6 +4,10 @@
 
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/reflect/serialize.hpp"
+#include "rime/ecs/query.hpp"
+#include "rime/ecs/render_transform.hpp"
+#include "rime/ecs/transform.hpp"
+#include "rime/replication/interpolation.hpp"
 
 namespace rime::replication {
 namespace {
@@ -23,6 +27,14 @@ namespace {
 ClientReplicator::ClientReplicator(ecs::World& world)
     : world_(&world), schema_(WireSchema::build(world.components())) {
     replicated_id_ = world.register_component<Replicated>();
+    local_transform_id_ = world.component_id<ecs::LocalTransform>();
+    // Client-only, and safe to be client-only: all three are unreflected, so they contribute to
+    // neither the wire schema nor the component schema hash the handshake compares. WorldTransform
+    // is registered here because a mirror needs one to be drawable at all (see
+    // prepare_transform_write) and nothing else on a headless client would have registered it.
+    previous_transform_id_ = world.register_component<PreviousTransform>();
+    world_transform_id_ = world.register_component<ecs::WorldTransform>();
+    render_transform_id_ = world.register_component<ecs::RenderTransform>();
 }
 
 void ClientReplicator::apply_inbound(net::NetDriver& driver) {
@@ -92,6 +104,112 @@ void ClientReplicator::on_spawn(core::ByteReader& reader) {
     }
 }
 
+void ClientReplicator::prepare_transform_write(ecs::Entity local,
+                                               ecs::ComponentId component,
+                                               const core::TypeInfo& type,
+                                               std::span<const std::byte> incoming) {
+    if (component != local_transform_id_) {
+        return; // only transforms are placed and interpolated today
+    }
+
+    // Decode once: the same value answers both questions below.
+    ecs::LocalTransform candidate{};
+    const bool decoded = core::deserialize(type, &candidate, incoming);
+
+    // (1) MAKE THE MIRROR DRAWABLE. propagate_transforms only touches entities that already have
+    // BOTH LocalTransform and WorldTransform, and a mirror is spawned bare — so without this it
+    // never acquires a world pose, and every renderer query (which reads WorldTransform) skips it
+    // silently. A replicated entity was literally undrawable before m11.6b.
+    //
+    // Seeded from the incoming value rather than left default. A default would be identity for the
+    // rest of this tick, and destruction::bind_destructibles reads WorldTransform in PREFERENCE to
+    // LocalTransform (bind.cpp's placement_of) — so a bind running before this tick's
+    // propagate_transforms would stand the instance at the world origin. The fallback that
+    // comment describes stops covering us the moment the component exists, so it has to be right
+    // on arrival, not one pass later.
+    if (world_->get_component_raw(local, world_transform_id_) == nullptr) {
+        void* slot = world_->add_component_raw(local, world_transform_id_);
+        if (slot != nullptr && decoded) {
+            static_cast<ecs::WorldTransform*>(slot)->value = candidate.value;
+        }
+    }
+
+    // Fetched AFTER the add above: add_component_raw relocates the entity between archetypes, so a
+    // pointer taken before it is dangling. Cheap to get wrong, silent when wrong.
+    const void* existing = world_->get_component_raw(local, local_transform_id_);
+    if (existing == nullptr) {
+        return; // first write for this mirror — there IS no previous, and `valid` must stay false
+    }
+
+    // (2) ROLL THE HISTORY. An unchanged re-send is not a new tick's worth of motion. Skipping it
+    // keeps `previous` at the last value that actually differed, which is what a renderer needs to
+    // blend from.
+    //
+    // Compared FIELD BY FIELD, deliberately not with memcmp. `core::Quat` is over-aligned, so
+    // `sizeof(Transform)` exceeds the 40 bytes it packs into and the remainder is padding whose
+    // contents nothing defines — a memcmp reads it, never matches, and silently turns this guard
+    // into a no-op. It did exactly that on the first attempt.
+    if (decoded) {
+        const auto& a = candidate.value;
+        const auto& b = static_cast<const ecs::LocalTransform*>(existing)->value;
+        const bool same = a.translation.x == b.translation.x &&
+                          a.translation.y == b.translation.y &&
+                          a.translation.z == b.translation.z && a.rotation.x == b.rotation.x &&
+                          a.rotation.y == b.rotation.y && a.rotation.z == b.rotation.z &&
+                          a.rotation.w == b.rotation.w && a.scale.x == b.scale.x &&
+                          a.scale.y == b.scale.y && a.scale.z == b.scale.z;
+        if (same) {
+            return;
+        }
+    }
+    if (world_->get_component_raw(local, previous_transform_id_) == nullptr) {
+        (void)world_->add_component_raw(local, previous_transform_id_);
+        // Born together and destroyed together, so the render pass can select on the pair and never
+        // meet a half-equipped mirror. Adding it lazily inside that pass is not an option: it walks
+        // archetypes, and a structural change during a walk is exactly what query.hpp forbids.
+        (void)world_->add_component_raw(local, render_transform_id_);
+    }
+    // Re-fetch BOTH after the add, for the same relocation reason as above.
+    const auto* current = world_->get<ecs::LocalTransform>(local);
+    auto* previous = world_->get<PreviousTransform>(local);
+    if (current == nullptr || previous == nullptr) {
+        return;
+    }
+    previous->value = current->value;
+    previous->valid = true;
+    previous->moved_this_tick = true; // consumed by settle_transform_history() at the tick's end
+}
+
+std::size_t ClientReplicator::settle_transform_history() {
+    // Expire history that has stopped being renewed. `valid` means "a genuinely new value landed
+    // during the tick that just ran", so it has to be turned off when a tick passes without one —
+    // otherwise the last step replays every tick forever, because `alpha` sweeps 0→1 on its own
+    // schedule and does not know this entity stopped moving.
+    //
+    // Keyed to a GENUINE change, not to "a record was applied". The server re-sends an unacked
+    // value for a round trip, so records keep arriving for an entity that is standing still; a pass
+    // that treated those as motion would hold the blend open for the whole re-send window and
+    // produce exactly the sawtooth this exists to stop. The re-send guard in
+    // prepare_transform_write is what tells the two apart, and this pass inherits that distinction
+    // rather than re-deriving a weaker one.
+    //
+    // Expiring is safe the moment one full tick has passed: the blend it drove ran over that tick's
+    // frames and reached alpha≈1, so the mirror is already drawn at `current` before this fires.
+    std::size_t settled = 0;
+    world_->query<PreviousTransform>().for_each([&](PreviousTransform& history) {
+        if (history.moved_this_tick) {
+            history.moved_this_tick = false; // one tick's worth of blend has now been on screen
+            return;
+        }
+        if (history.valid) {
+            history.valid = false;
+            ++settled;
+        }
+    });
+    histories_settled_ += settled;
+    return settled;
+}
+
 void ClientReplicator::replay_deferred(NetId id, ecs::Entity local) {
     // Stable partition by hand rather than remove_if + a second pass: the held records for one id
     // must be applied in the order they arrived, because two writes to the same component are a
@@ -111,6 +229,7 @@ void ClientReplicator::replay_deferred(NetId id, ecs::Entity local) {
         std::size_t packed = 0;
         if (schema_.lookup(schema_.wire_id_of(record.component), unused, type, packed) &&
             type != nullptr) {
+            prepare_transform_write(local, record.component, *type, record.bytes);
             void* slot = world_->get_component_raw(local, record.component);
             if (slot == nullptr) {
                 slot = world_->add_component_raw(local, record.component);
@@ -218,6 +337,7 @@ void ClientReplicator::on_delta(core::ByteReader& reader) {
                 ++records_deferred_;
                 continue;
             }
+            prepare_transform_write(local, local_id, *type, bytes);
             void* slot = world_->get_component_raw(local, local_id);
             if (slot == nullptr) {
                 // The mirror does not carry this component yet — the server added it after the

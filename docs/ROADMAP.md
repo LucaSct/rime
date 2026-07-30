@@ -159,6 +159,58 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > client→server path or a periodic state broadcast, which is late-join machinery. **Next:** m11.5 —
 > relevancy + budgets.
 >
+> **Update (2026-07-30) — m11.6b (drawing the blend).** m11.6a computed an interpolated pose that
+> nothing could read; this brick connects it to the renderer and finds two defects doing it. The
+> connection is **`ecs::RenderTransform`** — an unreflected "pose to draw this frame" component —
+> because `rime::render` links rhi/ecs/assets and `rime::replication` links ecs/net, so the two can
+> only meet on the module below both. `replication::update_render_transforms(world, alpha)` deposits
+> it once per frame from the render callback and `extract_scene` prefers it over `WorldTransform`,
+> falling back where absent. That split is also the determinism argument: `WorldTransform` stays the
+> simulated truth, and since `Application` hands `alpha` out through `FrameContext` alone, a sim
+> stage could not call the pass correctly even by mistake. **First defect: a replicated entity was
+> undrawable** — a mirror is spawned bare, `WorldTransform` is unreflected so it never crosses the
+> wire, and `propagate_transforms` only touches entities that already have both transforms, so no
+> mirror ever had a world pose and every renderer query skipped it in silence. It now gets one on
+> its first transform write, seeded from that write because `bind_destructibles` prefers
+> `WorldTransform` and a default would stand a destructible at the origin. **Second defect, the
+> sharper one: `valid` was never turned off.** `alpha` sweeps 0→1 every tick regardless of whether
+> an entity received anything, so a pair left valid after the motion stopped replays its last step
+> forever — the mirror snaps back and slides forward once per tick for as long as it stands still,
+> and debris coming to rest is the most common event in a destruction engine.
+> `settle_transform_history()` expires history a tick did not renew, keyed to a **genuinely
+> different value** rather than to "a record arrived" — the server re-sends an unacked value for a
+> round trip, and treating those as motion would hold the blend open for the whole window. m11.6a
+> could not see either: its proof drove the entity for 20 straight ticks, so "moves, then rests" —
+> one of the two behaviours the history exists to distinguish — was never run. Named gap: the blend
+> always spans exactly one tick, so an entity whose record relevancy defers replays at speed and
+> then holds (judder, not rewind); interpolating over the interval a value actually covers is the
+> **snapshot interpolation** layer, and the delta header already carries the server tick for it.
+> **Next:** m11.6c — the client→server input half.
+>
+> **Update (2026-07-30) — m11.5 (relevancy + budgets).** Per-client interest, nearest-first priority
+> ordering and a per-tick byte budget, plus the ready-made `distance_relevancy` policy in
+> `replication/relevancy.hpp`. Two decisions in that policy are worth more than the arithmetic:
+> position falls back from `WorldTransform` to `LocalTransform`, because debris — the population the
+> whole brick exists to cull — are spawned as roots carrying only the latter, so a stricter policy
+> would fail to locate exactly its own subject; and an entity with **no position at all is always
+> relevant**, because a distance filter that culled what it could not measure would silently stop
+> replicating every non-spatial entity in the game. Failing open costs bandwidth, failing closed
+> costs correctness, and only one of those is visible. The **hysteresis band** is load-bearing rather
+> than cosmetic: without it a boundary-straddling chunk re-enters every other tick, and every entry
+> both forces a full-state re-send and surrenders the per-chunk delta skip for that whole tick.
+>
+> The roadmap's "destruction events are never culled, debris transforms are distance-budgeted per
+> client" is now a **test rather than a comment**: with a policy scoring everything irrelevant and a
+> one-byte budget, the cross-peer destruction witness still matches bit for bit, because alive bits,
+> health and composition are all *derived* by the client from the op stream. **Three more instances
+> of the [replication invariant](design/replication.md) surfaced while building it** — a despawned
+> slot that read as eternally arriving and pinned the full-walk optimization off forever; per-item
+> relevancy bookkeeping strengthened when a record was *built* rather than *sent*; and the byte
+> budget declaring incomplete ticks complete, which retired withheld state from the candidate set
+> permanently. All three were found by counters, not by reading. Named gaps: the relevancy call still
+> **walks every replicated entity per client** (narrowing it needs a spatial index — its own brick),
+> and debris **velocity** is still not replicated. **Next:** m11.6 — interpolation + input.
+>
 > **Update (2026-07-22) — Milestone 10 (Advanced lighting) COMPLETE.** The whole [ADR-0032](adr/0032-lighting-v2.md)
 > stack landed on `main`, brick by brick, every technique gated behind `LightingSettings` so **off is
 > the byte-identical M5.6 baseline**: **m10.1a** RHI array/cube textures + depth-compare sampler ·
