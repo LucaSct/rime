@@ -372,3 +372,73 @@ place so its position among later-registered steps is stable — every existing 
 The phase is deliberately named `PostSim`, not `PostPhysics`: it *is* where the physics bridge runs,
 but `app` does not depend on `physics` (simulation-tick.md §1), and a stage must not be named after
 a module its own module cannot see.
+
+---
+
+## Amendment (2026-07-30, pre-m11.3): two claims the shipped code contradicts
+
+Ground-truth pass over §4 and §7 before building the replication core, in the same spirit as A1–A8:
+the ADR asserts two things about the *existing* transport and module graph that were never true of
+what m11.1/m11.2 actually shipped. Both were verified against the code, and both would have been
+inherited as design constraints by m11.3 if left standing.
+
+### A9. Snapshots are acked by the replication layer, not by the reliability layer's ack bitfield
+
+**§4 is wrong** where it says: *"each snapshot carries only components changed since the baseline
+the client has acked — the ack bitfield from §3 doubles as the delta-baseline tracker, which is why
+the reliability layer and replication are one module."*
+
+`ReliableChannel`'s acknowledgement machinery — `process_ack`, `received_bits_`, the
+frontier-anchored forward bitfield, `ack()`/`ack_bits()` — serves **only the reliable-ordered
+stream**. The unreliable-sequenced path has no acknowledgement in either direction:
+`receive_unreliable` compares an arriving sequence number against `latest_unreliable_seq_` and
+either delivers it or drops it as stale, and the sender keeps no per-packet state to be acked at
+all. That is not an oversight in m11.1 — it is the correct shape for a channel whose whole contract
+is "late state is garbage, so drop it, never resend." Snapshots ride that channel. Nothing acks
+them.
+
+So the baseline acknowledgement has to be **application-level traffic**: a small replication
+message the client sends back up its own **unreliable-sequenced** channel, naming the newest
+baseline it holds. Unreliable-sequenced is the right contract for it for the same reason it is
+right for snapshots — only the newest ack has any value, a lost one is superseded rather than
+missed, and it must never compete with genuine events for the reliable channel's in-flight window
+(`kWindow` = 32) or its `kMaxPending` = 256 backlog. An ack that could push a spawn or an m11.4
+damage-op list into backpressure would be the least valuable message on the wire crowding out one
+of the most.
+
+**The consequence for module shape is the part worth flagging**, because §4 draws a structural
+conclusion from the false premise: *"which is why the reliability layer and replication are one
+module."* With the premise gone, so is the argument. Replication needs no privileged access to
+channel internals — it is an ordinary client of the two public `send_*` calls. See A10.
+
+### A10. `engine/net` depends on core + platform only — replication is a module *above* it
+
+**§7 is wrong** where it says `engine/net` *"depends on `core`, `ecs`, `platform` (sockets), and
+interfaces."* It does not, and has not since it was born: `engine/net/CMakeLists.txt` states in its
+own header comment that the module *"depends on core + platform (sockets) and NOTHING above it — a
+removable feature module,"* and its `target_link_libraries` names `rime::platform` alone. m11.2
+honoured that boundary deliberately and at some cost, taking the component schema hash as an opaque
+`std::uint64_t` in `NetDriver::Config` rather than letting `engine/net` see `ecs` in order to
+compute it.
+
+This matters now because m11.3 is the first brick that genuinely needs *both* sides: it must walk
+an `ecs::World` through reflection and it must put bytes on a `net::Session`. Under §7-as-written
+the natural home would be inside `engine/net`; under the real graph that would drag `ecs` into a
+module that has kept itself free of it through two bricks, and would break guardrail #2's promise
+that the engine still builds with `engine/net` deleted.
+
+The replication core therefore lands as its **own module above both**, depending on `rime::ecs` and
+`rime::net` while neither depends on it. This is not a new shape in the tree: `engine/editorhost`
+already depends on both `rime::ecs` and `rime::stream` while `rime::stream` knows nothing of `ecs`
+— the same layering, one storey down. `engine/net` gains nothing from this brick and stays exactly
+as it is.
+
+### Also corrected: a stale ROADMAP cross-reference
+
+The ROADMAP's m11.3 line says the brick is *"preceded by the `compute_type_hash` name-folding
+micro-brick **+ format-version bump**."* A2's own implementation note records that the format
+version bump was **deliberately not done** — the hash is itself the compatibility gate and already
+produces a precise diagnostic, where a version bump would replace it with a blunter
+`UnsupportedVersion` and reject files whose container framing never changed. The ROADMAP line is
+updated to match the decision that was actually taken, so m11.3 does not begin by hunting for a
+prerequisite that was consciously declined.
