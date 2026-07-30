@@ -353,9 +353,51 @@ void ServerReplicator::publish_delta(net::Session& session,
         ++full_walk_ticks_;
     }
 
+    // ── Relevancy bookkeeping, applied at every exit from this function ──────────────────────────
+    //
+    // `was_relevant` is a per-item claim about what this client HOLDS, so corollary 2 governs it:
+    // it may strengthen only on evidence about that entity's own transmission, never on "we built a
+    // record for it". Those differ whenever the byte budget bites, and the gap is not benign — an
+    // ENTERING entity is by definition one whose state has not changed since the baseline, so if
+    // its entry record is dropped and we mark it delivered anyway, the ordinary change test will
+    // never re-offer it and the client mirrors it empty forever. That is the m11.5 foundation bug
+    // again, one layer up.
+    //
+    // So the rule, by case:
+    //   irrelevant                     → 0. It is not owed anything.
+    //   relevant, nothing to send      → 1. Vacuously satisfied; this is also the ONLY thing that
+    //                                    marks an entity with no replicable columns at all, which
+    //                                    would otherwise read as eternally entering and pin the
+    //                                    full walk on forever (instance six's shape).
+    //   relevant, record actually sent → 1. Real evidence.
+    //   relevant, record dropped       → unchanged. An entry stays 0 and retries next tick; an
+    //                                    ordinary change stays 1, because the client still holds
+    //                                    the older value and the clamped baseline will re-offer it.
+    const auto settle_relevancy = [&](std::size_t sent_records) {
+        for (std::size_t i = 0; i < sent_records && i < record_slot_.size(); ++i) {
+            const std::uint32_t slot = record_slot_[i];
+            if (slot < state.was_relevant.size()) {
+                state.was_relevant[slot] = 1;
+            }
+            if (record_entry_[i] != 0) {
+                ++entities_entered_;
+            }
+        }
+        for (std::size_t slot = 0; slot < slot_count; ++slot) {
+            if (!(priority_by_index_[slot] > 0.0f)) {
+                state.was_relevant[slot] = 0;
+            } else if (slot >= produced_record_.size() || produced_record_[slot] == 0) {
+                state.was_relevant[slot] = 1;
+            }
+        }
+    };
+
     // ── Collect one record per entity with at least one changed replicable component ────────────
     records_.clear();
     record_priority_.clear();
+    record_slot_.clear();
+    record_entry_.clear();
+    produced_record_.assign(slot_count, 0);
     const std::size_t archetypes = world_->archetype_count();
     for (std::size_t ai = 0; ai < archetypes; ++ai) {
         ecs::Archetype& arch = world_->archetype(ai);
@@ -414,9 +456,6 @@ void ServerReplicator::publish_delta(net::Session& session,
                 const float priority =
                     slot < priority_by_index_.size() ? priority_by_index_[slot] : 1.0f;
                 if (!(priority > 0.0f)) {
-                    if (slot < state.was_relevant.size()) {
-                        state.was_relevant[slot] = 0;
-                    }
                     ++entities_culled_;
                     continue; // this client does not care about it right now
                 }
@@ -425,14 +464,14 @@ void ServerReplicator::publish_delta(net::Session& session,
                 if (any_entering && !entering && !chunk_changed) {
                     continue; // full-walk tick, but this row neither changed nor entered
                 }
-                if (entering) {
-                    // Entering the relevant set. Its last write may predate the baseline — it was
-                    // never sent, not "already known" — so it must go out regardless of version.
-                    // Without this, an entity that comes into range while standing still is
-                    // mirrored empty forever.
-                    ++entities_entered_;
-                    state.was_relevant[slot] = 1;
-                }
+                // Entering the relevant set. Its last write may predate the baseline — it was never
+                // sent, not "already known" — so it must go out regardless of version. Without
+                // this, an entity that comes into range while standing still is mirrored empty
+                // forever.
+                //
+                // Note what is NOT done here: `was_relevant` is not set, and the entry is not
+                // counted. Both wait until the record is known to have SURVIVED the byte budget —
+                // see `settle_relevancy`.
                 scratch_.clear();
                 core::ByteWriter writer{scratch_};
                 write_net_id(writer, *net_id);
@@ -449,11 +488,17 @@ void ServerReplicator::publish_delta(net::Session& session,
                 }
                 records_.push_back(scratch_);
                 record_priority_.push_back(priority);
+                record_slot_.push_back(slot);
+                record_entry_.push_back(entering ? 1u : 0u);
+                if (slot < produced_record_.size()) {
+                    produced_record_[slot] = 1;
+                }
             }
         }
     }
 
     if (records_.empty()) {
+        settle_relevancy(0);
         return;
     }
 
@@ -474,23 +519,42 @@ void ServerReplicator::publish_delta(net::Session& session,
             return record_priority_[a] > record_priority_[b];
         });
         std::vector<std::vector<std::byte>> sorted;
+        std::vector<std::uint32_t> sorted_slots;
+        std::vector<std::uint8_t> sorted_entries;
         sorted.reserve(records_.size());
+        sorted_slots.reserve(records_.size());
+        sorted_entries.reserve(records_.size());
         for (const std::size_t i : order) {
             sorted.push_back(std::move(records_[i]));
+            // The parallel arrays must ride along, or `settle_relevancy` credits delivery to
+            // whichever entity happens to sit at that position after the sort — marking one entity
+            // as held on the strength of a different entity's packet.
+            sorted_slots.push_back(record_slot_[i]);
+            sorted_entries.push_back(record_entry_[i]);
         }
         records_.swap(sorted);
+        record_slot_.swap(sorted_slots);
+        record_entry_.swap(sorted_entries);
     } else if (state.cursor != 0 && state.cursor < records_.size()) {
         // No policy: no meaningful order, so rotation is the only fairness there is.
-        std::rotate(records_.begin(),
-                    records_.begin() + static_cast<std::ptrdiff_t>(state.cursor),
-                    records_.end());
+        const auto offset = static_cast<std::ptrdiff_t>(state.cursor);
+        std::rotate(records_.begin(), records_.begin() + offset, records_.end());
+        std::rotate(record_slot_.begin(), record_slot_.begin() + offset, record_slot_.end());
+        std::rotate(record_entry_.begin(), record_entry_.begin() + offset, record_entry_.end());
     } else {
         state.cursor = 0;
     }
 
     // The byte budget, applied AFTER ordering so a tight budget keeps what the policy said mattered
-    // most. Trimming here rather than inside the packing loop keeps the over-budget bookkeeping in
-    // one place: everything dropped is counted and the cursor advances past what was sent.
+    // most.
+    //
+    // Whatever it drops must be remembered, not just discarded. Trimming `records_` makes the tick
+    // LOOK complete to the packet loop below — every surviving record fits, so `covered ==
+    // records_.size()` — and the completeness test would then advance `complete_through`, which is
+    // the client's baseline clamp. Advancing it past records the budget deliberately withheld is
+    // corollary 1 exactly: a watermark moved on a tick that was only partly sent. The packet budget
+    // already got this right; the byte budget, which is the one m11.5 actually turns on, did not.
+    std::size_t dropped_by_bytes = 0;
     if (budget_.max_bytes_per_tick != 0) {
         std::size_t used = 0;
         std::size_t kept = 0;
@@ -502,7 +566,11 @@ void ServerReplicator::publish_delta(net::Session& session,
             used = next;
         }
         if (kept < records_.size()) {
+            dropped_by_bytes = records_.size() - kept;
+            entities_over_budget_ += dropped_by_bytes;
             records_.resize(kept);
+            record_slot_.resize(kept);
+            record_entry_.resize(kept);
         }
     }
 
@@ -533,15 +601,20 @@ void ServerReplicator::publish_delta(net::Session& session,
         parts.emplace_back(begin, records_.size());
     }
     if (parts.empty()) {
+        settle_relevancy(0);
         return;
     }
 
     const std::size_t covered = parts.back().second;
-    if (covered < records_.size()) {
-        // Over the per-tick packet budget. The remainder waits — and genuinely does arrive, because
-        // the baseline clamp above keeps it in the candidate set and the cursor below makes the
-        // next tick resume here rather than restart. Latency, not loss; the two mechanisms are what
-        // earn that claim, which the code made without them until m11.5 checked it.
+    if (covered < records_.size() || dropped_by_bytes > 0) {
+        // Over one of the two budgets. The remainder waits — and genuinely does arrive, because the
+        // baseline clamp above keeps it in the candidate set and the cursor below makes the next
+        // tick resume here rather than restart. Latency, not loss; the two mechanisms are what earn
+        // that claim, which the code made without them until m11.5 checked it.
+        //
+        // Note the byte-budget drops were already counted where they happened; only the
+        // packet-count remainder is added here, or a record refused by both budgets would be
+        // counted twice.
         entities_over_budget_ += records_.size() - covered;
         state.cursor += covered;
     } else {
@@ -570,6 +643,10 @@ void ServerReplicator::publish_delta(net::Session& session,
             ++delta_packets_sent_;
         }
     }
+
+    // Only now, with the packets actually handed to the session, is there evidence that these
+    // entities were sent. `covered` is the exact count that made it into a part.
+    settle_relevancy(covered);
 }
 
 } // namespace rime::replication

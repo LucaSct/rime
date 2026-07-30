@@ -217,7 +217,10 @@ private:
     // Reused across ticks so the steady state allocates nothing.
     std::vector<std::byte> scratch_;
     std::vector<std::vector<std::byte>> records_;
-    std::vector<float> record_priority_; // parallel to records_, for the ordering pass
+    std::vector<float> record_priority_;        // parallel to records_, for the ordering pass
+    std::vector<std::uint32_t> record_slot_;    // parallel to records_: whose record each one is
+    std::vector<std::uint8_t> record_entry_;    // parallel to records_: was this an entry send?
+    std::vector<std::uint8_t> produced_record_; // NetId::index → did this slot produce a record?
     std::vector<net::Received> inbox_;
 
     std::uint64_t delta_packets_sent_ = 0;

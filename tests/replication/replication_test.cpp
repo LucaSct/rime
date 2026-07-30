@@ -15,6 +15,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/net/net_driver.hpp"
 #include "rime/replication/client_replicator.hpp"
+#include "rime/replication/relevancy.hpp"
 #include "rime/replication/server_replicator.hpp"
 
 // m11.3's proof: a moving ECS world replicated to a second peer converges to a bit-identical state,
@@ -749,6 +750,265 @@ TEST_CASE("a despawned entity's slot does not pin the full-walk optimization off
     // and would fail on a perfectly healthy link.
     keeper_moving = false;
     run(10);
+    CHECK(replicated_state_hash(fx.server_world, server.map()) ==
+          replicated_state_hash(fx.client_world, client.map()));
+}
+
+TEST_CASE("distance_relevancy culls by range, admits on approach, and does not thrash a boundary") {
+    // The ready-made policy m11.5 ships. Three properties, because each one is a separate way the
+    // obvious implementation goes wrong:
+    //
+    //   1. It culls by range, and an entity that comes into range is SENT even though it never
+    //      changed — the entry path, exercised through the real policy rather than a test lambda.
+    //   2. An entity with no transform at all is ALWAYS relevant. A distance policy that culled
+    //      what it could not measure would silently stop replicating every non-spatial entity in
+    //      the game, and would do it invisibly.
+    //   3. An entity loitering on the boundary does not flip in and out every tick. That is what
+    //      the hysteresis band is for, and its absence is measurable rather than theoretical:
+    //      every re-entry costs a forced full-state send AND the per-chunk delta skip for that
+    //      whole tick, for that client.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::ScriptedLink& server_link = fx.network.add_node(fx.server_endpoint);
+    net::ScriptedLink& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    constexpr float kRadius = 100.0f;
+
+    // Near: comfortably inside. Far: comfortably outside, and it never moves or changes again —
+    // the case a pure filter loses forever.
+    ecs::LocalTransform near_t{};
+    near_t.value.translation.x = 10.0f;
+    const ecs::Entity near_entity = fx.server_world.spawn_with(near_t);
+
+    ecs::LocalTransform far_t{};
+    far_t.value.translation.x = 500.0f;
+    const ecs::Entity far_entity = fx.server_world.spawn_with(far_t);
+
+    // Straddles the boundary: oscillates between 0.95R and 1.05R, so a policy without a hysteresis
+    // band would flip it on every single tick.
+    ecs::LocalTransform edge_t{};
+    edge_t.value.translation.x = kRadius * 0.95f;
+    const ecs::Entity edge_entity = fx.server_world.spawn_with(edge_t);
+
+    // No transform of any kind — the "cannot be measured" case. Parent is unreflected, so this
+    // entity is replicated but carries nothing across the wire; what matters is that the POLICY
+    // scores it relevant rather than culling it.
+    const ecs::Entity placeless = fx.server_world.spawn_with(ecs::Parent{ecs::kNullEntity});
+
+    (void)server.replicate(near_entity);
+    (void)server.replicate(far_entity);
+    (void)server.replicate(edge_entity);
+    (void)server.replicate(placeless);
+
+    core::Vec3 eye{0.0f, 0.0f, 0.0f};
+    replication::DistanceRelevancy config;
+    config.radius = kRadius;
+    config.hysteresis = 0.1f; // leave at 110
+    config.viewpoint = [&](net::SessionId, core::Vec3& out) {
+        out = eye;
+        return true;
+    };
+    server.set_relevancy(replication::distance_relevancy(fx.server_world, config));
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    int tick_index = 0;
+    bool oscillate = false;
+    const auto run = [&](int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            fx.now_ms += kTickMs;
+            fx.network.advance_time(fx.now_ms);
+            fx.events.clear();
+            server_driver.update(fx.now_ms, fx.events);
+            server.on_session_events(fx.events);
+            (void)server.apply_inbound(server_driver);
+            fx.events.clear();
+            client_driver.update(fx.now_ms, fx.events);
+            client.apply_inbound(client_driver);
+            fx.server_world.advance_version();
+            if (oscillate) {
+                ++tick_index;
+                if (auto* t = fx.server_world.get<ecs::LocalTransform>(edge_entity)) {
+                    t->value.translation.x =
+                        (tick_index % 2 == 0) ? kRadius * 0.95f : kRadius * 1.05f;
+                    fx.server_world.mark_changed<ecs::LocalTransform>(edge_entity);
+                }
+            }
+            server.publish(server_driver, fx.now_ms);
+            client.send_ack(client_driver, fx.now_ms);
+        }
+    };
+
+    const auto mirror_of = [&](ecs::Entity server_entity) -> ecs::Entity {
+        const auto id = server.map().net_id_of(server_entity);
+        if (!id) {
+            return ecs::kNullEntity;
+        }
+        ecs::Entity found = ecs::kNullEntity;
+        client.map().for_each([&](replication::NetId mirrored_id, ecs::Entity mirror) {
+            if (mirrored_id.index == id->index) {
+                found = mirror;
+            }
+        });
+        return found;
+    };
+    const auto has_state = [&](ecs::Entity server_entity) {
+        const ecs::Entity mirror = mirror_of(server_entity);
+        return mirror.is_valid() && fx.client_world.get<ecs::LocalTransform>(mirror) != nullptr;
+    };
+
+    run(40);
+
+    // ── 1. Range culling, and its non-vacuousness. ──
+    CHECK(server.entities_culled_irrelevant() > 0);
+    CHECK(has_state(near_entity));
+    CHECK(!has_state(far_entity));
+
+    // ── 2. The unmeasurable entity was never culled. It is announced and bound on the client even
+    // though it carries no replicable state — the policy scored it relevant, which is the claim.
+    CHECK(mirror_of(placeless).is_valid());
+
+    // ── 3. Approach: the far entity comes into range WITHOUT EVER BEING WRITTEN AGAIN. ──
+    const std::uint64_t entered_before = server.entities_sent_on_entry();
+    eye.x = 450.0f; // now 50 away from the far entity, 440 from the near one
+    run(40);
+    CHECK(server.entities_sent_on_entry() > entered_before);
+    CHECK(has_state(far_entity));
+
+    // ── 4. Hysteresis: park the viewpoint at the origin and let the edge entity oscillate across
+    // the radius. Once inside, it must stay inside — it never reaches the 110 exit radius — so no
+    // entry, and therefore no full walk, should be attributable to it.
+    eye.x = 0.0f;
+    run(40); // settle: edge entity is inside, far entity is culled again
+    oscillate = true;
+    const std::uint64_t walks_before = server.full_walk_ticks();
+    const std::uint64_t entries_before = server.entities_sent_on_entry();
+    const std::uint64_t ticks_before = server.delta_ticks();
+    run(40);
+
+    CHECK(server.delta_ticks() - ticks_before > 0);           // the path really ran
+    CHECK(server.entities_sent_on_entry() == entries_before); // nothing re-entered
+    CHECK(server.full_walk_ticks() == walks_before);          // so no tick lost its skip
+    CHECK(has_state(edge_entity)); // and it stayed relevant throughout, rather than being dropped
+}
+
+TEST_CASE("a byte budget delays delivery without ever declaring the tick complete") {
+    // The byte budget is the half of m11.5 that actually gets turned on, and it had the same defect
+    // the packet budget was fixed for: trimming `records_` makes the tick LOOK complete to the
+    // packing loop — every surviving record fits — so `complete_through` advanced past state that
+    // was deliberately withheld. That watermark is the client's baseline clamp, so advancing it
+    // retires the withheld entities from the candidate set. An entity written ONCE and then never
+    // again is gone permanently: it did not change, so the delta skips it, and the budget already
+    // "completed" the tick it was owed on.
+    //
+    // Writing once and never again is the discriminating case. Continuously-moving entities hide
+    // this completely, because next tick's write re-offers them regardless — which is why a proof
+    // built on a moving world would pass against the bug.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::ScriptedLink& server_link = fx.network.add_node(fx.server_endpoint);
+    net::ScriptedLink& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    constexpr int kEntities = 200;
+    std::vector<ecs::Entity> entities;
+    for (int i = 0; i < kEntities; ++i) {
+        ecs::LocalTransform t{};
+        t.value.translation.x = static_cast<float>(i);
+        entities.push_back(fx.server_world.spawn_with(t));
+        (void)server.replicate(entities.back());
+    }
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    const auto run = [&](int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            fx.now_ms += kTickMs;
+            fx.network.advance_time(fx.now_ms);
+            fx.events.clear();
+            server_driver.update(fx.now_ms, fx.events);
+            server.on_session_events(fx.events);
+            (void)server.apply_inbound(server_driver);
+            fx.events.clear();
+            client_driver.update(fx.now_ms, fx.events);
+            client.apply_inbound(client_driver);
+            fx.server_world.advance_version();
+            server.publish(server_driver, fx.now_ms);
+            client.send_ack(client_driver, fx.now_ms);
+        }
+    };
+
+    // FIRST deliver everything with the budget off. This is the step that makes the test
+    // discriminating: an entity that has never been delivered is retried forever by the ENTRY path
+    // regardless of the baseline, so a world of first-time arrivals converges even with the
+    // watermark bug present. The bug only bites an entity the client already holds, whose LATER
+    // change is dropped — because that one is offered by the version delta alone, and the version
+    // delta is exactly what a wrongly-advanced baseline switches off.
+    run(60);
+    REQUIRE(replicated_state_hash(fx.server_world, server.map()) ==
+            replicated_state_hash(fx.client_world, client.map()));
+
+    // Now clamp the budget hard and rewrite every entity ONCE, in a single burst. Writing once is
+    // the discriminating case: a continuously-moving entity is re-offered by next tick's write
+    // whatever the baseline says, which would hide this completely.
+    replication::Budget budget;
+    budget.max_bytes_per_tick = 256; // a handful of records per tick against a 200-entity burst
+    server.set_budget(budget);
+
+    const std::uint64_t dropped_before = server.entities_dropped_over_budget();
+    for (int i = 0; i < kEntities; ++i) {
+        if (auto* t =
+                fx.server_world.get<ecs::LocalTransform>(entities[static_cast<std::size_t>(i)])) {
+            t->value.translation.y = static_cast<float>(i) + 1000.0f;
+            fx.server_world.mark_changed<ecs::LocalTransform>(
+                entities[static_cast<std::size_t>(i)]);
+        }
+    }
+
+    // Quiet from here: nothing is ever written again, so every one of those 200 changes must be
+    // delivered off the backlog or not at all.
+    run(400);
+
+    // Non-vacuousness: the budget really did refuse records, or this proves only that a world small
+    // enough to fit still works.
+    CHECK(server.entities_dropped_over_budget() > dropped_before);
+
+    // Delayed is fine; dropped is not.
     CHECK(replicated_state_hash(fx.server_world, server.map()) ==
           replicated_state_hash(fx.client_world, client.map()));
 }
