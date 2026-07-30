@@ -1250,3 +1250,121 @@ TEST_CASE("a permanently over-budget world still delivers its lowest-priority ta
     CHECK(replicated_state_hash(fx.server_world, server.map()) ==
           replicated_state_hash(fx.client_world, client.map()));
 }
+
+// A component too big to fit in one packet. LocalTransform is 40 packed bytes, so 32 of them is
+// 1280 — comfortably past the 1150-byte payload budget once the header is counted. Built out of
+// nested reflected structs because the reflection system has no array kind (scalars and structs
+// only), which is itself the reason a component like this is easy to write by accident.
+struct Bulk8 {
+    core::Transform a{}, b{}, c{}, d{}, e{}, f{}, g{}, h{};
+};
+
+struct Bulk32 {
+    Bulk8 q0{}, q1{}, q2{}, q3{};
+};
+
+RIME_REFLECT_BEGIN(Bulk8)
+RIME_REFLECT_FIELD(a)
+RIME_REFLECT_FIELD(b)
+RIME_REFLECT_FIELD(c)
+RIME_REFLECT_FIELD(d)
+RIME_REFLECT_FIELD(e)
+RIME_REFLECT_FIELD(f)
+RIME_REFLECT_FIELD(g)
+RIME_REFLECT_FIELD(h)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(Bulk32)
+RIME_REFLECT_FIELD(q0)
+RIME_REFLECT_FIELD(q1)
+RIME_REFLECT_FIELD(q2)
+RIME_REFLECT_FIELD(q3)
+RIME_REFLECT_END()
+
+TEST_CASE("an entity too big for one packet is dropped loudly, not retried forever") {
+    // An entity's record is NEVER SPLIT — parts are independently-complete packets, not fragments
+    // of one logical message. So an entity whose components exceed the payload budget on their own
+    // cannot be transmitted at all, by any amount of budget or patience. That is a schema fault,
+    // not a bandwidth one.
+    //
+    // The engine's job is to SAY SO. Both ways of not saying so were live at some point in this
+    // stack: build the oversized part and let the channel refuse it, which either loses the entity
+    // silently (if the tick still counts as complete) or jams `complete_through` forever (if it
+    // does not — the honest reading, and the one priority aging made permanent, because the
+    // undeliverable record ages and so sorts first every tick).
+    //
+    // What must happen instead: the oversized entity is dropped at build time and counted, the rest
+    // of the world converges normally, and the delivery watermark keeps advancing.
+    CHECK(core::packed_size(core::reflect<Bulk32>()) > replication::kMaxReplicationPayload);
+
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+    (void)fx.server_world.register_component<Bulk32>();
+    (void)fx.client_world.register_component<Bulk32>();
+
+    net::ScriptedLink& server_link = fx.network.add_node(fx.server_endpoint);
+    net::ScriptedLink& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    // The undeliverable one, plus ordinary neighbours that must be unaffected by it.
+    (void)server.replicate(fx.server_world.spawn_with(Bulk32{}));
+    constexpr int kNormal = 20;
+    for (int i = 0; i < kNormal; ++i) {
+        ecs::LocalTransform t{};
+        t.value.translation.x = static_cast<float>(i);
+        (void)server.replicate(fx.server_world.spawn_with(t));
+    }
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    net::SessionId server_session{};
+    for (int i = 0; i < 60; ++i) {
+        fx.now_ms += kTickMs;
+        fx.network.advance_time(fx.now_ms);
+        fx.events.clear();
+        server_driver.update(fx.now_ms, fx.events);
+        server.on_session_events(fx.events);
+        (void)server.apply_inbound(server_driver);
+        fx.events.clear();
+        client_driver.update(fx.now_ms, fx.events);
+        client.apply_inbound(client_driver);
+        fx.server_world.advance_version();
+        server.publish(server_driver, fx.now_ms);
+        client.send_ack(client_driver, fx.now_ms);
+        for (const net::SessionId sid : server_driver.session_ids()) {
+            server_session = sid;
+        }
+    }
+
+    // It was refused, and loudly.
+    CHECK(server.records_too_large() > 0);
+
+    // The delivery watermark still advances — the undeliverable entity does not jam the tick, which
+    // is the whole difference between "dropped loudly" and "wedged quietly".
+    CHECK(server.complete_through(server_session) > 0);
+
+    // And every ordinary entity got through, unaffected by its oversized neighbour.
+    int mirrored = 0;
+    client.map().for_each([&](replication::NetId, ecs::Entity mirror) {
+        if (fx.client_world.get<ecs::LocalTransform>(mirror) != nullptr) {
+            ++mirrored;
+        }
+    });
+    CHECK(mirrored == kNormal);
+}

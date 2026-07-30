@@ -77,6 +77,12 @@ struct Replicated {};
 // reserve under it so a future framing tweak cannot silently start refusing sends.
 inline constexpr std::size_t kMaxReplicationPayload = 1150;
 
+// The fixed header on every Delta packet: tag(1) + tick(8) + part index(1) + part count(1) +
+// record count(2). Named rather than open-coded because two places need to agree on it — the
+// packing loop that fills a part, and the guard that decides whether a single entity's record can
+// EVER fit in one. Those disagreeing is how an undeliverable record gets built anyway.
+inline constexpr std::size_t kHeaderBytes = 1 + 8 + 1 + 1 + 2;
+
 // How many Delta packets one tick may split into. Bounded for two independent reasons: the client's
 // completeness bitmask is 32 bits wide (see below), and an unbounded per-tick burst is exactly the
 // unprioritized-broadcast failure that m11.5's relevancy and byte budgets exist to fix. Entities
