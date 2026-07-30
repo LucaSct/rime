@@ -7,7 +7,9 @@ invariant below, add it to the table rather than writing another amendment.
 
 Its sibling is [reliability.md](reliability.md), which does the same job one storey down for the
 transport. This document exists because five bugs in two bricks turned out to be the same bug, and
-nobody noticed until the fifth.
+nobody noticed until the fifth. The sixth was found *by this document* — see
+[instance six](#instance-six-a-dead-slot-that-read-as-eternally-arriving), which is the argument for
+keeping it current rather than tidy.
 
 ---
 
@@ -49,6 +51,11 @@ transmission outcome**. Specifically it may never be:
 - **overwritten as a side effect of a different message kind's bookkeeping for the same slot.** A
   recycled index appears in both the despawn and spawn lists in one tick; a rollback keyed to the
   message kind rather than to the pre-tick value has one clobber the other.
+- **left behind when the item it describes ceases to exist.** A record keyed by a recyclable index
+  outlives its subject. Both directions are wrong: a stale *set* bit hands the next tenant a claim
+  that it has been sent something it has not, and a stale *clear* bit describes a slot that no longer
+  names anything — which, if the surrounding code reads "not held" as "about to be sent", is an
+  entity eternally arriving and never arrived.
 
 The two corollaries share a principle but not a shape, and a single sentence covering both ends up
 too loose to catch corollary-2 bugs. Keep them named separately.
@@ -72,7 +79,10 @@ not get over-applied to something that was never a cross-peer correctness questi
 | `was_relevant[]` + forced send on entry | `replication/src/server_replicator.cpp` | 2 — a version delta cannot see "never sent because filtered" |
 | Pre-tick value in the `announced[]` rollback | `replication/src/server_replicator.cpp` | 2 — a kind-keyed rollback clobbers a recycled index's other entry |
 | Per-batch verification in `apply_next_batch` | `destruction_net/src/destruction_client.cpp` | 2 — a fingerprint must be compared at ITS OWN fracture boundary, not against whatever state a catch-up burst ended on |
+| `was_relevant[]` cleared in `despawn()` | `replication/src/server_replicator.cpp` | 2 — a per-item bit may not outlive the item and be inherited by the slot's next tenant |
+| Dead slots score 0, not the live default | `replication/src/server_replicator.cpp` | 2 — "no policy scored it" must not read as "relevant"; see instance six |
 | `composition_checks_unverified()` | `destruction_net/src/destruction_client.cpp` | neither — but see the counting rule below |
+| `full_walk_ticks()` / `delta_ticks()` | `replication/src/server_replicator.cpp` | neither — the counting rule applied to a skip that stops happening |
 
 ---
 
@@ -98,6 +108,56 @@ has run. Counting it first is what made it visible enough to fix.
 A proof that cannot see how much it skipped is not a weaker proof; it is a **misleading** one, because
 it still reads as passing. When adding a counter feels like noise, that is the moment it is most
 worth adding.
+
+### The harder half: count the skips that *stop* happening
+
+The rule above catches work that was silently dropped. Its mirror image is an optimization that
+silently stops applying — and that one is worse, because there is no wrong output to notice. The bytes
+on the wire are identical, the state still converges, every test still passes, and only the cost
+moves.
+
+`full_walk_ticks()` exists for exactly that. `publish_delta` gives up the per-chunk "changed since
+baseline" skip on any tick where something enters a client's relevant set; the counter reports how
+often that happened, and `delta_ticks()` gives it a denominator. A steady state should keep the ratio
+near zero. **If it approaches 1.0, relevancy is thrashing and the "entries are rare and bursty"
+assumption the trade rests on has stopped being true.**
+
+Generalize it: when code takes a fast path *conditionally*, the condition going permanently false is
+a defect that no correctness test can see. Count the condition, not just the work.
+
+---
+
+## Instance six: a dead slot that read as eternally arriving
+
+Found while wiring m11.5's distance culling, by adding the counter above and watching it read 30 out
+of 30 on a quiet world.
+
+`publish_delta`'s entry test reads two slot-indexed arrays: `priority_by_index_`, which defaulted
+**every** slot to relevant, and `was_relevant[]`, which the cull path clears. But the policy only ever
+scores slots the `NetIdMap` still holds, and the allocator's slot vector never shrinks. So a slot that
+was culled (`was_relevant = 0`) and then despawned (unscored, stuck at the relevant default) read
+forever after as *relevant now, irrelevant last tick* — an entity permanently entering, which no
+longer existed. Every subsequent tick became a full walk of every archetype, chunk and column, for
+every client, for the life of the process.
+
+Two things make this the same bug as the other five rather than a new one:
+
+1. **A per-item record outlived its item** (corollary 2's third bullet, added for this).
+2. **An absence was read as a positive claim.** "No policy scored this slot" is not evidence of
+   relevance; it is evidence of nothing. Defaulting it to *relevant* turned missing information into
+   an assertion — structurally the same move as treating "we sent it" as "they hold it".
+
+Both halves are fixed: slots naming no live entity score 0, and `despawn()` clears `was_relevant` for
+that index on every client. The second is currently *masked* — a freshly spawned entity always has a
+fresh column write, so it leaves on the ordinary delta path rather than needing the entry path — but
+masked is not fixed, and the previous five instances all survived as long as they did by being masked
+by something.
+
+**Why distance culling is what exposed it.** The defect needs a cull followed by a despawn. Before
+m11.5 nothing was ever culled, so no `was_relevant` bit was ever 0 at despawn time and the whole
+shape was unreachable. Debris are culled and despawned continuously by design, which turns a
+formally-possible state into the steady state. Expect the same of the next mechanism that makes a
+rare transition common.
 
 ---
 
