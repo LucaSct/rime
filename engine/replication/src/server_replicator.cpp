@@ -3,6 +3,7 @@
 #include "rime/replication/server_replicator.hpp"
 
 #include <algorithm>
+#include <numeric>
 
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/reflect/serialize.hpp"
@@ -86,11 +87,11 @@ ServerReplicator::ClientState& ServerReplicator::client_for(net::SessionId id) {
     }
     for (ClientState& state : clients_) {
         if (!state.in_use) {
-            state = ClientState{id, true, 0, 0, 0, {}};
+            state = ClientState{id, true, 0, 0, 0, {}, {}};
             return state;
         }
     }
-    clients_.push_back(ClientState{id, true, 0, 0, 0, {}});
+    clients_.push_back(ClientState{id, true, 0, 0, 0, {}, {}});
     return clients_.back();
 }
 
@@ -147,6 +148,14 @@ std::size_t ServerReplicator::apply_messages(net::SessionId id,
         ++acks;
     }
     return acks;
+}
+
+void ServerReplicator::set_relevancy(RelevancyFn fn) {
+    relevancy_ = std::move(fn);
+}
+
+void ServerReplicator::set_budget(const Budget& budget) {
+    budget_ = budget;
 }
 
 void ServerReplicator::publish(net::NetDriver& driver, std::uint64_t now_ms) {
@@ -253,8 +262,45 @@ void ServerReplicator::publish_delta(net::Session& session,
     // may advance a watermark.
     const ecs::Version baseline = std::min(state.acked_baseline, state.complete_through);
 
+    // ── Relevancy: one policy call for this client, covering every replicated entity ────────────
+    //
+    // The result is splayed into `priority_by_index_` so the record walk below can answer "does
+    // this client care, and how much" with an array read instead of a call. With no policy
+    // installed every entity scores 1.0, which is the m11.3/11.4 behaviour exactly.
+    const std::size_t slot_count = allocator_.slot_count();
+    priority_by_index_.assign(slot_count, 1.0f);
+    if (relevancy_) {
+        candidates_.clear();
+        map_.for_each([this](NetId, ecs::Entity entity) { candidates_.push_back(entity); });
+        priorities_.assign(candidates_.size(), 0.0f);
+        relevancy_(state.id, candidates_, priorities_);
+        for (std::size_t i = 0; i < candidates_.size(); ++i) {
+            if (const auto id = map_.net_id_of(candidates_[i])) {
+                if (id->index < priority_by_index_.size()) {
+                    priority_by_index_[id->index] = priorities_[i];
+                }
+            }
+        }
+    }
+    state.was_relevant.resize(slot_count, 0);
+
+    // Is anything ENTERING this client's relevant set this tick? It matters before the walk starts,
+    // because the per-chunk "changed since baseline" skip below is what makes the delta cheap — and
+    // an entering entity is precisely one that has NOT changed, so its chunk is clean and the skip
+    // would step straight over it. On a tick with entries we give up the skip and walk everything;
+    // transitions are rare and bursty, so paying a full pass on those ticks is the cheap trade
+    // against a per-entity check that would slow down every tick instead.
+    bool any_entering = false;
+    for (std::size_t slot = 0; slot < slot_count; ++slot) {
+        if (priority_by_index_[slot] > 0.0f && state.was_relevant[slot] == 0) {
+            any_entering = true;
+            break;
+        }
+    }
+
     // ── Collect one record per entity with at least one changed replicable component ────────────
     records_.clear();
+    record_priority_.clear();
     const std::size_t archetypes = world_->archetype_count();
     for (std::size_t ai = 0; ai < archetypes; ++ai) {
         ecs::Archetype& arch = world_->archetype(ai);
@@ -284,12 +330,22 @@ void ServerReplicator::publish_delta(net::Session& session,
             // buffer. A column untouched since the client's baseline contributes nothing.
             std::vector<std::pair<ecs::ComponentId, WireComponentId>> dirty;
             for (const auto& [local, wire] : replicable) {
-                if (chunk.column_version(local) > baseline) {
+                if (any_entering || chunk.column_version(local) > baseline) {
                     dirty.emplace_back(local, wire);
                 }
             }
             if (dirty.empty()) {
                 continue;
+            }
+
+            // Whether this chunk genuinely changed since the baseline, as opposed to being walked
+            // only because some OTHER entity is entering relevance this tick.
+            bool chunk_changed = false;
+            for (const auto& [local, wire] : replicable) {
+                if (chunk.column_version(local) > baseline) {
+                    chunk_changed = true;
+                    break;
+                }
             }
 
             const std::uint32_t rows = chunk.size();
@@ -298,6 +354,29 @@ void ServerReplicator::publish_delta(net::Session& session,
                 const auto net_id = map_.net_id_of(entity);
                 if (!net_id) {
                     continue; // replicated tag but no identity yet — nothing to name it by
+                }
+                const std::uint32_t slot = net_id->index;
+                const float priority =
+                    slot < priority_by_index_.size() ? priority_by_index_[slot] : 1.0f;
+                if (!(priority > 0.0f)) {
+                    if (slot < state.was_relevant.size()) {
+                        state.was_relevant[slot] = 0;
+                    }
+                    ++entities_culled_;
+                    continue; // this client does not care about it right now
+                }
+                const bool entering =
+                    slot < state.was_relevant.size() && state.was_relevant[slot] == 0;
+                if (any_entering && !entering && !chunk_changed) {
+                    continue; // full-walk tick, but this row neither changed nor entered
+                }
+                if (entering) {
+                    // Entering the relevant set. Its last write may predate the baseline — it was
+                    // never sent, not "already known" — so it must go out regardless of version.
+                    // Without this, an entity that comes into range while standing still is
+                    // mirrored empty forever.
+                    ++entities_entered_;
+                    state.was_relevant[slot] = 1;
                 }
                 scratch_.clear();
                 core::ByteWriter writer{scratch_};
@@ -314,6 +393,7 @@ void ServerReplicator::publish_delta(net::Session& session,
                     writer.bytes(bytes);
                 }
                 records_.push_back(scratch_);
+                record_priority_.push_back(priority);
             }
         }
     }
@@ -328,12 +408,47 @@ void ServerReplicator::publish_delta(net::Session& session,
     // makes DELIVERY happen. Rotating the list rather than tracking an offset through the packing
     // loop keeps the loop itself unchanged, and the cost is a move per record on a path that is
     // already allocating them.
-    if (state.cursor != 0 && state.cursor < records_.size()) {
+    if (relevancy_) {
+        // Nearest-first (or whatever the policy means by "first"). A STABLE sort, so entities the
+        // policy scored equally keep the archetype walk's order — which is what lets the rotation
+        // cursor below still make progress through a large equal-priority tail instead of
+        // reshuffling it every tick and starving the same entities repeatedly.
+        std::vector<std::size_t> order(records_.size());
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::stable_sort(order.begin(), order.end(), [this](std::size_t a, std::size_t b) {
+            return record_priority_[a] > record_priority_[b];
+        });
+        std::vector<std::vector<std::byte>> sorted;
+        sorted.reserve(records_.size());
+        for (const std::size_t i : order) {
+            sorted.push_back(std::move(records_[i]));
+        }
+        records_.swap(sorted);
+    } else if (state.cursor != 0 && state.cursor < records_.size()) {
+        // No policy: no meaningful order, so rotation is the only fairness there is.
         std::rotate(records_.begin(),
                     records_.begin() + static_cast<std::ptrdiff_t>(state.cursor),
                     records_.end());
     } else {
         state.cursor = 0;
+    }
+
+    // The byte budget, applied AFTER ordering so a tight budget keeps what the policy said mattered
+    // most. Trimming here rather than inside the packing loop keeps the over-budget bookkeeping in
+    // one place: everything dropped is counted and the cursor advances past what was sent.
+    if (budget_.max_bytes_per_tick != 0) {
+        std::size_t used = 0;
+        std::size_t kept = 0;
+        for (; kept < records_.size(); ++kept) {
+            const std::size_t next = used + records_[kept].size();
+            if (next > budget_.max_bytes_per_tick && kept > 0) {
+                break;
+            }
+            used = next;
+        }
+        if (kept < records_.size()) {
+            records_.resize(kept);
+        }
     }
 
     // ── Pack records into independently-complete packets ────────────────────────────────────────

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -37,6 +38,32 @@
 // continuously-moving entities out of archetypes dominated by static ones. Worth measuring before
 // m11.4's debris makes it urgent.
 namespace rime::replication {
+
+// Score one client's interest in each candidate entity — the m11.5 relevancy seam.
+//
+// CALLED ONCE PER CLIENT PER TICK, over the whole candidate span, filling `priorities` in place.
+// Deliberately not once per entity: at the ADR's 64-player target with a few thousand replicated
+// entities, a per-entity indirect call is millions of them a tick, and the policy would become the
+// profile. One call per client leaves the policy free to be vectorized, spatially indexed, or
+// answered from a precomputed grid — none of which it could do if it were only ever shown one
+// entity at a time.
+//
+//   priorities[i] >  0   relevant; larger is sent sooner when the budget binds
+//   priorities[i] <= 0   not relevant to this client this tick; not sent at all
+//
+// Leave it unset and every entity is relevant at equal priority, which is exactly the m11.3/11.4
+// behaviour. `distance_relevancy` in relevancy.hpp is a ready-made policy; a game that wants
+// team-based, portal-based, or PVS relevancy writes its own and never touches this module.
+using RelevancyFn =
+    std::function<void(net::SessionId, std::span<const ecs::Entity>, std::span<float> priorities)>;
+
+// Per-client outbound limits. Zero means unlimited, which is the pre-m11.5 behaviour.
+struct Budget {
+    // Hard ceiling on delta payload bytes to one client in one tick. Enforced AFTER priority
+    // ordering, so what survives a tight budget is what the policy said mattered most — the
+    // difference between a budget that degrades gracefully and one that truncates arbitrarily.
+    std::size_t max_bytes_per_tick = 0;
+};
 
 class ServerReplicator {
 public:
@@ -73,6 +100,12 @@ public:
     // rest of the span for other readers. Returns how many acks were consumed.
     std::size_t apply_messages(net::SessionId id, std::span<const net::Received> messages);
 
+    // Install the relevancy policy (see RelevancyFn). Takes effect from the next publish.
+    void set_relevancy(RelevancyFn fn);
+
+    // Install the per-client outbound budget. Takes effect from the next publish.
+    void set_budget(const Budget& budget);
+
     // Announce structure and publish state to every connected client. Call from Publish — after
     // everything the tick will mutate has mutated, so the state described is the tick's final
     // state rather than a version of it that self-corrects next tick.
@@ -102,6 +135,19 @@ public:
         return entities_over_budget_;
     }
 
+    // Entities skipped because the relevancy policy scored them non-positive for that client. Not a
+    // fault — it is the mechanism working — but a proof asserts on it, because a relevancy test in
+    // which nothing was ever culled proves only that the unfiltered path still works.
+    [[nodiscard]] std::uint64_t entities_culled_irrelevant() const noexcept {
+        return entities_culled_;
+    }
+
+    // Entities sent because they ENTERED a client's relevant set, rather than because they changed.
+    // The counter that shows the version-delta and relevancy are composing rather than fighting.
+    [[nodiscard]] std::uint64_t entities_sent_on_entry() const noexcept {
+        return entities_entered_;
+    }
+
 private:
     struct ClientState {
         net::SessionId id{};
@@ -122,6 +168,17 @@ private:
         // budget sends the same prefix every tick and the tail is never delivered at all — the
         // baseline clamp alone gives correctness of the ack but not LIVENESS of delivery.
         std::size_t cursor = 0;
+
+        // Indexed by NetId::index: was this entity relevant to this client last tick?
+        //
+        // This is what makes relevancy safe to combine with a version-based delta. An entity that
+        // was irrelevant and becomes relevant has, by definition, not changed since the client's
+        // baseline — it was simply never sent — so the ordinary "changed since" test excludes it
+        // and the client would mirror an entity it has no state for. Transitioning into the
+        // relevant set therefore forces a send regardless of version. This is the per-client
+        // bookkeeping m11.5 was always going to need, and it is why relevancy could not be a pure
+        // filter.
+        std::vector<std::uint8_t> was_relevant;
         // Indexed by NetId::index: the generation this client has been told about, or 0 for "never
         // announced". Diffing this against the allocator each tick is what makes spawn/despawn
         // announcements self-healing — a client that missed an announcement is simply re-diffed
@@ -145,12 +202,24 @@ private:
     // Reused across ticks so the steady state allocates nothing.
     std::vector<std::byte> scratch_;
     std::vector<std::vector<std::byte>> records_;
+    std::vector<float> record_priority_; // parallel to records_, for the ordering pass
     std::vector<net::Received> inbox_;
 
     std::uint64_t delta_packets_sent_ = 0;
     std::uint64_t multipart_ticks_ = 0;
     std::uint64_t full_reseeds_ = 0;
     std::uint64_t entities_over_budget_ = 0;
+    std::uint64_t entities_culled_ = 0;
+    std::uint64_t entities_entered_ = 0;
+
+    RelevancyFn relevancy_;
+    Budget budget_;
+
+    // Per-tick scratch for the relevancy call, reused across clients and ticks.
+    std::vector<ecs::Entity> candidates_;
+    std::vector<float> priorities_;
+    // NetId::index → this client's priority for it, or 0 when the policy said nothing.
+    std::vector<float> priority_by_index_;
 };
 
 } // namespace rime::replication

@@ -529,3 +529,103 @@ TEST_CASE("entities withheld over the packet budget are still delivered eventual
     CHECK(replicated_state_hash(fx.server_world, server.map()) ==
           replicated_state_hash(fx.client_world, client.map()));
 }
+
+TEST_CASE("an entity entering the relevant set is sent even though it never changed") {
+    // m11.5's relevancy could not be a pure filter, and this is why. An entity that was irrelevant
+    // and becomes relevant has by definition NOT changed since the client's baseline — it was
+    // simply never sent. The ordinary "changed since" test therefore excludes it, and the client
+    // would mirror an entity it holds no state for, permanently. Entering the set has to force a
+    // send.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::Link& server_link = fx.network.add_node(fx.server_endpoint);
+    net::Link& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    // Written once at spawn and never again — the case a pure filter loses.
+    constexpr int kNear = 10;
+    constexpr int kFar = 10;
+    std::vector<ecs::Entity> far_entities;
+    for (int i = 0; i < kNear + kFar; ++i) {
+        ecs::LocalTransform t{};
+        t.value.translation.x = static_cast<float>(i);
+        const ecs::Entity e = fx.server_world.spawn_with(t);
+        (void)server.replicate(e);
+        if (i >= kNear) {
+            far_entities.push_back(e);
+        }
+    }
+
+    // The policy: entities in `far_entities` are irrelevant until `admit_far` flips.
+    bool admit_far = false;
+    server.set_relevancy(
+        [&](net::SessionId, std::span<const ecs::Entity> candidates, std::span<float> priorities) {
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                const bool is_far =
+                    std::find(far_entities.begin(), far_entities.end(), candidates[i]) !=
+                    far_entities.end();
+                priorities[i] = (is_far && !admit_far) ? 0.0f : 1.0f;
+            }
+        });
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    const auto run = [&](int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            fx.now_ms += kTickMs;
+            fx.network.advance_time(fx.now_ms);
+            fx.events.clear();
+            server_driver.update(fx.now_ms, fx.events);
+            server.on_session_events(fx.events);
+            (void)server.apply_inbound(server_driver);
+            fx.events.clear();
+            client_driver.update(fx.now_ms, fx.events);
+            client.apply_inbound(client_driver);
+            fx.server_world.advance_version(); // nothing is ever rewritten
+            server.publish(server_driver, fx.now_ms);
+            client.send_ack(client_driver, fx.now_ms);
+        }
+    };
+
+    const auto mirrored_with_state = [&]() {
+        int n = 0;
+        client.map().for_each([&](replication::NetId, ecs::Entity mirror) {
+            if (fx.client_world.get<ecs::LocalTransform>(mirror) != nullptr) {
+                ++n;
+            }
+        });
+        return n;
+    };
+
+    run(40);
+    // The cull really happened — a relevancy test in which nothing was culled proves nothing.
+    CHECK(server.entities_culled_irrelevant() > 0);
+    CHECK(mirrored_with_state() == kNear);
+
+    // Now they become relevant, without ever having been written again.
+    admit_far = true;
+    const std::uint64_t entered_before = server.entities_sent_on_entry();
+    run(40);
+
+    CHECK(server.entities_sent_on_entry() > entered_before);
+    CHECK(mirrored_with_state() == kNear + kFar);
+    CHECK(replicated_state_hash(fx.server_world, server.map()) ==
+          replicated_state_hash(fx.client_world, client.map()));
+}
