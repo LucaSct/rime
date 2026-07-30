@@ -585,3 +585,61 @@ diverged client, and a sample prints it to show two windows agree. Three callers
 privately are three subtly different answers to one question, and a witness that different callers
 compute differently is not a witness. It now ships as
 `destruction_net::shared_state_hash(world, map, destruction)`.
+
+---
+
+## Amendment (2026-07-30, post-m11.5): the general lesson, and where it now lives
+
+A16, A17 below are two more instances of a pattern that by then had appeared five times. Recording
+them individually was clearly not working — each was found by running code rather than by reading it,
+which means nobody was carrying the general rule into review. The rule now has a home that is
+*checkable* rather than historical: **[docs/design/replication.md](../design/replication.md)**,
+mirroring what `docs/design/reliability.md` already does for the transport. This module was the only
+one in the networking stack without a living design note, and that gap is most of why the pattern
+kept recurring.
+
+The rule, in one line: **any claim about what a peer holds needs evidence of holding — never evidence
+of some correlated-but-weaker event.** It has two corollaries with different failure shapes (a scalar
+watermark advanced on weak evidence; a per-item record inferred from a blind-spotted proxy or
+clobbered by another message kind's bookkeeping). The design doc states both, lists every mechanism
+enforcing them today, and carries the guidance m11.6's interpolation state will need. A one-line
+guardrail in `CLAUDE.md` points at it, so it is seen on every diff rather than only by someone who
+has read this amendment history.
+
+### A16. The `announced[]` rollback clobbered itself on a same-tick recycle under backpressure
+
+`publish_structure` writes `state.announced[i]` optimistically, then flushes despawns and spawns as
+two back-to-back sends, each rolling back only its own unsent tail — to a constant chosen from the
+message *kind*. A recycled index appears in **both** lists in one tick (`{idx, old_gen}` to despawn,
+`{idx, new_gen}` to spawn), and the two flushes run with no chance for the channel's backlog to drain
+between them, so backpressure on the first guarantees it on the second. The spawn rollback's `= 0`
+then overwrote the despawn rollback's correctly-restored `old_gen`; next tick's diff read `0`, took
+`announced != 0` as false, and **never re-emitted the despawn**. The client rebinds the index to the
+new incarnation and its old mirror is orphaned in the ECS world forever — precisely the phantom
+`ServerReplicator::despawn`'s own documentation says the class exists to prevent, reached through a
+rollback interaction instead of through the mistake it warns about.
+
+Fix: roll back to the value `announced[index]` held **before this tick's diff touched it**, carried
+alongside each id. That is ground truth and is correct however the two flushes fail; it can re-emit a
+despawn the client already applied, which is a no-op and the self-healing direction the whole diff is
+built on.
+
+Reachable on the ordinary debris path — `DestructionServer::sync_debris` despawns reclaimed chunks
+and replicates new ones in the same call, every tick, and all of destruction's traffic shares one
+`ReliableChannel` backlog with structure. Not covered by any existing test: the recycling proof runs
+lossless (so the rollback never executes) and the backpressure proof never touches replication.
+
+### A17. The composition check was the one uncounted skip, and it was hiding three more
+
+`DestructionClient::on_composition_check` returned silently when the batch it described had already
+been applied. Every other skip in the module has a counter; this one did not, and the m11.4b proof's
+`matches > 0 && mismatches == 0` stayed true while verifying almost nothing.
+
+Adding the counter and asserting `matches + mismatches + unverified == checks_sent` immediately
+exposed **three further silent paths**: two unresolvable-source skips inside `verify_composition`,
+and — the one that actually mattered — `apply_next_batch` overwriting `pending_verify_`, so a client
+pumping several batches to catch up silently discarded every batch's expectations but the last.
+
+The general form is worth more than the fix: **a proof that cannot see how much it skipped is not a
+weaker proof, it is a misleading one**, because it still reads as passing. The counting rule is now
+stated in the design doc.
