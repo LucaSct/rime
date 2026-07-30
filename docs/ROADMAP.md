@@ -67,6 +67,34 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > allocation*, reincarnation, a bounded session table, garbage that poisons nothing, **peer death by
 > timeout**, and a real-socket loopback case. **Next:** m11.3 — replication core.
 >
+> **Update (2026-07-30) — m11.3 (replication core) + ADR-0033 A9/A10.** A ground-truth pass first:
+> §4's claim that *"the ack bitfield doubles as the delta-baseline tracker"* is false against the
+> shipped code (that machinery serves only the reliable stream; the unreliable-sequenced channel
+> acknowledges nothing in either direction), and §7's claim that `engine/net` depends on `ecs` was
+> never true — it links `rime::platform` alone, which m11.2 paid real cost to preserve. Both are now
+> **amendments A9/A10**, and the second is why the brick landed as a **new `engine/replication`
+> module above `net` and `ecs`** rather than inside `engine/net` (the shape `editorhost` already has
+> with `ecs`+`stream`). The core: **`NetId`** (a generational `core::Handle`, recycled — debris churn
+> makes a never-reused counter unbounded in practice), reflection-derived **snapshot writers/readers**
+> whose component ids are each type's **rank in the `type_hash`-sorted set** (both peers derive it,
+> nothing is transmitted — `ComponentId` cannot go on the wire, since m11.2 made registration order a
+> non-contract), and **ack-baseline delta replication** that needs **no history buffer at all**:
+> `ecs::Chunk`'s per-column version stamps (ADR-0018 §4) already answer "changed since V", so
+> per-client state is *one integer*. Three traps found and closed in the design: the baseline ack has
+> nowhere to live but a replication message on the client's own unreliable channel (A9); a client
+> that acked a tick on the strength of one of its **parts** would make the server skip entities
+> written at that tick, diverging **permanently and silently**, so `AckTracker` advances only past
+> complete ticks; and because spawn/despawn (reliable) and deltas (unreliable) have **no ordering
+> relative to each other**, a recycled `NetId` needs `NetIdMap::resolve`'s generation check or a new
+> entity's state smears onto the old one's mirror. Also added `core::reflect::packed_size` — a framed
+> reader cannot use `sizeof`, which counts padding the wire format does not have. Proofs are
+> GPU-free on the scripted-loss harness: convergence to a **bit-identical NetId-ordered state hash**
+> under 20% loss with reordering (with a negative control, so the hash is proven to discriminate),
+> multi-packet ticks exercised, the cross-channel race observed firing, and `Parent` proven excluded
+> from the wire schema because it carries an `Entity`. Named gaps: no prioritization (m11.5), no
+> interpolation (m11.6), entity-reference fields do not replicate, and change detection is
+> chunk-grain so it over-includes. **Next:** m11.4 — networked destruction.
+>
 > **Update (2026-07-22) — Milestone 10 (Advanced lighting) COMPLETE.** The whole [ADR-0032](adr/0032-lighting-v2.md)
 > stack landed on `main`, brick by brick, every technique gated behind `LightingSettings` so **off is
 > the byte-identical M5.6 baseline**: **m10.1a** RHI array/cube textures + depth-compare sampler ·

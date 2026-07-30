@@ -136,4 +136,17 @@ std::string to_debug_string(const TypeInfo& type, const void* object) {
     return out;
 }
 
+std::size_t packed_size(const TypeInfo& type) {
+    // Mirrors serialize_into's walk exactly — same recursion, same per-field widths, just counting
+    // instead of copying. Keeping the two in the same file is deliberate: if one ever grows a case
+    // the other lacks, every framed read in the engine desynchronizes, so they should be edited
+    // together and be visibly adjacent when they are.
+    std::size_t total = 0;
+    for (const Field& field : type.fields) {
+        total += field.type == FieldType::Struct ? packed_size(*field.struct_type)
+                                                 : primitive_size(field.type);
+    }
+    return total;
+}
+
 } // namespace rime::core
