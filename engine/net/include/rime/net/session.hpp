@@ -82,7 +82,13 @@ public:
     // backpressure — surfaced as-is; whether to drop a drowning peer is game policy (call
     // disconnect()), not a session default.
     [[nodiscard]] bool send_reliable(std::span<const std::byte> message, std::uint64_t now_ms);
-    [[nodiscard]] bool send_unreliable(std::span<const std::byte> message, std::uint64_t now_ms);
+
+    // `stream` selects which supersedes-relationship this message belongs to — see
+    // ReliableChannel::send_unreliable, which explains why two kinds of message that say nothing
+    // about each other must not share one. Out of range refuses, like an oversized payload.
+    [[nodiscard]] bool send_unreliable(std::span<const std::byte> message,
+                                       std::uint64_t now_ms,
+                                       std::uint8_t stream = 0);
 
     // Move every message delivered since the last drain into `out` (appended, not cleared — the
     // same contract as Link::receive); returns the count. Polled, not called back: the game asks at

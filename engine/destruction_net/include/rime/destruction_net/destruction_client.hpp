@@ -75,15 +75,23 @@ public:
     // nothing was queued. Call once per `DestructionWorld::update()` — see the header note on why
     // never twice without an update() in between.
     //
-    //   destruction_client.apply_next_batch(destruction);   // PreSim
+    //   destruction_client.apply_next_batch(world, map, destruction);  // PreSim
     //   physics.step(dt);
-    //   destruction.update(physics);                        // the fracture boundary this batch
-    //   owns
+    //   destruction.update(physics);          // the fracture boundary this batch owns
     //
     // A client catching up after a stall loops that whole sequence while `pending_batches()`
     // remains high, which replays the authority's ticks one at a time, in order, at whatever rate
     // it can afford.
-    bool apply_next_batch(destruction::DestructionWorld& destruction);
+    //
+    // It also VERIFIES the previous batch's composition fingerprints before releasing the next one,
+    // which is why it needs the world and the map. That timing is the whole point: by the time this
+    // is called again, the previous batch's `update()` has run, so its fingerprints describe
+    // exactly the state that now exists. Verifying anywhere else during a catch-up compares against
+    // a state several fractures further on — which is why an earlier version could only ever check
+    // the last batch of a burst and silently dropped the rest.
+    bool apply_next_batch(const ecs::World& world,
+                          const replication::NetIdMap& map,
+                          destruction::DestructionWorld& destruction);
 
     // Complete ticks decoded but not yet handed over. Steady state is 0 or 1; a larger number means
     // this client is behind the authority by that many destruction ticks.
@@ -120,6 +128,22 @@ public:
 
     [[nodiscard]] std::uint64_t composition_mismatches() const noexcept {
         return composition_mismatches_;
+    }
+
+    // Composition fingerprints that could not be compared against anything. Three causes, all
+    // unavoidable and all previously SILENT:
+    //   - the batch they describe had already been applied (the check packet was lost and
+    //     retransmitted while the ops it follows sailed through), so the state they attest to has
+    //     been built over;
+    //   - the source wall's own mirror has not arrived yet;
+    //   - the mirror arrived but is not standing yet.
+    //
+    // None is a fault. What matters is that they are COUNTED. Every other skip in this module has a
+    // counter, and a verification that quietly stops verifying is worth strictly less than no
+    // verification at all — it still reads as a passing proof. `matches + mismatches + unverified`
+    // must equal the fingerprints the authority sent, and the m11.4b proof asserts exactly that.
+    [[nodiscard]] std::uint64_t composition_checks_unverified() const noexcept {
+        return composition_unverified_;
     }
 
     // Debris mirrors successfully bound to a locally-derived chunk.
@@ -216,6 +240,7 @@ private:
     std::uint64_t debris_unresolved_ = 0;
     std::uint64_t composition_matches_ = 0;
     std::uint64_t composition_mismatches_ = 0;
+    std::uint64_t composition_unverified_ = 0;
 
     // The fingerprints belonging to the batch most recently released by apply_next_batch, awaiting
     // the fracture boundary that makes them comparable.

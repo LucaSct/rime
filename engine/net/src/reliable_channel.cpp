@@ -65,7 +65,9 @@ namespace rime::net {
 
 // The header: channel u8 | seq u32 | ack u32 | ack_bits u32 — 13 bytes, written/read field by
 // field through core's bounds-checked cursors (this is the engine's first untrusted-remote-input
-// surface; nothing here is hand-parsed).
+// surface; nothing here is hand-parsed). UnreliableSequenced packets carry one more byte, the
+// stream id, for 14 — see send_unreliable's contract in the header for what a stream is and why
+// the byte is not charged to the other two channels.
 
 ReliableChannel::ReliableChannel(Link& link, const Endpoint& peer, std::uint64_t resend_ms) noexcept
     : link_(&link), peer_(peer), resend_ms_(resend_ms) {}
@@ -82,11 +84,14 @@ bool ReliableChannel::send_reliable(std::span<const std::byte> message, std::uin
     return true;
 }
 
-bool ReliableChannel::send_unreliable(std::span<const std::byte> message) {
-    if (message.size() > kMaxPayload) {
+bool ReliableChannel::send_unreliable(std::span<const std::byte> message, std::uint8_t stream) {
+    // Refused, not clamped. A stream id the caller got wrong is a caller believing two message
+    // kinds are independent when they would in fact be sharing a space and evicting each other —
+    // silently, and only on a link with jitter. Better a hard false at the send.
+    if (message.size() > kMaxPayload || stream >= kUnreliableStreams) {
         return false;
     }
-    transmit(Channel::UnreliableSequenced, next_unreliable_seq_++, message);
+    transmit(Channel::UnreliableSequenced, next_unreliable_seq_[stream]++, message, stream);
     ++packets_sent_;
     return true;
 }
@@ -135,6 +140,14 @@ std::size_t ReliableChannel::process_packet(std::span<const std::byte> packet,
     if (!reader.u8(channel) || !reader.u32(seq) || !reader.u32(ack) || !reader.u32(ack_bits)) {
         return 0; // too short to be one of our packets: ignore (untrusted input, clean drop)
     }
+    // The stream byte rides only on unreliable packets — the reliable stream is a single ordered
+    // conversation with nothing to pick between, and AckOnly carries no payload at all, so making
+    // every packet pay a byte for a field two of the three channels cannot use would be a header
+    // tax on the busiest path in the engine.
+    std::uint8_t stream = 0;
+    if (static_cast<Channel>(channel) == Channel::UnreliableSequenced && !reader.u8(stream)) {
+        return 0; // truncated: an unreliable packet without its stream byte is not one of ours
+    }
     std::span<const std::byte> payload;
     if (!reader.bytes(payload, reader.remaining())) {
         return 0; // cannot happen (remaining is by definition available), but never parse on faith
@@ -149,7 +162,7 @@ std::size_t ReliableChannel::process_packet(std::span<const std::byte> packet,
             receive_reliable(seq, payload, out);
             break;
         case Channel::UnreliableSequenced:
-            receive_unreliable(seq, payload, out);
+            receive_unreliable(stream, seq, payload, out);
             break;
         case Channel::AckOnly:
             break; // its ack state was already processed above; no payload, no sequence space
@@ -159,7 +172,8 @@ std::size_t ReliableChannel::process_packet(std::span<const std::byte> packet,
 
 void ReliableChannel::transmit(Channel channel,
                                std::uint32_t seq,
-                               std::span<const std::byte> payload) {
+                               std::span<const std::byte> payload,
+                               std::uint8_t stream) {
     // Every packet carries the current receive state (ack + ack_bits), so acks flow back on
     // whichever direction has traffic.
     packet_buf_.clear();
@@ -168,6 +182,9 @@ void ReliableChannel::transmit(Channel channel,
     writer.u32(seq);
     writer.u32(ack());
     writer.u32(ack_bits());
+    if (channel == Channel::UnreliableSequenced) {
+        writer.u8(stream); // 14-byte header on this channel only; see process_packet
+    }
     if (!payload.empty()) { // memcpy(dst, nullptr, 0) is UB by the letter of the standard
         writer.bytes(payload);
     }
@@ -237,14 +254,26 @@ void ReliableChannel::deliver(std::vector<Received>& out, std::span<const std::b
 }
 
 // ── Receiver side: unreliable-sequenced ─────────────────────────────────────────────────
-void ReliableChannel::receive_unreliable(std::uint32_t seq,
+void ReliableChannel::receive_unreliable(std::uint8_t stream,
+                                         std::uint32_t seq,
                                          std::span<const std::byte> payload,
                                          std::vector<Received>& out) {
-    if (have_unreliable_ && seq <= latest_unreliable_seq_) {
+    // Bounds-checked before it indexes anything: `stream` came off the wire, and this is the
+    // engine's untrusted-remote-input surface. A peer that passed the handshake agreed on a
+    // protocol version and so cannot name a stream this build lacks — which is exactly why a
+    // packet that does is counted as a lying peer rather than quietly tolerated.
+    if (stream >= kUnreliableStreams) {
+        ++unreliable_bad_stream_;
+        return;
+    }
+    // Per stream, not global. Two messages are only allowed to make each other garbage when the
+    // sender said they were about the same thing.
+    if (have_unreliable_[stream] && seq <= latest_unreliable_seq_[stream]) {
+        ++unreliable_superseded_;
         return; // stale or duplicate: a fresher packet already made this one garbage
     }
-    latest_unreliable_seq_ = seq;
-    have_unreliable_ = true;
+    latest_unreliable_seq_[stream] = seq;
+    have_unreliable_[stream] = true;
     out.push_back(Received{Channel::UnreliableSequenced,
                            std::vector<std::byte>(payload.begin(), payload.end())});
     ++messages_delivered_;

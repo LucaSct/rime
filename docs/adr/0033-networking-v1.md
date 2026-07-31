@@ -585,3 +585,96 @@ diverged client, and a sample prints it to show two windows agree. Three callers
 privately are three subtly different answers to one question, and a witness that different callers
 compute differently is not a witness. It now ships as
 `destruction_net::shared_state_hash(world, map, destruction)`.
+
+---
+
+## Amendment (2026-07-30, post-m11.5): the general lesson, and where it now lives
+
+A16, A17 below are two more instances of a pattern that by then had appeared five times. Recording
+them individually was clearly not working — each was found by running code rather than by reading it,
+which means nobody was carrying the general rule into review. The rule now has a home that is
+*checkable* rather than historical: **[docs/design/replication.md](../design/replication.md)**,
+mirroring what `docs/design/reliability.md` already does for the transport. This module was the only
+one in the networking stack without a living design note, and that gap is most of why the pattern
+kept recurring.
+
+The rule, in one line: **any claim about what a peer holds needs evidence of holding — never evidence
+of some correlated-but-weaker event.** It has two corollaries with different failure shapes (a scalar
+watermark advanced on weak evidence; a per-item record inferred from a blind-spotted proxy or
+clobbered by another message kind's bookkeeping). The design doc states both, lists every mechanism
+enforcing them today, and carries the guidance m11.6's interpolation state will need. A one-line
+guardrail in `CLAUDE.md` points at it, so it is seen on every diff rather than only by someone who
+has read this amendment history.
+
+### A16. The `announced[]` rollback clobbered itself on a same-tick recycle under backpressure
+
+`publish_structure` writes `state.announced[i]` optimistically, then flushes despawns and spawns as
+two back-to-back sends, each rolling back only its own unsent tail — to a constant chosen from the
+message *kind*. A recycled index appears in **both** lists in one tick (`{idx, old_gen}` to despawn,
+`{idx, new_gen}` to spawn), and the two flushes run with no chance for the channel's backlog to drain
+between them, so backpressure on the first guarantees it on the second. The spawn rollback's `= 0`
+then overwrote the despawn rollback's correctly-restored `old_gen`; next tick's diff read `0`, took
+`announced != 0` as false, and **never re-emitted the despawn**. The client rebinds the index to the
+new incarnation and its old mirror is orphaned in the ECS world forever — precisely the phantom
+`ServerReplicator::despawn`'s own documentation says the class exists to prevent, reached through a
+rollback interaction instead of through the mistake it warns about.
+
+Fix: roll back to the value `announced[index]` held **before this tick's diff touched it**, carried
+alongside each id. That is ground truth and is correct however the two flushes fail; it can re-emit a
+despawn the client already applied, which is a no-op and the self-healing direction the whole diff is
+built on.
+
+Reachable on the ordinary debris path — `DestructionServer::sync_debris` despawns reclaimed chunks
+and replicates new ones in the same call, every tick, and all of destruction's traffic shares one
+`ReliableChannel` backlog with structure. Not covered by any existing test: the recycling proof runs
+lossless (so the rollback never executes) and the backpressure proof never touches replication.
+
+### A17. The composition check was the one uncounted skip, and it was hiding three more
+
+`DestructionClient::on_composition_check` returned silently when the batch it described had already
+been applied. Every other skip in the module has a counter; this one did not, and the m11.4b proof's
+`matches > 0 && mismatches == 0` stayed true while verifying almost nothing.
+
+Adding the counter and asserting `matches + mismatches + unverified == checks_sent` immediately
+exposed **three further silent paths**: two unresolvable-source skips inside `verify_composition`,
+and — the one that actually mattered — `apply_next_batch` overwriting `pending_verify_`, so a client
+pumping several batches to catch up silently discarded every batch's expectations but the last.
+
+The general form is worth more than the fix: **a proof that cannot see how much it skipped is not a
+weaker proof, it is a misleading one**, because it still reads as passing. The counting rule is now
+stated in the design doc.
+
+### A18. Unreliable-sequenced gets one sequence space PER STREAM, and delta parts deliberately keep sharing one
+
+Found while designing m11.6c's client→server input message: `ReliableChannel` kept a *single*
+unreliable frontier per direction (`latest_unreliable_seq_`), and `receive_unreliable` dropped
+anything not strictly newer than it. That is the right contract for one kind of message and a trap
+for two. Any two unreliable messages sent in the same tick draw consecutive sequence numbers, so on
+a link with latency jitter they race — and whichever the receiver happens to see second silently
+discards the other, *before the application sees its bytes*. Not lost on the wire: dropped on
+arrival, for being "stale" when it was nothing of the sort. With one sender that never mattered;
+adding input as a second would have made it a coin flip every tick.
+
+`send_unreliable` now takes a **stream id** (one wire byte, carried only on that channel; 16 streams,
+bounds-checked on receive because it is untrusted input, refused rather than clamped on send — a
+silent clamp would merge two spaces the caller believed were separate, which is the bug the
+parameter exists to prevent). One stream per supersedes-relationship.
+
+**The part that is not the obvious cleanup.** The server splits an oversized tick into up to
+`kMaxDeltaPartsPerTick` Delta packets and sends them as separate unreliable messages, so the same
+mechanism has been quietly evicting *snapshot parts* since m11.3 — a reordered part is discarded and
+the tick stays incomplete. It looks like exactly what the stream id is for. **It must not be fixed
+that way.** The shared stream is the only thing keeping deltas ordered, and `on_delta` applies
+records blind — there is no per-record "is this older than what I hold" check. Split across streams,
+part 1 of tick N could land after part 0 of tick N+1 and write a stale value over a fresh one; the
+client would still count tick N+1 complete and acknowledge it, the server would advance the baseline
+and stop re-sending, and the two worlds would sit **permanently** disagreed. Trading a bandwidth cost
+for a silent-divergence risk is the wrong direction, and the completeness rule (A13/A14) already
+makes the bandwidth cost self-healing.
+
+So the parts stay together, the cost is now *visible* rather than merely absent
+(`ReliableChannel::unreliable_superseded()` — measured at 33 evictions per 80 same-tick sends on a
+lossless link with 0–40 ms jitter, versus 19 once independent kinds stopped colliding), and making
+the split safe is left as its own brick with a named prerequisite: either a per-record staleness
+guard or real fragment reassembly. This is the counting rule from A17 applied one layer down — the
+eviction was never wrong, but nothing could see how much of it was happening.

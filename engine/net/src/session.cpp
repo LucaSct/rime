@@ -69,11 +69,13 @@ bool Session::send_reliable(std::span<const std::byte> message, std::uint64_t no
     return true;
 }
 
-bool Session::send_unreliable(std::span<const std::byte> message, std::uint64_t now_ms) {
+bool Session::send_unreliable(std::span<const std::byte> message,
+                              std::uint64_t now_ms,
+                              std::uint8_t stream) {
     if (state_ != SessionState::Connected) {
         return false;
     }
-    if (!channel_.send_unreliable(message)) {
+    if (!channel_.send_unreliable(message, stream)) {
         return false;
     }
     last_sent_ms_ = now_ms;
