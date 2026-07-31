@@ -392,7 +392,7 @@ void ClientReplicator::send_ack(net::NetDriver& driver, std::uint64_t now_ms) {
     for (const net::SessionId id : driver.session_ids()) {
         net::Session* session = driver.session(id);
         if (session != nullptr && session->state() == net::SessionState::Connected) {
-            (void)session->send_unreliable(scratch_, now_ms);
+            (void)session->send_unreliable(scratch_, now_ms, kStreamBaselineAck);
         }
     }
 }

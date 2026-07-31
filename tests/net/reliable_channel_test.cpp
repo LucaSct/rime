@@ -22,6 +22,7 @@
 #include <thread>
 #include <vector>
 
+#include "rime/core/byte_cursor.hpp"
 #include "rime/net/reliable_channel.hpp"
 
 using namespace rime::net;
@@ -394,4 +395,96 @@ TEST_CASE("udp link loopback: the channel runs over a real socket, not just the 
     CHECK(from_a[10].channel == Channel::UnreliableSequenced);
     // Acks came home over the real wire too.
     CHECK(a_to_b.pending_count() == 0);
+}
+
+// Two kinds of unreliable message sent in the same tick used to race each other, and the loser was
+// discarded before the application ever saw its bytes — not lost on the wire, dropped on arrival
+// for being "stale" when it was nothing of the sort. With one sender that never mattered; the
+// moment a second kind exists it is a coin flip every tick.
+//
+// The proof runs the same traffic twice over the same seed and link, once sharing a stream and once
+// on two, and contrasts them. Written this way deliberately: an absolute threshold on the
+// two-stream run alone would pass just as happily against the unfixed code if the seed happened to
+// be kind, whereas the shared-stream half pins what the hazard actually costs.
+TEST_CASE("unreliable streams: two kinds sent in the same tick do not evict each other") {
+    constexpr int kRounds = 40;
+
+    const auto run = [](std::uint8_t stream_a, std::uint8_t stream_b) {
+        ScriptedNetwork::Config jitter;
+        jitter.min_latency_ms = 0;
+        jitter.max_latency_ms = 40; // wide enough that same-tick siblings routinely swap order
+        Harness h(jitter, /*seed=*/7);
+        for (int i = 0; i < kRounds; ++i) {
+            // The shape that bit us: two sends, back to back, every tick.
+            REQUIRE(h.a_to_b.send_unreliable(payload_of("a" + std::to_string(i)), stream_a));
+            REQUIRE(h.a_to_b.send_unreliable(payload_of("b" + std::to_string(i)), stream_b));
+            h.ticks(1);
+        }
+        h.ticks(20); // let the tail land
+        struct Result {
+            int a = 0, b = 0;
+            std::uint64_t superseded = 0;
+        } r;
+        for (const Received& m : h.from_a) {
+            if (m.channel == Channel::UnreliableSequenced) {
+                (to_string(m.bytes)[0] == 'a' ? r.a : r.b)++;
+            }
+        }
+        r.superseded = h.b_to_a.unreliable_superseded();
+        return r;
+    };
+
+    // THE HAZARD, pinned. One stream: the two series are one supersedes-chain, so roughly every
+    // other message is killed by its own sibling on a link that loses nothing at all.
+    const auto shared = run(0, 0);
+    MESSAGE("shared a=" << shared.a << " b=" << shared.b << " sup=" << shared.superseded);
+    CHECK(shared.superseded > 0); // non-vacuous: the link really did reorder same-tick siblings
+
+    // THE FIX. Independent streams, same seed, same link, same traffic: each series is now only
+    // ever superseded by its own newer messages, so both arrive very nearly whole.
+    const auto split = run(0, 1);
+    MESSAGE("split a=" << split.a << " b=" << split.b << " sup=" << split.superseded);
+    // Every one of these reads IDENTICAL to the shared run against the unfixed channel, because
+    // there the stream argument is ignored and the two runs are the same run. The contrast is the
+    // proof; an absolute threshold on the split run alone would not be one.
+    CHECK(split.a > shared.a);
+    CHECK(split.b > shared.b);
+    CHECK(split.a + split.b > shared.a + shared.b);
+    CHECK(split.superseded < shared.superseded);
+
+    // What survives is still bounded by honest within-series supersession: a message delayed past
+    // its own successor is late state, and late state is garbage by the channel's contract. The
+    // fix removes the sibling collisions, not the jitter — measured 47/80 shared vs 61/80 split.
+    CHECK(split.a + split.b < 2 * kRounds);
+}
+
+// The stream id is untrusted input. A peer that passed the handshake cannot name a stream this
+// build lacks, so one that does is lying or corrupt — count it and drop it, never index with it.
+TEST_CASE("unreliable streams: an out-of-range stream is refused, not clamped") {
+    ScriptedNetwork::Config perfect;
+    Harness h(perfect, /*seed=*/11);
+
+    // The sender refuses locally rather than emitting a packet no peer could accept. Refusing
+    // beats clamping: a clamp would silently merge two spaces the caller believed were separate,
+    // which is the exact bug the stream id exists to prevent.
+    CHECK_FALSE(h.a_to_b.send_unreliable(payload_of("nope"), ReliableChannel::kUnreliableStreams));
+    CHECK_FALSE(h.a_to_b.send_unreliable(payload_of("nope"), 255));
+
+    // And a hand-forged packet naming a bad stream is counted and dropped on the receiving side.
+    // Hand-built because an honest sender cannot produce one — the same "unreachable, so construct
+    // it directly" standard the refused-part branch is held to.
+    std::vector<std::byte> packet;
+    rime::core::ByteWriter forged(packet);
+    forged.u8(static_cast<std::uint8_t>(Channel::UnreliableSequenced));
+    forged.u32(0);  // seq
+    forged.u32(0);  // ack
+    forged.u32(0);  // ack_bits
+    forged.u8(200); // stream — well past kUnreliableStreams
+    forged.bytes(payload_of("forged"));
+
+    std::vector<Received> out;
+    const std::size_t delivered = h.b_to_a.process_packet(packet, out);
+    CHECK(delivered == 0);
+    CHECK(out.empty());
+    CHECK(h.b_to_a.unreliable_bad_stream() == 1);
 }

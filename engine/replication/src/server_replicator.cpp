@@ -740,7 +740,7 @@ void ServerReplicator::publish_delta(net::Session& session,
         for (std::size_t i = parts[p].first; i < parts[p].second; ++i) {
             writer.bytes(records_[i]);
         }
-        if (session.send_unreliable(scratch_, now_ms)) {
+        if (session.send_unreliable(scratch_, now_ms, kStreamDelta)) {
             ++delta_packets_sent_;
             // Credited HERE, per part, and only on acceptance. A refused part is bytes that never
             // existed; crediting the whole prefix regardless would strengthen a per-item record on

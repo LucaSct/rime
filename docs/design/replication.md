@@ -392,6 +392,34 @@ built and proven by direct construction, the same standard the refused-part bran
 
 ---
 
+## One unreliable stream per supersedes-relationship (ADR-0033 A18)
+
+`ReliableChannel::send_unreliable` takes a **stream id**, and picking it is a design decision rather
+than a label. A stream is a *supersedes-relationship*: a newer message on a stream makes an older one
+on that stream garbage, and the older is dropped on arrival.
+
+Two kinds that say nothing about each other must not share one. They are sent in the same tick, so
+they draw consecutive sequence numbers, and on any link with jitter the receiver sees them in either
+order — whichever lands second silently discards the other before the application sees its bytes.
+This was found before it could bite, while designing the input message that would have become the
+second unreliable sender.
+
+The interesting half is where the engine **declines** to split. Every part of a multi-part `Delta`
+rides one stream even though the parts complete each other rather than replace each other, because
+that shared stream is the only thing keeping deltas ordered and `on_delta` applies records blind.
+Split them and part 1 of tick N can land after part 0 of tick N+1, writing a stale value over a fresh
+one — and because the client would still count tick N+1 complete and acknowledge it, the server would
+advance the baseline, stop re-sending, and the two worlds would sit permanently disagreed. **A
+bandwidth cost that the completeness rule self-heals is worth more than a silent-divergence risk.**
+The cost is now visible as `unreliable_superseded()` instead of being invisible; closing it properly
+needs a per-record staleness guard or real fragment reassembly, which is its own brick.
+
+The general rule, which is corollary 1 wearing different clothes: **a message may only invalidate
+another when the sender said they were about the same thing.** Sequence adjacency is not that
+statement — it is an artifact of when the two were handed to the transport.
+
+---
+
 ## For the input half of m11.6 — build it to the rule the first time
 
 **The client→server input watermark is a fresh instance of corollary 1**, not a special case.
