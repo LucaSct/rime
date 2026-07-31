@@ -90,6 +90,29 @@ inline constexpr std::size_t kHeaderBytes = 1 + 8 + 1 + 1 + 2;
 // this degrades into latency rather than loss.
 inline constexpr std::uint8_t kMaxDeltaPartsPerTick = 8;
 
+// ── Unreliable stream assignment (ReliableChannel::send_unreliable) ────────────────────────────
+//
+// A stream is a supersedes-relationship: a newer message on a stream makes an older one on that
+// same stream garbage, and the older is dropped on arrival. Two kinds that say nothing about each
+// other must NOT share one, or on any link with jitter they race every tick and the loser is
+// discarded before the application sees it. The two directions are independent — a client's
+// stream 0 and a server's stream 0 never meet — so each is numbered from zero.
+//
+// THE DELIBERATE EXCEPTION, worth reading before adding a stream: **every part of a multi-part
+// Delta stays on ONE stream**, even though the parts are complements rather than replacements and
+// splitting them would stop them evicting each other. They stay together because the shared stream
+// is the only thing keeping deltas in order, and `on_delta` applies records BLIND — it has no
+// per-record "is this older than what I already hold" check. Split across streams, part 1 of tick N
+// could land after part 0 of tick N+1 and write a stale value over a fresh one; the client would
+// still count tick N+1 complete and acknowledge it, the server would advance the baseline and stop
+// re-sending, and the two worlds would sit permanently disagreed. The cost of keeping them together
+// is that a reordered part is dropped and re-sent — visible as ReliableChannel::unreliable_
+// superseded(), paid in bandwidth, and self-healed by the completeness rule. Ordering is worth more
+// than the bandwidth. Making the split safe needs either a per-record staleness guard or real
+// fragment reassembly, and that is its own brick.
+inline constexpr std::uint8_t kStreamDelta = 0; // server→client: snapshots, all parts together
+inline constexpr std::uint8_t kStreamBaselineAck = 0; // client→server: "the newest tick I hold"
+
 // The stale-baseline valve. If a client's acknowledged baseline falls this far behind the world
 // version, stop growing an ever-larger incremental delta (as the baseline recedes, "changed since"
 // tends toward "everything", paid *every* tick the client stays behind) and re-seed it from
