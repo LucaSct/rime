@@ -398,6 +398,16 @@ void ServerReplicator::publish_delta(net::Session& session,
         }
     };
 
+    // Refuse a record that cannot fit in a packet on its own. An entity's record is never split
+    // (parts are independently-complete packets, not fragments), so such a record would be built,
+    // packed alone into an oversized part, and refused by the channel every tick forever — losing
+    // the entity silently or jamming `complete_through`, depending on how honestly completeness is
+    // judged. Neither is a thing to do quietly. Dropping it here keeps the rest of the world
+    // converging, and `records_too_large()` names the real fault: a component that needs splitting.
+    const auto record_fits = [](std::size_t record_bytes) {
+        return kHeaderBytes + record_bytes <= kMaxReplicationPayload;
+    };
+
     // The ordering key: the policy's priority plus what this client is owed. See
     // Budget::starvation_gain — being passed over is itself a claim on the next tick's budget,
     // which is what stops a strict ordering from becoming a starvation machine.
@@ -497,6 +507,10 @@ void ServerReplicator::publish_delta(net::Session& session,
             const std::vector<std::byte> bytes = core::serialize(*type, value);
             writer.bytes(bytes);
         }
+        if (!record_fits(scratch_.size())) {
+            ++records_too_large_;
+            return;
+        }
         records_.push_back(scratch_);
         record_priority_.push_back(aged_priority(slot, priority_by_index_[slot]));
         record_slot_.push_back(static_cast<std::uint32_t>(slot));
@@ -583,6 +597,10 @@ void ServerReplicator::publish_delta(net::Session& session,
                     (void)schema_.lookup(wire, unused, type, packed);
                     const std::vector<std::byte> bytes = core::serialize(*type, value);
                     writer.bytes(bytes);
+                }
+                if (!record_fits(scratch_.size())) {
+                    ++records_too_large_;
+                    continue;
                 }
                 records_.push_back(scratch_);
                 record_priority_.push_back(aged_priority(slot, priority));
@@ -682,7 +700,7 @@ void ServerReplicator::publish_delta(net::Session& session,
     // arrive, per-tick delivery would decay as (1-p)^k, which is the wrong way to spend an
     // unreliable channel. An entity's record is never split, so a torn tick means "some entities
     // are fresher than others" — which is what a snapshot stream already does under ordinary loss.
-    constexpr std::size_t kHeader = 1 + 8 + 1 + 1 + 2;
+    constexpr std::size_t kHeader = kHeaderBytes;
     std::vector<std::pair<std::size_t, std::size_t>> parts; // [begin, end) into records_
     std::size_t begin = 0;
     std::size_t used = kHeader;
@@ -730,8 +748,22 @@ void ServerReplicator::publish_delta(net::Session& session,
             credit_sent(parts[p].first, parts[p].second);
         } else {
             // Refused by the channel. These records did not reach the wire, so they age exactly
-            // like budget-dropped ones — the rule is "a record that was not delivered is owed",
-            // and it must not depend on WHICH stage declined to carry it.
+            // like budget-dropped ones and the tick is not complete — the rule is "a record that
+            // was not delivered is owed", and it must not depend on WHICH stage declined to carry
+            // it.
+            //
+            // UNREACHABLE AS THE CODE STANDS, and deliberately kept anyway. `send_unreliable`
+            // refuses on a non-Connected session (publish() already filtered those) or a payload
+            // over ReliableChannel::kMaxPayload — and every part built above is at most
+            // kMaxReplicationPayload, which is held under kMaxPayload with a deliberate reserve,
+            // with the single-record case covered by `record_fits`. A link-level failure cannot
+            // surface here either: ReliableChannel::transmit ignores Link::send's result, which is
+            // the right call for an unreliable channel (a refused datagram is indistinguishable
+            // from a lost one) but does mean this branch cannot see it.
+            //
+            // So this is not an untested path to go build harness machinery for; it is the honest
+            // handling of a contract the channel documents and the current constants happen to make
+            // unreachable. If that reserve is ever spent, it becomes live and correct at once.
             bump_starvation(parts[p].first, parts[p].second);
             every_part_sent = false;
         }

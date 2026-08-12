@@ -85,6 +85,7 @@ not get over-applied to something that was never a cross-peer correctness questi
 | `credit_sent` per accepted part | `replication/src/server_replicator.cpp` | 2 — a refused `send_unreliable` is not evidence of holding |
 | Byte-budget drops block `complete_through` | `replication/src/server_replicator.cpp` | 1 — a trimmed tick is partial, however complete it looks to the packer |
 | `entry_pass_records()` / `delta_ticks()` | `replication/src/server_replicator.cpp` | neither — the counting rule, applied to relevancy churn |
+| `records_too_large()` + the build-time size guard | `replication/src/server_replicator.cpp` | 1 — an undeliverable record must not jam the watermark, nor pass as delivered |
 | Priority aging (`Budget::starvation_gain`) | `replication/src/server_replicator.cpp` | 1 (liveness half) — the rotation cursor's job on the *prioritized* path, which the cursor never reached |
 
 ---
@@ -219,6 +220,49 @@ defensible when the budget is known to cover the working set.
 alongside `was_relevant`. It is a claim about what we OWE rather than what the peer HOLDS — not
 corollary 2 proper — but the recycle hazard does not care which way the claim points: a new tenant
 inheriting the dead entity's grievance would jump the queue on its behalf.
+
+---
+
+## A record that cannot fit is a schema fault, and must say so
+
+An entity's record is **never split**. Parts are independently-complete packets, not fragments of one
+logical message — losing one costs that packet's entities for that tick rather than the whole tick.
+The consequence is easy to miss: an entity whose replicable components exceed the payload budget *on
+their own* cannot be transmitted at all, by any amount of budget or patience.
+
+That is a schema problem — split the component, or stop replicating it — and the engine's only job is
+to **say so**. Both ways of not saying so were live in this module at some point:
+
+- Build the oversized part and let the channel refuse it, while still counting the tick complete →
+  the entity is **silently lost forever**.
+- Build it, let it be refused, and honestly refuse to count the tick complete → `complete_through`
+  **jams permanently**, the baseline never advances, and the whole world is re-sent every tick.
+  Measured: `complete_through` stuck at 0 across 60 ticks.
+
+Priority aging made the second worse rather than better, which is worth noting as a pattern: an
+undeliverable record accumulates starvation, so it sorts *first* every tick and reserves a part
+forever. A correct fix exposed a latent fault by removing what had been hiding it.
+
+The guard drops such a record at build time and counts it in `records_too_large()`. The rest of the
+world converges, the watermark advances, and the real fault is visible instead of being either
+invisible or catastrophic. **`kHeaderBytes` is shared** between the packing loop and the guard on
+purpose — those two disagreeing about the header size is exactly how an undeliverable record gets
+built anyway.
+
+A note on why this is easy to hit by accident: the reflection system has no array kind, only scalars
+and nested structs, so an oversized component does not look oversized. Thirty-two transforms is 1280
+bytes and reads as four fields.
+
+**A consequence worth writing down, because it looks like missing test coverage and is not.** With
+that guard in place, `Session::send_unreliable` can no longer fail from `publish_delta`: it refuses on
+a non-Connected session (already filtered by `publish`) or a payload over
+`ReliableChannel::kMaxPayload`, and every part is capped at `kMaxReplicationPayload`, which sits under
+it with a deliberate reserve. A link-level failure cannot surface either — `ReliableChannel::transmit`
+ignores `Link::send`'s result, which is right for an unreliable channel (a refused datagram is
+indistinguishable from a lost one) but means the replicator never learns of it. The refused-part
+handling is therefore honest handling of a documented contract that the current constants make
+unreachable, not a gap wanting a `ScriptedNetwork` "refuse on demand" capability. Spend that reserve
+and it becomes live and already correct.
 
 ---
 

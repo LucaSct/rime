@@ -200,6 +200,24 @@ public:
     // per (client, tick), including ticks that produced no records.
     [[nodiscard]] std::uint64_t delta_ticks() const noexcept { return delta_ticks_; }
 
+    // Records discarded because one entity's state does not fit in a single packet.
+    //
+    // AN ENTITY'S RECORD IS NEVER SPLIT — that is the framing contract (see the packing loop: parts
+    // are independently-complete packets, not fragments of one logical message). So an entity whose
+    // serialized components exceed the payload budget on their own cannot be transmitted AT ALL, by
+    // any amount of budget or patience. It is a schema problem, not a bandwidth problem: the fix is
+    // to split the component or stop replicating it.
+    //
+    // What matters here is that the engine says so. The two ways of NOT saying so are both bad and
+    // both were live: let the oversized part be built and refused by the channel, which either
+    // silently loses the entity forever (if the tick still counts as complete) or jams
+    // `complete_through` forever (if it does not, which is the honest reading). Dropping it at
+    // build time and counting it keeps the rest of the world converging and makes the real fault
+    // visible.
+    //
+    // Non-zero means a component needs splitting. It should be zero in any healthy game.
+    [[nodiscard]] std::uint64_t records_too_large() const noexcept { return records_too_large_; }
+
 private:
     struct ClientState {
         net::SessionId id{};
@@ -284,6 +302,7 @@ private:
     std::uint64_t entities_culled_ = 0;
     std::uint64_t entities_entered_ = 0;
     std::uint64_t entry_pass_records_ = 0;
+    std::uint64_t records_too_large_ = 0;
     std::uint64_t delta_ticks_ = 0;
 
     RelevancyFn relevancy_;
