@@ -4,6 +4,8 @@
 
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/reflect/serialize.hpp"
+#include "rime/ecs/transform.hpp"
+#include "rime/replication/interpolation.hpp"
 
 namespace rime::replication {
 namespace {
@@ -23,6 +25,10 @@ namespace {
 ClientReplicator::ClientReplicator(ecs::World& world)
     : world_(&world), schema_(WireSchema::build(world.components())) {
     replicated_id_ = world.register_component<Replicated>();
+    local_transform_id_ = world.component_id<ecs::LocalTransform>();
+    // Client-only, and safe to be client-only: PreviousTransform is unreflected, so it contributes
+    // to neither the wire schema nor the component schema hash the handshake compares.
+    previous_transform_id_ = world.register_component<PreviousTransform>();
 }
 
 void ClientReplicator::apply_inbound(net::NetDriver& driver) {
@@ -92,6 +98,53 @@ void ClientReplicator::on_spawn(core::ByteReader& reader) {
     }
 }
 
+void ClientReplicator::rotate_transform_history(ecs::Entity local,
+                                                ecs::ComponentId component,
+                                                const core::TypeInfo& type,
+                                                std::span<const std::byte> incoming) {
+    if (component != local_transform_id_) {
+        return; // only transforms are interpolated today
+    }
+    const void* existing = world_->get_component_raw(local, local_transform_id_);
+    if (existing == nullptr) {
+        return; // first write for this mirror — there IS no previous, and `valid` must stay false
+    }
+
+    // An unchanged re-send is not a new tick's worth of motion. Skipping it keeps `previous` at the
+    // last value that actually differed, which is what a renderer needs to blend from.
+    //
+    // Compared FIELD BY FIELD, deliberately not with memcmp. `core::Quat` is over-aligned, so
+    // `sizeof(Transform)` exceeds the 40 bytes it packs into and the remainder is padding whose
+    // contents nothing defines — a memcmp reads it, never matches, and silently turns this guard
+    // into a no-op. It did exactly that on the first attempt.
+    ecs::LocalTransform candidate{};
+    if (core::deserialize(type, &candidate, incoming)) {
+        const auto& a = candidate.value;
+        const auto& b = static_cast<const ecs::LocalTransform*>(existing)->value;
+        const bool same = a.translation.x == b.translation.x &&
+                          a.translation.y == b.translation.y &&
+                          a.translation.z == b.translation.z && a.rotation.x == b.rotation.x &&
+                          a.rotation.y == b.rotation.y && a.rotation.z == b.rotation.z &&
+                          a.rotation.w == b.rotation.w && a.scale.x == b.scale.x &&
+                          a.scale.y == b.scale.y && a.scale.z == b.scale.z;
+        if (same) {
+            return;
+        }
+    }
+    if (world_->get_component_raw(local, previous_transform_id_) == nullptr) {
+        (void)world_->add_component_raw(local, previous_transform_id_);
+    }
+    // Re-fetch BOTH after the add: `add_component_raw` relocates the entity between archetypes, so
+    // any pointer taken before it is dangling. Cheap to get wrong, silent when wrong.
+    const auto* current = world_->get<ecs::LocalTransform>(local);
+    auto* previous = world_->get<PreviousTransform>(local);
+    if (current == nullptr || previous == nullptr) {
+        return;
+    }
+    previous->value = current->value;
+    previous->valid = true;
+}
+
 void ClientReplicator::replay_deferred(NetId id, ecs::Entity local) {
     // Stable partition by hand rather than remove_if + a second pass: the held records for one id
     // must be applied in the order they arrived, because two writes to the same component are a
@@ -111,6 +164,7 @@ void ClientReplicator::replay_deferred(NetId id, ecs::Entity local) {
         std::size_t packed = 0;
         if (schema_.lookup(schema_.wire_id_of(record.component), unused, type, packed) &&
             type != nullptr) {
+            rotate_transform_history(local, record.component, *type, record.bytes);
             void* slot = world_->get_component_raw(local, record.component);
             if (slot == nullptr) {
                 slot = world_->add_component_raw(local, record.component);
@@ -218,6 +272,7 @@ void ClientReplicator::on_delta(core::ByteReader& reader) {
                 ++records_deferred_;
                 continue;
             }
+            rotate_transform_history(local, local_id, *type, bytes);
             void* slot = world_->get_component_raw(local, local_id);
             if (slot == nullptr) {
                 // The mirror does not carry this component yet — the server added it after the

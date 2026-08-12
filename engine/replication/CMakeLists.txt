@@ -22,7 +22,8 @@ add_library(rime_replication STATIC
     src/snapshot.cpp
     src/server_replicator.cpp
     src/client_replicator.cpp
-    src/relevancy.cpp)
+    src/relevancy.cpp
+    src/interpolation.cpp)
 
 # Namespaced alias so dependents link `rime::replication`, matching our C++ namespace.
 add_library(rime::replication ALIAS rime_replication)

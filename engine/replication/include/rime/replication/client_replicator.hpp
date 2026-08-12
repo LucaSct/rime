@@ -117,6 +117,24 @@ private:
     // binds the id — arrival order is preserved, so the newest state still wins.
     void replay_deferred(NetId id, ecs::Entity local);
 
+    // Roll this mirror's transform history forward, BEFORE `component` is overwritten.
+    //
+    // Driven off the apply, not off a tick boundary, and that is the whole subtlety. A replicated
+    // write does not land when the packet nominally arrived: `replay_deferred` applies records
+    // whose Spawn had not yet bound, which can be many ticks later. A rotation keyed to "the tick
+    // counter advanced" would capture a previous that was never on screen for those records, or
+    // skip them entirely. Keying it to the write itself makes "previous" mean exactly what a
+    // renderer needs — the last value this client actually held. `incoming` is the value about to
+    // be written, so an unchanged re-send can be told apart from a real move. That distinction is
+    // not cosmetic: the server re-sends until the baseline advances, which takes a round trip, so
+    // the SAME value routinely lands two ticks running. Rotating on those would set previous :=
+    // current and collapse a genuine gap — the client would snap through exactly the motion
+    // interpolation exists to smooth.
+    void rotate_transform_history(ecs::Entity local,
+                                  ecs::ComponentId component,
+                                  const core::TypeInfo& type,
+                                  std::span<const std::byte> incoming);
+
     // One component write that arrived before the entity it belongs to. The bytes are COPIED: the
     // reader's span points into a datagram buffer that is reused the moment this call returns.
     struct DeferredRecord {
@@ -132,6 +150,8 @@ private:
     WireSchema schema_;
     NetIdMap map_;
     ecs::ComponentId replicated_id_{};
+    ecs::ComponentId local_transform_id_{};
+    ecs::ComponentId previous_transform_id_{};
     AckTracker acks_;
 
     std::vector<net::Received> inbox_;
