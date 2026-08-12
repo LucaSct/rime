@@ -734,15 +734,18 @@ TEST_CASE("a despawned entity's slot does not pin the full-walk optimization off
 
     // The world is now quiet and stable: one entity, permanently relevant, never rewritten. No
     // entity can legitimately be entering relevance any more, so the full walk must stop.
-    const std::uint64_t walks_before = server.full_walk_ticks();
+    const std::uint64_t entry_records_before = server.entry_pass_records();
     const std::uint64_t ticks_before = server.delta_ticks();
     run(30);
-    const std::uint64_t walks_added = server.full_walk_ticks() - walks_before;
+    const std::uint64_t entry_records_added = server.entry_pass_records() - entry_records_before;
     const std::uint64_t ticks_added = server.delta_ticks() - ticks_before;
 
     // Non-vacuousness: the delta path really did run on those ticks.
     REQUIRE(ticks_added > 0);
-    CHECK(walks_added == 0);
+    // No live entity is entering, so the entry pass must emit nothing. A dead slot that still read
+    // as relevant would be serialized here every tick — which is the defect, now visible directly
+    // as work done rather than indirectly as an optimization switched off.
+    CHECK(entry_records_added == 0);
 
     // And the surviving entity is still correctly mirrored — the fix must not buy its cheapness by
     // dropping the entry that matters. Let the keeper come to rest first: it has been moving every
@@ -928,18 +931,20 @@ TEST_CASE("distance_relevancy culls by range, admits on approach, and does not t
 
     // ── 4. Hysteresis: park the viewpoint at the origin and let the edge entity oscillate across
     // the radius. Once inside, it must stay inside — it never reaches the 110 exit radius — so no
-    // entry, and therefore no full walk, should be attributable to it.
+    // entry, and therefore no entry-pass work at all, should be attributable to it.
     eye.x = 0.0f;
     run(40); // settle: edge entity is inside, far entity is culled again
     oscillate = true;
-    const std::uint64_t walks_before = server.full_walk_ticks();
+    const std::uint64_t entry_records_before = server.entry_pass_records();
     const std::uint64_t entries_before = server.entities_sent_on_entry();
     const std::uint64_t ticks_before = server.delta_ticks();
     run(40);
 
     CHECK(server.delta_ticks() - ticks_before > 0);           // the path really ran
     CHECK(server.entities_sent_on_entry() == entries_before); // nothing re-entered
-    CHECK(server.full_walk_ticks() == walks_before);          // so no tick lost its skip
+    // And nothing was re-serialized either — the band held on both sides of the boundary, not just
+    // in the delivery counter.
+    CHECK(server.entry_pass_records() == entry_records_before);
     CHECK(has_state(edge_entity)); // and it stayed relevant throughout, rather than being dropped
 }
 
@@ -1042,6 +1047,111 @@ TEST_CASE("a byte budget delays delivery without ever declaring the tick complet
     CHECK(server.entities_dropped_over_budget() > dropped_before);
 
     // Delayed is fine; dropped is not.
+    CHECK(replicated_state_hash(fx.server_world, server.map()) ==
+          replicated_state_hash(fx.client_world, client.map()));
+}
+
+TEST_CASE("entry work is proportional to what entered, not to how big the world is") {
+    // The payoff proof for the entry pass, and the property the design it replaced could not have.
+    //
+    // The old shape gated the per-chunk "changed since baseline" skip on one global flag: if
+    // ANYTHING entered a client's relevant set, every column of every chunk of every replicated
+    // archetype was re-examined for that client. One distant chunk of rubble drifting into range
+    // cost a full pass over a world that had nothing to do with it — and at the ADR's 64-client,
+    // ~1000-debris target that flag is on essentially every tick, so the skip was effectively off
+    // whenever relevancy was on.
+    //
+    // Here: a settled, entirely quiet world of many entities, and then exactly ONE entity
+    // becomes relevant. The entry pass must do exactly one entity's worth of work. Not "less than
+    // the whole world" — exactly one, which is the claim that stays true as the world grows.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::ScriptedLink& server_link = fx.network.add_node(fx.server_endpoint);
+    net::ScriptedLink& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    // Sized to fit comfortably inside one tick's packet allowance (8 parts x 1150 bytes against
+    // ~51-byte records). Deliberately NOT larger: a world that cannot be delivered in one tick hits
+    // a separate, unrelated starvation defect on the relevancy path — see
+    // docs/design/replication.md — and this proof is about the entry pass, not about that.
+    constexpr int kBystanders = 120;
+    for (int i = 0; i < kBystanders; ++i) {
+        ecs::LocalTransform t{};
+        t.value.translation.x = static_cast<float>(i % 20); // all comfortably inside the radius
+        (void)server.replicate(fx.server_world.spawn_with(t));
+    }
+    // The one that will arrive later, parked far outside.
+    ecs::LocalTransform newcomer_t{};
+    newcomer_t.value.translation.x = 5000.0f;
+    const ecs::Entity newcomer = fx.server_world.spawn_with(newcomer_t);
+    (void)server.replicate(newcomer);
+
+    core::Vec3 eye{0.0f, 0.0f, 0.0f};
+    replication::DistanceRelevancy config;
+    config.radius = 100.0f;
+    config.viewpoint = [&](net::SessionId, core::Vec3& out) {
+        out = eye;
+        return true;
+    };
+    server.set_relevancy(replication::distance_relevancy(fx.server_world, config));
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    const auto run = [&](int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            fx.now_ms += kTickMs;
+            fx.network.advance_time(fx.now_ms);
+            fx.events.clear();
+            server_driver.update(fx.now_ms, fx.events);
+            server.on_session_events(fx.events);
+            (void)server.apply_inbound(server_driver);
+            fx.events.clear();
+            client_driver.update(fx.now_ms, fx.events);
+            client.apply_inbound(client_driver);
+            fx.server_world.advance_version(); // a quiet world: nothing is ever rewritten
+            server.publish(server_driver, fx.now_ms);
+            client.send_ack(client_driver, fx.now_ms);
+        }
+    };
+
+    // Settle everything. The 500 bystanders enter here, which is legitimate work.
+    run(120);
+    REQUIRE(server.entry_pass_records() >= static_cast<std::uint64_t>(kBystanders));
+
+    // Quiet: settled world, nothing entering, nothing written. The entry pass must go silent.
+    const std::uint64_t quiet_before = server.entry_pass_records();
+    run(30);
+    CHECK(server.entry_pass_records() == quiet_before);
+
+    // Now bring exactly one entity into range, by moving IT rather than the viewpoint — so the
+    // other 500 keep the same relevance and cannot contribute entries of their own.
+    if (auto* t = fx.server_world.get<ecs::LocalTransform>(newcomer)) {
+        t->value.translation.x = 5.0f;
+        fx.server_world.mark_changed<ecs::LocalTransform>(newcomer);
+    }
+    run(30);
+
+    // Exactly one entity's worth of entry work, in a world of 121. This is the number that would
+    // have been "the whole world" under the flag-gated design — and it stays 1 as the world grows,
+    // which is the actual claim.
+    CHECK(server.entry_pass_records() - quiet_before == 1);
     CHECK(replicated_state_hash(fx.server_world, server.map()) ==
           replicated_state_hash(fx.client_world, client.map()));
 }

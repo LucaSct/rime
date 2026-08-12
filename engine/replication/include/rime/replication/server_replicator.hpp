@@ -157,19 +157,24 @@ public:
         return entities_entered_;
     }
 
-    // (client, tick) pairs on which something entered relevance and the per-chunk "changed since
-    // baseline" skip was therefore given up — see the `any_entering` block in publish_delta.
+    // Records emitted by the ENTRY PASS — the targeted walk that serializes exactly the entities
+    // newly relevant to a client, rather than widening the chunk scan for everyone (see
+    // publish_delta).
     //
-    // This is the counter for a SKIP THAT STOPPED HAPPENING, which is the easiest kind to leave
-    // unmeasured: giving up the optimization is invisible from the outside, because the output is
-    // byte-for-byte identical and only the cost changes. Without it, a defect that pins the full
-    // walk on forever degrades every tick for every client and no test can see it. Expect this to
-    // be a small fraction of (clients × ticks) in a steady state; if it approaches 1.0, relevancy
-    // is thrashing and the entry burst is no longer a burst.
-    [[nodiscard]] std::uint64_t full_walk_ticks() const noexcept { return full_walk_ticks_; }
+    // This replaced a counter called `full_walk_ticks`, and the reason is worth keeping. The old
+    // design gated the per-chunk "changed since baseline" skip on a single global flag: if anything
+    // anywhere entered relevance, the whole replicated world was re-examined for that client. That
+    // counter existed to watch for the flag getting stuck on — a defect with no wrong output at
+    // all, since the bytes are identical and only the cost moves. It did get stuck, twice.
+    //
+    // The entry pass removes the flag rather than watching it, so the failure it guarded is now
+    // unrepresentable: there is no widening left to be stuck. What is worth counting instead is the
+    // real work — how many records the entry path actually produced. In a steady state with a
+    // stationary viewpoint this should sit at zero; sustained non-zero means relevancy is churning.
+    [[nodiscard]] std::uint64_t entry_pass_records() const noexcept { return entry_pass_records_; }
 
-    // Publishes that ran the delta path at all, so `full_walk_ticks` has a denominator. Counted per
-    // (client, tick) on the same footing, including ticks that produced no records.
+    // Publishes that ran the delta path at all, so `entry_pass_records` has a denominator. Counted
+    // per (client, tick), including ticks that produced no records.
     [[nodiscard]] std::uint64_t delta_ticks() const noexcept { return delta_ticks_; }
 
 private:
@@ -230,6 +235,12 @@ private:
     std::vector<std::uint32_t> record_slot_;    // parallel to records_: whose record each one is
     std::vector<std::uint8_t> record_entry_;    // parallel to records_: was this an entry send?
     std::vector<std::uint8_t> produced_record_; // NetId::index → did this slot produce a record?
+    // NetId::index → did the ENTRY PASS already serialize this slot in full this tick? The chunk
+    // walk skips those rows: the entry record carries every replicable column, so anything the
+    // version delta would add is a subset of what already went out.
+    std::vector<std::uint8_t> entry_emitted_;
+    // Scratch for the entry pass's per-entity column list, reused across entities and ticks.
+    std::vector<std::pair<ecs::ComponentId, WireComponentId>> entry_columns_;
     std::vector<net::Received> inbox_;
 
     std::uint64_t delta_packets_sent_ = 0;
@@ -238,7 +249,7 @@ private:
     std::uint64_t entities_over_budget_ = 0;
     std::uint64_t entities_culled_ = 0;
     std::uint64_t entities_entered_ = 0;
-    std::uint64_t full_walk_ticks_ = 0;
+    std::uint64_t entry_pass_records_ = 0;
     std::uint64_t delta_ticks_ = 0;
 
     RelevancyFn relevancy_;

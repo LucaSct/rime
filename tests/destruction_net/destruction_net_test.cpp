@@ -1348,10 +1348,10 @@ TEST_CASE(
     CHECK(destruction_client.pending_batches() == 0);
 
     // The relevancy thrash guard: with a hysteresis band and a stationary viewpoint, the steady
-    // state must not be re-entering every tick. If this ratio ever approaches 1.0, the per-chunk
-    // delta skip has stopped applying and m11.5's optimization is off (see
-    // docs/design/replication.md).
-    CHECK(state_server.full_walk_ticks() < state_server.delta_ticks());
+    // state must not keep re-entering. The entry pass does real, countable work per entering
+    // entity, so a churning policy shows up here as records rather than as a silently disabled
+    // optimization (see docs/design/replication.md).
+    CHECK(state_server.entry_pass_records() < state_server.delta_ticks());
 
     bool any_part_down = false;
     for (std::uint32_t i = 0; i < kWalls; ++i) {

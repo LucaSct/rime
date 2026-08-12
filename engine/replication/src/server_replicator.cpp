@@ -335,23 +335,7 @@ void ServerReplicator::publish_delta(net::Session& session,
     }
     state.was_relevant.resize(slot_count, 0);
 
-    // Is anything ENTERING this client's relevant set this tick? It matters before the walk starts,
-    // because the per-chunk "changed since baseline" skip below is what makes the delta cheap — and
-    // an entering entity is precisely one that has NOT changed, so its chunk is clean and the skip
-    // would step straight over it. On a tick with entries we give up the skip and walk everything;
-    // transitions are rare and bursty, so paying a full pass on those ticks is the cheap trade
-    // against a per-entity check that would slow down every tick instead.
-    bool any_entering = false;
-    for (std::size_t slot = 0; slot < slot_count; ++slot) {
-        if (priority_by_index_[slot] > 0.0f && state.was_relevant[slot] == 0) {
-            any_entering = true;
-            break;
-        }
-    }
     ++delta_ticks_;
-    if (any_entering) {
-        ++full_walk_ticks_;
-    }
 
     // ── Relevancy bookkeeping, applied at every exit from this function ──────────────────────────
     //
@@ -415,6 +399,75 @@ void ServerReplicator::publish_delta(net::Session& session,
     record_slot_.clear();
     record_entry_.clear();
     produced_record_.assign(slot_count, 0);
+    entry_emitted_.assign(slot_count, 0);
+
+    // ── The entry pass ───────────────────────────────────────────────────────────────────────────
+    //
+    // An entity ENTERING a client's relevant set has, by definition, not changed since that
+    // client's baseline — it was simply never sent — so the chunk walk's "changed since baseline"
+    // test cannot see it. Something has to send it anyway.
+    //
+    // The obvious fix, and the one this replaced, was a single global flag: if anything anywhere
+    // was entering, give up the skip and re-examine every column of every chunk of every replicated
+    // archetype for that client. The cost of that is proportional to the size of the WHOLE
+    // replicated world and it is triggered by ONE transition anywhere in it — so a static
+    // 10,000-entity level got walked in full because a single distant chunk of rubble drifted into
+    // range. The comment defending it said transitions are "rare and bursty". At the ADR's target —
+    // 64 clients, ~1000 debris, debris moving, viewpoints moving — the chance that *some* pair
+    // crosses *some* radius on a given tick approaches 1, so the flag is stuck on and the
+    // chunk-version skip, which the header calls the whole reason this design needs no history
+    // buffer, is effectively off whenever relevancy is on.
+    //
+    // So: emit the entering entities directly, and leave the chunk walk alone. This loop visits
+    // only the candidates already being iterated for relevancy, serializes only the ones actually
+    // entering, and pushes into the same record arrays — everything downstream (sort, rotate,
+    // budget, packetize, credit_sent) is agnostic about which pass produced a record. Cost becomes
+    // O(what changed) + O(what is entering for this client), with no coupling to how much of the
+    // rest of the world exists. The "rare and bursty" assumption is not merely better founded now;
+    // it is unnecessary.
+    map_.for_each([&](NetId id, ecs::Entity entity) {
+        const std::size_t slot = id.index;
+        if (slot >= slot_count || !(priority_by_index_[slot] > 0.0f) ||
+            state.was_relevant[slot] != 0) {
+            return; // dead, irrelevant, or already held — none of them are entering
+        }
+
+        // Every replicable column this entity has, not just the changed ones: the client has none
+        // of its state, so a delta against a baseline it never had would be meaningless.
+        entry_columns_.clear();
+        for (const ecs::ComponentId local : world_->signature_of(entity).ids()) {
+            const WireComponentId wire = schema_.wire_id_of(local);
+            if (wire != kInvalidWireComponentId) {
+                entry_columns_.emplace_back(local, wire);
+            }
+        }
+        if (entry_columns_.empty()) {
+            return; // nothing replicable to send; settle_relevancy marks it held vacuously
+        }
+
+        scratch_.clear();
+        core::ByteWriter writer{scratch_};
+        write_net_id(writer, id);
+        writer.u8(static_cast<std::uint8_t>(entry_columns_.size()));
+        for (const auto& [local, wire] : entry_columns_) {
+            writer.u16(static_cast<std::uint16_t>(wire));
+            const void* value = world_->get_component_raw(entity, local);
+            const core::TypeInfo* type = nullptr;
+            ecs::ComponentId unused{};
+            std::size_t packed = 0;
+            (void)schema_.lookup(wire, unused, type, packed);
+            const std::vector<std::byte> bytes = core::serialize(*type, value);
+            writer.bytes(bytes);
+        }
+        records_.push_back(scratch_);
+        record_priority_.push_back(priority_by_index_[slot]);
+        record_slot_.push_back(static_cast<std::uint32_t>(slot));
+        record_entry_.push_back(1);
+        produced_record_[slot] = 1;
+        entry_emitted_[slot] = 1;
+        ++entry_pass_records_;
+    });
+
     const std::size_t archetypes = world_->archetype_count();
     for (std::size_t ai = 0; ai < archetypes; ++ai) {
         ecs::Archetype& arch = world_->archetype(ai);
@@ -442,24 +495,18 @@ void ServerReplicator::publish_delta(net::Session& session,
 
             // The per-chunk-per-column skip test — the whole reason this design needs no history
             // buffer. A column untouched since the client's baseline contributes nothing.
+            //
+            // Unconditional again, as it was before relevancy existed. The entry pass above handles
+            // the one case this test structurally cannot see (an entity that is newly relevant and
+            // therefore unchanged), so nothing has to widen it any more.
             std::vector<std::pair<ecs::ComponentId, WireComponentId>> dirty;
             for (const auto& [local, wire] : replicable) {
-                if (any_entering || chunk.column_version(local) > baseline) {
+                if (chunk.column_version(local) > baseline) {
                     dirty.emplace_back(local, wire);
                 }
             }
             if (dirty.empty()) {
                 continue;
-            }
-
-            // Whether this chunk genuinely changed since the baseline, as opposed to being walked
-            // only because some OTHER entity is entering relevance this tick.
-            bool chunk_changed = false;
-            for (const auto& [local, wire] : replicable) {
-                if (chunk.column_version(local) > baseline) {
-                    chunk_changed = true;
-                    break;
-                }
             }
 
             const std::uint32_t rows = chunk.size();
@@ -476,19 +523,15 @@ void ServerReplicator::publish_delta(net::Session& session,
                     ++entities_culled_;
                     continue; // this client does not care about it right now
                 }
-                const bool entering =
-                    slot < state.was_relevant.size() && state.was_relevant[slot] == 0;
-                if (any_entering && !entering && !chunk_changed) {
-                    continue; // full-walk tick, but this row neither changed nor entered
+                if (slot < entry_emitted_.size() && entry_emitted_[slot] != 0) {
+                    // The entry pass already serialized this entity's FULL state this tick. The
+                    // dirty columns here are a subset of what went out, so a second record would be
+                    // redundant bytes competing for the same budget.
+                    continue;
                 }
-                // Entering the relevant set. Its last write may predate the baseline — it was never
-                // sent, not "already known" — so it must go out regardless of version. Without
-                // this, an entity that comes into range while standing still is mirrored empty
-                // forever.
-                //
-                // Note what is NOT done here: `was_relevant` is not set, and the entry is not
-                // counted. Both wait until the record is known to have SURVIVED the byte budget —
-                // see `settle_relevancy`.
+                // Note what is NOT done here: `was_relevant` is not set and nothing is counted as
+                // delivered. Both wait until the record is known to have survived the byte budget
+                // AND been accepted by the session — see `credit_sent`.
                 scratch_.clear();
                 core::ByteWriter writer{scratch_};
                 write_net_id(writer, *net_id);
@@ -506,7 +549,9 @@ void ServerReplicator::publish_delta(net::Session& session,
                 records_.push_back(scratch_);
                 record_priority_.push_back(priority);
                 record_slot_.push_back(slot);
-                record_entry_.push_back(entering ? 1u : 0u);
+                // Never an entry: by the time this walk runs, every entering slot has already been
+                // emitted above and is skipped here.
+                record_entry_.push_back(0u);
                 if (slot < produced_record_.size()) {
                     produced_record_[slot] = 1;
                 }
