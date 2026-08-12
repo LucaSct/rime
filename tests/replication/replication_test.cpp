@@ -1155,3 +1155,98 @@ TEST_CASE("entry work is proportional to what entered, not to how big the world 
     CHECK(replicated_state_hash(fx.server_world, server.map()) ==
           replicated_state_hash(fx.client_world, client.map()));
 }
+
+TEST_CASE("a permanently over-budget world still delivers its lowest-priority tail") {
+    // THE LIVENESS RULE, on the path relevancy actually uses. `publish_delta` chooses between
+    // ordering by priority and rotating by the resume cursor, and until this fix those were
+    // exclusive: installing a relevancy policy took the sort branch, so the cursor — the mechanism
+    // that exists precisely to stop a permanently over-budget world starving its tail — never ran.
+    // The sort branch's own comment claimed otherwise.
+    //
+    // The result was that the same highest-priority prefix went out every tick and everything below
+    // the cut-off was never delivered at all. Not late: never. That is the same bug the m11.5
+    // foundation commit fixed for the no-policy path, and prioritization is exactly the feature
+    // that reintroduced it.
+    //
+    // 501 entities at ~51 bytes a record is ~25.5 KB against a per-tick allowance of 8 packets x
+    // 1150 bytes, so roughly a third of the world fits each tick and the deficit is permanent — the
+    // condition has to be structural, not a burst that drains.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::ScriptedLink& server_link = fx.network.add_node(fx.server_endpoint);
+    net::ScriptedLink& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config server_config;
+    server_config.app_id = 0x52494D45u;
+    server_config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    server_config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = server_config;
+    client_config.schema_hash = ecs::component_schema_hash(fx.client_world);
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, server_config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    constexpr int kEntities = 501;
+    for (int i = 0; i < kEntities; ++i) {
+        ecs::LocalTransform t{};
+        // Spread across 20 distinct distances, all inside the radius. Distinct priorities are the
+        // point: with every entity scored equally the stable sort would preserve archetype order
+        // and the defect would be milder. A real distance policy produces a strict order, and a
+        // strict order is what starves a tail.
+        t.value.translation.x = static_cast<float>(i % 20);
+        (void)server.replicate(fx.server_world.spawn_with(t));
+    }
+
+    replication::DistanceRelevancy config;
+    config.radius = 100.0f;
+    config.viewpoint = [](net::SessionId, core::Vec3& out) {
+        out = core::Vec3{0.0f, 0.0f, 0.0f};
+        return true;
+    };
+    server.set_relevancy(replication::distance_relevancy(fx.server_world, config));
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    // Generous but bounded: the deficit is ~1/3 of the world per tick, so a mechanism that makes
+    // progress at all clears the backlog in tens of ticks. A mechanism that starves never clears it
+    // no matter how long the loop runs, which is the difference this asserts.
+    for (int i = 0; i < 250; ++i) {
+        fx.now_ms += kTickMs;
+        fx.network.advance_time(fx.now_ms);
+        fx.events.clear();
+        server_driver.update(fx.now_ms, fx.events);
+        server.on_session_events(fx.events);
+        (void)server.apply_inbound(server_driver);
+        fx.events.clear();
+        client_driver.update(fx.now_ms, fx.events);
+        client.apply_inbound(client_driver);
+        fx.server_world.advance_version(); // written once at spawn, never again
+        server.publish(server_driver, fx.now_ms);
+        client.send_ack(client_driver, fx.now_ms);
+    }
+
+    // Non-vacuousness: the budget really did bind, or this is a test of a world that fit.
+    CHECK(server.entities_dropped_over_budget() > 0);
+
+    int mirrored = 0;
+    client.map().for_each([&](replication::NetId, ecs::Entity mirror) {
+        if (fx.client_world.get<ecs::LocalTransform>(mirror) != nullptr) {
+            ++mirrored;
+        }
+    });
+
+    // Every one of them. Priority decides ORDER, never whether an entity is sent at all — otherwise
+    // "nearest-first" silently also means "farthest-never", which is not what a byte budget
+    // promises.
+    CHECK(mirrored == kEntities);
+    CHECK(replicated_state_hash(fx.server_world, server.map()) ==
+          replicated_state_hash(fx.client_world, client.map()));
+}

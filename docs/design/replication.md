@@ -85,6 +85,7 @@ not get over-applied to something that was never a cross-peer correctness questi
 | `credit_sent` per accepted part | `replication/src/server_replicator.cpp` | 2 — a refused `send_unreliable` is not evidence of holding |
 | Byte-budget drops block `complete_through` | `replication/src/server_replicator.cpp` | 1 — a trimmed tick is partial, however complete it looks to the packer |
 | `entry_pass_records()` / `delta_ticks()` | `replication/src/server_replicator.cpp` | neither — the counting rule, applied to relevancy churn |
+| Priority aging (`Budget::starvation_gain`) | `replication/src/server_replicator.cpp` | 1 (liveness half) — the rotation cursor's job on the *prioritized* path, which the cursor never reached |
 
 ---
 
@@ -171,25 +172,6 @@ rare transition common.
 
 ## Deliberate limitations
 
-- **The rotation cursor does not apply when a relevancy policy is installed — the low-priority tail
-  can starve forever.** This one is a live defect, not a cost. `publish_delta` chooses between two
-  orderings: sort by priority *or* rotate by the resume cursor. The sort branch's own comment says
-  the stable sort is "what lets the rotation cursor below still make progress", but the rotation is
-  in the `else` branch and therefore never runs on the relevancy path at all. In a world that is
-  permanently over the per-tick packet allowance, the same highest-priority prefix is sent every
-  tick and everything below the cut-off is never delivered — the exact liveness bug the m11.5
-  foundation commit fixed for the no-policy path, still present on the path m11.5 actually turns on.
-  Measured while writing the entry-pass proof: 501 entities, ~190 delivered per tick, ~310 re-entering
-  every tick forever, and the state hashes never converged.
-
-  It needs a deliberate decision rather than a quick patch, because the two obvious fixes trade
-  against each other. Rotating the sorted list guarantees delivery but abandons strict nearest-first.
-  Keeping strict priority preserves the policy's meaning but means "priority" silently also means
-  "some entities are never sent", which is not what the byte budget promises. The likely right answer
-  is neither: **age the priority** — boost an entity by how long this client has been owed it — so
-  the ordering stays semantically nearest-first while the tail is guaranteed to surface. That needs
-  per-(client, entity) state, so it inherits corollary 2 and should be keyed on the full generational
-  handle from the start.
 - **The relevancy call still walks every replicated entity per client.** The policy can be cheap per
   entity, but nothing narrows the span yet, so the O(clients × entities) pass stands. Narrowing it
   needs a spatial index over replicated entities — its own brick.
@@ -201,6 +183,42 @@ rare transition common.
   periodic authoritative broadcast — late-join machinery.
 - **Debris velocity is not replicated**, only transforms. The local solver's velocity is kept, which
   is a good estimate precisely because both peers launched the chunk from the same impulse.
+
+---
+
+## Priority aging — why an ordering needs a liveness rule
+
+A budget plus a strict ordering is a starvation machine. `publish_delta` sorts by priority when a
+relevancy policy is installed and rotates by the resume cursor when one is not — and those branches
+were exclusive, so the cursor, which exists precisely to stop a permanently over-budget world
+starving its tail, never ran on the path relevancy uses. The sort branch's own comment claimed it
+did.
+
+The consequence was not slow delivery but **no** delivery: the same highest-priority prefix went out
+every tick and everything below the cut-off was never sent. Measured with 501 entities against a
+per-tick allowance of ~180: **176 delivered, 325 permanently missing** — the same 176 the m11.5
+foundation bug produced, because it is the same packet arithmetic underneath a different cause.
+
+**The fix is to age the priority.** Each tick a record is built for a client and then dropped by a
+budget, that entity's `starved_ticks` increments; the ordering key becomes
+`priority + starvation_gain × starved_ticks`, and delivery resets the count to zero.
+
+Why this rather than rotating the sorted list: rotation guarantees delivery but throws away what
+priority is *for*, and the choice is not actually between fairness and locality. Aging keeps the
+ordering nearest-first **among entities equally owed**, and makes being passed over itself a claim on
+the next tick's budget. It also degrades correctly at both ends — with a budget that covers the
+working set nothing is ever starved, every age is zero, and the order is exactly what the policy
+asked for; with a budget that cannot, the tail rises instead of sinking.
+
+The gain sets the worst-case wait. `distance_relevancy` scores in (0, 1] (2.0 unpositioned), so the
+default 0.05 lets the least important entity in the world overtake the most important one after ~40
+ticks — well under a second at 60 Hz. Setting it to zero restores strict priority, which is only
+defensible when the budget is known to cover the working set.
+
+`starved_ticks` is a per-item record keyed by a recyclable index, so it is cleared in `despawn()`
+alongside `was_relevant`. It is a claim about what we OWE rather than what the peer HOLDS — not
+corollary 2 proper — but the recycle hazard does not care which way the claim points: a new tenant
+inheriting the dead entity's grievance would jump the queue on its behalf.
 
 ---
 
