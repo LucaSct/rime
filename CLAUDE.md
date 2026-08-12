@@ -182,6 +182,32 @@ pinned CI version). Mirror CI's exact file set — `find`, **not** `git ls-files
 '*.mm' \))`. CI's format job is the backstop, not the first line of defence — skipping the local run
 cost M6.3, M6.4 and M6.8 a red-CI round-trip each.
 
+**Landing a stack: every child conflicts the moment its parent merges.** We merge to `main` by
+**squash**, so `main` ends up holding the parent's *squashed* equivalent while each child branch
+still carries the parent's *original* commits. Git's three-way merge then falls back to the
+pre-stack merge base, sees both sides rewriting the same regions differently, and reports a
+genuine conflict — with no rebase or force-push having happened. `mergeable: true` across the
+whole stack before you start is therefore worthless: it is only ever true of the *next* PR.
+Landing #114–#120 hit this five times in a row. Per child, after each parent merges:
+
+```bash
+git rebase --onto origin/main <old-parent-tip> <child-branch>
+git diff <child-original-tip> HEAD          # MUST be empty — see below
+git push --force-with-lease origin <child-branch>
+```
+
+That `git diff` is the load-bearing step, not a sanity check. `main`'s tree after the squash is
+byte-identical to the old parent tip's tree, so replaying only the child's own commits is
+*provably* tree-preserving — and an empty diff **carries the child's existing green CI onto the
+new SHA**, because an identical tree cannot test differently. Check it; never assume it. Also
+pass an explicit `commit_message` when merging: the repo's `squash_merge_commit_message` is
+`COMMIT_MESSAGES`, which on a stacked PR concatenates all 10–17 commits, parents included.
+
+One consequence worth expecting: `concurrency: ci-${{ github.ref }}` with `cancel-in-progress`
+means each merge's `main` run is cancelled by the next merge, so a 7-PR stack leaves six
+cancelled `main` runs and one completed. The tree-identity argument above is then the only thing
+standing behind those intermediate commits.
+
 ### Recording conventions
 
 When a pattern or gotcha recurs, record it without being asked — project conventions here, richer
