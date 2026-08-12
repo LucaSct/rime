@@ -223,10 +223,15 @@ void ClientInputSender::send(net::NetDriver& driver, std::uint64_t now_ms) {
         return; // nothing recorded yet this session; an empty window is not worth a datagram
     }
 
-    // The window is the last `redundancy_` commands RECORDED, which is not the same as the last
-    // `redundancy_` un-acked. Once acknowledgements are flowing the un-acked list is short — one or
-    // two commands — and slicing from its end is exactly right; the distinction only shows up while
-    // the list is long, where the newest are still the ones worth repeating.
+    // The window is the newest `redundancy_` UN-ACKED commands, and drawing it from that list
+    // rather than from a separate history gives the mechanism a property worth naming: it widens
+    // exactly when it is needed. Acknowledgements advance only as far as the server has consumed,
+    // so a stretch of loss leaves the un-acked list long and every packet repeats more; a clean
+    // link keeps it one or two deep and the repetition costs almost nothing. Nothing tunes that —
+    // it falls out of what "un-acked" means.
+    //
+    // Retiring on the ack is also what stops the window repeating input the server is already done
+    // with, which on a long session would otherwise be the whole match.
     const std::size_t count = std::min(redundancy_, unacked_.size());
     const std::span<const InputCommand> window{unacked_.end() - static_cast<std::ptrdiff_t>(count),
                                                count};
@@ -422,11 +427,24 @@ void ServerInputReceiver::send_acks(net::NetDriver& driver, std::uint64_t now_ms
     }
 }
 
+void ServerInputReceiver::on_session_events(std::span<const net::SessionEvent> events) noexcept {
+    for (const net::SessionEvent& event : events) {
+        // Only the endings. A Connected event needs no answer here: a client's state is created
+        // lazily by its first command, and pre-creating it would allocate a buffer for every peer
+        // that connects and never sends input — which is exactly what an observer does.
+        if (event.kind == net::SessionEvent::Kind::Disconnected ||
+            event.kind == net::SessionEvent::Kind::ConnectFailed) {
+            forget(event.id);
+        }
+    }
+}
+
 void ServerInputReceiver::forget(net::SessionId id) noexcept {
     for (ClientInput& state : clients_) {
         if (state.in_use && state.id == id) {
             state.in_use = false;
             state.buffered.clear();
+            state.buffered.shrink_to_fit(); // clear() keeps the capacity; a dead client keeps none
             state.received_through = 0;
             state.consumed_through = 0;
         }

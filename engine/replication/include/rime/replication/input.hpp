@@ -337,7 +337,13 @@ public:
     // Tell each connected client how far its input has been consumed. Call from Publish.
     void send_acks(net::NetDriver& driver, std::uint64_t now_ms);
 
-    // Release a disconnected client's state. A per-session record keyed by a recyclable slot must
+    // Reap the state of sessions that ended. Call from PreSim with the same event batch
+    // ServerReplicator::on_session_events gets — without it nothing ever frees a client's slot, and
+    // a long-running server accumulates one dead entry per reconnect forever. Shipping `forget`
+    // alone would have been a leak wearing an API's clothes: correct, and called by nobody.
+    void on_session_events(std::span<const net::SessionEvent> events) noexcept;
+
+    // Release one disconnected client's state. A per-session record keyed by a recyclable slot must
     // not outlive its subject — the third bullet of corollary 2 in docs/design/replication.md,
     // which has already produced one bug in this module (instance six).
     void forget(net::SessionId id) noexcept;

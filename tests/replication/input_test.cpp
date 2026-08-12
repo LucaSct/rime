@@ -575,7 +575,12 @@ TEST_CASE("a disconnected client's input state does not outlive it") {
     (void)receiver.drain(id, delivered);
     REQUIRE(receiver.consumed_through(id) == 7);
 
-    receiver.forget(id);
+    // Through the event batch, which is how a server actually reaches this — `forget` on its own
+    // would be a correct function nobody calls, and the slot would never be freed.
+    net::SessionEvent ended{};
+    ended.kind = net::SessionEvent::Kind::Disconnected;
+    ended.id = id;
+    receiver.on_session_events(std::span{&ended, 1});
     CHECK(receiver.consumed_through(id) == 0);
 
     // The recycled slot must start clean, or the next tenant's first drain hands the game its
