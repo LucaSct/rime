@@ -159,6 +159,51 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > client→server path or a periodic state broadcast, which is late-join machinery. **Next:** m11.5 —
 > relevancy + budgets.
 >
+> **Update (2026-08-12) — m11.6c (the upstream half) + ADR-0033 A19/A20.** The one stream in M11 that
+> runs client→server, and the direction changes what the bytes mean: a snapshot is a fact, an input
+> is a *request*, so this path is built so that disbelieving one is the default. **What crosses the
+> wire is intent, not `platform::Event`** (A19) — raw device events are unbounded per tick, are
+> device-shaped rather than game-shaped (a keybind is client policy the server has no business
+> knowing), and would put the server's arithmetic on the client's side, which is §1's authority model
+> inverted. So an `InputCommand` carries movement axes on the unit disc, **absolute** view angles, and
+> two bitfields; `InputSampler` does the conversion the whole brick turns on — **the local path is
+> edge-shaped and the wire wants level-shaped**, so somebody has to integrate down/up edges into held
+> state and relative motion into an angle, and a sampler that read only the current frame's events
+> would send `held = 0` on every frame but the first. Channel choice is §3's `Delta` argument pointed
+> the other way: **unreliable-sequenced**, because a retransmitted input arrives a round trip stale
+> *and* holds every fresher one behind it — loss is answered with **redundancy rather than
+> retransmission**, each packet carrying the last few commands against a receive frontier that
+> deduplicates. Both new message kinds claim **their own unreliable stream** rather than defaulting
+> into stream 0 — this is the message pair whose design turned up A18's shared-sequence-space bug in
+> the first place, so sharing here would have been that bug in its original form, and the stream
+> argument defaulting to 0 makes the omission silent. `held` and `pressed` are separate fields
+> precisely because their loss stories differ:
+> a level is self-healing, an edge exists in exactly one command and is what the window protects. A11
+> carries upstream unchanged — the sequence is an ordering key, never a schedule.
+>
+> The server keeps **two frontiers, not one**, and this is the first mechanism in the module written
+> to [the replication invariant](design/replication.md) rather than retrofitted after a bug:
+> `received_through` advances on arrival (deduplication needs it to), `consumed_through` advances only
+> when the **game drains**, and only the second is acknowledged. One deliberate exception is written
+> down rather than left to look like an oversight: `consumed_through` is **not a completeness claim**
+> — it steps over permanent gaps, because nothing re-offers a lost input — and the consequence is that
+> a command leaving the client's un-acked list means *"the server will never act on it"*, not *"the
+> server acted on it"*, so reconciliation must compare resulting **state**, never a diff of command
+> lists. **The prediction seam ships as state, not as an interface** (A20): with no character
+> controller anywhere in `engine/`, a `virtual void replay(...) = 0` would be guessing at its own
+> signature, and a wrong guess in a header is inherited as a constraint. What is not a guess — the
+> un-acked command list and the `InputAck` echo that retires it — is built, bounded, counted and
+> proven. Proofs are GPU-free on the scripted-loss harness (16 cases), and the load-bearing one is a
+> **negative control**: the same scenario, same seed, same scripted drops, run at redundancy 1 and 3 —
+> **146 commands lost versus 23**, so the window is demonstrably *the reason* input survives rather
+> than a threshold some other design might meet by luck. Also proven: the ack does not move while a
+> server buffers without draining, a stale ack cannot resurrect retired commands, a flooding client
+> cannot grow server memory, a hostile count field is not a loop bound, and input and state
+> replication share one session without eating each other's mail. Named gaps: nothing consumes the
+> commands yet (there is no controller to consume them — M12), inputs are not associated with a
+> controlled entity, and there is no clock offset, so the tag cannot yet mean a server tick.
+> **Next:** m11.7 — the milestone proof, `samples/12-networked-destruction`.
+>
 > **Update (2026-07-30) — m11.6b (drawing the blend).** m11.6a computed an interpolated pose that
 > nothing could read; this brick connects it to the renderer and finds two defects doing it. The
 > connection is **`ecs::RenderTransform`** — an unreflected "pose to draw this frame" component —
@@ -820,10 +865,15 @@ lockstep), plus the **state-application seam** for late-join/drift correction (a
 **m11.4b** *the bodies half* — debris ride m11.3 snapshots through a debris↔entity bridge, with
 composition-hash drift detection ·
 **m11.5** **relevancy + budgets** — per-client interest, distance culling for debris transforms,
-nearest-first priority, per-tick byte budget · **m11.6** **interpolation + input** — BUILD the
-previous-tick transform history + alpha consume path (amendment A4: ADR-0023's buffer is an unbuilt
-seam), snapshot interpolation on top, tick-tagged client inputs on the `post_input`/`frame_input`
-path, the prediction *interface* (implementation deferred) · **m11.7** the proof —
+nearest-first priority, per-tick byte budget · **m11.6** **interpolation + input**, split in three at
+build time: **m11.6a** BUILD the previous-tick transform history (amendment A4: ADR-0023's buffer is
+an unbuilt seam) · **m11.6b** the alpha consume path — `ecs::RenderTransform`, the component below
+both `render` and `replication`, plus expiry so a resting mirror stops replaying its last step ·
+**m11.6c** the upstream half — tick-tagged client inputs as **intent rather than device events**
+(amendment A19) on an unreliable channel with a redundancy window, a consumption-not-arrival
+acknowledgement, and the prediction seam delivered as **state rather than an interface** (amendment
+A20). Snapshot interpolation over the interval a value actually covers is deferred with the seam
+named · **m11.7** the proof —
 `samples/12-networked-destruction`: a dedicated headless server with a **deterministic server-side
 scripted shooter** (amendment A6 — no player controller exists; that is M12 scope) + two clients
 over loopback see the same wall break at meaningful scale, hash-verified in CI. Proofs stay GPU-free

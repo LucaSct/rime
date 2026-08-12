@@ -29,6 +29,12 @@
 //                      reliable channel would also let a per-tick ack compete with genuine events
 //                      for the 32-packet in-flight window and the 256-message backlog — the least
 //                      valuable message on the wire crowding out one of the most (ADR-0033 A9).
+//   InputCommands    → UNRELIABLE-SEQUENCED, client→server.  Same supersede-never-resend argument
+//                      as Delta, pointed the other way: a retransmitted input arrives a round trip
+//                      stale AND holds every fresher one behind it. Loss is covered by carrying a
+//                      few recent commands in each packet instead (input.hpp).
+//   InputAck         → UNRELIABLE-SEQUENCED, server→client.  "How far I have consumed your input";
+//                      only the newest matters, exactly like BaselineAck in the other direction.
 namespace rime::replication {
 
 // ── THE SHARED PAYLOAD TAG SPACE ────────────────────────────────────────────────────────────────
@@ -59,11 +65,18 @@ inline constexpr std::uint8_t kTagBlockLast = 0x3F;
 }
 
 // Message discriminator, first byte of every replication payload.
+//
+// The block is shared between READERS as well as between modules: m11.6c added a second pair of
+// tenants inside replication's own range (the input path), so a tag being ours no longer implies
+// that any one class should consume it. Each reader passes over the tags it is not the reader for
+// — see ClientReplicator::apply_messages, which counts them rather than calling them malformed.
 enum class MessageTag : std::uint8_t {
-    Spawn = 1,       // reliable:   server→client, a batch of NetIds to create mirrors for
-    Despawn = 2,     // reliable:   server→client, a batch of NetIds whose mirrors must go
-    Delta = 3,       // unreliable: server→client, component state changed since a baseline
-    BaselineAck = 4, // unreliable: client→server, "the newest COMPLETE tick I hold"
+    Spawn = 1,         // reliable:   server→client, a batch of NetIds to create mirrors for
+    Despawn = 2,       // reliable:   server→client, a batch of NetIds whose mirrors must go
+    Delta = 3,         // unreliable: server→client, component state changed since a baseline
+    BaselineAck = 4,   // unreliable: client→server, "the newest COMPLETE tick I hold"
+    InputCommands = 5, // unreliable: client→server, a redundancy window of recent intent samples
+    InputAck = 6,      // unreliable: server→client, "the newest command I have CONSUMED"
 };
 
 // The marker that opts an entity into replication. Deliberately UNREFLECTED: it is a pure tag with
@@ -110,8 +123,20 @@ inline constexpr std::uint8_t kMaxDeltaPartsPerTick = 8;
 // superseded(), paid in bandwidth, and self-healed by the completeness rule. Ordering is worth more
 // than the bandwidth. Making the split safe needs either a per-record staleness guard or real
 // fragment reassembly, and that is its own brick.
-inline constexpr std::uint8_t kStreamDelta = 0; // server→client: snapshots, all parts together
+inline constexpr std::uint8_t kStreamDelta = 0;       // server→client: snapshots, all parts together
+inline constexpr std::uint8_t kStreamInputAck = 1;    // server→client: input consumption frontier
 inline constexpr std::uint8_t kStreamBaselineAck = 0; // client→server: "the newest tick I hold"
+inline constexpr std::uint8_t kStreamInputCommands = 1; // client→server: intent samples
+
+// Why input gets its own stream in BOTH directions rather than riding the ack's: an InputCommands
+// packet and a BaselineAck say nothing whatsoever about each other, and they are sent on the same
+// tick — which is exactly the collision this whole mechanism exists to prevent. This message pair
+// is the one A18 was found while designing, so sharing here would be the bug in its original form.
+//
+// Note that `send_unreliable`'s stream parameter DEFAULTS to 0, which is a convenience for the
+// single-sender case and a trap for every case after it: omitting the argument silently merges the
+// new kind into stream 0's supersedes-relationship, and the symptom (one of the two kinds arriving
+// at roughly half rate) points nowhere near the omission. Always name the stream.
 
 // The stale-baseline valve. If a client's acknowledged baseline falls this far behind the world
 // version, stop growing an ever-larger incremental delta (as the baseline recedes, "changed since"

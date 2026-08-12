@@ -23,7 +23,8 @@ add_library(rime_replication STATIC
     src/server_replicator.cpp
     src/client_replicator.cpp
     src/relevancy.cpp
-    src/interpolation.cpp)
+    src/interpolation.cpp
+    src/input.cpp)
 
 # Namespaced alias so dependents link `rime::replication`, matching our C++ namespace.
 add_library(rime::replication ALIAS rime_replication)
@@ -32,9 +33,12 @@ target_include_directories(rime_replication
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
-# Both PUBLIC: the public headers expose ecs::World/ComponentId and net::Session in their signatures.
+# All PUBLIC: the public headers expose ecs::World/ComponentId, net::Session, and — since m11.6c's
+# input sampler — platform::Event/Key in their signatures. rime::platform already arrived
+# transitively through rime::net, but a header that names a type directly should name its library
+# directly too: the transitive edge is net's business and could legitimately change.
 target_link_libraries(rime_replication
-    PUBLIC rime::ecs rime::net)
+    PUBLIC rime::ecs rime::net rime::platform)
 
 # Project-wide build policy (C++20 + warnings-as-errors + any sanitizer); from the top-level CMake.
 rime_apply_common_target_options(rime_replication)

@@ -87,6 +87,8 @@ not get over-applied to something that was never a cross-peer correctness questi
 | `entry_pass_records()` / `delta_ticks()` | `replication/src/server_replicator.cpp` | neither — the counting rule, applied to relevancy churn |
 | `records_too_large()` + the build-time size guard | `replication/src/server_replicator.cpp` | 1 — an undeliverable record must not jam the watermark, nor pass as delivered |
 | Priority aging (`Budget::starvation_gain`) | `replication/src/server_replicator.cpp` | 1 (liveness half) — the rotation cursor's job on the *prioritized* path, which the cursor never reached |
+| `consumed_through` advances only in `drain()` | `replication/src/input.cpp` | 1, upstream — the input ack is a claim about the SERVER, and arrival in a buffer is not holding |
+| `ClientInput` reset by `forget()` and on slot reuse | `replication/src/input.cpp` | 2 — a per-session record keyed by a recyclable slot must not outlive its subject |
 
 ---
 
@@ -420,10 +422,32 @@ statement — it is an artifact of when the two were handed to the transport.
 
 ---
 
-## For the input half of m11.6 — build it to the rule the first time
+## The input half of m11.6 — built to the rule, with one deliberate exception
 
-**The client→server input watermark is a fresh instance of corollary 1**, not a special case.
-Consumed ≠ arrived, consumed ≠ latest-received. If buffered input bursts ever need multi-part
-framing, re-derive the completeness discipline deliberately rather than assuming a small message
-never needs it — that assumption is what made the original baseline bug look like a non-issue
-until a wall that stops changing gave it a case where it mattered.
+The instruction this section used to carry was "**the client→server input watermark is a fresh
+instance of corollary 1**, not a special case. Consumed ≠ arrived, consumed ≠ latest-received."
+m11.6c built it that way, and it is the first mechanism here that was written to the rule instead of
+being retrofitted after a bug. `ServerInputReceiver` keeps **two** frontiers rather than one:
+
+- `received_through` — the newest sequence accepted into the buffer. Deduplication reads it, and it
+  must advance on arrival, or the redundancy window would deliver every command three times.
+- `consumed_through` — the newest sequence the **game has drained**. `InputAck` reports this, and it
+  advances in `drain()` and nowhere else.
+
+Collapsing them would be corollary 1 exactly: the client would retire commands its predictor still
+needs to replay, on the strength of bytes sitting in a buffer a stalled or overflowing server may
+still discard.
+
+### The exception, stated so it is not mistaken for the rule
+
+`consumed_through` is **not a completeness claim**, and this is the one place the invariant's shape
+genuinely differs. It steps over permanent gaps, because a command lost on an unreliable channel is
+never coming, and a frontier that waited for one would stall forever. `AckTracker`'s watermark can
+demand completeness because the server re-offers what a client did not acknowledge; nothing re-offers
+an input.
+
+The consequence belongs with the exception rather than three files away: a command leaving the
+client's un-acked list means *"the server will never act on it"*, **not** *"the server acted on it"*.
+So reconciliation must compare resulting **state** and can never simply replay a diff of command
+lists. A future predictor that assumes otherwise will be subtly wrong exactly under loss — the
+condition it exists to survive.

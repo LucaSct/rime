@@ -127,9 +127,10 @@ public:
     // acknowledgement. Should be zero against an honest peer.
     [[nodiscard]] std::uint64_t records_evicted() const noexcept { return records_evicted_; }
 
-    // Messages belonging to another module's tag block that we passed over. Non-zero the moment a
-    // session carries more than replication, and the counter a proof asserts on to show the two
-    // streams really are sharing one session rather than one having quietly starved the other.
+    // Messages this replicator is not the reader for, and passed over rather than consumed: another
+    // module's tag block, or — since m11.6c — another reader inside replication's own block. The
+    // counter a proof asserts on to show the streams really are sharing one session rather than one
+    // having quietly starved the other.
     [[nodiscard]] std::uint64_t foreign_messages() const noexcept { return foreign_; }
 
 private:
