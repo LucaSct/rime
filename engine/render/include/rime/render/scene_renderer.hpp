@@ -62,6 +62,12 @@ struct ExtractedScene {
 // run ecs::propagate_transforms first or camera/meshes/lights sit at stale poses. Conventions
 // (asserted by the M5.6 tests): a camera looks down its entity's local −z; a directional light
 // shines along its entity's local −z; a point light sits at its entity's world translation.
+//
+// An entity carrying an `ecs::RenderTransform` is extracted at THAT pose instead (m11.6b): it is
+// the per-frame presentation override a producer of smoothed motion deposits — network
+// interpolation is the first — while WorldTransform stays the simulated truth the tick computed.
+// The component is absent on essentially every entity, so this costs a null check and changes
+// nothing for a world that never produces one.
 [[nodiscard]] ExtractedScene extract_scene(ecs::World& world);
 
 // ── The renderer ──────────────────────────────────────────────────────────────────────────────

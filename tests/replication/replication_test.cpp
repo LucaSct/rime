@@ -8,8 +8,10 @@
 #include <span>
 #include <vector>
 
+#include "rime/core/jobs/job_system.hpp"
 #include "rime/core/reflect/serialize.hpp"
 #include "rime/ecs/reflect.hpp"
+#include "rime/ecs/render_transform.hpp"
 #include "rime/ecs/schema_hash.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
@@ -1440,6 +1442,9 @@ TEST_CASE("transform history rolls forward on the APPLY, and a first appearance 
             }
             server.publish(server_driver, fx.now_ms);
             client.send_ack(client_driver, fx.now_ms);
+            // Once per tick from Publish, unconditionally — the whole point is that it fires on the
+            // ticks where NOTHING arrived. See ClientReplicator::settle_transform_history.
+            (void)client.settle_transform_history();
         }
     };
 
@@ -1482,9 +1487,131 @@ TEST_CASE("transform history rolls forward on the APPLY, and a first appearance 
     CHECK(replication::interpolated_transform(fx.client_world, mirror, 0.5f).translation.x ==
           doctest::Approx((previous_x + current_x) * 0.5f));
 
+    // ── 2b. IT STOPS. This is the case m11.6a never exercised — its only motion phase ran the
+    // entity for 20 straight ticks and then despawned it — and the omission hid a defect, because
+    // "moves forever" and "moves, then rests" are exactly the two behaviours the history has to
+    // tell apart. `alpha` sweeps 0→1 every tick period on the frame clock's own schedule, whether
+    // or not this entity received anything, so a pair left valid after the motion stopped replays
+    // its last step forever: the mirror snaps back to `previous` and slides forward again, once per
+    // tick, for as long as it stands still. Debris coming to rest is the most common event in a
+    // destruction engine, so that is the steady state, not a corner.
+    //
+    // The server keeps re-sending the unchanged value here for a round trip (the baseline has not
+    // advanced), which is the trap in the fix: those re-sends are records arriving, and treating an
+    // arriving record as motion would hold the blend open for the whole re-send window. Only a
+    // GENUINELY different value counts as motion, which is the same distinction m11.6a's re-send
+    // guard already draws.
+    const std::uint64_t settled_before = client.histories_settled();
+    advance = false;
+    run(5);
+
+    const auto* rested = fx.client_world.get<replication::PreviousTransform>(mirror);
+    REQUIRE(rested != nullptr);
+    CHECK(!rested->valid);                              // the pair expired
+    CHECK(client.histories_settled() > settled_before); // and this pass is what expired it
+
+    // Read the resting pose rather than reusing the one sampled above: the server's LAST move was
+    // still one tick of latency away from the client when that sample was taken, so it lands during
+    // the phase below. The gap between the two is a full 10-unit step, which is exactly the
+    // distance a surviving history would jump backwards by.
+    const float resting_x = fx.client_world.get<ecs::LocalTransform>(mirror)->value.translation.x;
+    CHECK(resting_x > current_x);                   // the in-flight step did arrive
+    CHECK(rested->value.translation.x < resting_x); // and the stale previous is still behind it
+
+    // The observable consequence, and the assertion that fails against the unfixed code: a resting
+    // mirror draws at its current pose at EVERY alpha. Sampling at 0.0 is the sharp one — that is
+    // the far end of the stale pair, a whole 10-unit step behind, so a surviving history reads as a
+    // visible jump backwards rather than as a rounding difference.
+    CHECK(replication::interpolated_transform(fx.client_world, mirror, 0.0f).translation.x ==
+          doctest::Approx(resting_x));
+    CHECK(replication::interpolated_transform(fx.client_world, mirror, 0.5f).translation.x ==
+          doctest::Approx(resting_x));
+    CHECK(replication::interpolated_transform(fx.client_world, mirror, 1.0f).translation.x ==
+          doctest::Approx(resting_x));
+
+    // ── 2c. And the mirror is DRAWABLE at all, which it was not before this brick. A mirror is
+    // spawned bare and never receives a WorldTransform over the wire (it is unreflected by design),
+    // while propagate_transforms only touches entities that already have BOTH transforms — so
+    // nothing ever gave it a world pose and every renderer query skipped it in silence. The
+    // replicator now gives it one on its first transform write, seeded from that write so a
+    // consumer reading WorldTransform before the first propagate does not read the origin.
+    const auto* placed = fx.client_world.get<ecs::WorldTransform>(mirror);
+    REQUIRE(placed != nullptr);
+    core::JobSystem jobs{0};
+    ecs::propagate_transforms(fx.client_world, jobs);
+    CHECK(fx.client_world.get<ecs::WorldTransform>(mirror)->value.translation.x ==
+          doctest::Approx(resting_x)); // the hierarchy pass now finds it
+
     // ── 1. The history dies with its entity. A slot-keyed side table would hand this position to
     // whatever entity next occupied the slot; a component cannot, and this pins that.
     server.despawn(moving);
     run(20);
     CHECK(!fx.client_world.is_alive(mirror));
+}
+
+// m11.6b: the pass that turns the history into something a renderer can read. Built directly
+// rather than driven over the wire — update_render_transforms is a pure function of world state,
+// so a link, a handshake and twenty ticks would only obscure which input produced which output.
+// The parented case CANNOT be produced over the wire at all (Parent carries an Entity field, which
+// WireSchema::is_replicable refuses), so direct construction is the only way to prove it works —
+// the same "unreachable, not untested" standard the refused-part branch is held to.
+TEST_CASE("the render pass writes a blended pose, and composes a parented one") {
+    ecs::World world;
+    ecs::register_transform_components(world);
+    (void)world.register_component<ecs::WorldTransform>();
+    (void)world.register_component<ecs::RenderTransform>();
+    (void)world.register_component<replication::PreviousTransform>();
+
+    const auto at_x = [](float x) {
+        core::Transform t{};
+        t.translation.x = x;
+        return t;
+    };
+
+    // A mirror mid-transition: it held x=0 and now holds x=10.
+    replication::PreviousTransform history{};
+    history.value = at_x(0.0f);
+    history.valid = true;
+    const ecs::Entity moving = world.spawn_with(
+        ecs::LocalTransform{at_x(10.0f)}, history, ecs::RenderTransform{}, ecs::WorldTransform{});
+
+    // A mirror that has come to rest: same components, but its history has expired. It must draw at
+    // its current pose whatever alpha says, and it is here so the counter below has something to
+    // be wrong about — a pass that silently visited one entity reads exactly like one that visited
+    // both, unless the two are distinguishable in the result.
+    replication::PreviousTransform expired{};
+    expired.value = at_x(0.0f);
+    expired.valid = false;
+    const ecs::Entity resting = world.spawn_with(
+        ecs::LocalTransform{at_x(7.0f)}, expired, ecs::RenderTransform{}, ecs::WorldTransform{});
+
+    CHECK(replication::update_render_transforms(world, 0.5f) == 2);
+    CHECK(world.get<ecs::RenderTransform>(moving)->value.translation.x == doctest::Approx(5.0f));
+    CHECK(world.get<ecs::RenderTransform>(resting)->value.translation.x == doctest::Approx(7.0f));
+
+    // Alpha is the only input that changed, and the blend has to follow it every frame — this is
+    // what makes gating the pass on the ECS's change detection wrong: the DATA is identical here.
+    CHECK(replication::update_render_transforms(world, 0.0f) == 2);
+    CHECK(world.get<ecs::RenderTransform>(moving)->value.translation.x == doctest::Approx(0.0f));
+    CHECK(replication::update_render_transforms(world, 1.0f) == 2);
+    CHECK(world.get<ecs::RenderTransform>(moving)->value.translation.x == doctest::Approx(10.0f));
+
+    // A child of a moving parent. The history is a LOCAL transform — that is what replicates — so
+    // the pass has to re-compose it against the parent's world pose. Blending world poses directly
+    // would look right in a straight line and cut the corner on any rotation.
+    const ecs::Entity parent =
+        world.spawn_with(ecs::LocalTransform{at_x(100.0f)}, ecs::WorldTransform{at_x(100.0f)});
+    replication::PreviousTransform child_history{};
+    child_history.value = at_x(0.0f);
+    child_history.valid = true;
+    const ecs::Entity child = world.spawn_with(ecs::LocalTransform{at_x(4.0f)},
+                                               child_history,
+                                               ecs::RenderTransform{},
+                                               ecs::WorldTransform{},
+                                               ecs::Parent{parent});
+
+    CHECK(replication::update_render_transforms(world, 0.5f) == 3);
+    // 100 (parent) + 2 (half of the child's own 0→4 local step). Without the composition it reads
+    // as 2, and with the composition but no blend as 104 — three distinguishable answers.
+    CHECK(world.get<ecs::RenderTransform>(child)->value.translation.x == doctest::Approx(102.0f));
 }
