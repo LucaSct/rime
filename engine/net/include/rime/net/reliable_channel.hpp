@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -73,6 +74,12 @@ public:
     // session-layer decision, m11.2.)
     static constexpr std::size_t kMaxPending = 256;
 
+    // How many independent unreliable-sequenced streams one channel carries (see send_unreliable).
+    // 16 is enough for every kind of unreliable message M11 defines with room to spare, and small
+    // enough that the per-stream frontier tables stay two cache lines rather than an allocation.
+    // The id rides one wire byte, so growing it past 256 would be a format change, not a constant.
+    static constexpr std::uint8_t kUnreliableStreams = 16;
+
     // `resend_ms`: how long a reliable packet may stay unacked before update() retransmits it.
     // Fixed for v1 (RTT-adaptive RTO is a measured follow-up).
     ReliableChannel(Link& link, const Endpoint& peer, std::uint64_t resend_ms = 100) noexcept;
@@ -81,7 +88,29 @@ public:
     // in-flight window has budget, else sit until acks free some (update() pumps them). false =
     // refused (payload over kMaxPayload; or, for reliable, the backlog hit kMaxPending).
     bool send_reliable(std::span<const std::byte> message, std::uint64_t now_ms);
-    bool send_unreliable(std::span<const std::byte> message);
+
+    // `stream` picks WHICH sequence space this message supersedes within. Messages on the same
+    // stream follow the contract at the top of this file — a newer one makes an older one garbage,
+    // and the older is dropped on arrival. Messages on DIFFERENT streams are independent and never
+    // evict each other.
+    //
+    // That parameter exists because the single shared space was a trap. Two unreliable messages
+    // sent in the same tick draw consecutive sequence numbers, so on any link with latency jitter
+    // the two race — and whichever the receiver happens to see second silently discards the other,
+    // before the application ever sees its bytes. With one sender that never mattered; the moment
+    // a second kind of unreliable message exists, it is a coin flip every tick.
+    //
+    // ONE STREAM PER SUPERSEDING RELATIONSHIP, and that is a real design decision, not a label.
+    // Put two message kinds on separate streams when a new one of kind A says nothing about kind B.
+    // Keep them on the SAME stream when they must stay ordered relative to one another — splitting
+    // those buys throughput and pays for it with ordering, which for state that is applied blind is
+    // how a stale value lands on top of a fresh one. `snapshot.hpp` works an example through in the
+    // one place this engine deliberately declines to split.
+    //
+    // Out-of-range `stream` (>= kUnreliableStreams) is refused rather than clamped: a silent
+    // clamp would merge two spaces the caller believed were separate, which is the exact bug this
+    // parameter exists to prevent.
+    bool send_unreliable(std::span<const std::byte> message, std::uint8_t stream = 0);
 
     // Per-tick housekeeping: retransmit in-flight packets unacked past resend_ms, transmit queued
     // messages the window now has budget for, and emit one AckOnly if reliable traffic arrived
@@ -103,6 +132,23 @@ public:
 
     [[nodiscard]] std::size_t pending_count() const noexcept { return pending_.size(); }
 
+    // Unreliable packets discarded on arrival because something newer on the SAME stream had
+    // already been delivered. Non-zero is normal and is the contract working — late state is
+    // garbage. It is exposed because it is also the only way to see the cost of putting two
+    // messages on one stream that did not belong there: that shows up here as a steady count on a
+    // link with jitter, and is invisible everywhere else (the state still converges, because the
+    // completeness rule refuses to acknowledge a tick it did not fully receive and the sender
+    // simply pays to send it again).
+    [[nodiscard]] std::uint64_t unreliable_superseded() const noexcept {
+        return unreliable_superseded_;
+    }
+
+    // Packets naming a stream this build does not have. A peer that agreed on a protocol version
+    // cannot produce one, so a non-zero count means a corrupted or lying peer, not version skew.
+    [[nodiscard]] std::uint64_t unreliable_bad_stream() const noexcept {
+        return unreliable_bad_stream_;
+    }
+
 private:
     struct Pending {
         std::uint32_t seq;
@@ -111,13 +157,17 @@ private:
         bool transmitted = false; // false = queued behind a full in-flight window
     };
 
-    void transmit(Channel channel, std::uint32_t seq, std::span<const std::byte> payload);
+    void transmit(Channel channel,
+                  std::uint32_t seq,
+                  std::span<const std::byte> payload,
+                  std::uint8_t stream = 0);
     void pump(std::uint64_t now_ms); // transmit queued reliables the window has budget for
     void process_ack(std::uint32_t ack, std::uint32_t ack_bits);
     void receive_reliable(std::uint32_t seq,
                           std::span<const std::byte> payload,
                           std::vector<Received>& out);
-    void receive_unreliable(std::uint32_t seq,
+    void receive_unreliable(std::uint8_t stream,
+                            std::uint32_t seq,
                             std::span<const std::byte> payload,
                             std::vector<Received>& out);
     void deliver(std::vector<Received>& out, std::span<const std::byte> payload);
@@ -131,7 +181,7 @@ private:
 
     // Sender side.
     std::uint32_t next_reliable_seq_ = 0;
-    std::uint32_t next_unreliable_seq_ = 0;
+    std::array<std::uint32_t, kUnreliableStreams> next_unreliable_seq_{};
     std::deque<Pending> pending_; // unacked (or unsent) reliable messages, in seq order
     std::uint32_t in_flight_ = 0; // transmitted-but-unacked count (the window usage)
     bool ack_dirty_ = false;      // reliable traffic arrived since our last packet
@@ -144,15 +194,20 @@ private:
     std::uint64_t received_bits_ = 0;
     std::uint32_t window_base_ = 0;
 
-    // Receiver side, unreliable-sequenced.
-    std::uint32_t latest_unreliable_seq_ = 0;
-    bool have_unreliable_ = false;
+    // Receiver side, unreliable-sequenced — one independent frontier PER STREAM (see
+    // kUnreliableStreams). A single shared frontier was the original design and it made any two
+    // unreliable messages sent in the same tick compete: the one that arrived second won, and the
+    // other was discarded before its bytes ever reached the application.
+    std::array<std::uint32_t, kUnreliableStreams> latest_unreliable_seq_{};
+    std::array<bool, kUnreliableStreams> have_unreliable_{};
 
     std::vector<std::byte> packet_buf_; // scratch for transmit(), avoids per-send allocation
 
     std::uint64_t packets_sent_ = 0;
     std::uint64_t packets_resent_ = 0;
     std::uint64_t messages_delivered_ = 0;
+    std::uint64_t unreliable_superseded_ = 0;
+    std::uint64_t unreliable_bad_stream_ = 0;
 };
 
 } // namespace rime::net

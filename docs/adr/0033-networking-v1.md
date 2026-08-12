@@ -643,3 +643,38 @@ pumping several batches to catch up silently discarded every batch's expectation
 The general form is worth more than the fix: **a proof that cannot see how much it skipped is not a
 weaker proof, it is a misleading one**, because it still reads as passing. The counting rule is now
 stated in the design doc.
+
+### A18. Unreliable-sequenced gets one sequence space PER STREAM, and delta parts deliberately keep sharing one
+
+Found while designing m11.6c's client→server input message: `ReliableChannel` kept a *single*
+unreliable frontier per direction (`latest_unreliable_seq_`), and `receive_unreliable` dropped
+anything not strictly newer than it. That is the right contract for one kind of message and a trap
+for two. Any two unreliable messages sent in the same tick draw consecutive sequence numbers, so on
+a link with latency jitter they race — and whichever the receiver happens to see second silently
+discards the other, *before the application sees its bytes*. Not lost on the wire: dropped on
+arrival, for being "stale" when it was nothing of the sort. With one sender that never mattered;
+adding input as a second would have made it a coin flip every tick.
+
+`send_unreliable` now takes a **stream id** (one wire byte, carried only on that channel; 16 streams,
+bounds-checked on receive because it is untrusted input, refused rather than clamped on send — a
+silent clamp would merge two spaces the caller believed were separate, which is the bug the
+parameter exists to prevent). One stream per supersedes-relationship.
+
+**The part that is not the obvious cleanup.** The server splits an oversized tick into up to
+`kMaxDeltaPartsPerTick` Delta packets and sends them as separate unreliable messages, so the same
+mechanism has been quietly evicting *snapshot parts* since m11.3 — a reordered part is discarded and
+the tick stays incomplete. It looks like exactly what the stream id is for. **It must not be fixed
+that way.** The shared stream is the only thing keeping deltas ordered, and `on_delta` applies
+records blind — there is no per-record "is this older than what I hold" check. Split across streams,
+part 1 of tick N could land after part 0 of tick N+1 and write a stale value over a fresh one; the
+client would still count tick N+1 complete and acknowledge it, the server would advance the baseline
+and stop re-sending, and the two worlds would sit **permanently** disagreed. Trading a bandwidth cost
+for a silent-divergence risk is the wrong direction, and the completeness rule (A13/A14) already
+makes the bandwidth cost self-healing.
+
+So the parts stay together, the cost is now *visible* rather than merely absent
+(`ReliableChannel::unreliable_superseded()` — measured at 33 evictions per 80 same-tick sends on a
+lossless link with 0–40 ms jitter, versus 19 once independent kinds stopped colliding), and making
+the split safe is left as its own brick with a named prerequisite: either a per-record staleness
+guard or real fragment reassembly. This is the counting rule from A17 applied one layer down — the
+eviction was never wrong, but nothing could see how much of it was happening.
