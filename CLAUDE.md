@@ -173,8 +173,11 @@ Verify proportionately to the change — don't re-run the whole world for every 
 
 Per-brick: own branch → build → lavapipe green → small commits → push → PR → CI (3-OS + format +
 ASan/UBSan + TSan) → merge. Stacked PRs are **pre-retargeted to `main` before parents merge**
-(`gh api repos/LucaSct/rime/pulls/<N> -X PATCH -f base=main`) — the stored token lacks `read:org`,
-so drive PRs through the REST API, not `gh pr edit`/`gh pr checks`. **Run clang-format before
+(`gh api repos/LucaSct/rime/pulls/<N> -X PATCH -f base=main`). **Drive PRs through the REST API**
+rather than `gh pr edit`/`gh pr checks`: those wrappers need `read:org`, and whether you have it
+depends on how this machine authenticated — an interactive `gh auth login` grants it, a bare
+`GH_TOKEN`/PAT generally does not. The REST path works under either, so it is the one to reach for
+by default. `gh auth status` prints the scopes you actually hold. **Run clang-format before
 pushing** — it lives on the dev server at `~/.rime-tools/bin/clang-format` (v20.1.8, the exact
 pinned CI version). Mirror CI's exact file set — `find`, **not** `git ls-files` (which skips
 *untracked* new files and so silently misses a brand-new source file, the trap that red-CI'd M6.8):
