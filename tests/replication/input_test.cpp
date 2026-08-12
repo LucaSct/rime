@@ -662,3 +662,90 @@ TEST_CASE("input and state replication share a session without eating each other
     CHECK(client.foreign_messages() > 0);
     CHECK(client.malformed_messages() == 0);
 }
+
+TEST_CASE("input and the baseline ack must not share an unreliable stream") {
+    // ADR-0033 A18, from the side that motivated it. The two client→server messages are sent on the
+    // same tick, so they draw consecutive sequence numbers; on a jittery link the receiver sees
+    // them in either order, and if they shared one supersedes-relationship whichever landed second
+    // would be discarded before the application saw its bytes.
+    //
+    // The shape is A18's own: run the SAME traffic over the SAME seed and link twice, differing
+    // only in which stream the ack rides, and assert the contrast. An absolute threshold on the
+    // correct run alone would pass against the bug whenever the seed was kind. The ack is
+    // hand-built here rather than driven through ClientReplicator precisely so the wrong stream is
+    // expressible in a test without a knob in production code that exists only to be misused.
+    struct Counts {
+        std::uint64_t commands = 0;
+        std::uint64_t acks = 0;
+    };
+
+    const auto run = [](std::uint8_t ack_stream) {
+        Peers peers({/*loss_rate=*/0.0f, // lossless: every drop below is an EVICTION, not a loss
+                     /*duplicate_rate=*/0.0f,
+                     /*min_latency_ms=*/0,
+                     /*max_latency_ms=*/40}, // the jitter is what reorders them
+                    /*seed=*/0x5EED5EEDull);
+        peers.connect();
+
+        replication::ClientInputSender sender;
+        // ONE copy per packet, deliberately. The redundancy window exists to hide exactly this kind
+        // of packet loss and it does the job well enough to muffle the measurement: with the
+        // default window the two runs differ by a handful of commands out of 120, because an
+        // evicted packet's commands simply arrive in the next one. Turning it off makes one evicted
+        // packet equal one lost command, which is what the stream separation is actually worth.
+        sender.set_redundancy(1);
+        replication::ServerInputReceiver receiver;
+        Counts counts;
+
+        std::vector<std::byte> ack;
+        core::ByteWriter ack_writer{ack};
+        ack_writer.u8(static_cast<std::uint8_t>(replication::MessageTag::BaselineAck));
+        ack_writer.u64(1);
+
+        for (int i = 0; i < 120; ++i) {
+            peers.pump();
+
+            for (const net::SessionId id : peers.server_driver.session_ids()) {
+                net::Session* session = peers.server_driver.session(id);
+                REQUIRE(session != nullptr);
+                std::vector<net::Received> inbox;
+                (void)session->drain_received(inbox);
+                counts.commands += receiver.apply_messages(id, inbox);
+                for (const net::Received& message : inbox) {
+                    if (!message.bytes.empty() &&
+                        message.bytes[0] ==
+                            static_cast<std::byte>(replication::MessageTag::BaselineAck)) {
+                        ++counts.acks;
+                    }
+                }
+            }
+
+            (void)sender.record(replication::InputCommand{});
+            sender.send(peers.client_driver, peers.now_ms);
+            for (const net::SessionId id : peers.client_driver.session_ids()) {
+                net::Session* session = peers.client_driver.session(id);
+                REQUIRE(session != nullptr);
+                (void)session->send_unreliable(ack, peers.now_ms, ack_stream);
+            }
+        }
+        return counts;
+    };
+
+    const Counts shared = run(replication::kStreamInputCommands);
+    const Counts split = run(replication::kStreamBaselineAck);
+
+    // Both kinds do strictly better once they stop invalidating each other, and neither number is
+    // pinned: the claim is the contrast, which no arrangement of a kind seed can produce on its
+    // own.
+    CHECK(split.commands > shared.commands);
+    CHECK(split.acks >= shared.acks);
+
+    // Non-vacuousness: the shared run really did lose traffic on a LOSSLESS link, so every missing
+    // message was evicted on arrival rather than dropped on the wire. Measured on this seed: 77 of
+    // 120 commands delivered while sharing a stream against 103 once split — a quarter of the
+    // player's input discarded by the receiver, with nothing anywhere reporting a lost packet,
+    // because none was.
+    REQUIRE(shared.commands < 120);
+    MESSAGE("shared stream: " << shared.commands << " commands, " << shared.acks << " acks; split: "
+                              << split.commands << " commands, " << split.acks << " acks");
+}

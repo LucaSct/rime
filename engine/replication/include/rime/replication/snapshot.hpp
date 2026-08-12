@@ -123,9 +123,9 @@ inline constexpr std::uint8_t kMaxDeltaPartsPerTick = 8;
 // superseded(), paid in bandwidth, and self-healed by the completeness rule. Ordering is worth more
 // than the bandwidth. Making the split safe needs either a per-record staleness guard or real
 // fragment reassembly, and that is its own brick.
-inline constexpr std::uint8_t kStreamDelta = 0;       // server→client: snapshots, all parts together
-inline constexpr std::uint8_t kStreamInputAck = 1;    // server→client: input consumption frontier
-inline constexpr std::uint8_t kStreamBaselineAck = 0; // client→server: "the newest tick I hold"
+inline constexpr std::uint8_t kStreamDelta = 0;    // server→client: snapshots, all parts together
+inline constexpr std::uint8_t kStreamInputAck = 1; // server→client: input consumption frontier
+inline constexpr std::uint8_t kStreamBaselineAck = 0;   // client→server: "the newest tick I hold"
 inline constexpr std::uint8_t kStreamInputCommands = 1; // client→server: intent samples
 
 // Why input gets its own stream in BOTH directions rather than riding the ack's: an InputCommands
