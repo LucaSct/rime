@@ -302,6 +302,44 @@ TEST_CASE("m12.1 shape cast: the same cast twice gives bit-identical answers") {
     CHECK(a.initial_overlap == b.initial_overlap);
 }
 
+TEST_CASE("m12.1 shape cast: the contact normal survives every scale and angle") {
+    // The conditioning test, and it is here because this exact assertion has failed twice: once on
+    // x86-64 (normal 90 degrees off after a 50 m sweep) and once ONLY on arm64, where the two
+    // platforms round the advance differently and the final measured gap landed just above the
+    // touch tolerance, where the witness direction is already noise. The fix measures the normal at
+    // a slightly RETRACTED position, where the shapes are provably apart — well-conditioned by
+    // construction rather than by where the iteration happened to stop. These cases exist so a
+    // regression is caught on any platform rather than on the unlucky one.
+    physics::PhysicsWorld w;
+    add(w, box({0.25f, 20.0f, 20.0f}), {0.0f, 0.0f, 0.0f}); // a big flat wall: the hard case
+
+    // A flat face is the hard case precisely because the witness can slide anywhere across it
+    // without changing the distance, so the direction is ill-determined even in exact arithmetic.
+    for (const float start : {-2.0f, -5.0f, -50.0f, -500.0f}) {
+        CAPTURE(start);
+        physics::ShapeHit hit;
+        REQUIRE(w.shape_cast(
+            cast_along(
+                sphere(0.3f), {start, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, std::fabs(start) * 2.0f),
+            hit));
+        CHECK(hit.distance == doctest::Approx(std::fabs(start) - 0.55f).epsilon(0.001));
+        CHECK(hit.normal.x == doctest::Approx(-1.0f).epsilon(0.02));
+        CHECK(std::fabs(hit.normal.y) < 0.05f);
+        CHECK(std::fabs(hit.normal.z) < 0.05f);
+    }
+
+    SUBCASE("and an oblique sweep still reports the FACE normal, not the travel direction") {
+        // The normal describes the surface, not the sweep. A capsule walking diagonally into a wall
+        // must slide along it, which needs the wall's normal — returning the travel direction would
+        // make collide-and-slide stop dead instead.
+        physics::ShapeHit hit;
+        REQUIRE(w.shape_cast(
+            cast_along(sphere(0.3f), {-10.0f, 0.0f, -6.0f}, {1.0f, 0.0f, 0.6f}, 30.0f), hit));
+        CHECK(hit.normal.x == doctest::Approx(-1.0f).epsilon(0.03));
+        CHECK(std::fabs(hit.normal.z) < 0.1f);
+    }
+}
+
 TEST_CASE("m12.1 shape cast: a sweep that must not tunnel, at speed") {
     // The tunnelling case in query form: a small shape crossing a thin wall in one long step. A
     // discrete overlap test at the start and end positions sees nothing at either end; conservative

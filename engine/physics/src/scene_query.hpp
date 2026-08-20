@@ -421,6 +421,27 @@ inline constexpr int kMaxIterations = 32;
 // possible and the shapes can never meet along this line.
 inline constexpr float kMinClosing = 1e-6f;
 
+// How far back along the sweep to step before MEASURING THE CONTACT NORMAL, and why that is
+// necessary at all.
+//
+// At the touching configuration the two witness points are within kTouchTolerance of each other, so
+// the direction between them is whatever float cancellation left behind. On a flat face it is worse
+// than noisy: the witness may sit anywhere across that face without changing the distance, so the
+// direction is barely determined even in exact arithmetic. Measuring one millimetre earlier — where
+// the shapes are provably apart — makes the same direction well-conditioned by construction, rather
+// than by hoping the iteration happened to land somewhere favourable.
+//
+// This was learned twice. First a 50 m sweep at a wall reported the right distance and a normal
+// 90 degrees off; taking the previous iteration's direction fixed it on x86-64 and NOT on arm64,
+// because the two platforms round the advance differently and the last measured gap can land just
+// above the tolerance, where the direction is already noise.
+//
+// Scale-relative, because float error grows with coordinate magnitude: a fixed millimetre is
+// generous at 50 m and meaningless at 10 km.
+[[nodiscard]] inline float normal_back_off(float scale) noexcept {
+    return std::max(1e-3f, 1e-5f * scale);
+}
+
 } // namespace shape_cast_detail
 
 // One convex caster against one posed convex target. `dir` must be UNIT, so `t` is a world
@@ -455,16 +476,27 @@ template <class CasterSupport, class TargetSupport>
         }
     };
 
-    // The contact normal is captured from the last iteration that saw a MEASURABLE gap, not from
-    // the touching configuration itself — and that is a correctness decision, not a micro-
-    // optimization. At the touch the two witness points are within `kTouchTolerance` of each other,
-    // so their difference is dominated by floating-point cancellation; worse, on a flat face the
-    // witness can slide anywhere across that face without changing the distance at all, so its
-    // direction is barely determined even in exact arithmetic. Measured while the shapes are still
-    // apart, the same direction is unambiguous. (Symptom when this is got wrong: a 50 m sweep into
-    // a wall reports the right distance and a normal perpendicular to it.)
-    core::Vec3 last_n = dir;
-    bool have_last = false;
+    // The contact normal is measured at a slightly RETRACTED position rather than at the touch
+    // (see `normal_back_off` for the two platforms' worth of evidence behind that). One extra GJK
+    // call, paid only on a hit, in exchange for a direction that is well-conditioned by
+    // construction instead of by luck. `fallback` is used when even the retracted probe cannot
+    // answer — the shapes still overlap there, which is the depenetration case.
+    const auto measure_normal = [&](float hit_t, core::Vec3 fallback) -> core::Vec3 {
+        const float scale = core::length(caster_centre) + std::fabs(hit_t);
+        const core::Vec3 offset = dir * (hit_t - normal_back_off(scale));
+        const SweptSupport back{&caster, offset};
+        const GjkResult probe = gjk(back, target, (caster_centre + offset) - target_centre);
+        if (!probe.overlapping) {
+            const core::Vec3 d = probe.point_b - probe.point_a;
+            const float l = core::length(d);
+            if (l > narrowphase_detail::kNormalEps) {
+                // Flipped so it points OUT of the target and back at the caster, matching
+                // RayHit's convention.
+                return d * (-1.0f / l);
+            }
+        }
+        return fallback;
+    };
 
     float t = 0.0f;
     for (int iter = 0; iter < kMaxIterations; ++iter) {
@@ -475,18 +507,10 @@ template <class CasterSupport, class TargetSupport>
         const core::Vec3 delta = g.point_b - g.point_a;
         const float len = core::length(delta);
 
-        // The direction to report: the last well-separated measurement if we have one, otherwise
-        // whatever this iteration can offer, otherwise the sweep direction. Flipped on the way out
-        // so it points OUT of the target and back at the caster, matching RayHit's convention.
-        const auto contact_normal = [&]() -> core::Vec3 {
-            if (have_last) {
-                return last_n * -1.0f;
-            }
-            if (len > narrowphase_detail::kNormalEps) {
-                return delta * (-1.0f / len);
-            }
-            return dir * -1.0f;
-        };
+        // What this iteration alone can say about the direction — the fallback when the retracted
+        // probe is unusable, and the whole answer for an initial overlap.
+        const core::Vec3 witness_normal =
+            len > narrowphase_detail::kNormalEps ? delta * (-1.0f / len) : dir * -1.0f;
 
         if (g.overlapping) {
             // Overlapping at t == 0 is the caller's problem to fix (depenetration); overlapping
@@ -495,7 +519,11 @@ template <class CasterSupport, class TargetSupport>
             // miss here is how a fast body tunnels — the one failure this query exists to prevent.
             t_out = t;
             overlap_out = (t <= 0.0f);
-            n_out = contact_normal();
+            // An INITIAL overlap has no gap anywhere to measure, so the retracted probe is not
+            // attempted: the witnesses are all there is. A caller depenetrating from here wants
+            // EPA's penetration axis, which this query deliberately does not compute — the flag is
+            // the signal to go and do that.
+            n_out = overlap_out ? witness_normal : measure_normal(t, witness_normal);
             p_out = g.point_b;
             return true;
         }
@@ -503,7 +531,7 @@ template <class CasterSupport, class TargetSupport>
         if (g.distance <= kTouchTolerance) {
             t_out = t;
             overlap_out = false;
-            n_out = contact_normal();
+            n_out = measure_normal(t, witness_normal);
             p_out = g.point_b;
             return true;
         }
@@ -512,9 +540,6 @@ template <class CasterSupport, class TargetSupport>
             return false; // degenerate witnesses with a non-trivial distance: nothing to advance on
         }
         const core::Vec3 n = delta / len;
-        // Recorded only here, i.e. only from an iteration whose gap exceeded the touch tolerance.
-        last_n = n;
-        have_last = true;
 
         // The whole algorithm, in one line: how fast does travelling along `dir` close this gap?
         const float closing = core::dot(dir, n);
@@ -533,7 +558,7 @@ template <class CasterSupport, class TargetSupport>
     // while erring toward "missed" lets the caster pass through a solid surface.
     t_out = t;
     overlap_out = false;
-    n_out = have_last ? last_n * -1.0f : dir * -1.0f;
+    n_out = measure_normal(t, dir * -1.0f);
     p_out = caster_centre + dir * t;
     return true;
 }
