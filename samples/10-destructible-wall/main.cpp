@@ -49,6 +49,7 @@
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/assets/destructible_asset.hpp"
 #include "rime/audio/audio.hpp"
+#include "rime/core/diagnostics/work_ledger.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
@@ -206,8 +207,63 @@ struct SimResult {
     std::uint32_t audio_calls = 0;
     bool dust_fired = false;     // the dust field bloomed on the break
     bool debris_settled = false; // the world came to rest by `ticks`
+
+    // The WORK the run did (m12.0-perf / ADR-0035 §2a). These are integer counts, not clocks, so
+    // they are identical on every machine and CI can gate them on lavapipe forever. They live in
+    // SimResult rather than beside it deliberately: `operator==` drives the determinism check
+    // below, so the counters are held to the same bit-identical-across-worker-counts standard as
+    // the state hash. A counter that wobbled with thread count would be useless as a budget and is
+    // now caught by the proof that already exists.
+    std::uint32_t ticks_run = 0;
+    std::uint32_t bodies_final = 0;
+    std::uint32_t awake_final = 0; // must reach 0: the M7.5 sleep payoff, made falsifiable
+    std::uint32_t broadphase_pairs_peak = 0;
+    std::uint32_t manifolds_peak = 0;
+    std::uint32_t contact_points_peak = 0;
+    std::uint32_t largest_island_peak = 0; // the serial tail of the parallel solve
+
     bool operator==(const SimResult&) const = default;
 };
+
+// The sample's ledger, assembled by the CONSUMER — `core` knows nothing about physics or
+// destruction, and physics knows nothing about ledgers. Gluing the two is the sample's job, the
+// same arrow discipline that keeps `vfx` from ever linking `destruction`.
+core::WorkLedger make_ledger(const SimResult& r) {
+    core::WorkLedger ledger;
+    // Insertion order is the reading order: sim, then destruction, then physics.
+    ledger.set("sim.ticks_run", r.ticks_run);
+    ledger.set("destruction.parts_died", r.parts_died);
+    ledger.set("destruction.islands_detached", r.islands_detached);
+    ledger.set("destruction.debris_count", static_cast<std::uint64_t>(r.debris_count));
+    ledger.set("audio.calls", r.audio_calls);
+    ledger.set("physics.bodies_final", r.bodies_final);
+    ledger.set("physics.awake_final", r.awake_final);
+    ledger.set("physics.broadphase_pairs_peak", r.broadphase_pairs_peak);
+    ledger.set("physics.manifolds_peak", r.manifolds_peak);
+    ledger.set("physics.contact_points_peak", r.contact_points_peak);
+    ledger.set("physics.largest_island_peak", r.largest_island_peak);
+    return ledger;
+}
+
+// The budget. Ceilings bound the work; FLOORS are the load-bearing half, because every ceiling in
+// here is also satisfied by a run that did nothing at all — an intact wall has 0 dead parts, 0
+// debris and 0 contacts, and would sail under every upper bound. This is the same vacuity trap
+// m11.7 fell into and then made an assertion; here it is a budget.
+core::WorkBudget wall_budget(int tick_limit) {
+    core::WorkBudget b;
+    // Floors: the scenario actually happened.
+    b.at_least("destruction.parts_died", 1)
+        .at_least("destruction.islands_detached", 1)
+        .at_least("destruction.debris_count", 1)
+        .at_least("audio.calls", 1)
+        // Debris that never touched anything would report zero contacts, which would mean the
+        // solver did no work and "it settled" was true only because nothing ever moved.
+        .at_least("physics.contact_points_peak", 1);
+    // Ceilings: the work stayed bounded.
+    b.at_most("physics.awake_final", 0) // everything went to sleep — nothing is still churning
+        .at_most("sim.ticks_run", static_cast<std::uint64_t>(tick_limit) - 1); // settled in budget
+    return b;
+}
 
 // "Cut the legs out": sever a thin seam just above the anchored base, across the width. A few
 // overlapping blasts kill that low row, so everything above it loses its anchor and drops as ONE
@@ -252,6 +308,8 @@ SimResult run_sim(const assets::DestructibleAsset& asset, SimConfig cfg) {
     hit_base_seam(dw, inst);
     bool settled = false;
     float peak_dust = 0.0f;
+    SimResult peaks;
+    int ticks_run = 0;
     for (int t = 0; t < cfg.ticks; ++t) {
         pw.step(kDt);
         dw.update(pw);
@@ -259,13 +317,32 @@ SimResult run_sim(const assets::DestructibleAsset& asset, SimConfig cfg) {
         peak_dust =
             std::max(peak_dust, listeners.dust.coverage()); // catch the bloom before it ages
         listeners.dust.simulate(kDt);
-        if (t > 4 && pw.stats().awake_bodies == 0) {
+
+        // Peaks, not end-of-run values: the collapse is the interesting moment, and by the time
+        // the pile is asleep every load counter has fallen back to ~0. A ledger sampled only at
+        // rest would report a world that never did anything.
+        const physics::WorldStats s = pw.stats();
+        peaks.broadphase_pairs_peak = std::max(peaks.broadphase_pairs_peak, s.broadphase_pairs);
+        peaks.manifolds_peak = std::max(peaks.manifolds_peak, s.manifolds);
+        peaks.contact_points_peak = std::max(peaks.contact_points_peak, s.contact_points);
+        peaks.largest_island_peak = std::max(peaks.largest_island_peak, s.largest_island);
+
+        ticks_run = t + 1;
+        if (t > 4 && s.awake_bodies == 0) {
             settled = true; // came to rest (step FIRST, then gate — debris are born at rest)
             break;
         }
     }
 
     SimResult r;
+    const physics::WorldStats final_stats = pw.stats();
+    r.ticks_run = static_cast<std::uint32_t>(ticks_run);
+    r.bodies_final = final_stats.body_count;
+    r.awake_final = final_stats.awake_bodies;
+    r.broadphase_pairs_peak = peaks.broadphase_pairs_peak;
+    r.manifolds_peak = peaks.manifolds_peak;
+    r.contact_points_peak = peaks.contact_points_peak;
+    r.largest_island_peak = peaks.largest_island_peak;
     r.state_hash = dw.state_hash();
     r.world_hash = pw.world_hash();
     r.parts_died = listeners.parts_died;
@@ -556,14 +633,27 @@ int run_headless(const std::filesystem::path& cooked, const char* ppm) {
         run_sim(*asset, {-1, kTicks}) == base && run_sim(*asset, {1, kTicks}) == base &&
         run_sim(*asset, {2, kTicks}) == base && run_sim(*asset, {4, kTicks}) == base;
 
+    // (1b) The WORK LEDGER (m12.0-perf / ADR-0035 §2a). Counts, never clocks — so this assertion
+    // means the same thing on lavapipe in CI as on a 3060, and a change that quietly makes the
+    // frame do more work fails here without any hardware in the loop.
+    const core::WorkLedger ledger = make_ledger(base);
+    const auto violations = wall_budget(kTicks).check(ledger);
+    std::printf("  work ledger: %s\n", ledger.to_json(-1).c_str());
+    if (!violations.empty()) {
+        std::fprintf(
+            stderr, "  BUDGET VIOLATIONS:\n%s", core::WorkBudget::format(violations).c_str());
+    }
+
     const bool sim_ok = base.parts_died > 0 && base.islands_detached >= 1 && base.debris_settled &&
-                        listeners_fired && deterministic;
-    std::printf("  self-check: died>0=%d island>=1=%d settled=%d listeners=%d deterministic=%d\n",
-                base.parts_died > 0,
-                base.islands_detached >= 1,
-                base.debris_settled,
-                listeners_fired,
-                deterministic);
+                        listeners_fired && deterministic && violations.empty();
+    std::printf(
+        "  self-check: died>0=%d island>=1=%d settled=%d listeners=%d deterministic=%d budget=%d\n",
+        base.parts_died > 0,
+        base.islands_detached >= 1,
+        base.debris_settled,
+        listeners_fired,
+        deterministic,
+        violations.empty());
 
     // (2) The pixel proof — only where a device exists: the intact wall renders lit, and the hit
     // visibly changes the image (parts leave, debris tumbles into new pixels).
