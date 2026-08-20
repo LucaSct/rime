@@ -9,6 +9,61 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-20) — Milestone 12 ("The Block", the vision demo) kicks off.** **m12.0 lands
+> [ADR-0035](adr/0035-vision-demo-m12.md) (Accepted)**, and the milestone enters with a problem no
+> previous one had: its "done when" is written as an *adjective*. M12 is the last milestone on the
+> map and the only one that must answer **"feels right"** — so the ADR's first job is turning that
+> into clauses that can fail: own-input response ≤ 1 tick **against a prediction-off control**,
+> same-frame fire feedback, bounded remote-motion continuity, bit-exact peer agreement at ~10×
+> m11.7's scale, and scale *floors* (≥ 8 structures, ≥ 1,500 parts, ≥ 400 peak debris, ≥ 32 local
+> lights) **asserted by the proof**, because too-small is the quiet failure — below them the byte
+> budget never binds, relevancy never differs between clients, and half of M11 is dead code in the
+> run. The one clause that cannot be a test is named as such: a recorded human play session is
+> evidence for a judgement, not a passing assertion.
+>
+> **The load-bearing decision is how to make a performance claim durable.** This is the first
+> milestone that *can* make an absolute one — the primary workstation now has an RTX 3060, and M10
+> deferred every frame budget to exactly this point — while CI stays lavapipe forever. The ruling
+> **splits "how much work" from "how fast the work runs"**: the *work ledger* is a set of
+> machine-independent, exact, deterministic counters (most already built — `resolve_timings`,
+> `LocalShadowStats`, the SDF stamp counts, `WorldStats`, the m11.3–m11.6 replication suite;
+> **missing and added at m12.7: draws submitted vs. culled**, since no frustum cull exists anywhere
+> today) that **lavapipe gates in CI forever**, so a change that doubles draw calls or wakes a
+> sleeping pile fails deterministically with no hardware in the loop. The absolute claim is a
+> **self-gating `--perf` run** reporting a **distribution — p99 and max, never the mean**, because
+> destruction is bursty and the fracture tick is exactly the frame that must not hitch — with the
+> run's own ledger attached, so a fast run on a scene that did no work is self-evidently invalid.
+> Reports are fingerprinted JSON committed **append-only to `docs/perf/`**: the ADR culture applied
+> to measurements, so "measure before optimizing" finally gets a ledger instead of a habit. Numbers
+> are *not* fixed here — m12.0's baseline session ratifies them, and if the block sails under
+> trivially the budget tightens, because **a gate nothing can fail is not a gate**.
+>
+> **The player who was never built.** A11/A20 deferred prediction because no controller existed to
+> shape the seam; a ground-truth pass for the ADR also found [ADR-0026](adr/0026-physics-core.md)
+> still promising *"a capsule mover ships at m11.3"* — false, since that brick became the replication
+> core (now corrected by amendment). So: `step_character` is a **pure function over physics queries**
+> (capsule collide-and-slide on a new `shape_cast`), because purity is what makes it replayable and
+> replay is what prediction is built from; it lands in a new **`engine/gameplay`** that does *not*
+> link `destruction` (the M8.4 fan-out discipline), with **`engine/gameplay_net`** above it on the
+> `destruction_net` argument. Reconciliation compares **resulting state, never a diff of command
+> lists** — m11.6c's rule, and not a stylistic one: `consumed_through` steps over permanent gaps, so
+> a command leaving the un-acked list means *"the server will never act on it"*, and a list-diffing
+> predictor is wrong exactly under loss, the condition it exists for. The state↔input pairing crosses
+> as a replicated **`LastProcessedInput`** component riding the ordinary snapshot path — A15's
+> "data, not a message" move reused, so there is no new framing and no new completeness rule to get
+> wrong. **Scope rulings:** Track FL (water) is **out** — this is the "decided at M12.0" the roadmap
+> promised; Track FX is **in at its true size** (fx1a's draw pass load-bearing, fx1b contingent on
+> the ledger, fire-as-light deferred); audio is **in as cuttable polish**, first on the cut list.
+> **Never cut:** prediction, fx1a, the perf gate. All 37 deferred items across the ADRs, module
+> READMEs and named-gap trail are ruled in §6, because an unruled item silently becomes scope.
+> **Ladder:** m12.0 (this ADR + the hardware baseline) · m12.0-perf (harness + ledger) · m12.1
+> (shape casts + kinematic push-in) · m12.2 (the controller) · m12.3 (networked player, server-auth)
+> · m12.4 (**prediction + reconciliation — the hardest brick**) · m12.5 (interpolation v2) · m12.6
+> (fx1) · m12.7 (block content + frustum culling) · m12.8 (windowed present + FPS camera) · m12.9
+> (audio) · m12.p (the measured perf pass, scope chosen by the ledger) · m12.10 the proof,
+> `samples/99-the-block`. **Next:** m12.0-perf — the harness, proven on existing samples before the
+> block exists.
+
 > **Update (2026-08-20) — m11.7 (the milestone proof) + Milestone 11 COMPLETE.** M11's "done when"
 > now runs: [`samples/12-networked-destruction`](../samples/12-networked-destruction) — a dedicated
 > headless server owns the canonical destruction simulation while **two clients at opposite ends of
@@ -551,8 +606,14 @@ milestone boundary; time estimates come at brick-decomposition, not here.
   building on the M7 physics core's seams and the render graph. **Track FX** (`engine/vfx`) — a GPU
   particle substrate with fire and dust/smoke as effect families (spawned from the M8 destruction event
   fan-out; fire drives lights, smoke reads the M10 lighting data); it replaces M8.4's dust stub and
-  hard-gates M12's block. **Track FL** (`engine/fluids`) — CPU heightfield water with two-way buoyancy
-  coupling into physics; decided at M12.0. Both are cross-cutting (interleave under mainline-first), not
+  hard-gates M12's block — **scoped at m12.0** to its true size: fx1a's GPU draw pass for the existing
+  deterministic CPU sim is load-bearing, fx1b's compute scale-up is contingent on the ledger, and
+  fire-as-light is deferred behind its seam. **Track FL** (`engine/fluids`) — CPU heightfield water
+  with two-way buoyancy coupling into physics; *decided at M12.0, and the decision was **no**:* no
+  water in the block ([ADR-0035](adr/0035-vision-demo-m12.md) §5). A whole module plus a two-way
+  physics coupling does not earn a slot in a demo whose thesis is destruction, lighting and
+  networking at scale; the ADR-0026 substrate seams stay intact for whenever it opens. Both are
+  cross-cutting (interleave under mainline-first), not
   milestones; most of both is provable GPU-free/structural on lavapipe. *Inspired by: Frostbite/Niagara
   effects; shallow-water + SPH literature.*
 - **Graphics streaming (Track S):** the engine renders → captures → encodes → transports → a thin
@@ -961,6 +1022,33 @@ caught by a **counter**, never by reading the code.*
 
 **M12 — The vision demo: "The Block."** Sample `99-the-block` — destruction + dynamic
 lighting + scale, together, at a playable frame rate. The thesis, demonstrated.
+
+*Bricks (planned 2026-08-20; [ADR-0035](adr/0035-vision-demo-m12.md) is the architecture — the
+falsifiable thesis, the performance-governance split, the controller/prediction design, and the
+rulings on all 37 deferred items):* **m12.0** ADR-0035 + this ladder + the **hardware true-up** (the
+first RTX 3060 baseline session; the first `docs/perf/` entries; the budget numbers ratified against
+measurement rather than guessed — the decision brick, no engine code) · **m12.0-perf** the perf
+harness + **work ledger v1**, wired into `11-lit-rooms` and `10-destructible-wall` so the instrument
+is proven *before* the block exists, its proof being that a deliberately doubled draw count fails the
+ledger (a gate that cannot fail is not a gate) · **m12.1** physics top-up — **`shape_cast`** (sphere/
+capsule sweeps through the BVH, exposing the GJK-distance machinery CCD already uses) + **kinematic
+push-in** in `PhysicsSync` · **m12.2** `engine/gameplay` — the character controller as a **pure
+function over queries**, with replay determinism proven *here* so the next bricks debug
+reconciliation and never the mover · **m12.3** the networked player, **server-authoritative, no
+prediction yet** (`engine/gameplay_net`, the consume loop, the replicated `LastProcessedInput`,
+weapon→destruction glue), whose proof records **own-input latency = RTT ticks — the number m12.4 must
+beat** · **m12.4** **prediction + reconciliation** — the hardest brick in the milestone, flagged now
+the way m8.3 was · **m12.5** snapshot interpolation v2 over the interval a value actually covers (the
+delta header already carries the server tick) · **m12.6** Track FX brick fx1 — **fx1a** the GPU draw
+pass for the existing deterministic CPU sim with three effect families, off byte-identical; **fx1b**
+compute scale-up, contingent on the ledger · **m12.7** the block content + **view-frustum culling**
+(none exists today) with its submitted/culled counters, riding the cook-cache schema-key fix ·
+**m12.8** the playable client — **windowed present** (ADR-0023's seam; the RHI side has existed since
+M3.4) + a first-person camera on the predicted player · **m12.9** audio v1 (mixer + a Linux sink) ·
+**m12.p** the **measured** perf pass, its scope chosen by the ledger rather than guessed · **m12.10**
+the proof — `samples/99-the-block` (scripted CI mode, `--play`, `--perf`) + the docs true-up. Cut
+order if it runs long: audio → fx1b → m12.p's tail → m12.5. **Never cut:** m12.4, fx1a, the perf
+gate. Track FL (water) is **out** — the "decided at M12.0" the cross-cutting note promised.
 
 ---
 
