@@ -46,6 +46,7 @@
 
 #include "rime/app/application.hpp"
 #include "rime/assets/sdf_asset.hpp"
+#include "rime/core/diagnostics/work_ledger.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
 #include "rime/core/math/vec.hpp"
@@ -138,12 +139,13 @@ ecs::Entity spawn_box(ecs::World& world,
 
 // ── The scene geometry: a wall and its shadow ───────────────────────────────────────────────────
 // A dividing WALL stands across the floor, perpendicular to the view. A 45°-ish sun rakes over it,
-// so the wall casts a hard shadow across the floor strip in front of it (toward the camera), sealing
-// that strip — "the dark room" — from the direct sun; the floor beyond is sunlit. Break the wall and
-// the shadow lifts: direct sun floods the strip, its CSM shadow is gone, the DDGI bounce updates, and
-// the reflective floor picks it all up. Unlike gi_thesis_test.cpp's ceiling-sealed room (whose
-// relight is a small GI-only rise, deliberately measured in HDR), a lifted SUN shadow is a large,
-// plainly-visible LDR change — the right thing for a lived demo. All coordinates in metres.
+// so the wall casts a hard shadow across the floor strip in front of it (toward the camera),
+// sealing that strip — "the dark room" — from the direct sun; the floor beyond is sunlit. Break the
+// wall and the shadow lifts: direct sun floods the strip, its CSM shadow is gone, the DDGI bounce
+// updates, and the reflective floor picks it all up. Unlike gi_thesis_test.cpp's ceiling-sealed
+// room (whose relight is a small GI-only rise, deliberately measured in HDR), a lifted SUN shadow
+// is a large, plainly-visible LDR change — the right thing for a lived demo. All coordinates in
+// metres.
 constexpr core::Vec3 kFloorCenter{0.0f, -0.15f, 0.0f}; // a slab floor, top at y=0
 constexpr core::Vec3 kFloorHalf{3.5f, 0.15f, 3.5f};
 constexpr core::Vec3 kWallCenter{0.0f, 1.2f, 0.0f}; // across z=0, x in [-2.5, 2.5], the divider
@@ -426,6 +428,19 @@ int run_headless(int converge, const char* ppm) {
     // Converge the probe field with the wall UP, then read the sealed dark room's near floor.
     for (int i = 0; i < converge; ++i)
         app.step(app.fixed_dt());
+
+    // ── The WORK LEDGER, static half (m12.0-perf / ADR-0035 §2a) ─────────────────────────────
+    // Sampled on the LAST converged frame, so it describes the steady state rather than warmup.
+    // These are per-frame counters (each subsystem resets its own at the top of its update), and
+    // they are the numbers that make m10.2's and m10.4b's central claim — "a static scene must
+    // cost nothing after warmup, and a break must recompose only the region it could have
+    // affected" — into something CI can fail on rather than something a comment asserts.
+    core::WorkLedger ledger;
+    ledger.set("sdf.stamps_static", scene.renderer.sdf_clipmap().stats().stamps);
+    ledger.set("sdf.dirty_regions_static", scene.renderer.sdf_clipmap().stats().dirty_regions);
+    ledger.set("shadow.rendered_static", scene.renderer.local_shadow_stats().rendered);
+    ledger.set("shadow.reused_static", scene.renderer.local_shadow_stats().reused);
+    ledger.set("ddgi.probes_updated_static", scene.renderer.ddgi_stats().probes_updated);
     const std::vector<std::uint8_t> before =
         read_rgba8(*app.device(), app.graph()->physical(scene.last_ldr), kWidth, kHeight);
     const double dark_before = region_luminance(before, kDarkX0, kDarkY0, kDarkX1, kDarkY1);
@@ -435,8 +450,20 @@ int run_headless(int converge, const char* ppm) {
 
     // Break the divider and let the fast-tracked probes + shadow cache catch up.
     scene.break_wall();
-    for (int i = 0; i < converge; ++i)
+    // Peaks across the post-break frames rather than a guess at WHICH frame the invalidation
+    // lands on: the C1/C2 seams queue work that the next render drains, and pinning the sample to
+    // frame N+1 would make the proof depend on an ordering nobody promised.
+    std::uint32_t sdf_stamps_break = 0, shadow_rendered_break = 0, ddgi_fast_break = 0;
+    for (int i = 0; i < converge; ++i) {
         app.step(app.fixed_dt());
+        sdf_stamps_break = std::max(sdf_stamps_break, scene.renderer.sdf_clipmap().stats().stamps);
+        shadow_rendered_break =
+            std::max(shadow_rendered_break, scene.renderer.local_shadow_stats().rendered);
+        ddgi_fast_break = std::max(ddgi_fast_break, scene.renderer.ddgi_stats().fast_tracked);
+    }
+    ledger.set("sdf.stamps_on_break", sdf_stamps_break);
+    ledger.set("shadow.rendered_on_break", shadow_rendered_break);
+    ledger.set("ddgi.fast_tracked_on_break", ddgi_fast_break);
     const std::vector<std::uint8_t> after =
         read_rgba8(*app.device(), app.graph()->physical(scene.last_ldr), kWidth, kHeight);
     const double dark_after = region_luminance(after, kDarkX0, kDarkY0, kDarkX1, kDarkY1);
@@ -448,13 +475,46 @@ int run_headless(int converge, const char* ppm) {
                 dark_after,
                 dark_before > 0.01 ? dark_after / dark_before : 0.0);
     std::printf("  the break repainted %llu px\n", static_cast<unsigned long long>(changed));
+    std::printf("  work ledger: %s\n", ledger.to_json(-1).c_str());
+
+    // The budget. These are the M10 caching claims turned into a CI gate, and they come in
+    // STATIC/BREAK PAIRS on purpose: "a static frame re-stamps nothing" is worth nothing on its
+    // own, because a clipmap that had silently stopped working would also re-stamp nothing. The
+    // paired floor is what proves the zero was a decision rather than a corpse — the same reason
+    // m11.7 pairs every "it agreed" with a negative control that disagrees.
+    //
+    // Floors and ceilings with margin, never the measured value pinned exactly: these are counts
+    // of CPU-side decisions, so they are device-independent (lavapipe in CI reads the same numbers
+    // this RTX 3060 does), but a proof that demands equality would break on any legitimate content
+    // tweak and teach everyone to edit the expectation instead of reading it.
+    core::WorkBudget budget;
+    budget
+        // m10.4b: a static scene costs nothing after warmup…
+        .at_most("sdf.stamps_static", 0)
+        .at_most("sdf.dirty_regions_static", 0)
+        // …and the break recomposes, so that zero is a live decision, not a dead subsystem.
+        .at_least("sdf.stamps_on_break", 1)
+        // m10.2: the shadow cache serves a static frame from cache…
+        .at_most("shadow.rendered_static", 0)
+        .at_least("shadow.reused_static", 1)
+        // …and a destruction event invalidates the slot it touched.
+        .at_least("shadow.rendered_on_break", 1)
+        // m10.5: probes keep round-robining, and destruction fast-tracks the ones it touched.
+        .at_least("ddgi.probes_updated_static", 1)
+        .at_least("ddgi.fast_tracked_on_break", 1);
+
+    const auto violations = budget.check(ledger);
+    if (!violations.empty()) {
+        std::fprintf(
+            stderr, "  BUDGET VIOLATIONS:\n%s", core::WorkBudget::format(violations).c_str());
+    }
 
     // The done-when: the full stack renders lit (all six gates compose without conflict), the dark
     // room's floor brightens materially once the divider falls (the integrated thesis — direct sun
     // through the gap, the CSM shadow lifting, and the DDGI bounce arriving), and the break visibly
     // repaints the frame.
     const bool thesis = dark_after > dark_before * 1.4 && (dark_after - dark_before) > 4.0;
-    const bool ok = lit && thesis && changed > 2000;
+    const bool ok = lit && thesis && changed > 2000 && violations.empty();
     std::printf("11-lit-rooms: %s\n",
                 ok ? "the wall falls, the dark room lights up — M10 green!" : "FAILED self-check");
     return ok ? 0 : 1;

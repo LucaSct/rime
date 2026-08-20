@@ -5,6 +5,7 @@ rime_add_test(rime_core_tests
     log_test.cpp
     assert_test.cpp
     profile_test.cpp
+    work_ledger_test.cpp
     memory_test.cpp
     math_test.cpp
     quat_test.cpp
