@@ -582,7 +582,10 @@ mod imp {
     /// ties keep the first, any of them serves.
     fn brightest_pixel(rgba: &[u8], width: u32) -> (i32, i32) {
         let mut best = (0usize, 0u32);
-        for (i, px) in rgba.chunks_exact(4).enumerate() {
+        // `as_chunks::<4>()`: a pixel is four bytes by definition, so the constant belongs in
+        // the type. `.0` is the whole pixels; a trailing partial pixel is not one, and
+        // `chunks_exact(4)` skipped it too.
+        for (i, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
             let lum = px[0] as u32 + px[1] as u32 + px[2] as u32;
             if lum > best.1 {
                 best = (i, lum);

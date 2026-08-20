@@ -174,11 +174,9 @@ fn mesh_geometry_for_sdf(input: &Path) -> Result<SoupGeometry, asset_pipeline::P
         }
     };
     let vertices: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-    let triangles: Vec<[u32; 3]> = mesh
-        .indices
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
+    // `as_chunks::<3>()` already yields `[u32; 3]`, so the triangle list is a copy rather than a
+    // rebuild — the constant lives in the type instead of in three index expressions.
+    let triangles: Vec<[u32; 3]> = mesh.indices.as_chunks::<3>().0.to_vec();
     Ok((vertices, triangles))
 }
 

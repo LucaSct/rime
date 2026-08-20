@@ -11,6 +11,7 @@ never hide what they do — read them to learn the actual commands.
 | `setup.sh` / `setup.ps1` | Check the toolchain; auto-install the user-local pieces (Conan in an isolated venv, Rust via rustup) and guide on the rest (CMake ≥ 3.24, Ninja, a C++ compiler, the **Vulkan SDK** — needed from M3). |
 | `build.sh` / `build.ps1` | Configure + build the engine (Conan + CMake) and the tools (Cargo) and run their tests, in one step. |
 | `check-license-headers.sh` | Verify every C++/Rust source carries the SPDX header (CLAUDE.md). Run by CI's license gate. |
+| `perf.sh` | Measure frame/sim time on **this machine's GPU** and write a fingerprinted report to [`docs/perf/`](../docs/perf/). Deliberately not a CI job — see that directory's README. |
 
 ```sh
 scripts/setup.sh                 # once, to get the toolchains in place
@@ -18,6 +19,9 @@ scripts/build.sh                 # build everything (dev) + run all tests
 scripts/build.sh --preset release --no-tests
 scripts/build.sh --cpp-only --clean
 scripts/build.sh --cpp-only --sanitizer address   # ASan+UBSan build (GCC/Clang; see CI)
+
+scripts/perf.sh --commit                          # hardware perf run -> docs/perf/ (needs a Release build)
+scripts/perf.sh --sample lit-rooms --frames 1200  # one sample, into a scratch dir
 ```
 
 > `--sanitizer address|thread` sets the `RIME_SANITIZER` CMake option (`address` = ASan+UBSan,

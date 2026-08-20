@@ -1,0 +1,160 @@
+{
+  "schema": 1,
+  "run": {
+    "sample": "10-destructible-wall",
+    "commit": "95a2c0b",
+    "date": "2026-08-20"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "driver": "NVIDIA 610.43.03",
+    "os": "linux",
+    "build": "RelWithDebInfo",
+    "sanitizer": "off",
+    "preset": "destruction-collapse",
+    "width": 1920,
+    "height": 1080
+  },
+  "distributions": {
+    "sim.pre": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.schedule": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.transforms": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "sim.post": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.tick": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.004
+    },
+    "frame.declare": {
+      "count": 600,
+      "min_ms": 0.004,
+      "p50_ms": 0.005,
+      "p95_ms": 0.007,
+      "p99_ms": 0.009,
+      "max_ms": 0.015
+    },
+    "frame.execute": {
+      "count": 600,
+      "min_ms": 0.017,
+      "p50_ms": 0.018,
+      "p95_ms": 0.027,
+      "p99_ms": 0.035,
+      "max_ms": 0.075
+    },
+    "frame.submit": {
+      "count": 600,
+      "min_ms": 2.878,
+      "p50_ms": 3.059,
+      "p95_ms": 3.393,
+      "p99_ms": 3.490,
+      "max_ms": 3.579
+    },
+    "frame": {
+      "count": 600,
+      "min_ms": 2.908,
+      "p50_ms": 3.152,
+      "p95_ms": 3.597,
+      "p99_ms": 3.791,
+      "max_ms": 3.856
+    },
+    "sim.physics": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.367,
+      "p99_ms": 0.394,
+      "max_ms": 0.526
+    },
+    "frame.collapse": {
+      "count": 120,
+      "min_ms": 3.156,
+      "p50_ms": 3.448,
+      "p95_ms": 3.763,
+      "p99_ms": 3.814,
+      "max_ms": 3.834
+    },
+    "sim.physics.collapse": {
+      "count": 120,
+      "min_ms": 0.063,
+      "p50_ms": 0.347,
+      "p95_ms": 0.394,
+      "p99_ms": 0.489,
+      "max_ms": 0.526
+    }
+  },
+  "passes": {
+    "depth-prepass": {
+      "p50_ms": 0.798,
+      "max_ms": 0.836
+    },
+    "forward-pbr": {
+      "p50_ms": 1.055,
+      "max_ms": 1.085
+    },
+    "tonemap": {
+      "p50_ms": 0.625,
+      "max_ms": 1.085
+    }
+  },
+  "worst_frame": {
+    "index": 214,
+    "ms": 3.856,
+    "passes": {
+      "depth-prepass": 0.799,
+      "forward-pbr": 1.049,
+      "tonemap": 0.629
+    }
+  },
+  "ledger": {
+    "sim.ticks_run": 600,
+    "destruction.parts_died": 17,
+    "destruction.islands_detached": 1,
+    "destruction.debris_count": 18,
+    "audio.calls": 18,
+    "physics.bodies_final": 1,
+    "physics.awake_final": 0,
+    "physics.broadphase_pairs_peak": 77,
+    "physics.manifolds_peak": 67,
+    "physics.contact_points_peak": 259,
+    "physics.largest_island_peak": 18
+  }
+}

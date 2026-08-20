@@ -9,6 +9,41 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-20) — m12.0-perf COMPLETE: performance is now measured, in both halves.** The
+> brick landed in two passes. The first (#128) built the **work ledger** — counts, never clocks, so
+> lavapipe gates them in CI forever — and wired it into `10-destructible-wall` and `11-lit-rooms`,
+> turning M10's caching claims into a gate: a static frame re-stamps nothing and re-renders no
+> shadow slot, while the break recomposes exactly three SDF regions, invalidates the one shadow slot
+> it touched, and fast-tracks 60 probes. The budgets come in **static/break pairs** on purpose — a
+> clipmap that had silently stopped working would also re-stamp nothing, so each zero is paired with
+> a floor on its break-frame twin.
+>
+> The second pass built the **hardware report** (`core/diagnostics/perf_report.hpp`,
+> `--perf` on both samples, `scripts/perf.sh`): a fingerprinted JSON of frame/sim **distributions —
+> p50/p95/p99/max, and no mean anywhere**, because ten 40 ms frames in a 600-frame run move a mean
+> by half a millisecond and vanish. Reports are committed **append-only to
+> [`docs/perf/`](perf/)**, and a run is compared only against one whose fingerprint matches — GPU,
+> **driver**, OS, build config, **sanitizer**, preset, resolution. Two of those exist because of
+> past scars: an ASan binary would otherwise read as a catastrophic regression (#125's lesson), and
+> a Vulkan API version does not change across an NVIDIA driver update, so a driver's performance
+> change would have been billed to the engine. Three engine seams fell out of it: `on_post_submit`
+> (the only window in which per-pass GPU timestamps are readable), the engine's **first profile
+> zones** — `RIME_PROFILE_ZONE` had existed since M1.6 with *zero* callers, corrected in the ADR —
+> and `AdapterInfo::driver_name/info`.
+>
+> **The first RTX 3060 baseline is committed, and it does not ratify what ADR-0035 hoped it would.**
+> At 1920×1080 Release: the full M10 lighting stack runs at **p99 7.96 ms / max 8.05 ms**, and a
+> 60-part collapse at **p99 3.79 ms** with a **0.53 ms** worst sim tick — 2.1× and 15× inside the
+> proposed budget. By the letter of §2 that means *tighten*; the [amendment](adr/0035-vision-demo-m12.md)
+> rules otherwise, because the measurement is of the wrong subject: these samples are two orders of
+> magnitude smaller than the block §1 requires, so tightening against them would manufacture the
+> appearance of ratification. **The headline budget is re-timed to m12.7**, measured against the
+> block's own content; what m12.0 ratifies is the **relative** gate, which had nothing to compare
+> against until a baseline existed and could therefore not fail. It fails now at 8.76 ms, not 16.6.
+> The gate was proven to fail five ways on the 3060 — absolute breach, regression, missing timeline,
+> too-few-samples, and the vacuity guard catching a run whose wall never broke. **Next:** m12.1 —
+> physics top-up (`shape_cast` + kinematic push-in).
+
 > **Update (2026-08-20) — Milestone 12 ("The Block", the vision demo) kicks off.** **m12.0 lands
 > [ADR-0035](adr/0035-vision-demo-m12.md) (Accepted)**, and the milestone enters with a problem no
 > previous one had: its "done when" is written as an *adjective*. M12 is the last milestone on the
@@ -36,7 +71,10 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > Reports are fingerprinted JSON committed **append-only to `docs/perf/`**: the ADR culture applied
 > to measurements, so "measure before optimizing" finally gets a ledger instead of a habit. Numbers
 > are *not* fixed here — m12.0's baseline session ratifies them, and if the block sails under
-> trivially the budget tightens, because **a gate nothing can fail is not a gate**.
+> trivially the budget tightens, because **a gate nothing can fail is not a gate**. *(Amended at
+> m12.0-perf: the baseline exists and the headline numbers are **re-timed to m12.7** rather than
+> tightened — see ADR-0035 A1. Tightening a budget for the block against samples two orders of
+> magnitude smaller would have looked like ratification and meant nothing.)*
 >
 > **The player who was never built.** A11/A20 deferred prediction because no controller existed to
 > shape the seam; a ground-truth pass for the ADR also found [ADR-0026](adr/0026-physics-core.md)
@@ -68,7 +106,8 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > (fx1) · m12.7 (block content + frustum culling) · m12.8 (windowed present + FPS camera) · m12.9
 > (audio) · m12.p (the measured perf pass, scope chosen by the ledger) · m12.10 the proof,
 > `samples/99-the-block`. **Next:** m12.0-perf — the harness, proven on existing samples before the
-> block exists.
+> block exists. *(Done — see the completion entry above; the headline budget's ratification moved to
+> m12.7, where there is content of the right size to measure.)*
 
 > **Update (2026-08-20) — m11.7 (the milestone proof) + Milestone 11 COMPLETE.** M11's "done when"
 > now runs: [`samples/12-networked-destruction`](../samples/12-networked-destruction) — a dedicated

@@ -19,14 +19,21 @@ void set_zone_sink(ZoneSink sink) {
 void report_zone(std::string_view name, double ms) {
     // Copy the sink out under the lock, then call it unlocked (a zone sink may itself be
     // doing real work, e.g. appending to a trace buffer).
+    //
+    // The early return matters now that the engine actually places zones (m12.0-perf put them on
+    // the Application tick and frame stages). Copying a std::function whose captures exceed the
+    // small-object buffer HEAP-ALLOCATES, and the overwhelmingly common case — no sink installed,
+    // which is every shipping run and every CI run — would otherwise pay a malloc/free per zone
+    // exit for a sink nobody is listening to.
     ZoneSink sink;
     {
         const std::lock_guard<std::mutex> lock(g_zone_mutex);
+        if (!g_zone_sink) {
+            return;
+        }
         sink = g_zone_sink;
     }
-    if (sink) {
-        sink(name, ms);
-    }
+    sink(name, ms);
 }
 
 } // namespace rime::core

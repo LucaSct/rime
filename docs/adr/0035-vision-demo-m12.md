@@ -356,3 +356,77 @@ measured perf pass late, because it needs the block to measure; the proof last.
   scripted-loss harness with no GPU; m12.6 onward is content, scale and the hardware claim. If the
   milestone runs long, cutting there is a re-labelling, not a re-plan — which is the whole point of
   naming it now.
+
+---
+
+## Amendment (2026-08-20, m12.0-perf): the first baseline exists, and it does not ratify what §2 hoped it would
+
+§2 ended with *"Proposed headline budget, to be ratified at m12.0 against the baseline, not before"*
+and *"If the baseline shows the block sailing under trivially, tighten it at m12.0 — a gate nothing
+can fail is not a gate."* The baseline now exists. It says something the instruction did not
+anticipate, so the ruling is recorded rather than fudged.
+
+### A1. The headline budget is NOT tightened at m12.0, because the thing it measures does not exist yet
+
+Measured on the reference machine (RTX 3060, NVIDIA 610.43.03, Release, 1920×1080, no sanitizer;
+`docs/perf/2026-08-20-*.json`):
+
+| run | frame p50 | p95 | p99 | max | sim p99 | sim max |
+|---|---|---|---|---|---|---|
+| `11-lit-rooms` — the whole M10 lighting stack | 7.46 | 7.81 | **7.96** | **8.05** | — | — |
+| `10-destructible-wall` — a 60-part collapse | 3.15 | 3.60 | **3.79** | 3.86 | **0.394** | **0.526** |
+
+Against the proposed p99 ≤ 16.6 ms / max ≤ 33 ms, that is 2.1× of frame headroom; against the
+proposed sim-tick p99 ≤ 6 ms it is 15×. By the letter of §2, tighten.
+
+**We are not tightening, and the reason is that the measurement is of the wrong subject.** The
+headline budget is a claim about `99-the-block` — §1's floors put ≥ 8 structures, ≥ 1,500 parts,
+≥ 400 peak debris and ≥ 32 local lights in one frame. `11-lit-rooms` has four boxes and four lights;
+`10-destructible-wall` has sixty parts and two. Tightening a budget for the block against a scene
+two orders of magnitude smaller would produce a number with a measurement behind it and no meaning
+in it — the *appearance* of ratification, which is worse than an admitted estimate because it stops
+the question being asked again.
+
+So the ruling is a re-timing, not a re-numbering:
+
+> **The headline budget stays as proposed (p99 ≤ 16.6 ms, max ≤ 33 ms, sim-tick p99 ≤ 6 ms,
+> collapse-tick max ≤ 12 ms) and is ratified at m12.7, against the block's own content**, when
+> there is something of the right size to measure. m12.0's baseline is what the block's cost is
+> *budgeted out of*, not a margin already proven.
+
+What the baseline does establish is that the numbers are not fantasy: on this GPU the engine has
+~8.6 ms of frame and ~5.5 ms of tick to spend on the difference between these samples and the block.
+That is a budget, and m12.7 will find out whether it was enough.
+
+### A2. What m12.0 actually ratifies is the RELATIVE gate, which had nothing to compare against until now
+
+§2b asked the run to *"compare against the last committed report with the same fingerprint, failing
+on relative regression"*. Before this brick there were no committed reports, so that clause could
+not fire — it was, precisely, a gate that could not fail.
+
+It can now. With `docs/perf/2026-08-20-*.json` committed, a 10% slide on the reference machine fails
+at 8.76 ms rather than at 16.6 ms, which is where the real protection lives for the rest of the
+milestone. The absolute ceiling remains the *product* bar — loose today by design, because it says
+"60 Hz at 1080p" and not "as fast as this commit" — and the relative check is what bites.
+
+The corollary is a working rule, now in CLAUDE.md's brick-delivery list: **a perf-touching brick
+commits a `docs/perf/` run.** A regression gate is only as good as the freshness of the thing it
+compares against.
+
+### A3. Correction to §2a's inventory: `RIME_PROFILE_ZONE` had no callers at all
+
+§2a lists the instruments that "already exist" and names `RIME_PROFILE_ZONE` among them. The macro
+and its swappable sink have existed since M1.6; a grep across the tree found **zero** zones placed
+anywhere in `engine/` or `samples/`. What existed was the hook, not the measurement — the same shape
+of drift m11.8 found in ARCHITECTURE and the glossary, and worth recording for the same reason.
+
+m12.0-perf places the first zones: `sim.tick` and its five stages, plus `frame.declare` /
+`frame.execute` / `frame.submit`. They sit at stage granularity because `report_zone` takes a lock
+and copies its sink, so a zone in a per-entity loop would cost more than it measures — a limit of
+the current implementation, named here so the next person does not discover it by benchmarking it.
+
+One consequence is visible in the committed reports and is honest rather than tidy:
+`10-destructible-wall` drives physics *outside* `Application`'s fixed tick, so its `sim.tick`
+timeline reads ~0.001 ms while the real work sits in `sim.physics`. The sample predates the ordered
+sim stage (ADR-0032 §8) and has a determinism proof pinned to its current loop; moving it is a
+change to make deliberately, not as a side effect of measuring it.

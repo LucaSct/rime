@@ -268,6 +268,17 @@ struct AdapterInfo {
     std::uint32_t device_id = 0;
     DeviceType type = DeviceType::Other;
     std::uint32_t api_version = 0; // packed Vulkan version; format with rhi version helpers/logging
+    // The DRIVER behind the device, as the backend reports it: `driver_name` is the vendor's short
+    // name ("NVIDIA", "radv"), `driver_info` its own version string ("610.43.03", "Mesa 26.1.6").
+    //
+    // Text rather than a decoded version number on purpose. Every vendor packs the raw integer
+    // differently (NVIDIA does not use Vulkan's own major/minor/patch layout), so any "pretty"
+    // decode is wrong for someone. The one consumer that needs this — the perf report's machine
+    // fingerprint (core/diagnostics/perf_report.hpp) — only ever asks whether two strings are
+    // EQUAL, because a driver update must invalidate a committed baseline rather than silently
+    // compare across it. Empty when the backend cannot report it.
+    std::string driver_name;
+    std::string driver_info;
     // A "portability" implementation (VK_KHR_portability_subset — MoltenVK/Metal, D3D translation
     // layers) rather than a native Vulkan driver. Such drivers only guarantee a subset of Vulkan
     // and have translation-specific sharp edges; callers that hit one (e.g. GPU tests) can gate on

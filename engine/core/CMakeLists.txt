@@ -13,6 +13,7 @@ add_library(rime_core STATIC
     src/diagnostics/assert.cpp
     src/diagnostics/profile.cpp
     src/diagnostics/work_ledger.cpp
+    src/diagnostics/perf_report.cpp
     src/memory/arena.cpp
     src/memory/stack_allocator.cpp
     src/memory/pool.cpp
@@ -49,6 +50,18 @@ target_link_libraries(rime_core
 # (other modules, the tests) gets the same assert behavior as the library itself.
 target_compile_definitions(rime_core
     PUBLIC $<$<CONFIG:Debug>:RIME_ENABLE_ASSERTS=1>)
+
+# What this binary was actually built as, baked in for the perf report's machine fingerprint
+# (diagnostics/perf_report.hpp). PRIVATE because only that one translation unit reads them.
+#
+# It has to be the BUILD's answer rather than the caller's: a report taken from an unoptimized or
+# sanitizer-instrumented binary is several times slower and would read as a catastrophic
+# regression against a clean baseline. #125 landed because a sticky CMake cache let the flag you
+# configured with and the flag the binary carried disagree — the fingerprint is where that
+# disagreement must not survive.
+target_compile_definitions(rime_core
+    PRIVATE RIME_BUILD_CONFIG="$<CONFIG>"
+            RIME_BUILD_SANITIZER="${RIME_SANITIZER}")
 
 # Project-wide build policy (C++20 + warning set); defined in the top-level CMakeLists.
 rime_apply_common_target_options(rime_core)
