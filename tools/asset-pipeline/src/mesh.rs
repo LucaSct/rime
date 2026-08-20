@@ -258,7 +258,10 @@ pub struct Primitive {
 /// omit normals are usually planar or already split). Documented as a known simplification.
 pub fn compute_normals(vertices: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut normals = vec![[0.0f32; 3]; vertices.len()];
-    for tri in indices.chunks_exact(3) {
+    // `as_chunks::<3>()`: a triangle is three indices by definition, so the constant belongs in
+    // the type. `.0` is the whole triangles; a trailing 1- or 2-index remainder is not a triangle
+    // and is skipped, which is what `chunks_exact(3)` did too.
+    for tri in indices.as_chunks::<3>().0 {
         let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         let p0 = vertices[i0];
         let p1 = vertices[i1];

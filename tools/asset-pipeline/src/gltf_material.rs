@@ -188,12 +188,20 @@ fn to_rgba8(data: &gltf::image::Data) -> Result<Vec<u8>, PipelineError> {
     let px = &data.pixels;
     let rgba = match data.format {
         Format::R8G8B8A8 => px.clone(),
+        // `as_chunks::<N>()` over `chunks_exact(N)`: the chunk size is a constant here, so the
+        // typed form hands back `&[u8; N]` and the indexing below is bounds-checked at compile
+        // time instead of at run time. `.1` is the remainder, which a non-conforming image could
+        // make non-empty; ignoring it drops a trailing partial pixel exactly as `chunks_exact` did.
         Format::R8G8B8 => px
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
         Format::R8G8 => px
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|c| [c[0], c[1], 0, 255])
             .collect(),
         Format::R8 => px.iter().flat_map(|&r| [r, r, r, 255]).collect(),

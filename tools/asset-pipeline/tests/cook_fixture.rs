@@ -293,11 +293,9 @@ fn cube_sdf_cooks_to_the_committed_fixture_bytes() {
     let bytes = std::fs::read(fixtures().join("cube.stl")).unwrap();
     let mesh = import_stl_binary(&bytes).unwrap().mesh;
     let vertices: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-    let triangles: Vec<[u32; 3]> = mesh
-        .indices
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
+    // `as_chunks::<3>()` already yields `[u32; 3]`, so the triangle list is a copy rather than a
+    // rebuild — the constant lives in the type instead of in three index expressions.
+    let triangles: Vec<[u32; 3]> = mesh.indices.as_chunks::<3>().0.to_vec();
     let cooked = compute_sdf(&vertices, &triangles, &SdfCookConfig::for_mesh())
         .unwrap()
         .volume
@@ -317,11 +315,9 @@ fn cube_sdf_cook_is_byte_stable() {
     let bytes = std::fs::read(fixtures().join("cube.stl")).unwrap();
     let mesh = import_stl_binary(&bytes).unwrap().mesh;
     let vertices: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-    let triangles: Vec<[u32; 3]> = mesh
-        .indices
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
+    // `as_chunks::<3>()` already yields `[u32; 3]`, so the triangle list is a copy rather than a
+    // rebuild — the constant lives in the type instead of in three index expressions.
+    let triangles: Vec<[u32; 3]> = mesh.indices.as_chunks::<3>().0.to_vec();
     let a = compute_sdf(&vertices, &triangles, &SdfCookConfig::for_mesh())
         .unwrap()
         .volume
