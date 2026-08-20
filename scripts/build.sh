@@ -86,14 +86,23 @@ if [ "$do_cpp" -eq 1 ]; then
         -s build_type="$build_type" -s compiler.cppstd=20 \
         -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" --build=missing
 
-    # Extra cache var layered on top of the preset. --sanitizer maps to the RIME_SANITIZER
-    # option (see /CMakeLists.txt); off is the default and adds nothing. The ${var:+…} guard
-    # expands to nothing when empty, so this stays safe under `set -u` (and on macOS bash 3.2).
-    san_arg=""
-    [ "$sanitizer" != "off" ] && san_arg="-DRIME_SANITIZER=$sanitizer"
+    # Extra cache var layered on top of the preset: --sanitizer maps to the RIME_SANITIZER option
+    # (see /CMakeLists.txt).
+    #
+    # ALWAYS PASSED, INCLUDING `off`, AND THAT IS THE WHOLE POINT. A CMake cache is sticky: once
+    # `build/dev` has been configured with -DRIME_SANITIZER=address, the value persists across every
+    # later configure that does not overwrite it. So omitting the flag for the default did not mean
+    # "no sanitizer" — it meant "whatever this directory was last told", and the usual sequence
+    # (`build.sh --sanitizer address` at a brick boundary, then a plain `build.sh` the next day)
+    # silently kept every target instrumented while the banner said nothing about it. Worse, the
+    # LSAN_OPTIONS default below keys off *this* variable, not off the cache, so that run also lost
+    # the suppression list it needs: the whole GPU-touching half of the suite reddens on
+    # driver-owned leaks and the failure names LeakSanitizer rather than the stale configuration.
+    # One always-passed flag makes the command line the single source of truth.
+    san_arg="-DRIME_SANITIZER=$sanitizer"
 
-    say "C++: cmake configure ($preset${san_arg:+, sanitizer=$sanitizer})"
-    cmake --preset "$preset" ${san_arg:+"$san_arg"}
+    say "C++: cmake configure ($preset, sanitizer=$sanitizer)"
+    cmake --preset "$preset" "$san_arg"
 
     say "C++: cmake build ($preset)"
     cmake --build --preset "$preset"
