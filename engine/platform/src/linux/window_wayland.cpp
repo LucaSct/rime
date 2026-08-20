@@ -202,8 +202,13 @@ private:
 
 // ── Input listener callbacks ─────────────────────────────────────────────────────
 // Each is a plain C callback matching the protocol's listener signature; the structs that collect
-// them are defined just below (designated initializers fill the leading members and leave the
-// optional trailing ones null — which is also why -Wmissing-field-initializers stays quiet).
+// them are defined just below. registry_global caps the wl_seat bind at version 5 (see below), and
+// wl_pointer/wl_keyboard inherit that negotiated version from the wl_seat they are created from —
+// so any event "since" that version or earlier is fair game for the compositor to send, and the
+// listener slot for it must be non-null or libwayland aborts with "listener function for opcode N
+// of <interface> is NULL" the first time it arrives. Only events introduced *above* the bound
+// version (wl_pointer's axis_value120 at v8, axis_relative_direction at v9) are actually
+// unreachable and safe to leave null.
 
 void kb_keymap(void*, wl_keyboard*, std::uint32_t format, std::int32_t fd, std::uint32_t size) {
     if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
@@ -283,10 +288,13 @@ void kb_modifiers(void*,
     }
 }
 
-// Value-initialize the listener (every member null) and then set only the events we handle. This
-// way the optional trailing members newer protocol versions add — repeat_info here, the axis_*
-// family on the pointer below — need not be named, which also keeps -Wmissing-field-initializers
-// (GCC warns on designated initializers that omit them) satisfied across libwayland versions.
+// Reachable at the bound version (since 4) but there is no client-side repeat timer yet — kb_key
+// always reports repeat = false — so the rate/delay the compositor hands us has nowhere to go.
+void kb_repeat_info(void*, wl_keyboard*, std::int32_t, std::int32_t) {}
+
+// Value-initialize the listener (every member null) and then set only the events we act on, plus
+// the reachable-but-unused ones (repeat_info) as explicit no-ops so libwayland never dispatches
+// through a null slot. Members beyond the bound version stay null; see the comment above.
 const wl_keyboard_listener g_keyboard_listener = [] {
     wl_keyboard_listener l{};
     l.keymap = kb_keymap;
@@ -294,6 +302,7 @@ const wl_keyboard_listener g_keyboard_listener = [] {
     l.leave = kb_leave;
     l.key = kb_key;
     l.modifiers = kb_modifiers;
+    l.repeat_info = kb_repeat_info;
     return l;
 }();
 
@@ -388,6 +397,18 @@ void ptr_axis(void*, wl_pointer*, std::uint32_t, std::uint32_t axis, wl_fixed_t 
     post_event(e);
 }
 
+// frame/axis_source/axis_stop/axis_discrete are all reachable at the bound version (since 5) but
+// we don't do frame-grouped or source-aware scroll handling — ptr_axis already emits one
+// MouseWheel event per axis event, which is enough for the engine today. Explicit no-ops so
+// libwayland never dispatches through a null slot (see the comment above kb_keymap).
+void ptr_frame(void*, wl_pointer*) {}
+
+void ptr_axis_source(void*, wl_pointer*, std::uint32_t) {}
+
+void ptr_axis_stop(void*, wl_pointer*, std::uint32_t, std::uint32_t) {}
+
+void ptr_axis_discrete(void*, wl_pointer*, std::uint32_t, std::int32_t) {}
+
 const wl_pointer_listener g_pointer_listener = [] {
     wl_pointer_listener l{};
     l.enter = ptr_enter;
@@ -395,6 +416,10 @@ const wl_pointer_listener g_pointer_listener = [] {
     l.motion = ptr_motion;
     l.button = ptr_button;
     l.axis = ptr_axis;
+    l.frame = ptr_frame;
+    l.axis_source = ptr_axis_source;
+    l.axis_stop = ptr_axis_stop;
+    l.axis_discrete = ptr_axis_discrete;
     return l;
 }();
 
