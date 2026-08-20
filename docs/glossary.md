@@ -509,6 +509,109 @@ Entries are grouped roughly by area and kept short on purpose.
   a stateful decoder needs *before* the first frame — AV1's analog of H.264's SPS/PPS.
   Rime ships it out-of-band in the protocol's `StreamConfig` message.
 
+## Networking & replication
+
+The M11 vocabulary ([ADR-0033](adr/0033-networking-v1.md),
+[design/reliability.md](design/reliability.md), [design/replication.md](design/replication.md)).
+See also **Determinism / replication** under *Physics & destruction*.
+
+- **Datagram.** One self-contained packet. UDP delivers datagrams: they may be **lost**,
+  **reordered**, or **duplicated**, and never partially arrive. Everything below is machinery for
+  living with that honestly, rather than pretending (as TCP does) that it does not happen.
+- **Dedicated vs. listen server.** A *dedicated* server is a headless process that owns the
+  simulation and plays no part in it; a *listen* server is one player's client also acting as
+  server. Rime is dedicated-server-authoritative, and treats a listen server as a degenerate
+  *embedding* of that — not a second design.
+- **Authority.** Which machine's answer is the truth for a given thing. In Rime the server has it;
+  a client's copy of a server-owned entity is a **mirror** (`Authority::Remote`), and code paths
+  that would compute its state locally early-out instead of forking into a second implementation.
+- **Replication.** Keeping a client's view of the world in step with the server's. Rime's is
+  **hybrid**: destruction *topology* replicates as **events** the client replays deterministically,
+  dynamic *state* (debris, bodies) replicates as **snapshots**. See *event replay* and *snapshot*.
+- **NetId.** The server-assigned name for a replicated entity — the only stable way two machines
+  can talk about the same thing. A local index (an array slot, an `InstanceId`) is *not* one: it
+  agrees only if both peers happened to create things in the same order. Rime's is a **generational
+  handle** (`core::Handle`), so ids can be recycled — debris churn makes a never-reused counter
+  unbounded in practice — without a stale reference silently resolving to the new occupant
+  (`NetIdMap::resolve` checks the generation). Each side maps `NetId` ↔ its own local ECS handle;
+  the wire only ever names `NetId`s. Destructible *entities* and debris get them. Destruction
+  **parts** do not: their ids derive from the cooked fracture pattern identically on every peer
+  (the ADR-0029 addressing), so naming a part costs no table at all.
+- **Snapshot / delta / baseline.** A *snapshot* is "here is the state of these entities". A *delta*
+  sends only what changed since a **baseline** — the last state the server can prove the client
+  holds. The saving is enormous and the trap is famous: get the baseline wrong and the client is
+  wrong **forever**, because nothing re-sends what the server believes already arrived. The
+  baseline acknowledgement is a **replication-layer message** on the client's own
+  unreliable-sequenced stream — *not* the reliability layer's ack bitfield, which serves only the
+  reliable-ordered stream (ADR-0033 amendment A9).
+- **Event replay (networked destruction).** Replicating a *decision* instead of its *results*: the
+  server sends the committed damage ops (a few bytes, reliable-ordered) and every client re-runs
+  M8's deterministic damage → detach function locally (ADR-0029's replay contract), arriving at
+  bit-identical fracture topology **without streaming one byte of rubble geometry**. It is the
+  reason M8 was built as a pure, canonically-ordered function (ADR-0033 §2), and the reason the
+  M11 proof can demand exact agreement from clients that received different bytes.
+- **Sequence number and ack.** Each packet carries a number; the receiver **acks** what it got so
+  the sender can stop resending. Rime anchors the ack at the **delivery frontier** (the point up to
+  which everything has arrived) with a **forward-looking bitfield** of what landed beyond it —
+  rather than the more common "newest received + backward bitfield", which cannot report a late
+  recovery and can false-ack sequence 0.
+- **Reliable-ordered vs. unreliable-sequenced.** The two channel classes of Rime's reliability
+  layer (ADR-0033 §3). *Reliable-ordered*: everything arrives, exactly once, in send order —
+  resends until it lands (destruction events, spawn/despawn: missing one changes the world's shape
+  forever). *Unreliable-sequenced*: never resent, and anything older than what you already have is
+  dropped (positions: a retransmitted one arrives a round trip stale *and* holds fresher ones
+  behind it). Choosing per message kind is most of networking. Each unreliable **stream** owns its
+  own sequence space — sharing one silently starves whichever stream sends less often.
+- **Head-of-line blocking.** When one undelivered message stalls everything queued behind it —
+  the cost of reliability, and the reason position updates must not pay it.
+- **Redundancy window.** Answering loss by sending the same small payload again *in the next
+  packet* instead of retransmitting on demand. Rime's client input does this: each packet carries
+  the last few commands, deduplicated against a receive frontier. Cheap when payloads are tiny,
+  and it costs no round trip.
+- **Relevancy (interest management).** Deciding *per client* what is worth sending at all — a
+  player cannot see rubble across the map. Rime scores by distance with a **hysteresis band**, so a
+  boundary-straddling entity does not re-enter every other tick (each entry forces a full re-send).
+  The rule that shapes the whole system: **destruction events are never culled; debris transforms
+  are budgeted.** You can budget a correction, never an event. This is the seam 64-player scaling
+  lives behind.
+- **Priority and byte budget.** With more to send than fits, order by importance (nearest first)
+  and stop at a per-tick byte ceiling. The subtlety is bookkeeping: a tick cut short by the budget
+  is **not** complete, and recording it as complete retires the withheld state permanently.
+- **Tick / tick-tagging.** A *tick* is one fixed-size step of the simulation (see *fixed
+  timestep*); *tick-tagging* is stamping a message with the tick it belongs to. The natural reading
+  — "so both sides apply it at the same tick" — is **wrong**, and M11 recorded why (ADR-0033
+  amendment A11): reliable delivery is ordered but never *timely*, so the tag is an **ordering and
+  identity key**, not a schedule. Clients apply on arrival and are never in lockstep with the
+  server. Two server ticks may land inside one client tick, and merging them is a real bug — alive
+  bits still converge, but debris composition diverges.
+- **Interpolation (entity/snapshot).** Drawing a remote entity slightly in the past, blending
+  between states received, so motion is smooth despite arriving in discrete jumps. The price is a
+  little latency; the alternative is visible teleporting. *Shipped in M11:* a blend across one
+  tick, deposited into `ecs::RenderTransform` and expired when a tick does not renew it — otherwise
+  an entity at rest replays its last step forever, and debris coming to rest is the most common
+  event in a destruction engine. Interpolating over the interval a value *actually* covers is
+  deferred, with the delta header already carrying the server tick for it.
+- **Client-side prediction and reconciliation.** The client simulates its *own* input immediately
+  rather than waiting a round trip, then corrects when the server's answer arrives. Reconciliation
+  must compare resulting **state**, never a diff of command lists — a command leaving the un-acked
+  list means "the server will never act on it", which is not the same as "the server acted on it".
+- **Intent vs. device events.** What a client sends upstream. *Device events* are raw
+  key/mouse input; *intent* is "move this direction, look here, these buttons are held". Rime sends
+  intent: keybinds are client policy, raw events are unbounded per tick, and shipping devices
+  upstream would put the server's arithmetic on the client's side.
+- **Handshake and schema hash.** The exchange that turns an unknown address into a peer. Rime's is
+  **connectionless** — allocating per-peer state on first sight of an address is exactly the
+  denial-of-service a handshake exists to prevent — and it compares protocol version, app id and a
+  **schema hash** (a fold of the registered component layout) as *separate* fields, so a rejection
+  names what is wrong instead of just failing.
+- **Incarnation salt.** A random number identifying *this run* of a peer. Without it, a client
+  reconnecting from the same address restarts its sequence numbers at 0, and its previous
+  incarnation's in-flight packets are read as legitimate new traffic.
+- **Late join.** A client connecting mid-match, which needs a **baseline snapshot** of the world so
+  far rather than the event stream from the beginning. Named and deferred in M11.
+- **Lag compensation.** Server-side rewinding of the world to what a shooter *saw* when they fired,
+  so hits land despite latency. Named and deferred in M11.
+
 ## Performance & threading
 
 - **Job system / task scheduler.** Splits work into many small *jobs* spread across CPU
@@ -616,32 +719,3 @@ Entries are grouped roughly by area and kept short on purpose.
   for the system that owns it, but invisible to anything that only walks components (reflection,
   a `.rscene` save, a PIE snapshot) unless that system also exposes a **reconstructible-from-
   components** path — M9.7's restore proof is exactly that check, brick by brick.
-- **NetId.** A server-assigned, session-stable integer id for a replicated entity (M11,
-  ADR-0033). Each side maps `NetId` ↔ its local generational ECS handle (`NetIdMap`); the wire
-  only ever names `NetId`s. Destruction *parts* need none — their ids are derivable from the
-  cooked pattern identically on all sides (the ADR-0029 addressing); only dynamic debris *bodies*
-  and player entities get `NetId`s.
-- **Snapshot (netcode).** The server's periodic publish of dynamic world state — transforms,
-  velocities — to clients, sent on the **unreliable-sequenced** channel: a lost or late snapshot
-  is simply superseded by the next, never resent. Sent as **deltas against the last baseline the
-  client acked** — where that acknowledgement is a *replication-layer* message travelling back up
-  the client→server unreliable-sequenced channel, **not** the reliability layer's ack bitfield,
-  which serves only the reliable-ordered stream (ADR-0033 amendment A9). Clients
-  render an *interpolation buffer* a couple of snapshots in the past, on the fixed tick's
-  previous/current snapshot seam (ADR-0023).
-- **Event replay (networked destruction).** Replicating a *decision* instead of its *results*:
-  the server sends "damage event D at tick T" (a few bytes, reliable-ordered) and every client
-  re-runs the deterministic damage → detach function locally (ADR-0029's replay contract),
-  arriving at bit-identical fracture topology without streaming one byte of rubble transforms.
-  The reason M8 was built as a pure, canonically-ordered function (ADR-0033 §2).
-- **Relevancy / interest management.** Deciding, per client, which replicated state is worth
-  bandwidth this tick. Rime's v1: destruction *events* are world-relevant (never culled —
-  everyone's wall breaks); debris/body transform updates are distance-culled, nearest-first,
-  under a hard per-tick byte budget. The seam 64-player scaling lives behind.
-- **Reliable-ordered vs unreliable-sequenced.** The two channel classes of M11's reliability
-  layer over UDP (ADR-0033 §3): reliable-ordered = everything arrives, exactly once, in send
-  order (events, spawn/despawn — resent until acked); unreliable-sequenced = freshness over
-  completeness (snapshots — a newer packet makes an older one garbage, so drop, never resend).
-- **Tick-tagging.** Stamping a message (an input, an event) with the simulation-tick number it
-  belongs to, so both sides apply it at the same tick and the deterministic replay stays honest —
-  the fixed tick (ADR-0023) is what makes "the same tick" mean something.

@@ -9,6 +9,75 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-20) — m11.7 (the milestone proof) + Milestone 11 COMPLETE.** M11's "done when"
+> now runs: [`samples/12-networked-destruction`](../samples/12-networked-destruction) — a dedicated
+> headless server owns the canonical destruction simulation while **two clients at opposite ends of
+> the wall row receive demonstrably different bytes (640 vs 558) and still agree bit for bit** on
+> which parts died, what health they hold, and what debris exists. That claim is only available
+> because the hybrid model earns it: composition is **derived** from a replayed op stream, never
+> sent, so relevancy may legitimately give the two clients different mail without giving them
+> different worlds.
+>
+> **The brick opened on a contradiction in its own spec** — "two clients **over loopback**" and, in
+> the same sentence, "hash-verified **in CI**, deterministic, scripted loss, never environment luck."
+> Real UDP brings a per-runner scheduler; a proof that never touches a socket is a 51st unit test.
+> `net::Link` had already answered this one layer down, so the peers are written **once** against
+> `Link` and the transport is a flag. **Both ship, because what they can claim differs**: the
+> scripted run gates CI on an exact packet economy, the UDP run can make no exact claim but is the
+> only thing that can see a socket bug. Both produce the same hash, `d539e2f3e8799592`.
+>
+> **The design error worth recording.** The first version installed a plain `distance_relevancy` and
+> asserted the peers agree. They did not — and **the engine was right**: `shared_state_hash` folds
+> each peer's *own* `NetIdMap`, so a client relevancy never told about wall 5 hashes five walls
+> against the server's six. The mismatch was correct behaviour and the proof was measuring relevancy
+> rather than destruction. The roadmap already carried the rule ("destruction events are never
+> culled, debris transforms are distance-budgeted per client"), so destructibles are forced
+> always-relevant and debris stays distance-scored. What comparison to make is a design decision,
+> not a test detail. Comparison is peer-to-peer, **never against a checked-in constant** — the op
+> list is fed by contact impulses whose float results may legitimately differ between compilers, and
+> a golden hash would quietly convert this proof into the cross-platform float-determinism claim this
+> project has already recorded as false — and it is sampled at **quiescence barriers**, where
+> quiescence is each client's *own* hash going still, never its agreement with the server, which
+> would beg the question the barrier exists to ask.
+>
+> **Four ways it could have passed while broken, each now an assertion; the first draft hit three.**
+> Shots were single taps, so nothing died and **228 dead parts were 0** — every downstream claim
+> vacuous. `sync_debris` was never called, so no chunk became a replicated entity and the entire
+> m11.5 half measured an empty world (culled 0, over-budget 0; now **69603** and **24479**). And the
+> negative control decremented its counter and then applied the batch anyway, so "the sabotaged
+> client disagrees" was passing against a client that had lost nothing. Also asserted: loss actually
+> happened (299 packets), nothing was silently discarded as malformed, and the m11.6c input path
+> carried commands end to end. One trap the segfault taught: `ScriptedLink` holds a back-pointer to
+> the `ScriptedNetwork` that vended it, so returning the transport **by value** moves the network out
+> from under every link already handed out — it compiles, reads as ordinary RAII, and crashes in
+> endpoint comparison with a backtrace pointing nowhere near the move.
+>
+> **The milestone, whole.** **m11.0** ADR-0033 + the ladder · **m11.1** transport v2 (`UdpSocket`,
+> the `Link` seam, frontier-anchored acks) · **m11.2** sessions + the `Application` ordered sim stage
+> · **m11.3** replication core (`NetId`, reflection snapshots, ack-baseline deltas with **no history
+> buffer**) · **m11.4a/b** networked destruction — events, then debris · **m11.5** relevancy +
+> budgets · **m11.6a/b/c** interpolation, the draw path, and input as intent · **m11.7** the proof ·
+> **m11.8** this docs true-up. ADR-0033 accumulated **twenty-three amendments (A1–A23)**, nearly all of
+> them found by *building* rather than by reading — including two false claims in the ADR's own text
+> (A9/A10). The one that generalizes beyond networking is the
+> [replication invariant](design/replication.md): **any per-peer "what they have" fact may only
+> strengthen on confirmed *holding*** — never on "we sent it", "it arrived", or a proxy with a blind
+> spot. That bug appeared **five separate times** across m11.3–m11.5 in five different disguises, and
+> every instance was caught by a **counter**, never by reading the code. A proof that cannot see what
+> it skipped reads as passing.
+>
+> **Honest gaps, named not hidden.** Deferred fast-follows: **late-join baseline snapshots** (and so
+> composition mismatch is *detected but not repaired*); **transform quantization**; **lag
+> compensation**; **player-controller prediction** — the seam ships as state rather than an interface
+> (A20) precisely because no controller exists to shape it, and nothing consumes the replicated input
+> yet; debris **velocity** is not replicated; snapshot interpolation still spans exactly one tick
+> rather than the interval a value covers; the relevancy pass still **walks every replicated entity
+> per client** (narrowing it needs a spatial index); and the dev-server scale run has not been done.
+> **Next:** re-plan at the milestone boundary — M12, "The Block", is the vision demo, and it is the
+> first milestone that can make **absolute** performance claims now that a real GPU (an RTX 3060) is
+> the primary workstation. CI stays lavapipe, so how a hardware-only measurement becomes a durable,
+> regression-catching gate is an open design question, not a detail.
+
 > **Update (2026-07-28) — Milestone 11 (Networking + networked destruction) kicks off.**
 > **M11.0 landed [ADR-0033](adr/0033-networking-v1.md) (Accepted)** — the networking-v1 decisions:
 > **dedicated-server authority** (a listen server is a degenerate embedding, not a design; lockstep
@@ -877,9 +946,18 @@ named · **m11.7** the proof —
 `samples/12-networked-destruction`: a dedicated headless server with a **deterministic server-side
 scripted shooter** (amendment A6 — no player controller exists; that is M12 scope) + two clients
 over loopback see the same wall break at meaningful scale, hash-verified in CI. Proofs stay GPU-free
-and deterministic (scripted loss, never environment luck). Deferred fast-follows: late-join baseline
-snapshots, dev-server scale run, transform quantization, player-controller prediction, lag
-compensation.
+and deterministic (scripted loss, never environment luck) · **m11.8** the docs true-up. Deferred
+fast-follows: late-join baseline snapshots, dev-server scale run, transform quantization,
+player-controller prediction, lag compensation. *Status: **M11 COMPLETE** — m11.0–m11.8 all landed:
+ADR-0033 and its twenty-three amendments, the UDP transport and reliability layer, sessions, the
+replication core, networked destruction in both halves, relevancy and budgets, interpolation and
+upstream input, and the `samples/12-networked-destruction` proof — a dedicated server and two clients
+that receive **different bytes** (640 vs 558) and still agree bit for bit on the broken wall, run
+both on the deterministic scripted-loss harness (what CI gates on) and over real loopback UDP. The
+milestone's most portable lesson is not about networking: the
+[replication invariant](design/replication.md) — a per-peer "what they have" fact may strengthen only
+on confirmed **holding** — was violated five separate times in five disguises, and every instance was
+caught by a **counter**, never by reading the code.*
 
 **M12 — The vision demo: "The Block."** Sample `99-the-block` — destruction + dynamic
 lighting + scale, together, at a playable frame rate. The thesis, demonstrated.
