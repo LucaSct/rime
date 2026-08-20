@@ -40,12 +40,28 @@ struct JsonValue {
     bool boolean = false;
     std::string text; // Number: the raw token. String: the decoded contents.
     std::vector<JsonValue> array;
-    std::vector<std::pair<std::string, JsonValue>> object;
+
+    // An object's members as PARALLEL ARRAYS rather than one `vector<pair<string, JsonValue>>`,
+    // and the reason is a language rule worth knowing rather than a style preference. This type is
+    // RECURSIVE, so `JsonValue` is incomplete at the point these members are declared.
+    // `std::vector` explicitly permits an incomplete element type (C++17 §23.3.11.1) — `std::pair`
+    // does not, and instantiating one over an incomplete type is ill-formed. libstdc++ accepted the
+    // pair version; Clang correctly rejected it, which is what the TSan job (the only Clang build
+    // in CI) caught. Keys and values move together and are always the same length.
+    std::vector<std::string> keys;
+    std::vector<JsonValue> values;
+
+    [[nodiscard]] std::size_t member_count() const noexcept { return keys.size(); }
+
+    void add_member(std::string key, JsonValue value) {
+        keys.push_back(std::move(key));
+        values.push_back(std::move(value));
+    }
 
     [[nodiscard]] const JsonValue* find(std::string_view key) const {
-        for (const auto& [k, v] : object) {
-            if (k == key)
-                return &v;
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            if (keys[i] == key)
+                return &values[i];
         }
         return nullptr;
     }
@@ -249,7 +265,7 @@ private:
             JsonValue child;
             if (!value(child, depth + 1))
                 return false;
-            out.object.emplace_back(std::move(key), std::move(child));
+            out.add_member(std::move(key), std::move(child));
             skip_space();
             if (pos_ < s_.size() && s_[pos_] == ',') {
                 ++pos_;
@@ -847,7 +863,9 @@ bool PerfReport::parse(std::string_view text, PerfReport& out, std::string& erro
     const JsonValue* dists = nullptr;
     if (!need_object(root, "distributions", dists, error))
         return false;
-    for (const auto& [name, node] : dists->object) {
+    for (std::size_t i = 0; i < dists->member_count(); ++i) {
+        const std::string& name = dists->keys[i];
+        const JsonValue& node = dists->values[i];
         if (node.type != JsonValue::Type::Object) {
             error = fmt::format("distribution '{}' is not an object", name);
             return false;
@@ -872,7 +890,9 @@ bool PerfReport::parse(std::string_view text, PerfReport& out, std::string& erro
     const JsonValue* passes = nullptr;
     if (!need_object(root, "passes", passes, error))
         return false;
-    for (const auto& [name, node] : passes->object) {
+    for (std::size_t i = 0; i < passes->member_count(); ++i) {
+        const std::string& name = passes->keys[i];
+        const JsonValue& node = passes->values[i];
         if (node.type != JsonValue::Type::Object) {
             error = fmt::format("pass '{}' is not an object", name);
             return false;
@@ -897,7 +917,9 @@ bool PerfReport::parse(std::string_view text, PerfReport& out, std::string& erro
     const JsonValue* worst_passes = nullptr;
     if (!need_object(*worst, "passes", worst_passes, error))
         return false;
-    for (const auto& [name, node] : worst_passes->object) {
+    for (std::size_t i = 0; i < worst_passes->member_count(); ++i) {
+        const std::string& name = worst_passes->keys[i];
+        const JsonValue& node = worst_passes->values[i];
         if (node.type != JsonValue::Type::Number) {
             error = fmt::format("worst_frame pass '{}' is not a number", name);
             return false;
@@ -908,7 +930,9 @@ bool PerfReport::parse(std::string_view text, PerfReport& out, std::string& erro
     const JsonValue* ledger = nullptr;
     if (!need_object(root, "ledger", ledger, error))
         return false;
-    for (const auto& [name, node] : ledger->object) {
+    for (std::size_t i = 0; i < ledger->member_count(); ++i) {
+        const std::string& name = ledger->keys[i];
+        const JsonValue& node = ledger->values[i];
         if (node.type != JsonValue::Type::Number) {
             error = fmt::format("ledger counter '{}' is not a number", name);
             return false;
