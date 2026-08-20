@@ -35,9 +35,12 @@ feature module removed (guardrail #2). `rime_hello` stays as the trivial M0 laun
 
 - **Windowed present** — the loop renders into an offscreen target headlessly; presenting to a
   swapchain is wired when a display-bearing sample needs it.
-- **Temporal interpolation** — `alpha` is plumbed to the render callback; the previous-tick history
-  buffer that uses it (also an M11 enabler) is deferred until a smoothness workload asks for it. v0
-  renders the latest tick.
+- **Temporal interpolation** — **partly built at M11, and not here.** `alpha` is still plumbed from
+  this loop, but the previous-tick history buffer ADR-0023 deferred was built at m11.6a/b as
+  `replication::PreviousTransform`, consumed through `ecs::RenderTransform`. Note the scope: it
+  covers **replicated mirrors only**, because that is the workload that asked for it. A locally
+  simulated or predicted entity still has no history and still renders the latest tick, so a client's
+  *own* smoothing remains unbuilt — the half M12 owns.
 - **ECS-native input** — v0 exposes the frame's input snapshot via `Application::frame_input()`;
   routing it through an ECS resource / per-tick timeline is a later refinement.
 

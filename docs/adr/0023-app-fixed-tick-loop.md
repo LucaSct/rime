@@ -151,3 +151,28 @@ system; a GPU-backed headless render run on lavapipe. Builds on
 (the M11 seams), [ADR-0019](0019-render-graph.md)/[ADR-0022](0022-forward-pbr.md) (the render it
 drives). Next: **M5.8** — `06-render-graph` and `07-first-light` put this loop on screen. See
 [ROADMAP.md](../ROADMAP.md) → M5.*
+
+---
+
+## Amendment (2026-08-20, post-m11.6): the history buffer was built, and where it actually lives
+
+The Consequences above defer the previous-tick history buffer "to a workload that needs it." That
+workload arrived at **m11.6a/b**: a client watching a remote entity receives its state in discrete,
+lossy jumps, so drawing the latest tick judders visibly.
+
+Two things a reader of this ADR should not have to discover by grep:
+
+1. **It was not built in `app`.** It lives in `engine/replication` as `PreviousTransform`, consumed
+   through the unreflected `ecs::RenderTransform` component, because `render` and `replication` can
+   only meet on a module below both. `Application` still owns and hands out `alpha` — and hands it
+   out through `FrameContext` alone, which is deliberate: a sim stage cannot call the interpolation
+   pass correctly even by mistake.
+2. **Its scope is narrower than "temporal interpolation".** It covers **replicated mirrors only**.
+   Locally simulated and predicted entities still have no history and still render the latest tick,
+   so this ADR's "slight judder over a slow sim" consequence remains live for everything a client
+   owns. Closing that is M12's, alongside the prediction work.
+
+One defect worth recording because it is invisible until you look for it: history must be **expired**
+when a tick does not renew it. `alpha` sweeps 0→1 every tick regardless of whether anything arrived,
+so a pair left valid after motion stops replays its last step forever — and debris coming to rest is
+the most common event in a destruction engine. See `settle_transform_history()`.
