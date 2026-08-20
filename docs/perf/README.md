@@ -52,7 +52,7 @@ otherwise:
 | Driver | NVIDIA 610.43.03 (Vulkan 1.4.341) |
 | CPU | AMD Ryzen 9 9950X3D |
 | OS | CachyOS (Linux 7.1.5) |
-| Build | `release` preset, no sanitizer, validation layers off (`NDEBUG`) |
+| Build | `release` preset — which is **`RelWithDebInfo`**, not `Release`: optimized with debug info (see CMakePresets.json). No sanitizer; Vulkan validation layers off, since they follow `NDEBUG`. |
 | Resolution | 1920×1080 |
 
 A report is only ever compared against another report whose **fingerprint matches** — GPU, driver,
@@ -75,7 +75,7 @@ attributed to the engine.
 {
   "schema": 1,
   "run":     { "sample": "11-lit-rooms", "commit": "95a2c0b", "date": "2026-08-20" },
-  "machine": { "gpu": "…", "driver": "…", "os": "linux", "build": "Release",
+  "machine": { "gpu": "…", "driver": "…", "os": "linux", "build": "RelWithDebInfo",
                "sanitizer": "off", "preset": "all-lighting-gates",
                "width": 1920, "height": 1080 },
 
