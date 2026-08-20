@@ -29,8 +29,19 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > where the shapes are provably apart: taking it at the touch is ill-conditioned (on a flat face the
 > witness slides freely without changing the distance), which showed up as a normal 90° off on
 > x86-64, and then again on **arm64 only** after the first fix. Threshold-tuning was the wrong
-> answer; measuring where the answer is well-conditioned was the right one. **Next:** m12.2 —
-> `engine/gameplay`, the character controller as a pure function over these queries.
+> answer; measuring where the answer is well-conditioned was the right one.
+>
+> **Deferred, and named rather than left as folklore: GJK does not always converge to the right
+> FEATURE on a large box.** A support function returns corners, and for a query aimed exactly at a
+> face all four of that face's corners are equally extreme; which corner-simplex the iteration then
+> settles on depends on rounding, and on arm64 it can settle on one whose closest point is the box's
+> EDGE direction — so the reported normal comes back diagonal for an axis-aligned approach. The
+> shape cast now *bounds* that (a contact normal must oppose the motion that produced it, or it is
+> rejected in favour of the sweep direction) but does not *fix* it. The same weakness feeds
+> `collide_speculative`, so it is not only a query concern. It wants its own brick with its own
+> proof — a simplex/termination improvement is a change to the narrowphase every module sits on, not
+> a fast-follow. **Next:** m12.2 — `engine/gameplay`, the character controller as a pure function
+> over these queries.
 
 > **Update (2026-08-20) — m12.0-perf COMPLETE: performance is now measured, in both halves.** The
 > brick landed in two passes. The first (#128) built the **work ledger** — counts, never clocks, so

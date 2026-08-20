@@ -428,6 +428,11 @@ inline constexpr int kBisectIterations = 24;
 // large enough that the iteration cap is reached rather than the loop spinning in place.
 inline constexpr float kMinStep = 5e-7f;
 
+// How firmly a contact normal must oppose the sweep to be believed. Small, because a legitimate
+// grazing contact genuinely approaches perpendicular; the check is there to reject a normal that
+// opposes the motion NOT AT ALL, which is geometrically impossible for a surface just run into.
+inline constexpr float kNormalOpposesSweep = 1e-3f;
+
 // How far back along the sweep to step before MEASURING THE CONTACT NORMAL, and why that is
 // necessary at all.
 //
@@ -512,7 +517,29 @@ template <class TargetSupport>
             // why that distinction earns a whole field).
             const float l = core::length(probe.closest);
             if (l > narrowphase_detail::kNormalEps) {
-                return probe.closest * (1.0f / l);
+                const core::Vec3 n = probe.closest * (1.0f / l);
+
+                // SANITY CHECK, and it is a geometric invariant rather than a fudge: a surface you
+                // ran INTO must have a normal that opposes the motion that produced the contact.
+                // dot(n, dir) < 0, always — a normal perpendicular to the sweep describes a surface
+                // the caster travelled parallel to and could not have hit.
+                //
+                // It is here because GJK does not always converge to the right FEATURE on a large
+                // box. A support function returns corners, and for a sweep aimed exactly at a face
+                // all four of that face's corners are equally extreme; the tie is broken
+                // deterministically, but which corner-simplex the iteration then settles on depends
+                // on rounding. On arm64 it settles on one whose closest point is the box's EDGE
+                // direction, and the reported normal comes back diagonal — (0, 0.707, 0.707) for an
+                // axis-aligned sweep, which is exactly perpendicular to the travel.
+                //
+                // Rejecting that and falling back is strictly better than passing it on: -dir is
+                // the correct answer for the face-on case, and for collide-and-slide "stop" is a
+                // safe response where "slide sideways along a surface that is not there" is not.
+                // The underlying convergence problem is NOT fixed by this — it is bounded. See the
+                // deferred item in docs/ROADMAP.md.
+                if (core::dot(n, dir) < -kNormalOpposesSweep) {
+                    return n;
+                }
             }
         }
         return fallback;
