@@ -49,8 +49,23 @@ namespace gjk_detail {
 // truths — revisited with the M7.10 stress harness.
 inline constexpr float kTouchEps2 = 1e-10f;
 inline constexpr float kRelEps = 1e-4f;
+// The absolute noise floor of the convergence test, as a multiple of |closest| * |w| — the scale of
+// the products inside it. A few float epsilons: large enough to cover the rounding of that dot
+// product, small enough that it never stops a comparison the arithmetic could still resolve.
+inline constexpr float kSupportEps = 4e-7f;
 inline constexpr float kDuplicateEps2 = 1e-12f;
 inline constexpr float kTinyVol = 1e-9f;
+// Relative companion to kTinyVol, as a fraction of |edge|^2 * |point|^2 — the scale of the products
+// va/vb/vc are differenced from. Sized by measurement, not taste: on a real degenerate triangle
+// those three came out as exactly 1-2 ULP of a ~16.1 product, summing to 4 ULP, so a coefficient
+// of 3.4 ULP sat just under it and the check did not fire. This is ~16 ULP.
+//
+// Being generous is the SAFE direction here, which is why it is not tuned to the edge. Falling
+// back to the best edge is never wrong — an edge of the simplex is a subset of it, so its closest
+// point remains a valid upper bound and GJK's convergence argument is untouched. It is only
+// potentially less tight. Whereas accepting a sliver as a real face divides by noise and returns
+// its CENTROID, which is not an approximation of anything.
+inline constexpr float kDegenerateRel = 2e-6f;
 inline constexpr int kMaxIterations = 32;
 
 // Result of a closest-point query against one simplex feature: the point itself, and the
@@ -182,8 +197,22 @@ closest_on_triangle(const SupportVertex* v, int i0, int i1, int i2) noexcept {
 
     // Face region. va+vb+vc is proportional to the triangle's squared area; if it has collapsed
     // (collinear vertices) no face exists — take the best of the three edges instead.
+    //
+    // THE THRESHOLD MUST SCALE WITH THE TRIANGLE, and an absolute one is why it did not fire when
+    // it mattered. va/vb/vc are built from dot products of edge vectors with point vectors, so
+    // their float error grows as |edge|^2 * |point|^2 — for vertices a metre out that is ~1e-7,
+    // a hundred times the fixed 1e-9 epsilon. A collinear triangle whose `sum` should be zero
+    // therefore reads as 1e-7, the check passes it as a real face, and the division below turns
+    // pure noise into barycentric weights: the answer comes back as the triangle's CENTROID.
+    //
+    // Measured, sphere vs a 1 m box at a 1.9e-5 m gap: GJK returned distance 0.47 for a true gap
+    // of 1.9e-5, with a closest point at (0, -0.33, -0.33) — the centroid of a sliver whose three
+    // vertices were collinear along the box's y=z diagonal. That is where m12.1's diagonal contact
+    // normal came from, and why it looked like an edge direction: it was one.
     const float sum = va + vb + vc;
-    if (std::fabs(sum) <= kTinyVol) {
+    const float edge2 = std::max(core::dot(ab, ab), core::dot(ac, ac));
+    const float point2 = std::max(core::dot(a, a), std::max(core::dot(b, b), core::dot(c, c)));
+    if (std::fabs(sum) <= kTinyVol + kDegenerateRel * edge2 * point2) {
         FeatureClosest best = closest_on_segment(v, i0, i1);
         const FeatureClosest e1 = closest_on_segment(v, i0, i2);
         if (e1.dist2 < best.dist2) {
@@ -415,11 +444,33 @@ template <class SupA, class SupB>
         }
 
         // Convergence bound: the support plane through w perpendicular to `closest` bounds M, so
-        // if w is no closer to the origin than `closest` (up to a relative tolerance), no point
-        // of M is — the origin is outside and `closest` is (within tolerance) the answer. When
-        // the origin is INSIDE M this test can never fire: every support along -closest passes
-        // the origin (dot(closest, w) <= 0), keeping the left side >= dist2.
-        if (dist2 - core::dot(closest, w.w) <= kRelEps * dist2) {
+        // if w is no closer to the origin than `closest` (up to a tolerance), no point of M is —
+        // the origin is outside and `closest` is (within tolerance) the answer. When the origin is
+        // INSIDE M this test can never fire: every support along -closest passes the origin
+        // (dot(closest, w) <= 0), keeping the left side >= dist2.
+        //
+        // THE SECOND TERM IS NOT A LOOSENING, IT IS THE FLOOR THIS TEST CAN ACTUALLY RESOLVE.
+        // Read the left side as |closest| * (distance - lower_bound): a RELATIVE bound on how much
+        // the answer might still improve. But its float error is ABSOLUTE, and set by the size of
+        // the shapes rather than the size of the gap — `dot(closest, w.w)` multiplies a small
+        // vector by a support point that may be a hundred metres out. So the relative bound alone
+        // becomes unreachable once the gap falls below roughly (float eps / kRelEps) * |w|, and
+        // GJK cannot stop: it keeps taking supports along a direction whose y/z sign is pure noise,
+        // flipping between two opposite corners of the same face, until it has accreted NEAR-
+        // DUPLICATE vertices into a degenerate triangle. `closest` then describes that triangle's
+        // interior rather than the face — a correct closest point for a simplex that is nonsense.
+        //
+        // Measured, sphere vs box, before this term existed: at a 1.9e-5 m gap from a 1 m box, GJK
+        // returned distance 0.47 for a true gap of 1.9e-5, with a normal perpendicular to the true
+        // one. The failing gaps scale with the box, exactly as the model predicts — below ~1.4e-3 m
+        // for a 1 m box, below ~0.14 m for a 100 m box. That is the defect that reached m12.1's
+        // shape cast as a diagonal contact normal, and it was NEVER an arm64 bug; arm64 merely
+        // rounded its way across the threshold in a case x86 survived.
+        //
+        // Stopping here is not giving up: at this point the simplex is still the healthy one, and
+        // `closest` is right. It is CONTINUING that destroys the answer.
+        const float support_noise = kSupportEps * std::sqrt(dist2 * core::dot(w.w, w.w));
+        if (dist2 - core::dot(closest, w.w) <= kRelEps * dist2 + support_noise) {
             finish_separated();
             return res;
         }
