@@ -12,6 +12,7 @@ rime_add_test(rime_physics_tests
     sync_test.cpp
     query_test.cpp
     shape_cast_test.cpp
+    push_in_test.cpp
     events_test.cpp
     ccd_test.cpp
     hull_test.cpp

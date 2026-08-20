@@ -77,7 +77,73 @@ void PhysicsSync::reconcile(ecs::World& world, PhysicsWorld& physics) {
 
         const BodyId body = physics.create_body(d);
         world.add_component<RigidBodyHandle>(e, RigidBodyHandle{body});
-        bound_.push_back(Bound{e, body, d.motion == MotionType::Dynamic});
+        // Seed the pushed pose with the spawn pose: the body is already there, so its first tick
+        // must neither re-push it nor invent a velocity out of the difference from the origin.
+        bound_.push_back(Bound{e, body, d.motion, d.position, d.orientation});
+    }
+}
+
+void PhysicsSync::push_in(ecs::World& world, PhysicsWorld& physics, float dt) {
+    for (Bound& b : bound_) {
+        if (b.motion != MotionType::Kinematic) {
+            continue; // the sim owns a dynamic pose; a static one does not move at all
+        }
+        const ecs::WorldTransform* wt = world.get<ecs::WorldTransform>(b.entity);
+        if (wt == nullptr) {
+            continue; // lost its transform between reconcile and now
+        }
+        const core::Vec3 p = wt->value.translation;
+        const core::Quat q = wt->value.rotation;
+
+        // Exact comparison against the last pose WE pushed. Not the ECS change flag: a game may
+        // write through get<WorldTransform>() without marking, and a skip path with a blind spot is
+        // one that silently stops working (CLAUDE.md guardrail 5, in its general form).
+        if (p.x == b.pushed_position.x && p.y == b.pushed_position.y &&
+            p.z == b.pushed_position.z && q.x == b.pushed_orientation.x &&
+            q.y == b.pushed_orientation.y && q.z == b.pushed_orientation.z &&
+            q.w == b.pushed_orientation.w) {
+            if (!b.pushed_moving) {
+                continue; // unmoved and already at rest: one compare, as a sleeping body costs
+            }
+            // The game moved it last tick and has now stopped. One final push, zeroing the
+            // velocity — otherwise the solver goes on resolving contacts against a capsule it
+            // believes is still walking, and the crate it was pushing keeps sliding by itself.
+            BodyState rest;
+            rest.position = p;
+            rest.orientation = q; // linear/angular velocity default to zero
+            if (physics.set_body_state(b.body, rest)) {
+                b.pushed_moving = false;
+            }
+            continue;
+        }
+
+        BodyState s;
+        s.position = p;
+        s.orientation = q;
+        if (dt > 0.0f) {
+            const float inv_dt = 1.0f / dt;
+            s.linear_velocity = (p - b.pushed_position) * inv_dt;
+
+            // Angular velocity from the orientation delta: for dq = q_new · conj(q_old), the
+            // instantaneous ω satisfies dq ≈ (1, ½ω·dt), so ω = 2·dq.xyz / dt. The double-cover
+            // flip matters — q and −q are the same rotation, but their DIFFERENCES are not, and
+            // taking the long way round would report an angular velocity pointing backwards at
+            // enormous magnitude (docs/math/rigid-body-dynamics.md §3).
+            core::Quat dq = q * core::conjugate(b.pushed_orientation);
+            if (dq.w < 0.0f) {
+                dq = core::Quat{-dq.x, -dq.y, -dq.z, -dq.w};
+            }
+            s.angular_velocity = core::Vec3{dq.x, dq.y, dq.z} * (2.0f * inv_dt);
+        }
+        // set_body_state does the two things a raw field write would miss: it refits the broadphase
+        // proxy (a stale proxy reports no pairs, which surfaces much later as something falling
+        // through a floor) and wakes the body.
+        if (physics.set_body_state(b.body, s)) {
+            b.pushed_position = p;
+            b.pushed_orientation = q;
+            b.pushed_moving = core::length_squared(s.linear_velocity) > 0.0f ||
+                              core::length_squared(s.angular_velocity) > 0.0f;
+        }
     }
 }
 
@@ -86,7 +152,7 @@ void PhysicsSync::write_back(ecs::World& world, PhysicsWorld& physics) {
         // Only dynamic bodies move under simulation, and among those only awake ones moved this
         // tick (M7.5). Skipping the rest is the whole point of awake-only write-back: a settled
         // world stamps nothing, so change-tracking consumers do no work for it.
-        if (!b.dynamic || physics.is_asleep(b.body)) {
+        if (b.motion != MotionType::Dynamic || physics.is_asleep(b.body)) {
             continue;
         }
         BodyState s;
@@ -130,6 +196,7 @@ void PhysicsSync::write_back(ecs::World& world, PhysicsWorld& physics) {
 
 void PhysicsSync::step(ecs::World& world, PhysicsWorld& physics, float dt) {
     reconcile(world, physics);
+    push_in(world, physics, dt); // game-owned kinematic poses, before the sim reads them
     physics.step(dt);
     write_back(world, physics);
 }
