@@ -12,6 +12,7 @@ add_library(rime_core STATIC
     src/diagnostics/log.cpp
     src/diagnostics/assert.cpp
     src/diagnostics/profile.cpp
+    src/diagnostics/work_ledger.cpp
     src/memory/arena.cpp
     src/memory/stack_allocator.cpp
     src/memory/pool.cpp
