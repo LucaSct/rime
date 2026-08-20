@@ -333,11 +333,15 @@ TEST_CASE("m12.1 shape cast: a grid of scales and distances, because this is whe
             // 0.55 short of the origin however far away it started.
             const float want = std::fabs(start) - 0.55f;
             // Absolute, not relative: what matters to a character controller is how many
-            // CENTIMETRES it ends up inside a wall, and that must not grow with the sweep length.
-            CHECK(std::fabs(hit.distance - want) < 0.05f);
-            // And it must never stop PAST the surface — an overshoot is a capsule inside geometry,
-            // while stopping a hair early is invisible.
-            CHECK(hit.distance <= want + 0.05f);
+            // MILLIMETRES it ends up from the wall, and that must not grow with the sweep length.
+            // Measured worst across this grid is ~1e-3 m; the bound leaves an order of magnitude
+            // for platform-to-platform float differences without going slack.
+            CHECK(std::fabs(hit.distance - want) < 0.01f);
+            // And it must never stop PAST the surface. This is the asymmetric one: stopping a hair
+            // early is invisible, while stopping past it is a capsule inside geometry. Stepping by
+            // GJK's LOWER bound is what makes this side of the bound hold — with the reported
+            // distance (an upper bound) it did not, and the overshoot reached 0.98 m.
+            CHECK(hit.distance <= want + 0.005f);
             CHECK(hit.normal.x == doctest::Approx(-1.0f).epsilon(0.02));
             CHECK(std::fabs(hit.normal.y) < 0.05f);
             CHECK(std::fabs(hit.normal.z) < 0.05f);

@@ -418,6 +418,16 @@ inline constexpr float kTouchTolerance = 5e-5f;
 // problem — every individual step is safe, so exhausting the cap stops SHORT of the surface.
 inline constexpr int kMaxIterations = 64;
 
+// Bisection steps used to recover from an overshoot (see the overlap branch below). 24 halvings
+// resolve a kilometre-long sweep down to well under a tenth of a millimetre, and the loop exits
+// early once the bracket is inside the touch tolerance, which is the usual case after two or three.
+inline constexpr int kBisectIterations = 24;
+
+// A floor under the advance, so a zero lower bound cannot stall the loop. Two orders of magnitude
+// below the touch tolerance: small enough that it can never carry the caster through anything,
+// large enough that the iteration cap is reached rather than the loop spinning in place.
+inline constexpr float kMinStep = 5e-7f;
+
 // How far back along the sweep to step before MEASURING THE CONTACT NORMAL, and why that is
 // necessary at all.
 //
@@ -508,6 +518,11 @@ template <class TargetSupport>
         return fallback;
     };
 
+    // The last position PROVEN to be outside the target — the lower bound the overshoot recovery
+    // bisects from. Proven by observation, not by arithmetic.
+    float safe_t = 0.0f;
+    bool have_safe = false;
+
     float t = 0.0f;
     for (int iter = 0; iter < kMaxIterations; ++iter) {
         const ShapeSupport swept = posed_at(t);
@@ -530,17 +545,45 @@ template <class TargetSupport>
         const core::Vec3 witness_normal = gap_dir * -1.0f;
 
         if (g.overlapping) {
-            // Overlapping at t == 0 is the caller's problem to fix (depenetration); overlapping
-            // after a step means floating-point overshoot on a step that was supposed to stop just
-            // short, so report the touch we were converging on rather than a miss. Reporting a
-            // miss here is how a fast body tunnels — the one failure this query exists to prevent.
-            t_out = t;
-            overlap_out = (t <= 0.0f);
-            // An INITIAL overlap has no gap anywhere to measure, so the retracted probe is not
-            // attempted: the witnesses are all there is. A caller depenetrating from here wants
-            // EPA's penetration axis, which this query deliberately does not compute — the flag is
-            // the signal to go and do that.
-            n_out = overlap_out ? witness_normal : measure_normal(t, witness_normal);
+            if (!have_safe) {
+                // Overlapping before moving at all: the caller's problem to fix (depenetration),
+                // and a different instruction from "stopped at the surface". There is no gap
+                // anywhere to measure, so the witnesses are all there is — a caller depenetrating
+                // from here wants EPA's penetration axis, which this query deliberately does not
+                // compute, and the flag is the signal to go and do that.
+                t_out = 0.0f;
+                overlap_out = true;
+                n_out = witness_normal;
+                p_out = g.point_b;
+                return true;
+            }
+            // WE OVERSHOT — and the interesting part is that this is REACHABLE, which is why the
+            // recovery exists rather than an assertion. Stepping by the reported gap should not be
+            // able to pass through anything, because motion of length s changes a distance by at
+            // most s. But GJK's distance is an UPPER bound: it terminates on a simplex, and the
+            // closest point of a subset is never nearer than the closest point of the whole set, so
+            // an early termination reports a gap slightly WIDER than the truth and the step is
+            // slightly too long. On a large flat target that margin is enough to end up inside.
+            //
+            // So the answer is not to trust the number harder but to stop trusting it: bisect
+            // between the last position proven OUTSIDE and this one proven INSIDE. Every bound here
+            // is an observation — "GJK said overlapping" — rather than an arithmetic claim, which
+            // is what makes "never stop inside the target" hold regardless of the distance's
+            // accuracy. Paid only on the overshoot path.
+            float lo = safe_t; // outside, proven
+            float hi = t;      // inside, proven
+            for (int b = 0; b < kBisectIterations && (hi - lo) > kTouchTolerance; ++b) {
+                const float mid = 0.5f * (lo + hi);
+                const ShapeSupport probe = posed_at(mid);
+                if (gjk(probe, target, probe.pos - target_centre).overlapping) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            t_out = lo; // the last position proven to be outside
+            overlap_out = false;
+            n_out = measure_normal(lo, witness_normal);
             p_out = g.point_b;
             return true;
         }
@@ -553,13 +596,8 @@ template <class TargetSupport>
             return true;
         }
 
-        // MISS TEST, and it needs no direction at all: moving a further `tmax - t` can reduce the
-        // gap by at most that much, so a gap wider than the distance remaining can never close.
-        // Exact, and it subsumes both "sweeping away from this body" and "the body is beyond the
-        // end of the sweep".
-        if (g.distance > tmax - t) {
-            return false;
-        }
+        have_safe = true;
+        safe_t = t;
 
         // THE ADVANCE, and the safety argument in one line: motion of length s changes the distance
         // between two rigid bodies by at most s, so stepping by exactly the current gap can never
@@ -577,7 +615,32 @@ template <class TargetSupport>
         // finishes in ONE step (the gap goes to zero), and only oblique approaches iterate, which
         // is what the iteration cap below bounds. Correctness does not depend on the cap, because
         // every step is individually safe.
-        t += g.distance;
+        // THE ADVANCE, by the LOWER bound rather than the reported distance. `g.distance` is an
+        // upper bound (GJK terminates on a simplex), and advancing by an upper bound advances by
+        // slightly MORE than the gap — which is how a sweep finishes inside a large target, or
+        // past a thin one where the far side reads as a clean miss. `g.lower_bound` comes from the
+        // support plane and is guaranteed not to exceed the true gap, so the step provably cannot
+        // pass through anything. Motion of length s changes a distance by at most s; step by no
+        // more than the distance and you cannot arrive on the other side of it.
+        //
+        // The lower bound can be 0 when GJK terminates immediately, which would not advance at
+        // all, so the step never falls below a floor — progress is guaranteed, and the floor is
+        // far under the touch tolerance so it cannot itself overshoot anything meaningful.
+        const float step = std::max(g.lower_bound, kMinStep);
+
+        // A miss is never inferred from a number either: if the step would run past the end of the
+        // sweep, CLAMP to the end and measure there, so "it never reaches" is a measurement at
+        // tmax rather than an extrapolation. One extra GJK on the miss path, in exchange for a
+        // false miss being impossible — and a false miss is a caster walking through a wall.
+        const float next = t + step;
+        if (next >= tmax) {
+            if (t >= tmax) {
+                return false; // measured at the far end, and still apart: a genuine clean sweep
+            }
+            t = tmax;
+        } else {
+            t = next;
+        }
     }
 
     // Iterations exhausted while still converging (a shallow graze). Stop at the last provably-safe
