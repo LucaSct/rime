@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 #include "rime/core/math/vec.hpp"
@@ -301,6 +302,38 @@ struct GjkResult {
     float distance = 0.0f;
     core::Vec3 point_a{};
     core::Vec3 point_b{};
+
+    // The vector from the origin to the closest point of the Minkowski difference — i.e. the
+    // SEPARATING AXIS, pointing from B toward A, with `distance` as its length. Mathematically it
+    // is exactly `point_a - point_b`; numerically it is a far better answer, and a caller that
+    // needs the DIRECTION between the shapes should use this rather than differencing the
+    // witnesses.
+    //
+    // Why they differ: this is accumulated from the simplex's `w` values, which are already
+    // differences (support_A - support_B), so the cancellation happens once, early, between two
+    // related points. `point_a` and `point_b` are each accumulated separately from raw support
+    // points and then subtracted, so a large shape's far-flung support vertices are cancelled
+    // twice, independently. On a 100 m wall that is the difference between a correct normal and a
+    // diagonal one — and, through conservative advancement's step size, between stopping at a wall
+    // and ending up a metre inside it (m12.1). Zero when the shapes overlap: there is no separating
+    // axis then.
+    core::Vec3 closest{};
+
+    // A guaranteed LOWER BOUND on the true distance, and the field a swept query must step by.
+    //
+    // `distance` is an UPPER bound: GJK terminates on a simplex, and the closest point of a subset
+    // is never nearer than the closest point of the whole set, so an early termination reports a
+    // gap slightly WIDER than the truth. That is harmless for a contact test and dangerous for a
+    // sweep, where "advance by the gap" then advances by slightly more than the gap — enough to
+    // finish INSIDE a large target, or PAST a thin one, where the far side reads as a clean miss.
+    //
+    // This one comes from the support plane, which is exactly what the convergence test already
+    // evaluates: for the search direction v = closest and its support point w, every point p of the
+    // Minkowski difference satisfies dot(p, v̂) >= dot(w, v̂), so the origin cannot be nearer than
+    // dot(w, v̂). Valid at every iteration, so the largest seen is kept. Never negative, and never
+    // greater than `distance`.
+    float lower_bound = 0.0f;
+
     SupportVertex simplex[4];
     int simplex_count = 0;
 };
@@ -331,6 +364,10 @@ template <class SupA, class SupB>
     verts[0] = minkowski_support(seed_dir);
     core::Vec3 closest = verts[0].w;
 
+    // The running support-plane bound (see GjkResult::lower_bound). Declared before the finish
+    // lambdas because they capture it.
+    float lower_bound = 0.0f;
+
     const auto finish_separated = [&] {
         res.overlapping = false;
         res.point_a = core::Vec3{};
@@ -340,6 +377,8 @@ template <class SupA, class SupB>
             res.point_b += verts[i].b * lambda[i];
         }
         res.distance = core::length(closest);
+        res.closest = closest; // the well-conditioned direction — see GjkResult::closest
+        res.lower_bound = std::min(lower_bound, res.distance); // a bound, never an over-claim
         for (int i = 0; i < count; ++i) {
             res.simplex[i] = verts[i];
         }
@@ -364,6 +403,16 @@ template <class SupA, class SupB>
 
         const core::Vec3 d = -closest;
         const SupportVertex w = minkowski_support(d);
+
+        // The support-plane bound: dot(w, v̂) with v̂ = closest/|closest|. Every point of the
+        // Minkowski difference lies on the far side of that plane, so the origin is at least this
+        // far away. Kept as the largest seen — each iteration's bound is independently valid.
+        {
+            const float len = std::sqrt(dist2);
+            if (len > 0.0f) {
+                lower_bound = std::max(lower_bound, core::dot(w.w, closest) / len);
+            }
+        }
 
         // Convergence bound: the support plane through w perpendicular to `closest` bounds M, so
         // if w is no closer to the origin than `closest` (up to a relative tolerance), no point

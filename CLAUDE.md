@@ -168,6 +168,18 @@ Verify proportionately to the change — don't re-run the whole world for every 
   sanitizer pass. Still exercise every change end-to-end at least once.
 - GPU proofs are **structural** — properties the physics guarantees, checked with margins on
   lavapipe — never golden images (the M5.6/M6.4 pattern in `tests/render/pbr_pipeline_test.cpp`).
+- **A new translation unit gets a `clang++ -fsyntax-only` pass before it is pushed.** The local
+  build and every CI job except one are GCC or MSVC; **the only Clang build in the matrix is the
+  TSan job**, which sits behind the slowest matrix entry. m12.0-perf shipped a recursive type
+  holding a `std::vector<std::pair<std::string, T>>` — legal-looking, accepted by libstdc++, and
+  ill-formed (`std::vector` permits an incomplete element type; `std::pair` does not). A
+  GCC-only loop cannot see that class of bug. Reconstruct the flags from
+  `build/dev/compile_commands.json` so the check uses the real include paths.
+- **A red `format, lint & license` on a PR that touched no Rust is probably not yours.** CI pins
+  `dtolnay/rust-toolchain@stable`, which **floats**: a new Rust release can start rejecting code
+  that has been on `main` for a milestone (1.98.0 did, twice, on 2026-08-20). Read the failing
+  STEP before believing the diff caused it, and `rustup update stable` to reproduce locally. Same
+  rule as the SVT-AV1 ASan flake: read the log, then blame the PR.
 
 ### Brick delivery
 

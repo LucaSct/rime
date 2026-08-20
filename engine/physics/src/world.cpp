@@ -1365,6 +1365,137 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
     return true;
 }
 
+bool PhysicsWorld::shape_cast(const ShapeCast& cast,
+                              ShapeHit& out,
+                              const QueryFilter& filter) const {
+    const Impl& p = *impl_;
+
+    // A compound caster has no single support function (it is not convex), which is the same reason
+    // the CCD path refuses one — see the speculative-contact branch above.
+    if (cast.shape.type == ShapeType::Compound) {
+        return false;
+    }
+    // A finite, positive distance is a precondition rather than a nicety: the broadphase step
+    // queries the SWEPT AABB, and an unbounded sweep's box is the whole world — which would turn an
+    // O(log n) query into a scan of every body without saying so.
+    if (!(cast.max_distance > 0.0f) || !std::isfinite(cast.max_distance)) {
+        return false;
+    }
+    const float dir_len = core::length(cast.direction);
+    if (dir_len < 1e-8f) {
+        return false; // a zero-length sweep touches nothing (use overlap_sphere for "am I inside?")
+    }
+    const core::Vec3 dir = cast.direction / dir_len; // unit ⇒ the reported distance is world units
+    const float tmax = cast.max_distance;
+
+    const ConvexHull* caster_hull = p.hull_of(cast.shape);
+
+    // The swept bound: the caster's box at both ends of the sweep, unioned. Every body that could
+    // possibly be touched has a fat AABB overlapping this, so the BVH can reject the rest.
+    const Aabb start_box = p.aabb_of(cast.shape, cast.origin, cast.orientation);
+    const Aabb end_box = p.aabb_of(cast.shape, cast.origin + dir * tmax, cast.orientation);
+    const Aabb swept{core::Vec3{std::min(start_box.min.x, end_box.min.x),
+                                std::min(start_box.min.y, end_box.min.y),
+                                std::min(start_box.min.z, end_box.min.z)},
+                     core::Vec3{std::max(start_box.max.x, end_box.max.x),
+                                std::max(start_box.max.y, end_box.max.y),
+                                std::max(start_box.max.z, end_box.max.z)}};
+
+    float best_t = tmax;
+    std::uint32_t best_slot = core::kInvalidSlotIndex;
+    core::Vec3 best_n{0.0f, 0.0f, 0.0f};
+    core::Vec3 best_p{0.0f, 0.0f, 0.0f};
+    std::uint16_t best_child = 0;
+    bool best_overlap = false;
+
+    // One candidate body. A compound is opened one level (children are never compounds — the same
+    // rule the raycast follows) so the reported child names the destructible PART that was caught.
+    const auto test = [&](std::uint32_t slot) {
+        const std::uint32_t d = p.slots[slot].dense;
+        const ShapeDesc& shape = p.shape[d];
+        const core::Vec3 pos = p.position[d];
+        const core::Quat& orient = p.orientation[d];
+
+        const auto try_one = [&](const ShapeDesc& target_shape,
+                                 core::Vec3 target_pos,
+                                 const core::Quat& target_orient,
+                                 const ConvexHull* target_hull,
+                                 std::uint16_t child_index) {
+            const ShapeSupport target{&target_shape, target_pos, target_orient, target_hull};
+            float t = 0.0f;
+            core::Vec3 n{0.0f, 0.0f, 0.0f};
+            core::Vec3 pt{0.0f, 0.0f, 0.0f};
+            bool overlap = false;
+            if (!cast_convex_vs_convex(cast.shape,
+                                       cast.origin,
+                                       cast.orientation,
+                                       caster_hull,
+                                       target,
+                                       target_pos,
+                                       dir,
+                                       best_t,
+                                       t,
+                                       n,
+                                       pt,
+                                       overlap)) {
+                return;
+            }
+            // An INITIAL OVERLAP wins outright over any later touch, whatever its distance. It has
+            // to: distance 0 is already minimal, and a caller that must depenetrate needs to hear
+            // about the body it is inside rather than about a wall it would have reached later.
+            if (overlap && !best_overlap) {
+                best_t = 0.0f;
+                best_slot = slot;
+                best_n = n;
+                best_p = pt;
+                best_child = child_index;
+                best_overlap = true;
+                return;
+            }
+            if (best_overlap || t >= best_t) {
+                return;
+            }
+            best_t = t;
+            best_slot = slot;
+            best_n = n;
+            best_p = pt;
+            best_child = child_index;
+        };
+
+        if (const CompoundShape* c = p.compound_of(shape); c != nullptr) {
+            for (std::size_t i = 0; i < c->child_count(); ++i) {
+                try_one(c->child_shape[i],
+                        compound_child_world_pos(*c, i, pos, orient),
+                        compound_child_world_orient(*c, i, orient),
+                        compound_child_hull(c->child_shape[i], p.hull_span()),
+                        static_cast<std::uint16_t>(i));
+            }
+            return;
+        }
+        try_one(shape, pos, orient, p.hull_of(shape), 0);
+    };
+
+    // Each tree carries exactly one filter class, so a flag gates a whole tree — the same structure
+    // raycast() uses.
+    if (filter.dynamics) {
+        p.dynamic_tree.query(swept, test);
+    }
+    if (filter.statics) {
+        p.static_tree.query(swept, test);
+    }
+
+    if (best_slot == core::kInvalidSlotIndex) {
+        return false;
+    }
+    out.body = BodyId{best_slot, p.slots[best_slot].generation};
+    out.point = best_p;
+    out.normal = best_n;
+    out.distance = best_overlap ? 0.0f : best_t;
+    out.initial_overlap = best_overlap;
+    out.child = best_child;
+    return true;
+}
+
 void PhysicsWorld::overlap_sphere(core::Vec3 center,
                                   float radius,
                                   std::vector<BodyId>& out,
