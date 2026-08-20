@@ -193,41 +193,6 @@ fn unique_socket_path() -> PathBuf {
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::engine_args;
-
-    #[test]
-    fn forwards_assets_and_scene_when_present() {
-        let args = engine_args("/tmp/s.sock", Some("m.manifest"), Some("world.rscene"));
-        assert_eq!(
-            args,
-            [
-                "--editor-host",
-                "/tmp/s.sock",
-                "--viewport",
-                "--assets",
-                "m.manifest",
-                "--scene",
-                "world.rscene",
-            ]
-        );
-    }
-
-    #[test]
-    fn omits_optional_flags_when_absent() {
-        let args = engine_args("/tmp/s.sock", None, None);
-        assert_eq!(args, ["--editor-host", "/tmp/s.sock", "--viewport"]);
-    }
-
-    #[test]
-    fn scene_is_independent_of_assets() {
-        let args = engine_args("/tmp/s.sock", None, Some("world.rscene"));
-        assert!(args.windows(2).any(|w| w == ["--scene", "world.rscene"]));
-        assert!(!args.iter().any(|a| a == "--assets"));
-    }
-}
-
 fn connect_retry(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
     let start = Instant::now();
     loop {
@@ -380,5 +345,40 @@ fn to_input_event(input: Input) -> InputEvent {
         mods: 0,
         client_us: 0,
         seq: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::engine_args;
+
+    #[test]
+    fn forwards_assets_and_scene_when_present() {
+        let args = engine_args("/tmp/s.sock", Some("m.manifest"), Some("world.rscene"));
+        assert_eq!(
+            args,
+            [
+                "--editor-host",
+                "/tmp/s.sock",
+                "--viewport",
+                "--assets",
+                "m.manifest",
+                "--scene",
+                "world.rscene",
+            ]
+        );
+    }
+
+    #[test]
+    fn omits_optional_flags_when_absent() {
+        let args = engine_args("/tmp/s.sock", None, None);
+        assert_eq!(args, ["--editor-host", "/tmp/s.sock", "--viewport"]);
+    }
+
+    #[test]
+    fn scene_is_independent_of_assets() {
+        let args = engine_args("/tmp/s.sock", None, Some("world.rscene"));
+        assert!(args.windows(2).any(|w| w == ["--scene", "world.rscene"]));
+        assert!(!args.iter().any(|a| a == "--assets"));
     }
 }
