@@ -54,8 +54,14 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > wrong. **Scope rulings:** Track FL (water) is **out** — this is the "decided at M12.0" the roadmap
 > promised; Track FX is **in at its true size** (fx1a's draw pass load-bearing, fx1b contingent on
 > the ledger, fire-as-light deferred); audio is **in as cuttable polish**, first on the cut list.
-> **Never cut:** prediction, fx1a, the perf gate. All 37 deferred items across the ADRs, module
-> READMEs and named-gap trail are ruled in §6, because an unruled item silently becomes scope.
+> **Never cut:** prediction, fx1a, the perf gate. All 38 deferred items across the ADRs, module
+> READMEs and named-gap trail are ruled in §6, because an unruled item silently becomes scope — and
+> the 38th is the lesson: a **second, independent** review pass found **ADR-0032's C6** (bounded
+> debris *visual* retirement, declared "M10's to build" and never built) missing from a section whose
+> first draft claimed completeness. m8.5 bounds debris in the *physics* world, so no M10 proof ran
+> long enough to notice the *visual* population — render leaves, SDF stamps, shadow casters — growing
+> without limit. It is ruled in two halves: **m12.0-perf counts it, m12.7 fixes it**, which makes C6
+> the work ledger's first real customer.
 > **Ladder:** m12.0 (this ADR + the hardware baseline) · m12.0-perf (harness + ledger) · m12.1
 > (shape casts + kinematic push-in) · m12.2 (the controller) · m12.3 (networked player, server-auth)
 > · m12.4 (**prediction + reconciliation — the hardest brick**) · m12.5 (interpolation v2) · m12.6
@@ -1025,7 +1031,7 @@ lighting + scale, together, at a playable frame rate. The thesis, demonstrated.
 
 *Bricks (planned 2026-08-20; [ADR-0035](adr/0035-vision-demo-m12.md) is the architecture — the
 falsifiable thesis, the performance-governance split, the controller/prediction design, and the
-rulings on all 37 deferred items):* **m12.0** ADR-0035 + this ladder + the **hardware true-up** (the
+rulings on all 38 deferred items):* **m12.0** ADR-0035 + this ladder + the **hardware true-up** (the
 first RTX 3060 baseline session; the first `docs/perf/` entries; the budget numbers ratified against
 measurement rather than guessed — the decision brick, no engine code) · **m12.0-perf** the perf
 harness + **work ledger v1**, wired into `11-lit-rooms` and `10-destructible-wall` so the instrument

@@ -279,3 +279,28 @@ to a measured follow-up rather than front-loaded.
   than retrofitting a bound after several passes assume its absence.
 - **Keeping the per-frame editor stream unconditional** (decision 11's status quo). Rejected: it wastes
   a core at idle and would compound as M10 adds per-frame GPU work.
+
+---
+
+## Amendment (2026-08-20, post-M11): C6 was declared M10's to build, and was not built
+
+The contract table above lists **C6** — *"debris visual lifetime is bounded, and retirement emits a
+world-bounds event so lighting caches invalidate the region"* — as **"NEW — M10's to build"**, and the
+Consequences promise *"destruction gets one new event kind and a visual-retirement stage."*
+
+Neither shipped. `DestructionEventKind` still has exactly the four kinds m8.4 gave it —
+`PartDamaged`, `PartDied`, `IslandDetached`, `DebrisSettled` — and there is no retirement stage
+anywhere in `engine/destruction`. M10 built every other technique in this ADR and closed on its
+proof, so nothing failed loudly; the promise simply never got a brick.
+
+**The consequence is a slow leak rather than a bug.** m8.5's lifecycle bounds debris in the *physics*
+world (settle ⇒ linger ⇒ freeze, over `unregister_hull`/`unregister_compound`), which is why the
+absence never showed up in an M10 proof: those run for a few hundred ticks. What stays unbounded is
+the *visual* population — per-part render leaves, and with them the SDF stamp set and the
+shadow-caster set — so a long-running session accumulates casters that no longer correspond to
+anything a player can see. This ADR's own argument for C6 said as much at kickoff ("closes the
+SDF/shadow-caster growth found at kickoff"); the growth was correctly diagnosed and then left open.
+
+Recorded here rather than edited above because ADRs are append-only. Ruled for M12 in
+[ADR-0035](0035-vision-demo-m12.md) §6, where it matters for the first time: the block runs long, at
+≥ 400 peak debris, in a mode a human plays.

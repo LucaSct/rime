@@ -217,13 +217,32 @@ buildings, which do not dodge.
 
 ### §6. Every deferred item is ruled
 
-An unruled item silently becomes scope, so the M12 plan ruled all 37 found across the ADRs, module
+An unruled item silently becomes scope, so this ADR rules all **38** found across the ADRs, module
 READMEs, the roadmap's named-gap trail and the session notes. Summarised:
 
 - **In M12:** prediction (m12.4) · snapshot interpolation over the real interval (m12.5) · fx1a
   (m12.6) · audio as cuttable (m12.9) · the cook-cache schema-key fix (m12.7, the first cook-touching
   brick) · the `server.despawn` discipline backstop (m12.3, the first new replication consumer) ·
-  physics-interpolation-into-alpha, folded into m12.4/m12.5.
+  physics-interpolation-into-alpha, folded into m12.4/m12.5 · **ADR-0032 C6, debris *visual*
+  retirement** — see below.
+
+**C6, and what its discovery says about this section.** [ADR-0032](0032-lighting-v2.md) declared C6
+*"NEW — M10's to build"* and promised destruction "one new event kind and a visual-retirement stage".
+Neither shipped: `DestructionEventKind` still has exactly m8.4's four kinds. m8.5 bounds debris in the
+*physics* world, which is why no M10 proof ever noticed — those run for a few hundred ticks — but the
+*visual* population (render leaves, and with them the SDF stamp and shadow-caster sets) grows without
+limit. M12 is where that first bites: the block runs long, at ≥ 400 peak debris, in a mode a human
+plays. **Ruling: in M12, in two halves — m12.0-perf adds the ledger counter that *detects* unbounded
+caster/draw growth, and m12.7 builds the retirement stage that fixes it.** Detect before fix is the
+right order here, and it makes C6 the work ledger's first real customer: a population that climbs
+monotonically across a long run is exactly what §2a exists to catch.
+
+The honest note is *how* C6 was found. This section's first draft claimed all 37 items were ruled and
+that nothing remained — and C6 was missing from it, surfaced only by a **second, independent review
+pass** run against the same tree. That is this ADR's own thesis turned on itself: a completeness claim
+is only as good as the search behind it, and "I found everything" is precisely the assertion that
+cannot fail on its own terms. The count is 38 because someone looked again; it should be read as a
+floor, not a total.
 - **In M12 only if measured (m12.p):** the every-tick narrowphase cache (M7's named first hot spot,
   likely at 400+ debris) · TGS solver mode *iff* the stack-quality review shows building-scale wobble
   · hi-Z SSR *iff* SSR binds on the 3060 · transform quantization *iff* the ledger shows budget
@@ -269,8 +288,9 @@ measured perf pass late, because it needs the block to measure; the proof last.
 - **m12.6** — Track FX brick fx1 (**fx1a** load-bearing, **fx1b** contingent). The M8.6-deferred
   coverage-delta pixel proof lands at last.
 - **m12.7** — block content + render scale: the building prefab pattern, a procedural assembly script
-  emitting `.rscene`, street props, and **view-frustum culling with its submitted/culled counters**.
-  *Load-bearing.*
+  emitting `.rscene`, street props, **view-frustum culling with its submitted/culled counters**, and
+  **ADR-0032 C6's debris visual-retirement stage** (§6) — the fix for the growth m12.0-perf's counter
+  will have made visible. *Load-bearing.*
 - **m12.8** — the playable client: **windowed present** (filling ADR-0023's seam; the RHI side has
   existed since M3.4) + first-person camera on the predicted player. *Load-bearing — a vision demo
   nobody can play is not one.*
@@ -323,3 +343,16 @@ measured perf pass late, because it needs the block to measure; the proof last.
   not.
 - **Include Track FL (water) so the block has a river.** Rejected: a whole module and a two-way
   physics coupling, for a clause the vision statement does not make.
+- **Split the milestone in two — "The Player" and "The Block".** Genuinely arguable, and *not*
+  rejected on the merits: M12 as specified bundles two proof regimes that behave differently, one
+  GPU-free and CI-gateable (move/aim/shoot, predicted and reconciled under loss) and one that only a
+  single machine can judge (the block holds frame rate). A second independent review of this same
+  question proposed exactly that cut. It is **deferred rather than taken** because the milestone table
+  and VISION both name one final demo, and re-cutting the map is a deliberate act that wants its own
+  decision rather than a side effect of this ADR.
+
+  **The seam is left where the split would go.** The ladder already divides cleanly at
+  **m12.5 / m12.6**: everything up to and including m12.5 is the player line and is provable on the
+  scripted-loss harness with no GPU; m12.6 onward is content, scale and the hardware claim. If the
+  milestone runs long, cutting there is a re-labelling, not a re-plan — which is the whole point of
+  naming it now.
