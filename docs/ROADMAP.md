@@ -9,6 +9,45 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-21) — GJK feature convergence fixed, ahead of m12.2.** m12.1 ended by *bounding*
+> a narrowphase defect rather than repairing it; this repairs it, because the controller is built on
+> the query it corrupted. **Two of GJK's epsilons were ABSOLUTE while the float error they guard is
+> proportional to the size of the shapes** — the recurring shape of every bug in this pair of bricks:
+>
+> * the **convergence bound** compared against `kRelEps * dist2`, a purely relative budget, while the
+>   error in the dot product it evaluates scales with the SUPPORT magnitude. Below roughly
+>   *(float eps / kRelEps) × |w|* it could never fire, so GJK could not stop — it kept taking supports
+>   along a direction whose transverse sign was pure noise, flipping between two opposite corners of
+>   the same face, accreting **near-duplicate vertices**;
+> * the **triangle degeneracy check** compared `|va+vb+vc|` against a fixed `1e-9`, while those three
+>   are differences of products whose ULP grows as *|edge|² × |point|²*. For vertices a metre out one
+>   ULP is ~1.9e-6 — a thousand times the epsilon — so a **collinear** triangle read as a real face and
+>   the barycentric division turned noise into weights.
+>
+> Together GJK returned the **centroid of a sliver** whose vertices were collinear along the box's
+> y=z diagonal: a 0.3 m sphere 1.9e-5 m from a 1 m box reported **distance 0.47 for a true gap of
+> 1.9e-5**, normal perpendicular to the truth. That is where m12.1's diagonal contact normal came
+> from, and why it looked like an edge direction — it was one. Both epsilons are now scale-relative,
+> sized by measurement (the degenerate `va/vb/vc` came out as exactly 1–2 ULP of a ~16.1 product).
+>
+> **The gate reaches below the seam, and that is argued rather than sloppy.** Verified over 21,000
+> configurations: `shape_cast` gives byte-identical results with the bug present and absent, because
+> m12.1's lower-bound stepping and retracted normal probe mask it on x86-64 — so a seam-level
+> regression test provably *cannot* fail. `tests/physics/gjk_test.cpp` is the one physics test that
+> includes a `src/` header, and it does fail on the old code (0.4687 vs 0.00166). Everything else in
+> the suite still drives `PhysicsWorld` only.
+>
+> **Two things found on the way, both still open.** `GjkResult::lower_bound` can collapse to **zero**
+> when GJK exits through its no-progress guard: `closest` carries ~2e-6 of transverse noise, the
+> target's ±20 m transverse support components multiply it, and the product swamps the real axial
+> term. Since m12.1's shape cast *advances* by that bound, it then crawls at its minimum step to the
+> iteration cap and under-reports — 3.2e-5 m for a true 8.4e-3 m gap, i.e. a caster that barely moves
+> when it should step 8 mm. That is a **shape-cast stepping** problem rather than a GJK one now that
+> `distance` is trustworthy again, and it is the next thing to fix. Separately, below a gap of about
+> ten ULP of the vertex coordinates (5e-6 m for a 30 m box) the normal is accurate only to ~9°: the
+> float32 resolution floor, not an algorithm defect. **Next:** the shape-cast stepping fix, then
+> m12.2.
+
 > **Update (2026-08-20) — m12.1 COMPLETE: the physics top-up the controller needs.** Two halves,
 > neither of them new physics — both expose machinery the engine already had and could not reach.
 > **`shape_cast`** sweeps a convex shape along a line by **conservative advancement** over the GJK
@@ -31,16 +70,8 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > x86-64, and then again on **arm64 only** after the first fix. Threshold-tuning was the wrong
 > answer; measuring where the answer is well-conditioned was the right one.
 >
-> **Deferred, and named rather than left as folklore: GJK does not always converge to the right
-> FEATURE on a large box.** A support function returns corners, and for a query aimed exactly at a
-> face all four of that face's corners are equally extreme; which corner-simplex the iteration then
-> settles on depends on rounding, and on arm64 it can settle on one whose closest point is the box's
-> EDGE direction — so the reported normal comes back diagonal for an axis-aligned approach. The
-> shape cast now *bounds* that (a contact normal must oppose the motion that produced it, or it is
-> rejected in favour of the sweep direction) but does not *fix* it. The same weakness feeds
-> `collide_speculative`, so it is not only a query concern. It wants its own brick with its own
-> proof — a simplex/termination improvement is a change to the narrowphase every module sits on, not
-> a fast-follow. **Next:** m12.2 — `engine/gameplay`, the character controller as a pure function
+> **The GJK defect this brick uncovered is FIXED — see the entry above.** It was deferred here on
+> the day and taken next, because m12.2's collide-and-slide leans on exactly the normal it corrupted. **Next:** m12.2 — `engine/gameplay`, the character controller as a pure function
 > over these queries.
 
 > **Update (2026-08-20) — m12.0-perf COMPLETE: performance is now measured, in both halves.** The

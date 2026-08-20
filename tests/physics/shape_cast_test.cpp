@@ -78,12 +78,10 @@ TEST_CASE("m12.1 shape cast: a swept sphere stops at the surface, not at the cen
     CHECK(hit.distance == doctest::Approx(3.5f).epsilon(0.01));
     CHECK_FALSE(hit.initial_overlap);
 
-    SUBCASE("the normal opposes the sweep") {
-        // Only that, for an axis-aligned approach to a box FACE — see the grid test below for why
-        // the exact face normal is not guaranteed there, and docs/ROADMAP.md for the GJK
-        // feature-convergence defect behind it. The oblique and ground-plane cases DO assert the
-        // exact normal, because those are stable on every platform.
-        CHECK(core::dot(hit.normal, core::Vec3{1.0f, 0.0f, 0.0f}) < 0.0f);
+    SUBCASE("the normal is the target's outward face, pointing back at the caster") {
+        CHECK(hit.normal.x == doctest::Approx(-1.0f).epsilon(0.02));
+        CHECK(std::fabs(hit.normal.y) < 0.05f);
+        CHECK(std::fabs(hit.normal.z) < 0.05f);
     }
 
     SUBCASE("the witness point is on the target's surface") {
@@ -344,19 +342,46 @@ TEST_CASE("m12.1 shape cast: a grid of scales and distances, because this is whe
             // GJK's LOWER bound is what makes this side of the bound hold — with the reported
             // distance (an upper bound) it did not, and the overshoot reached 0.98 m.
             CHECK(hit.distance <= want + 0.005f);
-            // The NORMAL is asserted here only as far as the engine actually guarantees it: that it
-            // opposes the sweep. The exact face normal is NOT guaranteed for a sweep aimed squarely
-            // at a face of a LARGE box, and that is a known defect rather than a tolerance to be
-            // widened — GJK can converge to a corner-simplex whose closest point is the box's EDGE
-            // direction, so the answer is a correct normal for the WRONG FEATURE. It reproduces on
-            // arm64 and not on x86-64, because which corner the iteration settles on depends on
-            // rounding. Written up in docs/ROADMAP.md as wanting its own brick: a simplex or
-            // termination change touches the narrowphase every module sits on.
-            //
-            // What IS asserted everywhere: the distance bounds above, which are the load-bearing
-            // half for a character controller (not tunnelling, not ending up inside geometry), and
-            // the two cases below, whose normals are stable on every platform.
-            CHECK(core::dot(hit.normal, core::Vec3{1.0f, 0.0f, 0.0f}) < 0.0f);
+            // The exact FACE normal, restored: this assertion was scoped down to "opposes the
+            // sweep" when GJK could converge to a corner-simplex whose closest point was the box's
+            // EDGE direction. Both epsilons behind that are now scale-relative (src/gjk.hpp), so
+            // the face normal holds at every size and distance in this grid.
+            CHECK(hit.normal.x == doctest::Approx(-1.0f).epsilon(0.02));
+            CHECK(std::fabs(hit.normal.y) < 0.05f);
+            CHECK(std::fabs(hit.normal.z) < 0.05f);
+        }
+    }
+}
+
+TEST_CASE("m12.1 shape cast: a cast begun a hair from a large flat target resolves the face") {
+    // Coverage of the small-gap-against-big-geometry case a character controller lives in — a
+    // capsule resting against a floor or wall and stepping away from it.
+    //
+    // Explicitly NOT the gate for the GJK feature-convergence fix, though it looks like it should
+    // be: this test passes identically with that bug present and absent, because `shape_cast`
+    // steps by the lower bound and measures its normal at a retracted position, and those two
+    // together mask it on x86-64. That was verified over 21,000 configurations, not assumed. The
+    // real gate is tests/physics/gjk_test.cpp, which reaches below the seam precisely because
+    // nothing above it can see the defect.
+    for (const float half : {1.0f, 5.0f, 20.0f, 100.0f}) {
+        for (const float gap : {1.0e-3f, 1.0e-2f, 1.0e-1f}) {
+            CAPTURE(half);
+            CAPTURE(gap);
+            physics::PhysicsWorld w;
+            add(w, box({0.25f, half, half}), {0.0f, 0.0f, 0.0f});
+
+            // Sphere surface exactly `gap` from the box face at x = -0.25.
+            const float start = -(0.25f + 0.3f + gap);
+            physics::ShapeHit hit;
+            REQUIRE(w.shape_cast(
+                cast_along(sphere(0.3f), {start, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, 1.0f), hit));
+
+            CHECK_FALSE(hit.initial_overlap);
+            CHECK(hit.distance == doctest::Approx(gap).epsilon(0.05));
+            CHECK(hit.distance <= gap + 1e-3f); // never past the surface
+            CHECK(hit.normal.x == doctest::Approx(-1.0f).epsilon(0.02));
+            CHECK(std::fabs(hit.normal.y) < 0.05f);
+            CHECK(std::fabs(hit.normal.z) < 0.05f);
         }
     }
 }
@@ -409,9 +434,6 @@ TEST_CASE("m12.1 shape cast: a sweep that must not tunnel, at speed") {
     physics::ShapeHit hit;
     REQUIRE(w.shape_cast(
         cast_along(sphere(0.05f), {-50.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, 100.0f), hit));
-    // The DISTANCE is the point of this test and is asserted at full strength: a 100 m sweep must
-    // stop at the wall rather than pass through it. The normal is asserted only as opposing the
-    // sweep, for the same reason as the grid test above.
     CHECK(hit.distance == doctest::Approx(49.9f).epsilon(0.001));
-    CHECK(core::dot(hit.normal, core::Vec3{1.0f, 0.0f, 0.0f}) < 0.0f);
+    CHECK(hit.normal.x == doctest::Approx(-1.0f).epsilon(0.02));
 }
