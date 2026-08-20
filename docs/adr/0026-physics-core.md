@@ -147,3 +147,18 @@ not theoretical.)
 - **The dependency direction stays clean**: `engine/physics` depends only on `core` + `ecs`; destruction,
   render (lighting), and the effects modules depend on *it* (and on the ECS/event/cook seams), never the
   reverse.
+
+---
+
+## Amendment (2026-08-20, post-M11): the capsule mover did not ship at m11.3
+
+The Deferred register above says *"joints/motors/character controller (m12.0, with vehicles/ragdolls;
+a capsule mover still ships at m11.3)"*. The parenthetical is **false against the tree**, and the
+reason is a re-plan this ADR predates: when M11 was decomposed (ADR-0033, 2026-07-28), m11.3 was
+assigned to the **replication core**, and the mover was never re-homed to another brick.
+
+So there is no character controller, capsule mover, or `shape_cast` anywhere in `engine/` at the end
+of M11 — only two comments noting the absence. Anything planning on top of this register should
+budget the mover as **new work**, not as a follow-up to something half-built. Recorded here rather
+than edited above because ADRs are append-only, and because the failure mode is the one ADR-0033's
+A9/A10 already caught once: a decision record quietly outliving the code it describes.

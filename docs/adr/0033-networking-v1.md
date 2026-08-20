@@ -739,3 +739,70 @@ Honestly missing, so nobody mistakes the seam for the feature: the replay itself
 local state to the server's version, the comparison that decides a correction is needed, and the
 clock offset that would let a command be placed at a server tick. The last of those is the only one
 that needs new wire bytes.
+
+## Amendment (2026-08-20, m11.7): the milestone proof, and what it forced us to admit
+
+### A21. Destructibles are ALWAYS relevant — that is a correctness rule, not a bandwidth policy
+
+The ROADMAP has said "destruction events are never culled, debris transforms are distance-budgeted
+per client" since m11.0, and it read like a bandwidth heuristic: events are rare and small, so do not
+bother filtering them. m11.7 showed it is load-bearing for *correctness*, and found it the hard way.
+
+The proof's first version installed a plain `distance_relevancy` over everything and asserted the two
+clients agree. They did not. The engine was right and the proof was wrong:
+`destruction_net::shared_state_hash` walks each peer's **own** `NetIdMap`, so a client that relevancy
+never told about wall 5 folds five walls where the server folds six. Nothing had diverged — the
+client had simply never been introduced to an entity, and the hash correctly reported that the two
+peers were describing different sets of things.
+
+The rule that follows is narrower and stronger than "events are cheap":
+
+> A destructible's **existence** is what its op stream is addressed against. An op names the
+> destructible entity's `NetId` (A11's addressing), so a client that has not been told the entity
+> exists cannot apply, buffer, or even parse its topology. Relevancy may withhold a **correction**;
+> it may never withhold the **subject** of one.
+
+Debris are the opposite case and stay distance-scored, which is exactly what m11.5 was built for:
+their composition is derived (A15), so culling their transforms costs accuracy of *where* rubble is,
+never agreement about *what* rubble is. This is the general shape of the hybrid model's budget rule:
+**you can budget a correction, never an event, and never the identity an event is addressed to.**
+
+The payoff is that the milestone claim stops being rhetorical. Because destructibles are always
+relevant and debris are not, the two clients in `samples/12-networked-destruction` provably receive
+**different bytes** — 640 and 558 — and are still required to agree bit for bit. Two identical
+clients agreeing would prove far less.
+
+### A22. The proof ships on both transports, because neither can make the other's claim
+
+The ladder said "two clients over loopback" and, in the same sentence, "hash-verified in CI,
+deterministic, scripted loss, never environment luck." Those are not compatible: real UDP brings a
+scheduler that differs per CI runner, so no exact counter is reproducible; but a proof that never
+touches a socket cannot see a socket bug and is a 51st unit test.
+
+`net::Link` had already answered this at m11.1 — `UdpLink` and `ScriptedNetwork` are two
+implementations of one seam — so the peers are written **once** and the transport is a flag. Both
+variants ship, with their claims stated separately rather than blurred: the scripted run is what CI
+gates on and asserts an exact packet economy (299 packets dropped, 69603 entities culled, 24479
+dropped over budget); the UDP run asserts only *agreement*, and is the only thing exercising real
+`recvfrom`, real MTU, real ports.
+
+The comparison is peer-to-peer and never against a checked-in constant. A golden hash would convert
+this proof into a cross-platform float-determinism claim, which this project has already recorded as
+false: the op list is fed by contact impulses whose results may legitimately differ between
+compilers. What may not differ is what two peers in *one run* agree on. Sampling is at **quiescence
+barriers**, where quiescence is each client's own hash going still — never its agreement with the
+server, which would beg the question the barrier exists to ask.
+
+### A23. The ladder ran to m11.8, and the milestone's real lesson is not about networking
+
+The ladder above says m11.0–m11.7. It ran to **m11.8**, the docs true-up, and three bricks split at
+build time (m11.4a/b, m11.6a/b/c) with m11.5 growing three follow-on fixes of its own.
+
+Twenty-three amendments is a lot for one ADR, and the distribution is the point: almost none came
+from re-reading the decision, and two (A9/A10) corrected claims the ADR itself made about code that
+already existed. They came from building. The one that generalizes past networking is the
+[replication invariant](../design/replication.md) — *any per-peer "what they have" fact may
+strengthen only on confirmed **holding***, never on "we sent it", "it arrived", or a proxy with a
+blind spot. It appeared **five times in five disguises** across m11.3–m11.5, and every instance was
+caught by a **counter on a skip path**, never by reading the code. That is the durable engineering
+result of M11: a proof that cannot see what it skipped reads as passing.

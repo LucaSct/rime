@@ -8,7 +8,7 @@ someone learning how engines work, so it defines ideas as it goes. It describes 
 - 🟡 **Designed** — the shape is decided; code is partial or stubbed.
 - ⚪ **Planned** — intended; not started.
 
-As of 2026-07 the **bottom of the layer cake is built and CI-green on Windows, Linux, and
+As of 2026-08 the **bottom of the layer cake is built and CI-green on Windows, Linux, and
 macOS**: `core` 🟢 and `platform` 🟢 (Milestones 0–2), `rhi` 🟡 (Milestone 3 + the M5.1–M5.3
 renderer top-ups), `ecs` 🟢 (Milestone 4), `render` 🟢 (**Milestone 5 complete** — the M5.4 render
 graph, M5.5 scene layer, and M5.6 forward-PBR pipeline, shown by `samples/06`/`07` and the M5.9
@@ -25,8 +25,17 @@ cooked fracture patterns, damage-driven body-swap, and debris budgets, shown by
 editor-as-client shell (`tools/editor`) that drives the engine over the streaming wire, with the new
 engine-side `editorhost` and `scene` modules behind it (the reflection schema/snapshot/edit channel
 and the `.rscene` format); Track S's `stream` grew the S1 local fast path that carries the viewport.
-The remaining feature modules (`audio`, `vfx`) are still ⚪. This document is
-the blueprint we build toward; the per-section tags below say how far each part has actually come.
+`render` 🟢 took the **Milestone 10** advanced-lighting push — CSM, cached local shadows,
+clustered-forward many-lights, an SDF clipmap, DDGI probes and SSR, every technique gated so *off* is
+the byte-identical M5.6 baseline, with `samples/11-lit-rooms` proving the thesis: break a wall and the
+shadow moves *and* the bounced light updates. **Milestone 11** added the networking stack as three
+modules stacked by dependency — `net` 🟢 (the `Link` datagram seam, the reliability layer, sessions),
+`replication` 🟢 (`NetId`s, reflection snapshots, ack-baseline deltas, relevancy/budgets,
+interpolation, upstream input) and `destruction_net` 🟢 (the hybrid model: topology replays from
+events, trajectories correct from snapshots) — with `samples/12-networked-destruction` as its proof.
+`audio` 🟡 and `vfx` 🟡 are seams with stub backends behind them; `animation` ⚪ has not started. This
+document is the blueprint we build toward; the per-section tags below say how far each part has
+actually come.
 
 > New to the vocabulary? Keep [glossary.md](glossary.md) open in a tab.
 
@@ -64,7 +73,8 @@ This is the single most important structural rule in the codebase.
         ├───────────────────────────────────────────────────────┤
         │  Feature modules:                                       │
         │    render · physics · destruction · audio · animation  │
-        │    · scene/world · assets(runtime) · net                │
+        │    · scene/world · assets(runtime)                      │
+        │    · net → replication → destruction_net                │
         ├───────────────────────────────────────────────────────┤
         │  ecs   (the data-oriented world: entities, components)  │
         ├───────────────────────────────────────────────────────┤
@@ -212,7 +222,9 @@ ideas, mapped from how Battlefield 6's Frostbite does it:
   ("surface/seam emitters"), and audio coherently.
 - **Network-aware from the start:** prioritization & culling of part-destruction and
   debris so it scales to 64+ players. Determinism/replication is a design constraint,
-  not an afterthought.
+  not an afterthought — **delivered at M11 in [`destruction_net`](#destruction_net--networked-destruction-the-milestones-point)**,
+  which is what makes M8's "deterministic damage → detach" a *replication contract* rather than a
+  nice property: topology replays from an event list, trajectories correct from snapshots.
 
 ### `audio` 🟡 — *the sound seam*
 *The interface exists (M8.4): `AudioBackend::play(sound, position, gain)` and a `NullAudioBackend`
@@ -225,14 +237,80 @@ stub — the real GPU-driven FX system (track fx1) replaces it. The M8.6 sample 
 fan-out and self-checks its `coverage()` witness on the break; the actual GPU dust DRAW pass stays
 deferred to fx1 (M8.6 renders the wall + debris via per-part render leaves, not the dust).*
 
-### `animation` ⚪, `net` 🟡
-Skeletal animation & blending — planned. Networking — *the module is born (m11.1,
-[ADR-0033](adr/0033-networking-v1.md)): the `Link` datagram seam (`UdpLink` over
-`platform::UdpSocket`, plus the deterministic `ScriptedNetwork` proof harness) and the
-`ReliableChannel` reliability layer — reliable-ordered + unreliable-sequenced over one socket,
-frontier-anchored acks, driver-routed so one socket serves N peers
-([design/reliability.md](design/reliability.md)). Sessions (m11.2), replication (m11.3), and
-networked destruction (m11.4) build on it.* Each behind its own interface.
+### `animation` ⚪
+Skeletal animation & blending — planned, behind its own interface.
+
+### `net` 🟢 — *datagrams, reliability, sessions*
+*Milestone 11 ([ADR-0033](adr/0033-networking-v1.md)).* The bottom of the networking stack, and it
+**links `rime::platform` alone** — no `ecs`, no `core` types on the wire. That is not an accident of
+layering but a cost the module paid deliberately, and it is what lets everything above it be tested
+without a world.
+
+- **The `Link` datagram seam** — `UdpLink` (over `platform::UdpSocket`) and `ScriptedNetwork`
+  (in-process, virtual clock, xorshift64-seeded scripted loss/latency/reorder/duplicate) are two
+  implementations of *one* interface. Every networking proof in the engine is written against `Link`,
+  so it is GPU-free, deterministic, and reproducible in CI — and the *same* code can be pointed at a
+  real socket by changing a flag.
+- **`ReliableChannel`** — reliable-ordered and unreliable-sequenced streams over one socket. The ack
+  is **anchored at the delivery frontier with a forward-looking bitfield**, not the classic
+  "newest + backward bitfield", which an adversarial review showed has a seq-0 false-ack deadlock and
+  cannot report a late recovery. Each unreliable **stream** owns its own sequence space
+  ([design/reliability.md](design/reliability.md)).
+- **`NetDriver` + `Session`** — one driver owns the `Link` and routes datagrams by endpoint, so one
+  socket serves N peers; it is **role-agnostic** (`listen()` makes it a server, `connect()` a client).
+  The handshake is deliberately **connectionless** — allocating a channel on first sight of an
+  endpoint is precisely the DoS it exists to prevent — and validates protocol version, app id and
+  schema hash as *separate* fields so a rejection names what to fix. Every datagram carries a 4-byte
+  **incarnation salt**, because a peer reconnecting from the same address restarts its sequence
+  spaces at 0 and its old in-flight packets would otherwise be read as legitimate early traffic.
+
+### `replication` 🟢 — *the world on the wire*
+*Milestone 11.* Above both `net` and `ecs` — a separate module rather than code inside `net`, so the
+transport keeps its platform-only dependency (ADR-0033 amendment A10).
+
+- **`NetId`** — a server-assigned generational `core::Handle`, **recycled**, because debris churn
+  makes a never-reused counter unbounded in practice. `NetIdMap::resolve`'s generation check is what
+  stops a recycled id from smearing a new entity's state onto an old one's mirror.
+- **Snapshots from reflection** — writers/readers are derived from the component reflection, and a
+  component's wire id is its **rank in the `type_hash`-sorted set**: both peers derive it and nothing
+  is transmitted, since registration order was made a non-contract at m11.2.
+- **Delta replication with no history buffer.** `ecs::Chunk`'s per-column version stamps
+  ([ADR-0018 §4](adr/0018-ecs-storage-model.md)) already answer *"what changed since V"*, so
+  per-client state is **one integer**. `AckTracker` advances only past **complete** ticks — a client
+  that acked on the strength of one *part* of a tick would make the server skip writes it never
+  applied, diverging permanently and silently.
+- **Relevancy, priority and budget** — per-client interest with a hysteresis band, nearest-first
+  ordering, and a per-tick byte budget (`relevancy.hpp`, incl. a ready-made `distance_relevancy`).
+- **Interpolation** — a previous-tick transform history consumed through `ecs::RenderTransform`, the
+  unreflected "pose to draw this frame" component that lives below both `render` and `replication`
+  because that is the only place the two can meet. History a tick does not renew is **expired**, or a
+  mirror at rest replays its last step forever.
+- **Input, upstream** — the one client→server path, and the direction changes what the bytes mean: a
+  snapshot is a fact, an input is a *request*. What crosses is **intent, not device events**
+  (amendment A19), on an unreliable-sequenced stream where loss is answered with **redundancy rather
+  than retransmission**. The server keeps two frontiers and acknowledges only **consumption**, never
+  arrival.
+
+Read [design/replication.md](design/replication.md) before touching any per-peer "what they have"
+state — the invariant it records cost this milestone the same bug five times.
+
+### `destruction_net` 🟢 — *networked destruction (the milestone's point)*
+*Milestone 11.* Above both `destruction` and `replication` — the same layering argument again. It
+implements ADR-0033's **hybrid model**, and the split is the whole idea:
+
+- **Topology replicates as events.** The server commits the canonical **damage-op list** (contact-
+  derived ops included) on the reliable-ordered stream, addressed by the destructible entity's
+  **NetId** — never an `InstanceId`, which is a local table position two peers agree on only if they
+  happened to spawn in the same order. Each client replays it through M8's deterministic
+  damage → detach function, so **which parts died and what debris exists is *derived*, never sent**.
+- **Trajectories replicate as state.** Determinism gives both peers the same chunks in the same order
+  from the same initial conditions; it does not give them the same tumble afterwards. So debris
+  transforms ride the snapshot path and correct on a **tolerance**, not as a per-tick puppet string.
+- That split is exactly why destruction events are never culled while debris transforms are
+  distance-budgeted per client: **you can budget a correction, never an event.**
+- `shared_state_hash` is the cross-peer witness — per-part alive bits, health and debris composition
+  walked in NetId order — which is what lets `12-networked-destruction` demand *exact* equality from
+  two clients that provably received different bytes.
 
 ### `assets` 🟢 — *cooked-asset loading (files are the boundary)*
 The runtime side of the asset pipeline: open cooked binary files, validate them completely, and hand
