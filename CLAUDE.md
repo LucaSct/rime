@@ -172,7 +172,11 @@ Verify proportionately to the change — don't re-run the whole world for every 
 ### Brick delivery
 
 Per-brick: own branch → build → lavapipe green → small commits → push → PR → CI (3-OS + format +
-ASan/UBSan + TSan) → merge. Stacked PRs are **pre-retargeted to `main` before parents merge**
+ASan/UBSan + TSan) → merge. **A perf-touching brick also commits a `docs/perf/` run**
+(`scripts/perf.sh --commit`, Release, on hardware — ADR-0035 §2c): the regression gate is only as
+good as the freshness of what it compares against, and putting the report in the diff is what makes
+an absent measurement visible in review rather than merely absent. Stacked PRs are
+**pre-retargeted to `main` before parents merge**
 (`gh api repos/LucaSct/rime/pulls/<N> -X PATCH -f base=main`). **Drive PRs through the REST API**
 rather than `gh pr edit`/`gh pr checks`: those wrappers need `read:org`, and whether you have it
 depends on how this machine authenticated — an interactive `gh auth login` grants it, a bare
