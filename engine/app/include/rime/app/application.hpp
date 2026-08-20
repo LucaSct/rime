@@ -35,7 +35,8 @@
 // trivial M0 launcher; this is the real entry point a game or sample drives.
 namespace rime::rhi {
 class Device;
-}
+class CommandBuffer;
+} // namespace rime::rhi
 
 namespace rime::render {
 class RenderGraph;
@@ -106,6 +107,20 @@ public:
     using RenderFn = std::function<void(FrameContext&)>;
 
     void on_render(RenderFn fn) { render_ = std::move(fn); }
+
+    // Set the after-the-GPU-is-done callback (replacing any previous). It runs once per GPU frame,
+    // immediately after the frame's command buffer has been submitted AND completed, with the
+    // graph still holding this frame's passes and the command buffer still alive.
+    //
+    // That is a narrow window, and it exists for exactly one reason: it is the ONLY moment
+    // `RenderGraph::resolve_timings(cmd)` can read the frame's GPU timestamps — the graph resets at
+    // the top of the next frame, and the command buffer dies at the bottom of this one. Without
+    // this seam, per-pass GPU cost is unreachable from anything built on `Application`, which is
+    // most of the engine (m12.0-perf / ADR-0035 §2b needs it for the hardware report). Never called
+    // for a GPU-free app: there is no submission to be after.
+    using PostSubmitFn = std::function<void(render::RenderGraph&, rhi::CommandBuffer&)>;
+
+    void on_post_submit(PostSubmitFn fn) { post_submit_ = std::move(fn); }
 
     // Set the per-FIXED-TICK callback (replacing any previous). It runs once per simulation tick,
     // after the Schedule and transform propagation — the place per-tick work that must NOT run
@@ -200,6 +215,7 @@ private:
     ecs::Schedule schedule_;
     FixedTimestep timestep_;
     RenderFn render_;
+    PostSubmitFn post_submit_;
     std::array<std::vector<TickFn>, kSimStageCount> stages_;
     // Where on_fixed_tick's entry lives inside stages_[PostSim], or -1 if it was never set. Keeping
     // the index is what preserves the old REPLACING semantics on top of a list: a second

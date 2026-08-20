@@ -9,6 +9,7 @@
 #include "rime/app/application.hpp"
 
 #include "rime/core/diagnostics/log.hpp"
+#include "rime/core/diagnostics/profile.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/platform/clock.hpp"
 #include "rime/render/render_graph.hpp"
@@ -74,19 +75,43 @@ void Application::run_ticks(int ticks) {
     // then the post-sim and publish hooks. Every tick advances the sim by exactly fixed_dt() — the
     // invariant the determinism proof and M11 netcode both rest on (ADR-0023 §1). Systems read that
     // constant dt by capturing it.
+    //
+    // The profile zones below are the engine's FIRST placed zones — the hook has existed since M1.6
+    // with a sink and no callers, which m12.0-perf turns into a measurement (ADR-0035 §2b asks for
+    // "per-stage CPU ms", and this is where the stages are). They sit at STAGE granularity on
+    // purpose: `report_zone` takes a lock and copies the sink, so a zone inside a per-entity loop
+    // would cost more than it measures. With no sink installed a zone is two clock reads and an
+    // early return.
     for (int i = 0; i < ticks; ++i) {
-        // Before anything reads the world: poll the network, apply remote ops, route input
-        // (ADR-0033 A5). Structural changes are legal — this is the main thread between phases.
-        run_stage(SimStage::PreSim);
-        schedule_.run(world_, jobs_);
-        ecs::propagate_transforms(world_, jobs_);
-        // After the hierarchy is composed: where a physics PhysicsSync::step reads up-to-date
-        // WorldTransforms, steps the sim, and writes poses back (stamping change detection) —
-        // structural work that a parallel Schedule system could not do. This is exactly where the
-        // old single on_fixed_tick hook ran, and it still does.
-        run_stage(SimStage::PostSim);
-        // Last: everything this tick will change has changed, so a consumer here sees final state.
-        run_stage(SimStage::Publish);
+        RIME_PROFILE_ZONE("sim.tick");
+        {
+            // Before anything reads the world: poll the network, apply remote ops, route input
+            // (ADR-0033 A5). Structural changes are legal — this is the main thread between phases.
+            RIME_PROFILE_ZONE("sim.pre");
+            run_stage(SimStage::PreSim);
+        }
+        {
+            RIME_PROFILE_ZONE("sim.schedule");
+            schedule_.run(world_, jobs_);
+        }
+        {
+            RIME_PROFILE_ZONE("sim.transforms");
+            ecs::propagate_transforms(world_, jobs_);
+        }
+        {
+            // After the hierarchy is composed: where a physics PhysicsSync::step reads up-to-date
+            // WorldTransforms, steps the sim, and writes poses back (stamping change detection) —
+            // structural work that a parallel Schedule system could not do. This is exactly where
+            // the old single on_fixed_tick hook ran, and it still does.
+            RIME_PROFILE_ZONE("sim.post");
+            run_stage(SimStage::PostSim);
+        }
+        {
+            // Last: everything this tick will change has changed, so a consumer here sees final
+            // state.
+            RIME_PROFILE_ZONE("sim.publish");
+            run_stage(SimStage::Publish);
+        }
         ++tick_count_;
     }
 }
@@ -109,10 +134,27 @@ void Application::render_frame(double alpha) {
         // owns compile + execute + submit. (Present, for a windowed build, hangs off the exported
         // target — the ADR-0023 §4 seam; headless/streamed builds read it back or tap it instead.)
         graph_->reset();
-        render_(ctx);
+        {
+            RIME_PROFILE_ZONE("frame.declare");
+            render_(ctx);
+        }
         auto cmd = device_->begin_commands();
-        graph_->execute(*cmd);
-        device_->submit_blocking(*cmd);
+        {
+            RIME_PROFILE_ZONE("frame.execute");
+            graph_->execute(*cmd);
+        }
+        {
+            // Blocking, so this zone is the GPU's wall time as the CPU experiences it — the honest
+            // number for a headless run, and the reason a `frame` timeline built from it is not
+            // lying about where the time went.
+            RIME_PROFILE_ZONE("frame.submit");
+            device_->submit_blocking(*cmd);
+        }
+        // The one moment the frame's GPU timestamps are readable: submitted, completed, graph not
+        // yet reset, command buffer not yet dead. See on_post_submit().
+        if (post_submit_) {
+            post_submit_(*graph_, *cmd);
+        }
     } else {
         // GPU-free: the callback still runs (it might do a CPU capture, drive a headless probe, or
         // just request_quit()), it just gets a null graph/device.

@@ -352,6 +352,15 @@ bool VulkanDevice::pick_physical_device() {
     adapter_.device_id = best_props.deviceID;
     adapter_.type = to_rhi(best_props.deviceType);
     adapter_.api_version = best_props.apiVersion;
+
+    // Who is driving this device. VkPhysicalDeviceDriverProperties is core Vulkan 1.2 and the loop
+    // above already rejected anything below 1.3, so the chain is always available here.
+    VkPhysicalDeviceDriverProperties driver{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    props2.pNext = &driver;
+    vkGetPhysicalDeviceProperties2(best, &props2);
+    adapter_.driver_name = driver.driverName;
+    adapter_.driver_info = driver.driverInfo;
     return true;
 }
 
