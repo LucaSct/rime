@@ -301,6 +301,23 @@ struct GjkResult {
     float distance = 0.0f;
     core::Vec3 point_a{};
     core::Vec3 point_b{};
+
+    // The vector from the origin to the closest point of the Minkowski difference — i.e. the
+    // SEPARATING AXIS, pointing from B toward A, with `distance` as its length. Mathematically it
+    // is exactly `point_a - point_b`; numerically it is a far better answer, and a caller that
+    // needs the DIRECTION between the shapes should use this rather than differencing the
+    // witnesses.
+    //
+    // Why they differ: this is accumulated from the simplex's `w` values, which are already
+    // differences (support_A - support_B), so the cancellation happens once, early, between two
+    // related points. `point_a` and `point_b` are each accumulated separately from raw support
+    // points and then subtracted, so a large shape's far-flung support vertices are cancelled
+    // twice, independently. On a 100 m wall that is the difference between a correct normal and a
+    // diagonal one — and, through conservative advancement's step size, between stopping at a wall
+    // and ending up a metre inside it (m12.1). Zero when the shapes overlap: there is no separating
+    // axis then.
+    core::Vec3 closest{};
+
     SupportVertex simplex[4];
     int simplex_count = 0;
 };
@@ -340,6 +357,7 @@ template <class SupA, class SupB>
             res.point_b += verts[i].b * lambda[i];
         }
         res.distance = core::length(closest);
+        res.closest = closest; // the well-conditioned direction — see GjkResult::closest
         for (int i = 0; i < count; ++i) {
             res.simplex[i] = verts[i];
         }

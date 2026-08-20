@@ -1389,7 +1389,6 @@ bool PhysicsWorld::shape_cast(const ShapeCast& cast,
     const float tmax = cast.max_distance;
 
     const ConvexHull* caster_hull = p.hull_of(cast.shape);
-    const ShapeSupport caster{&cast.shape, cast.origin, cast.orientation, caster_hull};
 
     // The swept bound: the caster's box at both ends of the sweep, unioned. Every body that could
     // possibly be touched has a fat AABB overlapping this, so the BVH can reject the rest.
@@ -1427,8 +1426,18 @@ bool PhysicsWorld::shape_cast(const ShapeCast& cast,
             core::Vec3 n{0.0f, 0.0f, 0.0f};
             core::Vec3 pt{0.0f, 0.0f, 0.0f};
             bool overlap = false;
-            if (!cast_convex_vs_convex(
-                    caster, cast.origin, target, target_pos, dir, best_t, t, n, pt, overlap)) {
+            if (!cast_convex_vs_convex(cast.shape,
+                                       cast.origin,
+                                       cast.orientation,
+                                       caster_hull,
+                                       target,
+                                       target_pos,
+                                       dir,
+                                       best_t,
+                                       t,
+                                       n,
+                                       pt,
+                                       overlap)) {
                 return;
             }
             // An INITIAL OVERLAP wins outright over any later touch, whatever its distance. It has

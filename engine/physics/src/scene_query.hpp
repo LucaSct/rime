@@ -413,13 +413,10 @@ namespace shape_cast_detail {
 inline constexpr float kTouchTolerance = 5e-5f;
 
 // The cap exists because conservative advancement converges geometrically but not finitely: a
-// sweep that grazes a surface at a shallow angle takes ever-smaller steps forever. 32 is far more
-// than a well-conditioned cast needs (2-6 is typical).
-inline constexpr int kMaxIterations = 32;
-
-// A closing rate below this means the sweep is parallel to the gap or opening it — no advance is
-// possible and the shapes can never meet along this line.
-inline constexpr float kMinClosing = 1e-6f;
+// sweep that grazes a surface at a shallow angle takes ever-smaller steps forever. A head-on sweep
+// finishes in one or two; 64 gives an oblique approach room, and running out is not a correctness
+// problem — every individual step is safe, so exhausting the cap stops SHORT of the surface.
+inline constexpr int kMaxIterations = 64;
 
 // How far back along the sweep to step before MEASURING THE CONTACT NORMAL, and why that is
 // necessary at all.
@@ -427,19 +424,28 @@ inline constexpr float kMinClosing = 1e-6f;
 // At the touching configuration the two witness points are within kTouchTolerance of each other, so
 // the direction between them is whatever float cancellation left behind. On a flat face it is worse
 // than noisy: the witness may sit anywhere across that face without changing the distance, so the
-// direction is barely determined even in exact arithmetic. Measuring one millimetre earlier — where
-// the shapes are provably apart — makes the same direction well-conditioned by construction, rather
-// than by hoping the iteration happened to land somewhere favourable.
+// direction is barely determined even in exact arithmetic. Measuring where the shapes are provably
+// apart makes the same direction well-conditioned by construction, rather than by hoping the
+// iteration happened to land somewhere favourable.
 //
-// This was learned twice. First a 50 m sweep at a wall reported the right distance and a normal
-// 90 degrees off; taking the previous iteration's direction fixed it on x86-64 and NOT on arm64,
-// because the two platforms round the advance differently and the last measured gap can land just
-// above the tolerance, where the direction is already noise.
+// The distance is MEASURED, not guessed. Sweeping a 0.3 m sphere at walls of half-extent 1 m to
+// 50 m from starts of 1 m to 500 m, the worst deviation of the reported normal from the true face
+// normal was:
 //
-// Scale-relative, because float error grows with coordinate magnitude: a fixed millimetre is
+//     back-off        worst |n - n_true|
+//     1 mm            0.99   (two configurations returned a diagonal axis)
+//     1 cm            0.000000
+//     5 cm            0.000000
+//
+// So 1 cm, scaled with coordinate magnitude because float error does: a fixed centimetre is
 // generous at 50 m and meaningless at 10 km.
+//
+// This assertion has failed twice, which is why it is measured rather than reasoned about: first on
+// x86-64 (a 50 m sweep reporting a normal 90 degrees off), then — after a fix that took the
+// previous iteration's direction — on arm64 ONLY, because the two platforms round the advance
+// differently and the last measured gap can land where the direction is already noise.
 [[nodiscard]] inline float normal_back_off(float scale) noexcept {
-    return std::max(1e-3f, 1e-5f * scale);
+    return std::max(1e-2f, 1e-4f * scale);
 }
 
 } // namespace shape_cast_detail
@@ -451,9 +457,11 @@ inline constexpr float kMinClosing = 1e-6f;
 // `overlap_out` reports the case that must not be confused with a zero-distance touch: the shapes
 // were already intersecting before the sweep began. A caller that treats "started inside a wall"
 // as "stopped at the wall" produces a controller frozen in the geometry it is stuck in.
-template <class CasterSupport, class TargetSupport>
-[[nodiscard]] inline bool cast_convex_vs_convex(const CasterSupport& caster,
-                                                core::Vec3 caster_centre,
+template <class TargetSupport>
+[[nodiscard]] inline bool cast_convex_vs_convex(const ShapeDesc& caster_shape,
+                                                core::Vec3 caster_origin,
+                                                const core::Quat& caster_orient,
+                                                const ConvexHull* caster_hull,
                                                 const TargetSupport& target,
                                                 core::Vec3 target_centre,
                                                 core::Vec3 dir,
@@ -464,16 +472,18 @@ template <class CasterSupport, class TargetSupport>
                                                 bool& overlap_out) {
     using namespace shape_cast_detail;
 
-    // The caster support, re-posed at distance `t` along the sweep. Translating a support function
-    // is just translating its result (support_{A+v}(d) = support_A(d) + v — src/support.hpp), so
-    // sweeping costs nothing per iteration beyond the add.
-    struct SweptSupport {
-        const CasterSupport* base;
-        core::Vec3 offset;
-
-        [[nodiscard]] core::Vec3 operator()(core::Vec3 d) const noexcept {
-            return (*base)(d) + offset;
-        }
+    // The caster, RE-POSED at distance `t` along the sweep — not "posed once at the origin, then
+    // offset". The identity support_{A+v}(d) = support_A(d) + v is exact in real arithmetic and
+    // ruinous in floats: at a 500 m start the offset support would compute a point near the wall as
+    // (-500.3) + (499.5), two large numbers cancelling to ~0.8, so EVERY support point carried
+    // ~5e-5 of noise — which is the touch tolerance itself, leaving the whole GJK loop working
+    // inside its own error. Re-posing evaluates the support at the caster's ACTUAL current
+    // position, which is small, and costs one vector add either way.
+    //
+    // Measured before this was fixed, sweeping a sphere at a wall from 500 m out: errors up to
+    // 0.46 m, normals 90 degrees off, and — worst — walls dead ahead reported as clean misses.
+    const auto posed_at = [&](float at_t) {
+        return ShapeSupport{&caster_shape, caster_origin + dir * at_t, caster_orient, caster_hull};
     };
 
     // The contact normal is measured at a slightly RETRACTED position rather than at the touch
@@ -482,17 +492,17 @@ template <class CasterSupport, class TargetSupport>
     // construction instead of by luck. `fallback` is used when even the retracted probe cannot
     // answer — the shapes still overlap there, which is the depenetration case.
     const auto measure_normal = [&](float hit_t, core::Vec3 fallback) -> core::Vec3 {
-        const float scale = core::length(caster_centre) + std::fabs(hit_t);
-        const core::Vec3 offset = dir * (hit_t - normal_back_off(scale));
-        const SweptSupport back{&caster, offset};
-        const GjkResult probe = gjk(back, target, (caster_centre + offset) - target_centre);
+        const float scale = core::length(caster_origin) + std::fabs(hit_t);
+        const float probe_t = hit_t - normal_back_off(scale);
+        const ShapeSupport back = posed_at(probe_t);
+        const GjkResult probe = gjk(back, target, back.pos - target_centre);
         if (!probe.overlapping) {
-            const core::Vec3 d = probe.point_b - probe.point_a;
-            const float l = core::length(d);
+            // `closest` points from the target toward the caster and IS the target's outward
+            // normal — no flip, and no differencing of witness points (GjkResult::closest explains
+            // why that distinction earns a whole field).
+            const float l = core::length(probe.closest);
             if (l > narrowphase_detail::kNormalEps) {
-                // Flipped so it points OUT of the target and back at the caster, matching
-                // RayHit's convention.
-                return d * (-1.0f / l);
+                return probe.closest * (1.0f / l);
             }
         }
         return fallback;
@@ -500,17 +510,24 @@ template <class CasterSupport, class TargetSupport>
 
     float t = 0.0f;
     for (int iter = 0; iter < kMaxIterations; ++iter) {
-        const core::Vec3 offset = dir * t;
-        const SweptSupport swept{&caster, offset};
-        const GjkResult g = gjk(swept, target, (caster_centre + offset) - target_centre);
+        const ShapeSupport swept = posed_at(t);
+        const GjkResult g = gjk(swept, target, swept.pos - target_centre);
 
-        const core::Vec3 delta = g.point_b - g.point_a;
-        const float len = core::length(delta);
+        // The gap direction comes from the SEPARATING AXIS, never from `point_b - point_a`. The
+        // two are equal in exact arithmetic and very different in floats once the target's support
+        // vertices are large compared with the gap — a 100 m wall is enough. That matters far
+        // beyond cosmetics: the advance below divides by `dot(dir, n)`, so a direction 20 degrees
+        // off makes the step too LONG and conservative advancement stops being conservative.
+        // Measured before this was fixed: a sweep at a 100 m wall stopped 0.93 m INSIDE it, and
+        // another missed a wall dead ahead entirely.
+        const float axis_len = core::length(g.closest);
+        const core::Vec3 gap_dir = axis_len > narrowphase_detail::kNormalEps
+                                       ? g.closest * (-1.0f / axis_len) // caster -> target
+                                       : dir;
 
         // What this iteration alone can say about the direction — the fallback when the retracted
         // probe is unusable, and the whole answer for an initial overlap.
-        const core::Vec3 witness_normal =
-            len > narrowphase_detail::kNormalEps ? delta * (-1.0f / len) : dir * -1.0f;
+        const core::Vec3 witness_normal = gap_dir * -1.0f;
 
         if (g.overlapping) {
             // Overlapping at t == 0 is the caller's problem to fix (depenetration); overlapping
@@ -536,21 +553,31 @@ template <class CasterSupport, class TargetSupport>
             return true;
         }
 
-        if (len <= narrowphase_detail::kNormalEps) {
-            return false; // degenerate witnesses with a non-trivial distance: nothing to advance on
-        }
-        const core::Vec3 n = delta / len;
-
-        // The whole algorithm, in one line: how fast does travelling along `dir` close this gap?
-        const float closing = core::dot(dir, n);
-        if (closing <= kMinClosing) {
-            return false; // parallel or separating — this pair can never meet along the sweep
+        // MISS TEST, and it needs no direction at all: moving a further `tmax - t` can reduce the
+        // gap by at most that much, so a gap wider than the distance remaining can never close.
+        // Exact, and it subsumes both "sweeping away from this body" and "the body is beyond the
+        // end of the sweep".
+        if (g.distance > tmax - t) {
+            return false;
         }
 
-        t += g.distance / closing;
-        if (t > tmax) {
-            return false; // the safe step already carried us past the end of the sweep
-        }
+        // THE ADVANCE, and the safety argument in one line: motion of length s changes the distance
+        // between two rigid bodies by at most s, so stepping by exactly the current gap can never
+        // pass through the obstacle — WHATEVER the direction turns out to be.
+        //
+        // The textbook form is `gap / dot(dir, n)`, which converges faster by projecting onto the
+        // separating axis. It is also only as sound as `n`, and this engine's GJK does not always
+        // deliver `n` accurately for a small shape against a large one: measured on a sphere swept
+        // at a wall, it sometimes returns a DIAGONAL axis, which collapses `dot(dir, n)` toward
+        // zero and turns the step into a leap of thirty times the gap — straight through the wall
+        // and out the other side. Errors up to 0.98 m and outright tunnelling, on walls as small as
+        // 2 m across.
+        //
+        // The price is convergence speed, and it is paid where it is cheap: a head-on sweep still
+        // finishes in ONE step (the gap goes to zero), and only oblique approaches iterate, which
+        // is what the iteration cap below bounds. Correctness does not depend on the cap, because
+        // every step is individually safe.
+        t += g.distance;
     }
 
     // Iterations exhausted while still converging (a shallow graze). Stop at the last provably-safe
@@ -559,7 +586,7 @@ template <class CasterSupport, class TargetSupport>
     t_out = t;
     overlap_out = false;
     n_out = measure_normal(t, dir * -1.0f);
-    p_out = caster_centre + dir * t;
+    p_out = caster_origin + dir * t;
     return true;
 }
 
