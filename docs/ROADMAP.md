@@ -9,6 +9,29 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-20) — m12.1 COMPLETE: the physics top-up the controller needs.** Two halves,
+> neither of them new physics — both expose machinery the engine already had and could not reach.
+> **`shape_cast`** sweeps a convex shape along a line by **conservative advancement** over the GJK
+> distance the speculative-CCD path already uses: if the shapes are `d` apart and the sweep closes
+> that gap at rate `dot(dir, n)`, advancing by `d / dot(dir, n)` provably cannot pass through. It
+> exists because a ray is infinitely thin and threads gaps a body could never fit down — the reason
+> a controller built on raycasts walks through door frames. `ShapeHit::initial_overlap` is the field
+> that makes it more than a fat raycast: "touched after moving 0 m" and "started inside a wall" are
+> the same number and opposite instructions, and confusing them freezes a controller inside the
+> geometry it is stuck in. **Kinematic push-in** fills the seam `sync.hpp` has named since M7.6: a
+> game that moves a kinematic body's `WorldTransform` drives the physics body, *with the velocity
+> that move implies*, so a capsule walking into a crate PUSHES it at walking speed instead of
+> teleporting into it and having the solver undo a penetration by firing it off.
+>
+> Two things worth carrying forward. The "unmoved, so skip" path needed an **exit** — without one
+> final zeroing push, a body the game stops moving keeps its last velocity and the crate slides away
+> by itself forever. And the contact normal is measured at a **retracted** position, one extra GJK
+> where the shapes are provably apart: taking it at the touch is ill-conditioned (on a flat face the
+> witness slides freely without changing the distance), which showed up as a normal 90° off on
+> x86-64, and then again on **arm64 only** after the first fix. Threshold-tuning was the wrong
+> answer; measuring where the answer is well-conditioned was the right one. **Next:** m12.2 —
+> `engine/gameplay`, the character controller as a pure function over these queries.
+
 > **Update (2026-08-20) — m12.0-perf COMPLETE: performance is now measured, in both halves.** The
 > brick landed in two passes. The first (#128) built the **work ledger** — counts, never clocks, so
 > lavapipe gates them in CI forever — and wired it into `10-destructible-wall` and `11-lit-rooms`,
@@ -105,9 +128,9 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > · m12.4 (**prediction + reconciliation — the hardest brick**) · m12.5 (interpolation v2) · m12.6
 > (fx1) · m12.7 (block content + frustum culling) · m12.8 (windowed present + FPS camera) · m12.9
 > (audio) · m12.p (the measured perf pass, scope chosen by the ledger) · m12.10 the proof,
-> `samples/99-the-block`. **Next:** m12.0-perf — the harness, proven on existing samples before the
-> block exists. *(Done — see the completion entry above; the headline budget's ratification moved to
-> m12.7, where there is content of the right size to measure.)*
+> `samples/99-the-block`. **Next:** m12.2 — the character controller. *(m12.0-perf and m12.1 are
+> done; see the completion entries above. The headline budget's ratification moved to m12.7, where
+> there is content of the right size to measure.)*
 
 > **Update (2026-08-20) — m11.7 (the milestone proof) + Milestone 11 COMPLETE.** M11's "done when"
 > now runs: [`samples/12-networked-destruction`](../samples/12-networked-destruction) — a dedicated
