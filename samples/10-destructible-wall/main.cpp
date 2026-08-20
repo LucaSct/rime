@@ -24,10 +24,16 @@
 //
 // Run it:   build/dev/bin/destructible_wall --headless [--cooked <dir>] [--ppm out.ppm]
 //           build/dev/bin/destructible_wall --serve [--cooked <dir>] [--host 0.0.0.0] [--port 9100]
+//           build/dev/bin/destructible_wall --perf [--cooked <dir>] [--out r.json] [--baseline b]
 //
 // The headless self-check is the CI-gated done-when and is GPU-FREE at its core: the destruction
 // simulation is verified with no device (it runs on every OS), and the pixel proof runs only where
 // a Vulkan device is present (lavapipe on Linux CI).
+//
+// --perf is the hardware report (m12.0-perf / ADR-0035 §2b) and is NOT a CTest target — lavapipe
+// has no wall clock worth gating. Where 11-lit-rooms --perf measures a render-bound frame, this one
+// measures the SIMULATION under a collapse: the fracture tick is the exact moment that must not
+// hitch, and it is the moment a mean would hide.
 
 #include <algorithm>
 #include <atomic>
@@ -49,6 +55,8 @@
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/assets/destructible_asset.hpp"
 #include "rime/audio/audio.hpp"
+#include "rime/core/diagnostics/perf_report.hpp"
+#include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/diagnostics/work_ledger.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/quat.hpp"
@@ -697,6 +705,208 @@ int run_headless(const std::filesystem::path& cooked, const char* ppm) {
     return ok ? 0 : 1;
 }
 
+// ── --perf: the hardware report, sim-side (m12.0-perf / ADR-0035 §2b) ───────────────────────────
+struct PerfOptions {
+    int warmup = 30;       // unmeasured: pipeline/descriptor warmup, the intact wall standing still
+    int frames = 600;      // 10 s at 60 Hz — p99 is then the 594th frame rather than max
+    int break_frame = 60;  // hit early, so the collapse AND the settle both sit inside the run
+    int collapse = 120;    // frames after the hit that count as "the collapse window"
+    std::uint32_t width = 1920;
+    std::uint32_t height = 1080;
+    const char* out = nullptr;
+    const char* baseline = nullptr;
+};
+
+app::AppConfig perf_config(std::uint32_t w, std::uint32_t h) {
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {w, h};
+    cfg.tick_hz = 60.0;
+    return cfg;
+}
+
+int run_perf(const std::filesystem::path& cooked, const PerfOptions& opt) {
+    const auto asset = load_wall(cooked);
+    if (!asset) {
+        return 1;
+    }
+    app::Application app(perf_config(opt.width, opt.height));
+    if (!app.device()) {
+        std::fprintf(stderr, "10-destructible-wall --perf: no Vulkan device — a perf run needs "
+                             "real hardware, and there is nothing here to measure\n");
+        return 1;
+    }
+    WallScene scene(app, *asset);
+
+    core::PerfReport report;
+    core::MachineFingerprint fp = core::MachineFingerprint::detect();
+    const rhi::AdapterInfo& adapter = app.device()->adapter();
+    fp.gpu = adapter.name;
+    fp.driver = adapter.driver_name + " " + adapter.driver_info;
+    fp.preset = "destruction-collapse";
+    fp.width = opt.width;
+    fp.height = opt.height;
+    report.set_machine(fp);
+    report.set_run(core::RunInfo::detect("10-destructible-wall"));
+
+    std::vector<core::PassTiming> passes;
+    app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer& cmd) {
+        passes.clear();
+        for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(cmd)) {
+            passes.push_back(core::PassTiming{std::string(t.name), t.gpu_ms});
+        }
+    });
+
+    std::printf("10-destructible-wall --perf: %s (%s %s), %ux%u, %zu parts, measuring %d frames…\n",
+                fp.gpu.c_str(),
+                adapter.driver_name.c_str(),
+                adapter.driver_info.c_str(),
+                opt.width,
+                opt.height,
+                asset->parts.size(),
+                opt.frames);
+
+    for (int i = 0; i < opt.warmup; ++i) {
+        scene.step_and_refresh();
+        app.step(app.fixed_dt());
+    }
+
+    core::ZoneTimelines zones(report);
+    SimResult peaks;
+    for (int i = 0; i < opt.frames; ++i) {
+        if (i == opt.break_frame) {
+            hit_base_seam(scene.dw, scene.inst);
+        }
+        const core::Stopwatch frame_watch;
+
+        // The simulation is timed EXPLICITLY rather than through a profile zone, because this
+        // sample drives physics outside Application's fixed tick (`sim.tick` therefore measures an
+        // empty tick here, which the report shows honestly rather than hiding). Two timelines from
+        // one measurement: the whole run, and the collapse window on its own.
+        const core::Stopwatch sim_watch;
+        scene.step_and_refresh();
+        const double sim_ms = sim_watch.elapsed_ms();
+
+        app.step(app.fixed_dt());
+        const double frame_ms = frame_watch.elapsed_ms();
+
+        report.observe_frame(static_cast<std::uint64_t>(i), frame_ms, passes);
+        report.observe("sim.physics", sim_ms);
+        if (i >= opt.break_frame && i < opt.break_frame + opt.collapse) {
+            report.observe("frame.collapse", frame_ms);
+            report.observe("sim.physics.collapse", sim_ms);
+        }
+
+        // Peaks, not end-of-run values — by the time the pile is asleep every load counter has
+        // fallen back to ~0, and a ledger sampled only at rest describes a world that never did
+        // anything (the same reason --headless takes peaks).
+        const physics::WorldStats s = scene.pw.stats();
+        peaks.broadphase_pairs_peak = std::max(peaks.broadphase_pairs_peak, s.broadphase_pairs);
+        peaks.manifolds_peak = std::max(peaks.manifolds_peak, s.manifolds);
+        peaks.contact_points_peak = std::max(peaks.contact_points_peak, s.contact_points);
+        peaks.largest_island_peak = std::max(peaks.largest_island_peak, s.largest_island);
+    }
+    zones.stop();
+
+    const physics::WorldStats final_stats = scene.pw.stats();
+    peaks.ticks_run = static_cast<std::uint32_t>(opt.frames);
+    peaks.bodies_final = final_stats.body_count;
+    peaks.awake_final = final_stats.awake_bodies;
+    peaks.parts_died = scene.listeners.parts_died;
+    peaks.islands_detached = scene.listeners.islands_detached;
+    peaks.debris_count = scene.dw.debris_count();
+    peaks.audio_calls = static_cast<std::uint32_t>(scene.listeners.audio.log().size());
+    report.set_ledger(make_ledger(peaks));
+
+    core::PerfGate gate;
+    gate.at_most("frame", core::PerfStat::P99, 16.6)
+        .at_most("frame", core::PerfStat::Max, 33.0)
+        .at_most("frame.collapse", core::PerfStat::Max, 33.0)
+        // ADR-0035's sim budget: the tick must fit inside 60 Hz on its own, or the simulation dies
+        // no matter what the GPU manages. The collapse gets a wider max because a fracture tick
+        // legitimately does more work — but only twice as much, not ten times.
+        .at_most("sim.physics", core::PerfStat::P99, 6.0)
+        .at_most("sim.physics.collapse", core::PerfStat::Max, 12.0)
+        .require_samples("frame", 200)
+        .require_samples("sim.physics", 200)
+        .require_samples("frame.collapse", 30)
+        .max_regression(0.10);
+    // The vacuity guard, and the reason it is not decoration: every ceiling above is also satisfied
+    // by an intact wall that never broke — 0 dead parts, 0 debris, 0 contacts, and a very fast
+    // frame indeed.
+    gate.work()
+        .at_least("destruction.parts_died", 1)
+        .at_least("destruction.islands_detached", 1)
+        .at_least("destruction.debris_count", 1)
+        .at_least("physics.contact_points_peak", 1);
+
+    core::PerfReport baseline;
+    const core::PerfReport* baseline_ptr = nullptr;
+    if (opt.baseline) {
+        std::string error;
+        if (core::PerfReport::load_file(opt.baseline, baseline, error)) {
+            baseline_ptr = &baseline;
+        } else {
+            std::printf("  (no usable baseline: %s)\n", error.c_str());
+        }
+    }
+    const core::PerfGate::Result result = gate.check(report, baseline_ptr);
+
+    const auto frame = report.distribution("frame");
+    const auto sim = report.distribution("sim.physics");
+    const auto sim_collapse = report.distribution("sim.physics.collapse");
+    if (!frame || !sim) {
+        std::fprintf(stderr,
+                     "10-destructible-wall --perf: no frames were measured (--frames %d)\n",
+                     opt.frames);
+        return 1;
+    }
+    std::printf("  frame     p50 %.2f  p95 %.2f  p99 %.2f  max %.2f ms  (%zu frames)\n",
+                frame->p50_ms,
+                frame->p95_ms,
+                frame->p99_ms,
+                frame->max_ms,
+                frame->count);
+    std::printf("  sim       p50 %.3f  p95 %.3f  p99 %.3f  max %.3f ms\n",
+                sim->p50_ms,
+                sim->p95_ms,
+                sim->p99_ms,
+                sim->max_ms);
+    if (sim_collapse) {
+        std::printf("  sim@break p50 %.3f  p99 %.3f  max %.3f ms  (%zu frames)\n",
+                    sim_collapse->p50_ms,
+                    sim_collapse->p99_ms,
+                    sim_collapse->max_ms,
+                    sim_collapse->count);
+    }
+    std::printf("  worst frame #%llu at %.2f ms\n",
+                static_cast<unsigned long long>(report.worst_frame().index),
+                report.worst_frame().ms);
+    std::printf("  work ledger: %s\n", make_ledger(peaks).to_json(-1).c_str());
+
+    if (opt.out) {
+        FILE* f = std::fopen(opt.out, "wb");
+        if (!f) {
+            std::fprintf(stderr, "  could not write %s\n", opt.out);
+            return 1;
+        }
+        const std::string json = report.to_json();
+        std::fwrite(json.data(), 1, json.size(), f);
+        std::fclose(f);
+        std::printf("  wrote %s\n", opt.out);
+    }
+
+    std::fflush(stdout); // so the gate's stderr lines land after the numbers they judge
+    if (!result.ok()) {
+        std::fprintf(stderr, "  PERF GATE:\n%s", core::PerfGate::format(result).c_str());
+    } else {
+        std::printf("  perf gate: %s", core::PerfGate::format(result).c_str());
+    }
+    std::printf("10-destructible-wall --perf: %s\n",
+                result.ok() ? "within budget" : "FAILED the perf gate");
+    return result.ok() ? 0 : 1;
+}
+
 // ── --serve: stream the wall coming apart, let a client re-hit it (Track S0) ─────────────────────
 int run_serve(const std::filesystem::path& cooked, const std::string& host, std::uint16_t port) {
     const auto asset = load_wall(cooked);
@@ -785,11 +995,12 @@ int run_serve(const std::filesystem::path& cooked, const std::string& host, std:
 } // namespace
 
 int main(int argc, char** argv) {
-    enum class Mode { Headless, Serve } mode = Mode::Headless;
+    enum class Mode { Headless, Serve, Perf } mode = Mode::Headless;
     std::filesystem::path cooked = default_cooked();
     const char* ppm = nullptr;
     std::string host = "0.0.0.0";
     std::uint16_t port = 9100;
+    PerfOptions perf;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a(argv[i]);
@@ -797,8 +1008,22 @@ int main(int argc, char** argv) {
             mode = Mode::Headless;
         } else if (a == "--serve") {
             mode = Mode::Serve;
+        } else if (a == "--perf") {
+            mode = Mode::Perf;
         } else if (a == "--cooked" && i + 1 < argc) {
             cooked = argv[++i];
+        } else if (a == "--frames" && i + 1 < argc) {
+            perf.frames = std::atoi(argv[++i]);
+        } else if (a == "--warmup" && i + 1 < argc) {
+            perf.warmup = std::atoi(argv[++i]);
+        } else if (a == "--width" && i + 1 < argc) {
+            perf.width = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+        } else if (a == "--height" && i + 1 < argc) {
+            perf.height = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+        } else if (a == "--out" && i + 1 < argc) {
+            perf.out = argv[++i];
+        } else if (a == "--baseline" && i + 1 < argc) {
+            perf.baseline = argv[++i];
         } else if (a == "--ppm" && i + 1 < argc) {
             ppm = argv[++i];
         } else if (a == "--host" && i + 1 < argc) {
@@ -808,8 +1033,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Keep the scripted timeline inside a shortened run. A --frames 60 smoke test whose break
+    // lands at frame 60 would measure an intact wall and record no collapse window at all — which
+    // the gate does catch (that is what the vacuity floors are for), but failing on a mis-scaled
+    // script rather than on the engine wastes everyone's afternoon.
+    if (mode == Mode::Perf) {
+        if (perf.break_frame >= perf.frames) {
+            perf.break_frame = perf.frames / 10;
+        }
+        perf.collapse = std::min(perf.collapse, perf.frames - perf.break_frame);
+    }
+
     if (mode == Mode::Serve) {
         return run_serve(cooked, host, port);
+    }
+    if (mode == Mode::Perf) {
+        return run_perf(cooked, perf);
     }
     return run_headless(cooked, ppm);
 }

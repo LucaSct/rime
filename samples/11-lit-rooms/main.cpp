@@ -25,12 +25,19 @@
 //
 // Run it:   build/dev/bin/lit_rooms --headless [--frames N] [--ppm out.ppm]
 //           build/dev/bin/lit_rooms --serve [--host 0.0.0.0] [--port 9100] [--codec jpeg]
+//           build/dev/bin/lit_rooms --perf [--out r.json] [--baseline b.json] [--width W]
 //
 // The headless self-check is the CI-gated done-when: on a host with a Vulkan device (lavapipe on
 // Linux CI) it renders the full stack, breaks the wall, and asserts the dark room's floor
 // brightens; with no device it is an honest skip (exit 0) unless RIME_REQUIRE_VULKAN demands one.
 // The rigorous, isolated GI mechanism proofs live in tests/render/gi_thesis_test.cpp; this sample
 // is the everything-on-at-once integration and the lived demo.
+//
+// --perf is the HARDWARE half (m12.0-perf / ADR-0035 §2b), and it is deliberately NOT a CTest
+// target. CI renders on lavapipe, a CPU rasterizer, where a millisecond means nothing about a GPU;
+// gating absolute time there would be gating the CI machine's mood. So the counts stay in
+// --headless where CI can fail on them forever, and the clock lives here, run by hand or by
+// scripts/perf.sh on a machine whose fingerprint is written into the report.
 
 #include <algorithm>
 #include <atomic>
@@ -46,6 +53,8 @@
 
 #include "rime/app/application.hpp"
 #include "rime/assets/sdf_asset.hpp"
+#include "rime/core/diagnostics/perf_report.hpp"
+#include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/diagnostics/work_ledger.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
@@ -406,6 +415,17 @@ app::AppConfig gpu_config() {
     return cfg;
 }
 
+// The perf run renders at a real display resolution rather than the 540p the CI proof uses — a
+// frame budget is a claim about the resolution it was measured at, which is why the extent is part
+// of the report's fingerprint and not a footnote.
+app::AppConfig perf_config(std::uint32_t w, std::uint32_t h) {
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {w, h};
+    cfg.tick_hz = 60.0;
+    return cfg;
+}
+
 // The dark room's near floor, in frame fractions — the patch the divider seals from the sun and the
 // break relights. Tuned to the demo camera above (the lower-left third, where the near floor sits).
 constexpr float kDarkX0 = 0.10f, kDarkY0 = 0.62f, kDarkX1 = 0.45f, kDarkY1 = 0.92f;
@@ -520,6 +540,188 @@ int run_headless(int converge, const char* ppm) {
     return ok ? 0 : 1;
 }
 
+// ── --perf: the hardware report (m12.0-perf / ADR-0035 §2b) ─────────────────────────────────────
+struct PerfOptions {
+    int warmup = 60;      // unmeasured: DDGI convergence is not the steady state we are gating
+    int frames = 600;     // 10 s at 60 Hz — enough that p99 is the 594th frame, not max
+    int break_frame = 300;// the wall falls mid-run, so the collapse sits inside the sample
+    int collapse = 60;    // frames after the break that count as "the collapse window"
+    std::uint32_t width = 1920;
+    std::uint32_t height = 1080;
+    const char* out = nullptr;
+    const char* baseline = nullptr;
+};
+
+int run_perf(const PerfOptions& opt) {
+    app::Application app(perf_config(opt.width, opt.height));
+    if (!app.device()) {
+        std::fprintf(stderr, "11-lit-rooms --perf: no Vulkan device — a perf run needs real "
+                             "hardware, and there is nothing here to measure\n");
+        return 1;
+    }
+    LitRoomsApp scene(app);
+    (void)spawn_camera(app);
+
+    core::PerfReport report;
+    core::MachineFingerprint fp = core::MachineFingerprint::detect();
+    const rhi::AdapterInfo& adapter = app.device()->adapter();
+    fp.gpu = adapter.name;
+    // Both halves of the driver identity: "NVIDIA 610.43.03" rather than either alone, because a
+    // Mesa version string and an NVIDIA one are not comparable without knowing which is which.
+    fp.driver = adapter.driver_name + " " + adapter.driver_info;
+    fp.preset = "all-lighting-gates"; // csm + local shadows + clustered + sdf + ddgi + ssr
+    fp.width = opt.width;
+    fp.height = opt.height;
+    report.set_machine(fp);
+    report.set_run(core::RunInfo::detect("11-lit-rooms"));
+
+    // Per-pass GPU cost arrives through the one window in which it is readable: after the frame's
+    // submission has completed, before the graph resets (app::Application::on_post_submit).
+    std::vector<core::PassTiming> passes;
+    bool timestamps_seen = false;
+    app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer& cmd) {
+        passes.clear();
+        for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(cmd)) {
+            passes.push_back(core::PassTiming{std::string(t.name), t.gpu_ms});
+            timestamps_seen = true;
+        }
+    });
+
+    std::printf("11-lit-rooms --perf: %s (%s %s), %ux%u, warmup %d, measuring %d frames…\n",
+                fp.gpu.c_str(),
+                adapter.driver_name.c_str(),
+                adapter.driver_info.c_str(),
+                opt.width,
+                opt.height,
+                opt.warmup,
+                opt.frames);
+
+    for (int i = 0; i < opt.warmup; ++i)
+        app.step(app.fixed_dt());
+    const std::uint32_t probes_static = scene.renderer.ddgi_stats().probes_updated;
+
+    // From here the profile zones feed the report, so `sim.*` and `frame.*` land as their own
+    // timelines — the per-stage CPU breakdown, with no per-sample plumbing.
+    core::ZoneTimelines zones(report);
+    std::uint32_t sdf_break = 0, shadow_break = 0, ddgi_fast_break = 0;
+    for (int i = 0; i < opt.frames; ++i) {
+        if (i == opt.break_frame)
+            scene.break_wall();
+        const core::Stopwatch watch;
+        app.step(app.fixed_dt());
+        const double ms = watch.elapsed_ms();
+        report.observe_frame(static_cast<std::uint64_t>(i), ms, passes);
+        if (i >= opt.break_frame && i < opt.break_frame + opt.collapse) {
+            // The same frames again, on their own timeline. A collapse that hitches is invisible
+            // in a 600-frame p99 (60 frames cannot move the 594th) and obvious in a 60-frame one —
+            // which is the entire reason ADR-0035 asks for the window separately.
+            report.observe("frame.collapse", ms);
+            sdf_break = std::max(sdf_break, scene.renderer.sdf_clipmap().stats().stamps);
+            shadow_break = std::max(shadow_break, scene.renderer.local_shadow_stats().rendered);
+            ddgi_fast_break =
+                std::max(ddgi_fast_break, scene.renderer.ddgi_stats().fast_tracked);
+        }
+    }
+    zones.stop();
+
+    // The ledger travels WITH the timings, so the report can never be read as "fast" without also
+    // being read as "…and here is the work it did". A run that was quick because the lighting
+    // silently switched itself off is not a pass (ADR-0035 §2b's vacuity guard).
+    core::WorkLedger ledger;
+    ledger.set("frames.measured", static_cast<std::uint64_t>(opt.frames));
+    ledger.set("ddgi.probes_updated_static", probes_static);
+    ledger.set("sdf.stamps_on_break", sdf_break);
+    ledger.set("shadow.rendered_on_break", shadow_break);
+    ledger.set("ddgi.fast_tracked_on_break", ddgi_fast_break);
+    report.set_ledger(ledger);
+
+    // The gate. Absolute ceilings are ADR-0035's proposed headline budget; the sample floors are
+    // what stop a short or empty run from passing; the work budget is the vacuity guard.
+    core::PerfGate gate;
+    gate.at_most("frame", core::PerfStat::P99, 16.6)
+        .at_most("frame", core::PerfStat::Max, 33.0)
+        .at_most("frame.collapse", core::PerfStat::Max, 33.0)
+        .require_samples("frame", 200)
+        .require_samples("frame.collapse", 30)
+        .max_regression(0.10);
+    gate.work()
+        .at_least("ddgi.probes_updated_static", 1) // the probe field is alive…
+        .at_least("sdf.stamps_on_break", 1)        // …and the wall really came down
+        .at_least("shadow.rendered_on_break", 1);
+    // (draws.submitted / draws.culled join this budget at m12.7, when a frustum cull exists to
+    // count — today nothing in the engine counts a draw, so claiming one here would be a lie.)
+
+    core::PerfReport baseline;
+    const core::PerfReport* baseline_ptr = nullptr;
+    if (opt.baseline) {
+        std::string error;
+        if (core::PerfReport::load_file(opt.baseline, baseline, error)) {
+            baseline_ptr = &baseline;
+        } else {
+            // Not fatal, and not silent: a missing baseline means this run establishes one.
+            std::printf("  (no usable baseline: %s)\n", error.c_str());
+        }
+    }
+    const core::PerfGate::Result result = gate.check(report, baseline_ptr);
+
+    const auto frame = report.distribution("frame");
+    const auto collapse = report.distribution("frame.collapse");
+    const auto tick = report.distribution("sim.tick");
+    if (!frame) {
+        std::fprintf(stderr, "11-lit-rooms --perf: no frames were measured (--frames %d)\n",
+                     opt.frames);
+        return 1;
+    }
+    std::printf("  frame     p50 %.2f  p95 %.2f  p99 %.2f  max %.2f ms  (%zu frames)\n",
+                frame->p50_ms,
+                frame->p95_ms,
+                frame->p99_ms,
+                frame->max_ms,
+                frame->count);
+    if (collapse) {
+        std::printf("  collapse  p50 %.2f  p95 %.2f  p99 %.2f  max %.2f ms  (%zu frames)\n",
+                    collapse->p50_ms,
+                    collapse->p95_ms,
+                    collapse->p99_ms,
+                    collapse->max_ms,
+                    collapse->count);
+    }
+    if (tick) {
+        std::printf("  sim.tick  p50 %.3f  p99 %.3f  max %.3f ms\n",
+                    tick->p50_ms,
+                    tick->p99_ms,
+                    tick->max_ms);
+    }
+    std::printf("  worst frame #%llu at %.2f ms\n",
+                static_cast<unsigned long long>(report.worst_frame().index),
+                report.worst_frame().ms);
+    if (!timestamps_seen) {
+        std::printf("  (this device reports no GPU timestamps — the per-pass table is empty)\n");
+    }
+    std::printf("  work ledger: %s\n", ledger.to_json(-1).c_str());
+
+    if (opt.out) {
+        FILE* f = std::fopen(opt.out, "wb");
+        if (!f) {
+            std::fprintf(stderr, "  could not write %s\n", opt.out);
+            return 1;
+        }
+        const std::string json = report.to_json();
+        std::fwrite(json.data(), 1, json.size(), f);
+        std::fclose(f);
+        std::printf("  wrote %s\n", opt.out);
+    }
+
+    std::fflush(stdout); // so the gate's stderr lines land after the numbers they judge
+    if (!result.ok()) {
+        std::fprintf(stderr, "  PERF GATE:\n%s", core::PerfGate::format(result).c_str());
+    } else {
+        std::printf("  perf gate: %s", core::PerfGate::format(result).c_str());
+    }
+    std::printf("11-lit-rooms --perf: %s\n", result.ok() ? "within budget" : "FAILED the perf gate");
+    return result.ok() ? 0 : 1;
+}
+
 // ── --serve: stream the beat live; any key drops the wall ────────────────────────────────────────
 int run_serve(const std::string& host, std::uint16_t port, stream::Codec codec) {
     app::Application app(gpu_config());
@@ -605,12 +807,13 @@ stream::Codec parse_codec(std::string_view s) {
 } // namespace
 
 int main(int argc, char** argv) {
-    enum class Mode { Headless, Serve } mode = Mode::Headless;
+    enum class Mode { Headless, Serve, Perf } mode = Mode::Headless;
     int converge = 24;
     const char* ppm = nullptr;
     std::string host = "0.0.0.0";
     std::uint16_t port = 9100;
     stream::Codec codec = stream::Codec::Jpeg;
+    PerfOptions perf;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a(argv[i]);
@@ -618,8 +821,22 @@ int main(int argc, char** argv) {
             mode = Mode::Headless;
         else if (a == "--serve")
             mode = Mode::Serve;
-        else if (a == "--frames" && i + 1 < argc)
+        else if (a == "--perf")
+            mode = Mode::Perf;
+        else if (a == "--frames" && i + 1 < argc) {
             converge = std::atoi(argv[++i]);
+            perf.frames = converge;
+            perf.break_frame = converge / 2;
+        } else if (a == "--warmup" && i + 1 < argc)
+            perf.warmup = std::atoi(argv[++i]);
+        else if (a == "--width" && i + 1 < argc)
+            perf.width = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+        else if (a == "--height" && i + 1 < argc)
+            perf.height = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+        else if (a == "--out" && i + 1 < argc)
+            perf.out = argv[++i];
+        else if (a == "--baseline" && i + 1 < argc)
+            perf.baseline = argv[++i];
         else if (a == "--ppm" && i + 1 < argc)
             ppm = argv[++i];
         else if (a == "--host" && i + 1 < argc)
@@ -630,7 +847,17 @@ int main(int argc, char** argv) {
             codec = parse_codec(argv[++i]);
     }
 
+    // Keep the scripted break inside a shortened run (see the same clamp in 10-destructible-wall):
+    // a smoke run whose break never fires would measure a wall that is still standing.
+    if (mode == Mode::Perf) {
+        if (perf.break_frame >= perf.frames)
+            perf.break_frame = perf.frames / 2;
+        perf.collapse = std::min(perf.collapse, perf.frames - perf.break_frame);
+    }
+
     if (mode == Mode::Serve)
         return run_serve(host, port, codec);
+    if (mode == Mode::Perf)
+        return run_perf(perf);
     return run_headless(converge, ppm);
 }
