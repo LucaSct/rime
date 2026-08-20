@@ -285,6 +285,26 @@ public:
     // line-of-sight / picking primitive the whole engine reaches for.
     [[nodiscard]] bool raycast(const Ray& ray, RayHit& out, const QueryFilter& filter = {}) const;
 
+    // Sweep a convex shape along a straight line and report the NEAREST body it touches within
+    // `cast.max_distance`, or return false (out untouched) on a clean sweep. The thick-bodied
+    // sibling of raycast(), and the query a character controller moves with: a ray is infinitely
+    // thin, so it threads gaps a body could never fit through, and a controller built on rays walks
+    // through the door frames it should have caught on (m12.1, ADR-0035 §3).
+    //
+    // Broadphase-accelerated by the SWEPT AABB of the cast — the union of the shape's box at both
+    // ends of the sweep — then conservative advancement over GJK distance per candidate
+    // (src/scene_query.hpp). Same const/threading contract as raycast(): safe between steps, never
+    // concurrently with step().
+    //
+    // Returns true with `out.initial_overlap` set when the shape was ALREADY intersecting a body
+    // before moving. Callers must branch on that: it means "depenetrate first", not "stopped here",
+    // and treating it as a normal contact is how a controller freezes inside geometry.
+    //
+    // A Compound caster is rejected (returns false): a compound is not convex, so it has no single
+    // support function for GJK to ask. Cast its children separately if that day comes.
+    [[nodiscard]] bool
+    shape_cast(const ShapeCast& cast, ShapeHit& out, const QueryFilter& filter = {}) const;
+
     // Collect every body whose shape overlaps the sphere (`center`, `radius`) into `out` (cleared
     // first), in canonical slot order so the result is deterministic run to run. Broadphase-culled,
     // then an exact shape-vs-sphere test. The "what is inside this volume" query — an explosion's

@@ -5,8 +5,10 @@
 #include <cstdint>
 #include <limits>
 
+#include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/body.hpp"
+#include "rime/physics/shape.hpp"
 
 // Scene queries (M7.7): the world becomes *askable*. A raycast is the workhorse — hitscan weapons,
 // line-of-sight, mouse picking (M9), AI probes, the "what's under the crosshair" the physics
@@ -52,6 +54,68 @@ struct RayHit {
     // index == part index on an intact destructible), exactly as contact events already do for
     // impacts. On an exact tie between children the lowest index wins (the compound raycast's
     // strict-< scan), so the answer is deterministic.
+    std::uint16_t child = 0;
+};
+
+// ── Shape casts (m12.1) ───────────────────────────────────────────────────────────────────────
+// A convex shape swept along a straight line: "if I slide this capsule this way, what does it hit
+// first, and how far does it get?" It is the query a character controller moves with, and the one a
+// ray cannot answer — a ray is infinitely thin, so it happily threads a gap a body could never fit
+// through, and a controller built on rays walks through door frames it should have caught on.
+//
+// The technique is CONSERVATIVE ADVANCEMENT (Mirtich's, by way of Bullet's convex cast). GJK
+// already returns the exact distance between two posed convex shapes together with the two witness
+// points (src/gjk.hpp — the same machinery M7.10's speculative CCD contacts use). If the shapes are
+// `d` apart and the sweep direction closes the gap at rate `dot(dir, n)` — where `n` is the unit
+// vector between the witnesses — then advancing by `d / dot(dir, n)` CANNOT pass through the
+// obstacle, because no point of the shape can approach faster than that. So: measure, take the
+// largest provably-safe step, measure again. It converges in a handful of iterations and needs no
+// new geometry code, which is exactly why ADR-0035 §2 put a shape cast here rather than a bespoke
+// swept-primitive routine per shape pair.
+struct ShapeCast {
+    // The shape to sweep. Any convex shape works (the algorithm only asks for support points);
+    // sphere and capsule are what a character controller and a thick projectile actually use.
+    // A Compound is rejected — it is not convex, so it has no single support function, and a
+    // caster made of parts is not something v1 needs.
+    ShapeDesc shape{};
+    core::Vec3 origin{0.0f, 0.0f, 0.0f};            // where the shape's own origin starts
+    core::Quat orientation = core::quat_identity(); // fixed for the whole sweep: no rotational cast
+    core::Vec3 direction{0.0f, -1.0f, 0.0f};        // need not be unit; the cast normalizes it
+
+    // How far to sweep, in metres. Unlike `Ray::max_distance` this has NO unbounded default and
+    // must be finite: the broadphase step queries the swept AABB of the cast, and the swept AABB of
+    // an infinite sweep is the whole world — which would turn an O(log n) query into a scan of
+    // every body, silently. A non-finite or non-positive distance is rejected (the cast returns
+    // false) rather than quietly clamped.
+    float max_distance = 10.0f;
+};
+
+// What a shape cast hit. `distance` is how far along the normalized direction the shape travelled
+// before touching, so the resting pose is `cast.origin + normalize(cast.direction) * distance`.
+struct ShapeHit {
+    BodyId body;
+    // The witness point on the HIT BODY's surface — where the two shapes touch.
+    core::Vec3 point{0.0f, 0.0f, 0.0f};
+    // Outward surface normal of the hit body at that point, pointing back toward the caster — the
+    // same convention `RayHit::normal` uses, and the vector a collide-and-slide step projects its
+    // remaining motion onto.
+    core::Vec3 normal{0.0f, 0.0f, 0.0f};
+    float distance = 0.0f;
+
+    // TRUE when the cast shape was ALREADY intersecting this body at distance 0, before moving.
+    //
+    // This flag is the reason `ShapeHit` is not just a `RayHit` with a different name, and getting
+    // it wrong is how character controllers acquire their famous pathologies. "I touched something
+    // after moving 0 m" and "I started inside a wall" are the same number and completely different
+    // situations: the first means stop, the second means the caller must DEPENETRATE first, and a
+    // controller that treats the second as the first freezes solid inside the geometry it is stuck
+    // in. When this is set, `normal` and `point` describe the initial overlap as GJK's witnesses
+    // saw it, which is a usable push-out direction but not a contact plane.
+    bool initial_overlap = false;
+
+    // Which compound child was touched (M8.3's convention, as `RayHit::child`): the child index
+    // within the hit body's compound shape, 0 for a non-compound body. This is what lets a sweep
+    // name the destructible PART it caught on.
     std::uint16_t child = 0;
 };
 

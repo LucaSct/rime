@@ -394,4 +394,148 @@ namespace rime::physics {
     return false;
 }
 
+// ── Shape casts: conservative advancement over GJK distance (m12.1) ──────────────────────────
+//
+// The idea in one line: if two convex shapes are `d` apart and the sweep closes that gap at rate
+// `dot(dir, n)`, then advancing by `d / dot(dir, n)` provably cannot pass through the obstacle —
+// because no point of the shape approaches faster than the closing rate along the witness normal.
+// Take that step, measure again, repeat. This is Mirtich's conservative advancement, and it needs
+// nothing from geometry beyond the support function GJK already speaks (docs/math/gjk-epa.md).
+//
+// Why not a swept-primitive routine per shape pair: there are five shape types, so pairs grow as
+// n², each one its own algebra and its own bugs, and the destructible case (a hull) has no closed
+// form at all. One loop over GJK covers every convex shape the engine has or will have.
+namespace shape_cast_detail {
+
+// How close counts as touching. A hair under a tenth of a millimetre: tight enough that a resting
+// capsule is not visibly sunk into the floor, loose enough that the loop terminates in a handful
+// of iterations rather than chasing float noise toward zero.
+inline constexpr float kTouchTolerance = 5e-5f;
+
+// The cap exists because conservative advancement converges geometrically but not finitely: a
+// sweep that grazes a surface at a shallow angle takes ever-smaller steps forever. 32 is far more
+// than a well-conditioned cast needs (2-6 is typical).
+inline constexpr int kMaxIterations = 32;
+
+// A closing rate below this means the sweep is parallel to the gap or opening it — no advance is
+// possible and the shapes can never meet along this line.
+inline constexpr float kMinClosing = 1e-6f;
+
+} // namespace shape_cast_detail
+
+// One convex caster against one posed convex target. `dir` must be UNIT, so `t` is a world
+// distance. On a hit, `n_out` is the outward normal of the TARGET at the touch (pointing back
+// toward the caster) and `p_out` is the witness point on the target.
+//
+// `overlap_out` reports the case that must not be confused with a zero-distance touch: the shapes
+// were already intersecting before the sweep began. A caller that treats "started inside a wall"
+// as "stopped at the wall" produces a controller frozen in the geometry it is stuck in.
+template <class CasterSupport, class TargetSupport>
+[[nodiscard]] inline bool cast_convex_vs_convex(const CasterSupport& caster,
+                                                core::Vec3 caster_centre,
+                                                const TargetSupport& target,
+                                                core::Vec3 target_centre,
+                                                core::Vec3 dir,
+                                                float tmax,
+                                                float& t_out,
+                                                core::Vec3& n_out,
+                                                core::Vec3& p_out,
+                                                bool& overlap_out) {
+    using namespace shape_cast_detail;
+
+    // The caster support, re-posed at distance `t` along the sweep. Translating a support function
+    // is just translating its result (support_{A+v}(d) = support_A(d) + v — src/support.hpp), so
+    // sweeping costs nothing per iteration beyond the add.
+    struct SweptSupport {
+        const CasterSupport* base;
+        core::Vec3 offset;
+
+        [[nodiscard]] core::Vec3 operator()(core::Vec3 d) const noexcept {
+            return (*base)(d) + offset;
+        }
+    };
+
+    // The contact normal is captured from the last iteration that saw a MEASURABLE gap, not from
+    // the touching configuration itself — and that is a correctness decision, not a micro-
+    // optimization. At the touch the two witness points are within `kTouchTolerance` of each other,
+    // so their difference is dominated by floating-point cancellation; worse, on a flat face the
+    // witness can slide anywhere across that face without changing the distance at all, so its
+    // direction is barely determined even in exact arithmetic. Measured while the shapes are still
+    // apart, the same direction is unambiguous. (Symptom when this is got wrong: a 50 m sweep into
+    // a wall reports the right distance and a normal perpendicular to it.)
+    core::Vec3 last_n = dir;
+    bool have_last = false;
+
+    float t = 0.0f;
+    for (int iter = 0; iter < kMaxIterations; ++iter) {
+        const core::Vec3 offset = dir * t;
+        const SweptSupport swept{&caster, offset};
+        const GjkResult g = gjk(swept, target, (caster_centre + offset) - target_centre);
+
+        const core::Vec3 delta = g.point_b - g.point_a;
+        const float len = core::length(delta);
+
+        // The direction to report: the last well-separated measurement if we have one, otherwise
+        // whatever this iteration can offer, otherwise the sweep direction. Flipped on the way out
+        // so it points OUT of the target and back at the caster, matching RayHit's convention.
+        const auto contact_normal = [&]() -> core::Vec3 {
+            if (have_last) {
+                return last_n * -1.0f;
+            }
+            if (len > narrowphase_detail::kNormalEps) {
+                return delta * (-1.0f / len);
+            }
+            return dir * -1.0f;
+        };
+
+        if (g.overlapping) {
+            // Overlapping at t == 0 is the caller's problem to fix (depenetration); overlapping
+            // after a step means floating-point overshoot on a step that was supposed to stop just
+            // short, so report the touch we were converging on rather than a miss. Reporting a
+            // miss here is how a fast body tunnels — the one failure this query exists to prevent.
+            t_out = t;
+            overlap_out = (t <= 0.0f);
+            n_out = contact_normal();
+            p_out = g.point_b;
+            return true;
+        }
+
+        if (g.distance <= kTouchTolerance) {
+            t_out = t;
+            overlap_out = false;
+            n_out = contact_normal();
+            p_out = g.point_b;
+            return true;
+        }
+
+        if (len <= narrowphase_detail::kNormalEps) {
+            return false; // degenerate witnesses with a non-trivial distance: nothing to advance on
+        }
+        const core::Vec3 n = delta / len;
+        // Recorded only here, i.e. only from an iteration whose gap exceeded the touch tolerance.
+        last_n = n;
+        have_last = true;
+
+        // The whole algorithm, in one line: how fast does travelling along `dir` close this gap?
+        const float closing = core::dot(dir, n);
+        if (closing <= kMinClosing) {
+            return false; // parallel or separating — this pair can never meet along the sweep
+        }
+
+        t += g.distance / closing;
+        if (t > tmax) {
+            return false; // the safe step already carried us past the end of the sweep
+        }
+    }
+
+    // Iterations exhausted while still converging (a shallow graze). Stop at the last provably-safe
+    // distance and call it a hit: erring toward "stopped early" costs a fraction of a millimetre,
+    // while erring toward "missed" lets the caster pass through a solid surface.
+    t_out = t;
+    overlap_out = false;
+    n_out = have_last ? last_n * -1.0f : dir * -1.0f;
+    p_out = caster_centre + dir * t;
+    return true;
+}
+
 } // namespace rime::physics
