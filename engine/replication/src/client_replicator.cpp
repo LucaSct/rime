@@ -71,9 +71,14 @@ void ClientReplicator::apply_messages(std::span<const net::Received> messages) {
             case MessageTag::Delta:
                 on_delta(reader);
                 break;
+            case MessageTag::InputAck:
+                ++foreign_; // ours to ignore, not ours to read: m11.6c put a second reader
+                            // (ClientInputSender) on the same drained span, so a well-formed tag
+                            // from replication's own block can belong to someone else
+                break;
             default:
-                ++malformed_; // in OUR block but not a server→client message: BaselineAck travels
-                              // the other way, and the rest of the block is unassigned
+                ++malformed_; // in OUR block but not a server→client message: BaselineAck and
+                              // InputCommands travel the other way, and the rest is unassigned
                 break;
         }
     }

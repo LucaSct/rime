@@ -5,3 +5,12 @@ rime_add_test(rime_replication_tests
 
 target_link_libraries(rime_replication_tests
     PRIVATE rime::replication)
+
+# m11.6c's client→server input path. A separate binary rather than more cases in the file above:
+# it shares the harness discipline but none of the fixture, and the two failure stories a reader
+# chases are different ones.
+rime_add_test(rime_replication_input_tests
+    input_test.cpp)
+
+target_link_libraries(rime_replication_input_tests
+    PRIVATE rime::replication)

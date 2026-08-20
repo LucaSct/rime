@@ -678,3 +678,64 @@ lossless link with 0–40 ms jitter, versus 19 once independent kinds stopped co
 the split safe is left as its own brick with a named prerequisite: either a per-record staleness
 guard or real fragment reassembly. This is the counting rule from A17 applied one layer down — the
 eviction was never wrong, but nothing could see how much of it was happening.
+---
+
+## Amendment (2026-08-12, m11.6c): the upstream half
+
+The one stream that runs client→server, and two decisions the original text left open.
+
+### A19. What crosses the wire upstream is INTENT, not `platform::Event`
+
+§"m11.6" said "client input messages upstream" and A6 said the proof's clients are "camera observers
+whose input rides the m11.6 path", without ever saying what an input message contains. The obvious
+reading — forward the `platform::Event`s that `frame_input()` already exposes — is wrong on three
+independent counts, and the engine's own Track-S precedent makes it look more reasonable than it is.
+
+1. **Unbounded per tick.** A 1000 Hz mouse produces ~16 `MouseMove` events per 60 Hz tick. The one
+   message a player's responsiveness depends on must not be the one that fragments.
+2. **Device-shaped, not game-shaped.** `Key::W` is a *binding* — client-side policy the player may
+   remap, and the server has no business knowing it.
+3. **Arithmetic on the wrong side.** A client that reports where it moved is a client the server
+   trusts to do the server's arithmetic, which is §1's authority model inverted.
+
+So an `InputCommand` is a sample of intent — movement axes on the unit disc, **absolute** view
+angles, a held bitfield and a pressed bitfield — and `InputSampler` integrates the local event
+stream down to it. Absolute angles rather than deltas because a lost delta is aim lost *permanently*,
+while a lost absolute is repaired by the next sample; that self-healing property is what makes the
+unreliable channel acceptable for input at all.
+
+The contrast with `stream::InputEvent` (ADR-0030), which forwards raw device events, is not an
+inconsistency: there the remote end owns the **user interface** and a viewport genuinely wants the
+scroll wheel. Here the remote end owns the **simulation**.
+
+Channel choice follows the same argument §3 makes for `Delta`, pointed the other way:
+**unreliable-sequenced**, because a retransmitted input arrives a round trip stale *and* holds every
+fresher one behind it. Loss is answered with **redundancy instead of retransmission** — each packet
+carries the last few commands, and the server deduplicates on a receive frontier. `held` and
+`pressed` are separate fields precisely because their loss stories differ: a level is self-healing,
+an edge exists in exactly one command and is what the window protects.
+
+And A11's ruling carries upstream unchanged: the sequence number is an **ordering and identity key**,
+not a schedule. A client's tick 400 is not a time the server can locate, and there is no clock sync
+in this codebase. In v1 the server may order, deduplicate, and count gaps with it — nothing more.
+
+### A20. The prediction seam is delivered as state, not as an interface
+
+The ladder promised "the prediction *interface* (implementation deferred)". m11.6c deliberately does
+**not** ship an abstract class, and the reasoning is worth recording because it reads as scope being
+dropped and is not.
+
+There is no character controller, player, or weapon anywhere in `engine/` (A6; that is M12). A
+`virtual void replay(...) = 0` written today would be guessing at its own signature — World? entity?
+physics scene? dt? — and a wrong guess in a header is worse than an absence, because the next person
+inherits it as a constraint rather than a blank page.
+
+What is *not* a guess is that any predictor needs the commands the server has not confirmed
+consuming, and a way to retire them. That is what shipped: `ClientInputSender::unacked()`, retired by
+the `InputAck` echo, bounded, counted, and exercised by the proofs. The echo has a working sibling
+in-tree — ADR-0030 §5's `seq` + `client_us`, echoed on the first frame reflecting an input.
+
+Honestly missing, so nobody mistakes the seam for the feature: the replay itself, the rollback of
+local state to the server's version, the comparison that decides a correction is needed, and the
+clock offset that would let a command be placed at a server tick. The last of those is the only one
+that needs new wire bytes.
