@@ -642,14 +642,18 @@ template <class TargetSupport>
         if (g.overlapping) {
             if (!have_safe) {
                 // Overlapping before moving at all: the caller's problem to fix (depenetration),
-                // and a different instruction from "stopped at the surface". There is no gap
-                // anywhere to measure, so the witnesses are all there is — a caller depenetrating
-                // from here wants EPA's penetration axis, which this query deliberately does not
-                // compute, and the flag is the signal to go and do that.
+                // and a different instruction from "stopped at the surface". Nothing here is a
+                // measurement, and the outputs say so honestly rather than dressing up: an
+                // overlapping GJK carries only the simplex — witness points are a product of the
+                // DISTANCE computation, which an overlap exit never ran — and its `closest` is
+                // zero, which makes `witness_normal` the reversed sweep direction. So the normal
+                // is a deterministic retreat direction, the point is the zero vector, and a
+                // caller depenetrating from here wants EPA's penetration axis, which this query
+                // deliberately does not compute: the flag is the signal to go and do that.
                 t_out = 0.0f;
                 overlap_out = true;
                 n_out = witness_normal;
-                p_out = g.point_b;
+                p_out = core::Vec3{}; // no witnesses exist on this path — see above
                 return true;
             }
             // WE OVERSHOT — and the interesting part is that this is REACHABLE, which is why the
@@ -664,10 +668,18 @@ template <class TargetSupport>
             // between the last position proven OUTSIDE (safe_t) and this one proven INSIDE
             // (bisect_outside above). Paid only on the overshoot path.
             const float hit_t = bisect_outside(safe_t, t);
+            // The witness point must come from a measurement at the RETURNED position, and from a
+            // SEPARATED one: `g` here is the overlapping measurement, whose `point_b` is the zero
+            // vector, not a witness (an overlap exit fills only the simplex — see the initial-
+            // overlap branch above). hit_t was OBSERVED outside, so GJK there is separated by
+            // construction and its witnesses are real. Same accounting as measure_normal: one
+            // extra GJK, paid only on the overshoot path.
+            const ShapeSupport landed = posed_at(hit_t);
+            const GjkResult g_hit = gjk(landed, target, landed.pos - target_centre);
             t_out = hit_t; // the last position proven to be outside
             overlap_out = false;
             n_out = measure_normal(hit_t, witness_normal);
-            p_out = g.point_b;
+            p_out = g_hit.point_b;
             return true;
         }
 
@@ -758,9 +770,15 @@ template <class TargetSupport>
     // erring toward "stopped early" costs a fraction of a millimetre, while erring toward
     // "missed" lets the caster pass through a solid surface.
     const ShapeSupport last = posed_at(t);
-    const GjkResult g_last = gjk(last, target, last.pos - target_centre);
+    GjkResult g_last = gjk(last, target, last.pos - target_centre);
     if (g_last.overlapping) {
         t = bisect_outside(safe_t, t);
+        // Re-measure at the bisected position — for the WITNESSES, not just the position: the
+        // overlapping measurement's `point_b` is the zero vector (an overlap exit fills only the
+        // simplex), while the bisected t was observed outside, so GJK there is separated and
+        // carries a real witness for `p_out` below.
+        const ShapeSupport outside = posed_at(t);
+        g_last = gjk(outside, target, outside.pos - target_centre);
     }
     t_out = t;
     overlap_out = false;

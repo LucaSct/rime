@@ -111,8 +111,10 @@ struct ShapeHit {
     // after moving 0 m" and "I started inside a wall" are the same number and completely different
     // situations: the first means stop, the second means the caller must DEPENETRATE first, and a
     // controller that treats the second as the first freezes solid inside the geometry it is stuck
-    // in. When this is set, `normal` and `point` describe the initial overlap as GJK's witnesses
-    // saw it, which is a usable push-out direction but not a contact plane.
+    // in. When this is set, nothing was measured and the fields say so: `point` is the ZERO VECTOR
+    // (an overlapping GJK carries no witness points) and `normal` is the reversed sweep direction
+    // — a deterministic retreat, not a contact plane. Depenetration needs a penetration axis,
+    // which is EPA's job (the contact pipeline), not this query's.
     bool initial_overlap = false;
 
     // Which compound child was touched (M8.3's convention, as `RayHit::child`): the child index

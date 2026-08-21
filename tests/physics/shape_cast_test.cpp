@@ -608,6 +608,18 @@ TEST_CASE("m12.1 shape cast: the graze property, over a grid of angles and scale
                                 // assertion is 40× loose and catches only a gross regression.
                                 CHECK(hit.distance <= travel + 2e-2f);
 
+                                // The WITNESS POINT lands on the struck face, near the analytic
+                                // touch point (-hx, ay, 0). The tolerance is dominated by the
+                                // same shallow-penetration slack as the over-report bound above
+                                // (a stop 2e-2 past contact drags the witness that far across
+                                // the face) — tighten the two together. What it must catch at
+                                // ANY looseness is a zero-vector point: an exit that bisects
+                                // back from an overshoot used to report exactly that (an
+                                // overlapping GJK has no witnesses to give), and (0,0,0) is at
+                                // least hx from the touch point on every row of this grid.
+                                const core::Vec3 touch{-hx, ay, 0.0f};
+                                CHECK(core::length(hit.point - touch) <= 5e-2f);
+
                                 // The FACE normal, for the angles at which a face normal is
                                 // well-determined. Past ~60° the contact genuinely approaches the
                                 // surface edge-on and the retracted probe has little left to
