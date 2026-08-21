@@ -9,6 +9,50 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-21) — shape-cast stepping fixed; the graze no longer stops short.** The item the
+> entry below left open ("that is the next thing to fix") is closed. The old advance stepped by
+> `GjkResult::lower_bound` **radially** — deliberately refusing the textbook `d / dot(dir, n)`, because
+> m12.1 had measured a diagonal `n` turn that quotient into a 30× leap through a wall. A radial step
+> closes an oblique sweep's gap by only *(1 − cos θ)* per iteration, so a graze burned the whole
+> 64-iteration budget and reported a hit while still short of the surface; and the same bound
+> **collapses to zero** on GJK's early exits against a large target, which drops the loop to its
+> `kMinStep` floor and turns "short" into "barely moved".
+>
+> Three changes, in descending order of what they prove. **The projected plane bound**: `lower_bound`
+> now travels with `plane_dir`, the direction of the plane that *produced* it, and the step is
+> `lower_bound / -dot(dir, plane_dir)` — van den Bergen's ray-clip. The pairing is the whole point.
+> That is what m12.1's rejected form was missing: it divided a distance by a direction the distance
+> knew nothing about, where here bound and closing rate are two readings of **one plane**, so a noisy
+> direction merely tilts that plane and *weakens* the bound — the quotient stays a proven
+> under-estimate whatever the direction's quality. A plane the sweep never closes is a **proven miss**,
+> returned immediately instead of walked to `tmax` in 64 steps. **The leashed-distance rescue**: when
+> the proven step stalls below a sixteenth of the gap, advance by the measured distance — but only
+> ever by `min(measured, trusted_prev + last_advance)`. True distance is 1-Lipschitz along the sweep,
+> so that expression is an upper bound by induction, and the leash discards a measurement that is not
+> loose but *wrong*: GJK's stall exits reported **14.14 m for a true gap of 2.8e-5 m**, and a step
+> believing it clears the target and reads the far side as a clean miss. Clamping is asymmetric on
+> purpose — a falsely large distance moves the caster, a falsely small one only slows the descent.
+>
+> **Measured on a 3,696-configuration sphere-vs-box probe against the exact analytic TOI** (x86-64,
+> GCC -O2). Before: **1,340 under-reports, worst 3.35 m of travel**, every θ = 89° configuration
+> failing, and — with the rescue present but *unleashed* — **2 outright tunnels** through a 0.2 m wall.
+> After: **zero** under-reports beyond the loop's own resolution (worst residual 2.3e-4 radial, against
+> `kTouchTolerance` 5e-5 plus GJK's distance slack), zero tunnels, zero phantom hits on 132 clean-miss
+> configurations. The gate is `tests/physics/shape_cast_test.cpp` — three named regressions plus a
+> 280-row grid, all through `PhysicsWorld::shape_cast`, because unlike #131 this defect's symptom
+> **is** the number the seam returns; on the pre-fix code 72 of those 280 rows fail, the worst by
+> 0.167 m. `plane_dir`'s support-plane invariant is re-verified from raw supports in `gjk_test.cpp`.
+>
+> **What this uncovered, and it lands before m12.2.** GJK still reports **separated** at shallow
+> penetrations: measured, *separated with distance 4.9e-4 while the shapes were 2.9 mm into each
+> other* (sphere r = 1 against a 5 × 5 × 0.1 slab, oblique). A cast that believes that number keeps
+> stepping, and can stop up to **~1 cm radial PAST the surface** — 114 of the 3,696 probe
+> configurations, worst 9.9e-3. The suspicion is specific: `kTouchEps2 = 1e-10` is an **absolute**
+> epsilon — its own comment says so — guarding an error that scales with the shapes, the **third**
+> instance of exactly the disease the entry below fixed twice in the same header. The over-report assertion in the new grid is held deliberately loose
+> (`t ≤ L + 2e-2`, 40× the worst measured there) with a comment saying to tighten it when this lands.
+> **Next:** the GJK shallow-penetration discrimination fix, then m12.2.
+
 > **Update (2026-08-21) — GJK feature convergence fixed, ahead of m12.2.** m12.1 ended by *bounding*
 > a narrowphase defect rather than repairing it; this repairs it, because the controller is built on
 > the query it corrupted. **Two of GJK's epsilons were ABSOLUTE while the float error they guard is
