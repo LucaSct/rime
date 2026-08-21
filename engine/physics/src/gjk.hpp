@@ -47,6 +47,12 @@ namespace gjk_detail {
 // depth ~0), kRelEps stops iterating when the support point improves the squared distance by less
 // than 0.01% (float has ~7 digits; pushing further just spins on noise). Calibration points, not
 // truths — revisited with the M7.10 stress harness.
+//
+// kTouchEps2 is a FAST PATH, not the touch discriminator: at large coordinates a genuinely
+// touching pose can stall with dist2 well above it, which is why the stall exits demand a
+// separation CERTIFICATE (see finish_stalled in gjk()) instead of trusting whatever distance the
+// stalled simplex happens to hold. Its absoluteness — the disease #131 cured twice in this header
+// — is harmless in a fast path that only ever short-circuits toward "overlapping".
 inline constexpr float kTouchEps2 = 1e-10f;
 inline constexpr float kRelEps = 1e-4f;
 // The absolute noise floor of the convergence test, as a multiple of |closest| * |w| — the scale of
@@ -237,6 +243,169 @@ closest_on_triangle(const SupportVertex* v, int i0, int i1, int i2) noexcept {
     r.count = 3;
     r.dist2 = core::dot(r.point, r.point);
     return r;
+}
+
+// ── Double-precision support for the stall polish ────────────────────────────────────────────
+//
+// Everything below exists for exactly one caller: the stall polish in gjk() (the finish_stalled
+// lambda there carries the full argument). It runs ONLY after the float walk has already stalled
+// uncertified — never on the convergence path — so it is written for correctness-by-construction
+// rather than speed: a brute-force closest-point-on-hull instead of a second copy of the Voronoi
+// case analysis, because a rarely-exercised duplicate of 120 lines of region tests is exactly
+// where the next knife-edge bug would live.
+
+struct Vec3d {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+[[nodiscard]] constexpr Vec3d to_double(core::Vec3 v) noexcept {
+    return {v.x, v.y, v.z};
+}
+
+[[nodiscard]] constexpr core::Vec3 to_float(Vec3d v) noexcept {
+    return {static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z)};
+}
+
+[[nodiscard]] constexpr Vec3d operator+(Vec3d a, Vec3d b) noexcept {
+    return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+[[nodiscard]] constexpr Vec3d operator-(Vec3d a, Vec3d b) noexcept {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+[[nodiscard]] constexpr Vec3d operator*(Vec3d v, double s) noexcept {
+    return {v.x * s, v.y * s, v.z * s};
+}
+
+[[nodiscard]] constexpr double dot(Vec3d a, Vec3d b) noexcept {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+[[nodiscard]] constexpr Vec3d cross(Vec3d a, Vec3d b) noexcept {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+// Closest point to the ORIGIN on the convex hull of 1–4 points, in double, with barycentrics —
+// by brute force over every face of every dimension: each vertex, each edge, each triangle, and
+// (given four points) the solid tetrahedron's interior.
+//
+// The correctness argument is the projection theorem rather than a case analysis: the closest
+// point of a convex polytope lies in the relative interior of exactly one face, and for THAT face
+// the unconstrained affine projection of the origin lands strictly inside — so enumerating
+// "affine projection, kept only if its barycentrics are interior" over ALL faces is guaranteed to
+// visit the answer, every candidate kept is genuinely a point of the hull, and the minimum over
+// the candidates therefore IS the answer. Boundary cases (a projection landing exactly on an
+// edge's endpoint) are covered because the subface is enumerated too.
+//
+// Degenerate faces — a zero-length edge, a sliver triangle, a flat tetrahedron — are simply
+// SKIPPED: their closest points live on their own subfaces, which the enumeration already visits.
+// The same "falling back is never wrong" argument as kDegenerateRel above, minus the tuning: here
+// nothing needs to be tight, so the guards can sit orders of magnitude above double noise.
+struct HullClosest {
+    Vec3d point{};
+    double lambda[3] = {};
+    int index[3] = {}; // indices into the caller's point array
+    int count = 0;
+    double dist2 = 0.0;
+    bool contained = false; // four points, origin strictly inside: overlap, no closest feature
+};
+
+[[nodiscard]] inline HullClosest closest_on_hull_double(const Vec3d* p, int n) noexcept {
+    HullClosest best;
+    bool any = false;
+    const auto consider = [&](Vec3d q, int c, const int* idx, const double* lam) {
+        const double d2 = dot(q, q);
+        if (!any || d2 < best.dist2) {
+            any = true;
+            best.point = q;
+            best.count = c;
+            best.dist2 = d2;
+            for (int i = 0; i < c; ++i) {
+                best.index[i] = idx[i];
+                best.lambda[i] = lam[i];
+            }
+        }
+    };
+
+    // Vertices: always valid candidates, and the fallback every degenerate skip relies on.
+    for (int i = 0; i < n; ++i) {
+        const int idx[1] = {i};
+        const double lam[1] = {1.0};
+        consider(p[i], 1, idx, lam);
+    }
+
+    // Edges: keep the projection only if it lands strictly inside (endpoints are the vertex
+    // candidates above). A zero-length edge is skipped outright.
+    for (int i = 0; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            const Vec3d e = p[j] - p[i];
+            const double ee = dot(e, e);
+            if (!(ee > 0.0)) {
+                continue;
+            }
+            const double t = -dot(p[i], e) / ee;
+            if (t > 0.0 && t < 1.0) {
+                const int idx[2] = {i, j};
+                const double lam[2] = {1.0 - t, t};
+                consider(p[i] + e * t, 2, idx, lam);
+            }
+        }
+    }
+
+    // Triangles: project via the 2x2 Gram system (normal equations of the affine fit). The
+    // degeneracy guard is RELATIVE — det = |e1|^2 |e2|^2 sin^2(theta), so this floors the opening
+    // angle at ~1e-6 rad, four orders above double's rounding of the same product — and skipping
+    // is safe because the triangle's edges are already enumerated.
+    for (int i = 0; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            for (int k = j + 1; k < n; ++k) {
+                const Vec3d e1 = p[j] - p[i];
+                const Vec3d e2 = p[k] - p[i];
+                const double a11 = dot(e1, e1);
+                const double a12 = dot(e1, e2);
+                const double a22 = dot(e2, e2);
+                const double det = a11 * a22 - a12 * a12;
+                if (!(det > 1e-12 * a11 * a22)) {
+                    continue;
+                }
+                const double b1 = -dot(p[i], e1);
+                const double b2 = -dot(p[i], e2);
+                const double u = (b1 * a22 - b2 * a12) / det;
+                const double v = (b2 * a11 - b1 * a12) / det;
+                if (u > 0.0 && v > 0.0 && u + v < 1.0) {
+                    const int idx[3] = {i, j, k};
+                    const double lam[3] = {1.0 - u - v, u, v};
+                    consider(p[i] + e1 * u + e2 * v, 3, idx, lam);
+                }
+            }
+        }
+    }
+
+    // The solid tetrahedron: if the origin's barycentrics are strictly interior, the hull
+    // encloses it. Claiming containment is the one candidate that must NOT fire on a degenerate
+    // face (it would flip a separation into an overlap), so the volume guard errs toward "not
+    // contained" — a truly enclosing but flat tetrahedron puts the origin within noise of a face,
+    // which the caller's touch exit already reports as overlap.
+    if (n == 4) {
+        const Vec3d e1 = p[1] - p[0];
+        const Vec3d e2 = p[2] - p[0];
+        const Vec3d e3 = p[3] - p[0];
+        const double det = dot(e1, cross(e2, e3));
+        const double scale2 = dot(e1, e1) * dot(e2, e2) * dot(e3, e3);
+        if (det * det > 1e-18 * scale2) {
+            const Vec3d rhs = p[0] * -1.0;
+            const double l1 = dot(rhs, cross(e2, e3)) / det;
+            const double l2 = dot(e1, cross(rhs, e3)) / det;
+            const double l3 = dot(e1, cross(e2, rhs)) / det;
+            if (l1 > 0.0 && l2 > 0.0 && l3 > 0.0 && l1 + l2 + l3 < 1.0) {
+                best.contained = true;
+            }
+        }
+    }
+    return best;
 }
 
 } // namespace gjk_detail
@@ -436,6 +605,200 @@ template <class SupA, class SupB>
         res.simplex_count = count;
     };
 
+    // The largest squared support magnitude seen — the scale every certificate below is judged
+    // against, because a support-plane bound is a dot product of |w|-sized vectors and its float
+    // noise is kSupportEps * |w| (the same scaling the convergence test uses).
+    float max_w2 = core::dot(verts[0].w, verts[0].w);
+
+    // The STALL exits' finisher, and the discrimination this whole loop's honesty rests on.
+    //
+    // A stall exit (duplicate support, no monotone progress, iteration cap) knows only that the
+    // walk stopped — and `distance` at that point is an UPPER bound from an arbitrary simplex,
+    // which says NOTHING about which side of contact the shapes are on. Measured on the m12.1
+    // probe family (sphere r=1 vs a 5x5x0.1 slab): stalls reported "separated, 4.6e-4" at a true
+    // penetration of 2.5 MILLIMETRES, and a cast that believed it stopped 3 mm inside the wall
+    // (ROADMAP 2026-08-21, the deferred shallow-penetration item).
+    //
+    // The discriminating fact is GEOMETRY, not tuning: when the origin is inside the Minkowski
+    // difference, NO support plane can exclude it — every bound dot(w, v̂) is <= 0 — so a positive
+    // plane bound beyond the evaluation's own float noise is a PROOF of separation, and its
+    // absence at a stall means "not provably outside". `lower_bound` already holds the best plane
+    // seen; the verdict is earned in three steps:
+    //
+    //   1. The POLISH: restart the distance walk from the stalled simplex with every piece of
+    //      SIMPLEX arithmetic in double, and keep the best support-plane bound seen — the
+    //      in-loop one or any the polish produces.
+    //   2. That bound clears the noise floor: separated, certified, reported FROM THE POLISHED
+    //      SIMPLEX. The polish runs even when the in-loop bound alone would certify, because a
+    //      certified bound does not launder the stalled simplex's OTHER outputs: its `closest`
+    //      (the normal every caller derives), its distance (the upper bound the cast leashes),
+    //      and its witnesses are still wreckage. Measured: a retracted normal probe consuming a
+    //      certified-but-unpolished stall exit reported a contact normal TRANSVERSE to a 20 m
+    //      wall's face (n.x = 4e-4 where -1 was the answer) — the bound was true and everything
+    //      else was garbage.
+    //   3. Nothing certifies: report OVERLAPPING. Either the shapes truly penetrate (the measured
+    //      failure this fixes), or they sit within the noise floor of touching — and a narrowphase
+    //      that treats "indistinguishable from contact" as contact errs the way every consumer
+    //      here wants: the cast bisects to the boundary by observation, and the contact pipeline
+    //      seeds EPA exactly as it does for kTouchEps2 touches.
+    //
+    // WHY THE POLISH MUST BE A DESCENT, AND WHY IT MUST BE IN DOUBLE — i.e. why nothing cheaper
+    // works. Two designs were measured and buried on the way here:
+    //
+    //   * "Certify along the terminal simplex's own perpendicular." The stalled simplex in the
+    //     measured family is a SEGMENT — a chord of the CURVED Minkowski difference (sphere ⊕ box
+    //     is curved everywhere the sphere contributes), with endpoints near two far corners of the
+    //     slab face, e.g. v0 = (-1.08e-3, -5.011, -5.010), v1 = (-9.5e-4, 5.002, 5.001) at a true
+    //     gap of 8.7e-4. A secant of a curved surface is NOT tangent to it: that chord's exact
+    //     perpendicular through the origin is 0.13 rad off the true separating axis, and across a
+    //     5 m face that tilt costs 0.65 m of plane bound — the certificate evaluates to -0.93 for
+    //     a gap of 8.7e-4. No plane through that chord certifies, at ANY precision; the certifying
+    //     direction is almost perpendicular to the simplex on hand, so it has to be FOUND, by
+    //     iterating, not synthesized from the wreck.
+    //   * "Descend in float." The walk stalled precisely because float cannot descend here:
+    //     `closest` is a barycentric blend of ±5 m coordinates cancelling to a millimetre, so its
+    //     transverse error is ~1 ULP of the SUPPORT coordinates (~5e-7) while the transverse
+    //     SIGNAL that should steer the next support is smaller — the search direction's sign is
+    //     noise, and the loop flip-flops between opposite corners of the face. In double the same
+    //     blend carries ~1e-15 of error, six orders below the signal, and the walk descends like
+    //     the textbook algorithm. Measured on the slab family (384 stall-heavy poses): the whole
+    //     query — float walk plus polish — spends 11 support evaluations on average, 16 at worst,
+    //     and every pose certifies with a bound within 2.2% of the true gap.
+    //
+    // Precision discipline the polish depends on, easy to break silently:
+    //
+    //   * Re-difference w = a - b IN DOUBLE from the stored float witnesses. The float `w` was
+    //     rounded once already (fl(a-b) carries ~ULP(|b|) of transverse error — the very noise
+    //     being escaped); float a and b are EXACT doubles, so the re-difference is exact.
+    //   * Round the search direction to FLOAT before evaluating the support, and take the bound
+    //     along that same float vector (dot in double). The pair (lower_bound, plane_dir) handed
+    //     to the caller is then a statement about the exact plane the caller receives — sound for
+    //     ANY direction, because a support plane is a valid bound whatever direction it was queried
+    //     along; precision only buys tightness. The only irreducible fuzz left is the support
+    //     oracle's own float rounding, which is exactly what the noise floor prices.
+    //
+    // The verdict stays certificate-shaped: a positive plane bound above the noise floor is a
+    // full proof of separation on its own (convergence not required — see the geometry above), and
+    // without one the polish's own tetrahedron containment or touch exit reports overlap. The
+    // expensive path runs ONLY at stalls; the convergence path never pays for it.
+    //
+    // kTouchEps2 stays as the fast path above; its absoluteness is harmless now that it is no
+    // longer the only touch detector. (The ROADMAP suspicion named the epsilon; the measured
+    // culprit was stall exits claiming separation with no certificate — the same absolute-vs-
+    // scale disease as #131, in a different organ.)
+    const auto finish_stalled = [&] {
+        // The double-precision polish, seeded with the stalled simplex. Unconditional — see
+        // point 2 above for why a certified in-loop bound is not an excuse to skip it.
+        SupportVertex pverts[4];
+        Vec3d pw[4];
+        int pcount = count;
+        for (int i = 0; i < pcount; ++i) {
+            pverts[i] = verts[i];
+            pw[i] = to_double(verts[i].a) - to_double(verts[i].b); // exact — see above
+        }
+
+        double best_bound = 0.0;
+        core::Vec3 best_dir{};
+        HullClosest sol;
+        for (int it = 0; it < kMaxIterations; ++it) {
+            sol = closest_on_hull_double(pw, pcount);
+            if (sol.contained) {
+                // The polished simplex encloses the origin: a genuine overlap, proven the same
+                // way the float loop proves it. Adopt the enclosing tetrahedron so EPA seeds from
+                // the best available simplex.
+                count = pcount;
+                for (int i = 0; i < count; ++i) {
+                    verts[i] = pverts[i];
+                }
+                finish_overlapping();
+                return;
+            }
+
+            // Compact to the supporting feature (copy-out first, same aliasing hazard as
+            // solve_simplex). The appended vertex below always lands AFTER the feature, so on
+            // every exit pverts[0..sol.count) matches sol's barycentrics.
+            SupportVertex keptv[3];
+            Vec3d keptw[3];
+            for (int i = 0; i < sol.count; ++i) {
+                keptv[i] = pverts[sol.index[i]];
+                keptw[i] = pw[sol.index[i]];
+            }
+            for (int i = 0; i < sol.count; ++i) {
+                pverts[i] = keptv[i];
+                pw[i] = keptw[i];
+            }
+            pcount = sol.count;
+
+            if (sol.dist2 <= static_cast<double>(kTouchEps2)) {
+                count = pcount;
+                for (int i = 0; i < count; ++i) {
+                    verts[i] = pverts[i];
+                }
+                finish_overlapping();
+                return;
+            }
+
+            // The touch exit above floors |closest| at sqrt(kTouchEps2) = 1e-5, so this division
+            // can never see a denormal length — the guard a bare `> 0` comparison would not give
+            // (1/denormal is inf, which would fabricate an infinite certificate).
+            const double len = std::sqrt(sol.dist2);
+            const core::Vec3 n = to_float(sol.point * (1.0 / len));
+            const SupportVertex sw = minkowski_support(-n);
+            max_w2 = std::max(max_w2, core::dot(sw.w, sw.w));
+            const Vec3d swd = to_double(sw.a) - to_double(sw.b);
+
+            const double bound = dot(swd, to_double(n));
+            if (bound > best_bound) {
+                best_bound = bound;
+                best_dir = n;
+            }
+
+            // Same convergence test as the float loop, evaluated where it can actually resolve:
+            // the arithmetic noise term vanishes in double, leaving only the support oracle's
+            // float fuzz — which kSupportEps already prices.
+            const double fuzz = kSupportEps * std::sqrt(sol.dist2 * dot(swd, swd));
+            if (sol.dist2 - dot(sol.point, swd) <= kRelEps * sol.dist2 + fuzz) {
+                break;
+            }
+            bool duplicate = false;
+            for (int i = 0; i < pcount; ++i) {
+                const Vec3d diff = swd - pw[i];
+                if (dot(diff, diff) <= static_cast<double>(kDuplicateEps2)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                break;
+            }
+            pverts[pcount] = sw;
+            pw[pcount] = swd;
+            ++pcount;
+        }
+
+        // Merge the polish's best plane with the in-loop one — each is independently valid, and
+        // the PAIRING travels with whichever bound wins. The noise floor is recomputed here
+        // because the polish's own support evaluations may have raised max_w2.
+        if (best_bound > static_cast<double>(lower_bound)) {
+            lower_bound = static_cast<float>(best_bound);
+            plane_dir = best_dir;
+        }
+        const float noise_floor = kSupportEps * std::sqrt(max_w2);
+        if (lower_bound > noise_floor) {
+            // Certified. Report the POLISHED feature — its distance is the converged upper bound
+            // and its barycentrics reconstruct well-conditioned witnesses — not the stalled wreck.
+            count = sol.count;
+            for (int i = 0; i < count; ++i) {
+                verts[i] = pverts[i];
+                lambda[i] = static_cast<float>(sol.lambda[i]);
+            }
+            closest = to_float(sol.point);
+            finish_separated();
+            return;
+        }
+        finish_overlapping();
+    };
+
     float dist2 = core::dot(closest, closest);
     for (int iter = 0; iter < kMaxIterations; ++iter) {
         // Origin (numerically) on the simplex: a touching/overlapping contact. EPA sorts out the
@@ -447,6 +810,7 @@ template <class SupA, class SupB>
 
         const core::Vec3 d = -closest;
         const SupportVertex w = minkowski_support(d);
+        max_w2 = std::max(max_w2, core::dot(w.w, w.w));
 
         // The support-plane bound: dot(w, v̂) with v̂ = closest/|closest|. Every point of the
         // Minkowski difference lies on the far side of that plane, so the origin is at least this
@@ -495,7 +859,9 @@ template <class SupA, class SupB>
         }
 
         // Cycling guard: re-encountering a vertex means fp noise is driving the loop, not
-        // geometry. Accept the current answer as separated (distance is a valid upper bound).
+        // geometry. A stall, so the verdict must be EARNED — see finish_stalled: "separated" here
+        // is only an upper bound from an arbitrary simplex, and believing it uncertified is how a
+        // 2.5 mm penetration read as a 4.6e-4 gap.
         bool duplicate = false;
         for (int i = 0; i < count; ++i) {
             const core::Vec3 diff = w.w - verts[i].w;
@@ -505,7 +871,7 @@ template <class SupA, class SupB>
             }
         }
         if (duplicate) {
-            finish_separated();
+            finish_stalled();
             return res;
         }
 
@@ -519,20 +885,22 @@ template <class SupA, class SupB>
 
         const float new_dist2 = core::dot(closest, closest);
         // Monotonicity guard: exact GJK strictly descends; if float arithmetic stopped making
-        // progress, stop with the current (upper-bound) answer instead of spinning.
+        // progress, stop instead of spinning — but the verdict must be earned (finish_stalled):
+        // this is the exit that carried every misread in the shallow-penetration family.
         if (new_dist2 >= dist2) {
-            finish_separated();
+            finish_stalled();
             return res;
         }
         dist2 = new_dist2;
     }
 
     // Iteration cap (never hit in practice at our scales; a safety net, not a code path we rely
-    // on). Report the current state honestly: near-zero distance as overlap, else separated.
+    // on). Report the current state honestly: near-zero distance as overlap, else a stall —
+    // "separated" from here is subject to exactly the certificate finish_stalled demands.
     if (dist2 <= kTouchEps2) {
         finish_overlapping();
     } else {
-        finish_separated();
+        finish_stalled();
     }
     return res;
 }

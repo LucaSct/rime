@@ -593,32 +593,38 @@ TEST_CASE("m12.1 shape cast: the graze property, over a grid of angles and scale
                                 const float ct = std::cos(theta * kPi / 180.0f);
                                 CHECK(hit.distance >= travel - (5e-5f + 3e-4f) / ct - 1e-4f);
 
-                                // THE OVER-REPORT SIDE IS DELIBERATELY LOOSE, and the looseness is
-                                // a KNOWN DEFECT held open rather than slack for its own sake. GJK
-                                // still reports "separated, distance ≈ 5e-4" at true penetrations
-                                // of a couple of millimetres (measured: separated at 4.9e-4 with
-                                // the shapes 2.9 mm into each other), so a cast can stop a little
-                                // PAST the surface — up to ~1 cm radial across the wider research
-                                // sweep behind this fix. Suspected cause: `kTouchEps2` is
-                                // an ABSOLUTE epsilon where the error it guards scales with the
-                                // shapes — the third instance of exactly the disease #131 fixed
-                                // twice in the same header. It is the next brick
-                                // (docs/ROADMAP.md, 2026-08-21 follow-up); TIGHTEN THIS BOUND WHEN
-                                // IT LANDS. Worst measured here is 4.8e-4 m, so today the
-                                // assertion is 40× loose and catches only a gross regression.
-                                CHECK(hit.distance <= travel + 2e-2f);
+                                // NO OVER-REPORT. This bound was held 40x loose (2e-2) while GJK's
+                                // stall exits could still report "separated, 4.9e-4" with the
+                                // shapes 2.9 mm into each other — a cast believing that stops PAST
+                                // the surface. The stall certificate in src/gjk.hpp closed that:
+                                // a stall may claim separation only with a support-plane proof, so
+                                // every position this loop trusts as "outside" now really is, and
+                                // the bisection can no longer be talked out of retreating.
+                                // Measured on this grid with the certificate in: ZERO rows stop
+                                // past `travel` at all (the worst is 1e-5 SHORT of it). The
+                                // remaining theoretical ceiling is the certificate's own noise
+                                // floor — kSupportEps * |support| ≈ 1.1e-5 radial against the
+                                // 20 m wall, spent at 1/cos θ ≈ 1.3e-4 of travel at 85° — so the
+                                // bound sits at ~4x that ceiling and ~40x tighter than before,
+                                // with the slack there to absorb another platform's rounding, not
+                                // another defect.
+                                CHECK(hit.distance <= travel + 5e-4f);
 
                                 // The WITNESS POINT lands on the struck face, near the analytic
-                                // touch point (-hx, ay, 0). The tolerance is dominated by the
-                                // same shallow-penetration slack as the over-report bound above
-                                // (a stop 2e-2 past contact drags the witness that far across
-                                // the face) — tighten the two together. What it must catch at
-                                // ANY looseness is a zero-vector point: an exit that bisects
-                                // back from an overshoot used to report exactly that (an
-                                // overlapping GJK has no witnesses to give), and (0,0,0) is at
-                                // least hx from the touch point on every row of this grid.
+                                // touch point (-hx, ay, 0). This tolerance was 5e-2, riding on
+                                // the over-report defect above (a stop 2e-2 past contact drags
+                                // the witness that far across the face); with the stall
+                                // certificate in, the worst witness error measured on this grid
+                                // is 1.8e-3 — an 85° graze at the 20 m wall, where the stop is a
+                                // few 1e-4 of travel short and the contact patch of a sphere at a
+                                // sub-tolerance gap is genuinely that wide — so the bound sits at
+                                // ~2.8x the measurement. What it must catch at ANY looseness is a
+                                // zero-vector point: an exit that bisects back from an overshoot
+                                // used to report exactly that (an overlapping GJK has no
+                                // witnesses to give), and (0,0,0) is at least hx from the touch
+                                // point on every row of this grid.
                                 const core::Vec3 touch{-hx, ay, 0.0f};
-                                CHECK(core::length(hit.point - touch) <= 5e-2f);
+                                CHECK(core::length(hit.point - touch) <= 5e-3f);
 
                                 // The FACE normal, for the angles at which a face normal is
                                 // well-determined. Past ~60° the contact genuinely approaches the
