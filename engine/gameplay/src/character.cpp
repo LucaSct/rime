@@ -363,17 +363,46 @@ struct Caster {
     // Asked with a RAY (Caster::ground_below), because a step lip is precisely where a shape
     // query's normal is least trustworthy and "is this walkable" is the question the whole ladder
     // turns on.
+    //
+    // The ray's reach carries half a skin of slack beyond the drop the gate below could accept,
+    // and the slack is load-bearing, not belt-and-braces. "Landed exactly where we lifted from" is
+    // a legal answer (drop == lift — a diagonal approach that cleared no height yet, but did
+    // commit an advance toward the riser it will climb NEXT tick), and that answer sits at
+    // EXACTLY the ray's reach: half_height + radius + clearance + lift. A measurement that lives
+    // precisely at the end of the instrument is decided by float rounding, not by geometry —
+    // measured on a 0.3 m step approached 30° off axis, the ray missed the floor it was standing
+    // over and the ladder refused every attempt, wedging the character against the lip for good.
+    // The slack moves the decision back into the measured comparison, where it belongs.
     float drop = 0.0f;
     core::Vec3 floor_normal{0.0f, 1.0f, 0.0f};
-    if (!caster.ground_below(advanced, cfg, lift, drop, floor_normal)) {
+    if (!caster.ground_below(
+            advanced, cfg, lift + kBackOffFraction * cfg.skin, drop, floor_normal)) {
         return false;
     }
-    if (!walkable(floor_normal, cfg) || drop > lift) {
+    if (!walkable(floor_normal, cfg) || drop > lift + kBackOffFraction * cfg.skin) {
         return false;
     }
     drop = std::max(drop, 0.0f); // never LIFT on the way down; that is the recovery pass's job
 
-    position = advanced - kUp * drop;
+    // 4. CONFIRM THE FOOT FITS. The down-probe is a ray — infinitely thin, and it answers about
+    //    what is under the capsule's AXIS. When the advance ends with the axis still a hair in
+    //    front of the riser plane (a head-on approach leaves it skin-and-back-off short, since the
+    //    pressed stand-off is measured from the INFLATED surface), the ray reports the floor the
+    //    character came from, `drop == lift`, and the landing it describes would set the capsule
+    //    back down INTO the very riser it was pressed against. Measured: a 0.3 m step met head-on
+    //    landed 7 cm inside its own lip and handed the recovery pass a dig-out it had no budget
+    //    for. So the landed pose is checked the same way the slide loop checks a destination —
+    //    penetration, with the confirm probe's margin — and a landing that cannot actually be
+    //    stood in is refused. The wedge that results is the pre-ladder status quo, which the
+    //    end-of-tick recovery keeps clear; refusing is strictly better than committing a pose the
+    //    physics already calls impossible.
+    const core::Vec3 landed = advanced - kUp * drop;
+    physics::PenetrationHit landing_blocked;
+    if (caster.obstructed(landed, landing_blocked)) {
+        return false;
+    }
+
+    position = landed;
     // The tick's motion is spent on the step (`gained` is at least a radius, comfortably more than
     // one tick of walking), so there is nothing left to slide with. Clamping rather than
     // subtracting keeps the budget from going negative and the loop from walking backwards.
@@ -420,7 +449,14 @@ bool validate(CharacterConfig& config) noexcept {
     };
 
     // Radius first: it is the scale every other length is judged against, including skin's ceiling.
-    clamp_to(config.radius, 1e-3f, 1e3f);
+    //
+    // The lower bound is 4 mm rather than something smaller for a reason that is easy to miss: the
+    // skin window below is [1e-3, 0.25 * radius], and a radius under 4 mm makes that window EMPTY
+    // — hi < lo, which is undefined behaviour in std::clamp and, with a checked standard library,
+    // an abort. So the radius floor is set by the narrowest window it must still admit. A 4 mm
+    // character is nonsense anyway; the point is that a nonsense config is CLAMPED rather than
+    // detonating.
+    clamp_to(config.radius, 4e-3f, 1e3f);
     clamp_to(config.half_height, 0.0f, 1e3f); // 0 is legal — that capsule is a sphere
     clamp_to(config.max_speed, 0.0f, 1e3f);
     clamp_to(config.accel, 0.0f, 1e5f);
@@ -621,33 +657,55 @@ CharacterState step_character(const CharacterState& state,
         return caster.obstructed(at, out);
     };
 
-    // ── (c) Depenetration pre-pass ────────────────────────────────────────────────────────────
+    // ── (c) Depenetration recovery — the pass that runs TWICE ─────────────────────────────────
     // Starting a tick inside geometry is not a hypothetical: a crate the solver shoved into the
     // capsule, or destruction spawning debris on top of the player, both produce it in an ordinary
     // frame. A controller that meets it with a shape cast gets `initial_overlap` back — a flag that
     // says "depenetrate", carries no measurement, and cannot be moved on. So recovery runs FIRST,
     // out of the penetration query, before anything tries to move.
     //
+    // It runs AGAIN at the end of the tick (f2), and the second run is what makes "a tick never
+    // ENDS overlapping" a property the controller delivers rather than hopes for. The sweeps
+    // cannot deliver it alone: a tangential slide pressed against a convex EDGE — a step lip, a
+    // ramp's side — creeps millimetres closer per tick, because a grazing chord of a curved
+    // Minkowski surface is exactly where a cast's stop is least certain (the m12.1 lesson), until
+    // the real capsule is a few millimetres inside the lip. A start-of-tick-only recovery repairs
+    // that one tick LATE: every observer between the two ticks — the renderer, a replication
+    // snapshot, a gameplay trigger — sees the penetrated pose. Measured on a 0.3 m step approached
+    // 30° off axis: overlap of 3–14 mm on alternating ticks, popped out at the next tick's start,
+    // forever.
+    //
     // The push is capped per tick. Depenetration is a position write with no velocity behind it, so
     // an uncapped one is a teleport; capping it turns "shoved 2 m into a wall" into a visible slide
-    // out over several ticks.
-    bool overlapping = false;
-    for (int i = 0; i <= kMaxRecoveryPushes; ++i) {
-        physics::PenetrationHit pen;
-        if (!world.penetration(shape, s.position, core::quat_identity(), pen, recovery_filter)) {
-            overlapping = false;
-            break;
+    // out over several ticks. The cap is a budget for the WHOLE TICK — shared across both runs and
+    // however many pushes they take, because that is what `max_depenetration_per_tick` says it is.
+    // Capping each push separately would let a multi-push tick move several times the advertised
+    // rate — quietly, and exactly in the wedge case where the extra pushes exist. The push count is
+    // shared the same way, so kMaxRecoveryPushes keeps meaning what it says per tick.
+    float recovery_budget = cfg.max_depenetration_per_tick;
+    int recovery_pushes = 0;
+    // Returns whether the pose is STILL overlapping after doing what the remaining budget allows —
+    // the give-up, which every caller counts rather than hides.
+    const auto recover = [&]() -> bool {
+        for (;;) {
+            physics::PenetrationHit pen;
+            if (!world.penetration(
+                    shape, s.position, core::quat_identity(), pen, recovery_filter)) {
+                return false;
+            }
+            if (recovery_pushes >= kMaxRecoveryPushes || recovery_budget <= 0.0f) {
+                return true; // measured, and out of pushes or out of budget
+            }
+            // depth + skin, so the push clears the surface rather than landing exactly on it — the
+            // same stand-off every other position in this file keeps.
+            const float push = std::min(pen.depth + cfg.skin, recovery_budget);
+            recovery_budget -= push;
+            s.position = s.position + pen.normal * push;
+            ++recovery_pushes;
+            ++st.depenetrations;
         }
-        overlapping = true;
-        if (i == kMaxRecoveryPushes) {
-            break; // measured, and out of pushes — the give-up, reported below
-        }
-        // depth + skin, so the push clears the surface rather than landing exactly on it — the same
-        // stand-off every other position in this file keeps.
-        const float push = std::min(pen.depth + cfg.skin, cfg.max_depenetration_per_tick);
-        s.position = s.position + pen.normal * push;
-        ++st.depenetrations;
-    }
+    };
+    const bool overlapping = recover();
     if (overlapping) {
         // Counted rather than hidden. A `stuck` that appears for a few ticks is a deep overlap
         // being ground out at the capped rate and is fine; a `stuck` that never returns to zero is
@@ -739,21 +797,42 @@ CharacterState step_character(const CharacterState& state,
             s.position = s.position + dir * advance;
             remaining = remaining - dir * advance;
 
-            const core::Vec3 n = block.normal;
-            if (walkable(n, cfg)) {
-                s.grounded = true;
-                s.ground_normal = n;
-                touched_ground = true;
-            } else if (was_grounded && !jumped) {
-                // A steep normal while walking is either a wall or a step lip, and the casts in
-                // try_step_up are what tell those apart. A rejected attempt falls through to the
-                // ordinary clip below, which is the correct response to a real wall.
+            // STEP-UP IS TRIED FOR ANY BLOCKING CONTACT, not only for steep ones — and the reason
+            // is that "steep" was never the right question.
+            //
+            // Reaching this line already means the contact OPPOSES the motion (the check above
+            // sent every parallel surface on its way), so it is a thing in the character's path
+            // and never the ground it is walking along. A low step is exactly such a thing, and
+            // its contact normal reads WALKABLE, because a capsule meeting a 10 cm riser touches
+            // its top EDGE and the minimum-translation axis there points mostly upward. Gating
+            // step-up on an unwalkable normal therefore skipped precisely the steps that are
+            // easiest to climb: measured on the probe grid, a 0.10 m step under a 0.30 m budget
+            // was never climbed at all. The character marked the edge as "ground", clipped a
+            // little velocity against it, walked on, and spent three ticks with its shins inside
+            // solid geometry while the ground snap — whose ray, under the capsule's centre, still
+            // saw the floor behind the step — held it down there.
+            //
+            // The ladder itself is what decides: it only accepts when there is a walkable surface
+            // within `step_height` that the capsule can actually reach. A wall fails its forward
+            // probe, so the cost of asking is a few queries on a tick that was blocked anyway.
+            if (was_grounded && !jumped) {
                 if (try_step_up(caster, cfg, s.position, remaining, s.grounded, s.ground_normal)) {
                     ++st.steps_climbed;
                     touched_ground = true;
                     continue;
                 }
                 ++st.step_rejected;
+            }
+
+            const core::Vec3 n = block.normal;
+            if (walkable(n, cfg)) {
+                // Provisional: an edge contact's normal can read walkable while nothing walkable
+                // is under the capsule (a crest edge of a 50° wall measured (0, 0.906, 0.424)).
+                // The claim is re-verified against the world at the END of the tick (f3), where
+                // the pose it describes is the pose someone might believe it about.
+                s.grounded = true;
+                s.ground_normal = n;
+                touched_ground = true;
             }
 
             // THE CLIP, applied identically to the leftover displacement and to the velocity. Both
@@ -850,6 +929,7 @@ CharacterState step_character(const CharacterState& state,
     // with no gravity while grounded and no snap while rising, the character simply flew, gaining
     // 4.09 m of altitude on a 0.35 m step it was meant to be refused by. Verifying unconditionally
     // closes that: either the ground is still under you, or you are airborne and gravity resumes.
+    bool ground_confirmed = false; // set wherever a RAY has vouched for `grounded` at a final pose
     if (was_grounded && !jumped && !overlapping) {
         // Asked with a RAY, for the reasons in Caster::ground_below: the supporting surface's
         // identity and normal are what everything downstream turns on, and a shape query answers
@@ -858,14 +938,72 @@ CharacterState step_character(const CharacterState& state,
         core::Vec3 floor_normal{0.0f, 1.0f, 0.0f};
         if (caster.ground_below(s.position, cfg, cfg.snap_distance, drop, floor_normal) &&
             walkable(floor_normal, cfg) && drop <= cfg.snap_distance) {
-            s.position = s.position - kUp * std::max(drop, 0.0f);
+            // The ray answers about the surface under the AXIS, and the snap must not commit a
+            // pose the rest of the capsule cannot occupy. Walking diagonally off a ramp's side
+            // edge is the measured case: the axis crosses the edge first, the ray sees the flat
+            // ground below, and snapping the full drop buries the trailing flank 3–5 cm into the
+            // ramp edge still under it — refreshing an overlap every tick faster than the
+            // depenetration budget drains it.
+            //
+            // The check is against the REAL capsule, not the confirm probe, and the thinner shape
+            // is load-bearing. The snap's question is the invariant's own — "would this pose
+            // genuinely penetrate" — and asking it with the probe's extra half-skin manufactured a
+            // wall-climb: pressed against a steep face, the snapped pose sits sub-skin clear, the
+            // fattened probe called it blocked, the snap stopped pulling the character down, and
+            // the slide's upward clip walked it up a 50° wall at a centimetre a tick — "grounded"
+            // the whole way, because the axis ray still saw the floor beside the wall. A sub-skin
+            // graze the real capsule clears is exactly what the end-of-tick recovery (f2) exists
+            // to tidy; a genuine penetration is what this check refuses to create.
+            //
+            // When it refuses, the character keeps its height this tick and stays grounded (the
+            // ray DID find walkable ground in reach — it is resting on the edge), and the snap
+            // lands cleanly a tick or two later when the capsule has fully crossed.
+            const core::Vec3 snapped = s.position - kUp * std::max(drop, 0.0f);
+            physics::PenetrationHit snap_blocked;
+            if (!world.penetration(
+                    shape, snapped, core::quat_identity(), snap_blocked, recovery_filter)) {
+                s.position = snapped;
+                ++st.snaps;
+            }
             s.grounded = true;
             s.ground_normal = floor_normal;
-            ++st.snaps;
+            ground_confirmed = true; // this branch IS the (f3) verification, already passed
         } else if (!touched_ground) {
             // Nothing walkable within reach, and the slide loop did not land on anything either:
             // the character has walked off an edge. (The `touched_ground` guard matters — the loop
             // may have landed on a surface this cast cannot see straight down from.)
+            s.grounded = false;
+        }
+    }
+
+    // ── (f2) End-of-tick recovery — certifying the pose we hand back ──────────────────────────
+    // The second run of the pass declared at (c): everything that MOVES the character has now had
+    // its say, so this is the one place a residual overlap can be repaired before anyone outside
+    // this function can observe it. On a clean tick it costs exactly one penetration query and
+    // pushes nothing; on a graze tick it restores the contact offset the slide lost. It shares
+    // (c)'s budget and push count, so the per-tick caps still mean what they say.
+    if (recover()) {
+        ++st.stuck; // the same give-up as (c)'s, and counted the same way
+    }
+
+    // ── (f3) `grounded` is re-verified at the pose we hand back ───────────────────────────────
+    // `grounded` is a claim about the world — "a walkable surface is under me, within the snap's
+    // reach" — and the only claims this function returns are ones a RAY has vouched for at the
+    // FINAL pose. The slide loop's contact grounding is provisional: an edge contact's normal is
+    // a blend of the faces meeting there and can read walkable while the only thing under the
+    // capsule is a wall (a 50° crest edge measured (0, 0.906, 0.424)); and even a claim verified
+    // mid-tick can be stale by the time the tick ends, because the iterations after it kept
+    // moving (measured: the axis crossed the base line of a 55° ramp two slide iterations after
+    // the claim was checked, and the character ended the tick "standing" on the unwalkable face).
+    // The snap's own success is this same verification and sets the flag; everything else earns
+    // one raycast here. A refusal is not a judgement that the character is falling — only that
+    // gravity gets its say next tick, which un-grounds a false perch in one tick and costs a
+    // genuinely-supported pose nothing (the next tick's snap re-grounds it before it can drop).
+    if (s.grounded && !jumped && !ground_confirmed) {
+        float drop = 0.0f;
+        core::Vec3 floor_normal{0.0f, 1.0f, 0.0f};
+        if (!(caster.ground_below(s.position, cfg, cfg.snap_distance, drop, floor_normal) &&
+              walkable(floor_normal, cfg) && drop <= cfg.snap_distance)) {
             s.grounded = false;
         }
     }
