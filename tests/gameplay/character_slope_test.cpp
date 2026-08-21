@@ -31,14 +31,14 @@ gameplay::CharacterConfig config() {
 TEST_CASE("m12.2 slope: a 30 degree incline is climbed at max_speed * cos(slope)") {
     const float theta = 30.0f * kDeg;
     physics::PhysicsWorld w;
-    (void)add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
+    (void)add_ramp(w, theta, {10.0f, 0.5f, 6.0f});
 
     Character ch;
-    ch.spawn(w, config(), rest_on_slope(config(), theta, -20.0f, 0.0f), /*grounded=*/true);
+    ch.spawn(w, config(), rest_on_slope(config(), theta, -6.0f, 0.0f), /*grounded=*/true);
     ch.state.ground_normal = slope_normal(theta);
 
     const core::Vec3 start = ch.state.position;
-    constexpr int kTicks = 300;
+    constexpr int kTicks = 90;           // ~7.8 m along the slope — comfortably inside the ramp
     ch.tick_n(walk(1.0f, 0.0f), kTicks); // +move_x is world +X, which is uphill here
 
     // Vacuity guards (m11.7's discipline): a test that never cast and never touched the ground
@@ -54,21 +54,21 @@ TEST_CASE("m12.2 slope: a 30 degree incline is climbed at max_speed * cos(slope)
 
     // ±5%, and generous by two orders of magnitude on purpose. The real per-tick error is the
     // query residual (~2.3e-4 m) plus at most one skin-sized repositioning per contact change —
-    // millimetres against twenty-six metres. The margin is for the acceleration ramp at the start
-    // (~0.1 s to reach speed), which is a real 1% of a 5-second walk.
+    // millimetres against eight metres. The margin is for the acceleration ramp at the start
+    // (~0.1 s to reach speed), which is a real 4% of a 1.5-second walk.
     CHECK(travelled == doctest::Approx(expected).epsilon(0.05));
 
     // …and it went UP the slope, not along the flat or into it.
     const core::Vec3 uphill = slope_uphill(theta);
     CHECK(core::dot(moved, uphill) == doctest::Approx(travelled).epsilon(0.01));
-    CHECK(ch.state.position.y > start.y + 10.0f);
+    CHECK(ch.state.position.y > start.y + 3.0f); // sin(30°) * ~7.8 m of climb
     CHECK_FALSE(ch.overlapping());
 }
 
 TEST_CASE("m12.2 slope: a 30 degree incline holds a still character without creep") {
     const float theta = 30.0f * kDeg;
     physics::PhysicsWorld w;
-    (void)add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
+    (void)add_ramp(w, theta, {10.0f, 0.5f, 6.0f});
 
     Character ch;
     ch.spawn(w, config(), rest_on_slope(config(), theta, 0.0f, 0.0f), /*grounded=*/true);
@@ -89,7 +89,7 @@ TEST_CASE("m12.2 slope: a 30 degree incline holds a still character without cree
 TEST_CASE("m12.2 slope: a 60 degree face refuses to ground and slides a character down it") {
     const float theta = 60.0f * kDeg;
     physics::PhysicsWorld w;
-    (void)add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
+    (void)add_ramp(w, theta, {10.0f, 0.5f, 6.0f});
 
     Character ch;
     ch.spawn(w, config(), rest_on_slope(config(), theta, 0.0f, 0.0f));
@@ -121,7 +121,7 @@ TEST_CASE("m12.2 slope: the walkable limit is the configured cosine, not a hard-
     strict.max_slope_cos = std::cos(30.0f * kDeg);
 
     physics::PhysicsWorld w1;
-    (void)add_ramp(w1, theta, {40.0f, 0.5f, 20.0f});
+    (void)add_ramp(w1, theta, {10.0f, 0.5f, 6.0f});
     Character loose;
     loose.spawn(w1, permissive, rest_on_slope(permissive, theta, 0.0f, 0.0f), /*grounded=*/true);
     loose.state.ground_normal = slope_normal(theta);
@@ -129,7 +129,7 @@ TEST_CASE("m12.2 slope: the walkable limit is the configured cosine, not a hard-
     CHECK(loose.state.grounded);
 
     physics::PhysicsWorld w2;
-    (void)add_ramp(w2, theta, {40.0f, 0.5f, 20.0f});
+    (void)add_ramp(w2, theta, {10.0f, 0.5f, 6.0f});
     Character tight;
     tight.spawn(w2, strict, rest_on_slope(strict, theta, 0.0f, 0.0f), /*grounded=*/true);
     tight.state.ground_normal = slope_normal(theta);

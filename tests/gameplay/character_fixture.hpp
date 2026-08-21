@@ -48,9 +48,31 @@ inline constexpr core::Vec3 kUp{0.0f, 1.0f, 0.0f};
     return w.create_body(d);
 }
 
-// A big floor whose TOP SURFACE is exactly y = 0 — the reference plane every height assertion in
-// this suite is measured against.
-inline physics::BodyId add_ground(physics::PhysicsWorld& w, float extent = 100.0f) {
+// ── A SIZE LIMIT ON TEST GEOMETRY, AND WHY IT IS HERE ────────────────────────────────────────
+//
+// Every box in this suite is kept to a half-extent of about ten metres, and that is a MEASURED
+// constraint on the physics beneath, not a stylistic preference.
+//
+// GJK's overlap predicate loses shallow overlaps against very large convex shapes. Measured at
+// m12.2 with a 0.4 m capsule sunk into a box whose top face is y = 0, asking
+// PhysicsWorld::penetration() how deep it is:
+//
+//     box half-extent      deepest overlap MISSED ENTIRELY
+//     10 m                 none — correct at every depth tried, down to 1 mm
+//     20 m                 1.4 cm
+//     30 m and beyond      10 cm
+//
+// A 200 m floor therefore swallows a character up to its knees and reports nothing. That is a
+// defect in the collision core (the same family as the GJK work on #131/#132), not in the
+// controller, and no amount of care above the seam can recover a contact the query denies. Sizing
+// the fixtures inside the regime where the answers are trustworthy is what lets these tests assert
+// the CONTROLLER's behaviour rather than the collision core's error budget; the limitation itself
+// is reported upward rather than papered over.
+inline constexpr float kMaxTestExtent = 10.0f;
+
+// A floor whose TOP SURFACE is exactly y = 0 — the reference plane every height assertion in this
+// suite is measured against.
+inline physics::BodyId add_ground(physics::PhysicsWorld& w, float extent = kMaxTestExtent) {
     return add_static_box(w, {extent, 0.5f, extent}, {0.0f, -0.5f, 0.0f});
 }
 
@@ -192,6 +214,12 @@ struct Character {
     in.pressed = gameplay::kActionJump;
     in.held = gameplay::kActionJump;
     return in;
+}
+
+// The ground-plane part of a vector — what "did it stop moving" means for a character that may
+// legitimately have a vertical component from a slope or a fall.
+[[nodiscard]] inline core::Vec3 horizontal_of(core::Vec3 v) {
+    return core::Vec3{v.x, 0.0f, v.z};
 }
 
 [[nodiscard]] inline bool finite(core::Vec3 v) {
