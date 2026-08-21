@@ -9,6 +9,44 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-21) — GJK stall verdicts are now certificates; the shallow-penetration misread
+> is closed, and m12.2 is unblocked.** The deferred item below suspected `kTouchEps2`; the measured
+> culprit was the **stall exits** — duplicate-support, no-progress, iteration-cap — which reported
+> "separated" with whatever distance the stalled simplex held: an upper bound from an arbitrary
+> simplex, which says nothing about *which side of contact* the shapes are on. Measured: "separated,
+> 1.11e-3" at a true penetration of 1.85e-3 m, and a cast stopping ~1 cm past the surface.
+>
+> The verdict is now **earned**: when the origin is inside the Minkowski difference no support plane
+> can exclude it, so a plane bound above a scale-relative noise floor (`kSupportEps · |w|`) is a
+> *proof* of separation — and a stall without one reports overlapping. The subtlety worth the
+> teaching comment in `src/gjk.hpp` is what it takes to *find* that certificate. A first design
+> synthesized it from the terminal simplex's own perpendicular, and it is provably unfixable: the
+> measured stalls terminate on a **segment — a chord of the curved Minkowski difference** — whose
+> perpendicular is 0.13 rad off the true axis, costing 0.65 m of bound across a 5 m face (certificate
+> −0.93 for a true gap of 8.7e-4; *no plane through that chord certifies, at any precision*), while
+> defaulting the uncertified rest to overlap misreads genuine gaps up to ~300× the noise floor. The
+> landed design is an **unconditional double-precision distance polish at every stall**: restart the
+> walk from the stalled simplex with the simplex arithmetic in double (the transverse steering signal
+> the float loop lost sits ~6 orders above double's blend error), round each search direction to
+> float *before* the support call and take the bound along that exact float vector — so
+> `(lower_bound, plane_dir)` is a true statement about the plane the caller receives. The polish runs
+> even when the in-loop bound already certifies, because a true bound does not launder the stalled
+> simplex's other outputs — measured, a certified-but-unpolished exit handed the retracted normal
+> probe a normal transverse to a 20 m wall (n.x = 4e-4 where −1 was the answer).
+>
+> Fallout, both directions gated in `gjk_test.cpp` (penetration grid 1,536 poses, gap grid 384):
+> false "separated" 56 → **0**; zero-bound certificates 155 → **384/384 certified within 20 % of the
+> true gap** (worst 0.978×, over-claim ≤ 6.9e-8); stall-exit `distance` now worst **1.38 %** off
+> where it was unrelated garbage (14.14 m for 2.8e-5). The 80° graze cast reaches 2.0 exactly (was
+> 5.87 mm short). Cost: 11 support evaluations mean / 16 max for the *whole query* on the
+> stall-heavy family, and the normal convergence path pays nothing. One consequence needed care: an
+> exactly-flush cast start is honestly "not provably separated", so `shape_cast` now discriminates
+> touch from penetration **by observation** — retract by the touch tolerance, re-measure; separated
+> there is a hit at t = 0 with real witnesses, not `initial_overlap`. And the promise below is kept:
+> the grid's over-report slack tightens 2e-2 → **5e-4** (measured: zero of 280 rows stop past
+> `travel`, worst −1.05e-5) and the witness slack 5e-2 → **5e-3** (worst 1.795e-3).
+> **Next:** m12.2 — the character controller (in flight).
+
 > **Update (2026-08-21) — shape-cast stepping fixed; the graze no longer stops short.** The item the
 > entry below left open ("that is the next thing to fix") is closed. The old advance stepped by
 > `GjkResult::lower_bound` **radially** — deliberately refusing the textbook `d / dot(dir, n)`, because

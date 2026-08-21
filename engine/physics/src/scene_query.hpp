@@ -641,6 +641,29 @@ template <class TargetSupport>
 
         if (g.overlapping) {
             if (!have_safe) {
+                // OVERLAPPING AT THE VERY START — but GJK's "overlapping" verdict is the honest
+                // "not provably separated" (see the stall certificate in src/gjk.hpp), and a cast
+                // begun EXACTLY FLUSH with a surface is the measured case that lands here: a zero
+                // gap has no separation certificate to give, so a flush pose reports overlap.
+                // Flush is a TOUCH, not a penetration — nothing needs depenetrating — so the flag
+                // must not fire on it, and the two are discriminated the way every other fact in
+                // this loop is earned: by OBSERVATION. Retract the caster by the touch tolerance
+                // along the sweep and re-measure. Separated there means the start sat within
+                // kTouchTolerance of the surface along `dir` — a touching start, reported as a
+                // hit at t = 0 with real witnesses from the retracted (separated) measurement,
+                // exactly parallel to the in-loop `distance <= kTouchTolerance` hit. Still
+                // overlapping there means interpenetration deeper than the touch scale (or a
+                // contact the sweep direction cannot open, which no advance of this cast could
+                // resolve either): the depenetration case the flag exists for.
+                const ShapeSupport back = posed_at(-kTouchTolerance);
+                const GjkResult g_back = gjk(back, target, back.pos - target_centre);
+                if (!g_back.overlapping) {
+                    t_out = 0.0f;
+                    overlap_out = false;
+                    n_out = measure_normal(0.0f, dir * -1.0f);
+                    p_out = g_back.point_b;
+                    return true;
+                }
                 // Overlapping before moving at all: the caller's problem to fix (depenetration),
                 // and a different instruction from "stopped at the surface". Nothing here is a
                 // measurement, and the outputs say so honestly rather than dressing up: an
