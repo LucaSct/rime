@@ -63,6 +63,39 @@ cast_along(const physics::ShapeDesc& s, core::Vec3 origin, core::Vec3 dir, float
     return c;
 }
 
+// ── The graze fixture (2026-08-21), and why its answer is EXACT ───────────────────────────────
+//
+// A wall of half-extents (hx, S, S) at the origin; a sphere of radius `r` swept at it along
+//
+//     dir = (cos θ, sin θ·cos φ, sin θ·sin φ)
+//
+// so θ is the angle off the wall's own normal — θ = 0 is head-on, θ = 85° is a near-parallel graze
+// — and φ swings the transverse component around it, which is what stops the family from being
+// secretly two-dimensional. The origin is placed so that after travelling exactly `travel` the
+// sphere's centre sits at (-hx - r, ay, 0): flush against the -x face, touching it at (-hx, ay, 0).
+//
+// The exact time of impact is therefore `travel`, to the last bit, for EVERY θ in the family — and
+// nothing can be touched earlier, because the sphere's leading point sits at
+// x = -hx - (travel - t)·cos θ, strictly left of the face for every t < travel. That is what lets
+// the assertions below be absolute distances rather than a relative epsilon around a number
+// produced by the code under test.
+constexpr float kPi = 3.14159265358979f;
+
+core::Vec3 graze_dir(float theta_deg, float phi_deg) {
+    const float th = theta_deg * kPi / 180.0f;
+    const float ph = phi_deg * kPi / 180.0f;
+    return {std::cos(th), std::sin(th) * std::cos(ph), std::sin(th) * std::sin(ph)};
+}
+
+physics::ShapeCast
+graze_cast(float r, float hx, float ay, float theta_deg, float phi_deg, float travel) {
+    const core::Vec3 dir = graze_dir(theta_deg, phi_deg);
+    const core::Vec3 touch{-hx - r, ay, 0.0f};
+    // max_distance is one metre past the true contact: the sweep must STOP at the wall, not run
+    // out of budget at it, or "arrived at the end" and "hit the wall" would be the same answer.
+    return cast_along(sphere(r), touch - dir * travel, dir, travel + 1.0f);
+}
+
 } // namespace
 
 TEST_CASE("m12.1 shape cast: a swept sphere stops at the surface, not at the centre") {
@@ -436,4 +469,192 @@ TEST_CASE("m12.1 shape cast: a sweep that must not tunnel, at speed") {
         cast_along(sphere(0.05f), {-50.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, 100.0f), hit));
     CHECK(hit.distance == doctest::Approx(49.9f).epsilon(0.001));
     CHECK(hit.normal.x == doctest::Approx(-1.0f).epsilon(0.02));
+}
+
+// ── The 2026-08-21 stepping fix: oblique sweeps that used to stop short ───────────────────────
+//
+// SEAM-LEVEL IS SUFFICIENT FOR THIS DEFECT, which is worth saying out loud because the file next
+// door (gjk_test.cpp) argues the exact opposite for its own. #131's bug was MASKED by the layers
+// above it — 21,000 casts came back byte-identical with it present and absent — so no test at this
+// level could possibly fail, and reaching under the seam was the only option. Here the layers above
+// ARE the defect: the stepping rule lives in `cast_convex_vs_convex`, its symptom is literally the
+// distance the query reports, and every case below fails through `PhysicsWorld::shape_cast` on the
+// old code. Reaching under the seam would buy nothing and cost the house rule.
+//
+// THE DEFECT. m12.1 advanced by `g.lower_bound` — GJK's RADIAL support-plane bound — deliberately
+// refusing to divide it by a closing rate, because the direction on offer at the time was a witness
+// normal that could come back diagonal and turn one step into a leap through the wall. A radial
+// step closes an oblique sweep's gap by only (1 - cos θ) per iteration, so at 80–85° the
+// 64-iteration budget ran out with the caster still short of the surface, and the loop's honest
+// "stop where you got to" exhaustion answer surfaced as a hit at the wrong distance. Worse,
+// the bound COLLAPSES TO ZERO whenever GJK exits early against a large target, dropping the loop to
+// its kMinStep floor and turning "short" into "barely moved at all".
+//
+// THE REPAIR pairs the bound with `GjkResult::plane_dir`, the direction of the plane that PRODUCED
+// it, and divides by that same plane's closing rate — so a noisy direction can only weaken the
+// bound, never inflate the step (the argument is in THE ADVANCE, src/scene_query.hpp). The measured
+// numbers in each case below are what the pre-fix code returns, taken against a worktree at #131.
+TEST_CASE("m12.1 shape cast: an 80° graze reaches the wall instead of exhausting its budget") {
+    // The plain exhaustion case: 2 m of travel at 80° off the normal, at a wall big enough
+    // (half-extent 5 m) that GJK's support points dwarf the gap. Pre-fix: 1.99493 — 5.1 mm short
+    // after the iteration cap ran out mid-descent.
+    physics::PhysicsWorld w;
+    add(w, box({0.1f, 5.0f, 5.0f}), {0.0f, 0.0f, 0.0f});
+
+    physics::ShapeHit hit;
+    REQUIRE(w.shape_cast(graze_cast(0.3f, 0.1f, 0.0f, 80.0f, 0.0f, 2.0f), hit));
+    CHECK_FALSE(hit.initial_overlap);
+    CHECK(std::fabs(hit.distance - 2.0f) <= 1e-3f);
+}
+
+TEST_CASE("m12.1 shape cast: a graze at a 50 m wall neither leaps it nor stops short") {
+    // The case the Lipschitz LEASH exists for. A 5 cm sphere 20 m up a 50 m wall is the pose where
+    // GJK's stall exits misreport the distance outright — 14.14 m for a true gap of 2.8e-5 m, on
+    // this loop's own trace. The distance rescue believing that number steps clean over the wall
+    // and reports the far side as a clean MISS: a caster through solid geometry, the one failure
+    // this query exists to make impossible. Leashed to `trusted_prev + last_advance`, the same
+    // rescue converges. Pre-fix (radial stepping, no rescue at all): 1.99839, 1.6 mm short.
+    physics::PhysicsWorld w;
+    add(w, box({0.1f, 50.0f, 50.0f}), {0.0f, 0.0f, 0.0f});
+
+    physics::ShapeHit hit;
+    REQUIRE(w.shape_cast(graze_cast(0.05f, 0.1f, 20.0f, 60.0f, 45.0f, 2.0f), hit));
+    CHECK_FALSE(hit.initial_overlap);
+    CHECK(std::fabs(hit.distance - 2.0f) <= 1e-3f);
+}
+
+TEST_CASE("m12.1 shape cast: an 85° graze at a small wall still lands on the face") {
+    // The steepest angle a character controller plausibly meets — sliding almost along a wall and
+    // catching it. The wall is SMALL here (half-extent 1 m) on purpose: the shortfall is not a
+    // large-geometry artefact, it is the radial step's (1 - cos θ) convergence rate, and at 85°
+    // that factor is 0.087 whatever the wall measures. Pre-fix: 1.99589, 4.1 mm short.
+    physics::PhysicsWorld w;
+    add(w, box({0.1f, 1.0f, 1.0f}), {0.0f, 0.0f, 0.0f});
+
+    physics::ShapeHit hit;
+    REQUIRE(w.shape_cast(graze_cast(0.05f, 0.1f, 0.0f, 85.0f, 0.0f, 2.0f), hit));
+    CHECK_FALSE(hit.initial_overlap);
+    CHECK(std::fabs(hit.distance - 2.0f) <= 1e-3f);
+}
+
+TEST_CASE("m12.1 shape cast: the graze property, over a grid of angles and scales") {
+    // The three cases above are witnesses; this is the property. Same fixture, swept over the
+    // dimensions the defect actually varied along — approach angle, wall size, caster size, wall
+    // thickness, transverse direction, height up the face, and travel — because the failure was
+    // never a single configuration: pre-fix, 72 of these 280 rows break the no-under-report bound
+    // below, the worst by 0.167 m. Post-fix, none do.
+    //
+    // The grid is deliberately small enough to run in milliseconds (280 casts, ~15 ms in Debug):
+    // this is a permanent gate on every CI OS and both sanitizers, not a research sweep. The
+    // research sweep that produced the numbers in docs/ROADMAP.md was 3,696 configurations.
+    for (const float hx : {0.1f, 1.0f}) {
+        for (const float wall : {1.0f, 20.0f}) {
+            physics::PhysicsWorld w;
+            add(w, box({hx, wall, wall}), {0.0f, 0.0f, 0.0f});
+
+            for (const float theta : {0.0f, 30.0f, 60.0f, 80.0f, 85.0f}) {
+                for (const float r : {0.05f, 0.3f}) {
+                    for (const float phi : {0.0f, 45.0f}) {
+                        for (const float travel : {0.5f, 2.0f}) {
+                            for (const float ay : {0.0f, 0.4f * wall}) {
+                                // Off-centre rows only where the contact point stays comfortably
+                                // ON the face: within half a metre plus the caster's radius of the
+                                // edge the answer is an edge contact, whose analytic TOI is not
+                                // `travel` and which this fixture therefore cannot check.
+                                if (ay > wall - r - 0.5f) {
+                                    continue;
+                                }
+                                CAPTURE(hx);
+                                CAPTURE(wall);
+                                CAPTURE(theta);
+                                CAPTURE(r);
+                                CAPTURE(phi);
+                                CAPTURE(travel);
+                                CAPTURE(ay);
+
+                                physics::ShapeHit hit;
+                                REQUIRE(
+                                    w.shape_cast(graze_cast(r, hx, ay, theta, phi, travel), hit));
+                                CHECK_FALSE(hit.initial_overlap);
+                                CAPTURE(hit.distance);
+
+                                // NO UNDER-REPORT — the defect itself, and the asymmetric side of
+                                // the answer. Stopping short is not cosmetic at a graze: it is a
+                                // controller that refuses to reach a wall it is sliding along.
+                                //
+                                // The floor is the loop's own honest resolution, converted from
+                                // radial to travel. Perpendicular to the wall it can resolve
+                                // kTouchTolerance (5e-5 m, the gap it calls "touching") plus the
+                                // ~3e-4 m of slack GJK's distance carries at these scales; a sweep
+                                // θ off the normal spends that at 1/cos θ in travel, so the whole
+                                // bound is 4.5e-4 head-on and opens to 4.1e-3 at 85°. The last 1e-4
+                                // of it is float slop in the analytic `travel` itself. Worst
+                                // measured on this grid: 5.5e-4 m of travel short, at θ = 85.
+                                const float ct = std::cos(theta * kPi / 180.0f);
+                                CHECK(hit.distance >= travel - (5e-5f + 3e-4f) / ct - 1e-4f);
+
+                                // THE OVER-REPORT SIDE IS DELIBERATELY LOOSE, and the looseness is
+                                // a KNOWN DEFECT held open rather than slack for its own sake. GJK
+                                // still reports "separated, distance ≈ 5e-4" at true penetrations
+                                // of a couple of millimetres (measured: separated at 4.9e-4 with
+                                // the shapes 2.9 mm into each other), so a cast can stop a little
+                                // PAST the surface — up to ~1 cm radial across the wider research
+                                // sweep behind this fix. Suspected cause: `kTouchEps2` is
+                                // an ABSOLUTE epsilon where the error it guards scales with the
+                                // shapes — the third instance of exactly the disease #131 fixed
+                                // twice in the same header. It is the next brick
+                                // (docs/ROADMAP.md, 2026-08-21 follow-up); TIGHTEN THIS BOUND WHEN
+                                // IT LANDS. Worst measured here is 4.8e-4 m, so today the
+                                // assertion is 40× loose and catches only a gross regression.
+                                CHECK(hit.distance <= travel + 2e-2f);
+
+                                // The FACE normal, for the angles at which a face normal is
+                                // well-determined. Past ~60° the contact genuinely approaches the
+                                // surface edge-on and the retracted probe has little left to
+                                // resolve, so the assertion STOPS rather than being loosened into
+                                // something that could not fail. Worst deviation measured below
+                                // the cut: 0.03°, against a 5° bound.
+                                if (theta <= 60.0f) {
+                                    CHECK(-hit.normal.x >= std::cos(5.0f * kPi / 180.0f));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("m12.1 shape cast: the same grid of angles, passing CLEANLY over the wall") {
+    // The other half of the property, and it is not a formality: the two ways this loop can be
+    // wrong are opposite, and a fix for one is a plausible cause of the other. Every mechanism
+    // above hands the loop a REASON to keep advancing — the projected bound divides by a small
+    // closing rate, the rescue steps by a measured distance rather than a proven one — and the
+    // failure mode of "keep advancing" is a hit reported where there is no geometry. Exhausting the
+    // iteration cap returns `true` unconditionally (stopping short is the safe error for a sweep
+    // that is genuinely converging), so a cap-exhaustion bug SHOWS UP HERE as a phantom hit in open
+    // air and nowhere else.
+    //
+    // Same direction family, same wall, origin lifted so the caster's centre clears the +y face by
+    // r + 1 m for the whole sweep — a metre of daylight between surfaces, at every angle.
+    for (const float wall : {1.0f, 20.0f}) {
+        physics::PhysicsWorld w;
+        add(w, box({0.1f, wall, wall}), {0.0f, 0.0f, 0.0f});
+
+        for (const float theta : {0.0f, 30.0f, 60.0f, 80.0f, 85.0f}) {
+            for (const float travel : {0.5f, 2.0f}) {
+                CAPTURE(wall);
+                CAPTURE(theta);
+                CAPTURE(travel);
+                constexpr float r = 0.3f;
+                // The sweep's +y component is non-negative across this family, so clearing the top
+                // face at t = 0 clears it for the whole sweep — the start is the tightest point.
+                const core::Vec3 dir = graze_dir(theta, 0.0f);
+                const float lift = wall + r + 1.0f + travel * dir.y;
+                physics::ShapeHit hit;
+                CHECK_FALSE(w.shape_cast(graze_cast(r, 0.1f, lift, theta, 0.0f, travel), hit));
+            }
+        }
+    }
 }
