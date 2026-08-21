@@ -1515,6 +1515,118 @@ bool PhysicsWorld::shape_cast(const ShapeCast& cast,
     return true;
 }
 
+bool PhysicsWorld::penetration(const ShapeDesc& shape,
+                               core::Vec3 position,
+                               core::Quat orientation,
+                               PenetrationHit& out,
+                               const QueryFilter& filter) const {
+    const Impl& p = *impl_;
+
+    // A compound QUERY shape has no support function (it is not convex), the same refusal
+    // shape_cast and the CCD path make. Compound BODIES are fine — they are opened below.
+    if (shape.type == ShapeType::Compound) {
+        return false;
+    }
+    const ConvexHull* query_hull = p.hull_of(shape);
+    if (shape.type == ShapeType::ConvexHull && query_hull == nullptr) {
+        return false; // an unresolvable hull id describes no geometry
+    }
+
+    // Broadphase cull by the query shape's own tight box. Leaves carry FAT boxes, so a tight query
+    // box can only over-report — every genuinely overlapping body is found, and the extras are
+    // thrown out by the exact GJK test below.
+    const Aabb query_box = p.aabb_of(shape, position, orientation);
+
+    float best_depth = -1.0f;
+    core::Vec3 best_normal{0.0f, 1.0f, 0.0f};
+    std::uint32_t best_slot = core::kInvalidSlotIndex;
+    std::uint16_t best_child = 0;
+
+    const auto test = [&](std::uint32_t slot) {
+        if (p.is_excluded(filter, slot)) {
+            return;
+        }
+        const std::uint32_t d = p.slots[slot].dense;
+        const ShapeDesc& body_shape = p.shape[d];
+        const core::Vec3 body_pos = p.position[d];
+        const core::Quat& body_orient = p.orientation[d];
+
+        const ShapeSupport query{&shape, position, orientation, query_hull};
+
+        const auto try_one = [&](const ShapeDesc& target_shape,
+                                 core::Vec3 target_pos,
+                                 const core::Quat& target_orient,
+                                 const ConvexHull* target_hull,
+                                 std::uint16_t child_index) {
+            const ShapeSupport target{&target_shape, target_pos, target_orient, target_hull};
+
+            // GJK first, exactly as the narrowphase does: it answers "do they overlap at all"
+            // cheaply and, when they do, hands EPA the terminal simplex to start expanding from.
+            // EPA is only ever run on a simplex GJK already proved encloses the origin.
+            const GjkResult g = gjk(query, target, position - target_pos);
+            if (!g.overlapping) {
+                return;
+            }
+            const EpaResult e = epa(query, target, g.simplex, g.simplex_count);
+            if (!e.valid) {
+                // A numerically flat Minkowski difference — EPA's documented give-up. The
+                // narrowphase drops the contact for the tick; here we drop the candidate. Saying
+                // "no penetration" about a pair we could not measure is the honest answer: a
+                // fabricated axis would teleport the caller somewhere arbitrary.
+                return;
+            }
+
+            // Deepest wins, with an EXACT-tie break toward the lower slot then the lower child, so
+            // the answer never depends on which broadphase tree got walked first or how the BVH
+            // happens to be shaped. (Deepest, not nearest: a body wedged between two walls must
+            // resolve the worse violation first, and repeatedly resolving the deepest one strictly
+            // reduces the maximum, so the recovery converges.)
+            const bool better =
+                best_slot == core::kInvalidSlotIndex || e.depth > best_depth ||
+                (e.depth == best_depth &&
+                 (slot < best_slot || (slot == best_slot && child_index < best_child)));
+            if (!better) {
+                return;
+            }
+            best_depth = e.depth;
+            // EpaResult::normal separates by pushing B (the target) along it. The caller of THIS
+            // query is the query shape — it is the thing that has to move — so the reported normal
+            // is the other way round.
+            best_normal = -e.normal;
+            best_slot = slot;
+            best_child = child_index;
+        };
+
+        if (const CompoundShape* c = p.compound_of(body_shape); c != nullptr) {
+            for (std::size_t i = 0; i < c->child_count(); ++i) {
+                try_one(c->child_shape[i],
+                        compound_child_world_pos(*c, i, body_pos, body_orient),
+                        compound_child_world_orient(*c, i, body_orient),
+                        compound_child_hull(c->child_shape[i], p.hull_span()),
+                        static_cast<std::uint16_t>(i));
+            }
+            return;
+        }
+        try_one(body_shape, body_pos, body_orient, p.hull_of(body_shape), 0);
+    };
+
+    if (filter.dynamics) {
+        p.dynamic_tree.query(query_box, test);
+    }
+    if (filter.statics) {
+        p.static_tree.query(query_box, test);
+    }
+
+    if (best_slot == core::kInvalidSlotIndex) {
+        return false;
+    }
+    out.body = BodyId{best_slot, p.slots[best_slot].generation};
+    out.normal = best_normal;
+    out.depth = best_depth;
+    out.child = best_child;
+    return true;
+}
+
 void PhysicsWorld::overlap_sphere(core::Vec3 center,
                                   float radius,
                                   std::vector<BodyId>& out,

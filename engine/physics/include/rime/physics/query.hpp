@@ -142,4 +142,26 @@ struct ShapeHit {
     std::uint16_t child = 0;
 };
 
+// ── Penetration (m12.2) ───────────────────────────────────────────────────────────────────────
+// What a posed shape is stuck INSIDE, and which way to move to get out. This is the query
+// `ShapeHit::initial_overlap` is the signal to run: the cast can tell you that you started inside
+// something, but it deliberately measures nothing about the overlap, because an overlapping GJK
+// carries no witness points and a penetration AXIS is EPA's answer, not GJK's.
+//
+// Why a controller needs it. "Started inside" is not a hypothetical: a crate the solver pushes into
+// the player between ticks, or destruction spawning debris on top of them, both produce it in an
+// ordinary frame. A controller with no way to recover freezes solid — it casts, hears
+// initial_overlap, has no direction to move, and does that again forever.
+struct PenetrationHit {
+    BodyId body;
+    // Unit; the direction to push THE QUERY SHAPE to separate it (the opposite of the direction
+    // you would push the hit body). Stated in the query shape's favour because the caller of this
+    // query is the thing that needs to move — that is the whole point of asking.
+    core::Vec3 normal{0.0f, 0.0f, 0.0f};
+    float depth = 0.0f; // metres of overlap along `normal`; >= 0
+    // Which compound child is the deepest overlap, by the M8.3 convention shared with
+    // RayHit::child and ContactEvent::child_a/child_b. 0 for a non-compound body.
+    std::uint16_t child = 0;
+};
+
 } // namespace rime::physics

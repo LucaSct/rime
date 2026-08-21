@@ -305,6 +305,37 @@ public:
     [[nodiscard]] bool
     shape_cast(const ShapeCast& cast, ShapeHit& out, const QueryFilter& filter = {}) const;
 
+    // Report the DEEPEST overlap between a posed convex shape and any body it intersects — the
+    // depenetration query (m12.2, ADR-0035 §3). Returns false (out untouched) when the shape is
+    // clear of everything the filter admits.
+    //
+    // This is the query `shape_cast`'s `initial_overlap` flag tells you to run. A cast measures the
+    // travel to a touch and deliberately says nothing about an overlap it started in: an
+    // overlapping GJK terminates on a simplex and carries no witness points, so it has no
+    // penetration axis to report. Getting one means expanding that simplex out to the Minkowski
+    // difference's boundary — EPA, the same machinery the narrowphase runs on every touching pair
+    // (docs/math/gjk-epa.md). This method is the public face of it, and nothing else: the geometry
+    // stays below the seam.
+    //
+    // "Deepest" is the useful answer rather than "nearest" or "all": a character wedged into two
+    // walls must resolve the worse violation first, and resolving the deepest one repeatedly
+    // converges (each push strictly reduces the maximum). Exact-depth ties break toward the lower
+    // body slot, then the lower compound child, so the answer is deterministic run to run rather
+    // than a function of broadphase traversal order.
+    //
+    // A Compound QUERY shape is rejected (returns false) for the reason shape_cast rejects one: it
+    // is not convex, so GJK and EPA have no single support function to ask. Compound BODIES are
+    // fully supported — they are opened one level and the deepest child wins, so `out.child` names
+    // the destructible part the shape is buried in.
+    //
+    // Same const/threading contract as raycast(): safe between steps, never concurrently with
+    // step().
+    [[nodiscard]] bool penetration(const ShapeDesc& shape,
+                                   core::Vec3 position,
+                                   core::Quat orientation,
+                                   PenetrationHit& out,
+                                   const QueryFilter& filter = {}) const;
+
     // Collect every body whose shape overlaps the sphere (`center`, `radius`) into `out` (cleared
     // first), in canonical slot order so the result is deterministic run to run. Broadphase-culled,
     // then an exact shape-vs-sphere test. The "what is inside this volume" query — an explosion's
