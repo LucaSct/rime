@@ -664,8 +664,8 @@ CharacterState step_character(const CharacterState& state,
     // says "depenetrate", carries no measurement, and cannot be moved on. So recovery runs FIRST,
     // out of the penetration query, before anything tries to move.
     //
-    // It runs AGAIN at the end of the tick (f2), and the second run is what makes "a tick never
-    // ENDS overlapping" a property the controller delivers rather than hopes for. The sweeps
+    // It runs AGAIN after the slide (f2), and the second run is what makes "a tick never ENDS
+    // overlapping" a property the controller delivers rather than hopes for. The sweeps
     // cannot deliver it alone: a tangential slide pressed against a convex EDGE — a step lip, a
     // ramp's side — creeps millimetres closer per tick, because a grazing chord of a curved
     // Minkowski surface is exactly where a cast's stop is least certain (the m12.1 lesson), until
@@ -938,30 +938,38 @@ CharacterState step_character(const CharacterState& state,
         core::Vec3 floor_normal{0.0f, 1.0f, 0.0f};
         if (caster.ground_below(s.position, cfg, cfg.snap_distance, drop, floor_normal) &&
             walkable(floor_normal, cfg) && drop <= cfg.snap_distance) {
-            // The ray answers about the surface under the AXIS, and the snap must not commit a
-            // pose the rest of the capsule cannot occupy. Walking diagonally off a ramp's side
-            // edge is the measured case: the axis crosses the edge first, the ray sees the flat
-            // ground below, and snapping the full drop buries the trailing flank 3–5 cm into the
-            // ramp edge still under it — refreshing an overlap every tick faster than the
-            // depenetration budget drains it.
+            // The ray answers about the surface under the AXIS, and the snap must not hand back a
+            // pose the rest of the capsule cannot occupy — but it also must not refuse too
+            // eagerly, and both wrong answers were measured before this shape:
             //
-            // The check is against the REAL capsule, not the confirm probe, and the thinner shape
-            // is load-bearing. The snap's question is the invariant's own — "would this pose
-            // genuinely penetrate" — and asking it with the probe's extra half-skin manufactured a
-            // wall-climb: pressed against a steep face, the snapped pose sits sub-skin clear, the
-            // fattened probe called it blocked, the snap stopped pulling the character down, and
-            // the slide's upward clip walked it up a 50° wall at a centimetre a tick — "grounded"
-            // the whole way, because the axis ray still saw the floor beside the wall. A sub-skin
-            // graze the real capsule clears is exactly what the end-of-tick recovery (f2) exists
-            // to tidy; a genuine penetration is what this check refuses to create.
+            //   * committing the drop unconditionally: walking diagonally off a ramp's side edge,
+            //     the axis crosses first, the ray sees the flat ground below, and the full drop
+            //     buries the trailing flank 3–5 cm in the ramp edge still under it — refreshing
+            //     an overlap every tick faster than the depenetration budget drains it;
+            //   * refusing whenever the rest pose would touch anything: the clip against a step
+            //     lip's edge normal leaves `remaining` with an upward component, the character
+            //     RIDES the lip a few millimetres per tick, and with no snap ever pulling it back
+            //     down, a 0.35 m riser under a 0.30 m budget was climbed in ~20 ticks of grazes —
+            //     the snap is the designed counter to riding, so a snap that stops firing while
+            //     pressed against the very wall being ridden cancels nothing. (A downward SWEEP
+            //     has the same defect for the same reason: pressed against the wall, the inflated
+            //     probe reports initial_overlap for a sweep in ANY direction — the back-off
+            //     comment at the top of this file — and the measured drop is always zero.)
             //
-            // When it refuses, the character keeps its height this tick and stays grounded (the
-            // ray DID find walkable ground in reach — it is resting on the edge), and the snap
-            // lands cleanly a tick or two later when the capsule has fully crossed.
+            // The contract that satisfies both sides: the snap may commit a pose that penetrates
+            // only as much as THIS TICK's remaining recovery can provably clear. A sub-skin lip
+            // graze commits — the recovery pass below (f2) restores the offset before anyone can
+            // observe it, so the ride is cancelled every tick — while the 3–5 cm burial refuses
+            // and rests on the edge until the capsule has fully crossed it. The measurement is
+            // the real capsule (the invariant's own predicate), and the threshold is the same
+            // budget the recovery spends, so the promise "a tick never ends overlapping" is
+            // backed by arithmetic rather than optimism.
             const core::Vec3 snapped = s.position - kUp * std::max(drop, 0.0f);
-            physics::PenetrationHit snap_blocked;
-            if (!world.penetration(
-                    shape, snapped, core::quat_identity(), snap_blocked, recovery_filter)) {
+            physics::PenetrationHit snap_pen;
+            const bool snap_hits =
+                world.penetration(shape, snapped, core::quat_identity(), snap_pen, recovery_filter);
+            if (!snap_hits || (recovery_pushes < kMaxRecoveryPushes &&
+                               snap_pen.depth + cfg.skin <= recovery_budget)) {
                 s.position = snapped;
                 ++st.snaps;
             }
@@ -977,11 +985,21 @@ CharacterState step_character(const CharacterState& state,
     }
 
     // ── (f2) End-of-tick recovery — certifying the pose we hand back ──────────────────────────
-    // The second run of the pass declared at (c): everything that MOVES the character has now had
-    // its say, so this is the one place a residual overlap can be repaired before anyone outside
-    // this function can observe it. On a clean tick it costs exactly one penetration query and
-    // pushes nothing; on a graze tick it restores the contact offset the slide lost. It shares
-    // (c)'s budget and push count, so the per-tick caps still mean what they say.
+    // The second run of the pass declared at (c), and it runs LAST among the position writes,
+    // deliberately after the snap. Two kinds of residue land here: the sub-skin graze a
+    // tangential slide leaves against a convex lip (a cast's stop is least certain on a grazing
+    // chord — the m12.1 lesson), and the bounded penetration the snap above is PERMITTED to
+    // commit, whose whole justification is that this pass clears it before anyone can observe
+    // it. On a clean tick it costs exactly one penetration query and pushes nothing. It shares
+    // (c)'s budget and push count, so the per-tick caps still mean what they say — and the
+    // snap's commit gate checked against the same remaining budget, which is what entitles this
+    // pass to finish the job.
+    //
+    // The push out of a lip graze points partly UP, so a run of graze ticks would ratchet a
+    // character slowly up a riser its step budget refused — except the snap above re-measures
+    // the rest height from the ray every tick and pulls the ride back down, which is exactly why
+    // the snap must not stop firing while pressed against the wall being ridden (its comment).
+    // The two passes are a pair: the snap cancels altitude, this pass restores clearance.
     if (recover()) {
         ++st.stuck; // the same give-up as (c)'s, and counted the same way
     }
