@@ -63,14 +63,16 @@ struct RayHit {
 // ray cannot answer — a ray is infinitely thin, so it happily threads a gap a body could never fit
 // through, and a controller built on rays walks through door frames it should have caught on.
 //
-// The technique is CONSERVATIVE ADVANCEMENT (Mirtich's, by way of Bullet's convex cast). GJK
-// already returns the exact distance between two posed convex shapes together with the two witness
-// points (src/gjk.hpp — the same machinery M7.10's speculative CCD contacts use). If the shapes are
-// `d` apart and the sweep direction closes the gap at rate `dot(dir, n)` — where `n` is the unit
-// vector between the witnesses — then advancing by `d / dot(dir, n)` CANNOT pass through the
-// obstacle, because no point of the shape can approach faster than that. So: measure, take the
-// largest provably-safe step, measure again. It converges in a handful of iterations and needs no
-// new geometry code, which is exactly why ADR-0035 §2 put a shape cast here rather than a bespoke
+// The technique is CONSERVATIVE ADVANCEMENT (Mirtich's, by way of Bullet's convex cast, with the
+// step van den Bergen's ray cast uses). GJK measures the gap between two posed convex shapes and,
+// with it, a SUPPORT PLANE the whole target provably lies behind (src/gjk.hpp — the same machinery
+// M7.10's speculative CCD contacts use). If that plane is `b` away and the sweep closes it at rate
+// `c`, no contact can happen before an advance of `b / c` — a bound that stays sound however noisy
+// the measured direction is, because the bound and the closing rate are two readings of the SAME
+// plane (the textbook form divides by the witness-normal direction instead, which m12.1 measured
+// turning a noisy normal into a leap through the wall). So: measure, take the largest
+// provably-safe step, measure again. It converges in a handful of iterations and needs no new
+// geometry code, which is exactly why ADR-0035 §2 put a shape cast here rather than a bespoke
 // swept-primitive routine per shape pair.
 struct ShapeCast {
     // The shape to sweep. Any convex shape works (the algorithm only asks for support points);
@@ -109,8 +111,10 @@ struct ShapeHit {
     // after moving 0 m" and "I started inside a wall" are the same number and completely different
     // situations: the first means stop, the second means the caller must DEPENETRATE first, and a
     // controller that treats the second as the first freezes solid inside the geometry it is stuck
-    // in. When this is set, `normal` and `point` describe the initial overlap as GJK's witnesses
-    // saw it, which is a usable push-out direction but not a contact plane.
+    // in. When this is set, nothing was measured and the fields say so: `point` is the ZERO VECTOR
+    // (an overlapping GJK carries no witness points) and `normal` is the reversed sweep direction
+    // — a deterministic retreat, not a contact plane. Depenetration needs a penetration axis,
+    // which is EPA's job (the contact pipeline), not this query's.
     bool initial_overlap = false;
 
     // Which compound child was touched (M8.3's convention, as `RayHit::child`): the child index

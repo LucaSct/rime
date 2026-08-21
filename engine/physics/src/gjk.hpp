@@ -363,6 +363,18 @@ struct GjkResult {
     // greater than `distance`.
     float lower_bound = 0.0f;
 
+    // The unit direction of the support plane that PRODUCED `lower_bound` (same orientation as
+    // `closest`: from B toward A). Zero exactly when `lower_bound` is zero.
+    //
+    // A swept query needs the pair (bound, direction) JOINTLY, not the bound alone: the plane's
+    // statement is "no point of the Minkowski difference is nearer than `lower_bound` along THIS
+    // direction", so dividing the bound by the sweep's closing rate against this same direction
+    // turns a radial bound into a travel bound (the van den Bergen ray-clip step — see the shape
+    // cast in src/scene_query.hpp). Dividing by any OTHER direction's closing rate proves nothing,
+    // and `lower_bound` is a running max over planes from different iterations — without this
+    // field the pairing is lost and the projected step would be built on a category error.
+    core::Vec3 plane_dir{};
+
     SupportVertex simplex[4];
     int simplex_count = 0;
 };
@@ -393,9 +405,11 @@ template <class SupA, class SupB>
     verts[0] = minkowski_support(seed_dir);
     core::Vec3 closest = verts[0].w;
 
-    // The running support-plane bound (see GjkResult::lower_bound). Declared before the finish
-    // lambdas because they capture it.
+    // The running support-plane bound and the direction of the plane that set it (see
+    // GjkResult::lower_bound / plane_dir). Declared before the finish lambdas because they
+    // capture them.
     float lower_bound = 0.0f;
+    core::Vec3 plane_dir{};
 
     const auto finish_separated = [&] {
         res.overlapping = false;
@@ -408,6 +422,7 @@ template <class SupA, class SupB>
         res.distance = core::length(closest);
         res.closest = closest; // the well-conditioned direction — see GjkResult::closest
         res.lower_bound = std::min(lower_bound, res.distance); // a bound, never an over-claim
+        res.plane_dir = plane_dir; // the plane the bound came from; clamping only weakens it
         for (int i = 0; i < count; ++i) {
             res.simplex[i] = verts[i];
         }
@@ -439,7 +454,11 @@ template <class SupA, class SupB>
         {
             const float len = std::sqrt(dist2);
             if (len > 0.0f) {
-                lower_bound = std::max(lower_bound, core::dot(w.w, closest) / len);
+                const float bound = core::dot(w.w, closest) / len;
+                if (bound > lower_bound) {
+                    lower_bound = bound;
+                    plane_dir = closest * (1.0f / len);
+                }
             }
         }
 

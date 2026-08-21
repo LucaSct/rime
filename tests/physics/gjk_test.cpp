@@ -55,18 +55,38 @@ namespace {
 // a support function that can only return corners.
 constexpr float kSphereRadius = 0.3f;
 
-GjkResult probe(float half_extent, float gap) {
+// The pose kept ADDRESSABLE rather than run and thrown away: the plane-bound invariant below has to
+// re-evaluate the two support functions itself, from outside GJK, so it needs the shapes and not
+// just the result. `oy`/`oz` slide the sphere across the face — one plane measured eight times is
+// not a grid, and a bound is only interesting once the planes genuinely differ.
+struct Probe {
     ShapeDesc bx;
-    bx.type = ShapeType::Box;
-    bx.half_extents = {0.25f, half_extent, half_extent};
     ShapeDesc sp;
-    sp.type = ShapeType::Sphere;
-    sp.radius = kSphereRadius;
+    core::Vec3 centre;
 
-    const float x = -(0.25f + kSphereRadius + gap);
-    const ShapeSupport a{&sp, {x, 0.0f, 0.0f}, core::quat_identity(), nullptr};
-    const ShapeSupport b{&bx, {0.0f, 0.0f, 0.0f}, core::quat_identity(), nullptr};
-    return gjk(a, b, core::Vec3{x, 0.0f, 0.0f});
+    [[nodiscard]] ShapeSupport caster() const {
+        return ShapeSupport{&sp, centre, core::quat_identity(), nullptr};
+    }
+
+    [[nodiscard]] ShapeSupport wall() const {
+        return ShapeSupport{&bx, core::Vec3{}, core::quat_identity(), nullptr};
+    }
+
+    [[nodiscard]] GjkResult run() const { return gjk(caster(), wall(), centre); }
+};
+
+Probe make_probe(float half_extent, float gap, float oy = 0.0f, float oz = 0.0f) {
+    Probe p;
+    p.bx.type = ShapeType::Box;
+    p.bx.half_extents = {0.25f, half_extent, half_extent};
+    p.sp.type = ShapeType::Sphere;
+    p.sp.radius = kSphereRadius;
+    p.centre = {-(0.25f + kSphereRadius + gap), oy, oz};
+    return p;
+}
+
+GjkResult probe(float half_extent, float gap) {
+    return make_probe(half_extent, gap).run();
 }
 
 } // namespace
@@ -122,4 +142,91 @@ TEST_CASE("gjk: the lower bound never over-claims, which is what makes a sweep s
             CHECK(g.lower_bound <= gap * 1.02f);
         }
     }
+}
+
+TEST_CASE("gjk: the plane behind `lower_bound` re-verifies from raw support points") {
+    // `plane_dir` (2026-08-21) is the direction of the support plane that PRODUCED `lower_bound`,
+    // and it exists because the bound alone is a radial statement. m12.1's shape cast could only
+    // spend it radially, which shrinks an oblique sweep's gap by (1 - cos θ) per iteration and left
+    // an 85° graze metres short of the wall. Dividing the bound by the sweep's closing rate fixes
+    // that — but ONLY against the plane the bound came from. Against any other direction the
+    // quotient is a category error, and m12.1 had already measured what a mismatched direction does
+    // to a step: a 30× leap, straight through a wall and out the far side. `lower_bound` is a
+    // running maximum over planes from DIFFERENT iterations, so without this field the pairing is
+    // genuinely unrecoverable by the caller.
+    //
+    // What is asserted is the plane's own statement, re-derived FROM RAW SUPPORT POINTS: if the
+    // plane is real, the extreme point of the Minkowski difference along -plane_dir cannot lie
+    // nearer the origin, measured along plane_dir, than `lower_bound`. One support evaluation per
+    // shape — no simplex, no iteration history — so a bound produced by a corrupted iteration
+    // cannot certify itself out of its own leftovers.
+    struct Pose {
+        float half;
+        float gap;
+        float oy;
+        float oz;
+    };
+
+    // Face-on at three scales and three separations, plus three off-centre poses whose true
+    // closest direction is still the face normal but whose supports are far from the axis.
+    const Pose poses[] = {{1.0f, 1.0f, 0.0f, 0.0f},
+                          {1.0f, 1e-2f, 0.0f, 0.0f},
+                          {1.0f, 1e-4f, 0.0f, 0.0f},
+                          {20.0f, 1.0f, 0.0f, 0.0f},
+                          {20.0f, 1e-2f, 0.0f, 0.0f},
+                          {20.0f, 1e-4f, 0.0f, 0.0f},
+                          {100.0f, 1.0f, 0.0f, 0.0f},
+                          {100.0f, 1e-3f, 0.0f, 0.0f},
+                          {1.0f, 0.5f, 0.4f, 0.2f},
+                          {20.0f, 0.5f, 8.0f, -3.0f},
+                          {100.0f, 0.2f, 40.0f, 20.0f}};
+
+    int with_a_plane = 0;
+    for (const Pose& pose : poses) {
+        CAPTURE(pose.half);
+        CAPTURE(pose.gap);
+        CAPTURE(pose.oy);
+        CAPTURE(pose.oz);
+
+        const Probe p = make_probe(pose.half, pose.gap, pose.oy, pose.oz);
+        const GjkResult g = p.run();
+        REQUIRE_FALSE(g.overlapping);
+        CAPTURE(g.lower_bound);
+
+        const float len = core::length(g.plane_dir);
+        if (g.lower_bound <= 0.0f) {
+            // No plane ever beat zero, so there is no direction to report — and reporting one
+            // anyway would invite a caller to divide by its closing rate and step on nothing. The
+            // shape cast keys its "proven miss" branch on `lower_bound > 0` for exactly this
+            // reason. A zero bound is REACHABLE here rather than hypothetical: against a large
+            // target at a tiny gap it is what GJK's early exits actually produce.
+            CHECK(len == 0.0f);
+            continue;
+        }
+        ++with_a_plane;
+
+        // Unit, because the caller divides by `dot(dir, plane_dir)` and a direction of length 0.9
+        // would silently inflate every step by 11%.
+        CHECK(len == doctest::Approx(1.0f).epsilon(1e-4));
+
+        // The re-verification. `support_A(-n) - support_B(+n)` is the support of the Minkowski
+        // difference along -n by definition, i.e. its most origin-ward point in that direction.
+        const core::Vec3 wa = p.caster()(g.plane_dir * -1.0f);
+        const core::Vec3 wb = p.wall()(g.plane_dir);
+        const float reached = core::dot(wa - wb, g.plane_dir);
+
+        // The tolerance scales with the COORDINATE MAGNITUDE of the supports rather than with the
+        // gap, because that is what the dot product's float error scales with — a 100 m wall's
+        // support point carries ~1e-5 of absolute noise no matter how narrow the gap it is
+        // bounding. (The absolute-epsilon mistake this whole file is about, avoided rather than
+        // repeated.) Worst slack measured across these poses is 1.5e-8, against bounds from 1.7e-4
+        // to 1.9e-2 — six orders of margin, so this fails on a broken pairing and on nothing else.
+        const float scale = core::length(wa) + core::length(wb);
+        CHECK(reached >= g.lower_bound - 1e-4f * scale);
+    }
+
+    // Without this the block would pass vacuously on a build where every bound collapsed to zero —
+    // which is precisely the failure the shape cast's rescue path exists to survive, and precisely
+    // the state in which a silent green here would be a lie.
+    CHECK(with_a_plane >= 8);
 }
