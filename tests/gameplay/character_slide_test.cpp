@@ -50,8 +50,8 @@ TEST_CASE("m12.2 slide: a wall removes exactly the into-wall velocity and keeps 
     REQUIRE(speed > 1.0f); // vacuity: it is still moving, so "no normal component" means something
     const core::Vec3 wall_normal{0.0f, 0.0f, 1.0f};
     CHECK(std::fabs(core::dot(ch.state.velocity, wall_normal)) <= 1e-5f * speed);
-    CHECK(ch.state.velocity.x > 1.0f);   // …and it is sliding along the wall, not stopped
-    CHECK(ch.state.position.z > -3.0f);  // never got through it
+    CHECK(ch.state.velocity.x > 1.0f);  // …and it is sliding along the wall, not stopped
+    CHECK(ch.state.position.z > -3.0f); // never got through it
     CHECK_FALSE(ch.overlapping());
 }
 
@@ -64,10 +64,8 @@ TEST_CASE("m12.2 slide: the same holds at several wall orientations") {
 
         physics::PhysicsWorld w;
         (void)add_ground(w);
-        (void)add_static_box(w,
-                             {8.0f, 6.0f, 0.5f},
-                             n * 3.5f,
-                             core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, -rad));
+        (void)add_static_box(
+            w, {8.0f, 6.0f, 0.5f}, n * 3.5f, core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, -rad));
 
         Character ch;
         ch.spawn(w, config(), {0.0f, rest_y(config()), 0.0f}, /*grounded=*/true);

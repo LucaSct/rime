@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "rime/core/math/quat.hpp"
