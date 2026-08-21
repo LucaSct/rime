@@ -169,6 +169,112 @@ TEST_CASE("M7.7 query: overlap_sphere finds exactly the planted set, in canonica
     CHECK(hits[1].index == b.index);
 }
 
+// ── QueryFilter::exclude (m12.2) ─────────────────────────────────────────────────────────────
+// The asker standing inside the scene it is asking about. A character controller's capsule is a
+// kinematic body — it must be, so debris can hit the player — and it lives in the same broadphase
+// tree as everything else the controller wants to see, so no motion-class flag can hide it. These
+// four cases pin the contract: excluded in every query path, and a STALE id hides nothing.
+
+TEST_CASE("m12.2 query: raycast skips the excluded body and reports the next one behind it") {
+    physics::PhysicsWorld w;
+    const physics::BodyId near_ball = add(w, sphere(0.5f), {0.0f, 0.0f, 0.0f});
+    const physics::BodyId far_ball = add(w, sphere(0.5f), {0.0f, 0.0f, -3.0f});
+
+    const physics::Ray forward{{0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, -1.0f}};
+
+    physics::RayHit unfiltered;
+    REQUIRE(w.raycast(forward, unfiltered));
+    CHECK(unfiltered.body.index == near_ball.index);
+
+    physics::QueryFilter skip_near;
+    skip_near.exclude = near_ball;
+    physics::RayHit filtered;
+    REQUIRE(w.raycast(forward, filtered, skip_near));
+    CHECK(filtered.body.index == far_ball.index);
+    CHECK(filtered.distance == doctest::Approx(7.5f)); // 5 - (-3 + 0.5)
+
+    // Exclude the only remaining target too and the ray reports a clean miss rather than the
+    // nearest thing it was told to ignore.
+    physics::QueryFilter skip_far;
+    skip_far.exclude = far_ball;
+    physics::RayHit both;
+    CHECK_FALSE(w.raycast(forward, both, physics::QueryFilter{false, false}));
+    REQUIRE(w.raycast(forward, both, skip_far));
+    CHECK(both.body.index == near_ball.index);
+}
+
+TEST_CASE("m12.2 query: shape_cast skips the excluded body — the controller's own capsule") {
+    // The exact configuration the controller is in: a capsule body at the origin, sweeping forward
+    // from its OWN pose. Without exclusion the cast reports itself at distance 0 with
+    // initial_overlap set, and a controller that believes that spends the tick depenetrating from
+    // itself instead of walking.
+    physics::PhysicsWorld w;
+    const physics::BodyId self =
+        add(w, capsule(0.4f, 0.5f), {0.0f, 0.0f, 0.0f}, physics::MotionType::Kinematic);
+    const physics::BodyId wall =
+        add(w, box({2.0f, 2.0f, 0.5f}), {0.0f, 0.0f, -3.0f}, physics::MotionType::Static);
+
+    physics::ShapeCast cast;
+    cast.shape = capsule(0.4f, 0.5f);
+    cast.origin = {0.0f, 0.0f, 0.0f};
+    cast.direction = {0.0f, 0.0f, -1.0f};
+    cast.max_distance = 5.0f;
+
+    physics::ShapeHit self_hit;
+    REQUIRE(w.shape_cast(cast, self_hit));
+    CHECK(self_hit.body.index == self.index);
+    CHECK(self_hit.initial_overlap); // it is inside itself, exactly as reported
+
+    physics::QueryFilter skip_self;
+    skip_self.exclude = self;
+    physics::ShapeHit wall_hit;
+    REQUIRE(w.shape_cast(cast, wall_hit, skip_self));
+    CHECK(wall_hit.body.index == wall.index);
+    CHECK_FALSE(wall_hit.initial_overlap);
+    // Wall's near face at z = -2.5; the capsule's radius is 0.4, so it travels 2.1 m.
+    CHECK(wall_hit.distance == doctest::Approx(2.1f).epsilon(0.01));
+}
+
+TEST_CASE("m12.2 query: overlap_sphere drops the excluded body from the reported set") {
+    physics::PhysicsWorld w;
+    const physics::BodyId a = add(w, sphere(0.5f), {0.0f, 0.0f, 0.0f});
+    const physics::BodyId b = add(w, box({0.5f, 0.5f, 0.5f}), {1.5f, 0.0f, 0.0f});
+
+    std::vector<physics::BodyId> hits;
+    w.overlap_sphere({0.5f, 0.0f, 0.0f}, 1.2f, hits);
+    REQUIRE(hits.size() == 2);
+
+    physics::QueryFilter skip_a;
+    skip_a.exclude = a;
+    w.overlap_sphere({0.5f, 0.0f, 0.0f}, 1.2f, hits, skip_a);
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0].index == b.index);
+}
+
+TEST_CASE("m12.2 query: a STALE exclude id excludes nothing, even after its slot is reused") {
+    // The generational half of the contract. If exclusion matched on the slot index alone, a filter
+    // still carrying a destroyed body's id would go on hiding whatever body next occupies that
+    // slot — a silent, wandering hole in every query the filter is passed to.
+    physics::PhysicsWorld w;
+    const physics::BodyId first = add(w, sphere(0.5f), {0.0f, 0.0f, 0.0f});
+    w.destroy_body(first);
+    const physics::BodyId second = add(w, sphere(0.5f), {0.0f, 0.0f, 0.0f});
+    REQUIRE(second.index == first.index);           // the slot really was reused …
+    REQUIRE(second.generation != first.generation); // … with a bumped generation
+
+    physics::QueryFilter stale;
+    stale.exclude = first;
+    physics::RayHit hit;
+    REQUIRE(w.raycast(physics::Ray{{0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, -1.0f}}, hit, stale));
+    CHECK(hit.body.index == second.index);
+    CHECK(hit.body.generation == second.generation);
+
+    // …and the live id still does exclude.
+    physics::QueryFilter live;
+    live.exclude = second;
+    CHECK_FALSE(w.raycast(physics::Ray{{0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, -1.0f}}, hit, live));
+}
+
 TEST_CASE("M8.3 query: RayHit::child names the compound child a ray hit") {
     // The hitscan half of the M8 damage-to-part bridge (ADR-0029): contact events already name the
     // struck compound child (child_a/child_b); a raycast must name it too, or a hitscan weapon

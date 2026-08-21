@@ -38,6 +38,25 @@ struct Ray {
 struct QueryFilter {
     bool statics = true;
     bool dynamics = true;
+
+    // SELF-EXCLUSION (m12.2): a body this query pretends is not there. Null (the default) excludes
+    // nothing, so every existing call site keeps its exact meaning.
+    //
+    // It exists because the archetypal query asker is standing in the world it is asking about. A
+    // character controller's capsule IS a kinematic body — it has to be, or debris could not hit
+    // the player through ordinary contact events (ADR-0035 §3) — and kinematic bodies live in the
+    // dynamics tree. So every shape_cast the controller fires from its own position hits ITSELF at
+    // distance 0 with `initial_overlap` set, and a controller that believes that answer spends
+    // every tick depenetrating from its own body. Motion-class flags cannot express this: the
+    // capsule and the crate it wants to see are the same class.
+    //
+    // ONE id, not a list, by choice: v1's asker is one body asking about itself, and an ignore-list
+    // is speculative generality (plus a per-leaf loop on a hot path) until something needs it.
+    //
+    // A STALE id excludes nothing. The check is on the whole handle — index AND generation — so an
+    // exclusion naming a destroyed body does not silently start hiding whatever body later reuses
+    // that slot. Excluding a dead body is excluding nothing, which is exactly what it means.
+    BodyId exclude{};
 };
 
 // The nearest thing a raycast hit. `distance` is measured from the ray origin along the normalized
@@ -120,6 +139,28 @@ struct ShapeHit {
     // Which compound child was touched (M8.3's convention, as `RayHit::child`): the child index
     // within the hit body's compound shape, 0 for a non-compound body. This is what lets a sweep
     // name the destructible PART it caught on.
+    std::uint16_t child = 0;
+};
+
+// ── Penetration (m12.2) ───────────────────────────────────────────────────────────────────────
+// What a posed shape is stuck INSIDE, and which way to move to get out. This is the query
+// `ShapeHit::initial_overlap` is the signal to run: the cast can tell you that you started inside
+// something, but it deliberately measures nothing about the overlap, because an overlapping GJK
+// carries no witness points and a penetration AXIS is EPA's answer, not GJK's.
+//
+// Why a controller needs it. "Started inside" is not a hypothetical: a crate the solver pushes into
+// the player between ticks, or destruction spawning debris on top of them, both produce it in an
+// ordinary frame. A controller with no way to recover freezes solid — it casts, hears
+// initial_overlap, has no direction to move, and does that again forever.
+struct PenetrationHit {
+    BodyId body;
+    // Unit; the direction to push THE QUERY SHAPE to separate it (the opposite of the direction
+    // you would push the hit body). Stated in the query shape's favour because the caller of this
+    // query is the thing that needs to move — that is the whole point of asking.
+    core::Vec3 normal{0.0f, 0.0f, 0.0f};
+    float depth = 0.0f; // metres of overlap along `normal`; >= 0
+    // Which compound child is the deepest overlap, by the M8.3 convention shared with
+    // RayHit::child and ContactEvent::child_a/child_b. 0 for a non-compound body.
     std::uint16_t child = 0;
 };
 

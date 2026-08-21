@@ -11,6 +11,7 @@ rime_add_test(rime_physics_tests
     islands_test.cpp
     sync_test.cpp
     query_test.cpp
+    penetration_test.cpp
     shape_cast_test.cpp
     gjk_test.cpp
     push_in_test.cpp

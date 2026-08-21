@@ -237,6 +237,19 @@ struct PhysicsWorld::Impl {
         return s.dense;
     }
 
+    // Does `filter` name this broadphase slot as the body to pretend is not there (m12.2)? Called
+    // once per candidate leaf by every query's per-body test, which is why it is two integer
+    // compares and no branch on tree identity.
+    //
+    // The generation is part of the comparison on purpose: a QueryFilter carrying an id whose body
+    // has since been destroyed must exclude NOTHING, not whatever body happened to move into that
+    // slot afterwards. Matching on the index alone would turn a stale self-id into a silent,
+    // wandering hole in every query — the kind of bug that shows up as one crate in a hundred being
+    // invisible to hitscan.
+    [[nodiscard]] bool is_excluded(const QueryFilter& f, std::uint32_t slot) const noexcept {
+        return f.exclude.index == slot && f.exclude.generation == slots[slot].generation;
+    }
+
     // Resolve a shape's hull reference to its store entry — nullptr for primitives and for an
     // unresolvable id (null/foreign/stale/unregistered). The generation must match the slot's
     // current one and the slot must be live (M8.5 — a freed-then-reused slot has a bumped
@@ -1320,6 +1333,9 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
     // Pass the running `best_t` as the exact test's bound so a farther candidate is rejected
     // cheaply; the nearest survivor across both trees wins.
     const auto test = [&](std::uint32_t slot) {
+        if (p.is_excluded(filter, slot)) {
+            return;
+        }
         const std::uint32_t d = p.slots[slot].dense;
         float t = 0.0f;
         core::Vec3 n{0.0f, 0.0f, 0.0f};
@@ -1411,6 +1427,9 @@ bool PhysicsWorld::shape_cast(const ShapeCast& cast,
     // One candidate body. A compound is opened one level (children are never compounds — the same
     // rule the raycast follows) so the reported child names the destructible PART that was caught.
     const auto test = [&](std::uint32_t slot) {
+        if (p.is_excluded(filter, slot)) {
+            return;
+        }
         const std::uint32_t d = p.slots[slot].dense;
         const ShapeDesc& shape = p.shape[d];
         const core::Vec3 pos = p.position[d];
@@ -1496,6 +1515,137 @@ bool PhysicsWorld::shape_cast(const ShapeCast& cast,
     return true;
 }
 
+bool PhysicsWorld::penetration(const ShapeDesc& shape,
+                               core::Vec3 position,
+                               core::Quat orientation,
+                               PenetrationHit& out,
+                               const QueryFilter& filter) const {
+    const Impl& p = *impl_;
+
+    // A compound QUERY shape has no support function (it is not convex), the same refusal
+    // shape_cast and the CCD path make. Compound BODIES are fine — they are opened below.
+    if (shape.type == ShapeType::Compound) {
+        return false;
+    }
+    const ConvexHull* query_hull = p.hull_of(shape);
+    if (shape.type == ShapeType::ConvexHull && query_hull == nullptr) {
+        return false; // an unresolvable hull id describes no geometry
+    }
+
+    // Broadphase cull by the query shape's own tight box. Leaves carry FAT boxes, so a tight query
+    // box can only over-report — every genuinely overlapping body is found, and the extras are
+    // thrown out by the exact GJK test below.
+    const Aabb query_box = p.aabb_of(shape, position, orientation);
+
+    float best_depth = -1.0f;
+    core::Vec3 best_normal{0.0f, 1.0f, 0.0f};
+    std::uint32_t best_slot = core::kInvalidSlotIndex;
+    std::uint16_t best_child = 0;
+
+    const auto test = [&](std::uint32_t slot) {
+        if (p.is_excluded(filter, slot)) {
+            return;
+        }
+        const std::uint32_t d = p.slots[slot].dense;
+        const ShapeDesc& body_shape = p.shape[d];
+        const core::Vec3 body_pos = p.position[d];
+        const core::Quat& body_orient = p.orientation[d];
+
+        const ShapeSupport query{&shape, position, orientation, query_hull};
+
+        const auto try_one = [&](const ShapeDesc& target_shape,
+                                 core::Vec3 target_pos,
+                                 const core::Quat& target_orient,
+                                 const ConvexHull* target_hull,
+                                 std::uint16_t child_index) {
+            const ShapeSupport target{&target_shape, target_pos, target_orient, target_hull};
+
+            // GJK first, exactly as the narrowphase does: it answers "do they overlap at all"
+            // cheaply and, when they do, hands EPA the terminal simplex to start expanding from.
+            // EPA is only ever run on a simplex GJK already proved encloses the origin.
+            const GjkResult g = gjk(query, target, position - target_pos);
+            if (!g.overlapping) {
+                return;
+            }
+            const EpaResult e = epa(query, target, g.simplex, g.simplex_count);
+            if (!e.valid) {
+                // A numerically flat Minkowski difference — EPA's documented give-up. The
+                // narrowphase drops the contact for the tick; here we drop the candidate. Saying
+                // "no penetration" about a pair we could not measure is the honest answer: a
+                // fabricated axis would teleport the caller somewhere arbitrary.
+                return;
+            }
+            if (!(e.depth > 0.0f)) {
+                // ZERO DEPTH IS NOT A PENETRATION, and enforcing that is not pedantry — it is what
+                // keeps this query's answer meaning what its name says. EPA returns depth 0 when
+                // the origin sits ON the Minkowski difference's boundary, i.e. the shapes touch
+                // but do not overlap. There is nothing to push out of, and no direction that
+                // could be measured from a boundary case anyway.
+                //
+                // It is also the shape a FALSE positive takes. GJK's overlap test is a
+                // predicate, and its tolerance scales with the support extent it is comparing
+                // against, so against a large target (a 60 m ramp, an arena floor) a shape a
+                // centimetre clear can still trip it — measured here at m12.2, on a capsule
+                // 1.7 cm above a ramp. When that happens EPA immediately reports depth 0,
+                // because there genuinely is no overlap to expand into. Filtering on the
+                // MEASUREMENT rather than on the predicate turns that whole class of false
+                // positive into the correct answer, without this query needing an opinion about
+                // GJK's epsilons. (The predicate's own accuracy is tracked separately —
+                // docs/ROADMAP.md.)
+                return;
+            }
+
+            // Deepest wins, with an EXACT-tie break toward the lower slot then the lower child, so
+            // the answer never depends on which broadphase tree got walked first or how the BVH
+            // happens to be shaped. (Deepest, not nearest: a body wedged between two walls must
+            // resolve the worse violation first, and repeatedly resolving the deepest one strictly
+            // reduces the maximum, so the recovery converges.)
+            const bool better =
+                best_slot == core::kInvalidSlotIndex || e.depth > best_depth ||
+                (e.depth == best_depth &&
+                 (slot < best_slot || (slot == best_slot && child_index < best_child)));
+            if (!better) {
+                return;
+            }
+            best_depth = e.depth;
+            // EpaResult::normal separates by pushing B (the target) along it. The caller of THIS
+            // query is the query shape — it is the thing that has to move — so the reported normal
+            // is the other way round.
+            best_normal = -e.normal;
+            best_slot = slot;
+            best_child = child_index;
+        };
+
+        if (const CompoundShape* c = p.compound_of(body_shape); c != nullptr) {
+            for (std::size_t i = 0; i < c->child_count(); ++i) {
+                try_one(c->child_shape[i],
+                        compound_child_world_pos(*c, i, body_pos, body_orient),
+                        compound_child_world_orient(*c, i, body_orient),
+                        compound_child_hull(c->child_shape[i], p.hull_span()),
+                        static_cast<std::uint16_t>(i));
+            }
+            return;
+        }
+        try_one(body_shape, body_pos, body_orient, p.hull_of(body_shape), 0);
+    };
+
+    if (filter.dynamics) {
+        p.dynamic_tree.query(query_box, test);
+    }
+    if (filter.statics) {
+        p.static_tree.query(query_box, test);
+    }
+
+    if (best_slot == core::kInvalidSlotIndex) {
+        return false;
+    }
+    out.body = BodyId{best_slot, p.slots[best_slot].generation};
+    out.normal = best_normal;
+    out.depth = best_depth;
+    out.child = best_child;
+    return true;
+}
+
 void PhysicsWorld::overlap_sphere(core::Vec3 center,
                                   float radius,
                                   std::vector<BodyId>& out,
@@ -1507,6 +1657,9 @@ void PhysicsWorld::overlap_sphere(core::Vec3 center,
 
     std::vector<std::uint32_t> hits;
     const auto collect = [&](std::uint32_t slot) {
+        if (p.is_excluded(filter, slot)) {
+            return;
+        }
         const std::uint32_t d = p.slots[slot].dense;
         if (sphere_vs_shape(center,
                             radius,

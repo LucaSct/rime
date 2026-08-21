@@ -9,6 +9,36 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-21) — m12.2 COMPLETE: `engine/gameplay`, the character controller as a pure
+> function.** Collide-and-slide on a kinematic capsule over the `PhysicsWorld` seam:
+> `step_character(state, input, config, world, dt) → state`, no writes to the world it observes.
+> The ADR-0035 proofs hold — analytic slope/step/slide bounds and **replay determinism** (same
+> tape twice ⇒ bit-identical; two independently built worlds ⇒ identical trajectories) — plus
+> recovery convergence and a **1,296-cell structural probe grid** (18 slopes × 12 headings × 6
+> step heights) asserting only what must hold everywhere: no NaN, no tick ends overlapping, no
+> falling through the world, no `grounded` without a walkable surface under the axis, bounded
+> speed, bounded give-up counters.
+>
+> The grid is the story worth carrying forward. The hand-written cases all passed while **264
+> grid cells failed**, and the failures decomposed into five distinct controller defects — a
+> tangential slide grazing millimetres into a convex lip each tick, a foot-down ray whose reach
+> ended *exactly* at the answer it needed (float rounding decided a refusal), a step ladder
+> committing a landing measured by a ray that saw the floor behind the riser, a ground snap
+> burying the trailing flank in a ramp edge the axis had already crossed, and an edge-contact
+> normal reading walkable at the crest of a 50° wall. One principle closed all five: **the tick
+> certifies what it hands back** — depenetration recovery runs at start *and* end of the tick
+> under one shared budget, every committed pose (step landing, snap) is confirmed against a
+> penetration query before it is written, and `grounded` is returned only when a ray has vouched
+> for it at the final pose. Each fix was found by probe-first replay of a printed failing cell,
+> never by theorising from the summary line.
+>
+> **Deferred upward, measured:** GJK's overlap predicate loses shallow overlaps against very
+> large convex shapes (10 m half-extent: exact to 1 mm; 20 m: misses 1.4 cm; ≥30 m: misses
+> 10 cm — table in `tests/gameplay/character_fixture.hpp`). Test geometry is capped inside the
+> trustworthy regime; the defect belongs to the collision core (#131/#132 family), not the
+> controller. Named v1 costs live in `engine/gameplay/README.md`.
+> **Next:** m12.3 — `gameplay_net`, the server-authoritative networked player.
+
 > **Update (2026-08-21) — GJK stall verdicts are now certificates; the shallow-penetration misread
 > is closed, and m12.2 is unblocked.** The deferred item below suspected `kTouchEps2`; the measured
 > culprit was the **stall exits** — duplicate-support, no-progress, iteration-cap — which reported
