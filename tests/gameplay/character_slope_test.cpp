@@ -31,7 +31,7 @@ gameplay::CharacterConfig config() {
 TEST_CASE("m12.2 slope: a 30 degree incline is climbed at max_speed * cos(slope)") {
     const float theta = 30.0f * kDeg;
     physics::PhysicsWorld w;
-    add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
+    (void)add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
 
     Character ch;
     ch.spawn(w, config(), rest_on_slope(config(), theta, -20.0f, 0.0f), /*grounded=*/true);
@@ -68,7 +68,7 @@ TEST_CASE("m12.2 slope: a 30 degree incline is climbed at max_speed * cos(slope)
 TEST_CASE("m12.2 slope: a 30 degree incline holds a still character without creep") {
     const float theta = 30.0f * kDeg;
     physics::PhysicsWorld w;
-    add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
+    (void)add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
 
     Character ch;
     ch.spawn(w, config(), rest_on_slope(config(), theta, 0.0f, 0.0f), /*grounded=*/true);
@@ -89,7 +89,7 @@ TEST_CASE("m12.2 slope: a 30 degree incline holds a still character without cree
 TEST_CASE("m12.2 slope: a 60 degree face refuses to ground and slides a character down it") {
     const float theta = 60.0f * kDeg;
     physics::PhysicsWorld w;
-    add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
+    (void)add_ramp(w, theta, {60.0f, 0.5f, 20.0f});
 
     Character ch;
     ch.spawn(w, config(), rest_on_slope(config(), theta, 0.0f, 0.0f));
@@ -121,7 +121,7 @@ TEST_CASE("m12.2 slope: the walkable limit is the configured cosine, not a hard-
     strict.max_slope_cos = std::cos(30.0f * kDeg);
 
     physics::PhysicsWorld w1;
-    add_ramp(w1, theta, {40.0f, 0.5f, 20.0f});
+    (void)add_ramp(w1, theta, {40.0f, 0.5f, 20.0f});
     Character loose;
     loose.spawn(w1, permissive, rest_on_slope(permissive, theta, 0.0f, 0.0f), /*grounded=*/true);
     loose.state.ground_normal = slope_normal(theta);
@@ -129,7 +129,7 @@ TEST_CASE("m12.2 slope: the walkable limit is the configured cosine, not a hard-
     CHECK(loose.state.grounded);
 
     physics::PhysicsWorld w2;
-    add_ramp(w2, theta, {40.0f, 0.5f, 20.0f});
+    (void)add_ramp(w2, theta, {40.0f, 0.5f, 20.0f});
     Character tight;
     tight.spawn(w2, strict, rest_on_slope(strict, theta, 0.0f, 0.0f), /*grounded=*/true);
     tight.state.ground_normal = slope_normal(theta);

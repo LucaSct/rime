@@ -134,7 +134,7 @@ bool validate(CharacterConfig& config) noexcept;
 // the trajectory. `stuck` and `slide_exhausted` are the two to watch — they are the failure modes
 // that would otherwise present as "the player froze" with nothing to point at.
 struct StepStats {
-    std::uint32_t casts = 0;            // shape casts issued (a vacuity witness for the tests)
+    std::uint32_t casts = 0;            // world queries issued (a vacuity witness for the tests)
     std::uint32_t slide_iterations = 0; // iterations of the collide-and-slide loop
     std::uint32_t slide_exhausted = 0;  // hit max_slide_iterations with motion left over
     std::uint32_t steps_climbed = 0;    // step-up accepted

@@ -18,12 +18,16 @@
 // Those cases are the entire difference between a controller and a demo.
 //
 // ── SKIN IS A CONTACT OFFSET, NOT AN EPSILON ─────────────────────────────────────────────────
-// The capsule is kept `skin` metres away from every surface, and it never advances all the way to
-// a reported contact. That is not distrust of the cast; it is what makes the NEXT cast well-posed.
-// A capsule resting exactly on a plane is a degenerate GJK configuration — the witness points
-// coincide, the direction between them is whatever cancellation left behind, and the reported
-// normal is noise. Standing off by 2 cm means every query the controller ever issues is made from
-// a configuration where the geometry is unambiguous.
+// The capsule is kept `skin` metres away from every surface. That is not distrust of the cast; it
+// is what makes the NEXT cast well-posed. A capsule resting exactly on a plane is a degenerate GJK
+// configuration — the witness points coincide, the direction between them is whatever cancellation
+// left behind, and the reported normal is noise. Standing off by 2 cm means every query the
+// controller ever issues is made from a configuration where the geometry is unambiguous.
+//
+// HOW that offset is realised is itself load-bearing and cost a rewrite to get right: the movement
+// queries sweep a capsule INFLATED by skin rather than subtracting skin from a reported distance.
+// See the Caster block below for the measurement behind that, and for what the subtracted form
+// does to a character on a slope.
 //
 // The size is measured, not chosen. The cast's own tolerance stack is kTouchTolerance = 5e-5 plus
 // GJK's worst residual ~2.3e-4 (src/scene_query.hpp, ROADMAP 2026-08-21), so 2 cm dominates the
@@ -62,6 +66,40 @@ constexpr int kMaxPlanes = 3;
 // because the second one exists to handle "pushed out of A, now slightly inside B" — the wedge —
 // and a third would be an unbounded search wearing a small number's clothes.
 constexpr int kMaxRecoveryPushes = 2;
+
+// A sweep stops this fraction of the contact offset SHORT of where the inflated probe would touch,
+// so the probe is never left exactly tangent to a surface.
+//
+// This is not the contact offset — the inflated probe is (see Caster). It is the smaller,
+// separate requirement that the NEXT query be well posed. A probe resting exactly on a plane
+// reports `initial_overlap` for a sweep in ANY direction, including one straight along the
+// surface; the whole tick then measures nothing and the character cannot move. Worse, the flag is
+// raised by whatever the probe is touching — the FLOOR — which masks the wall it was walking into.
+// Measured: a 30° climb frozen after 0.6 m with 290 exhausted slide budgets in 300 ticks, the
+// velocity perfectly correct at 5.196 m/s the entire time.
+//
+// Backing off along the sweep is the classic over-correction on a graze (it divides by a cosine
+// nobody applied) — but it can no longer pin anything, because a grazing move never reaches this
+// code: a tangential sweep leaves the destination reachable, and the confirm-first branch in the
+// slide loop takes it. The back-off only runs when the character is genuinely approaching a
+// surface, which is exactly the geometry it is correct for.
+constexpr float kBackOffFraction = 0.5f;
+
+// How firmly a contact must OPPOSE the motion to be capable of blocking it. DIMENSIONLESS — a
+// cosine between two unit vectors — and deliberately the same value and the same argument as the
+// shape cast's own kNormalOpposesSweep (src/scene_query.hpp): a surface you ran INTO must have a
+// normal pointing back along the way you came. A plane with dot(n, dir) == 0 is PARALLEL to the
+// motion; travelling along it does not approach it, so it cannot be what stopped you, whatever a
+// query says.
+//
+// This is the controller's last line against a query that is wrong in the same way twice. Measured:
+// walking up a 30° ramp, at one particular spot 19 m from the ramp's centre, both the cast and the
+// penetration measurement reported the ramp as blocking a purely TANGENTIAL move. The clip then
+// removed nothing (the normal was perpendicular to the velocity), so the next tick posed the
+// identical query, got the identical answer, and the character stood still for 147 ticks with a
+// flawless 5.196 m/s velocity. Nothing else in this file can break that loop, because nothing else
+// changes between the ticks — but the geometry can: a perpendicular normal is not an obstruction.
+constexpr float kBlockingOpposition = 1e-3f;
 
 [[nodiscard]] core::Vec3 horizontal(core::Vec3 v) noexcept {
     return core::Vec3{v.x, 0.0f, v.z};
@@ -121,14 +159,15 @@ constexpr int kMaxRecoveryPushes = 2;
 // overlap and would otherwise report every resting contact as a penetration to escape from.
 struct Caster {
     const physics::PhysicsWorld* world;
-    physics::ShapeDesc shape; // the INFLATED probe: radius + skin
+    physics::ShapeDesc sweep;   // the SWEEP probe: radius + skin
+    physics::ShapeDesc confirm; // the CONFIRM probe: radius + skin/2 — see below
     physics::QueryFilter filter;
     StepStats* stats;
 
     [[nodiscard]] bool
     cast(core::Vec3 from, core::Vec3 dir, float distance, physics::ShapeHit& out) const {
         physics::ShapeCast c;
-        c.shape = shape;
+        c.shape = sweep;
         c.origin = from;
         c.orientation = core::quat_identity();
         c.direction = dir;
@@ -137,11 +176,76 @@ struct Caster {
         return world->shape_cast(c, out, filter);
     }
 
-    // Is the inflated probe obstructed at this pose — and if so, along which axis? EPA measures
-    // both, which is the whole reason this is the query the controller trusts (see PHANTOM
-    // CONTACTS in step_character).
+    // Is this pose genuinely unreachable — and if so, along which axis? EPA measures both, which
+    // is why this is the query the controller trusts over the cast (see PHANTOM CONTACTS in
+    // step_character).
+    //
+    // It measures the REAL capsule, not the inflated one, and the difference is what keeps the two
+    // questions apart. The sweep asks "where would I first touch, keeping my offset"; this asks
+    // "is this pose actually impossible". Asking the fattened shape the second question conflates
+    // them: every pose the controller deliberately produces has the inflated probe touching
+    // something, so "resting on the floor" and "blocked by a wall" become one reading, and the
+    // character stops dead a few centimetres before every step it meant to climb. (Measured: the
+    // 0.25 m step halted at z = -0.45 with the riser at z = -1, never once entering the step-up
+    // ladder.)
+    //
+    // The real capsule also has the LARGEST clearance of any shape here at a resting pose — one
+    // and a half contact offsets, ~3 cm — which matters because GJK's overlap predicate has a
+    // measured false-positive band at millimetre-to-centimetre clearances against large distant
+    // geometry. Asking the question with the most margin available is free, and it is the
+    // difference between a controller that walks and one that stutters.
     [[nodiscard]] bool obstructed(core::Vec3 at, physics::PenetrationHit& out) const {
-        return world->penetration(shape, at, core::quat_identity(), out, filter);
+        return world->penetration(confirm, at, core::quat_identity(), out, filter);
+    }
+
+    // WHERE THE GROUND IS UNDER `from`, AND WHICH WAY IT FACES — by RAYCAST, and the choice of
+    // instrument is the point.
+    //
+    // "What am I standing on" is the most consequential question this controller asks: its answer
+    // decides `walkable`, which decides grounded, which decides gravity, slope projection and
+    // whether a step-up is accepted. A shape query answers it badly at exactly the pose the
+    // character occupies — resting contact, where witness points coincide and the normal is
+    // whatever cancellation left behind — and worse, `penetration()` reports the DEEPEST overlap,
+    // which near a step lip is the RISER rather than the floor. Measured: a character standing
+    // squarely on flat ground beside a 0.35 m step was un-grounded, because the query it asked
+    // about the floor answered about the wall, and it then floated up the lip for 60 ticks.
+    //
+    // A ray against a box is a slab test (src/scene_query.hpp) — analytic, exact, and it returns
+    // the face's own normal. Against a hull it is the face-plane generalization. No tolerance, no
+    // near-tangential regime, no deepest-overlap ambiguity.
+    //
+    // Named cost (README): a ray is infinitely thin, so a capsule straddling a gap narrower than
+    // itself is judged by what is under its AXIS. v1 accepts that; the alternative is the shape
+    // query whose failure mode is worse and less predictable.
+    //
+    // `out_drop` is how far to lower the capsule so it rests `clearance` clear of that plane
+    // measured PERPENDICULAR to it — derived from the plane's own normal, so the cosine a slope
+    // introduces is applied rather than left implicit. It may be negative (the capsule is already
+    // below its resting height), which callers clamp.
+    [[nodiscard]] bool ground_below(core::Vec3 from,
+                                    const CharacterConfig& cfg,
+                                    float reach,
+                                    float& out_drop,
+                                    core::Vec3& out_normal) const {
+        const float clearance = (1.0f + kBackOffFraction) * cfg.skin;
+        physics::Ray ray;
+        ray.origin = from;
+        ray.direction = kUp * -1.0f;
+        ray.max_distance = cfg.half_height + cfg.radius + clearance + reach;
+        physics::RayHit hit;
+        ++stats->casts;
+        if (!world->raycast(ray, hit, filter)) {
+            return false;
+        }
+        const float facing = core::dot(hit.normal, kUp);
+        if (facing <= 0.0f) {
+            return false; // a downward-facing surface is a ceiling, not ground
+        }
+        // The bottom cap's centre sits `half_height` below the origin and must end up
+        // (radius + clearance) from the plane ALONG ITS NORMAL, which costs 1/facing vertically.
+        out_drop = hit.distance - (cfg.half_height + (cfg.radius + clearance) / facing);
+        out_normal = hit.normal;
+        return true;
     }
 };
 
@@ -187,59 +291,95 @@ struct Caster {
     physics::ShapeHit up_hit;
     if (caster.cast(position, kUp, cfg.step_height, up_hit)) {
         if (up_hit.initial_overlap) {
-            return false; // already touching something up there; not a step we can take
+            // Already touching something — which is EXPECTED here and must not abort the attempt:
+            // the only way to reach this code is by running into a riser, so of course the probe
+            // is in contact with it. A sweep cannot measure headroom from inside a contact, so ask
+            // the measurement instead: is the fully lifted pose clear? (Refusing on this flag was
+            // what made every step-up fail while reporting a tidy `step_rejected` count — the
+            // 0.25 m step stalled forever four rejections per tick.)
+            //
+            // v1 deferral, named in the README: an obstructed lift refuses outright rather than
+            // searching for the tallest lift that fits, so a step under a low ceiling is not
+            // climbed.
+            physics::PenetrationHit overhead;
+            if (caster.obstructed(position + kUp * cfg.step_height, overhead)) {
+                return false;
+            }
+        } else {
+            lift = std::min(std::max(up_hit.distance - kBackOffFraction * cfg.skin, 0.0f),
+                            cfg.step_height);
         }
-        lift = std::min(up_hit.distance, cfg.step_height);
     }
     if (lift <= cfg.skin) {
         return false;
     }
     const core::Vec3 lifted = position + kUp * lift;
 
-    // 2. ADVANCE from the lifted pose. The gate is `> skin` rather than `> 0`: gaining less than
-    //    the contact offset means we are still up against the same riser and have climbed nothing,
-    //    which is exactly what a too-tall step looks like from here.
-    float gained = lateral_len;
+    // 2. ADVANCE from the lifted pose, and probe a REACH rather than the leftover budget.
+    //
+    // The distance that decides "is this a step or a wall" is geometric — roughly a capsule radius,
+    // the distance at which the footprint is over the tread rather than the riser. The leftover
+    // displacement is not that distance and must not be used as it: a character already slowed by
+    // the wall it is standing against has a per-tick budget of millimetres, which is BELOW the
+    // progress gate, so every attempt is refused and the character stays slow. That is a feedback
+    // loop, and it wedges permanently — measured on a 0.25 m step under a 0.3 m budget: stalled at
+    // z = -0.69 forever, four step-up rejections every tick, never once accepted.
+    //
+    // So the probe reaches `max(leftover, radius)`, and — unlike every other advance in this file
+    // — the step COMMITS the whole of what it gains. A step-up is a discrete manoeuvre, not a
+    // slide: the capsule has to end up with its footprint over the TREAD, and that means moving
+    // about a radius forward. Committing only the tick's leftover leaves it hanging over the
+    // step's front EDGE instead, where the contact normal is a blend of riser and tread and the
+    // walkability test becomes a coin flip. (Measured: a 0.25 m step whose landing normal read
+    // (0, 0.495, 0.869) — refused — and a 0.40 m step whose edge normal read (0, 0.723, 0.691),
+    // just walkable, so the too-tall step was ACCEPTED and climbed 0.3 m at a time.)
+    const float reach = std::max(lateral_len, cfg.radius);
+    float gained = reach;
     physics::ShapeHit fwd_hit;
-    if (caster.cast(lifted, lateral_dir, lateral_len, fwd_hit)) {
+    if (caster.cast(lifted, lateral_dir, reach, fwd_hit)) {
         if (fwd_hit.initial_overlap) {
             return false;
         }
-        gained = std::min(fwd_hit.distance, lateral_len);
+        gained = std::min(std::max(fwd_hit.distance - kBackOffFraction * cfg.skin, 0.0f), reach);
     }
-    if (gained <= cfg.skin) {
+    // THE GATE, and it is what makes step_height a real bound: from the lifted pose the capsule
+    // must be able to travel a FULL RADIUS forward — which is exactly the statement "the obstacle
+    // has been cleared", since a capsule whose centre has advanced a radius past the riser is
+    // standing over what is beyond it. A step too tall for the lift blocks that move immediately
+    // (the 0.40 m riser above gained 0.131 m of 0.4 m), so it is refused on a MEASURED clearance
+    // rather than on the reading of an edge normal.
+    //
+    // Named cost (README): a climbable step with a wall less than a radius beyond it is refused.
+    if (gained < cfg.radius) {
         return false;
     }
     const core::Vec3 advanced = lifted + lateral_dir * gained;
 
-    // 3. SET THE FOOT DOWN, no further than we lifted (dropping further would not be a step, it
-    //    would be a fall we performed instantly). A miss means there is nothing under the new
-    //    position; an unwalkable landing means we would slide straight back off. Both refuse.
+    // 3. SET THE FOOT DOWN, no further than we lifted. A miss means there is nothing under the new
+    //    position; an unwalkable landing means we would slide straight back off; a landing further
+    //    down than we lifted is not a step at all but a fall we would be performing instantly.
+    //    All three refuse.
     //
-    // The landing normal is MEASURED with EPA at a pose just past the reported touch, not taken
-    // from the cast: a step lip is exactly the near-tangential configuration where a distance
-    // query's normal is least trustworthy, and "is this walkable" is the question the whole ladder
-    // turns on. See PHANTOM CONTACTS in step_character.
-    physics::ShapeHit down_hit;
-    if (!caster.cast(advanced, -kUp, lift, down_hit)) {
+    // Asked with a RAY (Caster::ground_below), because a step lip is precisely where a shape
+    // query's normal is least trustworthy and "is this walkable" is the question the whole ladder
+    // turns on.
+    float drop = 0.0f;
+    core::Vec3 floor_normal{0.0f, 1.0f, 0.0f};
+    if (!caster.ground_below(advanced, cfg, lift, drop, floor_normal)) {
         return false;
     }
-    if (down_hit.initial_overlap) {
+    if (!walkable(floor_normal, cfg) || drop > lift) {
         return false;
     }
-    const float drop = std::min(down_hit.distance, lift);
-    physics::PenetrationHit floor;
-    if (!caster.obstructed(advanced - kUp * (drop + cfg.skin), floor)) {
-        return false; // the cast saw a floor the measurement cannot find: no step here
-    }
-    if (!walkable(floor.normal, cfg)) {
-        return false;
-    }
+    drop = std::max(drop, 0.0f); // never LIFT on the way down; that is the recovery pass's job
 
     position = advanced - kUp * drop;
-    remaining = remaining - lateral_dir * gained;
+    // The tick's motion is spent on the step (`gained` is at least a radius, comfortably more than
+    // one tick of walking), so there is nothing left to slide with. Clamping rather than
+    // subtracting keeps the budget from going negative and the loop from walking backwards.
+    remaining = remaining - lateral_dir * std::min(gained, lateral_len);
     grounded = true;
-    ground_normal = floor.normal;
+    ground_normal = floor_normal;
     return true;
 }
 
@@ -410,8 +550,8 @@ CharacterState step_character(const CharacterState& state,
     // movement question, so the contact offset is carried by the geometry rather than by an
     // arithmetic correction applied to a distance measured in the wrong direction.
     const physics::ShapeDesc shape = character_shape(cfg);
-    physics::ShapeDesc probe_shape = shape;
-    probe_shape.radius += cfg.skin;
+    physics::ShapeDesc sweep_shape = shape;
+    sweep_shape.radius += cfg.skin;
 
     // Two filters, and the difference between them is the v1 SOLIDITY RULING (see README):
     //
@@ -437,7 +577,7 @@ CharacterState step_character(const CharacterState& state,
     recovery_filter.dynamics = true;
     recovery_filter.exclude = self;
 
-    const Caster caster{&world, probe_shape, move_filter, &st};
+    const Caster caster{&world, sweep_shape, shape, move_filter, &st};
 
     // ── PHANTOM CONTACTS, and why a contact has to be CONFIRMED ───────────────────────────────
     //
@@ -474,9 +614,9 @@ CharacterState step_character(const CharacterState& state,
     // `PenetrationHit::normal` is already stated as "push the QUERY shape to separate it", which
     // for a surface IS its outward normal facing the capsule — the same convention the slide loop
     // wants, with no flip.
-    // It measures the INFLATED probe, so "obstructed" means "the real capsule cannot keep its
-    // contact offset here" — which is exactly the condition the movement phase needs, and the same
-    // condition the casts are answering, so the two can never disagree about what a clearance is.
+    // "Obstructed" means the real capsule cannot keep (most of) its contact offset here — the
+    // condition the movement phase actually needs. See Caster::obstructed for why the probe it
+    // measures is half an offset thinner than the one the casts sweep.
     const auto obstructed_at = [&](core::Vec3 at, physics::PenetrationHit& out) {
         return caster.obstructed(at, out);
     };
@@ -538,24 +678,39 @@ CharacterState step_character(const CharacterState& state,
             const bool cast_hit = caster.cast(s.position, dir, len, hit);
             const core::Vec3 destination = s.position + dir * len;
 
-            // CONFIRM BEFORE BELIEVING — including believing a miss. See PHANTOM CONTACTS above.
-            // The one question that decides everything is "can the capsule stand where it was
-            // trying to go", and `penetration()` answers it by measurement; the cast contributes
-            // only HOW FAR along the way the first touch is, which is the one thing it is good at.
-            physics::PenetrationHit block;
-            if (!obstructed_at(destination, block)) {
-                if (cast_hit) {
-                    ++st.phantom_contacts;
-                }
+            // A CLEAN SWEEP WINS OUTRIGHT, and it is the one statement here strong enough to.
+            // The probe that just swept the entire budget and touched nothing strictly CONTAINS
+            // the real capsule, so "the inflated shape fits the whole way" implies "the capsule
+            // fits the whole way" as a matter of geometry, not of tolerance. No endpoint
+            // measurement of the smaller shape can contradict it; if one did, it would be the
+            // false reading. Taking the move here is also what removes the last deadlock: the old
+            // code refused to move on that disagreement, and since refusing changes none of the
+            // query's inputs it produced the identical disagreement forever. Measured: a 30° climb
+            // that walked 1.4 m and then stood still for 280 ticks with a perfect 5.196 m/s
+            // velocity and every counter at zero but one.
+            if (!cast_hit) {
                 s.position = destination;
                 remaining = core::Vec3{};
                 break;
             }
-            if (!cast_hit) {
-                // The measurement says blocked and the cast found nothing to stop at. Refuse to
-                // move rather than move blind, and count it — the destination is unreachable
-                // whatever the cast believes.
+
+            // Something is in the way — but is it? CONFIRM BEFORE BELIEVING (see PHANTOM CONTACTS
+            // above). The question that decides everything is "can the capsule stand where it was
+            // trying to go", and `penetration()` answers it by measurement; the cast contributes
+            // only HOW FAR along the way the first touch is, which is the one thing it is good at.
+            physics::PenetrationHit block;
+            if (!obstructed_at(destination, block)) {
                 ++st.phantom_contacts;
+                s.position = destination;
+                remaining = core::Vec3{};
+                break;
+            }
+            if (core::dot(block.normal, dir) >= -kBlockingOpposition) {
+                // A surface parallel to the motion cannot be what stops it — see
+                // kBlockingOpposition. This is the floor under a walking character, and it is the
+                // shape every doubled-up query failure takes.
+                ++st.phantom_contacts;
+                s.position = destination;
                 remaining = core::Vec3{};
                 break;
             }
@@ -572,11 +727,14 @@ CharacterState step_character(const CharacterState& state,
                 }
             }
 
-            // The advance comes straight off the INFLATED probe, so it already leaves a full
-            // perpendicular contact offset at any approach angle — no `- skin` correction, which
-            // is the arithmetic that used to pin a character to a slope (see the Caster note).
+            // The advance comes off the INFLATED probe, so the contact offset it leaves is
+            // perpendicular at any approach angle, minus the small back-off that keeps the probe
+            // off exact tangency (kBackOffFraction — and note this code is only reached when the
+            // destination is genuinely blocked, i.e. when the character is approaching a surface
+            // rather than grazing it).
+            const float back_off = kBackOffFraction * cfg.skin;
             const float advance = cast_hit && !hit.initial_overlap
-                                      ? std::min(std::max(hit.distance, 0.0f), len)
+                                      ? std::min(std::max(hit.distance - back_off, 0.0f), len)
                                       : 0.0f;
             s.position = s.position + dir * advance;
             remaining = remaining - dir * advance;
@@ -684,25 +842,25 @@ CharacterState step_character(const CharacterState& state,
     // sliding down"; it is not ground, and letting gravity plus the plane clip do their work makes
     // sliding down a steep face emergent rather than a special case. Ceilings need no case at all:
     // upward motion into a downward-facing plane is clipped by the loop above like any other wall.
-    if (was_grounded && !jumped && !overlapping && s.velocity.y <= 0.0f) {
-        physics::ShapeHit hit;
-        physics::PenetrationHit floor;
-        const bool found = caster.cast(s.position, -kUp, cfg.snap_distance, hit);
-        // The drop comes off the inflated probe, so the capsule lands with a full perpendicular
-        // contact offset. The NORMAL is measured a skin further down, where the probe genuinely
-        // overlaps the surface: "is this walkable" is too important a question to answer from a
-        // touching-configuration distance query (see PHANTOM CONTACTS).
-        const float drop =
-            found && !hit.initial_overlap ? std::min(hit.distance, cfg.snap_distance) : 0.0f;
-        if (found && caster.obstructed(s.position - kUp * (drop + cfg.skin), floor) &&
-            walkable(floor.normal, cfg)) {
-            s.position = s.position - kUp * drop;
+    //
+    // It runs on EVERY grounded tick, including one where the character is moving upward. That is
+    // not an optimisation missed — the snap is the only thing that re-verifies groundedness, and
+    // gating it on a downward velocity meant a rising character was never re-checked. A step lip's
+    // contact normal tilts upward, so a clip against it converts forward speed into upward speed;
+    // with no gravity while grounded and no snap while rising, the character simply flew, gaining
+    // 4.09 m of altitude on a 0.35 m step it was meant to be refused by. Verifying unconditionally
+    // closes that: either the ground is still under you, or you are airborne and gravity resumes.
+    if (was_grounded && !jumped && !overlapping) {
+        // Asked with a RAY, for the reasons in Caster::ground_below: the supporting surface's
+        // identity and normal are what everything downstream turns on, and a shape query answers
+        // that question about the nearest WALL when the character is standing next to one.
+        float drop = 0.0f;
+        core::Vec3 floor_normal{0.0f, 1.0f, 0.0f};
+        if (caster.ground_below(s.position, cfg, cfg.snap_distance, drop, floor_normal) &&
+            walkable(floor_normal, cfg) && drop <= cfg.snap_distance) {
+            s.position = s.position - kUp * std::max(drop, 0.0f);
             s.grounded = true;
-            s.ground_normal = floor.normal;
-            // Zero the descent. Keeping it would accumulate gravity tick after tick while standing
-            // still, so the first step off any ledge would launch the character downward at
-            // whatever speed the stand had silently built up.
-            s.velocity.y = 0.0f;
+            s.ground_normal = floor_normal;
             ++st.snaps;
         } else if (!touched_ground) {
             // Nothing walkable within reach, and the slide loop did not land on anything either:
@@ -710,6 +868,25 @@ CharacterState step_character(const CharacterState& state,
             // may have landed on a surface this cast cannot see straight down from.)
             s.grounded = false;
         }
+    }
+
+    // ── (g) The velocity ends the tick IN THE GROUND PLANE ────────────────────────────────────
+    // One re-projection, against the ground normal as it finally stands, and it does three jobs
+    // that would otherwise each need their own rule:
+    //
+    //   * it removes the upward speed a clip against a steep lip injected (see the snap note) —
+    //     which is what makes step-up load-bearing rather than optional, because a lip can no
+    //     longer be RIDDEN, only climbed;
+    //   * it removes the downward speed a standing character would otherwise accumulate, so the
+    //     first step off a ledge is not launched by a fall that never happened;
+    //   * it leaves an honest slope walk untouched, because that velocity is already in the plane.
+    //
+    // Doing it here rather than before the snap matters: `ground_normal` may have just changed
+    // (stepped onto a ramp, snapped onto a lower floor), and projecting against the plane you were
+    // on rather than the one you are on is how a controller acquires a one-tick hitch at every
+    // surface transition.
+    if (s.grounded && !jumped) {
+        s.velocity = s.velocity - s.ground_normal * core::dot(s.velocity, s.ground_normal);
     }
 
     return s;

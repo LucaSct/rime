@@ -80,17 +80,28 @@ inline physics::BodyId add_ramp(physics::PhysicsWorld& w, float theta, core::Vec
     return add_static_box(w, half, n * -half.y, slope_rotation(theta));
 }
 
-// Where a capsule of `cfg` RESTS on the ramp above the ground point (x, z). The controller keeps a
-// PERPENDICULAR contact offset of exactly `skin` — it sweeps a capsule inflated by skin, so the
-// clearance it leaves is perpendicular at any approach angle — and this reproduces that pose, so a
-// character placed here neither sinks nor is snapped on tick one.
+// The PERPENDICULAR clearance the controller settles at: it sweeps a capsule inflated by `skin`
+// and stops half an offset short of contact, so the real capsule comes to rest 1.5 offsets clear
+// of whatever it is standing on, measured perpendicular to that surface at any angle.
+[[nodiscard]] inline float rest_clearance(const gameplay::CharacterConfig& cfg) {
+    return 1.5f * cfg.skin;
+}
+
+// Where a capsule of `cfg` RESTS on the ramp above the ground point (x, z) — the pose the
+// controller's own ground snap converges to, so a character placed here neither sinks nor is
+// yanked on tick one.
 [[nodiscard]] inline core::Vec3
 rest_on_slope(const gameplay::CharacterConfig& cfg, float theta, float x, float z) {
-    // The bottom cap's centre must be (radius + skin) from the plane along n = (-sin θ, cos θ, 0):
-    //     -x sin θ + (y - half_height) cos θ == radius + skin
-    const float y =
-        (cfg.radius + cfg.skin + x * std::sin(theta)) / std::cos(theta) + cfg.half_height;
+    // The bottom cap's centre sits (radius + clearance) from the plane along n = (-sinθ, cosθ, 0):
+    //     -x sin θ + (y - half_height) cos θ == radius + clearance
+    const float y = (cfg.radius + rest_clearance(cfg) + x * std::sin(theta)) / std::cos(theta) +
+                    cfg.half_height;
     return core::Vec3{x, y, z};
+}
+
+// …and the same on flat ground, where it is just the capsule's half-height plus the clearance.
+[[nodiscard]] inline float rest_y(const gameplay::CharacterConfig& cfg, float surface_y = 0.0f) {
+    return surface_y + cfg.half_height + cfg.radius + rest_clearance(cfg);
 }
 
 // ── The character under test ──────────────────────────────────────────────────────────────────
