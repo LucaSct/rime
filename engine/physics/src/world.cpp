@@ -1575,6 +1575,25 @@ bool PhysicsWorld::penetration(const ShapeDesc& shape,
                 // fabricated axis would teleport the caller somewhere arbitrary.
                 return;
             }
+            if (!(e.depth > 0.0f)) {
+                // ZERO DEPTH IS NOT A PENETRATION, and enforcing that is not pedantry — it is what
+                // keeps this query's answer meaning what its name says. EPA returns depth 0 when
+                // the origin sits ON the Minkowski difference's boundary, i.e. the shapes touch
+                // but do not overlap. There is nothing to push out of, and no direction that
+                // could be measured from a boundary case anyway.
+                //
+                // It is also the shape a FALSE positive takes. GJK's overlap test is a
+                // predicate, and its tolerance scales with the support extent it is comparing
+                // against, so against a large target (a 60 m ramp, an arena floor) a shape a
+                // centimetre clear can still trip it — measured here at m12.2, on a capsule
+                // 1.7 cm above a ramp. When that happens EPA immediately reports depth 0,
+                // because there genuinely is no overlap to expand into. Filtering on the
+                // MEASUREMENT rather than on the predicate turns that whole class of false
+                // positive into the correct answer, without this query needing an opinion about
+                // GJK's epsilons. (The predicate's own accuracy is tracked separately —
+                // docs/ROADMAP.md.)
+                return;
+            }
 
             // Deepest wins, with an EXACT-tie break toward the lower slot then the lower child, so
             // the answer never depends on which broadphase tree got walked first or how the BVH

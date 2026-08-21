@@ -96,12 +96,32 @@ constexpr int kMaxRecoveryPushes = 2;
     return v + delta * (max_delta / len);
 }
 
-// A cast of the character's capsule, posed upright. Every query in this file goes through here so
-// that "the capsule is never rotated" is one fact in one place rather than five identical
-// initialisers that could drift apart.
+// ── HOW THE SKIN IS APPLIED: an INFLATED PROBE, not a subtracted distance ────────────────────
+//
+// The obvious way to keep a contact offset is to cast the real capsule and stop `skin` short:
+// `advance = hit.distance - skin`. It is wrong, and wrong in a way that only shows up on a slope,
+// which is where a character spends its life.
+//
+// `hit.distance` is measured ALONG THE SWEEP. Subtracting a fixed `skin` from it therefore leaves
+// a clearance of `skin` measured along the sweep too, and the PERPENDICULAR clearance that
+// actually matters is that times the cosine of the approach angle. Slide down a 60° face and the
+// approach is nearly tangential: the perpendicular clearance collapses toward zero, the next
+// tick's cast reports a contact at a distance BELOW skin, `distance - skin` clamps to zero, and
+// the character is pinned in mid-air with a perfectly healthy velocity. Measured before this
+// change: frozen at tick 6, 281 exhausted slide budgets in 300 ticks, velocity climbing past
+// 20 m/s against a position that never moved.
+//
+// So the skin is applied where it is geometrically meaningful — to the SHAPE. Every movement query
+// sweeps a capsule of radius + skin. A hit distance then already IS the safe advance, the
+// clearance it leaves is perpendicular by construction at any approach angle, and not one line of
+// the algorithm has to divide by a cosine. This is what "skin is a contact offset, not an epsilon"
+// means operationally: an offset belongs to the geometry, an epsilon belongs to a comparison.
+//
+// The real capsule keeps one job — the depenetration pre-pass, which must ask about GENUINE
+// overlap and would otherwise report every resting contact as a penetration to escape from.
 struct Caster {
     const physics::PhysicsWorld* world;
-    physics::ShapeDesc shape;
+    physics::ShapeDesc shape; // the INFLATED probe: radius + skin
     physics::QueryFilter filter;
     StepStats* stats;
 
@@ -115,6 +135,13 @@ struct Caster {
         c.max_distance = distance;
         ++stats->casts;
         return world->shape_cast(c, out, filter);
+    }
+
+    // Is the inflated probe obstructed at this pose — and if so, along which axis? EPA measures
+    // both, which is the whole reason this is the query the controller trusts (see PHANTOM
+    // CONTACTS in step_character).
+    [[nodiscard]] bool obstructed(core::Vec3 at, physics::PenetrationHit& out) const {
+        return world->penetration(shape, at, core::quat_identity(), out, filter);
     }
 };
 
@@ -151,15 +178,18 @@ struct Caster {
     }
     const core::Vec3 lateral_dir = lateral * (1.0f / lateral_len);
 
-    // 1. LIFT. Stop `skin` short of any ceiling, and refuse the whole manoeuvre if the lift would
-    //    be nothing — a step-up with no headroom is a teleport into a ceiling.
+    // Every distance below comes straight off the INFLATED probe (see Caster), so it is already a
+    // safe advance and no `- skin` correction appears anywhere in this ladder.
+
+    // 1. LIFT. Stop at any ceiling, and refuse the whole manoeuvre if the lift would be nothing —
+    //    a step-up with no headroom is a teleport into a ceiling.
     float lift = cfg.step_height;
     physics::ShapeHit up_hit;
-    if (caster.cast(position, kUp, cfg.step_height + cfg.skin, up_hit)) {
+    if (caster.cast(position, kUp, cfg.step_height, up_hit)) {
         if (up_hit.initial_overlap) {
-            return false; // already inside something up there; recovery's problem, not ours
+            return false; // already touching something up there; not a step we can take
         }
-        lift = std::max(up_hit.distance - cfg.skin, 0.0f);
+        lift = std::min(up_hit.distance, cfg.step_height);
     }
     if (lift <= cfg.skin) {
         return false;
@@ -171,11 +201,11 @@ struct Caster {
     //    which is exactly what a too-tall step looks like from here.
     float gained = lateral_len;
     physics::ShapeHit fwd_hit;
-    if (caster.cast(lifted, lateral_dir, lateral_len + cfg.skin, fwd_hit)) {
+    if (caster.cast(lifted, lateral_dir, lateral_len, fwd_hit)) {
         if (fwd_hit.initial_overlap) {
             return false;
         }
-        gained = std::max(fwd_hit.distance - cfg.skin, 0.0f);
+        gained = std::min(fwd_hit.distance, lateral_len);
     }
     if (gained <= cfg.skin) {
         return false;
@@ -185,19 +215,31 @@ struct Caster {
     // 3. SET THE FOOT DOWN, no further than we lifted (dropping further would not be a step, it
     //    would be a fall we performed instantly). A miss means there is nothing under the new
     //    position; an unwalkable landing means we would slide straight back off. Both refuse.
+    //
+    // The landing normal is MEASURED with EPA at a pose just past the reported touch, not taken
+    // from the cast: a step lip is exactly the near-tangential configuration where a distance
+    // query's normal is least trustworthy, and "is this walkable" is the question the whole ladder
+    // turns on. See PHANTOM CONTACTS in step_character.
     physics::ShapeHit down_hit;
-    if (!caster.cast(advanced, -kUp, lift + cfg.skin, down_hit)) {
+    if (!caster.cast(advanced, -kUp, lift, down_hit)) {
         return false;
     }
-    if (down_hit.initial_overlap || !walkable(down_hit.normal, cfg)) {
+    if (down_hit.initial_overlap) {
         return false;
     }
-    const float drop = std::max(down_hit.distance - cfg.skin, 0.0f);
+    const float drop = std::min(down_hit.distance, lift);
+    physics::PenetrationHit floor;
+    if (!caster.obstructed(advanced - kUp * (drop + cfg.skin), floor)) {
+        return false; // the cast saw a floor the measurement cannot find: no step here
+    }
+    if (!walkable(floor.normal, cfg)) {
+        return false;
+    }
 
     position = advanced - kUp * drop;
     remaining = remaining - lateral_dir * gained;
     grounded = true;
-    ground_normal = down_hit.normal;
+    ground_normal = floor.normal;
     return true;
 }
 
@@ -329,13 +371,27 @@ CharacterState step_character(const CharacterState& state,
     const bool jumped = was_grounded && (input.pressed & kActionJump) != 0u;
 
     if (was_grounded) {
-        const core::Vec3 flat = horizontal(s.velocity);
-        core::Vec3 v = approach(flat, wish * cfg.max_speed, cfg.accel * dt);
-        // Project onto the supporting plane so walking uphill GAINS height rather than driving
-        // into the slope and relying on the collision response to fix it. The consequence is
-        // physical and intended: along-slope speed becomes max_speed * cos(slope), so a steeper
-        // hill is climbed more slowly with no extra rule.
-        v = v - s.ground_normal * core::dot(v, s.ground_normal);
+        // ON THE GROUND, EVERYTHING HAPPENS IN THE GROUND PLANE — the wish direction, the target,
+        // and the acceleration. Doing it in the horizontal plane and projecting the RESULT looks
+        // equivalent and is not: the projection shrinks the horizontal component by cos²(slope)
+        // every tick while the acceleration only pushes it back up by accel*dt, so the two settle
+        // at a fixed point well below the intended speed. Measured on a 30° ramp: 2.5 m/s where
+        // 4.5 was wanted, which reads as "the controller mysteriously walks uphill at half speed".
+        //
+        // The target's magnitude is max_speed * cos(slope). That is a design ruling, not an
+        // accident of the algebra: the speed budget is partly spent on climbing, so a steeper hill
+        // is ascended more slowly, with no separate rule and no clamp.
+        const core::Vec3 n = s.ground_normal;
+        const core::Vec3 in_plane = s.velocity - n * core::dot(s.velocity, n);
+        const core::Vec3 wish_plane = wish - n * core::dot(wish, n);
+        const float wish_len = core::length(wish_plane);
+        const core::Vec3 target = wish_len > 0.0f
+                                      ? wish_plane * (cfg.max_speed * core::dot(n, kUp) / wish_len)
+                                      : core::Vec3{};
+        core::Vec3 v = approach(in_plane, target, cfg.accel * dt);
+        // Re-project: `approach` interpolates through velocity space and its result can leave the
+        // plane by a rounding's worth even when both ends lie in it.
+        v = v - n * core::dot(v, n);
         if (jumped) {
             // A jump SETS the vertical speed rather than adding an impulse, so jump height is a
             // config number a designer can read off, independent of what the ground was doing.
@@ -349,7 +405,13 @@ CharacterState step_character(const CharacterState& state,
         s.velocity = core::Vec3{v.x, s.velocity.y - cfg.gravity * dt, v.z};
     }
 
+    // The two shapes, and the division of labour between them (see the Caster note above): the
+    // REAL capsule answers "am I genuinely inside something", the INFLATED probe answers every
+    // movement question, so the contact offset is carried by the geometry rather than by an
+    // arithmetic correction applied to a distance measured in the wrong direction.
     const physics::ShapeDesc shape = character_shape(cfg);
+    physics::ShapeDesc probe_shape = shape;
+    probe_shape.radius += cfg.skin;
 
     // Two filters, and the difference between them is the v1 SOLIDITY RULING (see README):
     //
@@ -375,7 +437,49 @@ CharacterState step_character(const CharacterState& state,
     recovery_filter.dynamics = true;
     recovery_filter.exclude = self;
 
-    const Caster caster{&world, shape, move_filter, &st};
+    const Caster caster{&world, probe_shape, move_filter, &st};
+
+    // ── PHANTOM CONTACTS, and why a contact has to be CONFIRMED ───────────────────────────────
+    //
+    // A shape cast is a PREDICATE with a tolerance; `penetration()` is a MEASUREMENT. When they
+    // disagree, the measurement wins — and they do disagree, reproducibly, in exactly the
+    // configuration a character controller lives in.
+    //
+    // Measured at m12.2: a capsule sliding TANGENTIALLY along a large rotated face (a 120 m ramp
+    // at 30°, the capsule 1.7 cm clear of it, sweeping parallel to the surface) intermittently
+    // draws a "hit" whose normal is EXACTLY the reversed sweep direction — dot(n, dir) = -1.0000
+    // — at a distance near the end of the budget, while `penetration()` at the same pose reports
+    // the capsule comfortably clear. That normal is not geometry. It is `measure_normal`'s
+    // documented fallback (src/scene_query.hpp): when the retracted probe cannot produce a
+    // well-conditioned direction, the cast returns a deterministic retreat instead of guessing,
+    // which is the right thing for the cast to do and the wrong thing for a caller to believe.
+    //
+    // Believing it is expensive. The clip below removes the velocity component along the contact
+    // normal, and a normal that exactly opposes the motion removes ALL of it — so one phantom
+    // contact per few ticks halves a character's walking speed, and a run of them freezes it. The
+    // 30° climb measured 12.4 m instead of 26 m before this check existed.
+    //
+    // The same disagreement poisons the NORMAL, which is worse, because the normal decides whether
+    // a surface is ground. Measured on a 60° face: reported normals of (0.12, 0.29, 0.95),
+    // (-0.41, -0.71, -0.57), (-0.53, 0.85, 0.08) at successive ticks — in a scene with no Z
+    // geometry at all — against a true face normal of (-0.87, 0.50, 0). One of those reads as
+    // walkable, and the character strolls up a 60° cliff.
+    //
+    // So the controller takes BOTH decisions from one measurement instead: a contact blocks only
+    // if the capsule genuinely cannot stand where it was going, and its normal is EPA's
+    // penetration axis at that pose — measured where the shapes really do overlap, which is
+    // precisely where EPA is well conditioned, rather than at a touch, which is precisely where a
+    // distance query is not. One query, on the contact path only.
+    //
+    // `PenetrationHit::normal` is already stated as "push the QUERY shape to separate it", which
+    // for a surface IS its outward normal facing the capsule — the same convention the slide loop
+    // wants, with no flip.
+    // It measures the INFLATED probe, so "obstructed" means "the real capsule cannot keep its
+    // contact offset here" — which is exactly the condition the movement phase needs, and the same
+    // condition the casts are answering, so the two can never disagree about what a clearance is.
+    const auto obstructed_at = [&](core::Vec3 at, physics::PenetrationHit& out) {
+        return caster.obstructed(at, out);
+    };
 
     // ── (c) Depenetration pre-pass ────────────────────────────────────────────────────────────
     // Starting a tick inside geometry is not a hypothetical: a crate the solver shoved into the
@@ -431,31 +535,53 @@ CharacterState step_character(const CharacterState& state,
 
             physics::ShapeHit hit;
             ++st.slide_iterations;
-            // Cast `skin` beyond the budget: the capsule must learn about a surface it would come
-            // to rest against, not only one it would drive into.
-            if (!caster.cast(s.position, dir, len + cfg.skin, hit)) {
-                s.position = s.position + remaining;
+            const bool cast_hit = caster.cast(s.position, dir, len, hit);
+            const core::Vec3 destination = s.position + dir * len;
+
+            // CONFIRM BEFORE BELIEVING — including believing a miss. See PHANTOM CONTACTS above.
+            // The one question that decides everything is "can the capsule stand where it was
+            // trying to go", and `penetration()` answers it by measurement; the cast contributes
+            // only HOW FAR along the way the first touch is, which is the one thing it is good at.
+            physics::PenetrationHit block;
+            if (!obstructed_at(destination, block)) {
+                if (cast_hit) {
+                    ++st.phantom_contacts;
+                }
+                s.position = destination;
+                remaining = core::Vec3{};
+                break;
+            }
+            if (!cast_hit) {
+                // The measurement says blocked and the cast found nothing to stop at. Refuse to
+                // move rather than move blind, and count it — the destination is unreachable
+                // whatever the cast believes.
+                ++st.phantom_contacts;
                 remaining = core::Vec3{};
                 break;
             }
             if (hit.initial_overlap) {
-                // Recovery already ran this tick and this cast still says "inside". Moving on a
-                // flag that carries no measurement is how a controller walks through a wall, so
-                // the answer is to stop and count it (query.hpp explains why the two zero-distance
-                // cases must never be conflated).
-                ++st.stuck;
-                remaining = core::Vec3{};
-                break;
+                // The probe is already touching something. That is the RESTING case, not the
+                // "inside a wall" case — the real capsule is still clear (the recovery pass above
+                // measured that), it is simply within its contact offset of a surface. So: do not
+                // advance, do not panic, take the normal from the measurement, and let the clip
+                // below slide along the surface. Only a real overlap of the real capsule is stuck,
+                // and that is what the recovery pass reports.
+                physics::PenetrationHit here;
+                if (caster.obstructed(s.position, here)) {
+                    block = here; // measure the resting contact where the capsule actually is
+                }
             }
 
-            // NEVER negative. `hit.distance - skin` can be negative when the capsule was already
-            // resting against a surface, and backing up on it is precisely how a controller
-            // acquires a jitter: it retreats, the next tick re-approaches, and the player vibrates.
-            const float advance = std::min(std::max(hit.distance - cfg.skin, 0.0f), len);
+            // The advance comes straight off the INFLATED probe, so it already leaves a full
+            // perpendicular contact offset at any approach angle — no `- skin` correction, which
+            // is the arithmetic that used to pin a character to a slope (see the Caster note).
+            const float advance = cast_hit && !hit.initial_overlap
+                                      ? std::min(std::max(hit.distance, 0.0f), len)
+                                      : 0.0f;
             s.position = s.position + dir * advance;
             remaining = remaining - dir * advance;
 
-            const core::Vec3 n = hit.normal;
+            const core::Vec3 n = block.normal;
             if (walkable(n, cfg)) {
                 s.grounded = true;
                 s.ground_normal = n;
@@ -478,12 +604,37 @@ CharacterState step_character(const CharacterState& state,
             remaining = remaining - n * core::dot(remaining, n);
             s.velocity = s.velocity - n * core::dot(s.velocity, n);
 
+            // IS THIS A SURFACE WE ARE ALREADY TOUCHING? Almost always, yes: sliding along a wall
+            // means running into the same wall on every iteration, with a normal that differs from
+            // last iteration's only by float noise. Recording it again is not a harmless
+            // duplicate — it fills the plane list with three copies of one surface, and then the
+            // crease machinery below tries to slide along the intersection of a plane with itself.
+            // That cross product is zero, the degenerate-crease guard fires, and the character is
+            // "corner locked" against a single flat ramp. Measured before this check: 280 corner
+            // locks in 300 ticks on one 60° face, with the character frozen from tick 6 onward.
+            //
+            // The comparison is a DOT PRODUCT OF UNIT NORMALS — dimensionless, an angle, so it is
+            // legitimately an absolute constant (see the epsilon note at the top of this file).
+            // cos(2.5°): loose enough to absorb query noise on one flat face, far tighter than any
+            // corner a character can be in.
+            constexpr float kSamePlaneCos = 0.999f;
+            bool duplicate = false;
+            for (int p = 0; p < plane_count; ++p) {
+                if (core::dot(n, planes[p]) > kSamePlaneCos) {
+                    duplicate = true;
+                    break;
+                }
+            }
+
             // THE CREASE. Clipping by the new plane can push the motion back INTO a plane we are
             // already touching — the inside of a corner. Sliding along either plane alone is then
             // wrong; the only direction that satisfies both is their line of intersection, so the
             // motion is projected onto it.
             bool locked = false;
             for (int p = 0; p < plane_count && !locked; ++p) {
+                if (core::dot(n, planes[p]) > kSamePlaneCos) {
+                    continue; // the same surface: a plane forms no crease with itself
+                }
                 if (core::dot(remaining, planes[p]) >= 0.0f) {
                     continue;
                 }
@@ -499,8 +650,11 @@ CharacterState step_character(const CharacterState& state,
                 remaining = crease * core::dot(remaining, crease);
                 s.velocity = crease * core::dot(s.velocity, crease);
             }
-            // A fourth simultaneous plane, or a degenerate crease: no direction satisfies every
-            // constraint. Stop dead, and say so in a counter rather than jittering in place.
+            if (duplicate) {
+                continue; // already constrained by this surface; the clip above was the whole job
+            }
+            // A fourth DISTINCT simultaneous plane, or a degenerate crease: no direction satisfies
+            // every constraint. Stop dead, and say so in a counter rather than jittering in place.
             if (locked || plane_count == kMaxPlanes) {
                 s.velocity = core::Vec3{};
                 remaining = core::Vec3{};
@@ -532,12 +686,19 @@ CharacterState step_character(const CharacterState& state,
     // upward motion into a downward-facing plane is clipped by the loop above like any other wall.
     if (was_grounded && !jumped && !overlapping && s.velocity.y <= 0.0f) {
         physics::ShapeHit hit;
-        if (caster.cast(s.position, -kUp, cfg.snap_distance + cfg.skin, hit) &&
-            !hit.initial_overlap && walkable(hit.normal, cfg)) {
-            const float drop = std::max(hit.distance - cfg.skin, 0.0f);
+        physics::PenetrationHit floor;
+        const bool found = caster.cast(s.position, -kUp, cfg.snap_distance, hit);
+        // The drop comes off the inflated probe, so the capsule lands with a full perpendicular
+        // contact offset. The NORMAL is measured a skin further down, where the probe genuinely
+        // overlaps the surface: "is this walkable" is too important a question to answer from a
+        // touching-configuration distance query (see PHANTOM CONTACTS).
+        const float drop =
+            found && !hit.initial_overlap ? std::min(hit.distance, cfg.snap_distance) : 0.0f;
+        if (found && caster.obstructed(s.position - kUp * (drop + cfg.skin), floor) &&
+            walkable(floor.normal, cfg)) {
             s.position = s.position - kUp * drop;
             s.grounded = true;
-            s.ground_normal = hit.normal;
+            s.ground_normal = floor.normal;
             // Zero the descent. Keeping it would accumulate gravity tick after tick while standing
             // still, so the first step off any ledge would launch the character downward at
             // whatever speed the stand had silently built up.

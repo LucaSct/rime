@@ -90,7 +90,9 @@ struct CharacterConfig {
     float radius = 0.4f;      // capsule radius
     float half_height = 0.5f; // CYLINDER half-height; total height is 2*(half_height + radius)
 
-    float max_speed = 6.0f; // m/s, horizontal
+    // m/s on flat ground. On a slope the same budget buys max_speed * cos(slope) ALONG the
+    // surface — climbing costs speed, by design and with no separate rule (character.cpp).
+    float max_speed = 6.0f;
     float accel = 50.0f;    // m/s² toward the wish velocity, on the ground
     float air_accel = 8.0f; // …and in the air, where a player has much less authority
     float gravity = 9.81f;
@@ -141,6 +143,10 @@ struct StepStats {
     std::uint32_t depenetrations = 0;   // recovery pushes performed
     std::uint32_t stuck = 0;            // STILL overlapping after recovery — the freeze, counted
     std::uint32_t corner_locked = 0;    // a third incompatible plane zeroed the velocity
+    // A contact the shape cast reported that the depenetration query could not confirm — see
+    // "PHANTOM CONTACTS" in character.cpp. A steady trickle is the known shape-cast weakness on
+    // large rotated faces; a flood means something underneath has changed for the worse.
+    std::uint32_t phantom_contacts = 0;
 };
 
 // ── The step ──────────────────────────────────────────────────────────────────────────────────
