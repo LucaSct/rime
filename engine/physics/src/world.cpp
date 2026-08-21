@@ -237,6 +237,19 @@ struct PhysicsWorld::Impl {
         return s.dense;
     }
 
+    // Does `filter` name this broadphase slot as the body to pretend is not there (m12.2)? Called
+    // once per candidate leaf by every query's per-body test, which is why it is two integer
+    // compares and no branch on tree identity.
+    //
+    // The generation is part of the comparison on purpose: a QueryFilter carrying an id whose body
+    // has since been destroyed must exclude NOTHING, not whatever body happened to move into that
+    // slot afterwards. Matching on the index alone would turn a stale self-id into a silent,
+    // wandering hole in every query — the kind of bug that shows up as one crate in a hundred being
+    // invisible to hitscan.
+    [[nodiscard]] bool is_excluded(const QueryFilter& f, std::uint32_t slot) const noexcept {
+        return f.exclude.index == slot && f.exclude.generation == slots[slot].generation;
+    }
+
     // Resolve a shape's hull reference to its store entry — nullptr for primitives and for an
     // unresolvable id (null/foreign/stale/unregistered). The generation must match the slot's
     // current one and the slot must be live (M8.5 — a freed-then-reused slot has a bumped
@@ -1320,6 +1333,9 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
     // Pass the running `best_t` as the exact test's bound so a farther candidate is rejected
     // cheaply; the nearest survivor across both trees wins.
     const auto test = [&](std::uint32_t slot) {
+        if (p.is_excluded(filter, slot)) {
+            return;
+        }
         const std::uint32_t d = p.slots[slot].dense;
         float t = 0.0f;
         core::Vec3 n{0.0f, 0.0f, 0.0f};
@@ -1411,6 +1427,9 @@ bool PhysicsWorld::shape_cast(const ShapeCast& cast,
     // One candidate body. A compound is opened one level (children are never compounds — the same
     // rule the raycast follows) so the reported child names the destructible PART that was caught.
     const auto test = [&](std::uint32_t slot) {
+        if (p.is_excluded(filter, slot)) {
+            return;
+        }
         const std::uint32_t d = p.slots[slot].dense;
         const ShapeDesc& shape = p.shape[d];
         const core::Vec3 pos = p.position[d];
@@ -1507,6 +1526,9 @@ void PhysicsWorld::overlap_sphere(core::Vec3 center,
 
     std::vector<std::uint32_t> hits;
     const auto collect = [&](std::uint32_t slot) {
+        if (p.is_excluded(filter, slot)) {
+            return;
+        }
         const std::uint32_t d = p.slots[slot].dense;
         if (sphere_vs_shape(center,
                             radius,

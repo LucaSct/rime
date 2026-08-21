@@ -38,6 +38,25 @@ struct Ray {
 struct QueryFilter {
     bool statics = true;
     bool dynamics = true;
+
+    // SELF-EXCLUSION (m12.2): a body this query pretends is not there. Null (the default) excludes
+    // nothing, so every existing call site keeps its exact meaning.
+    //
+    // It exists because the archetypal query asker is standing in the world it is asking about. A
+    // character controller's capsule IS a kinematic body — it has to be, or debris could not hit
+    // the player through ordinary contact events (ADR-0035 §3) — and kinematic bodies live in the
+    // dynamics tree. So every shape_cast the controller fires from its own position hits ITSELF at
+    // distance 0 with `initial_overlap` set, and a controller that believes that answer spends
+    // every tick depenetrating from its own body. Motion-class flags cannot express this: the
+    // capsule and the crate it wants to see are the same class.
+    //
+    // ONE id, not a list, by choice: v1's asker is one body asking about itself, and an ignore-list
+    // is speculative generality (plus a per-leaf loop on a hot path) until something needs it.
+    //
+    // A STALE id excludes nothing. The check is on the whole handle — index AND generation — so an
+    // exclusion naming a destroyed body does not silently start hiding whatever body later reuses
+    // that slot. Excluding a dead body is excluding nothing, which is exactly what it means.
+    BodyId exclude{};
 };
 
 // The nearest thing a raycast hit. `distance` is measured from the ray origin along the normalized
