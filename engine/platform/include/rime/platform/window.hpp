@@ -61,6 +61,12 @@ public:
 
     // The native handles for surface creation (see native_window.hpp). Stable for the window's
     // life.
+    //
+    // Ask for this ONLY to build a rendering surface on the window. It is not a neutral getter
+    // everywhere: the Wayland backend reads the call as "a renderer owns this surface's pixels from
+    // now on" and stands down the placeholder buffer it would otherwise use to make a rendererless
+    // window visible (a Wayland surface with no buffer is never mapped at all). Querying the handle
+    // of a window you will never render to therefore leaves it invisible on Wayland.
     [[nodiscard]] virtual NativeWindow native_handle() const = 0;
 
     [[nodiscard]] virtual WindowId id() const = 0;

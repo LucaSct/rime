@@ -143,6 +143,11 @@ bool run_windowed(int max_frames) {
         while (poll_event(e)) input.process(e);
         if (input.key_pressed(Key::Escape)) window->request_close();
 
+        // Size the swapchain from the window; on Wayland the out-of-date signal never fires for a
+        // compositor resize (see Swapchain::ensure_extent).
+        const Extent2D fb_now = window->framebuffer_size();
+        swapchain->ensure_extent({fb_now.width, fb_now.height});
+
         rime::rhi::TextureHandle target = swapchain->acquire_next_image();
         if (!target.is_valid()) {
             const Extent2D s = window->framebuffer_size();

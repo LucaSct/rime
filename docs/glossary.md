@@ -657,6 +657,17 @@ See also **Determinism / replication** under *Physics & destruction*.
 - **xdg-shell.** The Wayland protocol extension that gives a bare surface a desktop-window role —
   title, move/resize, minimize/close — via `xdg_surface` + `xdg_toplevel`. Its client code is
   generated from an XML description by `wayland-scanner` at build time.
+- **Mapping (Wayland).** A Wayland surface becomes a real window only once a buffer is *attached and
+  committed* — until then the compositor does not lay it out, does not list it as a client, and
+  (because an unmapped surface is never re-laid-out) sends a single `configure` and nothing more. So
+  "created a window" and "there is a window on screen" are different claims here, unlike X11 or
+  Win32. Rime's Wayland backend attaches a flat `wl_shm` placeholder buffer to any window no
+  renderer has claimed, so a windowed program without a GPU still maps.
+- **`currentExtent` sentinel.** `VkSurfaceCapabilitiesKHR::currentExtent` normally reports the
+  surface's real size, and a mismatch is what makes `vkAcquireNextImageKHR` return
+  `VK_ERROR_OUT_OF_DATE_KHR` on a resize. On Wayland it is instead `0xFFFFFFFF` — "you choose" — so
+  the driver never contradicts the swapchain and **that resize signal never fires**. A Wayland
+  render loop must therefore size its swapchain from the *window*, not from an out-of-date return.
 - **DPI / content scale.** The ratio between physical pixels and layout points on HiDPI/Retina
   displays. A window reports its *framebuffer* size (real pixels, what the swapchain uses), its
   *logical* size (points/DIPs), and their ratio (`content_scale()`).
