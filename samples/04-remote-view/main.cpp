@@ -832,6 +832,10 @@ int run_client_windowed(const std::string& host,
         }
 
         quad->upload(pw, ph, pixels.data(), pixels.size());
+        // Size the swapchain from the window; on Wayland the out-of-date signal the branches below
+        // rely on is never raised for a compositor resize (see Swapchain::ensure_extent).
+        const Extent2D fb_now = window->framebuffer_size();
+        swapchain->ensure_extent({fb_now.width, fb_now.height});
         rhi::TextureHandle target = swapchain->acquire_next_image();
         if (!target.is_valid()) {
             const Extent2D s = window->framebuffer_size();

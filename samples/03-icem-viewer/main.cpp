@@ -540,6 +540,17 @@ bool run_windowed(const CpuMesh& mesh,
         if (input.key_pressed(Key::Escape))
             window->request_close();
 
+        // Wayland never raises the out-of-date signal the branches below rely on when the
+        // compositor resizes us (see Swapchain::ensure_extent), so drive the resize from the window
+        // instead. recreate() waits for the GPU to go idle, so the depth target is safe to rebuild
+        // right after it — and it must be, or it stays at the old size while the backbuffer moves.
+        {
+            const Extent2D fb_now = window->framebuffer_size();
+            if (swapchain->ensure_extent({fb_now.width, fb_now.height})) {
+                device->destroy(depth);
+                depth = make_depth(*device, swapchain->extent());
+            }
+        }
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float h = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / h;
@@ -887,6 +898,17 @@ bool run_warp_windowed(const CpuMesh& mesh,
         if (animate)
             phase += dt;
 
+        // Wayland never raises the out-of-date signal the branches below rely on when the
+        // compositor resizes us (see Swapchain::ensure_extent), so drive the resize from the window
+        // instead. recreate() waits for the GPU to go idle, so the depth target is safe to rebuild
+        // right after it — and it must be, or it stays at the old size while the backbuffer moves.
+        {
+            const Extent2D fb_now = window->framebuffer_size();
+            if (swapchain->ensure_extent({fb_now.width, fb_now.height})) {
+                device->destroy(depth);
+                depth = make_depth(*device, swapchain->extent());
+            }
+        }
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float h = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / h;
@@ -1125,6 +1147,12 @@ bool run_iso_windowed(const CpuMesh& mesh,
         if (input.key_down(Key::RightBracket))
             isovalue = std::min(sf.vmax, isovalue + step);
 
+        // Drive the resize from the window: on Wayland the out-of-date signal the branches below
+        // rely on is never raised for a compositor resize (see Swapchain::ensure_extent).
+        {
+            const Extent2D fb_now = window->framebuffer_size();
+            swapchain->ensure_extent({fb_now.width, fb_now.height});
+        }
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float h = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / h;
@@ -1305,6 +1333,17 @@ bool run_flow_windowed(const CpuMesh& mesh,
         if (input.key_pressed(Key::Escape))
             window->request_close();
 
+        // Wayland never raises the out-of-date signal the branches below rely on when the
+        // compositor resizes us (see Swapchain::ensure_extent), so drive the resize from the window
+        // instead. recreate() waits for the GPU to go idle, so the depth target is safe to rebuild
+        // right after it — and it must be, or it stays at the old size while the backbuffer moves.
+        {
+            const Extent2D fb_now = window->framebuffer_size();
+            if (swapchain->ensure_extent({fb_now.width, fb_now.height})) {
+                device->destroy(depth);
+                depth = make_depth(*device, swapchain->extent());
+            }
+        }
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float hh = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / hh;
@@ -1624,6 +1663,17 @@ bool run_assembly_windowed(rime::viewer::Assembly& a,
             if (input.key_pressed(digit[d]) && static_cast<std::size_t>(d) < a.parts.size())
                 a.parts[d].visible = !a.parts[d].visible;
 
+        // Wayland never raises the out-of-date signal the branches below rely on when the
+        // compositor resizes us (see Swapchain::ensure_extent), so drive the resize from the window
+        // instead. recreate() waits for the GPU to go idle, so the depth target is safe to rebuild
+        // right after it — and it must be, or it stays at the old size while the backbuffer moves.
+        {
+            const Extent2D fb_now = window->framebuffer_size();
+            if (swapchain->ensure_extent({fb_now.width, fb_now.height})) {
+                device->destroy(depth);
+                depth = make_depth(*device, swapchain->extent());
+            }
+        }
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float hh = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / hh;
@@ -1950,6 +2000,17 @@ bool run_engine_windowed(rime::viewer::EngineScene& s,
                 static_cast<std::size_t>(d) < s.assembly.parts.size())
                 s.assembly.parts[d].visible = !s.assembly.parts[d].visible;
 
+        // Wayland never raises the out-of-date signal the branches below rely on when the
+        // compositor resizes us (see Swapchain::ensure_extent), so drive the resize from the window
+        // instead. recreate() waits for the GPU to go idle, so the depth target is safe to rebuild
+        // right after it — and it must be, or it stays at the old size while the backbuffer moves.
+        {
+            const Extent2D fb_now = window->framebuffer_size();
+            if (swapchain->ensure_extent({fb_now.width, fb_now.height})) {
+                device->destroy(depth);
+                depth = make_depth(*device, swapchain->extent());
+            }
+        }
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float hh = static_cast<float>(ext.height);
         const float aspect = static_cast<float>(ext.width) / hh;
@@ -2118,6 +2179,12 @@ bool run_provenance_windowed(const rime::viewer::Provenance& prov, int max_frame
         if (input.key_pressed(Key::Escape))
             window->request_close();
 
+        // Drive the resize from the window: on Wayland the out-of-date signal the branches below
+        // rely on is never raised for a compositor resize (see Swapchain::ensure_extent).
+        {
+            const Extent2D fb_now = window->framebuffer_size();
+            swapchain->ensure_extent({fb_now.width, fb_now.height});
+        }
         const rime::rhi::Extent2D ext = swapchain->extent();
         const float W = static_cast<float>(ext.width), H = static_cast<float>(ext.height);
         if (input.wheel_y() != 0.0f)

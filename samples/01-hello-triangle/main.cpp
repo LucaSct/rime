@@ -3,9 +3,9 @@
 //
 // 01-hello-triangle — Rime's first triangle, rendered through the RHI, two ways:
 //   * windowed (M3.4, the default): open a native window, build a swapchain from it, and *present*
-//     the triangle each frame with frames-in-flight — the headed proof that pixels reach a screen
-//     (and the moment the M2 Wayland surface finally maps, since it shows only once a buffer is
-//     attached).
+//     the triangle each frame with frames-in-flight — the headed proof that pixels reach a screen.
+//     (On Wayland this is where a surface starts showing *real* content: the platform layer maps a
+//     rendererless window with a flat placeholder buffer, and the first present replaces it.)
 //   * off-screen (M3.3, --offscreen, and the automatic fallback where there's no display): render
 //     into an image, read it back, and print an ASCII preview — runnable anywhere, including on a
 //     software GPU (lavapipe) in CI. This is the form tests/rhi/offscreen_triangle_test asserts on.
@@ -139,6 +139,12 @@ bool run_windowed(int max_frames) {
         Event e{};
         while (poll_event(e)) input.process(e);
         if (input.key_pressed(Key::Escape)) window->request_close();
+
+        // Size the swapchain from the window every frame. On Wayland the out-of-date signal the
+        // branches below rely on is never raised for a compositor resize, so this is what actually
+        // keeps the two in step — see Swapchain::ensure_extent for the full argument.
+        const Extent2D fb_now = window->framebuffer_size();
+        swapchain->ensure_extent({fb_now.width, fb_now.height});
 
         rime::rhi::TextureHandle target = swapchain->acquire_next_image();
         if (!target.is_valid()) { // out of date (window resized): rebuild and try again next frame
