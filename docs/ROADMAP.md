@@ -9,6 +9,33 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-26) — m12.4 COMPLETE: prediction and reconciliation, the milestone's hardest
+> brick.** The client runs the same `step_character` the server will run, immediately, and checks
+> its work when the authority answers. ADR-0035 §1's "own-input response" clause is met and its
+> control is measured on the same tape: **1 tick with prediction on, 6 without** — the round trip.
+> Under 25% loss over 300 ticks, 124 pairings produced 2 corrections and 122 within-tolerance
+> skips; divergence after 300 lossy ticks was 0.2 m with reconciliation and 1.1 m without; a run
+> with 13 permanently-lost commands took 10 corrections and then agreed bit for bit.
+>
+> **§4's replay set was wrong, and only building it showed why.** It said "replay every `unacked()`
+> command with sequence > q" — but `unacked()` retires on the `InputAck` frontier, which rides a
+> *different* unreliable superseding stream from the snapshot carrying `q`, so the ack is routinely
+> fresher (measured on 60 of 300 ticks). Replaying from it skips commands the server consumed and
+> the client predicted, sliding the prediction backwards on every correction. The predictor keeps
+> its own `{sequence, command, state}` ring instead, retired on the reconciled `q`.
+>
+> **And m12.3 had shipped a silent transform bug that all of its own green proofs missed.** The
+> controller wrote only `WorldTransform`; `propagate_transforms` recomputes that from
+> `LocalTransform` one step later, so the write was discarded every tick. An avatar whose
+> `CharacterState` had walked to z = −3.29 had a transform and a physics body still at z = 0 — the
+> capsule pushed nothing, and every *other* client mirrored it standing at its spawn point forever.
+> It was invisible because `CharacterState` is what a controller test asserts on, and it was right
+> the whole time. The lesson is the milestone's own turned on itself: **a proof that asserts the
+> value a system computes has not thereby asserted that the value reached anyone.**
+>
+> **Next:** m12.5 — snapshot interpolation v2 and predicted-player smoothing (load-bearing-lite;
+> the cut-last brick).
+
 > **Update (2026-08-26) — m12.3 COMPLETE: the networked player, server-authoritative.**
 > `engine/gameplay_net` joins `gameplay` to `replication` so neither knows the other: the consume
 > loop, `PlayerRegistry`, the replicated `LastProcessedInput` pairing, and one message

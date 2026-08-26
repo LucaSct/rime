@@ -6,6 +6,9 @@ scoped in [ADR-0035](../../docs/adr/0035-vision-demo-m12.md) §3/§4 (m12.3) and
 **server-authoritative** half of the player: the consume loop, the session ↔ avatar registry, and
 the one component that pairs authoritative state with the input position that produced it.
 
+Since m12.4 it also holds the **`Predictor`**: the client half that makes your own input visible
+now instead of a round trip from now.
+
 It is the third module placed by the same guardrail-2 argument that created `replication` and
 `destruction_net`. Folding it into `replication` would give the transport a hard dependency on
 gameplay; folding it into `gameplay` would make a single-player character controller depend on
@@ -60,6 +63,50 @@ client retiring a dropped command has learned the truth. Deferring would advance
 commands still sitting in a queue, which is the replication invariant violated upstream. Every drop
 is counted.
 
+## Prediction and reconciliation (m12.4)
+
+The client runs **the same `step_character`** the server will run, on the same command, immediately
+— then checks its work when the authority's answer arrives. It is not trust: the server still
+decides what happened, and the client is snapped whenever it guessed wrong.
+
+Per tick: reconcile against the mirror's `{CharacterState, LastProcessedInput}` → predict this
+tick's command → publish the predicted pose to the **transforms only**. `CharacterState` on the
+mirror is never written by the client — it is the authority's word and the input to the next
+comparison, and overwriting it would make reconciliation compare the prediction against itself and
+agree forever.
+
+**The comparison is on resulting state at `q`, never on a diff of command lists** — m11.6c's rule,
+because `consumed_through` steps over permanent gaps, so a command leaving the send buffer means
+*the server will never act on it*, not *the server acted on it*. A list diff is wrong exactly under
+loss, the condition it exists for.
+
+**The `Predictor` keeps its own command history and does NOT replay from `unacked()`**, which is a
+deliberate departure from ADR-0035 §4's sketch. `unacked()` retires on
+`ClientInputSender::acked_through`, which comes from `InputAck` — a *different* unreliable
+superseding stream from the one carrying the snapshot's `q`. The ack is therefore routinely fresher
+(measured: on 60 of 300 ticks under 30% loss), so replaying only `unacked()` would skip every
+command in `(q, acked_through]` — commands the server consumed and the client predicted — and the
+prediction would slide backwards on every correction. The ring holds `{sequence, command, state}`
+and retires on the **reconciled `q`**, which is the only frontier that makes the replay set
+complete.
+
+The lost-command property survives unchanged: a command the server never received sits below the
+ack jump, `q` moves past it, the ring is trimmed past it, and the replay excludes it. The comparison
+at `q` then disagrees, a correction fires, and the client snaps to a truth in which that input never
+happened.
+
+**Why there is a tolerance at all**, given both sides run the same function on the same inputs: they
+do not run it against the same *world*. The client's physics world is built from mirrors that arrive
+at their own pace. Without a gate the predictor would correct every tick on a clean link. The
+epsilons are confined there, mid-flight; **at quiescence the two states must be equal bit for bit**,
+and that is what the proof asserts.
+
+One consequence worth knowing before it surprises someone: **a permanently-lost command only stops
+mattering when a later one arrives.** If the last thing a client ever sends is dropped, the server's
+frontier stops just short of it and the two sides sit exactly one tick of travel apart until
+somebody says something else. A real client keeps sending while standing still, so this is a
+property of contrived silence rather than of play — but it is why the proofs settle *with* input.
+
 ## The wire
 
 One message, in the **0x80–0xBF** block of the shared session tag registry
@@ -82,9 +129,10 @@ The session is the only thing that knows, and it is server-side only.
 | Brick | Provides | State |
 | --- | --- | --- |
 | m12.3 | `GameplayServer` (consume loop, rate budget, shot events), `GameplayClient` v1, `PlayerRegistry`, replicated `LastProcessedInput`, `AssignPlayer`; proofs: one-step-per-command, the rate budget against a negative control, ordering under scripted loss, bit-exact convergence at quiescence, the weapon→destruction glue end to end, and the **prediction-off latency baseline** | landed |
-| m12.4 | `Predictor` — the `{sequence, state}` ring, the tolerance gate, rewind and replay | next |
+| m12.4 | `Predictor` — the `{sequence, command, state}` ring, the tolerance gate, rewind and replay; proofs: own-input response ≤ 1 tick against a prediction-off control, bit-exact convergence at quiescence, corrections non-zero under loss, a reconciliation-off divergence control, and the ack-fresher-than-snapshot case | landed |
+| m12.5 | snapshot interpolation v2 + predicted-player smoothing | next |
 
-## The number m12.4 must beat
+## The numbers
 
 Measured by `tests/gameplay_net/latency_test.cpp`, with no clock synchronisation anywhere: count
 the client's *own* ticks between stamping sequence S onto a command and seeing a mirrored
@@ -96,14 +144,33 @@ no offset can enter (the ADR-0030 §5 trick).
 | 48 ms one-way (6 round-trip ticks at 60 Hz) | **6 ticks** | **0.30 m** |
 | zero-latency loopback | 2 ticks | — |
 
-ADR-0035 §1 asks for **≤ 1 tick** with prediction on, against this control. Recording it now, before
-the thing it controls for exists, is the point: a baseline measured afterwards is a baseline chosen
-to be beaten.
+ADR-0035 §1 asks for **≤ 1 tick** with prediction on, against exactly that control. m12.4 delivers
+it, and the control is re-run beside it in the same case so the two numbers come from one tape:
 
-## Named costs (v1)
+| | own-input response at 48 ms one-way |
+| --- | --- |
+| prediction **on** (m12.4) | **1 tick** |
+| prediction **off** (m12.3, the control) | **6 ticks** — the round trip |
 
-- **No prediction and no reconciliation.** That is m12.4, and the whole reason this brick ships
-  separately is to have an honest control for it.
+The rest of what m12.4 measures, all from `tests/gameplay_net/prediction_test.cpp`:
+
+| property | measured |
+| --- | --- |
+| worst prediction-vs-authority distance while walking | 0.20 m (a round trip of travel — the prediction runs *ahead*, which is the point) |
+| under 25% loss, 300 ticks | 124 pairings, **2 corrections**, 122 within tolerance, worst error 0.20 m |
+| divergence after 300 lossy ticks | reconciliation **on** 0.2 m · **off** 1.1 m |
+| with 13 permanently-lost commands | 10 corrections, then bit-exact agreement |
+| ack fresher than the snapshot | on **60 of 300** ticks — the condition §4's `unacked()` sketch would have got wrong |
+
+## Named costs
+
+- **The weapon is not predicted.** `step_weapon` is pure and would replay fine, but a client-side
+  shot resolves against a world that differs from the server's, so predicting hits means predicting
+  *wrong* hits and then unwinding damage. The mover is predicted; the trigger waits. Nothing in
+  `CharacterState` depends on the weapon, so the two are exactly consistent as they stand.
+- **No smoothing on a correction.** A correction snaps. m12.5 owns the interpolation that makes it
+  a slide instead, and doing it here would have meant tuning a smoothing curve against a
+  reconciliation that was not yet proven correct.
 - **No lag compensation**, and none is planned for M12: a shot is resolved against the world as it
   stands on the tick the server consumed the command, so a player shooting a moving target must
   lead it by their own latency. ADR-0035 §4 rules it out on the grounds that the block's targets are
@@ -118,6 +185,14 @@ to be beaten.
 `tests/gameplay_net/` — a server and N clients on a `ScriptedNetwork` over a virtual clock, so loss
 and latency are inputs rather than environment luck and every wait is a bounded tick loop.
 `consume_loop_test.cpp` (one step per command, the rate budget and its negative control, server
-authority over hostile input, ordering under 25% loss), `latency_test.cpp` (the baseline above,
-convergence at quiescence, two clients each told which avatar is their own), `weapon_glue_test.cpp`
-(the consumer glue, and the only file here that links `rime::destruction`).
+authority over hostile input, ordering under 25% loss, and the transform-handoff regression),
+`latency_test.cpp` (the prediction-off baseline, convergence at quiescence, two clients each told
+which avatar is their own), `prediction_test.cpp` (m12.4 — every case with its own negative
+control), `weapon_glue_test.cpp` (the consumer glue, and the only file here that links
+`rime::destruction`).
+
+The clients in `prediction_test.cpp` run a real client tick: their own `PhysicsWorld` over the same
+tiled level, `PhysicsSync` binding their replicated mirrors, and the predictor between the two. The
+m12.3 cases deliberately do **not** — their clients never simulate, because those cases *are*
+m12.4's negative control and a control that quietly acquired the mechanism it controls for would
+turn the comparison into a tautology.

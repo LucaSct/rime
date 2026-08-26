@@ -26,7 +26,8 @@ add_library(rime_gameplay_net STATIC
     src/components.cpp
     src/gameplay_client.cpp
     src/gameplay_server.cpp
-    src/player_registry.cpp)
+    src/player_registry.cpp
+    src/predictor.cpp)
 
 # Namespaced alias so dependents link `rime::gameplay_net`, matching our C++ namespace.
 add_library(rime::gameplay_net ALIAS rime_gameplay_net)
