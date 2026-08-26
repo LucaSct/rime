@@ -6,6 +6,7 @@
 #include "rime/core/reflect/type_info.hpp"
 #include "rime/ecs/entity.hpp"
 #include "rime/gameplay/character.hpp"
+#include "rime/gameplay/weapon.hpp"
 #include "rime/physics/world.hpp"
 
 // The ECS face of the character controller — deliberately THIN and deliberately not load-bearing.
@@ -79,4 +80,25 @@ RIME_REFLECT_FIELD(position)
 RIME_REFLECT_FIELD(velocity)
 RIME_REFLECT_FIELD(grounded)
 RIME_REFLECT_FIELD(ground_normal)
+RIME_REFLECT_END()
+
+// The weapon pair (m12.3). Reflected on the same terms as the character pair and for the same
+// reasons: the inspector and the replicator get them for free, and there is exactly one definition
+// of what a weapon remembers. Note the asymmetry that follows from replicating both — WeaponConfig
+// is written once and never again, so the version delta ships it on the entity's first tick and
+// then costs nothing forever; WeaponState changes on every shot, which is four bytes on the tick a
+// trigger is pulled.
+RIME_REFLECT_BEGIN(rime::gameplay::WeaponConfig)
+RIME_REFLECT_FIELD(range)
+RIME_REFLECT_FIELD(damage)
+RIME_REFLECT_FIELD(damage_radius)
+RIME_REFLECT_FIELD(impulse)
+RIME_REFLECT_FIELD(eye_height)
+RIME_REFLECT_FIELD(fire_bit)
+RIME_REFLECT_FIELD(cooldown_ticks)
+RIME_REFLECT_FIELD(automatic)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rime::gameplay::WeaponState)
+RIME_REFLECT_FIELD(cooldown)
 RIME_REFLECT_END()

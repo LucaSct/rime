@@ -102,9 +102,12 @@ public:
     // Despawn a replicated entity — USE THIS, never `world.despawn()` directly, for anything
     // carrying a NetId. It retracts the id before destroying the entity, so clients are told to
     // drop their mirrors; a bare `world.despawn` would leave a phantom on every client forever,
-    // with nothing that ever repairs it. (A checked-build backstop for the mistake is a named
-    // follow-up; today this is a documented discipline, which is worth stating plainly rather than
-    // pretending the type system enforces it.)
+    // with nothing that ever repairs it.
+    //
+    // The discipline now has a BACKSTOP (m12.3) rather than only a comment — see
+    // `net_ids_orphaned()`. It is still a discipline: the backstop repairs the mistake a tick late
+    // and makes it loud, which is strictly better than a phantom and strictly worse than calling
+    // this function.
     void despawn(ecs::Entity entity);
 
     // Drain session lifecycle: a newly Connected peer starts from nothing, a Disconnected one has
@@ -146,6 +149,29 @@ public:
     // sent everything it was owed. Lags `acked_baseline` whenever relevancy or the byte budget is
     // withholding, and that gap is the honest measure of how far behind a client is being kept.
     [[nodiscard]] ecs::Version complete_through(net::SessionId id) const noexcept;
+
+    // NetIds retracted by the BACKSTOP rather than by `despawn` — i.e. entities that were killed
+    // with a bare `world.despawn()` while still carrying a network identity (ADR-0035 §6 ruled this
+    // to m12.3, as the first brick to add a new replication consumer).
+    //
+    // WHAT WENT WRONG, AND WHY A COUNTER IS THE RIGHT SHAPE OF FIX. `despawn` above is the only
+    // path that retracts an id, so an entity destroyed behind the replicator's back leaves its
+    // NetId live in the allocator and bound in the map forever. The per-client structure diff then
+    // sees an id that is still live and never emits a Despawn: every client keeps a mirror of an
+    // entity that no longer exists, permanently, with no message that repairs it. It is the exact
+    // failure `AckTracker` and the relevancy-entry pass were each built to prevent, arriving
+    // through a door neither of them watches.
+    //
+    // The backstop runs once per `publish` — not per client — and does three things: it RETRACTS
+    // the id properly (so clients get the Despawn one tick late instead of never), it WARNS with
+    // the offending NetId, and it counts. Repairing without counting would be worse than either,
+    // because it would make the mistake invisible and therefore permanent in the source.
+    //
+    // The cost is one walk of the live-id slots per tick, comparing an entity handle against the
+    // directory — the same order as the structure diff already does per client, so it is
+    // strictly cheaper than the work it sits beside. It should read ZERO in any healthy game; a
+    // non-zero value names a call site that must be changed to use `despawn`.
+    [[nodiscard]] std::uint64_t net_ids_orphaned() const noexcept { return net_ids_orphaned_; }
 
     // Counters, so a proof can assert the mechanism actually fired rather than that nothing broke.
     [[nodiscard]] std::uint64_t delta_packets_sent() const noexcept { return delta_packets_sent_; }
@@ -273,6 +299,10 @@ private:
     void publish_structure(net::Session& session, ClientState& state, std::uint64_t now_ms);
     void publish_delta(net::Session& session, ClientState& state, std::uint64_t now_ms);
 
+    // The `despawn` discipline backstop — see net_ids_orphaned(). Runs once per publish, before
+    // any client is looked at, so every client sees the same repaired world in the same tick.
+    void reap_orphaned_ids();
+
     ecs::World* world_;
     WireSchema schema_;
     NetIdAllocator allocator_;
@@ -304,6 +334,11 @@ private:
     std::uint64_t entry_pass_records_ = 0;
     std::uint64_t records_too_large_ = 0;
     std::uint64_t delta_ticks_ = 0;
+    std::uint64_t net_ids_orphaned_ = 0;
+
+    // Scratch for reap_orphaned_ids, reused across ticks: collecting the offenders before
+    // retracting them keeps the walk from mutating the allocator it is iterating.
+    std::vector<NetId> orphaned_;
 
     RelevancyFn relevancy_;
     Budget budget_;

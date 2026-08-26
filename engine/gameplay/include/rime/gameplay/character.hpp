@@ -61,8 +61,10 @@ struct CharacterInput {
     std::uint32_t pressed = 0; // actions that went down this tick (an edge — exists in one tick)
 };
 
-// Action bits for `held` / `pressed`. The engine transports bits and assigns meaning to exactly
-// one of them; everything else is the game's.
+// Action bits for `held` / `pressed`. The engine transports every bit and assigns meaning to
+// exactly TWO of them — this one and `kActionFire` (weapon.hpp, bit 1). Everything from bit 2 up is
+// the game's, and both engine bits are configurable at their consumer (WeaponConfig::fire_bit), so
+// a game that wants bit 1 for something else is not fighting the engine for it.
 inline constexpr std::uint32_t kActionJump = 1u << 0;
 
 // ── The state ─────────────────────────────────────────────────────────────────────────────────

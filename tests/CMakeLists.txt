@@ -43,6 +43,7 @@ add_subdirectory(net)    # Link + reliability layer over the scripted-loss harne
 add_subdirectory(replication) # NetIds + snapshot delta replication: convergence under injected loss (M11.3)
 add_subdirectory(destruction_net) # the damage-op stream: two peers break the same wall (M11.4a)
 add_subdirectory(gameplay) # character controller: collide-and-slide proofs on static box geometry (m12.2)
+add_subdirectory(gameplay_net) # the networked player: consume loop, latency baseline, weapon glue (m12.3)
 if(RIME_BUILD_CAPI)
     add_subdirectory(capi) # the C ABI (M6.9), driven through librime_capi — GPU-free
 endif()

@@ -6,6 +6,7 @@
 #include <numeric>
 
 #include "rime/core/byte_cursor.hpp"
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/core/reflect/serialize.hpp"
 #include "rime/ecs/archetype.hpp"
 
@@ -192,7 +193,60 @@ void ServerReplicator::set_budget(const Budget& budget) {
     budget_ = budget;
 }
 
+void ServerReplicator::reap_orphaned_ids() {
+    // Walk the live id slots, not the map's bindings: the allocator is the thing that decides
+    // whether the structure diff will still call an id live, so it is the authority on what a
+    // client is being told exists.
+    orphaned_.clear();
+    const std::size_t slots = allocator_.slot_count();
+    for (std::size_t i = 0; i < slots; ++i) {
+        const NetId id = allocator_.live_id_at(static_cast<std::uint32_t>(i));
+        if (!id.is_valid()) {
+            continue;
+        }
+        const ecs::Entity entity = map_.resolve(id);
+        if (entity.is_valid() && world_->is_alive(entity)) {
+            continue;
+        }
+        orphaned_.push_back(id);
+    }
+
+    for (const NetId id : orphaned_) {
+        // Loud, once — the repair below makes the id go away, so this cannot spam per tick. The
+        // message names the id rather than the entity on purpose: the entity handle is already
+        // dead and would print as a stale slot, whereas the NetId is what a packet capture and
+        // every client's mirror table are keyed on.
+        RIME_WARN("replication: NetId {{{}, {}}} was orphaned — its entity was destroyed without "
+                  "ServerReplicator::despawn. Retracting it; fix the call site.",
+                  id.index,
+                  id.generation);
+        ++net_ids_orphaned_;
+        // Exactly the retraction `despawn` performs, minus the world.despawn that has already
+        // happened. Routed through despawn's own body would be circular (it looks the id up BY
+        // entity, and the entity is gone), so the per-client bookkeeping is repeated here — and
+        // repeating it is not optional: `was_relevant` and `starved_ticks` are per-item records
+        // keyed by a RECYCLABLE index, and a slot handed to a new entity while still carrying the
+        // dead one's bits is corollary 2 of docs/design/replication.md, instance seven.
+        map_.unbind(id);
+        allocator_.free(id);
+        for (ClientState& state : clients_) {
+            if (!state.in_use) {
+                continue;
+            }
+            if (id.index < state.was_relevant.size()) {
+                state.was_relevant[id.index] = 0;
+            }
+            if (id.index < state.starved_ticks.size()) {
+                state.starved_ticks[id.index] = 0;
+            }
+        }
+    }
+}
+
 void ServerReplicator::publish(net::NetDriver& driver, std::uint64_t now_ms) {
+    // The backstop first, so the structure diff below sees a world with no phantoms in it.
+    reap_orphaned_ids();
+
     for (const net::SessionId id : driver.session_ids()) {
         net::Session* session = driver.session(id);
         if (session == nullptr || session->state() != net::SessionState::Connected) {

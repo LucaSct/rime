@@ -52,7 +52,8 @@ namespace rime::replication {
 //
 //   0x01 – 0x3F   rime::replication   (m11.3 — this file)
 //   0x40 – 0x7F   rime::destruction_net (m11.4 — the damage-op stream)
-//   0x80 – 0xFF   unallocated
+//   0x80 – 0xBF   rime::gameplay_net  (m12.3 — the networked player)
+//   0xC0 – 0xFF   unallocated
 //
 // A module MUST ignore tags outside its own block rather than treat them as errors, and MUST NOT
 // consume them from a shared inbox — see ClientReplicator::apply_messages for the shape that makes

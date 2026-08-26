@@ -430,3 +430,72 @@ One consequence is visible in the committed reports and is honest rather than ti
 timeline reads ~0.001 ms while the real work sits in `sim.physics`. The sample predates the ordered
 sim stage (ADR-0032 §8) and has a determinism proof pinned to its current loop; moving it is a
 change to make deliberately, not as a side effect of measuring it.
+
+---
+
+## Amendment (2026-08-26, m12.3): the prediction-off baseline exists, and two corrections to §3/§4
+
+m12.3 built the networked player: `gameplay_net`, the consume loop, `LastProcessedInput`, Weapon v1
+and the weapon→destruction glue. Three things are worth recording — one number the next brick is
+measured against, and two places where building the thing changed what §3/§4 said about it.
+
+### B1. The number m12.4 must beat
+
+§1 makes "own-input response" falsifiable as *"≤ 1 tick, against a prediction-off control showing
+≥ RTT ticks, so prediction is provably the reason."* That control now exists and is measured, not
+asserted. `tests/gameplay_net/latency_test.cpp`, counting the client's OWN ticks between stamping a
+sequence and seeing a mirrored `LastProcessedInput >= q` — both endpoints on one machine's clock, so
+no offset can enter (the ADR-0030 §5 trick; there is still no clock synchronisation anywhere):
+
+| link | own-input latency | visible position lag, walking at 6 m/s |
+|---|---|---|
+| 48 ms one-way = 6 round-trip ticks at 60 Hz | **6 ticks** (best and worst of 8 samples) | **0.30 m** |
+| zero-latency loopback | 2 ticks | — |
+
+The zero-latency row is the control on the control: it is the tick-boundary quantum the harness
+costs, so the 6 is the network and not the fixture. **Recording it before m12.4 rather than after is
+the point** — a baseline measured afterwards is a baseline chosen to be beaten.
+
+### B2. §4's tick loop needed a rate budget it did not mention, and dropping is what keeps the ack honest
+
+§4 says *"drain each session (advancing `consumed_through`, the only honest ack); run
+`step_character` per command in order"*. Taken literally that is a speed hack: one step per command
+means a client sending two commands a tick moves two ticks a tick, for free, by editing a number in
+its own send loop.
+
+The fix is a per-player allowance that refills by one per tick and saturates at a burst ceiling, and
+the interesting part is what happens to the surplus. **Dropping it is honest; deferring it is not.**
+`consumed_through` is explicitly not a completeness claim — input.hpp already documents that it steps
+over permanent gaps — so a client retiring a dropped command has learned the truth: *the server will
+never act on this*. Deferring instead would advance the frontier over commands still sitting in a
+queue, which is corollary 1 of [the replication invariant](../design/replication.md) pointed
+upstream, and m12.4's predictor would then drop from its replay set commands the server had not yet
+applied. The divergence a throttled client does suffer is detected and repaired by the very
+comparison m12.4 builds, because that comparison is on resulting *state* and never on command lists.
+
+This is the same shape of reasoning §4 already uses about loss, arriving in a place §4 did not look.
+
+### B3. Correction to §3: the weapon's damage scale, and what a wrong default cost
+
+§3 specifies *"`Weapon` v1 (deterministic hitscan via `raycast`, with `RayHit::child` naming the
+part)"* and says nothing about magnitudes, which is reasonable for an ADR and left one trap. A cooked
+destructible part stands at **1.0 health** (`destruction/world.hpp`), so damage in this engine is a
+normalized quantity; the header's first draft defaulted to `45.0f`, an "hit points" number from a
+health scale Rime does not have. The m12.3 end-to-end proof deleted all sixteen parts of its test
+wall on the opening shot, and then spent 399 further shots measuring rubble.
+
+Recorded rather than quietly fixed because it is a class, not an incident: **an engine default that
+is not scaled against the engine's own cooked assets is a design claim nobody checked.** The
+defaults are now `damage = 0.5` and `impulse = 25` (the destruction suite tips a wall's upper slab
+with 30), and the proof asserts that breaching the wall took several damaging shots — the assertion
+that fails if the default drifts back.
+
+### B4. §6's `server.despawn` backstop shipped, and it repairs rather than merely complains
+
+§6 ruled the backstop into m12.3 as *"the first new replication consumer"*. It runs once per
+`publish` — not per client — walks the live NetId slots, and for any whose entity is no longer alive
+it **retracts the id properly, warns with the id, and counts** (`net_ids_orphaned()`). Repairing
+matters: without it a bare `world.despawn()` leaves every client holding a mirror of an entity that
+no longer exists, permanently, with no message that repairs it. Counting matters too — a silent
+repair would make the mistake invisible and therefore permanent in the source. It should read zero
+in any healthy game.

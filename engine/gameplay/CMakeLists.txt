@@ -21,7 +21,8 @@
 
 add_library(rime_gameplay STATIC
     src/character.cpp
-    src/components.cpp)
+    src/components.cpp
+    src/weapon.cpp)
 
 # Namespaced alias so dependents link `rime::gameplay`, matching our C++ namespace.
 add_library(rime::gameplay ALIAS rime_gameplay)
