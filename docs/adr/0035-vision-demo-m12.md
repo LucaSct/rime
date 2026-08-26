@@ -645,3 +645,39 @@ test — so it is asserted directly: two runs on the same seed and tape differin
 `smoothing_decay` produce **bit-identical simulation trajectories across 250 lossy ticks** while
 their drawn poses differ on 156 of them. Setting `smoothing_decay = 0` restores m12.4's behaviour
 exactly, which is both the negative control and the cut path if the brick has to go.
+
+---
+
+## Amendment (2026-08-27): the deferred split was taken — see ADR-0036
+
+The "Alternatives considered" entry above left this open:
+
+> **Split the milestone in two — "The Player" and "The Block".** … It is **deferred rather than
+> taken** because the milestone table and VISION both name one final demo, and re-cutting the map is
+> a deliberate act that wants its own decision rather than a side effect of this ADR.
+> **The seam is left where the split would go.** The ladder already divides cleanly at
+> **m12.5 / m12.6**.
+
+That decision has now been made, at that seam, in
+[ADR-0036](0036-milestone-split-player-and-block.md). **M12 is "The Player" (m12.0 – m12.5, plus a
+new closing proof m12.6); M13 is "The Block".** M13's "done when" is this ADR's §1 thesis verbatim —
+the demo did not move.
+
+**Reading this document after the split.** Everything it decides still stands; only labels below the
+seam changed, and this file is append-only so they could not be edited in place. The mapping:
+
+| this ADR says | now |
+|---|---|
+| m12.6 (Track FX fx1) | **m13.1** |
+| m12.7 (block content, culling, C6) | **m13.2** |
+| m12.8 (playable client) | **m13.3** |
+| m12.9 (audio) | **m13.4** |
+| m12.p (measured perf pass) | **m13.p** |
+| m12.10 (the `99-the-block` proof) | **m13.5** |
+
+So the A1 amendment's promise that the headline budget is "ratified at m12.7, against the block's
+own content" now reads **m13.2**; §6's C6 ruling splits across m12.0-perf (landed) and **m13.2**;
+and the cut order in §5 lies entirely inside M13.
+
+One label is reused: this ADR's ladder had no "m12.6 milestone proof", so a reference to **m12.6
+here means Track FX fx1**. ADR-0036 §"The brick ladders" carries the same table and says so too.

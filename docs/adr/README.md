@@ -60,3 +60,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0033](0033-networking-v1.md) — networking v1 (server authority; destruction as event-replay + state as snapshots; own UDP transport + reliability layer)
 - [ADR-0034](0034-svt-av1-4x-bump.md) — SVT-AV1 4.2.0 (a local Conan recipe, and low-delay's picture-in/picture-out contract)
 - [ADR-0035](0035-vision-demo-m12.md) — the vision demo, M12 (a falsifiable "feels right"; the work ledger + a self-gating hardware perf run; the character controller and client-side prediction)
+- [ADR-0036](0036-milestone-split-player-and-block.md) — splitting M12 into "The Player" (M12) and "The Block" (M13), at the seam ADR-0035 left for it

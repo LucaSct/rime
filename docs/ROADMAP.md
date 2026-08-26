@@ -9,6 +9,31 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-27) — THE MILESTONE IS SPLIT: M12 "The Player", M13 "The Block"
+> ([ADR-0036](adr/0036-milestone-split-player-and-block.md)).** ADR-0035 considered this cut and
+> *deferred rather than rejected* it, leaving the seam at m12.5 / m12.6 and saying the decision
+> wanted its own deliberate act. This is that act, taken after m12.5 landed — so the seam it
+> predicted is not a forecast but a description of where the work actually divided.
+>
+> **The evidence at the seam.** m12.0–m12.5 closed with seven measured numbers, every one from a
+> GPU-free, CI-gated proof: own-input response 1 tick with prediction against 6 without; predicted
+> equals authoritative bit-for-bit at quiescence; 2 corrections in 124 pairings under 25% loss;
+> 0.2 m divergence with reconciliation against 1.1 m without; 0 motionless frames of 120 where v1
+> had 79; and smoothing proven to leave the simulation bit-identical. Below the seam is content, a
+> GPU draw pass, a windowed client, audio, and a frame-time distribution only one machine on earth
+> can measure — with an unratified budget and a gate ADR-0035 itself calls procedurally weak. One
+> milestone could not have one "done when" for both.
+>
+> **The final demo does not move.** M13's "done when" is M12's old one word for word, and VISION is
+> deliberately not edited: this re-cuts the map, not the destination.
+>
+> **M12 gains one brick it did not have — m12.6, its own closing proof** — because a milestone here
+> is done when its proof *runs*, and every previous one ended in something a human could invoke.
+> The numbers above currently exist only as MESSAGE lines scrolling past in CI, which is a milestone
+> claim on trust.
+>
+> **Next:** m12.6 — `samples/13-networked-player`, and with it M12 closes.
+
 > **Update (2026-08-27) — m12.5 COMPLETE: interpolation v2 and predicted-player smoothing, and
 > the stutter m11.6 had been shipping.** Listed as *load-bearing-lite, cut last* — and it turned
 > out to fix a defect the milestone had carried since M11.
@@ -309,7 +334,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 
 > **Update (2026-08-20) — Milestone 12 ("The Block", the vision demo) kicks off.** **m12.0 lands
 > [ADR-0035](adr/0035-vision-demo-m12.md) (Accepted)**, and the milestone enters with a problem no
-> previous one had: its "done when" is written as an *adjective*. M12 is the last milestone on the
+> previous one had: its "done when" is written as an *adjective*. M12 was the last milestone on the
 > map and the only one that must answer **"feels right"** — so the ADR's first job is turning that
 > into clauses that can fail: own-input response ≤ 1 tick **against a prediction-off control**,
 > same-frame fire feedback, bounded remote-motion continuity, bit-exact peer agreement at ~10×
@@ -950,7 +975,8 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M9** | Editor v1 (Rust) | build a small scene in the editor, tweak components, hit Play |
 | **M10** | Advanced lighting | dynamic GI updates as the scene changes — *including when walls fall* |
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
-| **M12** | **"The Block" (vision demo)** | a destructible urban block (M8+M10+M11) runs at a playable frame rate and *feels* right |
+| **M12** | **"The Player"** | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated |
+| **M13** | **"The Block" (vision demo)** | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right |
 
 ### Detail
 
@@ -1328,7 +1354,22 @@ milestone's most portable lesson is not about networking: the
 on confirmed **holding** — was violated five separate times in five disguises, and every instance was
 caught by a **counter**, never by reading the code.*
 
-**M12 — The vision demo: "The Block."** Sample `99-the-block` — destruction + dynamic
+> **SPLIT (2026-08-27, [ADR-0036](adr/0036-milestone-split-player-and-block.md)).** What follows was
+> planned as one milestone and is now two, cut at the seam ADR-0035 explicitly left for it. The text
+> below is kept as written, because it is the plan the work was actually done against; read the
+> bricks through this mapping:
+>
+> **M12 — "The Player"** is m12.0 – m12.5, all landed, plus **m12.6**, its closing proof
+> (`samples/13-networked-player`) which ADR-0035's ladder did not have.
+>
+> **M13 — "The Block"** is everything from ADR-0035's m12.6 down, renamed: fx1 → **m13.1** ·
+> block content + culling + C6 → **m13.2** · the playable client → **m13.3** · audio → **m13.4** ·
+> the measured perf pass → **m13.p** · the proof `99-the-block` → **m13.5**. Its "done when" is
+> M12's old one, word for word: the final demo did not move.
+>
+> A reference to "m12.6" in ADR-0035 or anything older means Track FX fx1, i.e. **m13.1**.
+
+**M12/M13 — The vision demo: "The Block."** Sample `99-the-block` — destruction + dynamic
 lighting + scale, together, at a playable frame rate. The thesis, demonstrated.
 
 *Bricks (planned 2026-08-20; [ADR-0035](adr/0035-vision-demo-m12.md) is the architecture — the

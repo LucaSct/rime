@@ -131,7 +131,7 @@ The session is the only thing that knows, and it is server-side only.
 | m12.3 | `GameplayServer` (consume loop, rate budget, shot events), `GameplayClient` v1, `PlayerRegistry`, replicated `LastProcessedInput`, `AssignPlayer`; proofs: one-step-per-command, the rate budget against a negative control, ordering under scripted loss, bit-exact convergence at quiescence, the weapon→destruction glue end to end, and the **prediction-off latency baseline** | landed |
 | m12.4 | `Predictor` — the `{sequence, command, state}` ring, the tolerance gate, rewind and replay; proofs: own-input response ≤ 1 tick against a prediction-off control, bit-exact convergence at quiescence, corrections non-zero under loss, a reconciliation-off divergence control, and the ack-fresher-than-snapshot case | landed |
 | m12.5 | predicted-player **smoothing** — a correction's displacement is absorbed into a decaying visual offset, bounded so a large one is still shown at once; proofs: the drawn pose slides where m12.4's jumped, the simulation is bit-identical with smoothing on and off, and a slide finishes. (Snapshot interpolation v2 is the other half and lives in [`replication`](../replication/README.md).) | landed |
-| m12.6 | Track FX brick fx1 — the GPU draw pass for the existing deterministic CPU sim | next |
+| m12.6 | the M12 milestone proof — `samples/13-networked-player` | next |
 
 ## The numbers
 

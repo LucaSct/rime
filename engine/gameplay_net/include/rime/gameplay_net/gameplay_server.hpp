@@ -81,7 +81,7 @@ namespace rime::gameplay_net {
 // more importantly, so `gameplay_net` can hand destruction its input without linking it.
 //
 // THE MISS IS AN EVENT TOO (`did_hit == false`). A tracer, a muzzle flash and a report all happen
-// on a miss, and m12.6's FX families read exactly this list. An event stream that only carried hits
+// on a miss, and m13.1's FX families read exactly this list. An event stream that only carried hits
 // would make missing invisible, which is the opposite of "the shot feels connected".
 struct ShotEvent {
     net::SessionId shooter{};
