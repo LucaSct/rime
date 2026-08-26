@@ -363,6 +363,110 @@ TEST_CASE("a despawn removes the mirror, and a recycled NetId does not alias it"
     CHECK(client.despawns_applied() >= 1);
 }
 
+TEST_CASE("an entity killed behind the replicator's back is retracted by the backstop") {
+    // `ServerReplicator::despawn` has always carried a warning — never `world.despawn()` on
+    // anything holding a NetId — and until m12.3 that was all it carried. ADR-0035 §6 ruled the
+    // backstop into the first brick to add a new replication consumer, and this is its proof.
+    //
+    // WHAT THE MISTAKE COSTS WITHOUT ONE. `despawn` is the only path that retracts an id, so an
+    // entity destroyed directly leaves its NetId live in the allocator and bound in the map. The
+    // per-client structure diff then sees an id that is still live and never emits a Despawn: the
+    // client keeps a mirror of an entity that no longer exists, permanently, and no later message
+    // repairs it. It is the same silent-divergence family the AckTracker and the relevancy entry
+    // pass were each built to prevent, arriving through a door neither of them watches.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/8});
+
+    net::Link& server_link = fx.network.add_node(fx.server_endpoint);
+    net::Link& client_link = fx.network.add_node(fx.client_endpoint);
+
+    net::NetDriver::Config config;
+    config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    config.salt_seed = 0x5151ull;
+    net::NetDriver::Config client_config = config;
+    client_config.salt_seed = 0x6262ull;
+
+    net::NetDriver server_driver{server_link, config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+
+    // Two entities, so the backstop is shown to retract the RIGHT one rather than everything.
+    const ecs::Entity doomed = fx.server_world.spawn_with(ecs::LocalTransform{});
+    const ecs::Entity witness = fx.server_world.spawn_with(ecs::LocalTransform{});
+    const replication::NetId doomed_id = server.replicate(doomed);
+    const replication::NetId witness_id = server.replicate(witness);
+
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    const auto tick = [&]() {
+        fx.now_ms += kTickMs;
+        fx.network.advance_time(fx.now_ms);
+        fx.events.clear();
+        server_driver.update(fx.now_ms, fx.events);
+        server.on_session_events(fx.events);
+        (void)server.apply_inbound(server_driver);
+        fx.events.clear();
+        client_driver.update(fx.now_ms, fx.events);
+        client.apply_inbound(client_driver);
+        fx.server_world.advance_version();
+        server.publish(server_driver, fx.now_ms);
+        client.send_ack(client_driver, fx.now_ms);
+    };
+
+    for (int i = 0; i < 40; ++i) {
+        tick();
+    }
+    REQUIRE(client.map().size() == 2);
+    const ecs::Entity mirror = client.map().resolve(doomed_id);
+    REQUIRE(mirror.is_valid());
+    // The control: nothing has gone wrong yet, so the backstop has fired zero times. A counter that
+    // was already non-zero here would make the assertion below meaningless.
+    CHECK(server.net_ids_orphaned() == 0);
+
+    // THE MISTAKE. A bare world.despawn on a replicated entity — the call site a real game gets
+    // wrong once, in a kill handler somebody wrote in a hurry.
+    fx.server_world.despawn(doomed);
+    REQUIRE_FALSE(fx.server_world.is_alive(doomed));
+
+    for (int i = 0; i < 40; ++i) {
+        tick();
+    }
+
+    // The backstop saw it, retracted the id, and counted it — exactly once, not once per tick.
+    CHECK(server.net_ids_orphaned() == 1);
+    // …and the client was told, so the mirror is gone rather than a phantom standing forever.
+    CHECK_FALSE(fx.client_world.is_alive(mirror));
+    CHECK_FALSE(client.map().resolve(doomed_id).is_valid());
+    CHECK(client.despawns_applied() >= 1);
+
+    // The witness is untouched: the backstop retracted the dead id and nothing else.
+    CHECK(client.map().resolve(witness_id).is_valid());
+    CHECK(client.map().size() == 1);
+
+    // And the recycled slot is safe to hand out. This is the half that would have been quietly
+    // wrong if the backstop had only freed the allocator: `was_relevant` and `starved_ticks` are
+    // per-item records keyed by INDEX, so a new tenant inheriting the dead entity's bits is
+    // corollary 2 of docs/design/replication.md all over again.
+    const ecs::Entity replacement = fx.server_world.spawn_with(ecs::LocalTransform{});
+    const replication::NetId replacement_id = server.replicate(replacement);
+    CHECK(replacement_id.index == doomed_id.index);
+    CHECK(replacement_id.generation != doomed_id.generation);
+    for (int i = 0; i < 40; ++i) {
+        tick();
+    }
+    const ecs::Entity new_mirror = client.map().resolve(replacement_id);
+    REQUIRE(new_mirror.is_valid());
+    CHECK(new_mirror != mirror);
+    CHECK(client.map().size() == 2);
+    // Still exactly one orphan for the whole run: the disciplined spawn path does not trip it.
+    CHECK(server.net_ids_orphaned() == 1);
+}
+
 TEST_CASE("state arriving before its Spawn is held and replayed, not dropped") {
     // ADR-0033 A14. The cross-channel race is deliberate (§3): a reliable Spawn can land after the
     // unreliable Delta that first names an entity. What the client does with that Delta decides

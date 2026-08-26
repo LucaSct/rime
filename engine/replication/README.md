@@ -73,9 +73,14 @@ app.add_sim_stage(SimStage::Publish, [&](ecs::World&, double) { server.publish(d
 ```
 
 Opt an entity in with `server.replicate(entity)`. **Despawn it with `server.despawn(entity)`, never
-`world.despawn()`** — the latter leaves a phantom on every client with nothing to repair it. That is
-a documented discipline today, not something the type system enforces; a checked-build backstop is a
-named follow-up.
+`world.despawn()`** — the latter leaves a phantom on every client with nothing to repair it.
+
+Since m12.3 (ADR-0035 §6) that discipline has a **backstop**. `publish` walks the live NetId slots
+once per tick — not once per client — and for any whose entity is no longer alive it retracts the id
+properly, logs a warning naming it, and increments `net_ids_orphaned()`. So the mistake costs a
+one-tick-late despawn instead of a permanent phantom. It is still a discipline, not an enforcement:
+the counter exists precisely so a repaired mistake does not become an invisible one, and it should
+read **zero** in any healthy game. A non-zero value names a call site to change.
 
 ### Sharing a session with another module
 

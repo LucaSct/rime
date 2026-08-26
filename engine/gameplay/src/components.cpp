@@ -14,6 +14,8 @@ namespace rime::gameplay {
 void register_gameplay_components(ecs::World& world) {
     (void)world.register_component<CharacterConfig>();
     (void)world.register_component<CharacterState>();
+    (void)world.register_component<WeaponConfig>();
+    (void)world.register_component<WeaponState>();
 }
 
 void step_character_entity(ecs::World& world,

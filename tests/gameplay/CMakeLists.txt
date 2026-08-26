@@ -11,7 +11,8 @@ rime_add_test(rime_gameplay_tests
     character_slide_test.cpp
     character_recovery_test.cpp
     character_replay_test.cpp
-    character_grid_test.cpp)
+    character_grid_test.cpp
+    weapon_test.cpp)
 
 target_link_libraries(rime_gameplay_tests
     PRIVATE rime::gameplay rime::physics)

@@ -9,6 +9,35 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-26) — m12.3 COMPLETE: the networked player, server-authoritative.**
+> `engine/gameplay_net` joins `gameplay` to `replication` so neither knows the other: the consume
+> loop, `PlayerRegistry`, the replicated `LastProcessedInput` pairing, and one message
+> (`AssignPlayer`, claiming the shared tag registry's 0x80–0xBF block). `Weapon` v1 landed in
+> `gameplay` alongside it — deterministic hitscan whose `RayHit::child` names the destructible part,
+> with the damage call left to the consumer, so `gameplay` still never links `destruction`.
+>
+> **The number the brick exists to produce:** with prediction off, own-input latency is **6 ticks at
+> 48 ms one-way** — exactly the round trip — and **0.30 m** of visible position lag while walking at
+> 6 m/s. Measured with no clock synchronisation, by counting the client's own ticks between stamping
+> a sequence and seeing it come back on its own avatar. ADR-0035 §1 asks m12.4 for ≤ 1 tick against
+> this control; recording it *before* prediction exists is the point.
+>
+> Two things building it changed about the design on paper. **§4's loop needed a rate budget it did
+> not mention** — one step per command hands a client a speed multiplier for editing its own send
+> loop — and the surplus must be *dropped*, never deferred: `consumed_through` steps over commands
+> the server will never act on, so dropping is honest and deferring would advance the frontier over
+> commands still queued. And **the weapon's damage default was wrong by ~45×**: parts cook at 1.0
+> health, the header said 45, and the end-to-end proof levelled all sixteen parts of its test wall
+> on the opening shot before spending 399 more shots measuring rubble. An engine default that is not
+> scaled against the engine's own cooked assets is a design claim nobody checked.
+>
+> ADR-0035 §6's **`server.despawn` backstop** shipped with it: `ServerReplicator::publish` now walks
+> the live NetIds once per tick and retracts, warns about and counts any whose entity was destroyed
+> behind its back — repairing a permanent phantom into a one-tick-late despawn, and counting it so
+> the call site still gets fixed.
+>
+> **Next:** m12.4 — prediction + reconciliation, the milestone's hardest brick.
+
 > **Update (2026-08-21) — m12.2 COMPLETE: `engine/gameplay`, the character controller as a pure
 > function.** Collide-and-slide on a kinematic capsule over the `PhysicsWorld` seam:
 > `step_character(state, input, config, world, dt) → state`, no writes to the world it observes.
@@ -75,7 +104,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > there is a hit at t = 0 with real witnesses, not `initial_overlap`. And the promise below is kept:
 > the grid's over-report slack tightens 2e-2 → **5e-4** (measured: zero of 280 rows stop past
 > `travel`, worst −1.05e-5) and the witness slack 5e-2 → **5e-3** (worst 1.795e-3).
-> **Next:** m12.2 — the character controller (in flight).
+> **Next:** m12.2 — the character controller (in flight). *[landed 2026-08-21; m12.3 landed 2026-08-26.]*
 
 > **Update (2026-08-21) — shape-cast stepping fixed; the graze no longer stops short.** The item the
 > entry below left open ("that is the next thing to fix") is closed. The old advance stepped by

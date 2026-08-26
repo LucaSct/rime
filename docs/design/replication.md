@@ -89,6 +89,9 @@ not get over-applied to something that was never a cross-peer correctness questi
 | Priority aging (`Budget::starvation_gain`) | `replication/src/server_replicator.cpp` | 1 (liveness half) — the rotation cursor's job on the *prioritized* path, which the cursor never reached |
 | `consumed_through` advances only in `drain()` | `replication/src/input.cpp` | 1, upstream — the input ack is a claim about the SERVER, and arrival in a buffer is not holding |
 | `ClientInput` reset by `forget()` and on slot reuse | `replication/src/input.cpp` | 2 — a per-session record keyed by a recyclable slot must not outlive its subject |
+| `reap_orphaned_ids()` — the `despawn` backstop | `replication/src/server_replicator.cpp` | 2 — an id whose entity is gone must stop being announced as live, and its per-item records must be cleared before the index is recycled (m12.3, ADR-0035 §6) |
+| `PlayerRegistry` rows carry their session generation | `gameplay_net/src/player_registry.cpp` | 2 — the third per-session record in the tree, under the same rule as the two above (m12.3) |
+| Over-rate commands are DROPPED, never deferred | `gameplay_net/src/gameplay_server.cpp` | 1, upstream — a deferred command still in a queue may not be covered by `consumed_through`; dropping makes the frontier's claim true (m12.3) |
 
 ---
 
