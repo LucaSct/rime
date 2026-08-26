@@ -7,6 +7,7 @@ add_subdirectory(codec_bench)          # S0.3: measure the streaming codecs (raw
 add_subdirectory(05-ecs-playground)    # M4.6: 200k entities in parallel + transforms composing; GPU-free
 add_subdirectory(09-physics-playground) # M7.8: M7's "done when" — fall/collide/stack, raycast, parallel fixed tick; GPU-free
 add_subdirectory(12-networked-destruction) # M11.7: M11's "done when" — a server + two clients agree on a broken wall; GPU-free
+add_subdirectory(13-networked-player) # m12.6: M12's "done when" — a predicted player, its prediction-off control in the same match; GPU-free
 
 # Needs the Vulkan RHI backend (the agnostic interface alone can't render).
 if(RIME_RHI_VULKAN)
