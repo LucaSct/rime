@@ -130,7 +130,8 @@ The session is the only thing that knows, and it is server-side only.
 | --- | --- | --- |
 | m12.3 | `GameplayServer` (consume loop, rate budget, shot events), `GameplayClient` v1, `PlayerRegistry`, replicated `LastProcessedInput`, `AssignPlayer`; proofs: one-step-per-command, the rate budget against a negative control, ordering under scripted loss, bit-exact convergence at quiescence, the weapon→destruction glue end to end, and the **prediction-off latency baseline** | landed |
 | m12.4 | `Predictor` — the `{sequence, command, state}` ring, the tolerance gate, rewind and replay; proofs: own-input response ≤ 1 tick against a prediction-off control, bit-exact convergence at quiescence, corrections non-zero under loss, a reconciliation-off divergence control, and the ack-fresher-than-snapshot case | landed |
-| m12.5 | snapshot interpolation v2 + predicted-player smoothing | next |
+| m12.5 | predicted-player **smoothing** — a correction's displacement is absorbed into a decaying visual offset, bounded so a large one is still shown at once; proofs: the drawn pose slides where m12.4's jumped, the simulation is bit-identical with smoothing on and off, and a slide finishes. (Snapshot interpolation v2 is the other half and lives in [`replication`](../replication/README.md).) | landed |
+| m12.6 | Track FX brick fx1 — the GPU draw pass for the existing deterministic CPU sim | next |
 
 ## The numbers
 
@@ -168,9 +169,15 @@ The rest of what m12.4 measures, all from `tests/gameplay_net/prediction_test.cp
   shot resolves against a world that differs from the server's, so predicting hits means predicting
   *wrong* hits and then unwinding damage. The mover is predicted; the trigger waits. Nothing in
   `CharacterState` depends on the weapon, so the two are exactly consistent as they stand.
-- **No smoothing on a correction.** A correction snaps. m12.5 owns the interpolation that makes it
-  a slide instead, and doing it here would have meant tuning a smoothing curve against a
-  reconciliation that was not yet proven correct.
+- **Smoothing is presentation-only, and that is load-bearing.** `state()` is the simulation's
+  answer and never carries the offset; `visual_position()` is what a renderer draws. Feeding the
+  offset back would put a hidden accumulator inside a function m12.2 proved pure, and the symptom
+  would be a rare desync rather than a failing test. The proof asserts the two arms' simulation
+  trajectories are bit-identical over 250 lossy ticks while the drawn poses differ on 156 of them.
+- **m12.5 is the milestone's designated cut** — ADR-0035 §5 lists it last on the cut order after
+  audio and fx1b, and it is the only brick in this module that a player would notice the *absence*
+  of rather than the *failure* of. Everything above it works without it: corrections would simply be
+  shown as jumps, which is m12.4's behaviour and is exactly what `smoothing_decay = 0` restores.
 - **No lag compensation**, and none is planned for M12: a shot is resolved against the world as it
   stands on the tick the server consumed the command, so a player shooting a moving target must
   lead it by their own latency. ADR-0035 §4 rules it out on the grounds that the block's targets are
@@ -188,8 +195,8 @@ and latency are inputs rather than environment luck and every wait is a bounded 
 authority over hostile input, ordering under 25% loss, and the transform-handoff regression),
 `latency_test.cpp` (the prediction-off baseline, convergence at quiescence, two clients each told
 which avatar is their own), `prediction_test.cpp` (m12.4 — every case with its own negative
-control), `weapon_glue_test.cpp` (the consumer glue, and the only file here that links
-`rime::destruction`).
+control), `smoothing_test.cpp` (m12.5), `weapon_glue_test.cpp` (the consumer glue, and the only file
+here that links `rime::destruction`).
 
 The clients in `prediction_test.cpp` run a real client tick: their own `PhysicsWorld` over the same
 tiled level, `PhysicsSync` binding their replicated mirrors, and the predictor between the two. The

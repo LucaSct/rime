@@ -111,7 +111,30 @@ which whichever module drained first consumed and misparsed the other's traffic.
   Translating them through the `NetIdMap` is a follow-up.
 - **No prioritization.** Over the per-tick packet budget, the remainder waits for the next tick —
   latency, not loss, and deliberately not solved here with an ad-hoc heuristic. That is m11.5.
-- **No interpolation.** Mirrors snap to the last state received. m11.6 builds the history buffer.
+- **Interpolation is v2 (m12.5), and it blends over the interval a value actually covers.**
+  m11.6 built the previous/current history but blended it over exactly *one* tick — right only if a
+  value arrives every tick, which loss, relevancy, the byte budget and simply-not-changing all make
+  false. A value covering N ticks of motion was then played in one tick and held for N−1: the mirror
+  lurched and froze, at a rate set by how badly the link was behaving. **Nothing about it is
+  detectable from state** — every position is correct and every convergence proof stayed green.
+
+  v2 derives the span from the difference between the two values' server ticks (the Delta header
+  already carries one, and a *difference* of two server ticks needs no shared clock), and stretches
+  the blend across that many local tick periods. A value arriving every tick gives span 1 and v2 is
+  then bit-identical to v1, which is what lets m11.6's proofs stand unchanged. Measured over a
+  3-tick interval: v2 shows **0 motionless frames of 120** against v1's **79**, and its worst
+  single-frame jump is a third of v1's.
+
+  Two bounds go with it. A gap above `kMaxInterpolationSpan` (8 ticks) **snaps** rather than
+  crawling — a relevancy re-entry after two seconds would otherwise drag the entity across the level
+  in slow motion while the authority already has it elsewhere — and the snap is counted
+  (`histories_snapped_far()`). And a value arriving mid-blend retargets from *where the mirror is
+  being drawn*, not from `current`, so jitter does not reintroduce the jump v2 exists to remove.
+
+  **Still not built:** a full playback clock — render at `server_tick − delay` against a multi-sample
+  ring, which is what handles a value arriving *out of order* rather than merely late. v2 keeps two
+  samples and cannot reorder them. That is a bigger design (a per-client clock, a real jitter
+  buffer) and it wants evidence that the tail it addresses actually binds before it is built.
 - **Chunk-grain change detection over-includes.** An entity that did not move but shares a chunk
   with entities that did gets re-sent. Bounded by chunk occupancy; the mitigation is a content
   discipline (keep movers out of static-dominated archetypes), worth measuring before m11.4's debris

@@ -9,6 +9,36 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-27) — m12.5 COMPLETE: interpolation v2 and predicted-player smoothing, and
+> the stutter m11.6 had been shipping.** Listed as *load-bearing-lite, cut last* — and it turned
+> out to fix a defect the milestone had carried since M11.
+>
+> m11.6's interpolation blended previous→current over **exactly one tick**, which is right only if
+> a value arrives every tick. Its proof moved its entity every tick, so that was the only case ever
+> exercised. Loss, relevancy, the byte budget and simply-not-changing all break it: a value carrying
+> N ticks of motion was played in one tick and held for N−1, so the mirror lurched and froze — at a
+> rate set by how badly the link was behaving. Measured over a 3-tick interval: **v1 showed 79
+> motionless frames of 120; v2 shows 0**, with a third of v1's worst single-frame jump.
+>
+> The span needs no clock, which is why the information was already there: the Delta header carries
+> the server tick, and a *difference* of two server ticks has no origin to agree about. A gap above
+> 8 ticks snaps rather than crawling (counted), and a value arriving mid-blend retargets from where
+> the mirror is being drawn rather than from the newest value.
+>
+> **This is the third time this milestone that a proof asserted the right value and missed what
+> mattered** (m12.3's transform write was the second). The pattern is not carelessness but a
+> property of what is easy to assert: **state is easy to check and motion is not**, so a suite grown
+> out of convergence proofs is systematically blind to how anything moves. Every position v1
+> produced was correct.
+>
+> Predicted-player smoothing lands beside it: a correction's displacement is absorbed into a
+> decaying visual offset, bounded so a large one is still shown at once. It is presentation-only and
+> that is asserted rather than intended — two runs differing only in the smoothing constant produce
+> bit-identical simulation trajectories over 250 lossy ticks while their drawn poses differ on 156.
+>
+> **Next:** m12.6 — Track FX brick fx1 (fx1a load-bearing: the GPU draw pass for the existing
+> deterministic CPU sim, off byte-identical).
+
 > **Update (2026-08-26) — m12.4 COMPLETE: prediction and reconciliation, the milestone's hardest
 > brick.** The client runs the same `step_character` the server will run, immediately, and checks
 > its work when the authority answers. ADR-0035 §1's "own-input response" clause is met and its

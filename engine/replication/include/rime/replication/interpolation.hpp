@@ -3,16 +3,41 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "rime/core/math/transform.hpp"
+#include "rime/ecs/chunk.hpp" // ecs::Version
 #include "rime/ecs/entity.hpp"
 #include "rime/ecs/world.hpp"
 
-// Client-side transform history (m11.6) — the previous/current pair that lets a renderer draw
-// between two ticks instead of snapping to the newest one.
+// Client-side transform history (m11.6, v2 at m12.5) — the previous/current pair that lets a
+// renderer draw between two ticks instead of snapping to the newest one.
 //
 // This is the buffer ADR-0023 §3 left as a documented seam. The alpha has been computed and handed
 // to the render callback since M2; what was missing is the *previous* state to blend it against.
+//
+// ── WHAT v1 GOT WRONG, AND WHY IT ONLY SHOWS AT SCALE (m12.5) ────────────────────────────────
+//
+// v1 blended previous→current over EXACTLY ONE local tick: `alpha` sweeps 0→1 once per tick period,
+// and `settle_transform_history` then expired the pair. That is right if and only if a value
+// arrives every tick — which is the one case m11.6's proof exercised, and not the case a real
+// session is in. Loss drops snapshots; relevancy holds distant entities back; the byte budget
+// defers records; and the server sends nothing at all for an entity that did not change. So a
+// mirror routinely receives a value covering N server ticks of motion.
+//
+// v1 then played those N ticks of motion in ONE tick and held still for the other N−1. The mirror
+// lurches and freezes, lurches and freezes — at a rate set by how badly the link is behaving, which
+// is exactly when a player is least forgiving. Nothing about it is detectable from state: the
+// positions are all correct, and every convergence proof stays green.
+//
+// v2 blends over THE INTERVAL THE VALUE ACTUALLY COVERS. The Delta header already carries the
+// server tick (snapshot.hpp), so the gap between two values for the same mirror is known exactly,
+// with no clock synchronisation anywhere: it is a difference of two server ticks, and a difference
+// needs no shared origin. `span_ticks` is that gap; the blend runs across that many local tick
+// periods instead of one.
+//
+// A value arriving every tick gives span 1 and v2 is then bit-identical to v1 — which is what lets
+// m11.6's proofs stand unchanged, and is the first thing m12.5's own proof asserts.
 //
 // WHY A COMPONENT AND NOT A SIDE TABLE. The obvious implementation is an array indexed by
 // `NetId::index`, parallel to the ones ServerReplicator already keeps. It would be wrong for a
@@ -49,13 +74,46 @@ struct PreviousTransform {
     // Set by the apply path when a genuinely different value lands; cleared once per tick by
     // ClientReplicator::settle_transform_history(). Bookkeeping, not state a reader should consult.
     bool moved_this_tick = false;
+
+    // ── v2 (m12.5): how long this blend is, and how far through it we are ─────────────────────
+
+    // Local tick periods the previous→current blend covers, derived from the difference between
+    // the server ticks of the two values. Never 0 (that would divide by nothing) and never above
+    // `kMaxInterpolationSpan` — see there for what happens instead.
+    std::uint16_t span_ticks = 1;
+
+    // Whole tick periods of this blend already shown. Advanced once per tick by
+    // settle_transform_history, and deliberately NOT advanced on the tick the value arrived: the
+    // frames that follow that tick are the blend's FIRST period, so they must sample at 0.
+    std::uint16_t elapsed_ticks = 0;
+
+    // The server tick `current` was written at — the other half of the subtraction that produces
+    // `span_ticks`. It is a bare difference of two server ticks, so it says nothing about what time
+    // it is on either machine and needs no clock offset (ADR-0033 A11 rules one out; this does not
+    // want one).
+    ecs::Version source_tick = 0;
 };
 
-// Where to draw `entity` at `alpha` in [0, 1) between the previous tick and the current one.
+// The longest blend v2 will stretch to. Past it the mirror SNAPS instead, and the snap is counted
+// (`ClientReplicator::histories_snapped_far`).
+//
+// It is a bound on presentation lag, and it is what makes "smooth" not turn into "wrong". A mirror
+// that was culled by relevancy for two seconds and then re-entered carries a gap of 120 ticks; a
+// blend stretched over that would crawl the entity across the level in slow motion while the
+// authority already has it somewhere else — visibly worse than the snap it replaced. Eight ticks is
+// ~133 ms at 60 Hz: long enough to cover ordinary loss and jitter, short enough that the eye reads
+// the result as motion rather than as drift.
+inline constexpr std::uint16_t kMaxInterpolationSpan = 8;
+
+// Where to draw `entity` at `alpha` in [0, 1) within the CURRENT tick period.
+//
+// The fraction actually blended is `(elapsed_ticks + alpha) / span_ticks`, so a value covering
+// three ticks is drawn a third of the way along after one tick period, not all the way. With
+// span 1 this reduces to `alpha` exactly, which is v1.
 //
 // Returns the current transform unchanged when there is no valid previous — the snap case above.
 // `alpha` is clamped, so a caller that hands over a stale accumulator gets a sane frame rather than
-// extrapolation it did not ask for.
+// extrapolation it did not ask for; the composed fraction is clamped for the same reason.
 [[nodiscard]] core::Transform
 interpolated_transform(const ecs::World& world, ecs::Entity entity, float alpha) noexcept;
 

@@ -196,13 +196,25 @@ struct ClientPeer {
         return handle != nullptr ? handle->body : physics::BodyId{};
     }
 
-    // What the local avatar should be DRAWN at: the prediction when it is on, the mirror otherwise.
+    // The SIMULATION's answer for this client's avatar: the prediction when it is on, the mirror
+    // otherwise. Every convergence assertion uses this, because convergence is a claim about state.
     [[nodiscard]] gameplay::CharacterState visible_state() const {
         if (predict && predictor.seeded()) {
             return predictor.state();
         }
         const gameplay::CharacterState* mirrored = mirrored_state();
         return mirrored != nullptr ? *mirrored : gameplay::CharacterState{};
+    }
+
+    // What a renderer would DRAW: the same thing, plus whatever is left of the smoothing slide.
+    // Separate from `visible_state()` on purpose — m12.5's whole point is that these two differ
+    // for a few ticks after a correction, and a proof that could not tell them apart could not
+    // check either one.
+    [[nodiscard]] core::Vec3 drawn_position() const {
+        if (predict && predictor.seeded()) {
+            return predictor.visual_position();
+        }
+        return visible_state().position;
     }
 };
 
@@ -404,8 +416,14 @@ struct Match {
             }
 
             if (client.predictor.seeded()) {
+                // The SMOOTHED pose (m12.5) goes to the transforms — what is drawn, and what the
+                // local capsule follows. `state()` stays the simulation's answer and is what the
+                // next tick predicts from. The offset is sub-decimetre by construction and the
+                // local capsule is excluded from the player's own queries, so nothing the client
+                // simulates can see the difference; what a renderer sees is a slide instead of a
+                // jump.
                 gameplay::write_character_pose(
-                    client.world, avatar, client.predictor.state().position);
+                    client.world, avatar, client.predictor.visual_position());
             }
         }
         client.unpredicted.clear();
