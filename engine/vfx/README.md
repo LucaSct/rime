@@ -2,8 +2,9 @@
 
 A deliberately small, **deletable** CPU particle field that turns destruction events into visible
 feedback: when a part breaks or an island detaches, a puff of billboard dust blooms at the break and
-drifts away. It is a *stub* in the honest sense — the real GPU-driven FX system (track **fx1**)
-replaces this whole module.
+drifts away. It was a *stub* in the honest sense — and since **m13.1a** it is a stub that is
+actually drawn: `render::FxParticlePass` renders these particles as additive HDR billboards. What
+remains stubby is the *content* (one family, no atlas, no GPU sim), not the pipeline.
 
 ## The idea
 
@@ -15,11 +16,17 @@ replaces this whole module.
   on a burst and decays to zero as the puff ages out; the M8.6 sample self-checks this witness (its
   peak coverage on the break).
 
-**GPU-free by construction.** The simulation lives here; the actual additive *draw* pass stays deferred
-to the real FX system (**fx1**). The M8.6 sample drives this field from the destruction fan-out and
-self-checks its `coverage()`, but renders the wall + debris via per-part render leaves, not the dust.
-The budget is a hard cap (default ~200 particles) so a demolition storm cannot unbound it —
-m8.5's budget discipline, in miniature.
+**GPU-free by construction, and it stays that way.** The simulation lives here; the additive *draw*
+pass lives in [`rime::render`](../render/README.md) as `FxParticlePass` — **landed at m13.1a**, which
+is what finally put pixels behind `coverage()`. The arrow still only points one way: vfx does not
+know rendering exists, and render does not know vfx exists. Converting a `DustParticle` into a
+`GpuParticle` is the CONSUMER's glue, exactly like the destruction fan-out below.
+
+`coverage()` is now a *checked* witness rather than a promised one: the m13.1a proof renders a burst
+and shows that on-screen radiance and this scalar rise and decay together (20.27 → 3.64 against
+0.078 → 0.011). The budget is a hard cap (default ~200 particles) so a demolition storm cannot
+unbound it — m8.5's budget discipline, in miniature — and the draw side carries its own independent
+cap for the same reason.
 
 It is **not wired to destruction**: the fan-out glue (a `DestructionEvent` → `emit_burst`) lives in
 the consumer, so the dependency arrow never points from vfx into destruction. Removable feature module

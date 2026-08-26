@@ -20,7 +20,8 @@ add_library(rime_render STATIC
     src/lighting/clustered.cpp
     src/lighting/sdf_clipmap.cpp
     src/lighting/ddgi.cpp
-    src/lighting/ssr.cpp)
+    src/lighting/ssr.cpp
+    src/fx_pass.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
 # library, the same offline model the tests/samples use (ADR-0008). The generated headers are
@@ -41,7 +42,9 @@ rime_add_shaders(rime_render
     shaders/pick_id.vert
     shaders/pick_id.frag
     shaders/gizmo.vert
-    shaders/gizmo.frag)
+    shaders/gizmo.frag
+    shaders/particle.vert
+    shaders/particle.frag)
 
 # The SSR G-buffer variant (m10.7a): the shadowed shader compiled a second time with -DWRITE_GBUFFER
 # so it emits the thin normal+roughness G-buffer into a second attachment. One source, two modules —

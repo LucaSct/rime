@@ -10,6 +10,7 @@
 # here). One source of truth per shader — never a copy.
 rime_add_test(rime_render_tests
     render_graph_test.cpp
+    fx_particle_test.cpp
     scene_layer_test.cpp
     pbr_pipeline_test.cpp
     pick_test.cpp
@@ -25,8 +26,11 @@ rime_add_test(rime_render_tests
     render_transform_test.cpp
     viewer_frame_graph_test.cpp)
 
+# rime::vfx joins the link for the fx1a coverage-delta proof: the CPU sim is the input the
+# GPU pass draws, and the conversion between them is the CONSUMER's glue — which is why it lives in
+# the test rather than in either module.
 target_link_libraries(rime_render_tests
-    PRIVATE rime::render)
+    PRIVATE rime::render rime::vfx)
 
 target_include_directories(rime_render_tests
     PRIVATE ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer)
