@@ -60,7 +60,7 @@ struct Aim {
     core::Vec3 direction{0.0f, 0.0f, -1.0f};
 };
 
-// The view direction for a (yaw, pitch) pair, in ONE place so the mover, the weapon, and m12.8's
+// The view direction for a (yaw, pitch) pair, in ONE place so the mover, the weapon, and m13.3's
 // camera cannot drift apart.
 //
 // The convention is the engine's (render/components.hpp), continued from character.cpp's yaw
@@ -155,7 +155,7 @@ struct WeaponState {
 // ── What the tick produced ────────────────────────────────────────────────────────────────────
 
 // A shot left the barrel. Emitted whether or not it hit anything, because a miss still has a
-// muzzle flash, a tracer and a report — the m12.6 FX families read this, and a `WeaponFired` that
+// muzzle flash, a tracer and a report — the m13.1 FX families read this, and a `WeaponFired` that
 // only existed on hits would make missing silent.
 struct WeaponFired {
     core::Vec3 origin{0.0f, 0.0f, 0.0f};
