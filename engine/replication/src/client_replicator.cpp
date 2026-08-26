@@ -112,7 +112,8 @@ void ClientReplicator::on_spawn(core::ByteReader& reader) {
 void ClientReplicator::prepare_transform_write(ecs::Entity local,
                                                ecs::ComponentId component,
                                                const core::TypeInfo& type,
-                                               std::span<const std::byte> incoming) {
+                                               std::span<const std::byte> incoming,
+                                               ecs::Version server_tick) {
     if (component != local_transform_id_) {
         return; // only transforms are placed and interpolated today
     }
@@ -180,9 +181,66 @@ void ClientReplicator::prepare_transform_write(ecs::Entity local,
     if (current == nullptr || previous == nullptr) {
         return;
     }
-    previous->value = current->value;
+
+    // ── v2 (m12.5): how long is this blend, and where does it start from? ─────────────────────
+    //
+    // The span is the gap between the server ticks of the OLD value and the NEW one — a plain
+    // difference of two server ticks, which needs no shared clock to be meaningful. A first value
+    // (source_tick 0) or a non-monotonic tick falls back to one, which is v1's behaviour.
+    std::uint64_t gap = 1;
+    if (previous->source_tick != 0 && server_tick > previous->source_tick) {
+        gap = server_tick - previous->source_tick;
+    }
+
+    if (gap > kMaxInterpolationSpan) {
+        // Too far to blend honestly. SNAP: drop the history so the mirror draws at `current` from
+        // the next frame, which is structurally the same case as a first appearance and is handled
+        // the same way. Counted, because "distant things teleport" is a real complaint and this is
+        // the number that explains it.
+        previous->valid = false;
+        previous->moved_this_tick = false;
+        previous->span_ticks = 1;
+        previous->elapsed_ticks = 0;
+        previous->source_tick = server_tick;
+        ++histories_snapped_far_;
+        return;
+    }
+
+    // WHERE THE NEW BLEND STARTS. Not from `current` when a blend is still running — from wherever
+    // the mirror is being DRAWN right now. A value arriving mid-blend is the ordinary case under
+    // jitter (the previous one covered three ticks and the next arrived after two), and restarting
+    // from `current` would teleport the mirror forward to a pose it had not reached yet and then
+    // blend on from there. That jump is precisely the artefact v2 exists to remove, so removing it
+    // in one place and reintroducing it in another would be a poor trade.
+    //
+    // HOW FAR ALONG THE OLD BLEND IS, at this moment: `elapsed_ticks + 1` periods, not
+    // `elapsed_ticks`. This apply runs at the START of a tick, so the frames of the period that
+    // just finished have already been drawn — and `settle_transform_history` deliberately does not
+    // count the arrival tick, so `elapsed_ticks` lags the shown progress by exactly one.
+    //
+    // Getting this off by one is not subtle in its effect but is very subtle in its cause: with
+    // span 1 it makes `elapsed(0) < span(1)` true, the retarget samples at fraction 0, which IS
+    // `previous`, and so `previous` never advances at all. The mirror then blends from wherever it
+    // first appeared for the rest of the session. (Measured on m11.6's own proof, which expects a
+    // 10-unit gap and saw 190.)
+    //
+    // `interpolated_transform` composes `(elapsed + alpha) / span`, so alpha 1 is exactly the
+    // "one more whole period" this needs. The sub-tick fraction belongs to the renderer and is not
+    // knowable here; the residual is under one frame of motion and is not cumulative.
+    const bool blend_still_running =
+        previous->valid && static_cast<std::uint32_t>(previous->elapsed_ticks) + 1u <
+                               static_cast<std::uint32_t>(previous->span_ticks);
+    if (blend_still_running) {
+        previous->value = interpolated_transform(*world_, local, 1.0f);
+    } else {
+        previous->value = current->value;
+    }
+
     previous->valid = true;
     previous->moved_this_tick = true; // consumed by settle_transform_history() at the tick's end
+    previous->span_ticks = static_cast<std::uint16_t>(gap);
+    previous->elapsed_ticks = 0;
+    previous->source_tick = server_tick;
 }
 
 std::size_t ClientReplicator::settle_transform_history() {
@@ -200,13 +258,23 @@ std::size_t ClientReplicator::settle_transform_history() {
     //
     // Expiring is safe the moment one full tick has passed: the blend it drove ran over that tick's
     // frames and reached alpha≈1, so the mirror is already drawn at `current` before this fires.
+    //
+    // v2 (m12.5) makes this a COUNTDOWN rather than a one-shot. `elapsed_ticks` advances here, once
+    // per tick, and the pair expires only when the whole span has been shown. Note what is NOT
+    // advanced: the tick on which the value arrived. The frames that follow that tick are the
+    // blend's first period, so they must sample at elapsed 0 — incrementing here would skip the
+    // start of every blend and make each one a fraction short.
     std::size_t settled = 0;
     world_->query<PreviousTransform>().for_each([&](PreviousTransform& history) {
         if (history.moved_this_tick) {
-            history.moved_this_tick = false; // one tick's worth of blend has now been on screen
+            history.moved_this_tick = false; // this tick IS the blend's first period
             return;
         }
-        if (history.valid) {
+        if (!history.valid) {
+            return;
+        }
+        ++history.elapsed_ticks;
+        if (history.elapsed_ticks >= history.span_ticks) {
             history.valid = false;
             ++settled;
         }
@@ -234,7 +302,7 @@ void ClientReplicator::replay_deferred(NetId id, ecs::Entity local) {
         std::size_t packed = 0;
         if (schema_.lookup(schema_.wire_id_of(record.component), unused, type, packed) &&
             type != nullptr) {
-            prepare_transform_write(local, record.component, *type, record.bytes);
+            prepare_transform_write(local, record.component, *type, record.bytes, record.tick);
             void* slot = world_->get_component_raw(local, record.component);
             if (slot == nullptr) {
                 slot = world_->add_component_raw(local, record.component);
@@ -337,12 +405,13 @@ void ClientReplicator::on_delta(core::ByteReader& reader) {
                 DeferredRecord record;
                 record.id = id;
                 record.component = local_id;
+                record.tick = tick;
                 record.bytes.assign(bytes.begin(), bytes.end());
                 deferred_.push_back(std::move(record));
                 ++records_deferred_;
                 continue;
             }
-            prepare_transform_write(local, local_id, *type, bytes);
+            prepare_transform_write(local, local_id, *type, bytes, tick);
             void* slot = world_->get_component_raw(local, local_id);
             if (slot == nullptr) {
                 // The mirror does not carry this component yet — the server added it after the

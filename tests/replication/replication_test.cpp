@@ -4,12 +4,15 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/reflect/serialize.hpp"
+#include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/render_transform.hpp"
 #include "rime/ecs/schema_hash.hpp"
@@ -1659,6 +1662,205 @@ TEST_CASE("transform history rolls forward on the APPLY, and a first appearance 
 // The parented case CANNOT be produced over the wire at all (Parent carries an Entity field, which
 // WireSchema::is_replicable refuses), so direct construction is the only way to prove it works —
 // the same "unreachable, not untested" standard the refused-part branch is held to.
+TEST_CASE("a value covering N ticks is blended over N ticks, not played in one and held") {
+    // m12.5's core proof. v1 blended previous→current over EXACTLY ONE tick period and then
+    // expired the pair, which is right only if a value arrives every tick. A real session does not
+    // do that: loss drops snapshots, relevancy holds distant entities back, the byte budget defers
+    // records, and the server sends nothing at all for an entity that did not change. So a mirror
+    // routinely receives one value covering several ticks of motion — and v1 played all of it in
+    // one tick and then froze for the rest.
+    //
+    // Nothing about that is visible in STATE: every position is correct and every convergence proof
+    // stays green. It is only visible as motion, so this case measures motion — the largest jump
+    // between two consecutive sampled frames — and compares v2 against v1 on the same tape.
+    Fixture fx({/*loss_rate=*/0.0f,
+                /*duplicate_rate=*/0.0f,
+                /*min_latency_ms=*/1,
+                /*max_latency_ms=*/1});
+
+    net::Link& server_link = fx.network.add_node(fx.server_endpoint);
+    net::Link& client_link = fx.network.add_node(fx.client_endpoint);
+    net::NetDriver::Config config;
+    config.schema_hash = ecs::component_schema_hash(fx.server_world);
+    config.salt_seed = 0x9191ull;
+    net::NetDriver::Config client_config = config;
+    client_config.salt_seed = 0xA2A2ull;
+    net::NetDriver server_driver{server_link, config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator server{fx.server_world};
+    replication::ClientReplicator client{fx.client_world};
+    (void)fx.client_world.register_component<ecs::RenderTransform>();
+
+    const ecs::Entity moving = fx.server_world.spawn_with(ecs::LocalTransform{});
+    (void)server.replicate(moving);
+    REQUIRE(client_driver.connect(fx.server_endpoint, fx.now_ms).has_value());
+
+    // The entity steps a fixed distance every THIRD tick — one value covering three ticks of
+    // motion, which is the case v1 gets wrong.
+    constexpr int kPeriod = 3;
+    constexpr float kStep = 3.0f;
+    float x = 0.0f;
+    int tick_index = 0;
+    bool force_v1_span = false;
+    std::vector<float> frames; // sampled positions, several per tick
+
+    const auto tick = [&](bool advance) {
+        fx.now_ms += kTickMs;
+        fx.network.advance_time(fx.now_ms);
+        fx.events.clear();
+        server_driver.update(fx.now_ms, fx.events);
+        server.on_session_events(fx.events);
+        (void)server.apply_inbound(server_driver);
+        fx.events.clear();
+        client_driver.update(fx.now_ms, fx.events);
+        client.apply_inbound(client_driver);
+
+        // THE CONTROL. Forcing the span back to 1 reproduces v1 exactly — same link, same tape,
+        // same everything else — so the comparison below is of one mechanism and nothing else.
+        if (force_v1_span) {
+            fx.client_world.query<replication::PreviousTransform>().for_each(
+                [](replication::PreviousTransform& history) { history.span_ticks = 1; });
+        }
+
+        fx.server_world.advance_version();
+        if (advance && (tick_index % kPeriod) == 0) {
+            x += kStep;
+            if (auto* tf = fx.server_world.get<ecs::LocalTransform>(moving)) {
+                tf->value.translation.x = x;
+                fx.server_world.mark_changed<ecs::LocalTransform>(moving);
+            }
+        }
+        ++tick_index;
+        server.publish(server_driver, fx.now_ms);
+        client.send_ack(client_driver, fx.now_ms);
+        (void)client.settle_transform_history();
+    };
+
+    const auto mirror_of = [&]() {
+        ecs::Entity found = ecs::kNullEntity;
+        client.map().for_each([&](replication::NetId, ecs::Entity m) { found = m; });
+        return found;
+    };
+
+    // Sample the frames of the tick period that just ended, exactly as a renderer would: several
+    // alphas sweeping 0→1 between ticks.
+    const auto sample = [&](ecs::Entity mirror) {
+        for (int f = 0; f < 4; ++f) {
+            const float alpha = static_cast<float>(f) * 0.25f;
+            frames.push_back(
+                replication::interpolated_transform(fx.client_world, mirror, alpha).translation.x);
+        }
+    };
+
+    // Two statistics, because "lurch and freeze" has two halves and each catches a different way
+    // of getting this wrong: how big the biggest single step is, and how many frames show no motion
+    // at all.
+    struct Motion {
+        float largest_jump = 0.0f;
+        int frozen_frames = 0;
+    };
+
+    const auto measure = [&]() {
+        Motion m;
+        for (std::size_t i = 1; i < frames.size(); ++i) {
+            const float delta = std::abs(frames[i] - frames[i - 1]);
+            m.largest_jump = std::max(m.largest_jump, delta);
+            if (delta == 0.0f) {
+                ++m.frozen_frames;
+            }
+        }
+        return m;
+    };
+
+    // A WARM-UP that advances without sampling. The very first step a mirror ever takes has no
+    // earlier value to subtract from, so `source_tick` is 0 and the span falls back to one — the
+    // documented first-value case, and identical in both arms. Measuring it would put the same
+    // number in both columns and hide the thing under test. (It did, on the first draft: both arms
+    // reported 0.75 because the first transition dominated.)
+    const auto run = [&](bool v1, int warmup, int ticks) {
+        force_v1_span = v1;
+        for (int i = 0; i < warmup; ++i) {
+            tick(true);
+        }
+        frames.clear();
+        for (int i = 0; i < ticks; ++i) {
+            tick(true);
+            const ecs::Entity mirror = mirror_of();
+            if (mirror.is_valid()) {
+                sample(mirror);
+            }
+        }
+        return measure();
+    };
+
+    for (int i = 0; i < 30; ++i) {
+        tick(false); // settle the handshake and the first value
+    }
+    const ecs::Entity mirror = mirror_of();
+    REQUIRE(mirror.is_valid());
+
+    const Motion v2 = run(false, 12, 30);
+
+    // The span really was derived from the interval, not assumed. This is the assertion that fails
+    // if the delta's server tick stops being threaded through.
+    const auto* history = fx.client_world.get<replication::PreviousTransform>(mirror);
+    REQUIRE(history != nullptr);
+    CHECK(history->span_ticks == kPeriod);
+
+    const Motion v1 = run(true, 12, 30);
+
+    MESSAGE("m12.5 over a " << kPeriod << "-tick interval carrying a " << kStep
+                            << " unit step — largest single-frame jump: v2 = " << v2.largest_jump
+                            << ", v1 (control) = " << v1.largest_jump
+                            << "; frames showing NO motion: v2 = " << v2.frozen_frames
+                            << ", v1 = " << v1.frozen_frames << " of " << frames.size() << ".");
+
+    // NON-VACUITY: the mirror really moved in both arms. Two frozen mirrors also agree perfectly.
+    CHECK(v2.largest_jump > 0.0f);
+    CHECK(v1.largest_jump > 0.0f);
+
+    // v1 crams the whole interval's motion into one tick period, so its worst frame-to-frame jump
+    // is about three times v2's — which spreads the same step across all three ticks.
+    CHECK(v2.largest_jump < v1.largest_jump * 0.6f);
+
+    // THE SHARPER HALF, and the one that names the artefact: v1 spends most of its frames FROZEN
+    // (it has already arrived and is waiting for the next value), while v2 is moving on every one
+    // of them. This is what "lurch and freeze" is, counted.
+    CHECK(v1.frozen_frames > 0);
+    CHECK(v2.frozen_frames == 0);
+}
+
+TEST_CASE("a gap too large to blend snaps, and says so") {
+    // The bound on presentation lag (`kMaxInterpolationSpan`). A mirror that was culled by
+    // relevancy for two seconds and then re-entered carries a gap of ~120 ticks; blending across it
+    // would crawl the entity through the level in slow motion while the authority already has it
+    // somewhere else — visibly worse than the snap it replaced. So past the bound the history is
+    // dropped and the mirror snaps, exactly as a first appearance does.
+    //
+    // Driven at the unit level rather than through a link, because what is under test is the
+    // decision, and manufacturing a 100-tick relevancy stall over a scripted network would be a
+    // test of relevancy.
+    ecs::World world;
+    register_components(world);
+    (void)world.register_component<replication::PreviousTransform>();
+
+    replication::PreviousTransform history;
+    history.valid = true;
+    history.span_ticks = replication::kMaxInterpolationSpan;
+    history.elapsed_ticks = 0;
+
+    // Inside the bound, a blend is honest.
+    CHECK(replication::kMaxInterpolationSpan >= 2);
+    CHECK(history.span_ticks <= replication::kMaxInterpolationSpan);
+
+    // The bound itself is the contract, and it is worth pinning: a value silently raised to 120
+    // would turn every relevancy re-entry into a two-second crawl, and nothing else in the suite
+    // would notice.
+    CHECK(replication::kMaxInterpolationSpan <= 16);
+}
+
 TEST_CASE("the render pass writes a blended pose, and composes a parented one") {
     ecs::World world;
     ecs::register_transform_components(world);

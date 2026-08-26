@@ -22,7 +22,13 @@ interpolated_transform(const ecs::World& world, ecs::Entity entity, float alpha)
         return current->value; // nothing to blend from — snap (see the header on why not a default)
     }
 
-    const float t = std::clamp(alpha, 0.0f, 1.0f);
+    // v2 (m12.5): the fraction is measured against the interval this value actually covers, not
+    // against one tick. `span_ticks` is never 0 (interpolation.hpp), but the guard is cheap and a
+    // divide-by-zero here would be a NaN transform reaching the renderer.
+    const float span = static_cast<float>(previous->span_ticks > 0 ? previous->span_ticks : 1);
+    const float progress =
+        static_cast<float>(previous->elapsed_ticks) + std::clamp(alpha, 0.0f, 1.0f);
+    const float t = std::clamp(progress / span, 0.0f, 1.0f);
     core::Transform out;
     out.translation.x = previous->value.translation.x +
                         (current->value.translation.x - previous->value.translation.x) * t;

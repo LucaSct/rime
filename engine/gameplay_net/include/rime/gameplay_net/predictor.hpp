@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "rime/core/math/vec.hpp"
 #include "rime/gameplay/character.hpp"
 #include "rime/physics/body.hpp"
 #include "rime/replication/input.hpp"
@@ -92,6 +93,33 @@ public:
         // playable session has, and it matches `replication::kMaxUnackedCommands` so the two
         // bounds cannot disagree about how far back a correction may reach.
         std::size_t max_history = replication::kMaxUnackedCommands;
+
+        // ── Presentation smoothing (m12.5) ────────────────────────────────────────────────────
+        //
+        // A correction is a rewind: the simulation state jumps, correctly and instantly. Drawing
+        // that jump is what a player calls rubber-banding — and it is avoidable, because being
+        // right about where you are and drawing yourself getting there are different jobs.
+        //
+        // So a correction's displacement is absorbed into a VISUAL OFFSET which then decays toward
+        // zero. The simulation never sees it: `state()` is the truth the next tick predicts from,
+        // and `visual_position()` is the lie the renderer is told. Feeding the offset back into the
+        // prediction would be a controller with a hidden accumulator, which is exactly what m12.2's
+        // purity rule forbids and what would break replay.
+        //
+        // The fraction of the offset REMAINING after one tick. 0.75 clears ~90% of a correction in
+        // eight ticks (~133 ms) — fast enough that the player is never meaningfully misplaced,
+        // slow enough that the eye reads a slide instead of a jump. 0 disables smoothing outright,
+        // which is m12.4's behaviour and the negative control the proof measures against.
+        float smoothing_decay = 0.75f;
+
+        // Corrections larger than this SNAP instead of sliding.
+        //
+        // A big correction means the prediction was badly wrong — a teleport, a shove, several
+        // seconds of lost input. Sliding a player smoothly across two metres of a firefight is
+        // worse than moving them at once: for that whole slide they are drawn somewhere they
+        // demonstrably are not, and they will shoot from there. Smoothing is for the small,
+        // frequent errors; a large one is honest information and should be shown.
+        float max_smoothing_distance = 1.0f;
     };
 
     void set_config(const Config& config) noexcept { config_ = config; }
@@ -135,9 +163,24 @@ public:
                    physics::BodyId self,
                    float dt);
 
-    // The state the local avatar should be drawn at: the newest prediction, or the last
-    // authoritative state if nothing has been predicted on top of it.
+    // The SIMULATION's answer: the newest prediction, or the last authoritative state if nothing
+    // has been predicted on top of it. This is what the next tick predicts from, and it never
+    // carries the presentation offset.
     [[nodiscard]] const gameplay::CharacterState& state() const noexcept { return predicted_; }
+
+    // Where the local avatar should be DRAWN this tick — `state().position` plus whatever is left
+    // of the last correction's smoothing offset (m12.5). Equal to `state().position` when smoothing
+    // is disabled, when nothing has been corrected, and once a slide has finished.
+    //
+    // Only the position is smoothed. Velocity and `grounded` are simulation facts a renderer has no
+    // business seeing a softened version of — an avatar drawn as airborne because its correction is
+    // still settling would be a presentation layer inventing gameplay.
+    [[nodiscard]] core::Vec3 visual_position() const noexcept {
+        return predicted_.position + visual_offset_;
+    }
+
+    // What is left of the current slide, in metres. Zero when nothing is being smoothed.
+    [[nodiscard]] float smoothing_offset() const noexcept;
 
     [[nodiscard]] bool seeded() const noexcept { return seeded_; }
 
@@ -168,6 +211,18 @@ public:
     [[nodiscard]] std::uint64_t corrections_unverifiable() const noexcept { return unverifiable_; }
 
     [[nodiscard]] std::uint64_t commands_replayed() const noexcept { return replayed_; }
+
+    // Corrections absorbed into a slide (m12.5), and corrections shown at once because they
+    // exceeded `max_smoothing_distance`. They sum to `corrections()` whenever smoothing is on, so a
+    // gap between the two totals means a correction went through neither path — which would be a
+    // bug in this class rather than in the session.
+    [[nodiscard]] std::uint64_t corrections_smoothed() const noexcept { return smoothed_; }
+
+    [[nodiscard]] std::uint64_t corrections_snapped() const noexcept { return snapped_; }
+
+    // The largest visual offset a correction ever opened, in metres — the number to look at when
+    // deciding whether `max_smoothing_distance` is drawn in the right place.
+    [[nodiscard]] float max_smoothing_offset() const noexcept { return max_offset_; }
 
     // The largest position error a correction ever had to repair, in metres. The honest measure of
     // how wrong prediction got — and the number to watch when tuning `position_tolerance`, because
@@ -214,7 +269,13 @@ private:
     std::uint64_t unverifiable_ = 0;
     std::uint64_t replayed_ = 0;
     std::uint64_t evicted_ = 0;
+    std::uint64_t smoothed_ = 0;
+    std::uint64_t snapped_ = 0;
     float max_correction_ = 0.0f;
+    float max_offset_ = 0.0f;
+
+    // Presentation only — see Config::smoothing_decay. Never read by `predict`.
+    core::Vec3 visual_offset_{0.0f, 0.0f, 0.0f};
 };
 
 } // namespace rime::gameplay_net

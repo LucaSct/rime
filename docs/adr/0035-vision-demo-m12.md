@@ -582,3 +582,66 @@ every skip inside the consume loop and none of them could see a write being over
 The new case (`consume_loop_test.cpp`, "the avatar's transform and its physics body follow the
 controller") asserts the handoff instead of the state, and was checked against a deliberately
 reverted fix to confirm it fails — on all three consequences, including the client's mirror.
+
+---
+
+## Amendment (2026-08-27, m12.5): what "interpolate over the interval a value actually covers" was hiding
+
+m12.5 built the two halves the ladder names — snapshot interpolation v2 in `replication`, and
+predicted-player smoothing in `gameplay_net`. The brick was listed as *load-bearing-lite, cut last*.
+It turned out to be the one that fixed a defect the milestone had been carrying since m11.6.
+
+### D1. v1's interpolation was wrong for every case except the one its proof exercised
+
+m11.6 blended `previous → current` over **exactly one tick period**, then expired the pair. That is
+correct if and only if a value arrives every tick — and m11.6's proof moved its entity every tick,
+so it was the only case ever exercised.
+
+A real session is never in that case. Loss drops snapshots; relevancy holds distant entities back;
+the byte budget defers records; and the server sends nothing at all for an entity that did not
+change. So a mirror routinely receives one value carrying N ticks of motion — and v1 played all of
+it in one tick and held still for the other N−1. **The mirror lurched and froze, at a rate set by
+how badly the link was behaving**, which is when a player is least forgiving.
+
+Measured over a 3-tick interval, sampling four frames a tick: v1 showed **79 motionless frames out
+of 120**; v2 shows **0**, and its worst single-frame jump is a third of v1's.
+
+This is the third time in this milestone that a proof asserted the right value and missed the thing
+that mattered (m12.3's transform write was the second — amendment C3). The pattern is worth naming
+because it is not carelessness, it is a property of what is easy to assert: **state is easy to check
+and motion is not**, so a suite grown from convergence proofs is systematically blind to how
+anything *moves*. Every position v1 produced was correct. The bug was in the timing, and only a test
+that sampled frames rather than ticks could see it.
+
+### D2. The span needs no clock, and that is why it was available all along
+
+The fix needs to know how many ticks a value covers, which sounds like it needs a clock — and
+ADR-0033 A11 rules one out, with M12 inheriting the ruling (§4). It does not: the Delta header
+already carries the server tick, and the span is a **difference of two server ticks**. A difference
+has no origin, so it says nothing about what time it is on either machine and needs no offset. The
+information was already on the wire; nothing was reading it.
+
+Two bounds go with it, each argued at its site: a gap above `kMaxInterpolationSpan` (8 ticks) snaps
+rather than crawling, and is counted; and a value arriving mid-blend retargets from where the mirror
+is *being drawn* rather than from `current`, so jitter does not reintroduce the jump v2 removes.
+
+**Not built, and named:** a full playback clock — render at `server_tick − delay` against a
+multi-sample ring, which is what handles a value arriving out of *order* rather than merely late. v2
+holds two samples and cannot reorder them. That wants a per-client clock and a real jitter buffer,
+and it should be built when the ledger shows the tail it addresses actually binds.
+
+### D3. Smoothing is presentation-only, asserted rather than intended
+
+A correction is a rewind: the state jumps, correctly. Drawing that jump is rubber-banding, so the
+displacement is absorbed into a visual offset that decays away (~90% in eight ticks) and is
+**bounded** — a correction above `max_smoothing_distance` is shown at once, because sliding a player
+across two metres of a firefight draws them somewhere they demonstrably are not, and they will shoot
+from there.
+
+The claim that matters is that none of this reaches the simulation. `state()` never carries the
+offset; only `visual_position()` does. A smoothing layer that leaked would be a hidden accumulator
+inside a function m12.2 proved pure, and it would surface as a rare desync rather than a failing
+test — so it is asserted directly: two runs on the same seed and tape differing only in
+`smoothing_decay` produce **bit-identical simulation trajectories across 250 lossy ticks** while
+their drawn poses differ on 156 of them. Setting `smoothing_decay = 0` restores m12.4's behaviour
+exactly, which is both the negative control and the cut path if the brick has to go.

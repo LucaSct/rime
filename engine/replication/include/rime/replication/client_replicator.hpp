@@ -127,6 +127,18 @@ public:
     // acknowledgement. Should be zero against an honest peer.
     [[nodiscard]] std::uint64_t records_evicted() const noexcept { return records_evicted_; }
 
+    // Mirrors that SNAPPED because the gap since their last value exceeded `kMaxInterpolationSpan`
+    // (m12.5) — a relevancy re-entry, a long stall, a burst of loss. Not a fault: it is the bound
+    // on presentation lag doing its job, and the alternative (a blend stretched over two seconds)
+    // would crawl the entity across the level while the authority already has it elsewhere.
+    //
+    // Worth watching rather than ignoring: a value that climbs steadily in a session with a healthy
+    // link means the span bound is mis-tuned for this game's send cadence, and the symptom a player
+    // reports is "distant things teleport".
+    [[nodiscard]] std::uint64_t histories_snapped_far() const noexcept {
+        return histories_snapped_far_;
+    }
+
     // Messages this replicator is not the reader for, and passed over rather than consumed: another
     // module's tag block, or — since m11.6c — another reader inside replication's own block. The
     // counter a proof asserts on to show the streams really are sharing one session rather than one
@@ -160,10 +172,13 @@ private:
     // those would set previous := current and collapse a genuine gap — the client would snap
     // through exactly the motion interpolation exists to smooth. It is also what
     // settle_transform_history() keys off, so that a re-send window is not mistaken for motion.
+    // `server_tick` is the Delta header's tick — what makes v2's span a real interval rather than
+    // an assumed one tick (interpolation.hpp).
     void prepare_transform_write(ecs::Entity local,
                                  ecs::ComponentId component,
                                  const core::TypeInfo& type,
-                                 std::span<const std::byte> incoming);
+                                 std::span<const std::byte> incoming,
+                                 ecs::Version server_tick);
 
     // One component write that arrived before the entity it belongs to. The bytes are COPIED: the
     // reader's span points into a datagram buffer that is reused the moment this call returns.
@@ -171,6 +186,10 @@ private:
         NetId id{};
         ecs::ComponentId component{};
         std::vector<std::byte> bytes;
+        // The server tick of the Delta this record arrived in. Held so a record replayed later
+        // still produces the RIGHT interpolation span (m12.5): using the replay tick instead would
+        // make a deferred entity's first blend as long as the spawn took to arrive.
+        ecs::Version tick = 0;
     };
 
     void on_despawn(core::ByteReader& reader);
@@ -198,6 +217,7 @@ private:
     std::uint64_t records_deferred_ = 0;
     std::uint64_t records_replayed_ = 0;
     std::uint64_t records_evicted_ = 0;
+    std::uint64_t histories_snapped_far_ = 0;
     std::uint64_t histories_settled_ = 0;
 
     // Records waiting for their Spawn, in arrival order. Bounded (see kMaxDeferredRecords): an

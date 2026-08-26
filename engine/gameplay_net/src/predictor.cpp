@@ -32,6 +32,13 @@ void Predictor::reset(const gameplay::CharacterState& state) {
     newest_sequence_ = 0;
     have_last_ = false;
     last_q_ = 0;
+    // A reseed is a teleport the game asked for. Carrying the previous slide across it would drag
+    // the avatar visually back toward wherever it used to be.
+    visual_offset_ = core::Vec3{};
+}
+
+float Predictor::smoothing_offset() const noexcept {
+    return std::sqrt(core::length_squared(visual_offset_));
 }
 
 const gameplay::CharacterState* Predictor::find_entry(std::uint32_t sequence) const noexcept {
@@ -96,6 +103,25 @@ bool Predictor::reconcile(const gameplay::CharacterState& authoritative,
                           const physics::PhysicsWorld& world,
                           physics::BodyId self,
                           float dt) {
+    // ── The slide decays first, every tick, before any early-out ─────────────────────────────
+    //
+    // This is the one thing in `reconcile` that must happen on EVERY call, including the many ticks
+    // that carry no new snapshot. Putting it above the early-outs is what makes "call this once per
+    // tick" the only ordering rule a client has to remember — the alternative, a separate
+    // `advance_presentation()`, is a second rule whose omission would present as a correction that
+    // slides once and then sticks forever.
+    if (config_.smoothing_decay <= 0.0f) {
+        visual_offset_ = core::Vec3{};
+    } else {
+        visual_offset_ = visual_offset_ * std::clamp(config_.smoothing_decay, 0.0f, 1.0f);
+        // Below a tenth of a millimetre the slide is over. Snapping the residue to zero keeps the
+        // offset from being a permanently non-zero number that a proof would have to write an
+        // epsilon around, and geometric decay never reaches zero on its own.
+        if (core::length_squared(visual_offset_) < 1e-8f) {
+            visual_offset_ = core::Vec3{};
+        }
+    }
+
     if (!seeded_) {
         // The first authoritative state we ever see IS the seed. Doing it here rather than making
         // the game call `reset` means a client that simply wires the loop up gets a correct start
@@ -172,6 +198,9 @@ bool Predictor::reconcile(const gameplay::CharacterState& authoritative,
         }
     }
 
+    // ── Absorb the jump into the slide, before the state actually moves ──────────────────────
+    const core::Vec3 before = predicted_.position;
+
     predicted_ = authoritative;
     history_.clear();
     for (const replication::InputCommand& command : to_replay) {
@@ -188,6 +217,28 @@ bool Predictor::reconcile(const gameplay::CharacterState& authoritative,
     // caught up with everything we predicted, so the newest sequence we know about is `q` itself —
     // leaving the old value would have this reporting a command that no longer exists anywhere.
     newest_sequence_ = history_.empty() ? q : history_.back().sequence;
+
+    // The displacement the correction just applied, measured AFTER the replay: what matters
+    // visually is where the avatar ends up this tick versus where it was drawn last tick, not the
+    // intermediate rewind. Adding to the existing offset rather than replacing it is deliberate —
+    // corrections can arrive faster than a slide finishes, and replacing would make the second one
+    // discard the first one's remaining debt and jump anyway.
+    if (config_.smoothing_decay > 0.0f) {
+        const core::Vec3 candidate = visual_offset_ + (before - predicted_.position);
+        const float distance = std::sqrt(core::length_squared(candidate));
+        if (distance > config_.max_smoothing_distance) {
+            // Too far to hide. Show it — see Config::max_smoothing_distance on why a long slide is
+            // worse than a jump.
+            visual_offset_ = core::Vec3{};
+            ++snapped_;
+        } else {
+            visual_offset_ = candidate;
+            max_offset_ = std::max(max_offset_, distance);
+            ++smoothed_;
+        }
+    } else {
+        ++snapped_;
+    }
     return true;
 }
 

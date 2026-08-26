@@ -11,6 +11,7 @@ rime_add_test(rime_gameplay_net_tests
     consume_loop_test.cpp
     latency_test.cpp
     prediction_test.cpp
+    smoothing_test.cpp
     weapon_glue_test.cpp)
 
 # rime::gameplay_net PUBLIC-links gameplay + replication, which transitively brings physics, ecs,
