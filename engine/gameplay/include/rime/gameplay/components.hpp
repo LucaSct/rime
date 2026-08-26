@@ -34,6 +34,33 @@ namespace rime::gameplay {
 // is), and calling it early keeps component ids stable.
 void register_gameplay_components(ecs::World& world);
 
+// Publish a controller-computed pose to the rest of the engine, and stamp it changed.
+//
+// THIS EXISTS BECAUSE WRITING `WorldTransform` ALONE IS NOT ENOUGH, and the failure is silent. The
+// canonical tick order (docs/design/simulation-tick.md) runs gameplay at step 2 and
+// `propagate_transforms` at step 3 — and propagate RECOMPUTES `WorldTransform` from
+// `LocalTransform` for every entity carrying both. So a controller that writes only WorldTransform
+// has its write discarded one step later by a pass doing exactly its job: the character's own
+// `CharacterState` marches off correctly while its transform, its kinematic body, and every
+// replicated mirror of it stay at the spawn point forever.
+//
+// It is silent because `CharacterState` is the thing tests naturally assert on and it is right.
+// (Measured at m12.4: an avatar whose state had walked to z = −3.29 had a WorldTransform, a
+// LocalTransform and a physics body all still reading z = 0. m12.3's proofs were green throughout.)
+//
+// So the pose is written to BOTH, and `LocalTransform` is the one that makes it survive. The
+// mark_changed calls are for the ECS's change-detection consumers (render upload, editor sync,
+// replication); `PhysicsSync::push_in` deliberately does NOT rely on them — it compares against the
+// pose it last pushed, because a game may legitimately write a transform without stamping it, and a
+// flag with a blind spot is exactly the class of bug guardrail 5 exists about.
+//
+// A PARENTED character is not supported and `LocalTransform` is left alone for one: the controller
+// computes a WORLD-space position by construction, and assigning that to a child's local transform
+// would place it at the wrong point in its parent's frame. Such an entity keeps the WorldTransform
+// write (which propagate will then overwrite), which is the honest failure — visibly wrong rather
+// than subtly wrong — and it is why the parent check is a check and not an assumption.
+void write_character_pose(ecs::World& world, ecs::Entity player, const core::Vec3& position);
+
 // Advance ONE character entity by one tick. Reads {CharacterConfig, CharacterState} and the
 // entity's physics::RigidBodyHandle (for the BodyId to exclude from queries — PhysicsSync's bind is
 // what puts it there), calls step_character, and writes the result into the state component AND the

@@ -72,6 +72,60 @@ TEST_CASE("the server moves an avatar only on the commands it consumed") {
           last_sequence);
 }
 
+TEST_CASE("the avatar's transform and its physics body follow the controller") {
+    // THE REGRESSION THIS EXISTS FOR, and it shipped green in m12.3 before m12.4's client-side work
+    // tripped over it. The controller wrote only `WorldTransform`; `propagate_transforms` runs one
+    // step later in the canonical tick order and RECOMPUTES WorldTransform from `LocalTransform`,
+    // so the write was discarded every tick by a pass doing exactly its job.
+    //
+    // It was silent because `CharacterState` — the thing every other case in this file asserts on —
+    // stayed perfectly correct. Measured before the fix: state at z = -3.29, WorldTransform at 0,
+    // LocalTransform at 0, physics body at 0. The consequences are all one layer out: the kinematic
+    // capsule never moves, so the player pushes nothing and debris cannot hit them where they are;
+    // and the replicated transform is wrong, so every OTHER client mirrors this avatar standing at
+    // its spawn point forever.
+    //
+    // So this case asserts the handoff itself, not the state, and it is the only one here that
+    // reaches for the transform components at all.
+    Match match;
+    add_ground(match.physics);
+    ClientPeer& client = match.add_client();
+    match.settle();
+    const ecs::Entity avatar = match.spawned.front();
+
+    for (int i = 0; i < 40; ++i) {
+        (void)client.send_input(walk(0.0f, 1.0f), match.now_ms);
+        match.tick();
+    }
+
+    const gameplay::CharacterState* state = match.server_state(avatar);
+    REQUIRE(state != nullptr);
+    REQUIRE(state->position.z < -1.0f); // non-vacuity: it really walked somewhere
+
+    // Both transforms carry the pose, and LocalTransform is the one that makes it survive step 3.
+    const ecs::WorldTransform* world_tf = match.world.get<ecs::WorldTransform>(avatar);
+    const ecs::LocalTransform* local_tf = match.world.get<ecs::LocalTransform>(avatar);
+    REQUIRE(world_tf != nullptr);
+    REQUIRE(local_tf != nullptr);
+    CHECK(world_tf->value.translation.z == doctest::Approx(state->position.z));
+    CHECK(local_tf->value.translation.z == doctest::Approx(state->position.z));
+
+    // …and push_in drove the kinematic body there, which is what makes the capsule a real
+    // participant in the world rather than a number in a component.
+    const physics::RigidBodyHandle* handle = match.world.get<physics::RigidBodyHandle>(avatar);
+    REQUIRE(handle != nullptr);
+    physics::BodyState body{};
+    REQUIRE(match.physics.get_body_state(handle->body, body));
+    CHECK(body.position.z == doctest::Approx(state->position.z));
+
+    // The client's mirror agrees, which is the half that matters to every other player.
+    const ecs::Entity mirror = client.local_player();
+    REQUIRE(mirror.is_valid());
+    const ecs::LocalTransform* mirrored = client.world.get<ecs::LocalTransform>(mirror);
+    REQUIRE(mirrored != nullptr);
+    CHECK(mirrored->value.translation.z < -1.0f);
+}
+
 TEST_CASE("a starved tick does not move the avatar, and says so") {
     // THE COMMITMENT: `step_character` runs once per CONSUMED command and not at all otherwise.
     // A server that re-ran the last command on a tick with no input would move the player a tick

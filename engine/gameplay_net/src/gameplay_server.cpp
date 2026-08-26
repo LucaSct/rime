@@ -7,33 +7,13 @@
 #include "rime/core/byte_cursor.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/gameplay/components.hpp"
 #include "rime/gameplay_net/components.hpp"
+#include "rime/gameplay_net/convert.hpp"
 #include "rime/physics/components.hpp"
 #include "rime/physics/world.hpp"
 
 namespace rime::gameplay_net {
-
-namespace {
-
-// The wire types and the mover's types are the same fields with different owners (character.hpp on
-// why they are mirrored rather than shared). This is the whole conversion, and it lives in
-// `gameplay_net` precisely so that neither side has to know about the other.
-//
-// `sequence` does NOT cross. It is the network's bookkeeping, not the mover's, and leaving it out
-// is what keeps a replay tape a statement about intent rather than about a particular session.
-[[nodiscard]] gameplay::CharacterInput
-to_character_input(const replication::InputCommand& command) noexcept {
-    gameplay::CharacterInput input;
-    input.move_x = command.move_x;
-    input.move_y = command.move_y;
-    input.yaw = command.yaw;
-    input.pitch = command.pitch;
-    input.held = command.held;
-    input.pressed = command.pressed;
-    return input;
-}
-
-} // namespace
 
 GameplayServer::PlayerState* GameplayServer::find_state(net::SessionId id) noexcept {
     for (PlayerState& state : states_) {
@@ -132,15 +112,14 @@ void GameplayServer::apply_command(ecs::World& world,
         gameplay::step_character(*state, input, *config, physics, handle->body, dt, &step_stats_);
     world.mark_changed<gameplay::CharacterState>(player);
 
-    // The handoff to physics: the controller owns the pose, and writing it into WorldTransform is
-    // how it says so. `PhysicsSync::push_in` reads that transform next and drives the kinematic
-    // capsule there with the velocity the move implied — which is what makes a player PUSH a crate
-    // rather than teleport through it (physics/sync.hpp, gameplay/components.hpp).
-    if (ecs::WorldTransform* transform = world.get<ecs::WorldTransform>(player);
-        transform != nullptr) {
-        transform->value.translation = state->position;
-        world.mark_changed<ecs::WorldTransform>(player);
-    }
+    // The handoff to physics and to replication, through the ONE function that knows how a
+    // controller-computed pose reaches the rest of the engine (gameplay/components.hpp). It writes
+    // LocalTransform as well as WorldTransform, and that is not belt-and-braces:
+    // propagate_transforms runs at step 3 of the tick and recomputes WorldTransform from
+    // LocalTransform, so a WorldTransform-only write is discarded one step after it is made —
+    // silently, because CharacterState (the thing a test asserts on) stays correct while the body
+    // and every replicated mirror sit at the spawn point.
+    gameplay::write_character_pose(world, player, state->position);
 
     // ── The shot ──────────────────────────────────────────────────────────────────────────────
     //

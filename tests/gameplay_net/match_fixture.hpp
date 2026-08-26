@@ -20,6 +20,7 @@
 #include "rime/gameplay_net/components.hpp"
 #include "rime/gameplay_net/gameplay_client.hpp"
 #include "rime/gameplay_net/gameplay_server.hpp"
+#include "rime/gameplay_net/predictor.hpp"
 #include "rime/net/net_driver.hpp"
 #include "rime/physics/physics.hpp"
 #include "rime/replication/client_replicator.hpp"
@@ -91,6 +92,31 @@ inline physics::BodyId add_ground(physics::PhysicsWorld& w, float extent = 10.0f
     return add_static_box(w, {extent, 0.5f, extent}, {0.0f, -0.5f, 0.0f});
 }
 
+// A TILED floor, and the reason the tiles exist rather than one big box.
+//
+// The 10 m half-extent above is not a stylistic bound, it is a measured one: GJK's overlap
+// predicate loses shallow overlaps against very large convex shapes, and a 200 m floor swallows a
+// capsule to the knees and reports nothing. But m12.4's runs walk a player at 6 m/s for several
+// hundred ticks — tens of metres — and a player who walks off the edge of the world is in free
+// fall, which never quiesces, so the "at quiescence they agree exactly" proofs would have nothing
+// to assert at. (Measured: a 300-tick straight walk ended at y = -43.)
+//
+// Tiling is how a real level is built anyway, and it keeps every box inside the regime where the
+// collision answers are trustworthy. Tiles overlap slightly so there is no seam to fall through.
+inline void add_tiled_ground(physics::PhysicsWorld& w, int tiles_per_axis = 5) {
+    constexpr float kTile = 10.0f;
+    constexpr float kPitch = 2.0f * kTile - 0.2f; // a 0.2 m overlap: no gap at the seams
+    const int half = tiles_per_axis / 2;
+    for (int ix = -half; ix <= half; ++ix) {
+        for (int iz = -half; iz <= half; ++iz) {
+            (void)add_static_box(
+                w,
+                {kTile, 0.5f, kTile},
+                {static_cast<float>(ix) * kPitch, -0.5f, static_cast<float>(iz) * kPitch});
+        }
+    }
+}
+
 // Where a capsule of `cfg` comes to rest on flat ground: half-height + radius + the 1.5-skin
 // contact clearance the controller's inflated probe settles at.
 [[nodiscard]] inline float rest_y(const gameplay::CharacterConfig& cfg, float surface_y = 0.0f) {
@@ -101,15 +127,35 @@ inline physics::BodyId add_ground(physics::PhysicsWorld& w, float extent = 10.0f
 
 struct ClientPeer {
     ecs::World world;
+    // A real client simulates too: it needs the level's collision to run the mover locally (m12.4),
+    // and it binds its replicated mirrors to bodies exactly as the server binds its own.
+    physics::PhysicsWorld physics;
+    physics::PhysicsSync sync;
+
     net::Link* link = nullptr;
     std::unique_ptr<net::NetDriver> driver;
     std::unique_ptr<replication::ClientReplicator> replicator;
     replication::ClientInputSender sender;
     gameplay_net::GameplayClient gameplay;
+    gameplay_net::Predictor predictor;
     net::Endpoint endpoint{};
+
+    // Prediction is OPT-IN so that m12.3's cases keep measuring a genuinely prediction-off client.
+    // That is not tidiness: those cases ARE m12.4's negative control, and a control that quietly
+    // acquired the mechanism it controls for would turn the whole comparison into a tautology.
+    bool predict = false;
+
+    // The character config the local avatar runs on. Prediction must use the SAME config the server
+    // does — it arrives replicated on the mirror, and the predictor reads it from there.
+    gameplay::CharacterConfig config{};
 
     // The last command this client built, so a test can restate held levels without re-deriving.
     replication::InputCommand last{};
+
+    // Commands recorded since the last tick and not yet predicted. A vector rather than a single
+    // slot because a test may deliberately record several in one tick (the rate-budget case), and
+    // predicting only the newest would silently make that scenario untestable.
+    std::vector<replication::InputCommand> unpredicted;
 
     // Build and send one command. Returns the sequence it was stamped with.
     //
@@ -119,6 +165,7 @@ struct ClientPeer {
     std::uint32_t send_input(replication::InputCommand command, std::uint64_t now_ms) {
         last = sender.record(command);
         sender.send(*driver, now_ms);
+        unpredicted.push_back(last);
         return last.sequence;
     }
 
@@ -126,6 +173,9 @@ struct ClientPeer {
         return gameplay.local_player(replicator->map());
     }
 
+    // The AUTHORITATIVE state, as replicated. The client never writes this component — it is the
+    // authority's, and it is the input reconciliation compares against. Overwriting it with the
+    // prediction would make the next comparison check the prediction against itself.
     [[nodiscard]] const gameplay::CharacterState* mirrored_state() const {
         const ecs::Entity player = local_player();
         return player.is_valid() ? world.get<gameplay::CharacterState>(player) : nullptr;
@@ -133,6 +183,26 @@ struct ClientPeer {
 
     [[nodiscard]] std::uint32_t last_processed() const {
         return gameplay.last_processed_input(world, replicator->map());
+    }
+
+    // The body PhysicsSync bound to the local avatar's mirror — what the mover excludes from its
+    // own queries. Null until the mirror's Spawn and its first Delta have both landed.
+    [[nodiscard]] physics::BodyId local_body() const {
+        const ecs::Entity player = local_player();
+        if (!player.is_valid()) {
+            return physics::BodyId{};
+        }
+        const physics::RigidBodyHandle* handle = world.get<physics::RigidBodyHandle>(player);
+        return handle != nullptr ? handle->body : physics::BodyId{};
+    }
+
+    // What the local avatar should be DRAWN at: the prediction when it is on, the mirror otherwise.
+    [[nodiscard]] gameplay::CharacterState visible_state() const {
+        if (predict && predictor.seeded()) {
+            return predictor.state();
+        }
+        const gameplay::CharacterState* mirrored = mirrored_state();
+        return mirrored != nullptr ? *mirrored : gameplay::CharacterState{};
     }
 };
 
@@ -203,6 +273,24 @@ struct Match {
         replicator = std::make_unique<replication::ServerReplicator>(world);
     }
 
+    // Stand the level: the same collision geometry on the server AND on every client, present and
+    // future.
+    //
+    // In a game this is the cooked scene both peers load; here it is one box. It matters for m12.4
+    // because a client that cannot see the floor cannot PREDICT standing on it — the mover would
+    // find nothing under the capsule, and the prediction would fall while the authority walked.
+    // (m12.3's cases do not call this: their clients never simulate, so a floor they never query is
+    // scenery.)
+    void stand_level(int tiles_per_axis = 5) {
+        level_tiles = tiles_per_axis;
+        add_tiled_ground(physics, tiles_per_axis);
+        for (auto& client : clients) {
+            add_tiled_ground(client->physics, tiles_per_axis);
+        }
+    }
+
+    int level_tiles = 0;
+
     // Add a client and start its handshake. Call before `settle()`.
     ClientPeer& add_client() {
         auto peer = std::make_unique<ClientPeer>();
@@ -220,6 +308,9 @@ struct Match {
 
         clients.push_back(std::move(peer));
         ClientPeer& added = *clients.back();
+        if (level_tiles > 0) {
+            add_tiled_ground(added.physics, level_tiles); // the same level, whatever the order
+        }
         (void)added.driver->connect(server_endpoint, now_ms);
         return added;
     }
@@ -263,6 +354,65 @@ struct Match {
         (void)replicator->replicate(entity);
         spawned.push_back(entity);
         return entity;
+    }
+
+    // The client's own half of the tick, run right after its mail is applied.
+    //
+    // The order here is the whole of m12.4 and it is written out longhand for the same reason the
+    // server's is: it IS the thing under test.
+    //
+    //   1. propagate, then bind. The snapshot wrote LocalTransform; propagate derives the
+    //      WorldTransform that PhysicsSync places a new body at, so binding before propagating
+    //      would stand every fresh mirror at the origin for one tick.
+    //   2. RECONCILE against the mirror's {CharacterState, LastProcessedInput} — before anything
+    //      local touches this avatar, because that pairing is the authority's word and the only
+    //      honest input to the comparison.
+    //   3. PREDICT this tick's commands, which is what makes the player's own input visible now
+    //      rather than a round trip from now.
+    //   4. Publish the predicted pose to the TRANSFORMS ONLY. `CharacterState` on the mirror is
+    //      never written by the client: it is the authority's, and overwriting it would make the
+    //      next reconcile compare the prediction against itself and always agree.
+    //   5. push_in / step / write_back, exactly as the server does.
+    void tick_client_simulation(ClientPeer& client) {
+        ecs::propagate_transforms(client.world, jobs);
+        client.sync.reconcile(client.world, client.physics);
+
+        const ecs::Entity avatar = client.local_player();
+        const physics::BodyId self = client.local_body();
+
+        if (client.predict && avatar.is_valid() && self.is_valid()) {
+            // The config the server is running, as replicated — not a local guess. Two sides
+            // stepping the same commands under different configs is a divergence with no divergent
+            // input behind it, and it would present as a predictor that never converges.
+            if (const gameplay::CharacterConfig* cfg =
+                    client.world.get<gameplay::CharacterConfig>(avatar);
+                cfg != nullptr) {
+                client.config = *cfg;
+            }
+
+            if (const gameplay::CharacterState* authoritative =
+                    client.world.get<gameplay::CharacterState>(avatar);
+                authoritative != nullptr) {
+                const std::uint32_t q = client.last_processed();
+                (void)client.predictor.reconcile(
+                    *authoritative, q, client.config, client.physics, self, kDt);
+            }
+
+            for (const replication::InputCommand& command : client.unpredicted) {
+                (void)client.predictor.predict(
+                    command, client.config, client.physics, self, kDt, nullptr);
+            }
+
+            if (client.predictor.seeded()) {
+                gameplay::write_character_pose(
+                    client.world, avatar, client.predictor.state().position);
+            }
+        }
+        client.unpredicted.clear();
+
+        client.sync.push_in(client.world, client.physics, kDt);
+        client.physics.step(kDt);
+        client.sync.write_back(client.world, client.physics);
     }
 
     // ONE tick of the whole system, in the canonical order. See the file header on why this is
@@ -309,6 +459,7 @@ struct Match {
                 client->sender.apply_messages(inbox);
                 (void)client->gameplay.apply_messages(inbox);
             }
+            tick_client_simulation(*client);
         }
 
         // ── The simulation (server only: m12.3 has no client-side prediction) ──

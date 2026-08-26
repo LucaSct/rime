@@ -34,14 +34,31 @@ void step_character_entity(ecs::World& world,
     *state = step_character(*state, input, *config, physics, handle->body, dt, stats);
     world.mark_changed<CharacterState>(player);
 
-    // The handoff to physics. The controller owns the character's pose; writing it into
-    // WorldTransform is how it says so, and push_in is what turns that statement into motion the
-    // solver can see. mark_changed is for the ECS's change-detection consumers (render upload,
-    // editor sync, replication); push_in deliberately does NOT rely on it — it compares against the
-    // pose it last pushed, because a game may legitimately write a transform without stamping it
-    // and a flag with a blind spot is exactly the class of bug guardrail 5 exists about.
-    if (ecs::WorldTransform* tf = world.get<ecs::WorldTransform>(player); tf != nullptr) {
-        tf->value.translation = state->position;
+    // The handoff to physics and to everything else that reads a transform — see the long note on
+    // `write_character_pose`. `push_in` is what turns the pose into motion the solver can see,
+    // which is what makes a player PUSH a crate rather than teleport through it (physics/sync.hpp).
+    write_character_pose(world, player, state->position);
+}
+
+void write_character_pose(ecs::World& world, ecs::Entity player, const core::Vec3& position) {
+    // LocalTransform FIRST and unconditionally for a root, because it is the one
+    // propagate_transforms reads. Writing only WorldTransform is the silent failure the header
+    // documents.
+    const ecs::Parent* parent = world.get<ecs::Parent>(player);
+    const bool is_root = parent == nullptr || !parent->value.is_valid();
+    if (is_root) {
+        if (ecs::LocalTransform* local = world.get<ecs::LocalTransform>(player); local != nullptr) {
+            local->value.translation = position;
+            world.mark_changed<ecs::LocalTransform>(player);
+        }
+    }
+
+    // WorldTransform too, so a consumer reading it BEFORE propagate runs this tick — push_in, a
+    // query, a same-tick trigger — sees the fresh pose rather than last tick's. For a root the two
+    // agree, so propagate's recompute is then a no-op rather than a correction.
+    if (ecs::WorldTransform* world_tf = world.get<ecs::WorldTransform>(player);
+        world_tf != nullptr) {
+        world_tf->value.translation = position;
         world.mark_changed<ecs::WorldTransform>(player);
     }
 }

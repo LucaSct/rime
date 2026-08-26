@@ -499,3 +499,86 @@ matters: without it a bare `world.despawn()` leaves every client holding a mirro
 no longer exists, permanently, with no message that repairs it. Counting matters too — a silent
 repair would make the mistake invisible and therefore permanent in the source. It should read zero
 in any healthy game.
+
+---
+
+## Amendment (2026-08-26, m12.4): prediction lands, §4's replay set was wrong, and m12.3 shipped a silent transform bug
+
+m12.4 built the `Predictor`. Three things to record: the number §1 asked for, a correction to §4's
+sketch that only building it revealed, and a defect in m12.3 that its own green proofs could not see.
+
+### C1. §1's "own-input response" clause is met, and its control is measured beside it
+
+§1 asks for *"≤ 1 tick, against a prediction-off control showing ≥ RTT ticks, so prediction is
+provably the reason."* Both arms run the same tape over the same 48 ms link and differ in one
+boolean (`tests/gameplay_net/prediction_test.cpp`):
+
+| | own-input response |
+|---|---|
+| prediction **on** | **1 tick** |
+| prediction **off** (m12.3's baseline) | **6 ticks** — exactly the round trip |
+
+Supporting numbers, each with its own negative control: worst prediction-vs-authority distance while
+walking **0.20 m** (the prediction runs *ahead*, which is the point); under 25% loss over 300 ticks,
+124 pairings produced **2 corrections** and 122 within-tolerance skips; divergence after 300 lossy
+ticks was **0.2 m with reconciliation and 1.1 m without**; and a run with 13 permanently-lost
+commands took 10 corrections and then agreed **bit for bit**.
+
+§4's "a lossy run with zero corrections fails" is enforced as an assertion, not a hope: every other
+case in the file would still pass with `reconcile` hard-wired to return false, and that one would
+not.
+
+### C2. §4's replay set is wrong: `unacked()` is retired on the wrong frontier
+
+§4 sketches the replay as *"replay every `unacked()` command with sequence > q"*. That has a hole,
+and it is invisible on a clean link.
+
+`unacked()` retires on `ClientInputSender::acked_through`, which comes from the `InputAck` message.
+That ack rides an unreliable **superseding** stream; the snapshot carrying `q` rides a *different*
+one, and relevancy or a byte budget can hold the player's record back further still. So
+`acked_through >= q`, often strictly — **measured on 60 of 300 ticks under 30% loss**. Replaying
+only `unacked()` therefore skips every command in `(q, acked_through]`: commands the server *did*
+consume and the client *did* predict. The prediction slides a few ticks backwards on every
+correction, under exactly the conditions prediction exists to smooth over.
+
+**Ruling: the `Predictor` keeps its own `{sequence, command, state}` ring, retired on the reconciled
+`q`** — the only frontier that makes the replay set complete. `unacked()` remains what m11.6c built
+it to be (the bound on the client's send buffer) and is not the predictor's input.
+
+Everything §4 promised survives. A lost command still sits below the ack jump, so `q` moves past it,
+the ring is trimmed past it, and the replay excludes it — both sides end up agreeing the input never
+happened. What changes is only *where the replay set comes from*.
+
+A related property, found the same way and worth writing down because it looks like a bug: **a
+permanently-lost command stops mattering only when a later one arrives.** If the last thing a client
+ever sends is dropped, `consumed_through` stops just short of it and the two sides sit exactly one
+tick of travel apart — measured at 0.1 m, which is 6 m/s × one tick, on the nose — until somebody
+says something else. A real client keeps sending while standing still, so this is a property of
+contrived silence rather than of play; the proofs settle *with* input because of it.
+
+### C3. m12.3 shipped a silent transform bug, and its proofs were green throughout
+
+The controller wrote its pose to `WorldTransform` only. `propagate_transforms` runs one step later
+in the canonical tick order and **recomputes `WorldTransform` from `LocalTransform`** for every
+entity carrying both — so the write was discarded every tick, by a pass doing exactly its job.
+
+Measured: an avatar whose `CharacterState` had walked to z = −3.29 had a `WorldTransform`, a
+`LocalTransform` and a physics body all still reading z = 0. The consequences are all one layer out
+from where the tests were looking: the kinematic capsule never moves, so the player pushes nothing
+and debris cannot hit them where they are; and **the replicated transform is wrong, so every other
+client mirrors that avatar standing at its spawn point forever.**
+
+It was silent because `CharacterState` is what a controller test naturally asserts on, and
+`CharacterState` was perfectly correct the whole time. Every m12.3 proof stayed green.
+
+The fix is one function — `gameplay::write_character_pose` — used by both the m12.2 ECS wrapper and
+the m12.3 consume loop, writing `LocalTransform` (the one propagate reads) as well as
+`WorldTransform`. A parented character is explicitly unsupported and keeps the old behaviour, since
+a world-space pose assigned to a child's local transform would be wrong in a different way.
+
+The lesson is the milestone's own, turned on itself once more: **a proof that asserts the value a
+system computes has not thereby asserted that the value reached anyone.** m12.3's counters covered
+every skip inside the consume loop and none of them could see a write being overwritten downstream.
+The new case (`consume_loop_test.cpp`, "the avatar's transform and its physics body follow the
+controller") asserts the handoff instead of the state, and was checked against a deliberately
+reverted fix to confirm it fails — on all three consequences, including the client's mirror.
