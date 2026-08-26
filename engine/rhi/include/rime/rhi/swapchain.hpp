@@ -52,6 +52,32 @@ public:
     [[nodiscard]] virtual Format format() const = 0;   // the backbuffer color format
     [[nodiscard]] virtual Extent2D extent() const = 0; // current size in pixels
 
+    // Recreate only if `wanted` differs from the current extent; returns true if it rebuilt. This
+    // is the resize entry point a windowed frame loop should call every frame with the window's
+    // framebuffer_size(), and it exists because "recreate when acquire/present reports out of date"
+    // is NOT a sufficient trigger on every platform.
+    //
+    // On Wayland, VkSurfaceCapabilitiesKHR::currentExtent is the 0xFFFFFFFF sentinel — the surface
+    // takes whatever size the swapchain was built with. The driver therefore has no notion of the
+    // window's real size, nothing ever contradicts the swapchain, and VK_ERROR_OUT_OF_DATE_KHR is
+    // never reported for a compositor resize. Measured: a 775x1025 window presenting a 784x514
+    // swapchain indefinitely, its content stopping halfway down. X11 and Win32 do report a real
+    // currentExtent, so the out-of-date paths still matter — this is an additional trigger, not a
+    // replacement. Comparing against the window costs two integer compares on the frames that
+    // match, and it also catches a window resized between create_window() and the swapchain built
+    // from its size, which an event-driven trigger misses.
+    bool ensure_extent(Extent2D wanted) {
+        if (wanted.width == 0 || wanted.height == 0) {
+            return false; // minimized/zero-size: nothing to build, and build() would reject it
+        }
+        const Extent2D current = extent();
+        if (wanted.width == current.width && wanted.height == current.height) {
+            return false;
+        }
+        recreate(wanted);
+        return true;
+    }
+
 protected:
     Swapchain() = default; // obtained only from Device::create_swapchain()
 

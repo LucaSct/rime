@@ -9,9 +9,12 @@
 #include <xkbcommon/xkbcommon-names.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -33,9 +36,27 @@
 //
 // Keys carry the physical evdev code (shared key_from_evdev); text and modifier state come from
 // xkbcommon. Unlike X11/Win32/macOS, a Wayland surface only becomes visible once a buffer is
-// attached — which is the renderer's job — so under M2 (no renderer yet) the window is created and
-// fully event-wired but not yet mapped on screen; the runnable M2.5 proof on Linux therefore uses
-// X11, and pixels arrive here with the M3 Vulkan swapchain (VK_KHR_wayland_surface).
+// attached — a rule with a sharp consequence: a window with no renderer is not merely blank, it is
+// never MAPPED. The compositor does not lay it out, does not list it as a client, and — because an
+// unmapped surface is never re-laid-out — sends exactly one xdg_toplevel.configure and then nothing
+// ever again. Measured on Hyprland 0.56.1: `hyprctl clients` reported zero windows for a running
+// 00-hello-window, which prints one 784x1029 configure and then sits invisible forever.
+//
+// So this backend attaches a PLACEHOLDER wl_shm buffer for windows that no renderer claims. That
+// keeps the platform layer's promise — "open a window, get input, get resizes, close cleanly" —
+// true on Wayland without a GPU, which is what the M2.5 proof actually asserts. The claim is
+// deferred by one pump rather than made in the constructor, and the test is `native_handle()`: the
+// only reason to ask for the raw wl_surface is to build a rendering surface on it, and the RHI does
+// so during setup, before the first frame. A window whose handle was never taken has no renderer,
+// so we paint it ourselves; a window whose handle was taken pays nothing, because the placeholder
+// is never allocated at all. That inference is documented on `Window::native_handle()` itself,
+// since it gives a plain getter a side effect that a caller could not otherwise guess.
+//
+// Every buffer touch is gated on an acked xdg_surface.configure — see on_surface_configured() for
+// the two protocol races that gate closes, both of which were traced live on this compositor.
+//
+// Pixels for real content still arrive with the M3 Vulkan swapchain (VK_KHR_wayland_surface); the
+// placeholder is only ever the fallback for a rendererless window.
 namespace rime::platform {
 namespace {
 
@@ -43,6 +64,7 @@ wl_display* g_display = nullptr;
 wl_registry* g_registry = nullptr;
 wl_compositor* g_compositor = nullptr;
 xdg_wm_base* g_wm_base = nullptr;
+wl_shm* g_shm = nullptr; // optional: only the rendererless placeholder below needs it
 wl_seat* g_seat = nullptr;
 wl_keyboard* g_keyboard = nullptr;
 wl_pointer* g_pointer = nullptr;
@@ -95,6 +117,21 @@ KeyMods current_mods() {
     return m;
 }
 
+// One anonymous, memory-backed file to share pixels with the compositor. wl_shm works by handing
+// the compositor a file descriptor it maps read-only, so the buffer must live in a real file —
+// memfd_create gives us one with no filesystem name to clean up or collide on.
+int make_shm_fd(std::size_t bytes) {
+    const int fd = ::memfd_create("rime-placeholder", MFD_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    if (::ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 class WaylandWindow final : public Window {
 public:
     explicit WaylandWindow(const WindowDesc& desc); // defined below the listeners it wires up
@@ -113,6 +150,7 @@ public:
         // a live display (the same display-gated teardown-order footgun the X11 backend has; the
         // local focus/registry bookkeeping above is process-local and always safe).
         if (g_display != nullptr) {
+            release_placeholder(); // buffer + pool are proxies too: same live-display rule
             if (toplevel_ != nullptr) {
                 xdg_toplevel_destroy(toplevel_);
             }
@@ -123,6 +161,10 @@ public:
                 wl_surface_destroy(surface_);
             }
             wl_display_flush(g_display);
+        } else if (pool_data_ != nullptr) {
+            // Display already gone: the proxies died with it, but the mapping is ours to return.
+            ::munmap(pool_data_, pool_bytes_);
+            pool_data_ = nullptr;
         }
     }
 
@@ -149,16 +191,64 @@ public:
     void request_close() override { notify_close(); }
 
     void show() override {
-        // No buffer yet (that is the renderer's job in M3), so committing here does not map pixels;
-        // it simply finishes the surface setup. The compositor maps the window on the first buffer.
+        // Committing here finishes the surface setup; it cannot map pixels, because mapping needs a
+        // buffer and no renderer has had the chance to attach one yet. The window becomes visible
+        // on the first buffer — either the renderer's, or the placeholder settle_placeholder()
+        // attaches on the first pump if no renderer ever claims this surface.
         wl_surface_commit(surface_);
         wl_display_flush(g_display);
     }
 
     [[nodiscard]] NativeWindow native_handle() const override {
         // M3's Vulkan backend builds a surface from wl_display* + wl_surface*
-        // (VK_KHR_wayland_surface).
+        // (VK_KHR_wayland_surface). Taking the handle is also the signal that a renderer owns this
+        // surface's pixels from here on, so the placeholder below stands down permanently — see the
+        // file header on why this, and not a WindowDesc flag, is the honest test. The store is
+        // atomic because this method is `const` and documented stable, so nothing stops a render
+        // thread from calling it while the main thread pumps and reads the flag.
+        renderer_attached_.store(true, std::memory_order_relaxed);
         return NativeWindow{WindowSystem::Wayland, g_display, surface_};
+    }
+
+    // Called once per pump. By the time the first pump runs, any renderer has already taken the
+    // native handle during setup, so this is the earliest moment at which "nobody is going to draw
+    // this window" is a decidable fact rather than a guess. Note this only records the INTENT to
+    // paint: the paint itself must wait for a configure to have been acked (see maybe_paint).
+    void settle_placeholder() {
+        if (renderer_attached_.load(std::memory_order_relaxed) || placeholder_settled_) {
+            return;
+        }
+        placeholder_settled_ = true;
+        maybe_paint_placeholder();
+    }
+
+    // The ack half of the xdg-shell configure handshake, and the only place a placeholder paint may
+    // originate. xdg-shell is strict about the order here: a client must ack a configure before the
+    // commit that answers it, and attaching ANY buffer before the first xdg_surface.configure is a
+    // protocol error (`xdg_surface.unconfigured_buffer`), which is fatal — every later dispatch
+    // fails and the app soft-hangs with a dead connection.
+    //
+    // Both halves of that were live traced as real races, not theory. The initial configure arrived
+    // ~460us AFTER the constructor's wl_display_roundtrip returned, so painting from the pump was
+    // relying on init being slow enough for the bytes to land first — luck that a Release build or
+    // a compositor that defers configures to its own layout clock (Mutter, KWin) removes. And
+    // painting straight from xdg_toplevel.configure committed the new size BEFORE this ack went
+    // out, which compositors enforcing a state mandate (weston, on a maximized window) treat as
+    // fatal.
+    //
+    // So: xdg_toplevel.configure only records a pending size, and everything that touches a buffer
+    // happens here, after the ack.
+    void on_surface_configured() {
+        configured_ = true;
+        // Adopting a new size already repaints, so painting again here would allocate and fill a
+        // second identical buffer for every configure — measured on the wire as two attach/commit
+        // cycles per resize. The else covers the first configure of a window whose size did not
+        // change, which is what maps it.
+        if (pending_size_) {
+            apply_pending_size();
+        } else {
+            maybe_paint_placeholder();
+        }
     }
 
     [[nodiscard]] WindowId id() const override { return id_; }
@@ -175,12 +265,34 @@ public:
         post_event(e);
     }
 
-    void notify_resize(std::uint32_t w, std::uint32_t h) {
+    // xdg_toplevel.configure: the ADVISORY half of the handshake. It records the size and nothing
+    // else — no buffer may be touched until the xdg_surface.configure that closes this batch has
+    // been acked. If that ack already happened for an earlier batch, the size is applied when the
+    // next one arrives, which is the protocol's own pacing rather than ours.
+    void notify_configure_size(std::uint32_t w, std::uint32_t h) {
         if (w == width_ && h == height_) {
             return;
         }
-        width_ = w;
-        height_ = h;
+        pending_size_ = Extent2D{w, h};
+    }
+
+    [[nodiscard]] wl_surface* surface() const { return surface_; }
+
+private:
+    // Adopt the size the compositor last proposed, repaint a placeholder if we own the pixels, and
+    // tell the app. Runs only from on_surface_configured(), i.e. only after an ack.
+    void apply_pending_size() {
+        const Extent2D size = *pending_size_;
+        pending_size_.reset();
+        if (size.width == width_ && size.height == height_) {
+            return;
+        }
+        width_ = size.width;
+        height_ = size.height;
+        // A rendererless window has to repaint itself at the new size or the compositor keeps
+        // showing the old, smaller buffer — the very artefact this backend is fixing. A window with
+        // a renderer is left alone: attaching here would fight its presents.
+        maybe_paint_placeholder();
         Event e{};
         e.type = EventType::WindowResize;
         e.window = id_;
@@ -188,9 +300,101 @@ public:
         post_event(e);
     }
 
-    [[nodiscard]] wl_surface* surface() const { return surface_; }
+    // The single gate every placeholder paint passes through: we must want one, no renderer may
+    // have claimed the surface, and a configure must already be acked.
+    void maybe_paint_placeholder() {
+        if (!placeholder_settled_ || !configured_ ||
+            renderer_attached_.load(std::memory_order_relaxed)) {
+            return;
+        }
+        paint_placeholder();
+    }
 
-private:
+    // Attach an opaque, window-sized buffer so the compositor maps the surface. XRGB8888 is the one
+    // format wl_shm is required to support, and being opaque it also spares the compositor a
+    // blending pass for a window that is only ever a flat backdrop.
+    void paint_placeholder() {
+        if (g_shm == nullptr || width_ == 0 || height_ == 0) {
+            return; // no wl_shm global, or no size yet: nothing sensible to attach
+        }
+        const std::size_t stride = static_cast<std::size_t>(width_) * 4u;
+        const std::size_t bytes = stride * height_;
+        if (bytes > static_cast<std::size_t>(INT32_MAX)) {
+            return; // wl_shm_create_pool takes an int32 size; a negative one is a protocol error
+        }
+
+        // Reallocate only when the window grew; shrinking reuses the existing mapping. The pool is
+        // rebuilt with it because a wl_shm_pool is bound to the fd's size at creation.
+        if (bytes > pool_bytes_) {
+            release_placeholder();
+            const int fd = make_shm_fd(bytes);
+            if (fd < 0) {
+                return;
+            }
+            void* data = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (data == MAP_FAILED) {
+                ::close(fd);
+                return;
+            }
+            pool_ = wl_shm_create_pool(g_shm, fd, static_cast<std::int32_t>(bytes));
+            ::close(fd); // the pool holds its own reference; our copy is done
+            pool_data_ = data;
+            pool_bytes_ = bytes;
+        }
+        if (pool_ == nullptr || pool_data_ == nullptr) {
+            return;
+        }
+
+        if (buffer_ != nullptr) {
+            wl_buffer_destroy(buffer_); // one buffer per size; the pool memory outlives it
+        }
+        buffer_ = wl_shm_pool_create_buffer(pool_,
+                                            0,
+                                            static_cast<std::int32_t>(width_),
+                                            static_cast<std::int32_t>(height_),
+                                            static_cast<std::int32_t>(stride),
+                                            WL_SHM_FORMAT_XRGB8888);
+        if (buffer_ == nullptr) {
+            return;
+        }
+
+        // A flat neutral fill. Deliberately not black: a window that is exactly the desktop's
+        // background colour is indistinguishable from not having opened, which is the failure this
+        // whole path exists to make impossible to mistake.
+        std::uint32_t* px = static_cast<std::uint32_t*>(pool_data_);
+        const std::size_t count = static_cast<std::size_t>(width_) * height_;
+        for (std::size_t i = 0; i < count; ++i) {
+            px[i] = 0x00181c24u; // XRGB: x=0, R=0x18, G=0x1c, B=0x24
+        }
+
+        wl_surface_attach(surface_, buffer_, 0, 0);
+        // wl_surface_damage, not damage_buffer: the latter is a v4 request and the compositor bind
+        // accepts older versions, where calling it is a fatal `invalid_method`. The two differ only
+        // in coordinate space (surface vs buffer), and with no buffer scale ever set on this
+        // surface the two spaces are identical — so the deprecated one is exactly right and
+        // version-safe.
+        wl_surface_damage(
+            surface_, 0, 0, static_cast<std::int32_t>(width_), static_cast<std::int32_t>(height_));
+        wl_surface_commit(surface_);
+        wl_display_flush(g_display);
+    }
+
+    void release_placeholder() {
+        if (buffer_ != nullptr) {
+            wl_buffer_destroy(buffer_);
+            buffer_ = nullptr;
+        }
+        if (pool_ != nullptr) {
+            wl_shm_pool_destroy(pool_);
+            pool_ = nullptr;
+        }
+        if (pool_data_ != nullptr) {
+            ::munmap(pool_data_, pool_bytes_);
+            pool_data_ = nullptr;
+        }
+        pool_bytes_ = 0;
+    }
+
     WindowId id_;
     wl_surface* surface_ = nullptr;
     xdg_surface* xdg_surface_ = nullptr;
@@ -198,6 +402,19 @@ private:
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
     bool should_close_ = false;
+
+    // Placeholder state. `renderer_attached_` is mutable because native_handle() is const by the
+    // Window interface, and the observation it records — "someone asked for the raw surface" — is
+    // about this object's future, not about the value it returned. It is atomic because that method
+    // is documented as a stable getter, so a caller is entitled to use it off-thread.
+    mutable std::atomic<bool> renderer_attached_{false};
+    bool placeholder_settled_ = false;
+    bool configured_ = false;              // an xdg_surface.configure has been acked
+    std::optional<Extent2D> pending_size_; // proposed by xdg_toplevel.configure, not yet adopted
+    wl_shm_pool* pool_ = nullptr;
+    wl_buffer* buffer_ = nullptr;
+    void* pool_data_ = nullptr;
+    std::size_t pool_bytes_ = 0;
 };
 
 // ── Input listener callbacks ─────────────────────────────────────────────────────
@@ -459,8 +676,12 @@ const xdg_wm_base_listener g_wm_base_listener = {
     .ping = wm_base_ping,
 };
 
-void surface_configure(void*, xdg_surface* surface, std::uint32_t serial) {
+void surface_configure(void* data, xdg_surface* surface, std::uint32_t serial) {
+    // Ack first, then let the window act on the batch — that order is what xdg-shell requires of
+    // every commit answering a configure, and it is the whole reason painting lives here rather
+    // than in toplevel_configure or the pump.
     xdg_surface_ack_configure(surface, serial);
+    static_cast<WaylandWindow*>(data)->on_surface_configured();
 }
 
 const xdg_surface_listener g_xdg_surface_listener = {
@@ -473,8 +694,8 @@ void toplevel_configure(void* data,
                         std::int32_t height,
                         wl_array*) {
     if (width > 0 && height > 0) {
-        static_cast<WaylandWindow*>(data)->notify_resize(static_cast<std::uint32_t>(width),
-                                                         static_cast<std::uint32_t>(height));
+        static_cast<WaylandWindow*>(data)->notify_configure_size(
+            static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
     }
 }
 
@@ -501,6 +722,8 @@ void registry_global(void*,
         g_wm_base =
             static_cast<xdg_wm_base*>(wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
         xdg_wm_base_add_listener(g_wm_base, &g_wm_base_listener, nullptr);
+    } else if (std::strcmp(interface, wl_shm_interface.name) == 0) {
+        g_shm = static_cast<wl_shm*>(wl_registry_bind(registry, name, &wl_shm_interface, 1));
     } else if (std::strcmp(interface, wl_seat_interface.name) == 0) {
         g_seat = static_cast<wl_seat*>(
             wl_registry_bind(registry, name, &wl_seat_interface, version < 5 ? version : 5));
@@ -586,6 +809,10 @@ void wayland_shutdown() {
         xdg_wm_base_destroy(g_wm_base);
         g_wm_base = nullptr;
     }
+    if (g_shm != nullptr) {
+        wl_shm_destroy(g_shm);
+        g_shm = nullptr;
+    }
     if (g_compositor != nullptr) {
         wl_compositor_destroy(g_compositor);
         g_compositor = nullptr;
@@ -620,6 +847,13 @@ void wayland_pump() {
         wl_display_cancel_read(g_display);
     }
     wl_display_dispatch_pending(g_display);
+
+    // Give any window nobody is rendering to its placeholder buffer, so it actually maps. This runs
+    // after dispatch so the first pass acts on a size the compositor has already configured.
+    for (auto& [surface, window] : g_windows()) {
+        (void)surface;
+        window->settle_placeholder();
+    }
 }
 
 std::unique_ptr<Window> wayland_create_window(const WindowDesc& desc) {
