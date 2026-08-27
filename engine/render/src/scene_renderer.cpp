@@ -18,6 +18,7 @@
 #include "rime/ecs/render_transform.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/culling.hpp"
 
 namespace rime::render {
 
@@ -294,6 +295,68 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     fu.view_proj =
         core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far) *
         scene.camera.view;
+    // ── View-frustum culling (m13.2a, ADR-0035 §2a) ──────────────────────────────────────
+    //
+    // Done HERE rather than inside extract_scene because the frustum needs the frame's aspect
+    // ratio — which is a property of the target, not of the world — and because the per-mesh
+    // bounds live in the registry, which extraction deliberately does not know about.
+    //
+    // The draws and their parallel entity array are compacted TOGETHER. They are parallel by
+    // contract (`ExtractedScene::draw_entities`), and the pick pass reads the pairing to answer
+    // "which entity is this pixel"; compacting one and not the other would mis-identify every
+    // entity after the first culled draw — a bug with no wrong pixel anywhere.
+    // IT PARTITIONS, IT DOES NOT DELETE — and that distinction is the whole of this brick's one
+    // real hazard.
+    //
+    // ONE draw list feeds the camera passes AND both shadow passes (the cascade fit and the local
+    // spots render the same geometry from the LIGHT's point of view). Culling it against the
+    // CAMERA's frustum therefore removes shadow casters that are off-screen but cast into the
+    // view — a ceiling above the camera stops shadowing the floor under it, and the room it was
+    // darkening lights up.
+    //
+    // That is not a hypothetical. The first version of this deleted the culled entries, and
+    // `gi_thesis_test` — a covered room lit only by bounce — went from 0.04 to 0.74 on its floor
+    // pixel, because its ceiling and divider were no longer drawn into the shadow map. Every other
+    // render proof stayed green.
+    //
+    // So the culled draws are moved to the BACK rather than dropped, and the visible ones keep
+    // their relative order at the front. `record_draws` indexes each draw's uniform slice and its
+    // five material textures by LOOP POSITION, so every parallel array stays aligned by
+    // construction: the camera passes take the first `visible` entries, the shadow passes take all
+    // of them, and neither needs to know the other exists.
+    std::size_t visible = scene.draws.size();
+    if (cull_enabled_) {
+        const Frustum frustum = frustum_from_view_proj(fu.view_proj);
+        std::size_t front = 0;
+        std::vector<DrawItem> hidden_draws;
+        std::vector<ecs::Entity> hidden_entities;
+        for (std::size_t read = 0; read < scene.draws.size(); ++read) {
+            const GpuMesh& mesh = meshes_.get(scene.draws[read].mesh);
+            core::Vec3 world_min;
+            core::Vec3 world_max;
+            transform_aabb(
+                scene.draws[read].model, mesh.local_min, mesh.local_max, world_min, world_max);
+            if (aabb_in_frustum(frustum, world_min, world_max)) {
+                scene.draws[front] = scene.draws[read];
+                scene.draw_entities[front] = scene.draw_entities[read];
+                ++front;
+            } else {
+                hidden_draws.push_back(scene.draws[read]);
+                hidden_entities.push_back(scene.draw_entities[read]);
+            }
+        }
+        visible = front;
+        for (std::size_t i = 0; i < hidden_draws.size(); ++i) {
+            scene.draws[front] = hidden_draws[i];
+            scene.draw_entities[front] = hidden_entities[i];
+            ++front;
+        }
+        cull_stats_.culled += hidden_draws.size();
+        cull_stats_.submitted += visible;
+    } else {
+        cull_stats_.submitted += scene.draws.size();
+    }
+
     fu.camera_pos[0] = scene.camera.position[0];
     fu.camera_pos[1] = scene.camera.position[1];
     fu.camera_pos[2] = scene.camera.position[2];
@@ -417,14 +480,36 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     }
 
     // ── Declare the frame ─────────────────────────────────────────────────────────────────
+    // The SHADOW view: every draw, because a caster outside the camera's frustum still casts into
+    // it. See the partition note above.
+    SceneDrawData shadow_data{};
+    shadow_data.meshes = &meshes_;
+    shadow_data.draws = frame_draws_;
+    shadow_data.base_color_textures = frame_base_color_;
+    shadow_data.metallic_roughness_textures = frame_metallic_roughness_;
+    shadow_data.normal_textures = frame_normal_;
+    shadow_data.occlusion_textures = frame_occlusion_;
+    shadow_data.emissive_textures = frame_emissive_;
+    shadow_data.frame_ubo = frame_ubo_;
+    shadow_data.draw_ubo = draw_ubo_;
+    shadow_data.material_sampler = material_sampler_;
+
+    // The CAMERA view: the visible prefix. Every parallel array is sliced to the same length, so
+    // `record_draws`'s index-by-loop-position stays correct.
+    const std::size_t visible_count = std::min(visible, frame_draws_.size());
     SceneDrawData data{};
     data.meshes = &meshes_;
-    data.draws = frame_draws_;
-    data.base_color_textures = frame_base_color_;
-    data.metallic_roughness_textures = frame_metallic_roughness_;
-    data.normal_textures = frame_normal_;
-    data.occlusion_textures = frame_occlusion_;
-    data.emissive_textures = frame_emissive_;
+    data.draws = std::span<const DrawItem>{frame_draws_}.subspan(0, visible_count);
+    data.base_color_textures =
+        std::span<const rhi::TextureHandle>{frame_base_color_}.subspan(0, visible_count);
+    data.metallic_roughness_textures =
+        std::span<const rhi::TextureHandle>{frame_metallic_roughness_}.subspan(0, visible_count);
+    data.normal_textures =
+        std::span<const rhi::TextureHandle>{frame_normal_}.subspan(0, visible_count);
+    data.occlusion_textures =
+        std::span<const rhi::TextureHandle>{frame_occlusion_}.subspan(0, visible_count);
+    data.emissive_textures =
+        std::span<const rhi::TextureHandle>{frame_emissive_}.subspan(0, visible_count);
     data.frame_ubo = frame_ubo_;
     data.draw_ubo = draw_ubo_;
     data.material_sampler = material_sampler_;
@@ -468,15 +553,16 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             ci.light_dir = core::Vec3{fu.dir_lights[0].direction[0],
                                       fu.dir_lights[0].direction[1],
                                       fu.dir_lights[0].direction[2]};
-            shadow = csm_.add(graph, depth_prepass_, data, ci, lighting_);
+            // shadow_data, not data: a caster off-screen still casts into the view.
+            shadow = csm_.add(graph, depth_prepass_, shadow_data, ci, lighting_);
         } else {
             shadow = csm_.empty_binding(graph, dummy_shadow_array_);
         }
         // The local (spot) binding: the cached spot maps, else the same count-0 placeholder.
         const LocalShadowBinding local =
-            has_local
-                ? local_shadows_.add(graph, depth_prepass_, data, scene.spot_lights, lighting_)
-                : local_shadows_.empty_binding(graph, dummy_shadow_array_);
+            has_local ? local_shadows_.add(
+                            graph, depth_prepass_, shadow_data, scene.spot_lights, lighting_)
+                      : local_shadows_.empty_binding(graph, dummy_shadow_array_);
         // The clustered binding (m10.3): the froxel light lists, else the flag-0 placeholder that
         // sends the shader back to the uniform-block light loop.
         ClusterBinding clusters;
