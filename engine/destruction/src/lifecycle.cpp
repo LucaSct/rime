@@ -27,6 +27,33 @@
 // not "same as lifecycle-off".
 namespace rime::destruction {
 
+std::size_t DestructionWorld::Impl::visual_debris_count() const noexcept {
+    std::size_t n = 0;
+    for (const Debris& d : debris) {
+        n += d.phase != DebrisPhase::Retired ? 1 : 0;
+    }
+    return n;
+}
+
+void DestructionWorld::Impl::retire_debris(std::size_t debris_index) {
+    Debris& rec = debris[debris_index];
+    if (rec.phase == DebrisPhase::Retired) {
+        return; // idempotent, like freeze
+    }
+    rec.phase = DebrisPhase::Retired;
+
+    // The announcement, on the channel that already exists. Same payload shape as PartDied and
+    // IslandDetached, so a lighting cache subscribes to it with the code it already has — which is
+    // exactly what ADR-0032 C6 promised ("no new plumbing").
+    DestructionEvent ev;
+    ev.kind = DestructionEventKind::DebrisEvicted;
+    ev.instance = InstanceId{rec.instance, 0};
+    ev.body = physics::BodyId{}; // already destroyed at freeze time
+    ev.world_bounds = rec.last_bounds;
+    ev.magnitude = 0.0f;
+    events.push(ev);
+}
+
 std::size_t DestructionWorld::Impl::live_debris_count() const noexcept {
     std::size_t n = 0;
     for (const Debris& d : debris) {
@@ -58,6 +85,13 @@ void DestructionWorld::Impl::freeze_debris(std::size_t debris_index, physics::Ph
     // runtime compound registered just for it; a k=1 debris body instead carries a SHARED pattern
     // hull, so its `compound` is null and there is nothing to free — unregistering that shared hull
     // would dangle every sibling and every future spawn that uses it (the pattern is immortal).
+    // Capture the extent BEFORE the body goes. This is the last moment anyone can ask the physics
+    // world where this debris is, and the visual-retirement stage (m13.2b) needs it possibly
+    // hundreds of ticks later to tell a lighting cache which region to invalidate.
+    physics::BodyState st{};
+    if (world.get_body_state(rec.body, st)) {
+        rec.last_bounds = physics::Aabb{st.position, st.position};
+    }
     world.destroy_body(rec.body);
     if (rec.compound.is_valid()) {
         (void)world.unregister_compound(rec.compound);
@@ -116,6 +150,37 @@ void DestructionWorld::Impl::enforce_debris_budget(physics::PhysicsWorld& world)
             break; // no settled debris to shed right now — soft cap under an active burst
         }
         freeze_debris(victim, world);
+    }
+
+    // 3) VISUAL budget (m13.2b — ADR-0032 C6). Past it, retire the OLDEST frozen debris until the
+    //    visible population is back under the cap.
+    //
+    //    Oldest-first by roster index, not by the size×age score the live cap uses, and the
+    //    difference is deliberate. The live cap is shedding SIMULATION cost, so it wants to drop
+    //    whatever is least interesting to keep simulating. This is shedding VISUAL cost from a set
+    //    of things that are all equally static — so the only fair rule is the one a player would
+    //    predict: the wreckage that has been lying there longest goes first. Roster index IS
+    //    creation order (the roster is append-only), so it needs no extra state and stays
+    //    deterministic for free.
+    //
+    //    Only FROZEN debris are eligible. A Falling or Settled piece is still simulating and still
+    //    plainly visible; retiring it would delete rubble out from under a player watching it come
+    //    to rest. Under a burst the visual cap is therefore soft in exactly the way the live cap
+    //    is, and catches up as pieces freeze.
+    if (lifecycle.max_visual_debris > 0) {
+        while (visual_debris_count() > lifecycle.max_visual_debris) {
+            std::size_t victim = std::numeric_limits<std::size_t>::max();
+            for (std::size_t d = 0; d < debris.size(); ++d) {
+                if (debris[d].phase == DebrisPhase::Frozen) {
+                    victim = d;
+                    break; // ascending scan ⇒ the first Frozen row is the oldest
+                }
+            }
+            if (victim == std::numeric_limits<std::size_t>::max()) {
+                break; // nothing frozen yet — soft, and re-checked next tick
+            }
+            retire_debris(victim);
+        }
     }
 }
 

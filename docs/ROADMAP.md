@@ -9,6 +9,40 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-27) — m13.2b: ADR-0032's C6 is finally built, two milestones late.** C6 —
+> "debris visual lifetime is bounded, and retirement emits a world-bounds event so lighting caches
+> invalidate the region" — was declared *"NEW — M10's to build"*, was not built, and was recorded as
+> such in a post-M11 amendment. ADR-0035 §6 ruled it into M12; the split moved it here.
+>
+> It was a **leak, not a bug**, which is why nothing caught it for two milestones. m8.5 bounds
+> debris in the PHYSICS world — settle ⇒ linger ⇒ freeze destroys the body — but deliberately keeps
+> the roster record so ids never shift, and ADR-0029 §8 says in as many words that "a render leaf
+> can outlive the physics body at its last pose". Correct for v1 rendering; it also means debris
+> never despawns VISUALLY, so a long session accumulates render leaves, SDF bricks and shadow
+> casters for rubble nobody can see. Every M10 proof runs a few hundred ticks, and the stores it
+> *does* bound were the ones anyone was watching.
+>
+> Now: `DestructionEventKind::DebrisEvicted` on the existing C2 channel (same payload shape as
+> `PartDied`, so caches subscribe with the code they already have — §9's "no new plumbing", kept),
+> and a `max_visual_debris` budget deliberately larger than the physics one, so rubble stays
+> visible well after it stops simulating and is still bounded.
+>
+> Three decisions the ADR left open, each recorded in an amendment: retirement **marks rather than
+> erases**, because `destruction_net` indexes the roster directly and a shifting row would
+> re-point every replicated mirror; it evicts **oldest-first** rather than by the live cap's
+> size×age score, because these are all equally static and "the wreckage lying there longest goes
+> first" is the rule a player predicts; and the bounds are captured at **freeze** time, not at
+> retirement — by then the body has been gone for hundreds of ticks, and the obvious
+> implementation ships an event whose region is a zero-extent box at the origin that a lighting
+> cache would faithfully use to invalidate the wrong place.
+>
+> Measured: a 20-part collapse under a budget of 6 plateaus at 6 visible rows over 400 ticks with 14
+> evictions announced, while the roster keeps all 20. A zero-budget arm reproduces the pre-C6 leak
+> deliberately, so the bound has a control rather than only a description.
+>
+> **Next:** m13.2c — the block content itself (the building prefab pattern, a procedural assembly
+> emitting `.rscene`, street props).
+
 > **Update (2026-08-27) — m13.2a: view-frustum culling, and the counters that keep it honest.**
 > ADR-0035 §2a named this as the one work-ledger entry M13 must ADD, "because no cull exists yet":
 > extraction emitted *literally every* `{WorldTransform, MeshRef, MaterialRef}`, which is fine at

@@ -166,6 +166,7 @@ struct Listeners {
     std::uint32_t parts_died = 0;
     std::uint32_t islands_detached = 0;
     std::uint32_t debris_settled = 0;
+    std::uint32_t debris_evicted = 0; // m13.2b: rubble past the VISUAL budget
 
     void consume(std::span<const destruction::DestructionEvent> events) {
         using K = destruction::DestructionEventKind;
@@ -189,6 +190,14 @@ struct Listeners {
                     break;
                 case K::DebrisSettled:
                     ++debris_settled;
+                    break;
+                case K::DebrisEvicted:
+                    // ADR-0032 C6 (m13.2b): this rubble has crossed the VISUAL budget. A renderer
+                    // drops its leaf here, and a lighting cache invalidates `world_bounds` exactly
+                    // as it does for PartDied — same payload, same channel. This sample has no
+                    // per-debris leaf to drop, so it only counts; the counter is what makes the
+                    // eviction visible instead of silent.
+                    ++debris_evicted;
                     break;
             }
         }

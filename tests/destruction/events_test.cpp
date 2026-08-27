@@ -112,7 +112,7 @@ TEST_CASE("M8.4 one break ⇒ exactly one PartDied and one IslandDetached, in th
     dw.apply_damage(inst, {-0.25f, 0.25f, 0.0f}, 0.2f, 10.0f, core::Vec3{0.0f, 0.0f, 7.0f});
     dw.update(pw);
 
-    int damaged = 0, died = 0, detached = 0, settled = 0;
+    int damaged = 0, died = 0, detached = 0, settled = 0, evicted = 0;
     for (const destruction::DestructionEvent& e : dw.events()) {
         switch (e.kind) {
             case destruction::DestructionEventKind::PartDamaged:
@@ -127,12 +127,19 @@ TEST_CASE("M8.4 one break ⇒ exactly one PartDied and one IslandDetached, in th
             case destruction::DestructionEventKind::DebrisSettled:
                 ++settled;
                 break;
+            case destruction::DestructionEventKind::DebrisEvicted:
+                ++evicted;
+                break;
         }
     }
     CHECK(damaged == 0); // part 0 went straight to dead — no survived-damage event
     CHECK(died == 1);
     CHECK(detached == 1);
     CHECK(settled == 0);
+    // No debris has been retired here: the visual budget (m13.2b) only fires past its cap, and
+    // one break is nowhere near it. Asserted rather than ignored so the new kind cannot start
+    // appearing on ordinary ticks unnoticed.
+    CHECK(evicted == 0);
 
     // Order: the death (stage 2) is published before the detachment (the fracture that follows).
     REQUIRE(dw.events().size() == 2);

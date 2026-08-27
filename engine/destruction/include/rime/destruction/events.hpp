@@ -35,6 +35,23 @@ enum class DestructionEventKind : std::uint8_t {
     // A debris body came to rest — a physics `Slept` event (M7.9) on a body fracture created. The
     // basis for m8.5's lifecycle (settle ⇒ linger ⇒ freeze). `body` is the settled debris.
     DebrisSettled = 3,
+    // A frozen debris crossed the VISUAL budget and was retired: its render leaf, its SDF stamp and
+    // its shadow-caster entry should all go (m13.2b — ADR-0032 C6, ruled to M12/M13 by ADR-0035
+    // §6).
+    //
+    // THE ONE THIS CHANNEL WAS EXTENDED FOR, and the reason is a leak rather than a bug. m8.5's
+    // lifecycle bounds debris in the PHYSICS world — settle ⇒ linger ⇒ freeze destroys the body —
+    // but it deliberately keeps the roster record so ids never shift, and ADR-0029 §8 says in as
+    // many words that "a render leaf can outlive the physics body at its last pose". Correct for
+    // v1 rendering; it also means debris never despawns VISUALLY, so a long session accumulates
+    // render leaves, SDF bricks and shadow casters for rubble nobody can see. Nothing ever told
+    // those caches a piece was gone, because for rendering nothing was.
+    //
+    // `world_bounds` is the leaf's last known extent, captured when the body was destroyed at
+    // FREEZE time — the last moment anyone could ask the physics world where it was. That is what
+    // makes this event usable as a cache invalidation exactly like `PartDied` and `IslandDetached`:
+    // same payload shape, same channel, no new plumbing. `body` is null (it was already destroyed).
+    DebrisEvicted = 4,
 };
 
 // One destruction event. Which fields are meaningful depends on `kind` (documented above): part
