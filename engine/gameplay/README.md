@@ -44,7 +44,7 @@ The controller's design is argued **in the code, next to the numbers that forced
 | m12.2 | `step_character` collide-and-slide (slide loop, plane clipping, creases), step-up/step-down, ground snap, depenetration recovery, jump/gravity, reflected `CharacterState`/`CharacterConfig`; proofs: analytic slope/step/slide bounds, replay determinism, recovery convergence, and a 1,296-cell structural probe grid | landed |
 | m12.3 | **Weapon v1** — `step_weapon` deterministic hitscan, `aim_direction`/`character_aim` (the one view basis), semi-auto vs. automatic, tick-counted cooldown, reflected `WeaponConfig`/`WeaponState`; proofs: the aim convention against its own definition, self-exclusion, the eye-height cover case with its negative control, the cooldown period at four values, and replay bit-identity | landed |
 | m12.4 | prediction + reconciliation replay `step_character` from a corrected state — the purity this module was built for, cashed in ([`gameplay_net`](../gameplay_net/README.md)) | landed |
-| m12.6 | the M12 milestone proof — `samples/13-networked-player` | next |
+| m12.6 | the M12 milestone proof — [`samples/13-networked-player`](../../samples/13-networked-player). **M12 "The Player" closes here.** | landed |
 
 ## Named costs (v1 deferrals, each argued at its site in `src/character.cpp`)
 

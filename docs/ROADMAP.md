@@ -9,6 +9,36 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-27) — MILESTONE 12 ("The Player") COMPLETE.** m12.6 closes it with
+> `samples/13-networked-player`, the proof [ADR-0036](adr/0036-milestone-split-player-and-block.md)
+> said the split created: a headless server and two clients on a 20%-loss link, driving the same
+> scripted tape and differing in exactly one boolean — **client 0 predicts, client 1 does not.**
+>
+> The control is a PEER IN THE SAME MATCH rather than a second run, because the cheapest way to be
+> wrong about "prediction is the reason" is to compare two numbers that were never comparable. Same
+> server, same tick, same scripted losses, same tape.
+>
+> ```
+> own-input response   prediction ON  : 1 tick     prediction OFF : 7 ticks (round trip is 6)
+> agreement            both clients match the server BIT FOR BIT at quiescence
+> remote continuity    0 of 1679 drawn frames exceed 3 ticks of walking (worst 0.110 m)
+> non-vacuous          packets dropped, commands lost outright, 4 corrections, 386 within tolerance,
+>                      40 shots fired / 12 hit, the wall lost 40 of 40 parts to gunfire
+> ```
+>
+> It self-gates: the binary exits non-zero if any clause fails, so the clauses live in the program
+> rather than in a CMake assertion nobody reads. **GPU-free** — it never opens a window; the playable
+> client is m13.3.
+>
+> Two things the run made visible that were worth writing into the sample rather than tuning away.
+> Starved player-ticks track the loss rate almost exactly (272 of ~1300 at 20% loss) because a lost
+> packet costs one tick's command and the next packet's redundancy window then delivers two — that
+> is the design working, and it is printed rather than asserted. And the two handshakes RACE on a
+> lossy link, so pairing a client to its avatar by spawn order compares one client's prediction
+> against the other player's authoritative state; the pairing goes through the NetId instead.
+>
+> **Next:** M13 "The Block" — m13.1, Track FX brick fx1.
+
 > **Update (2026-08-27) — THE MILESTONE IS SPLIT: M12 "The Player", M13 "The Block"
 > ([ADR-0036](adr/0036-milestone-split-player-and-block.md)).** ADR-0035 considered this cut and
 > *deferred rather than rejected* it, leaving the seam at m12.5 / m12.6 and saying the decision
@@ -975,7 +1005,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M9** | Editor v1 (Rust) | build a small scene in the editor, tweak components, hit Play |
 | **M10** | Advanced lighting | dynamic GI updates as the scene changes — *including when walls fall* |
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
-| **M12** | **"The Player"** | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated |
+| **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
 | **M13** | **"The Block" (vision demo)** | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right |
 
 ### Detail
