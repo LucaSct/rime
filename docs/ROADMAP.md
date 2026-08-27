@@ -41,7 +41,25 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > families (impact dust, lingering smoke, muzzle flash) and the destruction/weapon event glue are
 > **m13.1b**. Both land in m13.1; the split is sequencing, not scope.
 >
-> **Next:** m13.1b — the families and the consumer glue.
+> **m13.1b lands with it: the three families and the consumer glue.** `impact_dust`,
+> `lingering_smoke`, `muzzle_flash` — differing in ways a test can name rather than in taste. Smoke
+> has **negative gravity** (it rises) and **growth** (it expands as it dissipates, so a long-lived
+> puff does not just fade in place); a flash lives under a tenth of a second with no gravity, because
+> nothing falls in 60 ms. Gravity and growth are per PARTICLE, which is what lets one field — and one
+> draw — hold all three while smoke rises and dust settles in the same puff. The proofs assert the
+> families against **each other**, because three identically-parameterised puffs that all work would
+> prove one family three times and read as coverage.
+>
+> The glue stays in the consumer, as the M8.4 fan-out rule requires: a `PartDied` becomes dust, an
+> `IslandDetached` becomes dust *and* smoke, a shot becomes a flash at the muzzle. **One authoring
+> lesson worth recording:** scaling the smoke purely by the detach's `magnitude` looks obviously
+> right and emits *nothing*, because an island can detach with a magnitude of exactly 0 — the damage
+> impulse went to the part struck dead, and the event is explicitly not emitted for a killed part's
+> own chunk. A structural collapse should always smoke and the impulse scales it *up*; multiply
+> instead of flooring and the quietest collapses, where a wall simply gives way, are the ones with
+> no smoke at all.
+>
+> **Next:** m13.2 — block content, view-frustum culling, and ADR-0032 C6's debris visual retirement.
 
 > **Update (2026-08-27) — MILESTONE 12 ("The Player") COMPLETE.** m12.6 closes it with
 > `samples/13-networked-player`, the proof [ADR-0036](adr/0036-milestone-split-player-and-block.md)
