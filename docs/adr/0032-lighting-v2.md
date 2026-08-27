@@ -304,3 +304,47 @@ SDF/shadow-caster growth found at kickoff"); the growth was correctly diagnosed 
 Recorded here rather than edited above because ADRs are append-only. Ruled for M12 in
 [ADR-0035](0035-vision-demo-m12.md) §6, where it matters for the first time: the block runs long, at
 ≥ 400 peak debris, in a mode a human plays.
+
+---
+
+## Amendment (2026-08-27, m13.2b): C6 is built
+
+The amendment above recorded that C6 — *"debris visual lifetime is bounded, and retirement emits a
+world-bounds event so lighting caches invalidate the region"* — was declared M10's to build and was
+not built, and that ADR-0035 §6 had ruled it into M12. The milestone split moved that half to
+**m13.2b**, and it has now landed. Both halves of §9's decision shipped as written:
+
+- **The new event kind.** `DestructionEventKind::DebrisEvicted`, carrying the leaf's world-space
+  AABB on the existing C2 channel — same payload shape as `PartDied` and `IslandDetached`, so a
+  lighting cache subscribes with the code it already has. §9 promised "no new plumbing" and there is
+  none.
+- **The visual-retirement stage.** `LifecycleConfig::max_visual_debris`, deliberately larger than
+  the physics `max_live_debris` (512 against 128 by default) so rubble stays visible well after it
+  stops simulating and is still ultimately bounded. Past it, the oldest FROZEN debris are retired.
+
+Three things worth recording about how it turned out, because each was a decision the ADR left open:
+
+**Retirement marks, it does not erase.** The roster is append-only and `destruction_net` indexes it
+DIRECTLY — a shifting row would silently re-point every replicated debris mirror at a different
+chunk. So a retired row keeps its index and gains a phase, exactly as `freeze_debris` already kept
+the record rather than erasing it. `debris_retired()` is the query; `debris_body()` deliberately
+cannot answer it, because a frozen row and a retired row both read a null body and the difference
+between them is precisely what this brick is about.
+
+**Oldest-first, not the live cap's score.** m8.5's live cap sheds by `size × age`, because it is
+choosing what is least interesting to keep SIMULATING. The visual budget is choosing among things
+that are all equally static, so the only rule a player would predict is "the wreckage lying there
+longest goes first" — which is roster index, since the roster is creation-ordered. It needs no extra
+state and is deterministic for free.
+
+**The bounds must be captured at FREEZE time, not at retirement.** By the time the visual budget
+retires a row, its body has been destroyed for possibly hundreds of ticks and nothing remembers
+where it was. `freeze_debris` therefore reads the body's pose immediately before destroying it —
+the last moment anyone can ask. Deferring that read is the obvious implementation and it produces a
+`DebrisEvicted` event whose `world_bounds` is a zero-extent box at the origin, which a lighting
+cache would faithfully use to invalidate the wrong place.
+
+Measured (`tests/destruction/lifecycle_test.cpp`): a 20-part collapse under a visual budget of 6
+plateaus at 6 visible rows across a 400-tick run, with 14 evictions announced, while the roster
+keeps all 20. The zero-budget arm reproduces the pre-C6 leak deliberately — every row stays visible
+forever — so the bound has a control to be measured against rather than only a description.

@@ -128,7 +128,11 @@ struct DestructionWorld::Impl {
     // (a physics Slept), now lingering; Frozen = reclaimed — body destroyed and any owned compound
     // unregistered, the roster record kept so debris ids never shift. Only used when the lifecycle
     // is enabled; a debris otherwise stays Falling forever (append-only, the M8.3/8.4 behaviour).
-    enum class DebrisPhase : std::uint8_t { Falling = 0, Settled = 1, Frozen = 2 };
+    // Falling → Settled → Frozen → Retired. The last two are NOT the same thing, and conflating
+    // them is the mistake ADR-0032 C6 exists to correct: FROZEN means the physics body is gone but
+    // the thing is still SEEN (ADR-0029 §8's deliberate choice — rubble stays), while RETIRED means
+    // the visuals go too.
+    enum class DebrisPhase : std::uint8_t { Falling = 0, Settled = 1, Frozen = 2, Retired = 3 };
 
     // One detached island, now a free dynamic body. Member part ids live in the shared CSR pool
     // `debris_part_pool` (rows [first_part, first_part + part_count), ascending) — flat storage so
@@ -144,6 +148,11 @@ struct DestructionWorld::Impl {
         physics::CompoundId compound{};
         DebrisPhase phase = DebrisPhase::Falling;
         std::uint64_t settled_tick = 0; // the update() tick it came to rest — age = tick - this
+        // The extent this debris last occupied, captured at FREEZE time — the last moment the
+        // physics world could still be asked where it was. It is what the `DebrisEvicted` event
+        // carries when the visual budget retires the row, and the reason it must be captured early:
+        // by retirement time the body has been destroyed for many ticks and nothing remembers.
+        physics::Aabb last_bounds{};
     };
 
     std::vector<Pattern> patterns;
@@ -176,6 +185,12 @@ struct DestructionWorld::Impl {
     void freeze_debris(std::size_t debris_index, physics::PhysicsWorld& world);
     // How many debris bodies are still live (not yet frozen) — the quantity the cap bounds.
     [[nodiscard]] std::size_t live_debris_count() const noexcept;
+
+    // How many rows are still VISIBLE (any phase but Retired) — the number the visual budget caps.
+    [[nodiscard]] std::size_t visual_debris_count() const noexcept;
+
+    // Mark a frozen row retired and announce it on the C2 channel (m13.2b, ADR-0032 C6).
+    void retire_debris(std::size_t debris_index);
     // A debris's size proxy for the eviction score: Σ its member parts' cooked volumes.
     [[nodiscard]] float debris_size(const Debris& d) const noexcept;
 

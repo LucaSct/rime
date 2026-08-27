@@ -232,6 +232,15 @@ physics::BodyId DestructionWorld::debris_body(std::size_t debris) const noexcept
     return impl_->debris[debris].body;
 }
 
+bool DestructionWorld::debris_retired(std::size_t debris) const noexcept {
+    return debris < impl_->debris.size() &&
+           impl_->debris[debris].phase == Impl::DebrisPhase::Retired;
+}
+
+std::size_t DestructionWorld::visual_debris_count() const noexcept {
+    return impl_->visual_debris_count();
+}
+
 InstanceId DestructionWorld::debris_source(std::size_t debris) const noexcept {
     if (debris >= impl_->debris.size()) {
         return InstanceId{};

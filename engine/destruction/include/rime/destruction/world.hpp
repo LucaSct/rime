@@ -61,6 +61,20 @@ struct LifecycleConfig {
     // early — largest-and-oldest first — until the population is back under the cap. A still-moving
     // (unsettled) piece is never evicted, so under a burst the cap is briefly soft and catches up.
     std::uint32_t max_live_debris = 128;
+
+    // The VISUAL budget (m13.2b — ADR-0032 C6): how many debris rows may still be considered
+    // visible. Past it, the OLDEST frozen debris are RETIRED — marked, and announced on the C2
+    // channel as `DebrisEvicted` carrying the extent they last occupied — so a consumer can drop
+    // the render leaf, the SDF stamp and the shadow-caster entry that outlive the physics body.
+    //
+    // DELIBERATELY LARGER THAN `max_live_debris`, because that is the whole point: rubble should
+    // stay visible long after it stops simulating (the cheap, static, "the wreckage is still
+    // there" look) and still be ultimately bounded. 512 against a 128-body live cap gives roughly
+    // four generations of settled rubble on screen.
+    //
+    // 0 means UNBOUNDED — the pre-C6 behaviour, where the visual population grows forever. Kept as
+    // a spelling so the leak can be reproduced deliberately, which is what the proof does.
+    std::uint32_t max_visual_debris = 512;
 };
 
 // Who decides what happens to an instance (m11.4, ADR-0033 §1 + A1).
@@ -272,6 +286,21 @@ public:
     // one-part island is a hull body; a multi-part island is a runtime dynamic compound (ADR-0029
     // §2). Null / empty for an out-of-range index.
     [[nodiscard]] physics::BodyId debris_body(std::size_t debris) const noexcept;
+
+    // Has debris #i been RETIRED by the visual budget (m13.2b)? A retired row keeps its index —
+    // the roster is append-only and `destruction_net` indexes it directly — but a consumer should
+    // treat it as gone: no render leaf, no SDF stamp, no shadow caster.
+    //
+    // Distinct from "frozen", and the distinction matters: a frozen debris has no physics body but
+    // is still SEEN, which is exactly the state ADR-0029 §8 created on purpose. `debris_body()`
+    // returns null for both, so a consumer that only checked the body could not tell the two apart
+    // — and the one that matters visually is this one.
+    [[nodiscard]] bool debris_retired(std::size_t debris) const noexcept;
+
+    // How many debris rows are still visible — not retired. The ledger number ADR-0035 §2a's C6
+    // ruling wants bounded: it must plateau at `max_visual_debris` across a long run rather than
+    // climbing with the roster.
+    [[nodiscard]] std::size_t visual_debris_count() const noexcept;
     [[nodiscard]] InstanceId debris_source(std::size_t debris) const noexcept;
     [[nodiscard]] std::span<const std::uint32_t> debris_parts(std::size_t debris) const noexcept;
 

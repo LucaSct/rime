@@ -399,6 +399,143 @@ SoakRun run_soak(const assets::DestructibleAsset& asset, int workers, std::uint3
 
 } // namespace
 
+TEST_CASE("m13.2b: the VISUAL population is bounded too, and retirement announces its region") {
+    // ADR-0032 **C6**, ruled to this milestone by ADR-0035 §6, and the leak it closes.
+    //
+    // m8.5 bounds debris in the PHYSICS world: settle ⇒ linger ⇒ freeze destroys the body. But it
+    // deliberately KEEPS the roster record so ids never shift, and ADR-0029 §8 says in as many
+    // words that "a render leaf can outlive the physics body at its last pose". Correct for v1
+    // rendering — and it means debris never despawns VISUALLY, so a long session accumulates render
+    // leaves, SDF bricks and shadow casters for rubble nobody can see.
+    //
+    // It is a leak rather than a bug, which is exactly why nothing caught it for two milestones:
+    // every M10 proof runs a few hundred ticks, and the physics stores it *does* bound are the ones
+    // anybody was watching. ADR-0032's own amendment records that the growth was correctly
+    // diagnosed at kickoff and then simply never got a brick.
+    const assets::DestructibleAsset asset = make_grid(10, 2, {0.25f, 0.25f, 0.15f}, 1000.0f, 1.0f);
+    constexpr std::uint32_t kVisual = 6;
+
+    destruction::DestructionWorld dw;
+    physics::PhysicsWorld pw;
+    destruction::LifecycleConfig cfg;
+    cfg.enabled = true;
+    cfg.freeze_delay_ticks = 10;     // freeze quickly, so there is something to retire
+    cfg.max_live_debris = 1000000;   // the LIVE cap is not what is under test here
+    cfg.max_visual_debris = kVisual; // …this is
+    dw.configure_lifecycle(cfg);
+
+    const destruction::PatternId pattern = dw.register_pattern(asset, pw);
+    const destruction::InstanceId inst = dw.spawn(pattern, core::Transform{}, pw);
+    add_ground(pw, 0.0f);
+    for (std::uint32_t c = 0; c < 10; ++c) {
+        dw.apply_damage(inst, {static_cast<float>(c) * 0.5f - 2.25f, 0.0f, 0.0f}, 0.2f, 10.0f, {});
+    }
+
+    int evicted_events = 0;
+    std::vector<physics::Aabb> evicted_bounds;
+    for (int i = 0; i < 400; ++i) {
+        pw.step(kDt);
+        dw.update(pw);
+        for (const destruction::DestructionEvent& e : dw.events()) {
+            if (e.kind == destruction::DestructionEventKind::DebrisEvicted) {
+                ++evicted_events;
+                evicted_bounds.push_back(e.world_bounds);
+            }
+        }
+    }
+
+    // NON-VACUITY: the wall really did produce more debris than the visual budget allows. Without
+    // this the bound below is satisfied by a run that never made enough rubble to test it.
+    REQUIRE(dw.debris_count() > kVisual);
+    MESSAGE("m13.2b: roster " << dw.debris_count() << " rows, " << dw.visual_debris_count()
+                              << " still visible (budget " << kVisual << "), " << evicted_events
+                              << " evictions announced");
+
+    // THE CLAIM. The roster keeps growing — it must, because `destruction_net` indexes it directly
+    // and a shifting row would re-point every mirror — but the VISIBLE population is capped.
+    CHECK(dw.visual_debris_count() <= kVisual);
+    CHECK(evicted_events > 0);
+
+    // Every eviction was announced on the existing C2 channel, one per retired row, carrying a
+    // usable region. `world_bounds` is captured at FREEZE time — the last moment the physics world
+    // could still be asked where the debris was — because by retirement the body has been gone for
+    // many ticks and nothing else remembers. A zero-extent-at-the-origin bound would mean that
+    // capture never happened, and a lighting cache would invalidate the wrong place.
+    CHECK(static_cast<std::size_t>(evicted_events) == evicted_bounds.size());
+    int away_from_origin = 0;
+    for (const physics::Aabb& b : evicted_bounds) {
+        away_from_origin += core::length(b.min) > 0.01f ? 1 : 0;
+    }
+    CHECK(away_from_origin > 0);
+
+    // …and the retired rows are the OLDEST ones, which is the rule a player would predict: the
+    // wreckage lying there longest goes first. Roster index is creation order, so the retired set
+    // must be a prefix — anything else means the scan is not doing what its comment says.
+    std::size_t last_retired = 0;
+    bool prefix = true;
+    for (std::size_t d = 0; d < dw.debris_count(); ++d) {
+        if (dw.debris_retired(d)) {
+            last_retired = d;
+        } else if (last_retired > 0 && d < last_retired) {
+            prefix = false;
+        }
+    }
+    CHECK(prefix);
+
+    // Frozen and retired are DIFFERENT states, and `debris_body()` cannot tell them apart — both
+    // read null. A consumer that only checked the body would keep drawing retired rubble forever,
+    // which is the whole failure this brick exists to fix.
+    int frozen_but_visible = 0;
+    for (std::size_t d = 0; d < dw.debris_count(); ++d) {
+        if (!dw.debris_retired(d) && !dw.debris_body(d).is_valid()) {
+            ++frozen_but_visible;
+        }
+    }
+    CHECK(frozen_but_visible > 0);
+}
+
+TEST_CASE("m13.2b: a zero visual budget is the pre-C6 behaviour, unbounded and byte-identical") {
+    // The escape hatch, and the control. `max_visual_debris = 0` means "never retire" — exactly
+    // what the engine did before C6 — so the leak can be reproduced deliberately rather than only
+    // described. Without this, "the budget bounds the population" would have no arm to be measured
+    // against.
+    const assets::DestructibleAsset asset = make_grid(10, 2, {0.25f, 0.25f, 0.15f}, 1000.0f, 1.0f);
+
+    const auto run = [&](std::uint32_t visual_budget) {
+        destruction::DestructionWorld dw;
+        physics::PhysicsWorld pw;
+        destruction::LifecycleConfig cfg;
+        cfg.enabled = true;
+        cfg.freeze_delay_ticks = 10;
+        cfg.max_live_debris = 1000000;
+        cfg.max_visual_debris = visual_budget;
+        dw.configure_lifecycle(cfg);
+        const destruction::PatternId pattern = dw.register_pattern(asset, pw);
+        const destruction::InstanceId inst = dw.spawn(pattern, core::Transform{}, pw);
+        add_ground(pw, 0.0f);
+        for (std::uint32_t c = 0; c < 10; ++c) {
+            dw.apply_damage(
+                inst, {static_cast<float>(c) * 0.5f - 2.25f, 0.0f, 0.0f}, 0.2f, 10.0f, {});
+        }
+        for (int i = 0; i < 400; ++i) {
+            pw.step(kDt);
+            dw.update(pw);
+        }
+        return std::pair{dw.visual_debris_count(), dw.debris_count()};
+    };
+
+    const auto [unbounded_visible, unbounded_roster] = run(0);
+    const auto [bounded_visible, bounded_roster] = run(6);
+
+    // Same rubble either way — retirement does not change what fractured.
+    CHECK(unbounded_roster == bounded_roster);
+    // With no budget, EVERY row stays visible: the leak, reproduced.
+    CHECK(unbounded_visible == unbounded_roster);
+    // With one, the population plateaus.
+    CHECK(bounded_visible <= 6);
+    CHECK(bounded_visible < unbounded_visible);
+}
+
 TEST_CASE("M8.5 soak: continuous refracture under a cap stays bounded and bit-reproducible across "
           "worker counts") {
     // The headline lifetime proof: a sustained stream of fractures (three walls carved in rotation)
