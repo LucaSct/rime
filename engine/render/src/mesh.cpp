@@ -7,6 +7,7 @@
 
 #include "rime/render/mesh.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -198,6 +199,19 @@ MeshId MeshRegistry::add(const CpuMesh& mesh, std::string_view debug_name) {
         return kInvalidMeshId;
     }
     GpuMesh g;
+    // The local bounds, from the vertices we are about to upload — the only moment the CPU has
+    // them all in hand (m13.2a).
+    g.local_min = {mesh.vertices[0].px, mesh.vertices[0].py, mesh.vertices[0].pz};
+    g.local_max = g.local_min;
+    for (const MeshVertex& v : mesh.vertices) {
+        g.local_min.x = std::min(g.local_min.x, v.px);
+        g.local_min.y = std::min(g.local_min.y, v.py);
+        g.local_min.z = std::min(g.local_min.z, v.pz);
+        g.local_max.x = std::max(g.local_max.x, v.px);
+        g.local_max.y = std::max(g.local_max.y, v.py);
+        g.local_max.z = std::max(g.local_max.z, v.pz);
+    }
+
     rhi::BufferDesc vbd{};
     vbd.size = mesh.vertices.size() * sizeof(MeshVertex);
     vbd.usage = rhi::BufferUsage::Vertex;

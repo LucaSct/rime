@@ -9,6 +9,38 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-27) — m13.2a: view-frustum culling, and the counters that keep it honest.**
+> ADR-0035 §2a named this as the one work-ledger entry M13 must ADD, "because no cull exists yet":
+> extraction emitted *literally every* `{WorldTransform, MeshRef, MaterialRef}`, which is fine at
+> six walls and not at a block of per-part render leaves.
+>
+> Gribb–Hartmann planes from the frame's own `view_proj`, per-mesh local bounds computed once at
+> upload, a conservative world AABB per draw, and the positive-vertex test. The near plane is
+> `row2` **alone** — Vulkan clip space runs z from 0 to w, not −w to w, and the OpenGL form culls
+> correctly everywhere except directly in front of the camera, which is the one place a player is
+> guaranteed to be looking.
+>
+> **The bug worth recording: it must PARTITION, not delete.** One extracted draw list feeds the
+> camera passes *and* both shadow passes, which render the same geometry from the light's point of
+> view. The first version deleted culled entries — so an occluder outside the camera frustum stopped
+> being drawn into the shadow map and stopped shadowing anything. `gi_thesis_test`'s covered room
+> went from **0.04 to 0.74** on its floor pixel; every other render proof stayed green. The camera
+> passes now take the visible prefix and the shadow passes the whole list, which works because
+> `record_draws` indexes each draw's uniforms and textures by loop position.
+>
+> **The proof is "on is identical to off", not "off is the baseline".** The M10 gate discipline is
+> for techniques that change the picture; culling must not change it at all, so the honest claim is
+> that the two render byte-identically — measured, alongside `40 culled of 65`, because a cull that
+> silently stopped culling would pass the identity check perfectly. That counter is exactly what
+> §2a asked for: "culling degrading to 'culled 0 of 4,000' is a red number rather than a warm
+> frame."
+>
+> *Noted in passing, not fixed here:* the shadow path emits a pre-existing Vulkan validation warning
+> (`shadow_map` bound as a 2D view where the shader declares a 2D array). The shipped shadow tests
+> emit it too, so it predates this brick — worth its own look.
+>
+> **Next:** m13.2b — ADR-0032 C6's debris visual-retirement stage, then the block content itself.
+
 > **Update (2026-08-27) — m13.1a: the FX particles are finally DRAWN, and M8.4's deferred pixel
 > proof lands.** Milestone 13 ("The Block") opens with Track FX brick fx1a's load-bearing half.
 >

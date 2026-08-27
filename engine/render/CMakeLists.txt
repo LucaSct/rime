@@ -21,7 +21,8 @@ add_library(rime_render STATIC
     src/lighting/sdf_clipmap.cpp
     src/lighting/ddgi.cpp
     src/lighting/ssr.cpp
-    src/fx_pass.cpp)
+    src/fx_pass.cpp
+    src/culling.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
 # library, the same offline model the tests/samples use (ADR-0008). The generated headers are

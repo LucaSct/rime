@@ -9,6 +9,7 @@
 #include "rime/assets/sdf_asset.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/culling.hpp"
 #include "rime/render/lighting/clustered.hpp"
 #include "rime/render/lighting/ddgi.hpp"
 #include "rime/render/lighting/local_shadows.hpp"
@@ -119,6 +120,28 @@ public:
     // The editor host and the M10 samples set these; the M5.6/M6.4 proofs leave them default.
     void set_lighting(const LightingSettings& lighting) { lighting_ = lighting; }
 
+    // ── View-frustum culling (m13.2a) ─────────────────────────────────────────────────────────
+    //
+    // ON by default, and deliberately NOT hung off the "off is the byte-identical baseline" gate
+    // every M10 lighting technique uses. That discipline is for techniques that CHANGE the picture;
+    // culling must not change it at all — it removes draws that could not have contributed a pixel.
+    // So the honest proof is not "off is identical to before" but **"on is identical to off"** for
+    // a scene where everything is visible, which is what `culling_test.cpp` asserts.
+    //
+    // The toggle exists so that proof can be written, and so a suspected cull bug can be bisected
+    // in one line rather than by rebuilding.
+    void set_culling_enabled(bool enabled) noexcept { cull_enabled_ = enabled; }
+
+    [[nodiscard]] bool culling_enabled() const noexcept { return cull_enabled_; }
+
+    // The ledger entry ADR-0035 §2a names: draws submitted vs. draws the frustum removed,
+    // accumulated across frames. **`culled == 0` with a large `submitted` is the failure mode this
+    // exists to catch** — a cull that has stopped culling is invisible in every pixel and, on a
+    // fast enough machine, in every frame time.
+    [[nodiscard]] const CullStats& cull_stats() const noexcept { return cull_stats_; }
+
+    void reset_cull_stats() noexcept { cull_stats_ = {}; }
+
     [[nodiscard]] const LightingSettings& lighting() const noexcept { return lighting_; }
 
     // The C2 destruction hook (m10.2): tell the local-shadow cache that geometry in `region` (a
@@ -211,6 +234,8 @@ private:
     ecs::Version sdf_instances_since_ = 0;
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
+    bool cull_enabled_ = true;
+    CullStats cull_stats_{};
 
     rhi::BufferHandle frame_ubo_;
     rhi::BufferHandle draw_ubo_;

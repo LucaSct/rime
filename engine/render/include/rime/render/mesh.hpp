@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "rime/core/math/vec.hpp"
 #include "rime/rhi/rhi.hpp"
 
 // Meshes for the scene layer (M5.5): the CPU-side vertex soup, procedural primitives (until the
@@ -79,6 +80,17 @@ struct GpuMesh {
     rhi::BufferHandle vertices;
     rhi::BufferHandle indices;
     std::uint32_t index_count = 0;
+
+    // The mesh's LOCAL-space bounding box, computed once at upload from the vertex positions
+    // (m13.2a). It is what view-frustum culling transforms and tests — see culling.hpp.
+    //
+    // Kept here rather than beside the geometry because the registry is the one place that has
+    // seen every vertex: recomputing bounds at cull time would mean reading vertex buffers back
+    // from the GPU every frame, and asking the caller to supply them would mean every caller
+    // getting it right. A degenerate mesh (rejected by `add`) never reaches this struct, so the
+    // box is always valid for a live id.
+    core::Vec3 local_min{0.0f, 0.0f, 0.0f};
+    core::Vec3 local_max{0.0f, 0.0f, 0.0f};
 };
 
 // Owns every mesh's GPU buffers; hands out dense MeshIds. Host-visible uploads for M5 (the same
