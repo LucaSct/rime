@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -299,6 +300,105 @@ TEST_CASE("M8.4 DebrisSettled fires when a fallen debris body comes to rest") {
     }
     REQUIRE(pw.stats().awake_bodies == 0); // the world came to rest
     CHECK(settled >= 1);                   // …and at least one settle was reported
+}
+
+TEST_CASE("m13.1b: the fan-out drives all three FX families, and the glue stays in the consumer") {
+    // ADR-0035 §5 asks fx1a for three families "driven from destruction and weapon events through
+    // consumer glue". THIS IS THE GLUE — and where it lives is the whole architectural claim: it is
+    // in a consumer, not in either module. `rime::destruction` does not know vfx exists,
+    // `rime::vfx` does not know destruction exists, and the mapping from "what happened" to "what
+    // it looks like" belongs to whoever owns both. That is the M8.4 fan-out rule, restated one
+    // milestone on with more families to be wrong about.
+    //
+    // Note what is NOT being tested: whether the numbers look good. That is art direction. What is
+    // tested is that a break produces a DIFFERENT effect from a detach, and that a shot produces a
+    // third — because a glue layer that mapped everything to one family would be indistinguishable
+    // from no glue at all.
+    const assets::DestructibleAsset asset = make_grid(2, 2, {0.25f, 0.25f, 0.15f}, 1000.0f, 1.0f);
+
+    destruction::DestructionWorld dw;
+    physics::PhysicsWorld pw;
+    const destruction::PatternId pattern = dw.register_pattern(asset, pw);
+    const destruction::InstanceId inst = dw.spawn(pattern, core::Transform{}, pw);
+    dw.apply_damage(inst, {-0.25f, 0.25f, 0.0f}, 0.2f, 10.0f, core::Vec3{0.0f, 0.0f, 7.0f});
+    dw.update(pw);
+
+    vfx::ParticleField fx;
+    int deaths = 0;
+    int detaches = 0;
+    for (const destruction::DestructionEvent& e : dw.events()) {
+        switch (e.kind) {
+            case destruction::DestructionEventKind::PartDied:
+                // A part struck out of a wall: dust, and nothing else. It is a small, sharp event.
+                fx.emit_burst(e.world_bounds.min, e.world_bounds.max, 1.0f, vfx::impact_dust());
+                ++deaths;
+                break;
+            case destruction::DestructionEventKind::IslandDetached:
+                // A whole island coming away is bigger: dust AND smoke that outlives it.
+                //
+                // The smoke intensity has a FLOOR, and that floor is the interesting part. Scaling
+                // it purely by `magnitude` looks obviously right — magnitude is the impulse the
+                // island left with, the "how violent was this" number the C2 channel carries — and
+                // it emits NOTHING here, because this island detached with a magnitude of exactly
+                // 0. That is documented behaviour, not a bug: the damage impulse went to the part
+                // that was struck DEAD, and `IslandDetached` is explicitly not emitted for a killed
+                // part's own chunk (destruction/events.hpp). An island can come away purely because
+                // what held it up is gone.
+                //
+                // So a structural collapse always smokes; the impulse scales it UP. A consumer that
+                // multiplied instead of flooring would ship a game where the quietest collapses —
+                // the ones where a wall simply gives way — are the ones with no smoke at all.
+                fx.emit_burst(e.world_bounds.min, e.world_bounds.max, 1.0f, vfx::impact_dust());
+                fx.emit_burst(e.world_bounds.min,
+                              e.world_bounds.max,
+                              std::clamp(0.3f + e.magnitude * 0.1f, 0.3f, 1.0f),
+                              vfx::lingering_smoke());
+                ++detaches;
+                break;
+            default:
+                break;
+        }
+    }
+    REQUIRE(deaths == 1);
+    REQUIRE(detaches == 1);
+
+    // The weapon half of the same glue. It needs no gameplay link at all — a muzzle flash is a
+    // point and a direction, and turning a `gameplay_net::ShotEvent` into those two values is the
+    // three lines below with `shot.origin` and `shot.direction` substituted in. Kept synthetic here
+    // so that `tests/destruction` does not acquire a dependency on the player stack to prove a
+    // mapping.
+    const core::Vec3 muzzle{0.6f, 1.4f, 0.2f};
+    fx.emit_burst(muzzle, muzzle, 1.0f, vfx::muzzle_flash());
+
+    int dust = 0;
+    int smoke = 0;
+    int flash = 0;
+    for (const vfx::Particle& p : fx.particles()) {
+        dust += p.family == vfx::Family::ImpactDust ? 1 : 0;
+        smoke += p.family == vfx::Family::LingeringSmoke ? 1 : 0;
+        flash += p.family == vfx::Family::MuzzleFlash ? 1 : 0;
+    }
+    CHECK(dust > 0);
+    CHECK(smoke > 0);
+    CHECK(flash > 0);
+
+    // And they behave like three families rather than three names for one. After a third of a
+    // second the flash is gone, the dust is still settling, and the smoke is still climbing —
+    // which is the only reason "three families" is worth the word.
+    for (int i = 0; i < 20; ++i) {
+        fx.simulate(1.0f / 60.0f);
+    }
+    int dust_left = 0;
+    int smoke_left = 0;
+    int flash_left = 0;
+    for (const vfx::Particle& p : fx.particles()) {
+        dust_left += p.family == vfx::Family::ImpactDust ? 1 : 0;
+        smoke_left += p.family == vfx::Family::LingeringSmoke ? 1 : 0;
+        flash_left += p.family == vfx::Family::MuzzleFlash ? 1 : 0;
+    }
+    CHECK(flash_left == 0);
+    CHECK(dust_left > 0);
+    CHECK(smoke_left > 0);
 }
 
 TEST_CASE("M8.4 fan-out: three listeners observe the stream once each, and VFX is removable") {

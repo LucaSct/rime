@@ -9,6 +9,58 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-27) — m13.1a: the FX particles are finally DRAWN, and M8.4's deferred pixel
+> proof lands.** Milestone 13 ("The Block") opens with Track FX brick fx1a's load-bearing half.
+>
+> `engine/vfx` has simulated deterministic CPU billboards since M8.4 and **nothing has ever drawn
+> them.** The M8.6 sample fed the field from destruction events and self-checked `coverage()` — a
+> CPU number standing in for pixels that did not exist, with its own header promising that "the
+> m8.6 GPU pass's coverage-delta pixel test confirms it on screen". That test is here, a milestone
+> late.
+>
+> `render::FxParticlePass`: additive HDR billboards, six vertices synthesised per particle from
+> `gl_VertexIndex` with the particle array read straight from a storage buffer by
+> `gl_InstanceIndex` — no vertex buffer, no index buffer, no per-particle mesh. Depth-tested,
+> depth-write off, and **unsorted on purpose**: additive blending is commutative, so it is the one
+> blend mode where the transparency-ordering problem does not arise.
+>
+> **Off is structural, not careful.** With the gate off the pass is never declared into the graph,
+> so there is no bind, no barrier and no attachment load — the frame is byte-identical to a build
+> without the file. A pass that ran and drew zero instances would be *almost* that, and ADR-0032
+> §11's regression bridge cannot be built on almost. The proof compares raw bytes, and separately
+> shows that `intensity = 0` is provably a *different state* from the gate being off (the pass runs,
+> binds and blends, and draws nothing visible) — because a design where "dark" and "absent" are
+> indistinguishable makes the baseline untestable.
+>
+> **The coverage delta, measured:** a burst takes on-screen radiance 0 → 20.27 while `coverage()`
+> goes 0 → 0.078; as the puff ages both fall monotonically, together, to 3.64 and 0.011; when the
+> field retires, the screen is exactly black again. Sampled at six points rather than two, because
+> "up then back to zero" is also true of a pass that flickers.
+>
+> fx1a is sequenced in two halves — this is the draw pass, the gate and the proof; the three effect
+> families (impact dust, lingering smoke, muzzle flash) and the destruction/weapon event glue are
+> **m13.1b**. Both land in m13.1; the split is sequencing, not scope.
+>
+> **m13.1b lands with it: the three families and the consumer glue.** `impact_dust`,
+> `lingering_smoke`, `muzzle_flash` — differing in ways a test can name rather than in taste. Smoke
+> has **negative gravity** (it rises) and **growth** (it expands as it dissipates, so a long-lived
+> puff does not just fade in place); a flash lives under a tenth of a second with no gravity, because
+> nothing falls in 60 ms. Gravity and growth are per PARTICLE, which is what lets one field — and one
+> draw — hold all three while smoke rises and dust settles in the same puff. The proofs assert the
+> families against **each other**, because three identically-parameterised puffs that all work would
+> prove one family three times and read as coverage.
+>
+> The glue stays in the consumer, as the M8.4 fan-out rule requires: a `PartDied` becomes dust, an
+> `IslandDetached` becomes dust *and* smoke, a shot becomes a flash at the muzzle. **One authoring
+> lesson worth recording:** scaling the smoke purely by the detach's `magnitude` looks obviously
+> right and emits *nothing*, because an island can detach with a magnitude of exactly 0 — the damage
+> impulse went to the part struck dead, and the event is explicitly not emitted for a killed part's
+> own chunk. A structural collapse should always smoke and the impulse scales it *up*; multiply
+> instead of flooring and the quietest collapses, where a wall simply gives way, are the ones with
+> no smoke at all.
+>
+> **Next:** m13.2 — block content, view-frustum culling, and ADR-0032 C6's debris visual retirement.
+
 > **Update (2026-08-27) — MILESTONE 12 ("The Player") COMPLETE.** m12.6 closes it with
 > `samples/13-networked-player`, the proof [ADR-0036](adr/0036-milestone-split-player-and-block.md)
 > said the split created: a headless server and two clients on a 20%-loss link, driving the same
