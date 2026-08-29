@@ -12,6 +12,7 @@ rime_add_test(rime_render_tests
     render_graph_test.cpp
     fx_particle_test.cpp
     culling_test.cpp
+    present_test.cpp
     scene_layer_test.cpp
     pbr_pipeline_test.cpp
     pick_test.cpp

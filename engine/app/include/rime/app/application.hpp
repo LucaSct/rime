@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "rime/app/fixed_timestep.hpp"
@@ -15,7 +16,8 @@
 #include "rime/ecs/schedule.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/platform/event.hpp"
-#include "rime/rhi/types.hpp" // Extent2D only — no Vulkan, no backend
+#include "rime/render/render_graph.hpp" // RGTexture (FrameContext::present) — no backend headers
+#include "rime/rhi/types.hpp"           // Extent2D only — no Vulkan, no backend
 
 // The application framework (M5.7, ADR-0023): `rime::app::Application` ties the engine's modules
 // into a runnable whole and owns the frame loop. Its defining feature is a FIXED SIMULATION TICK
@@ -26,8 +28,19 @@
 //
 // Headless-first, deliberately: this is where the engine is developed and CI'd on a machine with no
 // display (lavapipe), so the whole loop — ticks, input, and optional GPU rendering into an
-// offscreen target — runs and is verified without a window. The windowed/swapchain PRESENT path is
-// a documented seam (ADR-0023 §4), wired when a display-bearing sample (07-first-light) needs it.
+// offscreen target — runs and is verified without a window.
+//
+// WINDOWED PRESENT (m13.3a) finally closes ADR-0023 §4's seam, which had been open since M5.7 and
+// which `07-first-light --windowed` has been printing an honest "needs a display; running headless
+// instead" against ever since. Set `AppConfig::windowed` and the loop additionally owns a
+// platform::Window and an rhi::Swapchain: it pumps the OS event queue into the same input snapshot
+// a headless test injects into, acquires a backbuffer, copies whatever the render callback set as
+// `FrameContext::present` onto it, and presents.
+//
+// **Windowed is a REQUEST, never a requirement.** No display, no window backend, or no surface
+// support degrades to exactly the headless path with one warning — because the alternative is a
+// binary that runs in CI only by accident of which machine it landed on. `windowed()` reports what
+// actually happened, and it is what a proof should assert against rather than the config field.
 //
 // `Application` owns the JobSystem, the ECS World, the sim Schedule, and the FixedTimestep; it
 // OPTIONALLY owns an rhi::Device + render::RenderGraph (config.gpu), so pure-sim tools and tests
@@ -36,10 +49,15 @@
 namespace rime::rhi {
 class Device;
 class CommandBuffer;
+class Swapchain;
 } // namespace rime::rhi
 
+namespace rime::platform {
+class Window;
+}
+
 namespace rime::render {
-class RenderGraph;
+class PresentPass;
 }
 
 namespace rime::app {
@@ -52,6 +70,13 @@ struct AppConfig {
     unsigned worker_threads = 0;   // JobSystem workers; 0 = hardware_concurrency()-1
     bool gpu = false;              // create an rhi::Device + render::RenderGraph for the frame
     rhi::Extent2D render_extent{}; // offscreen render size when gpu (0×0 = none declared yet)
+
+    // ── Windowed present (m13.3a, ADR-0023 §4) ───────────────────────────────────────────────
+    // Requires `gpu`: presenting means a swapchain, and a swapchain means a device. Requesting a
+    // window without a display is not an error — see the class comment.
+    bool windowed = false;
+    std::string window_title = "Rime";
+    rhi::Extent2D window_size{1280, 720};
 };
 
 // Everything a render callback is handed for one frame. `world` is post-tick (already simulated
@@ -68,6 +93,12 @@ struct FrameContext {
     render::RenderGraph* graph = nullptr;
     rhi::Device* device = nullptr;
     rhi::Extent2D extent{};
+
+    // OUT — the one field a callback WRITES. Set it to the image you want on screen and the loop
+    // copies that onto the acquired backbuffer and presents it (m13.3a). Ignored when the app is
+    // not windowed, so the same callback serves a headless run unchanged, which is what lets a
+    // display-bearing sample keep exactly one render path instead of two.
+    render::RGTexture present{};
 };
 
 class Application {
@@ -97,6 +128,16 @@ public:
     // AFTER the frame ran (a headless self-check, an engine/stream tap). Handles from the last
     // frame stay valid until the next frame's reset().
     [[nodiscard]] render::RenderGraph* graph() noexcept { return graph_.get(); }
+
+    // Did a window and swapchain actually come up? False on a headless build, a machine with no
+    // display, or a device without surface support — even when `config.windowed` was set. Assert
+    // against THIS, never against the config, or a proof passes on a workstation and means nothing
+    // in CI.
+    [[nodiscard]] bool windowed() const noexcept { return swapchain_ != nullptr; }
+
+    // The window, or nullptr when not windowed. Exposed so an app can read its framebuffer size or
+    // title it; the loop owns its lifetime and its event pump.
+    [[nodiscard]] platform::Window* window() noexcept { return window_.get(); }
 
     // The constant a simulation tick advances the world by. Systems integrate against THIS (not a
     // frame dt) — capture it by value in a system body; it never changes for the app's lifetime.
@@ -187,6 +228,10 @@ public:
 
     // Headless: run exactly `frames` iterations off the real monotonic clock. The bounded loop CI
     // runs (no window to close it).
+    // When this returns the GPU is IDLE — no frame is still in flight. That matters only for a
+    // windowed run (present queues work and returns, where the headless path blocks on submit), and
+    // it is what makes it safe for a caller to destroy its own meshes, textures and renderer
+    // immediately afterwards.
     void run_frames(int frames);
 
     // Run off the real clock until quit is requested (a sim system or the render callback calls
@@ -208,6 +253,9 @@ private:
     void run_ticks(int ticks);       // run `ticks` simulation steps
     void render_frame(double alpha); // build + execute the render frame (if a callback/GPU exist)
     void run_one_frame(double frame_dt);
+    void open_window(); // windowed setup; leaves the app headless on any failure
+    bool pump_window(); // drain the OS queue into the input snapshot; false = close requested
+    void finish_gpu();  // block until no frame is in flight — see the definition
 
     AppConfig config_;
     core::JobSystem jobs_;
@@ -225,6 +273,22 @@ private:
 
     std::unique_ptr<rhi::Device> device_;        // owned when config.gpu
     std::unique_ptr<render::RenderGraph> graph_; // owned when a device exists
+
+    // Windowed present (m13.3a). All three are null together: either the window, the swapchain and
+    // the copy pass all came up, or the app is headless. There is no half-windowed state.
+    std::unique_ptr<platform::Window> window_;
+    std::unique_ptr<rhi::Swapchain> swapchain_;
+    std::unique_ptr<render::PresentPass> present_pass_;
+    bool platform_started_ = false; // we called platform::init() and owe it a shutdown()
+
+    // Presented frames' command buffers, kept alive until their GPU work is provably done.
+    // `Swapchain::present` does not wait, and a command buffer owns its timestamp query pool — so
+    // letting one die at the end of the frame that submitted it destroys a pool the GPU is still
+    // reading. Sized `frames_in_flight() + 1`: with only that many fence slots, a buffer this old
+    // was submitted to a slot that has since been re-acquired, and acquire waits on its fence.
+    // Empty (and unused) headless, where submit_blocking has already finished the frame.
+    std::vector<std::unique_ptr<rhi::CommandBuffer>> presented_cmds_;
+    std::size_t presented_slot_ = 0;
 
     std::vector<platform::Event> pending_input_; // queued for the next frame
     std::vector<platform::Event> frame_input_;   // this frame's snapshot (what systems see)

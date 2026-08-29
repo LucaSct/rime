@@ -9,7 +9,8 @@ rime_add_test(rime_app_tests
     fixed_timestep_test.cpp
     application_test.cpp
     sim_stage_test.cpp
-    editor_play_test.cpp)
+    editor_play_test.cpp
+    windowed_test.cpp)
 
 target_link_libraries(rime_app_tests
     PRIVATE rime::app rime::editorhost rime::physics)

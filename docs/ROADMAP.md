@@ -9,6 +9,56 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-29) — m13.3a: the engine presents to a window, and the player has eyes.**
+> ADR-0023 §4's present seam had been open since M5.7. `07-first-light --windowed` printed *"needs a
+> display (Mac); running --headless instead"* for two milestones. It presents now: **150 frames in a
+> window on the RTX 3060, zero Vulkan validation errors**, with the headless self-check unchanged.
+>
+> **`render::PresentPass`** — a fullscreen copy onto the swapchain image. A pass and not an RHI blit
+> because there is no texture-to-texture copy in the interface, and adding one means a new virtual
+> plus a layout-transition story in every backend, to move pixels the raster path already moves.
+> Colour management is a deliberate no-op, checked rather than assumed: `tonemap.frag` already
+> applies the sRGB transfer function in-shader and the Vulkan backend selects a **UNORM** surface, so
+> pass-through is correct. An _SRGB surface would double-encode and wash out every midtone — that is
+> the one change that would silently break it.
+>
+> **`Application` windowed mode.** Window, swapchain, and the OS pump feeding the *same* input
+> snapshot a headless test injects into — so a sim system reading `frame_input()` cannot tell the two
+> apart, which is what makes the headless input proof mean something about the windowed build. The
+> app-facing surface is one out-field: `ctx.present = last_ldr`. That single line is the whole
+> windowed path in the sample, and the same callback still serves `--headless` and `--serve`.
+> **Windowed is a REQUEST, never a requirement** — no display degrades to exactly the headless loop
+> with one warning, because the alternative is a binary CI can only run by accident.
+>
+> **`gameplay::FirstPersonView`** — pure, like `step_character` beside it: two floats and a position
+> in, a `core::Transform` out, no world and no dependency on `render`. Its load-bearing proof asserts
+> the view's forward **is** the mover's forward across 37 angles. Those are two independently written
+> trig expressions of the same angle in two modules, and if they drift the character strafes when the
+> player pushes forward: instantly obvious to play, invisible in every state dump.
+>
+> **Four real bugs, every one found by the validation layer or by the brick's own tests** — and all
+> four are the same root cause wearing different clothes: `submit_blocking` finishes a frame,
+> `present` does not.
+>
+> 1. GPU resources destroyed while a presented frame was still executing.
+> 2. The idle wait had to move from `~Application` to **loop exit**: an app destroys its own meshes,
+>    textures and renderer *between* `run()` returning and the Application dying, so waiting only in
+>    the destructor still frees them out from under a live frame.
+> 3. A command buffer owns its timestamp query pool, so it must outlive its frame. Fixed with a ring
+>    sized from a new `Swapchain::frames_in_flight()`: with only that many fence slots, a buffer that
+>    old was submitted to a slot since re-acquired, and acquire waits on its fence.
+> 4. **Acquire and present must pair.** An acquired image never presented leaves the next acquire
+>    waiting on a fence that never signals — a hard deadlock, not a dropped frame. Found by this
+>    brick's own degradation test, which hung the suite. A callback naming nothing to show now gets a
+>    cleared frame, and `step()` pumps the window too (a windowed app driven frame-by-frame would
+>    otherwise never service the OS queue and FIFO present would block forever).
+>
+> *Also worth expecting:* the degradation test forces the null window backend rather than trusting
+> the machine. Without that it is vacuous on any developer desktop — which is exactly where the
+> windowed path gets written, and exactly why it would rot.
+>
+> **Next:** m13.3b — the font atlas and text pass the HUD ruling requires (ADR-0035 amendment E4).
+
 > **Update (2026-08-29) — m13.2c/d: the block exists, and the engine can finally draw a
 > destructible.** ADR-0035's m12.7 bundled "block content + render scale". Culling (m13.2a) and C6
 > (m13.2b) had landed; scoping the rest turned up a gap nobody had written down: **nothing in the

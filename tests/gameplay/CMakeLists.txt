@@ -6,6 +6,7 @@
 # and physics::PhysicsWorld — with geometry made of static boxes; nothing here includes anything
 # under engine/*/src.
 rime_add_test(rime_gameplay_tests
+    first_person_test.cpp
     character_slope_test.cpp
     character_step_test.cpp
     character_slide_test.cpp

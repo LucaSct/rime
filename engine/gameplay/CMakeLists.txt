@@ -21,6 +21,7 @@
 
 add_library(rime_gameplay STATIC
     src/character.cpp
+    src/first_person.cpp
     src/components.cpp
     src/weapon.cpp)
 
