@@ -44,6 +44,7 @@ add_subdirectory(replication) # NetIds + snapshot delta replication: convergence
 add_subdirectory(destruction_net) # the damage-op stream: two peers break the same wall (M11.4a)
 add_subdirectory(gameplay) # character controller: collide-and-slide proofs on static box geometry (m12.2)
 add_subdirectory(gameplay_net) # the networked player: consume loop, latency baseline, weapon glue (m12.3)
+add_subdirectory(blockkit) # the block as content: assembly, .rscene round trip, ADR-0035 §1's scale floors — GPU-free (m13.2c)
 if(RIME_BUILD_CAPI)
     add_subdirectory(capi) # the C ABI (M6.9), driven through librime_capi — GPU-free
 endif()
