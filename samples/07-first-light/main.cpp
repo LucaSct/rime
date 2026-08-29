@@ -42,7 +42,9 @@
 #include "rime/render/components.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/render_graph.hpp"
+#include "rime/render/culling.hpp"
 #include "rime/render/scene_renderer.hpp"
+#include "rime/render/text/hud.hpp"
 #include "rime/rhi/rhi.hpp"
 #include "rime/stream/frame_codec.hpp"
 #include "rime/stream/frame_streamer.hpp"
@@ -254,20 +256,30 @@ struct FirstLightApp {
     render::MaterialRegistry materials;
     rhi::TextureHandle checker{};
     render::SceneRenderer renderer;
+    render::text::HudRenderer hud;
     ecs::Entity camera{};
     render::RGTexture last_ldr{};
+    bool show_hud = false;
 
     // Precondition: `application.device() != nullptr`. The device check is deliberately the
     // CALLER's job, not ours: the GPU resources below dereference the device in this initializer
     // list, so a GPU-less host has to be handled BEFORE we get here — dereferencing a null device
     // is exactly what crashed the headless run on a runner with no Vulkan driver.
     explicit FirstLightApp(app::Application& application)
-        : app(application), meshes(*app.device()), renderer(*app.device(), meshes, materials) {
+        : app(application), meshes(*app.device()), renderer(*app.device(), meshes, materials),
+          hud(*app.device(), render::kLdrFormat) {
         checker = make_checker(*app.device());
         build_scene(app, meshes, materials, checker, camera);
         renderer.set_ambient(0.03f, 0.03f, 0.04f);
         app.on_render([this](app::FrameContext& ctx) {
             last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
+            if (show_hud) {
+                // Declared AFTER the scene and BEFORE the loop's present pass: the HUD LOADS the
+                // finished LDR and blends over it, so it has to be the last thing written into that
+                // image and the first thing the present copy sees.
+                draw_hud(ctx);
+                hud.declare(*ctx.graph, last_ldr);
+            }
             // ONE LINE is the whole windowed path (m13.3a): name the image you want on screen and
             // the loop copies it onto the acquired backbuffer and presents. Ignored when the app is
             // not windowed, which is why --headless and --serve still run this exact callback.
@@ -279,6 +291,53 @@ struct FirstLightApp {
 
     FirstLightApp(const FirstLightApp&) = delete;
     FirstLightApp& operator=(const FirstLightApp&) = delete;
+
+    // The engine's first native HUD (m13.3b). Deliberately a LAYOUT and not a widget tree: a panel,
+    // right-aligned values against dim labels, one accent colour for the number the eye should find
+    // first. Everything here is what the engine already knows about itself and previously could only
+    // say in a log line.
+    void draw_hud(app::FrameContext& ctx) {
+        namespace st = render::text::style;
+        using render::text::HudRenderer;
+
+        hud.begin(ctx.extent);
+
+        constexpr float kW = 268.0f;
+        const float rows = 4.0f;
+        const float h = st::kPadding * 2.0f + st::kLineHeight * (rows + 0.9f);
+        hud.panel(st::kPadding, st::kPadding, kW, h);
+
+        float y = st::kPadding * 2.0f;
+        const float left = st::kPadding * 2.0f;
+        // Measured, not guessed. A hardcoded offset here collided with the title the moment the
+        // font's advance changed — which is the whole reason text_width() is part of the API.
+        hud.text(left, y, "RIME", st::kAccent, 18.0f);
+        hud.text(left + HudRenderer::text_width("RIME ", 18.0f), y + 3.0f, "first light",
+                 st::kLabel, 14.0f);
+        y += st::kLineHeight * 1.6f;
+
+        const render::CullStats cull = renderer.cull_stats();
+        char buf[64];
+        const auto row = [&](const char* label, const char* value, render::text::Color c) {
+            hud.text(st::kPadding * 2.0f, y, label, st::kLabel, st::kTextSize);
+            // Right-aligned values: a column of numbers whose digits line up is enormously faster to
+            // read at a glance than one that ragged-lefts, and text_width() exists for exactly this.
+            const float w = HudRenderer::text_width(value, st::kTextSize);
+            hud.text(st::kPadding + kW - st::kPadding - w, y, value, c, st::kTextSize);
+            y += st::kLineHeight;
+        };
+
+        std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(ctx.frame_index));
+        row("frame", buf, st::kText);
+        std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(app.tick_count()));
+        row("ticks", buf, st::kText);
+        std::snprintf(buf, sizeof(buf), "%llu / %llu",
+                      static_cast<unsigned long long>(cull.submitted),
+                      static_cast<unsigned long long>(cull.considered()));
+        // The m13.2a counter, on screen at last: "submitted of considered". A cull that silently
+        // stopped culling shows here as the two numbers converging.
+        row("drawn", buf, cull.culled > 0 ? st::kAccent : st::kWarn);
+    }
 
     void pose_camera(float yaw, float pitch, float distance) {
         app.world().get<ecs::WorldTransform>(camera)->value =
@@ -316,6 +375,7 @@ int run_windowed(int frames) {
 
     FirstLightApp scene(app);
     scene.pose_camera(0.6f, 0.25f, 4.2f);
+    scene.show_hud = true; // the windowed run is the one a human looks at
 
     if (app.windowed()) {
         std::printf("07-first-light: presenting in a window — close it (or ESC) to exit.\n");
@@ -347,6 +407,9 @@ int run_headless(int frames, const char* ppm) {
         return std::getenv("RIME_REQUIRE_VULKAN") ? 1 : 0; // absent GPU: a skip, unless required
     }
     FirstLightApp fl(app);
+    // Off by default: the headless self-check below counts lit pixels, and a HUD would perturb
+    // exactly the numbers it asserts on. RIME_HUD=1 turns it on for capturing a look at it.
+    fl.show_hud = std::getenv("RIME_HUD") != nullptr;
     std::printf("07-first-light: rendering %d frame(s) on '%s' (%ux%u)\n",
                 frames,
                 fl.app.device()->adapter().name.c_str(),
