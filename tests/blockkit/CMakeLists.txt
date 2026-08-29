@@ -29,7 +29,7 @@ target_compile_definitions(block_standup_test PRIVATE RIME_BLOCK_COOKED_DIR="${B
 # red test rather than a quietly smaller block. Keep them in the same order for review.
 #   name        size            parts  seed
 #   wall_bg     8   3   0.3     12     1301
-#   wall_hero   8   3   0.3     28     1310
+#   wall_hero   8   3   0.3     28     1302
 #   side_bg     7.4 3   0.3     12     1303
 #   side_hero   7.4 3   0.3     28     1304
 #   floor_bg    7.4 0.3 7.4     12     1305
@@ -39,7 +39,7 @@ target_compile_definitions(block_standup_test PRIVATE RIME_BLOCK_COOKED_DIR="${B
 #   crate       1   1   1        8     1309
 set(BLOCK_COOKS
     "wall_bg|8|3|0.3|12|1301"
-    "wall_hero|8|3|0.3|28|1310"
+    "wall_hero|8|3|0.3|28|1302"
     "side_bg|7.4|3|0.3|12|1303"
     "side_hero|7.4|3|0.3|28|1304"
     "floor_bg|7.4|0.3|7.4|12|1305"

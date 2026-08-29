@@ -315,12 +315,29 @@ TEST_CASE("part leaves: m13.2b's visual budget despawns leaves rather than leaki
 
     fx.destruction.apply_damage({0}, {0.0f, 2.0f, 0.0f}, 8.0f, 20.0f, {0.0f, 0.0f, 0.0f});
 
+    // Run until the visual population is back under the cap, rather than for a fixed number of
+    // ticks. m13.2b's cap is deliberately SOFT under a burst — only FROZEN debris may be retired,
+    // because deleting rubble a player is watching come to rest would be worse than exceeding a
+    // budget for a moment — so the contract is "it catches up", not "it is never exceeded".
+    //
+    // The first version of this case ran 400 ticks and asserted the cap outright. That passed only
+    // because the old wall fixture happened to settle within 400; regenerating the fixture (the
+    // m13.fracture-clip rewrite) changed the debris pattern and it took ~2400. The test was pinned
+    // to an accident of the fixture, not to the behaviour.
     std::size_t retired_total = 0;
-    for (int tick = 0; tick < 400; ++tick) {
+    int ticks = 0;
+    constexpr int kBound = 6000;
+    for (; ticks < kBound; ++ticks) {
         fx.physics.step(kDt);
         fx.destruction.update(fx.physics);
         retired_total += fx.leaves.update(fx.world, fx.destruction, fx.physics).leaves_retired;
+        if (ticks > 200 && fx.destruction.visual_debris_count() <= life.max_visual_debris) {
+            break;
+        }
     }
+    MESSAGE("converged after " << ticks << " ticks: " << fx.destruction.visual_debris_count()
+                               << " visible of a " << fx.destruction.debris_count() << " roster");
+    CHECK(ticks < kBound); // it converged rather than running out the bound
 
     // The C6 contract, from the render side: rubble the budget evicted stops costing anything.
     CHECK(retired_total > 0);

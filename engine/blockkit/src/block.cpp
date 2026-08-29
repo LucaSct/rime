@@ -41,10 +41,7 @@ constexpr std::uint64_t fourcc(char a, char b, char c, char d) noexcept {
 constexpr std::array<CookSpec, 9> kCooks{{
     // Front and back walls: the full footprint.
     {"wall_bg", 8.0f, 3.0f, 0.3f, 12, 1301, fourcc('B', 'G', 'W', 'L')},
-    // Seed 1310, not the 1302 this table first used: at 28 parts in a thin 8x3x0.3 wall that seed
-    // trips the cooker's closed-manifold check (tools/asset-pipeline/src/fracture.rs). The seed is
-    // chosen because `rime fracture` PROVES this one is clean, not because it happened to work.
-    {"wall_hero", 8.0f, 3.0f, 0.3f, 28, 1310, fourcc('H', 'R', 'W', 'L')},
+    {"wall_hero", 8.0f, 3.0f, 0.3f, 28, 1302, fourcc('H', 'R', 'W', 'L')},
     // Side walls: shortened by one slab thickness at each end so they butt between the front and
     // back walls instead of overlapping them at the corners (see block.hpp's geometry note).
     {"side_bg", 7.4f, 3.0f, 0.3f, 12, 1303, fourcc('B', 'G', 'S', 'W')},
