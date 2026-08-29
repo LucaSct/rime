@@ -55,6 +55,9 @@
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/assets/destructible_asset.hpp"
 #include "rime/audio/audio.hpp"
+#include "rime/audio/bank.hpp"
+#include "rime/audio/mixer.hpp"
+#include "rime/audio/wav.hpp"
 #include "rime/core/diagnostics/perf_report.hpp"
 #include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/diagnostics/work_ledger.hpp"
@@ -162,6 +165,20 @@ core::Vec3 subset_com(const assets::DestructibleAsset& asset,
 struct Listeners {
     vfx::DustField dust;
     audio::NullAudioBackend audio;
+
+    // m13.4: the REAL mixer, fed the same events as the null backend and no more. Optional and
+    // borrowed — the sample's self-check still asserts on `audio.log()`, so wiring a mixer in
+    // cannot move a single number the proof depends on. When it is null this is exactly the M8.4
+    // sample it has always been.
+    audio::Mixer* mixer = nullptr;
+
+    void sound(audio::SoundId id, core::Vec3 at, float gain) {
+        audio.play(kSoundImpactConcrete, at, gain); // the M8.4 log, unchanged
+        if (mixer != nullptr) {
+            mixer->play(id, at, gain);
+        }
+    }
+
     std::uint32_t parts_damaged = 0;
     std::uint32_t parts_died = 0;
     std::uint32_t islands_detached = 0;
@@ -181,15 +198,21 @@ struct Listeners {
                 case K::PartDied:
                     ++parts_died;
                     dust.emit_burst(lo, hi, 0.6f);
-                    audio.play(kSoundImpactConcrete, centre, std::min(1.0f, e.magnitude));
+                    sound(audio::sound::kPartBreak, centre, std::min(1.0f, e.magnitude));
                     break;
                 case K::IslandDetached:
                     ++islands_detached;
                     dust.emit_burst(lo, hi, 1.0f);
-                    audio.play(kSoundImpactConcrete, centre, 1.0f);
+                    // An island coming free is the big one — the low, long sound.
+                    sound(audio::sound::kCollapse, centre, 1.0f);
                     break;
                 case K::DebrisSettled:
                     ++debris_settled;
+                    // Rubble coming to rest. Quiet on purpose: a settle per chunk is dozens of
+                    // events, and at full gain they would drown the break that caused them.
+                    if (mixer != nullptr) {
+                        mixer->play(audio::sound::kDebrisSettle, centre, 0.35f);
+                    }
                     break;
                 case K::DebrisEvicted:
                     // ADR-0032 C6 (m13.2b): this rubble has crossed the VISUAL budget. A renderer
@@ -213,6 +236,11 @@ constexpr float kDt = 1.0f / 60.0f;
 struct SimConfig {
     int workers = -1; // physics job-system threads; −1 = sequential
     int ticks = 300;  // sim ticks to run after the hit
+
+    // m13.4: write the destruction's own mixdown here (16-bit stereo WAV). Null = no audio work at
+    // all, which is the default and what every existing proof runs. The mixer's real proof is the
+    // offline one in tests/audio; this is how a HUMAN hears it, driven by the same events.
+    const char* wav = nullptr;
 };
 
 struct SimResult {
@@ -322,6 +350,27 @@ SimResult run_sim(const assets::DestructibleAsset& asset, SimConfig cfg) {
 
     Listeners listeners;
 
+    // m13.4: an optional real mixdown, rendered in LOCKSTEP with the simulation — one tick is one
+    // tick's worth of samples, so the WAV's timeline IS the sim's timeline. Nothing about the
+    // proof's counters changes; the null backend still logs exactly what it logged at M8.4.
+    std::unique_ptr<audio::Mixer> mixer;
+    std::vector<float> mixdown;
+    const std::size_t frames_per_tick =
+        static_cast<std::size_t>(static_cast<double>(audio::kSampleRate) * kDt);
+    if (cfg.wav != nullptr) {
+        audio::MixerConfig mc;
+        mc.reference_distance = 1.5f;
+        mc.max_distance = 40.0f;
+        mixer = std::make_unique<audio::Mixer>(audio::SoundBank::engine_defaults(), mc);
+        // A listener a few metres back from the wall, facing it. Off to one side on purpose: a
+        // listener dead in front would pan everything to centre and the stereo field would be a
+        // claim nobody could hear.
+        audio::Listener l;
+        l.position = {-2.0f, 1.0f, 6.0f};
+        mixer->set_listener(l);
+        listeners.mixer = mixer.get();
+    }
+
     hit_base_seam(dw, inst);
     bool settled = false;
     float peak_dust = 0.0f;
@@ -331,6 +380,11 @@ SimResult run_sim(const assets::DestructibleAsset& asset, SimConfig cfg) {
         pw.step(kDt);
         dw.update(pw);
         listeners.consume(dw.events()); // the fan-out, every tick
+        if (mixer) {
+            const std::size_t before = mixdown.size();
+            mixdown.resize(before + frames_per_tick * 2u);
+            mixer->render(std::span<float>(mixdown).subspan(before));
+        }
         peak_dust =
             std::max(peak_dust, listeners.dust.coverage()); // catch the bloom before it ages
         listeners.dust.simulate(kDt);
@@ -348,6 +402,26 @@ SimResult run_sim(const assets::DestructibleAsset& asset, SimConfig cfg) {
         if (t > 4 && s.awake_bodies == 0) {
             settled = true; // came to rest (step FIRST, then gate — debris are born at rest)
             break;
+        }
+    }
+
+    if (mixer) {
+        // Tail: keep rendering past the last event so the collapse's own decay is in the file
+        // rather than cut off at whatever tick the solver happened to fall asleep on.
+        for (int i = 0; i < 90 && mixer->voice_count() > 0; ++i) {
+            const std::size_t before = mixdown.size();
+            mixdown.resize(before + frames_per_tick * 2u);
+            mixer->render(std::span<float>(mixdown).subspan(before));
+        }
+        if (audio::write_wav(cfg.wav, mixdown, audio::kSampleRate, 2)) {
+            const audio::MixStats& ms = mixer->stats();
+            std::printf("  wrote %s — %.2f s, %llu voices, peak %.2f, %llu clipped\n", cfg.wav,
+                        static_cast<double>(mixdown.size() / 2u) / audio::kSampleRate,
+                        static_cast<unsigned long long>(ms.voices_started),
+                        static_cast<double>(ms.peak),
+                        static_cast<unsigned long long>(ms.clipped_samples));
+        } else {
+            std::fprintf(stderr, "  could not write %s\n", cfg.wav);
         }
     }
 
@@ -622,7 +696,7 @@ std::optional<assets::DestructibleAsset> load_wall(const std::filesystem::path& 
 }
 
 // ── --headless: the M8 done-when ─────────────────────────────────────────────────────────────────
-int run_headless(const std::filesystem::path& cooked, const char* ppm) {
+int run_headless(const std::filesystem::path& cooked, const char* ppm, const char* wav) {
     const auto asset = load_wall(cooked);
     if (!asset) {
         return 1;
@@ -632,7 +706,10 @@ int run_headless(const std::filesystem::path& cooked, const char* ppm) {
     // (1) The deterministic destruction self-check (GPU-FREE — the real done-when). A generous tick
     // budget lets the debris pile come fully to rest; the loop breaks the moment it does.
     constexpr int kTicks = 1500;
-    const SimResult base = run_sim(*asset, {-1, kTicks});
+    // Only the BASE run writes audio: the determinism comparisons below re-run the same sim
+    // several ways and would otherwise overwrite the file four times for no gain. The mixer does not
+    // touch SimResult, so its presence cannot change what those comparisons compare.
+    const SimResult base = run_sim(*asset, {-1, kTicks, wav});
     std::printf("  hit the base seam: %u parts died, %u island(s) detached, %zu debris; "
                 "audio played %u times; dust %s; settled=%s\n",
                 base.parts_died,
@@ -1007,6 +1084,7 @@ int main(int argc, char** argv) {
     enum class Mode { Headless, Serve, Perf } mode = Mode::Headless;
     std::filesystem::path cooked = default_cooked();
     const char* ppm = nullptr;
+    const char* wav = nullptr; // m13.4: write the destruction's own mixdown (see SimConfig::wav)
     std::string host = "0.0.0.0";
     std::uint16_t port = 9100;
     PerfOptions perf;
@@ -1033,6 +1111,8 @@ int main(int argc, char** argv) {
             perf.out = argv[++i];
         } else if (a == "--baseline" && i + 1 < argc) {
             perf.baseline = argv[++i];
+        } else if (a == "--wav" && i + 1 < argc) {
+            wav = argv[++i];
         } else if (a == "--ppm" && i + 1 < argc) {
             ppm = argv[++i];
         } else if (a == "--host" && i + 1 < argc) {
@@ -1059,5 +1139,5 @@ int main(int argc, char** argv) {
     if (mode == Mode::Perf) {
         return run_perf(cooked, perf);
     }
-    return run_headless(cooked, ppm);
+    return run_headless(cooked, ppm, wav);
 }
