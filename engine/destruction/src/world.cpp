@@ -147,6 +147,13 @@ physics::BodyId DestructionWorld::body_of(InstanceId instance) const noexcept {
     return impl_->instances[instance.index].body;
 }
 
+PatternId DestructionWorld::pattern_of(InstanceId instance) const noexcept {
+    if (instance.index >= impl_->instances.size()) {
+        return PatternId{};
+    }
+    return impl_->instances[instance.index].pattern;
+}
+
 std::uint32_t DestructionWorld::part_count(PatternId pattern) const noexcept {
     if (pattern.index >= impl_->patterns.size()) {
         return 0;
