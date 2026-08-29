@@ -233,6 +233,39 @@ fn order_face(verts: &[V3], on_plane: &[usize], n: V3) -> Vec<usize> {
     loop_idx
 }
 
+/// Is this face set a closed, consistently-wound polyhedral surface? Mirrors the two topology rules
+/// `build_convex_hull` enforces at load, so a malformed cell is caught where it is produced rather
+/// than where it is consumed:
+///
+///   * no directed edge appears twice — two faces traversing `a -> b` the same way means one of
+///     them is wound inward;
+///   * every directed edge `a -> b` has its twin `b -> a` on the neighbouring face — an edge with no
+///     twin is a hole in the surface, which is what happens when two faces disagree about whether a
+///     nearly-collinear vertex lies on the edge they share.
+///
+/// Returns a short description of the first defect found, for the error message.
+fn check_closed_manifold(faces: &[Vec<usize>]) -> Result<(), String> {
+    let mut edges: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+    for face in faces {
+        for k in 0..face.len() {
+            let a = face[k];
+            let b = face[(k + 1) % face.len()];
+            if a == b {
+                return Err(format!("face repeats vertex {a}"));
+            }
+            if !edges.insert((a, b)) {
+                return Err(format!("directed edge {a}->{b} appears in two faces"));
+            }
+        }
+    }
+    for &(a, b) in &edges {
+        if !edges.contains(&(b, a)) {
+            return Err(format!("edge {a}->{b} has no opposite-direction twin"));
+        }
+    }
+    Ok(())
+}
+
 /// A built Voronoi cell: its vertices, its faces (each a CCW loop of vertex indices) with the source
 /// site each face's plane came from (`Some(j)` ⇒ shared with cell `j`), plus derived volume, COM, and
 /// AABB. The tuple-free return keeps `build_cell` readable.
@@ -449,6 +482,34 @@ pub fn fracture_box(cfg: &FractureConfig) -> Result<Destructible, PipelineError>
             )));
         }
 
+        // Closed-manifold check — the same structural test `build_convex_hull` runs at load
+        // (engine/physics/src/hull.hpp: "same directed edge twice" / "open boundary"). It is
+        // repeated HERE because without it the cooker can write a `.rdest` that the asset decoder
+        // happily accepts — every count in range, every index valid — and that `register_hull` then
+        // rejects at load, hundreds of milliseconds and one process boundary away from the cause.
+        // That is the worst shape a failure can take: late, silent, and attributed to whatever tried
+        // to use the file.
+        //
+        // It is NOT a new-configuration problem, and the first framing of this comment said it was.
+        // Measured over 60 seeds per config: 4/60 at 28 parts in a thin 8x3x0.3 wall, 3/60 in a
+        // THICK 8x3x3 one (so thinness is not the driver), and 3/60 at the 2x1.5x0.3 / 16-part
+        // config this file's own tests have used since M8.1. The rate tracks part count, not shape.
+        //
+        // The cause is in `build_cell`, and is NOT fixed here — this only guarantees a bad cell
+        // never reaches a file. Every failure observed so far contains a DUPLICATED directed edge
+        // (never an untwinned one alone), which points at rival copies of one geometric corner
+        // where several planes pass within EPS of a single point: the triple enumeration emits
+        // each, they can sit further apart than the dedup tolerance, and the +/-EPS membership
+        // slack then seats both on both incident faces. Two hypotheses are already refuted by
+        // measurement — duplicate faces from near-coincident planes (deduping them changes no
+        // outcome) and an inverted winding (every face agrees with its plane normal).
+        if let Err(defect) = check_closed_manifold(&faces) {
+            return Err(PipelineError::Unsupported(format!(
+                "Voronoi cell for site {si} is not a closed polyhedron ({defect}); \
+                 use a different seed or fewer parts"
+            )));
+        }
+
         // Shared-face area ⇒ bond strength. A face on a bisector toward site j is shared with cell j.
         for (f, src) in faces.iter().zip(&face_source) {
             if let Some(j) = *src {
@@ -659,6 +720,56 @@ mod tests {
             for &ix in &q.face_indices {
                 assert!((ix as usize) < q.vertices.len());
             }
+
+            // TOPOLOGY, which the checks above cannot see. Counts in range and indices in bounds
+            // are satisfied perfectly by a surface with a hole in it — this test asserted "a valid
+            // convex shape" for two milestones while never once checking the shape was closed, and
+            // m13.2c found a seed where it is not.
+            let mut edges: std::collections::BTreeSet<(u32, u32)> =
+                std::collections::BTreeSet::new();
+            let mut at = 0usize;
+            for &c in &q.face_counts {
+                let face = &q.face_indices[at..at + c as usize];
+                at += c as usize;
+                for k in 0..face.len() {
+                    let (a, b) = (face[k], face[(k + 1) % face.len()]);
+                    assert_ne!(a, b, "part {i} face repeats vertex {a}");
+                    assert!(
+                        edges.insert((a, b)),
+                        "part {i} directed edge {a}->{b} is in two faces"
+                    );
+                }
+            }
+            for &(a, b) in &edges {
+                assert!(
+                    edges.contains(&(b, a)),
+                    "part {i} edge {a}->{b} has no twin — the surface is open"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cell_that_is_not_closed_is_an_error_rather_than_a_file() {
+        // The regression: an 8x3x0.3 wall at 28 parts, seed 1302, produced a cell whose faces
+        // disagreed about a shared edge. The cooked `.rdest` decoded cleanly and `register_hull`
+        // rejected it at load, one process boundary from the cause. The cooker must refuse instead.
+        //
+        // This asserts the GUARANTEE (a bad cell never becomes a file), not the absence of bad
+        // cells — the thresholding defect in `build_cell` that produces them is still there.
+        let cfg = FractureConfig::wall([4.0, 1.5, 0.15], 28, 1302);
+        match fracture_box(&cfg) {
+            Err(PipelineError::Unsupported(msg)) => {
+                assert!(
+                    msg.contains("not a closed polyhedron"),
+                    "expected the manifold check to fire, got: {msg}"
+                );
+            }
+            Err(e) => panic!("expected a closed-polyhedron rejection, got {e:?}"),
+            Ok(d) => panic!(
+                "expected a rejection; cooked {} parts instead",
+                d.parts.len()
+            ),
         }
     }
 
@@ -731,8 +842,13 @@ mod tests {
 
     #[test]
     fn a_different_seed_gives_a_different_partition() {
+        // Seed 3, not seed 2: at this configuration seed 2 produces two cells whose faces
+        // disagree about a shared edge, and the closed-manifold check now refuses to cook them.
+        // That defect is not new — this test has been cooking those broken parts since M8.1 and
+        // never noticed, because it only compares BYTES and never registers a hull. See
+        // `a_cell_that_is_not_closed_is_an_error_rather_than_a_file`.
         let a = fracture_box(&FractureConfig::wall([1.0, 0.75, 0.15], 16, 1)).unwrap();
-        let b = fracture_box(&FractureConfig::wall([1.0, 0.75, 0.15], 16, 2)).unwrap();
+        let b = fracture_box(&FractureConfig::wall([1.0, 0.75, 0.15], 16, 3)).unwrap();
         // Same conserved volume, different vertex data.
         assert!((a.total_volume() - b.total_volume()).abs() < 1.0e-3);
         assert_ne!(a.cook().0, b.cook().0, "different seeds must differ");
