@@ -1662,6 +1662,8 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
 | **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). The renderer costs 5.2 ms; the remainder is physics at 667 debris |
 | **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
+| **M15** | **"The Platform Proof"** | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
+| **M16** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3, plus M13's unmet frame-rate clause and the physics-at-debris-scale cost m13.p measured ([ADR-0038](adr/0038-platform-proof-m15.md) rules the split) |
 
 ### Detail
 
@@ -2110,6 +2112,30 @@ degrading with a counter instead of failing the load, and `editor --smoke` openi
 edit that survives it · **m14.4** the round trip end to end, M14's "done when" · **m14.5** the asset
 browser against real cooked assets, if there is room. Cut order: m14.5 → m14.2's open-a-file half.
 **Never cut:** m14.1, m14.3 — without either there is no round trip.
+
+**M15 — "The Platform Proof."** *Planned 2026-08-30; [ADR-0038](adr/0038-platform-proof-m15.md) is
+the architecture.* M13 and M14 were each reported complete one wire too early, and the same review
+found the one gap that is not last-mile: **there is no engine-level answer to "how does a scene file
+name a mesh."** `MeshRef` is a dense registry index, `MeshAsset{u64}` is resolved by nothing, and
+`GpuAssetBridge` is textures-only — so the editor's `place` button is a dead end and every game must
+reinvent `blockkit`'s `SlabRole` + `apply_palette`. VISION §5's platform proof is unmet because of it.
+
+*Bricks:* **m15.0** the ADR + this ladder · **m15.1** **asset references that survive** (the
+architectural core; everything visual depends on it) · **m15.2** a game supplies its own editor host,
+so `rime-engine` stops knowing what a `SlabRole` is · **m15.3** the editor can author — Save, entity
+names, spawn-with-transform, a working `place`, a colour swatch · **m15.4** the editor draws real
+content (ADR-0037's cut m14.5) · **m15.5** pointer capture, without which you cannot ship a
+first-person game · **m15.6** dead reflected fields implemented or deleted · **m15.7** the on-ramp —
+README build instructions, a getting-started page, `samples/hello-game` · **m15.8** the proof: a
+target range authored in the editor, its diff touching only `samples/` and `docs/`. Cut order:
+m15.7's hello-game → m15.6's alpha mask → m15.3's colour swatch. **Never cut:** m15.1, m15.3's Save,
+m15.8.
+
+**M13's frame-rate clause is carried to M16, with the number written down** — `frame` p99 35.60 ms
+against a ratified 16.6. The budget does not move; M13 stands at ⚠️. It goes to M16 because m13.p
+says where the cost is and it is not where M15 works: the whole M10 stack renders in 5.23 ms, and
+what remains is physics at 667 debris — ADR-0035 §6's predicted narrowphase cache, now with its
+measurement.
 
 **M14 starts after M13 closes.** `99-the-block` has one open defect (the collapse does not stay
 local), and starting the editor work while an integration bug is open is how integration bugs get
