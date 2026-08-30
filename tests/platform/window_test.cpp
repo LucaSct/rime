@@ -47,3 +47,35 @@ TEST_CASE("null window: lifecycle, sizing, and close") {
 
     shutdown(); // clears the queue and resets the quit flag for the next case
 }
+
+// m15.5. The contract that matters about pointer capture is not "the mode was stored" — it is that
+// ASKING IS NOT GETTING. `set_cursor_mode` returns the mode actually in effect, which the caller
+// must read; a Wayland compositor may not advertise pointer constraints, another X11 client may own
+// the pointer, and the headless backend has no pointer at all. Every one of those is a real
+// deployment, and a caller that assumed its request was granted puts the player in free-look with a
+// cursor still free to walk off the window.
+//
+// The null backend is the honest worst case and so the best place to pin this: it refuses
+// everything, which means the fallback path is exercised on every CI OS on every run rather than
+// only on the machines where refusal is hard to reproduce.
+TEST_CASE("null window: a cursor-mode request is answered, not echoed") {
+    set_headless(true);
+    REQUIRE(init());
+    auto win = create_window(WindowDesc{.title = "cursor", .width = 320, .height = 240});
+    REQUIRE(win != nullptr);
+
+    CHECK(win->cursor_mode() == CursorMode::Normal); // the resting state
+
+    // Not Locked, and that is the assertion. A backend that echoed the request would pass every
+    // weaker check ("it returned something", "the mode is one of the enumerators") and fail this.
+    CHECK(win->set_cursor_mode(CursorMode::Locked) == CursorMode::Normal);
+    CHECK(win->cursor_mode() == CursorMode::Normal);
+
+    CHECK(win->set_cursor_mode(CursorMode::Hidden) == CursorMode::Normal);
+    CHECK(win->cursor_mode() == CursorMode::Normal);
+
+    // Asking for what it already has is still answered truthfully.
+    CHECK(win->set_cursor_mode(CursorMode::Normal) == CursorMode::Normal);
+
+    shutdown();
+}

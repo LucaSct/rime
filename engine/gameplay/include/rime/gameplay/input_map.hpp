@@ -53,19 +53,33 @@ struct InputBindings {
 
     platform::MouseButton fire = platform::MouseButton::Left;
 
-    // ── Look, and the reason it is a DRAG by default ─────────────────────────────────────────
-    // `platform::CursorMode::Locked` is declared in mouse.hpp and its comment says each backend
-    // implements pointer capture "in M2.3". It does not: as of m13.3c `CursorMode` is referenced by
-    // nothing at all, and `platform::Window` has no set_cursor_mode() to reference it with. Without
-    // capture, free look walks the real cursor off the window and the camera stops steering
-    // mid-turn — a control scheme that breaks silently at the screen edge.
+    // ── Look, and why it still DEFAULTS to a drag ────────────────────────────────────────────
+    // Pointer capture is real as of m15.5 — `platform::Window::set_cursor_mode` is implemented by
+    // every backend — but it is not something a control scheme may ASSUME. A locked cursor is a
+    // request the platform can refuse: a Wayland compositor need not advertise pointer constraints,
+    // another X11 client can hold the pointer, and the headless backend has no pointer at all. Free
+    // look on a cursor that is not actually locked walks it off the window and the camera stops
+    // steering mid-turn — the failure reads as a broken camera rather than a missing capability.
     //
     // So the default is hold-to-look, the DCC/editor convention, which needs nothing from the
-    // backends and cannot break that way. Set `look_requires_drag = false` once pointer lock is a
-    // real platform brick, and a game (rather than a viewer) will want exactly that.
+    // backends and cannot break that way. A game flips it from what the window ACTUALLY gave it:
+    //
+    //     bindings.look_requires_drag = look_requires_drag_for(win->set_cursor_mode(Locked));
+    //
+    // — never from what it asked for.
     platform::MouseButton look_drag = platform::MouseButton::Right;
     bool look_requires_drag = true;
 };
+
+// Hold-to-look is required exactly when the cursor is not locked (m15.5).
+//
+// One line, and it is a named function rather than an inline comparison for a reason: it is the
+// single place the engine decides that a REQUEST for capture is not evidence of capture. Take the
+// argument from `set_cursor_mode`'s return value or from `cursor_mode()`; passing the mode you
+// wanted turns the check into a tautology, which is the bug this exists to make hard to write.
+[[nodiscard]] constexpr bool look_requires_drag_for(platform::CursorMode achieved) noexcept {
+    return achieved != platform::CursorMode::Locked;
+}
 
 // What one frame of device input asked for.
 //

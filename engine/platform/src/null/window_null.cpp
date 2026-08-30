@@ -47,6 +47,16 @@ public:
 
     void show() override {}
 
+    // NORMAL, ALWAYS — the headless window has no pointer to hide, pin or free, so any other answer
+    // would be a claim it cannot back. This is deliberately the un-echoed case: a caller that
+    // assumes `set_cursor_mode(Locked)` means the cursor is locked is wrong on the very backend
+    // every CI OS runs, which is where that assumption is cheapest to catch. It is also the same
+    // answer a real Wayland compositor gives when it does not advertise pointer constraints, so the
+    // fallback path gets exercised on every platform rather than only where it is hard to reach.
+    CursorMode set_cursor_mode(CursorMode) override { return CursorMode::Normal; }
+
+    [[nodiscard]] CursorMode cursor_mode() const override { return CursorMode::Normal; }
+
     [[nodiscard]] NativeWindow native_handle() const override {
         return NativeWindow{WindowSystem::Null, nullptr, nullptr};
     }

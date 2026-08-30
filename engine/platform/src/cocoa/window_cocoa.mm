@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 #import <Cocoa/Cocoa.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <cstdint>
@@ -349,6 +350,13 @@ public:
 
     ~CocoaWindow() override {
         @autoreleasepool {
+            // Give the pointer back first: a decoupled cursor and an unbalanced [NSCursor hide]
+            // are both system-wide state that outlives this window, and a user left with a frozen
+            // invisible pointer has to log out (m15.5).
+            if (active_ == CursorMode::Locked) {
+                CGAssociateMouseAndMouseCursor(true);
+            }
+            set_cursor_visible(true);
             window_.delegate = nil; // sever the (weak) link before we and the delegate die
             [window_ orderOut:nil];
             [window_ close];
@@ -423,6 +431,8 @@ public:
     }
 
     void notify_focus(bool focused) {
+        focused_ = focused;
+        apply_cursor_mode(); // release the pointer on the way out, retake it on the way in
         Event e{};
         e.type = EventType::WindowFocus;
         e.window = id_;
@@ -432,13 +442,83 @@ public:
 
     [[nodiscard]] NSView* view() const { return view_; }
 
+    // POINTER CAPTURE (m15.5). macOS is the one backend that needs no recentring: NSEvent's
+    // deltaX/deltaY come from the HID layer and are already relative, so the whole job is to stop
+    // the CURSOR from following the mouse — CGAssociateMouseAndMouseCursor(false) — and hide it.
+    // That also disposes of the classic warp-feedback trap the X11 and Win32 backends have to
+    // handle: with the two decoupled, moving the cursor cannot manufacture mouse motion.
+    CursorMode set_cursor_mode(CursorMode mode) override {
+        desired_ = mode;
+        apply_cursor_mode();
+        return active_;
+    }
+
+    [[nodiscard]] CursorMode cursor_mode() const override { return active_; }
+
+    void apply_cursor_mode() {
+        // An unfocused window must not hold the pointer: on macOS a decoupled cursor is system
+        // wide, so a background app that kept it would freeze the pointer over every other window.
+        const CursorMode want =
+            (desired_ == CursorMode::Locked && !focused_) ? CursorMode::Normal : desired_;
+        if (want == active_) {
+            return;
+        }
+        @autoreleasepool {
+            if (active_ == CursorMode::Locked && want != CursorMode::Locked) {
+                CGAssociateMouseAndMouseCursor(true);
+            }
+            set_cursor_visible(want == CursorMode::Normal);
+            if (want == CursorMode::Locked) {
+                // Decouple FIRST, then place the cursor in the middle. In that order the warp moves
+                // only the cursor — the mouse is no longer attached to it — so it cannot show up as
+                // a delta in the next NSEvent, which is the documented hazard of warping.
+                CGAssociateMouseAndMouseCursor(false);
+                warp_to_centre();
+            }
+        }
+        active_ = want;
+    }
+
 private:
+    // [NSCursor hide]/[NSCursor unhide] are a COUNTER, like Win32's ShowCursor: unbalanced calls
+    // leave the pointer invisible for the rest of the session. Track it and only call on a real
+    // transition.
+    void set_cursor_visible(bool visible) {
+        if (visible == cursor_visible_) {
+            return;
+        }
+        cursor_visible_ = visible;
+        if (visible) {
+            [NSCursor unhide];
+        } else {
+            [NSCursor hide];
+        }
+    }
+
+    void warp_to_centre() {
+        NSScreen* screen = window_.screen != nil ? window_.screen : [NSScreen mainScreen];
+        if (screen == nil) {
+            return;
+        }
+        const NSRect frame = window_.frame;
+        // CGWarpMouseCursorPosition is in global display space with the origin at the TOP left,
+        // while every NSRect here has it at the bottom left. Flipping against the screen's own
+        // frame is the conversion; using the main screen's height instead would misplace the
+        // cursor on any secondary display.
+        const CGFloat flipped = NSMaxY([screen frame]) - NSMidY(frame);
+        CGWarpMouseCursorPosition(CGPointMake(NSMidX(frame), flipped));
+    }
+
     WindowId id_;
     NSWindow* window_ = nil;
     RimeMetalView* view_ = nil;
     RimeWindowDelegate* delegate_ = nil;
     CAMetalLayer* layer_ = nil;
     bool should_close_ = false;
+    CursorMode desired_ = CursorMode::Normal;
+    CursorMode active_ = CursorMode::Normal;
+    bool focused_ = false;
+    bool cursor_visible_ = true; // mirrors NSCursor's hide counter, which must stay balanced
 };
 
 // Recover the C++ window for an NSEvent's target window (used to tag events with their WindowId

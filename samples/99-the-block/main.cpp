@@ -2055,10 +2055,34 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         return 1;
     }
 
+    // The device->intent map's bindings, owned by main so the render callback below can read the
+    // look scheme the window actually granted.
+    gameplay::InputBindings bindings{};
+
     if (demo.app.windowed()) {
+        // ASK for the cursor, then believe the ANSWER (m15.5). A compositor that does not advertise
+        // pointer constraints hands back a weaker mode, and a build that assumed otherwise would put
+        // the player in free-look with a cursor still free to walk off the window — a camera that
+        // stops steering mid-turn, blamed on the camera. The control scheme and the help text both
+        // come from what was actually granted.
+        // Asking is not getting, and it is not getting YET either. On Wayland a surface can only
+        // lock a pointer that is already over it, so this request is routinely refused at startup
+        // and granted a moment later when the mouse enters the window — which is why the answer is
+        // re-read every frame below rather than believed once here.
+        const platform::CursorMode cursor =
+            demo.app.window()->set_cursor_mode(platform::CursorMode::Locked);
+        bindings.look_requires_drag = gameplay::look_requires_drag_for(cursor);
         std::printf("99-the-block: presenting in a window.\n"
-                    "  WASD move · hold RIGHT-DRAG to look · LEFT CLICK to fire\n"
-                    "  F detonates the charge on the hero building · ESC to exit\n");
+                    "  WASD move · %s to look · LEFT CLICK to fire\n"
+                    "  F detonates the charge on the hero building · ESC to exit\n",
+                    bindings.look_requires_drag
+                        // Not "this display cannot lock": at startup the pointer is usually not
+                        // over the window yet, and on Wayland that alone is enough to refuse. The
+                        // scheme switches by itself the moment the lock is granted, so the text
+                        // says what is true now and what will change rather than diagnosing the
+                        // platform from one early answer.
+                        ? "hold RIGHT-DRAG (free look engages if the cursor locks)"
+                        : "MOVE THE MOUSE");
     } else {
         std::printf("99-the-block: no display available; running the script headless instead.\n");
     }
@@ -2075,8 +2099,16 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         live.pressed = 0; // an edge is consumed by exactly one tick, or one click fires forever
     });
     demo.app.on_render([&](app::FrameContext& ctx) {
+        // The look scheme follows the cursor mode the window ACTUALLY holds, every frame. It is
+        // live state: the lock is granted when the pointer enters, and dropped again whenever the
+        // window loses focus (a background app must not keep the pointer). Deciding once at startup
+        // would leave the player in drag-look for a session that locked a moment later, or — worse
+        // — in free-look after the lock was released behind their back.
+        if (platform::Window* win = demo.app.window()) {
+            bindings.look_requires_drag = gameplay::look_requires_drag_for(win->cursor_mode());
+        }
         const gameplay::FrameIntent intent = gameplay::map_frame_input(
-            demo.session.client.devices, ctx.input, demo.session.client.view);
+            demo.session.client.devices, ctx.input, demo.session.client.view, bindings);
         live = gameplay_net::to_input_command(intent.character);
         if (intent.quit) {
             quit = true;
