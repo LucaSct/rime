@@ -194,7 +194,14 @@ void apply_edit(ecs::World& world, stream::MessageType type, std::span<const std
             break;
         }
         case EditorMessage::Spawn:
-            (void)world.spawn();
+            // WITH A TRANSFORM, not empty (m15.3). A bare `world.spawn()` produced an entity the
+            // gizmo would not touch (it requires LocalTransform) and the renderer would not draw,
+            // so "+ spawn" added an invisible, unmovable row to the outliner and the user's next
+            // step was to hunt through "+ add component". A placement is the one thing every
+            // spawned entity wants; everything else is genuinely a choice.
+            (void)(world.is_registered<ecs::LocalTransform>()
+                       ? world.spawn_with(ecs::LocalTransform{})
+                       : world.spawn());
             break;
         case EditorMessage::Despawn: {
             core::ByteReader r(payload);

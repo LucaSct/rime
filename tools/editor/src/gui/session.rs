@@ -18,7 +18,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rime_protocol::{
     AssetEntry, AssetList, Connection, EditorMessage, FrameMessage, InputEvent, InputKind,
-    MessageType, PickResult, PlayState, Schema, Snapshot, SnapshotComponent, ViewportCamera,
+    MessageType, PickResult, PlayState, SaveResult, Schema, Snapshot, SnapshotComponent,
+    ViewportCamera,
 };
 
 use super::protocol_input::Input;
@@ -68,6 +69,12 @@ pub struct SharedState {
     /// `camera` above — continuous state the toolbar/border/tick-counter read each repaint, never
     /// consumed. Defaults to `PlayState::default()` (Edit, tick 0) before the engine's first frame.
     pub play_state: PlayState,
+    /// The newest un-consumed answer to a `SaveScene` (m15.3). The UI `take()`s it each repaint and
+    /// turns it into the status line, because **a refusal is a normal outcome** here, not a
+    /// transport error: the engine declines to save a world whose load skipped component types it
+    /// does not register, and the user has to be told why rather than left wondering whether the
+    /// click registered.
+    pub last_save: Option<SaveResult>,
     last_frame_at: Option<Instant>,
 }
 
@@ -304,6 +311,11 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
             // pixels it describes.
             if let Ok(camera) = ViewportCamera::decode(payload) {
                 shared.lock().unwrap().camera = Some(camera);
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::SaveResult.to_code() => {
+            if let Ok(result) = SaveResult::decode(payload) {
+                shared.lock().unwrap().last_save = Some(result);
             }
         }
         MessageType::Other(code) if code == EditorMessage::PlayState.to_code() => {

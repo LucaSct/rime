@@ -624,6 +624,86 @@ TEST_CASE("editorhost: spawn_entity_from_payload places an entity with the expec
     CHECK(placed == 1);
 }
 
+TEST_CASE("editorhost: a placed entity gets a transform even when the payload has none (m15.3)") {
+    // The asset browser's "place" sends a MeshAsset and NOTHING ELSE — it has no reason to know the
+    // byte layout of a transform. A bare `world.spawn()` therefore produced an entity the gizmo
+    // refuses to touch (it edits LocalTransform) and the renderer never draws (it queries
+    // WorldTransform+MeshRef+MaterialRef): an invisible, unmovable row in the outliner. So the
+    // handler supplies the placement the browser cannot.
+    ecs::World world;
+    (void)world.register_component<ecs::LocalTransform>();
+    (void)world.register_component<et::AssetRef>();
+
+    const std::vector<std::byte> asset_blob = core::serialize(et::AssetRef{0x1234ULL});
+    std::vector<std::byte> payload;
+    core::ByteWriter w(payload);
+    w.u16(1);
+    w.u64(core::reflect<et::AssetRef>().type_hash);
+    w.u32(static_cast<std::uint32_t>(asset_blob.size()));
+    w.bytes(asset_blob);
+
+    REQUIRE(editorhost::spawn_entity_from_payload(world, payload));
+    REQUIRE(world.entity_count() == 1);
+
+    int placed = 0;
+    world.query<ecs::LocalTransform, et::AssetRef>().for_each(
+        [&](ecs::Entity, ecs::LocalTransform& tf, et::AssetRef& a) {
+            ++placed;
+            CHECK(a.asset == 0x1234ULL);
+            CHECK(tf.value.translation.x == 0.0f); // at the origin, where the gizmo can find it
+            CHECK(tf.value.scale.x == 1.0f);       // and visible rather than scaled to nothing
+        });
+    CHECK(placed == 1);
+}
+
+TEST_CASE("editorhost: an authored placement in the payload wins over the default (m15.3)") {
+    // The default must not clobber a real placement — a scene-authoring client that DOES send a
+    // LocalTransform (or a future duplicate-entity command) would otherwise have every entity snap
+    // to the origin. The payload is applied after the spawn, so it simply overwrites.
+    ecs::World world;
+    (void)world.register_component<ecs::LocalTransform>();
+
+    ecs::LocalTransform authored{};
+    authored.value.translation = {7.0f, 8.0f, 9.0f};
+    const std::vector<std::byte> blob = core::serialize(authored);
+    std::vector<std::byte> payload;
+    core::ByteWriter w(payload);
+    w.u16(1);
+    w.u64(core::reflect<ecs::LocalTransform>().type_hash);
+    w.u32(static_cast<std::uint32_t>(blob.size()));
+    w.bytes(blob);
+
+    REQUIRE(editorhost::spawn_entity_from_payload(world, payload));
+    REQUIRE(world.entity_count() == 1);
+
+    int placed = 0;
+    world.query<ecs::LocalTransform>().for_each([&](ecs::Entity, ecs::LocalTransform& tf) {
+        ++placed;
+        CHECK(tf.value.translation.y == 8.0f);
+    });
+    CHECK(placed == 1);
+}
+
+TEST_CASE("editorhost: a host that never registered a transform still places, it does not crash") {
+    // m15.2 lets a GAME supply its own host, so the registered component set is no longer the
+    // engine's to assume — and `spawn_with<T>` on an unregistered T does not fail politely, it
+    // traps. A minimal host must degrade to a plain spawn.
+    ecs::World world;
+    (void)world.register_component<et::AssetRef>();
+
+    const std::vector<std::byte> asset_blob = core::serialize(et::AssetRef{0x99ULL});
+    std::vector<std::byte> payload;
+    core::ByteWriter w(payload);
+    w.u16(1);
+    w.u64(core::reflect<et::AssetRef>().type_hash);
+    w.u32(static_cast<std::uint32_t>(asset_blob.size()));
+    w.bytes(asset_blob);
+
+    REQUIRE(editorhost::spawn_entity_from_payload(world, payload));
+    CHECK(world.entity_count() == 1);
+    CHECK_FALSE(world.is_registered<ecs::LocalTransform>());
+}
+
 TEST_CASE("editorhost: ViewportCamera and GizmoState round-trip their wire payloads (m9.6b)") {
     // The gizmo channel's two payloads, serialized and parsed back bit-exactly. GPU-free — the
     // messages are pure state; their live behaviour (the engine rendering a gizmo, the editor

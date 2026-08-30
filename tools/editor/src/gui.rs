@@ -171,13 +171,24 @@ struct EditorApp {
     gizmo_drag: Option<DragSession>,
     gizmo_snap: bool,
     last_gizmo_state: Option<GizmoState>,
+    // ── Saving (m15.3) ──────────────────────────────────────────────────────────────────────
+    // The scene this session opened, if any: what `Save` writes back to, and what makes it
+    // meaningfully different from `Save As`. `save_as_path` is the inline text field, because there
+    // is no native file dialog in this shell and adding one is a platform dependency, not a menu
+    // item. `save_status` is the last outcome — INCLUDING A REFUSAL, which is a normal answer here
+    // (the engine declines to save a world whose load dropped components it does not understand)
+    // and has to be shown rather than swallowed.
+    scene_path: Option<String>,
+    save_as_path: String,
+    save_status: Option<(String, bool)>, // (message, ok)
 }
 
 impl EditorApp {
     fn new(engine: String, assets: Option<String>, scene: Option<String>) -> Self {
         let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
         let (out_tx, out_rx) = mpsc::channel();
-        let session = EngineSession::spawn(engine, assets, scene, Arc::clone(&shared), out_rx);
+        let session =
+            EngineSession::spawn(engine, assets, scene.clone(), Arc::clone(&shared), out_rx);
         Self {
             dock: default_layout(),
             shared,
@@ -195,6 +206,9 @@ impl EditorApp {
             gizmo_drag: None,
             gizmo_snap: false,
             last_gizmo_state: None,
+            scene_path: scene.clone(),
+            save_as_path: scene.clone().unwrap_or_default(),
+            save_status: None,
         }
     }
 
@@ -311,6 +325,10 @@ impl eframe::App for EditorApp {
         // Undo/redo — keyboard (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y) and the Edit menu.
         let mut do_undo = false;
         let mut do_redo = false;
+        // Saving (m15.3): set by Ctrl+S or the File menu; `Some("")` means "write back where the
+        // scene was opened", which is a decision the engine owns.
+        let mut do_save: Option<String> = None;
+        let scene_is_open = self.scene_path.is_some();
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 if i.modifiers.shift {
@@ -321,6 +339,11 @@ impl eframe::App for EditorApp {
             }
             if i.modifiers.command && i.key_pressed(egui::Key::Y) {
                 do_redo = true;
+            }
+            // Ctrl/Cmd+S — the reflex every user already has. Only meaningful with a scene open;
+            // Save As lives in the menu, because it needs a path and this shell has no file dialog.
+            if i.modifiers.command && i.key_pressed(egui::Key::S) && scene_is_open {
+                do_save = Some(String::new());
             }
         });
 
@@ -358,7 +381,47 @@ impl eframe::App for EditorApp {
             egui::menu::bar(ui, |ui| {
                 ui.label(egui::RichText::new("Rime Editor").strong());
                 ui.separator();
-                ui.label("File");
+                // ── File (m15.3) ────────────────────────────────────────────────────────────
+                // This was `ui.label("File")` — a dead menu bar entry — while `SaveScene` had been
+                // implemented end to end on the wire since m14.3 and sent only from the headless
+                // smoke. **A person editing in this window lost their work on close.** The seam was
+                // built and wired to a test rather than to the product, which is the pattern this
+                // repo keeps recording; this is the wire.
+                ui.menu_button("File", |ui| {
+                    let has_scene = self.scene_path.is_some();
+                    if ui
+                        .add_enabled(has_scene, egui::Button::new("Save\tCtrl+S"))
+                        .on_disabled_hover_text(
+                            "no scene was opened — use Save As, or launch with --scene",
+                        )
+                        .clicked()
+                    {
+                        // An empty path means "write back where it was opened". The engine owns
+                        // that decision, so the editor never has to reconstruct the path it was
+                        // given.
+                        do_save = Some(String::new());
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.label("Save As");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.save_as_path)
+                                .desired_width(260.0)
+                                .hint_text("path/to/scene.rscene"),
+                        );
+                        if ui
+                            .add_enabled(
+                                !self.save_as_path.trim().is_empty(),
+                                egui::Button::new("Write"),
+                            )
+                            .clicked()
+                        {
+                            do_save = Some(self.save_as_path.trim().to_string());
+                            ui.close_menu();
+                        }
+                    });
+                });
                 ui.menu_button("Edit", |ui| {
                     if ui
                         .add_enabled(can_undo, egui::Button::new("Undo\tCtrl+Z"))
@@ -445,6 +508,30 @@ impl eframe::App for EditorApp {
                 actions.push(cmd);
             }
         }
+        if let Some(path) = do_save {
+            // Straight to the wire, NOT onto the undo stack: a save mutates a file, not the world,
+            // so there is nothing for an inverse to restore. `Save As` also becomes the session's
+            // scene, so the next Ctrl+S writes where the user last chose.
+            if !path.is_empty() {
+                self.scene_path = Some(path.clone());
+            }
+            let (msg, payload) = Command::SaveScene { path }.to_wire();
+            let _ = self.out_tx.send(Outbound::Editor { msg, payload });
+            self.save_status = Some(("saving…".to_owned(), true));
+        }
+        // The engine's answer. A REFUSAL IS A NORMAL OUTCOME (the engine declines to save a world
+        // whose load dropped component types it does not register — m14.3), so it lands in the
+        // status bar with its reason rather than being swallowed as a failed request.
+        if let Some(result) = self.shared.lock().unwrap().last_save.take() {
+            self.save_status = Some(if result.ok {
+                (
+                    format!("saved {} entities to {}", result.entities, result.path),
+                    true,
+                )
+            } else {
+                (result.error, false)
+            });
+        }
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -465,6 +552,20 @@ impl eframe::App for EditorApp {
                 ui.label(format!("{} entities", entities.len()));
                 ui.separator();
                 ui.label(format!("{frames} frames · {fps:.0} fps"));
+                // The save outcome, kept visible until the next one. A refusal is red and carries
+                // the engine's reason verbatim — "cannot save" with no cause is indistinguishable
+                // from a bug, and a user who cannot tell those apart reaches for a workaround.
+                if let Some((message, ok)) = &self.save_status {
+                    ui.separator();
+                    ui.colored_label(
+                        if *ok {
+                            egui::Color32::from_rgb(90, 200, 120)
+                        } else {
+                            egui::Color32::from_rgb(220, 80, 80)
+                        },
+                        message,
+                    );
+                }
             });
         });
 
@@ -650,7 +751,9 @@ impl TabViewer for EditorTabs<'_> {
                     &mut gz,
                 );
             }
-            Tab::Outliner => outliner_ui(ui, self.entities, self.selected, self.actions),
+            Tab::Outliner => {
+                outliner_ui(ui, self.schema, self.entities, self.selected, self.actions)
+            }
             Tab::Inspector => inspector_ui(
                 ui,
                 self.entities,
@@ -734,7 +837,11 @@ fn assets_ui(
                 if a.kind == AssetKind::Mesh {
                     if let Some(hash) = mesh_asset_hash {
                         if ui.small_button("place").clicked() {
-                            // MeshAsset { asset: <content id> } — one u64 field, packed as-is.
+                            // MeshAsset { asset: <content id> } — one u64 field, packed as-is. The
+                            // placement itself is the ENGINE's to supply (m15.3): the browser has
+                            // no business knowing the byte layout of a transform, and the host
+                            // gives every payload-spawned entity a LocalTransform it does not
+                            // already carry, so the result is movable the moment it appears.
                             let blob = encode_value(&Value::Struct(vec![(
                                 "asset".to_string(),
                                 Value::U64(a.id),
@@ -969,8 +1076,52 @@ fn viewport_input(
     }
 }
 
+/// A readable name for an outliner row (m15.3).
+///
+/// The block opens as 213 entities, and `entity 0 · 3 components` … `entity 212 · 3 components` is
+/// a list you cannot work in. There is no `Name` component to fall back on: reflection has no
+/// string type at all (`FieldType` is Bool/Int/UInt/Float/Double/Struct) and ECS components must be
+/// trivially-copyable PODs, so an authored name needs `FieldType::String` threaded through the
+/// serializer, the scene format, the schema wire and the inspector — a brick of its own, ruled in
+/// ADR-0038 and not smuggled in here.
+///
+/// So the label is DERIVED from what the entity already carries: its most distinctive component's
+/// short type name. That is free, it works for every scene including ones authored before any
+/// naming existed, and for the block it turns an unreadable list into `SlabRole`, `PointLight`,
+/// `Camera`. An entity is still addressed by index — this changes what a human reads, not what the
+/// protocol says.
+fn outliner_label(schema: &Schema, index: usize, entity: &SnapshotEntity) -> String {
+    // Least-common-first: a `Camera` or a `SlabRole` says far more about an entity than the
+    // `LocalTransform` almost everything has, so the ranking is by how much the type narrows things
+    // down rather than by declaration order.
+    const BORING: [&str; 4] = [
+        "rime::ecs::LocalTransform",
+        "rime::ecs::WorldTransform",
+        "rime::ecs::Parent",
+        "rime::ecs::RenderTransform",
+    ];
+    let mut best: Option<&str> = None;
+    for component in &entity.components {
+        let Some(entry) = schema.type_by_hash(component.type_hash) else {
+            continue;
+        };
+        if BORING.contains(&entry.name.as_str()) {
+            continue;
+        }
+        best = Some(&entry.name);
+        break;
+    }
+    let short = best.map(|full| full.rsplit("::").next().unwrap_or(full));
+    match short {
+        Some(name) => format!("{index}  {name}"),
+        // Nothing distinctive: a freshly spawned entity, or one that is only a transform.
+        None => format!("{index}  entity"),
+    }
+}
+
 fn outliner_ui(
     ui: &mut egui::Ui,
+    schema: &Schema,
     entities: &[SnapshotEntity],
     selected: &mut Option<usize>,
     actions: &mut Vec<Command>,
@@ -988,10 +1139,19 @@ fn outliner_ui(
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (i, e) in entities.iter().enumerate() {
-            let label = format!("entity {} · {} components", i, e.components.len());
-            if ui.selectable_label(*selected == Some(i), label).clicked() {
+            let label = outliner_label(schema, i, e);
+            let row = ui.selectable_label(*selected == Some(i), label);
+            if row.clicked() {
                 *selected = Some(i);
             }
+            // The full picture on hover, so the derived label costs no information.
+            row.on_hover_text(format!(
+                "entity {} ({}:{}) · {} components",
+                i,
+                e.index,
+                e.generation,
+                e.components.len()
+            ));
         }
     });
 }
@@ -1211,5 +1371,83 @@ pub mod protocol_input {
         PointerMove { x: i32, y: i32 },
         PointerDown { x: i32, y: i32, button: u32 },
         PointerUp { x: i32, y: i32, button: u32 },
+    }
+}
+
+#[cfg(test)]
+mod outliner_tests {
+    use super::*;
+    use rime_protocol::{FieldDesc, FieldKind, SchemaEntry, SnapshotComponent};
+
+    fn entry(name: &str, hash: u64) -> SchemaEntry {
+        SchemaEntry {
+            type_hash: hash,
+            name: name.to_string(),
+            is_component: true,
+            fields: vec![FieldDesc {
+                name: "x".to_string(),
+                kind: FieldKind::F32,
+                nested_hash: 0,
+            }],
+        }
+    }
+
+    fn component(hash: u64) -> SnapshotComponent {
+        SnapshotComponent {
+            type_hash: hash,
+            data: Vec::new(),
+        }
+    }
+
+    fn entity(hashes: &[u64]) -> SnapshotEntity {
+        SnapshotEntity {
+            index: 7,
+            generation: 1,
+            components: hashes.iter().copied().map(component).collect(),
+        }
+    }
+
+    // m15.3. The block opens as 213 entities, and `entity 0 · 3 components` repeated 213 times is a
+    // list nobody can work in. There is no Name component to lean on — reflection has no string
+    // type at all — so the label is derived from the most DISTINCTIVE component the entity carries.
+    #[test]
+    fn a_transform_is_not_what_names_an_entity() {
+        let schema = Schema {
+            types: vec![
+                entry("rime::ecs::LocalTransform", 1),
+                entry("rime::blockkit::SlabRole", 2),
+            ],
+        };
+        // LocalTransform first in the component list, and still not the label: almost everything has
+        // one, so it narrows nothing down.
+        assert_eq!(outliner_label(&schema, 4, &entity(&[1, 2])), "4  SlabRole");
+    }
+
+    #[test]
+    fn the_short_name_is_what_a_human_reads() {
+        let schema = Schema {
+            types: vec![entry("rime::render::PointLight", 9)],
+        };
+        assert_eq!(outliner_label(&schema, 0, &entity(&[9])), "0  PointLight");
+    }
+
+    #[test]
+    fn an_entity_with_nothing_distinctive_still_gets_a_row() {
+        // A freshly spawned entity is exactly this — one LocalTransform, since m15.3 stopped
+        // spawning them empty — and it must still be selectable rather than blank.
+        let schema = Schema {
+            types: vec![entry("rime::ecs::LocalTransform", 1)],
+        };
+        assert_eq!(outliner_label(&schema, 12, &entity(&[1])), "12  entity");
+    }
+
+    #[test]
+    fn a_component_the_schema_does_not_describe_is_skipped_not_shown_raw() {
+        // The engine's own host opens a game's scene with types it does not register (m15.2). Those
+        // arrive as component blobs with no schema entry; they must not become the label.
+        let schema = Schema {
+            types: vec![entry("rime::render::Camera", 5)],
+        };
+        assert_eq!(outliner_label(&schema, 1, &entity(&[999, 5])), "1  Camera");
     }
 }
