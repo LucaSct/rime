@@ -354,7 +354,7 @@ public:
             // are both system-wide state that outlives this window, and a user left with a frozen
             // invisible pointer has to log out (m15.5).
             if (active_ == CursorMode::Locked) {
-                CGAssociateMouseAndMouseCursor(true);
+                CGAssociateMouseAndMouseCursorPosition(true);
             }
             set_cursor_visible(true);
             window_.delegate = nil; // sever the (weak) link before we and the delegate die
@@ -444,9 +444,9 @@ public:
 
     // POINTER CAPTURE (m15.5). macOS is the one backend that needs no recentring: NSEvent's
     // deltaX/deltaY come from the HID layer and are already relative, so the whole job is to stop
-    // the CURSOR from following the mouse — CGAssociateMouseAndMouseCursor(false) — and hide it.
-    // That also disposes of the classic warp-feedback trap the X11 and Win32 backends have to
-    // handle: with the two decoupled, moving the cursor cannot manufacture mouse motion.
+    // the CURSOR from following the mouse — CGAssociateMouseAndMouseCursorPosition(false) — and
+    // hide it. That also disposes of the classic warp-feedback trap the X11 and Win32 backends have
+    // to handle: with the two decoupled, moving the cursor cannot manufacture mouse motion.
     CursorMode set_cursor_mode(CursorMode mode) override {
         desired_ = mode;
         apply_cursor_mode();
@@ -465,14 +465,14 @@ public:
         }
         @autoreleasepool {
             if (active_ == CursorMode::Locked && want != CursorMode::Locked) {
-                CGAssociateMouseAndMouseCursor(true);
+                CGAssociateMouseAndMouseCursorPosition(true);
             }
             set_cursor_visible(want == CursorMode::Normal);
             if (want == CursorMode::Locked) {
                 // Decouple FIRST, then place the cursor in the middle. In that order the warp moves
                 // only the cursor — the mouse is no longer attached to it — so it cannot show up as
                 // a delta in the next NSEvent, which is the documented hazard of warping.
-                CGAssociateMouseAndMouseCursor(false);
+                CGAssociateMouseAndMouseCursorPosition(false);
                 warp_to_centre();
             }
         }

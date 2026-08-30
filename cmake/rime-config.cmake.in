@@ -34,14 +34,21 @@ if(@RIME_RHI_VULKAN@)
 endif()
 
 # Linux windowing — PRIVATE usage requirements of rime::platform (+ the rime_xdg_shell protocol
-# glue): Xlib, plus Wayland and xkbcommon located via pkg-config, recreating the same
-# PkgConfig::WAYLAND / PkgConfig::XKBCOMMON imported targets the export references. macOS and
-# Windows link their windowing from OS frameworks already baked into the archives — nothing to
-# re-find there.
+# glue): Xlib, plus Wayland, wayland-cursor and xkbcommon located via pkg-config, recreating the
+# same PkgConfig::* imported targets the export references. macOS and Windows link their windowing
+# from OS frameworks already baked into the archives — nothing to re-find there.
+#
+# EVERY pkg-config target rime_platform links must be listed here, even PRIVATE ones. A static
+# archive's private link libraries still ride the export as `$<LINK_ONLY:...>`, so a consumer's
+# `find_package(rime)` fails at GENERATE time with "the target was not found" — a message that
+# names the missing imported target and not the library that needed it. m15.5 added
+# wayland-cursor and learned this from the SDK-consumer job, which is the only one that builds
+# out of tree and therefore the only one that can see it.
 if(UNIX AND NOT APPLE)
     find_dependency(X11)
     find_dependency(PkgConfig)
     pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
+    pkg_check_modules(WAYLAND_CURSOR REQUIRED IMPORTED_TARGET wayland-cursor)
     pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 endif()
 
