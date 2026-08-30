@@ -398,6 +398,11 @@ render::PbrMaterialDesc build_desc(const assets::MaterialAsset& m,
     d.emissive[2] = m.emissive[2];
     d.normal_scale = m.normal_scale;
     d.occlusion_strength = m.occlusion_strength;
+    // glTF's three alpha modes collapse to one threshold (m15.6): only Mask discards, and Opaque
+    // and Blend both leave the cutoff at zero, which the shader reads as "never mask". Until this
+    // line the zoo drew every alpha-tested material as an opaque quad — the cook carried
+    // `alpha_mode`/`alpha_cutoff` faithfully and nothing downstream looked at them.
+    d.alpha_cutoff = m.alpha_mode == assets::AlphaMode::Mask ? m.alpha_cutoff : 0.0f;
     const auto resolve = [&](assets::TextureAssetHandle h) {
         return h.is_valid() ? bridge.texture_or_placeholder(h) : rhi::TextureHandle{};
     };

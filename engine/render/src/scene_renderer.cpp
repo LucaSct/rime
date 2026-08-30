@@ -421,6 +421,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         du.emissive[0] = material.emissive[0];
         du.emissive[1] = material.emissive[1];
         du.emissive[2] = material.emissive[2];
+        du.emissive[3] = material.alpha_cutoff; // 0 = no masking; see PbrMaterialDesc
         std::memcpy(
             &draw_staging_[static_cast<std::size_t>(i) * kDrawUniformStride], &du, sizeof(du));
         // Resolve each slot to its map or the correct fallback, so record_draws never branches on
