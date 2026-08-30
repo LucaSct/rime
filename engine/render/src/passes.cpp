@@ -14,6 +14,7 @@
 #include "pbr_forward.vert.spv.h"
 #include "pbr_forward_shadowed.frag.spv.h"
 #include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
+#include "present.frag.spv.h"
 #include "tonemap.frag.spv.h"
 
 namespace rime::render {
@@ -357,6 +358,60 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
 }
 
 // ── TonemapPass ───────────────────────────────────────────────────────────────────────────────
+
+PresentPass::PresentPass(rhi::Device& device, rhi::Format target_format) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 fullscreen_vert_spv,
+                                 sizeof(fullscreen_vert_spv),
+                                 "fullscreen.vert");
+    fragment_shader_ = make_shader(device,
+                                   rhi::ShaderStage::Fragment,
+                                   present_frag_spv,
+                                   sizeof(present_frag_spv),
+                                   "present.frag");
+
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    };
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = fragment_shader_;
+    pd.color_format = target_format; // the swapchain's, not ours — see the header
+    pd.cull = rhi::CullMode::None;
+    pd.bindings = bindings;
+    pd.debug_name = "present";
+    pipeline_ = device.create_graphics_pipeline(pd);
+
+    rhi::SamplerDesc sd{};
+    sd.mag_filter = rhi::Filter::Nearest;
+    sd.min_filter = rhi::Filter::Nearest;
+    sd.address_mode = rhi::AddressMode::ClampToEdge;
+    sd.debug_name = "present-nearest";
+    sampler_ = device.create_sampler(sd);
+}
+
+PresentPass::~PresentPass() {
+    device_.destroy(sampler_);
+    device_.destroy(pipeline_);
+    device_.destroy(fragment_shader_);
+    device_.destroy(vertex_shader_);
+}
+
+void PresentPass::add(RenderGraph& graph, RGTexture source, RGTexture target) const {
+    // DontCare: the triangle covers every pixel of the backbuffer, so its previous contents (last
+    // frame's image, still sitting in the recycled swapchain slot) are dead.
+    const RGColorAttachment colors[] = {{target, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
+    const RGTexture sampled[] = {source};
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.sampled = sampled;
+    graph.add_raster_pass("present", desc, [this, &graph, source](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipeline_);
+        cmd.bind_texture(0, graph.physical(source), sampler_);
+        cmd.draw(3);
+    });
+}
 
 TonemapPass::TonemapPass(rhi::Device& device) : device_(device) {
     vertex_shader_ = make_shader(device,

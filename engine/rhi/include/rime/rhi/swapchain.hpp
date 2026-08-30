@@ -52,6 +52,18 @@ public:
     [[nodiscard]] virtual Format format() const = 0;   // the backbuffer color format
     [[nodiscard]] virtual Extent2D extent() const = 0; // current size in pixels
 
+    // How many frames the backend keeps in flight — the number of fence slots `acquire_next_image`
+    // cycles through.
+    //
+    // A caller needs this because `present()` does NOT wait: any per-frame resource the caller owns
+    // (most sharply its COMMAND BUFFER, which owns the timestamp query pool) is still in use by the
+    // GPU when the call returns, and destroying it there is a use-after-free. Keeping the last
+    // `frames_in_flight() + 1` of them is provably enough: there are only this many slots, so a
+    // resource that old was submitted to a slot which has since been re-acquired — and acquire
+    // waits on that slot's fence. Nothing headless needs this, because `submit_blocking` has
+    // already finished the frame by the time anything is destroyed.
+    [[nodiscard]] virtual std::uint32_t frames_in_flight() const = 0;
+
     // Recreate only if `wanted` differs from the current extent; returns true if it rebuilt. This
     // is the resize entry point a windowed frame loop should call every frame with the window's
     // framebuffer_size(), and it exists because "recreate when acquire/present reports out of date"

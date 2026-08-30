@@ -387,6 +387,8 @@ public:
 
     [[nodiscard]] Extent2D extent() const override { return {extent_.width, extent_.height}; }
 
+    [[nodiscard]] std::uint32_t frames_in_flight() const override { return kFramesInFlight; }
+
 private:
     explicit VulkanSwapchain(VulkanDevice& device) noexcept : device_(device) {}
 

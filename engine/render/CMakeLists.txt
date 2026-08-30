@@ -40,6 +40,7 @@ rime_add_shaders(rime_render
     shaders/ssr_resolve.frag
     shaders/fullscreen.vert
     shaders/tonemap.frag
+    shaders/present.frag
     shaders/pick_id.vert
     shaders/pick_id.frag
     shaders/gizmo.vert

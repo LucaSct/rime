@@ -275,6 +275,39 @@ private:
 // Fullscreen triangle: read HDR radiance, apply the ACES curve, sRGB-encode into the LDR target.
 // The shape every post pass copies (declare input sampled, output as the color attachment, draw 3
 // vertices).
+// Copy a finished LDR image onto a target the caller owns — in practice the swapchain backbuffer
+// (m13.3a, closing ADR-0023 §4's present seam). A fullscreen triangle rather than a copy because
+// the RHI has no texture-to-texture copy, and one raster pass needs no new RHI surface at all.
+//
+// The target format is a CONSTRUCTOR parameter, not a constant, because unlike every other pass in
+// this file the destination is not ours: a swapchain reports whatever surface format the driver
+// agreed to, and a graphics pipeline bakes its colour format in. One PresentPass per swapchain,
+// rebuilt if the swapchain ever comes back with a different format.
+//
+// Colour management: none, deliberately. See present.frag — the tonemap already applied the sRGB
+// transfer function and the backend selects a UNORM surface, so a pass-through is correct. An
+// _SRGB surface would double-encode.
+class PresentPass {
+public:
+    PresentPass(rhi::Device& device, rhi::Format target_format);
+    ~PresentPass();
+
+    PresentPass(const PresentPass&) = delete;
+    PresentPass& operator=(const PresentPass&) = delete;
+
+    // Declare the pass: sample `source`, write every pixel of `target`.
+    void add(RenderGraph& graph, RGTexture source, RGTexture target) const;
+
+    [[nodiscard]] bool valid() const noexcept { return pipeline_.is_valid(); }
+
+private:
+    rhi::Device& device_;
+    rhi::ShaderHandle vertex_shader_;
+    rhi::ShaderHandle fragment_shader_;
+    rhi::PipelineHandle pipeline_;
+    rhi::SamplerHandle sampler_;
+};
+
 class TonemapPass {
 public:
     explicit TonemapPass(rhi::Device& device);

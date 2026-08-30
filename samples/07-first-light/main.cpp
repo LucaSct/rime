@@ -268,6 +268,10 @@ struct FirstLightApp {
         renderer.set_ambient(0.03f, 0.03f, 0.04f);
         app.on_render([this](app::FrameContext& ctx) {
             last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
+            // ONE LINE is the whole windowed path (m13.3a): name the image you want on screen and
+            // the loop copies it onto the acquired backbuffer and presents. Ignored when the app is
+            // not windowed, which is why --headless and --serve still run this exact callback.
+            ctx.present = last_ldr;
         });
     }
 
@@ -288,6 +292,48 @@ app::AppConfig gpu_config() {
     cfg.render_extent = {kWidth, kHeight};
     cfg.tick_hz = 60.0;
     return cfg;
+}
+
+// ── --windowed: present in a real window (m13.3a, ADR-0023 §4) ───────────────────────────────────
+// The seam this flag printed an apology about for two milestones. `Application` now owns the window
+// and the swapchain; the sample's job is a config flag and the one `ctx.present = last_ldr` line in
+// the render callback above — the SAME callback --headless and --serve run.
+//
+// No display is not an error. `windowed()` reports what actually came up, and on a machine without
+// one the app degrades to exactly the headless loop; that is what lets this binary be run by CI at
+// all. `--frames N` bounds the run (a smoke test); without it, close the window to exit.
+int run_windowed(int frames) {
+    app::AppConfig cfg = gpu_config();
+    cfg.windowed = true;
+    cfg.window_title = "Rime — 07 first light";
+    cfg.window_size = {kWidth, kHeight};
+
+    app::Application app(cfg);
+    if (!app.device()) {
+        std::fprintf(stderr, "07-first-light: no Vulkan device (need a driver or lavapipe)\n");
+        return std::getenv("RIME_REQUIRE_VULKAN") != nullptr ? 1 : 0;
+    }
+
+    FirstLightApp scene(app);
+    scene.pose_camera(0.6f, 0.25f, 4.2f);
+
+    if (app.windowed()) {
+        std::printf("07-first-light: presenting in a window — close it (or ESC) to exit.\n");
+    } else {
+        std::printf("07-first-light: no display available; running the same frames headless.\n");
+    }
+
+    if (frames > 0) {
+        app.run_frames(frames);
+    } else if (app.windowed()) {
+        (void)app.run(); // unbounded: the window close ends it
+    } else {
+        app.run_frames(120); // headless with no window to close would spin forever
+    }
+    std::printf("07-first-light: %llu frames, %llu ticks\n",
+                static_cast<unsigned long long>(app.frame_index()),
+                static_cast<unsigned long long>(app.tick_count()));
+    return 0;
 }
 
 // ── --headless: render, self-check, exit code ────────────────────────────────────────────────────
@@ -490,13 +536,8 @@ int main(int argc, char** argv) {
             codec = parse_codec(argv[++i]);
     }
 
-    if (mode == Mode::Windowed) {
-        // Presenting to a swapchain needs a display; this box is headless (ADR-0023 §4). The
-        // windowed path lands with the Mac build — until then, be honest and run headless.
-        std::printf(
-            "07-first-light: --windowed needs a display (Mac); running --headless instead.\n");
-        mode = Mode::Headless;
-    }
+    if (mode == Mode::Windowed)
+        return run_windowed(frames);
     if (mode == Mode::Serve)
         return run_serve(host, port, codec);
     return run_headless(frames, ppm);
