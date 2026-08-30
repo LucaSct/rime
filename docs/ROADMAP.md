@@ -9,6 +9,60 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-30) — m13.5: `99-the-block` runs, and M13 does not close.** The vision demo is
+> built. It is the first process in this repo's history to hold a cooked destructible city block, the
+> M10 lighting stack, a replicated server, a predicted client, a first-person camera, a window and a
+> mixer at the same time — and running them together found five defects that no subsystem's own
+> tests could see, plus one that stops the milestone.
+>
+> **Twenty gated claims pass.** 2,016 parts and 36 local lights standing; the avatar replicated and
+> the predictor seeded (the camera-on-the-predicted-player wiring m13.3a named and deferred to
+> exactly here); shots reaching the block; peak live debris past ADR-0035 §1's 400 floor with the
+> visual budget above the live one; destruction replicated with every composition check matching,
+> nothing unresolved, and both peers agreeing on `shared_state_hash`; the mixer driven by destruction
+> events without clipping; and the frustum cull doing real work in both directions — **1,983 culled
+> of 2,051 considered** — on a frame that comes back lit.
+>
+> **THE MILESTONE DOES NOT CLOSE, and the reason is a real defect.** *The collapse does not stay
+> local.* A 5 m demolition charge on ONE building's corner ends with the entire block flat — across a
+> 12 m gap to its neighbours, then across the 12 m street. `--idle` is the control that pinned it: the
+> same block with a player who never moves or shoots stands untouched for 550 ticks and then loses
+> its whole south side to that one charge. So it is not the player, not the rifle, and not the
+> charge's size. Local damage propagates without bound.
+>
+> Nothing before this could have seen it. `block_standup_test` binds the block and steps it briefly,
+> `block_render_test` draws it, and every destruction suite works on ONE destructible at a time. Two
+> neighbouring buildings and 400 chunks of falling rubble is a configuration that had never run.
+> M13's "feels right" clause is what this blocks, and it is **reported by the demo and deliberately
+> not asserted** — a permanently red CTest stops being information after the first day, while leaving
+> it out silently would be worse. It becomes claim #21 in the brick that fixes it.
+>
+> **Five defects found by composition alone**, each invisible in isolation and each fixed here:
+> *(1)* the sample registered the four modules the block's SCENE needs and none of the four the
+> SESSION needs — so the block stood up and drew perfectly while the predictor never seeded and
+> destruction replicated zero ops. *(2)* `ServerReplicator::replicate` inside a `world.query()` is a
+> structural change during iteration; it aborts on the next chunk index. *(3)* Damage ops are
+> addressed by NetId, so a server must `replicate()` its destructibles — and a client must therefore
+> **drop its own copies** and be sent them, or it holds 280 instances where 140 receive damage and
+> 140 stand there forever. *(4)* `apply_palette` derives the look from the reflected `SlabRole`, and
+> running it once at load is right for a peer that loads off disk and wrong for a client whose
+> destructibles arrive tick by tick: 2,016 leaves existed and followed the sim perfectly while the
+> renderer considered 35 entities, because a leaf with no material is not a draw. *(5)* the
+> cross-peer witness is `destruction_net::shared_state_hash`, never `DestructionWorld::state_hash()`
+> — the latter folds physics body ids and local instance indices, so two peers in perfect agreement
+> still disagree on it.
+>
+> **Two things were nearly proved by accident**, and both are the m13.2d lesson in new places. The
+> render claims are made on a frame drawn while the block is STANDING, chosen by the condition *"the
+> client holds every part"* rather than by a tick number — at tick 0 the leaves do not exist and a
+> few ticks later replication has still only delivered part of the block, so a fixed tick measured 35
+> props and passed "the cull did work" while drawing no block at all. And the tape is tight because
+> the tail is expensive: 1,100 ticks took 226 s on a real GPU in Debug, which under ASan on lavapipe
+> is a timeout rather than a test. It is 430 now, at 37 s, with every claim still reachable.
+>
+> **Next:** the locality fix (the brick that closes M13), then m13.p — the measured perf pass, whose
+> scope now comes from a demo that exists rather than from a guess.
+
 > **Update (2026-08-30) — m13.3c: the window is wired to the keyboard.** m13.3a opened a window,
 > built `gameplay::FirstPersonView`, proved its view maths across 37 angles, and printed *"close it
 > (or ESC) to exit"*. ESC did nothing, and there was no way to walk anywhere. Every part existed and
@@ -1430,6 +1484,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
 | **M13** | **"The Block" (vision demo)** | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right |
+| **M14** | **"The Authoring Loop"** | open the shipped block in the editor, change it, save it, and run the changed scene in the game ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 
 ### Detail
 
@@ -1851,6 +1906,33 @@ M3.4) + a first-person camera on the predicted player · **m12.9** audio v1 (mix
 the proof — `samples/99-the-block` (scripted CI mode, `--play`, `--perf`) + the docs true-up. Cut
 order if it runs long: audio → fx1b → m12.p's tail → m12.5. **Never cut:** m12.4, fx1a, the perf
 gate. Track FL (water) is **out** — the "decided at M12.0" the cross-cutting note promised.
+
+**M14 — "The Authoring Loop."** *Planned 2026-08-30; [ADR-0037](adr/0037-authoring-loop-m14.md) is
+the architecture.* M13 built content the editor cannot open — `rime-blockgen` writes a 213-entity
+block, `99-the-block` runs it, and the editor answers *"unknown component type
+`rime::blockkit::SlabRole`"*. The editor itself is **not** missing: engine-as-server, a streamed
+viewport, picking and gizmos all work on the default scene. What is missing is a **round trip**, and
+the "done when" is exactly that.
+
+The root cause is bigger than the editor and M13 proved it independently: there is no single answer
+in this codebase to *"what components does a Rime world have?"*, so every consumer hand-assembles a
+list and the lists have diverged. `99-the-block`'s first draft hit the same defect from the other
+side — four symptoms (predictor never seeds, zero destruction ops, peers disagree, mixer silent) from
+one missing registration list.
+
+*Bricks:* **m14.0** the ADR + this ladder (decision brick, no engine code) · **m14.1** the
+**component profile** — one registration function every `.rscene` consumer calls, unknown components
+degrading with a counter instead of failing the load, and `editor --smoke` opening the REAL block
+(the gate that would have caught `SlabRole` the day m13.2c landed) · **m14.2** the GUI shell
+**compiled by CI** (`--features gui`; built, not run) and able to open a named scene file ·
+**m14.3** **save** — the editor writes a `.rscene` back, with a byte-identical round trip and an
+edit that survives it · **m14.4** the round trip end to end, M14's "done when" · **m14.5** the asset
+browser against real cooked assets, if there is room. Cut order: m14.5 → m14.2's open-a-file half.
+**Never cut:** m14.1, m14.3 — without either there is no round trip.
+
+**M14 starts after M13 closes.** `99-the-block` has one open defect (the collapse does not stay
+local), and starting the editor work while an integration bug is open is how integration bugs get
+expensive.
 
 ---
 
