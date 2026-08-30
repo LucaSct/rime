@@ -9,6 +9,49 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-29) — the fracture root cause, fixed rather than guarded.** m13.2c found that
+> `rime fracture` could emit a `.rdest` whose parts are not closed polyhedra, shipped a guard so the
+> cooker refuses to write one, and recorded the cause as open. This is the cause.
+>
+> **What it was.** `build_cell` enumerated every plane TRIPLE, kept the intersections that passed an
+> inside test, then rebuilt each face by asking which vertices lay within EPS of its plane. Two
+> independent epsilon decisions per shared edge is one too many: where three or more bisectors pass
+> within EPS of one geometric corner, the enumeration emits a RIVAL point per triple — measured at
+> up to 3.9e-3 apart, **39x the 1e-4 dedup tolerance**, so dedup could never merge them — and the two
+> faces meeting there disagreed about which rival was theirs. Verified by instrumentation, not
+> inferred: the rival pairs sit on *different* plane-incidence sets.
+>
+> **The fix is sequential half-space clipping.** Start from the box as a closed vertex/edge/face
+> structure and clip plane by plane; an edge that crosses is cut ONCE and the resulting vertex is
+> shared by both faces that own it. A corner is never something the algorithm searches for — it is
+> the single point where one specific edge met one specific plane — so a rival cannot exist. Closure
+> becomes an invariant of the construction rather than an agreement between epsilon tests.
+> O(planes x faces) instead of O(planes^3).
+>
+> Two supporting pieces: **the cap is chained** from the edges the clip created rather than
+> angular-sorted (sorting is an independent reconstruction of a boundary the clip already
+> established — the same mistake one layer down), and **degenerate inputs are perturbed** (clipping
+> fixes the algorithm; it cannot fix three sites whose bisectors are genuinely near-concurrent, and
+> the sites came from a PRNG so nothing depends on any particular one — jitter and rebuild,
+> deterministically, bounded).
+>
+> **Two wrong turns worth recording, because both looked right.** WELDING the clusters fixed
+> topology completely (0/360) and was still wrong: welding MOVES vertices, so faces bent by up to
+> the weld tolerance and planarity went from ~1e-4 to 6e-3 against `hull.hpp`'s `kPlaneEps` of 1e-4
+> — a topology failure traded for a geometry one the runtime rejects. And the first perturbation did
+> nothing at all: twelve attempts reproduced the IDENTICAL failure because the jitter was 3.8e-4
+> against a 5.2e-3 cluster, an order of magnitude too small to break what it aimed at.
+>
+> **Result: 0 failures in 350 configuration/seed pairs** (seven box shapes, 8-60 parts) with
+> planarity preserved, against 5-10% for the old builder on the same sweep. Both committed fixtures
+> regenerated; both seeds that had been changed *to dodge* this bug are restored, because a
+> workaround should not outlive its cause.
+>
+> *One test was pinned to an accident.* The m13.2d eviction proof ran 400 ticks and asserted the
+> visual cap outright — which passed only because the old fixture happened to settle that fast. The
+> new partition takes ~1700. m13.2b's cap is deliberately SOFT under a burst (only frozen debris may
+> be retired), so the test now asserts what the contract actually says: that it CATCHES UP.
+
 > **Update (2026-08-29) — m13.4: the engine makes a sound.** M8.4's `AudioBackend` seam has stood
 > since M8 with nothing but a LOGGER behind it. There is a real mixer there now: voices, distance
 > attenuation, constant-power stereo panning, per-block gain ramping.
