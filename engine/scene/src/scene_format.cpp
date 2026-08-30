@@ -5,6 +5,7 @@
 
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <cstdlib>
@@ -522,7 +523,8 @@ std::string save_scene_to_string(const ecs::World& world) {
     return out;
 }
 
-LoadReport load_scene_from_string(ecs::World& world, std::string_view text) {
+LoadReport
+load_scene_from_string(ecs::World& world, std::string_view text, const LoadOptions& options) {
     LoadReport report;
     const std::vector<std::string_view> toks = tokenize(text);
 
@@ -666,11 +668,23 @@ LoadReport load_scene_from_string(ecs::World& world, std::string_view text) {
                         return report;
                     }
                 }
-                report.error =
-                    fmt::format("unknown component type '{}' (hash 0x{:016x}) — is it registered?",
-                                c.name,
-                                c.hash);
-                return report;
+                if (!options.allow_unknown_components) {
+                    report.error = fmt::format(
+                        "unknown component type '{}' (hash 0x{:016x}) — is it registered?",
+                        c.name,
+                        c.hash);
+                    return report;
+                }
+                // Tolerated: this build has no such module. The record is dropped and COUNTED —
+                // a caller that may save this world back owes `skipped_components` a check, or it
+                // will quietly delete what it could not read (LoadOptions).
+                ++report.skipped_components;
+                if (std::find(report.unknown_types.begin(), report.unknown_types.end(), c.name) ==
+                        report.unknown_types.end() &&
+                    report.unknown_types.size() < kMaxReportedUnknownTypes) {
+                    report.unknown_types.emplace_back(c.name);
+                }
+                continue;
             }
             const ecs::ComponentInfo& info = registry.info(id);
             std::byte* slot = static_cast<std::byte*>(world.add_component_raw(e, id));
@@ -702,13 +716,16 @@ bool save_scene_file(const ecs::World& world, const std::filesystem::path& path)
     return static_cast<bool>(out);
 }
 
-LoadReport load_scene_file(ecs::World& world, const std::filesystem::path& path) {
+LoadReport
+load_scene_file(ecs::World& world, const std::filesystem::path& path, const LoadOptions& options) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        return LoadReport{false, "cannot open scene file: " + path.string(), 0, 0};
+        LoadReport missing;
+        missing.error = "cannot open scene file: " + path.string();
+        return missing;
     }
     const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    return load_scene_from_string(world, text);
+    return load_scene_from_string(world, text, options);
 }
 
 } // namespace rime::scene

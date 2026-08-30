@@ -56,9 +56,13 @@ add_executable(rime_engine
 
 set_target_properties(rime_engine PROPERTIES OUTPUT_NAME rime-engine)
 
+# rime::worldkit + rime::blockkit arrive with m14.1: the host registers the engine's component
+# profile (one shared list) plus the game's own, so it can open the content this engine ships. It
+# could not before — `blockkit::SlabRole` failed the load and the editor smoke never noticed,
+# because it used a synthetic scene.
 target_link_libraries(rime_engine
     PRIVATE rime::editorhost rime::scene rime::assets rime::ecs rime::app rime::physics rime::render
-            rime::rhi rime::stream rime::platform rime::core fmt::fmt)
+            rime::rhi rime::stream rime::platform rime::core rime::worldkit rime::blockkit fmt::fmt)
 
 rime_apply_common_target_options(rime_engine)
 

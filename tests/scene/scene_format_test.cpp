@@ -310,3 +310,83 @@ TEST_CASE("scene: the checked-in first-light fixture loads") {
     });
     CHECK(parented == 1);
 }
+
+// ── m14.1: a tool may open a scene it does not fully understand ─────────────────────────────────
+//
+// The editor could not open the block. `rime-blockgen` writes `blockkit::SlabRole` into the scene,
+// the editor host had never registered that type, and one unknown record failed the whole file — so
+// the newest content in the repo was unopenable by the tool that exists to author content.
+//
+// The case that makes tolerance SAFE is the second one. Dropping what you cannot read is only
+// acceptable while it is impossible to do it silently, so the count and the names are the contract,
+// not a convenience.
+TEST_CASE("m14.1: an unknown component type can be skipped, and it is always counted") {
+    ecs::World w;
+    ecs::register_transform_components(w);
+    render::register_render_components(w);
+    const std::string cam = camera_hash_hex();
+
+    const std::string text = fmt::format(
+        "rime_scene 1\n"
+        "entity 0 {{ rime::render::Camera {} {{ fov_y 0.8 }} some::Bogus 0x1234 {{ }} }}\n"
+        "entity 1 {{ some::Bogus 0x1234 {{ }} other::Alien 0x5678 {{ }} }}\n",
+        cam);
+
+    SUBCASE("strict is still the default, and still refuses") {
+        // Every existing caller keeps the behaviour it had. That is what makes this change safe to
+        // land under a milestone's worth of content.
+        const scene::LoadReport r = scene::load_scene_from_string(w, text);
+        CHECK_FALSE(r.ok);
+        CHECK(r.error.find("unknown component type") != std::string::npos);
+    }
+
+    SUBCASE("tolerant loads the rest, counts what it dropped, and names it") {
+        scene::LoadOptions opt;
+        opt.allow_unknown_components = true;
+        const scene::LoadReport r = scene::load_scene_from_string(w, text, opt);
+        REQUIRE_MESSAGE(r.ok, r.error);
+
+        CHECK(r.entities == 2);
+        CHECK(r.components == 1);         // the Camera — the one type this world has
+        CHECK(r.skipped_components == 3); // two Bogus, one Alien
+
+        // DISTINCT names, in first-seen order: the report has to be able to say WHICH module is
+        // missing. A bare count tells you something went wrong and nothing about what to install.
+        REQUIRE(r.unknown_types.size() == 2);
+        CHECK(r.unknown_types[0] == "some::Bogus");
+        CHECK(r.unknown_types[1] == "other::Alien");
+
+        // The known component really did land — "tolerant" must not mean "gave up".
+        CHECK(w.query<render::Camera>().count() == 1);
+    }
+
+    SUBCASE("a clean load reports zero, so the counter is not noise") {
+        scene::LoadOptions opt;
+        opt.allow_unknown_components = true;
+        const scene::LoadReport r = scene::load_scene_from_string(
+            w,
+            fmt::format("rime_scene 1\nentity 0 {{ rime::render::Camera {} {{ }} }}\n", cam),
+            opt);
+        REQUIRE(r.ok);
+        CHECK(r.skipped_components == 0);
+        CHECK(r.unknown_types.empty());
+    }
+}
+
+TEST_CASE("m14.1: schema drift stays fatal even when unknown types are tolerated") {
+    // The distinction the whole design rests on. An UNKNOWN type means this build does not have
+    // that module — survivable. A DRIFTED type means this build HAS the module and the file is
+    // stale, so the bytes are data the loader was supposed to understand and would be discarding.
+    // Tolerating the first must never quietly start tolerating the second.
+    ecs::World w;
+    ecs::register_transform_components(w);
+    render::register_render_components(w);
+
+    scene::LoadOptions opt;
+    opt.allow_unknown_components = true;
+    const scene::LoadReport r = scene::load_scene_from_string(
+        w, "rime_scene 1\nentity 0 { rime::render::Camera 0xdeadbeefdeadbeef { } }", opt);
+    CHECK_FALSE(r.ok);
+    CHECK(r.error.find("schema drift") != std::string::npos);
+    CHECK(r.skipped_components == 0); // it was not "skipped" — it was refused
+}

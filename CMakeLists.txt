@@ -353,6 +353,7 @@ add_subdirectory(engine/gameplay)  # character controller: collide-and-slide on 
 add_subdirectory(engine/gameplay_net) # the networked player: consume loop + LastProcessedInput (m12.3)
 add_subdirectory(engine/destruction_render) # per-part render leaves for destructibles: the destruction<->render bridge (m13.2d)
 add_subdirectory(engine/blockkit)  # the vision demo's block as content: prefab, assembly, palette (m13.2c)
+add_subdirectory(engine/worldkit)  # the component profile: one answer to "what components does a world have" (m14.1)
 
 # The C ABI (M6.9): a SHARED library over a tiny extern "C" surface — the ADR-0001 boundary the Rust
 # editor/tools drive the engine through. Sits on top of app+assets; optional per the modularity

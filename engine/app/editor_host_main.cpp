@@ -42,6 +42,7 @@
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_id.hpp"
 #include "rime/assets/manifest.hpp"
+#include "rime/blockkit/role.hpp"
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/diagnostics/log.hpp"
 #include "rime/core/jobs/job_system.hpp"
@@ -65,6 +66,7 @@
 #include "rime/stream/frame_codec.hpp"
 #include "rime/stream/frame_streamer.hpp"
 #include "rime/stream/protocol.hpp"
+#include "rime/worldkit/profile.hpp"
 
 namespace {
 
@@ -92,20 +94,65 @@ void build_default_world(ecs::World& world) {
         place(1.0f, 0.0f, 0.0f), render::MeshRef{1}, render::MaterialRef{1}, ecs::Parent{ground});
 }
 
+// The host's component set, and the load policy that goes with it (m14.1, ADR-0037).
+//
+// It used to be three hand-written lines here and four more in `load_viewport_scene`, and they were
+// the wrong set: transform + render + physics, against content that carries `blockkit::SlabRole`
+// and `destruction::Destructible`. So the editor could not open the block — the newest content in
+// the repo — and its smoke test stayed green throughout, because it used a synthetic scene.
+//
+// `worldkit::register_engine_components` is now the single list of what the ENGINE defines, shared
+// with every sample and tool. `blockkit` is added on top because this repo's editor is the vision
+// demo's editor; a different game would add its own module here and nothing else would move.
+void register_editor_components(ecs::World& world) {
+    (void)worldkit::register_engine_components(world);
+    blockkit::register_blockkit_components(world); // the game's own, layered on the engine's
+}
+
+// Load a scene the way a TOOL must: an unknown component type is skipped and counted, not fatal.
+//
+// An editor is expected to open scenes authored by builds that had modules it does not, and
+// refusing the whole file over one unknown record is what made it unable to open its own engine's
+// content. Schema drift stays fatal — that means the module IS present and the file is stale, which
+// is data loss rather than a missing feature.
+//
+// The counters are REPORTED, loudly, and that is the half that makes tolerance safe: a tool that
+// drops what it cannot read and then says nothing is one save away from deleting it.
+bool load_scene_for_editor(ecs::World& world, std::string_view scene_path) {
+    scene::LoadOptions options;
+    options.allow_unknown_components = true;
+    const scene::LoadReport report =
+        scene::load_scene_file(world, std::filesystem::path(scene_path), options);
+    if (!report.ok) {
+        RIME_ERROR("rime-engine: scene load failed ({}): {}", scene_path, report.error);
+        return false;
+    }
+    if (report.skipped_components != 0) {
+        std::string names;
+        for (const std::string& n : report.unknown_types) {
+            names += (names.empty() ? "" : ", ") + n;
+        }
+        // Named, not just counted: "3 unknown" sends a reader hunting, a type name sends them to
+        // the module that is missing from this build.
+        RIME_WARN("rime-engine: {} component(s) skipped — this build does not register: {}",
+                  report.skipped_components,
+                  names);
+    }
+    RIME_INFO("rime-engine: loaded {} entities, {} components, {} skipped ({})",
+              report.entities,
+              report.components,
+              report.skipped_components,
+              scene_path);
+    return true;
+}
+
 void register_and_populate(ecs::World& world, std::string_view scene_path) {
-    ecs::register_transform_components(world);
-    render::register_render_components(world);
+    register_editor_components(world);
     if (scene_path.empty()) {
         build_default_world(world);
-    } else {
-        const scene::LoadReport report =
-            scene::load_scene_file(world, std::filesystem::path(scene_path));
-        if (report.ok) {
-            core::JobSystem jobs;
-            ecs::propagate_transforms(world, jobs);
-        } else {
-            RIME_ERROR("rime-engine: scene load failed ({}): {}", scene_path, report.error);
-        }
+    } else if (load_scene_for_editor(world, scene_path)) {
+        core::JobSystem jobs;
+        ecs::propagate_transforms(world, jobs);
     }
 }
 
@@ -353,11 +400,11 @@ void load_viewport_scene(ecs::World& world,
                          render::MeshRegistry& meshes,
                          render::MaterialRegistry& materials,
                          std::string_view scene_path) {
-    ecs::register_transform_components(world);
-    // WorldTransform is derived state, deliberately unreflected (reflect.hpp) — register it so the
-    // renderer and the gizmo pass can query it live; it stays out of the scene and the snapshot.
-    (void)world.register_component<ecs::WorldTransform>();
-    render::register_render_components(world);
+    // One list, shared with the non-viewport path above and with every sample (m14.1).
+    // WorldTransform is in it: derived state, deliberately unreflected (reflect.hpp), so it stays
+    // out of the scene and the snapshot but must exist for the renderer and the gizmo pass to query
+    // it live.
+    register_editor_components(world);
 
     (void)meshes.add(render::make_uv_sphere(0.8f, 32, 64), "sphere"); // MeshRef 0
     (void)meshes.add(render::make_plane(10.0f, 4.0f), "floor");       // MeshRef 1
@@ -376,13 +423,9 @@ void load_viewport_scene(ecs::World& world,
     floor_mat.roughness = 0.8f;
     (void)materials.add(floor_mat); // MaterialRef 1
 
-    const scene::LoadReport report =
-        scene::load_scene_file(world, std::filesystem::path(scene_path));
-    if (!report.ok) {
-        RIME_ERROR("rime-engine: viewport scene load failed ({}): {}", scene_path, report.error);
-        // Leave the world as whatever loaded; the editor still connects and shows an empty/partial
-        // outliner rather than the host crashing on a bad path.
-    }
+    // Leaves the world as whatever loaded on failure: the editor still connects and shows an
+    // empty/partial outliner rather than the host dying on a bad path.
+    (void)load_scene_for_editor(world, scene_path);
     derive_world_transforms(world);
 }
 
@@ -430,6 +473,15 @@ int serve_viewport(std::string_view socket_path,
     } else {
         load_viewport_scene(app.world(), meshes, materials, scene_path);
     }
+    // CLUSTERED FORWARD, because an editor must be able to host a scene it did not author (m14.1).
+    // The ADR-0022 uniform-block path caps at 4 directional + 16 point lights and DROPS the rest
+    // with a warning; the block carries 36 local lights, so opening it in the viewport lit a
+    // deliberately-dark dusk scene with less than half its rig. That is not a worse picture, it is
+    // a different scene — the same reasoning block_render_test and 99-the-block already apply, now
+    // applied where a user opens arbitrary content rather than only where we author it.
+    render::LightingSettings lighting;
+    lighting.clustered_enabled = true;
+    renderer.set_lighting(lighting);
     renderer.set_ambient(0.03f, 0.03f, 0.04f);
 
     // The editor's gizmo state (selection + mode + hovered axis), updated by the drain below and

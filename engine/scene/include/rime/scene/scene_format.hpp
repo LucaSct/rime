@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace rime::ecs {
 class World;
@@ -47,16 +48,51 @@ namespace rime::scene {
 // not by this number).
 inline constexpr int kSceneFormatVersion = 1;
 
-// Outcome of a load. On failure `ok` is false and `error` explains why (a bad header, an unknown or
-// schema-drifted component type, an unknown field, a malformed value, a dangling entity reference);
-// the world may have been PARTIALLY populated, so load into a world you are willing to discard on
-// failure. On success `entities`/`components` report what was created.
+// How to load. The default is STRICT — every component type the file names must be registered —
+// because that is what a game wants: a scene it authored, loaded by a build that is missing one of
+// its own modules, is a bug and should say so at the door.
+//
+// A TOOL wants the other answer (m14.1). An editor is expected to open scenes authored by builds
+// that had modules it does not, and refusing the whole file over one unknown record makes it unable
+// to open the very content the engine ships — which is exactly what happened: the editor could not
+// open the block because it had never registered `blockkit::SlabRole`.
+struct LoadOptions {
+    // Skip a component whose type this world has never heard of, and count it, instead of failing
+    // the load. SCHEMA DRIFT IS STILL FATAL either way, and the difference is the whole point: an
+    // unknown type means "this build does not have that module", which is survivable; a drifted
+    // type means "this build HAS that module and the file is stale", which is data you would be
+    // silently discarding.
+    //
+    // WHAT A CALLER OWES: anything that may SAVE the world afterwards must check
+    // `skipped_components` and refuse, or offer to, because writing back a world that dropped what
+    // it could not read is how an editor quietly deletes the parts of a scene it did not
+    // understand. Tolerance without that check is worse than the error message it replaced.
+    bool allow_unknown_components = false;
+};
+
+// Outcome of a load. On failure `ok` is false and `error` explains why (a bad header, a
+// schema-drifted or — under strict options — unknown component type, an unknown field, a malformed
+// value, a dangling entity reference); the world may have been PARTIALLY populated, so load into a
+// world you are willing to discard on failure. On success `entities`/`components` report what was
+// created.
 struct LoadReport {
     bool ok = false;
     std::string error;
     std::size_t entities = 0;
     std::size_t components = 0;
+
+    // Components dropped because this world has no such type (only reachable with
+    // `LoadOptions::allow_unknown_components`). Zero on a strict load, which is why it is safe for
+    // every existing caller to ignore it.
+    std::size_t skipped_components = 0;
+    // The distinct type names behind that count, in first-seen order — so a report can say WHICH
+    // module is missing rather than only how many records went missing. Bounded: a file naming
+    // thousands of unknown types is a corrupt file, not a diagnostic worth printing in full.
+    std::vector<std::string> unknown_types;
 };
+
+// The cap on `LoadReport::unknown_types`. The count keeps counting past it.
+inline constexpr std::size_t kMaxReportedUnknownTypes = 16;
 
 // Serialize every live entity and its *reflected* components to `.rscene` text. Entities are
 // numbered 0..N-1 in a stable iteration order and any entity-reference field is emitted as that
@@ -65,17 +101,20 @@ struct LoadReport {
 // component with nothing reflected has nothing to author).
 [[nodiscard]] std::string save_scene_to_string(const ecs::World& world);
 
-// Parse `.rscene` text into `world`. Every component type named in the file must be registered in
-// `world` with a matching `type_hash` (register your component set first — e.g.
-// ecs::register_transform_components + render::register_render_components — exactly as the editor
-// host requires). Spawns one fresh entity per record and remaps entity references to them.
-// WorldTransform is NOT written by a load (it is derived — run ecs::propagate_transforms
-// afterward).
-[[nodiscard]] LoadReport load_scene_from_string(ecs::World& world, std::string_view text);
+// Parse `.rscene` text into `world`. By default every component type named in the file must be
+// registered in `world` with a matching `type_hash` — register your component set first, and
+// `worldkit::register_engine_components` is the one list that names the engine's own (a game adds
+// its content module's on top). Spawns one fresh entity per record and remaps entity references to
+// them. WorldTransform is NOT written by a load (it is derived — run ecs::propagate_transforms
+// afterward). Pass `LoadOptions` to let unknown types be skipped and counted instead.
+[[nodiscard]] LoadReport
+load_scene_from_string(ecs::World& world, std::string_view text, const LoadOptions& options = {});
 
 // File conveniences. `save_scene_file` writes the whole buffer; `load_scene_file` reads the whole
 // file then parses it. A missing/unreadable file is a clean `false` / `LoadReport{ok=false}`.
 [[nodiscard]] bool save_scene_file(const ecs::World& world, const std::filesystem::path& path);
-[[nodiscard]] LoadReport load_scene_file(ecs::World& world, const std::filesystem::path& path);
+[[nodiscard]] LoadReport load_scene_file(ecs::World& world,
+                                         const std::filesystem::path& path,
+                                         const LoadOptions& options = {});
 
 } // namespace rime::scene

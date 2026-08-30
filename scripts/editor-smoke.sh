@@ -52,9 +52,11 @@ if [ ! -f "$toolchain" ]; then
         -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" --build=missing
 fi
 
-say "build rime-engine ($preset)"
+say "build rime-engine + rime-blockgen ($preset)"
 cmake --preset "$preset"
-cmake --build --preset "$preset" --target rime_engine
+# rime_blockgen too (m14.1): the block scene is GENERATED, not checked in, and opening it is the
+# case this smoke exists for. See the block section below.
+cmake --build --preset "$preset" --target rime_engine rime_blockgen
 
 # ── 2) Build the Rust editor ─────────────────────────────────────────────────────────────────────
 say "build editor (cargo)"
@@ -69,6 +71,24 @@ scene="$repo_root/samples/07-first-light/first_light.rscene"
 
 say "run editor --smoke (editor channel: schema + snapshot + edit)"
 "$editor_bin" --smoke --engine "$engine_bin" --scene "$scene"
+
+# ── 4) The block: the scene the engine actually SHIPS (m14.1, ADR-0037) ──────────────────────────
+#
+# THIS IS THE CASE THIS SMOKE WAS MISSING. Until m14.1 the editor could not open the block at all —
+# `rime-blockgen` writes `blockkit::SlabRole`, the host had never registered it, and the scene load
+# failed on the newest content in the repo. This job stayed green through all seven PRs of the M13
+# stack, because it only ever opened a synthetic four-entity scene.
+#
+# Generated rather than checked in, deliberately: a fixture committed today is a fixture that stops
+# tracking the generator tomorrow, and "the editor opens what blockgen writes" is the actual claim.
+say "generate the block scene (rime-blockgen)"
+blockgen_bin="$repo_root/$build_dir/bin/rime-blockgen"
+block_scene="$repo_root/$build_dir/editor-smoke-block.rscene"
+[ -x "$blockgen_bin" ] || { echo "editor-smoke.sh: missing $blockgen_bin" >&2; exit 1; }
+"$blockgen_bin" --out "$block_scene" --stats
+
+say "run editor --smoke --scene block.rscene (the engine's own content, 213 entities)"
+"$editor_bin" --smoke --engine "$engine_bin" --scene "$block_scene"
 
 # The streamed viewport: the engine renders a scene and streams it; the editor receives + LZ4-decodes
 # real frames. Needs a Vulkan device on the engine side — lavapipe (mesa) in CI. On a host with no
@@ -85,6 +105,16 @@ if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1
     # CI blind spot.)
     say "run editor --smoke --frames --scene (streamed viewport hosts a loaded .rscene)"
     "$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$scene"
+
+    # NOT the block through this path, and the reason is worth writing down rather than leaving as an
+    # absence. The viewport smoke asserts a PICK on the brightest rendered pixel, and the block's
+    # slabs do not draw here: their geometry lives in the cooked `.rdest` patterns and reaches a
+    # renderer through the m13.2d render leaves, which the viewport does not build. Resolving cooked
+    # assets into the live viewport registry is the asset-bridge brick (ADR-0037 m14.5), not this
+    # one. Adding the run anyway would assert "the frame is black" and call it coverage.
+    #
+    # What m14.1 claims about the block is what the CHANNEL run above proves: it opens, all 213
+    # entities and 604 components arrive, nothing is skipped, and an edit round-trips.
 else
     say "skip viewport smoke — no Vulkan device (vulkaninfo not usable); channel smoke covered it"
 fi
