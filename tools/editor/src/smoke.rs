@@ -52,8 +52,9 @@ mod imp {
 
     use rime_protocol::{
         decode_value, encode_value, AssetKind, AssetList, Connection, EditorMessage, FrameMessage,
-        GizmoAxis, GizmoMode, GizmoState, MessageType, PickRequest, PickResult, Schema,
-        SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, Value, ViewportCamera,
+        GizmoAxis, GizmoMode, GizmoState, MessageType, PickRequest, PickResult, SaveResult,
+        SaveScene, Schema, SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, Value,
+        ViewportCamera,
     };
 
     // A tiny cook manifest the smoke hands the engine (--assets) to prove the browse path end to end:
@@ -216,6 +217,18 @@ mod imp {
 
     /// Read messages until a PickResult arrives (m9.6), skipping streamed frames — in viewport mode
     /// the engine keeps rendering while the pick pass runs, and the answer is a frame late by design.
+    /// Read messages until a SaveResult arrives (m14.3). A REFUSAL is a normal outcome here, not a
+    /// transport error — the engine declines to save a world whose load skipped component types it
+    /// does not register — so this returns the result and lets the caller decide.
+    fn recv_save_result(conn: &mut Connection<UnixStream>) -> Result<SaveResult, String> {
+        loop {
+            let (ty, payload) = conn.recv().map_err(|e| format!("recv save result: {e}"))?;
+            if ty == MessageType::Other(EditorMessage::SaveResult.to_code()) {
+                return SaveResult::decode(&payload).map_err(|e| format!("decode save: {e}"));
+            }
+        }
+    }
+
     fn recv_pick(conn: &mut Connection<UnixStream>) -> Result<PickResult, String> {
         loop {
             let (ty, payload) = conn.recv().map_err(|e| format!("recv pick result: {e}"))?;
@@ -262,6 +275,10 @@ mod imp {
             .or_else(|| std::env::var("RIME_ENGINE_BIN").ok())
             .ok_or("no engine binary — pass --engine <rime-engine> or set RIME_ENGINE_BIN")?;
         let scene = arg_value(args, "--scene");
+        // `--save <path>` (m14.3): after the edit lands, ask the ENGINE to write the world back and
+        // check it says it did. This is the editor half of the authoring round trip — the other
+        // half is a game loading the file that comes out (m14.4).
+        let save_to = arg_value(args, "--save");
         let frames: u32 = arg_value(args, "--frames")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
@@ -525,9 +542,41 @@ mod imp {
                 ));
             }
 
+            // ── Save the edited world back (m14.3) ───────────────────────────────────────────
+            // The ENGINE writes it: scene_format.hpp makes the C++ writer the reference
+            // implementation of the format and this crate reuses it through files rather than
+            // reimplementing the byte layout. So the check is that the request is answered and the
+            // answer is a success with a real path and a non-empty file.
+            let saved = if let Some(path) = &save_to {
+                conn.send_editor(
+                    EditorMessage::SaveScene,
+                    &SaveScene { path: path.clone() }.encode(),
+                )
+                .map_err(|e| format!("send save: {e}"))?;
+                let r = recv_save_result(&mut conn)?;
+                if !r.ok {
+                    return Err(format!("engine refused to save: {}", r.error));
+                }
+                if r.path != *path {
+                    return Err(format!("saved to '{}', asked for '{}'", r.path, path));
+                }
+                if r.bytes == 0 || r.entities == 0 {
+                    return Err(format!(
+                        "save reported success but wrote {} bytes for {} entities",
+                        r.bytes, r.entities
+                    ));
+                }
+                format!(
+                    "; saved {} entities to {} ({} bytes)",
+                    r.entities, r.path, r.bytes
+                )
+            } else {
+                String::new()
+            };
+
             conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
             format!(
-                "editor <-> engine OK: {} schema types, {} entities, {} assets browsed; typed field edit {before} -> {after} applied and confirmed via snapshot; pick answered honestly (no viewport => miss); clean shutdown",
+                "editor <-> engine OK: {} schema types, {} entities, {} assets browsed; typed field edit {before} -> {after} applied and confirmed via snapshot; pick answered honestly (no viewport => miss){saved}; clean shutdown",
                 schema.types.len(),
                 snapshot.entities.len(),
                 assets.assets.len()

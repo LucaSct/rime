@@ -9,6 +9,53 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-30) — m14.3 + m14.4: the authoring round trip closes, and MILESTONE 14 IS
+> COMPLETE.** M14's "done when" — *open the shipped block in the editor, change it, save it, and run
+> the changed scene in the game* — now runs end to end in CI:
+>
+> ```
+> 1/4  rime-blockgen writes the block                    213 entities
+> 2/4  the game runs it              scene digest 0xa5878734ce157fff · all 23 claims hold
+> 3/4  the editor opens/edits/saves  typed field edit 22 -> 23 · saved 213 entities (81,924 bytes)
+> 4/4  the game runs the SAVED file  scene digest 0xce9b5bc60e2cf557 · all 23 claims hold
+> ```
+>
+> **The digests differing is the assertion, not the decoration.** "The game ran the file the editor
+> saved" is equally true of a game that quietly ignored the file and regenerated its own level, and
+> that is the failure `scripts/authoring-round-trip.sh` exists to catch. Two runs with different
+> placement digests are provably running different scenes — and both still pass every one of the
+> demo's 23 claims, so the edit produced a scene that WORKS rather than merely a different one.
+>
+> **m14.3 — save.** `SaveScene`/`SaveResult` join the editor channel (0x021D / 0x0207). **The engine
+> writes the file, never the editor**: `scene_format.hpp` makes the C++ writer the reference
+> implementation and the Rust side is required to reuse it through files rather than reimplement the
+> byte layout. `99-the-block` gained `--scene <file>`, so the game can run a scene someone authored
+> instead of the one it generates — and every number it gates on is now **measured from the loaded
+> world** rather than taken from the generator's intent, because with `--scene` the two can differ.
+> That is the whole point of an editor, and it is the m13.2c discipline applied one layer up.
+>
+> **A lossy load can never be saved**, and that closes the contract m14.1 opened. The editor loads
+> leniently so it can open a scene from a build it does not match; the world in memory is therefore
+> missing whatever it could not read, and writing it back would delete those records — silently,
+> permanently, with every counter green. `save_hosted_scene` refuses, and names the count, because
+> "cannot save" with no reason is indistinguishable from a bug. Tolerance at load is only safe
+> because of the veto at save.
+>
+> **m14.2 was struck: there was nothing to do**, and the ADR that proposed it was wrong about a fact.
+> [ADR-0037](adr/0037-authoring-loop-m14.md) §4 claimed the egui shell was not built by CI. The
+> `editor-smoke` job has run `cargo test -p editor --bins --features gui` since **m9.3d**, and
+> `gui.rs` has forwarded `--scene` to the engine child since the same brick. The ADR carries a dated
+> correction rather than a quiet edit. The lesson is the ADR's own argument pointed the other way:
+> **check the workflow before claiming CI does not cover something** — it is one grep.
+>
+> **M14 "The Authoring Loop" is COMPLETE:** m14.0 (the ADR), m14.1 (the profile + the tolerant
+> loader + the editor opening the block), m14.3 (save), m14.4 (the round trip). m14.5 (the asset
+> browser against real cooked assets) was the cuttable tail and is not done — the block's slabs still
+> do not DRAW in the viewport, because their geometry lives in cooked `.rdest` patterns that reach a
+> renderer through m13.2d's leaves. That is the asset-bridge brick and it is named, not hidden.
+>
+> **Next:** m13.p — the measured perf pass, the last open item from M13.
+
 > **Update (2026-08-30) — m14.1: the editor opens the block.** The first M14 brick, and it closes the
 > thing that started the milestone: *"unknown component type `rime::blockkit::SlabRole` — is it
 > registered?"*. It is now `loaded 213 entities, 604 components, 0 skipped`, with a typed field edit
@@ -1570,7 +1617,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
 | **M13** | **"The Block" (vision demo)** ✅ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — 23 claims green in `samples/99-the-block`, including a collapse that stays local |
-| **M14** | **"The Authoring Loop"** | open the shipped block in the editor, change it, save it, and run the changed scene in the game ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
+| **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 
 ### Detail
 
@@ -2005,6 +2052,10 @@ in this codebase to *"what components does a Rime world have?"*, so every consum
 list and the lists have diverged. `99-the-block`'s first draft hit the same defect from the other
 side — four symptoms (predictor never seeds, zero destruction ops, peers disagree, mixer silent) from
 one missing registration list.
+
+> **Struck (2026-08-30): m14.2.** It proposed building the egui shell in CI and teaching the shell to
+> open a named scene file. Both already existed — since m9.3d — and ADR-0037 §4 asserted otherwise
+> without checking the workflow. See the ADR's dated correction.
 
 *Bricks:* **m14.0** the ADR + this ladder (decision brick, no engine code) · **m14.1** the
 **component profile** — one registration function every `.rscene` consumer calls, unknown components

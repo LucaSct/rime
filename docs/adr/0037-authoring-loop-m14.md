@@ -1,7 +1,8 @@
 # ADR-0037: M14 — "The Authoring Loop"
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-30
+- Corrected: 2026-08-30 (see *Correction* at the end — §4 rested on a claim that was false)
 
 ## Context
 
@@ -155,3 +156,28 @@ than they look.
 **Rebuild the editor shell on something other than egui.** Not considered seriously at this point:
 the shell works, the architecture behind it is proven, and re-litigating the UI toolkit before the
 round trip exists would be optimising the part that is not blocking anything.
+
+## Correction (2026-08-30, while building m14.2)
+
+**§4 was wrong, and it was wrong about a fact I could have checked.** It says the egui shell "is not
+built by CI" and that "nothing in the matrix builds it, so 1,215 lines of `gui.rs` and 1,043 of
+`gizmo.rs` can rot silently".
+
+The `editor-smoke` job has run `cargo test -p editor --bins --features gui` since **m9.3d**, which
+both compiles the whole eframe/winit stack and runs the shell's headless unit tests — including the
+engine-child argv builder that forwards `--scene`. And `gui.rs` has read `--scene` and passed it to
+the engine child since the same brick. So both halves of m14.2 already existed when this ADR
+proposed building them.
+
+**What that changes.** m14.2 is struck from the ladder — there was nothing to do. M14 is m14.0
+(this ADR), **m14.1** (the profile, the tolerant loader, the editor opening the block), **m14.3**
+(save) and **m14.4** (the round trip). The rest of the ADR stands: §1's diagnosis of the component
+drift was correct and cost two real failures, §2 and §3 were built as written, and the "done when"
+is unchanged and met.
+
+**Why it happened, since that is the reusable part.** The claim came from a memory of the editor's
+state — the shell being feature-gated off by default, which is true — and I generalised "off by
+default" into "not built anywhere" without grepping the workflow. The same ADR argues that a gate
+which cannot see the content is worthless; a plan that asserts a gate is missing without looking is
+the same mistake pointed the other way. **Check the workflow file before claiming CI does not cover
+something**; it is one grep.
