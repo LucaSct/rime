@@ -13,7 +13,7 @@
 //! the engine assigns a fresh handle on spawn, so a naive undo can't reproduce the identity edits
 //! reference (a considered v1 limitation, noted in the PR; a spawn/despawn history is a later brick).
 
-use rime_protocol::{encode_despawn, ComponentRef, EditorMessage, SetComponent};
+use rime_protocol::{encode_despawn, ComponentRef, EditorMessage, SaveScene, SetComponent};
 
 /// An entity's live handle (index, generation) — how an edit names the entity it targets.
 pub type EntityKey = (u32, u32);
@@ -49,6 +49,17 @@ pub enum Command {
     Step,
     /// Restore the pre-play snapshot; back to Edit (m9.7).
     Stop,
+    /// Write the world back to a `.rscene` (m15.3). An empty path means "the file it was opened
+    /// from"; the engine refuses rather than guesses when there is no such file.
+    ///
+    /// **The engine writes it, not the editor.** `scene_format.hpp` makes the C++ writer the
+    /// reference implementation of the format, and this crate reuses it through files rather than
+    /// reimplementing the byte layout — so "save" is a request, and the answer comes back as a
+    /// `SaveResult` (which may be a refusal, with its reason).
+    ///
+    /// Deliberately NOT on the undo stack: it mutates a file, not the world, and there is nothing
+    /// for an inverse to restore.
+    SaveScene { path: String },
 }
 
 impl Command {
@@ -91,6 +102,10 @@ impl Command {
             Command::Pause => (EditorMessage::Pause, Vec::new()),
             Command::Step => (EditorMessage::Step, Vec::new()),
             Command::Stop => (EditorMessage::Stop, Vec::new()),
+            Command::SaveScene { path } => (
+                EditorMessage::SaveScene,
+                SaveScene { path: path.clone() }.encode(),
+            ),
         }
     }
 
@@ -239,5 +254,50 @@ mod tests {
         // The payload is a ComponentRef the engine can parse back.
         let cr = ComponentRef::decode(&payload).expect("decode ref");
         assert_eq!((cr.index, cr.generation, cr.type_hash), (3, 0, 7));
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    use rime_protocol::SaveScene as WireSaveScene;
+
+    // m15.3. `SaveScene` was implemented end to end on the wire at m14.3 and reachable only from
+    // the headless smoke — `File` in the menu bar was a dead `ui.label`, so a person editing in the
+    // GUI lost their work on close. These pin the command layer the menu now goes through, which is
+    // the link that was missing rather than the message that always worked.
+    #[test]
+    fn save_becomes_the_wire_message_with_its_path() {
+        let (msg, payload) = Command::SaveScene {
+            path: "/tmp/a b/scene.rscene".to_string(),
+        }
+        .to_wire();
+        assert_eq!(msg, EditorMessage::SaveScene);
+        let decoded = WireSaveScene::decode(&payload).expect("decode");
+        assert_eq!(decoded.path, "/tmp/a b/scene.rscene");
+    }
+
+    #[test]
+    fn an_empty_path_survives_and_means_write_it_back() {
+        // Distinct from a missing field: it is how the editor says "wherever you opened it from",
+        // a decision the engine owns because only it knows the path it was handed.
+        let (_, payload) = Command::SaveScene {
+            path: String::new(),
+        }
+        .to_wire();
+        assert!(WireSaveScene::decode(&payload)
+            .expect("decode")
+            .path
+            .is_empty());
+    }
+
+    #[test]
+    fn saving_is_not_a_structural_change() {
+        // It mutates a FILE, not the world — so it must not trigger a resync, and there is nothing
+        // for an undo inverse to restore either.
+        assert!(!Command::SaveScene {
+            path: String::new()
+        }
+        .is_structural());
     }
 }

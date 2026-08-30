@@ -19,6 +19,7 @@
 #include "rime/ecs/archetype.hpp"
 #include "rime/ecs/chunk.hpp"
 #include "rime/ecs/component.hpp"
+#include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/scene/scene_format.hpp"
 
@@ -599,7 +600,14 @@ bool spawn_entity_from_payload(ecs::World& world, std::span<const std::byte> pay
     if (!r.u16(comp_count)) {
         return false;
     }
-    const ecs::Entity e = world.spawn();
+    // A PLACEMENT BY DEFAULT, for the same reason bare `Spawn` gets one (m15.3). The asset
+    // browser's "place" sends a MeshAsset and nothing else, and an entity with no LocalTransform is
+    // one the gizmo will not touch and the renderer will not draw — so "place" put an invisible,
+    // unmovable row in the outliner. If the payload carries its own LocalTransform the loop below
+    // simply overwrites this one, so an authored placement still wins.
+    const ecs::Entity e = world.is_registered<ecs::LocalTransform>()
+                              ? world.spawn_with(ecs::LocalTransform{})
+                              : world.spawn();
     for (std::uint16_t c = 0; c < comp_count; ++c) {
         std::uint64_t hash = 0;
         std::uint32_t blob_len = 0;
@@ -651,7 +659,14 @@ bool EditorHost::poll_one(ecs::World& world) {
             return true;
         }
         case EditorMessage::Spawn:
-            (void)world.spawn();
+            // WITH A TRANSFORM, not empty (m15.3). A bare `world.spawn()` produced an entity the
+            // gizmo would not touch (it requires LocalTransform) and the renderer would not draw,
+            // so "+ spawn" added an invisible, unmovable row to the outliner and the user's next
+            // step was to hunt through "+ add component". A placement is the one thing every
+            // spawned entity wants; everything else is genuinely a choice.
+            (void)(world.is_registered<ecs::LocalTransform>()
+                       ? world.spawn_with(ecs::LocalTransform{})
+                       : world.spawn());
             return true;
         case EditorMessage::Despawn: {
             core::ByteReader r(payload);
