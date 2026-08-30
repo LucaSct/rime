@@ -2131,6 +2131,44 @@ target range authored in the editor, its diff touching only `samples/` and `docs
 m15.7's hello-game → m15.6's alpha mask → m15.3's colour swatch. **Never cut:** m15.1, m15.3's Save,
 m15.8.
 
+> **Progress (2026-08-30) — m15.0 through m15.6b are on `main`; m15.7 and m15.8 are open.**
+>
+> | brick | state | what landed |
+> |---|---|---|
+> | m15.0 | ✅ #158 | ADR-0038 and this ladder |
+> | m15.1 | ✅ #159 | `GpuAssetBridge::resolve_scene_meshes` — a scene names a mesh by content id and it draws |
+> | m15.2 | ✅ #160 | `run_editor_host` is a library; `the-block-host` is the game's own binary |
+> | m15.3 | ✅ #161 | File▸Save/Save As + Ctrl+S, refusals shown verbatim, spawn-with-transform, a readable outliner |
+> | m15.4 | ✅ #162 | the viewport resolves cooked meshes, and a `ScenePreparer` lets a game supply its own look |
+> | m15.5 | ✅ #163 | `Window::set_cursor_mode` on all four backends; `fullscreen`/`high_dpi` deleted |
+> | m15.6a | ✅ #164 | `alpha_cutoff` reaches the forward shaders — alpha-tested glTF stops being an opaque quad |
+> | m15.6b | ✅ #165 | `Collider::sensor` becomes real: `PhysicsWorld::trigger_events()` |
+> | m15.7 | open | the on-ramp: README build instructions, `docs/getting-started.md`, `samples/hello-game`, the drifted `samples/README.md` |
+> | m15.8 | open | **the proof** — a target range authored through the editor, its diff touching only `samples/` and `docs/` |
+>
+> **m15.6 was split** into 15.6a (alpha) and 15.6b (sensors): two independent dead fields, in two
+> modules, with nothing shared but the reason they were dead. **m15.3's colour swatch was cut**, as
+> the cut order allows, and an authored `Name` component was ruled OUT of m15.3 rather than smuggled
+> in — reflection has no string type at all (`FieldType` is Bool/Int/UInt/Float/Double/Struct) and
+> components must be trivially-copyable PODs, so a real name needs `FieldType::String` threaded
+> through the serializer, the scene format, the schema wire and the inspector. The outliner derives
+> a label from each entity's most distinctive component instead.
+>
+> **Three things these bricks found that no test was looking for.** m15.4's first working version
+> drew the block as 140 floating one-metre cubes — every destructible slab is authored with an
+> IDENTITY scale because its size lives in its cooked `.rdest`, which only looking at the frame
+> revealed. m15.6b's kinematic case found that the event stage drops any region whose inverse masses
+> sum to zero, so a static trigger volume watching for a character was discarded before its trigger
+> flag was computed. And m15.5's two CI failures were both in the backends no local build compiles.
+>
+> **Still open, and named rather than absent:** masked materials cast unmasked shadows (the depth and
+> shadow passes have no fragment shader at all); the cooked-material → `PbrMaterialDesc` conversion
+> still lives in `samples/08-gltf-zoo/main.cpp`, the same private fork `mesh_from_cooked` was before
+> m15.1; Wayland pointer lock is verified only as far as "the protocols bind and the refusal is
+> reported honestly" — the grant itself needs a hand on a real mouse; and a windowed run emits four
+> `vkDestroyBuffer ... currently in use` validation errors at teardown, present with and without
+> pointer capture and therefore older than both.
+
 **M13's frame-rate clause is carried to M16, with the number written down** — `frame` p99 35.60 ms
 against a ratified 16.6. The budget does not move; M13 stands at ⚠️. It goes to M16 because m13.p
 says where the cost is and it is not where M15 works: the whole M10 stack renders in 5.23 ms, and
