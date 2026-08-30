@@ -8,6 +8,11 @@ namespace rime::ecs {
 class World;
 }
 
+namespace rime::render {
+class MeshRegistry;
+class MaterialRegistry;
+} // namespace rime::render
+
 // The editor host, as a LIBRARY a game builds its own binary from (m15.2, ADR-0038).
 //
 // WHY THIS EXISTS. `rime-engine` used to register `blockkit` — the vision demo's content module —
@@ -41,12 +46,34 @@ namespace rime::app {
 // silent.
 using ComponentRegistrar = std::function<void(ecs::World&)>;
 
+// Make the loaded world DRAWABLE (m15.4). Called once, in the viewport path only, after the scene
+// has loaded and before the first frame — with the registries a game may add meshes and materials
+// to.
+//
+// WHY A GAME HAS TO BE ASKED. A `.rscene` stores components, and a component is not geometry. The
+// engine can close that gap on its own exactly when the scene names a cooked mesh by asset id —
+// `render::MeshAsset`, resolved through `GpuAssetBridge` (m15.1), which the viewport now does for
+// every host. But a game is free to *derive* its appearance instead, and the vision demo does: its
+// 213 slabs carry a `blockkit::SlabRole` and nothing else, and `blockkit::apply_palette` turns that
+// into MeshRef/MaterialRef at startup. No amount of engine cleverness can guess that mapping.
+//
+// So the engine asks. This is the same reasoning as `ComponentRegistrar` one step further along: a
+// host binary is where a game tells the editor about itself, first what its components ARE and now
+// what they LOOK LIKE. Both are ordinary C++ in the game's own target — nothing here loads a
+// plugin, and nothing in `engine/` names a game.
+//
+// Default `{}` means "the scene is already drawable, or it is not, and either way the engine has
+// nothing to add" — the honest v1 behaviour for `rime-engine` opening arbitrary content.
+using ScenePreparer =
+    std::function<void(ecs::World&, render::MeshRegistry&, render::MaterialRegistry&)>;
+
 // Parse `--editor-host <socket> [--scene <file>] [--assets <manifest>] [--viewport]` and serve
 // until the client disconnects. `usage_name` is what the usage line calls this binary, so a game's
 // host does not tell its users to run `rime-engine`.
 [[nodiscard]] int run_editor_host(int argc,
                                   char** argv,
                                   const ComponentRegistrar& registrar,
-                                  const char* usage_name = "rime-engine");
+                                  const char* usage_name = "rime-engine",
+                                  const ScenePreparer& prepare = {});
 
 } // namespace rime::app

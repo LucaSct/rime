@@ -53,8 +53,8 @@ mod imp {
     use rime_protocol::{
         decode_value, encode_value, AssetKind, AssetList, Connection, EditorMessage, FrameMessage,
         GizmoAxis, GizmoMode, GizmoState, MessageType, PickRequest, PickResult, SaveResult,
-        SaveScene, Schema, SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, Value,
-        ViewportCamera,
+        SaveScene, Schema, SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, SpawnEntity,
+        Value, ViewportCamera,
     };
 
     // A tiny cook manifest the smoke hands the engine (--assets) to prove the browse path end to end:
@@ -279,6 +279,30 @@ mod imp {
         // check it says it did. This is the editor half of the authoring round trip — the other
         // half is a game loading the file that comes out (m14.4).
         let save_to = arg_value(args, "--save");
+        // m15.4. `--place-mesh <hex id>` does through the wire exactly what the asset browser's
+        // "place" button does: SpawnEntity carrying a `render::MeshAsset` and nothing else. Paired
+        // with `--save`, one run AUTHORS a scene that names a cooked mesh by content id — which is
+        // the only way to get one without hand-writing reflection type hashes into a fixture file
+        // that would rot the first time a component changes shape.
+        let place_mesh: Option<u64> = arg_value(args, "--place-mesh")
+            .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+        // Where to put it. Optional, and the default (none — the engine's identity placement) is
+        // deliberately kept: it is what the asset browser's button actually sends. But a proof that
+        // the mesh DREW needs it somewhere the camera can see, and the first run of this landed a
+        // 0.5m cube inside the demo scene's 0.8m sphere — resolved, uploaded, drawn, and visible as
+        // two stray corner slivers.
+        let place_at: Option<(f32, f32, f32)> = arg_value(args, "--place-at").and_then(|v| {
+            let n: Vec<f32> = v.split(',').filter_map(|c| c.trim().parse().ok()).collect();
+            (n.len() == 3).then(|| (n[0], n[1], n[2]))
+        });
+        // m15.4. `--dump-frame <path.ppm>` writes the last streamed frame so a human can LOOK at
+        // what the editor draws; `--min-coverage <pct>` is the machine's version of the same
+        // question. "Not a uniform image" passes on one stray lit pixel, which is exactly what a
+        // viewport that resolved nothing looks like once a single light bleeds into the clear.
+        let dump_frame = arg_value(args, "--dump-frame");
+        let min_coverage: f32 = arg_value(args, "--min-coverage")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
         let frames: u32 = arg_value(args, "--frames")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
@@ -295,10 +319,19 @@ mod imp {
         if let Some(scene) = &scene {
             cmd.arg("--scene").arg(scene);
         }
-        // In channel mode, also hand the engine a small manifest so the smoke can prove the browse
-        // path (engine reads the file → AssetList over the live socket). The file must live until the
-        // engine reads it at connect time; the smoke deletes it once the AssetList arrives.
-        let manifest_path = if frames == 0 {
+        // A REAL `--assets` wins, in either mode (m15.4). The viewport needs it to resolve a scene
+        // that names a cooked mesh by content id, and forwarding it only in channel mode is why the
+        // first run of that proof drew nothing and reported nothing: the flag was accepted by this
+        // binary and quietly never reached the engine.
+        let real_assets = arg_value(args, "--assets");
+        if let Some(a) = &real_assets {
+            cmd.arg("--assets").arg(a);
+        }
+        // Otherwise, in channel mode, hand the engine a small synthetic manifest so the smoke can
+        // prove the browse path (engine reads the file → AssetList over the live socket). The file
+        // must live until the engine reads it at connect time; the smoke deletes it once the
+        // AssetList arrives.
+        let manifest_path = if frames == 0 && real_assets.is_none() {
             let p = std::env::temp_dir().join(format!(
                 "rime-editor-smoke-{}-{}.manifest",
                 std::process::id(),
@@ -340,11 +373,32 @@ mod imp {
             // decode path end to end — then close.
             let (got, w, h, pixels) = receive_frames(&mut conn, frames)?;
 
+            // Coverage: the share of pixels the renderer actually put geometry on. The clear is
+            // black, so a non-background pixel is a drawn one. This is the number that separates
+            // "the scene is there" from "something flickered" — and the one m15.4 needed, because
+            // before it the block's viewport was a lit void and every weaker check passed.
+            let coverage = coverage_pct(&pixels);
+            if let Some(path) = dump_frame.as_deref() {
+                write_ppm(path, w, h, &pixels).map_err(|e| format!("dump frame: {e}"))?;
+                println!("editor: wrote {path} ({w}x{h}, {coverage:.1}% covered)");
+            }
+            if coverage < min_coverage {
+                return Err(format!(
+                    "viewport frame covers {coverage:.1}% of the image, below the {min_coverage:.1}% \
+                     this scene must draw — the world loaded but its geometry did not reach the renderer"
+                ));
+            }
+
             // Live pick (m9.6), self-locating so no scene coordinates are hardcoded: the brightest
             // pixel of a decoded frame is by construction on a lit, rendered surface (the cleared
             // background is black), so picking it MUST name a real entity — the click→PickRequest→
-            // ID-pass→PickResult loop proven against the live renderer. A corner pixel of the same
-            // frame is empty sky and must miss.
+            // ID-pass→PickResult loop proven against the live renderer. A BACKGROUND pixel of the
+            // same frame must miss — and it is located the same way rather than assumed to be the
+            // corner (0,0). m15.4 made the block openable in the viewport, and the block fills 86%
+            // of the frame including both top corners; "the corner is empty sky" was a property of
+            // the four-entity demo scene, not of a viewport. A check that only holds for a sparse
+            // scene fails on a real one, and it failed as a *negative* — the reading that looks
+            // like a picker bug.
             let (bx, by) = brightest_pixel(&pixels, w);
             conn.send_editor(
                 EditorMessage::PickRequest,
@@ -367,14 +421,20 @@ mod imp {
                     hit.index, hit.generation
                 ));
             }
-            conn.send_editor(
-                EditorMessage::PickRequest,
-                &PickRequest { x: 0, y: 0 }.encode(),
-            )
-            .map_err(|e| format!("send pick: {e}"))?;
-            let miss = recv_pick(&mut conn)?;
-            if miss.is_hit() {
-                return Err("picking the empty corner pixel claimed a hit".into());
+            let miss_at = background_pixel(&pixels, w);
+            if let Some((mx, my)) = miss_at {
+                conn.send_editor(
+                    EditorMessage::PickRequest,
+                    &PickRequest { x: mx, y: my }.encode(),
+                )
+                .map_err(|e| format!("send pick: {e}"))?;
+                let miss = recv_pick(&mut conn)?;
+                if miss.is_hit() {
+                    return Err(format!(
+                        "picking background pixel ({mx},{my}) claimed a hit on entity {}:{}",
+                        miss.index, miss.generation
+                    ));
+                }
             }
 
             // Gizmo channel (m9.6b), end to end over the live wire. First: the engine ships the
@@ -458,11 +518,18 @@ mod imp {
                 ));
             }
 
+            let miss_note = match miss_at {
+                Some((mx, my)) => format!("background ({mx},{my}) missed"),
+                // Said out loud rather than silently skipped: a frame with no background left is a
+                // scene that covers every pixel, and then this run simply has no negative case.
+                None => "no background pixel to miss-test".to_string(),
+            };
             conn.send_bye().map_err(|e| format!("send bye: {e}"))?;
             drain_until_closed(&mut conn);
             format!(
-                "editor <-> engine viewport OK: {} entities; {got} frames decoded to {w}x{h} RGBA; \
-                 pick at ({bx},{by}) hit entity {}:{}, corner missed; viewport-camera lens verified \
+                "editor <-> engine viewport OK: {} entities; {got} frames decoded to {w}x{h} RGBA \
+                 ({coverage:.1}% covered); pick at ({bx},{by}) hit entity {}:{}, {miss_note}; \
+                 viewport-camera lens verified \
                  (vp*inv=I, err {id_err:.1e}); gizmo translate {tx_before} -> {tx_after} applied; \
                  clean shutdown",
                 snapshot.entities.len(),
@@ -476,7 +543,19 @@ mod imp {
             if let Some(p) = &manifest_path {
                 let _ = std::fs::remove_file(p);
             }
-            if assets.assets.len() != 2 || !assets.assets.iter().any(|a| a.kind == AssetKind::Mesh)
+            // The exact-shape check belongs to the SYNTHETIC manifest this smoke wrote — it is
+            // asserting a known two-row file round-tripped. A caller who passed a real `--assets`
+            // is browsing a real cook whose contents are the cook's business, so the claim weakens
+            // honestly to "it parsed and it has a mesh" rather than silently comparing against a
+            // manifest that is not the one in play.
+            let expected_len = if manifest_path.is_some() {
+                2
+            } else {
+                assets.assets.len()
+            };
+            if assets.assets.len() != expected_len
+                || assets.assets.is_empty()
+                || !assets.assets.iter().any(|a| a.kind == AssetKind::Mesh)
             {
                 return Err(format!(
                     "asset list did not round-trip the manifest: {:?}",
@@ -540,6 +619,61 @@ mod imp {
                     "the GPU-free host claimed a pick hit ({}:{})",
                     pick.index, pick.generation
                 ));
+            }
+
+            // ── Place a cooked mesh by content id (m15.4) ────────────────────────────────────
+            // The type hash comes from the SCHEMA the engine just sent, so this works against any
+            // host that registers the component and reports honestly against one that does not —
+            // rather than baking a hash the next reflection change would silently invalidate.
+            if let Some(id) = place_mesh {
+                let hash = schema
+                    .types
+                    .iter()
+                    .find(|t| t.name == "rime::render::MeshAsset")
+                    .map(|t| t.type_hash)
+                    .ok_or("engine schema has no rime::render::MeshAsset to place")?;
+                let blob =
+                    encode_value(&Value::Struct(vec![("asset".to_string(), Value::U64(id))]));
+                let mut components = vec![(hash, blob)];
+                if let Some((px, py, pz)) = place_at {
+                    let local = schema
+                        .types
+                        .iter()
+                        .find(|t| t.name == "rime::ecs::LocalTransform")
+                        .map(|t| t.type_hash)
+                        .ok_or("engine schema has no rime::ecs::LocalTransform")?;
+                    let v3 = |x: f32, y: f32, z: f32| {
+                        Value::Struct(vec![
+                            ("x".to_string(), Value::F32(x)),
+                            ("y".to_string(), Value::F32(y)),
+                            ("z".to_string(), Value::F32(z)),
+                        ])
+                    };
+                    components.push((
+                        local,
+                        encode_value(&Value::Struct(vec![(
+                            "value".to_string(),
+                            Value::Struct(vec![
+                                ("translation".to_string(), v3(px, py, pz)),
+                                (
+                                    "rotation".to_string(),
+                                    Value::Struct(vec![
+                                        ("x".to_string(), Value::F32(0.0)),
+                                        ("y".to_string(), Value::F32(0.0)),
+                                        ("z".to_string(), Value::F32(0.0)),
+                                        ("w".to_string(), Value::F32(1.0)),
+                                    ]),
+                                ),
+                                ("scale".to_string(), v3(1.0, 1.0, 1.0)),
+                            ]),
+                        )])),
+                    ));
+                }
+                conn.send_editor(
+                    EditorMessage::SpawnEntity,
+                    &SpawnEntity { components }.encode(),
+                )
+                .map_err(|e| format!("send place: {e}"))?;
             }
 
             // ── Save the edited world back (m14.3) ───────────────────────────────────────────
@@ -624,6 +758,46 @@ mod imp {
             got += 1;
         }
         Ok((got, dims.0, dims.1, last))
+    }
+
+    /// The (x, y) of a pixel that is the black clear colour — background, nothing drawn on it — or
+    /// None if the scene covers the whole frame. The negative half of the pick proof: picking here
+    /// must report empty space. Scans from the top, where sky is likeliest.
+    fn background_pixel(rgba: &[u8], width: u32) -> Option<(i32, i32)> {
+        let w = width.max(1) as usize;
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .position(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 <= 12)
+            .map(|i| ((i % w) as i32, (i / w) as i32))
+    }
+
+    /// The share of pixels (0-100) that are not the black clear colour — i.e. that some draw
+    /// actually wrote to. A tiny threshold rather than `!= 0` so a nearly-unlit surface still
+    /// counts as drawn and compression noise does not.
+    fn coverage_pct(rgba: &[u8]) -> f32 {
+        let px = rgba.as_chunks::<4>().0;
+        if px.is_empty() {
+            return 0.0;
+        }
+        let lit = px
+            .iter()
+            .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 12)
+            .count();
+        100.0 * lit as f32 / px.len() as f32
+    }
+
+    /// Write RGBA pixels as a binary PPM (P6). Deliberately not PNG: PPM is nine lines of code and
+    /// no dependency, every image viewer opens it, and the point is to be able to LOOK at a frame
+    /// rather than to ship an image format.
+    fn write_ppm(path: &str, w: u32, h: u32, rgba: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut out = Vec::with_capacity(15 + (w * h * 3) as usize);
+        write!(out, "P6\n{w} {h}\n255\n")?;
+        for p in rgba.as_chunks::<4>().0 {
+            out.extend_from_slice(&p[..3]);
+        }
+        std::fs::write(path, out)
     }
 
     /// The (x, y) of the brightest pixel of an RGBA image — the most-lit spot of the rendered

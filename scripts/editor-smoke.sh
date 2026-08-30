@@ -121,7 +121,7 @@ echo "$game_out" | grep -q ", 0 skipped" || {
 # being discoverable (vulkaninfo). Locally, run it directly if you have any Vulkan ICD.
 if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1; then
     say "run editor --smoke --frames (streamed viewport: render → LZ4 → decode)"
-    "$editor_bin" --smoke --frames 8 --engine "$engine_bin"
+    "$editor_bin" --smoke --frames 8 --engine "$engine_bin" --min-coverage 10
 
     # Same streamed-viewport path, but hosting a real --scene rather than the built-in demo (m9.5
     # passthrough): the engine loads first_light.rscene into the viewport world, renders it, and the
@@ -129,17 +129,59 @@ if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1
     # end. (serve_viewport silently ignored --scene before this brick; without a test that path is a
     # CI blind spot.)
     say "run editor --smoke --frames --scene (streamed viewport hosts a loaded .rscene)"
-    "$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$scene"
+    "$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$scene" --min-coverage 10
 
-    # NOT the block through this path, and the reason is worth writing down rather than leaving as an
-    # absence. The viewport smoke asserts a PICK on the brightest rendered pixel, and the block's
-    # slabs do not draw here: their geometry lives in the cooked `.rdest` patterns and reaches a
-    # renderer through the m13.2d render leaves, which the viewport does not build. Resolving cooked
-    # assets into the live viewport registry is the asset-bridge brick (ADR-0037 m14.5), not this
-    # one. Adding the run anyway would assert "the frame is black" and call it coverage.
+    # THE BLOCK, through the streamed viewport, via the GAME's own host (m15.4). This run was
+    # refused for two bricks with a comment saying why: the block's slabs draw as cooked fracture
+    # parts, the viewport built none, and adding the run anyway would have asserted "the frame is
+    # black" and called it coverage. m15.4 closed that by giving a game somewhere to say what its
+    # components LOOK like — `run_editor_host`'s ScenePreparer, which `the-block-host` answers with
+    # blockkit's palette plus one preview box per cooked pattern.
     #
-    # What m14.1 claims about the block is what the CHANNEL run above proves: it opens, all 213
-    # entities and 604 components arrive, nothing is skipped, and an edit round-trips.
+    # COVERAGE IS THE ASSERTION, not "a frame arrived". The block fills most of the frame, so a
+    # floor requiring the picture to be substantially drawn is what separates "the buildings are
+    # there" from "one lamp is lit and the rest resolved to nothing" — the exact failure the old
+    # refusal existed to avoid asserting past.
+    say "run editor --smoke --frames --scene block.rscene through the GAME's host (m15.4)"
+    "$editor_bin" --smoke --frames 8 --engine "$blockhost_bin" --scene "$block_scene" \
+        --min-coverage 40
+
+    # THE ENGINE'S OWN ROUTE, with no game host and no game code: a scene that names a cooked mesh
+    # by CONTENT ID resolves through the m15.1 asset bridge and draws. Authored the way a user would
+    # — the editor places the mesh and saves the scene — rather than from a fixture with hand-written
+    # reflection type hashes in it, which would rot the first time a component changed shape.
+    zoo_manifest="$repo_root/$build_dir/samples/08-gltf-zoo/cooked/manifest.txt"
+    if [ -f "$zoo_manifest" ]; then
+        mesh_id="$(awk -F'\t' '$2=="mesh"{print $3; exit}' "$zoo_manifest")"
+        placed="$repo_root/$build_dir/editor-smoke-placed.rscene"
+        say "author a scene that names a cooked mesh by content id (place + save)"
+        "$editor_bin" --smoke --engine "$engine_bin" --assets "$zoo_manifest" \
+            --place-mesh "$mesh_id" --place-at 0,0.6,2.2 --save "$placed" >/dev/null
+        grep -q "rime::render::MeshAsset" "$placed" || {
+            echo "editor-smoke.sh: the saved scene does not name a mesh by asset id" >&2; exit 1; }
+
+        # THE ASSERTION IS THE DIFFERENCE, like the two hosts above. The same scene, the same engine,
+        # the same binary — with the manifest the bridge resolves the reference and the mesh draws;
+        # without it there is nothing to resolve the id against and the entity stays present,
+        # editable and undrawn. If both runs said the same thing the bridge would not be doing the
+        # work, and a coverage number alone cannot see that (the cube lands in front of the floor,
+        # so it replaces lit pixels rather than adding them — measured, not assumed).
+        say "reopen it in the viewport WITH --assets (expect the bridge to resolve it)"
+        with_out="$("$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$placed" \
+            --assets "$zoo_manifest" 2>&1)"
+        echo "$with_out" | grep -E "resolved [0-9]+ mesh reference|viewport OK" || true
+        echo "$with_out" | grep -qE "resolved [1-9][0-9]* mesh reference" || {
+            echo "editor-smoke.sh: --assets did not resolve the scene's MeshAsset" >&2; exit 1; }
+
+        say "reopen it WITHOUT --assets (expect no resolve — the id has nothing to resolve against)"
+        without_out="$("$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$placed" 2>&1)"
+        echo "$without_out" | grep -q "mesh reference" && {
+            echo "editor-smoke.sh: the viewport resolved meshes with no manifest — the run with" \
+                 "--assets proves nothing" >&2; exit 1; }
+        echo "$without_out" | grep -E "viewport OK" || true
+    else
+        say "skip the cooked-mesh viewport proof — 08-gltf-zoo has not been cooked in this build"
+    fi
 else
     say "skip viewport smoke — no Vulkan device (vulkaninfo not usable); channel smoke covered it"
 fi
