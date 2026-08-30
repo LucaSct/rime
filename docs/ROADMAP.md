@@ -9,6 +9,50 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-30) — m13.p: the block is measured, and it MISSES the budget.** The first
+> hardware numbers for the vision demo, Release, 1920×1080, RTX 3060, 600 frames with the full M10
+> stack on (m13.L):
+>
+> | timeline | p50 | p99 | max |
+> |---|---|---|---|
+> | `frame` — server + client + render, the demo's wall clock | 18.84 | **35.60** | 37.97 |
+> | `frame.player` — client + render, i.e. one machine | 13.40 | 27.51 | 28.97 |
+> | `render` | **5.23** | 12.69 | 12.98 |
+> | `sim.client` | 7.48 | 16.59 | 17.02 |
+> | `sim.server` | 5.83 | 8.97 | 9.71 |
+>
+> **Against ADR-0035's ratified budget (p99 ≤ 16.6 ms, max ≤ 33 ms) the demo fails, and the budget
+> does not move.** It was ratified at m12.0 against measurement; relaxing it because the first
+> measurement missed is precisely what a ratified number exists to prevent. **M13's "playable frame
+> rate" clause is therefore NOT met.**
+>
+> **The renderer is not the problem.** The entire M10 stack — CSM, local shadows, clustered forward,
+> the SDF clipmap, DDGI and SSR — costs **5.23 ms** at 1080p on a 3060, drawing 1,830 of 2,051. The
+> time is in simulation, and the split is what says so.
+>
+> **One measured fix, and it was worth 2.1×.** The client's destruction catch-up drained *every*
+> queued batch in one tick, each with a full `physics.step` — `12-networked-destruction`'s "one batch
+> per update, never two merged" rule, which is right for fidelity and unbounded in cost. Measured:
+> **10 physics steps in a single tick**, `sim.client` p99 **58 ms**, against a server doing the same
+> work at 9 ms. The physics was never slow; the loop was unbounded. Capping catch-up at two batches
+> per tick took `frame` p99 from **75.8 → 35.6 ms** and `sim.client` p99 from **58.1 → 16.6 ms**.
+> Deferring is not merging — batches still apply one at a time in order, and the headless proof's
+> drain-to-quiescence bound is what shows the client still converges (168 quiet ticks of 600).
+>
+> **`draws.submitted` / `draws.culled` finally reach a ledger.** ADR-0035 §2a named them and
+> `11-lit-rooms:651` has carried a note deferring them ever since, because "nothing in the engine
+> counts a draw". The cull has counted them since m13.2a; the entry never followed. It has now.
+>
+> **The named next target, and the ADR called it.** ADR-0035 §6 listed "the every-tick narrowphase
+> cache (M7's named first hot spot, **likely at 400+ debris**)" as *in M12 only if measured*. Peak
+> live debris here is **667**, and physics-at-debris-scale is what remains after the catch-up fix.
+> That prediction is now measurement-backed rather than a guess — which is the entire job m13.p was
+> given.
+>
+> `scripts/perf.sh --sample the-block` runs it;
+> `docs/perf/2026-08-30-99-the-block-nvidia-geforce-rtx-3060.json` is the committed baseline. Not a
+> CTest — CI renders on lavapipe, where a millisecond is a statement about the runner's mood.
+
 > **Update (2026-08-30) — m14.3 + m14.4: the authoring round trip closes, and MILESTONE 14 IS
 > COMPLETE.** M14's "done when" — *open the shipped block in the editor, change it, save it, and run
 > the changed scene in the game* — now runs end to end in CI:
@@ -1616,7 +1660,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M10** | Advanced lighting | dynamic GI updates as the scene changes — *including when walls fall* |
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
-| **M13** | **"The Block" (vision demo)** ✅ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — 23 claims green in `samples/99-the-block`, including a collapse that stays local |
+| **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). The renderer costs 5.2 ms; the remainder is physics at 667 debris |
 | **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 
 ### Detail
