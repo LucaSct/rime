@@ -285,3 +285,15 @@ TEST_CASE("m13.3c: FlyCamera integrates, latches quit, and IS its eye") {
     cam.update(quiet, 0.016f);
     CHECK(cam.quit_requested());
 }
+
+// m15.5. The one-line policy that decides a control scheme, tested because the tempting way to
+// write it at the call site — comparing against the mode you REQUESTED — is a tautology that always
+// says "locked" and always ships free-look on a cursor that is not locked.
+TEST_CASE("m15.5: hold-to-look is required unless the cursor is actually locked") {
+    CHECK_FALSE(look_requires_drag_for(platform::CursorMode::Locked));
+    CHECK(look_requires_drag_for(platform::CursorMode::Normal));
+    // Hidden is NOT locked: the cursor is invisible but still moving freely, so it still walks off
+    // the window and the camera still stops at the edge. Treating "we hid it" as "we captured it"
+    // is the subtle version of the same mistake.
+    CHECK(look_requires_drag_for(platform::CursorMode::Hidden));
+}

@@ -73,6 +73,11 @@ elseif(UNIX)
     # Wayland backend: the client library + xkbcommon (keyboard), located via pkg-config.
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
+    # A Wayland client OWNS its cursor: `wl_pointer.set_cursor` with a null surface is the only way
+    # to hide one, and nothing restores it afterwards — so a backend that can hide but not draw is a
+    # backend that loses the pointer permanently. wayland-cursor loads the user's theme, which is
+    # what lets Hidden be reversible (m15.5). Ships inside libwayland-dev, which CI already installs.
+    pkg_check_modules(WAYLAND_CURSOR REQUIRED IMPORTED_TARGET wayland-cursor)
     pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 
     # Wayland ships its protocols as XML; wayland-scanner turns the xdg-shell description into C
@@ -96,12 +101,36 @@ elseif(UNIX)
         COMMAND ${WAYLAND_SCANNER} private-code "${_xdg_xml}" "${_wl_gen}/xdg-shell-protocol.c"
         DEPENDS "${_xdg_xml}" VERBATIM)
 
+    # POINTER CAPTURE (m15.5) needs two more protocols, both unstable-v1 and both from the same
+    # wayland-protocols package: `pointer-constraints` to pin the cursor, `relative-pointer` to be
+    # told how far it tried to move while pinned. They come as a pair — a lock with no relative
+    # source freezes the cursor and reports nothing, which is worse than not locking at all. They
+    # have shipped since 2015, so requiring them at BUILD time is safe; whether the running
+    # COMPOSITOR advertises them is a separate question the backend answers at runtime.
+    foreach(_proto pointer-constraints relative-pointer)
+        set(_xml "${WAYLAND_PROTOCOLS_DIR}/unstable/${_proto}/${_proto}-unstable-v1.xml")
+        add_custom_command(
+            OUTPUT "${_wl_gen}/${_proto}-unstable-v1-client-protocol.h"
+            COMMAND ${WAYLAND_SCANNER} client-header "${_xml}"
+                    "${_wl_gen}/${_proto}-unstable-v1-client-protocol.h"
+            DEPENDS "${_xml}" VERBATIM)
+        add_custom_command(
+            OUTPUT "${_wl_gen}/${_proto}-unstable-v1-protocol.c"
+            COMMAND ${WAYLAND_SCANNER} private-code "${_xml}"
+                    "${_wl_gen}/${_proto}-unstable-v1-protocol.c"
+            DEPENDS "${_xml}" VERBATIM)
+        list(APPEND _wl_generated
+            "${_wl_gen}/${_proto}-unstable-v1-protocol.c"
+            "${_wl_gen}/${_proto}-unstable-v1-client-protocol.h")
+    endforeach()
+
     # The generated marshalling code is C and not ours to hold to -Werror, so it builds as its own
     # static lib with default flags; rime_platform links it and inherits the generated header's dir.
     enable_language(C)
     add_library(rime_xdg_shell STATIC
         "${_wl_gen}/xdg-shell-protocol.c"
-        "${_wl_gen}/xdg-shell-client-protocol.h")
+        "${_wl_gen}/xdg-shell-client-protocol.h"
+        ${_wl_generated})
     # The generated-header dir is a BUILD_INTERFACE include only — it must never leak into the
     # install export as an absolute build path (and the xdg-shell glue is internal to rime_platform;
     # no consumer includes it). SDK install (M6.8): a STATIC PRIVATE dep still contributes symbols
@@ -111,7 +140,7 @@ elseif(UNIX)
     rime_install_support_lib(rime_xdg_shell)
 
     target_link_libraries(rime_platform
-        PRIVATE rime_xdg_shell PkgConfig::WAYLAND PkgConfig::XKBCOMMON)
+        PRIVATE rime_xdg_shell PkgConfig::WAYLAND PkgConfig::WAYLAND_CURSOR PkgConfig::XKBCOMMON)
     add_dependencies(rime_platform rime_xdg_shell) # generate the protocol header before compiling
 endif()
 

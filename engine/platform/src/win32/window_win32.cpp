@@ -323,6 +323,14 @@ public:
     }
 
     ~Win32Window() override {
+        // Give the pointer back before the window goes. A clip that outlives its window confines
+        // the cursor to a rectangle of empty desktop, and an unbalanced ShowCursor leaves it
+        // invisible — both survive the process on Windows, so this is not merely tidy (m15.5).
+        if (active_ == CursorMode::Locked) {
+            ClipCursor(nullptr);
+            ReleaseCapture();
+        }
+        set_cursor_visible(true);
         if (hwnd_ != nullptr) {
             SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
             DestroyWindow(hwnd_);
@@ -383,6 +391,20 @@ public:
 
     // The single WndProc for our window class: recover the instance from GWLP_USERDATA and turn the
     // message into engine events. Declared static (a plain C callback) but a member so it can touch
+    // POINTER CAPTURE (m15.5). ClipCursor + recentre rather than RAWINPUT, for the same reason the
+    // X11 backend warps instead of using XI2: the deltas a camera wants are exactly "how far from
+    // the middle did it get", the confine is what stops the pointer leaving, and neither needs a
+    // second input path with its own message queue and its own focus rules to keep in step. Raw
+    // input's advantage — sub-pixel and unaccelerated motion — is one this engine does not yet have
+    // a use for, and it would bypass the user's own pointer-speed settings if it did.
+    CursorMode set_cursor_mode(CursorMode mode) override {
+        desired_ = mode;
+        apply_cursor_mode();
+        return active_;
+    }
+
+    [[nodiscard]] CursorMode cursor_mode() const override { return active_; }
+
     // the instance's private state, mirroring how the Cocoa delegate calls back into CocoaWindow.
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (msg == WM_NCCREATE) {
@@ -400,6 +422,61 @@ public:
     }
 
 private:
+    POINT client_centre_screen() const {
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        POINT c{(rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2};
+        ClientToScreen(hwnd_, &c);
+        return c;
+    }
+
+    void recentre() {
+        const POINT c = client_centre_screen();
+        SetCursorPos(c.x, c.y);
+    }
+
+    // ShowCursor is a COUNTER, not a flag: N hides need N shows before the cursor comes back, and
+    // an unbalanced call leaves the pointer invisible for the rest of the session (and, because the
+    // counter is per-queue, sometimes across the whole desktop). So visibility is tracked here and
+    // the API is called only on an actual transition.
+    void set_cursor_visible(bool visible) {
+        if (visible == cursor_visible_) {
+            return;
+        }
+        cursor_visible_ = visible;
+        ShowCursor(visible ? TRUE : FALSE);
+    }
+
+    void apply_cursor_mode() {
+        // An unfocused window must not hold the pointer — see the X11 backend for the same rule.
+        const CursorMode want =
+            (desired_ == CursorMode::Locked && !focused_) ? CursorMode::Normal : desired_;
+        if (want == active_) {
+            return;
+        }
+        if (active_ == CursorMode::Locked) {
+            ClipCursor(nullptr);
+            ReleaseCapture();
+        }
+        set_cursor_visible(want == CursorMode::Normal);
+        if (want == CursorMode::Locked) {
+            RECT rc{};
+            GetClientRect(hwnd_, &rc);
+            POINT tl{rc.left, rc.top};
+            POINT br{rc.right, rc.bottom};
+            ClientToScreen(hwnd_, &tl);
+            ClientToScreen(hwnd_, &br);
+            RECT screen{tl.x, tl.y, br.x, br.y};
+            // Both, and they do different jobs: ClipCursor keeps the pointer inside the client area
+            // (so a fast flick cannot escape between recentres), SetCapture keeps mouse messages
+            // coming to this window even if one does.
+            ClipCursor(&screen);
+            SetCapture(hwnd_);
+            recentre();
+        }
+        active_ = want;
+    }
+
     LRESULT handle_message(UINT msg, WPARAM wparam, LPARAM lparam) {
         switch (msg) {
             case WM_CLOSE:
@@ -421,6 +498,8 @@ private:
                 e.type = EventType::WindowFocus;
                 e.window = id_;
                 e.focus.focused = (msg == WM_SETFOCUS);
+                focused_ = e.focus.focused;
+                apply_cursor_mode(); // release the pointer on the way out, retake it on the way in
                 post_event(e);
                 return 0;
             }
@@ -469,6 +548,30 @@ private:
             case WM_MOUSEMOVE: {
                 const auto x = static_cast<float>(GET_X_LPARAM(lparam));
                 const auto y = static_cast<float>(GET_Y_LPARAM(lparam));
+                if (active_ == CursorMode::Locked) {
+                    // Delta from the middle, then put it back. The recentre itself posts a
+                    // WM_MOUSEMOVE at exactly the middle; a zero delta is that echo (or a motion
+                    // that moved nothing), and neither is worth reporting.
+                    RECT rc{};
+                    GetClientRect(hwnd_, &rc);
+                    const auto cx = static_cast<float>((rc.right - rc.left) / 2);
+                    const auto cy = static_cast<float>((rc.bottom - rc.top) / 2);
+                    const float dx = x - cx;
+                    const float dy = y - cy;
+                    if (dx == 0.0f && dy == 0.0f) {
+                        return 0;
+                    }
+                    recentre();
+                    Event le{};
+                    le.type = EventType::MouseMove;
+                    le.window = id_;
+                    le.mouse_move.x = cx; // pinned while locked
+                    le.mouse_move.y = cy;
+                    le.mouse_move.dx = dx;
+                    le.mouse_move.dy = dy;
+                    post_event(le);
+                    return 0;
+                }
                 Event e{};
                 e.type = EventType::MouseMove;
                 e.window = id_;
@@ -557,6 +660,10 @@ private:
     float last_mouse_y_ = 0.0f;
     bool have_last_mouse_ = false;
     bool should_close_ = false;
+    CursorMode desired_ = CursorMode::Normal;
+    CursorMode active_ = CursorMode::Normal;
+    bool focused_ = false;
+    bool cursor_visible_ = true; // mirrors ShowCursor's counter, which must stay balanced
 };
 
 } // namespace

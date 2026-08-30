@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 #include <linux/input-event-codes.h>
+#include <pointer-constraints-unstable-v1-client-protocol.h>
 #include <poll.h>
+#include <relative-pointer-unstable-v1-client-protocol.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <wayland-client.h>
+#include <wayland-cursor.h>
 #include <xdg-shell-client-protocol.h>
 #include <xkbcommon/xkbcommon-names.h>
 #include <xkbcommon/xkbcommon.h>
@@ -22,6 +25,7 @@
 #include "keymap_linux.hpp"
 #include "linux_backend.hpp"
 #include "platform_backend.hpp"
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/platform/window.hpp"
 
@@ -68,6 +72,25 @@ wl_shm* g_shm = nullptr; // optional: only the rendererless placeholder below ne
 wl_seat* g_seat = nullptr;
 wl_keyboard* g_keyboard = nullptr;
 wl_pointer* g_pointer = nullptr;
+
+// POINTER CAPTURE (m15.5), and the pair is not optional. `pointer_constraints` pins the cursor;
+// `relative_pointer` is the only way to learn how far it TRIED to move while pinned — a lock
+// without it freezes the pointer and reports nothing, which is a worse camera than no lock at all.
+// Both stay null when the compositor does not advertise them, and that is a supported outcome, not
+// an error: set_cursor_mode then reports the weaker mode it actually achieved.
+zwp_pointer_constraints_v1* g_pointer_constraints = nullptr;
+zwp_relative_pointer_manager_v1* g_relative_pointer_manager = nullptr;
+zwp_relative_pointer_v1* g_relative_pointer = nullptr;
+// The user's cursor theme, and the surface we draw it on. Loaded lazily on the first hide, because
+// a window that never hides its cursor should not pay for a theme it will not use — and because the
+// load needs wl_shm, which arrives from the registry after the display is up.
+wl_cursor_theme* g_cursor_theme = nullptr;
+wl_surface* g_cursor_surface = nullptr;
+bool g_cursor_theme_tried = false;
+// The serial of the last pointer `enter`. wl_pointer::set_cursor — the ONLY way to hide a cursor on
+// Wayland, by giving it a null surface — must quote a serial from a pointer event, so the value has
+// to be kept from when it arrived.
+std::uint32_t g_pointer_enter_serial = 0;
 
 xkb_context* g_xkb_ctx = nullptr;
 xkb_keymap* g_xkb_keymap = nullptr;
@@ -132,11 +155,155 @@ int make_shm_fd(std::size_t bytes) {
     return fd;
 }
 
+// Load the default cursor theme once, and answer whether we can draw a pointer at all. This is the
+// gate on hiding: a client that hides the cursor and cannot put it back has taken the pointer away
+// from the user for the life of the process, so the honest thing is to refuse to hide rather than
+// to hide optimistically.
+bool ensure_cursor_theme() {
+    if (g_cursor_theme_tried) {
+        return g_cursor_theme != nullptr && g_cursor_surface != nullptr;
+    }
+    g_cursor_theme_tried = true;
+    if (g_shm == nullptr || g_compositor == nullptr) {
+        return false;
+    }
+    g_cursor_theme =
+        wl_cursor_theme_load(nullptr, 24, g_shm); // nullptr = the user's configured one
+    if (g_cursor_theme == nullptr) {
+        return false;
+    }
+    g_cursor_surface = wl_compositor_create_surface(g_compositor);
+    return g_cursor_surface != nullptr;
+}
+
+// Put the ordinary arrow back. "left_ptr" is the X11-era name every theme still ships; "default" is
+// the newer cursor-spec name and not universally present, so both are tried.
+void restore_default_cursor() {
+    if (!ensure_cursor_theme() || g_pointer == nullptr) {
+        return;
+    }
+    wl_cursor* cursor = wl_cursor_theme_get_cursor(g_cursor_theme, "left_ptr");
+    if (cursor == nullptr) {
+        cursor = wl_cursor_theme_get_cursor(g_cursor_theme, "default");
+    }
+    if (cursor == nullptr || cursor->image_count == 0) {
+        return;
+    }
+    wl_cursor_image* image = cursor->images[0]; // frame 0: this backend does not animate cursors
+    wl_buffer* buffer = wl_cursor_image_get_buffer(image);
+    if (buffer == nullptr) {
+        return;
+    }
+    wl_surface_attach(g_cursor_surface, buffer, 0, 0);
+    wl_surface_damage(g_cursor_surface,
+                      0,
+                      0,
+                      static_cast<std::int32_t>(image->width),
+                      static_cast<std::int32_t>(image->height));
+    wl_surface_commit(g_cursor_surface);
+    wl_pointer_set_cursor(g_pointer,
+                          g_pointer_enter_serial,
+                          g_cursor_surface,
+                          static_cast<std::int32_t>(image->hotspot_x),
+                          static_cast<std::int32_t>(image->hotspot_y));
+}
+
+// Defined below, beside the listener it installs.
+void ensure_relative_pointer();
+
 class WaylandWindow final : public Window {
 public:
     explicit WaylandWindow(const WindowDesc& desc); // defined below the listeners it wires up
 
+    // ── Pointer capture (m15.5) ──────────────────────────────────────────────────────────────
+    // Wayland does not let a client move or grab the pointer; it lets it ASK the compositor to
+    // constrain one, and the compositor may simply not offer the protocol. So the honest answer to
+    // "did I get Locked?" is computed, never assumed — `active_` is set from what actually
+    // succeeded, and that is what `cursor_mode()` returns.
+    CursorMode set_cursor_mode(CursorMode mode) override {
+        desired_ = mode;
+        reapply_cursor_mode();
+        return active_;
+    }
+
+    [[nodiscard]] CursorMode cursor_mode() const override { return active_; }
+
+    [[nodiscard]] bool is_locked() const noexcept { return active_ == CursorMode::Locked; }
+
+    // Establish (or stand down) whatever the compositor will actually give us. Called on request
+    // and again on pointer `enter`, because hiding a cursor needs a serial from a pointer event —
+    // a mode set before the pointer ever entered can only take effect once it does.
+    void reapply_cursor_mode() {
+        const bool have_pointer = g_pointer != nullptr && g_pointer_focus == this;
+        CursorMode got = CursorMode::Normal;
+        if (have_pointer) {
+            // A null cursor surface IS the hide request in this protocol.
+            if (desired_ != CursorMode::Normal && ensure_cursor_theme()) {
+                wl_pointer_set_cursor(g_pointer, g_pointer_enter_serial, nullptr, 0, 0);
+                got = CursorMode::Hidden;
+            } else if (desired_ == CursorMode::Normal && active_ != CursorMode::Normal) {
+                // Nothing restores the default cursor for us. Leaving it hidden after a mode change
+                // is the bug where the pointer never comes back and the user force-quits.
+                restore_default_cursor();
+            }
+        }
+        // Belt and braces on registry ordering. `seat_capabilities` normally runs in the second
+        // init roundtrip, after every global has bound — but the seat listener is added from within
+        // the FIRST roundtrip's dispatch, so a compositor is free to deliver capabilities before
+        // the relative-pointer manager has been bound. That would leave a pointer with no relative
+        // source and locking permanently unavailable, for a reason nothing would report.
+        ensure_relative_pointer();
+        // WHY IT DID NOT LOCK, said once. There are three distinct reasons and they need three
+        // different responses from whoever is reading: a compositor without the protocol will never
+        // lock (ship the drag scheme), a pointer that has not entered the surface yet will lock the
+        // moment it does (wait), and neither is distinguishable from the other — or from a bug in
+        // this file — by watching the return value alone. Once, because it is re-evaluated on every
+        // pointer enter and a per-frame line would bury the log.
+        if (desired_ == CursorMode::Locked && !lock_diagnosed_) {
+            if (g_pointer_constraints == nullptr || g_relative_pointer_manager == nullptr) {
+                lock_diagnosed_ = true;
+                RIME_WARN("wayland: this compositor advertises no pointer constraints — the cursor "
+                          "cannot be locked, so free look is unavailable");
+            } else if (!have_pointer) {
+                lock_diagnosed_ = true;
+                RIME_INFO("wayland: pointer lock is pending — a surface can only lock a pointer "
+                          "that is over it, so move the mouse into the window");
+            }
+        }
+        const bool want_lock = desired_ == CursorMode::Locked && have_pointer;
+        if (!want_lock && locked_ != nullptr) {
+            zwp_locked_pointer_v1_destroy(locked_);
+            locked_ = nullptr;
+        }
+        if (want_lock && locked_ == nullptr && g_pointer_constraints != nullptr &&
+            g_relative_pointer != nullptr) {
+            locked_ = zwp_pointer_constraints_v1_lock_pointer(
+                g_pointer_constraints,
+                surface_,
+                g_pointer,
+                nullptr,
+                ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
+        }
+        if (locked_ != nullptr) {
+            got = CursorMode::Locked;
+        }
+        if (got == CursorMode::Locked && active_ != CursorMode::Locked) {
+            // Say it once when it happens. Acquiring the lock is otherwise completely invisible —
+            // no event, no error, and the only observable is a camera that starts behaving — so
+            // without this line "did the constraint attach?" and "is the rest of the input path
+            // broken?" look identical from a log.
+            RIME_INFO("wayland: pointer locked — free look is live");
+        }
+        active_ = got;
+    }
+
     ~WaylandWindow() override {
+        // Drop the constraint first: a locked pointer whose surface is gone is the compositor's
+        // problem to clean up, and not every compositor does it gracefully.
+        if (locked_ != nullptr && g_display != nullptr) {
+            zwp_locked_pointer_v1_destroy(locked_);
+        }
+        locked_ = nullptr;
         g_windows().erase(surface_);
         if (this == g_keyboard_focus) {
             g_keyboard_focus = nullptr;
@@ -396,6 +563,12 @@ private:
     }
 
     WindowId id_;
+    // Cursor mode: what was asked for, what the compositor actually gave, and the constraint object
+    // itself (null whenever we are not locked, for any reason).
+    CursorMode desired_ = CursorMode::Normal;
+    CursorMode active_ = CursorMode::Normal;
+    zwp_locked_pointer_v1* locked_ = nullptr;
+    bool lock_diagnosed_ = false; // the "why not" above is said once, not once per pointer enter
     wl_surface* surface_ = nullptr;
     xdg_surface* xdg_surface_ = nullptr;
     xdg_toplevel* toplevel_ = nullptr;
@@ -525,7 +698,7 @@ const wl_keyboard_listener g_keyboard_listener = [] {
 
 void ptr_enter(void*,
                wl_pointer*,
-               std::uint32_t,
+               std::uint32_t serial,
                wl_surface* surface,
                wl_fixed_t sx,
                wl_fixed_t sy) {
@@ -533,6 +706,13 @@ void ptr_enter(void*,
     g_pointer_x = wl_fixed_to_double(sx);
     g_pointer_y = wl_fixed_to_double(sy);
     g_pointer_have_last = false; // first motion after entering reports zero delta
+    // Hiding a cursor needs a serial from a pointer event and the pointer must be over the surface,
+    // so entering is the first moment a requested Hidden/Locked can actually be honoured — a mode
+    // set before the pointer ever arrived would otherwise be silently lost (m15.5).
+    g_pointer_enter_serial = serial;
+    if (g_pointer_focus != nullptr) {
+        g_pointer_focus->reapply_cursor_mode();
+    }
 }
 
 void ptr_leave(void*, wl_pointer*, std::uint32_t, wl_surface*) {
@@ -541,6 +721,13 @@ void ptr_leave(void*, wl_pointer*, std::uint32_t, wl_surface*) {
 
 void ptr_motion(void*, wl_pointer*, std::uint32_t, wl_fixed_t sx, wl_fixed_t sy) {
     if (g_pointer_focus == nullptr) {
+        return;
+    }
+    // While locked the compositor pins the cursor, so absolute motion is either absent or a
+    // constant — and forwarding it would post a MouseMove with a real position and a zero delta
+    // between every relative event, which reads downstream as "the mouse stopped". The relative
+    // pointer is the only source in this mode.
+    if (g_pointer_focus->is_locked()) {
         return;
     }
     const double x = wl_fixed_to_double(sx);
@@ -640,6 +827,55 @@ const wl_pointer_listener g_pointer_listener = [] {
     return l;
 }();
 
+// RELATIVE MOTION — the other half of the lock (m15.5). The compositor sends this whenever the
+// pointer moves, whether or not anything is constrained, so it is gated on the focused window
+// actually being locked: unlocked, `ptr_motion` already reports movement with a delta, and posting
+// both would double every mouse movement in the engine's accumulator.
+//
+// `dx`/`dy` are pointer-accelerated; `dx_unaccel`/`dy_unaccel` are the raw device deltas. The
+// ACCELERATED pair is the right default for a camera: it is what the user's own pointer-speed and
+// acceleration settings produce everywhere else on their desktop, so a look that used the raw
+// values would ignore the configuration the user already chose.
+void relative_motion(void*,
+                     zwp_relative_pointer_v1*,
+                     std::uint32_t,
+                     std::uint32_t,
+                     wl_fixed_t dx,
+                     wl_fixed_t dy,
+                     wl_fixed_t,
+                     wl_fixed_t) {
+    if (g_pointer_focus == nullptr || !g_pointer_focus->is_locked()) {
+        return;
+    }
+    Event e{};
+    e.type = EventType::MouseMove;
+    e.window = g_pointer_focus->id();
+    // The position where the lock caught it, unchanged for as long as the lock holds — because
+    // that is literally where the pointer is. `ptr_motion` is suppressed while locked, so nothing
+    // else advances these, and a caller reading x/y during free look correctly sees a pointer that
+    // is not moving. It is not a meaningful cursor location to draw a UI at; that is what the mode
+    // is for.
+    e.mouse_move.x = static_cast<float>(g_pointer_x);
+    e.mouse_move.y = static_cast<float>(g_pointer_y);
+    e.mouse_move.dx = static_cast<float>(wl_fixed_to_double(dx));
+    e.mouse_move.dy = static_cast<float>(wl_fixed_to_double(dy));
+    post_event(e);
+}
+
+const zwp_relative_pointer_v1_listener g_relative_pointer_listener = {
+    .relative_motion = relative_motion,
+};
+
+void ensure_relative_pointer() {
+    if (g_relative_pointer != nullptr || g_relative_pointer_manager == nullptr ||
+        g_pointer == nullptr) {
+        return;
+    }
+    g_relative_pointer =
+        zwp_relative_pointer_manager_v1_get_relative_pointer(g_relative_pointer_manager, g_pointer);
+    zwp_relative_pointer_v1_add_listener(g_relative_pointer, &g_relative_pointer_listener, nullptr);
+}
+
 void seat_capabilities(void*, wl_seat* seat, std::uint32_t caps) {
     const bool has_keyboard = (caps & WL_SEAT_CAPABILITY_KEYBOARD) != 0;
     if (has_keyboard && g_keyboard == nullptr) {
@@ -653,7 +889,15 @@ void seat_capabilities(void*, wl_seat* seat, std::uint32_t caps) {
     if (has_pointer && g_pointer == nullptr) {
         g_pointer = wl_seat_get_pointer(seat);
         wl_pointer_add_listener(g_pointer, &g_pointer_listener, nullptr);
+        // One relative pointer per wl_pointer, created here rather than per lock: it is a property
+        // of the DEVICE, and creating it lazily inside set_cursor_mode would mean the first lock
+        // silently produced no motion until the next round trip.
+        ensure_relative_pointer();
     } else if (!has_pointer && g_pointer != nullptr) {
+        if (g_relative_pointer != nullptr) {
+            zwp_relative_pointer_v1_destroy(g_relative_pointer);
+            g_relative_pointer = nullptr;
+        }
         wl_pointer_destroy(g_pointer);
         g_pointer = nullptr;
     }
@@ -724,6 +968,12 @@ void registry_global(void*,
         xdg_wm_base_add_listener(g_wm_base, &g_wm_base_listener, nullptr);
     } else if (std::strcmp(interface, wl_shm_interface.name) == 0) {
         g_shm = static_cast<wl_shm*>(wl_registry_bind(registry, name, &wl_shm_interface, 1));
+    } else if (std::strcmp(interface, zwp_pointer_constraints_v1_interface.name) == 0) {
+        g_pointer_constraints = static_cast<zwp_pointer_constraints_v1*>(
+            wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1));
+    } else if (std::strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
+        g_relative_pointer_manager = static_cast<zwp_relative_pointer_manager_v1*>(
+            wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1));
     } else if (std::strcmp(interface, wl_seat_interface.name) == 0) {
         g_seat = static_cast<wl_seat*>(
             wl_registry_bind(registry, name, &wl_seat_interface, version < 5 ? version : 5));

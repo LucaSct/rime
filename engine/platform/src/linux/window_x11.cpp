@@ -9,6 +9,7 @@
 #include "keymap_linux.hpp"
 #include "linux_backend.hpp"
 #include "platform_backend.hpp"
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/platform/window.hpp"
 
@@ -111,6 +112,15 @@ public:
         // path is display-gated, so CI's off-screen proof never reached it (an Xvfb run / the S0
         // windowed client is what surfaced the crash).
         if (g_display != nullptr) {
+            // Release the pointer BEFORE the window goes: an active grab outliving its window is
+            // how an X session ends up with a desktop that will not respond to the mouse, and this
+            // destructor is the only place that can prevent it (m15.5).
+            if (active_ == CursorMode::Locked) {
+                XUngrabPointer(g_display, CurrentTime);
+            }
+            if (blank_cursor_ != 0) {
+                XFreeCursor(g_display, blank_cursor_);
+            }
             XDestroyWindow(g_display, window_);
             XFlush(g_display);
         }
@@ -182,6 +192,7 @@ public:
                 e.type = EventType::WindowFocus;
                 e.window = id_;
                 e.focus.focused = (ev.type == FocusIn);
+                focus_changed(e.focus.focused);
                 post_event(e);
                 break;
             }
@@ -201,7 +212,120 @@ public:
         }
     }
 
+    // POINTER CAPTURE, XLIB ONLY (m15.5). Xlib has no relative-motion source of its own — XI2 raw
+    // events do, but pulling in libXi for one feature is a dependency this backend does not
+    // otherwise need — so Locked is the classic warp-and-recentre: hide the cursor, grab the
+    // pointer so it cannot leave, and after every motion warp it back to the middle. dx/dy are then
+    // the distance from the middle, which is exactly the relative motion a camera wants.
+    CursorMode set_cursor_mode(CursorMode mode) override {
+        desired_ = mode;
+        apply_cursor_mode();
+        return active_;
+    }
+
+    [[nodiscard]] CursorMode cursor_mode() const override { return active_; }
+
 private:
+    // An empty 1x1 cursor. X11 has no "hide the pointer" call; the idiom is to define a cursor made
+    // of nothing, which is what every toolkit does. Created once, on first use.
+    ::Cursor invisible_cursor() {
+        if (blank_cursor_ != 0) {
+            return blank_cursor_;
+        }
+        char nothing[8] = {};
+        Pixmap pm = XCreateBitmapFromData(g_display, window_, nothing, 1, 1);
+        XColor black{};
+        blank_cursor_ = XCreatePixmapCursor(g_display, pm, pm, &black, &black, 0, 0);
+        XFreePixmap(g_display, pm);
+        return blank_cursor_;
+    }
+
+    void warp_to_centre() {
+        // 0L, not `None`: this file #undef s that macro at the top (it collides with our own enum
+        // names), and the src argument means "relative to wherever the pointer already is".
+        XWarpPointer(g_display,
+                     0L,
+                     window_,
+                     0,
+                     0,
+                     0,
+                     0,
+                     static_cast<int>(width_ / 2),
+                     static_cast<int>(height_ / 2));
+        XFlush(g_display);
+    }
+
+    void apply_cursor_mode() {
+        // Focus is the gate on Locked, not a suggestion: a grabbed pointer belongs to a window the
+        // user is not looking at, which reads as a frozen desktop. So an unfocused window drops to
+        // the strongest mode it can honestly hold, and `focus_changed` puts it back.
+        const CursorMode want =
+            (desired_ == CursorMode::Locked && !focused_) ? CursorMode::Normal : desired_;
+        if (want == active_) {
+            return;
+        }
+        if (active_ == CursorMode::Locked) {
+            XUngrabPointer(g_display, CurrentTime);
+        }
+        switch (want) {
+            case CursorMode::Normal:
+                XUndefineCursor(g_display, window_);
+                break;
+            case CursorMode::Hidden:
+                XDefineCursor(g_display, window_, invisible_cursor());
+                break;
+            case CursorMode::Locked: {
+                XDefineCursor(g_display, window_, invisible_cursor());
+                // ConfineTo the window AND owner_events=True, so our own key/button events keep
+                // arriving normally while the pointer cannot leave.
+                const int grabbed =
+                    XGrabPointer(g_display,
+                                 window_,
+                                 True,
+                                 PointerMotionMask | ButtonPressMask | ButtonReleaseMask,
+                                 GrabModeAsync,
+                                 GrabModeAsync,
+                                 window_,
+                                 invisible_cursor(),
+                                 CurrentTime);
+                if (grabbed != GrabSuccess) {
+                    // Named, because the three ways this fails want three different responses and
+                    // the return value alone cannot tell them apart: another client owns the
+                    // pointer (a menu, a drag, a screen locker), the window is not viewable yet, or
+                    // this code is wrong. Once — it is retried on every focus change.
+                    if (!grab_diagnosed_) {
+                        grab_diagnosed_ = true;
+                        RIME_WARN("x11: XGrabPointer refused ({}) — another client holds the "
+                                  "pointer, so the cursor cannot be locked",
+                                  grabbed);
+                    }
+                    // Another client holds the pointer (a menu, a drag, a screen locker). Report
+                    // what we actually have rather than what was asked for — the whole point of the
+                    // return value.
+                    XDefineCursor(g_display, window_, invisible_cursor());
+                    active_ = CursorMode::Hidden;
+                    XFlush(g_display);
+                    return;
+                }
+                warp_to_centre();
+                break;
+            }
+        }
+        if (want == CursorMode::Locked && active_ != CursorMode::Locked) {
+            // Acquiring the grab is otherwise invisible: no event, no error, and the only
+            // observable is a camera that starts behaving.
+            RIME_INFO("x11: pointer grabbed — free look is live");
+        }
+        active_ = want;
+        XFlush(g_display);
+    }
+
+    // Called from the FocusIn/FocusOut arm: re-establish or stand down the grab.
+    void focus_changed(bool focused) {
+        focused_ = focused;
+        apply_cursor_mode();
+    }
+
     void apply_title(std::string_view title) {
         const std::string t(title);
         XStoreName(g_display, window_, t.c_str()); // legacy WM_NAME (Latin-1)
@@ -292,6 +416,30 @@ private:
     void handle_motion(XMotionEvent& me) {
         const auto x = static_cast<float>(me.x);
         const auto y = static_cast<float>(me.y);
+        if (active_ == CursorMode::Locked) {
+            // Relative to the middle, then put it back. The warp itself generates a MotionNotify at
+            // exactly the middle, and THAT is the event this swallows: a zero delta is either the
+            // echo of our own warp or a motion that moved nothing, and both are nothing to report.
+            // (Trying to match the echo by position instead would also swallow a real motion that
+            // happened to land dead centre — same outcome, more state.)
+            const auto cx = static_cast<float>(width_ / 2);
+            const auto cy = static_cast<float>(height_ / 2);
+            const float dx = x - cx;
+            const float dy = y - cy;
+            if (dx == 0.0f && dy == 0.0f) {
+                return;
+            }
+            warp_to_centre();
+            Event le{};
+            le.type = EventType::MouseMove;
+            le.window = id_;
+            le.mouse_move.x = cx; // pinned: an absolute position is meaningless while locked
+            le.mouse_move.y = cy;
+            le.mouse_move.dx = dx;
+            le.mouse_move.dy = dy;
+            post_event(le);
+            return;
+        }
         Event e{};
         e.type = EventType::MouseMove;
         e.window = id_;
@@ -325,6 +473,13 @@ private:
     float last_mouse_y_ = 0.0f;
     bool have_last_mouse_ = false;
     bool should_close_ = false;
+    // What the caller asked for, and what we actually hold. They differ whenever the window is
+    // unfocused or another client owns the pointer, and `cursor_mode()` reports the second.
+    CursorMode desired_ = CursorMode::Normal;
+    CursorMode active_ = CursorMode::Normal;
+    bool focused_ = false;
+    ::Cursor blank_cursor_ = 0;
+    bool grab_diagnosed_ = false; // the refusal above is said once, not once per focus change
 };
 
 bool x11_init() {

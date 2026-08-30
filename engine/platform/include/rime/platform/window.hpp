@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "rime/core/containers/handle.hpp"
+#include "rime/platform/mouse.hpp"
 #include "rime/platform/native_window.hpp"
 
 // The Window seam: an OS-agnostic handle to an on-screen window. Concrete backends (Cocoa, Win32,
@@ -36,9 +37,16 @@ struct WindowDesc {
     std::uint32_t width = 1280;
     std::uint32_t height = 720;
     bool resizable = true;
-    bool fullscreen = false;
-    bool high_dpi = true; // create a HiDPI-aware (Retina) window when the display supports it
 };
+
+// GONE, NOT FORGOTTEN (m15.5): `fullscreen` and `high_dpi` used to sit here. Neither was ever read
+// by a backend or set by a caller — they were a promise the engine had no code behind, and this
+// repo's rule is that a declared knob the engine ignores is worse than an absent one, because it
+// reads as "tried and it did not work". Fullscreen is a real brick (four backends, four different
+// state machines) and belongs in one. HiDPI is partly live already but not as a toggle: Cocoa sizes
+// its layer to `backingScaleFactor`, and X11 reports content_scale() == 1.0 with a comment saying
+// why (there is no single honest DPI source on X11). Re-add either as the first line of the brick
+// that implements it.
 
 class Window {
 public:
@@ -58,6 +66,28 @@ public:
     virtual void request_close() = 0;
 
     virtual void show() = 0;
+
+    // ── Pointer capture (m15.5) ──────────────────────────────────────────────────────────────
+    //
+    // Ask the window for a cursor mode; get back the mode ACTUALLY IN EFFECT, which may be weaker
+    // than the request. That return value is the whole design, and it is not defensive politeness:
+    // a Wayland compositor is free not to advertise `zwp_pointer_constraints_v1` at all, and a
+    // window that reported Locked anyway would leave the caller steering a camera with a cursor
+    // that is still walking off the screen — the failure looking exactly like a broken camera
+    // rather than a missing capability. The engine's rule about never strengthening a claim on
+    // anything short of confirmation (CLAUDE.md guardrail 5) is the same rule one layer down.
+    //
+    // Locked means: cursor hidden, pinned, and MouseMove events carry relative motion in dx/dy with
+    // x/y frozen. Every backend that supports it delivers that; how it gets there differs
+    // (constrained pointer, warp-and-recentre, RAWINPUT), and those differences stay inside the
+    // backends. Hidden means hidden and free — the mode a drag-look wants while the button is held.
+    //
+    // A backend may drop out of Locked on its own when the window loses focus: an app that keeps
+    // the pointer of a background window is a bug the OS blames on the app. Callers must therefore
+    // treat `cursor_mode()` as live state and re-request on focus gain rather than assume the mode
+    // they set is the mode they still have.
+    virtual CursorMode set_cursor_mode(CursorMode mode) = 0;
+    [[nodiscard]] virtual CursorMode cursor_mode() const = 0;
 
     // The native handles for surface creation (see native_window.hpp). Stable for the window's
     // life.
