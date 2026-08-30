@@ -37,12 +37,13 @@
 #include "rime/ecs/system.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/gameplay/input_map.hpp"
 #include "rime/platform/clock.hpp"
 #include "rime/platform/socket.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/culling.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/render_graph.hpp"
-#include "rime/render/culling.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/render/text/hud.hpp"
 #include "rime/rhi/rhi.hpp"
@@ -261,6 +262,15 @@ struct FirstLightApp {
     render::RGTexture last_ldr{};
     bool show_hud = false;
 
+    // When set, the frame drives this camera from its own input snapshot and poses the scene's
+    // camera entity from it (m13.3c). Borrowed, not owned: `run_windowed` keeps it on the stack
+    // beside the app so its lifetime obviously outlives the callback that captures `this`.
+    //
+    // It hangs off FirstLightApp rather than living in run_windowed's own callback because there is
+    // exactly ONE render callback here and every mode shares it — the property that has kept
+    // --headless, --serve and --windowed from drifting into three render paths.
+    gameplay::FlyCamera* fly = nullptr;
+
     // Precondition: `application.device() != nullptr`. The device check is deliberately the
     // CALLER's job, not ours: the GPU resources below dereference the device in this initializer
     // list, so a GPU-less host has to be handled BEFORE we get here — dereferencing a null device
@@ -272,6 +282,17 @@ struct FirstLightApp {
         build_scene(app, meshes, materials, checker, camera);
         renderer.set_ambient(0.03f, 0.03f, 0.04f);
         app.on_render([this](app::FrameContext& ctx) {
+            // Input, first: the camera the scene is about to be rendered from is posed from THIS
+            // frame's events, so a keystroke shows up in the very frame it arrived rather than the
+            // next one. `ctx.input` is the same snapshot a headless test injects into, which is why
+            // the whole path is provable without a window (tests/app/windowed_input_test.cpp).
+            if (fly != nullptr) {
+                fly->update(ctx.input, static_cast<float>(ctx.frame_dt));
+                ctx.world.get<ecs::WorldTransform>(camera)->value = fly->transform();
+                if (fly->quit_requested()) {
+                    app.request_quit();
+                }
+            }
             last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
             if (show_hud) {
                 // Declared AFTER the scene and BEFORE the loop's present pass: the HUD LOADS the
@@ -294,8 +315,8 @@ struct FirstLightApp {
 
     // The engine's first native HUD (m13.3b). Deliberately a LAYOUT and not a widget tree: a panel,
     // right-aligned values against dim labels, one accent colour for the number the eye should find
-    // first. Everything here is what the engine already knows about itself and previously could only
-    // say in a log line.
+    // first. Everything here is what the engine already knows about itself and previously could
+    // only say in a log line.
     void draw_hud(app::FrameContext& ctx) {
         namespace st = render::text::style;
         using render::text::HudRenderer;
@@ -303,7 +324,7 @@ struct FirstLightApp {
         hud.begin(ctx.extent);
 
         constexpr float kW = 268.0f;
-        const float rows = 4.0f;
+        const float rows = fly != nullptr ? 5.0f : 4.0f;
         const float h = st::kPadding * 2.0f + st::kLineHeight * (rows + 0.9f);
         hud.panel(st::kPadding, st::kPadding, kW, h);
 
@@ -312,16 +333,20 @@ struct FirstLightApp {
         // Measured, not guessed. A hardcoded offset here collided with the title the moment the
         // font's advance changed — which is the whole reason text_width() is part of the API.
         hud.text(left, y, "RIME", st::kAccent, 18.0f);
-        hud.text(left + HudRenderer::text_width("RIME ", 18.0f), y + 3.0f, "first light",
-                 st::kLabel, 14.0f);
+        hud.text(left + HudRenderer::text_width("RIME ", 18.0f),
+                 y + 3.0f,
+                 "first light",
+                 st::kLabel,
+                 14.0f);
         y += st::kLineHeight * 1.6f;
 
         const render::CullStats cull = renderer.cull_stats();
         char buf[64];
         const auto row = [&](const char* label, const char* value, render::text::Color c) {
             hud.text(st::kPadding * 2.0f, y, label, st::kLabel, st::kTextSize);
-            // Right-aligned values: a column of numbers whose digits line up is enormously faster to
-            // read at a glance than one that ragged-lefts, and text_width() exists for exactly this.
+            // Right-aligned values: a column of numbers whose digits line up is enormously faster
+            // to read at a glance than one that ragged-lefts, and text_width() exists for exactly
+            // this.
             const float w = HudRenderer::text_width(value, st::kTextSize);
             hud.text(st::kPadding + kW - st::kPadding - w, y, value, c, st::kTextSize);
             y += st::kLineHeight;
@@ -331,12 +356,27 @@ struct FirstLightApp {
         row("frame", buf, st::kText);
         std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(app.tick_count()));
         row("ticks", buf, st::kText);
-        std::snprintf(buf, sizeof(buf), "%llu / %llu",
+        std::snprintf(buf,
+                      sizeof(buf),
+                      "%llu / %llu",
                       static_cast<unsigned long long>(cull.submitted),
                       static_cast<unsigned long long>(cull.considered()));
         // The m13.2a counter, on screen at last: "submitted of considered". A cull that silently
         // stopped culling shows here as the two numbers converging.
         row("drawn", buf, cull.culled > 0 ? st::kAccent : st::kWarn);
+
+        // Where you are, when you can move (m13.3c). This is the readout that makes a dead input
+        // path visible AT A GLANCE instead of feeling like a stiff camera: if the numbers do not
+        // change while you hold W, nothing downstream of the keyboard is running.
+        if (fly != nullptr) {
+            std::snprintf(buf,
+                          sizeof(buf),
+                          "%.1f %.1f %.1f",
+                          static_cast<double>(fly->position.x),
+                          static_cast<double>(fly->position.y),
+                          static_cast<double>(fly->position.z));
+            row("eye", buf, st::kText);
+        }
     }
 
     void pose_camera(float yaw, float pitch, float distance) {
@@ -353,6 +393,86 @@ app::AppConfig gpu_config() {
     return cfg;
 }
 
+// ── --input-selftest: CI's proof that THIS BINARY is wired to the keyboard ───────────────────────
+//
+// tests/app/windowed_input_test.cpp proves the engine join: events posted to an Application reach a
+// FlyCamera and move a posed camera entity. What no unit test can reach is the LAST link — whether
+// `run_windowed` below actually constructs one and hands it `ctx.input`. That is precisely the link
+// m13.3a got wrong (every part built, nothing connected, all proofs green), so it gets a check that
+// runs in CI against the real executable rather than against a test's own re-creation of it.
+//
+// It owns the loop with step() instead of run(), because posting one event per frame is the only
+// way to script a key being held. Everything downstream is untouched: the same render callback, the
+// same FlyCamera, the same camera entity, the same pose.
+int windowed_input_selftest(app::Application& app, gameplay::FlyCamera& fly) {
+    constexpr double kDt = 1.0 / 60.0;
+    const auto post = [&app](platform::EventType t, auto fill) {
+        platform::Event e{};
+        e.type = t;
+        fill(e);
+        app.post_input(e);
+    };
+
+    app.step(kDt); // a baseline frame with no input at all
+    const core::Vec3 start = fly.position;
+    const float start_yaw = fly.view.yaw;
+
+    // Hold W. One KeyDown is enough: platform::Input keeps the key's LEVEL across frames and
+    // new_frame() only rolls the edges, so thirty steps is thirty frames of walking.
+    post(platform::EventType::KeyDown, [](platform::Event& e) { e.key.key = platform::Key::W; });
+    for (int i = 0; i < 30; ++i) {
+        app.step(kDt);
+    }
+    const core::Vec3 walked = fly.position;
+    post(platform::EventType::KeyUp, [](platform::Event& e) { e.key.key = platform::Key::W; });
+    app.step(kDt);
+    const core::Vec3 stopped = fly.position;
+    app.step(kDt);
+    app.step(kDt);
+
+    // Then a right-drag turn.
+    post(platform::EventType::MouseButton, [](platform::Event& e) {
+        e.button.button = platform::MouseButton::Right;
+        e.button.down = true;
+    });
+    post(platform::EventType::MouseMove, [](platform::Event& e) { e.mouse_move.dx = 160.0f; });
+    app.step(kDt);
+    const float turned_yaw = fly.view.yaw;
+
+    // Then ESC, the promise this sample printed for two milestones and did not keep.
+    post(platform::EventType::KeyDown,
+         [](platform::Event& e) { e.key.key = platform::Key::Escape; });
+    app.step(kDt);
+
+    // We own this loop, so we own the idle wait: step() has no exit to put one in, and everything
+    // this scene rendered with — the checker, the meshes, the SceneRenderer's pipelines — is about
+    // to be destroyed by ~FirstLightApp. Without this, a windowed run frees all of it out from
+    // under a frame still executing, and the validation layer says so fifteen times.
+    app.finish_gpu();
+
+    const float moved = core::length(walked - start);
+    const bool ok_move = moved > 0.5f;
+    const bool ok_stop = core::length(fly.position - stopped) < 1e-4f;
+    const bool ok_turn = turned_yaw != start_yaw;
+    const bool ok_quit = app.quit_requested();
+
+    std::printf("  input self-check: moved %.2f m [%s] · stops on key-up [%s] · "
+                "yaw %.3f -> %.3f [%s] · ESC quits [%s]\n",
+                static_cast<double>(moved),
+                ok_move ? "ok" : "FAIL",
+                ok_stop ? "ok" : "FAIL",
+                static_cast<double>(start_yaw),
+                static_cast<double>(turned_yaw),
+                ok_turn ? "ok" : "FAIL",
+                ok_quit ? "ok" : "FAIL");
+
+    if (!ok_move || !ok_stop || !ok_turn || !ok_quit) {
+        std::fprintf(stderr, "07-first-light: the windowed path is not wired to input\n");
+        return 1;
+    }
+    return 0;
+}
+
 // ── --windowed: present in a real window (m13.3a, ADR-0023 §4) ───────────────────────────────────
 // The seam this flag printed an apology about for two milestones. `Application` now owns the window
 // and the swapchain; the sample's job is a config flag and the one `ctx.present = last_ldr` line in
@@ -361,7 +481,13 @@ app::AppConfig gpu_config() {
 // No display is not an error. `windowed()` reports what actually came up, and on a machine without
 // one the app degrades to exactly the headless loop; that is what lets this binary be run by CI at
 // all. `--frames N` bounds the run (a smoke test); without it, close the window to exit.
-int run_windowed(int frames) {
+//
+// AND YOU CAN MOVE IN IT (m13.3c). m13.3a built the window, built `FirstPersonView`, proved the
+// view maths across 37 angles, printed "close it (or ESC) to exit" — and wired none of it to
+// anything, so ESC did nothing and there was no way to walk anywhere. The parts were all there; the
+// join was not. It is four lines below, and the reason it took a brick is that nothing in the
+// engine turned OS events into an intent (see engine/gameplay/input_map.hpp).
+int run_windowed(int frames, bool input_selftest) {
     app::AppConfig cfg = gpu_config();
     cfg.windowed = true;
     cfg.window_title = "Rime — 07 first light";
@@ -374,13 +500,39 @@ int run_windowed(int frames) {
     }
 
     FirstLightApp scene(app);
-    scene.pose_camera(0.6f, 0.25f, 4.2f);
     scene.show_hud = true; // the windowed run is the one a human looks at
 
+    // Start exactly where the fixed shot always started, then let go of it. The orbit pose is
+    // converted rather than re-chosen: `camera_transform` composes yaw then −pitch about local
+    // right, so the free view's pitch is the orbit's negated, and the eye is wherever the orbit put
+    // it. Same first frame as before this brick; every frame after it is yours.
+    gameplay::FlyCamera fly;
+    fly.view.yaw = 0.6f;
+    fly.view.pitch = -0.25f;
+    fly.position = camera_transform(0.6f, 0.25f, 4.2f, {0.0f, -0.2f, 0.0f}).translation;
+    scene.fly = &fly;
+
     if (app.windowed()) {
-        std::printf("07-first-light: presenting in a window — close it (or ESC) to exit.\n");
+        std::printf("07-first-light: presenting in a window.\n"
+                    "  WASD move · Space/Ctrl up-down · Shift boost · hold RIGHT-DRAG to look\n"
+                    "  ESC or the close box to exit\n");
+        // Right-drag rather than free look, and the reason is a real gap rather than a taste call:
+        // platform::CursorMode::Locked is declared in mouse.hpp and implemented by no backend, so
+        // an uncaptured pointer would leave the window mid-turn. Pointer capture is a platform
+        // brick; until it lands, saying "right-drag" is the honest instruction.
     } else {
         std::printf("07-first-light: no display available; running the same frames headless.\n");
+    }
+
+    if (input_selftest) {
+        // Runs on the SAME `app` and `scene` a human session uses — the point is the wiring above,
+        // not a separate rig. Windowed or degraded-to-headless makes no difference: post_input()
+        // and the OS pump fill one snapshot (ADR-0023 §5), which is what lets CI run this at all.
+        const int rc = windowed_input_selftest(app, fly);
+        std::printf("07-first-light: %llu frames, %llu ticks\n",
+                    static_cast<unsigned long long>(app.frame_index()),
+                    static_cast<unsigned long long>(app.tick_count()));
+        return rc;
     }
 
     if (frames > 0) {
@@ -574,6 +726,7 @@ stream::Codec parse_codec(std::string_view s) {
 int main(int argc, char** argv) {
     enum class Mode { Headless, Serve, Windowed } mode = Mode::Headless;
     int frames = 30;
+    bool input_selftest = false;
     const char* ppm = nullptr;
     std::string host = "0.0.0.0";
     std::uint16_t port = 9100;
@@ -587,7 +740,10 @@ int main(int argc, char** argv) {
             mode = Mode::Serve;
         else if (a == "--windowed")
             mode = Mode::Windowed;
-        else if (a == "--frames" && i + 1 < argc)
+        else if (a == "--input-selftest") {
+            mode = Mode::Windowed; // it exercises the windowed wiring, so it implies the mode
+            input_selftest = true;
+        } else if (a == "--frames" && i + 1 < argc)
             frames = std::atoi(argv[++i]);
         else if (a == "--ppm" && i + 1 < argc)
             ppm = argv[++i];
@@ -600,7 +756,7 @@ int main(int argc, char** argv) {
     }
 
     if (mode == Mode::Windowed)
-        return run_windowed(frames);
+        return run_windowed(frames, input_selftest);
     if (mode == Mode::Serve)
         return run_serve(host, port, codec);
     return run_headless(frames, ppm);

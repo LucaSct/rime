@@ -226,13 +226,14 @@ void Application::run_ticks(int ticks) {
     }
 }
 
-void Application::render_frame(double alpha) {
+void Application::render_frame(double alpha, double frame_dt) {
     if (!render_) {
         return; // a pure-sim app declares no render frame
     }
     FrameContext ctx{world_,
                      jobs_,
                      alpha,
+                     frame_dt,
                      frame_index_,
                      frame_input_,
                      graph_.get(),
@@ -343,7 +344,7 @@ void Application::run_one_frame(double frame_dt) {
 
     const FixedTimestep::Step step = timestep_.advance(frame_dt);
     run_ticks(step.ticks);
-    render_frame(step.alpha);
+    render_frame(step.alpha, frame_dt);
     ++frame_index_;
 }
 
@@ -364,7 +365,7 @@ FixedTimestep::Step Application::step(double frame_dt) {
 
     const FixedTimestep::Step s = timestep_.advance(frame_dt);
     run_ticks(s.ticks);
-    render_frame(s.alpha);
+    render_frame(s.alpha, frame_dt);
     ++frame_index_;
     return s;
 }

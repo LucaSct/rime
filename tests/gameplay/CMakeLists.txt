@@ -13,6 +13,7 @@ rime_add_test(rime_gameplay_tests
     character_recovery_test.cpp
     character_replay_test.cpp
     character_grid_test.cpp
+    input_map_test.cpp
     weapon_test.cpp)
 
 target_link_libraries(rime_gameplay_tests

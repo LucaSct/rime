@@ -22,6 +22,7 @@
 add_library(rime_gameplay STATIC
     src/character.cpp
     src/first_person.cpp
+    src/input_map.cpp
     src/components.cpp
     src/weapon.cpp)
 
@@ -32,10 +33,15 @@ target_include_directories(rime_gameplay
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
-# All PUBLIC: the seam headers expose core math, physics::PhysicsWorld/BodyId, and (in
-# components.hpp) the ecs reflection macros.
+# All PUBLIC: the seam headers expose core math, physics::PhysicsWorld/BodyId, (in components.hpp)
+# the ecs reflection macros, and (in input_map.hpp) platform::Input / Event / Key.
+#
+# The `platform` edge (m13.3c) is DOWNWARD — platform sits two layers below gameplay in the cake
+# (docs/ARCHITECTURE.md §2) — and is not the kind of edge the note above refuses. Those were
+# sideways edges to peer feature modules; this one is the OS input abstraction, it is GPU-free, and
+# it has a null backend, so every proof in tests/gameplay still runs on any CI machine.
 target_link_libraries(rime_gameplay
-    PUBLIC rime::core rime::ecs rime::physics)
+    PUBLIC rime::core rime::ecs rime::physics rime::platform)
 
 # Project-wide build policy (C++20 + warnings-as-errors + any sanitizer); from the top-level CMake.
 rime_apply_common_target_options(rime_gameplay)
