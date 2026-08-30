@@ -6,6 +6,18 @@
 #ifndef NOMINMAX
 #define NOMINMAX // keep <windows.h> from defining min()/max() macros that break std::min/max.
 #endif
+// This backend calls the ...W entry points explicitly (CreateWindowExW, RegisterClassExW, …), but a
+// handful of Win32 *constants* still follow the TCHAR switch: IDC_ARROW is MAKEINTRESOURCE(32512),
+// and MAKEINTRESOURCE expands to the ANSI MAKEINTRESOURCEA unless UNICODE is defined. Its LPSTR
+// then will not convert to the LPCWSTR LoadCursorW takes — "cannot convert argument 2 from 'LPSTR'
+// to 'LPCWSTR'". Defining UNICODE here points those macros at the W forms the rest of the file
+// already uses, rather than open-coding the resource number.
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
 #include <windows.h>
 // <windowsx.h> provides GET_X_LPARAM / GET_Y_LPARAM, which sign-extend mouse coords correctly
 // (a bare LOWORD() truncates to an unsigned WORD and breaks on multi-monitor negative positions).

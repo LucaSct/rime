@@ -11,9 +11,19 @@
 
 // winsock2.h must precede any windows.h; ws2tcpip.h adds getaddrinfo; afunix.h adds SOCKADDR_UN
 // (AF_UNIX, S1.4 — shipped in the Windows 10 SDK, 1803+). We include no windows.h here.
-#include <afunix.h>
+//
+// THE ORDER IS LOAD-BEARING, AND ONLY THE clang-format GUARD KEEPS IT. afunix.h declares
+// `ADDRESS_FAMILY sun_family;` without including what defines ADDRESS_FAMILY (ws2def.h, reached via
+// winsock2.h), so it must come last. Left to itself our .clang-format sorts these into
+// afunix/winsock2/ws2tcpip and the SDK header stops parsing: "afunix.h(24): error C3646:
+// 'sun_family': unknown override specifier", then "'sun_family': is not a member of 'sockaddr_un'"
+// at fill_sun() below. Note that separating them with BLANK LINES does not help — our config sets
+// `IncludeBlocks: Regroup`, which merges the blocks back together before sorting. Hence off/on.
+// clang-format off
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <afunix.h>
+// clang-format on
 
 #include <cstdio>  // std::remove (unlink a stale socket file)
 #include <cstring> // std::memcpy
