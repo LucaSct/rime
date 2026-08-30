@@ -79,6 +79,7 @@
 
 #include "rime/app/application.hpp"
 #include "rime/assets/cooked_reader.hpp"
+#include "rime/assets/sdf_asset.hpp"
 #include "rime/audio/mixer.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
@@ -170,6 +171,10 @@ bool g_idle = false;
 // How many ticks the script runs. A variable rather than a constant so a human can run the demo
 // past the point CI stops caring; the default is chosen for CI's clock (see the beats above).
 std::uint64_t g_ticks = kDefaultTicks;
+
+// --ppm <file>: write the intact frame the render claims are made about, so a human can look at the
+// thing the counters are describing.
+std::string g_ppm;
 
 // ── Small helpers ───────────────────────────────────────────────────────────────────────────────
 
@@ -285,6 +290,27 @@ read_rgba8(rhi::Device& device, rhi::TextureHandle tex, std::uint32_t w, std::ui
     device.read_buffer(rb, out.data(), out.size(), 0);
     device.destroy(rb);
     return out;
+}
+
+// Write an RGBA8 readback as a binary PPM — the same one-screen helper every other sample carries.
+// `--ppm` exists because a demo nobody has looked at is a demo nobody has checked: every claim in
+// this file is a counter, and counters cannot see a scene that is correct-but-wrong (m13.3b found
+// two such bugs by looking).
+void write_ppm(const char* path,
+               const std::vector<std::uint8_t>& px,
+               std::uint32_t w,
+               std::uint32_t h) {
+    std::FILE* f = std::fopen(path, "wb");
+    if (f == nullptr) {
+        std::fprintf(stderr, "99-the-block: cannot write %s\n", path);
+        return;
+    }
+    std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
+        (void)std::fwrite(&px[i * 4], 1, 3, f);
+    }
+    (void)std::fclose(f);
+    std::printf("  wrote %s\n", path);
 }
 
 [[nodiscard]] double mean_luma(const std::vector<std::uint8_t>& rgba) {
@@ -920,6 +946,74 @@ struct Session {
     return c;
 }
 
+// ── The SDF field the DDGI probes trace (m13.L) ──────────────────────────────────────────────────
+//
+// Without this, `ddgi_enabled` is a lie that reports work: the probes update, trace an EMPTY field,
+// and blend in nothing. That is exactly what the first m13.L run measured — 384 probes updated,
+// 24,576 rays traced, and `sdf.stamps == 0`. The claim caught it; the flag never would have.
+//
+// ONE BOX PER BUILDING, NOT ONE PER SLAB. The block has 140 destructible slabs, and a per-slab
+// field would be 140 instances recomposed as the street falls down. A building envelope is what a
+// bounce actually cares about — the mass that occludes the sun and reflects the street lamps — and
+// it is eight instances. The cost is resolution: a doorway is not a hole in the field, and a
+// partial collapse does not thin it. Both are honest limits of an envelope, recorded rather than
+// hidden, and the finer field is the kind of thing m10.4b's per-part note anticipates.
+[[nodiscard]] float box_sdf_distance(core::Vec3 p, core::Vec3 half) noexcept {
+    const core::Vec3 q{std::fabs(p.x) - half.x, std::fabs(p.y) - half.y, std::fabs(p.z) - half.z};
+    const core::Vec3 m{std::fmax(q.x, 0.0f), std::fmax(q.y, 0.0f), std::fmax(q.z, 0.0f)};
+    return core::length(m) + std::fmin(std::fmax(q.x, std::fmax(q.y, q.z)), 0.0f);
+}
+
+// An analytic box baked into a voxel grid — the same construction 11-lit-rooms uses for its walls
+// (`build_box_sdf`), kept local rather than shared because it is four lines of maths and a sample
+// helper is the wrong thing to promote into the engine without a second caller.
+[[nodiscard]] assets::MeshSdfAsset build_box_sdf(core::Vec3 half, std::uint32_t target_res = 16) {
+    const float longest = std::fmax(half.x, std::fmax(half.y, half.z)) * 2.0f;
+    const float voxel = longest / static_cast<float>(target_res);
+    const float pad = 2.0f * voxel;
+    const float h[3] = {half.x, half.y, half.z};
+    assets::MeshSdfAsset sdf;
+    std::uint32_t res[3]{};
+    float origin[3]{};
+    for (int a = 0; a < 3; ++a) {
+        res[a] = std::max<std::uint32_t>(
+            static_cast<std::uint32_t>(std::ceil((2.0f * h[a] + 2.0f * pad) / voxel)), 4u);
+        origin[a] = -0.5f * static_cast<float>(res[a]) * voxel;
+    }
+    sdf.grid_origin = {origin[0], origin[1], origin[2]};
+    sdf.voxel_size = voxel;
+    sdf.resolution = {res[0], res[1], res[2]};
+    sdf.local_bounds = assets::Aabb{core::Vec3{-half.x, -half.y, -half.z}, half};
+    sdf.distances.resize(sdf.voxel_count());
+    float max_abs = 0.0f;
+    for (std::uint32_t z = 0; z < res[2]; ++z) {
+        for (std::uint32_t y = 0; y < res[1]; ++y) {
+            for (std::uint32_t x = 0; x < res[0]; ++x) {
+                const core::Vec3 p{sdf.grid_origin.x + (static_cast<float>(x) + 0.5f) * voxel,
+                                   sdf.grid_origin.y + (static_cast<float>(y) + 0.5f) * voxel,
+                                   sdf.grid_origin.z + (static_cast<float>(z) + 0.5f) * voxel};
+                const float d = box_sdf_distance(p, half);
+                sdf.distances[sdf.index(x, y, z)] = d;
+                max_abs = std::fmax(max_abs, std::fabs(d));
+            }
+        }
+    }
+    sdf.max_abs_distance = max_abs;
+    return sdf;
+}
+
+// Where building `b` stands and how big it is — `building_frame` in blockkit/src/block.cpp,
+// re-derived from the same authored params, exactly as `hero_face` above does. Kept as a second
+// derivation on purpose: if the two ever disagree the field sits where the buildings are not, and
+// the GI would be subtly wrong with nothing failing.
+[[nodiscard]] core::Vec3 building_centre(std::uint32_t b, const blockkit::BlockParams& p) noexcept {
+    const std::uint32_t side = b / p.buildings_per_side;
+    const std::uint32_t idx = b % p.buildings_per_side;
+    return {p.footprint * 0.5f + static_cast<float>(idx) * (p.footprint + p.building_gap),
+            static_cast<float>(p.storeys) * p.storey_height * 0.5f,
+            (p.street_width + p.footprint) * 0.5f * (side == 0 ? -1.0f : 1.0f)};
+}
+
 // ── The hero beat: a demolition charge on the corner ────────────────────────────────────────────
 //
 // A RIFLE CANNOT DO THIS, and pretending otherwise would be the dishonest version of this sample.
@@ -986,18 +1080,82 @@ struct Visuals {
     render::text::HudRenderer hud;
     blockkit::BlockPalette palette;
     ecs::Entity camera = ecs::kNullEntity;
+    // The pose the SCENE authored for its camera, kept because the demo overwrites the camera
+    // entity with the player's eye every frame. See `use_authored_camera`.
+    core::Transform authored_camera{};
     render::RGTexture last_ldr{};
     render::CullStats cull{};
     destruction_render::LeafStats leaf_stats{};
 
+    // The M10 stack's work, ACCUMULATED across frames (m13.L). Every one of these counters is reset
+    // per frame by its subsystem — `SdfClipmap::add` does `stats_ = {}` on entry, and a converged
+    // clipmap deliberately declares nothing at all ("idle work is a bug", ADR-0032 §11). So a claim
+    // that reads them after four frames reads the idle frame and concludes the field was never
+    // composed. That is exactly what the first version of this asserted, and it was the claim that
+    // was wrong rather than the engine.
+    std::uint64_t sdf_stamps_total = 0;
+    std::uint64_t ddgi_probes_total = 0;
+    std::uint64_t spot_maps_total = 0; // rendered + reused
+
     explicit Visuals(rhi::Device& device)
         : meshes(device), renderer(device, meshes, materials), hud(device, render::kLdrFormat) {
-        // CLUSTERED FORWARD IS REQUIRED, not a preference: the block carries 36 local lights and
-        // the ADR-0022 uniform-block path caps at 16. Without it the frame is not a worse picture,
-        // it is a different scene — and the m13.2d note that says so is the only reason this line
-        // exists.
+        // ── THE WHOLE M10 STACK, ON (m13.L) ──────────────────────────────────────────────────────
+        //
+        // It was not, and that is worth writing down rather than quietly fixing. m13.5 set
+        // `clustered_enabled` and nothing else — copied from `block_render_test`, which only ever
+        // needed the light cap lifted — so the vision demo shipped with **no shadows, no GI, no
+        // SSR**. M13's "done when" names M8+**M10**+M11+M12, and the M10 clause was unfulfilled by
+        // one line. Nothing caught it: the render claim was "the frame came back lit", and ambient
+        // plus clustered point lights is lit.
+        //
+        // Every gate below is independently defaulted OFF (settings.hpp: "a caller opts in, and
+        // until it does the frame is the byte-identical pre-M10 baseline"). That default is right
+        // for the regression bridge and it is a trap for a demo, because opting in is silent in
+        // both directions. The claims in run_headless now assert each gate is on AND that its
+        // subsystem did work — a counter, not a flag, because a flag can be true while the pass
+        // never runs.
         render::LightingSettings lighting;
+
+        // Clustered forward is REQUIRED, not a preference: the block carries 36 local lights and
+        // the ADR-0022 uniform-block path caps at 16. Without it the frame is not a worse picture,
+        // it is a different scene (the m13.2d note).
         lighting.clustered_enabled = true;
+
+        // The sun, through cascades. Three at 2048 over a 44 m street: the near cascade covers the
+        // block the player is standing in, the far one the end of the road.
+        lighting.shadows_enabled = true;
+        lighting.cascade_count = 3;
+        lighting.shadow_map_resolution = 2048;
+
+        // The 36 street spots and interior points. NOTE THE CAP, because it bites here and is not
+        // this brick's to fix: `kMaxLocalShadows = 8` (settings.hpp:25), so 8 of 36 cast shadows
+        // and the other 28 render as unshadowed cones — selected by ECS iteration order, not by
+        // relevance. The priority atlas that would evict by intensity x coverage is named as the
+        // m10.2 fast-follow and does not exist. Left as a measured limitation for M16.
+        lighting.local_shadows_enabled = true;
+        lighting.local_shadow_resolution = 1024;
+
+        // The traceable field, and the probes that read it. DDGI REQUIRES the clipmap — it traces
+        // the same field m10.4b composes.
+        //
+        // The lattice is camera-centred and recentres as the player walks, so it does not need to
+        // span the street: 8x6x8 at 2 m is a 14x10x14 m volume around the eye, which is the room
+        // and the road in front of it. lit-rooms uses 0.5 m spacing for one interior; a street
+        // wants reach over resolution.
+        lighting.sdf_clipmap_enabled = true;
+        lighting.ddgi_enabled = true;
+        lighting.ddgi_probe_count_x = 8;
+        lighting.ddgi_probe_count_y = 6;
+        lighting.ddgi_probe_count_z = 8;
+        lighting.ddgi_probe_spacing = 2.0f;
+        lighting.ddgi_rays_per_probe = 64;
+        lighting.ddgi_hysteresis = 0.85f;
+
+        // Screen-space reflections on the wet dusk road.
+        lighting.ssr_enabled = true;
+        lighting.ssr_max_distance = 12.0f;
+        lighting.ssr_thickness = 0.5f;
+
         renderer.set_lighting(lighting);
         renderer.set_ambient(blockkit::kAmbient[0], blockkit::kAmbient[1], blockkit::kAmbient[2]);
     }
@@ -1008,13 +1166,34 @@ struct Visuals {
         palette = blockkit::build_palette(materials);
         blockkit::upload_prop_meshes(palette, meshes);
         (void)blockkit::apply_palette(world, palette);
+
+        // The field the DDGI probes trace (m13.L). Ids 1..N are the buildings, 0 is the street.
+        const blockkit::BlockParams p;
+        const core::Vec3 street_half{
+            p.street_length() * 0.5f + p.building_gap, 0.25f, p.street_width * 0.5f + p.footprint};
+        renderer.sdf_clipmap().update_instance(
+            0,
+            build_box_sdf(street_half, 24),
+            core::mat4_translation({p.street_length() * 0.5f, -0.25f, 0.0f}));
+        const core::Vec3 building_half{p.footprint * 0.5f,
+                                       static_cast<float>(p.storeys) * p.storey_height * 0.5f,
+                                       p.footprint * 0.5f};
+        const assets::MeshSdfAsset building_sdf = build_box_sdf(building_half, 16);
+        for (std::uint32_t b = 0; b < p.building_count(); ++b) {
+            // One baked grid, eight placements: every building is the same box, so re-baking it per
+            // instance would be eight identical voxel grids and eight times the cook.
+            renderer.sdf_clipmap().update_instance(
+                b + 1, building_sdf, core::mat4_translation(building_centre(b, p)));
+        }
+
         // The camera the block itself authored (blockkit places one at the west viewpoint), found
         // rather than spawned: the demo poses an existing entity so that a scene loaded from disk
         // brings its own camera, exactly as any other content would.
         world.query<ecs::WorldTransform, render::Camera>().for_each(
-            [&](ecs::Entity e, ecs::WorldTransform&, render::Camera&) {
+            [&](ecs::Entity e, ecs::WorldTransform& tf, render::Camera&) {
                 if (camera == ecs::kNullEntity) {
                     camera = e;
+                    authored_camera = tf.value;
                 }
             });
     }
@@ -1042,6 +1221,16 @@ struct Demo {
 
     audio::Mixer mixer{audio::SoundBank::engine_defaults(), block_mix()};
     audio::MixStats audio_stats{};
+
+    // Pose the camera from the SCENE rather than from the player.
+    //
+    // The render claims are made about the frames this is on for, and that is a correction rather
+    // than a preference. The player's eye follows a scripted tape that walks AT a building, so the
+    // captured frame was a close-up of a wall: 68 of 2,051 draws submitted, and "the frame came
+    // back lit" was a statement about masonry. The block authors a camera at the west end looking
+    // down its own street (1,830 submitted) — that is the view the scene is about, and the view a
+    // claim about the scene should be measured on. The m13.2d lesson, in a third place.
+    bool use_authored_camera = false;
 
     std::uint64_t frames_rendered = 0;
     std::uint64_t audio_events = 0;
@@ -1159,11 +1348,16 @@ struct Demo {
         }
         ecs::World& world = session.client.world;
         if (auto* tf = world.get<ecs::WorldTransform>(visuals->camera)) {
-            tf->value = session.client.camera_transform();
+            tf->value =
+                use_authored_camera ? visuals->authored_camera : session.client.camera_transform();
         }
         visuals->renderer.reset_cull_stats();
         visuals->last_ldr = visuals->renderer.render(*ctx.graph, world, ctx.extent, true).ldr;
         visuals->cull = visuals->renderer.cull_stats();
+        visuals->sdf_stamps_total += visuals->renderer.sdf_clipmap().stats().stamps;
+        visuals->ddgi_probes_total += visuals->renderer.ddgi_stats().probes_updated;
+        visuals->spot_maps_total += visuals->renderer.local_shadow_stats().rendered +
+                                    visuals->renderer.local_shadow_stats().reused;
         draw_hud(ctx);
         visuals->hud.declare(*ctx.graph, visuals->last_ldr);
         ctx.present = visuals->last_ldr; // the one line that is the whole windowed path (m13.3a)
@@ -1271,6 +1465,14 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
     bool intact_captured = false;
     render::CullStats intact_cull{};
     double intact_luma = 0.0;
+
+    // What the M10 stack did on the frames the render claims are made about.
+    struct LightingWork {
+        std::uint64_t spot_maps = 0;
+        std::uint64_t ddgi_probes = 0;
+        std::uint64_t sdf_stamps = 0;
+    } lit;
+
     if (demo.visuals) {
         demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
     }
@@ -1288,15 +1490,28 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
         if (!intact_captured && demo.visuals &&
             demo.visuals->leaf_stats.leaves_live >= stats.parts) {
             intact_captured = true;
+            demo.use_authored_camera = true; // the claims below are about the BLOCK, not the wall
             demo.app.run_frames(4);
             intact_cull = demo.visuals->cull;
+            // Snapshot what the LIGHTING actually did on those frames (m13.L). Counters, not the
+            // settings flags: a flag can be true while the pass never runs, which is the whole
+            // failure mode being closed here.
+            lit.spot_maps = demo.visuals->spot_maps_total;
+            lit.ddgi_probes = demo.visuals->ddgi_probes_total;
+            lit.sdf_stamps = demo.visuals->sdf_stamps_total;
             if (render::RenderGraph* graph = demo.app.graph()) {
                 const rhi::TextureHandle tex = graph->physical(demo.visuals->last_ldr);
                 if (tex.is_valid()) {
-                    intact_luma = mean_luma(read_rgba8(*demo.app.device(), tex, kWidth, kHeight));
+                    const std::vector<std::uint8_t> px =
+                        read_rgba8(*demo.app.device(), tex, kWidth, kHeight);
+                    intact_luma = mean_luma(px);
+                    if (!g_ppm.empty()) {
+                        write_ppm(g_ppm.c_str(), px, kWidth, kHeight);
+                    }
                 }
             }
             demo.app.finish_gpu();
+            demo.use_authored_camera = false; // back to the player for the rest of the run
         }
         if (t % 100 == 0 || t == g_ticks - 1) {
             std::printf("    t=%4llu  parts %5zu  live debris %4zu  ops %llu\n",
@@ -1484,6 +1699,26 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
         // street came back" from "the pass ran and produced black", which is the failure a counter
         // cannot see. block_render_test makes the sharper comparative claim.
         claims.push_back({"render: the frame came back lit", intact_luma > 1.0});
+
+        // ── The M10 clause of M13's "done when" (m13.L) ──────────────────────────────────────
+        //
+        // m13.5 shipped this demo with only `clustered_enabled` and every claim green, because
+        // "the frame came back lit" is satisfied by ambient plus point lights. These are the
+        // assertions that would have caught it, and they are deliberately about WORK DONE rather
+        // than about the settings struct: `lighting().shadows_enabled` being true proves someone
+        // set a bool, while `local_shadow_stats().rendered + .reused` being non-zero proves a
+        // shadow map exists.
+        const render::LightingSettings& ls = demo.visuals->renderer.lighting();
+        claims.push_back({"lighting: every M10 gate is on",
+                          ls.shadows_enabled && ls.local_shadows_enabled && ls.clustered_enabled &&
+                              ls.sdf_clipmap_enabled && ls.ddgi_enabled && ls.ssr_enabled});
+        claims.push_back({"lighting: spot shadow maps were produced", lit.spot_maps > 0});
+        claims.push_back({"lighting: the SDF field was composed", lit.sdf_stamps > 0});
+        claims.push_back({"lighting: DDGI probes were traced", lit.ddgi_probes > 0});
+        std::printf("  lighting  : %llu spot maps, %llu sdf stamps, %llu probe updates\n",
+                    static_cast<unsigned long long>(lit.spot_maps),
+                    static_cast<unsigned long long>(lit.sdf_stamps),
+                    static_cast<unsigned long long>(lit.ddgi_probes));
         std::printf("  drawn     : %llu culled of %llu considered, %llu submitted, %zu leaves, "
                     "mean luma %.2f\n",
                     static_cast<unsigned long long>(intact_cull.culled),
@@ -1588,6 +1823,8 @@ int main(int argc, char** argv) {
             mode = Mode::Play;
         } else if (a == "--ticks" && i + 1 < argc) {
             g_ticks = static_cast<std::uint64_t>(std::atoll(argv[++i]));
+        } else if (a == "--ppm" && i + 1 < argc) {
+            g_ppm = argv[++i];
         } else if (a == "--idle") {
             g_idle = true;
         } else if (a == "--scene" && i + 1 < argc) {
