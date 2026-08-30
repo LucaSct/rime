@@ -14,6 +14,10 @@
 // M6 asset pipeline imports real ones), and the registry that owns their GPU buffers behind small
 // dense ids — because ECS components must stay trivially-copyable PODs (ADR-0018), an entity
 // carries a MeshId, never buffer handles or pointers.
+namespace rime::assets {
+struct MeshAsset;
+}
+
 namespace rime::render {
 
 // One vertex, 48 bytes, interleaved: position + normal (shading) + uv (texturing) + tangent
@@ -45,6 +49,20 @@ struct CpuMesh {
 // A y = 0 plane spanning ±half_extent on x/z, facing +y. `uv_tiles` repeats the texture that many
 // times across the span (a mipmapped checker floor wants > 1).
 [[nodiscard]] CpuMesh make_plane(float half_extent, float uv_tiles = 1.0f);
+
+// ── Cooked mesh → renderable mesh (m15.1) ─────────────────────────────────────────────────
+//
+// Unpack a cooked `assets::MeshAsset`'s interleaved, attribute-set-described blob into the
+// renderer's fixed 48-byte vertex. A mesh cooked without tangents (no normal map) gets them
+// derived here, so the single always-tangented forward pipeline serves it too (M6.4).
+//
+// IT LIVES IN THE ENGINE BECAUSE EVERY GAME NEEDS IT. This was 45 lines inside
+// `samples/08-gltf-zoo/main.cpp`, which meant the only documented way to draw a cooked mesh was to
+// copy a sample's private helper — one of the several small forks ADR-0038 counts as the reason
+// VISION §5's platform proof is unmet. Skin attributes are ignored: there is no runtime that reads
+// them (no `engine/anim`, and this vertex layout has no joint indices), which is named in ADR-0038
+// as deferred past M16 rather than pretended about here.
+[[nodiscard]] CpuMesh mesh_from_cooked(const assets::MeshAsset& asset);
 
 // An axis-aligned cube of the given half extent, centered at the origin: 24 vertices (4 per face,
 // so each face has its own flat normal — a shared-corner cube cannot have hard edges), 36 indices,
