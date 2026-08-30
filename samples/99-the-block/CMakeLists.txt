@@ -69,8 +69,14 @@ endforeach()
 
 # M13's "done when", in CI. The sim half runs anywhere (it is GPU-free); the render assertions are
 # self-guarded on a device, and a host without one is an honest skip rather than a red build —
-# unless RIME_REQUIRE_VULKAN says otherwise. Deliberately NOT a timing gate: see main.cpp on why the
-# clock lives in --perf and never in CTest.
+# unless RIME_REQUIRE_VULKAN says otherwise.
+#
+# Deliberately NOT a timing gate, and there is no --perf mode yet: the clock belongs on hardware
+# whose fingerprint goes into a report, never on a CI rasteriser, and its scope should come from
+# this demo rather than from a guess about it. That is m13.p.
+#
+# One claim is REPORTED AND NOT ASSERTED — the collapse does not stay local — so this test passes
+# while M13 stays open. See main.cpp's KNOWN DEFECT block; it becomes claim #21 when it is fixed.
 add_test(NAME the_block_headless COMMAND the_block --headless)
 set_tests_properties(the_block_headless PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
