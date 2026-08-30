@@ -20,4 +20,5 @@ if(RIME_RHI_VULKAN)
     add_subdirectory(08-gltf-zoo)       # M6.10: M6's "done when" — cooked glTF gallery (import→cook→load→render)
     add_subdirectory(10-destructible-wall) # M8.6: M8's "done when" — a cooked wall breaks, debris flies, one event stream fans out
     add_subdirectory(11-lit-rooms)         # M10.8: M10's "done when" — full lighting stack; break a wall, the dark room lights up
+    add_subdirectory(99-the-block)         # m13.5: M13's "done when" — the vision demo, everything at once
 endif()

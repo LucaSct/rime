@@ -35,4 +35,24 @@ to_character_input(const replication::InputCommand& command) noexcept {
     return input;
 }
 
+// The inverse, and it lives here for the SAME reason (m13.5). A live client folds devices into a
+// `CharacterInput` (gameplay/input_map.hpp) and then has to put it on the wire; a scripted client
+// authors an `InputCommand` directly. Both must arrive at the server as the same six fields, so the
+// two directions belong in one file where a drift between them is visible in a single screen rather
+// than split across a sample and an engine header.
+//
+// `sequence` is left untouched: the sender owns it (`ClientInputSender::record` stamps it), and a
+// converter that guessed one would be inventing network bookkeeping out of a movement intent.
+[[nodiscard]] inline replication::InputCommand
+to_input_command(const gameplay::CharacterInput& input) noexcept {
+    replication::InputCommand command;
+    command.move_x = input.move_x;
+    command.move_y = input.move_y;
+    command.yaw = input.yaw;
+    command.pitch = input.pitch;
+    command.held = input.held;
+    command.pressed = input.pressed;
+    return command;
+}
+
 } // namespace rime::gameplay_net
