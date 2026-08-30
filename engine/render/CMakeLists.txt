@@ -8,6 +8,8 @@
 # docs/design/render-graph.md.
 
 add_library(rime_render STATIC
+    src/text/font.cpp
+    src/text/hud.cpp
     src/render_graph.cpp
     src/mesh.cpp
     src/passes.cpp
@@ -41,6 +43,8 @@ rime_add_shaders(rime_render
     shaders/fullscreen.vert
     shaders/tonemap.frag
     shaders/present.frag
+    shaders/hud.vert
+    shaders/hud.frag
     shaders/pick_id.vert
     shaders/pick_id.frag
     shaders/gizmo.vert

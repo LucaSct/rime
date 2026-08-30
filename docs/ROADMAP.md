@@ -9,6 +9,53 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-29) — m13.3b: the engine can draw a letter.** Until now nothing in the C++
+> engine could. Every number the engine knows about itself — parts alive, live debris, submitted vs
+> culled, active lights — was reachable only from a log line or the Rust editor's egui shell, which
+> means it could not be *in the picture*. Luca ruled the vision demo gets a NATIVE HUD, which made
+> this a rendering subsystem rather than a detail of the playable client (ADR-0035 amendment E4).
+>
+> **No dependency, by policy.** `third_party/README` says "we don't pull in a library for something
+> we should understand and own", and a HUD font is inside that line. FreeType and stb_truetype are
+> both fine and neither is worth a dependency, a license entry and a build-graph edge for this.
+>
+> **A 5x7 glyph set for all 95 printable ASCII characters**, authored as ASCII art and mechanically
+> packed — no byte was typed by hand. The compact table lives in the source and the HUMAN-LEGIBLE
+> form lives in the test, which renders glyphs back into art and compares them against letters
+> written out longhand. 475 hex bytes are unreviewable by eye; 665 string literals are unreadable in
+> a diff; so the data is compact and the *proof* is legible.
+>
+> **A signed distance field**, built with 8SSEDT (Danielsson's transform in Leymarie & Levine's
+> two-pass form: propagate the nearest-seed VECTOR, not a step count, which is what makes the answer
+> Euclidean). That is why a 5x7 source bitmap looks crisp at 18 px — the shader recovers an analytic
+> edge with one `smoothstep` whose band width comes from `fwidth`, so text is sized by the frame
+> rather than by the asset. A fixed band would be wrong in both directions at once, which is the
+> usual way this is got wrong.
+>
+> **An immediate-mode overlay**: `begin()`, a few `panel()`/`text()` calls, `declare()`. No widget
+> tree — a debug HUD's content changes every frame and its layout is written by the person reading
+> it, so a retained model would be pure ceremony. It LOADS the finished LDR and blends with no depth
+> attachment: always-on-top by construction, the policy `GizmoRenderer` already uses.
+>
+> **The look**, since it was a taste ruling: a translucent near-black panel (text alone over a bright
+> frame is unreadable whatever colour it is), dim labels against bright right-aligned values, and ONE
+> accent — a HUD where everything is highlighted highlights nothing.
+>
+> **Two bugs caught by LOOKING, not by testing**, which is worth recording because no assertion here
+> would have found either. The advance ratio (0.62) was narrower than the glyph body (5/7 ≈ 0.714),
+> so consecutive letters overlapped and text read as cramped; it is 6/7 now — the classic terminal
+> cell, a 5-wide glyph in a 6-wide box. And once that was fixed the sample's title collided with its
+> subtitle, because the offset between them was a hardcoded 58 px instead of a `text_width()` call —
+> the exact function that exists to prevent it.
+>
+> Proofs: glyph art round-trip, atlas determinism, the field's signedness and monotonicity, UV tiling
+> (all GPU-free); plus pixel proofs that text draws, that an 'M' covers more than a '.' (a pass
+> drawing one blob per character satisfies "text draws" perfectly), and that **every pixel the HUD
+> did not touch comes back byte-identical** — the overlay contract, and the property that quietly
+> breaks the day someone gives the pass a depth attachment or the wrong load op.
+>
+> **Next:** m13.4 (audio, cuttable) or m13.p (the measured perf pass), then m13.5's `99-the-block`.
+
 > **Update (2026-08-29) — m13.3a: the engine presents to a window, and the player has eyes.**
 > ADR-0023 §4's present seam had been open since M5.7. `07-first-light --windowed` printed *"needs a
 > display (Mac); running --headless instead"* for two milestones. It presents now: **150 frames in a
