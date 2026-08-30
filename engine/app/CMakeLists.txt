@@ -63,3 +63,19 @@ target_link_libraries(rime_engine
 rime_apply_common_target_options(rime_engine)
 
 rime_apply_common_target_options(rime_hello)
+
+# ── rime-blockgen — the vision demo's procedural assembly (m13.2c) ────────────────────────────────
+# `rime-blockgen --out block.rscene` writes the whole block — 8 buildings, 140 destructible slabs and
+# crates, the street furniture and the dusk lighting rig — as a `.rscene`. ADR-0035 called this "a
+# procedural assembly script"; it is C++ rather than Rust tooling because the format keys components
+# by C++ reflection type_hash (see engine/blockkit/block.hpp). GPU-free: it fills a World and
+# serializes it, and never opens a device. A runnable tool, so deliberately not installed.
+add_executable(rime_blockgen
+    block_gen_main.cpp)
+
+set_target_properties(rime_blockgen PROPERTIES OUTPUT_NAME rime-blockgen)
+
+target_link_libraries(rime_blockgen
+    PRIVATE rime::blockkit rime::scene rime::ecs rime::core)
+
+rime_apply_common_target_options(rime_blockgen)
