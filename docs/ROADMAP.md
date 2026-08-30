@@ -9,6 +9,61 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-30) — m13.3c: the window is wired to the keyboard.** m13.3a opened a window,
+> built `gameplay::FirstPersonView`, proved its view maths across 37 angles, and printed *"close it
+> (or ESC) to exit"*. ESC did nothing, and there was no way to walk anywhere. Every part existed and
+> **nothing called any of them**: `FirstPersonView` was referenced by its own header, its own `.cpp`
+> and its own test; `platform::Input` — the polled-state layer with per-frame edges, built back at
+> M2.3 — was referenced by its own test and by nothing else in the engine, the samples or the tools.
+> The join was the missing piece, not the parts. This is the repo's own recorded failure shape —
+> *assert the handoff, not the value* — landing for the fifth time, so the join is now a named,
+> tested seam instead of forty lines inlined into whichever sample wanted it first.
+>
+> **`engine/gameplay/input_map.hpp`** — bindings, a `FrameIntent`, `map_frame_input()` and
+> `fly_step()`, plus the `FlyCamera` a sample or an editor viewport flies with. `FrameIntent` splits
+> deliberately: `character` is the exact `CharacterInput` `step_character` consumes and the wire
+> replicates, while `vertical`/`boost`/`quit` sit beside it because a simulated capsule has no such
+> concepts. Growing `CharacterInput` for a debug camera would cost every packet, forever.
+>
+> **One call, not three.** `map_frame_input` owns the `new_frame()`/`process()` loop rather than
+> leaving it to the caller, because forgetting `Input::new_frame()` leaves every `*_pressed()` edge
+> latched true — so ESC would quit on the frame after you tapped it *and on every frame you held
+> it*. The failure is silent and the fix is unrepresentable-by-construction, so it is built that way.
+>
+> **Look is a right-drag, and that is a gap rather than a taste call.**
+> `platform::CursorMode::Locked` is declared in `mouse.hpp`, its comment says each backend implements
+> pointer capture "in M2.3", and as of today `CursorMode` is referenced by **nothing at all** —
+> `platform::Window` has no `set_cursor_mode()` to reference it with. Without capture, free look
+> walks the real cursor off the window and the camera stops steering mid-turn. Hold-to-look needs
+> nothing from the backends and cannot break that way; `look_requires_drag = false` is one field
+> away once pointer lock is a real platform brick, and a game rather than a viewer will want it.
+>
+> **`FrameContext::frame_dt`** joins `alpha`: the loop knew the frame's real dt and did not pass it,
+> so anything that is presentation rather than simulation — a free camera, a UI animation — had no
+> honest clock to run on.
+>
+> **A real defect fell out, in the one loop-driver m13.3a did not cover.** `run()` and `run_frames()`
+> idle the GPU at loop exit; `step()` has no exit and cannot. So a windowed app driven frame-by-frame
+> frees its meshes, textures and pipelines out from under a frame still executing — fifteen
+> validation errors across four VUIDs, found the first time this brick's self-check ran. It is
+> m13.3a's own root cause (*`present` does not finish a frame the way `submit_blocking` does*) in its
+> last hiding place, and it is worse than it looks: **headless is safe**, so the mode that needs the
+> call is the one CI never runs. `Application::finish_gpu()` is public now, with the hazard written
+> down where a caller will meet it.
+>
+> **The proofs are three, and the third is the point.** Unit cases for the fold (edges stay edges,
+> opposed keys cancel, a diagonal is on the unit disc, the fly basis re-derives `character.cpp`'s own
+> right/forward across 24 yaws). Then `tests/app/windowed_input_test.cpp` for the *engine* join —
+> events posted to an `Application` reach a `FlyCamera` and move a posed camera entity, GPU-free, so
+> it runs on every CI OS. Then `first_light --input-selftest`, a CTest **on the binary**, because no
+> unit test can reach the last link: whether `run_windowed` actually constructs one and hands it
+> `ctx.input`. That link is exactly what m13.3a got wrong with every proof green. All three were
+> checked by breaking them — cutting the sample's wiring, deleting `new_frame()`, and skewing the fly
+> basis each turn the corresponding gate red.
+>
+> **Next:** m13.5's `99-the-block`, then m13.p (the measured perf pass — after the proof exists, so
+> its scope comes from a measurement rather than a guess).
+
 > **Update (2026-08-29) — the fracture root cause, fixed rather than guarded.** m13.2c found that
 > `rime fracture` could emit a `.rdest` whose parts are not closed polyhedra, shipped a guard so the
 > cooker refuses to write one, and recorded the cause as open. This is the cause.

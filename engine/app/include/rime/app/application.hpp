@@ -88,6 +88,12 @@ struct FrameContext {
     ecs::World& world;
     core::JobSystem& jobs;
     double alpha = 0.0;
+    // Seconds of REAL time this frame covers — the same dt the accumulator was just advanced by,
+    // and not a fixed step. It is here for the things that are presentation rather than simulation
+    // and therefore must not run on the tick: a free camera, a UI animation, a smoothed readout
+    // (m13.3c). Anything the server arbitrates uses `Application::fixed_dt()` instead; the whole
+    // point of the split is that this number varies and that one does not.
+    double frame_dt = 0.0;
     std::uint64_t frame_index = 0;
     std::span<const platform::Event> input = {};
     render::RenderGraph* graph = nullptr;
@@ -243,19 +249,35 @@ public:
 
     [[nodiscard]] bool quit_requested() const noexcept { return quit_; }
 
+    // Block until no frame is still executing on the GPU.
+    //
+    // `run()` and `run_frames()` do this for you at loop exit, which is why their contract can
+    // promise the GPU is idle when they return. `step()` CANNOT: it is one frame, it has no exit,
+    // and idling inside it would serialise the pipeline it exists to keep full. So a caller who
+    // drives the loop frame-by-frame owns this call, and must make it before destroying anything
+    // the frames rendered with — its meshes, textures, materials, renderer.
+    //
+    // Headless this is redundant (a headless frame ends on `submit_blocking`, which has already
+    // finished it) and windowed it is required (`present` queues and returns). That asymmetry is
+    // the m13.3a root cause in its last uncovered place, and it is worse than it looks: the mode
+    // that needs the call is the one CI never runs, so the validation layer reports it on a
+    // developer's desktop and nowhere else. Cheap and harmless when unnecessary — just call it.
+    void finish_gpu();
+
     // ── Introspection (the proofs read these) ────────────────────────────────────────────────
     [[nodiscard]] std::uint64_t frame_index() const noexcept { return frame_index_; }
 
     [[nodiscard]] std::uint64_t tick_count() const noexcept { return tick_count_; }
 
 private:
-    void run_stage(SimStage stage);  // run every step registered at one phase, in order
-    void run_ticks(int ticks);       // run `ticks` simulation steps
-    void render_frame(double alpha); // build + execute the render frame (if a callback/GPU exist)
+    void run_stage(SimStage stage); // run every step registered at one phase, in order
+    void run_ticks(int ticks);      // run `ticks` simulation steps
+    // Build + execute the render frame (if a callback/GPU exist). Takes the frame's dt as well as
+    // its alpha because both go into the FrameContext the callback sees.
+    void render_frame(double alpha, double frame_dt);
     void run_one_frame(double frame_dt);
     void open_window(); // windowed setup; leaves the app headless on any failure
     bool pump_window(); // drain the OS queue into the input snapshot; false = close requested
-    void finish_gpu();  // block until no frame is in flight — see the definition
 
     AppConfig config_;
     core::JobSystem jobs_;

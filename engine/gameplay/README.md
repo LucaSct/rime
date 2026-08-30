@@ -45,6 +45,27 @@ The controller's design is argued **in the code, next to the numbers that forced
 | m12.3 | **Weapon v1** — `step_weapon` deterministic hitscan, `aim_direction`/`character_aim` (the one view basis), semi-auto vs. automatic, tick-counted cooldown, reflected `WeaponConfig`/`WeaponState`; proofs: the aim convention against its own definition, self-exclusion, the eye-height cover case with its negative control, the cooldown period at four values, and replay bit-identity | landed |
 | m12.4 | prediction + reconciliation replay `step_character` from a corrected state — the purity this module was built for, cashed in ([`gameplay_net`](../gameplay_net/README.md)) | landed |
 | m12.6 | the M12 milestone proof — [`samples/13-networked-player`](../../samples/13-networked-player). **M12 "The Player" closes here.** | landed |
+| m13.3a | `FirstPersonView` — pointer motion in, an eye transform out; pure, no world, no entities. Its forward is asserted to *be* `step_character`'s forward across 37 angles | landed |
+| m13.3c | **`input_map.hpp`** — `InputBindings`, `FrameIntent`, `map_frame_input()`, `fly_step()`, `FlyCamera`. The device→intent map, and the only thing in this module that touches `rime::platform` | landed |
+
+### On the `platform` edge (m13.3c)
+
+`input_map.hpp` is why this module links `rime::platform`, and that edge is **downward** — platform
+sits two layers below gameplay in the cake ([ARCHITECTURE §2](../../docs/ARCHITECTURE.md)). It is not
+the same kind of edge as the ones the build file deliberately refuses (`destruction`, `net`), which
+are sideways to peer feature modules and would make a single-player build drag in the whole
+networking stack. Platform is GPU-free and has a null backend, so every proof here still runs
+headless on any CI machine.
+
+The brick existed because both halves of the map were already built and connected to nothing:
+`FirstPersonView` was referenced only by its own header, `.cpp` and test, and `platform::Input`
+(M2.3) only by its own test. A window opened in m13.3a with no way to move in it. The lesson is in
+`tests/app/windowed_input_test.cpp`, which asserts the *join* rather than either part.
+
+One limitation is real and named: look is a **right-drag**, not free look, because
+`platform::CursorMode::Locked` is declared in `mouse.hpp` and implemented by no backend — there is no
+`Window::set_cursor_mode()` at all. Set `InputBindings::look_requires_drag = false` when pointer
+capture becomes a platform brick.
 
 ## Named costs (v1 deferrals, each argued at its site in `src/character.cpp`)
 
@@ -80,3 +101,10 @@ gun), and `character_grid_test.cpp`: 18 slopes x 12 headings x 6 step heights as
 structural invariants (no NaN, no tick ends overlapping, no falling through the world, no unearned
 `grounded`, bounded speed, bounded give-up counters). A failing cell prints itself as a
 reproduction.
+
+`input_map_test.cpp` (m13.3c) covers the device→intent fold: that the frame is rolled so edges stay
+edges, that opposed keys cancel, that a diagonal lands on the unit disc and not the unit square, and
+that `fly_step`'s basis re-derives `character.cpp`'s own right/forward across 24 yaws. The *join* is
+proved elsewhere on purpose — `tests/app/windowed_input_test.cpp` drives a real `Application` with
+injected events, and `first_light --input-selftest` is a CTest on the binary, because only running it
+can show a sample actually wires one up.
