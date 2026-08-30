@@ -45,6 +45,7 @@ enum class EditorMessage : std::uint16_t {
     PickResult = 0x0204, // engine -> editor: the entity under a picked viewport pixel (m9.6)
     ViewportCamera = 0x0205,  // engine -> editor: the viewport's exact render lens (m9.6 gizmos)
     PlayState = 0x0206,       // engine -> editor: the play/edit phase + tick count (m9.7)
+    SaveResult = 0x0207,      // engine -> editor: the outcome of a SaveScene (m14.3)
     SetComponent = 0x0210,    // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,           // editor -> engine: spawn an empty entity
     Despawn = 0x0212,         // editor -> engine: despawn an entity
@@ -58,6 +59,7 @@ enum class EditorMessage : std::uint16_t {
     Pause = 0x021A, // editor -> engine: stop ticking; the viewport keeps rendering (m9.7)
     Step = 0x021B,  // editor -> engine: run exactly one fixed tick, then stay Paused (m9.7)
     Stop = 0x021C,  // editor -> engine: restore the pre-play snapshot; back to Edit (m9.7)
+    SaveScene = 0x021D, // editor -> engine: write the world back to a .rscene path (m14.3)
 };
 
 // True if `type` (as received by recv_message) is an editor-channel message (the reserved band).
@@ -243,6 +245,53 @@ struct PlayStateMsg {
 [[nodiscard]] std::vector<std::byte> serialize_play_state(const PlayStateMsg& msg);
 [[nodiscard]] bool parse_play_state(std::span<const std::byte> payload, PlayStateMsg& out);
 
+// ── Saving the world back to a `.rscene` (m14.3, ADR-0037) ──────────────────────────────
+//
+// The engine writes the file, not the editor, and that is a rule rather than a convenience:
+// scene_format.hpp makes the C++ writer the REFERENCE implementation of the format, and the Rust
+// editor is required to reuse it through files rather than reimplement the byte layout. So "save"
+// is a request the editor sends and an outcome the engine reports.
+
+// What the host knows about the scene it is hosting. `skipped_components` is the count its LOAD
+// reported (scene::LoadReport) — the editor loads leniently so it can open scenes from builds it
+// does not match, and that tolerance is only safe while this number can veto a save.
+struct HostedScene {
+    std::string path;                   // where it was loaded from; "" for a built-in world
+    std::size_t skipped_components = 0; // components the load dropped as unknown
+};
+
+struct SceneSaveOutcome {
+    bool ok = false;
+    std::string error;
+    std::string path; // where it was actually written
+    std::size_t entities = 0;
+    std::size_t bytes = 0;
+};
+
+// Write `world` to `requested_path`, or to the path it was loaded from when that is empty.
+//
+// IT REFUSES A LOSSY WORLD. If the load skipped component types this build does not register, the
+// world in memory is missing them, and writing it back would delete them from the file — silently,
+// permanently, and with every counter green. That is the failure mode `scene::LoadOptions` warns
+// about at the other end of the same contract, and this is where the contract is kept. The refusal
+// names the count, because "cannot save" without a reason is indistinguishable from a bug.
+//
+// It is a pure function of (world, hosted, path) plus one file write, so the refusal is testable
+// without a socket, an editor, or a running engine — which is the point of it living here rather
+// than inline in the host's message loop.
+[[nodiscard]] SceneSaveOutcome save_hosted_scene(const ecs::World& world,
+                                                 const HostedScene& hosted,
+                                                 std::string_view requested_path);
+
+// Serialize / parse the `SaveScene` payload: [path_len:u32][path bytes] (UTF-8, may be empty).
+[[nodiscard]] std::vector<std::byte> serialize_save_scene(std::string_view path);
+[[nodiscard]] bool parse_save_scene(std::span<const std::byte> payload, std::string& out_path);
+
+// Serialize / parse the `SaveResult` payload:
+// [ok:u8][entities:u64][bytes:u64][path_len:u32][path][error_len:u32][error].
+[[nodiscard]] std::vector<std::byte> serialize_save_result(const SceneSaveOutcome& outcome);
+[[nodiscard]] bool parse_save_result(std::span<const std::byte> payload, SceneSaveOutcome& out);
+
 class PlaySession {
 public:
     // Begin (from Edit: snapshot `world` first) or resume (from Paused — keeping the ORIGINAL
@@ -288,6 +337,14 @@ public:
     // Send the schema then a full world snapshot — call once, right after the connection handshake.
     [[nodiscard]] bool send_hello(const ecs::World& world);
 
+    // Tell the host WHICH scene it is serving, so a `SaveScene` with no path knows where to write
+    // back and — the load-bearing half — so a lossy load can veto the save entirely (m14.3; see
+    // `save_hosted_scene`). Unset, the world is treated as a built-in with no file to return to,
+    // and a pathless save is refused rather than guessed at.
+    void set_hosted_scene(HostedScene scene) { hosted_ = std::move(scene); }
+
+    [[nodiscard]] const HostedScene& hosted_scene() const noexcept { return hosted_; }
+
     // Block for the next client message and apply it to `world` (set-component / spawn / despawn)
     // at this call site (= the caller's tick boundary). Returns false when the connection closes or
     // the peer says Bye — the caller's drain loop then stops. A non-edit or malformed message is
@@ -301,6 +358,7 @@ public:
 
 private:
     stream::ProtocolConnection conn_;
+    HostedScene hosted_;
 };
 
 } // namespace rime::editorhost

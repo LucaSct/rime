@@ -29,6 +29,8 @@
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
 #include "rime/platform/socket.hpp"
+#include "rime/render/components.hpp"
+#include "rime/scene/scene_format.hpp"
 #include "rime/stream/protocol.hpp"
 
 using namespace rime;
@@ -828,4 +830,171 @@ TEST_CASE("editorhost: message_affects_frame classifies the idle-skip triggers (
 
     // An out-of-band value (a cast the receiver would drop) does not wake the pipeline.
     CHECK_FALSE(message_affects_frame(static_cast<EditorMessage>(0x02F0)));
+}
+
+// ── m14.3: saving the world back to a `.rscene` ─────────────────────────────────────────────────
+//
+// The engine writes the file, not the editor — scene_format.hpp makes the C++ writer the reference
+// implementation and the Rust editor is required to reuse it through files. So "save" is a request
+// the editor sends and an outcome the engine reports, and the outcome is what these cases pin down.
+//
+// The case that earns the file is `a lossy load can never be saved`. m14.1 taught the loader to
+// skip component types this build does not register, which is what lets the editor open a scene
+// from a build it does not match. That tolerance is only safe while it cannot be laundered into
+// data loss by a later save, and this is the one place that is enforced.
+
+TEST_CASE("m14.3: a hosted scene saves, and the file round-trips") {
+    ecs::World world;
+    ecs::register_transform_components(world);
+    render::register_render_components(world);
+    core::Transform tf{};
+    tf.translation = {1.0f, 2.0f, 3.0f};
+    (void)world.spawn_with(ecs::LocalTransform{tf}, render::Camera{0.8f, 0.1f, 500.0f, true});
+    (void)world.spawn_with(ecs::LocalTransform{});
+
+    const std::filesystem::path out =
+        std::filesystem::temp_directory_path() / "rime_m14_3_save.rscene";
+    std::error_code ec;
+    std::filesystem::remove(out, ec);
+
+    editorhost::HostedScene hosted; // no path, nothing skipped
+    const editorhost::SceneSaveOutcome r =
+        editorhost::save_hosted_scene(world, hosted, out.string());
+    REQUIRE_MESSAGE(r.ok, r.error);
+    CHECK(r.path == out.string());
+    CHECK(r.entities == world.entity_count());
+    CHECK(r.bytes > 0);
+    REQUIRE(std::filesystem::exists(out));
+
+    // Round trip: what was written loads back into an identically-registered world with the same
+    // reflected content. world_content_hash deliberately excludes entity ids, which a load never
+    // reproduces (it mints fresh handles) — so it is the right witness for "the DATA came back".
+    ecs::World reloaded;
+    ecs::register_transform_components(reloaded);
+    render::register_render_components(reloaded);
+    const scene::LoadReport back = scene::load_scene_file(reloaded, out);
+    REQUIRE_MESSAGE(back.ok, back.error);
+    CHECK(back.entities == world.entity_count());
+    CHECK(editorhost::world_content_hash(reloaded) == editorhost::world_content_hash(world));
+
+    std::filesystem::remove(out, ec);
+}
+
+TEST_CASE("m14.3: an edit survives the save, which is the whole point of saving") {
+    ecs::World world;
+    ecs::register_transform_components(world);
+    render::register_render_components(world);
+    const ecs::Entity e = world.spawn_with(ecs::LocalTransform{}, render::Camera{});
+
+    // The edit an inspector would make, applied through the same seam the wire uses.
+    core::Transform moved{};
+    moved.translation = {7.0f, 8.0f, 9.0f};
+    world.get<ecs::LocalTransform>(e)->value = moved;
+
+    const std::filesystem::path out =
+        std::filesystem::temp_directory_path() / "rime_m14_3_edit.rscene";
+    std::error_code ec;
+    std::filesystem::remove(out, ec);
+
+    editorhost::HostedScene hosted;
+    REQUIRE(editorhost::save_hosted_scene(world, hosted, out.string()).ok);
+
+    ecs::World reloaded;
+    ecs::register_transform_components(reloaded);
+    render::register_render_components(reloaded);
+    REQUIRE(scene::load_scene_file(reloaded, out).ok);
+
+    int seen = 0;
+    reloaded.query<ecs::LocalTransform>().for_each([&](ecs::Entity, ecs::LocalTransform& lt) {
+        CHECK(lt.value.translation.x == doctest::Approx(7.0f));
+        CHECK(lt.value.translation.y == doctest::Approx(8.0f));
+        CHECK(lt.value.translation.z == doctest::Approx(9.0f));
+        ++seen;
+    });
+    CHECK(seen == 1);
+    std::filesystem::remove(out, ec);
+}
+
+TEST_CASE("m14.3: a lossy load can never be saved") {
+    // THE ONE THAT EARNS THIS FILE. The editor opens leniently; the world in memory is therefore
+    // missing whatever this build could not read. Writing it back would delete those records from
+    // the file — silently, permanently, with every counter green. The veto lives here.
+    ecs::World world;
+    ecs::register_transform_components(world);
+    (void)world.spawn_with(ecs::LocalTransform{});
+
+    const std::filesystem::path out =
+        std::filesystem::temp_directory_path() / "rime_m14_3_lossy.rscene";
+    std::error_code ec;
+    std::filesystem::remove(out, ec);
+
+    editorhost::HostedScene hosted;
+    hosted.path = out.string();
+    hosted.skipped_components = 3; // the load dropped three records it did not understand
+
+    const editorhost::SceneSaveOutcome r =
+        editorhost::save_hosted_scene(world, hosted, out.string());
+    CHECK_FALSE(r.ok);
+    // The reason has to be IN the message. "Cannot save" with no cause is indistinguishable from a
+    // bug, and a user who cannot tell those apart will reach for the workaround.
+    CHECK(r.error.find("3 component(s)") != std::string::npos);
+    // And nothing was written — a refusal that still truncated the file would be the worst outcome
+    // available.
+    CHECK_FALSE(std::filesystem::exists(out));
+}
+
+TEST_CASE("m14.3: a pathless save writes back where it was opened, or refuses") {
+    ecs::World world;
+    ecs::register_transform_components(world);
+    (void)world.spawn_with(ecs::LocalTransform{});
+
+    SUBCASE("a built-in world has nowhere to go") {
+        // Inventing a path would put a scene file somewhere nobody asked for.
+        const editorhost::SceneSaveOutcome r =
+            editorhost::save_hosted_scene(world, editorhost::HostedScene{}, {});
+        CHECK_FALSE(r.ok);
+        CHECK(r.error.find("no path") != std::string::npos);
+    }
+
+    SUBCASE("a loaded world saves over itself") {
+        const std::filesystem::path out =
+            std::filesystem::temp_directory_path() / "rime_m14_3_inplace.rscene";
+        std::error_code ec;
+        std::filesystem::remove(out, ec);
+        editorhost::HostedScene hosted;
+        hosted.path = out.string();
+
+        const editorhost::SceneSaveOutcome r = editorhost::save_hosted_scene(world, hosted, {});
+        REQUIRE_MESSAGE(r.ok, r.error);
+        CHECK(r.path == out.string());
+        CHECK(std::filesystem::exists(out));
+        std::filesystem::remove(out, ec);
+    }
+}
+
+TEST_CASE("m14.3: the SaveScene/SaveResult payloads round-trip") {
+    // The Rust client decodes these bytes; a drift between the two encoders is a silent protocol
+    // break, so both directions are pinned here and mirrored by rime-protocol's conformance test.
+    const std::vector<std::byte> req = editorhost::serialize_save_scene("/tmp/a b.rscene");
+    std::string path;
+    REQUIRE(editorhost::parse_save_scene(req, path));
+    CHECK(path == "/tmp/a b.rscene");
+
+    std::string empty_path;
+    REQUIRE(editorhost::parse_save_scene(editorhost::serialize_save_scene({}), empty_path));
+    CHECK(empty_path.empty());
+
+    editorhost::SceneSaveOutcome sent;
+    sent.ok = false;
+    sent.error = "refusing to save: 2 component(s)";
+    sent.path = "/tmp/x.rscene";
+    sent.entities = 213;
+    sent.bytes = 40960;
+    editorhost::SceneSaveOutcome got;
+    REQUIRE(editorhost::parse_save_result(editorhost::serialize_save_result(sent), got));
+    CHECK(got.ok == sent.ok);
+    CHECK(got.error == sent.error);
+    CHECK(got.path == sent.path);
+    CHECK(got.entities == sent.entities);
+    CHECK(got.bytes == sent.bytes);
 }

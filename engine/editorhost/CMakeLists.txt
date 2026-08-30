@@ -18,9 +18,13 @@ target_include_directories(rime_editorhost
 
 # PUBLIC: the header exposes ecs::Entity + stream::ProtocolConnection in its signatures; core comes
 # transitively (byte cursor, reflection).
+# rime::scene arrives with m14.3 (save): the C++ writer is the REFERENCE implementation of the
+# `.rscene` format (scene_format.hpp) and the Rust editor is required to reuse it through files
+# rather than reimplement the byte layout — so the engine, not the editor, writes the file.
+# fmt for the refusal message, which has to name a count to be actionable.
 target_link_libraries(rime_editorhost
     PUBLIC rime::ecs rime::stream
-    PRIVATE rime::core)
+    PRIVATE rime::core rime::scene fmt::fmt)
 
 # Project-wide build policy (C++20 + warnings-as-errors + any sanitizer); from the top-level CMake.
 rime_apply_common_target_options(rime_editorhost)

@@ -14,8 +14,9 @@ use std::thread;
 use rime_protocol::{
     decode_value, encode_value, AssetKind, AssetList, Codec, ComponentRef, Connection,
     EditorMessage, FieldKind, FrameMessage, GizmoAxis, GizmoMode, GizmoState, InputEvent,
-    InputKind, MessageType, PickRequest, PickResult, PixelFormat, PlayPhase, PlayState, Schema,
-    SetComponent, Snapshot, SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    InputKind, MessageType, PickRequest, PickResult, PixelFormat, PlayPhase, PlayState, SaveResult,
+    SaveScene, Schema, SetComponent, Snapshot, SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC,
+    PROTOCOL_VERSION,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -390,4 +391,54 @@ fn connection_handshakes_and_exchanges_a_message() {
     assert_eq!(ty, MessageType::Bye);
 
     server.join().expect("server thread");
+}
+
+// ── m14.3: the save request/result codecs ───────────────────────────────────────────────────────
+//
+// No golden fixture for these: the engine-side encoder is exercised directly by
+// tests/editorhost/editor_host_test.cpp ("the SaveScene/SaveResult payloads round-trip"), and both
+// files spell the byte layout out in their doc comments. What this pins is the Rust half — that a
+// path survives exactly (paths with spaces are ordinary) and that a REFUSAL decodes as a refusal
+// with its reason intact, since a client that silently turned one into a success would be worse
+// than one that could not save at all.
+#[test]
+fn save_scene_round_trips_including_the_empty_path() {
+    let req = SaveScene {
+        path: "/tmp/a b/scene one.rscene".to_string(),
+    };
+    assert_eq!(SaveScene::decode(&req.encode()).expect("decode"), req);
+
+    // Empty means "write back where it was opened" — a distinct instruction, not a missing field.
+    let same_file = SaveScene::default();
+    assert_eq!(
+        SaveScene::decode(&same_file.encode()).expect("decode"),
+        same_file
+    );
+}
+
+#[test]
+fn save_result_round_trips_and_a_refusal_stays_a_refusal() {
+    let ok = SaveResult {
+        ok: true,
+        entities: 213,
+        bytes: 40960,
+        path: "/tmp/block.rscene".to_string(),
+        error: String::new(),
+    };
+    assert_eq!(SaveResult::decode(&ok.encode()).expect("decode"), ok);
+
+    let refused = SaveResult {
+        ok: false,
+        entities: 0,
+        bytes: 0,
+        path: String::new(),
+        error: "refusing to save: this build did not understand 3 component(s)".to_string(),
+    };
+    let got = SaveResult::decode(&refused.encode()).expect("decode");
+    assert_eq!(got, refused);
+    assert!(!got.ok, "a refusal must not decode as a success");
+    assert!(
+        got.error.contains("3 component(s)"),
+        "the reason must survive the wire — a bare 'cannot save' is indistinguishable from a bug"
+    );
 }

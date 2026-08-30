@@ -49,6 +49,13 @@ pub enum EditorMessage {
     /// extent — so gizmo math projects/unprojects through the same matrices the pixels were
     /// rendered with (m9.6 gizmos).
     ViewportCamera,
+    /// engine → editor: the outcome of a [`EditorMessage::SaveScene`] (m14.3). Payload
+    /// `[ok:u8][entities:u64][bytes:u64][path_len:u32][path][error_len:u32][error]`.
+    ///
+    /// A refusal is a normal outcome, not a transport failure: the engine declines to save a world
+    /// whose load skipped component types it does not register, because writing it back would
+    /// delete them from the file. The error string carries the reason.
+    SaveResult,
     /// engine → editor: the play/edit phase plus how many fixed ticks have run (m9.7).
     PlayState,
     /// editor → engine: set a component's bytes on an entity.
@@ -80,6 +87,13 @@ pub enum EditorMessage {
     Step,
     /// editor → engine: restore the pre-play snapshot; back to Edit (m9.7).
     Stop,
+    /// editor → engine: write the world back to a `.rscene` (m14.3). Payload
+    /// `[path_len:u32][path]`; an empty path means "the file it was opened from".
+    ///
+    /// The ENGINE writes it, never the editor: `scene_format.hpp` makes the C++ writer the
+    /// reference implementation of the format, and this crate is required to reuse it through
+    /// files rather than reimplement the byte layout.
+    SaveScene,
 }
 
 impl EditorMessage {
@@ -92,6 +106,7 @@ impl EditorMessage {
             EditorMessage::PickResult => 0x0204,
             EditorMessage::ViewportCamera => 0x0205,
             EditorMessage::PlayState => 0x0206,
+            EditorMessage::SaveResult => 0x0207,
             EditorMessage::SetComponent => 0x0210,
             EditorMessage::Spawn => 0x0211,
             EditorMessage::Despawn => 0x0212,
@@ -105,6 +120,7 @@ impl EditorMessage {
             EditorMessage::Pause => 0x021A,
             EditorMessage::Step => 0x021B,
             EditorMessage::Stop => 0x021C,
+            EditorMessage::SaveScene => 0x021D,
         }
     }
 
@@ -117,6 +133,7 @@ impl EditorMessage {
             0x0204 => Some(EditorMessage::PickResult),
             0x0205 => Some(EditorMessage::ViewportCamera),
             0x0206 => Some(EditorMessage::PlayState),
+            0x0207 => Some(EditorMessage::SaveResult),
             0x0210 => Some(EditorMessage::SetComponent),
             0x0211 => Some(EditorMessage::Spawn),
             0x0212 => Some(EditorMessage::Despawn),
@@ -130,6 +147,7 @@ impl EditorMessage {
             0x021A => Some(EditorMessage::Pause),
             0x021B => Some(EditorMessage::Step),
             0x021C => Some(EditorMessage::Stop),
+            0x021D => Some(EditorMessage::SaveScene),
             _ => None,
         }
     }
@@ -962,4 +980,90 @@ impl ComponentRef {
             type_hash,
         })
     }
+}
+
+/// `SaveScene` (editor → engine, m14.3): ask the engine to write the world to a `.rscene`.
+///
+/// The path may be empty, meaning "the file this world was opened from". The engine refuses rather
+/// than guesses when there is no such file, because inventing one puts a scene somewhere nobody
+/// asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SaveScene {
+    pub path: String,
+}
+
+impl SaveScene {
+    /// Serialize the payload: `[path_len:u32][path bytes]` (UTF-8).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32(self.path.len() as u32);
+        w.bytes(self.path.as_bytes());
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let path = read_string(&mut r)?;
+        Ok(SaveScene { path })
+    }
+}
+
+/// `SaveResult` (engine → editor, m14.3): what came of a [`SaveScene`].
+///
+/// **A refusal is a normal outcome, not a transport failure.** The engine declines to save a world
+/// whose load skipped component types this build does not register, because writing it back would
+/// delete them from the file; `error` carries the reason and `ok` is false. A client must show it
+/// rather than retry.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SaveResult {
+    pub ok: bool,
+    pub entities: u64,
+    pub bytes: u64,
+    pub path: String,
+    pub error: String,
+}
+
+impl SaveResult {
+    /// Serialize the payload:
+    /// `[ok:u8][entities:u64][bytes:u64][path_len:u32][path][error_len:u32][error]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(u8::from(self.ok));
+        w.u64(self.entities);
+        w.u64(self.bytes);
+        w.u32(self.path.len() as u32);
+        w.bytes(self.path.as_bytes());
+        w.u32(self.error.len() as u32);
+        w.bytes(self.error.as_bytes());
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let ok = r.u8()? != 0;
+        let entities = r.u64()?;
+        let bytes = r.u64()?;
+        let path = read_string(&mut r)?;
+        let error = read_string(&mut r)?;
+        Ok(SaveResult {
+            ok,
+            entities,
+            bytes,
+            path,
+            error,
+        })
+    }
+}
+
+/// A `[len:u32][bytes]` UTF-8 string, as the engine's `write_string` emits.
+///
+/// Invalid UTF-8 is `Truncated` rather than a lossy replacement: a path we cannot reproduce exactly
+/// is a path we must not pretend to have, and the alternative is telling a user their scene was
+/// saved somewhere it was not.
+fn read_string(r: &mut Reader<'_>) -> Result<String> {
+    let len = r.u32()? as usize;
+    let bytes = r.take_bytes(len)?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| Error::Truncated)
 }

@@ -3,7 +3,11 @@
 
 #include "rime/editorhost/editor_host.hpp"
 
+#include <fmt/core.h>
+
+#include <filesystem>
 #include <span>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -16,6 +20,7 @@
 #include "rime/ecs/chunk.hpp"
 #include "rime/ecs/component.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/scene/scene_format.hpp"
 
 // The editor host's implementation. serialize_world / deserialize_world are the reflection walk:
 // for every entity, for every *reflected* component, serialize its bytes through its TypeInfo.
@@ -126,6 +131,11 @@ bool message_affects_frame(EditorMessage msg) noexcept {
         // are never received here, but a total switch classifies them for completeness.
         case EditorMessage::RequestSnapshot:
         case EditorMessage::PickRequest:
+        // SaveScene writes a file and answers with a SaveResult. It changes nothing in the world,
+        // so it must not wake the render loop — an editor that saves every few seconds would
+        // otherwise defeat the whole idle-skip (m10.0-perf: "idle work is a bug").
+        case EditorMessage::SaveScene:
+        case EditorMessage::SaveResult:
         case EditorMessage::Schema:
         case EditorMessage::Snapshot:
         case EditorMessage::AssetList:
@@ -446,6 +456,109 @@ bool parse_play_state(std::span<const std::byte> payload, PlayStateMsg& out) {
     return true;
 }
 
+// ── Saving the world back to a `.rscene` (m14.3) ─────────────────────────────────────────
+
+namespace {
+
+void write_string(core::ByteWriter& w, std::string_view s) {
+    w.u32(static_cast<std::uint32_t>(s.size()));
+    for (const char c : s) {
+        w.u8(static_cast<std::uint8_t>(c));
+    }
+}
+
+bool read_string(core::ByteReader& r, std::string& out) {
+    std::uint32_t len = 0;
+    if (!r.u32(len)) {
+        return false;
+    }
+    std::span<const std::byte> bytes;
+    if (!r.bytes(bytes, len)) {
+        return false;
+    }
+    out.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    return true;
+}
+
+} // namespace
+
+SceneSaveOutcome save_hosted_scene(const ecs::World& world,
+                                   const HostedScene& hosted,
+                                   std::string_view requested_path) {
+    SceneSaveOutcome out;
+
+    // THE REFUSAL, and it is the whole reason this is a function rather than three inline lines.
+    // The editor loads leniently so it can open a scene authored by a build it does not match
+    // (scene::LoadOptions, m14.1). What is in memory is therefore missing whatever it could not
+    // read, and writing that back deletes those records from the file — silently, permanently, with
+    // every counter green. Tolerance at load is only safe while this veto exists at save.
+    if (hosted.skipped_components != 0) {
+        out.error = fmt::format(
+            "refusing to save: this build did not understand {} component(s) in the scene it "
+            "loaded, and saving would delete them. Open it in a build that registers them.",
+            hosted.skipped_components);
+        return out;
+    }
+
+    const std::string path(requested_path.empty() ? hosted.path : std::string(requested_path));
+    if (path.empty()) {
+        // A built-in world has no file to go back to, and inventing one would put a scene somewhere
+        // nobody asked for.
+        out.error = "refusing to save: no path given and this world was not loaded from a file";
+        return out;
+    }
+
+    const std::string text = scene::save_scene_to_string(world);
+    if (!scene::save_scene_file(world, std::filesystem::path(path))) {
+        out.error = "could not write scene file: " + path;
+        return out;
+    }
+
+    out.ok = true;
+    out.path = path;
+    out.entities = world.entity_count();
+    out.bytes = text.size();
+    return out;
+}
+
+std::vector<std::byte> serialize_save_scene(std::string_view path) {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    write_string(w, path);
+    return out;
+}
+
+bool parse_save_scene(std::span<const std::byte> payload, std::string& out_path) {
+    core::ByteReader r(payload);
+    return read_string(r, out_path);
+}
+
+std::vector<std::byte> serialize_save_result(const SceneSaveOutcome& outcome) {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    w.u8(outcome.ok ? 1u : 0u);
+    w.u64(static_cast<std::uint64_t>(outcome.entities));
+    w.u64(static_cast<std::uint64_t>(outcome.bytes));
+    write_string(w, outcome.path);
+    write_string(w, outcome.error);
+    return out;
+}
+
+bool parse_save_result(std::span<const std::byte> payload, SceneSaveOutcome& out) {
+    core::ByteReader r(payload);
+    std::uint8_t ok = 0;
+    std::uint64_t entities = 0;
+    std::uint64_t bytes = 0;
+    if (!r.u8(ok) || !r.u64(entities) || !r.u64(bytes) || !read_string(r, out.path) ||
+        !read_string(r, out.error)) {
+        return false;
+    }
+    out.ok = ok != 0;
+    out.entities = static_cast<std::size_t>(entities);
+    out.bytes = static_cast<std::size_t>(bytes);
+    return true;
+}
+
 void PlaySession::play(const ecs::World& world) {
     if (phase_ == PlayPhase::Edit) {
         snapshot_ = serialize_world(world);
@@ -592,6 +705,29 @@ bool EditorHost::poll_one(ecs::World& world) {
             w.u32(0);
             (void)conn_.send_message(static_cast<stream::MessageType>(EditorMessage::PickResult),
                                      out);
+            return true;
+        }
+        case EditorMessage::SaveScene: {
+            // The engine writes the file (scene_format.hpp: the C++ writer is the reference
+            // implementation and the Rust editor reuses it through files). The editor is told the
+            // outcome either way — including a refusal, which must carry its reason or it is
+            // indistinguishable from a bug.
+            std::string path;
+            if (!parse_save_scene(payload, path)) {
+                RIME_ERROR("editorhost: malformed SaveScene");
+                return true;
+            }
+            const SceneSaveOutcome outcome = save_hosted_scene(world, hosted_, path);
+            if (outcome.ok) {
+                RIME_INFO("editorhost: saved {} entities to {} ({} bytes)",
+                          outcome.entities,
+                          outcome.path,
+                          outcome.bytes);
+            } else {
+                RIME_WARN("editorhost: save refused — {}", outcome.error);
+            }
+            (void)conn_.send_message(static_cast<stream::MessageType>(EditorMessage::SaveResult),
+                                     serialize_save_result(outcome));
             return true;
         }
         default:

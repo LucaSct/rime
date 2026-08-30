@@ -68,6 +68,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -202,6 +203,58 @@ void register_all(ecs::World& world) {
     return live;
 }
 
+// What is ACTUALLY standing in a world, counted from the world.
+//
+// `blockkit::BlockStats` describes what `assemble` intended to build, and for a generated block the
+// two agree. With `--scene` they need not: the whole point of an editor is that the file differs
+// from what the generator would have produced, so every number the proof gates on is measured from
+// the world that came off disk. The same discipline m13.2c applied to the block's own scale floors.
+struct MeasuredScene {
+    std::size_t entities = 0;
+    std::size_t destructibles = 0;
+    std::size_t parts = 0; // only knowable after binding — the patterns carry the part counts
+    std::size_t local_lights = 0;
+
+    // A fingerprint of the AUTHORED placements — every entity's LocalTransform translation, FNV-1a
+    // over the raw float bits in load order.
+    //
+    // It exists so the round trip can be OBSERVED rather than assumed (m14.4). "The game ran the
+    // file the editor saved" is worth very little on its own: it is equally true of a game that
+    // silently regenerated its own level and ignored the file. Two runs whose digests DIFFER are
+    // running different scenes, and that is the claim M14's "done when" actually makes.
+    std::uint64_t placement_digest = 0;
+};
+
+[[nodiscard]] MeasuredScene measure_scene(ecs::World& world) {
+    MeasuredScene m;
+    m.entities = world.entity_count();
+    world.query<destruction::Destructible>().for_each(
+        [&](ecs::Entity, destruction::Destructible&) { ++m.destructibles; });
+    world.query<render::PointLight>().for_each(
+        [&](ecs::Entity, render::PointLight&) { ++m.local_lights; });
+    world.query<render::SpotLight>().for_each(
+        [&](ecs::Entity, render::SpotLight&) { ++m.local_lights; });
+
+    // FNV-1a over the translation bits. Bits, not values: an edit of 22 -> 23 must change this, and
+    // so must an edit far below any epsilon a comparison would pick.
+    std::uint64_t h = 1469598103934665603ull;
+    const auto fold = [&h](float v) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(bits));
+        for (int i = 0; i < 4; ++i) {
+            h ^= static_cast<std::uint64_t>((bits >> (i * 8)) & 0xFFu);
+            h *= 1099511628211ull;
+        }
+    };
+    world.query<ecs::LocalTransform>().for_each([&](ecs::Entity, ecs::LocalTransform& lt) {
+        fold(lt.value.translation.x);
+        fold(lt.value.translation.y);
+        fold(lt.value.translation.z);
+    });
+    m.placement_digest = h;
+    return m;
+}
+
 // The ground the block stands on and the player walks along. It is NOT in the scene file: blockkit
 // authors the block, and a street slab is level geometry every peer stands up for itself — the same
 // split `13-networked-player` makes with its floor, and the reason a client can predict standing on
@@ -254,7 +307,7 @@ struct Peer {
     core::JobSystem jobs{0};
     destruction::DestructionWorld destruction;
     std::unordered_map<std::uint64_t, destruction::PatternId> patterns;
-    blockkit::BlockStats stats;
+    MeasuredScene measured;
 
     [[nodiscard]] bool register_patterns(const std::filesystem::path& cooked,
                                          destruction_render::PartLeafRenderer* leaves = nullptr,
@@ -311,16 +364,40 @@ struct Peer {
     // destructibles, because the server is about to send them. Keeping both would give the client
     // 280 destructible instances: 140 mirrored ones receiving damage and 140 local ones standing
     // there forever, which draws as a building that never falls behind the one that does.
-    [[nodiscard]] bool stand_up(destruction::Authority authority, bool own_destructibles) {
+    [[nodiscard]] bool stand_up(destruction::Authority authority,
+                                bool own_destructibles,
+                                std::string_view scene_path) {
         register_all(world);
         (void)add_street(physics, blockkit::BlockParams{});
-        ecs::World authoring;
-        stats = blockkit::assemble(authoring, blockkit::BlockParams{});
-        if (!scene::load_scene_from_string(world, scene::save_scene_to_string(authoring)).ok) {
-            std::fprintf(stderr, "99-the-block: the block's own scene file did not load back\n");
-            return false;
+
+        // `--scene <file>` runs A SCENE SOMEONE AUTHORED rather than the one blockgen produces —
+        // M14's "done when": open the shipped block in the editor, change it, save it, and run the
+        // changed scene here. Without it the demo generates its own, exactly as before.
+        //
+        // STRICT load either way. A tool opens a scene leniently because it may not have every
+        // module; a GAME that cannot construct part of its own level is broken and should say so at
+        // the door (scene::LoadOptions).
+        if (!scene_path.empty()) {
+            const scene::LoadReport r =
+                scene::load_scene_file(world, std::filesystem::path(scene_path));
+            if (!r.ok) {
+                std::fprintf(stderr,
+                             "99-the-block: could not load '%s': %s\n",
+                             std::string(scene_path).c_str(),
+                             r.error.c_str());
+                return false;
+            }
+        } else {
+            ecs::World authoring;
+            (void)blockkit::assemble(authoring, blockkit::BlockParams{});
+            if (!scene::load_scene_from_string(world, scene::save_scene_to_string(authoring)).ok) {
+                std::fprintf(stderr,
+                             "99-the-block: the block's own scene file did not load back\n");
+                return false;
+            }
         }
         (void)blockkit::derive_world_transforms(world);
+        measured = measure_scene(world);
 
         // C6's budget, at block scale. 10-destructible-wall runs 48 live; this needs an order of
         // magnitude more. Both caps rise together and the visual one stays LARGER — inverting them
@@ -346,13 +423,18 @@ struct Peer {
         }
 
         const destruction::BindStats bound = bind(authority);
-        if (bound.unresolved != 0 || bound.bound != stats.destructibles()) {
+        if (bound.unresolved != 0 || bound.bound != measured.destructibles) {
             std::fprintf(stderr,
                          "99-the-block: bound %zu of %zu destructibles, %zu unresolved\n",
                          bound.bound,
-                         stats.destructibles(),
+                         measured.destructibles,
                          bound.unresolved);
             return false;
+        }
+        // Parts are only knowable now: the count lives in the cooked patterns the bind resolved.
+        for (std::size_t i = 0; i < destruction.instance_count(); ++i) {
+            measured.parts += destruction.instance_part_count(
+                destruction::InstanceId{static_cast<std::uint32_t>(i), 0});
         }
         return true;
     }
@@ -504,6 +586,7 @@ struct Session {
     explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {}
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked,
+                             std::string_view scene_path,
                              destruction_render::PartLeafRenderer* leaves,
                              render::MeshRegistry* meshes) {
         // A rifle, not a demolition charge: cooked parts stand at 1.0 health, so the damage number
@@ -522,8 +605,8 @@ struct Session {
         // A server binds Local (it owns them, and every damage source feeds them); a client binds
         // Remote, which is what stops its own solver's contact impulses from eroding a wall the
         // server is already eroding for it.
-        if (!server.stand_up(destruction::Authority::Local, true) ||
-            !client.stand_up(destruction::Authority::Remote, false)) {
+        if (!server.stand_up(destruction::Authority::Local, true, scene_path) ||
+            !client.stand_up(destruction::Authority::Remote, false, scene_path)) {
             return false;
         }
 
@@ -562,11 +645,11 @@ struct Session {
         for (const ecs::Entity e : destructibles) {
             (void)server.replicator->replicate(e);
         }
-        if (destructibles.size() != server.stats.destructibles()) {
+        if (destructibles.size() != server.measured.destructibles) {
             std::fprintf(stderr,
                          "99-the-block: replicated %zu of %zu destructibles\n",
                          destructibles.size(),
-                         server.stats.destructibles());
+                         server.measured.destructibles);
             return false;
         }
         return true;
@@ -966,11 +1049,12 @@ struct Demo {
 
     explicit Demo(const app::AppConfig& cfg) : app(cfg) {}
 
-    [[nodiscard]] bool start(const std::filesystem::path& cooked) {
+    [[nodiscard]] bool start(const std::filesystem::path& cooked, std::string_view scene_path) {
         if (app.device() != nullptr) {
             visuals = std::make_unique<Visuals>(*app.device());
         }
         if (!session.start(cooked,
+                           scene_path,
                            visuals ? &visuals->leaves : nullptr,
                            visuals ? &visuals->meshes : nullptr)) {
             return false;
@@ -1140,7 +1224,7 @@ struct Demo {
 };
 
 // ── --headless: M13's "done when", as a CI-gated self-check ─────────────────────────────────────
-int run_headless(const std::filesystem::path& cooked) {
+int run_headless(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
     cfg.gpu = true; // a device if there is one; the sim half runs either way
     cfg.render_extent = {kWidth, kHeight};
@@ -1155,16 +1239,19 @@ int run_headless(const std::filesystem::path& cooked) {
             return 1;
         }
     }
-    if (!demo.start(cooked)) {
+    if (!demo.start(cooked, scene_path)) {
         return 1;
     }
 
-    const blockkit::BlockStats& stats = demo.session.client.stats;
+    const MeasuredScene& stats = demo.session.server.measured;
+    std::printf("99-the-block: scene digest 0x%016llx%s\n",
+                static_cast<unsigned long long>(stats.placement_digest),
+                scene_path.empty() ? " (generated)" : " (loaded from --scene)");
     std::printf("99-the-block: %zu entities, %zu destructibles, %zu parts, %zu local lights\n",
                 stats.entities,
-                stats.destructibles(),
+                stats.destructibles,
                 stats.parts,
-                stats.local_lights());
+                stats.local_lights);
 
     const std::size_t parts_at_start = demo.session.parts_alive();
     const std::vector<std::size_t> parts_at_start_per = demo.session.parts_per_building();
@@ -1277,7 +1364,7 @@ int run_headless(const std::filesystem::path& cooked) {
     std::printf("  scale     : parts %zu >= %zu, local lights %zu >= %zu\n",
                 stats.parts,
                 kMinParts,
-                stats.local_lights(),
+                stats.local_lights,
                 kMinLocalLights);
     std::printf("  player    : spawned %s, predicted %s\n",
                 demo.session.client.local_player().is_valid() ? "yes" : "NO",
@@ -1355,7 +1442,7 @@ int run_headless(const std::filesystem::path& cooked) {
     std::vector<Claim> claims{
         // 1. It composes, at ADR-0035 §1's declared scale.
         {"scale: parts >= 1500", stats.parts >= kMinParts},
-        {"scale: local lights >= 32", stats.local_lights() >= kMinLocalLights},
+        {"scale: local lights >= 32", stats.local_lights >= kMinLocalLights},
         // 4. The player is in it, and PREDICTED — the m13.3a deferral, closed here.
         {"player: avatar replicated to the client", demo.session.client.local_player().is_valid()},
         {"player: the predictor is seeded", demo.session.client.predictor.seeded()},
@@ -1423,7 +1510,7 @@ int run_headless(const std::filesystem::path& cooked) {
 }
 
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
-int run_play(const std::filesystem::path& cooked) {
+int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kWidth, kHeight};
@@ -1437,7 +1524,7 @@ int run_play(const std::filesystem::path& cooked) {
         std::fprintf(stderr, "99-the-block: --play needs a Vulkan device\n");
         return 1;
     }
-    if (!demo.start(cooked)) {
+    if (!demo.start(cooked, scene_path)) {
         return 1;
     }
 
@@ -1491,6 +1578,7 @@ int run_play(const std::filesystem::path& cooked) {
 int main(int argc, char** argv) {
     enum class Mode { Headless, Play } mode = Mode::Headless;
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
+    std::string scene_path; // --scene: run a scene someone authored, not the generated one (m14.4)
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a(argv[i]);
@@ -1502,13 +1590,15 @@ int main(int argc, char** argv) {
             g_ticks = static_cast<std::uint64_t>(std::atoll(argv[++i]));
         } else if (a == "--idle") {
             g_idle = true;
+        } else if (a == "--scene" && i + 1 < argc) {
+            scene_path = argv[++i];
         } else if (a == "--cooked" && i + 1 < argc) {
             cooked = argv[++i];
         }
     }
 
     if (mode == Mode::Play) {
-        return run_play(cooked);
+        return run_play(cooked, scene_path);
     }
-    return run_headless(cooked);
+    return run_headless(cooked, scene_path);
 }

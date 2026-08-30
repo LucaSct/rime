@@ -339,6 +339,14 @@ jobs:
       - name: Editor GUI build + unit tests (--features gui)
         run: cd tools && cargo test -p editor --bins --features gui
 
+      # M14's "done when" (m14.4): blockgen writes the block, the game runs it and prints a
+      # placement digest, the editor opens/edits/saves it through the live host, and the game runs
+      # the SAVED file. The digests must differ — "the game ran the file the editor saved" is
+      # equally true of a game that ignored the file and regenerated its own level, and that is
+      # precisely the failure this asserts against.
+      - name: Authoring round trip (blockgen → game → editor → game)
+        run: ./scripts/authoring-round-trip.sh
+
   lint:
     name: format, lint & license
     runs-on: ubuntu-latest # style/lint are OS-independent — check once.

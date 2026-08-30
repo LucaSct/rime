@@ -118,7 +118,9 @@ void register_editor_components(ecs::World& world) {
 //
 // The counters are REPORTED, loudly, and that is the half that makes tolerance safe: a tool that
 // drops what it cannot read and then says nothing is one save away from deleting it.
-bool load_scene_for_editor(ecs::World& world, std::string_view scene_path) {
+bool load_scene_for_editor(ecs::World& world,
+                           std::string_view scene_path,
+                           editorhost::HostedScene& hosted) {
     scene::LoadOptions options;
     options.allow_unknown_components = true;
     const scene::LoadReport report =
@@ -143,14 +145,20 @@ bool load_scene_for_editor(ecs::World& world, std::string_view scene_path) {
               report.components,
               report.skipped_components,
               scene_path);
+    // Remember BOTH: where it came from (so a pathless save writes back where it opened) and what
+    // the load dropped (so a lossy world can never be saved over the file it came from — m14.3).
+    hosted.path = std::string(scene_path);
+    hosted.skipped_components = report.skipped_components;
     return true;
 }
 
-void register_and_populate(ecs::World& world, std::string_view scene_path) {
+void register_and_populate(ecs::World& world,
+                           std::string_view scene_path,
+                           editorhost::HostedScene& hosted) {
     register_editor_components(world);
     if (scene_path.empty()) {
         build_default_world(world);
-    } else if (load_scene_for_editor(world, scene_path)) {
+    } else if (load_scene_for_editor(world, scene_path, hosted)) {
         core::JobSystem jobs;
         ecs::propagate_transforms(world, jobs);
     }
@@ -267,8 +275,10 @@ void send_asset_list(stream::ProtocolConnection& conn, std::string_view assets_p
 // editorhost::EditorHost path.
 int serve_channel(stream::ProtocolConnection conn,
                   ecs::World& world,
-                  std::string_view assets_path) {
+                  std::string_view assets_path,
+                  const editorhost::HostedScene& hosted) {
     editorhost::EditorHost host(std::move(conn));
+    host.set_hosted_scene(hosted); // so SaveScene knows where to write, and when to refuse (m14.3)
     if (!host.send_hello(world)) {
         RIME_ERROR("rime-engine: failed to send schema + snapshot");
         return 1;
@@ -399,7 +409,8 @@ void build_viewport_scene(ecs::World& world,
 void load_viewport_scene(ecs::World& world,
                          render::MeshRegistry& meshes,
                          render::MaterialRegistry& materials,
-                         std::string_view scene_path) {
+                         std::string_view scene_path,
+                         editorhost::HostedScene& hosted) {
     // One list, shared with the non-viewport path above and with every sample (m14.1).
     // WorldTransform is in it: derived state, deliberately unreflected (reflect.hpp), so it stays
     // out of the scene and the snapshot but must exist for the renderer and the gizmo pass to query
@@ -425,7 +436,7 @@ void load_viewport_scene(ecs::World& world,
 
     // Leaves the world as whatever loaded on failure: the editor still connects and shows an
     // empty/partial outliner rather than the host dying on a bad path.
-    (void)load_scene_for_editor(world, scene_path);
+    (void)load_scene_for_editor(world, scene_path, hosted);
     derive_world_transforms(world);
 }
 
@@ -442,7 +453,8 @@ int serve_viewport(std::string_view socket_path,
         // than fail. The editor still gets the schema + snapshot + edits; its viewport shows a
         // placeholder.
         RIME_WARN("rime-engine: no Vulkan device — serving the editor channel without a viewport");
-        register_and_populate(app.world(), {});
+        editorhost::HostedScene hosted;
+        register_and_populate(app.world(), scene_path, hosted);
         auto listener = platform::LocalListener::bind(socket_path);
         if (!listener) {
             RIME_ERROR("rime-engine: could not bind '{}'", socket_path);
@@ -455,7 +467,8 @@ int serve_viewport(std::string_view socket_path,
             return 1;
         }
         stream::ProtocolConnection conn(std::move(*sock));
-        return conn.handshake() ? serve_channel(std::move(conn), app.world(), assets_path) : 1;
+        return conn.handshake() ? serve_channel(std::move(conn), app.world(), assets_path, hosted)
+                                : 1;
     }
 
     // Build the renderable scene and wire the per-frame render into the app's graph. The picker is
@@ -468,10 +481,11 @@ int serve_viewport(std::string_view socket_path,
     render::GizmoRenderer gizmos(*app.device(), meshes);
     // `--scene` hosts a real saved world; without it, the built-in sphere row (the m9.6 gizmo/pick
     // demo). Either way the registries above are populated so MeshRef/MaterialRef indices resolve.
+    editorhost::HostedScene hosted;
     if (scene_path.empty()) {
         build_viewport_scene(app.world(), meshes, materials);
     } else {
-        load_viewport_scene(app.world(), meshes, materials, scene_path);
+        load_viewport_scene(app.world(), meshes, materials, scene_path, hosted);
     }
     // CLUSTERED FORWARD, because an editor must be able to host a scene it did not author (m14.1).
     // The ADR-0022 uniform-block path caps at 4 directional + 16 point lights and DROPS the rest
@@ -642,6 +656,27 @@ int serve_viewport(std::string_view socket_path,
                 }
                 if (msg == editorhost::EditorMessage::RequestSnapshot) {
                     snapshot_requested = true;
+                } else if (msg == editorhost::EditorMessage::SaveScene) {
+                    // Same call the GPU-free channel makes (EditorHost::poll_one), so the viewport
+                    // and channel paths cannot drift into two save policies. Answered inline rather
+                    // than queued: a save reads the world and writes a file, and this drain already
+                    // runs on the thread that owns the world.
+                    std::string save_path;
+                    if (editorhost::parse_save_scene(e.payload, save_path)) {
+                        const editorhost::SceneSaveOutcome outcome =
+                            editorhost::save_hosted_scene(app.world(), hosted, save_path);
+                        if (outcome.ok) {
+                            RIME_INFO("rime-engine: saved {} entities to {} ({} bytes)",
+                                      outcome.entities,
+                                      outcome.path,
+                                      outcome.bytes);
+                        } else {
+                            RIME_WARN("rime-engine: save refused — {}", outcome.error);
+                        }
+                        (void)conn.send_message(
+                            static_cast<stream::MessageType>(editorhost::EditorMessage::SaveResult),
+                            editorhost::serialize_save_result(outcome));
+                    }
                 } else if (msg == editorhost::EditorMessage::PickRequest) {
                     core::ByteReader r(e.payload);
                     std::uint32_t ux = 0;
@@ -843,7 +878,8 @@ int serve(std::string_view socket_path,
         return serve_viewport(socket_path, scene_path, assets_path);
     }
     ecs::World world;
-    register_and_populate(world, scene_path);
+    editorhost::HostedScene hosted;
+    register_and_populate(world, scene_path, hosted);
     auto listener = platform::LocalListener::bind(socket_path);
     if (!listener) {
         RIME_ERROR("rime-engine: could not bind editor-host socket '{}'", socket_path);
@@ -863,7 +899,7 @@ int serve(std::string_view socket_path,
         RIME_ERROR("rime-engine: protocol handshake failed");
         return 1;
     }
-    return serve_channel(std::move(conn), world, assets_path);
+    return serve_channel(std::move(conn), world, assets_path, hosted);
 }
 
 } // namespace
