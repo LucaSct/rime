@@ -89,14 +89,12 @@
 #include "rime/destruction/bind.hpp"
 #include "rime/destruction/components.hpp"
 #include "rime/destruction/world.hpp"
-#include "rime/destruction_net/components.hpp"
 #include "rime/destruction_net/composition.hpp"
 #include "rime/destruction_net/destruction_client.hpp"
 #include "rime/destruction_net/destruction_server.hpp"
 #include "rime/destruction_render/part_leaves.hpp"
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
-#include "rime/ecs/render_transform.hpp"
 #include "rime/ecs/schema_hash.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
@@ -105,7 +103,6 @@
 #include "rime/gameplay/first_person.hpp"
 #include "rime/gameplay/input_map.hpp"
 #include "rime/gameplay/weapon.hpp"
-#include "rime/gameplay_net/components.hpp"
 #include "rime/gameplay_net/convert.hpp"
 #include "rime/gameplay_net/gameplay_client.hpp"
 #include "rime/gameplay_net/gameplay_server.hpp"
@@ -124,6 +121,7 @@
 #include "rime/replication/server_replicator.hpp"
 #include "rime/rhi/rhi.hpp"
 #include "rime/scene/scene_format.hpp"
+#include "rime/worldkit/profile.hpp"
 
 #ifndef RIME_BLOCK_COOKED_DIR
 #define RIME_BLOCK_COOKED_DIR "cooked"
@@ -174,27 +172,21 @@ std::uint64_t g_ticks = kDefaultTicks;
 
 // ── Small helpers ───────────────────────────────────────────────────────────────────────────────
 
-// EVERY module whose components cross the wire or the scene file, registered in ONE place and in
-// one order, because both peers hash this set into `NetDriver::Config::schema_hash` and a driver
-// whose peer registered a different set refuses the connection outright.
+// Every component this demo's worlds hold: the engine's profile (m14.1) plus the game's own.
 //
-// This function is where the first draft of this sample went wrong, and the failure is worth
-// recording because it is the shape of failure a composition demo exists to find. It registered the
-// four modules the block's SCENE needs and none of the four the SESSION needs — so the block stood
-// up and drew perfectly, the avatar even replicated, and then: the predictor never seeded (no
-// `RigidBodyHandle` component meant no body to predict against), destruction replicated zero ops,
-// the peers' hashes disagreed, and the mixer heard nothing. Four failures, one cause, and not one
-// of them visible in any single subsystem's own tests.
+// It used to be nine hand-written lines here, and the first draft got them wrong in a way that took
+// a while to see: it named the four modules the block's SCENE needs and none of the four its
+// SESSION needs, so the block stood up and drew perfectly while the predictor never seeded (no
+// `RigidBodyHandle` meant no body to predict against), destruction replicated zero ops, the peers'
+// hashes disagreed, and the mixer heard nothing. Four symptoms, one missing list.
+//
+// `worldkit::register_engine_components` is that list, once, shared with the editor host and
+// anything else that opens a `.rscene`. The order inside it is fixed, which matters beyond
+// tidiness: `ecs::component_schema_hash` goes into `NetDriver::Config`, and two peers that
+// registered different sets refuse to connect. Both peers calling one function cannot disagree.
 void register_all(ecs::World& world) {
-    ecs::register_transform_components(world);
-    physics::register_physics_components(world);
-    blockkit::register_blockkit_components(world);
-    destruction::register_destruction_components(world);
-    destruction_net::register_destruction_net_components(world);
-    gameplay::register_gameplay_components(world);
-    gameplay_net::register_gameplay_net_components(world);
-    render::register_render_components(world);
-    (void)world.register_component<ecs::RenderTransform>();
+    (void)worldkit::register_engine_components(world);
+    blockkit::register_blockkit_components(world); // the game's own, layered on the engine's
 }
 
 // How many debris bodies are still LIVE (not frozen by the C6 budget). The roster is append-only,

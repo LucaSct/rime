@@ -9,6 +9,53 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-30) — m14.1: the editor opens the block.** The first M14 brick, and it closes the
+> thing that started the milestone: *"unknown component type `rime::blockkit::SlabRole` — is it
+> registered?"*. It is now `loaded 213 entities, 604 components, 0 skipped`, with a typed field edit
+> round-tripping through the channel.
+>
+> **`engine/worldkit` — one answer to "what components does a Rime world have?"** There was none, and
+> the drift between everyone's private list had already cost two silent failures: the editor unable to
+> open the newest content in the repo, and `99-the-block`'s first draft registering the four modules
+> the block's SCENE needs and none of the four its SESSION needs (predictor never seeds, zero
+> destruction ops, peers disagree, mixer silent — four symptoms, one missing list). Both callers now
+> share `worldkit::register_engine_components`, and a game layers its own module on top in one visible
+> line. **A profile, not a registry**: ADR-0037 rejected module self-registration because it needs
+> mutable global state (guardrail 4) and turns "does the engine build without this module?" into a
+> runtime question (guardrail 2). Nothing in the engine depends on `worldkit`, so deleting it leaves
+> the engine building — the same promise `blockkit` makes.
+>
+> **The loader degrades, and counts.** `scene::LoadOptions::allow_unknown_components` lets a tool skip
+> a component type it has never heard of instead of failing the whole file — because an editor is
+> expected to open scenes from builds it does not match, and refusing over one record is what made it
+> unable to open its own engine's content. **Strict stays the default**, so no game's behaviour moved.
+> **Schema drift stays fatal either way**, and that distinction is the design: an unknown type means
+> "this build lacks that module" (survivable), a drifted type means "this build HAS it and the file is
+> stale" (data you would be discarding). The count and the type NAMES are reported, because a tool
+> that drops what it cannot read and says nothing is one save away from deleting it — which is the
+> alternative ADR-0037 explicitly rejected.
+>
+> **Two gates, and the second is the one that was missing.** `tests/worldkit` asserts the block's own
+> `.rscene` loads with zero unknown types — GPU-free, asset-free, on every CI OS — with a negative
+> control that fails if the engine profile ever quietly absorbs a game's content. And
+> `scripts/editor-smoke.sh` now generates a real block with `rime-blockgen` and opens it. That job
+> stayed green through all seven PRs of the M13 stack while the block was unopenable, because it only
+> ever opened a synthetic four-entity scene.
+>
+> **One defect fell out of pointing the editor at real content:** the viewport was on the ADR-0022
+> uniform-block light path, which caps at 4 directional + 16 point and drops the rest. The block
+> carries 36 local lights, so opening it lit a deliberately-dark dusk scene with less than half its
+> rig. Clustered forward is on now — the same call `block_render_test` and `99-the-block` already
+> make, applied where a user opens arbitrary content rather than only where we author it.
+>
+> **Not in this brick, and named rather than left as an absence:** the block's slabs do not DRAW in
+> the viewport. Their geometry lives in the cooked `.rdest` patterns and reaches a renderer through
+> m13.2d's render leaves, which the viewport does not build; resolving cooked assets into the live
+> viewport registry is the asset-bridge brick. So the streamed-viewport smoke deliberately does not
+> run against the block — asserting a pick on a black frame would be coverage in name only.
+>
+> **Next:** m14.2 (the GUI shell compiled by CI, and opening a named scene file), then m14.3 (save).
+
 > **Update (2026-08-30) — m13.6: the collapse stays local, and MILESTONE 13 IS COMPLETE.** m13.5
 > shipped `99-the-block` with 20 claims passing and one reported as a known defect: one demolition
 > charge flattened the entire block. This is the cause, and it is not in the physics.
