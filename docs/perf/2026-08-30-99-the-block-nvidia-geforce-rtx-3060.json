@@ -1,0 +1,217 @@
+{
+  "schema": 1,
+  "run": {
+    "sample": "99-the-block",
+    "commit": "68bcfd7-dirty",
+    "date": "2026-08-30"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "driver": "NVIDIA 610.57.04",
+    "os": "linux",
+    "build": "RelWithDebInfo",
+    "sanitizer": "off",
+    "preset": "block-all-lighting-gates",
+    "width": 1920,
+    "height": 1080
+  },
+  "distributions": {
+    "sim.block": {
+      "count": 600,
+      "min_ms": 0.081,
+      "p50_ms": 14.242,
+      "p95_ms": 24.615,
+      "p99_ms": 25.491,
+      "max_ms": 26.242
+    },
+    "sim.client": {
+      "count": 600,
+      "min_ms": 0.010,
+      "p50_ms": 7.482,
+      "p95_ms": 16.087,
+      "p99_ms": 16.593,
+      "max_ms": 17.022
+    },
+    "sim.server": {
+      "count": 600,
+      "min_ms": 0.004,
+      "p50_ms": 5.828,
+      "p95_ms": 8.655,
+      "p99_ms": 8.971,
+      "max_ms": 9.714
+    },
+    "sim.pre": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.schedule": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "sim.transforms": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "sim.post": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.tick": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.002,
+      "p99_ms": 0.002,
+      "max_ms": 0.003
+    },
+    "frame.declare": {
+      "count": 600,
+      "min_ms": 0.252,
+      "p50_ms": 0.299,
+      "p95_ms": 0.498,
+      "p99_ms": 0.516,
+      "max_ms": 0.582
+    },
+    "frame.execute": {
+      "count": 600,
+      "min_ms": 1.378,
+      "p50_ms": 1.470,
+      "p95_ms": 1.616,
+      "p99_ms": 1.675,
+      "max_ms": 1.850
+    },
+    "frame.submit": {
+      "count": 600,
+      "min_ms": 2.300,
+      "p50_ms": 3.520,
+      "p95_ms": 9.585,
+      "p99_ms": 10.604,
+      "max_ms": 10.872
+    },
+    "frame": {
+      "count": 600,
+      "min_ms": 4.073,
+      "p50_ms": 18.842,
+      "p95_ms": 33.450,
+      "p99_ms": 35.598,
+      "max_ms": 37.974
+    },
+    "frame.render": {
+      "count": 600,
+      "min_ms": 3.951,
+      "p50_ms": 5.230,
+      "p95_ms": 11.617,
+      "p99_ms": 12.690,
+      "max_ms": 12.982
+    },
+    "frame.player": {
+      "count": 600,
+      "min_ms": 3.999,
+      "p50_ms": 13.398,
+      "p95_ms": 24.844,
+      "p99_ms": 27.507,
+      "max_ms": 28.968
+    },
+    "frame.collapse": {
+      "count": 90,
+      "min_ms": 14.511,
+      "p50_ms": 24.986,
+      "p95_ms": 33.319,
+      "p99_ms": 36.939,
+      "max_ms": 36.939
+    }
+  },
+  "passes": {
+    "ddgi-trace": {
+      "p50_ms": 0.071,
+      "max_ms": 0.195
+    },
+    "ddgi-blend-irradiance": {
+      "p50_ms": 0.016,
+      "max_ms": 0.068
+    },
+    "ddgi-blend-visibility": {
+      "p50_ms": 0.027,
+      "max_ms": 0.225
+    },
+    "depth-prepass": {
+      "p50_ms": 0.058,
+      "max_ms": 0.398
+    },
+    "cluster-cull": {
+      "p50_ms": 0.009,
+      "max_ms": 0.026
+    },
+    "forward-pbr shadowed": {
+      "p50_ms": 0.621,
+      "max_ms": 4.051
+    },
+    "ssr-resolve": {
+      "p50_ms": 0.858,
+      "max_ms": 4.455
+    },
+    "tonemap": {
+      "p50_ms": 0.055,
+      "max_ms": 3.238
+    },
+    "hud": {
+      "p50_ms": 0.005,
+      "max_ms": 2.460
+    }
+  },
+  "worst_frame": {
+    "index": 558,
+    "ms": 37.974,
+    "passes": {
+      "ddgi-trace": 0.156,
+      "ddgi-blend-irradiance": 0.033,
+      "ddgi-blend-visibility": 0.068,
+      "depth-prepass": 0.172,
+      "depth-prepass": 0.077,
+      "depth-prepass": 0.071,
+      "depth-prepass": 0.058,
+      "cluster-cull": 0.019,
+      "forward-pbr shadowed": 3.115,
+      "ssr-resolve": 1.625,
+      "tonemap": 0.194,
+      "hud": 0.016
+    }
+  },
+  "ledger": {
+    "frames.measured": 600,
+    "draws.submitted": 1830,
+    "draws.culled": 221,
+    "parts.alive_end": 1227,
+    "debris.peak_live": 667,
+    "leaves.live": 2016,
+    "sdf.stamps": 13,
+    "ddgi.probes_updated": 264960,
+    "shadow.spot_maps": 5520,
+    "net.max_batches_per_tick": 2,
+    "net.client_physics_steps": 794
+  }
+}

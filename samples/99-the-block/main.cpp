@@ -85,6 +85,7 @@
 #include "rime/blockkit/palette.hpp"
 #include "rime/blockkit/role.hpp"
 #include "rime/core/diagnostics/perf_report.hpp"
+#include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/diagnostics/work_ledger.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math.hpp"
@@ -163,6 +164,11 @@ constexpr std::uint64_t kDefaultTicks = 430;
 constexpr std::size_t kMinParts = 1500;
 constexpr std::size_t kMinLocalLights = 32;
 constexpr std::size_t kMinPeakDebris = 400;
+
+// How many queued destruction batches a client may apply in one tick. Each costs a full physics
+// step, so this is a frame-time bound, not a fidelity knob — see the note at the drain loop. Two
+// lets a client that fell one behind recover immediately without ever paying for ten at once.
+constexpr std::size_t kMaxCatchUpBatchesPerTick = 2;
 
 // Set by --idle. A file-scope flag rather than a parameter because the tape is a pure function of
 // tick by contract and threading a mode through it would invite reading anything else in too.
@@ -602,6 +608,22 @@ struct Session {
     std::size_t peak_live_debris = 0;
     std::size_t peak_visual_debris = 0;
     destruction::BindStats client_bound{};
+
+    // The two halves of a tick, timed apart (m13.p). This demo is a server AND a client in one
+    // process, so its combined simulation cost is roughly what TWO machines pay — and gating a
+    // player-facing frame budget on that number would be measuring the demo's topology rather than
+    // the engine. A player's machine runs the client half.
+    double last_server_ms = 0.0;
+    double last_client_ms = 0.0;
+
+    // How many destruction batches the client drained in its worst single tick, and how many
+    // physics steps that cost it in total. The client's catch-up loop runs a FULL physics step per
+    // queued batch (12-networked-destruction's "one batch per update, never two merged" rule, which
+    // is right for fidelity) — so if it ever falls behind during a collapse, the cost of catching
+    // up is serialised into one frame with no bound on it. This is the counter that says whether
+    // that is happening or whether the spike is something else.
+    std::size_t max_batches_per_tick = 0;
+    std::uint64_t total_client_steps = 0;
     std::uint64_t shots_fired = 0;
     std::uint64_t shots_hit = 0;
     std::uint64_t damage_ops = 0;
@@ -730,6 +752,7 @@ struct Session {
                 inbox, client.replicator->map(), client.world);
         }
 
+        const core::Stopwatch client_watch;
         ecs::propagate_transforms(client.world, client.jobs);
         // Stand up whatever replication just delivered, BEFORE anything can damage it. Idempotent,
         // so this is one query on the overwhelming majority of ticks where nothing new arrived.
@@ -762,15 +785,36 @@ struct Session {
 
         // ONE queued batch per destruction update — never two merged, which would skip the fracture
         // boundary between them and make two waves of debris look like one island.
+        // BOUNDED CATCH-UP (m13.p, and it is a measured fix rather than a precaution).
+        //
+        // 12-networked-destruction drains EVERY queued batch in one tick — "one batch per
+        // destruction update, never two merged", which is right: merging skips the fracture
+        // boundary between them and makes two waves of debris look like one island. But each batch
+        // costs a full `physics.step`, and during a collapse the client falls behind, so the whole
+        // cost of catching up serialises into one frame. Measured on this demo before the cap:
+        // **10 physics steps in a single tick**, and `sim.client` p99 = 58 ms against a server that
+        // never exceeded 9.5 ms doing the same work. The physics was never the problem.
+        //
+        // DEFERRING IS NOT MERGING. Batches stay queued and are still applied one at a time, in
+        // order, with their fracture boundaries intact — the client simply spreads the catch-up
+        // over several ticks and lags a little longer. That it still converges is not assumed: the
+        // headless proof drains to quiescence with a BOUND and fails if the peers never agree.
+        std::size_t batches_this_tick = 0;
         do {
             (void)client.destruction_net_client.apply_next_batch(
                 client.world, client.replicator->map(), client.destruction);
             client.physics.step(kDt);
             client.destruction.update(client.physics);
-        } while (client.destruction_net_client.pending_batches() > 0);
+            ++batches_this_tick;
+        } while (client.destruction_net_client.pending_batches() > 0 &&
+                 batches_this_tick < kMaxCatchUpBatchesPerTick);
+        max_batches_per_tick = std::max(max_batches_per_tick, batches_this_tick);
+        total_client_steps += batches_this_tick;
         client.sync.write_back(client.world, client.physics);
+        last_client_ms = client_watch.elapsed_ms();
 
         // ── The server's simulation ──
+        const core::Stopwatch server_watch;
         server.world.advance_version();
         server.gameplay.consume(server.world, server.physics, server.input, kDt);
         ecs::propagate_transforms(server.world, server.jobs);
@@ -804,6 +848,7 @@ struct Session {
             ++damage_ops;
         }
         server.destruction.update(server.physics);
+        last_server_ms = server_watch.elapsed_ms();
         // The damage-op shape, and it is not a curiosity — it is the number that made m13.5's
         // runaway collapse legible. Parts stand at 1.0 health, so an op at or above 1.0 kills
         // outright; a population that is almost entirely instant kills means the damage tuning is
@@ -1744,6 +1789,253 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
     return 0;
 }
 
+// ── --perf: the hardware report (m13.p, ADR-0035 §2b) ───────────────────────────────────────────
+//
+// Deliberately NOT a CTest, and 11-lit-rooms:36-40 states the rule: CI renders on lavapipe, a CPU
+// rasteriser, where a millisecond is a statement about the runner's mood. The counts stay in
+// --headless where CI can fail on them forever; the clock lives here, run by hand or by
+// scripts/perf.sh on a machine whose fingerprint is written into the report.
+//
+// IT MEASURES THE AUTHORED CAMERA, looking down the street, and that is the whole point. The
+// scripted player walks AT a building and sees 68 of 2,051 draws; the authored view sees 1,830.
+// Gating the frame budget on the near-empty view would be gating nothing — the number that has to
+// hold is the one for the view the demo is about.
+struct PerfOptions {
+    int warmup = 90;        // unmeasured: DDGI convergence and the first-frame uploads are not the
+                            // steady state being gated
+    int frames = 600;       // 10 s at 60 Hz — enough that p99 is the 594th frame, not max
+    int charge_frame = 300; // the hero building comes down mid-run, inside the sample
+    int collapse = 90;      // frames after it that count as "the collapse window"
+    std::uint32_t width = 1920;
+    std::uint32_t height = 1080;
+    const char* out = nullptr;
+    const char* baseline = nullptr;
+};
+
+int run_perf(const std::filesystem::path& cooked,
+             std::string_view scene_path,
+             const PerfOptions& opt) {
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {opt.width, opt.height};
+    cfg.tick_hz = 60.0;
+
+    Demo demo(cfg);
+    if (demo.app.device() == nullptr) {
+        std::fprintf(stderr,
+                     "99-the-block --perf: no Vulkan device — a perf run needs real "
+                     "hardware, and there is nothing here to measure\n");
+        return 1;
+    }
+    if (!demo.start(cooked, scene_path)) {
+        return 1;
+    }
+    demo.use_authored_camera = true; // see the note above
+
+    core::PerfReport report;
+    core::MachineFingerprint fp = core::MachineFingerprint::detect();
+    const rhi::AdapterInfo& adapter = demo.app.device()->adapter();
+    fp.gpu = adapter.name;
+    fp.driver = adapter.driver_name + " " + adapter.driver_info;
+    fp.preset = "block-all-lighting-gates"; // csm + local shadows + clustered + sdf + ddgi + ssr
+    fp.width = opt.width;
+    fp.height = opt.height;
+    report.set_machine(fp);
+    report.set_run(core::RunInfo::detect("99-the-block"));
+
+    std::vector<core::PassTiming> passes;
+    bool timestamps_seen = false;
+    demo.app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer& cmd) {
+        passes.clear();
+        for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(cmd)) {
+            passes.push_back(core::PassTiming{std::string(t.name), t.gpu_ms});
+            timestamps_seen = true;
+        }
+    });
+    demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
+
+    std::printf("99-the-block --perf: %s (%s %s), %ux%u, warmup %d, measuring %d frames…\n",
+                fp.gpu.c_str(),
+                adapter.driver_name.c_str(),
+                adapter.driver_info.c_str(),
+                opt.width,
+                opt.height,
+                opt.warmup,
+                opt.frames);
+
+    std::uint64_t tick = 0;
+    for (int i = 0; i < opt.warmup; ++i, ++tick) {
+        demo.step_sim(scripted_tape(tick));
+        demo.app.step(demo.app.fixed_dt());
+    }
+
+    core::ZoneTimelines zones(report);
+    for (int i = 0; i < opt.frames; ++i, ++tick) {
+        if (i == opt.charge_frame && !demo.charge_fired) {
+            demo.fire_charge();
+        }
+        const core::Stopwatch watch;
+        // The SIM is inside the frame's clock because a player pays for it. It is also on its own
+        // timeline: ADR-0035 budgets the tick separately, and `sim.*` zones come from the
+        // Application's schedule, which this demo does not use — its simulation is the Session.
+        const core::Stopwatch sim_watch;
+        demo.step_sim(scripted_tape(tick));
+        report.observe("sim.block", sim_watch.elapsed_ms());
+        // The split that decides whether the ENGINE misses the budget or this DEMO's topology does.
+        report.observe("sim.client", demo.session.last_client_ms);
+        report.observe("sim.server", demo.session.last_server_ms);
+        const core::Stopwatch render_watch;
+        demo.app.step(demo.app.fixed_dt());
+        const double render_ms = render_watch.elapsed_ms();
+        const double ms = watch.elapsed_ms();
+        report.observe_frame(static_cast<std::uint64_t>(i), ms, passes);
+        report.observe("frame.render", render_ms);
+        // WHAT A PLAYER'S MACHINE WOULD PAY, and it is a diagnostic rather than the gate.
+        //
+        // This demo is a server AND a client in one process — that is what makes it a proof about
+        // M11+M12 rather than a single-player scene — so its wall-clock frame includes a whole
+        // authoritative simulation no player runs. `frame` stays the gated number, because moving
+        // the goalposts to the flattering measurement is exactly what a ratified budget exists to
+        // prevent. This line is here to answer the different question the budget cannot: is the
+        // ENGINE too slow, or is this demo's topology?
+        report.observe("frame.player", demo.session.last_client_ms + render_ms);
+        if (i >= opt.charge_frame && i < opt.charge_frame + opt.collapse) {
+            // The collapse, on its own timeline. A hitch there is invisible in a 600-frame p99 —
+            // 90 frames cannot move the 594th — and obvious in a 90-frame one. That is exactly why
+            // ADR-0035 asks for the window separately.
+            report.observe("frame.collapse", ms);
+        }
+    }
+    zones.stop();
+    demo.app.finish_gpu();
+
+    // The ledger travels WITH the timings, so a report can never be read as "fast" without also
+    // being read as "…and here is the work it did" (ADR-0035 §2b's vacuity guard). A run that was
+    // quick because the lighting silently switched itself off is not a pass — which is not a
+    // hypothetical here: m13.L found the demo shipped with M10 off and every claim green.
+    //
+    // draws.submitted / draws.culled LAND HERE AT LAST. ADR-0035 §2a named them as the entry to
+    // add, and 11-lit-rooms:651 still carries the note deferring them because "nothing in the
+    // engine counts a draw". The frustum cull has counted them since m13.2a; the ledger entry never
+    // followed.
+    core::WorkLedger ledger;
+    ledger.set("frames.measured", static_cast<std::uint64_t>(opt.frames));
+    ledger.set("draws.submitted", demo.visuals->cull.submitted);
+    ledger.set("draws.culled", demo.visuals->cull.culled);
+    ledger.set("parts.alive_end", demo.session.parts_alive());
+    ledger.set("debris.peak_live", demo.session.peak_live_debris);
+    ledger.set("leaves.live", demo.visuals->leaf_stats.leaves_live);
+    ledger.set("sdf.stamps", demo.visuals->sdf_stamps_total);
+    ledger.set("ddgi.probes_updated", demo.visuals->ddgi_probes_total);
+    ledger.set("shadow.spot_maps", demo.visuals->spot_maps_total);
+    ledger.set("net.max_batches_per_tick", demo.session.max_batches_per_tick);
+    ledger.set("net.client_physics_steps", demo.session.total_client_steps);
+    report.set_ledger(ledger);
+
+    core::PerfGate gate;
+    gate.at_most("frame", core::PerfStat::P99, 16.6)
+        .at_most("frame", core::PerfStat::Max, 33.0)
+        .at_most("frame.collapse", core::PerfStat::Max, 33.0)
+        .at_most("sim.block", core::PerfStat::P99, 6.0)
+        .require_samples("frame", 200)
+        .require_samples("frame.collapse", 45)
+        .max_regression(0.10);
+    // The vacuity guard, and every floor here is a thing that was actually found switched off at
+    // some point in M13.
+    gate.work()
+        .at_least("draws.submitted", 1)
+        .at_least("sdf.stamps", 1)
+        .at_least("ddgi.probes_updated", 1)
+        .at_least("shadow.spot_maps", 1)
+        .at_least("debris.peak_live", 1);
+
+    core::PerfReport baseline;
+    const core::PerfReport* baseline_ptr = nullptr;
+    if (opt.baseline != nullptr) {
+        std::string error;
+        if (core::PerfReport::load_file(opt.baseline, baseline, error)) {
+            baseline_ptr = &baseline;
+        } else {
+            std::printf("  (no usable baseline: %s)\n", error.c_str());
+        }
+    }
+    const core::PerfGate::Result result = gate.check(report, baseline_ptr);
+
+    const auto frame = report.distribution("frame");
+    if (!frame) {
+        std::fprintf(stderr, "99-the-block --perf: no frames were measured\n");
+        return 1;
+    }
+    std::printf("  frame     p50 %.2f  p95 %.2f  p99 %.2f  max %.2f ms  (%zu frames)\n",
+                frame->p50_ms,
+                frame->p95_ms,
+                frame->p99_ms,
+                frame->max_ms,
+                frame->count);
+    if (const auto collapse = report.distribution("frame.collapse")) {
+        std::printf("  collapse  p50 %.2f  p95 %.2f  p99 %.2f  max %.2f ms  (%zu frames)\n",
+                    collapse->p50_ms,
+                    collapse->p95_ms,
+                    collapse->p99_ms,
+                    collapse->max_ms,
+                    collapse->count);
+    }
+    if (const auto sim = report.distribution("sim.block")) {
+        std::printf(
+            "  sim(both) p50 %.3f  p99 %.3f  max %.3f ms\n", sim->p50_ms, sim->p99_ms, sim->max_ms);
+    }
+    if (const auto c = report.distribution("sim.client")) {
+        std::printf("  sim.client p50 %.3f  p99 %.3f  max %.3f ms  <- what a player pays\n",
+                    c->p50_ms,
+                    c->p99_ms,
+                    c->max_ms);
+    }
+    if (const auto r = report.distribution("frame.render")) {
+        std::printf(
+            "  render    p50 %.2f  p99 %.2f  max %.2f ms\n", r->p50_ms, r->p99_ms, r->max_ms);
+    }
+    if (const auto pl = report.distribution("frame.player")) {
+        std::printf("  frame.player p50 %.2f  p99 %.2f  max %.2f ms  "
+                    "<- client + render, i.e. one machine\n",
+                    pl->p50_ms,
+                    pl->p99_ms,
+                    pl->max_ms);
+    }
+    if (const auto sv = report.distribution("sim.server")) {
+        std::printf(
+            "  sim.server p50 %.3f  p99 %.3f  max %.3f ms\n", sv->p50_ms, sv->p99_ms, sv->max_ms);
+    }
+    std::printf("  worst frame #%llu at %.2f ms\n",
+                static_cast<unsigned long long>(report.worst_frame().index),
+                report.worst_frame().ms);
+    if (!timestamps_seen) {
+        std::printf("  (this device reports no GPU timestamps — the per-pass table is empty)\n");
+    }
+    std::printf("  work ledger: %s\n", ledger.to_json(-1).c_str());
+
+    if (opt.out != nullptr) {
+        std::FILE* f = std::fopen(opt.out, "wb");
+        if (f == nullptr) {
+            std::fprintf(stderr, "  could not write %s\n", opt.out);
+            return 1;
+        }
+        const std::string json = report.to_json();
+        (void)std::fwrite(json.data(), 1, json.size(), f);
+        (void)std::fclose(f);
+        std::printf("  wrote %s\n", opt.out);
+    }
+
+    std::fflush(stdout); // so the gate's stderr lands after the numbers it judges
+    if (!result.ok()) {
+        std::fprintf(stderr, "  PERF GATE:\n%s", core::PerfGate::format(result).c_str());
+    } else {
+        std::printf("  perf gate: %s", core::PerfGate::format(result).c_str());
+    }
+    std::printf("99-the-block --perf: %s\n",
+                result.ok() ? "within budget" : "FAILED the perf gate");
+    return result.ok() ? 0 : 1;
+}
+
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
@@ -1811,7 +2103,8 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 } // namespace
 
 int main(int argc, char** argv) {
-    enum class Mode { Headless, Play } mode = Mode::Headless;
+    enum class Mode { Headless, Play, Perf } mode = Mode::Headless;
+    PerfOptions perf{};
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
     std::string scene_path; // --scene: run a scene someone authored, not the generated one (m14.4)
 
@@ -1821,6 +2114,20 @@ int main(int argc, char** argv) {
             mode = Mode::Headless;
         } else if (a == "--play") {
             mode = Mode::Play;
+        } else if (a == "--perf") {
+            mode = Mode::Perf;
+        } else if (a == "--frames" && i + 1 < argc) {
+            perf.frames = std::atoi(argv[++i]);
+        } else if (a == "--warmup" && i + 1 < argc) {
+            perf.warmup = std::atoi(argv[++i]);
+        } else if (a == "--width" && i + 1 < argc) {
+            perf.width = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+        } else if (a == "--height" && i + 1 < argc) {
+            perf.height = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+        } else if (a == "--out" && i + 1 < argc) {
+            perf.out = argv[++i];
+        } else if (a == "--baseline" && i + 1 < argc) {
+            perf.baseline = argv[++i];
         } else if (a == "--ticks" && i + 1 < argc) {
             g_ticks = static_cast<std::uint64_t>(std::atoll(argv[++i]));
         } else if (a == "--ppm" && i + 1 < argc) {
@@ -1834,6 +2141,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (mode == Mode::Perf) {
+        // A short probe run (scripts/perf.sh uses --frames 12) must not try to fire the charge
+        // after the run has ended, nor demand a collapse window it cannot fill.
+        perf.charge_frame = std::min(perf.charge_frame, perf.frames / 2);
+        perf.collapse = std::min(perf.collapse, perf.frames - perf.charge_frame);
+        return run_perf(cooked, scene_path, perf);
+    }
     if (mode == Mode::Play) {
         return run_play(cooked, scene_path);
     }

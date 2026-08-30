@@ -24,7 +24,7 @@ Rime perf — measure frame/sim time on this machine and write a fingerprinted r
 
 Usage: scripts/perf.sh [options]
   --preset dev|release    build to measure (default: release — Debug numbers mean nothing)
-  --sample NAME           lit-rooms | destructible-wall | all   (default: all)
+  --sample NAME           lit-rooms | destructible-wall | the-block | all  (default: all)
   --frames N              measured frames per run (default: the sample's own, 600)
   --width W --height H    render resolution (default: 1920x1080)
   --commit                write the reports into docs/perf/ instead of a scratch dir
@@ -130,9 +130,15 @@ run_one() {
 case "$sample" in
     lit-rooms)         run_one lit_rooms 11-lit-rooms ;;
     destructible-wall) run_one destructible_wall 10-destructible-wall ;;
+    # m13.p. The vision demo, and the only sample whose numbers the milestone's "playable frame
+    # rate" clause is actually about. It needs its cooked `.rdest` set — the CTest fixtures produce
+    # it (`ctest -R block_demo_cook` in the build dir), and the run will refuse to start without it
+    # rather than measure a block that is not there.
+    the-block)         run_one the_block 99-the-block ;;
     all)
         run_one lit_rooms 11-lit-rooms
         run_one destructible_wall 10-destructible-wall
+        run_one the_block 99-the-block
         ;;
     *) echo "perf.sh: unknown sample '$sample' (try --help)" >&2; exit 2 ;;
 esac
