@@ -14,6 +14,15 @@
 function(rime_add_test name)
     add_executable(${name} ${ARGN})
     target_link_libraries(${name} PRIVATE doctest::doctest)
+    # doctest FORWARD-DECLARES std::basic_ostream rather than including <ostream>, to keep its own
+    # header cheap. Streaming a failing CHECK's operands then needs the COMPLETE type, and whether
+    # you have it depends on your standard library: libstdc++ drags <ostream> in behind <string>, so
+    # Linux never noticed; MSVC's STL does not, and every test that compares a std::string_view
+    # (nine of them, across assets/core/physics/destruction/platform) failed to compile with a
+    # hundred lines of errors inside <__msvc_string_view.hpp>. This is doctest's documented switch
+    # for the situation — it includes the real <ostream>. Set on the funnel so a new test that
+    # happens to CHECK a string_view cannot reintroduce it.
+    target_compile_definitions(${name} PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
     rime_apply_common_target_options(${name})
     # doctest's header transitively includes libstdc++'s <ciso646>, whose C++20 deprecation
     # #warning Clang surfaces even from a system header (GCC suppresses it). Under our -Werror

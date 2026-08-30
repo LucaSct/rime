@@ -115,7 +115,37 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 function(rime_apply_common_target_options target)
     target_compile_features(${target} PUBLIC cxx_std_20)
     if(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /permissive-)
+        # /utf-8 is not optional here: our sources are UTF-8 with no BOM and 485 of 535 of them
+        # carry non-ASCII bytes (the em dashes, §, → in the teaching comments). Without this MSVC
+        # decodes them in the machine's ANSI codepage, and a mangled multi-byte sequence in a
+        # COMMENT can swallow the following token — which is how tests/core/work_ledger_test.cpp
+        # failed with "illegal escape sequence" on a line whose raw string literal is perfectly
+        # valid. GCC/Clang default to UTF-8, so this whole class of failure is MSVC-only.
+        # /Zc:preprocessor selects MSVC's conformant preprocessor. The legacy one rescans a macro
+        # argument as ordinary tokens, so a RAW STRING passed to a macro loses its raw-ness: the
+        # doctest line CHECK(... == R"({"odd\"name\\here":1})") in tests/core/work_ledger_test.cpp
+        # was read as a plain literal with escapes, failing with "illegal escape sequence" and
+        # "invalid literal suffix 'name'". Any test that asserts on JSON — i.e. any test that will
+        # ever be written about the work ledger or the .rscene format — hits this.
+        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /Zc:preprocessor)
+
+        # Warnings MSVC reports that our code is deliberately in the business of triggering:
+        #   C4324 — "structure was padded due to alignment specifier". Every alignas(16) SIMD type
+        #           in core/math and physics raises it. The padding IS the point; GCC/Clang have
+        #           no equivalent diagnostic.
+        #   C4127 — "conditional expression is constant", raised from inside doctest's macros.
+        target_compile_options(${target} PRIVATE /wd4324 /wd4127)
+
+        # NOMINMAX: <windows.h> defines min()/max() as macros, and on Windows the Vulkan headers
+        # pull it in via vulkan_win32.h (VK_USE_PLATFORM_WIN32_KHR). The macro then rewrites
+        # `std::min(a, b)` into `std::(a) < (b) ? …`, which is how command_buffer_vulkan.cpp
+        # failed with "illegal token on right side of '::'". WIN32_LEAN_AND_MEAN keeps the rest of
+        # that header cheap. _CRT_SECURE_NO_WARNINGS: MSVC deprecates the *standard* std::getenv /
+        # std::strcpy (C4996); the code is conforming, so silence the vendor opinion rather than
+        # fork it. Set project-wide so no TU can forget the order-dependent ones.
+        target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+                                                     _CRT_SECURE_NO_WARNINGS)
+
         if(RIME_WARNINGS_AS_ERRORS)
             target_compile_options(${target} PRIVATE /WX)
         endif()
