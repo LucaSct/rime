@@ -392,7 +392,10 @@ TEST_CASE("ddgi: irradiance decays geometrically at the configured hysteresis ra
     // image-wide MAX from step to step, right as several near-tied bright texels all decay in
     // lockstep. This is still a tight, meaningful check: a wrong hysteresis constant or a blend
     // formula bug would miss it by far more than 15%.
-    const float expected_10 = initial * std::pow(0.8f, 10);
+    // 10.0f, not 10: std::pow(float, int) resolves to the double overload (the standard's promotion
+    // rule), so an int exponent quietly makes this a double computation narrowed back to float —
+    // which MSVC /W4 reports as C4244 and GCC does not mention at all.
+    const float expected_10 = initial * std::pow(0.8f, 10.0f);
     MESSAGE("after 10 dark updates: " << values[9] << " (expected ~" << expected_10 << ")");
     CHECK(std::fabs(values[9] - expected_10) < 0.15f * std::max(expected_10, 0.001f));
 

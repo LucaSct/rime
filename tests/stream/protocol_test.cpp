@@ -469,13 +469,25 @@ TEST_CASE("LocalSocket / LocalListener refuse bad paths cleanly (s1.4)") {
         CHECK_FALSE(platform::LocalSocket::connect(unique_local_path("noserver")).has_value());
     }
     SUBCASE("bind creates the socket node and close() unlinks it") {
+        // std::filesystem::exists() cannot ask this question portably. On Linux an AF_UNIX bind()
+        // leaves an ordinary socket node that stats fine; on Windows it leaves a REPARSE POINT the
+        // stat APIs refuse with ERROR_CANT_ACCESS_FILE, so the throwing overload throws — "exists:
+        // The file cannot be accessed by the system" — for a node that is demonstrably there. The
+        // weaker question holds on both: is it something other than ABSENT? Linux answers
+        // file_type::socket, Windows answers an access error, and only a genuinely unlinked node
+        // answers not_found. symlink_status() so the reparse point is not followed.
+        const auto node_present = [](const std::string& p) {
+            std::error_code ec;
+            return std::filesystem::symlink_status(p, ec).type() !=
+                   std::filesystem::file_type::not_found;
+        };
         const std::string path = unique_local_path("unlink");
         {
             auto l = platform::LocalListener::bind(path);
             REQUIRE(l.has_value());
-            CHECK(std::filesystem::exists(path)); // the bind created the node
+            CHECK(node_present(path)); // the bind created the node
         } // ~LocalListener → close() unlinks
-        CHECK_FALSE(std::filesystem::exists(path));
+        CHECK_FALSE(node_present(path));
     }
 }
 
