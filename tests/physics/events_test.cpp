@@ -38,6 +38,7 @@ struct BodyParams {
     core::Vec3 linear_velocity{0.0f, 0.0f, 0.0f};
     float friction = 0.5f;
     float restitution = 0.0f;
+    bool sensor = false; // m15.6
 };
 
 physics::BodyId add_body(physics::PhysicsWorld& w,
@@ -51,6 +52,7 @@ physics::BodyId add_body(physics::PhysicsWorld& w,
     d.linear_velocity = params.linear_velocity;
     d.friction = params.friction;
     d.restitution = params.restitution;
+    d.sensor = params.sensor;
     return w.create_body(d);
 }
 
@@ -294,4 +296,139 @@ TEST_CASE("the event stream is bit-identical across worker counts") {
     CHECK(run(1) == sequential);
     CHECK(run(2) == sequential);
     CHECK(run(4) == sequential);
+}
+
+// ── m15.6: sensors and trigger events ───────────────────────────────────────────────────────────
+// `Collider::sensor` shipped at M7.8 — reflected, inspectable, serialized — and was read by NOTHING
+// until now, so ticking it in the editor produced a solid collider with no warning. These prove the
+// two halves of what it now means: DETECTED like any other body, SOLVED like no body at all.
+
+TEST_CASE("m15.6: a sensor is passed through, and the pass is reported") {
+    physics::PhysicsWorld w;
+
+    // A static sensor slab at the origin, and a ball dropped straight through it. A solid slab
+    // would stop the ball dead; the assertion is that it does not.
+    BodyParams sensor_params;
+    sensor_params.motion = physics::MotionType::Static;
+    sensor_params.sensor = true;
+    const physics::BodyId volume =
+        add_body(w, box({2.0f, 0.25f, 2.0f}), {0.0f, 0.0f, 0.0f}, sensor_params);
+
+    BodyParams faller;
+    faller.linear_velocity = {0.0f, -6.0f, 0.0f};
+    const physics::BodyId ball = add_body(w, sphere(0.25f), {0.0f, 2.0f, 0.0f}, faller);
+
+    int began = 0;
+    int persisted = 0;
+    int ended = 0;
+    std::size_t contact_events_seen = 0;
+    for (int i = 0; i < 120; ++i) {
+        w.step(kDt);
+        contact_events_seen += w.contact_events().size();
+        for (const physics::TriggerEvent& t : w.trigger_events()) {
+            // Canonical order means either end may be the sensor — the pair is what is named.
+            CHECK((same_body(t.a, volume) || same_body(t.b, volume)));
+            CHECK((same_body(t.a, ball) || same_body(t.b, ball)));
+            if (t.phase == physics::ContactPhase::Began) {
+                ++began;
+            } else if (t.phase == physics::ContactPhase::Persisted) {
+                ++persisted;
+            } else {
+                ++ended;
+            }
+        }
+    }
+
+    // The whole lifecycle, once each way: in, through, out.
+    CHECK(began == 1);
+    CHECK(ended == 1);
+    CHECK(persisted > 0); // it is not infinitely thin; some ticks are spent inside
+
+    // NOT A CONTACT. A sensor pair must never reach the contact stream — a consumer summing
+    // contact impulses for damage (M8) would otherwise take damage from walking through a doorway.
+    CHECK(contact_events_seen == 0);
+
+    // And it kept falling. This is the load-bearing one: enter/exit could be reported by a solid
+    // body too, so the proof that the solver skipped it is that the ball ended up BELOW the slab,
+    // travelling at least as fast as it started.
+    physics::BodyState st{};
+    REQUIRE(w.get_body_state(ball, st));
+    CHECK(st.position.y < -1.0f);
+    CHECK(st.linear_velocity.y < -6.0f);
+}
+
+TEST_CASE("m15.6: a KINEMATIC body trips a sensor — the case the contact rule would silence") {
+    // Contacts suppress a region whose every dynamic member is asleep, and a kinematic body has
+    // zero inverse mass so it is never an "awake dynamic member" at all. Applying that rule to
+    // triggers would silence exactly the archetypal case: a scripted or character-controlled volume
+    // walking into a trigger. This is why TriggerEvents are never suppressed.
+    physics::PhysicsWorld w;
+
+    BodyParams sensor_params;
+    sensor_params.motion = physics::MotionType::Static;
+    sensor_params.sensor = true;
+    const physics::BodyId volume =
+        add_body(w, box({1.0f, 1.0f, 1.0f}), {0.0f, 0.0f, 0.0f}, sensor_params);
+
+    BodyParams kin;
+    kin.motion = physics::MotionType::Kinematic;
+    const physics::BodyId walker = add_body(w, sphere(0.25f), {-3.0f, 0.0f, 0.0f}, kin);
+
+    // A kinematic body's pose is DRIVEN, not integrated — in a live game `PhysicsSync::push_in`
+    // copies it from the entity's transform each tick. Doing that by hand here is what makes this a
+    // test of the kinematic case rather than of an unused velocity field.
+    const auto place_walker = [&](float x) {
+        physics::BodyState st{};
+        REQUIRE(w.get_body_state(walker, st));
+        st.position = {x, 0.0f, 0.0f};
+        REQUIRE(w.set_body_state(walker, st));
+    };
+
+    int began = 0;
+    int ended = 0;
+    constexpr int kSteps = 240;
+    for (int i = 0; i < kSteps; ++i) {
+        place_walker(-3.0f + 2.0f * kDt * static_cast<float>(i));
+        w.step(kDt);
+        for (const physics::TriggerEvent& t : w.trigger_events()) {
+            CHECK((same_body(t.a, volume) || same_body(t.b, volume)));
+            CHECK((same_body(t.a, walker) || same_body(t.b, walker)));
+            if (t.phase == physics::ContactPhase::Began) {
+                ++began;
+            } else if (t.phase == physics::ContactPhase::Ended) {
+                ++ended;
+            }
+        }
+    }
+    CHECK(began == 1);
+    CHECK(ended == 1);
+
+    // Undeflected. A kinematic body ignores impulses regardless, so the honest check that the
+    // sensor did nothing is that it sits exactly where it was placed and never drifted off the
+    // driven line — which a solved contact, or gravity leaking in, would break.
+    physics::BodyState st{};
+    REQUIRE(w.get_body_state(walker, st));
+    CHECK(st.position.x ==
+          doctest::Approx(-3.0f + 2.0f * kDt * static_cast<float>(kSteps - 1)).epsilon(0.001));
+    CHECK(st.position.y == doctest::Approx(0.0f).epsilon(0.001));
+}
+
+TEST_CASE("m15.6: a non-sensor pair still reports contacts and no triggers") {
+    // The negative half of the split, and the reason it is a separate case: if `sensor` were
+    // wired to the wrong place — read from the wrong body, or defaulted to true — the two tests
+    // above would still pass while every ordinary collision quietly stopped resolving.
+    physics::PhysicsWorld w;
+    (void)add_static(w, box({4.0f, 0.5f, 4.0f}), {0.0f, -0.5f, 0.0f});
+    const physics::BodyId ball = add_body(w, sphere(0.5f), {0.0f, 2.0f, 0.0f});
+
+    std::size_t contacts = 0;
+    std::size_t triggers = 0;
+    for (int i = 0; i < 180; ++i) {
+        w.step(kDt);
+        contacts += w.contact_events().size();
+        triggers += w.trigger_events().size();
+    }
+    CHECK(contacts > 0);
+    CHECK(triggers == 0);
+    CHECK(state_of_y(w, ball) > 0.0f); // it landed ON the ground, not through it
 }

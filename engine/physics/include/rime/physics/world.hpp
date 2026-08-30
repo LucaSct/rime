@@ -369,6 +369,13 @@ public:
     // worker-thread count observe the identical stream.
     [[nodiscard]] std::span<const ContactEvent> contact_events() const noexcept;
 
+    // trigger_events(): the same enter/stay/exit stream for regions where at least one body is a
+    // SENSOR (m15.6). Separate from contact_events() rather than mixed in, because a trigger has
+    // no point, no normal and no impulse — a consumer summing contact impulses must not have to
+    // learn to skip records whose numbers are all zero by construction. Same canonical order, same
+    // buffered-and-swapped lifetime as the other two families: valid until the next step().
+    [[nodiscard]] std::span<const TriggerEvent> trigger_events() const noexcept;
+
     // sleep_events(): one entry per body that fell asleep (Slept — the DebrisSettled basis) or was
     // woken by the simulation (Woke) this tick. In dense body order. See events.hpp on why an
     // explicit wake_body()/apply_impulse() wake is not reported here.

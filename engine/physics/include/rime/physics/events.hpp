@@ -13,11 +13,10 @@
 // reproducible order with reproducible payloads (same-binary determinism, ADR-0026): a networked
 // or replayed destruction sequence must be a pure function of the physics, event stream included.
 //
-// Two families ship here — contact events and sleep events. A THIRD, trigger/sensor events, is a
-// named part of the brick but deliberately deferred: it needs a sensor-body concept that is not in
-// M7's shipped shape/body scope, and it has no consumer yet (M8 damage rides contact events, not
-// triggers). Adding it now would be generalizing ahead of a measured need — the same discipline
-// ADR-0026 applies to the private AABB tree. It lands with the first gameplay volume that wants it.
+// Three families ship here — contact, sleep, and (m15.6) TRIGGER events. The third was deferred at
+// M7.9 for a good reason and stayed deferred for a bad one: `Collider::sensor` was added anyway,
+// reflected, authored and shown in the inspector, and read by nothing — so a designer could tick
+// "sensor" on a volume and get a solid wall with no warning. This is that field becoming real.
 namespace rime::physics {
 
 // What happened to a contact between a body pair across one tick. Modelled on the standard
@@ -70,6 +69,31 @@ enum class SleepPhase : std::uint8_t {
 struct SleepEvent {
     BodyId body;
     SleepPhase phase = SleepPhase::Slept;
+};
+
+// An overlap with a SENSOR body across one tick (m15.6). A sensor takes part in the broadphase and
+// the exact narrowphase like any other body, so this is real geometry rather than an AABB guess —
+// but it is skipped by the solver, so it exchanges no impulse, joins no island, and cannot push or
+// wake anything.
+//
+// It carries WHO and WHICH PHASE and nothing else, deliberately: there is no contact point, no
+// normal and no impulse, because nothing was solved. A ContactEvent with those fields zeroed would
+// read like a contact that happened to be gentle.
+//
+// `a`/`b` are in the same canonical order as ContactEvent (a.index < b.index), which means EITHER
+// may be the sensor — a consumer that wants "what entered my trigger" checks both ends. Phases are
+// the same enter/stay/exit lifecycle, computed by the same merge, so `Began`/`Ended` are the pair
+// that matters and `Persisted` is every tick in between.
+//
+// Unlike contacts, a trigger is NOT suppressed when the bodies inside it are asleep: an overlap
+// does not stop existing because nothing is moving, and a kinematic character — the archetypal
+// thing a trigger watches for — is never an "awake dynamic body" at all.
+struct TriggerEvent {
+    BodyId a;
+    BodyId b;
+    ContactPhase phase = ContactPhase::Began;
+    std::uint16_t child_a = 0; // the touching child within a compound (0 for a plain body)
+    std::uint16_t child_b = 0;
 };
 
 } // namespace rime::physics
