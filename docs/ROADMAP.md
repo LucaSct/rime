@@ -1484,6 +1484,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
 | **M13** | **"The Block" (vision demo)** | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right |
+| **M14** | **"The Authoring Loop"** | open the shipped block in the editor, change it, save it, and run the changed scene in the game ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 
 ### Detail
 
@@ -1905,6 +1906,33 @@ M3.4) + a first-person camera on the predicted player · **m12.9** audio v1 (mix
 the proof — `samples/99-the-block` (scripted CI mode, `--play`, `--perf`) + the docs true-up. Cut
 order if it runs long: audio → fx1b → m12.p's tail → m12.5. **Never cut:** m12.4, fx1a, the perf
 gate. Track FL (water) is **out** — the "decided at M12.0" the cross-cutting note promised.
+
+**M14 — "The Authoring Loop."** *Planned 2026-08-30; [ADR-0037](adr/0037-authoring-loop-m14.md) is
+the architecture.* M13 built content the editor cannot open — `rime-blockgen` writes a 213-entity
+block, `99-the-block` runs it, and the editor answers *"unknown component type
+`rime::blockkit::SlabRole`"*. The editor itself is **not** missing: engine-as-server, a streamed
+viewport, picking and gizmos all work on the default scene. What is missing is a **round trip**, and
+the "done when" is exactly that.
+
+The root cause is bigger than the editor and M13 proved it independently: there is no single answer
+in this codebase to *"what components does a Rime world have?"*, so every consumer hand-assembles a
+list and the lists have diverged. `99-the-block`'s first draft hit the same defect from the other
+side — four symptoms (predictor never seeds, zero destruction ops, peers disagree, mixer silent) from
+one missing registration list.
+
+*Bricks:* **m14.0** the ADR + this ladder (decision brick, no engine code) · **m14.1** the
+**component profile** — one registration function every `.rscene` consumer calls, unknown components
+degrading with a counter instead of failing the load, and `editor --smoke` opening the REAL block
+(the gate that would have caught `SlabRole` the day m13.2c landed) · **m14.2** the GUI shell
+**compiled by CI** (`--features gui`; built, not run) and able to open a named scene file ·
+**m14.3** **save** — the editor writes a `.rscene` back, with a byte-identical round trip and an
+edit that survives it · **m14.4** the round trip end to end, M14's "done when" · **m14.5** the asset
+browser against real cooked assets, if there is room. Cut order: m14.5 → m14.2's open-a-file half.
+**Never cut:** m14.1, m14.3 — without either there is no round trip.
+
+**M14 starts after M13 closes.** `99-the-block` has one open defect (the collapse does not stay
+local), and starting the editor work while an integration bug is open is how integration bugs get
+expensive.
 
 ---
 
