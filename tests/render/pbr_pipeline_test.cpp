@@ -536,6 +536,93 @@ TEST_CASE("pbr: a base-color texture reaches the shading (M5.6)") {
     CHECK(green_dominant > 500);
 }
 
+// m15.6. ALPHA MASKING, which the engine cooked and then ignored: `assets::AlphaMode::Mask` and
+// `alpha_cutoff` have ridden every cooked material since M6.3 and reached no shader, so every
+// alpha-tested glTF drew as an opaque quad. The proof is structural and needs no texture at all —
+// alpha comes from the base-color FACTOR, so the three cases differ by one float and nothing else,
+// which is what makes "the cutoff is a threshold" separable from "the cutoff kills everything".
+TEST_CASE("m15.6: the alpha cutoff discards below it, keeps above it, and 0 masks nothing") {
+    using ecs::WorldTransform;
+
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping alpha-mask proof");
+        return;
+    }
+    constexpr std::uint32_t kSize = 128;
+
+    MeshRegistry meshes(*device);
+    const MeshId plane = meshes.add(make_plane(2.0f, 1.0f), "alpha-floor");
+
+    // One scene, rendered three times with only the material's alpha and cutoff changed. Counting
+    // COVERED pixels (anything above the ambient-lit background) is the honest observable: a
+    // discard removes coverage, and nothing else in this scene can.
+    const auto covered_pixels = [&](float alpha, float cutoff) {
+        MaterialRegistry materials;
+        PbrMaterialDesc mat{};
+        mat.metallic = 0.0f;
+        mat.roughness = 1.0f;
+        mat.base_color[3] = alpha;
+        mat.alpha_cutoff = cutoff;
+        const MaterialId id = materials.add(mat);
+
+        ecs::World world;
+        register_render_components(world);
+        (void)world.spawn_with(WorldTransform{}, MeshRef{plane}, MaterialRef{id});
+
+        core::Transform cam_tf{};
+        cam_tf.translation = {0.0f, 6.0f, 0.0f};
+        cam_tf.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -core::kHalfPi);
+        (void)world.spawn_with(WorldTransform{cam_tf}, Camera{});
+
+        core::Transform light_tf{};
+        light_tf.translation = {0.0f, 5.0f, 0.0f};
+        (void)world.spawn_with(WorldTransform{light_tf},
+                               PointLight{1.0f, 1.0f, 1.0f, 30.0f, 50.0f});
+
+        SceneRenderer renderer(*device, meshes, materials);
+        renderer.set_ambient(0.0f, 0.0f, 0.0f); // black background: coverage is unambiguous
+
+        RenderGraph graph(*device);
+        graph.reset();
+        const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize}, false);
+        REQUIRE(out.ldr.is_valid());
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+
+        const std::vector<std::uint8_t> ldr =
+            read_texture(*device, graph.physical(out.ldr), kSize, kSize, 4);
+        std::uint32_t lit = 0;
+        for (std::size_t q = 0; q < ldr.size(); q += 4) {
+            if (ldr[q] > 8 || ldr[q + 1] > 8 || ldr[q + 2] > 8) {
+                ++lit;
+            }
+        }
+        return lit;
+    };
+
+    // The control: opaque, no cutoff. The plane covers a large, definite part of the frame — this
+    // is the number the two masked cases are measured against, not a constant guessed here.
+    const std::uint32_t opaque = covered_pixels(1.0f, 0.0f);
+    CHECK(opaque > 1000);
+
+    // A CUTOFF OF ZERO MASKS NOTHING, even at alpha 0.02. This is the case that makes the single
+    // float sufficient for glTF's three modes: Opaque and Blend leave the cutoff at 0 and must be
+    // untouched by the masking branch no matter what their alpha is.
+    CHECK(covered_pixels(0.02f, 0.0f) == opaque);
+
+    // Below the cutoff: gone. Not "dimmer" — a discard writes no colour and no depth.
+    CHECK(covered_pixels(0.25f, 0.5f) == 0);
+
+    // Above it: kept, in full. Together with the line above this is what distinguishes a threshold
+    // from "any non-zero cutoff discards everything", which would pass the previous check alone.
+    CHECK(covered_pixels(0.75f, 0.5f) == opaque);
+}
+
 // ── M6.4: material maps ─────────────────────────────────────────────────────────────────────────
 // The forward pass now consumes normal / metallic-roughness / emissive / occlusion maps and cooked
 // tangents. Same rule as above: structural properties the physics guarantees, never golden pixels.

@@ -83,7 +83,9 @@ struct GpuDrawUniforms {
                        0.5f,
                        1.0f,
                        1.0f}; // x metallic, y roughness, z normal_scale, w AO strength
-    float emissive[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // rgb = emissive factor (linear), w unused (M6.4)
+    // rgb = emissive factor (linear); w = alpha cutoff, 0 = no masking (m15.6). The w slot was
+    // spare, so alpha masking costs no extra uniform bytes and no descriptor change.
+    float emissive[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 static_assert(std::is_standard_layout_v<GpuFrameUniforms> && sizeof(GpuFrameUniforms) == 752 &&

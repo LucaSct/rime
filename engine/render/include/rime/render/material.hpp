@@ -33,6 +33,20 @@ struct PbrMaterialDesc {
     float normal_scale = 1.0f;              // scales the normal map's tangent-plane XY (M6.4)
     float occlusion_strength = 1.0f;        // lerps AO toward 1 (no occlusion) at 0 (M6.4)
 
+    // ALPHA MASKING (m15.5/m15.6): discard fragments whose base-color alpha is below this. Zero —
+    // the default — means no masking at all, which is what makes one float enough to express glTF's
+    // three alpha modes here: Opaque and Blend both leave it 0, Mask sets it to the material's
+    // cutoff. An enum would have to be kept in sync with the shader's branch; a threshold of zero
+    // simply cannot mask anything.
+    //
+    // `assets::AlphaMode` and `assets::MaterialAsset::alpha_cutoff` have been cooked and reflected
+    // since M6.3 and read by NOTHING, so every alpha-tested glTF — foliage, fences, decals — has
+    // rendered as an opaque quad with no warning. This is the field that ends that.
+    //
+    // Appended after the factors and before the maps: verified by grep that nothing positionally
+    // aggregate-initialises past `roughness` (the hazard the note at the top of this struct names).
+    float alpha_cutoff = 0.0f;
+
     // Optional maps, each driving / multiplied with its factor above (the glTF convention; the
     // fallback is the identity). BORROWED, not owned: the caller keeps them alive as long as any
     // material references them — ownership stays wherever the pixels came from until the M6 loader

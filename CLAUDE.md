@@ -168,6 +168,15 @@ Verify proportionately to the change — don't re-run the whole world for every 
   sanitizer pass. Still exercise every change end-to-end at least once.
 - GPU proofs are **structural** — properties the physics guarantees, checked with margins on
   lavapipe — never golden images (the M5.6/M6.4 pattern in `tests/render/pbr_pipeline_test.cpp`).
+- **Judge a build by its EXIT STATUS, never by grepping its output.** `cmake --build ... | grep -E
+  "error:"` is the habit to break: glslang reports a failed shader compile as `ERROR:` and ninja as
+  `FAILED:`, so a broken build passes the grep, ninja leaves the previous binaries in place, and the
+  tests that follow run green **against a stale executable**. In m15.6 that hid a one-line shader
+  error (`'alpha' : redefinition`) through an add, a run, and two falsification attempts — the
+  "proof" and both "it still passes when broken" results were all measured on an hour-old binary.
+  Run the build as its own command and check `$?`, or grep `-iE "error|FAILED"` at minimum. Doctest
+  makes the same failure quiet: a test case that did not compile in is *skipped*, not missing, and
+  `-tc="name*"` reporting `0 passed` is what tells you.
 - **A new translation unit gets a `clang++ -fsyntax-only` pass before it is pushed.** The local
   build and every CI job except one are GCC or MSVC; **the only Clang build in the matrix is the
   TSan job**, which sits behind the slowest matrix entry. m12.0-perf shipped a recursive type

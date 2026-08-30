@@ -136,7 +136,16 @@ vec3 perturb_normal(vec3 world_normal) {
 void main() {
     vec3 n = perturb_normal(v_world_normal);
     vec3 v = normalize(frame.camera_pos.xyz - v_world_pos);
-    vec3 albedo = draw.base_color.rgb * texture(base_color_tex, v_uv).rgb;
+    // ALPHA MASK (m15.6). Sample once, mask, then use the rgb. `draw.emissive.w` is the cutoff and
+    // zero means "no masking" — so an opaque or blended material takes the false branch on a
+    // comparison that can never be true, and needs no shader variant. The discard is FIRST because
+    // a discarded fragment must not have written depth or run the BRDF.
+    vec4 base_sample = texture(base_color_tex, v_uv);
+    float base_alpha = draw.base_color.a * base_sample.a;
+    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
+        discard;
+    }
+    vec3 albedo = draw.base_color.rgb * base_sample.rgb;
 
     // Metallic-roughness map: glTF packs roughness in G and metallic in B; each multiplies its
     // factor (the white fallback → the factor alone). Roughness → α is floored as in M5.6: α = 0
