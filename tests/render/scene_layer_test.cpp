@@ -258,3 +258,57 @@ TEST_CASE("scene layer: a registry cube through the graph and the graduated came
     device->destroy(fsh);
     device->destroy(vsh);
 }
+
+// m15.4. `make_box` — the non-uniform sibling of `make_cube`, and now the shape both are built
+// from. Worth its own proof because the *reason* it exists is a size that must live in the mesh
+// rather than in a transform: a destructible's dimensions come from its cooked `.rdest` while its
+// LocalTransform is identity-scaled and belongs to the gizmo. A box that silently came out cubic
+// would put 140 one-metre cubes where an editor should draw buildings, which is exactly what the
+// first run of that brick produced.
+TEST_CASE("render: make_box is a box, and make_cube is its uniform case") {
+    using namespace rime::render;
+
+    const CpuMesh box = make_box(rime::core::Vec3{2.0f, 0.25f, 4.0f});
+    CHECK(box.vertices.size() == 24); // 4 per face, so each face keeps a flat normal
+    CHECK(box.indices.size() == 36);
+
+    // Extents, per axis and independently: a uniform-scale bug passes any single-axis check.
+    float lo[3] = {1e9f, 1e9f, 1e9f};
+    float hi[3] = {-1e9f, -1e9f, -1e9f};
+    for (const MeshVertex& v : box.vertices) {
+        const float p[3] = {v.px, v.py, v.pz};
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = std::fmin(lo[a], p[a]);
+            hi[a] = std::fmax(hi[a], p[a]);
+        }
+    }
+    CHECK(lo[0] == doctest::Approx(-2.0f));
+    CHECK(hi[0] == doctest::Approx(2.0f));
+    CHECK(lo[1] == doctest::Approx(-0.25f));
+    CHECK(hi[1] == doctest::Approx(0.25f));
+    CHECK(lo[2] == doctest::Approx(-4.0f));
+    CHECK(hi[2] == doctest::Approx(4.0f));
+
+    // Every face normal is axis-aligned and unit: the flat-shaded box the comment promises, not a
+    // stretched cube whose normals were left pointing along the pre-scale diagonal. This is the
+    // property a "scale the cube's vertices" implementation would quietly break.
+    for (const MeshVertex& v : box.vertices) {
+        const float n[3] = {v.nx, v.ny, v.nz};
+        const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        CHECK(len == doctest::Approx(1.0f));
+        const int nonzero = (std::fabs(n[0]) > 0.5f ? 1 : 0) + (std::fabs(n[1]) > 0.5f ? 1 : 0) +
+                            (std::fabs(n[2]) > 0.5f ? 1 : 0);
+        CHECK(nonzero == 1);
+    }
+
+    // The delegation is real, not two copies that agree today: same vertices, byte for byte.
+    const CpuMesh cube = make_cube(0.75f);
+    const CpuMesh viaBox = make_box(rime::core::Vec3{0.75f, 0.75f, 0.75f});
+    REQUIRE(cube.vertices.size() == viaBox.vertices.size());
+    for (std::size_t i = 0; i < cube.vertices.size(); ++i) {
+        CHECK(cube.vertices[i].px == viaBox.vertices[i].px);
+        CHECK(cube.vertices[i].py == viaBox.vertices[i].py);
+        CHECK(cube.vertices[i].pz == viaBox.vertices[i].pz);
+    }
+    CHECK(cube.indices == viaBox.indices);
+}

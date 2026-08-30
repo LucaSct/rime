@@ -46,6 +46,7 @@
 
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_id.hpp"
+#include "rime/assets/asset_server.hpp"
 #include "rime/assets/manifest.hpp"
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/diagnostics/log.hpp"
@@ -61,6 +62,7 @@
 #include "rime/platform/socket.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/gizmo_renderer.hpp"
+#include "rime/render/gpu_asset_bridge.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/render_graph.hpp"
@@ -236,23 +238,35 @@ void apply_edit(ecs::World& world, stream::MessageType type, std::span<const std
     }
 }
 
-// Load a cook manifest and send it as the browser's AssetList (m9.5). A no-op if no --assets path
-// was given; a warn (not a failure) if the file is missing/malformed — the editor just shows an
-// empty browser rather than the session refusing to start. The AssetListEntry views borrow the
-// parsed Manifest's strings, so it must outlive the send (it does — send happens before return).
-void send_asset_list(stream::ProtocolConnection& conn, std::string_view assets_path) {
+// Read and parse the `--assets` cook manifest, or nullopt. A warn (not a failure) if the path is
+// empty/missing/malformed: the editor should still open, with an empty browser and an unresolvable
+// viewport, rather than refuse to start over a content path.
+//
+// Two callers now (m15.4): the browser's AssetList, and the viewport's mesh resolver — which needs
+// the SAME manifest, since a `render::MeshAsset` is a content id and a content id is meaningless
+// without the table that maps it to a cooked file.
+std::optional<assets::Manifest> load_manifest(std::string_view assets_path) {
     if (assets_path.empty()) {
-        return;
+        return std::nullopt;
     }
     std::ifstream in(std::filesystem::path(assets_path), std::ios::binary);
     if (!in) {
         RIME_WARN("editor-host: could not open --assets manifest '{}'", assets_path);
-        return;
+        return std::nullopt;
     }
     const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    const std::optional<assets::Manifest> manifest = assets::Manifest::parse(text);
+    std::optional<assets::Manifest> manifest = assets::Manifest::parse(text);
     if (!manifest) {
         RIME_WARN("editor-host: --assets manifest '{}' is malformed", assets_path);
+    }
+    return manifest;
+}
+
+// Send the cook manifest as the browser's AssetList (m9.5). The AssetListEntry views borrow the
+// parsed Manifest's strings, so it must outlive the send (it does — send happens before return).
+void send_asset_list(stream::ProtocolConnection& conn, std::string_view assets_path) {
+    const std::optional<assets::Manifest> manifest = load_manifest(assets_path);
+    if (!manifest) {
         return;
     }
     std::vector<editorhost::AssetListEntry> entries;
@@ -439,7 +453,8 @@ void load_viewport_scene(ecs::World& world,
 int serve_viewport(std::string_view socket_path,
                    std::string_view scene_path,
                    std::string_view assets_path,
-                   const app::ComponentRegistrar& registrar) {
+                   const app::ComponentRegistrar& registrar,
+                   const app::ScenePreparer& prepare) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kViewportWidth, kViewportHeight};
@@ -484,6 +499,49 @@ int serve_viewport(std::string_view socket_path,
     } else {
         load_viewport_scene(app.world(), meshes, materials, scene_path, hosted, registrar);
     }
+
+    // ── Make it drawable (m15.4) ─────────────────────────────────────────────────────────────
+    //
+    // Two routes, and a scene may use either or both. Neither existed before this brick, which is
+    // why opening real content showed an empty viewport: the world loaded, was fully editable, and
+    // drew nothing.
+    //
+    //  1. THE ENGINE'S ROUTE — a scene that names a cooked mesh by asset id (`render::MeshAsset`)
+    //     is resolved by the m15.1 bridge: request → async load → GPU upload → MeshRef+MaterialRef.
+    //     Needs `--assets`, because a content id means nothing without the manifest that maps it to
+    //     a cooked file. This is the path a new game gets for free.
+    //  2. THE GAME'S ROUTE — the `prepare` hook, for content whose appearance is DERIVED rather
+    //     than referenced (the block's SlabRole → palette). See editor_host_app.hpp.
+    core::JobSystem asset_jobs(2);
+    assets::AssetServer asset_server(asset_jobs);
+    render::GpuAssetBridge bridge(*app.device(), asset_server);
+    bridge.set_mesh_sink(meshes, materials);
+    std::optional<assets::Manifest> catalog = load_manifest(assets_path);
+    if (catalog) {
+        bridge.set_catalog(*catalog, std::filesystem::path(assets_path).parent_path());
+        // Resolve, then BLOCK for the loads and resolve again. A viewport is opened to be looked
+        // at, so the honest startup cost is waiting once for the meshes the scene actually names —
+        // rather than streaming them in over the first few frames and calling a grey placeholder a
+        // picture. Re-resolving is what swaps the placeholder for the real mesh (m15.1).
+        (void)bridge.resolve_scene_meshes(app.world());
+        asset_server.wait_for_pending_loads();
+        asset_server.pump();
+        (void)bridge.drain();
+        const render::GpuAssetBridge::ResolveStats resolved =
+            bridge.resolve_scene_meshes(app.world());
+        if (resolved.resolved != 0 || bridge.unresolved_count() != 0) {
+            // Counted, not assumed. `unresolved` is a scene naming an id this manifest does not
+            // list — the entity is present and editable and simply cannot be drawn, which is
+            // exactly the failure that reads as "the viewport is broken" without a number.
+            RIME_INFO("editor-host: resolved {} mesh reference(s) from --assets, {} unresolvable",
+                      resolved.resolved,
+                      bridge.unresolved_count());
+        }
+    }
+    if (prepare) {
+        prepare(app.world(), meshes, materials);
+    }
+
     // CLUSTERED FORWARD, because an editor must be able to host a scene it did not author (m14.1).
     // The ADR-0022 uniform-block path caps at 4 directional + 16 point lights and DROPS the rest
     // with a warning; the block carries 36 local lights, so opening it in the viewport lit a
@@ -871,9 +929,10 @@ int serve(std::string_view socket_path,
           std::string_view scene_path,
           std::string_view assets_path,
           bool viewport,
-          const app::ComponentRegistrar& registrar) {
+          const app::ComponentRegistrar& registrar,
+          const app::ScenePreparer& prepare) {
     if (viewport) {
-        return serve_viewport(socket_path, scene_path, assets_path, registrar);
+        return serve_viewport(socket_path, scene_path, assets_path, registrar, prepare);
     }
     ecs::World world;
     editorhost::HostedScene hosted;
@@ -907,7 +966,8 @@ namespace rime::app {
 int run_editor_host(int argc,
                     char** argv,
                     const ComponentRegistrar& registrar,
-                    const char* usage_name) {
+                    const char* usage_name,
+                    const ScenePreparer& prepare) {
     std::string_view socket_path;
     std::string_view scene_path;
     std::string_view assets_path;
@@ -932,7 +992,7 @@ int run_editor_host(int argc,
                    usage_name);
         return 2;
     }
-    return serve(socket_path, scene_path, assets_path, viewport, registrar);
+    return serve(socket_path, scene_path, assets_path, viewport, registrar, prepare);
 }
 
 } // namespace rime::app

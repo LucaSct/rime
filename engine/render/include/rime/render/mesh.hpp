@@ -70,6 +70,17 @@ struct CpuMesh {
 // to).
 [[nodiscard]] CpuMesh make_cube(float half_extent);
 
+// The same box with a half extent per axis — a wall, a slab, a kerb. `make_cube` is now the uniform
+// case of this, so the two cannot drift apart.
+//
+// Worth having as its own mesh rather than a scaled cube (m15.4): a non-uniform SCALE on the
+// transform is the other way to get this shape, and it is the wrong way when the shape is a
+// property of the ASSET rather than of the placement. A destructible's size lives in its cooked
+// `.rdest` (`DestructibleAsset::half_extents`) while its LocalTransform is identity-scaled and
+// belongs to the gizmo — bake the size into the mesh and one entity's box cannot be resized by
+// dragging another's.
+[[nodiscard]] CpuMesh make_box(const core::Vec3& half_extents);
+
 // A UV sphere: `rings` latitude bands from pole to pole, `segments` longitude slices. The
 // parameterization (θ from +y pole, φ around y):
 //     p = r·(sinθ·cosφ, cosθ, sinθ·sinφ),   n = p / r,   uv = (φ/2π, θ/π)

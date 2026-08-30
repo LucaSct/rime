@@ -36,7 +36,8 @@ rime_apply_common_target_options(the_block)
 add_executable(the_block_host block_host_main.cpp)
 set_target_properties(the_block_host PROPERTIES OUTPUT_NAME the-block-host)
 target_link_libraries(the_block_host
-    PRIVATE rime::editorhost_app rime::worldkit rime::blockkit rime::ecs)
+    PRIVATE rime::editorhost_app rime::worldkit rime::blockkit rime::ecs rime::render
+            rime::destruction)
 rime_apply_common_target_options(the_block_host)
 
 # ── The cooked block ────────────────────────────────────────────────────────────────────────────

@@ -39,25 +39,31 @@ CpuMesh make_plane(float half_extent, float uv_tiles) {
 }
 
 CpuMesh make_cube(float half_extent) {
+    return make_box(core::Vec3{half_extent, half_extent, half_extent});
+}
+
+CpuMesh make_box(const core::Vec3& half_extents) {
     // 4 vertices per face (24 total) so each face keeps its own flat normal — sharing corner
     // vertices would force the rasterizer to interpolate normals across the edge and shade the
-    // cube like a blob. Faces are laid out (+x, -x, +y, -y, +z, -z); each quad's vertices wind
+    // box like a blob. Faces are laid out (+x, -x, +y, -y, +z, -z); each quad's vertices wind
     // counter-clockwise when seen from OUTSIDE along its normal.
     CpuMesh m;
-    const float e = half_extent;
 
     struct Face {
         std::array<float, 3> normal;
         std::array<std::array<float, 3>, 4> corners; // CCW from outside
     };
 
+    const float x = half_extents.x;
+    const float y = half_extents.y;
+    const float z = half_extents.z;
     const Face faces[6] = {
-        {{+1, 0, 0}, {{{+e, -e, -e}, {+e, +e, -e}, {+e, +e, +e}, {+e, -e, +e}}}},
-        {{-1, 0, 0}, {{{-e, -e, +e}, {-e, +e, +e}, {-e, +e, -e}, {-e, -e, -e}}}},
-        {{0, +1, 0}, {{{-e, +e, -e}, {-e, +e, +e}, {+e, +e, +e}, {+e, +e, -e}}}},
-        {{0, -1, 0}, {{{-e, -e, +e}, {-e, -e, -e}, {+e, -e, -e}, {+e, -e, +e}}}},
-        {{0, 0, +1}, {{{-e, -e, +e}, {+e, -e, +e}, {+e, +e, +e}, {-e, +e, +e}}}},
-        {{0, 0, -1}, {{{+e, -e, -e}, {-e, -e, -e}, {-e, +e, -e}, {+e, +e, -e}}}},
+        {{+1, 0, 0}, {{{+x, -y, -z}, {+x, +y, -z}, {+x, +y, +z}, {+x, -y, +z}}}},
+        {{-1, 0, 0}, {{{-x, -y, +z}, {-x, +y, +z}, {-x, +y, -z}, {-x, -y, -z}}}},
+        {{0, +1, 0}, {{{-x, +y, -z}, {-x, +y, +z}, {+x, +y, +z}, {+x, +y, -z}}}},
+        {{0, -1, 0}, {{{-x, -y, +z}, {-x, -y, -z}, {+x, -y, -z}, {+x, -y, +z}}}},
+        {{0, 0, +1}, {{{-x, -y, +z}, {+x, -y, +z}, {+x, +y, +z}, {-x, +y, +z}}}},
+        {{0, 0, -1}, {{{+x, -y, -z}, {-x, -y, -z}, {-x, +y, -z}, {+x, +y, -z}}}},
     };
     const float uvs[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
     for (const Face& f : faces) {
