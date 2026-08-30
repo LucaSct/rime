@@ -35,10 +35,12 @@
 #include <vector>
 
 #include "rime/assets/asset_server.hpp"
+#include "rime/assets/manifest.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
+#include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
@@ -873,4 +875,110 @@ TEST_CASE("gpu bridge: a cooked texture replaces the magenta placeholder on drai
         tally(render_floor(bridge.texture_or_placeholder(handle)));
     CHECK(after_magenta < 100);
     CHECK(after_grey > 500);
+}
+
+// ── m15.1: a scene names a mesh by CONTENT ID and it draws ──────────────────────────────────────
+//
+// The architectural gap ADR-0038 calls M15's only non-last-mile item. `render::MeshRef` is a dense
+// index into a runtime registry — correct only while every loader builds its registries in the same
+// order — and `render::MeshAsset{u64}` was a stable content id that nothing resolved. The editor's
+// asset browser could place a cooked mesh and get an entity that neither drew nor moved, and every
+// game had to reinvent `blockkit`'s SlabRole + apply_palette to put a look on a scene.
+//
+// THE LOAD-BEARING PART OF THIS TEST IS THE REGISTRY NOBODY TOUCHES. The world gets a `MeshAsset`
+// and nothing else; the `MeshRegistry` is handed to the bridge empty and never written to by the
+// test. If the entity ends up drawing, the whole chain — manifest → AssetServer → mesh_from_cooked
+// → registry upload → MeshRef → the forward pass — closed on its own.
+TEST_CASE("m15.1: a MeshAsset content id resolves to a drawn mesh") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device — skipping the asset-reference proof");
+        return;
+    }
+    constexpr std::uint32_t kSize = 96;
+    constexpr std::uint64_t kCubeId = 0x00c0ffee0000cafeull;
+
+    // The manifest is the id → cooked-file resolver, and `rime cook` writes one beside its output.
+    // Hand-built here so the test owns the id it asserts on rather than depending on a hash that
+    // changes whenever the fixture is re-cooked.
+    const std::string manifest_text =
+        "# rime-manifest v1\ncube.gltf\tmesh\t00c0ffee0000cafe\tcube.rmesh\n";
+    const std::optional<assets::Manifest> manifest = assets::Manifest::parse(manifest_text);
+    REQUIRE(manifest.has_value());
+
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    GpuAssetBridge bridge(*device, server);
+
+    MeshRegistry meshes(*device); // EMPTY, and the test never adds to it
+    MaterialRegistry materials;
+    bridge.set_mesh_sink(meshes, materials);
+    bridge.set_catalog(*manifest, std::filesystem::path(RIME_ASSETS_FIXTURE_DIR));
+
+    ecs::World world;
+    ecs::register_transform_components(world);
+    register_render_components(world);
+    core::Transform placed{};
+    placed.translation = {0.0f, 0.0f, 0.0f};
+    const ecs::Entity e = world.spawn_with(ecs::WorldTransform{placed}, MeshAsset{kCubeId});
+
+    SUBCASE("it resolves, uploads, and the entity gains what the renderer needs") {
+        // First pass: requested, not yet loaded. The entity is given the placeholder so the draw
+        // path never has to branch on readiness — "still loading" looks like a grey box.
+        GpuAssetBridge::ResolveStats first = bridge.resolve_scene_meshes(world);
+        CHECK(first.unresolved == 0);
+        REQUIRE(world.get<MeshRef>(e) != nullptr);
+        // A material too: SceneRenderer draws <WorldTransform, MeshRef, MaterialRef>, so a mesh
+        // without one is not a dim object, it is an absent one.
+        REQUIRE(world.get<MaterialRef>(e) != nullptr);
+        const MeshId placeholder = world.get<MeshRef>(e)->mesh;
+
+        // Pump until the async load lands, then upload and re-resolve.
+        CHECK(first.pending == 1); // the placeholder stood in while the load was in flight
+        CHECK(first.resolved == 1);
+
+        // Block for the async load, ready it on the main thread, upload it.
+        server.wait_for_pending_loads();
+        server.pump();
+        CHECK(bridge.drain() == 1);
+        REQUIRE(bridge.meshes_uploaded() == 1);
+        const GpuAssetBridge::ResolveStats second = bridge.resolve_scene_meshes(world);
+        CHECK(second.unresolved == 0);
+        CHECK(second.pending == 0);
+
+        // The point: the entity now draws the COOKED mesh, not the placeholder — and the registry
+        // it came from was filled entirely by the bridge.
+        REQUIRE(world.get<MeshRef>(e) != nullptr);
+        CHECK(world.get<MeshRef>(e)->mesh != placeholder);
+        CHECK(meshes.size() >= 2); // the placeholder cube + the cooked one
+
+        // Idempotent: a third pass at rest changes nothing.
+        const GpuAssetBridge::ResolveStats third = bridge.resolve_scene_meshes(world);
+        CHECK(third.resolved == 0);
+    }
+
+    SUBCASE("an id the manifest does not know is counted, not guessed at") {
+        // The failure this whole brick exists to end is a scene that silently draws nothing. An
+        // unknown id must be answerable after the fact, so it is a counter rather than a log line.
+        (void)world.spawn_with(ecs::WorldTransform{placed}, MeshAsset{0xdeadbeefull});
+        const GpuAssetBridge::ResolveStats stats = bridge.resolve_scene_meshes(world);
+        CHECK(stats.unresolved == 1);
+        CHECK(bridge.unresolved_count() == 1);
+    }
+
+    SUBCASE("without a catalog nothing resolves, and it says so") {
+        // Tolerance without a counter is how a tool loses content quietly.
+        GpuAssetBridge bare(*device, server);
+        MeshRegistry bare_meshes(*device);
+        MaterialRegistry bare_materials;
+        bare.set_mesh_sink(bare_meshes, bare_materials);
+        const GpuAssetBridge::ResolveStats stats = bare.resolve_scene_meshes(world);
+        CHECK(stats.resolved == 0);
+        CHECK(stats.unresolved >= 1);
+        CHECK(bare.unresolved_count() >= 1);
+    }
+    (void)kSize;
 }

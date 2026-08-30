@@ -10,7 +10,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 
+#include "rime/assets/mesh_asset.hpp"
 #include "rime/core/diagnostics/log.hpp"
 #include "rime/core/math/scalar.hpp"
 #include "rime/core/math/vec.hpp"
@@ -250,6 +252,82 @@ std::span<const rhi::VertexAttribute> MeshRegistry::vertex_attributes() noexcept
         {3, rhi::Format::RGBA32Float, offsetof(MeshVertex, tx)},
     };
     return kAttrs;
+}
+
+// ── Cooked mesh → renderable mesh (m15.1) ────────────────────────────────────────────────────────
+
+namespace {
+
+[[nodiscard]] float read_f32(const std::byte* p) noexcept {
+    float v = 0.0f;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+// The byte offset of one attribute inside the interleaved vertex, given the mesh's attribute set:
+// the sum of the sizes of the attributes that precede it in the cook's fixed order (which is what
+// `expected_vertex_stride` also sums). Callers check `has_attrib` first for optional attributes.
+[[nodiscard]] std::uint32_t attrib_offset(assets::VertexAttribs set,
+                                          assets::VertexAttribs which) noexcept {
+    using A = assets::VertexAttribs;
+    std::uint32_t off = 0;
+    for (const A bit : {A::Position, A::Normal, A::Uv, A::Tangent, A::Joints, A::Weights}) {
+        if (bit == which) {
+            return off;
+        }
+        if (assets::has_attrib(set, bit)) {
+            off += assets::attrib_size(bit);
+        }
+    }
+    return off;
+}
+
+} // namespace
+
+CpuMesh mesh_from_cooked(const assets::MeshAsset& asset) {
+    using A = assets::VertexAttribs;
+    CpuMesh out;
+    out.indices = asset.indices;
+    out.vertices.resize(asset.vertex_count);
+
+    const bool has_n = assets::has_attrib(asset.attribs, A::Normal);
+    const bool has_uv = assets::has_attrib(asset.attribs, A::Uv);
+    const bool has_t = assets::has_attrib(asset.attribs, A::Tangent);
+    const std::uint32_t off_p = attrib_offset(asset.attribs, A::Position);
+    const std::uint32_t off_n = attrib_offset(asset.attribs, A::Normal);
+    const std::uint32_t off_uv = attrib_offset(asset.attribs, A::Uv);
+    const std::uint32_t off_t = attrib_offset(asset.attribs, A::Tangent);
+
+    for (std::uint32_t i = 0; i < asset.vertex_count; ++i) {
+        const std::byte* base =
+            asset.vertices.data() + static_cast<std::size_t>(i) * asset.vertex_stride;
+        MeshVertex v;
+        v.px = read_f32(base + off_p);
+        v.py = read_f32(base + off_p + 4);
+        v.pz = read_f32(base + off_p + 8);
+        if (has_n) {
+            v.nx = read_f32(base + off_n);
+            v.ny = read_f32(base + off_n + 4);
+            v.nz = read_f32(base + off_n + 8);
+        }
+        if (has_uv) {
+            v.u = read_f32(base + off_uv);
+            v.v = read_f32(base + off_uv + 4);
+        }
+        if (has_t) {
+            v.tx = read_f32(base + off_t);
+            v.ty = read_f32(base + off_t + 4);
+            v.tz = read_f32(base + off_t + 8);
+            v.tw = read_f32(base + off_t + 12);
+        }
+        out.vertices[i] = v;
+    }
+    // Derivable only with both — a mesh with no uvs has no tangent frame to speak of, and the
+    // default (1,0,0,1) at least decodes to a finite basis.
+    if (!has_t && has_uv && has_n) {
+        compute_tangents(out);
+    }
+    return out;
 }
 
 } // namespace rime::render

@@ -6,7 +6,12 @@
 #include <span>
 #include <vector>
 
+#include "rime/assets/manifest.hpp"
+#include "rime/assets/mesh_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
+#include "rime/ecs/query.hpp"
+#include "rime/ecs/world.hpp"
+#include "rime/render/components.hpp"
 #include "rime/rhi/device.hpp"
 #include "rime/rhi/resources.hpp"
 
@@ -55,6 +60,21 @@ std::size_t GpuAssetBridge::drain() {
             ++newly_uploaded;
         }
     }
+    // Meshes, on the same seam and with the same readiness rule (m15.1). `MeshRegistry::add` does
+    // the GPU upload, so a mesh becomes drawable the moment its id lands in uploaded_meshes_ — the
+    // next resolve_scene_meshes() swaps the placeholder cube for it.
+    if (mesh_sink_ != nullptr) {
+        for (const auto& [id, handle] : by_id_) {
+            if (!handle.is_valid() || uploaded_meshes_.count(handle.index) != 0) {
+                continue;
+            }
+            if (const assets::MeshAsset* mesh = server_.get(handle)) {
+                uploaded_meshes_.emplace(handle.index,
+                                         mesh_sink_->add(mesh_from_cooked(*mesh), "cooked"));
+                ++newly_uploaded;
+            }
+        }
+    }
     return newly_uploaded;
 }
 
@@ -82,6 +102,113 @@ rhi::TextureHandle GpuAssetBridge::upload(const assets::TextureAsset& texture) {
     }
     device_.write_texture_mips(handle, levels);
     return handle;
+}
+
+// ── Meshes by content id (m15.1) ─────────────────────────────────────────────────────────────────
+
+void GpuAssetBridge::set_mesh_sink(MeshRegistry& meshes, MaterialRegistry& materials) {
+    mesh_sink_ = &meshes;
+    material_sink_ = &materials;
+    if (placeholders_built_) {
+        return;
+    }
+    // A unit cube and a neutral grey, uploaded once. They are what a placed-but-not-yet-loaded mesh
+    // shows, for the same reason the magenta texture exists: the draw path never branches on
+    // readiness, so "still loading" looks like a grey box rather than like nothing at all.
+    placeholder_mesh_ = meshes.add(make_cube(0.5f), "asset-placeholder");
+    PbrMaterialDesc neutral{};
+    neutral.base_color[0] = 0.72f;
+    neutral.base_color[1] = 0.72f;
+    neutral.base_color[2] = 0.74f;
+    neutral.metallic = 0.0f;
+    neutral.roughness = 0.7f;
+    neutral_material_ = materials.add(neutral);
+    placeholders_built_ = true;
+}
+
+void GpuAssetBridge::set_catalog(const assets::Manifest& manifest,
+                                 std::filesystem::path cooked_dir) {
+    catalog_ = &manifest;
+    cooked_dir_ = std::move(cooked_dir);
+}
+
+assets::MeshAssetHandle GpuAssetBridge::request_mesh(assets::AssetId id) {
+    if (const auto it = by_id_.find(id.value); it != by_id_.end()) {
+        return it->second; // coalesced: one request and one upload per content id
+    }
+    if (catalog_ == nullptr) {
+        unresolved_.insert(id.value);
+        return {};
+    }
+    const assets::ManifestEntry* entry = catalog_->find_by_id(id);
+    if (entry == nullptr) {
+        // The manifest is the authority on what has been cooked. An id it does not know is a scene
+        // referencing content this build does not have — counted, never guessed at.
+        unresolved_.insert(id.value);
+        return {};
+    }
+    const assets::MeshAssetHandle handle = server_.request_mesh(cooked_dir_ / entry->cooked_file);
+    by_id_.emplace(id.value, handle);
+    return handle;
+}
+
+MeshId GpuAssetBridge::mesh_or_placeholder(assets::MeshAssetHandle handle) const {
+    if (handle.is_valid()) {
+        if (const auto it = uploaded_meshes_.find(handle.index); it != uploaded_meshes_.end()) {
+            return it->second;
+        }
+    }
+    return placeholder_mesh_;
+}
+
+GpuAssetBridge::ResolveStats GpuAssetBridge::resolve_scene_meshes(ecs::World& world) {
+    ResolveStats stats;
+    if (mesh_sink_ == nullptr) {
+        return stats; // no sink: nothing to resolve into, and saying so beats pretending
+    }
+
+    // Collect, then mutate. `add_component` moves an entity between archetypes, which reallocates
+    // the chunk vector a query is walking — the same trap m13.5 hit twice.
+    struct Pending {
+        ecs::Entity entity;
+        MeshId mesh;
+        bool needs_material;
+    };
+
+    std::vector<Pending> pending;
+    world.query<MeshAsset>().for_each([&](ecs::Entity e, MeshAsset& asset) {
+        if (asset.asset == 0) {
+            return;
+        }
+        const assets::MeshAssetHandle handle = request_mesh(assets::AssetId{asset.asset});
+        if (!handle.is_valid()) {
+            ++stats.unresolved;
+            return;
+        }
+        const MeshId id = mesh_or_placeholder(handle);
+        if (id == placeholder_mesh_) {
+            ++stats.pending;
+        }
+        const MeshRef* existing = world.get<MeshRef>(e);
+        const bool needs_material = world.get<MaterialRef>(e) == nullptr;
+        if (existing != nullptr && existing->mesh == id && !needs_material) {
+            return; // already correct — the steady state costs one query and nothing else
+        }
+        pending.push_back(Pending{e, id, needs_material});
+    });
+
+    for (const Pending& p : pending) {
+        if (MeshRef* ref = world.get<MeshRef>(p.entity)) {
+            ref->mesh = p.mesh;
+        } else {
+            world.add_component(p.entity, MeshRef{p.mesh});
+        }
+        if (p.needs_material) {
+            world.add_component(p.entity, MaterialRef{neutral_material_});
+        }
+        ++stats.resolved;
+    }
+    return stats;
 }
 
 } // namespace rime::render
