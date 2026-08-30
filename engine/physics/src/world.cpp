@@ -85,6 +85,7 @@ struct PhysicsWorld::Impl {
     std::vector<float> friction;      // Coulomb μ (M7.4 solver material)
     std::vector<float> restitution;   // bounciness e (M7.4 solver material)
     std::vector<std::uint8_t> ccd;    // 1 ⇒ continuous collision: speculative contacts (M7.10)
+    std::vector<std::uint8_t> sensor; // 1 ⇒ a trigger volume: overlaps reported, no impulse (m15.6)
     std::vector<float> sleep_timer;   // seconds spent below the sleep thresholds (M7.5)
     std::vector<std::uint8_t> asleep; // 1 ⇒ deactivated: skipped by integration + solve (M7.5)
     std::vector<ShapeDesc> shape;     // needed to recompute the world AABB after moving
@@ -161,6 +162,11 @@ struct PhysicsWorld::Impl {
     // accessors expose a stable snapshot of the completed tick until the next step().
     std::vector<ContactEvent> contact_events_front;
     std::vector<ContactEvent> contact_events_back;
+    // Triggers get their own pair of buffers, not a flag on ContactEvent: a trigger has no point,
+    // no normal and no impulse, and a consumer iterating contacts must not have to skip records
+    // whose numeric fields are all meaningless (m15.6).
+    std::vector<TriggerEvent> trigger_events_front;
+    std::vector<TriggerEvent> trigger_events_back;
     std::vector<SleepEvent> sleep_events_front;
     std::vector<SleepEvent> sleep_events_back;
 
@@ -184,6 +190,11 @@ struct PhysicsWorld::Impl {
         float normal_impulse = 0.0f; // summed over the manifold; meaningful for `cur` only
         float tangent_impulse = 0.0f;
         bool suppressed = false; // has a dynamic member but every one is asleep — present, no event
+        // A sensor participant (m15.6): reported as a trigger rather than a contact. The flag
+        // rides the record so ONE key-sorted merge classifies both families — a trigger's
+        // enter/stay/exit is the identical began/persisted/ended computation, and duplicating it
+        // would be two lifecycles to keep in agreement.
+        bool trigger = false;
     };
 
     std::vector<ContactRecord> contact_cur;
@@ -670,6 +681,7 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     p.friction.push_back(d.friction);
     p.restitution.push_back(d.restitution);
     p.ccd.push_back(d.ccd ? std::uint8_t{1} : std::uint8_t{0});
+    p.sensor.push_back(d.sensor ? std::uint8_t{1} : std::uint8_t{0});
     p.sleep_timer.push_back(0.0f);
     p.asleep.push_back(0); // a freshly created body always starts awake
     p.shape.push_back(d.shape);
@@ -713,6 +725,7 @@ void PhysicsWorld::destroy_body(BodyId id) {
         p.friction[d] = p.friction[last];
         p.restitution[d] = p.restitution[last];
         p.ccd[d] = p.ccd[last];
+        p.sensor[d] = p.sensor[last];
         p.sleep_timer[d] = p.sleep_timer[last];
         p.asleep[d] = p.asleep[last];
         p.shape[d] = p.shape[last];
@@ -735,6 +748,7 @@ void PhysicsWorld::destroy_body(BodyId id) {
     p.friction.pop_back();
     p.restitution.pop_back();
     p.ccd.pop_back();
+    p.sensor.pop_back();
     p.sleep_timer.pop_back();
     p.asleep.pop_back();
     p.shape.pop_back();
@@ -906,6 +920,14 @@ void PhysicsWorld::step(float dt) {
         if (p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
             continue; // no dynamic member — immovable pair, nothing solvable
         }
+        // A SENSOR EXCHANGES NO IMPULSE (m15.6). Skipping it here, and only here, is what makes a
+        // trigger a trigger: it still runs through the broadphase and the exact narrowphase — the
+        // overlap is real geometry, not an AABB guess — but it never becomes a constraint, so it
+        // never joins an island, never wakes a stack, and cannot push anything. The manifold
+        // survives to the event stage below, where it is reported as a trigger instead.
+        if (p.sensor[da] != 0 || p.sensor[db] != 0) {
+            continue;
+        }
         constraints.push_back(
             prepare_contact_constraint(bodies, m, da, db, static_cast<std::uint32_t>(mi), dt));
     }
@@ -1052,7 +1074,13 @@ void PhysicsWorld::step(float dt) {
         if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
             continue; // defensive: build_contacts only emits live pairs
         }
-        if (p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
+        const bool is_trigger = p.sensor[da] != 0 || p.sensor[db] != 0;
+        // A CONTACT needs a dynamic member — an immovable pair exchanges no impulse, so there is
+        // nothing to report. A TRIGGER does not: overlap is the whole event, and the archetypal
+        // case is a STATIC volume watching for a KINEMATIC character, where both inverse masses are
+        // zero. Dropping trigger pairs here was silent — the volume simply never fired — and it is
+        // the reason this exception is spelled out rather than folded into the condition (m15.6).
+        if (!is_trigger && p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
             continue; // no dynamic member — not an evented contact
         }
         // Representative point = the deepest (first max, strict >, so ties resolve
@@ -1078,7 +1106,14 @@ void PhysicsWorld::step(float dt) {
             m.normal,
             normal_impulse,
             tangent_impulse,
-            /*suppressed=*/!(awake_dyn_a || awake_dyn_b)});
+            // A TRIGGER IS NEVER SUPPRESSED, and that is a real difference rather than an
+            // oversight. Contacts suppress a pair whose every dynamic member is asleep, because a
+            // resting stack exchanging no new impulse has nothing to report. An overlap does not
+            // stop being an overlap when the body inside it falls asleep — and, more to the point,
+            // a KINEMATIC character has zero inverse mass and is never "an awake dynamic member"
+            // at all, so the contact rule would silence exactly the case triggers exist for.
+            /*suppressed=*/is_trigger ? false : !(awake_dyn_a || awake_dyn_b),
+            /*trigger=*/is_trigger});
     }
 
     // Classify by a linear merge of the two key-sorted lists (cur = this tick, prev = last tick):
@@ -1088,7 +1123,22 @@ void PhysicsWorld::step(float dt) {
     // merge position (so a matching prev record is not reported Ended) but emit nothing. The
     // result is naturally in canonical region order.
     p.contact_events_back.clear();
+    p.trigger_events_back.clear();
     const auto emit_contact = [&](const Impl::ContactRecord& r, ContactPhase phase) {
+        if (r.trigger) {
+            // Same lifecycle, different family. A trigger carries only WHO and WHICH PHASE —
+            // there is no contact point, no normal and no impulse to report, because nothing was
+            // solved. Reporting a manifold's geometry here would hand a consumer numbers that look
+            // like a contact and are not one.
+            TriggerEvent t;
+            t.a = r.a;
+            t.b = r.b;
+            t.phase = phase;
+            t.child_a = static_cast<std::uint16_t>(r.children >> 16);
+            t.child_b = static_cast<std::uint16_t>(r.children & 0xFFFFu);
+            p.trigger_events_back.push_back(t);
+            return;
+        }
         ContactEvent e;
         e.a = r.a;
         e.b = r.b;
@@ -1154,6 +1204,7 @@ void PhysicsWorld::step(float dt) {
     // Publish: swap the filled back buffers to front, so the accessors return this tick's events,
     // stable until the next step() refills and swaps again (the double buffer).
     p.contact_events_front.swap(p.contact_events_back);
+    p.trigger_events_front.swap(p.trigger_events_back);
     p.sleep_events_front.swap(p.sleep_events_back);
 
     // ---- 8. Commit the contact cache from the SOLVED manifolds (closing the warm-start loop),
@@ -1871,6 +1922,10 @@ bool PhysicsWorld::compound_info(CompoundId id, CompoundInfo& out) const {
 
 std::span<const ContactEvent> PhysicsWorld::contact_events() const noexcept {
     return {impl_->contact_events_front.data(), impl_->contact_events_front.size()};
+}
+
+std::span<const TriggerEvent> PhysicsWorld::trigger_events() const noexcept {
+    return {impl_->trigger_events_front.data(), impl_->trigger_events_front.size()};
 }
 
 std::span<const SleepEvent> PhysicsWorld::sleep_events() const noexcept {

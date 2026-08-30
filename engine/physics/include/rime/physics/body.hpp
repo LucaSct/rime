@@ -61,6 +61,13 @@ struct BodyDesc {
     // move fast enough per tick to need it. Realized as speculative contacts
     // (docs/design/physics.md).
     bool ccd = false;
+
+    // A TRIGGER VOLUME (m15.6): detected exactly like any other body — broadphase, exact
+    // narrowphase, per-region enter/stay/exit — but skipped by the solver, so it exchanges no
+    // impulse, joins no island, and cannot push, block or wake anything. Overlaps arrive as
+    // `PhysicsWorld::trigger_events()` instead of contacts. `physics::Collider::sensor` maps
+    // straight onto this.
+    bool sensor = false;
 };
 
 // A snapshot of a body's motion state, read out of the pool.

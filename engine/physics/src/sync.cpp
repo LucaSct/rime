@@ -72,6 +72,10 @@ void PhysicsSync::reconcile(ecs::World& world, PhysicsWorld& physics) {
         d.linear_damping = rb.linear_damping;
         d.angular_damping = rb.angular_damping;
         d.gravity_factor = rb.gravity_factor;
+        // The authored field finally reaching the simulation (m15.6). `Collider::sensor` has been
+        // reflected, inspectable and serialized since M7.8 and read by NOTHING, so a designer who
+        // ticked it got a solid collider and no warning.
+        d.sensor = col.sensor;
         d.position = wt.value.translation; // place the body where the entity already is
         d.orientation = wt.value.rotation;
 
