@@ -9,6 +9,48 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-29) — m13.4: the engine makes a sound.** M8.4's `AudioBackend` seam has stood
+> since M8 with nothing but a LOGGER behind it. There is a real mixer there now: voices, distance
+> attenuation, constant-power stereo panning, per-block gain ramping.
+>
+> **Constant power, not linear**, and the difference is audible: linear panning sums to constant
+> AMPLITUDE, which is ~3 dB quieter at centre than at the edges, so a source passing the listener
+> ducks exactly as it goes by — the moment it should be most present. Summing squares stays flat,
+> and the proof asserts that across a nine-point arc.
+>
+> **Procedural sounds, not assets.** There is no cooked audio format, and inventing one is an
+> asset-pipeline brick rather than an audio brick — ADR-0035 gave this slot to "audio v1 … polish,
+> cuttable", so spending it on a file format would buy a pipeline and no sound at all. The bank
+> synthesizes impacts the classic way (filtered noise burst for the crack, decaying sine for the
+> body, exponential envelope). The noise source is a **hash of the sample index**, not
+> `std::uniform_real_distribution`, which is explicitly not specified to produce identical values
+> across implementations — so the mixdown proof asserts EXACT samples instead of weakening to
+> statistics.
+>
+> **A Linux sink that costs the build nothing.** `find_package(ALSA QUIET)`: real headers when
+> present, a "no device" stub otherwise. No conanfile entry, no CI change — ADR-0035 asked for "a
+> Linux sink first … CI is deaf either way", so a missing libasound must not fail a build. Selected
+> at BUILD time rather than dlopen-ed, specifically so ALSA's enum constants come from ALSA's own
+> headers instead of being hardcoded to talk to a library we never included.
+>
+> **The clipping counter earned its place on first contact.** The first real event load — the m8.6
+> wall's 43 voices from 18 destruction events — came back at **peak 1.84 with 222 samples clipped**.
+> The 0.7 master gain was a guess and it was wrong; it is 0.35 now, measured against that case
+> (peak 0.92, 0 clipped). Distortion is the one failure nobody can see and CI cannot hear, which is
+> exactly why the counter exists.
+>
+> The wall sample gained `--wav`: the same destruction events that already fan out to dust and the
+> null backend now also drive the mixer, rendered in LOCKSTEP with the sim, so the file's timeline
+> *is* the simulation's. The M8.4 null-backend log is untouched, so no counter the sample's
+> self-check depends on moved.
+>
+> *Worth a look, found by listening rather than by a test:* that mixdown has ~13 s of genuine silence
+> between the collapse and the `DebrisSettled` events. The pile visibly stops moving seconds before
+> the physics sleep detector fires. Real behaviour, not an audio bug — but if the block's collapse is
+> to sound right in m13.5, that gap is the thing to look at.
+>
+> **Next:** m13.p (the measured perf pass) and m13.5's `99-the-block`.
+
 > **Update (2026-08-29) — m13.3b: the engine can draw a letter.** Until now nothing in the C++
 > engine could. Every number the engine knows about itself — parts alive, live debris, submitted vs
 > culled, active lights — was reachable only from a log line or the Rust editor's egui shell, which
