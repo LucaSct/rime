@@ -7,7 +7,7 @@
 #
 #   rime-blockgen        writes block.rscene          (the content the engine ships)
 #   the_block --scene    runs it, prints a digest     (the game, before)
-#   editor --smoke       opens it, edits it, saves it (the editor, through the live engine host)
+#   editor --smoke       opens it, edits it, saves it (through THE GAME'S OWN HOST — see below)
 #   the_block --scene    runs the SAVED file          (the game, after)
 #
 # THE DIGESTS MUST DIFFER, and that assertion is the whole point. "The game ran the file the editor
@@ -46,10 +46,16 @@ mkdir -p "$work"
 
 say "build the engine host, the generator, the demo, and the editor"
 cmake --preset "$preset"
-cmake --build --preset "$preset" --target rime_engine rime_blockgen the_block
+cmake --build --preset "$preset" --target rime_engine rime_blockgen the_block the_block_host
 ( cd tools && cargo build -p editor $cargo_flag )
 
-engine_bin="$repo_root/$build_dir/bin/rime-engine"
+# THE GAME'S OWN HOST, not the engine's (m15.2). `rime-engine` registers the engine's components
+# and nothing else, so it opens this scene degraded — 213 `blockkit::SlabRole` records skipped —
+# and m14.3's save veto then REFUSES to write it back, because doing so would delete them from the
+# file. That is not a hypothetical: pointing this script at rime-engine after m15.2 landed produced
+# exactly that refusal, which is the contract working. The block's scene belongs to the block's
+# host.
+engine_bin="$repo_root/$build_dir/bin/the-block-host"
 blockgen_bin="$repo_root/$build_dir/bin/rime-blockgen"
 demo_bin="$repo_root/$build_dir/bin/the_block"
 editor_bin="$repo_root/tools/target/$cargo_dir/editor"

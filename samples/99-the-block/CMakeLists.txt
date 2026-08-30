@@ -28,6 +28,17 @@ target_link_libraries(the_block
 
 rime_apply_common_target_options(the_block)
 
+# ── The demo's own editor host (m15.2) ──────────────────────────────────────────────────────────
+# The whole point of ADR-0038's §2: a game that wants its components in the editor's inspector
+# builds its own host from the engine's library and adds its module on top. Nine lines of C++, one
+# CMake target, and nothing in engine/ knows this game exists. Point the editor at it with
+# `editor --engine build/dev/bin/the-block-host`.
+add_executable(the_block_host block_host_main.cpp)
+set_target_properties(the_block_host PROPERTIES OUTPUT_NAME the-block-host)
+target_link_libraries(the_block_host
+    PRIVATE rime::editorhost_app rime::worldkit rime::blockkit rime::ecs)
+rime_apply_common_target_options(the_block_host)
+
 # ── The cooked block ────────────────────────────────────────────────────────────────────────────
 # The nine `.rdest` files this consumes are produced by `rime fracture`, exactly as a user would.
 # Its OWN cooked dir, per preset, so dev/asan/tsan never share cooked bytes and this demo can be run
