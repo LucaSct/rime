@@ -37,17 +37,24 @@ target_compile_definitions(the_block PRIVATE RIME_BLOCK_COOKED_DIR="${BLOCK_DEMO
 # This list and `blockkit::cook_specs()` are two descriptions of one thing; the demo reads the
 # produced files back and refuses to start if they disagree, so a drift here is a loud failure
 # rather than a quietly smaller block. Same nine rows as tests/blockkit, in the same order.
-#   name        size            parts  seed
+# DAMAGE TUNING IS PER COOK, and m13.5 is why. `damage_threshold` is the contact impulse a part
+# absorbs before it takes damage, and it is a property of the part's MASS — the fracturer's 5.0
+# default was tuned for M8's small test wall. A building slab part is two orders of magnitude
+# heavier: measured on the block, contact impulses reach 669 kg·m/s, and at threshold 5 with parts
+# standing at 1.0 health, 729 of 799 contact ops were INSTANT KILLS. One demolition charge then
+# flattened the whole block, across a 12 m gap and then the street. Explicit apply_damage (a weapon,
+# a charge) does not go through this path, so these numbers do not make a wall bulletproof.
+#   name        size            parts  seed  dmg-threshold  dmg-scale
 set(BLOCK_DEMO_COOKS
-    "wall_bg|8|3|0.3|12|1301"
-    "wall_hero|8|3|0.3|28|1302"
-    "side_bg|7.4|3|0.3|12|1303"
-    "side_hero|7.4|3|0.3|28|1304"
-    "floor_bg|7.4|0.3|7.4|12|1305"
-    "floor_hero|7.4|0.3|7.4|28|1306"
-    "half_bg|3|3|0.3|6|1307"
-    "half_hero|3|3|0.3|14|1308"
-    "crate|1|1|1|8|1309")
+    "wall_bg|8|3|0.3|12|1301|20|0.0015"
+    "wall_hero|8|3|0.3|28|1302|20|0.0015"
+    "side_bg|7.4|3|0.3|12|1303|20|0.0015"
+    "side_hero|7.4|3|0.3|28|1304|20|0.0015"
+    "floor_bg|7.4|0.3|7.4|12|1305|20|0.0015"
+    "floor_hero|7.4|0.3|7.4|28|1306|20|0.0015"
+    "half_bg|3|3|0.3|6|1307|12|0.0025"
+    "half_hero|3|3|0.3|14|1308|12|0.0025"
+    "crate|1|1|1|8|1309|4|0.02")
 
 foreach(cook IN LISTS BLOCK_DEMO_COOKS)
     # '|' and not ';': a semicolon IS CMake's list separator, so a ';'-joined record is flattened by
@@ -59,9 +66,12 @@ foreach(cook IN LISTS BLOCK_DEMO_COOKS)
     list(GET cook 3 c_z)
     list(GET cook 4 c_parts)
     list(GET cook 5 c_seed)
+    list(GET cook 6 c_dthr)
+    list(GET cook 7 c_dscale)
     add_test(NAME block_demo_cook_${c_name}
         COMMAND cargo run --quiet --manifest-path tools/Cargo.toml --bin rime --
                 fracture --size ${c_x} ${c_y} ${c_z} --parts ${c_parts} --seed ${c_seed}
+                --damage-threshold ${c_dthr} --damage-scale ${c_dscale}
                 --out "${BLOCK_DEMO_COOKED}" --name ${c_name}
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     set_tests_properties(block_demo_cook_${c_name} PROPERTIES FIXTURES_SETUP block_demo_cook)

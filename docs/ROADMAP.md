@@ -9,6 +9,45 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-30) — m13.6: the collapse stays local, and MILESTONE 13 IS COMPLETE.** m13.5
+> shipped `99-the-block` with 20 claims passing and one reported as a known defect: one demolition
+> charge flattened the entire block. This is the cause, and it is not in the physics.
+>
+> **`damage_threshold` is cooked per pattern, and the fracturer's default was tuned for a different
+> object.** `FractureConfig::wall` sets 5.0 kg·m/s with a damage scale of 1.0 — right for M8's small
+> test wall, and two orders of magnitude wrong for an 8×3×0.3 m building slab. Parts stand at 1.0
+> health, so **any contact above 6.0 kg·m/s killed a part outright**. Measured on the block: contact
+> impulses reach **669 kg·m/s**, and **729 of 799 damage ops were instant kills**. The cascade had no
+> way to damp — every chunk that landed on a neighbour deleted what it touched, which detached more.
+>
+> **The knob did not exist.** `rime fracture` had no way to set either value: they were hardcoded in
+> the Rust asset pipeline and unreachable from the CLI, so the block could not have been tuned even
+> if someone had known to. m13.6 adds `--damage-threshold` / `--damage-scale` and gives all nine
+> cooks tuning matched to their part mass (20 / 0.0015 for the big slabs, 12 / 0.0025 for the
+> half-walls, 4 / 0.02 for the much lighter crates). Explicit `apply_damage` — a weapon, a charge —
+> never went through this path, so none of it makes a wall bulletproof.
+>
+> **The result, measured.** The same charge that used to flatten eight buildings now levels the hero
+> it was aimed at, seriously damages the two beside it, and leaves the far side of the street
+> untouched: `0/180 34/420 57/180 180/180 180/180 180/180 420/420 180/180`, far side intact 4 of 4.
+> Instant kills fall from 729-of-799 to a small minority. Peak live debris is **591**, still past
+> ADR-0035 §1's 400 floor, because the hero building still comes all the way down.
+>
+> **Two claims were promoted rather than added.** *The far side of the street is untouched* and *most
+> of the block is still standing* were the reported defect; they are assertions now, and they read
+> 0-of-4 and 0-of-8 before the fix. A third is new and is a shape correction: the peers' agreement is
+> now asserted **after draining to quiescence with a bound** — the script ends while the pile is
+> still falling and the wire still has traffic on it, so the old form was asking the question too
+> early and would have been pinned to whatever tick the loop stopped at. It asserts that they CATCH
+> UP, with a limit, so it cannot pass by never converging (the m13.2b eviction-proof correction, in a
+> new place).
+>
+> **M13 "The Block" is COMPLETE** — `99-the-block --headless` runs 23 claims green in 38 s, and the
+> milestone's "done when" is met. The one clause CI cannot judge is the frame rate, which is m13.p's
+> and is deliberately unmeasured here: a perf pass should take its scope from a demo that exists.
+>
+> **Next:** m13.p (the measured perf pass), then M14 — [ADR-0037](adr/0037-authoring-loop-m14.md).
+
 > **Update (2026-08-30) — m13.5: `99-the-block` runs, and M13 does not close.** The vision demo is
 > built. It is the first process in this repo's history to hold a cooked destructible city block, the
 > M10 lighting stack, a replicated server, a predicted client, a first-person camera, a window and a
@@ -1483,7 +1522,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M10** | Advanced lighting | dynamic GI updates as the scene changes — *including when walls fall* |
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
-| **M13** | **"The Block" (vision demo)** | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right |
+| **M13** | **"The Block" (vision demo)** ✅ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — 23 claims green in `samples/99-the-block`, including a collapse that stays local |
 | **M14** | **"The Authoring Loop"** | open the shipped block in the editor, change it, save it, and run the changed scene in the game ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 
 ### Detail

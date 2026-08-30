@@ -61,6 +61,22 @@ enum Command {
         /// Output file stem (writes `<name>.rdest`).
         #[arg(long, default_value = "wall")]
         name: String,
+        /// Impulse (kg·m/s) a part absorbs from a CONTACT before it takes any damage. Fences the
+        /// resting case (a standing wall's own supports exchange m·g·dt every tick) — and, at the
+        /// other end, decides whether falling rubble can destroy what it lands on.
+        ///
+        /// IT IS A PROPERTY OF THE PART'S MASS, not of the engine. The 5.0 default was tuned for
+        /// M8's small test wall; an 8x3x0.3 m building slab in 12 pieces is two orders of magnitude
+        /// heavier, and at 5.0 every debris impact kills the part it hits outright — which is what
+        /// made one demolition charge flatten an entire city block (m13.5). Explicit `apply_damage`
+        /// (a weapon, a charge) does not go through this, so raising it does not make a wall
+        /// bulletproof.
+        #[arg(long, default_value_t = 5.0)]
+        damage_threshold: f32,
+        /// Damage per unit of contact impulse above the threshold. Parts stand at 1.0 health, so
+        /// `1 / (impulse you want to be lethal - threshold)` is the number to reason with.
+        #[arg(long, default_value_t = 1.0)]
+        damage_scale: f32,
     },
     /// Cook a triangle mesh's signed-distance field (M10.4a, ADR-0032 §2): the offline, cook-side
     /// half of the SDF-traced GI pipeline. Reads geometry from a glTF/GLB or binary STL source (no
@@ -115,7 +131,17 @@ fn main() -> ExitCode {
             seed,
             out,
             name,
-        }) => run_fracture(&size, parts, seed, &out, &name),
+            damage_threshold,
+            damage_scale,
+        }) => run_fracture(
+            &size,
+            parts,
+            seed,
+            &out,
+            &name,
+            damage_threshold,
+            damage_scale,
+        ),
         Some(Command::Sdf {
             input,
             out,
@@ -126,10 +152,21 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_fracture(size: &[f32], parts: u32, seed: u64, out: &Path, name: &str) -> ExitCode {
+#[allow(clippy::too_many_arguments)]
+fn run_fracture(
+    size: &[f32],
+    parts: u32,
+    seed: u64,
+    out: &Path,
+    name: &str,
+    damage_threshold: f32,
+    damage_scale: f32,
+) -> ExitCode {
     // The CLI takes full dimensions (a 2 m wall); the fracturer works in half-extents.
     let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
-    let cfg = asset_pipeline::fracture::FractureConfig::wall(half, parts, seed);
+    let mut cfg = asset_pipeline::fracture::FractureConfig::wall(half, parts, seed);
+    cfg.damage_threshold = damage_threshold;
+    cfg.damage_scale = damage_scale;
     match asset_pipeline::cook_fracture(&cfg, name, out) {
         Ok(result) => {
             for entry in &result.manifest {
