@@ -244,6 +244,13 @@ public:
     [[nodiscard]] std::uint32_t part_count(PatternId pattern) const noexcept;
     [[nodiscard]] std::uint32_t instance_part_count(InstanceId instance) const noexcept;
 
+    // Which pattern this instance was spawned from — the null id for an unknown instance. The
+    // symmetric partner of body_of/authority_of, added by m13.2d: a per-part render leaf needs the
+    // pattern to know which uploaded part MESH to draw, and going the long way round (entity ->
+    // Destructible{asset} -> the caller's resolver) would make the render bridge depend on content
+    // ids it has no other reason to know about.
+    [[nodiscard]] PatternId pattern_of(InstanceId instance) const noexcept;
+
     // Per-part runtime state. `part_alive` means "still standing in the instance's compound":
     // false once the part LEFT the wall — either struck dead (health hit zero, so it flies off as
     // its own debris chunk carrying the killing impulse, ADR-0029 §2) or DETACHED as an orphaned

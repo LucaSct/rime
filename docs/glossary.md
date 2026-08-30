@@ -429,6 +429,23 @@ Entries are grouped roughly by area and kept short on purpose.
   it can be budgeted or frozen.
 - **Determinism / replication.** *Determinism*: the same inputs always produce the same
   result (vital for networked physics). *Replication*: syncing state across the network.
+- **Render leaf.** The entity that *draws* one part of a destructible. A destructible entity is
+  never itself drawn: it declares intent (`Destructible{asset}`) and carries the material, while
+  its 12–28 fractured parts each get a leaf whose transform follows the part through standing,
+  detached and frozen. Built by `engine/destruction_render` (m13.2d); before that, every sample
+  rolled its own.
+- **Slab.** One cooked destructible box in a building — a wall, a floor, or the roof. `rime
+  fracture` only makes boxes, so a building is an arrangement of slabs and a door or window can
+  only be a *gap left between them*.
+- **Block, the.** The vision demo's content: 8 hollow buildings down a 44 m street, 16 slabs each,
+  140 destructible instances, 2,016 parts. Assembled procedurally by `engine/blockkit` (m13.2c).
+- **Hero building.** One of the two buildings in the block fractured ~2.3× finer than the other six
+  (28 parts a slab against 12), so that a single collapse can supply the ≥400 peak live debris
+  bodies ADR-0035 §1 asks the demo to reach. Same geometry, finer break — the scale is not
+  distorted to satisfy a counter.
+- **Ground band.** The darker, rougher material every building's ground storey wears. With no
+  textures in the engine, colour and roughness are the whole surface vocabulary, and this is the
+  cheapest rule that gives a facade vertical structure — it reads as shopfronts under a low sun.
 
 ## Assets & the pipeline
 

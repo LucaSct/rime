@@ -681,3 +681,106 @@ and the cut order in §5 lies entirely inside M13.
 
 One label is reused: this ADR's ladder had no "m12.6 milestone proof", so a reference to **m12.6
 here means Track FX fx1**. ADR-0036 §"The brick ladders" carries the same table and says so too.
+
+
+## Amendment (2026-08-29, m13.2c/d): §2's brick list was missing a system, and the scene format must not carry a MaterialRef
+
+### E1. There is no render-leaf system, and §2's ledger never noticed because nothing was drawing parts
+
+§2a inventoried the render work M13 must ADD and named exactly one entry: view-frustum culling,
+"because no cull exists yet". It missed a larger one. **Nothing in the engine turns a destructible's
+parts into anything a renderer can draw.** `destruction/world.hpp` has said so since M8 — "per-part
+render leaves land with the [sample]" — and `10-destructible-wall` accordingly hand-rolls
+`build_leaves`/`refresh_leaves` against one instance of 60 parts.
+
+That is a defensible v1 for one wall. It is not one for §1's floors: 140 instances totalling 2,016
+parts, with m13.3 and m13.5 each about to copy the loop. So m12.7's remainder split into **m13.2c**
+(the block as content) and **m13.2d** (`engine/destruction_render`, the bridge).
+
+The bridge is its own module for the reason that produced `replication` and `destruction_net`:
+`destruction` must not depend on `render` (it sits below it and is proven GPU-free), and `render`
+must not know what a fracture is. Its load-bearing property is **one mesh per (pattern, part), not
+per (instance, part)** — 148 uploads for the whole block rather than 2,016 copies of identical
+geometry, which is the difference between the naive loop being affordable and not.
+
+### E2. `.rscene` must carry a ROLE, not a MaterialRef — and this is a general property of the format
+
+§2 assumed the "procedural assembly script emitting `.rscene`" would author the block's appearance.
+It cannot, safely. `render::MeshRef` and `render::MaterialRef` hold **dense indices into runtime
+registries**. A scene file storing `MaterialRef{7}` is correct only for as long as every loader
+happens to build its registries in the identical order; insert one material at the front of the
+palette and every entity in the file shades as something else, with nothing failing and no counter
+moving.
+
+So the block's `.rscene` carries placement plus a reflected `blockkit::SlabRole{building, storey,
+kind, tint}`, and `apply_palette()` derives `MeshRef`/`MaterialRef` at load. This is the same split
+`.rdest` already makes — cooked destruction geometry carries no material either — and it has a
+pleasant consequence the ADR did not anticipate: **the entire appearance of the vision demo is one
+translation unit of floats**, re-tintable without regenerating the scene or re-cooking anything.
+
+Stated generally, for any future `.rscene` author: *the format may carry content ids and authored
+intent; it must not carry a dense runtime registry index.*
+
+### E3. `rime fracture` could write geometry the runtime refuses, and had been doing so since M8.1
+
+Building the block hit a `register_hull` rejection: a cooked part whose faces disagreed about a
+shared edge (a duplicated directed edge, two edges with no twin). The `.rdest` decoded *cleanly* —
+every count in range, every index valid, the asset schema fully satisfied — and only the physics
+validator caught it, at load, one process boundary away from the cause.
+
+Two things came out of that, and they should be read separately.
+
+**The guarantee, which shipped.** `rime fracture` now runs the same closed-manifold check
+`build_convex_hull` runs and refuses to write a file whose *topology* it would reject. That word is
+load-bearing: the guard mirrors the two topology rules only, not the runtime's planarity, convexity
+and volume checks. Empirically that is enough today — across a 200-seed sweep no topology-clean cell
+failed a metric check — but the worst planarity residual measured is 7.2e-5 against a 1e-4 limit,
+which is 28% of headroom and not a margin to rely on. Mirroring the metric checks too is cheap and
+should happen when someone next touches this. The cost of *not* having it is
+the shape of failure this repository keeps legislating against: late, silent, and attributed to
+whatever tried to use the artefact. `every_part_is_a_valid_convex_shape` also now checks topology,
+which its name has claimed since M8.1 while it verified only counts and index ranges.
+
+**The defect, which did not.** It is not a new-configuration problem, and the first draft of this
+amendment said it was. Measured over 60 seeds per config: 4/60 at 28 parts in a thin 8x3x0.3 wall,
+**3/60 in a thick 8x3x3 one** — so thinness is not the driver — and 3/60 at the 2x1.5x0.3 / 16-part
+config this cooker's own tests have used since M8.1. The rate tracks part count, not shape.
+
+The cause is in `build_cell`'s epsilon handling, and three hypotheses have been **refuted by
+measurement**: duplicate faces from near-coincident planes (deduping them changes no outcome), an
+inverted winding (every face agrees with its plane normal to dot > 0.9), and the thin-box framing
+above. Every failure observed contains a *duplicated directed edge*, never an untwinned one alone —
+which points away from the T-vertex story and toward **rival copies of a single geometric corner**:
+where several planes pass within EPS of one point, the triple enumeration emits each rival, they can
+end up further apart than the dedup tolerance, and the +/-EPS membership slack then seats both on
+both incident faces. The same slack admits points genuinely outside the cell by up to 1e-4.
+
+If that reading holds, the fix is not a bigger epsilon — it is **sequential half-space clipping**:
+start from the box as a closed vertex/edge/face structure and clip plane by plane, computing each
+edge-plane crossing once and sharing it between the truncated face and the new cap. Closure becomes
+an invariant by construction rather than an agreement among ~34 independent epsilon tests. It is
+also the foundation ADR-0027's deferred mesh-sourced fracture needs.
+
+**Schedule it in the m13.3 window rather than later**, for a reason that is about cost and not
+elegance: the rewrite changes cooked bytes for *every* seed, so it should land before more `.rdest`
+fixtures and replay baselines accumulate against the current output. m13.2c's own cooks are
+generated at test time and deliberately uncommitted, which is what keeps that cost small today.
+
+The finding that matters most for calibration: **this was already on `main`.** Seed 2 of
+`a_different_seed_gives_a_different_partition` has cooked two malformed parts since M8.1, and the
+test never noticed because it compares cooked BYTES and never registers a hull. A proof that cannot
+see what it skipped reads as passing — the guardrail-5 lesson, arriving from the asset pipeline
+rather than from replication.
+
+### E4. A brick is added to M13: the engine has no text rendering at all
+
+Luca ruled on 2026-08-29 that the vision demo gets a native HUD rather than stats in the Rust
+editor's egui shell. There is **no font atlas and no text pass anywhere in the C++ engine**, so this
+is a rendering subsystem, not a detail of the playable-client brick. §2's m12.8 (now m13.3)
+therefore splits:
+
+- **m13.3a** — windowed present + the first-person camera on the predicted player (ADR-0035's
+  original m12.8). *Load-bearing.*
+- **m13.3b** — text/HUD: a font atlas, a text pass on `GizmoRenderer`'s always-on-top overlay model,
+  and a designed overlay. *Load-bearing — it competes with m13.4 (audio, already cuttable) for the
+  milestone, and that trade should be made deliberately rather than discovered.*

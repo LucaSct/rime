@@ -9,6 +9,74 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Update (2026-08-29) — m13.2c/d: the block exists, and the engine can finally draw a
+> destructible.** ADR-0035's m12.7 bundled "block content + render scale". Culling (m13.2a) and C6
+> (m13.2b) had landed; scoping the rest turned up a gap nobody had written down: **nothing in the
+> engine turned a destructible's parts into render leaves.** `10-destructible-wall` hand-rolls its
+> own `build_leaves`/`refresh_leaves`, and `destruction/world.hpp` says so outright — "per-part
+> render leaves land with the [sample]". Fine for one wall of 60 parts; not a strategy for 140
+> instances and 2,016, and m13.3 and m13.5 would each have copied the loop. So the remainder split.
+>
+> **m13.2c — the block, as content.** A new module `engine/blockkit` (the prefab, the procedural
+> assembly, the palette) plus `rime-blockgen`, which writes the whole thing as a `.rscene`. It is
+> C++ and not Rust tooling because the format keys every component by its C++ reflection type_hash,
+> and a Rust emitter would have to reproduce those across a language boundary. **8 buildings, 16
+> slabs each, 140 destructible instances, 2,016 parts, 36 local lights + the sun, 213 entities** —
+> clearing every ADR-0035 §1 floor (>= 8 structures, >= 1,500 parts, >= 32 local lights), measured
+> from the world that came back off disk rather than from the generator's intent.
+>
+> **The design call worth recording: the scene carries no MaterialRef.** `MeshRef`/`MaterialRef` are
+> dense indices into *runtime registries*, so authoring them into a file is correct only while every
+> loader builds its registries in the identical order — insert one material at the front of the
+> palette and every entity silently shades as something else, with nothing failing. The `.rscene`
+> therefore carries arrangement plus a reflected `SlabRole{building, storey, kind, tint}`, and
+> `apply_palette` derives the look at load. The same split `.rdest` already makes, and it means
+> re-tinting the block is an edit to one function rather than a regenerated scene.
+>
+> **A cooker bug fell out of it, and it was not new — nor is it about thin walls.** Measured at
+> 60 seeds a config: 4/60 at 28 parts in an 8x3x0.3 wall, 3/60 in a THICK 8x3x3 one, and 3/60 at the
+> 2x1.5x0.3 config this cooker's tests have used since M8.1. The rate tracks part count, not shape.
+> The failure is a Voronoi cell whose faces disagree about a shared edge; the
+> `.rdest` decodes cleanly — every count in range, every index valid — and `register_hull` rejects
+> it at load, one process boundary from the cause. `rime fracture` now runs the same closed-manifold
+> topology check the runtime does and refuses to write the file (topology only — the metric checks
+> are not mirrored yet, and the worst measured planarity residual leaves 28% of headroom). **This
+> was already happening on `main`**:
+> seed 2 of `a_different_seed_gives_a_different_partition` has been cooking two malformed parts
+> since M8.1, and nothing noticed because that test compares bytes and never registers a hull.
+> `every_part_is_a_valid_convex_shape` now checks topology, which is what its name always claimed.
+> The epsilon defect in `build_cell` that *produces* the bad cells is **not fixed** — the guard only
+> guarantees one can never reach a file. Three hypotheses are refuted by measurement (duplicate
+> faces, inverted winding, and the thin-box framing); the surviving reading is rival copies of one
+> geometric corner where several planes pass within EPS of a point, and the fix it implies is
+> sequential half-space clipping rather than a bigger epsilon. Worth doing in the m13.3 window,
+> because the rewrite changes cooked bytes for every seed and should land before more `.rdest`
+> fixtures accumulate against the current output.
+>
+> **m13.2d — the render bridge.** `engine/destruction_render`, a bridge module by the same
+> guardrail-2 argument that produced `replication` and `destruction_net`: `destruction` must not
+> depend on `render`, and `render` must not know what a fracture is. **One mesh per (pattern, part),
+> not per (instance, part)** — 148 uploads for the block instead of 2,016 copies of identical
+> geometry. A leaf's pose comes from whichever of three states it is in (standing / riding its
+> debris body / frozen at its last pose), and a fourth ends it: retired, when m13.2b's visual budget
+> evicts its rubble — despawned, not hidden, because a hidden leaf still costs an extraction visit
+> and a frustum test every frame.
+>
+> Measured: **one hero building's full collapse peaks at 420 live debris bodies** against §1's >= 400
+> floor, under a lifecycle of 512 live / 1024 visual. The obvious config — raise live past the 512
+> visual default so C6 keeps binding — is wrong: `world.hpp` makes "visual is deliberately larger
+> than live" an invariant, and inverting it lets a still-simulating debris be visually retired.
+> Drawn on hardware, the frame reports **561 culled of 2,051 considered, 1,490 submitted** — exactly
+> what ADR-0035 §2a wanted the block for: a cull counter doing real work in both directions rather
+> than "culled 0 of 4,000".
+>
+> *Worth expecting:* `LifecycleConfig::enabled` defaults to **false**, and missing it makes every
+> budget assertion vacuous rather than wrong. It was missed in two tests here before the eviction
+> proof refused to evict.
+>
+> **Next:** m13.3a — the playable client (windowed present + a first-person camera on the predicted
+> player), then m13.3b, the engine text/HUD brick Luca ruled in on 2026-08-29.
+
 > **Update (2026-08-27) — m13.2b: ADR-0032's C6 is finally built, two milestones late.** C6 —
 > "debris visual lifetime is bounded, and retirement emits a world-bounds event so lighting caches
 > invalidate the region" — was declared *"NEW — M10's to build"*, was not built, and was recorded as
