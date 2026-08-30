@@ -51,18 +51,36 @@ target_link_libraries(rime_hello
 # owns for the duration of a play session) — deliberately linked HERE, not into the rime_app library,
 # so rime::app itself stays physics-agnostic (guardrail #2: a sim-only Application still builds with
 # physics removed). Not SDK surface — a runnable tool, deliberately not installed.
+# The editor host as a LIBRARY (m15.2): the serving logic, parameterised by which component set it
+# registers. It links neither worldkit nor blockkit — a host supplies its component set through a
+# callback, which is what lets a game build its own binary without the engine knowing the game
+# exists. See include/rime/app/editor_host_app.hpp.
+add_library(rime_editorhost_app STATIC
+    editor_host_app.cpp)
+add_library(rime::editorhost_app ALIAS rime_editorhost_app)
+
+target_include_directories(rime_editorhost_app
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+
+target_link_libraries(rime_editorhost_app
+    PUBLIC rime::ecs
+    PRIVATE rime::editorhost rime::scene rime::assets rime::app rime::physics rime::render
+            rime::rhi rime::stream rime::platform rime::core fmt::fmt)
+
+rime_apply_common_target_options(rime_editorhost_app)
+rime_install_module(rime_editorhost_app)
+
+# The ENGINE's host: the engine's component profile and nothing else.
 add_executable(rime_engine
-    editor_host_main.cpp)
+    rime_engine_main.cpp)
 
 set_target_properties(rime_engine PROPERTIES OUTPUT_NAME rime-engine)
 
-# rime::worldkit + rime::blockkit arrive with m14.1: the host registers the engine's component
-# profile (one shared list) plus the game's own, so it can open the content this engine ships. It
-# could not before — `blockkit::SlabRole` failed the load and the editor smoke never noticed,
-# because it used a synthetic scene.
+# NOT rime::blockkit any more (m15.2). One game's content module was compiled into the engine's
+# editor host, which is the thing that made "a second game without forking the engine" false.
 target_link_libraries(rime_engine
-    PRIVATE rime::editorhost rime::scene rime::assets rime::ecs rime::app rime::physics rime::render
-            rime::rhi rime::stream rime::platform rime::core rime::worldkit rime::blockkit fmt::fmt)
+    PRIVATE rime::editorhost_app rime::worldkit rime::ecs)
 
 rime_apply_common_target_options(rime_engine)
 

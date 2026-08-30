@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// `rime-engine --editor-host <socket> [--scene <file>] [--viewport]` — the engine as the editor's
-// live host process (M9, ADR-0016/0031). The Rust editor (tools/editor) launches this and connects
-// over the s1.4 local socket.
+// The editor host, as a library (m15.2 — see include/rime/app/editor_host_app.hpp for why). A host
+// binary is this plus a component registrar: `rime-engine` supplies the engine's profile,
+// `the-block-host` supplies the engine's plus the demo's. The Rust editor launches whichever it is
+// pointed at with `--engine <path>` and connects over the s1.4 local socket (M9, ADR-0016/0031).
+//
+//   <host> --editor-host <socket> [--scene <file>] [--assets <manifest>] [--viewport]
 //
 // Two modes share one connection:
 //   * The **editor channel** (always): send the component schema + a full-world snapshot, then
@@ -20,6 +23,8 @@
 // The connection is full-duplex: one thread sends (schema/snapshot/frames), one receives (edits).
 // The World is touched only by the send/render thread — the receiver just queues raw edits, which
 // the render thread applies at a frame boundary (the ECS structural-change rule, ADR-0018).
+
+#include "rime/app/editor_host_app.hpp"
 
 #include <fmt/core.h>
 
@@ -42,7 +47,6 @@
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_id.hpp"
 #include "rime/assets/manifest.hpp"
-#include "rime/blockkit/role.hpp"
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/diagnostics/log.hpp"
 #include "rime/core/jobs/job_system.hpp"
@@ -66,7 +70,6 @@
 #include "rime/stream/frame_codec.hpp"
 #include "rime/stream/frame_streamer.hpp"
 #include "rime/stream/protocol.hpp"
-#include "rime/worldkit/profile.hpp"
 
 namespace {
 
@@ -77,9 +80,8 @@ constexpr std::uint32_t kViewportHeight = 540;
 
 // ── Editor channel (GPU-free) ─────────────────────────────────────────────────────────────
 
-// A small default scene so `rime-engine --editor-host <socket>` (no --scene) still hands the editor
-// something to inspect. Mirrors the samples/07-first-light shape — the world the m9.2 fixture
-// holds.
+// A small default scene so a host with no `--scene` still hands the editor something to inspect.
+// Mirrors the samples/07-first-light shape — the world the m9.2 fixture holds.
 void build_default_world(ecs::World& world) {
     const auto place = [](float x, float y, float z) {
         return ecs::LocalTransform{core::Transform{
@@ -92,21 +94,6 @@ void build_default_world(ecs::World& world) {
         world.spawn_with(place(0.0f, 0.0f, 0.0f), render::MeshRef{0}, render::MaterialRef{0});
     (void)world.spawn_with(
         place(1.0f, 0.0f, 0.0f), render::MeshRef{1}, render::MaterialRef{1}, ecs::Parent{ground});
-}
-
-// The host's component set, and the load policy that goes with it (m14.1, ADR-0037).
-//
-// It used to be three hand-written lines here and four more in `load_viewport_scene`, and they were
-// the wrong set: transform + render + physics, against content that carries `blockkit::SlabRole`
-// and `destruction::Destructible`. So the editor could not open the block — the newest content in
-// the repo — and its smoke test stayed green throughout, because it used a synthetic scene.
-//
-// `worldkit::register_engine_components` is now the single list of what the ENGINE defines, shared
-// with every sample and tool. `blockkit` is added on top because this repo's editor is the vision
-// demo's editor; a different game would add its own module here and nothing else would move.
-void register_editor_components(ecs::World& world) {
-    (void)worldkit::register_engine_components(world);
-    blockkit::register_blockkit_components(world); // the game's own, layered on the engine's
 }
 
 // Load a scene the way a TOOL must: an unknown component type is skipped and counted, not fatal.
@@ -126,7 +113,7 @@ bool load_scene_for_editor(ecs::World& world,
     const scene::LoadReport report =
         scene::load_scene_file(world, std::filesystem::path(scene_path), options);
     if (!report.ok) {
-        RIME_ERROR("rime-engine: scene load failed ({}): {}", scene_path, report.error);
+        RIME_ERROR("editor-host: scene load failed ({}): {}", scene_path, report.error);
         return false;
     }
     if (report.skipped_components != 0) {
@@ -136,11 +123,11 @@ bool load_scene_for_editor(ecs::World& world,
         }
         // Named, not just counted: "3 unknown" sends a reader hunting, a type name sends them to
         // the module that is missing from this build.
-        RIME_WARN("rime-engine: {} component(s) skipped — this build does not register: {}",
+        RIME_WARN("editor-host: {} component(s) skipped — this build does not register: {}",
                   report.skipped_components,
                   names);
     }
-    RIME_INFO("rime-engine: loaded {} entities, {} components, {} skipped ({})",
+    RIME_INFO("editor-host: loaded {} entities, {} components, {} skipped ({})",
               report.entities,
               report.components,
               report.skipped_components,
@@ -154,8 +141,9 @@ bool load_scene_for_editor(ecs::World& world,
 
 void register_and_populate(ecs::World& world,
                            std::string_view scene_path,
-                           editorhost::HostedScene& hosted) {
-    register_editor_components(world);
+                           editorhost::HostedScene& hosted,
+                           const app::ComponentRegistrar& registrar) {
+    registrar(world);
     if (scene_path.empty()) {
         build_default_world(world);
     } else if (load_scene_for_editor(world, scene_path, hosted)) {
@@ -251,13 +239,13 @@ void send_asset_list(stream::ProtocolConnection& conn, std::string_view assets_p
     }
     std::ifstream in(std::filesystem::path(assets_path), std::ios::binary);
     if (!in) {
-        RIME_WARN("rime-engine: could not open --assets manifest '{}'", assets_path);
+        RIME_WARN("editor-host: could not open --assets manifest '{}'", assets_path);
         return;
     }
     const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     const std::optional<assets::Manifest> manifest = assets::Manifest::parse(text);
     if (!manifest) {
-        RIME_WARN("rime-engine: --assets manifest '{}' is malformed", assets_path);
+        RIME_WARN("editor-host: --assets manifest '{}' is malformed", assets_path);
         return;
     }
     std::vector<editorhost::AssetListEntry> entries;
@@ -280,13 +268,13 @@ int serve_channel(stream::ProtocolConnection conn,
     editorhost::EditorHost host(std::move(conn));
     host.set_hosted_scene(hosted); // so SaveScene knows where to write, and when to refuse (m14.3)
     if (!host.send_hello(world)) {
-        RIME_ERROR("rime-engine: failed to send schema + snapshot");
+        RIME_ERROR("editor-host: failed to send schema + snapshot");
         return 1;
     }
     send_asset_list(host.connection(), assets_path);
     while (host.poll_one(world)) {
     }
-    fmt::print("rime-engine: editor session closed ({} entities)\n", world.entity_count());
+    fmt::print("editor-host: editor session closed ({} entities)\n", world.entity_count());
     return 0;
 }
 
@@ -410,12 +398,13 @@ void load_viewport_scene(ecs::World& world,
                          render::MeshRegistry& meshes,
                          render::MaterialRegistry& materials,
                          std::string_view scene_path,
-                         editorhost::HostedScene& hosted) {
+                         editorhost::HostedScene& hosted,
+                         const app::ComponentRegistrar& registrar) {
     // One list, shared with the non-viewport path above and with every sample (m14.1).
     // WorldTransform is in it: derived state, deliberately unreflected (reflect.hpp), so it stays
     // out of the scene and the snapshot but must exist for the renderer and the gizmo pass to query
     // it live.
-    register_editor_components(world);
+    registrar(world);
 
     (void)meshes.add(render::make_uv_sphere(0.8f, 32, 64), "sphere"); // MeshRef 0
     (void)meshes.add(render::make_plane(10.0f, 4.0f), "floor");       // MeshRef 1
@@ -442,7 +431,8 @@ void load_viewport_scene(ecs::World& world,
 
 int serve_viewport(std::string_view socket_path,
                    std::string_view scene_path,
-                   std::string_view assets_path) {
+                   std::string_view assets_path,
+                   const app::ComponentRegistrar& registrar) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kViewportWidth, kViewportHeight};
@@ -452,15 +442,15 @@ int serve_viewport(std::string_view socket_path,
         // No Vulkan device (a GPU-less host): serve the editor channel without a viewport rather
         // than fail. The editor still gets the schema + snapshot + edits; its viewport shows a
         // placeholder.
-        RIME_WARN("rime-engine: no Vulkan device — serving the editor channel without a viewport");
+        RIME_WARN("editor-host: no Vulkan device — serving the editor channel without a viewport");
         editorhost::HostedScene hosted;
-        register_and_populate(app.world(), scene_path, hosted);
+        register_and_populate(app.world(), scene_path, hosted, registrar);
         auto listener = platform::LocalListener::bind(socket_path);
         if (!listener) {
-            RIME_ERROR("rime-engine: could not bind '{}'", socket_path);
+            RIME_ERROR("editor-host: could not bind '{}'", socket_path);
             return 1;
         }
-        fmt::print("rime-engine: editor host listening on {} (no viewport)\n", socket_path);
+        fmt::print("editor-host: editor host listening on {} (no viewport)\n", socket_path);
         std::fflush(stdout);
         auto sock = listener->accept();
         if (!sock) {
@@ -485,7 +475,7 @@ int serve_viewport(std::string_view socket_path,
     if (scene_path.empty()) {
         build_viewport_scene(app.world(), meshes, materials);
     } else {
-        load_viewport_scene(app.world(), meshes, materials, scene_path, hosted);
+        load_viewport_scene(app.world(), meshes, materials, scene_path, hosted, registrar);
     }
     // CLUSTERED FORWARD, because an editor must be able to host a scene it did not author (m14.1).
     // The ADR-0022 uniform-block path caps at 4 directional + 16 point lights and DROPS the rest
@@ -544,16 +534,16 @@ int serve_viewport(std::string_view socket_path,
 
     auto streamer = stream::FrameStreamer::create(*app.device(), cfg.render_extent);
     if (!streamer) {
-        RIME_ERROR("rime-engine: could not create the frame streamer");
+        RIME_ERROR("editor-host: could not create the frame streamer");
         return 1;
     }
 
     auto listener = platform::LocalListener::bind(socket_path);
     if (!listener) {
-        RIME_ERROR("rime-engine: could not bind editor-host socket '{}'", socket_path);
+        RIME_ERROR("editor-host: could not bind editor-host socket '{}'", socket_path);
         return 1;
     }
-    fmt::print("rime-engine: editor host + viewport on {} ({}x{}, '{}')\n",
+    fmt::print("editor-host: editor host + viewport on {} ({}x{}, '{}')\n",
                socket_path,
                kViewportWidth,
                kViewportHeight,
@@ -562,12 +552,12 @@ int serve_viewport(std::string_view socket_path,
 
     auto sock = listener->accept();
     if (!sock) {
-        RIME_ERROR("rime-engine: accept failed");
+        RIME_ERROR("editor-host: accept failed");
         return 1;
     }
     stream::ProtocolConnection conn(std::move(*sock));
     if (!conn.handshake()) {
-        RIME_ERROR("rime-engine: protocol handshake failed");
+        RIME_ERROR("editor-host: protocol handshake failed");
         return 1;
     }
 
@@ -576,7 +566,7 @@ int serve_viewport(std::string_view socket_path,
                            editorhost::serialize_schema(app.world())) ||
         !conn.send_message(static_cast<stream::MessageType>(editorhost::EditorMessage::Snapshot),
                            editorhost::serialize_world(app.world()))) {
-        RIME_ERROR("rime-engine: failed to send schema + snapshot");
+        RIME_ERROR("editor-host: failed to send schema + snapshot");
         return 1;
     }
     send_asset_list(conn, assets_path); // the browser's manifest (m9.5), if --assets was given
@@ -666,12 +656,12 @@ int serve_viewport(std::string_view socket_path,
                         const editorhost::SceneSaveOutcome outcome =
                             editorhost::save_hosted_scene(app.world(), hosted, save_path);
                         if (outcome.ok) {
-                            RIME_INFO("rime-engine: saved {} entities to {} ({} bytes)",
+                            RIME_INFO("editor-host: saved {} entities to {} ({} bytes)",
                                       outcome.entities,
                                       outcome.path,
                                       outcome.bytes);
                         } else {
-                            RIME_WARN("rime-engine: save refused — {}", outcome.error);
+                            RIME_WARN("editor-host: save refused — {}", outcome.error);
                         }
                         (void)conn.send_message(
                             static_cast<stream::MessageType>(editorhost::EditorMessage::SaveResult),
@@ -818,7 +808,7 @@ int serve_viewport(std::string_view socket_path,
             frame.codec = stream::Codec::LZ4;
             frame.desc = frame_desc;
             if (!encoder.encode(stream::Codec::LZ4, frame_desc, view.pixels, frame.data)) {
-                RIME_ERROR("rime-engine: frame encode failed");
+                RIME_ERROR("editor-host: frame encode failed");
                 break;
             }
             if (!conn.send_frame(frame)) {
@@ -862,7 +852,7 @@ int serve_viewport(std::string_view socket_path,
     // Synchronous capture() completes each frame before returning, so nothing is in flight to
     // drain; the streamer (and its readback buffers) release cleanly ahead of the device at scope
     // exit.
-    fmt::print("rime-engine: viewport session closed after {} frames ({} entities)\n",
+    fmt::print("editor-host: viewport session closed after {} frames ({} entities)\n",
                sequence,
                app.world().entity_count());
     return 0;
@@ -873,30 +863,31 @@ int serve_viewport(std::string_view socket_path,
 int serve(std::string_view socket_path,
           std::string_view scene_path,
           std::string_view assets_path,
-          bool viewport) {
+          bool viewport,
+          const app::ComponentRegistrar& registrar) {
     if (viewport) {
-        return serve_viewport(socket_path, scene_path, assets_path);
+        return serve_viewport(socket_path, scene_path, assets_path, registrar);
     }
     ecs::World world;
     editorhost::HostedScene hosted;
-    register_and_populate(world, scene_path, hosted);
+    register_and_populate(world, scene_path, hosted, registrar);
     auto listener = platform::LocalListener::bind(socket_path);
     if (!listener) {
-        RIME_ERROR("rime-engine: could not bind editor-host socket '{}'", socket_path);
+        RIME_ERROR("editor-host: could not bind editor-host socket '{}'", socket_path);
         return 1;
     }
-    fmt::print("rime-engine: editor host listening on {} ({} entities)\n",
+    fmt::print("editor-host: editor host listening on {} ({} entities)\n",
                socket_path,
                world.entity_count());
     std::fflush(stdout);
     auto sock = listener->accept();
     if (!sock) {
-        RIME_ERROR("rime-engine: accept failed");
+        RIME_ERROR("editor-host: accept failed");
         return 1;
     }
     stream::ProtocolConnection conn(std::move(*sock));
     if (!conn.handshake()) {
-        RIME_ERROR("rime-engine: protocol handshake failed");
+        RIME_ERROR("editor-host: protocol handshake failed");
         return 1;
     }
     return serve_channel(std::move(conn), world, assets_path, hosted);
@@ -904,7 +895,12 @@ int serve(std::string_view socket_path,
 
 } // namespace
 
-int main(int argc, char** argv) {
+namespace rime::app {
+
+int run_editor_host(int argc,
+                    char** argv,
+                    const ComponentRegistrar& registrar,
+                    const char* usage_name) {
     std::string_view socket_path;
     std::string_view scene_path;
     std::string_view assets_path;
@@ -924,9 +920,12 @@ int main(int argc, char** argv) {
 
     if (socket_path.empty()) {
         fmt::print(stderr,
-                   "usage: rime-engine --editor-host <socket> [--scene <file.rscene>] "
-                   "[--assets <manifest>] [--viewport]\n");
+                   "usage: {} --editor-host <socket> [--scene <file.rscene>] "
+                   "[--assets <manifest>] [--viewport]\n",
+                   usage_name);
         return 2;
     }
-    return serve(socket_path, scene_path, assets_path, viewport);
+    return serve(socket_path, scene_path, assets_path, viewport, registrar);
 }
+
+} // namespace rime::app

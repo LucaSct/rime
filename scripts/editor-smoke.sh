@@ -56,7 +56,7 @@ say "build rime-engine + rime-blockgen ($preset)"
 cmake --preset "$preset"
 # rime_blockgen too (m14.1): the block scene is GENERATED, not checked in, and opening it is the
 # case this smoke exists for. See the block section below.
-cmake --build --preset "$preset" --target rime_engine rime_blockgen
+cmake --build --preset "$preset" --target rime_engine rime_blockgen the_block_host
 
 # ── 2) Build the Rust editor ─────────────────────────────────────────────────────────────────────
 say "build editor (cargo)"
@@ -87,8 +87,33 @@ block_scene="$repo_root/$build_dir/editor-smoke-block.rscene"
 [ -x "$blockgen_bin" ] || { echo "editor-smoke.sh: missing $blockgen_bin" >&2; exit 1; }
 "$blockgen_bin" --out "$block_scene" --stats
 
-say "run editor --smoke --scene block.rscene (the engine's own content, 213 entities)"
-"$editor_bin" --smoke --engine "$engine_bin" --scene "$block_scene"
+# ── 5) TWO HOSTS, ONE SCENE (m15.2) ─────────────────────────────────────────────────────────────
+#
+# The engine's host registers the ENGINE's components and nothing else; the demo builds its own host
+# that adds `blockkit` on top. Same scene, same unmodified editor, `--engine` pointed at a different
+# binary — which is the whole of ADR-0038 §2: a game gets its components into the inspector by
+# building one CMake target, not by editing engine C++.
+#
+# The assertion is the DIFFERENCE. The engine host must degrade (loading the scene, dropping the
+# types it does not know, and SAYING how many); the game's host must be clean. If they ever report
+# the same thing, either the engine host has grown a game's module back or the game's host is not
+# registering anything — and both look fine from any other angle.
+say "run editor --smoke --scene block.rscene through the ENGINE's host (expect a degraded load)"
+engine_out="$("$editor_bin" --smoke --engine "$engine_bin" --scene "$block_scene" 2>&1)"
+echo "$engine_out" | grep -E "skipped|editor <-> engine OK" || true
+echo "$engine_out" | grep -q "component(s) skipped" || {
+    echo "editor-smoke.sh: the engine host opened a game's scene with nothing skipped — it should" \
+         "not know what a SlabRole is" >&2; exit 1; }
+
+say "run editor --smoke --scene block.rscene through the GAME's host (expect 0 skipped)"
+blockhost_bin="$repo_root/$build_dir/bin/the-block-host"
+[ -x "$blockhost_bin" ] || { echo "editor-smoke.sh: missing $blockhost_bin" >&2; exit 1; }
+game_out="$("$editor_bin" --smoke --engine "$blockhost_bin" --scene "$block_scene" 2>&1)"
+echo "$game_out" | grep -E "0 skipped|editor <-> engine OK" || true
+echo "$game_out" | grep -q "component(s) skipped" && {
+    echo "editor-smoke.sh: the game's own host skipped components of its own scene" >&2; exit 1; }
+echo "$game_out" | grep -q ", 0 skipped" || {
+    echo "editor-smoke.sh: the game's host did not report a clean load" >&2; exit 1; }
 
 # The streamed viewport: the engine renders a scene and streams it; the editor receives + LZ4-decodes
 # real frames. Needs a Vulkan device on the engine side — lavapipe (mesa) in CI. On a host with no
