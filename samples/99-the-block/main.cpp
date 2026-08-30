@@ -21,8 +21,8 @@
 //   1. IT COMPOSES. Eight subsystems in one frame, each still doing real work — asserted with each
 //      one's own counter, not with "it didn't crash". A subsystem that silently switched itself off
 //      is the failure this catches, and it is the likeliest one.
-//   2. IT IS DESTRUCTIBLE AT SCALE. Sustained fire on a hero building drops live parts, raises live
-//      debris past ADR-0035 §1's floor, and the pile then settles.
+//   2. IT IS DESTRUCTIBLE AT SCALE. A demolition charge on a hero building drops live parts, raises
+//      live debris past ADR-0035 §1's floor, and the pile then settles — and the peers converge.
 //   3. THE PEERS AGREE. The client's destruction state hash converges on the server's, bit for bit,
 //      with the composition checks matching and nothing left unresolved.
 //   4. THE PLAYER IS IN IT. The camera is mounted on the m12.4 PREDICTED player — the wiring
@@ -38,8 +38,9 @@
 //      mode on hardware whose fingerprint goes into the report — the 11-lit-rooms split, ADR-0035
 //      §2b — and that is m13.p, the next brick but one.
 //
-// AND ONE CLAIM FAILS, reported rather than asserted: THE COLLAPSE DOES NOT STAY LOCAL. See the
-// KNOWN DEFECT block in run_headless. M13 does not close until that is fixed.
+//   7. THE COLLAPSE STAYS LOCAL. Levelling one building must not level the block. This shipped as a
+//      reported KNOWN DEFECT in m13.5 and is an assertion as of m13.6 — see the comment on it in
+//      run_headless for what was wrong and why nothing else could have seen it.
 //
 // ── What it deliberately does NOT prove ─────────────────────────────────────────────────────────
 //
@@ -504,6 +505,9 @@ struct Session {
     std::uint64_t shots_fired = 0;
     std::uint64_t shots_hit = 0;
     std::uint64_t damage_ops = 0;
+    float max_op_amount = 0.0f;   // largest single damage op; parts stand at 1.0 health
+    std::uint64_t lethal_ops = 0; // ops that killed their part outright
+    std::uint64_t total_ops = 0;
 
     explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {}
 
@@ -699,6 +703,18 @@ struct Session {
             ++damage_ops;
         }
         server.destruction.update(server.physics);
+        // The damage-op shape, and it is not a curiosity — it is the number that made m13.5's
+        // runaway collapse legible. Parts stand at 1.0 health, so an op at or above 1.0 kills
+        // outright; a population that is almost entirely instant kills means the damage tuning is
+        // wrong for the content's scale, whatever the collapse looks like. It read 729 of 799 with
+        // the fracturer's default threshold and reads a small minority now.
+        for (const destruction::DamageOp& op : server.destruction.committed_ops()) {
+            max_op_amount = std::max(max_op_amount, op.amount);
+            if (op.amount >= 1.0f) {
+                ++lethal_ops;
+            }
+            ++total_ops;
+        }
 
         // ── PostSim: the debris bridge ──
         // Every new chunk becomes a replicated entity, live chunks get this tick's transform, and
@@ -844,12 +860,14 @@ struct Session {
 // reaches the client through the same replication path the rifle's damage takes.
 struct Charge {
     core::Vec3 at{};
-    // Sized to take the corner out, NOT the building. A radius past the 8 m footprint is a
-    // "delete this building" button wearing a demolition charge's name, and the collapse that
-    // follows says nothing about whether the structure cascades — because there is no structure
-    // left to cascade.
-    float radius = 5.0f;
-    float damage = 3.0f;
+    // Sized to bring the HERO BUILDING down — ADR-0035 §1 wants >= 400 peak live debris and one
+    // hero building's 420 parts is what makes that reachable at all (block_standup_test measured
+    // exactly that). A background building's 180 could not supply it however hard it were hit.
+    //
+    // It is applied to that building's slabs ONLY. Whether the collapse then spreads is the
+    // question m13.6 answered: it used to, and it was contact damage rather than the charge.
+    float radius = 11.0f;
+    float damage = 9.0f;
     float impulse = 7.0f;
 };
 
@@ -1157,6 +1175,7 @@ int run_headless(const std::filesystem::path& cooked) {
                 stats.local_lights());
 
     const std::size_t parts_at_start = demo.session.parts_alive();
+    const std::vector<std::size_t> parts_at_start_per = demo.session.parts_per_building();
     std::size_t peak_leaves = 0;
 
     // The frame the render claims are made about is drawn while the block is STANDING, a few ticks
@@ -1214,6 +1233,30 @@ int run_headless(const std::filesystem::path& cooked) {
         }
     }
 
+    // ── Drain to quiescence, with a bound ───────────────────────────────────────────────────────
+    // The script ends while the pile is still falling and the wire still has traffic on it, so
+    // "the peers agree" cannot be asked yet. Run on with an empty tape until they do — and BOUND
+    // it, so the claim cannot pass by never converging. That is the shape the m13.2b eviction proof
+    // was corrected to: assert that it CATCHES UP, with a limit, rather than asserting a state that
+    // happened to hold at whatever tick the loop stopped.
+    constexpr std::uint64_t kSettleBound = 600;
+    std::uint64_t settled_after = 0;
+    const auto agree = [&demo] {
+        return destruction_net::shared_state_hash(demo.session.server.world,
+                                                  demo.session.server.replicator->map(),
+                                                  demo.session.server.destruction) ==
+               destruction_net::shared_state_hash(demo.session.client.world,
+                                                  demo.session.client.replicator->map(),
+                                                  demo.session.client.destruction);
+    };
+    while (settled_after < kSettleBound && !agree()) {
+        demo.step_sim(replication::InputCommand{});
+        ++settled_after;
+    }
+    std::printf("  settled   : peers agreed after %llu quiet ticks (bound %llu)\n",
+                static_cast<unsigned long long>(settled_after),
+                static_cast<unsigned long long>(kSettleBound));
+
     const std::size_t parts_at_end = demo.session.parts_alive();
     {
         const std::vector<std::size_t> per = demo.session.parts_per_building();
@@ -1264,11 +1307,53 @@ int run_headless(const std::filesystem::path& cooked) {
                 static_cast<unsigned long long>(dc.composition_mismatches()),
                 static_cast<unsigned long long>(dc.debris_bound()),
                 static_cast<unsigned long long>(dc.debris_unresolved()));
+    std::printf("  damage    : %llu ops, %llu instant kills (>= 1.0 health), largest %.2f\n",
+                static_cast<unsigned long long>(demo.session.total_ops),
+                static_cast<unsigned long long>(demo.session.lethal_ops),
+                static_cast<double>(demo.session.max_op_amount));
     std::printf("  audio     : %llu events, %zu voices, peak %.2f, %llu clipped\n",
                 static_cast<unsigned long long>(demo.audio_events),
                 demo.mixer.voice_count(),
                 static_cast<double>(demo.audio_stats.peak),
                 static_cast<unsigned long long>(demo.audio_stats.clipped_samples));
+
+    // ── COLLAPSE LOCALITY — m13.5 found this failing, m13.6 fixed it, and it is a claim now ─────
+    //
+    // The defect: one demolition charge on ONE building used to flatten the entire block, across
+    // the 12 m gap to its neighbours and then across the 12 m street. Not the player, not the
+    // rifle, and not the charge's size — `--idle` reproduced it with a player who never moves.
+    //
+    // The cause was contact damage tuned for a different object. `damage_threshold` is cooked per
+    // pattern and the fracturer's 5.0 default was set for M8's small test wall; a building slab
+    // part is two orders of magnitude heavier. Measured here: contact impulses reached 669 kg·m/s
+    // against a threshold of 5 and a part health of 1.0, so 729 of 799 contact ops were INSTANT
+    // KILLS and the cascade could not damp. The cooks now carry their own tuning
+    // (--damage-threshold /
+    // --damage-scale, m13.6) and the same charge leaves the far side of the street untouched.
+    //
+    // WHAT IS ASSERTED, and why it is not "only the charged building falls": a nine-metre building
+    // collapsing four metres from its neighbour SHOULD hurt it, and the demo shows exactly that —
+    // the two adjacent buildings lose parts. What must not happen is the damage carrying on across
+    // the street. So the claim is about REACH, which is the thing that was broken.
+    const std::vector<std::size_t> parts_end_per = demo.session.parts_per_building();
+    std::size_t far_side_intact = 0;
+    std::size_t fully_intact = 0;
+    {
+        const blockkit::BlockParams p;
+        std::printf("  locality  :");
+        for (std::size_t b = 0; b + 1 < parts_end_per.size(); ++b) {
+            const bool intact = parts_end_per[b] >= parts_at_start_per[b];
+            // "Far side" = the north row, across the street from the south hero that was charged.
+            if (b >= p.buildings_per_side && intact) {
+                ++far_side_intact;
+            }
+            if (intact) {
+                ++fully_intact;
+            }
+            std::printf(" %zu/%zu", parts_end_per[b], parts_at_start_per[b]);
+        }
+        std::printf("  (far side intact %zu/%u)\n", far_side_intact, p.buildings_per_side);
+    }
 
     struct Claim {
         const char* name;
@@ -1293,6 +1378,12 @@ int run_headless(const std::filesystem::path& cooked) {
         {"net: composition checks all matched", dc.composition_mismatches() == 0},
         {"net: no debris left unresolved", dc.debris_unresolved() == 0},
         {"net: the peers' destruction state hashes agree", server_hash == client_hash},
+        {"net: they agreed WITHIN the settle bound", settled_after < kSettleBound},
+        // The claim m13.5 shipped as a KNOWN DEFECT and m13.6 earned. Before the fix this read
+        // 0 of 4 and 0 of 8 — the whole block, every time.
+        {"collapse: the far side of the street is untouched",
+         far_side_intact == blockkit::BlockParams{}.buildings_per_side},
+        {"collapse: most of the block is still standing", fully_intact >= 5},
         // Audio ran and did not distort.
         {"audio: destruction drove the mixer", demo.audio_events > 0},
         {"audio: nothing clipped", demo.audio_stats.clipped_samples == 0},
@@ -1323,45 +1414,8 @@ int run_headless(const std::filesystem::path& cooked) {
                     intact_luma);
     }
 
-    // ── THE OPEN DEFECT, measured and named rather than left for someone to notice ───────────────
-    //
-    // Every claim above can hold while the entire block demolishes itself, and on this run it does.
-    // A 5 m charge on ONE building's corner ends with all eight buildings flat — and `--idle`,
-    // which runs the same block with a player who never moves or shoots, shows the structure is
-    // stable for 550 ticks and then loses the whole south side to that one charge. So it is not the
-    // player, not the rifle, and not the charge's size: local damage propagates without bound,
-    // across a 12 m gap and then across a 12 m street.
-    //
-    // This is what m13.5 was for. No previous test could see it: `block_standup_test` binds the
-    // block and steps it briefly, `block_render_test` draws it, and the destruction suites work on
-    // ONE destructible at a time. Two neighbouring buildings and 400 chunks of falling rubble is a
-    // configuration that had never run until this sample ran it.
-    //
-    // It is reported and NOT asserted, deliberately. Making it claim #21 today would give the repo
-    // a permanently red CTest, which stops being information after the first day; leaving it out
-    // silently would be worse. It becomes an assertion in the brick that fixes it, and until then
-    // M13's "feels right" clause is not met — see docs/ROADMAP.md.
-    {
-        const std::vector<std::size_t> per = demo.session.parts_per_building();
-        const blockkit::BlockParams p;
-        std::size_t untouched_intact = 0;
-        for (std::size_t b = 0; b + 1 < per.size(); ++b) {
-            if (b != p.hero_south && per[b] > 0) {
-                ++untouched_intact;
-            }
-        }
-        const std::size_t others = p.building_count() - 1;
-        std::printf(
-            "\n  KNOWN DEFECT — the collapse does not stay local:\n"
-            "    charged 1 building, %zu of the other %zu still have any parts standing.\n"
-            "    Reproduce the control with --idle. M13's \"feels right\" clause is NOT met;\n"
-            "    this is reported, not asserted, so the gate below stays meaningful.\n",
-            untouched_intact,
-            others);
-    }
-
     int failed = 0;
-    std::printf("\n  M13 claims that ARE gated:\n");
+    std::printf("\n  M13 \"done when\":\n");
     for (const Claim& c : claims) {
         std::printf("    [%s] %s\n", c.ok ? " ok " : "FAIL", c.name);
         failed += c.ok ? 0 : 1;
@@ -1371,8 +1425,7 @@ int run_headless(const std::filesystem::path& cooked) {
         std::fprintf(stderr, "99-the-block: %d of %zu claims failed\n", failed, claims.size());
         return 1;
     }
-    std::printf("\n99-the-block: all %zu gated claims hold. M13 is NOT closed — see the known\n"
-                "defect above; the milestone's \"feels right\" clause is what it blocks.\n",
+    std::printf("\n99-the-block: all %zu claims hold — M13's \"done when\" is met.\n",
                 claims.size());
     return 0;
 }

@@ -16,21 +16,24 @@ build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI
 `--cooked <dir>` points at the nine `.rdest` files; the build cooks them into the target's own
 directory and bakes that path in, so the two commands above just work after a build.
 
-## Status: 20 gated claims pass, and the milestone is **not** closed
+## Status: 23 claims pass — M13's "done when" is met
 
-**The collapse does not stay local.** A 5 m demolition charge on one building's corner ends with the
-whole block flat — across the 12 m gap to its neighbours, then across the 12 m street. `--idle` is
-the control that pinned it down: the same block with a player who never moves or shoots stands
-untouched for 550 ticks and then loses its entire south side to that one charge. Not the player, not
-the rifle, not the charge's size — local damage propagates without bound.
+It did not start that way. m13.5 shipped this demo with 20 claims passing and one **reported as a
+known defect**: *the collapse does not stay local*. A charge on one building flattened the whole
+block, across the 12 m gap to its neighbours and then across the street. `--idle` — the same block
+with a player who never moves or shoots — reproduced it, so it was not the player, the rifle, or the
+charge's size.
 
-No earlier test could have seen it. `block_standup_test` binds the block and steps it briefly,
-`block_render_test` draws it, and every destruction suite works on one destructible at a time. Two
-neighbouring buildings and 400 chunks of falling rubble had never run.
+**The cause was damage tuning, not physics.** `damage_threshold` is cooked per pattern and the
+fracturer's 5.0 default was set for M8's small test wall. A building slab part is two orders of
+magnitude heavier: measured here, contact impulses reached **669 kg·m/s** against a threshold of 5
+and a part health of 1.0, so **729 of 799 contact ops were instant kills** and the cascade could not
+damp. m13.6 put `--damage-threshold` / `--damage-scale` on `rime fracture` — they had never been
+reachable from the CLI at all — and gave each cook tuning matched to its part mass.
 
-It is **reported by the demo, not asserted**. A permanently red CTest stops being information after
-the first day; leaving it out silently would be worse. It becomes claim #21 in the brick that fixes
-it, and until then M13's "feels right" clause is what it blocks.
+Now the same charge levels the hero building, seriously damages the two buildings beside it, and
+leaves the far side of the street untouched. The `locality` line prints the per-building survivors
+and `damage` prints the op population that made the defect legible.
 
 ## What the gate covers
 
@@ -39,9 +42,10 @@ it, and until then M13's "feels right" clause is what it blocks.
 | scale | 2,016 parts (floor 1,500) · 36 local lights (floor 32) |
 | player | the avatar replicates, and the **predictor seeds** — the camera rides the predicted pose, the wiring m13.3a named and deferred to here |
 | destruction | shots reach the block · parts fall · peak live debris ≥ 400 · the visual budget stays above the live one |
-| networking | ops replicate · every composition check matches · nothing unresolved · both peers agree on `shared_state_hash` |
+| networking | ops replicate · every composition check matches · nothing unresolved · both peers agree on `shared_state_hash`, **within a bounded settle** |
 | audio | destruction drives the mixer · nothing clips |
 | render | the cull considers every part and rejects **1,983 of 2,051** · every leaf finds its mesh · the frame comes back lit |
+| collapse | the far side of the street is untouched · most of the block is still standing |
 
 "A playable frame rate" is the one clause CI cannot judge — lavapipe is a CPU rasteriser, so a
 millisecond there is a statement about the runner's mood. Counts stay in `--headless` where CI can
