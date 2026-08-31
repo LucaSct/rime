@@ -2169,6 +2169,63 @@ m15.8.
 > `vkDestroyBuffer ... currently in use` validation errors at teardown, present with and without
 > pointer capture and therefore older than both.
 
+### The adversarial review that M11–M15 never got (2026-08-31)
+
+Kimi's last review ran 2026-08-12 and Fable was out of credits through M13–M15, so **every line of
+implementation from M12 onward reached `main` unreviewed** — recorded here because a review that was
+skipped silently is indistinguishable from one that passed. Nine units were dispatched against
+`e3ccf84`; five completed. Every finding below was re-verified against the code by hand, and the two
+marked *measured* were settled by running something rather than by reading.
+
+**Confirmed, and worth fixing in roughly this order:**
+
+1. **A subnormal float makes a `.rscene` unloadable — the writer emits values its own reader
+   refuses.** `engine/scene/src/scene_format.cpp:268-292` requires `errno == 0`, and glibc's
+   `strtof` sets `ERANGE` on *every* subnormal result even though the returned value is exactly
+   right. Drag a scale toward zero in the inspector and the file will not reload, in the game or in
+   the editor. *Measured* here: `strtof("1e-39")` → correct value, `errno=34`; `"1e40"` → `inf`,
+   same flag. The fix must split underflow (accept) from overflow (keep rejecting).
+2. **Save is not gated on the play phase.** `engine/app/editor_host_app.cpp:714-722` handles
+   `SaveScene` with no `play_session.phase()` check, three lines above `Play`/`Step`, which both
+   consult it. Ctrl+S during Play overwrites the authored scene with mid-collapse debris poses;
+   Stop restores the world but not the file. Latent at m14.3, reachable since m15.3's File menu.
+3. **`scripts/authoring-round-trip.sh` gates on one inequality over translation bits.** The digest
+   is computed engine-side from the loaded world — the right side — but folds only translations,
+   pre-simulation. A writer bug that zeroed every rotation would keep it green. Both run logs are
+   already on disk; requiring the four printed counts to be *equal* across runs closes it.
+4. **Nothing in the repo passes `--no-tests=error`.** *Measured*: `ctest -R <no match>` exits **0**
+   ("No tests were found!!!", ctest 4.4.2). The LeakSanitizer and TSan steps select by name regex
+   against an already-built tree, so a renamed target empties them and they stay green. Latent
+   today (the filters match 6 and 3 tests) — and the same shape as the bug #167 fixed, which closed
+   the instance and not the class.
+5. **M12's "bit for bit, no epsilon" clause never compares `velocity.y` or `grounded`**
+   (`samples/13-networked-player/main.cpp:684-687`) — the one claim whose whole value is that it has
+   no exceptions carries one.
+6. **`write_character_pose` silently no-ops** (`engine/gameplay/src/components.cpp:43-66`): the
+   comment says "LocalTransform FIRST and unconditionally for a root", the code guards on
+   `!= nullptr`, and none of its three skip paths has a counter. No in-tree caller hits it yet.
+7. **Deferred-record eviction retroactively falsifies an ack** (`client_replicator.cpp:400-404`):
+   the *oldest* held record is evicted while `dropped_here` fails only the current tick, so a tick
+   already acked on the strength of being held can never be re-offered. **m11.4b code, not M12's**;
+   reachability needs >512 in-flight unresolved records and is unproven.
+8. `sample_frames` uses `return` where `continue` is meant (`main.cpp:523-525`), so one unresolved
+   mirror stops sampling every later client. `setup.ps1:48-51` prints `[ok] conan installed`
+   whether or not it did — the very lesson `build.ps1`'s `Run()` documents, in its sibling file.
+
+**Checked and found sound**, which is worth recording so it is not re-litigated: no guardrail-5
+violation anywhere in m12.3–m12.6 — every per-peer fact was traced to the event that advances it,
+and `Predictor::history_` retires on the reconciled state rather than on the `acked_through` proxy
+the ADR originally specified. The netwall join barrier waits on confirmed holding, is bounded, and
+does not shift the shot schedule; its negative control cannot go vacuous. The CoreAudio render
+callback is genuinely realtime-safe. None of the three test files edited in #167 was weakened.
+
+**Not reviewed, so that the gap is visible rather than merely absent:** M15's editor⇄engine seams
+and its sensor/masking/pointer-capture bricks, M13's fracture geometry and windowed-teardown
+lifetimes, and the destruction core — four units were cut off by the session limit mid-analysis.
+Two leads they had reached and did not finish: the renderer guards the mesh-index **sentinel but
+not the range**, and m13.2d has suspect stale-body pose recovery and gen-0 `InstanceId`
+reconstruction. Those four are the first candidates for the next review pass.
+
 **M13's frame-rate clause is carried to M16, with the number written down** — `frame` p99 35.60 ms
 against a ratified 16.6. The budget does not move; M13 stands at ⚠️. It goes to M16 because m13.p
 says where the cost is and it is not where M15 works: the whole M10 stack renders in 5.23 ms, and
