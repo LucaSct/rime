@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "rime/assets/cooked_reader.hpp"
+#include "rime/core/byte_cursor.hpp"
 #include "rime/core/math.hpp"
 #include "rime/destruction/bind.hpp"
 #include "rime/destruction/components.hpp"
@@ -47,6 +48,7 @@
 #include "rime/destruction_net/composition.hpp"
 #include "rime/destruction_net/destruction_client.hpp"
 #include "rime/destruction_net/destruction_server.hpp"
+#include "rime/destruction_net/wire.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/schema_hash.hpp"
 #include "rime/ecs/transform.hpp"
@@ -94,6 +96,10 @@ constexpr std::uint64_t kMatchTicks = 260;
 // A tick budget for driving the network to quiescence at a barrier. A bound, not a hope: exceeding
 // it is a failure with a deadline rather than a hang.
 constexpr std::uint64_t kQuiesceTickBudget = 400;
+
+// A tick budget for the join barrier, in the same spirit as the quiesce budget above: a bound, not
+// a hope. Generous because a real socket handshake is paced by the OS, not by our virtual clock.
+constexpr std::uint64_t kJoinTickBudget = 600;
 
 // How many consecutive drained ticks with an unchanged per-client hash count as settled. Watching
 // each client's OWN hash go quiet is deliberately not the same as comparing it to the server's:
@@ -248,13 +254,32 @@ struct Peer {
     }
 };
 
+// How many of this peer's replicated entities are BOUND destructibles — exactly the mirrors
+// shared_state_hash will fold. The join barrier waits on this and not on the session state alone,
+// because a session is Connected a good while before the component deltas that bind its mirrors
+// have arrived.
+[[nodiscard]] std::uint32_t bound_destructibles(const Peer& peer,
+                                                const replication::NetIdMap& map) {
+    std::uint32_t bound = 0;
+    map.for_each([&](replication::NetId, ecs::Entity entity) {
+        const auto* ref = peer.world.get<destruction::DestructibleInstanceRef>(entity);
+        bound += (ref != nullptr && ref->instance != destruction::kUnboundInstance) ? 1u : 0u;
+    });
+    return bound;
+}
+
 // What one run of the match observed. Everything a caller asserts on comes back here rather than
 // being checked inside the loop, so the sabotaged run can assert the OPPOSITE of the honest one
 // without a second copy of the match.
 struct RunResult {
     bool ran = false;
+    bool joined = false; // both clients connected AND holding every destructible before shot one
     std::uint64_t server_hash = 0;
     std::uint64_t client_hash[2] = {0, 0};
+
+    // Ops the clients threw away because the op outran the mirror it names (ADR-0033 §3). The
+    // counter always existed; not asserting on it is what let a silent divergence read as a pass.
+    std::uint64_t ops_dropped_unmapped[2] = {0, 0};
 
     // Liveness — the proof that the run was not vacuous.
     std::uint64_t dead_parts = 0;
@@ -417,6 +442,21 @@ RunResult run_match(const assets::DestructibleAsset& asset,
     std::vector<replication::InputCommand> drained_input;
     int sabotage_budget = sabotage_client >= 0 ? 1 : 0;
 
+    // Does this inbox carry a committed damage-op list? The negative control needs to drop a real
+    // batch, so it has to be able to see one.
+    const auto carries_damage_ops = [](std::span<const net::Received> messages) {
+        for (const net::Received& message : messages) {
+            core::ByteReader reader{message.bytes};
+            std::uint8_t tag = 0;
+            if (reader.u8(tag) && destruction_net::owns_tag(tag) &&
+                static_cast<destruction_net::MessageTag>(tag) ==
+                    destruction_net::MessageTag::DamageOps) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     // One tick of the whole system, in the order Application's sim stage prescribes (ADR-0033 A5):
     // PreSim = poll, apply remote ops, bind; sim; Publish = send.
     const auto tick = [&](bool run_shots) {
@@ -467,8 +507,15 @@ RunResult run_match(const assets::DestructibleAsset& asset,
                 inbox.clear();
                 r.client_bytes[i] += session->drain_received(inbox);
                 state_clients[i].apply_messages(inbox);
-                const bool sabotage_now =
-                    sabotage_client == i && sabotage_budget > 0 && match_tick == kSabotageTick;
+                // Land the sabotage on the first inbox at or after kSabotageTick that ACTUALLY
+                // carries damage ops, rather than on whatever happens to arrive on that exact
+                // tick. The original spelling (`match_tick == kSabotageTick`) was hostage to the
+                // scripted network's seeded loss/latency schedule: shift the run's phase by a few
+                // ticks — as the join barrier above does — and tick 25 carries no damage ops, the
+                // sabotage drops nothing, and the negative control silently proves nothing. A
+                // control that only fires when the schedule cooperates is not a control.
+                const bool sabotage_now = sabotage_client == i && sabotage_budget > 0 &&
+                                          match_tick >= kSabotageTick && carries_damage_ops(inbox);
                 if (sabotage_now) {
                     // Drop this client's damage ops on the floor, exactly once. The channel has
                     // already delivered them, so nothing retransmits — which is precisely the
@@ -602,6 +649,50 @@ RunResult run_match(const assets::DestructibleAsset& asset,
         return false;
     };
 
+    // Both clients connected AND holding every destructible.
+    const auto joined = [&]() -> bool {
+        for (int i = 0; i < 2; ++i) {
+            bool connected = false;
+            for (const net::SessionId id : client_drivers[i]->session_ids()) {
+                const net::Session* s = client_drivers[i]->session(id);
+                connected =
+                    connected || (s != nullptr && s->state() == net::SessionState::Connected);
+            }
+            if (!connected || bound_destructibles(clients[i], state_clients[i].map()) !=
+                    static_cast<std::uint32_t>(kWalls)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // ── The join barrier ─────────────────────────────────────────────────────────────────────────
+    // Drive ticks with NO shots until both clients have actually joined. Firing before that is not
+    // a lossy-network scenario the engine is meant to ride out — it is damage aimed at a mirror
+    // that does not exist yet, and ADR-0033 §3 says exactly what becomes of it: an op whose NetId
+    // does not resolve, or resolves to an entity not yet bound to an instance, is DROPPED and
+    // counted. The reliable Spawn and the unreliable component delta are different channels, so an
+    // op can outrun the binding; the repair for a mirror that missed real destruction is the A3
+    // state-application seam, which is late-join machinery this proof does not build.
+    //
+    // THE SCRIPTED NETWORK HID THE NEED FOR THIS, and that is the whole reason the UDP variant
+    // exists. A virtual network delivers in lockstep with the virtual clock, so the handshake
+    // finishes around tick 4 and the first shot at match tick 20 always lands on a bound mirror.
+    // Real sockets do not keep our clock: this loop burns 250 ms of VIRTUAL time in a fraction of
+    // a real millisecond, so the connect retry fires over and over before the kernel has delivered
+    // the first datagram, and the session only comes up near tick 27 — seven match ticks after
+    // wall 0 was already being shot. Seventeen ops died there, wall 0 stayed pristine on both
+    // clients, and all four barriers disagreed while every packet counter said the wire was fine.
+    std::uint64_t join_ticks = 0;
+    while (join_ticks < kJoinTickBudget && !joined()) {
+        tick(/*run_shots=*/false);
+        ++join_ticks;
+    }
+    r.joined = joined();
+    if (!r.joined) {
+        return r; // ran stays false: the caller reports a setup failure rather than a divergence
+    }
+
     std::size_t next_barrier = 0;
     for (std::uint64_t t = 0; t < kMatchTicks; ++t) {
         tick(/*run_shots=*/true);
@@ -628,6 +719,7 @@ RunResult run_match(const assets::DestructibleAsset& asset,
     r.dropped_over_budget = state_server.entities_dropped_over_budget();
     r.multipart_ticks = state_server.multipart_ticks();
     for (int i = 0; i < 2; ++i) {
+        r.ops_dropped_unmapped[i] = destruction_clients[i].ops_dropped_unmapped();
         r.deltas_applied[i] = state_clients[i].deltas_applied();
         r.malformed[i] = state_clients[i].malformed_messages();
     }
@@ -677,7 +769,10 @@ int main(int argc, char** argv) {
                                     /*loss_rate=*/scripted ? 0.10f : 0.0f,
                                     /*sabotage_client=*/-1);
     if (!run.ran) {
-        std::fprintf(stderr, "12-networked-destruction: the match could not be set up\n");
+        std::fprintf(stderr,
+                     run.joined ? "12-networked-destruction: the match could not be set up\n"
+                                : "12-networked-destruction: the clients never joined (session up "
+                                  "and every destructible bound) within the join budget\n");
         return 1;
     }
 
@@ -712,6 +807,11 @@ int main(int argc, char** argv) {
           "both clients actually applied replication deltas");
     check(run.malformed[0] == 0 && run.malformed[1] == 0,
           "no client silently discarded a message as malformed");
+    // The counter that would have named this bug on sight. A dropped op is legal engine behaviour
+    // (ADR-0033 §3) but never legal INSIDE this proof: every op here is aimed at a mirror the join
+    // barrier has already established, so one dropped op means the match outran the world again.
+    check(run.ops_dropped_unmapped[0] == 0 && run.ops_dropped_unmapped[1] == 0,
+          "no client dropped a destruction op for an unbound mirror");
     check(run.input_consumed[0] > 0 && run.input_consumed[1] > 0,
           "the m11.6c input path carried commands end to end (proof of flow)");
 
@@ -743,11 +843,14 @@ int main(int argc, char** argv) {
 
     std::fprintf(stderr,
                  "\nserver %016llx | client0 %016llx | client1 %016llx\n"
+                 "unmapped-drops %llu/%llu\n"
                  "dead parts %llu | dropped %llu | culled %llu | over-budget %llu | "
                  "multipart %llu\nclient bytes %llu / %llu | input consumed %llu / %llu\n",
                  static_cast<unsigned long long>(run.server_hash),
                  static_cast<unsigned long long>(run.client_hash[0]),
                  static_cast<unsigned long long>(run.client_hash[1]),
+                 static_cast<unsigned long long>(run.ops_dropped_unmapped[0]),
+                 static_cast<unsigned long long>(run.ops_dropped_unmapped[1]),
                  static_cast<unsigned long long>(run.dead_parts),
                  static_cast<unsigned long long>(run.packets_dropped),
                  static_cast<unsigned long long>(run.culled_irrelevant),
