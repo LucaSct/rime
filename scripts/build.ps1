@@ -84,7 +84,30 @@ if (-not $RustOnly) {
     #   specified.  /  CMAKE_CXX_COMPILER not set, after EnableLanguage
     # Conan must be told which generator the presets use. build.sh needs no equivalent: on Linux the
     # toolchain emits no platform/toolset at all.
+    #
+    # -s:b compiler.cppstd=17 is the other Windows-only flag, and it is about the BUILD context, not
+    # ours. Plain -s sets only the HOST profile; the build profile keeps whatever `conan profile
+    # detect` chose, and on MSVC that is cppstd=14. glslang -- the offline shader compiler, a build
+    # requirement -- pulls in spirv-tools, which refuses to compile below 17:
+    #   spirv-tools/1.4.313.0: Cannot build for this configuration: Current cppstd (14) is lower
+    #   than the required C++ standard (17).  /  ERROR: There are invalid packages
+    # build.sh needs no equivalent because `conan profile detect` on GCC/Clang picks gnu17 already,
+    # which is also why 17 and not 20: it is the value the Linux build context has been proving
+    # green all along, rather than a new one for these two tools to meet.
+    #
+    # This one is worth knowing HOW it hides. It only bites when Conan actually has to build those
+    # tools, and whether it does depends on the MSVC version: Conan Center has prebuilt binaries for
+    # compiler.version=194, so a machine on VS 17.14 downloads them and never exercises the build
+    # profile at all. The CI runner is on 195, finds no match, builds from source, and fails in
+    # `conan install` before a single file of ours is compiled. A green local build proves nothing
+    # here -- the two machines are not running the same steps.
+    # '-s:b' is QUOTED, and must stay that way. Bare, PowerShell reads -s:b as its own -Name:Value
+    # parameter syntax, splits it there, and hands conan `-s:` and `b` as two arguments -- which it
+    # rejects with "ambiguous option: -s: could match -s, -s:b, -s:h, -s:a". Quoting passes the token
+    # through untouched. Same trap for -o:b / -c:b, should either ever be needed. (No comment lines
+    # inside the argument list below, either: a backtick continuation cannot span one.)
     Run $conan install . -of "build/$Preset" -s build_type=$buildType -s compiler.cppstd=20 `
+        '-s:b' compiler.cppstd=17 `
         -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" `
         -c tools.cmake.cmaketoolchain:generator=Ninja --build=missing
 
