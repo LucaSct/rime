@@ -41,12 +41,23 @@ rime_install_module(rime_audio)
 # Selecting at BUILD time rather than dlopen-ing at runtime is deliberate: it keeps ALSA's enum
 # constants coming from ALSA's own headers instead of being hardcoded to talk to a library we never
 # included, which is a silent ABI assumption waiting to rot.
-find_package(ALSA QUIET)
-if(ALSA_FOUND)
-    target_sources(rime_audio PRIVATE src/sink_alsa.cpp)
-    target_link_libraries(rime_audio PRIVATE ALSA::ALSA)
-    message(STATUS "rime_audio: ALSA sink enabled")
+#
+# macOS is NOT an ALSA host and was therefore falling through to the null sink — structurally deaf
+# on a platform we support and develop on. CoreAudio needs no find_package: AudioToolbox and
+# CoreAudio ship with every macOS SDK, so the sink is unconditionally available there and the
+# "capability the host may or may not have" reasoning below applies only to Linux.
+if(APPLE)
+    target_sources(rime_audio PRIVATE src/sink_coreaudio.cpp)
+    target_link_libraries(rime_audio PRIVATE "-framework AudioToolbox" "-framework CoreAudio")
+    message(STATUS "rime_audio: CoreAudio sink enabled")
 else()
-    target_sources(rime_audio PRIVATE src/sink_null.cpp)
-    message(STATUS "rime_audio: no ALSA headers — audio sink will report no device")
+    find_package(ALSA QUIET)
+    if(ALSA_FOUND)
+        target_sources(rime_audio PRIVATE src/sink_alsa.cpp)
+        target_link_libraries(rime_audio PRIVATE ALSA::ALSA)
+        message(STATUS "rime_audio: ALSA sink enabled")
+    else()
+        target_sources(rime_audio PRIVATE src/sink_null.cpp)
+        message(STATUS "rime_audio: no ALSA headers — audio sink will report no device")
+    endif()
 endif()
