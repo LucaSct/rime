@@ -98,6 +98,33 @@ if (-not $RustOnly) {
 }
 
 if (-not $CppOnly) {
+    # Point the rime-ffi crate (M6.9) at the freshly-built C ABI so its live tests link the current
+    # rime_capi instead of compiling themselves out. build.sh does this with RIME_CAPI_DIR plus an
+    # -Wl,-rpath baked into the test binary so the loader finds the library without LD_LIBRARY_PATH.
+    # Windows has no rpath, which is why this was left undone (docs/design/ffi.md called it deferred)
+    # and why those four tests have reported themselves ignored on every Windows run there has been.
+    #
+    # PATH is the Windows answer: it is what the loader actually searches for a DLL. Two directories,
+    # because two different tools want two different files -- the LINKER needs the import library
+    # build/<preset>/lib/rime_capi.lib, the LOADER needs build/<preset>/bin/rime_capi.dll. Nothing
+    # else was ever missing: the DLL has always exported its symbols properly (engine/capi compiles
+    # with RIME_CAPI_BUILD, which flips the header's macro to dllexport), so this closes the gap
+    # rather than working around it. Verified: with both set, all four live tests run and pass here.
+    #
+    # Guarded on both files existing, mirroring build.sh's .so/.dylib check. -RustOnly, or a tree
+    # configured with RIME_BUILD_CAPI=OFF, leaves the variable unset and the tests honestly ignored
+    # -- which is now a visible `0 passed; 4 ignored` rather than a green `4 passed` that ran nothing.
+    if (-not $RustOnly) {
+        $capiLibDir = Join-Path $repoRoot "build/$Preset/lib"
+        $capiBinDir = Join-Path $repoRoot "build/$Preset/bin"
+        if ((Test-Path (Join-Path $capiLibDir 'rime_capi.lib')) -and
+            (Test-Path (Join-Path $capiBinDir 'rime_capi.dll'))) {
+            $env:RIME_CAPI_DIR = $capiLibDir
+            $env:PATH = "$capiBinDir;$env:PATH"
+            Say "Rust: RIME_CAPI_DIR=$capiLibDir (rime-ffi links the C ABI)"
+        }
+    }
+
     # rust-toolchain.toml lives in tools/, so run cargo from there.
     $cargoArgs = if ($Preset -eq 'release') { @('--release') } else { @() }
     Push-Location tools

@@ -173,11 +173,10 @@ mod tests {
     // built librime_capi. Without it they are marked #[ignore] rather than merely returning early,
     // and that distinction is the whole point. The early return prints a SKIP line to stderr, but
     // `cargo test` CAPTURES the stderr of a passing test, so nothing that build.sh, build.ps1 or CI
-    // runs ever showed it: the summary read `4 passed` for four tests that did nothing. On Windows,
-    // where build.ps1 deliberately leaves RIME_CAPI_DIR unset (no rpath equivalent — the documented
-    // v1 gap in docs/design/ffi.md), that was every run. #[ignore] moves the fact into the line the
-    // runner always prints: `0 passed; 4 ignored`, each naming its reason. The C++ tests/capi suite
-    // is what actually covers the ABI on Windows; this crate should say so rather than imply it.
+    // runs ever showed it: the summary read `4 passed` for four tests that did nothing. #[ignore]
+    // moves the fact into the line the runner always prints: `0 passed; 4 ignored`, each naming its
+    // reason. Windows was every run of that until build.ps1 learned to set RIME_CAPI_DIR and put the
+    // DLL's directory on PATH; the marker still matters for a bare `cargo test` with no engine build.
     //
     // The mesh fixture is the same one the C++ cross-language test consumes — proving both
     // languages agree on the cooked bytes.

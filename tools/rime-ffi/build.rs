@@ -11,8 +11,9 @@
 // set — a bare `cargo test` in a checkout with no engine build — we emit nothing: the bindings and
 // tests compile out and the crate still builds and "passes" green. That is what lets the Rust
 // workspace be tested standalone while CI (which sets RIME_CAPI_DIR) runs the real cross-language
-// proof. Windows DLL discovery has no rpath equivalent, so build.sh sets RIME_CAPI_DIR on
-// Linux/macOS only; on Windows the crate cleanly skips (a documented v1 gap — see docs/design/ffi.md).
+// proof. Windows DLL discovery has no rpath equivalent, so build.ps1 puts build/<preset>/bin on
+// PATH instead — the loader's own search path — while the link-search below points at the import
+// library in build/<preset>/lib. All three OSes run the live tests (see docs/design/ffi.md).
 fn main() {
     // Declare the custom cfg so the compiler doesn't warn about it being "unexpected".
     println!("cargo:rustc-check-cfg=cfg(capi_available)");
