@@ -85,6 +85,17 @@ if (-not $RustOnly) {
     # Conan must be told which generator the presets use. build.sh needs no equivalent: on Linux the
     # toolchain emits no platform/toolset at all.
     #
+    # It is needed TWICE, once per context, and for the same reason the cppstd flag below is: plain
+    # -c sets only the HOST profile, so the build profile gets no [conf] section at all. spirv-tools
+    # arrives as a BUILD requirement (through glslang), so it configured with Conan's MSVC default:
+    #   spirv-tools/1.4.313.0: RUN: cmake -G "Visual Studio 18 2026" ...
+    #   CMake Error: Could not create named generator Visual Studio 18 2026
+    # -- a generator name the runner's CMake is too old to know. Host-context packages (fmt, lz4) ran
+    # cmake -G "Ninja" correctly in that very same log, which is what makes the split legible: when
+    # one dependency configures with Ninja and the next with Visual Studio, the conf is on one
+    # profile only. It hides exactly the way the cppstd flag does -- a machine that downloads a
+    # prebuilt spirv-tools never configures it, so it never sees this.
+    #
     # -s:b compiler.cppstd=17 is the other Windows-only flag, and it is about the BUILD context, not
     # ours. Plain -s sets only the HOST profile; the build profile keeps whatever `conan profile
     # detect` chose, and on MSVC that is cppstd=14. glslang -- the offline shader compiler, a build
@@ -104,12 +115,13 @@ if (-not $RustOnly) {
     # '-s:b' is QUOTED, and must stay that way. Bare, PowerShell reads -s:b as its own -Name:Value
     # parameter syntax, splits it there, and hands conan `-s:` and `b` as two arguments -- which it
     # rejects with "ambiguous option: -s: could match -s, -s:b, -s:h, -s:a". Quoting passes the token
-    # through untouched. Same trap for -o:b / -c:b, should either ever be needed. (No comment lines
+    # through untouched. '-c:b' below is quoted for the same reason, as -o:b would be. (No comment
     # inside the argument list below, either: a backtick continuation cannot span one.)
     Run $conan install . -of "build/$Preset" -s build_type=$buildType -s compiler.cppstd=20 `
         '-s:b' compiler.cppstd=17 `
         -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" `
-        -c tools.cmake.cmaketoolchain:generator=Ninja --build=missing
+        -c tools.cmake.cmaketoolchain:generator=Ninja `
+        '-c:b' tools.cmake.cmaketoolchain:generator=Ninja --build=missing
 
     Say "C++: cmake configure ($Preset)"; Run cmake --preset $Preset
     Say "C++: cmake build ($Preset)"; Run cmake --build --preset $Preset
