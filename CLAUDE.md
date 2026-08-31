@@ -184,6 +184,18 @@ Verify proportionately to the change — don't re-run the whole world for every 
   ill-formed (`std::vector` permits an incomplete element type; `std::pair` does not). A
   GCC-only loop cannot see that class of bug. Reconstruct the flags from
   `build/dev/compile_commands.json` so the check uses the real include paths.
+- **A `.ps1` is only verified by RUNNING it under `powershell.exe`.** The default Windows shell is
+  still PowerShell 5.1, which reads a BOM-less script in the machine's ANSI codepage (1252 on a
+  Western install) rather than UTF-8. An em dash's third byte decodes to U+201D, which PowerShell
+  honours as a double-quote delimiter: one em dash inside a double-quoted string truncates it, the
+  quote meant to close it opens a runaway string that swallows the lines below, and the parse error
+  is reported against an innocent line further down. `scripts/setup.ps1` was therefore unable to
+  start from M0.4 (2026-06-17) until 2026-08-31, while its own header claimed CI exercised it — the
+  Windows job runs `build.ps1` under `shell: pwsh` (PowerShell 7, UTF-8 regardless) and no job runs
+  `setup.ps1` at all. `.ps1` files are ASCII-only now and the lint job greps for it. The trap within
+  the trap: `[Parser]::ParseFile()` reports ZERO errors on a file `powershell.exe -File` refuses to
+  run, because it decodes as UTF-8 — a parse check is not the proof, the same way grepping a build
+  log is not the proof. Run it.
 - **A red `format, lint & license` on a PR that touched no Rust is probably not yours.** CI pins
   `dtolnay/rust-toolchain@stable`, which **floats**: a new Rust release can start rejecting code
   that has been on `main` for a milestone (1.98.0 did, twice, on 2026-08-20). Read the failing

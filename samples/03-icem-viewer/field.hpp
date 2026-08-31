@@ -183,9 +183,16 @@ inline std::string rd_str(std::istream& is) {
                     const int dj[6] = {0, 0, -1, 1, 0, 0};
                     const int dk[6] = {0, 0, 0, 0, -1, 1};
                     for (int d = 0; d < 6; ++d) {
-                        const long ni = static_cast<long>(i) + di[d];
-                        const long nj = static_cast<long>(j) + dj[d];
-                        const long nk = static_cast<long>(k) + dk[d];
+                        // int64_t, not long: the neighbour index must stay SIGNED through the
+                        // bounds test, and `long` only does that on LP64. Windows is LLP64, where
+                        // long is 32 bits — the same width as the uint32_t extents — so `ni >= nx`
+                        // converts ni to *unsigned* and the comparison changes meaning (MSVC
+                        // C4018). The `ni < 0` short-circuit happens to save the result here, which
+                        // is exactly what makes it worth pinning: nothing would have failed until
+                        // someone reordered the condition. int64_t is 64-bit on both.
+                        const std::int64_t ni = static_cast<std::int64_t>(i) + di[d];
+                        const std::int64_t nj = static_cast<std::int64_t>(j) + dj[d];
+                        const std::int64_t nk = static_cast<std::int64_t>(k) + dk[d];
                         if (ni < 0 || nj < 0 || nk < 0 || ni >= nx || nj >= ny || nk >= nz)
                             continue;
                         const std::size_t gn = idx(static_cast<std::uint32_t>(ni),
@@ -320,9 +327,11 @@ struct VectorField {
                     const int di[6] = {-1, 1, 0, 0, 0, 0}, dj[6] = {0, 0, -1, 1, 0, 0},
                               dk[6] = {0, 0, 0, 0, -1, 1};
                     for (int d = 0; d < 6; ++d) {
-                        const long ni = static_cast<long>(i) + di[d],
-                                   nj = static_cast<long>(j) + dj[d],
-                                   nk = static_cast<long>(k) + dk[d];
+                        // int64_t rather than long — see the same dilation loop above for why
+                        // `long` silently becomes an unsigned comparison on Windows (LLP64).
+                        const std::int64_t ni = static_cast<std::int64_t>(i) + di[d],
+                                           nj = static_cast<std::int64_t>(j) + dj[d],
+                                           nk = static_cast<std::int64_t>(k) + dk[d];
                         if (ni < 0 || nj < 0 || nk < 0 || ni >= nx || nj >= ny || nk >= nz)
                             continue;
                         const std::size_t gn = idx(static_cast<std::uint32_t>(ni),

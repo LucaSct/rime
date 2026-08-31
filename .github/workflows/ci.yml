@@ -386,3 +386,22 @@ jobs:
 
       - name: License headers (SPDX)
         run: ./scripts/check-license-headers.sh
+
+      # Windows PowerShell 5.1 (powershell.exe - still the Windows default) reads a BOM-less .ps1 in
+      # the machine's ANSI codepage rather than UTF-8. On a Western install that is Windows-1252,
+      # where an em dash's third byte decodes to U+201D, which PowerShell honours as a DOUBLE-QUOTE
+      # DELIMITER: one em dash inside a double-quoted string truncates it, the quote meant to close
+      # it opens a runaway string that swallows the lines below, and the parse error is finally
+      # reported against an innocent line further down the file.
+      #
+      # No other job here can see that. The Windows build step runs build.ps1 under `shell: pwsh`
+      # (PowerShell 7, which reads UTF-8 whatever the codepage), and nothing in this workflow runs
+      # setup.ps1 at all - which is how setup.ps1 shipped unable to start from M0.4 (2026-06-17)
+      # until someone ran it by hand on a real Windows box. A grep is the only guard CI can offer.
+      - name: PowerShell scripts are ASCII (Windows PowerShell reads them as ANSI, not UTF-8)
+        run: |
+          if grep -rlP '[^[:ascii:]]' scripts/*.ps1; then
+            echo "::error::the .ps1 file(s) listed above contain non-ASCII bytes; see the header" \
+                 "comment in scripts/setup.ps1 for why that stops the script from running"
+            exit 1
+          fi

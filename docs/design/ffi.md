@@ -71,11 +71,22 @@ built library) before the cargo step:
   the FFI compiles out, and the tests pass by **skipping with a loud message**. So the Rust workspace
   is testable standalone while CI runs the real linked proof.
 
-**Cross-platform status (v1):** Linux and macOS resolve the library at test time via the rpath.
-Windows has no rpath equivalent, so `build.sh` sets `RIME_CAPI_DIR` on Linux/macOS only and the Rust
-live tests skip on Windows — the C++ `tests/capi` suite still covers the ABI on all three OSes (it
-links the library through CMake, which handles the build-tree RPATH/DLL path). Windows DLL-discovery
-polish is deferred.
+**Cross-platform status:** all three OSes run the live tests. Linux and macOS resolve the library at
+test time via an rpath baked into the test binary by `build.rs`. Windows has no rpath, so
+`build.ps1` uses the mechanism the Windows loader actually consults: it exports `RIME_CAPI_DIR`
+pointing at the import library in `build/<preset>/lib` and prepends `build/<preset>/bin` — where
+`rime_capi.dll` lands — to `PATH`. Two directories because two tools want two files: the linker
+wants `rime_capi.lib`, the loader wants `rime_capi.dll`. Nothing else was ever missing; the DLL has
+always exported its symbols properly, since `engine/capi` compiles with `RIME_CAPI_BUILD` and that
+flips the header's macro to `dllexport`.
+
+This was deferred through v1, and what the deferral actually cost is worth recording: with
+`RIME_CAPI_DIR` unset the live tests compiled themselves out and returned early, and because
+`cargo test` captures a passing test's stderr, their `SKIP:` line was invisible in every run anyone
+performed. The Windows summary read `4 passed` for four tests that executed one `return`. They are
+now `#[cfg_attr(not(capi_available), ignore)]`, so an unlinked build reports `0 passed; 4 ignored`
+with a reason on each row — which is what the C++ `tests/capi` suite (covering the ABI on all three
+OSes through CMake, which handles the build-tree RPATH/DLL path) was quietly standing in for.
 
 ## Protocol reservation (the editor channel)
 
@@ -90,11 +101,12 @@ this round-trip today.
 
 `bindgen`; callbacks or render/GPU access across the ABI (the boundary is allocation-free and
 data-only by design); a stable-forever guarantee (pre-1.0); and Windows `.def`/exported-symbol-list
-polish beyond what CI needs.
+polish beyond what CI needs (the `dllexport` path covers what we link against; an explicit export
+list would only matter for a consumer we do not have yet).
 
 ## Proof
 
-- **cargo** (`tools/rime-ffi`, CI on Linux/macOS): `rime_version` matches the workspace version;
+- **cargo** (`tools/rime-ffi`, CI on all three OSes): `rime_version` matches the workspace version;
   `asset_validate` on the golden `quad.rmesh` returns kind=mesh, the pinned schema hash, and (4, 6);
   a corrupt file returns an error with a message; a headless app create→tick×3→destroy runs clean.
 - **ctest** (`tests/capi`, all 3 OSes + the ASan/UBSan job): the same paths from C++, giving the

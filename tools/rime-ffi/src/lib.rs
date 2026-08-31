@@ -169,9 +169,17 @@ mod api {
 
 #[cfg(test)]
 mod tests {
-    // Each test skips loudly when the library isn't linked in (RIME_CAPI_DIR unset), so a bare
-    // `cargo test` stays green while CI runs the real thing. The mesh fixture is the same one the
-    // C++ cross-language test consumes — proving both languages agree on the cooked bytes.
+    // These are the LIVE tests: they only mean anything when RIME_CAPI_DIR pointed build.rs at a
+    // built librime_capi. Without it they are marked #[ignore] rather than merely returning early,
+    // and that distinction is the whole point. The early return prints a SKIP line to stderr, but
+    // `cargo test` CAPTURES the stderr of a passing test, so nothing that build.sh, build.ps1 or CI
+    // runs ever showed it: the summary read `4 passed` for four tests that did nothing. #[ignore]
+    // moves the fact into the line the runner always prints: `0 passed; 4 ignored`, each naming its
+    // reason. Windows was every run of that until build.ps1 learned to set RIME_CAPI_DIR and put the
+    // DLL's directory on PATH; the marker still matters for a bare `cargo test` with no engine build.
+    //
+    // The mesh fixture is the same one the C++ cross-language test consumes — proving both
+    // languages agree on the cooked bytes.
     #[cfg(capi_available)]
     const QUAD_RMESH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -193,6 +201,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(capi_available), ignore = "RIME_CAPI_DIR unset: no librime_capi")]
     fn version_matches_workspace() {
         skip_if_unavailable!();
         #[cfg(capi_available)]
@@ -207,6 +216,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(capi_available), ignore = "RIME_CAPI_DIR unset: no librime_capi")]
     fn validates_the_golden_mesh_fixture() {
         skip_if_unavailable!();
         #[cfg(capi_available)]
@@ -228,6 +238,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(capi_available), ignore = "RIME_CAPI_DIR unset: no librime_capi")]
     fn rejects_a_corrupt_file_with_a_message() {
         skip_if_unavailable!();
         #[cfg(capi_available)]
@@ -245,6 +256,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(capi_available), ignore = "RIME_CAPI_DIR unset: no librime_capi")]
     fn headless_app_create_tick_destroy() {
         skip_if_unavailable!();
         #[cfg(capi_available)]
