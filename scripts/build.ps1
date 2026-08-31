@@ -161,7 +161,24 @@ if (-not $CppOnly) {
     }
 
     # rust-toolchain.toml lives in tools/, so run cargo from there.
-    $cargoArgs = if ($Preset -eq 'release') { @('--release') } else { @() }
+    #
+    # The @() around the `if` is load-bearing. Written the obvious way --
+    #   $cargoArgs = if ($Preset -eq 'release') { @('--release') } else { @() }
+    # -- PowerShell UNROLLS the empty array as the statement's output, and $cargoArgs lands as $null
+    # rather than as an empty array. Splatting $null then contributes one $null argument, which
+    # Run()'s [string[]] parameter coerces to an empty STRING, and cargo is handed a stray '':
+    #   error: unexpected argument '' found  /  cargo build  failed with exit code 1
+    # (the double space in that message is the empty argument). The array subexpression @(...) always
+    # produces an array, so the dev preset splats zero arguments the way it reads as doing.
+    #
+    # Why this survived every local run: Windows PowerShell 5.1 SILENTLY DROPS empty-string arguments
+    # when invoking a native program, so `& cargo build ''` succeeds there and the bug is invisible.
+    # CI runs this script under `shell: pwsh` -- PowerShell 7, whose Standard argument passing sends
+    # the empty string through faithfully -- and cargo rejects it. That is the exact INVERSE of the
+    # encoding trap in Run() below: there, 5.1 is the strict one and pwsh hides the fault; here, 5.1
+    # is the forgiving one and only pwsh shows it. A green local `build.ps1 -RustOnly` proves nothing
+    # about this line; it has to be read in CI's log.
+    $cargoArgs = @(if ($Preset -eq 'release') { '--release' })
     Push-Location tools
     try {
         Say 'Rust: cargo build'; Run cargo build @cargoArgs
