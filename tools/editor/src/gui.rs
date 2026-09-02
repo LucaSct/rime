@@ -120,6 +120,65 @@ struct ActiveEdit {
 /// current bytes (the edit target and the drag's grab-time "before"), and its world-space center
 /// (where the engine draws the gizmo, and the origin of the drag's constraint axis). Rebuilt each
 /// repaint from the snapshot mirror so it tracks live edits.
+/// Decompose a camera quaternion into the yaw/pitch a fly camera thinks in (m17.1).
+///
+/// Taken from where the rotation puts FORWARD (local -z) rather than from a general Euler
+/// extraction: the camera convention is "looks down -z", so this asks the one question that
+/// matters and cannot disagree with the renderer about axis order. Roll is deliberately dropped --
+/// a fly camera has none, and silently discarding it here is what keeps the horizon level.
+fn yaw_pitch_from_quat(q: gizmo::Quat) -> (f32, f32) {
+    // forward = q * (0,0,-1), expanded.
+    let (x, y, z, w) = (q.x, q.y, q.z, q.w);
+    let fx = -2.0 * (x * z + w * y);
+    let fy = -2.0 * (y * z - w * x);
+    let fz = -(1.0 - 2.0 * (x * x + y * y));
+    let pitch = fy.clamp(-1.0, 1.0).asin();
+    let yaw = (-fx).atan2(-fz);
+    (yaw, pitch)
+}
+
+/// Rebuild the camera rotation from yaw then pitch: R = Ry(yaw) * Rx(pitch), the standard FPS
+/// order. Applying pitch in the camera's own frame (rather than the world's) is what stops the
+/// horizon from tilting as you turn.
+fn quat_from_yaw_pitch(yaw: f32, pitch: f32) -> gizmo::Quat {
+    let qy = gizmo::Quat::from_axis_angle(gizmo::Vec3::new(0.0, 1.0, 0.0), yaw);
+    let qx = gizmo::Quat::from_axis_angle(gizmo::Vec3::new(1.0, 0.0, 0.0), pitch);
+    qy.mul(qx).normalized()
+}
+
+/// The viewport fly-camera (m17.1).
+///
+/// There is NO new protocol message behind this, and that is the point: the viewport camera IS the
+/// world's Camera entity (`compute_camera_lens` reads it from the world), so flying it is an
+/// ordinary `SetComponent` on that entity's LocalTransform -- the same edit path the inspector and
+/// the gizmo already use, already undoable, already proven by the smoke.
+///
+/// Yaw/pitch are kept HERE rather than re-derived from the entity's quaternion each frame, because
+/// round-tripping through a quaternion loses which way you came: at the poles the extracted angles
+/// jump, and a camera that flips when you look straight up is the classic symptom. Seeded once from
+/// the entity, then owned by the editor for the rest of the session.
+#[derive(Default)]
+struct FlyCam {
+    yaw: f32,
+    pitch: f32,
+    pos: [f32; 3],
+    seeded: bool,
+}
+
+/// The camera entity's edit target: which entity, and the LocalTransform bytes to rewrite.
+#[derive(Clone)]
+struct NavTarget {
+    key: EntityKey,
+    local_hash: u64,
+}
+
+/// The viewport's fly-camera view, bundled so `viewport_ui` keeps one argument per concern -- the
+/// same reason `GizmoView` exists next door.
+struct FlyView<'a> {
+    target: Option<NavTarget>,
+    cam: &'a mut FlyCam,
+}
+
 #[derive(Clone)]
 struct GizmoTarget {
     key: EntityKey,
@@ -171,6 +230,8 @@ struct EditorApp {
     gizmo_drag: Option<DragSession>,
     gizmo_snap: bool,
     last_gizmo_state: Option<GizmoState>,
+    // Viewport fly camera (m17.1). See FlyCam for why yaw/pitch live here.
+    fly: FlyCam,
     // ── Saving (m15.3) ──────────────────────────────────────────────────────────────────────
     // The scene this session opened, if any: what `Save` writes back to, and what makes it
     // meaningfully different from `Save As`. `save_as_path` is the inline text field, because there
@@ -206,6 +267,7 @@ impl EditorApp {
             gizmo_drag: None,
             gizmo_snap: false,
             last_gizmo_state: None,
+            fly: FlyCam::default(),
             scene_path: scene.clone(),
             save_as_path: scene.clone().unwrap_or_default(),
             save_status: None,
@@ -621,6 +683,37 @@ impl eframe::App for EditorApp {
                 })
             });
 
+        // The camera entity (m17.1): the FIRST entity carrying a render::Camera, matching the
+        // engine's own "first active camera wins" rule in extract_scene -- if the editor flew a
+        // different one, the picture would not move and nothing would say why.
+        let camera_hash = schema
+            .types
+            .iter()
+            .find(|t| t.name == "rime::render::Camera")
+            .map(|t| t.type_hash);
+        let nav_target = camera_hash.and_then(|ch| {
+            let lh = local_hash?;
+            let e = entities
+                .iter()
+                .find(|e| e.components.iter().any(|c| c.type_hash == ch))?;
+            let local = e.components.iter().find(|c| c.type_hash == lh)?;
+            // Seed once from the entity, then the editor owns the orientation. Re-seeding every
+            // frame would fight the user: the pose we send this frame arrives back next frame.
+            if !self.fly.seeded {
+                if let Some(trs) = gizmo::decode_trs_blob(&local.data) {
+                    self.fly.pos = [trs.translation.x, trs.translation.y, trs.translation.z];
+                    let (yaw, pitch) = yaw_pitch_from_quat(trs.rotation);
+                    self.fly.yaw = yaw;
+                    self.fly.pitch = pitch;
+                    self.fly.seeded = true;
+                }
+            }
+            Some(NavTarget {
+                key: (e.index, e.generation),
+                local_hash: lh,
+            })
+        });
+
         let mut viewer = EditorTabs {
             frame_tex: self.frame_tex.as_ref(),
             frame_dims,
@@ -643,6 +736,8 @@ impl eframe::App for EditorApp {
             gizmo_snap: self.gizmo_snap,
             gizmo_hover: &mut self.gizmo_hover,
             gizmo_drag: &mut self.gizmo_drag,
+            nav_target,
+            fly: &mut self.fly,
         };
         DockArea::new(&mut self.dock)
             .style(Style::from_egui(ctx.style().as_ref()))
@@ -701,6 +796,9 @@ struct EditorTabs<'a> {
     gizmo_snap: bool,
     gizmo_hover: &'a mut Option<gizmo::Axis>,
     gizmo_drag: &'a mut Option<DragSession>,
+    // Fly camera (m17.1): the camera entity to edit, and the editor-owned orientation.
+    nav_target: Option<NavTarget>,
+    fly: &'a mut FlyCam,
 }
 
 /// The viewport's gizmo view, bundled so `viewport_ui` takes one argument instead of eight. Borrows
@@ -749,6 +847,10 @@ impl TabViewer for EditorTabs<'_> {
                     self.play_phase,
                     self.out_tx,
                     &mut gz,
+                    &mut FlyView {
+                        target: self.nav_target.clone(),
+                        cam: &mut *self.fly,
+                    },
                 );
             }
             Tab::Outliner => {
@@ -874,6 +976,109 @@ fn kind_glyph(kind: AssetKind) -> &'static str {
     }
 }
 
+/// Fly the viewport camera (m17.1): right-drag to look, WASD to move, Q/E down/up, Shift to sprint.
+///
+/// The whole feature is one `SetComponent` on the camera entity's LocalTransform per frame that the
+/// input changed -- no new protocol message, no engine-side camera state, no second source of truth
+/// about where the view is. That falls out of the viewport camera BEING an ordinary world entity.
+///
+/// Two deliberate choices worth naming. Movement is scaled by the frame's delta time, so the camera
+/// covers the same ground per second whether the engine is streaming at 60 fps or at 3 -- and the
+/// cove scene genuinely does run at 3 in a Debug build, which is exactly when a per-frame step
+/// would crawl. And LOOK is on the RIGHT button because the left one already means pick-and-gizmo;
+/// stealing it would have cost the editor its selection gesture.
+fn viewport_fly(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    view: &mut FlyView,
+    actions: &mut Vec<Command>,
+) {
+    let Some(target) = view.target.clone() else {
+        return; // no camera entity in this world; nothing to fly
+    };
+    let fly = &mut *view.cam;
+    if !fly.seeded {
+        return; // not yet synced to the entity — moving now would teleport the view
+    }
+
+    const LOOK_RAD_PER_PX: f32 = 0.0045;
+    const PITCH_LIMIT: f32 = 1.5533; // ~89 deg: stop just short, where forward is still well-defined
+    const SPEED: f32 = 12.0; // metres/second, sized for a ~100 m scene
+    const SPRINT: f32 = 5.0;
+
+    let mut changed = false;
+
+    // Look: right-drag anywhere in the viewport. dragged_by keeps this independent of the gizmo's
+    // left-button drag, so looking around mid-gizmo-hover does not grab a handle.
+    if response.dragged_by(egui::PointerButton::Secondary) {
+        let d = response.drag_delta();
+        if d.x != 0.0 || d.y != 0.0 {
+            fly.yaw -= d.x * LOOK_RAD_PER_PX;
+            fly.pitch = (fly.pitch - d.y * LOOK_RAD_PER_PX).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+            changed = true;
+        }
+    }
+
+    // Move: only while the pointer is over the viewport, so WASD typed into an inspector field
+    // never flies the camera.
+    if response.hovered() {
+        let (mut fwd, mut right, mut up) = (0.0f32, 0.0f32, 0.0f32);
+        let sprint = ui.input(|i| {
+            let k = |key| i.key_down(key);
+            if k(egui::Key::W) {
+                fwd += 1.0;
+            }
+            if k(egui::Key::S) {
+                fwd -= 1.0;
+            }
+            if k(egui::Key::D) {
+                right += 1.0;
+            }
+            if k(egui::Key::A) {
+                right -= 1.0;
+            }
+            if k(egui::Key::E) {
+                up += 1.0;
+            }
+            if k(egui::Key::Q) {
+                up -= 1.0;
+            }
+            i.modifiers.shift
+        });
+        if fwd != 0.0 || right != 0.0 || up != 0.0 {
+            let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.1);
+            let speed = SPEED * if sprint { SPRINT } else { 1.0 } * dt;
+            // The camera basis from yaw alone: moving stays HORIZONTAL when you are looking down,
+            // which is what makes a fly camera usable over terrain. Q/E own the vertical axis.
+            let (sy, cy) = fly.yaw.sin_cos();
+            // forward = -z rotated by yaw; right = +x rotated by yaw
+            fly.pos[0] += (-sy * fwd + cy * right) * speed;
+            fly.pos[1] += up * speed;
+            fly.pos[2] += (-cy * fwd - sy * right) * speed;
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return;
+    }
+    let trs = gizmo::Trs {
+        translation: gizmo::Vec3::new(fly.pos[0], fly.pos[1], fly.pos[2]),
+        rotation: quat_from_yaw_pitch(fly.yaw, fly.pitch),
+        // Scale is forced to 1: a camera entity with a scale is meaningless, and preserving a
+        // stray one would silently distort the lens.
+        scale: gizmo::Vec3::new(1.0, 1.0, 1.0),
+    };
+    actions.push(Command::SetComponent {
+        key: target.key,
+        type_hash: target.local_hash,
+        blob: gizmo::encode_trs_blob(&trs),
+    });
+    // The engine only redraws when something asks it to; without this the view would advance one
+    // frame per input event rather than continuously while a key is held.
+    ui.ctx().request_repaint();
+}
+
 fn viewport_ui(
     ui: &mut egui::Ui,
     frame_tex: Option<&egui::TextureHandle>,
@@ -881,6 +1086,7 @@ fn viewport_ui(
     play_phase: PlayPhase,
     out_tx: &Sender<Outbound>,
     gz: &mut GizmoView,
+    fly: &mut FlyView,
 ) {
     let avail = ui.available_size();
     let (rect, response) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
@@ -892,6 +1098,7 @@ fn viewport_ui(
             egui::Color32::WHITE,
         );
         viewport_input(out_tx, &response, rect, frame_dims, gz);
+        viewport_fly(ui, &response, fly, &mut *gz.actions);
     } else {
         ui.painter()
             .rect_filled(rect, 0.0, egui::Color32::from_gray(20));
@@ -997,12 +1204,18 @@ fn viewport_input(
         };
         if let Some(session) = grabbed {
             *gz.drag = Some(session);
-        } else if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
-            let _ = out_tx.send(Outbound::Input(protocol_input::Input::PointerDown {
-                x,
-                y,
-                button: 0,
-            }));
+        } else if response.dragged_by(egui::PointerButton::Primary) {
+            // PRIMARY ONLY. This used to forward a pointer-down for any button, which was harmless
+            // while nothing else used the right button -- and became a bug the moment the fly camera
+            // did (m17.1): every look-around also picked, so turning the view silently changed the
+            // selection under it.
+            if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
+                let _ = out_tx.send(Outbound::Input(protocol_input::Input::PointerDown {
+                    x,
+                    y,
+                    button: 0,
+                }));
+            }
         }
     }
 
@@ -1022,8 +1235,10 @@ fn viewport_input(
                     blob,
                 });
             }
-        } else if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
-            let _ = out_tx.send(Outbound::Input(protocol_input::Input::PointerMove { x, y }));
+        } else if response.dragged_by(egui::PointerButton::Primary) {
+            if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
+                let _ = out_tx.send(Outbound::Input(protocol_input::Input::PointerMove { x, y }));
+            }
         }
     }
 
