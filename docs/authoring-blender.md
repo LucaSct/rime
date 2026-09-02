@@ -182,7 +182,38 @@ All are free and open, and all run natively on Linux and Windows.
 
 ---
 
-## 7. The first thing to make
+## 7. Measured end to end, on a real asset
+
+The whole path was run against a CC0 model from Poly Haven (`Barrel_02`, 1k) — chosen because it
+ships exactly what §2 asks for: a `_diff` base colour, an `_arm` ORM pack, and the **`_nor_gl`**
+(+Y) normal variant.
+
+```
+rime cook Barrel_02_1k.gltf --out cooked
+  -> Barrel_02_1k.rmesh, .mat0.rmat, img0.lin/img1.srgb/img2.lin.rtex
+```
+
+What the engine then read back, and what each line demonstrates:
+
+| Observed | Why it matters |
+|---|---|
+| colour spaces `img1.srgb`, `img0.lin`, `img2.lin` | the cook picked each from USAGE, not a flag |
+| material payload 100 bytes | the m16.5 schema, carrying the two new flags |
+| **`double_sided = YES`** | the artist's glTF flag survived cook → engine. Before M16 it was dropped entirely |
+| 1 submesh, `material_slot = 0` | the submesh table is real and reaches the runtime |
+| `settle took 4 rounds; 1 material resolved` | the four-level chain resolving a genuine cooked material |
+| BC7: 5,592,620 → 1,398,344 bytes | **exactly 4.00x**, on a real 1024² texture |
+
+And the authored `.rscene` came out carrying **one `MeshAsset`** (the placed barrel, by content id)
+and **two `MeshRef`s** — the hand-authored ones from the default world. That is the m16.8 rule doing
+what it is supposed to: the derived index was excluded, the authored ones survived.
+
+**One thing worth knowing about ORM in the wild.** This asset binds its ARM map only to
+`metallicRoughnessTexture`, not also to `occlusionTexture`, so its AO channel is cooked but unused
+(`occlusion_tex` resolved to 0). If you want AO, bind the same image to BOTH slots in Blender — §2
+says so, and this is what it looks like when you do not.
+
+## 8. The first thing to make
 
 A **trim sheet** for one building kit: one 2048² sheet with window frames, sills, cornices, pipes
 and vents as horizontal strips, and a couple of 1024² tiling wall surfaces. It is the highest-leverage
