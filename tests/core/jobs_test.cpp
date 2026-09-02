@@ -332,3 +332,58 @@ TEST_CASE("nested submissions may overflow a ring without deadlocking") {
 
     CHECK(total.load() == outer * inner);
 }
+
+TEST_CASE("a second JobSystem on the same thread does not hijack the first one's deque") {
+    // The queue index used to be one `thread_local int` shared by every JobSystem on the thread,
+    // overwritten by each constructor. The header's own comment predicted the failure and asked
+    // for it to be revisited "before anything nests pools"; the editor host then began building
+    // three of them. After the second construction, every main-thread submission into the FIRST
+    // system pushed into and popped from one of that system's WORKER deques — two threads acting
+    // as the Chase-Lev owner of one deque, which is outside what the algorithm guarantees. The
+    // bounds assert could not see it: with enough cores the wrong index is still in range.
+    //
+    // The observable symptom is a job that is never joined (the group counter never reaches zero,
+    // so wait() hangs) or one executed twice. This case reproduces the editor host's sequence:
+    // build A, submit through it, build B, then keep submitting through A.
+    constexpr std::size_t kItems = 2048;
+
+    JobSystem a(3);
+    std::vector<std::atomic<int>> visits(kItems);
+    for (auto& v : visits) {
+        v.store(0, std::memory_order_relaxed);
+    }
+
+    // Baseline: A alone works.
+    a.parallel_for(kItems, 32, [&](std::size_t i) { visits[i].fetch_add(1); });
+    for (std::size_t i = 0; i < kItems; ++i) {
+        REQUIRE(visits[i].load() == 1);
+    }
+
+    {
+        // B is constructed on this same thread, exactly as the editor host constructs its asset
+        // pool while the Application's pool is alive. B has a DIFFERENT worker count, which is
+        // what made the stale index land in range but on the wrong deque.
+        JobSystem b(2);
+        b.parallel_for(64, 8, [](std::size_t) {}); // B is real and usable too
+
+        // ...and A must still work while B is alive. Before the fix this is where a wave went
+        // missing: the submission landed in one of A's worker deques.
+        for (auto& v : visits) {
+            v.store(0, std::memory_order_relaxed);
+        }
+        a.parallel_for(kItems, 32, [&](std::size_t i) { visits[i].fetch_add(1); });
+        for (std::size_t i = 0; i < kItems; ++i) {
+            CHECK(visits[i].load() == 1);
+        }
+    }
+
+    // ...and after B is destroyed, A is still intact — the unbind must not have taken A's binding
+    // with it.
+    for (auto& v : visits) {
+        v.store(0, std::memory_order_relaxed);
+    }
+    a.parallel_for(kItems, 32, [&](std::size_t i) { visits[i].fetch_add(1); });
+    for (std::size_t i = 0; i < kItems; ++i) {
+        CHECK(visits[i].load() == 1);
+    }
+}

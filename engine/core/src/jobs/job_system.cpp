@@ -86,18 +86,62 @@ constexpr std::size_t kJobSegmentSize = 1u << 14; // 16384 jobs per segment (pow
 // rather than corruption.
 constexpr std::size_t kMaxJobSegments = 256; // 4M jobs in flight from one thread
 
-// Which deque this thread owns: a worker's index, or num_workers for the submitting thread.
-// -1 means "not a participant" — submitting from such a thread is a contract violation.
+// WHICH DEQUE THIS THREAD SUBMITS TO, PER JOB SYSTEM. A worker's index, or num_workers for the
+// system's own submitting thread. Absent (-1) means "not a participant in THIS system" —
+// submitting from such a thread is a contract violation.
 //
-// KNOWN LIMITATION (pre-existing, not introduced by the segmented ring): this is per-thread, not
-// per-JobSystem, and the constructor overwrites it. So if two JobSystems are alive on one thread,
-// the second construction repoints the first one's submitting thread at the wrong deque index —
-// run() would then push to one of that system's WORKER deques, breaking the Chase-Lev
-// single-owner rule. run() bounds-checks the index, which catches the out-of-range subset of this
-// but not the in-range-yet-wrong case. Fixing it properly means making the index per-system
-// (a small map, or a submit token handed out by the constructor). Sufficient for a main-loop
-// engine that builds one pool; revisit before anything nests pools.
-thread_local int t_queue_index = -1;
+// This used to be a bare `thread_local int`, shared by every JobSystem alive on the thread, and
+// the constructor overwrote it. The header's own comment predicted the consequence and asked for
+// it to be revisited "before anything nests pools" — and then the editor host began constructing
+// three (engine/app/editor_host_app.cpp: the Application's own pool, a 2-worker asset pool, and a
+// transient pool during play Stop). After the second construction, every main-thread submission
+// into the FIRST system pushed into and popped from one of that system's WORKER deques, so two
+// threads acted as the Chase-Lev owner of one deque. That is outside what any work-stealing proof
+// covers: the algorithm is correct, its single-owner precondition was being violated from above.
+// The bounds assert could not catch it — with hw >= 4 the wrong index is still in range, which is
+// precisely the "in-range-yet-wrong" case the old comment named.
+//
+// A fixed-size array scanned linearly, rather than a map: a thread realistically binds to one or
+// two systems, the lookup is on the submit path, and this costs no allocation and no hashing.
+struct QueueBinding {
+    std::uint64_t system_id = 0; // 0 == empty; ids start at 1
+    int index = -1;
+};
+
+constexpr std::size_t kMaxBoundSystemsPerThread = 8;
+thread_local std::array<QueueBinding, kMaxBoundSystemsPerThread> t_bindings{};
+
+[[nodiscard]] int queue_index_for(std::uint64_t system_id) noexcept {
+    for (const QueueBinding& b : t_bindings) {
+        if (b.system_id == system_id) {
+            return b.index;
+        }
+    }
+    return -1; // this thread never bound to that system — see run()'s assert
+}
+
+void bind_queue(std::uint64_t system_id, int index) noexcept {
+    for (QueueBinding& b : t_bindings) {
+        if (b.system_id == system_id || b.system_id == 0) {
+            b.system_id = system_id;
+            b.index = index;
+            return;
+        }
+    }
+    // More live job systems on one thread than this array holds. Raising the bound is trivial;
+    // needing to is a design smell worth seeing.
+    RIME_ASSERT(false && "too many JobSystems bound on one thread");
+}
+
+void unbind_queue(std::uint64_t system_id) noexcept {
+    for (QueueBinding& b : t_bindings) {
+        if (b.system_id == system_id) {
+            b = QueueBinding{};
+            return;
+        }
+    }
+}
+
 // Segment bodies are unique_ptr-owned arrays: Job holds an atomic, so it is neither copyable nor
 // movable, which rules out a flat std::vector<Job> (resize needs MoveInsertable) — and a flat
 // vector could not grow anyway without invalidating every Job* already in a deque.
@@ -177,8 +221,14 @@ JobSystem::JobSystem(unsigned num_workers) {
         queues_.push_back(std::make_unique<ChaseLevDeque<Job*>>(1024));
     }
 
+    // A process-unique id, taken before any worker starts so worker_main can bind against it.
+    static std::atomic<std::uint64_t> s_next_id{1};
+    id_ = s_next_id.fetch_add(1, std::memory_order_relaxed);
+
     // This (constructing) thread owns the last queue; it submits here and helps drain via wait().
-    t_queue_index = static_cast<int>(num_workers_);
+    // Bound per-system, so constructing a second JobSystem on this thread no longer repoints this
+    // one's submissions at a worker's deque.
+    bind_queue(id_, static_cast<int>(num_workers_));
 
     workers_.reserve(num_workers_);
     for (unsigned i = 0; i < num_workers_; ++i) {
@@ -193,11 +243,17 @@ JobSystem::~JobSystem() {
             worker.join();
         }
     }
+    // Release this thread's binding. Worker threads' bindings die with their TLS when they exit.
+    unbind_queue(id_);
 }
 
 void JobSystem::run(std::function<void()> task, Counter* counter) {
-    RIME_ASSERT(t_queue_index >= 0); // submit from the main thread or from within a running job
-    RIME_ASSERT(t_queue_index < static_cast<int>(queues_.size()));
+    // The index is looked up for THIS system: submit from the thread that constructed it, or from
+    // within one of its own running jobs. A thread that never bound to this system gets -1 rather
+    // than silently borrowing whatever index another system left behind.
+    const int queue_index = queue_index_for(id_);
+    RIME_ASSERT(queue_index >= 0); // submit from the main thread or from within a running job
+    RIME_ASSERT(queue_index < static_cast<int>(queues_.size()));
     Job* job = allocate_job(std::move(task), counter);
     if (counter != nullptr) {
         // Bump AFTER allocating but BEFORE the push that makes the job visible. Allocation can now
@@ -208,15 +264,16 @@ void JobSystem::run(std::function<void()> task, Counter* counter) {
         // relaxed increment is correctly ordered.
         counter->fetch_add(1, std::memory_order_relaxed);
     }
-    queues_[static_cast<std::size_t>(t_queue_index)]->push(job);
+    queues_[static_cast<std::size_t>(queue_index)]->push(job);
 }
 
 void JobSystem::wait(Counter& counter) {
-    RIME_ASSERT(t_queue_index >= 0);
+    const int queue_index = queue_index_for(id_);
+    RIME_ASSERT(queue_index >= 0);
     // Help run jobs (ours first, then stolen) until the group is done, rather than blocking — so
     // the calling thread is a full participant and cannot deadlock waiting on a busy pool.
     while (counter.load(std::memory_order_acquire) > 0) {
-        Job* job = get_job(t_queue_index);
+        Job* job = get_job(queue_index);
         if (job != nullptr) {
             execute(job);
         } else {
@@ -261,7 +318,7 @@ void JobSystem::execute(Job* job) {
 }
 
 void JobSystem::worker_main(int queue_index) {
-    t_queue_index = queue_index;
+    bind_queue(id_, queue_index);
     int idle_spins = 0;
     while (!stop_.load(std::memory_order_acquire)) {
         Job* job = get_job(queue_index);
