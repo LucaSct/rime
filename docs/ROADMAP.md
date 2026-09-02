@@ -2226,11 +2226,40 @@ Blender-authored proof. Cut order: m16.7 → m16.6 → m16.5. **Never cut:** m16
 > | m16.9 | ⚠️ partial | `docs/authoring-blender.md` written; **the Blender-authored proof asset is not made** |
 >
 > **What M16 has NOT done, named rather than left absent.** The milestone's own "done when" requires
-> an asset authored in Blender, cooked, placed and rendering in both hosts, with its diff touching
+> an asset **authored in Blender**, cooked, placed and rendering in both hosts, with its diff touching
 > only `assets/`, `samples/` and `docs/`. The authoring contract exists and every engine capability
 > it names is in place, but **nobody has authored the asset**, so the proof has not run and M16
 > stands at ⚠️ rather than ✅. That is a person-with-Blender task, not an engine task, and saying so
 > is the point of writing it down.
+>
+> **The path itself is now proven on real third-party content, which is a different claim.** A CC0
+> Poly Haven model (`Barrel_02`) — `_diff` / `_arm` / `_nor_gl`, exactly what the contract asks for —
+> was downloaded, cooked, placed by content id, saved, reopened and rendered in the editor. Six
+> observations, each demonstrating a specific brick rather than "it worked": colour spaces chosen
+> from usage not a flag; `double_sided` surviving cook → engine (dropped entirely before M16); the
+> submesh table reaching the runtime; `settle` taking **4 rounds** on a genuine material; BC7 at
+> **exactly 4.00x** on a real 1024² texture; and the authored `.rscene` carrying one `MeshAsset`
+> alongside two hand-authored `MeshRef`s — the m16.8 per-entity rule on real data instead of on a
+> fixture built to demonstrate it. The cook is also confirmed to churn **no mesh id** when only the
+> material changes, which is the content-addressing fact the whole milestone was designed around.
+> This does **not** close m16.9: a downloaded asset is not an authored one, and the "done when" says
+> authored.
+>
+> **A fourth thing the bricks got wrong, and the most instructive, because only *looking* found it.**
+> That barrel first rendered **solid magenta** — the AssetServer's not-loaded-yet placeholder — while
+> every instrument reported success: `settle` said "converged in 4 rounds, 1 material resolved,
+> **0 pending**", and m16.3's test passed. The "already built this material" cache in
+> `resolve_scene_materials` did an early `continue` that skipped the residency re-check **and never
+> touched `complete`**, so a material assembled while its textures were still streaming was handed
+> back unchanged forever. It is the never-revisit short-circuit m16.3 set out to remove for meshes,
+> reintroduced one level down for materials **inside the same milestone**. The test could not have
+> caught it: it asserted `base_color_texture.is_valid()`, and the placeholder is a valid handle — the
+> comment above that line already claimed "not the magenta placeholder" while the code checked
+> something weaker. **When a comment asserts more than the code beneath it, the code is the bug.**
+> Now fixed, with the assertion comparing against `placeholder_texture()` directly; falsified by
+> disabling the fix, where that assertion and only that one fails. Worth recording: `pending == 0`
+> passes in **both** configurations, which is the measured proof that the counter was structurally
+> blind — a skip path that does not count reads exactly like success, as CLAUDE.md says.
 >
 > Also still absent, and now documented rather than discovered: glTF **Blend draws as Opaque** (no
 > transparency pass); skinned meshes cook but do not render; there is no terrain material blending,
