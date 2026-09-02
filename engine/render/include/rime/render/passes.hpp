@@ -124,6 +124,12 @@ struct DrawItem {
     std::uint32_t first_index = 0;
     std::uint32_t index_count = 0;
 
+    // The entity's material SET, if it has one (m16.3). Carried only from extraction to
+    // `resolve_draws`, which uses it to pick this submesh's material and then leaves `material`
+    // final — the geometry passes never look at it. A field rather than another array parallel to
+    // `draws`, because there are already several of those and each one is a chance to desync.
+    MaterialSetId material_set = kInvalidMaterialSetId;
+
     // Per-draw pipeline selectors, so a geometry pass can partition its list once rather than
     // branching per draw. Set from the material by the renderer; unused until the bricks that
     // consume them land.

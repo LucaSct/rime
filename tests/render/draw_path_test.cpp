@@ -26,14 +26,24 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <optional>
+#include <sstream>
+#include <string>
 #include <vector>
 
+#include "material_fixture.hpp"
 #include "render_test_support.hpp"
+#include "rime/assets/manifest.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/gpu_asset_bridge.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
+#include "texture_fixture.hpp"
 
 using namespace rime;
 using namespace rime::render;
@@ -246,4 +256,146 @@ TEST_CASE("m16.2: a mesh split into submeshes draws identically, and the split i
     REQUIRE(partly_bad != kInvalidMeshId);
     CHECK(meshes.rejected_submeshes() == rejected_before + 1);
     CHECK(meshes.get(partly_bad).submeshes.size() == 1); // only the good range survived
+}
+
+TEST_CASE("m16.3: a scene-placed mesh gets its COOKED material, not neutral grey") {
+    // The headline of M16. m15.1 made a scene name a mesh by content id and draw it, and stopped
+    // one field short: the entity got `neutral_material_` (gpu_asset_bridge.cpp:119-125) which,
+    // because the idempotence check short-circuited, was NEVER revisited. Cooked materials were
+    // decoded by nobody outside the gltf-zoo sample, so every asset class dead-ended at grey.
+    //
+    // The chain is FOUR LEVELS deep and that is the whole difficulty: mesh Ready → read its
+    // submesh `material_slot` → material Ready → read its five texture ids → textures Ready. Each
+    // level's request cannot even be issued until the level above it has landed, which is why a
+    // fixed one-round wait/pump/drain cannot converge and `settle` exists.
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the material-bridge proof");
+        return;
+    }
+
+    // A self-contained cooked tree in a temp dir: the committed fixtures carry no `.rmat` at all
+    // (material is the one cooked kind with no cross-language fixture — a gap m16.5 closes), so the
+    // material and its texture are synthesised here from the same builders the assets tests use.
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "rime-m16-3-material-bridge";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    const auto write = [&](const std::string& name, const std::vector<std::byte>& bytes) {
+        std::ofstream f(dir / name, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    };
+
+    constexpr std::uint64_t kMeshId = 0x00c0ffee0000cafeull;
+    constexpr std::uint64_t kMatId = 0x00c0ffee0000aa70ull;
+    constexpr std::uint64_t kTexId = 0x00c0ffee00007e00ull;
+
+    rime_test::TextureFileBuilder tex;
+    write("quad.img0.srgb.rtex", tex.build());
+
+    rime_test::MaterialFileBuilder mat;
+    mat.base_color_tex = kTexId;
+    mat.metallic_roughness_tex = 0; // empty slots take the shader's 1x1 fallback, not a placeholder
+    mat.normal_tex = 0;
+    mat.occlusion_tex = 0;
+    mat.emissive_tex = 0;
+    write("quad.mat0.rmat", mat.build());
+
+    // The cooked mesh is the committed fixture, copied in so one directory holds the whole tree.
+    {
+        const std::filesystem::path src =
+            std::filesystem::path(RIME_ASSETS_FIXTURE_DIR) / "quad.rmesh";
+        std::filesystem::copy_file(src, dir / "quad.rmesh");
+    }
+
+    // The manifest, hand-built so the test owns the ids it asserts on. THE `#material0` LINE IS THE
+    // EDGE ITSELF (ADR-0039 ruling 1): the mesh's source path plus the submesh's slot number is
+    // what resolves a material, rather than a material id embedded in the mesh payload.
+    std::ostringstream mf;
+    mf << "# rime-manifest v1\n"
+       << "quad.gltf\tmesh\t" << std::hex << std::setw(16) << std::setfill('0') << kMeshId
+       << "\tquad.rmesh\n"
+       << "quad.gltf#material0\tmaterial\t" << std::setw(16) << std::setfill('0') << kMatId
+       << "\tquad.mat0.rmat\n"
+       << "quad.gltf#image0.srgb\ttexture\t" << std::setw(16) << std::setfill('0') << kTexId
+       << "\tquad.img0.srgb.rtex\n";
+    const std::optional<assets::Manifest> manifest = assets::Manifest::parse(mf.str());
+    REQUIRE(manifest.has_value());
+
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    GpuAssetBridge bridge(*device, server);
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    bridge.set_mesh_sink(meshes, materials);
+    bridge.set_catalog(*manifest, dir);
+
+    ecs::World world;
+    register_render_components(world);
+    core::Transform placed{};
+    const ecs::Entity e = world.spawn_with(ecs::WorldTransform{placed}, MeshAsset{kMeshId});
+
+    const std::size_t rounds = bridge.settle(world, 8);
+
+    // THE SETTLE ACTUALLY LOOPED. Without this the proof would pass just as well against a
+    // synchronous stub — and the four-level chain is exactly what a one-round wait cannot resolve.
+    CHECK(rounds > 1);
+    MESSAGE("settle converged in " << rounds << " rounds");
+
+    // The entity now carries a material SET, and the set's material is NOT the neutral grey.
+    const MaterialSet* set = world.get<MaterialSet>(e);
+    REQUIRE(set != nullptr);
+    REQUIRE(set->set != kInvalidMaterialSetId);
+    const MaterialSetRegistry* sets = bridge.material_sets();
+    REQUIRE(sets != nullptr);
+    const MaterialId fallback = world.get<MaterialRef>(e)->material;
+    const MaterialId resolved = sets->material_for(set->set, 0, fallback);
+    CHECK(resolved != fallback); // it is not the grey the bridge assigns as a placeholder
+
+    // The FACTORS came from the cooked record, each distinct in the fixture so a mis-mapped field
+    // cannot hide behind a default.
+    const PbrMaterialDesc& desc = materials.get(resolved);
+    CHECK(desc.base_color[0] == doctest::Approx(0.8f));
+    CHECK(desc.base_color[1] == doctest::Approx(0.4f));
+    CHECK(desc.metallic == doctest::Approx(0.25f));
+    CHECK(desc.roughness == doctest::Approx(0.6f));
+    CHECK(desc.normal_scale == doctest::Approx(0.5f));
+    CHECK(desc.occlusion_strength == doctest::Approx(0.75f));
+    // The fixture is AlphaMode::Mask, so the cutoff survives — the field that has been cooked since
+    // M6.3 and read by nothing, which is why every alpha-tested glTF drew as an opaque quad.
+    CHECK(desc.alpha_cutoff == doctest::Approx(0.3f));
+
+    // And its base-colour map is a real uploaded texture, not the magenta placeholder.
+    CHECK(desc.base_color_texture.is_valid());
+
+    // NEGATIVE CONTROL. Everything above would pass just as well against a bridge that invented a
+    // material out of nothing, so: the same world, the same cooked files, and NO catalog. Nothing
+    // may resolve, the entity must keep the fallback grey, and the failure must be COUNTED rather
+    // than silent — a scene that quietly draws the wrong colour is the failure this brick exists to
+    // end, and it looks identical to one that drew the right one unless something is counting.
+    {
+        assets::AssetServer bare_server(jobs);
+        GpuAssetBridge bare(*device, bare_server);
+        MeshRegistry bare_meshes(*device);
+        MaterialRegistry bare_materials;
+        bare.set_mesh_sink(bare_meshes, bare_materials);
+        // deliberately no set_catalog
+
+        ecs::World bare_world;
+        register_render_components(bare_world);
+        const ecs::Entity be =
+            bare_world.spawn_with(ecs::WorldTransform{placed}, MeshAsset{kMeshId});
+        (void)bare.settle(bare_world, 4);
+
+        CHECK(bare_world.get<MaterialSet>(be) == nullptr); // no set was ever minted
+        CHECK(bare.material_stats().resolved == 0);
+        CHECK(bare.unresolved_count() >= 1); // and it says which id it could not find
+    }
+
+    std::filesystem::remove_all(dir);
 }

@@ -44,7 +44,9 @@ namespace {
 
 } // namespace
 
-ResolveDrawStats resolve_draws(ExtractedScene& scene, const MeshRegistry& meshes) {
+ResolveDrawStats resolve_draws(ExtractedScene& scene,
+                               const MeshRegistry& meshes,
+                               const MaterialSetRegistry* material_sets) {
     ResolveDrawStats stats;
 
     // Built into fresh vectors rather than compacted in place: expansion can GROW the list, so the
@@ -68,10 +70,13 @@ ResolveDrawStats resolve_draws(ExtractedScene& scene, const MeshRegistry& meshes
             DrawItem item = src;
             item.first_index = gpu.submeshes[s].first_index;
             item.index_count = gpu.submeshes[s].index_count;
-            // The per-slot MATERIAL is not resolved yet: until m16.3 teaches the asset bridge to
-            // map `material_slot` through the manifest, every submesh of an entity draws with that
-            // entity's single MaterialRef. Splitting the geometry first is what makes that brick a
-            // material change rather than a draw-path change as well.
+            // This submesh's own material, when the entity carries a set (m16.3). The MaterialRef
+            // already in `item.material` is the fallback, so an entity with no set — every world
+            // before m16.3, and every single-material mesh — is unaffected.
+            if (material_sets != nullptr && item.material_set != kInvalidMaterialSetId) {
+                item.material = material_sets->material_for(
+                    item.material_set, gpu.submeshes[s].material_slot, item.material);
+            }
             out_draws.push_back(item);
             out_entities.push_back(scene.draw_entities[i]);
             if (s > 0) {
@@ -96,8 +101,16 @@ ExtractedScene extract_scene(ecs::World& world) {
         [&](ecs::Entity e, ecs::WorldTransform& wt, MeshRef& mesh, MaterialRef& mat) {
             if (mesh.mesh == kInvalidMeshId || mat.material == kInvalidMaterialId)
                 return; // half-dressed entity: nothing sensible to draw
-            scene.draws.push_back(
-                {mesh.mesh, mat.material, core::to_matrix(pose_to_draw(world, e, wt))});
+            DrawItem item{};
+            item.mesh = mesh.mesh;
+            item.material = mat.material; // the fallback, and the whole answer without a set
+            item.model = core::to_matrix(pose_to_draw(world, e, wt));
+            // Optional: an entity resolved by the asset bridge carries a per-submesh material set.
+            // Absent on every world that predates m16.3, which then behaves exactly as before.
+            if (const MaterialSet* set = world.get<MaterialSet>(e)) {
+                item.material_set = set->set;
+            }
+            scene.draws.push_back(item);
             scene.draw_entities.push_back(e);
         });
 
@@ -368,7 +381,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // Before ANY registry lookup: a MeshRef can name a mesh this registry does not hold (a scene
     // file is untrusted input), and every path below — the cull loop, record_draws for the depth,
     // forward and shadow passes — indexes with it.
-    const ResolveDrawStats resolved = resolve_draws(scene, meshes_);
+    const ResolveDrawStats resolved = resolve_draws(scene, meshes_, material_sets_);
     const std::size_t unresolvable = resolved.dropped;
     if (unresolvable != 0) {
         unresolvable_draws_ += unresolvable;

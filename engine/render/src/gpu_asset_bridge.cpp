@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "rime/assets/manifest.hpp"
+#include "rime/assets/material_asset.hpp"
 #include "rime/assets/mesh_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
 #include "rime/ecs/query.hpp"
@@ -16,6 +17,26 @@
 #include "rime/rhi/resources.hpp"
 
 namespace rime::render {
+
+PbrMaterialDesc material_from_cooked(const assets::MaterialAsset& m) noexcept {
+    PbrMaterialDesc d{};
+    d.base_color[0] = m.base_color[0];
+    d.base_color[1] = m.base_color[1];
+    d.base_color[2] = m.base_color[2];
+    d.base_color[3] = m.base_color[3];
+    d.metallic = m.metallic;
+    d.roughness = m.roughness;
+    d.emissive[0] = m.emissive[0];
+    d.emissive[1] = m.emissive[1];
+    d.emissive[2] = m.emissive[2];
+    d.normal_scale = m.normal_scale;
+    d.occlusion_strength = m.occlusion_strength;
+    // Only Mask discards; Opaque and Blend both leave the cutoff at zero, which the shader reads as
+    // "never mask". See the header for why one float expresses all three modes.
+    d.alpha_cutoff = m.alpha_mode == assets::AlphaMode::Mask ? m.alpha_cutoff : 0.0f;
+    return d;
+}
+
 namespace {
 
 rhi::Format to_rhi_format(assets::TextureFormat format) noexcept {
@@ -209,6 +230,203 @@ GpuAssetBridge::ResolveStats GpuAssetBridge::resolve_scene_meshes(ecs::World& wo
         ++stats.resolved;
     }
     return stats;
+}
+
+assets::MaterialAssetHandle GpuAssetBridge::request_material(assets::AssetId id) {
+    if (const auto it = mat_by_id_.find(id.value); it != mat_by_id_.end()) {
+        return it->second;
+    }
+    if (catalog_ == nullptr) {
+        unresolved_.insert(id.value);
+        return {};
+    }
+    const assets::ManifestEntry* entry = catalog_->find_by_id(id);
+    if (entry == nullptr) {
+        unresolved_.insert(id.value);
+        return {};
+    }
+    const assets::MaterialAssetHandle handle =
+        server_.request_material(cooked_dir_ / entry->cooked_file);
+    mat_by_id_.emplace(id.value, handle);
+    return handle;
+}
+
+assets::TextureAssetHandle GpuAssetBridge::request_texture_by_id(assets::AssetId id) {
+    if (const auto it = tex_by_id_.find(id.value); it != tex_by_id_.end()) {
+        return it->second;
+    }
+    if (catalog_ == nullptr) {
+        unresolved_.insert(id.value);
+        return {};
+    }
+    const assets::ManifestEntry* entry = catalog_->find_by_id(id);
+    if (entry == nullptr) {
+        unresolved_.insert(id.value);
+        return {};
+    }
+    const assets::TextureAssetHandle handle = request_texture(cooked_dir_ / entry->cooked_file);
+    tex_by_id_.emplace(id.value, handle);
+    return handle;
+}
+
+bool GpuAssetBridge::build_material(const assets::MaterialAsset& cooked, PbrMaterialDesc& out) {
+    out = material_from_cooked(cooked);
+
+    // The second level of the dependency: the material's texture ids are only knowable now that it
+    // is Ready. Request each, then resolve it — `texture_or_placeholder` hands back magenta until
+    // the upload drains, so the material is usable immediately and sharpens later.
+    bool all_resident = true;
+    const auto slot = [&](assets::AssetId id, rhi::TextureHandle& dest) {
+        if (id.value == 0) {
+            return; // an empty slot is not a pending one: the shader's 1x1 fallback is correct
+        }
+        const assets::TextureAssetHandle h = request_texture_by_id(id);
+        if (!h.is_valid()) {
+            ++material_stats_.unresolved;
+            return;
+        }
+        dest = texture_or_placeholder(h);
+        if (dest == placeholder_) {
+            all_resident = false;
+        }
+    };
+    slot(cooked.base_color_tex, out.base_color_texture);
+    slot(cooked.metallic_roughness_tex, out.metallic_roughness_texture);
+    slot(cooked.normal_tex, out.normal_texture);
+    slot(cooked.occlusion_tex, out.occlusion_texture);
+    slot(cooked.emissive_tex, out.emissive_texture);
+    return all_resident;
+}
+
+GpuAssetBridge::MaterialStats GpuAssetBridge::resolve_scene_materials(ecs::World& world) {
+    MaterialStats stats;
+    if (mesh_sink_ == nullptr || material_sink_ == nullptr || catalog_ == nullptr) {
+        return stats;
+    }
+
+    struct Pending {
+        ecs::Entity entity;
+        std::vector<MaterialId> materials;
+    };
+
+    std::vector<Pending> pending;
+
+    world.query<MeshAsset>().for_each([&](ecs::Entity e, MeshAsset& asset) {
+        if (asset.asset == 0) {
+            return;
+        }
+        // The mesh must be uploaded before its submesh table — and therefore its material slots —
+        // can be read at all. This is the first level of the chain.
+        const auto req = by_id_.find(asset.asset);
+        if (req == by_id_.end() || !req->second.is_valid()) {
+            return;
+        }
+        const auto up = uploaded_meshes_.find(req->second.index);
+        if (up == uploaded_meshes_.end()) {
+            ++stats.pending; // mesh not resident yet; nothing to join against
+            return;
+        }
+        const assets::ManifestEntry* mesh_entry =
+            catalog_->find_by_id(assets::AssetId{asset.asset});
+        if (mesh_entry == nullptr) {
+            return; // already counted by request_mesh
+        }
+        const GpuMesh& gpu = mesh_sink_->get(up->second);
+
+        // How many slots this mesh names. The table is guaranteed non-empty by MeshRegistry::add.
+        std::uint32_t slot_count = 0;
+        for (const SubmeshRange& sm : gpu.submeshes) {
+            slot_count = std::max(slot_count, sm.material_slot + 1);
+        }
+        std::vector<MaterialId> materials(slot_count, kInvalidMaterialId);
+
+        bool complete = true;
+        for (std::uint32_t slot = 0; slot < slot_count; ++slot) {
+            // ADR-0039 ruling 1: the edge is the manifest's `#materialN` convention.
+            const std::string label = mesh_entry->source_path + "#material" + std::to_string(slot);
+            const assets::ManifestEntry* mat_entry = catalog_->find_by_source(label);
+            if (mat_entry == nullptr) {
+                ++stats.slots_defaulted;
+                continue; // no material cooked for this slot — the fallback MaterialRef stands
+            }
+            if (const auto known = material_of_id_.find(mat_entry->id.value);
+                known != material_of_id_.end()) {
+                materials[slot] = known->second;
+                continue;
+            }
+            const assets::MaterialAssetHandle mh = request_material(mat_entry->id);
+            if (!mh.is_valid()) {
+                ++stats.unresolved;
+                continue;
+            }
+            const assets::MaterialAsset* cooked = server_.get(mh);
+            if (cooked == nullptr) {
+                complete = false; // still loading — level two
+                continue;
+            }
+            PbrMaterialDesc desc{};
+            if (!build_material(*cooked, desc)) {
+                complete = false; // a texture is still streaming — level three
+            }
+            const MaterialId id = material_sink_->add(desc);
+            material_of_id_.emplace(mat_entry->id.value, id);
+            materials[slot] = id;
+        }
+
+        if (!complete) {
+            ++stats.pending;
+        }
+        pending.push_back(Pending{e, std::move(materials)});
+    });
+
+    // Collect, then mutate — add_component moves an entity between archetypes and would reallocate
+    // the chunks the query above is walking.
+    for (Pending& p : pending) {
+        bool any = false;
+        for (const MaterialId id : p.materials) {
+            any = any || id != kInvalidMaterialId;
+        }
+        if (!any) {
+            continue; // nothing resolved for this mesh yet; leave its fallback MaterialRef alone
+        }
+        const auto existing = set_of_entity_.find(p.entity.index);
+        if (existing == set_of_entity_.end()) {
+            const MaterialSetId set = material_sets_.add(std::move(p.materials));
+            set_of_entity_.emplace(p.entity.index, set);
+            if (MaterialSet* comp = world.get<MaterialSet>(p.entity)) {
+                comp->set = set;
+            } else {
+                world.add_component(p.entity, MaterialSet{set});
+            }
+        } else {
+            // UPDATE IN PLACE rather than minting a new id, so a set resolved before its textures
+            // streamed in sharpens without the entity's component going stale. This is the same
+            // mechanism MaterialRegistry::update provides one level down, and it is what replaces
+            // the never-revisited neutral grey that made this whole brick necessary.
+            material_sets_.update(existing->second, std::move(p.materials));
+        }
+        ++stats.resolved;
+    }
+
+    material_stats_ = stats;
+    return stats;
+}
+
+std::size_t GpuAssetBridge::settle(ecs::World& world, std::size_t max_rounds) {
+    std::size_t round = 0;
+    for (; round < max_rounds; ++round) {
+        server_.wait_for_pending_loads();
+        server_.pump();
+        (void)drain();
+        const ResolveStats meshes = resolve_scene_meshes(world);
+        const MaterialStats mats = resolve_scene_materials(world);
+        // Quiescent: nothing is waiting on a level below it. Note this deliberately does NOT check
+        // `resolved`, which stays nonzero in the steady state.
+        if (meshes.pending == 0 && mats.pending == 0) {
+            return round + 1;
+        }
+    }
+    return round;
 }
 
 } // namespace rime::render

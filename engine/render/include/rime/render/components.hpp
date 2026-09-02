@@ -42,6 +42,20 @@ struct MaterialRef {
     MaterialId material = kInvalidMaterialId;
 };
 
+// Shade each of the mesh's submeshes with the corresponding entry of that material SET (m16.3).
+//
+// DERIVED, AND DELIBERATELY NOT REFLECTED. Like MeshRef and MaterialRef this is a dense index into
+// a runtime registry, minted per session by the asset bridge — it is meaningless in any other
+// process, so it must never be written into a `.rscene` (ADR-0039 ruling 4). Leaving it out of the
+// reflection macros below is what enforces that: the scene writer serializes reflected components
+// and cannot see this one at all, so the exclusion cannot be forgotten later.
+//
+// An entity without one falls back to its single MaterialRef for every submesh, which is exactly
+// what a single-material mesh wants and what every pre-m16.3 world already has.
+struct MaterialSet {
+    MaterialSetId set = kInvalidMaterialSetId;
+};
+
 // A perspective camera. Position + orientation come from the entity's WorldTransform; this
 // component holds only the lens. `active` marks the camera a frame renders through (the scene
 // renderer takes the first active one it finds).
@@ -117,6 +131,7 @@ inline void register_render_components(ecs::World& world) {
     (void)world.register_component<MeshRef>();
     (void)world.register_component<MeshAsset>();
     (void)world.register_component<MaterialRef>();
+    (void)world.register_component<MaterialSet>();
     (void)world.register_component<Camera>();
     (void)world.register_component<DirectionalLight>();
     (void)world.register_component<PointLight>();

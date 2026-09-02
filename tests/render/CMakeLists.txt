@@ -38,7 +38,10 @@ target_link_libraries(rime_render_tests
     PRIVATE rime::render rime::vfx)
 
 target_include_directories(rime_render_tests
-    PRIVATE ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer)
+    PRIVATE ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer
+    # m16.3's material-bridge proof synthesises a cooked material + texture with the same builders
+    # the engine/assets tests use, because no `.rmat` fixture is committed.
+    PRIVATE ${CMAKE_SOURCE_DIR}/tests/assets)
 
 # The GPU asset-bridge proof loads the committed cooked checker.rtex through the AssetServer + bridge;
 # hand it the same fixtures dir the engine/assets tests use (CMake emits forward slashes on every OS).
