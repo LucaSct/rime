@@ -2168,6 +2168,11 @@ m15.8.
 > reported honestly" — the grant itself needs a hand on a real mouse; and a windowed run emits four
 > `vkDestroyBuffer ... currently in use` validation errors at teardown, present with and without
 > pointer capture and therefore older than both.
+>
+> **Corrected (2026-09-02): not at teardown.** Review pass 2 reproduced them live and traced them to
+> `SceneRenderer::ensure_draw_capacity` destroying `draw_ubo_` while the previous in-flight frame
+> still has it bound — they fire mid-run on draw-count growth, which is why they looked older than
+> pointer capture. Teardown itself measured clean over 7,960 frames. See the pass-2 section below.
 
 ### The adversarial review that M11–M15 never got (2026-08-31)
 
@@ -2225,6 +2230,133 @@ lifetimes, and the destruction core — four units were cut off by the session l
 Two leads they had reached and did not finish: the renderer guards the mesh-index **sentinel but
 not the range**, and m13.2d has suspect stale-body pose recovery and gen-0 `InstanceId`
 reconstruction. Those four are the first candidates for the next review pass.
+
+### Review pass 2 — those four units, finished, plus three never-reviewed modules (2026-09-02)
+
+The four units above were resumed from their own transcripts after a second session limit killed
+them mid-analysis, and three modules that had never been reviewed at all were added: `core`'s
+work-stealing deque and job system, the physics large-shape overlap question, and the asset cook
+pipeline. Baseline `b53bf0f`. Reviewer, so a skipped review stays visible: **Fable** ran the
+destruction, RHI, renderer and editor⇄engine units; the other three were run locally after the
+budget forced a trim from seven concurrent units to four. Every finding below was re-verified
+against the code by hand, and the ones marked *measured* were settled by running something.
+
+**Confirmed, in roughly the order they should be fixed:**
+
+1. **A network packet can write anywhere in the heap.** `destruction_client.cpp:121` reads
+   `op.part` raw off the wire; the stage-1 remote loop (`damage.cpp:493-510`) validates the
+   instance index and the authority and copies the part index straight through; `damage.cpp:641`
+   then does `inst.health[part] -= ops[j].amount` — `std::vector::operator[]`, unchecked in
+   release. Any netwall client, one malformed `DamageOps` message. `amount` is unchecked too: NaN
+   health never reaches `<= 0`, so the part becomes unkillable and poisons `state_hash`.
+2. **`draw_ubo_` is destroyed while the previous frame still has it bound** —
+   `scene_renderer.cpp:234`, reached from `ensure_draw_capacity` whenever the per-frame draw count
+   grows. `kFramesInFlight = 2` and `acquire_next_image` waits only on frame N−2, so frame N−1 is
+   still executing. **Reproduced live** on the workstation with validation on. The same
+   single-copy asymmetry lets `write_buffer` overwrite `frame_ubo_`/`draw_ubo_` *contents*
+   host-side while in flight (`scene_renderer.cpp:387,439`) — a torn matrix for one frame, ordered
+   by nothing, and invisible to standard validation. One fix (per-frame-in-flight copies) closes
+   both. The code named this seam and m13.3a shipped frames-in-flight without closing it:
+   "safe in the v0 blocking model … frames-in-flight will demand per-frame buffering here."
+3. **An out-of-range `MeshRef` is UB in three draw paths** — the open lead, now settled as
+   **reachable**. `MeshRegistry::get` is `return meshes_[id];` (`mesh.hpp:140`); extraction filters
+   only the sentinel (`scene_renderer.cpp:56`); `scene_renderer.cpp:334`, `passes.cpp:49` and
+   `scene_picker.cpp:175` then index with whatever survived. The asymmetry is accidental, not
+   deliberate — materials are range-guarded (`scene_renderer.cpp:403`) and so is the gizmo
+   renderer (`gizmo_renderer.cpp:267`). Cooked assets cannot reach it; a scene file can.
+4. **…and the editor is the producer that reaches it.** Saving from the live viewport serializes
+   the derived `MeshRef`/`MaterialRef` the asset bridge stamped into the world
+   (`editor_host_app.cpp:541-543`, `gpu_asset_bridge.cpp:200-210`, `editor_host.cpp:512`), so
+   Ctrl+S **with zero edits** writes ~150 session-local registry indices into `block.rscene` — the
+   exact thing `samples/99-the-block/main.cpp:382-386` forbids authoring. The round-trip proof
+   cannot see it: `scripts/authoring-round-trip.sh:95` runs `--smoke --save` without `--frames`,
+   so the `prepare` hook and the asset bridge never run. The m14.3 save veto guards *subtraction*
+   only; additions sail through with every counter green.
+5. **The cook cache ignores cook parameters and serves a wrong-colorspace texture.** *Measured*:
+   the same PNG cooked `--srgb` and `--linear` into fresh directories gives different bytes
+   (`496c…` vs `6898…`) and different content ids; cooking with the flag flipped into an existing
+   directory returns the sRGB bytes under the sRGB id and logs `0 source(s) cooked, 1 from cache`.
+   The cache record (`cook_cache.rs:124-148`) keys on source path + source hash + `cooker_version`
+   — the authors anticipated "the cooker changed" and not "the cook request changed". Re-cooking
+   normal maps as linear into an existing tree silently keeps them sRGB.
+6. **The fracture cook writes `.rdest` files its own engine refuses to load.** `repair_t_junctions`
+   inserts vertices within ≈0.5–1.3 mm of a face edge; `hull.hpp:44` rejects a face more than
+   `kPlaneEps = 1e-4` (0.1 mm, absolute) off its Newell plane; the cook validates topology only.
+   *Measured* over 1,500 shipped-scale cooks: 10 parts would fail hull planarity, worst deviation
+   `8.92e-4`, ~0.4% of cooks. The shipped seeds happen to cook clean, which is why CI never sees
+   it. On a bad seed `register_pattern` returns the null id and the destructible silently never
+   stands.
+7. **Play→Stop dangles every entity reference, and the next Save deletes the hierarchy.**
+   `serialize_world` writes `Parent.value` as raw bytes with no remap (`editor_host.cpp:153-193`),
+   `stop` despawns everything (every despawn bumps the slot generation), and the restore memcpys
+   the dead handles back. Children snap to local-as-world, and a following Ctrl+S collapses every
+   `Parent` to `null`. Invisible to the m9.7 witness because `world_content_hash` is identity-blind
+   and the restored blob is byte-identical; latent for shipped content, which is flat.
+8. **`live_debris_count()` counts Retired rows as live** (`lifecycle.cpp:57-65`), so past ~640 rows
+   at block scale the cap is permanently over budget and every debris freezes the tick it settles,
+   bypassing the 120-tick linger. The counting rule predates the Retired phase.
+9. **`apply_detach_set` cannot reproduce multi-part islands** (`damage.cpp:696-730`), so a
+   late-joiner's debris roster diverges from the authority while `world.hpp:206-212` promises
+   identity. Latent — only the test calls the seam — and that test asserts `debris_count() > 0`
+   rather than roster equality, with both worlds in hand.
+10. **The editor's undo stack survives Stop with dead keys** (`commands.rs:153-188`, no `clear()`),
+    so undo silently no-ops after any Play/Stop cycle: the stack pops, the button stays enabled,
+    nothing moves. The code half-knows — the same staleness is documented and handled for the
+    snapshot mirror.
+11. Smaller, each with a scenario in the unit reports: `DebrisEvicted` published one tick late;
+    `apply_set_component` mutates before deserializing so a truncated blob half-applies; duplicate
+    `PartDamaged` when a part is hit by both sources in a tick; editor selection is a raw row index
+    that survives Stop only by accident of ordering; a non-UTF-8 scene path loses the save reply;
+    DDGI's imported-state bookkeeping is stale by one transition and correctness rests on two
+    backend nets the render graph calls a v0 stopgap.
+
+**Two records corrected. A fixed defect recorded as open is a skipped review pointed the other
+way, and both took a probe rather than a read to notice:**
+
+- **The ≥20 m large-shape overlap blind band no longer exists.** *Measured*: 168 configurations —
+  thin slab and cube, centred and off-centre, half-extents 10 m to 500 m, penetration depths 0.1 mm
+  to 200 mm — **zero misses, every depth within 0.5 mm of truth**. The probe is not vacuous; an
+  off-slab query row correctly reports `MISS`. Presumably closed as a side effect of the #131/#132/
+  #133 GJK work and never re-measured. So `kMaxTestExtent = 10.0f` and the table at
+  `tests/gameplay/character_fixture.hpp:52-72` now constrain the entire gameplay suite to 10 m
+  geometry for a defect that is gone — while the shipped street is a 44 m half-extent box
+  (`samples/99-the-block/main.cpp:277`). Nothing pins the repair, so a regression would be silent.
+- **The four `vkDestroyBuffer ... currently in use` errors are not at teardown**, as the m15
+  progress note above records. Teardown is clean — *measured*, 7,960 frames of `first_light
+  --windowed` closed by the window box with validation on and zero in-use errors. They fire
+  mid-run, on draw-buffer growth driven by camera movement, which is why they appeared "with and
+  without pointer capture and therefore older than both".
+
+**Checked and found sound**, recorded so it is not re-litigated: the **Chase-Lev deque** matches
+the Lê–Pop–Cohen–Nardelli (2013) C11 orderings exactly — including the relaxed `top` load after the
+seq-cst fence in `pop()`, which is the detail implementations usually get wrong — and retiring
+buffers instead of freeing them closes the thief-reads-freed-array hazard by construction;
+*measured* 0/12 exactly-once failures against **4/12** for a negative control with that one fence
+weakened to release. **Cook determinism and content-id path independence** both hold, measured on
+a 14-file cooked tree. The **collapse cascade** terminates structurally, is order-free and
+replay-deterministic. Both m13.2d leads are **sound today**: generation 0 is not the null handle
+here (nullness is structural and the tables are append-only), and `freeze_debris` nulls the body id
+in the same call that destroys it — though the first assumption dies the day instance despawn lands
+and `DestructibleInstanceRef` has nowhere to store a generation. Also sound: the render-graph
+compiler's hazard edges and deterministic order, `RenderGraph::reset()`, swapchain recreation,
+teardown ordering, the `.rdest` decoder (stricter than the net path), the C ABI seam, and the
+editor protocol's framing and cross-language conformance fixtures.
+
+**One instrument caveat, because a proof that cannot see what it skipped reads as passing —
+including this review's own.** The deque probe's phase 2 is documented as "the single-element
+take-vs-steal race, isolated"; against a deque with exactly that bug injected it scored **0/12**.
+All four detections came from phase 1, the general sustained-contention phase. Isolation removed
+the contention it was trying to concentrate. Phase 1 carries the entire result.
+
+**Still unreviewed, so the gap stays visible:** `engine/stream`, `engine/vfx`, `engine/blockkit`,
+and whatever `net`/`replication` the first pass did not reach. Three questions were ranked highest
+in their own units and not reached: the **runtime parse of cooked formats as untrusted input**
+(`engine/assets` texture/material decode — the `.rdest` and mesh paths are covered by other units
+and are sound); **physics solver determinism under thread-count and island-order variation**, which
+is what M12's "bit for bit, no epsilon" claim actually rests on; and the **m15.6b sensor
+completeness** question. Also untouched: `engine/ecs` invalidation rules, `slot_map` generation ABA,
+the allocators, the `type_hash` collision carried over from the M11 deferred list, the RHI-seam
+audit (guardrail #1), and whether any test *fails* on a validation error rather than printing it.
 
 **M13's frame-rate clause is carried to M16, with the number written down** — `frame` p99 35.60 ms
 against a ratified 16.6. The budget does not move; M13 stands at ⚠️. It goes to M16 because m13.p
