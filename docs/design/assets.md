@@ -43,7 +43,7 @@ u32   vertex_count
 u32   index_count           a 32-bit triangle-list index buffer; must be a multiple of 3
 f32×3 aabb_min              local-space bounds, computed at cook time
 f32×3 aabb_max
-u32   submesh_count         v1: 0 or 1
+u32   submesh_count         one per glTF primitive (see the correction below)
       submesh_count × { u32 first_index, u32 index_count, u32 material_slot }
 byte  vertices[vertex_count × vertex_stride]     interleaved vertex blob
 u32   indices[index_count]
@@ -293,6 +293,27 @@ content and stores it once. A second, separate hash of the *source path* is what
 browser look up by; it is not the identity. The cook also emits a plain-text **manifest** (one line
 per asset: `source-path ⇥ kind ⇥ id-hex ⇥ cooked-file`) — derived data that can be regenerated and so
 can never lie, unlike a hand-authored database.
+
+### The mesh→material edge is the manifest's `#materialN` convention (M16, ADR-0039)
+
+**Two corrections to the section above, both dated 2026-09-02.** The mesh payload's
+`submesh_count` line said "v1: 0 or 1"; the cooker has emitted **one submesh per glTF primitive**
+since `from_primitives` existed (`tools/asset-pipeline/src/mesh.rs:107-118`). The doc had simply
+outgrown itself.
+
+And the manifest is not only a human/browser lookup — since M16 it carries a **runtime contract**.
+A cooked material's manifest line has `source_path = "<mesh-source>#material<N>"`
+(`tools/asset-pipeline/src/lib.rs:230-240`), and a submesh's `material_slot` names that `N`. The
+engine joins them at load: mesh id → `find_by_id` → `source_path + "#material" + slot` →
+`find_by_source` → material id. **The cook may not change that naming without breaking scene
+loading.**
+
+The join lives in the manifest rather than in the mesh payload for one reason, and it is worth
+stating because the payload version looks tidier: an `AssetId` is the hash of the payload, so
+embedding material ids in the mesh would make every texture recompression change material ids,
+change mesh ids, and therefore **invalidate every `.rscene` in the project** — mesh ids are what
+scene files carry. [ADR-0039](../adr/0039-authored-surfaces-m16.md) records the rejected design and
+the condition that would reverse the ruling (a manifest that grows a typed reference column).
 
 ## Schema versioning (reflection `type_hash`)
 

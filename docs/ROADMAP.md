@@ -1663,7 +1663,8 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). The renderer costs 5.2 ms; the remainder is physics at 667 debris |
 | **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 | **M15** | **"The Platform Proof"** | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
-| **M16** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3, plus M13's unmet frame-rate clause and the physics-at-debris-scale cost m13.p measured ([ADR-0038](adr/0038-platform-proof-m15.md) rules the split) |
+| **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) |
+| **M17** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3, plus M13's unmet frame-rate clause and the physics-at-debris-scale cost m13.p measured ([ADR-0038](adr/0038-platform-proof-m15.md) rules the split; renumbered from M16 by [ADR-0039](adr/0039-authored-surfaces-m16.md)) |
 
 ### Detail
 
@@ -2174,6 +2175,41 @@ m15.8.
 > still has it bound — they fire mid-run on draw-count growth, which is why they looked older than
 > pointer capture. Teardown itself measured clean over 7,960 frames. See the pass-2 section below.
 
+**M16 — "Authored Surfaces."** *Planned 2026-09-02; [ADR-0039](adr/0039-authored-surfaces-m16.md) is
+the architecture.* m15.1 made a scene name a mesh and draw it, and stopped one field short: the entity
+gets a hardcoded neutral grey (`gpu_asset_bridge.cpp:119-125`) that, because the idempotence check at
+`:194` short-circuits, is **never revisited**. Cooked materials are decoded by nobody outside
+`08-gltf-zoo` and tests, so every asset class a game needs dead-ends at grey.
+
+Planning found three things that make this bigger than wiring up materials, each verified rather than
+assumed. **No game resolves scene assets at all** — `resolve_scene_meshes` has exactly two callers,
+the editor host and one test, and no sample calls it; the game half is a missing runtime, not a
+missing pump. **Alpha masking is broken in the primary view, not only in shadows** — the depth
+pre-pass has no fragment shader, so it writes depth for masked-out texels and the geometry behind
+fails `CompareOp::Equal`, rendering the hole as clear colour; the pre-pass is on by default and
+m15.6a's proof passes `use_depth_prepass=false`, the one configuration no caller uses. And
+**`alpha_cutoff` is always 0 through the engine's asset path**, so masking does nothing for a placed
+mesh regardless.
+
+*Bricks:* **m16.0** the ADR + this ladder (decision brick, no engine code) · **m16.1** prerequisites —
+per-frame-in-flight UBO copies, the cook-cache parameter key, and BC formats + a device capability
+query (there is none today) · **m16.2** **the draw path widens, once** — one `DrawItem` per submesh,
+which lands *before* the material bridge because per-submesh, masked depth and double-sided are all
+the same change to `DrawItem` and `record_draws` · **m16.3** **the material half of the asset
+bridge** (the headline) · **m16.4** masked depth, and therefore masked shadows · **m16.5**
+double-sided + a clamped sampler, as one payload change so material ids churn once · **m16.6** mip
+alpha coverage in the cook · **m16.7** BC7/BC5, spike first · **m16.8** one asset runtime for both
+hosts, plus the save that stops writing derived components · **m16.9** the authoring doc and the
+Blender-authored proof. Cut order: m16.7 → m16.6 → m16.5. **Never cut:** m16.2, m16.3, m16.8, m16.9.
+
+> **The ordering is load-bearing and worth stating.** `AssetId = fnv1a_64(payload)` and the schema
+> hash is in the header, unhashed — so a schema bump churns no ids, but a payload *content* change
+> churns them transitively: texture bytes → texture ids → material payloads embed texture ids →
+> material ids. **Nothing churns mesh ids**, which is exactly why the ADR refuses to put material ids
+> in the mesh payload: mesh ids are what `.rscene` files carry, and recompressing a texture must not
+> invalidate every scene in the project. It is also why every id-churning cook change lands before
+> the proof asset, which is the first thing to commit an id.
+
 ### The adversarial review that M11–M15 never got (2026-08-31)
 
 Kimi's last review ran 2026-08-12 and Fable was out of credits through M13–M15, so **every line of
@@ -2363,6 +2399,11 @@ against a ratified 16.6. The budget does not move; M13 stands at ⚠️. It goes
 says where the cost is and it is not where M15 works: the whole M10 stack renders in 5.23 ms, and
 what remains is physics at 667 debris — ADR-0035 §6's predicted narrowphase cache, now with its
 measurement.
+
+> **Renumbered (2026-09-02):** that milestone is now **M17**. [ADR-0039](adr/0039-authored-surfaces-m16.md)
+> inserts "Authored Surfaces" as M16, because a visual bar cannot be judged on content that renders
+> grey. The frame-rate clause travels with "The Visual Bar" and is unchanged — same 35.60 ms against
+> the same ratified 16.6.
 
 **M14 starts after M13 closes.** `99-the-block` has one open defect (the collapse does not stay
 local), and starting the editor work while an integration bug is open is how integration bugs get
