@@ -134,6 +134,32 @@ named counter and a warn-once**, never silently substitute the magenta placehold
 that nothing exercises is a fallback that does not work, and this engine has shipped that shape
 before.
 
+#### The BC spike, run before any of it was written (2026-09-02)
+
+*Measured.* `textureCompressionBC = true` on both local devices — the RTX 3060 (NVIDIA) and the
+integrated RADV. **Lavapipe, which is what CI actually runs (`mesa-vulkan-drivers`), is not installed
+on this machine and was NOT verified.** That is deliberately not blocking: m16.1 adds the device
+capability query the RHI has never had, and a test that *reports* BC support turns the question into
+a fact CI answers permanently, rather than an assumption either way. If lavapipe says no, the honest
+shape is a CPU encode→decode→error-bound proof plus an explicitly named unproven GPU gap — never a
+GPU test that silently skips.
+
+*Encoders.* `third_party/README.md`'s policy decides this more cleanly than a licence audit would:
+"we don't pull in a library for something we should understand and own", and the directory "vendors
+no dependency *source*" because "the source is still fetched and checksummed at build time". A BC7
+crate that ships **prebuilt per-platform binaries** fails both clauses, on a three-OS CI, for a
+format we can encode ourselves. So:
+
+- **BC5 is written in-tree.** Two independent BC4 channels — min/max endpoints and 3-bit indices. It
+  is genuinely small, it needs no dependency, and it doubles as the encoder harness.
+- **BC7 is written in-tree, mode 6 only** (single subset, RGBA endpoints, 4-bit indices): ~250 lines,
+  with mediocre quality on high-contrast blocks, documented as the known limitation and the reason a
+  better mode search is a later brick. Taking a vendored-binary dependency to avoid writing 250 lines
+  is the trade this repo's policy exists to refuse.
+
+*Not verified:* crate licences were not audited directly — this machine has no network (crates.io
+returns 403) — but the policy above makes the question moot rather than open.
+
 ### What M16 does not fix, said plainly
 
 glTF `Blend` still draws as **Opaque**. There is no transparency pass and this milestone does not add
