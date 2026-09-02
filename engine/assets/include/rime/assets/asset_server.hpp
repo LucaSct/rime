@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "rime/assets/material_asset.hpp"
 #include "rime/assets/mesh_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
 #include "rime/core/jobs/job_system.hpp"
@@ -57,6 +58,7 @@ template <class T> struct AssetHandle {
 
 using MeshAssetHandle = AssetHandle<MeshAsset>;
 using TextureAssetHandle = AssetHandle<TextureAsset>;
+using MaterialAssetHandle = AssetHandle<MaterialAsset>;
 
 class AssetServer {
 public:
@@ -74,15 +76,24 @@ public:
     // within a job.
     [[nodiscard]] MeshAssetHandle request_mesh(const std::filesystem::path& path);
     [[nodiscard]] TextureAssetHandle request_texture(const std::filesystem::path& path);
+    // Materials (m16.3) complete the set. A cooked material is a fixed 92-byte record, so the load
+    // is trivially cheap — but it goes through the same async slot machinery as the other two
+    // rather than being read synchronously, because a material is the FIRST level of a two-level
+    // dependency: its five texture ids are only known once it is Ready, and the textures cannot be
+    // requested before then. Making it async here is what lets one settle loop drive the whole
+    // chain instead of the bridge special-casing materials.
+    [[nodiscard]] MaterialAssetHandle request_material(const std::filesystem::path& path);
 
     [[nodiscard]] AssetState state(MeshAssetHandle handle) const;
     [[nodiscard]] AssetState state(TextureAssetHandle handle) const;
+    [[nodiscard]] AssetState state(MaterialAssetHandle handle) const;
 
     // The loaded asset, or nullptr if the handle is invalid / not yet Ready. The `_or_placeholder`
     // form never returns null — it is what the render extraction calls, so recording never
     // branches.
     [[nodiscard]] const MeshAsset* get(MeshAssetHandle handle) const;
     [[nodiscard]] const TextureAsset* get(TextureAssetHandle handle) const;
+    [[nodiscard]] const MaterialAsset* get(MaterialAssetHandle handle) const;
     [[nodiscard]] const MeshAsset& get_or_placeholder(MeshAssetHandle handle) const;
     [[nodiscard]] const TextureAsset& get_or_placeholder(TextureAssetHandle handle) const;
 
@@ -119,6 +130,7 @@ private:
 
     void load_mesh_job(std::uint32_t index, std::filesystem::path path);
     void load_texture_job(std::uint32_t index, std::filesystem::path path);
+    void load_material_job(std::uint32_t index, std::filesystem::path path);
 
     core::JobSystem& jobs_;
 
@@ -127,11 +139,14 @@ private:
     mutable std::mutex mu_;
     std::deque<Slot<MeshAsset>> mesh_slots_;
     std::deque<Slot<TextureAsset>> tex_slots_;
+    std::deque<Slot<MaterialAsset>> mat_slots_;
     std::unordered_map<std::string, std::uint32_t> mesh_by_path_; // path → slot, for coalescing
     std::unordered_map<std::string, std::uint32_t> tex_by_path_;
+    std::unordered_map<std::string, std::uint32_t> mat_by_path_;
     std::vector<std::pair<std::uint32_t, MeshAsset>>
         mesh_done_; // completed CPU loads awaiting pump()
     std::vector<std::pair<std::uint32_t, TextureAsset>> tex_done_;
+    std::vector<std::pair<std::uint32_t, MaterialAsset>> mat_done_;
 
     std::atomic<std::size_t> physical_loads_{0};
     core::JobSystem::Counter inflight_{0}; // in-flight job count; ~AssetServer waits on it

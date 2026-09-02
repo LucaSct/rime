@@ -22,6 +22,16 @@ namespace rime::render {
 using MaterialId = std::uint32_t;
 inline constexpr MaterialId kInvalidMaterialId = 0xFFFFFFFFu;
 
+// Forward-declared so this header keeps its light dependency set; the definition arrives with
+// `rime/assets/material_asset.hpp`, which the one .cpp that implements the conversion includes.
+} // namespace rime::render
+
+namespace rime::assets {
+struct MaterialAsset;
+}
+
+namespace rime::render {
+
 struct PbrMaterialDesc {
     // The first three fields keep their M5.5 order, because positional aggregate init
     // `{base_color, metallic, roughness}` is used across the render tests — inserting a field ahead
@@ -61,6 +71,68 @@ struct PbrMaterialDesc {
     rhi::TextureHandle normal_texture{};
     rhi::TextureHandle occlusion_texture{};
     rhi::TextureHandle emissive_texture{};
+};
+
+// Convert a cooked material record into the renderer's description — FACTORS ONLY.
+//
+// This was `build_desc`, an anonymous-namespace function inside `samples/08-gltf-zoo/main.cpp`,
+// which meant the only place in the engine that knew how to turn a `.rmat` into something drawable
+// was a sample. Every game either copied it or drew neutral grey. Promoting it is most of what
+// makes cooked materials reach a scene-placed mesh at all (m16.3, ADR-0039).
+//
+// It deliberately does NOT resolve the five texture slots. Those need a GPU upload path and a
+// residency policy — placeholder until drained, fallback when a slot is empty — which belongs to
+// `GpuAssetBridge`, not to a pure conversion. Keeping the split means this function is exact,
+// GPU-free, and unit-testable, and the sample can still apply its own map-stripping control on top.
+//
+// The one non-trivial mapping is alpha: glTF's three modes collapse to a single threshold, because
+// `alpha_cutoff == 0` already means "never mask" to the shader. Opaque and Blend both leave it at
+// zero — which is also an honest statement of a limitation, since Blend genuinely draws as Opaque
+// (no transparency pass exists; ADR-0039 says so out loud rather than letting it be discovered).
+[[nodiscard]] PbrMaterialDesc material_from_cooked(const assets::MaterialAsset& cooked) noexcept;
+
+using MaterialSetId = std::uint32_t;
+inline constexpr MaterialSetId kInvalidMaterialSetId = 0xFFFFFFFFu;
+
+// One mesh's materials, indexed by a submesh's `material_slot` (m16.3, ADR-0039 ruling 2).
+//
+// An entity cannot simply hold `std::vector<MaterialId>`: components are trivially-copyable PODs,
+// so the vector lives here and the entity holds a `MaterialSet{MaterialSetId}` index. One entity,
+// N draws — which is what keeps picking and the outliner honest, as against the alternative of
+// spawning a child entity per submesh and polluting the scene the author actually made.
+//
+// Rows are append-only and mutated in place, exactly like MaterialRegistry, so a set resolved
+// before its textures have streamed in can be filled without minting a new id.
+class MaterialSetRegistry {
+public:
+    [[nodiscard]] MaterialSetId add(std::vector<MaterialId> materials) {
+        sets_.push_back(std::move(materials));
+        return static_cast<MaterialSetId>(sets_.size() - 1);
+    }
+
+    void update(MaterialSetId id, std::vector<MaterialId> materials) {
+        sets_[id] = std::move(materials);
+    }
+
+    [[nodiscard]] bool contains(MaterialSetId id) const noexcept {
+        return id != kInvalidMaterialSetId && id < sets_.size();
+    }
+
+    // The material for `slot`, or `fallback` when the set does not cover it. A mesh whose submesh
+    // names a slot its material set never resolved is a content error, not a crash: it draws with
+    // the fallback and the bridge counts it.
+    [[nodiscard]] MaterialId
+    material_for(MaterialSetId id, std::uint32_t slot, MaterialId fallback) const noexcept {
+        if (!contains(id) || slot >= sets_[id].size() || sets_[id][slot] == kInvalidMaterialId) {
+            return fallback;
+        }
+        return sets_[id][slot];
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept { return sets_.size(); }
+
+private:
+    std::vector<std::vector<MaterialId>> sets_;
 };
 
 // A plain store: add during setup, read while building the frame. CPU data only — the PBR pass

@@ -135,6 +135,22 @@ TextureAssetHandle AssetServer::request_texture(const std::filesystem::path& pat
     return TextureAssetHandle{index};
 }
 
+MaterialAssetHandle AssetServer::request_material(const std::filesystem::path& path) {
+    const std::string key = path.string();
+    std::uint32_t index;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (const auto it = mat_by_path_.find(key); it != mat_by_path_.end()) {
+            return MaterialAssetHandle{it->second};
+        }
+        index = static_cast<std::uint32_t>(mat_slots_.size());
+        mat_slots_.emplace_back();
+        mat_by_path_.emplace(key, index);
+    }
+    jobs_.run([this, index, path] { load_material_job(index, path); }, &inflight_);
+    return MaterialAssetHandle{index};
+}
+
 void AssetServer::load_mesh_job(std::uint32_t index, std::filesystem::path path) {
     physical_loads_.fetch_add(1, std::memory_order_relaxed);
     // IO + decode happen OUTSIDE the lock — this is the parallel part.
@@ -178,13 +194,36 @@ void AssetServer::load_texture_job(std::uint32_t index, std::filesystem::path pa
     }
 }
 
+void AssetServer::load_material_job(std::uint32_t index, std::filesystem::path path) {
+    physical_loads_.fetch_add(1, std::memory_order_relaxed);
+    std::optional<MaterialAsset> mat;
+    if (const std::optional<std::vector<std::byte>> bytes = platform::read_file(path)) {
+        AssetError error = AssetError::Io;
+        mat = read_material(*bytes, error);
+        if (!mat) {
+            RIME_ERROR(
+                "assets: async material load '{}' failed: {}", path.string(), to_string(error));
+        }
+    } else {
+        RIME_ERROR("assets: async material load cannot open '{}'", path.string());
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    if (mat) {
+        mat_done_.emplace_back(index, std::move(*mat));
+    } else {
+        mat_slots_[index].state = AssetState::Failed;
+    }
+}
+
 std::size_t AssetServer::pump() {
     std::vector<std::pair<std::uint32_t, MeshAsset>> meshes;
     std::vector<std::pair<std::uint32_t, TextureAsset>> textures;
+    std::vector<std::pair<std::uint32_t, MaterialAsset>> materials;
     {
         std::lock_guard<std::mutex> lock(mu_);
         meshes.swap(mesh_done_);
         textures.swap(tex_done_);
+        materials.swap(mat_done_);
         // Move each completed CPU load into its slot and mark it Ready, still under the lock so a
         // concurrent job's state write and a getter's read stay ordered.
         for (auto& [index, mesh] : meshes) {
@@ -195,8 +234,12 @@ std::size_t AssetServer::pump() {
             tex_slots_[index].asset = std::move(tex);
             tex_slots_[index].state = AssetState::Ready;
         }
+        for (auto& [index, mat] : materials) {
+            mat_slots_[index].asset = std::move(mat);
+            mat_slots_[index].state = AssetState::Ready;
+        }
     }
-    return meshes.size() + textures.size();
+    return meshes.size() + textures.size() + materials.size();
 }
 
 AssetState AssetServer::state(MeshAssetHandle handle) const {
@@ -207,6 +250,11 @@ AssetState AssetServer::state(MeshAssetHandle handle) const {
 AssetState AssetServer::state(TextureAssetHandle handle) const {
     std::lock_guard<std::mutex> lock(mu_);
     return handle.index < tex_slots_.size() ? tex_slots_[handle.index].state : AssetState::Failed;
+}
+
+AssetState AssetServer::state(MaterialAssetHandle handle) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return handle.index < mat_slots_.size() ? mat_slots_[handle.index].state : AssetState::Failed;
 }
 
 const MeshAsset* AssetServer::get(MeshAssetHandle handle) const {
@@ -226,6 +274,14 @@ const TextureAsset* AssetServer::get(TextureAssetHandle handle) const {
         return nullptr;
     }
     return &*tex_slots_[handle.index].asset;
+}
+
+const MaterialAsset* AssetServer::get(MaterialAssetHandle handle) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (handle.index >= mat_slots_.size() || mat_slots_[handle.index].state != AssetState::Ready) {
+        return nullptr;
+    }
+    return &*mat_slots_[handle.index].asset;
 }
 
 const MeshAsset& AssetServer::get_or_placeholder(MeshAssetHandle handle) const {

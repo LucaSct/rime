@@ -90,7 +90,12 @@ struct ResolveDrawStats {
 //
 // The parallel `draw_entities` array is kept in step — an entity is repeated once per submesh — so
 // the pick pass still maps a rasterised pixel back to the right entity.
-[[nodiscard]] ResolveDrawStats resolve_draws(ExtractedScene& scene, const MeshRegistry& meshes);
+// `material_sets` is optional (null = none resolved): when an entity carries a `MaterialSet`, each
+// submesh takes the set's entry for its own `material_slot`, falling back to the entity's single
+// MaterialRef for any slot the set does not cover.
+[[nodiscard]] ResolveDrawStats resolve_draws(ExtractedScene& scene,
+                                             const MeshRegistry& meshes,
+                                             const MaterialSetRegistry* material_sets = nullptr);
 
 // Pull the renderable view of a World: draws, the active camera, lights. Reads WorldTransform —
 // run ecs::propagate_transforms first or camera/meshes/lights sit at stale poses. Conventions
@@ -249,6 +254,12 @@ public:
     // submit_blocking pay two extra small buffers and need not call it at all.
     void set_frames_in_flight(std::uint32_t frames);
 
+    // Where per-submesh materials come from (m16.3). Null — the default — means every submesh uses
+    // its entity's single MaterialRef, which is what a world built by hand or by a pre-m16.3 path
+    // wants. The GpuAssetBridge owns the registry; hand it over with
+    // `renderer.set_material_sets(bridge.material_sets())` once, after construction.
+    void set_material_sets(const MaterialSetRegistry* sets) noexcept { material_sets_ = sets; }
+
     // Slots in the uniform ring — `frames_in_flight + 1`. Exposed for the proof, which asserts the
     // ring is actually deeper than one and therefore that the growth path cannot free a live
     // buffer.
@@ -327,6 +338,7 @@ private:
     // a bad ref does not print per frame. A content error, surfaced rather than silently absorbed.
     std::size_t unresolvable_draws_ = 0;
     bool warned_unresolvable_mesh_ = false;
+    const MaterialSetRegistry* material_sets_ = nullptr;
 
     // Per-frame arrays the pass lambdas' SceneDrawData spans point into — members (not locals)
     // because they must outlive render() and still be alive at graph.execute().
