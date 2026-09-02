@@ -118,6 +118,20 @@ pub fn import_materials(
             occlusion_strength: mat.occlusion_texture().map(|o| o.strength()).unwrap_or(1.0),
             alpha_cutoff: mat.alpha_cutoff().unwrap_or(0.5),
             alpha_mode: map_alpha_mode(mat.alpha_mode()),
+            // m16.5: both of these were read by nothing before now.
+            double_sided: mat.double_sided(),
+            // glTF puts wrap modes on each texture's SAMPLER, not on the material, and the engine
+            // binds one sampler per draw — so the base-colour map's mode is the one that decides.
+            // ClampToEdge is the only non-repeat mode the RHI has, so anything that is not Repeat
+            // clamps.
+            clamp_uv: pbr
+                .base_color_texture()
+                .map(|t| {
+                    let s = t.texture().sampler();
+                    s.wrap_s() != gltf::texture::WrappingMode::Repeat
+                        || s.wrap_t() != gltf::texture::WrappingMode::Repeat
+                })
+                .unwrap_or(false),
             base_color_tex,
             metallic_roughness_tex,
             normal_tex,

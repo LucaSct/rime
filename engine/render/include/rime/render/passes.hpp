@@ -137,6 +137,7 @@ struct DrawItem {
         None = 0,
         AlphaMasked = 1u << 0, // needs the alpha-testing depth variant (m16.4)
         DoubleSided = 1u << 1, // needs cull-mode off (m16.5)
+        ClampUv = 1u << 2,     // sample with ClampToEdge rather than Repeat (m16.5)
     };
 
     std::uint32_t flags = None;
@@ -164,6 +165,10 @@ struct SceneDrawData {
     std::uint32_t frame_ubo_offset = 0;
     rhi::BufferHandle draw_ubo;
     rhi::SamplerHandle material_sampler;
+    // The ClampToEdge sibling (m16.5), selected per draw by DrawItem::ClampUv. Two samplers rather
+    // than a per-material one: address mode is the only axis any material has asked to vary, and a
+    // sampler per material would be a descriptor per material for one boolean.
+    rhi::SamplerHandle clamp_sampler;
 };
 
 // m10.1: what the shadowed forward pass samples — the cascade depth array (a sampler2DArrayShadow

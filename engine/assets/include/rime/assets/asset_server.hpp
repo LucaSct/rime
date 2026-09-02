@@ -76,7 +76,7 @@ public:
     // within a job.
     [[nodiscard]] MeshAssetHandle request_mesh(const std::filesystem::path& path);
     [[nodiscard]] TextureAssetHandle request_texture(const std::filesystem::path& path);
-    // Materials (m16.3) complete the set. A cooked material is a fixed 92-byte record, so the load
+    // Materials (m16.3) complete the set. A cooked material is a fixed 100-byte record, so the load
     // is trivially cheap — but it goes through the same async slot machinery as the other two
     // rather than being read synchronously, because a material is the FIRST level of a two-level
     // dependency: its five texture ids are only known once it is Ready, and the textures cannot be

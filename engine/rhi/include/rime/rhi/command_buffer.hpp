@@ -146,6 +146,18 @@ public:
 
     // Draw using the bound index buffer: `index_count` indices from `first_index`, with
     // `vertex_offset` added to each index before the vertex is fetched.
+    // Override the bound pipeline's cull mode for the draws that follow (m16.5, ADR-0039).
+    //
+    // Cull is pipeline state in Vulkan, so the alternative to this was a pipeline permutation per
+    // cull mode -- twelve forward variants instead of six, four depth variants instead of two --
+    // for one boolean that a material carries. Dynamic cull state is Vulkan 1.3 core and every
+    // pipeline this backend creates declares it, so a caller may set it at any point after binding.
+    //
+    // Each pipeline still carries its own default in GraphicsPipelineDesc::cull, and a caller that
+    // never touches this gets exactly the behaviour it always had -- which is why this is additive
+    // rather than a migration.
+    virtual void set_cull_mode(CullMode mode) = 0;
+
     virtual void draw_indexed(std::uint32_t index_count,
                               std::uint32_t instance_count = 1,
                               std::uint32_t first_index = 0,

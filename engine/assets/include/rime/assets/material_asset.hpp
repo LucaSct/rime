@@ -55,6 +55,12 @@ struct MaterialAsset {
     AssetId normal_tex{};             // linear: tangent-space normal, (128,128,255) = flat
     AssetId occlusion_tex{};          // linear: R = ambient occlusion
     AssetId emissive_tex{};           // sRGB colour
+
+    // m16.5. Both were dropped by the cook until now: glTF carries `doubleSided` on the material
+    // and wrap modes on each texture's sampler, and neither reached the engine, so every surface
+    // was back-face culled and every texture repeated.
+    bool double_sided = false; // draw both faces -- foliage cards, cloth, thin geometry
+    bool clamp_uv = false;     // the base-colour sampler clamps rather than repeats (atlases)
 };
 
 } // namespace rime::assets

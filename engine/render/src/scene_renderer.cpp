@@ -241,6 +241,11 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
     sd.address_mode = rhi::AddressMode::Repeat;
     sd.debug_name = "material-sampler";
     material_sampler_ = device.create_sampler(sd);
+    // The clamp sibling (m16.5): identical filtering, ClampToEdge addressing. An atlas or trim
+    // sheet sampled with Repeat bleeds its far edge into its near one, worst at coarse mips.
+    sd.address_mode = rhi::AddressMode::ClampToEdge;
+    sd.debug_name = "material-sampler-clamp";
+    clamp_sampler_ = device.create_sampler(sd);
 
     // The placeholder depth array bound where a shadow type is absent (m10.2): 1×1 and 2 layers, so
     // it takes a 2-D-ARRAY view that satisfies the shadowed pipeline's sampler2DArrayShadow
@@ -265,6 +270,7 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
 
 SceneRenderer::~SceneRenderer() {
     device_.destroy(dummy_shadow_array_);
+    device_.destroy(clamp_sampler_);
     device_.destroy(material_sampler_);
     device_.destroy(flat_normal_);
     device_.destroy(white_);
@@ -540,6 +546,12 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         // CPU and GPU cannot disagree about which draws are masked.
         if (material.alpha_cutoff > 0.0f) {
             frame_draws_[i].flags |= DrawItem::AlphaMasked;
+        }
+        if (material.double_sided) {
+            frame_draws_[i].flags |= DrawItem::DoubleSided;
+        }
+        if (material.clamp_uv) {
+            frame_draws_[i].flags |= DrawItem::ClampUv;
         } // 0 = no masking; see PbrMaterialDesc
         std::memcpy(
             &draw_staging_[static_cast<std::size_t>(i) * kDrawUniformStride], &du, sizeof(du));
@@ -613,6 +625,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     shadow_data.frame_ubo = frame_ubos_[ubo_slot_];
     shadow_data.draw_ubo = draw_ubos_[ubo_slot_];
     shadow_data.material_sampler = material_sampler_;
+    shadow_data.clamp_sampler = clamp_sampler_;
 
     // The CAMERA view: the visible prefix. Every parallel array is sliced to the same length, so
     // `record_draws`'s index-by-loop-position stays correct.
@@ -633,6 +646,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     data.frame_ubo = frame_ubos_[ubo_slot_];
     data.draw_ubo = draw_ubos_[ubo_slot_];
     data.material_sampler = material_sampler_;
+    data.clamp_sampler = clamp_sampler_;
 
     RGTexture depth = graph.create_texture({extent, kDepthFormat, "scene-depth"});
     RGTexture hdr = graph.create_texture({extent, kHdrFormat, "scene-hdr"});

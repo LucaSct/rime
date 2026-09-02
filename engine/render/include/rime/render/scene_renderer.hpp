@@ -325,7 +325,8 @@ private:
     std::uint32_t ubo_slot_ = 0;
     rhi::TextureHandle white_;       // 1x1 white: base-color / MR / occlusion / emissive fallback
     rhi::TextureHandle flat_normal_; // 1x1 (128,128,255): the normal-map fallback = +Z (no bump)
-    rhi::SamplerHandle material_sampler_; // trilinear + a little anisotropy, Repeat
+    rhi::SamplerHandle material_sampler_;
+    rhi::SamplerHandle clamp_sampler_; // the same filtering, ClampToEdge (m16.5)
     // A 1×1, 2-layer depth array that stands in at the shadowed pipeline's binding 7/9 when a
     // shadow type is absent (no sun, or no spots) — the descriptors must be valid even when
     // unsampled (m10.2). 2 layers so it gets a 2-D-ARRAY view compatible with sampler2DArrayShadow.

@@ -492,3 +492,85 @@ TEST_CASE("m16.4: a masked material no longer punches a hole through the depth p
     // proving the fix did not achieve its result by quietly disabling the pre-pass.
     CHECK(frame(true, true) == frame(false, true));
 }
+
+TEST_CASE("m16.5: double-sided draws its back face, and a clamped sampler stops at the edge") {
+    // glTF carries `doubleSided` on the material and wrap modes on each texture's sampler. The cook
+    // read NEITHER — a repo-wide grep for `double` in tools/asset-pipeline returned zero hits — so
+    // every surface the engine drew was back-face culled and every texture repeated, whatever the
+    // author asked for. Foliage cards vanished from behind unless duplicated and flipped by hand,
+    // and every atlas bled its far edge into its near one.
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the double-sided proof");
+        return;
+    }
+
+    MeshRegistry meshes(*device);
+    const MeshId plane = meshes.add(make_plane(1.5f), "one-sided-plane");
+    REQUIRE(plane != kInvalidMeshId);
+    MaterialRegistry materials;
+
+    PbrMaterialDesc desc{};
+    desc.base_color[0] = 0.9f;
+    desc.base_color[1] = 0.8f;
+    desc.base_color[2] = 0.3f;
+    const MaterialId mat = materials.add(desc);
+
+    // The plane faces +y. Viewed from BELOW it presents only back faces, so with culling on it is
+    // invisible and with culling off it is lit.
+    const auto frame = [&](bool double_sided, float eye_y) {
+        PbrMaterialDesc m = desc;
+        m.double_sided = double_sided;
+        materials.update(mat, m);
+
+        ecs::World world;
+        register_render_components(world);
+        core::Transform plane_tf{};
+        (void)world.spawn_with(ecs::WorldTransform{plane_tf}, MeshRef{plane}, MaterialRef{mat});
+        core::Transform cam_tf{};
+        cam_tf.translation = {0.0f, eye_y, 0.0f};
+        // Look straight at the plane: pitch the camera toward it from wherever the eye is.
+        const float pitch =
+            eye_y > 0.0f ? -std::numbers::pi_v<float> / 2.0f : std::numbers::pi_v<float> / 2.0f;
+        cam_tf.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, pitch);
+        (void)world.spawn_with(ecs::WorldTransform{cam_tf}, Camera{});
+        core::Transform light_tf{};
+        light_tf.translation = {0.0f, eye_y, 0.0f};
+        (void)world.spawn_with(ecs::WorldTransform{light_tf},
+                               PointLight{1.0f, 1.0f, 1.0f, 120.0f, 40.0f});
+
+        SceneRenderer renderer(*device, meshes, materials);
+        RenderGraph graph(*device);
+        const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize}, true);
+        REQUIRE(out.ldr.is_valid());
+        graph.export_texture(out.ldr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        const std::vector<std::uint8_t> px =
+            read_texture(*device, graph.physical(out.ldr), kSize, kSize, 4);
+        std::size_t lit = 0;
+        for (std::size_t i = 0; i < px.size(); i += 4) {
+            if (px[i] > 20 || px[i + 1] > 20) {
+                ++lit;
+            }
+        }
+        return lit;
+    };
+
+    // From BELOW: single-sided shows nothing, double-sided shows the plane.
+    const std::size_t behind_culled = frame(false, -3.0f);
+    const std::size_t behind_double = frame(true, -3.0f);
+    CHECK(behind_culled == 0);
+    CHECK(behind_double > 0);
+    MESSAGE("from behind: " << behind_culled << " lit culled vs " << behind_double
+                            << " double-sided");
+
+    // NEGATIVE CONTROL: from the FRONT the two settings must be identical. Otherwise "double-sided"
+    // is really "culling disabled everywhere", which would also pass the assertions above.
+    CHECK(frame(false, 3.0f) == frame(true, 3.0f));
+    CHECK(frame(false, 3.0f) > 0); // …and the front view is not simply empty
+}

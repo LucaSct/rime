@@ -68,6 +68,12 @@ struct VulkanPipeline {
     // Which bind point this pipeline targets (graphics or compute, M5.2). One handle type serves
     // both kinds; binding through the wrong call is caught at record time against this field.
     VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    // The pipeline's DECLARED cull mode. Cull is dynamic state on every graphics pipeline (m16.5),
+    // which means Vulkan requires vkCmdSetCullMode before any draw — so bind_pipeline replays this
+    // immediately. That is what keeps the promise that a caller who never calls set_cull_mode gets
+    // exactly the behaviour it always had: the static default simply becomes the value bound with
+    // the pipeline, and an override is a call after the bind.
+    VkCullModeFlags cull = VK_CULL_MODE_BACK_BIT;
     // The pipeline's declared set-0 shape (ADR-0020): the layout object plus the BindingDesc list
     // it was built from (post-sugar). Descriptor *sets* are no longer cached here — M3.5 cached
     // one set per pipeline, which cannot express bindings that change per draw (a UBO slice, a
@@ -288,6 +294,7 @@ public:
     void buffer_barrier(BufferHandle buffer, ResourceState from, ResourceState to) override;
     void push_constants(const void* data, std::uint32_t size, std::uint32_t offset) override;
     void set_viewport(const Viewport& viewport) override;
+    void set_cull_mode(CullMode mode) override;
     void set_scissor(const Rect2D& scissor) override;
     void draw(std::uint32_t vertex_count,
               std::uint32_t instance_count,

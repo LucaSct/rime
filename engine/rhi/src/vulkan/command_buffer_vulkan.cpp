@@ -339,6 +339,12 @@ void VulkanCommandBuffer::bind_pipeline(PipelineHandle pipeline) {
         return;
     }
     current_pipeline_ = p; // remembered so flush_bindings can find the layout + binding list
+    // Replay the pipeline's own cull mode (m16.5). Cull became dynamic state so that a
+    // double-sided material needs no pipeline permutation; the cost is that Vulkan then REQUIRES
+    // the command buffer to set it before drawing. Doing it here means no existing call site
+    // changed, and the validation layer's "state is dynamic, but never called vkCmdSetCullMode"
+    // cannot fire for a caller that does not care.
+    vkCmdSetCullMode(cmd_, p->cull);
     // A new pipeline may have a different set layout, and a bound descriptor set is only valid
     // for compatible layouts — so the next draw must bake+bind a set for *this* pipeline even if
     // the attached resources didn't change. The pending attachments themselves survive pipeline
@@ -668,6 +674,13 @@ void VulkanCommandBuffer::push_constants(const void* data,
                        offset,
                        size,
                        data);
+}
+
+void VulkanCommandBuffer::set_cull_mode(CullMode mode) {
+    // Vulkan 1.3 core; every pipeline this backend creates declares VK_DYNAMIC_STATE_CULL_MODE, so
+    // this is always legal after a bind. Reuses the same enum translation the pipeline's static
+    // default goes through, so "dynamic" and "baked" can never disagree about what a mode means.
+    vkCmdSetCullMode(cmd_, to_vk(mode));
 }
 
 void VulkanCommandBuffer::set_viewport(const Viewport& viewport) {
