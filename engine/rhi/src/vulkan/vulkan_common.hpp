@@ -160,6 +160,15 @@ template <class Dst, class Src>
             return VK_FORMAT_R16_SNORM;
         case Format::R8Snorm:
             return VK_FORMAT_R8_SNORM;
+        // Block-compressed (m16.1). BC7's UNORM and SRGB variants are the same bits with a
+        // different view; BC5 is two-channel and always UNORM here (the signed SNORM variant
+        // encodes -1..1, which a tangent-space normal stored as 0..1 does not want).
+        case Format::BC7Unorm:
+            return VK_FORMAT_BC7_UNORM_BLOCK;
+        case Format::BC7Srgb:
+            return VK_FORMAT_BC7_SRGB_BLOCK;
+        case Format::BC5Unorm:
+            return VK_FORMAT_BC5_UNORM_BLOCK;
     }
     return VK_FORMAT_UNDEFINED;
 }

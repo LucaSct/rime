@@ -489,6 +489,9 @@ int serve_viewport(std::string_view socket_path,
     render::MeshRegistry meshes(*app.device());
     render::MaterialRegistry materials;
     render::SceneRenderer renderer(*app.device(), meshes, materials);
+    // Size the renderer's uniform ring to this backend's actual frame depth rather than leaving it
+    // on the safe default. Same rule Application applies to its own per-frame command buffers.
+    renderer.set_frames_in_flight(app.frames_in_flight());
     render::ScenePicker picker(*app.device(), meshes);
     render::GizmoRenderer gizmos(*app.device(), meshes);
     // `--scene` hosts a real saved world; without it, the built-in sphere row (the m9.6 gizmo/pick

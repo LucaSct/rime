@@ -223,6 +223,23 @@ public:
     // registry, or a hand-edited `.rscene` — and the entities concerned are not being drawn.
     [[nodiscard]] std::size_t unresolvable_draws() const noexcept { return unresolvable_draws_; }
 
+    // Tell the renderer how many frames the presentation path keeps in flight, so it can size its
+    // uniform ring to `n + 1` (see the ring's note below for why that is the provably sufficient
+    // number). Call it once, before the first render(), with `Swapchain::frames_in_flight()`.
+    //
+    // The DEFAULT IS THE SAFE MAXIMUM rather than the headless minimum, deliberately: a windowed
+    // caller who forgets this call gets a slightly larger ring, while the opposite default would
+    // silently restore a use-after-free that only appears under load. Headless callers using
+    // submit_blocking pay two extra small buffers and need not call it at all.
+    void set_frames_in_flight(std::uint32_t frames);
+
+    // Slots in the uniform ring — `frames_in_flight + 1`. Exposed for the proof, which asserts the
+    // ring is actually deeper than one and therefore that the growth path cannot free a live
+    // buffer.
+    [[nodiscard]] std::uint32_t ubo_slot_count() const noexcept {
+        return static_cast<std::uint32_t>(frame_ubos_.size());
+    }
+
 private:
     void ensure_draw_capacity(std::uint32_t draw_count);
 
@@ -259,9 +276,26 @@ private:
     bool cull_enabled_ = true;
     CullStats cull_stats_{};
 
-    rhi::BufferHandle frame_ubo_;
-    rhi::BufferHandle draw_ubo_;
-    std::uint32_t draw_capacity_ = 0;
+    // ── The uniform ring: one slot per frame that can be in flight ────────────────────────────
+    //
+    // These used to be single buffers, which was correct only in the v0 blocking model where the
+    // GPU is idle between frames. `ensure_draw_capacity`'s own comment said so and named the seam
+    // ("frames-in-flight will demand per-frame buffering here"); m13.3a then shipped
+    // frames-in-flight without closing it. Two things went wrong at once, both measured:
+    // `ensure_draw_capacity` DESTROYED a buffer that the previous frame's command buffer still had
+    // baked into its descriptor sets, and `write_buffer` OVERWROTE contents the GPU was still
+    // reading — a host write to mapped memory, ordered by nothing a pipeline barrier can express.
+    //
+    // The fix is the rule `rhi/swapchain.hpp` already states for command buffers: keep
+    // `frames_in_flight() + 1` of the resource. There are only that many fence slots, so a slot
+    // that old was submitted to a slot since re-acquired, and acquire waits on its fence. Each slot
+    // therefore grows and is written only when its own frame comes round again.
+    std::vector<rhi::BufferHandle> frame_ubos_;
+    std::vector<rhi::BufferHandle> draw_ubos_;
+    // Per slot, because slots grow independently — growing the one we are about to write is safe,
+    // growing all of them would destroy buffers the other in-flight frames are still using.
+    std::vector<std::uint32_t> draw_capacities_;
+    std::uint32_t ubo_slot_ = 0;
     rhi::TextureHandle white_;       // 1x1 white: base-color / MR / occlusion / emissive fallback
     rhi::TextureHandle flat_normal_; // 1x1 (128,128,255): the normal-map fallback = +Z (no bump)
     rhi::SamplerHandle material_sampler_; // trilinear + a little anisotropy, Repeat

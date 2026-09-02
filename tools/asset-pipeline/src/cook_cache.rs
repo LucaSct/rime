@@ -9,6 +9,11 @@
 //! cook. This is the measure-before-optimize baseline for streaming: the multi-megabyte ICEM parts
 //! (M6.6) re-cook only when they actually change.
 //!
+//! Since M16 the key also covers the cook **request** (`params_hash`), not just the input: `--srgb`
+//! and `--linear` produce different bytes from the same PNG, and the cache could not previously see
+//! the difference — so re-cooking normal maps as linear into an existing tree silently served the
+//! sRGB ones and called it a hit.
+//!
 //! The record keys on the *primary source file's* bytes. That is exact for self-contained sources —
 //! binary STL, `.glb`, PNG/JPEG, and embedded-buffer glTF — which is what M6 cooks. A `.gltf` that
 //! references *external* `.bin`/image files is a known v1 limitation: edits to those siblings are not
@@ -22,21 +27,37 @@ use std::path::Path;
 use crate::cooked::COOKER_VERSION;
 use crate::manifest::ManifestEntry;
 
-/// One source's cache record: the FNV-1a hash of its bytes, the cooker version that produced its
-/// outputs, and the manifest entries those outputs correspond to (so a hit re-emits them without
-/// re-reading the cooked files).
+/// One source's cache record: the FNV-1a hash of its bytes, the hash of the cook *request* that
+/// produced its outputs, the cooker version, and the manifest entries those outputs correspond to
+/// (so a hit re-emits them without re-reading the cooked files).
 pub struct CacheRecord {
     pub src_hash: u64,
+    /// A fingerprint of the cook PARAMETERS, not of the input bytes. See `is_fresh`.
+    pub params_hash: u64,
     pub cooker_version: u32,
     pub entries: Vec<ManifestEntry>,
 }
 
 impl CacheRecord {
-    /// A cache hit: the source bytes still hash to `src_hash`, the cooker version matches this build,
-    /// and every cooked file the record names still exists under `out_dir`. Any miss ⇒ re-cook (the
-    /// safe direction — we never serve a file that isn't there or was cooked by a different cooker).
-    pub fn is_fresh(&self, src_hash: u64, out_dir: &Path) -> bool {
+    /// A cache hit: the source bytes still hash to `src_hash`, the cook request still hashes to
+    /// `params_hash`, the cooker version matches this build, and every cooked file the record names
+    /// still exists under `out_dir`. Any miss ⇒ re-cook (the safe direction — we never serve a file
+    /// that isn't there, was cooked by a different cooker, or was cooked with different parameters).
+    ///
+    /// THE PARAMETER HASH IS WHY THIS IS NOT JUST "DID THE INPUT CHANGE". The record used to key on
+    /// source bytes and cooker version alone, which covers "the input changed" and "the cooker
+    /// changed" but not "the cook REQUEST changed" — and the request decides the output as surely as
+    /// the input does. Measured before the fix: the same PNG cooked `--srgb` then `--linear` into one
+    /// output directory produced different bytes and different content ids on two fresh cooks, but a
+    /// flag flip in an existing directory returned the sRGB bytes under the sRGB id and reported
+    /// "0 source(s) cooked, 1 from cache". Re-cooking normal maps as linear into an existing tree
+    /// silently kept them sRGB, and nothing anywhere said so.
+    ///
+    /// It is a hash rather than a copy of the parameters so that adding a cook option later is one
+    /// line at the call site and needs no cache-format change.
+    pub fn is_fresh(&self, src_hash: u64, params_hash: u64, out_dir: &Path) -> bool {
         self.src_hash == src_hash
+            && self.params_hash == params_hash
             && self.cooker_version == COOKER_VERSION
             && self
                 .entries
@@ -77,31 +98,38 @@ pub fn parse(text: &str) -> BTreeMap<String, CacheRecord> {
             continue;
         }
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() != 7 {
+        if cols.len() != 8 {
             continue;
         }
-        // Columns: primary_source \t src_hash(hex) \t cooker_version \t entry_source \t kind \t
-        //          id(hex) \t cooked_file. cols[0] groups (and is the cook-time lookup key); cols[3]
-        //          is *this* asset's manifest source label, which may sub-qualify the primary with `#`.
-        let (Ok(src_hash), Ok(cooker_version), Some(kind), Ok(id)) = (
+        // Columns: primary_source \t src_hash(hex) \t params_hash(hex) \t cooker_version \t
+        //          entry_source \t kind \t id(hex) \t cooked_file. cols[0] groups (and is the
+        //          cook-time lookup key); cols[4] is *this* asset's manifest source label, which may
+        //          sub-qualify the primary with `#`.
+        let (Ok(src_hash), Ok(params_hash), Ok(cooker_version), Some(kind), Ok(id)) = (
             u64::from_str_radix(cols[1], 16),
-            cols[2].parse::<u32>(),
-            intern_kind(cols[4]),
-            u64::from_str_radix(cols[5], 16),
+            u64::from_str_radix(cols[2], 16),
+            cols[3].parse::<u32>(),
+            intern_kind(cols[5]),
+            u64::from_str_radix(cols[6], 16),
         ) else {
             continue;
         };
         let primary = cols[0].to_string();
         let entry = ManifestEntry {
-            source_path: cols[3].to_string(),
+            source_path: cols[4].to_string(),
             kind,
             id,
-            cooked_file: cols[6].to_string(),
+            cooked_file: cols[7].to_string(),
         };
         match map.get_mut(&primary) {
-            // A source's lines must agree on its hash and cooker version; a discordant line means the
-            // cache is corrupt for that source, so we ignore it (the freshness check then re-cooks).
-            Some(rec) if rec.src_hash == src_hash && rec.cooker_version == cooker_version => {
+            // A source's lines must agree on its hashes and cooker version; a discordant line means
+            // the cache is corrupt for that source, so we ignore it (the freshness check then
+            // re-cooks).
+            Some(rec)
+                if rec.src_hash == src_hash
+                    && rec.params_hash == params_hash
+                    && rec.cooker_version == cooker_version =>
+            {
                 rec.entries.push(entry);
             }
             Some(_) => {}
@@ -110,6 +138,7 @@ pub fn parse(text: &str) -> BTreeMap<String, CacheRecord> {
                     primary,
                     CacheRecord {
                         src_hash,
+                        params_hash,
                         cooker_version,
                         entries: vec![entry],
                     },
@@ -121,13 +150,17 @@ pub fn parse(text: &str) -> BTreeMap<String, CacheRecord> {
 }
 
 /// Render a **deterministic** `cook-cache.txt`: a banner (no timestamp), then one tab-separated line
-/// per cooked asset — `primary_source \t src_hash \t cooker_version \t entry_source \t kind \t id \t
-/// cooked_file` — sorted by primary source (the `BTreeMap`) then cooked file, so the same cook always
-/// writes the same bytes. The `entry_source` column is each asset's own manifest label (crucially NOT
-/// the grouping key), so a cache hit reconstructs the exact manifest — including `#material0`,
-/// `#skeleton`, `#animation/<name>` sub-labels that share the primary's bytes.
+/// per cooked asset — `primary_source \t src_hash \t params_hash \t cooker_version \t entry_source \t
+/// kind \t id \t cooked_file` — sorted by primary source (the `BTreeMap`) then cooked file, so the
+/// same cook always writes the same bytes. The `entry_source` column is each asset's own manifest
+/// label (crucially NOT the grouping key), so a cache hit reconstructs the exact manifest — including
+/// `#material0`, `#skeleton`, `#animation/<name>` sub-labels that share the primary's bytes.
+///
+/// The banner reads `v3` because the `params_hash` column moved every field after it. A v2 (or v1)
+/// line now fails the column count in `parse` and is dropped, which degrades to "cook everything" —
+/// the safe direction, and the same self-healing the v1→v2 bump relied on.
 pub fn render(records: &BTreeMap<String, CacheRecord>) -> String {
-    let mut out = String::from("# rime-cook-cache v2\n");
+    let mut out = String::from("# rime-cook-cache v3\n");
     for (primary_source, rec) in records {
         let mut entries: Vec<&ManifestEntry> = rec.entries.iter().collect();
         entries.sort_by(|a, b| a.cooked_file.cmp(&b.cooked_file));
@@ -135,9 +168,10 @@ pub fn render(records: &BTreeMap<String, CacheRecord>) -> String {
             // `{:016x}` mirrors the manifest's hex width, so both sidecars read the same way.
             let _ = writeln!(
                 out,
-                "{}\t{:016x}\t{}\t{}\t{}\t{:016x}\t{}",
+                "{}\t{:016x}\t{:016x}\t{}\t{}\t{}\t{:016x}\t{}",
                 primary_source,
                 rec.src_hash,
+                rec.params_hash,
                 rec.cooker_version,
                 e.source_path,
                 e.kind,
@@ -174,6 +208,7 @@ mod tests {
             "part.gltf".to_string(),
             CacheRecord {
                 src_hash: 0xdead_beef_0000_0001,
+                params_hash: 0xfeed_0000_0000_0002,
                 cooker_version: COOKER_VERSION,
                 entries: vec![
                     entry("part.gltf", "mesh", "part.rmesh", 0x11),
@@ -187,6 +222,7 @@ mod tests {
         assert_eq!(back.len(), 1);
         let rec = back.get("part.gltf").unwrap();
         assert_eq!(rec.src_hash, 0xdead_beef_0000_0001);
+        assert_eq!(rec.params_hash, 0xfeed_0000_0000_0002);
         assert_eq!(rec.cooker_version, COOKER_VERSION);
         assert_eq!(rec.entries.len(), 4);
         // Sub-qualified source labels and kinds are preserved exactly (the two bugs this guards).
@@ -211,29 +247,46 @@ mod tests {
     fn a_wrong_cooker_version_or_hash_is_not_fresh() {
         let rec = CacheRecord {
             src_hash: 7,
+            params_hash: 9,
             cooker_version: COOKER_VERSION.wrapping_add(1),
             entries: vec![],
         };
         // Right hash, wrong cooker version → stale.
-        assert!(!rec.is_fresh(7, Path::new("/nonexistent")));
+        assert!(!rec.is_fresh(7, 9, Path::new("/nonexistent")));
         let rec2 = CacheRecord {
             src_hash: 7,
+            params_hash: 9,
             cooker_version: COOKER_VERSION,
             entries: vec![],
         };
         // Wrong hash → stale even at the right version.
-        assert!(!rec2.is_fresh(8, Path::new("/nonexistent")));
+        assert!(!rec2.is_fresh(8, 9, Path::new("/nonexistent")));
+        // Right source hash and version, DIFFERENT cook parameters → stale. This is the case the
+        // record could not see before: `--srgb` then `--linear` over the same bytes.
+        assert!(!rec2.is_fresh(7, 10, Path::new("/nonexistent")));
     }
 
     #[test]
     fn malformed_lines_are_dropped() {
         // A line with too few columns, a non-hex hash, and an unknown kind are each rejected — the
-        // whole cache parses to empty, which just means "cook everything". (An older 6-column v1 line
-        // lands in the first case, so a stale cache re-cooks rather than misreads.)
-        let text = "# rime-cook-cache v2\n\
-                    a.stl\t0000000000000001\t1\tmesh\t0000000000000000\ta.rmesh\n\
-                    b.stl\tnothex\t1\tb.stl\tmesh\t0000000000000000\tb.rmesh\n\
-                    c.stl\t0000000000000001\t1\tc.stl\tmystery\t0000000000000000\tc.rbin\n";
+        // whole cache parses to empty, which just means "cook everything". Older v1 (6-column) and
+        // v2 (7-column) lines land in the first case, so a stale cache self-heals into a re-cook
+        // rather than being misread — which is what makes a format bump safe.
+        let text = "# rime-cook-cache v3\n\
+                    a.stl\t0000000000000001\t0000000000000002\t1\tmesh\t0000000000000000\ta.rmesh\n\
+                    b.stl\tnothex\t0000000000000002\t1\tb.stl\tmesh\t0000000000000000\tb.rmesh\n\
+                    c.stl\t0000000000000001\tnothex\t1\tc.stl\tmesh\t0000000000000000\tc.rmesh\n\
+                    d.stl\t0000000000000001\t0000000000000002\t1\td.stl\tmystery\t0000000000000000\td.rbin\n";
         assert!(parse(text).is_empty());
+    }
+
+    #[test]
+    fn a_v2_cache_is_dropped_rather_than_misread() {
+        // The v2 line is well-formed FOR V2 — seven columns, all fields parseable. Under v3 it must
+        // be dropped, not shifted by one and read as a params_hash of "1". A silently misread cache
+        // is worse than no cache: it would serve files under the wrong freshness key.
+        let v2 = "# rime-cook-cache v2\n\
+                  a.stl\t0000000000000001\t1\ta.stl\tmesh\t0000000000000000\ta.rmesh\n";
+        assert!(parse(v2).is_empty(), "a v2 line must not parse as v3");
     }
 }
