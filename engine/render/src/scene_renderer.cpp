@@ -162,12 +162,10 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
       forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device),
       sdf_clipmap_(device), ddgi_(device), ssr_(device) {
-    rhi::BufferDesc fd{};
-    fd.size = sizeof(GpuFrameUniforms);
-    fd.usage = rhi::BufferUsage::Uniform;
-    fd.memory = rhi::MemoryUsage::CpuToGpu;
-    fd.debug_name = "scene-frame-ubo";
-    frame_ubo_ = device.create_buffer(fd);
+    // Default ring depth: kFramesInFlight (2, private to the Vulkan swapchain) + 1. See
+    // set_frames_in_flight for why the default is the safe maximum rather than the headless
+    // minimum.
+    set_frames_in_flight(2);
 
     // The white fallback: one white texel that decodes to 1.0. Multiplying by it is the identity,
     // so the shader needs no "has texture?" branch — the classic dummy-texture trick. It serves
@@ -233,29 +231,71 @@ SceneRenderer::~SceneRenderer() {
     device_.destroy(material_sampler_);
     device_.destroy(flat_normal_);
     device_.destroy(white_);
-    if (draw_ubo_.is_valid())
-        device_.destroy(draw_ubo_);
-    device_.destroy(frame_ubo_);
+    for (rhi::BufferHandle b : draw_ubos_) {
+        if (b.is_valid())
+            device_.destroy(b);
+    }
+    for (rhi::BufferHandle b : frame_ubos_) {
+        if (b.is_valid())
+            device_.destroy(b);
+    }
+}
+
+void SceneRenderer::set_frames_in_flight(std::uint32_t frames) {
+    const std::uint32_t slots = frames + 1; // the swapchain.hpp rule, applied to uniforms
+    if (slots == frame_ubos_.size())
+        return;
+
+    // Rebuilding the ring destroys buffers, so it is only legal while nothing is in flight — at
+    // construction, or before the first frame. Callers are told to call this once, before render().
+    for (rhi::BufferHandle b : draw_ubos_) {
+        if (b.is_valid())
+            device_.destroy(b);
+    }
+    for (rhi::BufferHandle b : frame_ubos_) {
+        if (b.is_valid())
+            device_.destroy(b);
+    }
+
+    frame_ubos_.clear();
+    draw_ubos_.clear();
+    draw_capacities_.assign(slots, 0);
+    ubo_slot_ = 0;
+
+    rhi::BufferDesc fd{};
+    fd.size = sizeof(GpuFrameUniforms);
+    fd.usage = rhi::BufferUsage::Uniform;
+    fd.memory = rhi::MemoryUsage::CpuToGpu;
+    fd.debug_name = "scene-frame-ubo";
+    for (std::uint32_t i = 0; i < slots; ++i) {
+        frame_ubos_.push_back(device_.create_buffer(fd));
+        draw_ubos_.push_back({}); // allocated lazily by ensure_draw_capacity, per slot
+    }
 }
 
 void SceneRenderer::ensure_draw_capacity(std::uint32_t draw_count) {
-    if (draw_count <= draw_capacity_)
+    // Grows only THIS FRAME'S SLOT. That is what makes destroy-and-recreate safe again: the slot is
+    // one the ring has come back round to, so its previous submission has already been waited on by
+    // `acquire_next_image`'s fence. Growing every slot here would be the original bug wearing a
+    // ring — it would free buffers the other in-flight frames still have bound.
+    const std::size_t s = ubo_slot_;
+    if (draw_count <= draw_capacities_[s] && draw_ubos_[s].is_valid())
         return;
-    // Grow geometrically from a floor of 64. Destroy-and-recreate is safe in the v0 blocking
-    // model (the GPU is idle between frames); frames-in-flight will demand per-frame buffering
-    // here — a documented seam, not an accident.
-    std::uint32_t capacity = draw_capacity_ == 0 ? 64u : draw_capacity_;
+
+    // Grow geometrically from a floor of 64. Slots grow independently, so a scene that settles at a
+    // given draw count pays each slot's growth once and then never again.
+    std::uint32_t capacity = draw_capacities_[s] == 0 ? 64u : draw_capacities_[s];
     while (capacity < draw_count)
         capacity *= 2;
-    if (draw_ubo_.is_valid())
-        device_.destroy(draw_ubo_);
+    if (draw_ubos_[s].is_valid())
+        device_.destroy(draw_ubos_[s]);
     rhi::BufferDesc bd{};
     bd.size = static_cast<std::uint64_t>(capacity) * kDrawUniformStride;
     bd.usage = rhi::BufferUsage::Uniform;
     bd.memory = rhi::MemoryUsage::CpuToGpu;
     bd.debug_name = "scene-draw-ubo";
-    draw_ubo_ = device_.create_buffer(bd);
-    draw_capacity_ = capacity;
+    draw_ubos_[s] = device_.create_buffer(bd);
+    draw_capacities_[s] = capacity;
 }
 
 void SceneRenderer::sync_sdf_instances(ecs::World& world) {
@@ -295,6 +335,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                                             ecs::World& world,
                                             rhi::Extent2D extent,
                                             bool use_depth_prepass) {
+    // Advance the uniform ring first, so every buffer this frame touches belongs to a slot the
+    // presentation fence has already waited on. Done unconditionally — an early-return frame
+    // consuming a slot costs nothing and keeps the slot sequence independent of scene content.
+    ubo_slot_ = (ubo_slot_ + 1) % static_cast<std::uint32_t>(frame_ubos_.size());
+
     ExtractedScene scene = extract_scene(world);
     // Before ANY registry lookup: a MeshRef can name a mesh this registry does not hold (a scene
     // file is untrusted input), and every path below — the cull loop, record_draws for the depth,
@@ -414,7 +459,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         fu.point_lights[i] = scene.point_lights[i];
     fu.light_counts[0] = ndir;
     fu.light_counts[1] = npoint;
-    device_.write_buffer(frame_ubo_, &fu, sizeof(fu));
+    device_.write_buffer(frame_ubos_[ubo_slot_], &fu, sizeof(fu));
 
     // ── Per-draw uniforms + resolved textures ─────────────────────────────────────────────
     frame_draws_ = std::move(scene.draws);
@@ -466,7 +511,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         frame_emissive_[i] = pick(material.emissive_texture, white_);
     }
     if (draw_count > 0)
-        device_.write_buffer(draw_ubo_, draw_staging_.data(), draw_staging_.size());
+        device_.write_buffer(draw_ubos_[ubo_slot_], draw_staging_.data(), draw_staging_.size());
 
     // The runtime SDF clipmap (m10.4b): a fourth, independent gate. `sync_sdf_instances` (m10.5a)
     // closes the gap this brick's own comment used to name here: every entity carrying
@@ -521,8 +566,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     shadow_data.normal_textures = frame_normal_;
     shadow_data.occlusion_textures = frame_occlusion_;
     shadow_data.emissive_textures = frame_emissive_;
-    shadow_data.frame_ubo = frame_ubo_;
-    shadow_data.draw_ubo = draw_ubo_;
+    shadow_data.frame_ubo = frame_ubos_[ubo_slot_];
+    shadow_data.draw_ubo = draw_ubos_[ubo_slot_];
     shadow_data.material_sampler = material_sampler_;
 
     // The CAMERA view: the visible prefix. Every parallel array is sliced to the same length, so
@@ -541,8 +586,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         std::span<const rhi::TextureHandle>{frame_occlusion_}.subspan(0, visible_count);
     data.emissive_textures =
         std::span<const rhi::TextureHandle>{frame_emissive_}.subspan(0, visible_count);
-    data.frame_ubo = frame_ubo_;
-    data.draw_ubo = draw_ubo_;
+    data.frame_ubo = frame_ubos_[ubo_slot_];
+    data.draw_ubo = draw_ubos_[ubo_slot_];
     data.material_sampler = material_sampler_;
 
     RGTexture depth = graph.create_texture({extent, kDepthFormat, "scene-depth"});

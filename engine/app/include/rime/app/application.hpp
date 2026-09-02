@@ -141,6 +141,17 @@ public:
     // in CI.
     [[nodiscard]] bool windowed() const noexcept { return swapchain_ != nullptr; }
 
+    // How many frames the presentation path keeps in flight — 1 when headless, where
+    // `submit_blocking` has already finished the frame before anything else runs.
+    //
+    // Callers need this to size any per-frame resource they own themselves, by the same
+    // `frames_in_flight() + 1` rule this class applies to `presented_cmds_`. A SceneRenderer's
+    // uniform buffers are exactly that kind of resource: hand this to
+    // `SceneRenderer::set_frames_in_flight` so its ring matches the backend rather than a default.
+    [[nodiscard]] std::uint32_t frames_in_flight() const noexcept {
+        return swapchain_ != nullptr ? swapchain_->frames_in_flight() : 1u;
+    }
+
     // The window, or nullptr when not windowed. Exposed so an app can read its framebuffer size or
     // title it; the loop owns its lifetime and its event pump.
     [[nodiscard]] platform::Window* window() noexcept { return window_.get(); }
