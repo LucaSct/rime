@@ -55,7 +55,7 @@ fn unchanged_source_hits_cache_changed_source_recooks() {
     std::fs::write(&src, quad_stl(0.0)).unwrap();
 
     // First cook: a miss — nothing is cached yet.
-    let r1 = cook_path(&src, &out, ColorSpace::Srgb).unwrap();
+    let r1 = cook_path(&src, &out, ColorSpace::Srgb, false).unwrap();
     assert_eq!((r1.sources_cooked, r1.sources_cached), (1, 0));
 
     // Poison the cooked file. If the next cook *skips*, this marker survives — an mtime-independent
@@ -66,7 +66,7 @@ fn unchanged_source_hits_cache_changed_source_recooks() {
     std::fs::write(&cooked, &poisoned).unwrap();
 
     // Second cook, source bytes unchanged: a hit — the cooked file is left exactly as it was.
-    let r2 = cook_path(&src, &out, ColorSpace::Srgb).unwrap();
+    let r2 = cook_path(&src, &out, ColorSpace::Srgb, false).unwrap();
     assert_eq!((r2.sources_cooked, r2.sources_cached), (0, 1));
     assert_eq!(
         std::fs::read(&cooked).unwrap(),
@@ -77,7 +77,7 @@ fn unchanged_source_hits_cache_changed_source_recooks() {
     // Change the source bytes: a different content hash → a miss → the file is re-cooked (marker gone,
     // valid RMA1 bytes back). This is what proves the key is content, not mtime.
     std::fs::write(&src, quad_stl(5.0)).unwrap();
-    let r3 = cook_path(&src, &out, ColorSpace::Srgb).unwrap();
+    let r3 = cook_path(&src, &out, ColorSpace::Srgb, false).unwrap();
     assert_eq!((r3.sources_cooked, r3.sources_cached), (1, 0));
     assert_ne!(
         std::fs::read(&cooked).unwrap(),
@@ -101,6 +101,7 @@ fn a_cache_hit_reproduces_the_full_cook_manifest_for_sub_assets() {
         &fixtures().join("material_quad.gltf"),
         &out,
         ColorSpace::Srgb,
+        false,
     )
     .unwrap();
     assert_eq!((r1.sources_cooked, r1.sources_cached), (1, 0));
@@ -111,6 +112,7 @@ fn a_cache_hit_reproduces_the_full_cook_manifest_for_sub_assets() {
         &fixtures().join("material_quad.gltf"),
         &out,
         ColorSpace::Srgb,
+        false,
     )
     .unwrap();
     assert_eq!((r2.sources_cooked, r2.sources_cached), (0, 1));
@@ -135,10 +137,10 @@ fn a_deleted_cooked_file_forces_a_recook_even_when_the_source_is_unchanged() {
     let src = out.join("part.stl");
     std::fs::write(&src, quad_stl(0.0)).unwrap();
 
-    cook_path(&src, &out, ColorSpace::Srgb).unwrap();
+    cook_path(&src, &out, ColorSpace::Srgb, false).unwrap();
     std::fs::remove_file(out.join("part.rmesh")).unwrap(); // cache still references it
 
-    let r = cook_path(&src, &out, ColorSpace::Srgb).unwrap();
+    let r = cook_path(&src, &out, ColorSpace::Srgb, false).unwrap();
     assert_eq!((r.sources_cooked, r.sources_cached), (1, 0));
     assert!(
         out.join("part.rmesh").exists(),

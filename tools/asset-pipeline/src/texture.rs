@@ -23,6 +23,11 @@ use crate::cooked::{wrap_container, ByteWriter, ASSET_KIND_TEXTURE, TEXTURE_SCHE
 /// (normal/metallic-roughness/occlusion) is linear.
 pub const TEXFMT_RGBA8_UNORM: u32 = 0; // linear data
 pub const TEXFMT_RGBA8_SRGB: u32 = 1; // perceptual colour
+                                      // 2 and 3 stay reserved for BC1/BC3. m16.7 makes these real; BC7 needs both colour spaces exactly
+                                      // as RGBA8 does, so it takes two values.
+pub const TEXFMT_BC5_UNORM: u32 = 4;
+pub const TEXFMT_BC7_UNORM: u32 = 5;
+pub const TEXFMT_BC7_SRGB: u32 = 6;
 
 /// Four bytes per texel — the one place the RGBA8 stride lives (mirrors `kTextureBytesPerPixel`).
 pub const BYTES_PER_PIXEL: usize = 4;
@@ -36,11 +41,19 @@ pub enum ColorSpace {
 }
 
 impl ColorSpace {
-    /// The wire `format` value written into the payload header.
+    /// The wire `format` value written into the payload header for an uncompressed texture.
     pub fn wire_format(self) -> u32 {
         match self {
             ColorSpace::Linear => TEXFMT_RGBA8_UNORM,
             ColorSpace::Srgb => TEXFMT_RGBA8_SRGB,
+        }
+    }
+
+    /// The BC7 wire value for this colour space (m16.7).
+    pub fn wire_format_bc7(self) -> u32 {
+        match self {
+            ColorSpace::Linear => TEXFMT_BC7_UNORM,
+            ColorSpace::Srgb => TEXFMT_BC7_SRGB,
         }
     }
 }
@@ -119,12 +132,32 @@ impl Texture {
     /// mirrors `decode_texture` in the engine's reader exactly: a fixed header, the mip table, then
     /// every level's pixels concatenated.
     pub fn cook(&self) -> (Vec<u8>, u64) {
-        let mips = self.generate_mips();
+        self.cook_with(false)
+    }
+
+    /// Cook, optionally BLOCK-COMPRESSING every level as BC7 (m16.7).
+    ///
+    /// BC7 rather than BC5 for now, even for normal maps: BC5 stores two channels and the shader
+    /// would have to reconstruct Z, which `pbr_forward_shadowed.frag` does not do yet (it reads z
+    /// from the texture). BC7 is the zero-shader-churn option, and ADR-0039 records BC5-for-normals
+    /// as the follow-on once that shader change lands. The encoder for both already exists in
+    /// `bcn`, so that brick is a selection change rather than new compression work.
+    pub fn cook_with(&self, block_compress: bool) -> (Vec<u8>, u64) {
+        let mut mips = self.generate_mips();
+        if block_compress {
+            for m in &mut mips {
+                m.pixels = crate::bcn::compress_level(&m.pixels, m.width, m.height, false);
+            }
+        }
 
         let mut p = ByteWriter::new();
         p.u32(self.width);
         p.u32(self.height);
-        p.u32(self.color_space.wire_format());
+        p.u32(if block_compress {
+            self.color_space.wire_format_bc7()
+        } else {
+            self.color_space.wire_format()
+        });
         p.u32(mips.len() as u32);
 
         // The mip table: {width, height, offset, size} per level, offsets tiling the pixel blob that

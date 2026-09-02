@@ -167,6 +167,7 @@ fn a_normal_mapped_gltf_cooks_tangents_and_a_plain_one_does_not() {
         &fixtures().join("material_quad.gltf"),
         &out,
         ColorSpace::Srgb,
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -177,7 +178,13 @@ fn a_normal_mapped_gltf_cooks_tangents_and_a_plain_one_does_not() {
 
     // quad.gltf names no material → no normal map → the mesh stays plain P/N/UV (32-byte stride).
     let plain = temp_out("tangent_gate_plain");
-    asset_pipeline::cook_path(&fixtures().join("quad.gltf"), &plain, ColorSpace::Srgb).unwrap();
+    asset_pipeline::cook_path(
+        &fixtures().join("quad.gltf"),
+        &plain,
+        ColorSpace::Srgb,
+        false,
+    )
+    .unwrap();
     assert_eq!(
         stride_of(&std::fs::read(plain.join("quad.rmesh")).unwrap()),
         32,
@@ -189,10 +196,20 @@ fn a_normal_mapped_gltf_cooks_tangents_and_a_plain_one_does_not() {
 fn cook_gltf_writes_every_asset_deterministically() {
     let a = temp_out("mat_files_a");
     let b = temp_out("mat_files_b");
-    asset_pipeline::cook_path(&fixtures().join("material_quad.gltf"), &a, ColorSpace::Srgb)
-        .unwrap();
-    asset_pipeline::cook_path(&fixtures().join("material_quad.gltf"), &b, ColorSpace::Srgb)
-        .unwrap();
+    asset_pipeline::cook_path(
+        &fixtures().join("material_quad.gltf"),
+        &a,
+        ColorSpace::Srgb,
+        false,
+    )
+    .unwrap();
+    asset_pipeline::cook_path(
+        &fixtures().join("material_quad.gltf"),
+        &b,
+        ColorSpace::Srgb,
+        false,
+    )
+    .unwrap();
 
     // The cooked set: the mesh, one material, three unique textures, and the manifest — every file
     // byte-identical across two independent cooks (no map/iteration order leaks into the output).
@@ -217,7 +234,13 @@ fn skinned_skeleton_and_clip_cook_to_the_committed_fixture_bytes() {
     // the fixtures are regenerated (`rime cook tests/assets/fixtures/skinned.gltf --out
     // tests/assets/fixtures`).
     let out = temp_out("skinned");
-    asset_pipeline::cook_path(&fixtures().join("skinned.gltf"), &out, ColorSpace::Srgb).unwrap();
+    asset_pipeline::cook_path(
+        &fixtures().join("skinned.gltf"),
+        &out,
+        ColorSpace::Srgb,
+        false,
+    )
+    .unwrap();
     for name in ["skinned.rskel", "skinned.Spin.ranim"] {
         let cooked = std::fs::read(out.join(name)).unwrap();
         let committed = std::fs::read(fixtures().join(name)).unwrap();
@@ -348,7 +371,7 @@ fn two_sources_sharing_a_stem_are_refused_rather_than_silently_overwriting() {
     std::fs::copy(fixtures().join("quad.gltf"), src.join("quad.gltf")).unwrap();
     std::fs::copy(fixtures().join("cube.stl"), src.join("quad.stl")).unwrap();
 
-    let text = match asset_pipeline::cook_path(&src, &out.join("cooked"), ColorSpace::Srgb) {
+    let text = match asset_pipeline::cook_path(&src, &out.join("cooked"), ColorSpace::Srgb, false) {
         Ok(_) => panic!("a stem collision must be refused, not silently resolved by overwriting"),
         Err(e) => e.to_string(),
     };
@@ -371,9 +394,84 @@ fn two_sources_sharing_a_stem_are_refused_rather_than_silently_overwriting() {
     // NEGATIVE CONTROL: the same directory without the colliding file cooks fine. Without this the
     // test passes just as well against a cook_path that refuses everything.
     std::fs::remove_file(src.join("quad.stl")).unwrap();
-    asset_pipeline::cook_path(&src, &out.join("cooked2"), ColorSpace::Srgb)
+    asset_pipeline::cook_path(&src, &out.join("cooked2"), ColorSpace::Srgb, false)
         .expect("a directory with no stem collision must still cook");
     assert!(out.join("cooked2").join("manifest.txt").exists());
 
     let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn bc7_cooks_to_a_file_whose_levels_round_up_to_whole_blocks() {
+    // The size rule the C++ reader validates against, asserted here so the two languages cannot
+    // drift: every level is ceil(w/4) * ceil(h/4) * 16 bytes, which for a full mip chain means the
+    // 2x2 and 1x1 levels each still cost a whole 16-byte block.
+    use asset_pipeline::cooked::read_header;
+    use asset_pipeline::texture::{Texture, TEXFMT_BC7_SRGB};
+
+    const N: u32 = 16;
+    let mut px = vec![0u8; (N * N) as usize * 4];
+    for y in 0..N {
+        for x in 0..N {
+            let i = ((y * N + x) as usize) * 4;
+            px[i] = (x * 16) as u8;
+            px[i + 1] = (y * 16) as u8;
+            px[i + 2] = 128;
+            px[i + 3] = 255;
+        }
+    }
+    let tex = Texture::from_rgba8(N, N, ColorSpace::Srgb, px);
+    let (bytes, _id) = tex.cook_with(true);
+
+    let (header, _payload_slice) =
+        read_header(&bytes).expect("BC7 cook must produce a readable container");
+    assert_eq!(
+        header.asset_kind,
+        asset_pipeline::cooked::ASSET_KIND_TEXTURE
+    );
+
+    // Walk the payload's own mip table and check each level's size against the block rule.
+    let payload = &bytes[24..];
+    let u32_at = |o: usize| -> u32 { u32::from_le_bytes(payload[o..o + 4].try_into().unwrap()) };
+    assert_eq!(u32_at(0), N);
+    assert_eq!(u32_at(4), N);
+    assert_eq!(
+        u32_at(2 * 4),
+        TEXFMT_BC7_SRGB,
+        "the format tag must say BC7 sRGB"
+    );
+    let mip_count = u32_at(3 * 4);
+    assert_eq!(mip_count, 5, "16x16 has levels 16,8,4,2,1");
+
+    let mut expected_offset = 0u32;
+    for level in 0..mip_count as usize {
+        let base = 16 + level * 16;
+        let w = u32_at(base);
+        let h = u32_at(base + 4);
+        let off = u32_at(base + 8);
+        let size = u32_at(base + 12);
+        let blocks = w.div_ceil(4) * h.div_ceil(4);
+        assert_eq!(
+            size,
+            blocks * 16,
+            "level {level} ({w}x{h}) is not whole blocks"
+        );
+        assert_eq!(
+            off, expected_offset,
+            "level {level} offset does not tile the blob"
+        );
+        expected_offset += size;
+    }
+    // The 1x1 level still costs a full block — the case a naive w*h*bpp computation gets wrong.
+    let last = 16 + (mip_count as usize - 1) * 16;
+    assert_eq!(u32_at(last), 1);
+    assert_eq!(u32_at(last + 12), 16);
+
+    // …and the whole thing really is about a quarter of the RGBA8 cook.
+    let (plain, _) = tex.cook();
+    let ratio = plain.len() as f32 / bytes.len() as f32;
+    assert!(
+        ratio > 3.0 && ratio < 4.5,
+        "BC7 should be ~4x smaller, got {ratio}x"
+    );
 }

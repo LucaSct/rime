@@ -11,6 +11,7 @@
 //! the graduation of the ICEM viewer's in-process loader into the offline pipeline — proving the
 //! pipeline is not glTF-shaped: STL cooks to the very same RMA1 `MeshAsset` the engine already loads.
 
+pub mod bcn;
 pub mod clip;
 pub mod cook_cache;
 pub mod cooked;
@@ -327,9 +328,10 @@ pub fn cook_texture(
     input: &Path,
     out_dir: &Path,
     color_space: ColorSpace,
+    block_compress: bool,
 ) -> Result<CookOutput, PipelineError> {
     let texture = Texture::from_file(input, color_space)?;
-    let (bytes, id) = texture.cook();
+    let (bytes, id) = texture.cook_with(block_compress);
 
     let stem = input
         .file_stem()
@@ -408,11 +410,15 @@ fn cook_one(
     input: &Path,
     out_dir: &Path,
     color_space: ColorSpace,
+    block_compress: bool,
 ) -> Result<CookOutput, PipelineError> {
     match cook_kind_for(input) {
+        // Only standalone textures take the flag today. A glTF's own images cook through
+        // gltf_material, which picks each map's colour space from its usage; extending block
+        // compression there is a follow-on and wants the same per-usage judgement.
         Some(SourceKind::GltfMesh) => cook_gltf(input, out_dir),
         Some(SourceKind::StlMesh) => cook_stl(input, out_dir),
-        Some(SourceKind::Texture) => cook_texture(input, out_dir, color_space),
+        Some(SourceKind::Texture) => cook_texture(input, out_dir, color_space, block_compress),
         None => Err(PipelineError::Unsupported(format!(
             "{}: unrecognised source extension (expected .gltf/.glb/.stl/.png/.jpg/.jpeg)",
             input.display()
@@ -431,13 +437,14 @@ fn cook_one(
 /// A tagged byte encoding rather than a bare discriminant, so that appending a parameter later
 /// (block-compression format, alpha-coverage cutoff) cannot alias an existing combination: the tag
 /// changes with the encoding, and a longer buffer hashes differently from a shorter one.
-fn cook_params_hash(color_space: ColorSpace) -> u64 {
+fn cook_params_hash(color_space: ColorSpace, block_compress: bool) -> u64 {
     let bytes = [
-        1u8, // params-encoding tag; bump when the layout below changes
+        2u8, // params-encoding tag; bumped by m16.7 when block_compress was appended
         match color_space {
             ColorSpace::Srgb => 0,
             ColorSpace::Linear => 1,
         },
+        u8::from(block_compress),
     ];
     cooked::fnv1a_64(&bytes)
 }
@@ -450,6 +457,7 @@ pub fn cook_path(
     input: &Path,
     out_dir: &Path,
     color_space: ColorSpace,
+    block_compress: bool,
 ) -> Result<CookOutput, PipelineError> {
     let mut inputs: Vec<PathBuf> = if input.is_dir() {
         std::fs::read_dir(input)?
@@ -471,7 +479,7 @@ pub fn cook_path(
 
     // The cook request's own fingerprint, constant across this invocation's sources: two cooks of
     // the same bytes with different flags must not serve each other's output.
-    let params_hash = cook_params_hash(color_space);
+    let params_hash = cook_params_hash(color_space, block_compress);
 
     let mut combined = CookOutput::default();
     let mut records: BTreeMap<String, CacheRecord> = BTreeMap::new();
@@ -503,7 +511,7 @@ pub fn cook_path(
         }
 
         // Miss: cook it, and record what it produced so the next run can skip it.
-        let out = cook_one(source, out_dir, color_space)?;
+        let out = cook_one(source, out_dir, color_space, block_compress)?;
         combined.sources_cooked += 1;
         records.insert(
             src_key,
