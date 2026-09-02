@@ -127,6 +127,22 @@ struct SdfRef {
 // (World::register_component is idempotent, so calling this after spawning is harmless; calling
 // it FIRST keeps component ids stable across worlds, which serialization will eventually thank
 // us for).
+// The three DERIVED components (m16.8, ADR-0039 ruling 4). Each is a dense index into a runtime
+// registry minted by the asset bridge, so its value is meaningless in any other process. MeshRef
+// and MaterialRef stay REFLECTED — m9-era scenes legitimately author them against a
+// hand-registered vocabulary, and the inspector shows them — but a save must never write one back,
+// because the viewport fills them in from cooked assets and Ctrl+S would then bake this session's
+// indices into the authored file.
+} // namespace rime::render
+
+namespace rime::ecs {
+template <> inline constexpr bool kDerivedComponent<rime::render::MeshRef> = true;
+template <> inline constexpr bool kDerivedComponent<rime::render::MaterialRef> = true;
+template <> inline constexpr bool kDerivedComponent<rime::render::MaterialSet> = true;
+} // namespace rime::ecs
+
+namespace rime::render {
+
 inline void register_render_components(ecs::World& world) {
     (void)world.register_component<MeshRef>();
     (void)world.register_component<MeshAsset>();

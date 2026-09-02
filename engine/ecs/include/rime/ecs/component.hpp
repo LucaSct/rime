@@ -58,7 +58,39 @@ struct ComponentInfo {
     std::uint32_t alignment = 0; // alignof(T)
     ComponentOps ops{};
     const core::TypeInfo* type_info = nullptr; // reflection fields, or null if T isn't reflected
+    // DERIVED state: computed at runtime, never authored, and never written to a scene file
+    // (m16.8, ADR-0039 ruling 4). See `kDerivedComponent` below for why this is a property of the
+    // TYPE rather than a decision the writer's caller makes.
+    bool derived = false;
 };
+
+// Opt a component out of serialization: `template <> inline constexpr bool kDerivedComponent<T> =
+// true;` beside the type's own declaration.
+//
+// A derived component is one the engine recomputes — a dense index into a runtime registry, a
+// cached world transform — so its value is meaningful only inside the process that produced it.
+// Writing one into a `.rscene` does not merely waste bytes: it bakes this session's registry
+// indices into an authored file, so the next run resolves them against a different registry and
+// draws the wrong thing (or indexes out of bounds). Saving the block after the viewport had
+// resolved it did exactly that, with no edit made.
+//
+// It is a trait on the TYPE, next to the type, rather than an exclusion list passed to the writer,
+// because an exclusion list is something a caller can forget and a new call site never learns
+// about. Reflection already carries "can this be serialized at all"; this carries "should it be".
+template <class T> inline constexpr bool kDerivedComponent = false;
+
+// "Some of this entity's components were COMPUTED by the engine, not authored."
+//
+// The pair to `kDerivedComponent`, and the reason the exclusion is precise rather than blunt. The
+// same component can be authored on one entity and derived on another: a hand-written `.rscene`
+// legitimately gives an entity a `MeshRef` against a vocabulary it registered itself (every m9-era
+// scene does), while the asset bridge STAMPS a `MeshRef` onto an entity that names a cooked asset
+// by content id. Excluding the type everywhere would silently delete the first case; excluding it
+// nowhere bakes this session's registry indices into the file in the second.
+//
+// So whoever derives the state tags the entity, and the writer skips derived components only there.
+// Deliberately unreflected: it is bookkeeping, and must never reach a file itself.
+struct DerivedComponents {};
 
 namespace detail {
 
@@ -136,6 +168,7 @@ public:
         } else {
             info.name = "<unreflected component>";
         }
+        info.derived = kDerivedComponent<T>;
         index_of_.emplace(key, infos_.size());
         infos_.push_back(info);
         return id;

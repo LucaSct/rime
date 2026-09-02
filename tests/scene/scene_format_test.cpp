@@ -55,18 +55,23 @@ void build_first_light(ecs::World& w) {
     (void)w.spawn_with(ecs::LocalTransform{trs(0.0f, 10.0f, 0.0f)},
                        render::DirectionalLight{1.0f, 0.95f, 0.9f, 3.0f});
     const ecs::Entity ground = w.spawn_with(
-        ecs::LocalTransform{trs(0.0f, 0.0f, 0.0f)}, render::MeshRef{0}, render::MaterialRef{0});
+        ecs::LocalTransform{trs(0.0f, 0.0f, 0.0f)}, render::MeshAsset{0}, render::MaterialRef{0});
     (void)w.spawn_with(ecs::LocalTransform{trs(1.0f, 0.0f, 0.0f)},
-                       render::MeshRef{1},
+                       render::MeshAsset{1},
                        render::MaterialRef{1},
                        ecs::Parent{ground});
 }
 
-// Find the (single) entity whose MeshRef.mesh == id, or a null entity.
-ecs::Entity entity_with_mesh(ecs::World& w, render::MeshId id) {
+// Find the (single) entity whose MeshAsset.asset == id, or a null entity.
+//
+// These tests need a tag that SURVIVES A SAVE, and since m16.8 `MeshRef` is not one: it is a dense
+// index into a runtime registry, marked derived (ecs::kDerivedComponent) so the writer refuses to
+// bake this session's indices into an authored file. `MeshAsset` is the authored counterpart — a
+// content id, meaningful in any process — which is exactly the identity these cases want.
+ecs::Entity entity_with_mesh(ecs::World& w, std::uint64_t id) {
     ecs::Entity found = ecs::kNullEntity;
-    w.query<render::MeshRef>().for_each([&](ecs::Entity e, render::MeshRef& m) {
-        if (m.mesh == id) {
+    w.query<render::MeshAsset>().for_each([&](ecs::Entity e, render::MeshAsset& m) {
+        if (m.asset == id) {
             found = e;
         }
     });
@@ -139,11 +144,11 @@ TEST_CASE("scene: a multi-level parent chain remaps correctly") {
     ecs::register_transform_components(src);
     render::register_render_components(src);
     const ecs::Entity gp =
-        src.spawn_with(ecs::LocalTransform{trs(1.0f, 0.0f, 0.0f)}, render::MeshRef{10});
+        src.spawn_with(ecs::LocalTransform{trs(1.0f, 0.0f, 0.0f)}, render::MeshAsset{10});
     const ecs::Entity p = src.spawn_with(
-        ecs::LocalTransform{trs(2.0f, 0.0f, 0.0f)}, render::MeshRef{11}, ecs::Parent{gp});
+        ecs::LocalTransform{trs(2.0f, 0.0f, 0.0f)}, render::MeshAsset{11}, ecs::Parent{gp});
     (void)src.spawn_with(
-        ecs::LocalTransform{trs(3.0f, 0.0f, 0.0f)}, render::MeshRef{12}, ecs::Parent{p});
+        ecs::LocalTransform{trs(3.0f, 0.0f, 0.0f)}, render::MeshAsset{12}, ecs::Parent{p});
 
     const std::string text = scene::save_scene_to_string(src);
     ecs::World dst;
@@ -437,4 +442,76 @@ TEST_CASE("m14.1: schema drift stays fatal even when unknown types are tolerated
     CHECK_FALSE(r.ok);
     CHECK(r.error.find("schema drift") != std::string::npos);
     CHECK(r.skipped_components == 0); // it was not "skipped" — it was refused
+}
+
+TEST_CASE("m16.8: a save never writes derived components back into the authored scene") {
+    // Ctrl+S with ZERO edits used to corrupt the file. The viewport resolves cooked assets by
+    // stamping MeshRef/MaterialRef — dense indices into THIS session's registries — onto every
+    // entity, and the writer serialized every reflected component, so ~150 session-local indices
+    // went into `block.rscene`. The next run resolved them against a different registry and drew
+    // the wrong meshes, or indexed out of bounds.
+    //
+    // The exclusion is a property of the TYPE (ecs::kDerivedComponent), declared beside the
+    // component, rather than a list handed to the writer — a list is something a caller forgets and
+    // a new call site never learns about.
+    ecs::World src;
+    ecs::register_transform_components(src);
+    render::register_render_components(src);
+
+    // The entity the BRIDGE resolved: it names an asset, and the engine stamped registry indices
+    // onto it. `DerivedComponents` is the tag the bridge adds to say exactly that.
+    (void)src.spawn_with(ecs::LocalTransform{trs(1.0f, 2.0f, 3.0f)},
+                         render::MeshAsset{0xabcdef01u}, // authored: a content id
+                         render::MeshRef{7},             // derived: a registry index
+                         render::MaterialRef{3},         // derived
+                         render::MaterialSet{2},         // derived (and unreflected besides)
+                         ecs::DerivedComponents{});
+
+    // …and an entity that AUTHORED the same components against its own vocabulary, which every
+    // m9-era scene does. It carries no tag, so its MeshRef must survive the save untouched.
+    (void)src.spawn_with(
+        ecs::LocalTransform{trs(9.0f, 0.0f, 0.0f)}, render::MeshRef{1}, render::MaterialRef{1});
+
+    std::size_t excluded = 0;
+    const std::string text = scene::save_scene_to_string(src, &excluded);
+
+    // The two reflected derived components were refused, and COUNTED — an exclusion that silently
+    // stops working looks exactly like one that had nothing to exclude.
+    // Two excluded on the tagged entity (MeshRef, MaterialRef); MaterialSet is unreflected and
+    // never reaches the writer at all. COUNTED, because an exclusion that silently stops working
+    // looks exactly like one that had nothing to exclude.
+    CHECK(excluded == 2);
+    CHECK(text.find("rime::render::MeshAsset") != std::string::npos);
+    CHECK(text.find("rime::ecs::LocalTransform") != std::string::npos);
+
+    // THE CONTROL THAT MAKES THE RULE PRECISE RATHER THAN BLUNT: the untagged entity's authored
+    // MeshRef is still there. Excluding the TYPE everywhere would silently delete it — and that is
+    // not hypothetical, it is what every hand-authored m9-era scene relies on.
+    CHECK(text.find("rime::render::MeshRef") != std::string::npos);
+
+    // …and the file round-trips: the authored state comes back, the derived state does not.
+    ecs::World dst;
+    ecs::register_transform_components(dst);
+    render::register_render_components(dst);
+    REQUIRE(scene::load_scene_from_string(dst, text).ok);
+    const ecs::Entity e = entity_with_mesh(dst, 0xabcdef01u);
+    REQUIRE(e != ecs::kNullEntity);
+    CHECK(dst.get<render::MeshRef>(e) == nullptr); // the derived index did not survive
+    CHECK(dst.get<render::MaterialRef>(e) == nullptr);
+    // …while the authored entity kept both.
+    int authored = 0;
+    dst.query<render::MeshRef>().for_each([&](ecs::Entity, render::MeshRef& m) {
+        if (m.mesh == 1) {
+            ++authored;
+        }
+    });
+    CHECK(authored == 1);
+    REQUIRE(dst.get<ecs::LocalTransform>(e) != nullptr);
+    CHECK(dst.get<ecs::LocalTransform>(e)->value.translation.x == 1.0f);
+
+    // Saving the RELOADED world is byte-identical: the round trip has reached a fixed point, which
+    // is the property that makes "place, save, reopen, save" safe to repeat.
+    std::size_t second_excluded = 1;
+    CHECK(scene::save_scene_to_string(dst, &second_excluded) == text);
+    CHECK(second_excluded == 0); // nothing derived survived the load to be excluded again
 }

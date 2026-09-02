@@ -229,8 +229,15 @@ GpuAssetBridge::ResolveStats GpuAssetBridge::resolve_scene_meshes(ecs::World& wo
         if (p.needs_material) {
             world.add_component(p.entity, MaterialRef{neutral_material_});
         }
+        // Mark the entity as carrying engine-computed state, so a save excludes the MeshRef and
+        // MaterialRef just stamped on it — without touching an entity that AUTHORED those same
+        // components against its own registry (m16.8).
+        if (world.get<ecs::DerivedComponents>(p.entity) == nullptr) {
+            world.add_component(p.entity, ecs::DerivedComponents{});
+        }
         ++stats.resolved;
     }
+    meshes_resolved_ += stats.resolved;
     return stats;
 }
 
@@ -399,6 +406,9 @@ GpuAssetBridge::MaterialStats GpuAssetBridge::resolve_scene_materials(ecs::World
                 comp->set = set;
             } else {
                 world.add_component(p.entity, MaterialSet{set});
+            }
+            if (world.get<ecs::DerivedComponents>(p.entity) == nullptr) {
+                world.add_component(p.entity, ecs::DerivedComponents{});
             }
         } else {
             // UPDATE IN PLACE rather than minting a new id, so a set resolved before its textures

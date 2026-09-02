@@ -526,18 +526,27 @@ int serve_viewport(std::string_view socket_path,
         // at, so the honest startup cost is waiting once for the meshes the scene actually names —
         // rather than streaming them in over the first few frames and calling a grey placeholder a
         // picture. Re-resolving is what swaps the placeholder for the real mesh (m15.1).
-        (void)bridge.resolve_scene_meshes(app.world());
-        asset_server.wait_for_pending_loads();
-        asset_server.pump();
-        (void)bridge.drain();
-        const render::GpuAssetBridge::ResolveStats resolved =
-            bridge.resolve_scene_meshes(app.world());
-        if (resolved.resolved != 0 || bridge.unresolved_count() != 0) {
+        // `settle` rather than one wait/pump/drain round (m16.8). Materials made the chain FOUR
+        // levels deep — mesh Ready, read its submesh material_slot, material Ready, read its five
+        // texture ids, textures Ready — and each level's request cannot be issued until the level
+        // above has landed. A single blocking round resolves level one and leaves every material
+        // magenta forever, which is precisely what the startup sequence here used to do.
+        const std::size_t rounds = bridge.settle(app.world());
+        const render::GpuAssetBridge::MaterialStats mats = bridge.material_stats();
+        renderer.set_material_sets(bridge.material_sets());
+        RIME_INFO("editor-host: asset settle took {} round(s); {} material(s) resolved, {} pending",
+                  rounds,
+                  mats.resolved,
+                  mats.pending);
+        // NOTE: `scripts/editor-smoke.sh` greps for "resolved N mesh reference" — this line is an
+        // interface, not just a diagnostic. m16.8 briefly replaced it with a settle summary and the
+        // smoke went red; the summary is additive above rather than a substitution.
+        if (bridge.meshes_resolved() != 0 || bridge.unresolved_count() != 0) {
             // Counted, not assumed. `unresolved` is a scene naming an id this manifest does not
             // list — the entity is present and editable and simply cannot be drawn, which is
             // exactly the failure that reads as "the viewport is broken" without a number.
             RIME_INFO("editor-host: resolved {} mesh reference(s) from --assets, {} unresolvable",
-                      resolved.resolved,
+                      bridge.meshes_resolved(),
                       bridge.unresolved_count());
         }
     }
@@ -590,6 +599,15 @@ int serve_viewport(std::string_view socket_path,
 
     render::RGTexture last_ldr{};
     app.on_render([&](app::FrameContext& ctx) {
+        // PER-FRAME, which this loop never did (m16.8). The editor pumped exactly once at startup,
+        // so anything requested afterwards never became resident — which is why the asset
+        // browser's `place` button spawned an entity that stayed a grey placeholder for the rest
+        // of the session. One tick is pump + drain + re-resolve; it costs nothing when there is
+        // nothing in flight.
+        if (asset_server.pump() != 0 || bridge.drain() != 0) {
+            (void)bridge.resolve_scene_meshes(ctx.world);
+            (void)bridge.resolve_scene_materials(ctx.world);
+        }
         last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
         // One lens per frame, shared by the gizmo pass and the ViewportCamera message — computed
         // AFTER the tick (the callback runs post-tick), so it sees the same WorldTransforms the

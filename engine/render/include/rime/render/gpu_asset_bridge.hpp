@@ -154,6 +154,11 @@ public:
 
     [[nodiscard]] const MaterialStats& material_stats() const noexcept { return material_stats_; }
 
+    // Meshes resolved across every resolve_scene_meshes call, cumulative. `settle` does the
+    // resolving itself, so a caller that ran it and then asked resolve_scene_meshes again would
+    // correctly get zero — the work already happened. This is what such a caller should report.
+    [[nodiscard]] std::size_t meshes_resolved() const noexcept { return meshes_resolved_; }
+
     // Ids the catalog could not resolve, deduplicated. A COUNTER RATHER THAN A LOG LINE: a scene
     // that silently drew nothing is the failure this whole brick exists to end, so "which asset did
     // you not find" has to be answerable after the fact.
@@ -211,6 +216,7 @@ private:
     std::unordered_map<std::uint64_t, MaterialId> material_of_id_; // content id → registry material
     std::unordered_map<std::uint32_t, MaterialSetId> set_of_entity_; // entity index → its set
     MaterialStats material_stats_{};
+    std::size_t meshes_resolved_ = 0;
 };
 
 } // namespace rime::render
