@@ -8,7 +8,9 @@
 
 #include "rime/render/passes.hpp"
 
+#include "depth_masked.frag.spv.h"
 #include "depth_only.vert.spv.h"
+#include "depth_only_masked.vert.spv.h"
 #include "fullscreen.vert.spv.h"
 #include "pbr_forward.frag.spv.h"
 #include "pbr_forward.vert.spv.h"
@@ -39,13 +41,24 @@ namespace {
 // what changes: its mesh buffers, its 256-byte slice of the draw-uniform buffer, and (for the
 // shading pass) its base-color texture. Draws run in extraction order, unsorted — sorting by
 // pipeline/material/depth is a measured optimization for when scenes are big enough to show it.
-void record_draws(rhi::CommandBuffer& cmd, const SceneDrawData& data, bool bind_material_textures) {
+// `flag_filter`/`flag_match`: record only the draws whose flags AND to `flag_match` under
+// `flag_filter`. A pass with two pipelines calls this twice — once per partition — which switches
+// pipeline once instead of per draw, and keeps the single-pipeline callers exactly as they were
+// (filter 0 matches everything).
+void record_draws(rhi::CommandBuffer& cmd,
+                  const SceneDrawData& data,
+                  bool bind_material_textures,
+                  std::uint32_t flag_filter = 0,
+                  std::uint32_t flag_match = 0) {
     // Binding 0 is FrameUniforms at data.frame_ubo_offset — 0 for the camera pass, cascade c's
     // 256-byte view_proj slice for a CSM depth pass (m10.1). depth_only.vert / the forward shaders
     // read only the leading members of whatever block sits there, so one loop serves every view.
     cmd.bind_uniform_buffer(0, data.frame_ubo, data.frame_ubo_offset);
     for (std::size_t i = 0; i < data.draws.size(); ++i) {
         const DrawItem& item = data.draws[i];
+        if ((item.flags & flag_filter) != flag_match) {
+            continue; // belongs to the other partition
+        }
         const GpuMesh& mesh = data.meshes->get(item.mesh);
         cmd.bind_vertex_buffer(mesh.vertices);
         cmd.bind_index_buffer(mesh.indices, rhi::IndexType::Uint32);
@@ -99,9 +112,44 @@ DepthPrepass::DepthPrepass(rhi::Device& device) : device_(device) {
     pd.bindings = bindings;
     pd.debug_name = "depth-prepass";
     pipeline_ = device.create_graphics_pipeline(pd);
+
+    // The MASKED variant (m16.4): same vertex expression (compiled from the same source with
+    // -DMASKED, so `invariant gl_Position` still holds across the pair), plus a fragment stage that
+    // discards below the material's alpha cutoff. Kept as a SECOND pipeline rather than replacing
+    // the first, so opaque geometry — nearly all of it — keeps paying nothing for a texture fetch
+    // and a branch it does not need.
+    masked_vertex_shader_ = make_shader(device,
+                                        rhi::ShaderStage::Vertex,
+                                        depth_only_masked_vert_spv,
+                                        sizeof(depth_only_masked_vert_spv),
+                                        "depth_only_masked.vert");
+    masked_fragment_shader_ = make_shader(device,
+                                          rhi::ShaderStage::Fragment,
+                                          depth_masked_frag_spv,
+                                          sizeof(depth_masked_frag_spv),
+                                          "depth_masked.frag");
+    // Bindings 2-6 so `record_draws(bind_material_textures=true)` serves this pipeline unchanged;
+    // the shader samples only binding 2, and an unused-but-bound sampler costs nothing.
+    const rhi::BindingDesc masked_bindings[] = {
+        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    };
+    pd.vertex_shader = masked_vertex_shader_;
+    pd.fragment_shader = masked_fragment_shader_;
+    pd.bindings = masked_bindings;
+    pd.debug_name = "depth-prepass-masked";
+    masked_pipeline_ = device.create_graphics_pipeline(pd);
 }
 
 DepthPrepass::~DepthPrepass() {
+    device_.destroy(masked_pipeline_);
+    device_.destroy(masked_fragment_shader_);
+    device_.destroy(masked_vertex_shader_);
     device_.destroy(pipeline_);
     device_.destroy(vertex_shader_);
 }
@@ -121,10 +169,28 @@ void DepthPrepass::add(RenderGraph& graph,
     depth_att.layer = layer;
     RenderGraph::RasterPassDesc desc{};
     desc.depth = &depth_att;
-    graph.add_raster_pass("depth-prepass", desc, [pipe = pipeline_, data](rhi::CommandBuffer& cmd) {
-        cmd.bind_pipeline(pipe);
-        record_draws(cmd, data, /*bind_material_textures=*/false);
-    });
+    graph.add_raster_pass(
+        "depth-prepass",
+        desc,
+        [pipe = pipeline_, masked = masked_pipeline_, data](rhi::CommandBuffer& cmd) {
+            // Two partitions, one pipeline switch. Opaque first (the overwhelming majority, and
+            // the byte-identical old path), then the masked draws through the alpha-testing
+            // variant. Without the second half, depth is written for texels the forward pass
+            // discards and everything behind a masked hole fails CompareOp::Equal — the hole
+            // renders as clear colour, in the PRIMARY view.
+            cmd.bind_pipeline(pipe);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/false,
+                         DrawItem::AlphaMasked,
+                         0);
+            cmd.bind_pipeline(masked);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/true,
+                         DrawItem::AlphaMasked,
+                         DrawItem::AlphaMasked);
+        });
 }
 
 // ── ForwardPbrPass ────────────────────────────────────────────────────────────────────────────

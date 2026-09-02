@@ -534,7 +534,13 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         du.emissive[0] = material.emissive[0];
         du.emissive[1] = material.emissive[1];
         du.emissive[2] = material.emissive[2];
-        du.emissive[3] = material.alpha_cutoff; // 0 = no masking; see PbrMaterialDesc
+        du.emissive[3] = material.alpha_cutoff;
+        // Route this draw to the alpha-testing depth pipeline (m16.4). A nonzero cutoff is exactly
+        // what "this material masks" means -- the same single float the shader branches on, so the
+        // CPU and GPU cannot disagree about which draws are masked.
+        if (material.alpha_cutoff > 0.0f) {
+            frame_draws_[i].flags |= DrawItem::AlphaMasked;
+        } // 0 = no masking; see PbrMaterialDesc
         std::memcpy(
             &draw_staging_[static_cast<std::size_t>(i) * kDrawUniformStride], &du, sizeof(du));
         // Resolve each slot to its map or the correct fallback, so record_draws never branches on

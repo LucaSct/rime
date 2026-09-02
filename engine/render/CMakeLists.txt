@@ -50,13 +50,21 @@ rime_add_shaders(rime_render
     shaders/gizmo.vert
     shaders/gizmo.frag
     shaders/particle.vert
-    shaders/particle.frag)
+    shaders/particle.frag
+    shaders/depth_masked.frag)
 
 # The SSR G-buffer variant (m10.7a): the shadowed shader compiled a second time with -DWRITE_GBUFFER
 # so it emits the thin normal+roughness G-buffer into a second attachment. One source, two modules —
 # the baseline shadowed shader stays free of the unused second output.
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag WRITE_GBUFFER pbr_forward_shadowed_gbuffer.frag)
+
+# The masked depth-prepass vertex variant (m16.4): the SAME source with -DMASKED so it also passes
+# UV through. Compiled rather than hand-copied so `invariant gl_Position` still means something —
+# both modules compute gl_Position from one expression, which is what the forward pass's
+# CompareOp::Equal depth test depends on.
+rime_add_shader_variant(rime_render
+    shaders/depth_only.vert MASKED depth_only_masked.vert)
 
 # Namespaced alias so dependents link `rime::render`, matching our C++ namespace.
 add_library(rime::render ALIAS rime_render)

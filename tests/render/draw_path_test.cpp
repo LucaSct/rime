@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <numbers>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -398,4 +399,96 @@ TEST_CASE("m16.3: a scene-placed mesh gets its COOKED material, not neutral grey
     }
 
     std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("m16.4: a masked material no longer punches a hole through the depth pre-pass") {
+    // THE PRIMARY-VIEW ASSERTION, which has never existed. The depth pre-pass had no fragment
+    // shader, so it wrote depth for texels a masked material discards; the forward pass then
+    // discarded there, and everything BEHIND the hole failed CompareOp::Equal and was never
+    // shaded. The hole rendered as clear colour — a cutout in front of a lit wall.
+    //
+    // m15.6a's proof could not see this because it renders with `use_depth_prepass=false`
+    // (pbr_pipeline_test.cpp:591), the one configuration no production caller uses: every sample
+    // and the editor host pass true.
+    //
+    // So the property under test is M5.6's own contract, restored for masked materials: THE SAME
+    // PIXELS EITHER WAY. A tolerance would accept a hole that leaked a little.
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the masked-depth proof");
+        return;
+    }
+
+    MeshRegistry meshes(*device);
+    const MeshId quad = meshes.add(make_plane(0.6f), "masked-quad");
+    const MeshId wall = meshes.add(make_plane(3.0f), "wall");
+    REQUIRE(quad != kInvalidMeshId);
+    REQUIRE(wall != kInvalidMeshId);
+
+    MaterialRegistry materials;
+    // A cutout material with NO base-colour texture: the shader's 1x1 white fallback has alpha 1,
+    // so a cutoff above 1 discards every fragment. That makes the masked quad fully transparent —
+    // the strongest possible version of the bug, since the wall behind must be entirely visible.
+    PbrMaterialDesc cutout{};
+    cutout.base_color[3] = 0.0f; // alpha 0 * white 1 = 0, below any positive cutoff
+    cutout.alpha_cutoff = 0.5f;
+    const MaterialId masked_mat = materials.add(cutout);
+    const MaterialId wall_mat = materials.add({{0.9f, 0.2f, 0.2f, 1.0f}, 0.0f, 0.6f});
+
+    const auto frame = [&](bool prepass, bool with_quad) {
+        ecs::World world;
+        register_render_components(world);
+        core::Transform wall_tf{};
+        wall_tf.translation = {0.0f, 0.0f, -6.0f};
+        wall_tf.rotation =
+            core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, std::numbers::pi_v<float> / 2.0f);
+        (void)world.spawn_with(ecs::WorldTransform{wall_tf}, MeshRef{wall}, MaterialRef{wall_mat});
+        if (with_quad) {
+            core::Transform quad_tf{}; // between the camera and the wall
+            quad_tf.translation = {0.0f, 0.0f, -3.0f};
+            quad_tf.rotation =
+                core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, std::numbers::pi_v<float> / 2.0f);
+            (void)world.spawn_with(
+                ecs::WorldTransform{quad_tf}, MeshRef{quad}, MaterialRef{masked_mat});
+        }
+        core::Transform cam_tf{};
+        (void)world.spawn_with(ecs::WorldTransform{cam_tf}, Camera{});
+        core::Transform light_tf{};
+        light_tf.translation = {0.0f, 2.0f, 0.0f};
+        (void)world.spawn_with(ecs::WorldTransform{light_tf},
+                               PointLight{1.0f, 1.0f, 1.0f, 90.0f, 60.0f});
+
+        SceneRenderer renderer(*device, meshes, materials);
+        RenderGraph graph(*device);
+        const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize}, prepass);
+        REQUIRE(out.ldr.is_valid());
+        graph.export_texture(out.ldr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        return read_texture(*device, graph.physical(out.ldr), kSize, kSize, 4);
+    };
+
+    // A fully-discarded quad must be INVISIBLE: the scene with it must match the scene without it,
+    // with the pre-pass ON. Before the fix the quad still wrote depth and blacked out the wall.
+    CHECK(frame(true, true) == frame(true, false));
+
+    // …and the pre-pass must not change the picture, which is M5.6's contract and the assertion
+    // that would have caught this in the first place.
+    CHECK(frame(true, true) == frame(false, true));
+
+    // NEGATIVE CONTROL 1: with the cutoff at zero the material does not mask at all, so the quad
+    // becomes an ordinary opaque surface and the two scenes must now DIFFER. Without this, a
+    // renderer that simply dropped every masked draw would pass everything above.
+    PbrMaterialDesc opaque = cutout;
+    opaque.alpha_cutoff = 0.0f;
+    materials.update(masked_mat, opaque);
+    CHECK(frame(true, true) != frame(true, false));
+
+    // NEGATIVE CONTROL 2: and with masking off, prepass-on and prepass-off must STILL agree —
+    // proving the fix did not achieve its result by quietly disabling the pre-pass.
+    CHECK(frame(true, true) == frame(false, true));
 }

@@ -20,7 +20,17 @@
 // differently; docs/math/pbr.md ("the depth pre-pass contract") walks through why.
 #version 450
 
+//
+// THE MASKED VARIANT (-DMASKED, m16.4). Compiled a second time from THIS SOURCE rather than copied
+// into a sibling file, and that is the whole point: `gl_Position` must be the same expression in
+// both modules or `invariant` guarantees nothing and the Equal test starts rejecting geometry
+// sporadically. A hand-copied second vertex shader is where that contract dies quietly, six months
+// later, when someone edits one of them.
 layout(location = 0) in vec3 in_position;
+#ifdef MASKED
+layout(location = 2) in vec2 in_uv; // location 2 of the shared registry vertex (48-byte stride)
+layout(location = 0) out vec2 v_uv;
+#endif
 
 layout(std140, set = 0, binding = 0) uniform FrameUniforms {
     mat4 view_proj;
@@ -33,5 +43,8 @@ layout(std140, set = 0, binding = 1) uniform DrawUniforms {
 invariant gl_Position;
 
 void main() {
+#ifdef MASKED
+    v_uv = in_uv;
+#endif
     gl_Position = frame.view_proj * (draw.model * vec4(in_position, 1.0));
 }
