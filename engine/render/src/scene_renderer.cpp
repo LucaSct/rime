@@ -44,6 +44,23 @@ namespace {
 
 } // namespace
 
+std::size_t drop_unresolvable_draws(ExtractedScene& scene, const MeshRegistry& meshes) {
+    std::size_t dropped = 0;
+    std::size_t front = 0;
+    for (std::size_t read = 0; read < scene.draws.size(); ++read) {
+        if (!meshes.contains(scene.draws[read].mesh)) {
+            ++dropped;
+            continue;
+        }
+        scene.draws[front] = scene.draws[read];
+        scene.draw_entities[front] = scene.draw_entities[read];
+        ++front;
+    }
+    scene.draws.resize(front);
+    scene.draw_entities.resize(front);
+    return dropped;
+}
+
 ExtractedScene extract_scene(ecs::World& world) {
     ExtractedScene scene;
 
@@ -279,6 +296,19 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                                             rhi::Extent2D extent,
                                             bool use_depth_prepass) {
     ExtractedScene scene = extract_scene(world);
+    // Before ANY registry lookup: a MeshRef can name a mesh this registry does not hold (a scene
+    // file is untrusted input), and every path below — the cull loop, record_draws for the depth,
+    // forward and shadow passes — indexes with it.
+    const std::size_t unresolvable = drop_unresolvable_draws(scene, meshes_);
+    if (unresolvable != 0) {
+        unresolvable_draws_ += unresolvable;
+        if (!warned_unresolvable_mesh_) {
+            RIME_WARN("render: dropped {} draw(s) naming a mesh id this registry does not hold "
+                      "(unresolvable MeshRef — stale or hand-edited scene?)",
+                      unresolvable);
+            warned_unresolvable_mesh_ = true;
+        }
+    }
     if (!scene.camera.found) {
         if (!warned_no_camera_) {
             RIME_WARN("render: no active camera in the world — declaring no passes");

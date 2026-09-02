@@ -112,6 +112,11 @@ void ScenePicker::begin_pick(ecs::World& world,
     }
 
     ExtractedScene scene = extract_scene(world);
+    // Same guarantee the SceneRenderer establishes, for the same reason: the draw loop below
+    // indexes the mesh registry, and an unresolvable MeshRef out of a scene file would make that
+    // an out-of-bounds read. Dropping here also keeps the pick consistent with what was drawn —
+    // an entity the renderer refused must not be pickable.
+    (void)drop_unresolvable_draws(scene, meshes_);
     if (!scene.camera.found || scene.draws.empty()) {
         return; // nothing rendered ⇒ nothing pickable
     }

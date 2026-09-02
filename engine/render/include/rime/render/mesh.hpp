@@ -137,7 +137,20 @@ public:
     // Upload a mesh; returns its id (kInvalidMeshId on failure, after logging).
     [[nodiscard]] MeshId add(const CpuMesh& mesh, std::string_view debug_name = {});
 
+    // UNCHECKED. `id` must have come from add() and must not be kInvalidMeshId — callers are
+    // expected to have filtered through `contains()` (or the drop pass in scene_renderer.hpp)
+    // first. It stays unchecked because it sits in the per-draw inner loop of every geometry pass;
+    // the guarantee is established once, where the draw list is built, rather than re-tested per
+    // frame per pass.
     [[nodiscard]] const GpuMesh& get(MeshId id) const { return meshes_[id]; }
+
+    // Is this id safe to `get()`? A MeshId can reach the renderer from a `.rscene` on disk, which
+    // is untrusted input — the reader validates that the field is a u32, never that it names a
+    // mesh this registry actually holds. Guarding the SENTINEL alone is not enough: the sentinel
+    // is one value and the out-of-range set is 4 billion of them.
+    [[nodiscard]] bool contains(MeshId id) const noexcept {
+        return id != kInvalidMeshId && id < meshes_.size();
+    }
 
     [[nodiscard]] std::size_t size() const noexcept { return meshes_.size(); }
 

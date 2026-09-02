@@ -263,8 +263,7 @@ void GizmoRenderer::declare(RenderGraph& graph,
     // or light entity has a pose worth dragging but no mesh worth tinting).
     GpuMesh tint_mesh{};
     const auto* mesh_ref = world.get<MeshRef>(sel.entity);
-    const bool tint =
-        mesh_ref != nullptr && mesh_ref->mesh != kInvalidMeshId && mesh_ref->mesh < meshes_.size();
+    const bool tint = mesh_ref != nullptr && meshes_.contains(mesh_ref->mesh);
     if (tint) {
         tint_mesh = meshes_.get(mesh_ref->mesh);
     }

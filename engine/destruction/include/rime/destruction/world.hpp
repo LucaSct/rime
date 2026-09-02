@@ -192,8 +192,20 @@ public:
     //
     // Ops naming an unknown instance are dropped. Ops naming a Local instance are dropped too: that
     // is a caller bug (the server does not own this instance), and applying them would let a
-    // mirror's damage bleed into state this peer is itself authoritative for.
+    // mirror's damage bleed into state this peer is itself authoritative for. So are ops whose
+    // part index is outside this peer's copy of the pattern, or whose amount is negative or
+    // non-finite — these arrive off a socket and are validated as untrusted input, not trusted as
+    // a peer's word. Every drop is counted; see `rejected_remote_ops()`.
     void apply_remote_ops(std::span<const DamageOp> ops);
+
+    // How many queued remote ops update() has REFUSED, cumulative. A remote op arrives off the
+    // wire, so stage 1 validates every field of it — unknown or non-Remote instance, a part index
+    // outside this peer's copy of the pattern, a negative or non-finite amount — and refuses the
+    // op rather than indexing with it. This counter is how a caller tells "the authority sent me
+    // nothing" apart from "I threw away everything the authority sent me": without it, a peer
+    // dropping every op looks exactly like a quiet one. Nonzero means corruption or a genuine
+    // disagreement about a pattern, and is worth surfacing rather than tolerating.
+    [[nodiscard]] std::uint64_t rejected_remote_ops() const noexcept;
 
     // --- the state-application seam (ADR-0033 A3) ------------------------------------------------
     //

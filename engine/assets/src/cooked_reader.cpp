@@ -464,6 +464,19 @@ std::uint64_t texture_schema_hash() noexcept {
     return core::reflect<detail::TextureMipV1>().type_hash;
 }
 
+namespace {
+
+// Sanity ceilings for a corrupt, hostile, or merely over-ambitious texture. 16384 per axis is the
+// largest maxImageDimension2D in common use (the Vulkan-guaranteed minimum is 4096, so anything
+// above this is unusable on every GPU rather than merely large); 64 Mi texels caps the base mip at
+// 256 MiB of RGBA8, which is far above any texture the cook is meant to produce and small enough
+// that a crafted extent cannot demand a multi-gigabyte allocation before the exact-length check
+// runs.
+constexpr std::uint32_t kMaxTextureExtentPerAxis = 16384;
+constexpr std::uint64_t kMaxTextureTexels = std::uint64_t{64} * 1024 * 1024;
+
+} // namespace
+
 std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
                                            AssetError& out_error) noexcept {
     core::ByteReader reader(payload);
@@ -483,8 +496,19 @@ std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
     // (RGBA8 linear / sRGB); a full chain's length is fully determined by the base extent, so any
     // other mip_count is a corrupt or foreign file — caught here rather than by walking a bad
     // table.
+    //
+    // The extent needs a CEILING as well as a floor, which the mip cross-check does not provide:
+    // a 268435456x1 file is perfectly self-consistent (its mip chain is exactly as long as that
+    // extent demands) and would be accepted, and the extent then travels unmodified into
+    // vkCreateImage. Exceeding maxImageDimension2D there is invalid usage — driver-defined in
+    // release, and the guaranteed floor for that limit is only 4096. This needs no attacker
+    // either: a legitimate 20000x10000 source image cooks without complaint. Same reasoning and
+    // same shape as decode_mesh_sdf's ceilings below; the per-axis bound alone is not enough,
+    // because 16384x16384 passes it and is a 1 GiB base mip, so the texel total is bounded too.
     if (format_raw > static_cast<std::uint32_t>(TextureFormat::Rgba8Srgb) || width == 0 ||
-        height == 0 || mip_count != full_mip_count(width, height)) {
+        height == 0 || width > kMaxTextureExtentPerAxis || height > kMaxTextureExtentPerAxis ||
+        std::uint64_t{width} * std::uint64_t{height} > kMaxTextureTexels ||
+        mip_count != full_mip_count(width, height)) {
         out_error = AssetError::InvalidTexture;
         return std::nullopt;
     }

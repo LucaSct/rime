@@ -156,6 +156,32 @@ TEST_CASE("negative battery: texture header/format errors") {
         b.mip_count_override = full_mip_count(b.width, b.height) + 1; // must be exactly the chain
         expect_error(b.build(), AssetError::InvalidTexture);
     }
+    // The mip cross-check bounds the extent from BELOW (a zero extent has no chain) but not from
+    // above: a 268435456x1 file is perfectly self-consistent, and the extent then travels
+    // unmodified into vkCreateImage, where exceeding maxImageDimension2D is invalid usage —
+    // driver-defined in release, and the Vulkan-guaranteed floor for that limit is only 4096.
+    //
+    // These two subcases straddle the ceiling by ONE, on a one-pixel-tall texture. That keeps both
+    // files fully self-consistent and about 128 KB, so the rejection can only be the extent rule
+    // and not a short blob — a file too large to build honestly would be rejected either way, and
+    // would prove nothing.
+    SUBCASE("a base extent one past the per-axis ceiling") {
+        TextureFileBuilder b;
+        b.width = 16385; // kMaxTextureExtentPerAxis + 1
+        b.height = 1;
+        expect_error(b.build(), AssetError::InvalidTexture);
+    }
+    SUBCASE("POSITIVE CONTROL: a base extent exactly AT the ceiling still loads") {
+        TextureFileBuilder b;
+        b.width = 16384; // kMaxTextureExtentPerAxis
+        b.height = 1;
+        AssetError err{};
+        const std::vector<std::byte> bytes = b.build();
+        const auto tex = read_texture(bytes, err);
+        REQUIRE_MESSAGE(tex.has_value(), "a legal maximum-size texture must still decode");
+        CHECK(tex->width == 16384);
+        CHECK(tex->height == 1);
+    }
 }
 
 TEST_CASE("negative battery: mip table inconsistent with the base extent is rejected") {

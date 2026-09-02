@@ -170,6 +170,13 @@ struct DestructionWorld::Impl {
     std::vector<DamageOp> pending_remote_ops;
     std::vector<DamageOp> committed_ops;
 
+    // Remote ops refused by stage 1's validation, cumulative over the world's life. Every field of
+    // a remote op is untrusted (it was decoded off a socket), and a peer that silently discards
+    // ops is indistinguishable from one that has nothing to do — so the drops are counted and
+    // readable. Nonzero in a healthy session means either packet corruption or a peer disagreeing
+    // with us about a pattern's part count.
+    std::uint64_t rejected_remote_ops = 0;
+
     // M8.5 lifecycle state: the budget policy (default-off ⇒ nothing is ever reclaimed, so 8.2–8.4
     // scenes stay byte-identical) and the update() tick counter that debris age is measured in.
     LifecycleConfig lifecycle{};
