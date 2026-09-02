@@ -44,21 +44,45 @@ namespace {
 
 } // namespace
 
-std::size_t drop_unresolvable_draws(ExtractedScene& scene, const MeshRegistry& meshes) {
-    std::size_t dropped = 0;
-    std::size_t front = 0;
-    for (std::size_t read = 0; read < scene.draws.size(); ++read) {
-        if (!meshes.contains(scene.draws[read].mesh)) {
-            ++dropped;
+ResolveDrawStats resolve_draws(ExtractedScene& scene, const MeshRegistry& meshes) {
+    ResolveDrawStats stats;
+
+    // Built into fresh vectors rather than compacted in place: expansion can GROW the list, so the
+    // read-ahead-of-write trick the drop-only version used no longer holds.
+    std::vector<DrawItem> out_draws;
+    std::vector<ecs::Entity> out_entities;
+    out_draws.reserve(scene.draws.size());
+    out_entities.reserve(scene.draw_entities.size());
+
+    for (std::size_t i = 0; i < scene.draws.size(); ++i) {
+        const DrawItem& src = scene.draws[i];
+        if (!meshes.contains(src.mesh)) {
+            ++stats.dropped;
             continue;
         }
-        scene.draws[front] = scene.draws[read];
-        scene.draw_entities[front] = scene.draw_entities[read];
-        ++front;
+        const GpuMesh& gpu = meshes.get(src.mesh);
+        // Guaranteed non-empty by MeshRegistry::add, which synthesises a whole-mesh range when a
+        // CpuMesh carries no table — so this loop needs no "does it have submeshes" branch, and
+        // the single-submesh case costs exactly one iteration.
+        for (std::size_t s = 0; s < gpu.submeshes.size(); ++s) {
+            DrawItem item = src;
+            item.first_index = gpu.submeshes[s].first_index;
+            item.index_count = gpu.submeshes[s].index_count;
+            // The per-slot MATERIAL is not resolved yet: until m16.3 teaches the asset bridge to
+            // map `material_slot` through the manifest, every submesh of an entity draws with that
+            // entity's single MaterialRef. Splitting the geometry first is what makes that brick a
+            // material change rather than a draw-path change as well.
+            out_draws.push_back(item);
+            out_entities.push_back(scene.draw_entities[i]);
+            if (s > 0) {
+                ++stats.expanded;
+            }
+        }
     }
-    scene.draws.resize(front);
-    scene.draw_entities.resize(front);
-    return dropped;
+
+    scene.draws = std::move(out_draws);
+    scene.draw_entities = std::move(out_entities);
+    return stats;
 }
 
 ExtractedScene extract_scene(ecs::World& world) {
@@ -344,7 +368,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // Before ANY registry lookup: a MeshRef can name a mesh this registry does not hold (a scene
     // file is untrusted input), and every path below — the cull loop, record_draws for the depth,
     // forward and shadow passes — indexes with it.
-    const std::size_t unresolvable = drop_unresolvable_draws(scene, meshes_);
+    const ResolveDrawStats resolved = resolve_draws(scene, meshes_);
+    const std::size_t unresolvable = resolved.dropped;
     if (unresolvable != 0) {
         unresolvable_draws_ += unresolvable;
         if (!warned_unresolvable_mesh_) {

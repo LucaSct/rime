@@ -60,7 +60,11 @@ void record_draws(rhi::CommandBuffer& cmd, const SceneDrawData& data, bool bind_
             cmd.bind_texture(5, data.occlusion_textures[i], data.material_sampler);
             cmd.bind_texture(6, data.emissive_textures[i], data.material_sampler);
         }
-        cmd.draw_indexed(mesh.index_count);
+        // The submesh range, not the whole mesh (m16.2). Every DrawItem carries one, because
+        // MeshRegistry::add guarantees at least one range per mesh and extraction emits one draw
+        // per range — so a single-material mesh takes the identical path with first_index 0 and
+        // index_count == the whole buffer, and renders byte-identically to before.
+        cmd.draw_indexed(item.index_count, 1, item.first_index);
     }
 }
 

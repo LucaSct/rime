@@ -106,12 +106,34 @@ inline constexpr std::uint32_t kDrawUniformStride = 256;
 static_assert(sizeof(GpuDrawUniforms) <= kDrawUniformStride);
 
 // ── The draw list ─────────────────────────────────────────────────────────────────────────────
-// One drawable thing, fully resolved to registry ids + a world matrix. This is what scene
-// extraction produces and what the geometry passes consume — deliberately flat and GPU-agnostic.
+// One recorded draw: a RANGE of one mesh, with one material, at one transform. This is what scene
+// extraction (plus `resolve_draws`) produces and what the geometry passes consume — deliberately
+// flat and GPU-agnostic.
+//
+// The shape is fixed here deliberately and once (ADR-0039 ruling 3). Three separate bricks in M16
+// consume this struct — per-submesh draws, masked depth, and double-sided materials — and each of
+// them would otherwise widen it and rewrite `record_draws` and the seven arrays that travel
+// alongside a draw list. Adding the fields together costs nothing while they are unused.
 struct DrawItem {
     MeshId mesh = kInvalidMeshId;
     MaterialId material = kInvalidMaterialId;
     core::Mat4 model;
+
+    // The submesh range within `mesh` (m16.2). Defaults draw nothing on their own — extraction
+    // always fills these from the mesh's table, which `MeshRegistry::add` guarantees is non-empty.
+    std::uint32_t first_index = 0;
+    std::uint32_t index_count = 0;
+
+    // Per-draw pipeline selectors, so a geometry pass can partition its list once rather than
+    // branching per draw. Set from the material by the renderer; unused until the bricks that
+    // consume them land.
+    enum Flags : std::uint32_t {
+        None = 0,
+        AlphaMasked = 1u << 0, // needs the alpha-testing depth variant (m16.4)
+        DoubleSided = 1u << 1, // needs cull-mode off (m16.5)
+    };
+
+    std::uint32_t flags = None;
 };
 
 // Everything the geometry passes need to record their draws. The spans/pointers are BORROWED and

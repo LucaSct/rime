@@ -34,12 +34,33 @@ struct MeshVertex {
     float tx = 1.0f, ty = 0.0f, tz = 0.0f, tw = 1.0f;
 };
 
+// One contiguous run of indices drawn with one material (m16.2, ADR-0039 ruling 2).
+//
+// A glTF file with three materials cooks to ONE mesh with three of these, and the cook has emitted
+// them since `Mesh::from_primitives` existed. Until this brick the renderer dropped them at
+// `mesh_from_cooked`, because `CpuMesh` had no field they could live in — so a multi-material
+// object rendered entirely in one material, and "split by material" was something the author had
+// to do at the Blender-object level.
+//
+// `material_slot` is an index into the SOURCE's material list, not a runtime `MaterialId`: the
+// runtime id is resolved per instance through the manifest's `#materialN` convention, because a
+// cooked mesh must not embed ids that change when a texture is recompressed (see ADR-0039).
+struct SubmeshRange {
+    std::uint32_t first_index = 0;
+    std::uint32_t index_count = 0;
+    std::uint32_t material_slot = 0;
+};
+
 // The CPU-side mesh: an indexed triangle list. Indices are 32-bit throughout — 16-bit halves the
 // bandwidth for small meshes, but one index format keeps every path simple until a measurement
 // says otherwise (measure before optimize).
 struct CpuMesh {
     std::vector<MeshVertex> vertices;
     std::vector<std::uint32_t> indices;
+    // Empty means "one submesh covering everything" — `MeshRegistry::add` synthesises it, so every
+    // uploaded mesh has at least one range and no draw path needs a special case. Procedural
+    // primitives leave it empty; cooked meshes carry the cook's table.
+    std::vector<SubmeshRange> submeshes;
 };
 
 // ── Procedural primitives ─────────────────────────────────────────────────────────────────
@@ -120,6 +141,16 @@ struct GpuMesh {
     // box is always valid for a live id.
     core::Vec3 local_min{0.0f, 0.0f, 0.0f};
     core::Vec3 local_max{0.0f, 0.0f, 0.0f};
+
+    // ALWAYS AT LEAST ONE (m16.2). `add` synthesises a whole-mesh range when the CpuMesh carries no
+    // table, so extraction can loop unconditionally rather than branching on "does this mesh have
+    // submeshes". Every range is validated against `index_count` at upload, so a draw built from
+    // one is in bounds by construction.
+    //
+    // Culling uses the WHOLE-MESH bounds above for every submesh of a mesh. That is conservative in
+    // the safe direction — a submesh can only be drawn when it might have been visible anyway — and
+    // per-submesh bounds are a later optimisation with a measurement attached.
+    std::vector<SubmeshRange> submeshes;
 };
 
 // Owns every mesh's GPU buffers; hands out dense MeshIds. Host-visible uploads for M5 (the same
@@ -154,6 +185,11 @@ public:
 
     [[nodiscard]] std::size_t size() const noexcept { return meshes_.size(); }
 
+    // Submesh ranges `add` refused because they fell outside their mesh's index buffer, cumulative.
+    // A dropped range means part of a mesh is not being drawn, which looks exactly like content
+    // that was authored that way — so it is counted rather than merely logged.
+    [[nodiscard]] std::size_t rejected_submeshes() const noexcept { return rejected_submeshes_; }
+
     // The vertex layout every registry mesh shares — what pipelines drawing these meshes declare.
     [[nodiscard]] static std::span<const rhi::VertexAttribute> vertex_attributes() noexcept;
 
@@ -164,6 +200,7 @@ public:
 private:
     rhi::Device& device_;
     std::vector<GpuMesh> meshes_;
+    std::size_t rejected_submeshes_ = 0;
 };
 
 } // namespace rime::render
