@@ -170,8 +170,13 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/lsan-suppressions.txt
+        # --no-tests=error because `ctest -R <pattern that matches nothing>` prints
+        # "No tests were found!!!" and exits ZERO (measured, ctest 4.4.2). These steps select by
+        # name regex against an already-built tree, so renaming a target would silently empty the
+        # step and leave it green — a sanitizer job that runs no tests is indistinguishable from
+        # one that found no problems. Same class as the bug #167 fixed for the Windows build.
         run: >-
-          ctest --test-dir build/dev --output-on-failure -R
+          ctest --test-dir build/dev --output-on-failure --no-tests=error -R
           'rime_core_tests|rime_ecs_tests|rime_physics_tests|rime_assets_tests|rime_destruction_tests|rime_capi_tests'
 
   sanitize-thread:
@@ -246,8 +251,9 @@ jobs:
       - name: Run core + ecs + assets tests under TSan
         env:
           TSAN_OPTIONS: halt_on_error=1
+        # --no-tests=error: see the LeakSanitizer step above — an empty name filter exits 0.
         run: ctest --test-dir build/dev -R 'rime_core_tests|rime_ecs_tests|rime_assets_tests'
-          --output-on-failure
+          --output-on-failure --no-tests=error
 
   # The SDK proof (M6.8): the in-tree tests show the code works; this shows the *package* works —
   # that a downstream project can install Rime, find_package(rime CONFIG), link rime::*, and build
