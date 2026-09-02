@@ -57,6 +57,11 @@ struct PbrMaterialDesc {
     // aggregate-initialises past `roughness` (the hazard the note at the top of this struct names).
     float alpha_cutoff = 0.0f;
 
+    // m16.5. Both cooked from glTF, and both dropped entirely before that brick: every surface was
+    // back-face culled and every texture repeated, whatever the author asked for.
+    bool double_sided = false; // draw both faces — foliage cards, cloth, thin geometry
+    bool clamp_uv = false;     // sample with ClampToEdge, not Repeat: atlases and trim sheets
+
     // Optional maps, each driving / multiplied with its factor above (the glTF convention; the
     // fallback is the identity). BORROWED, not owned: the caller keeps them alive as long as any
     // material references them — ownership stays wherever the pixels came from until the M6 loader

@@ -204,9 +204,16 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     cb.attachmentCount = color_count;
     cb.pAttachments = blends.data();
 
-    const VkDynamicState dyn_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    // VK_DYNAMIC_STATE_CULL_MODE (m16.5, ADR-0039) joins viewport and scissor. Vulkan 1.3 core, so
+    // no extension or feature check is needed — and it is the alternative to a pipeline
+    // PERMUTATION EXPLOSION: the forward pass already bakes six variants, and making cull a
+    // compile-time axis would make twelve, plus four in the depth pass. `desc.cull` stays the
+    // pipeline's default, which every existing caller keeps getting; only a caller that actually
+    // has double-sided materials ever issues set_cull_mode.
+    const VkDynamicState dyn_states[] = {
+        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE};
     VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dyn.dynamicStateCount = 2;
+    dyn.dynamicStateCount = 3;
     dyn.pDynamicStates = dyn_states;
 
     // Descriptor set-0 layout (ADR-0020): built from the pipeline's declared binding list — or
@@ -286,6 +293,9 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
 
     VulkanPipeline p;
     p.layout = layout;
+    // Remembered so bind_pipeline can replay it: cull is dynamic state on every graphics pipeline
+    // (m16.5), so the static default has to be re-applied at bind time.
+    p.cull = rs.cullMode;
     p.set_layout = set_layout;
     p.bindings = std::move(bindings);
     p.push_constant_stages = desc.push_constant_size > 0 ? pc_stages : 0;

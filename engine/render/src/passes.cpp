@@ -67,11 +67,17 @@ void record_draws(rhi::CommandBuffer& cmd,
             // The five material maps (fallbacks already resolved by the SceneRenderer), bindings
             // 2–6 matching pbr_forward.frag. The depth pre-pass skips them — it has no fragment
             // shader.
-            cmd.bind_texture(2, data.base_color_textures[i], data.material_sampler);
-            cmd.bind_texture(3, data.metallic_roughness_textures[i], data.material_sampler);
-            cmd.bind_texture(4, data.normal_textures[i], data.material_sampler);
-            cmd.bind_texture(5, data.occlusion_textures[i], data.material_sampler);
-            cmd.bind_texture(6, data.emissive_textures[i], data.material_sampler);
+            // The clamp sampler for a material that asked for it (m16.5). One sampler served all
+            // five slots with AddressMode::Repeat, so every atlas and trim sheet bled its far edge
+            // into its near one — worst at coarse mips, where the bleed is widest.
+            const rhi::SamplerHandle sampler = ((item.flags & DrawItem::ClampUv) != 0)
+                                                   ? data.clamp_sampler
+                                                   : data.material_sampler;
+            cmd.bind_texture(2, data.base_color_textures[i], sampler);
+            cmd.bind_texture(3, data.metallic_roughness_textures[i], sampler);
+            cmd.bind_texture(4, data.normal_textures[i], sampler);
+            cmd.bind_texture(5, data.occlusion_textures[i], sampler);
+            cmd.bind_texture(6, data.emissive_textures[i], sampler);
         }
         // The submesh range, not the whole mesh (m16.2). Every DrawItem carries one, because
         // MeshRegistry::add guarantees at least one range per mesh and extraction emits one draw
@@ -178,18 +184,39 @@ void DepthPrepass::add(RenderGraph& graph,
             // variant. Without the second half, depth is written for texels the forward pass
             // discards and everything behind a masked hole fails CompareOp::Equal — the hole
             // renders as clear colour, in the PRIMARY view.
+            // Four partitions: {opaque, masked} x {single-sided, double-sided}. The cull half is
+            // NOT optional here even though the pre-pass writes no colour: the forward pass tests
+            // CompareOp::Equal, so a face the pre-pass culled has no depth for the forward pass to
+            // match and is never shaded. A double-sided material culled here is invisible there.
             cmd.bind_pipeline(pipe);
+            cmd.set_cull_mode(rhi::CullMode::Back);
             record_draws(cmd,
                          data,
                          /*bind_material_textures=*/false,
-                         DrawItem::AlphaMasked,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
                          0);
+            cmd.set_cull_mode(rhi::CullMode::None);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/false,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
+                         DrawItem::DoubleSided);
             cmd.bind_pipeline(masked);
+            // Masked geometry is overwhelmingly foliage, which is also where double-sided lives —
+            // so the depth pass honours the same cull flag. A card whose back face is culled here
+            // would write no depth from behind and shade inconsistently with the forward pass.
+            cmd.set_cull_mode(rhi::CullMode::Back);
             record_draws(cmd,
                          data,
                          /*bind_material_textures=*/true,
-                         DrawItem::AlphaMasked,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
                          DrawItem::AlphaMasked);
+            cmd.set_cull_mode(rhi::CullMode::None);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/true,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided);
         });
 }
 
@@ -355,7 +382,18 @@ void ForwardPbrPass::add(RenderGraph& graph,
         depth_prepassed ? pipeline_after_prepass_ : pipeline_standalone_;
     graph.add_raster_pass("forward-pbr", desc, [pipe, data](rhi::CommandBuffer& cmd) {
         cmd.bind_pipeline(pipe);
-        record_draws(cmd, data, /*bind_material_textures=*/true);
+        // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
+        // overwhelming majority and the byte-identical old path — then the double-sided draws with
+        // culling off. Dynamic state rather than a second pipeline: the forward pass already bakes
+        // six variants, and a cull axis would make twelve (ADR-0039).
+        cmd.set_cull_mode(rhi::CullMode::Back);
+        record_draws(cmd, data, /*bind_material_textures=*/true, DrawItem::DoubleSided, 0);
+        cmd.set_cull_mode(rhi::CullMode::None);
+        record_draws(cmd,
+                     data,
+                     /*bind_material_textures=*/true,
+                     DrawItem::DoubleSided,
+                     DrawItem::DoubleSided);
     });
 }
 
@@ -423,7 +461,18 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
             cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
             cmd.bind_uniform_buffer(16, ddgi.ubo);
-            record_draws(cmd, data, /*bind_material_textures=*/true);
+            // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
+            // overwhelming majority and the byte-identical old path — then the double-sided draws
+            // with culling off. Dynamic state rather than a second pipeline: the forward pass
+            // already bakes six variants, and a cull axis would make twelve (ADR-0039).
+            cmd.set_cull_mode(rhi::CullMode::Back);
+            record_draws(cmd, data, /*bind_material_textures=*/true, DrawItem::DoubleSided, 0);
+            cmd.set_cull_mode(rhi::CullMode::None);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/true,
+                         DrawItem::DoubleSided,
+                         DrawItem::DoubleSided);
         });
 }
 

@@ -34,6 +34,8 @@ PbrMaterialDesc material_from_cooked(const assets::MaterialAsset& m) noexcept {
     // Only Mask discards; Opaque and Blend both leave the cutoff at zero, which the shader reads as
     // "never mask". See the header for why one float expresses all three modes.
     d.alpha_cutoff = m.alpha_mode == assets::AlphaMode::Mask ? m.alpha_cutoff : 0.0f;
+    d.double_sided = m.double_sided;
+    d.clamp_uv = m.clamp_uv;
     return d;
 }
 

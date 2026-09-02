@@ -53,6 +53,14 @@ pub struct Material {
     pub occlusion_strength: f32,
     pub alpha_cutoff: f32,
     pub alpha_mode: AlphaMode,
+    /// Draw both faces (glTF `doubleSided`). Foliage cards, cloth, thin geometry — anything whose
+    /// back is meant to be seen. Dropped entirely by the cook before m16.5, so every surface the
+    /// engine drew was back-face culled regardless of what the author asked for.
+    pub double_sided: bool,
+    /// The base-colour sampler CLAMPS rather than repeats (glTF sampler `wrapS`/`wrapT`). Matters
+    /// for atlases and trim sheets, where a repeating sampler bleeds the far edge of the sheet into
+    /// the near one at every mip level.
+    pub clamp_uv: bool,
     /// Texture references, each the `AssetId` of a cooked texture (0 = none, use the fallback).
     pub base_color_tex: u64,
     pub metallic_roughness_tex: u64,
@@ -73,6 +81,9 @@ impl Default for Material {
             occlusion_strength: 1.0,
             alpha_cutoff: 0.5,
             alpha_mode: AlphaMode::Opaque,
+            // Both are the glTF defaults: single-sided, repeating.
+            double_sided: false,
+            clamp_uv: false,
             base_color_tex: 0,
             metallic_roughness_tex: 0,
             normal_tex: 0,
@@ -105,6 +116,10 @@ impl Material {
         p.u64(self.normal_tex);
         p.u64(self.occlusion_tex);
         p.u64(self.emissive_tex);
+        // m16.5, appended: two u32 flags rather than bytes, so the record stays 4-byte aligned and
+        // the wire keeps its "every field is 4 or 8 bytes" shape.
+        p.u32(u32::from(self.double_sided));
+        p.u32(u32::from(self.clamp_uv));
         wrap_container(ASSET_KIND_MATERIAL, MATERIAL_SCHEMA_HASH, &p.into_vec())
     }
 }
@@ -126,6 +141,10 @@ mod tests {
             occlusion_strength: 0.75,
             alpha_cutoff: 0.3,
             alpha_mode: AlphaMode::Mask,
+            // Both non-default, so the round trip proves each landed in its own field rather than
+            // both reading as the glTF default.
+            double_sided: true,
+            clamp_uv: true,
             base_color_tex: 0x1111_1111_1111_1111,
             metallic_roughness_tex: 0x2222_2222_2222_2222,
             normal_tex: 0x3333_3333_3333_3333,
@@ -146,7 +165,7 @@ mod tests {
         assert_eq!(header.asset_kind, ASSET_KIND_MATERIAL);
         assert_eq!(header.type_schema_hash, MATERIAL_SCHEMA_HASH);
         // A material is a fixed record: 12 f32 + 1 u32 factors (52 bytes) + 5 u64 texture ids (40).
-        assert_eq!(payload.len(), 92);
+        assert_eq!(payload.len(), 100); // 92 factors/refs + the two m16.5 u32 flags
     }
 
     #[test]
@@ -154,7 +173,7 @@ mod tests {
         // The cross-language contract in one line: the engine's material_schema_hash() returns this
         // exact value (pinned in cooked_material_test.cpp). If the C++ MaterialV1 record ever changes,
         // that test and this constant diverge until both are updated together.
-        assert_eq!(MATERIAL_SCHEMA_HASH, 0x8436_DE4E_4E0F_E575);
+        assert_eq!(MATERIAL_SCHEMA_HASH, 0x94E3_32EC_B509_4E4F);
     }
 
     #[test]

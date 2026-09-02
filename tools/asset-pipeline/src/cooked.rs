@@ -33,7 +33,7 @@ pub const CONTAINER_VERSION: u16 = 1;
 /// tangent basis, a mip-filter change, a schema-hash update), so a stale cache re-cooks instead of
 /// serving outdated bytes. Kept independent of `CARGO_PKG_VERSION`, which tracks releases, not cook
 /// semantics.
-pub const COOKER_VERSION: u32 = 1;
+pub const COOKER_VERSION: u32 = 2; // m16.5: the material schema gained double_sided + clamp_uv
 
 /// `asset_kind` wire value for a mesh (matches `engine/assets/asset_id.hpp`; append, never renumber).
 pub const ASSET_KIND_MESH: u16 = 1;
@@ -69,7 +69,7 @@ pub const TEXTURE_SCHEMA_HASH: u64 = 0x3728_A3AA_75B7_B335;
 /// Same contract as the mesh/texture hashes — the cooker embeds it, the reader rejects a mismatch — so
 /// the two languages agree on the cooked-material layout by construction. Update in lockstep with the
 /// engine if the material record ever gains, loses, or reorders a field.
-pub const MATERIAL_SCHEMA_HASH: u64 = 0x8436_DE4E_4E0F_E575;
+pub const MATERIAL_SCHEMA_HASH: u64 = 0x94E3_32EC_B509_4E4F;
 
 /// The skeleton schema fingerprint: the reflection `type_hash` of the v1 per-joint record (parent,
 /// name hash, inverse-bind matrix, bind-pose TRS), computed and pinned by the C++ engine

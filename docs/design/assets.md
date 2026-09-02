@@ -97,9 +97,11 @@ u64   metallic_roughness_tex AssetId                       (0 = none)
 u64   normal_tex             AssetId                       (0 = none)
 u64   occlusion_tex          AssetId                       (0 = none)
 u64   emissive_tex           AssetId                       (0 = none)
+u32   double_sided           glTF `doubleSided`            (m16.5; 0 = cull back faces)
+u32   clamp_uv               base-colour sampler clamps    (m16.5; 0 = repeat)
 ```
 
-A material is a **fixed 92-byte record** — no variable-length tail — so the reader reads it straight
+A material is a **fixed 100-byte record** — no variable-length tail — so the reader reads it straight
 through and requires exactly that length (no short read, no trailing bytes). It is the metallic-
 roughness parameter set (the shared vocabulary of glTF/UE/Unity/Frostbite) plus **references** to the
 textures that drive it. A texture slot is not pixels but an `AssetId` — the content hash of an already-
@@ -333,7 +335,8 @@ a future *pixel format* is an appended `TextureFormat` value (old files stay val
 change, so it needs no re-cook.
 
 Materials use it too, and here the fingerprinted record is the **whole** payload (a material has no
-variable-length tail): the factor and texture-reference fields, pinned at `0x8436DE4E4E0FE575`. Both
+variable-length tail): the factor and texture-reference fields plus the m16.5 flags, pinned at
+`0x94E332ECB5094E4F`. Both
 languages embed that constant, so the cooked-material format agrees across the C++ reader and the Rust
 `material.rs` cooker by construction. Adding a material property later (a new factor, a KHR-extension
 knob) changes the fingerprint — a deliberate re-cook — which is why the container leaves room for the

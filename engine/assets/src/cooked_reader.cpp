@@ -65,6 +65,10 @@ struct MaterialV1 {
     std::uint64_t normal_tex;
     std::uint64_t occlusion_tex;
     std::uint64_t emissive_tex;
+    // m16.5. Appended, which bumps material_schema_hash and forces a deliberate re-cook -- the
+    // point of deriving the fingerprint from the field set rather than hand-maintaining a version.
+    std::uint32_t double_sided; // glTF `doubleSided`, dropped entirely by the cook until now
+    std::uint32_t clamp_uv;     // the base-colour sampler clamps rather than repeats
 };
 
 // The v1 cooked-skeleton per-joint record, reflected for the same reason the records above are: so
@@ -183,6 +187,8 @@ RIME_REFLECT_FIELD(metallic_roughness_tex)
 RIME_REFLECT_FIELD(normal_tex)
 RIME_REFLECT_FIELD(occlusion_tex)
 RIME_REFLECT_FIELD(emissive_tex)
+RIME_REFLECT_FIELD(double_sided)
+RIME_REFLECT_FIELD(clamp_uv)
 RIME_REFLECT_END()
 
 RIME_REFLECT_BEGIN(rime::assets::detail::SkeletonJointV1)
@@ -596,6 +602,8 @@ std::optional<MaterialAsset> decode_material(std::span<const std::byte> payload,
     std::uint64_t normal_tex = 0;
     std::uint64_t occlusion_tex = 0;
     std::uint64_t emissive_tex = 0;
+    std::uint32_t double_sided_raw = 0;
+    std::uint32_t clamp_uv_raw = 0;
 
     // A material is a fixed record with no variable-length tail: read every field in wire order.
     // This order IS the format — it must match detail::MaterialV1 (which fingerprints it) and the
@@ -607,7 +615,8 @@ std::optional<MaterialAsset> decode_material(std::span<const std::byte> payload,
         !reader.f32(mat.normal_scale) || !reader.f32(mat.occlusion_strength) ||
         !reader.f32(mat.alpha_cutoff) || !reader.u32(alpha_mode_raw) ||
         !reader.u64(base_color_tex) || !reader.u64(metallic_roughness_tex) ||
-        !reader.u64(normal_tex) || !reader.u64(occlusion_tex) || !reader.u64(emissive_tex)) {
+        !reader.u64(normal_tex) || !reader.u64(occlusion_tex) || !reader.u64(emissive_tex) ||
+        !reader.u32(double_sided_raw) || !reader.u32(clamp_uv_raw)) {
         out_error = AssetError::Truncated;
         return std::nullopt;
     }
@@ -652,6 +661,11 @@ std::optional<MaterialAsset> decode_material(std::span<const std::byte> payload,
     mat.normal_tex = AssetId{normal_tex};
     mat.occlusion_tex = AssetId{occlusion_tex};
     mat.emissive_tex = AssetId{emissive_tex};
+    // Any nonzero value is true. Not range-checked to {0,1}: unlike alpha_mode, where an unknown
+    // value would name a behaviour that does not exist, a flag has only two behaviours and every
+    // bit pattern maps onto one of them.
+    mat.double_sided = double_sided_raw != 0;
+    mat.clamp_uv = clamp_uv_raw != 0;
     return mat;
 }
 

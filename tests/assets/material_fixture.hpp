@@ -47,6 +47,11 @@ struct MaterialFileBuilder {
     std::uint64_t occlusion_tex = 0;
     std::uint64_t emissive_tex = 0x5555'5555'5555'5555ULL;
 
+    // m16.5, appended to match the wire. Both non-default so a round trip proves each landed in its
+    // own field rather than both reading as the glTF default.
+    std::uint32_t double_sided = 1;
+    std::uint32_t clamp_uv = 1;
+
     std::vector<std::byte> trailing; // extra bytes counted into the payload (the over-long case)
 
     [[nodiscard]] std::vector<std::byte> build_payload() const {
@@ -70,6 +75,8 @@ struct MaterialFileBuilder {
         w.u64(normal_tex);
         w.u64(occlusion_tex);
         w.u64(emissive_tex);
+        w.u32(double_sided);
+        w.u32(clamp_uv);
         w.bytes(trailing);
         return payload;
     }

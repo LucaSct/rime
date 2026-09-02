@@ -111,7 +111,7 @@ TEST_CASE("material_schema_hash is the reflected v1 material layout: stable, non
     // guard (a change to the record or the hashing must be deliberate) and as the exact constant
     // the Rust cooker embeds — the cross-language golden-fixture test checks that the cooker and
     // this reader agree on it. Distinct from the mesh and texture hashes (different records).
-    CHECK(material_schema_hash() == 0x8436DE4E4E0FE575ULL);
+    CHECK(material_schema_hash() == 0x94E332ECB5094E4FULL);
     CHECK(material_schema_hash() != mesh_schema_hash());
     CHECK(material_schema_hash() != texture_schema_hash());
 }
