@@ -55,9 +55,19 @@ void DestructionWorld::Impl::retire_debris(std::size_t debris_index) {
 }
 
 std::size_t DestructionWorld::Impl::live_debris_count() const noexcept {
+    // "Live" means HOLDING A PHYSICS BODY — the resource the cap exists to bound. Written as an
+    // allow-list of the two phases that do, rather than as "not Frozen", because the deny-list
+    // form was written when Frozen was the only bodyless phase and silently acquired a second one
+    // when Retired arrived (m13.2b): a Retired row has no body, can never leave this count, and
+    // the cap pass only ever accepts Settled rows as victims. At block scale (m13.p measured 667+
+    // debris rows against a 128 cap and a 512 visual budget) more than 128 rows end up Retired, so
+    // the budget loop would be permanently over its cap and freeze every debris the tick it
+    // settled — bypassing the whole 120-tick linger, and making settled rubble non-interactive the
+    // instant it stopped moving. An allow-list cannot rot the same way: a new bodyless phase has
+    // to be added here deliberately.
     std::size_t n = 0;
     for (const Debris& d : debris) {
-        if (d.phase != DebrisPhase::Frozen) {
+        if (d.phase == DebrisPhase::Falling || d.phase == DebrisPhase::Settled) {
             ++n;
         }
     }

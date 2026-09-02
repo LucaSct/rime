@@ -387,3 +387,68 @@ TEST_CASE("M7.7 impulse: an impulse wakes a sleeping body; a static body ignores
     CHECK(as.linear_velocity.x == doctest::Approx(0.0f));
     CHECK(as.angular_velocity.z == doctest::Approx(0.0f));
 }
+
+TEST_CASE("m15.6b completion: a sensor is invisible to queries unless asked for") {
+    // m15.6b made `Collider::sensor` real to the SOLVER — a trigger volume reports overlaps and
+    // takes no impulse. But the flag was read in exactly two places in the runtime (the constraint
+    // skip and the event classification) and no query path consulted it, so a trigger was a
+    // trigger to the solver and a SOLID WALL to raycast, shape_cast, penetration and
+    // overlap_sphere. A designer ticking `sensor` on a doorway volume to detect the player walking
+    // through it got an invisible box the player bonks into, cannot enter, and cannot shoot past.
+    physics::PhysicsWorld w;
+
+    physics::BodyDesc trigger;
+    trigger.motion = physics::MotionType::Static;
+    trigger.shape = box({1.0f, 1.0f, 1.0f});
+    trigger.position = {0.0f, 0.0f, 0.0f};
+    trigger.sensor = true;
+    const physics::BodyId volume = w.create_body(trigger);
+
+    // A solid wall BEHIND the trigger, so "the ray reached something" is distinguishable from "the
+    // ray hit nothing at all" — without it a broken filter that drops every body would pass.
+    const physics::BodyId wall =
+        add(w, box({1.0f, 1.0f, 0.5f}), {0.0f, 0.0f, -5.0f}, physics::MotionType::Static);
+
+    physics::Ray ray;
+    ray.origin = {0.0f, 0.0f, 5.0f};
+    ray.direction = {0.0f, 0.0f, -1.0f};
+    ray.max_distance = 20.0f;
+
+    SUBCASE("by default the ray passes through the trigger and hits what is behind it") {
+        physics::RayHit hit;
+        REQUIRE(w.raycast(ray, hit));
+        CHECK(hit.body == wall); // NOT the trigger sitting 4 m nearer the origin
+    }
+    SUBCASE("asking for sensors finds the trigger, which is what makes the default meaningful") {
+        physics::QueryFilter f;
+        f.sensors = true;
+        physics::RayHit hit;
+        REQUIRE(w.raycast(ray, hit, f));
+        CHECK(hit.body == volume); // the nearer body, once it is admitted
+    }
+    SUBCASE("penetration ignores a sensor, so a controller is never pushed out of a trigger") {
+        // Query shape fully inside the trigger volume and clear of the wall.
+        physics::PenetrationHit hit;
+        CHECK_FALSE(
+            w.penetration(box({0.2f, 0.2f, 0.2f}), {0.0f, 0.0f, 0.0f}, core::quat_identity(), hit));
+
+        physics::QueryFilter f;
+        f.sensors = true;
+        CHECK(w.penetration(
+            box({0.2f, 0.2f, 0.2f}), {0.0f, 0.0f, 0.0f}, core::quat_identity(), hit, f));
+        CHECK(hit.body == volume);
+    }
+    SUBCASE("a NON-sensor body in the same place is still hit — the flag is what matters") {
+        // The control that stops this whole case passing against "queries ignore static boxes".
+        physics::PhysicsWorld plain;
+        physics::BodyDesc solid;
+        solid.motion = physics::MotionType::Static;
+        solid.shape = box({1.0f, 1.0f, 1.0f});
+        solid.position = {0.0f, 0.0f, 0.0f};
+        solid.sensor = false;
+        const physics::BodyId blocker = plain.create_body(solid);
+        physics::RayHit hit;
+        REQUIRE(plain.raycast(ray, hit));
+        CHECK(hit.body == blocker);
+    }
+}

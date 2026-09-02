@@ -106,6 +106,59 @@ TEST_CASE("m13.2a: a transformed box is bounded conservatively") {
     CHECK(mx.z == doctest::Approx(1.0f)); // untouched by a Z rotation
 }
 
+TEST_CASE("an out-of-range MeshRef is dropped and counted, not used to index the registry") {
+    // A MeshRef is a dense index into a RUNTIME registry, but it reaches the World from a
+    // `.rscene` on disk — untrusted input, where the reader validates the field is a u32 and never
+    // that it names a mesh anything holds. Guarding the sentinel alone leaves 4 billion values
+    // that index a std::vector out of bounds; the garbage GpuMesh's buffer handles then reach the
+    // RHI. Materials were already range-guarded here and meshes were not, which is how the
+    // asymmetry survived.
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping mesh-id range proof");
+        return;
+    }
+
+    MeshRegistry meshes(*device);
+    const MeshId only = meshes.add(make_cube(0.5f), "range-cube");
+    REQUIRE(only != kInvalidMeshId);
+    REQUIRE(meshes.size() == 1);
+
+    CHECK(meshes.contains(only));
+    CHECK_FALSE(meshes.contains(kInvalidMeshId)); // the sentinel, which was already caught
+    CHECK_FALSE(meshes.contains(1));              // one past the end
+    CHECK_FALSE(meshes.contains(4000000000u));    // and the hand-edited-scene case
+
+    // A scene carrying one good draw and two unresolvable ones, in a deliberately awkward order so
+    // the compaction is exercised rather than a simple truncation.
+    ExtractedScene scene;
+    scene.draws.push_back({4000000000u, 0, core::Mat4{}});
+    scene.draw_entities.push_back(ecs::Entity{});
+    scene.draws.push_back({only, 0, core::Mat4{}});
+    scene.draw_entities.push_back(ecs::Entity{});
+    scene.draws.push_back({1, 0, core::Mat4{}});
+    scene.draw_entities.push_back(ecs::Entity{});
+
+    const std::size_t dropped = drop_unresolvable_draws(scene, meshes);
+
+    CHECK(dropped == 2);
+    REQUIRE(scene.draws.size() == 1);
+    CHECK(scene.draws[0].mesh == only); // the survivor is the one that resolves
+    // The parallel array must stay parallel, or the pick pass maps pixels to the wrong entity.
+    CHECK(scene.draw_entities.size() == scene.draws.size());
+
+    // NEGATIVE CONTROL: a scene of entirely valid draws must come through untouched. Without this
+    // the assertions above pass just as well against a function that drops everything.
+    ExtractedScene clean;
+    clean.draws.push_back({only, 0, core::Mat4{}});
+    clean.draw_entities.push_back(ecs::Entity{});
+    CHECK(drop_unresolvable_draws(clean, meshes) == 0);
+    CHECK(clean.draws.size() == 1);
+}
+
 TEST_CASE("m13.2a: culling is invisible — on and off render byte-identical pixels") {
     // THE HEADLINE. Culling's contract is that it removes only draws that could not have
     // contributed a pixel, so the honest proof is not "off is the old baseline" but "ON IS OFF".

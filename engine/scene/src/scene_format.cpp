@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -287,7 +288,19 @@ template <class T> bool parse_number(std::string_view tok, T& out) {
         } else {
             out = std::strtod(c, &end);
         }
-        return errno == 0 && end == c + buf.size();
+        // ERANGE MEANS TWO DIFFERENT THINGS AND ONLY ONE OF THEM IS AN ERROR. glibc raises it for
+        // overflow AND for underflow, but the outcomes could not be less alike: on overflow strtof
+        // returns ±HUGE_VALF and the value is simply wrong, while on underflow it returns the
+        // correctly-rounded subnormal (or zero) — the exactly right answer, flagged only because
+        // it is inexact-by-representation. Treating both as failure made the reader refuse floats
+        // its OWN writer emits: drag a scale toward zero in the inspector, save, and the scene
+        // would never load again, in the game or the editor. Measured: strtof("1e-39") returns the
+        // exact value with errno = ERANGE; strtof("1e40") returns inf with the same flag. The
+        // finiteness of the result is what separates them.
+        if (errno == ERANGE && !std::isfinite(out)) {
+            return false; // genuine overflow: the value is lost, not merely denormal
+        }
+        return (errno == 0 || errno == ERANGE) && end == c + buf.size();
     }
 }
 

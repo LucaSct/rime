@@ -198,6 +198,54 @@ TEST_CASE("scene: floats round-trip to the exact same bits and the writer is sta
     CHECK(t1 == t2);
 }
 
+TEST_CASE("scene: a subnormal float survives the round trip; an overflowing one is still refused") {
+    // The reader used to require errno == 0 after strtof, and glibc raises ERANGE for underflow as
+    // well as overflow. But the two are opposites: on underflow strtof returns the correctly-
+    // rounded subnormal — the exactly right value — while on overflow it returns inf and the value
+    // is gone. Refusing both meant the reader rejected floats its own writer had just emitted, so
+    // dragging a scale toward zero in the inspector produced a scene file that would never load
+    // again. Only the finiteness of the result tells the two cases apart.
+    ecs::World src;
+    ecs::register_transform_components(src);
+    render::register_render_components(src);
+
+    // 1e-39f is subnormal for IEEE binary32 (the smallest normal is ~1.18e-38).
+    constexpr float kSubnormal = 1e-39f;
+    REQUIRE(kSubnormal != 0.0f);           // it really is representable...
+    REQUIRE(kSubnormal < 1.17549435e-38f); // ...and really is below the normal minimum
+    (void)src.spawn_with(render::PointLight{0.1f, 0.2f, 0.3f, kSubnormal, 1.0f});
+
+    const std::string text = scene::save_scene_to_string(src);
+    ecs::World dst;
+    ecs::register_transform_components(dst);
+    render::register_render_components(dst);
+    const auto result = scene::load_scene_from_string(dst, text);
+    REQUIRE_MESSAGE(result.ok, "the writer's own output must reload: " << result.error);
+
+    bool seen = false;
+    dst.query<render::PointLight>().for_each([&](ecs::Entity, render::PointLight& l) {
+        CHECK(l.intensity == kSubnormal); // exact bits, not merely "close to zero"
+        seen = true;
+    });
+    CHECK(seen);
+
+    // NEGATIVE CONTROL: overflow must STILL be refused. Without this the fix could have been
+    // "ignore errno entirely", which would silently turn an out-of-range literal into inf. Built
+    // by substituting into the writer's OWN output, so the file is valid in every other respect
+    // and the only thing under test is the one number.
+    const std::string radius_line = "radius 1";
+    const std::size_t at = text.find(radius_line);
+    REQUIRE(at != std::string::npos);
+    std::string overflowing = text;
+    overflowing.replace(at, radius_line.size(), "radius 1e40");
+
+    ecs::World bad;
+    ecs::register_transform_components(bad);
+    render::register_render_components(bad);
+    const auto bad_result = scene::load_scene_from_string(bad, overflowing);
+    CHECK_FALSE(bad_result.ok); // 1e40 does not fit a float: still an error, not an inf
+}
+
 TEST_CASE("scene: a hand-authored file loads, omitted fields keeping defaults") {
     // Deliberately messy: a comment, blank lines, extra spaces, only two of Camera's four fields.
     const std::string text = fmt::format(R"(# a hand-written scene

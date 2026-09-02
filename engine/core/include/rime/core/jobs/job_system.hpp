@@ -99,6 +99,12 @@ private:
     void execute(Job* job);
     void worker_main(int queue_index);
 
+    // A process-unique id, NOT `this`. The per-thread queue binding below is keyed on it because a
+    // destroyed JobSystem and a freshly constructed one can share an address, and a stale binding
+    // that silently started matching the new system would reintroduce exactly the bug the binding
+    // exists to prevent — with a wrong queue count, so it would index another system's worker
+    // deque. An id from a monotonic counter cannot be recycled.
+    std::uint64_t id_ = 0;
     unsigned num_workers_ = 0;
     std::atomic<bool> stop_{false};
     // One deque per worker, plus one for the submitting/main thread (the last index). Pointers so

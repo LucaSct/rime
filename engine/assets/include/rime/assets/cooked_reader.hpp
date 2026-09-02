@@ -58,7 +58,8 @@ enum class AssetError {
     InvalidLayout,   // mesh: attribute flags / stride / counts are internally inconsistent
     IndexOutOfRange, // mesh: an index references a vertex that does not exist
     BadSubmesh,      // mesh: a submesh's [first, first+count) falls outside the index buffer
-    InvalidTexture,  // texture: unknown format, or a mip table inconsistent with the base extent
+    InvalidTexture,  // texture: unknown format, a mip table inconsistent with the base extent, or
+                     // an extent past the sanity ceiling (see decode_texture)
     InvalidMaterial, // material: unknown alpha mode, or a non-finite factor
     InvalidSkeleton, // skeleton: joints out of topological order, or a non-finite bind value
     InvalidClip,     // clip: bad channel path/interp, non-monotonic times, or a non-finite value

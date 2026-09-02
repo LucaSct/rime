@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <numeric>
 #include <span>
@@ -412,6 +413,10 @@ std::span<const DamageOp> DestructionWorld::committed_ops() const noexcept {
     return impl_->committed_ops;
 }
 
+std::uint64_t DestructionWorld::rejected_remote_ops() const noexcept {
+    return impl_->rejected_remote_ops;
+}
+
 void DestructionWorld::apply_remote_ops(std::span<const DamageOp> ops) {
     // Validation is deferred to update()'s stage 1, which is where the drops are documented and
     // where the instance table is about to be walked anyway. Queuing is deliberately dumb so that
@@ -490,14 +495,35 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
     // op and a local one can never land in the same run. Leading is simply the honest reading — on
     // a pure client every op in the tick is one of these, and the list is then byte-for-byte the
     // server's own.
+    // EVERY FIELD OF A REMOTE OP IS UNTRUSTED INPUT. These ops are decoded straight off the wire
+    // (destruction_net's DamageOps message), so this loop is the single chokepoint where a hostile
+    // or corrupt packet is stopped: the part index reaches `inst.health[part] -= amount` in stage 2
+    // and `fracture_instance` below, both of which index with vector::operator[] and would happily
+    // write outside the allocation. The local `apply_damage` path cannot carry a bad part id — it
+    // names a point and a radius and derives the parts itself — so validating here covers the whole
+    // surface. Each rejection is COUNTED rather than silently dropped: a mirror that quietly
+    // discards half the authority's ops looks exactly like one that is keeping up.
     for (const DamageOp& remote : impl.pending_remote_ops) {
         const std::uint32_t idx = remote.instance.index;
         if (!remote.instance.is_valid() || idx >= impl.instances.size()) {
+            ++impl.rejected_remote_ops;
             continue; // an instance this peer does not have (yet) — the op is dropped, and the
                       // state-application seam is what repairs a mirror that missed structure
         }
         if (impl.instances[idx].authority != Authority::Remote) {
+            ++impl.rejected_remote_ops;
             continue; // caller bug: nobody upstream owns this instance (see apply_remote_ops)
+        }
+        if (remote.part >= impl.instances[idx].alive.size()) {
+            ++impl.rejected_remote_ops;
+            continue; // out of range for THIS peer's copy of the pattern — never index with it
+        }
+        // A non-finite or negative amount is not a smaller version of a valid op, it is a different
+        // kind of thing: negative damage heals, and NaN health never compares <= 0.0f, so the part
+        // becomes permanently unkillable and poisons every state_hash it appears in.
+        if (!std::isfinite(remote.amount) || remote.amount < 0.0f) {
+            ++impl.rejected_remote_ops;
+            continue;
         }
         Impl::PendingOp op;
         op.instance = idx;

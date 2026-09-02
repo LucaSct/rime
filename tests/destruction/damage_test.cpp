@@ -8,7 +8,9 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -743,4 +745,63 @@ TEST_CASE("M8.3 cost: worst-case re-solve + swap on the 100-part wall (the ADR-0
                 standing,
                 update_us,
                 register_us);
+}
+
+TEST_CASE(
+    "a remote op is untrusted input: out-of-range part and bad amounts are refused, counted") {
+    // Remote ops are decoded straight off a socket by destruction_net. Before this validation the
+    // part index reached `inst.health[part] -= amount` with vector::operator[] — unchecked in
+    // release — so one message naming part 0x3FFFFFFF wrote a caller-chosen float roughly 4 GiB
+    // past the allocation. The amount was equally unguarded: NaN health never compares <= 0.0f, so
+    // the part becomes permanently unkillable and poisons every state_hash it appears in.
+    const assets::DestructibleAsset asset = make_grid(2, 2, {0.25f, 0.25f, 0.15f}, 1000.0f, 1.0f);
+    destruction::DestructionWorld dw;
+    physics::PhysicsWorld pw;
+    const destruction::PatternId pattern = dw.register_pattern(asset, pw);
+    REQUIRE(pattern.is_valid());
+    const destruction::InstanceId inst = dw.spawn(pattern, core::Transform{}, pw);
+    REQUIRE(inst.is_valid());
+    dw.set_authority(inst, destruction::Authority::Remote);
+    REQUIRE(dw.instance_part_count(inst) == 4);
+
+    const std::uint64_t hash_before = dw.state_hash();
+
+    // Four hostile shapes, one per rejection reason the validator covers.
+    std::vector<destruction::DamageOp> hostile(4);
+    for (auto& op : hostile) {
+        op.instance = inst;
+        op.amount = 5.0f; // lethal, if it were ever applied
+    }
+    hostile[0].part = 0x3FFFFFFFu;                               // far out of range
+    hostile[1].part = 4;                                         // one past the end
+    hostile[2].part = 1;                                         // in range...
+    hostile[2].amount = std::numeric_limits<float>::quiet_NaN(); // ...but unkillable-making
+    hostile[3].part = 1;
+    hostile[3].amount = -5.0f; // negative damage is a heal the model never anticipated
+
+    dw.apply_remote_ops(hostile);
+    dw.update(pw); // must not read or write outside the health/alive allocations
+
+    CHECK(dw.rejected_remote_ops() == 4);
+    for (std::uint32_t p = 0; p < 4; ++p) {
+        CHECK(dw.part_alive(inst, p));
+        CHECK(dw.part_health(inst, p) == doctest::Approx(1.0f));
+    }
+    // Refusing an op must leave the world byte-identical, not merely alive: a mirror that mutated
+    // and then "recovered" would still have diverged from the authority for a tick.
+    CHECK(dw.state_hash() == hash_before);
+
+    // NEGATIVE CONTROL. Without this the test passes just as well against a validator that refuses
+    // every remote op — which would be a far worse bug than the one being fixed, and invisible
+    // from the assertions above.
+    destruction::DamageOp good;
+    good.instance = inst;
+    good.part = 3;
+    good.amount = 5.0f;
+    dw.apply_remote_ops(std::span{&good, 1});
+    dw.update(pw);
+
+    CHECK(dw.rejected_remote_ops() == 4); // unchanged: the valid op was NOT refused
+    CHECK_FALSE(dw.part_alive(inst, 3));  // and it landed
+    CHECK(dw.state_hash() != hash_before);
 }

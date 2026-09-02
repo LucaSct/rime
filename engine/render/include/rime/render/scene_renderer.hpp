@@ -59,6 +59,23 @@ struct ExtractedScene {
     std::vector<SpotLightData> spot_lights; // m10.2: CPU-shaped (the shadow fit needs pos/dir/cone)
 };
 
+// Drop every draw whose mesh id this registry cannot resolve, and return how many were dropped.
+//
+// WHY THIS EXISTS, AND WHY IT IS NOT INSIDE extract_scene. `extract_scene` is deliberately
+// registry-free — it turns a World into a flat draw list and knows nothing about GPU state — so it
+// can only filter the SENTINEL. But a `MeshRef` is a dense index into a runtime registry, and it
+// can reach the World from a `.rscene` on disk (untrusted input; the scene reader validates the
+// field is a u32, never that it names a real mesh) or from a scene saved in a session whose
+// registry differed. Indexing with such an id is an out-of-bounds read of a GpuMesh, whose garbage
+// buffer handles then reach the RHI.
+//
+// Every consumer of an ExtractedScene that indexes the registry must call this first. The count is
+// returned rather than silently swallowed because a scene that quietly stops drawing is the single
+// hardest bug class in this engine to notice — an unresolvable ref is a content error worth
+// reporting, not a rendering strategy.
+[[nodiscard]] std::size_t drop_unresolvable_draws(ExtractedScene& scene,
+                                                  const MeshRegistry& meshes);
+
 // Pull the renderable view of a World: draws, the active camera, lights. Reads WorldTransform —
 // run ecs::propagate_transforms first or camera/meshes/lights sit at stale poses. Conventions
 // (asserted by the M5.6 tests): a camera looks down its entity's local −z; a directional light
@@ -201,6 +218,11 @@ public:
 
     [[nodiscard]] const DdgiStats& ddgi_stats() const noexcept { return ddgi_.stats(); }
 
+    // How many draws render() has refused because their MeshRef named a mesh this registry does
+    // not hold, cumulative. Nonzero means content is wrong — a scene saved against a different
+    // registry, or a hand-edited `.rscene` — and the entities concerned are not being drawn.
+    [[nodiscard]] std::size_t unresolvable_draws() const noexcept { return unresolvable_draws_; }
+
 private:
     void ensure_draw_capacity(std::uint32_t draw_count);
 
@@ -251,6 +273,10 @@ private:
     float ambient_[3] = {0.02f, 0.02f, 0.02f};
     bool warned_lights_ = false;
     bool warned_no_camera_ = false;
+    // Draws refused by drop_unresolvable_draws, cumulative, plus a warn-once latch so a scene with
+    // a bad ref does not print per frame. A content error, surfaced rather than silently absorbed.
+    std::size_t unresolvable_draws_ = 0;
+    bool warned_unresolvable_mesh_ = false;
 
     // Per-frame arrays the pass lambdas' SceneDrawData spans point into — members (not locals)
     // because they must outlive render() and still be alive at graph.execute().
