@@ -361,6 +361,26 @@ GpuAssetBridge::MaterialStats GpuAssetBridge::resolve_scene_materials(ecs::World
             if (const auto known = material_of_id_.find(mat_entry->id.value);
                 known != material_of_id_.end()) {
                 materials[slot] = known->second;
+                // Built already — but "built" is not "resident". A material assembled in an earlier
+                // round can still be holding the magenta placeholder in any slot whose texture had
+                // not finished uploading, and only build_material can tell. Re-run it until every
+                // slot is real, sharpening the registry entry in place (MaterialRegistry::update
+                // mints no id, so the entity's MaterialSet stays valid across the swap).
+                if (material_incomplete_.count(mat_entry->id.value) != 0) {
+                    const assets::MaterialAsset* ready =
+                        server_.get(request_material(mat_entry->id));
+                    if (ready == nullptr) {
+                        complete = false;
+                        continue;
+                    }
+                    PbrMaterialDesc sharpened{};
+                    if (build_material(*ready, sharpened)) {
+                        material_incomplete_.erase(mat_entry->id.value);
+                    } else {
+                        complete = false;
+                    }
+                    material_sink_->update(known->second, sharpened);
+                }
                 continue;
             }
             const assets::MaterialAssetHandle mh = request_material(mat_entry->id);
@@ -376,6 +396,9 @@ GpuAssetBridge::MaterialStats GpuAssetBridge::resolve_scene_materials(ecs::World
             PbrMaterialDesc desc{};
             if (!build_material(*cooked, desc)) {
                 complete = false; // a texture is still streaming — level three
+                // Remember that this one is unfinished, or the cache hit above will hand its
+                // placeholder-holding descriptor back on every later round without ever noticing.
+                material_incomplete_.insert(mat_entry->id.value);
             }
             const MaterialId id = material_sink_->add(desc);
             material_of_id_.emplace(mat_entry->id.value, id);

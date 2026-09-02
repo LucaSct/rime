@@ -2210,6 +2210,71 @@ Blender-authored proof. Cut order: m16.7 → m16.6 → m16.5. **Never cut:** m16
 > invalidate every scene in the project. It is also why every id-churning cook change lands before
 > the proof asset, which is the first thing to commit an id.
 
+> **Progress (2026-09-02) — m16.0 through m16.8 are implemented; m16.9 is half done.**
+>
+> | brick | state | what landed |
+> |---|---|---|
+> | m16.0 | ✅ #171 | ADR-0039, the four decisions, and the BC spike |
+> | m16.1 | ✅ #172 | UBO ring, cook-cache parameter key, BC formats + the RHI's first capability query |
+> | m16.2 | ✅ #173 | one `DrawItem` per submesh; the picker takes the same ranges |
+> | m16.3 | ✅ #174 | **cooked materials reach a scene-placed mesh** — `settle()` measured at 4 rounds |
+> | m16.4 | ✅ #175 | masked DEPTH, not just masked shadows |
+> | m16.5 | ✅ #176 | double-sided + a clamped sampler, one payload change |
+> | m16.6 | ✅ #177 | mip alpha coverage, capped at 4x rather than inflating haze |
+> | m16.7 | ✅ #178 | BC7 + BC5, both encoders written in-tree |
+> | m16.8 | ✅ #179 | the save stops writing derived state; the editor ticks per frame |
+> | m16.9 | ⚠️ partial | `docs/authoring-blender.md` written; **the Blender-authored proof asset is not made** |
+>
+> **What M16 has NOT done, named rather than left absent.** The milestone's own "done when" requires
+> an asset **authored in Blender**, cooked, placed and rendering in both hosts, with its diff touching
+> only `assets/`, `samples/` and `docs/`. The authoring contract exists and every engine capability
+> it names is in place, but **nobody has authored the asset**, so the proof has not run and M16
+> stands at ⚠️ rather than ✅. That is a person-with-Blender task, not an engine task, and saying so
+> is the point of writing it down.
+>
+> **The path itself is now proven on real third-party content, which is a different claim.** A CC0
+> Poly Haven model (`Barrel_02`) — `_diff` / `_arm` / `_nor_gl`, exactly what the contract asks for —
+> was downloaded, cooked, placed by content id, saved, reopened and rendered in the editor. Six
+> observations, each demonstrating a specific brick rather than "it worked": colour spaces chosen
+> from usage not a flag; `double_sided` surviving cook → engine (dropped entirely before M16); the
+> submesh table reaching the runtime; `settle` taking **4 rounds** on a genuine material; BC7 at
+> **exactly 4.00x** on a real 1024² texture; and the authored `.rscene` carrying one `MeshAsset`
+> alongside two hand-authored `MeshRef`s — the m16.8 per-entity rule on real data instead of on a
+> fixture built to demonstrate it. The cook is also confirmed to churn **no mesh id** when only the
+> material changes, which is the content-addressing fact the whole milestone was designed around.
+> This does **not** close m16.9: a downloaded asset is not an authored one, and the "done when" says
+> authored.
+>
+> **A fourth thing the bricks got wrong, and the most instructive, because only *looking* found it.**
+> That barrel first rendered **solid magenta** — the AssetServer's not-loaded-yet placeholder — while
+> every instrument reported success: `settle` said "converged in 4 rounds, 1 material resolved,
+> **0 pending**", and m16.3's test passed. The "already built this material" cache in
+> `resolve_scene_materials` did an early `continue` that skipped the residency re-check **and never
+> touched `complete`**, so a material assembled while its textures were still streaming was handed
+> back unchanged forever. It is the never-revisit short-circuit m16.3 set out to remove for meshes,
+> reintroduced one level down for materials **inside the same milestone**. The test could not have
+> caught it: it asserted `base_color_texture.is_valid()`, and the placeholder is a valid handle — the
+> comment above that line already claimed "not the magenta placeholder" while the code checked
+> something weaker. **When a comment asserts more than the code beneath it, the code is the bug.**
+> Now fixed, with the assertion comparing against `placeholder_texture()` directly; falsified by
+> disabling the fix, where that assertion and only that one fails. Worth recording: `pending == 0`
+> passes in **both** configurations, which is the measured proof that the counter was structurally
+> blind — a skip path that does not count reads exactly like success, as CLAUDE.md says.
+>
+> Also still absent, and now documented rather than discovered: glTF **Blend draws as Opaque** (no
+> transparency pass); skinned meshes cook but do not render; there is no terrain material blending,
+> no LODs or instancing, and no texture streaming. BC7 is **mode 6 only** — good on smooth blocks,
+> mediocre where a hard edge crosses a 4x4 block — and normal maps take BC7 rather than BC5 because
+> BC5 needs a shader change to reconstruct Z.
+>
+> **Three things the bricks got wrong first, each caught by something other than reading**, because
+> the pattern is more useful than the incidents: adding fields to a reflected record did **not**
+> change its schema hash (the fingerprint comes from the `RIME_REFLECT` block, not the struct);
+> making cull dynamic broke every draw path that never sets it, which the validation layer said
+> immediately; and a coverage binary search must return `hi`, not the midpoint, because coverage is
+> a step function and a midpoint lands on the wrong side of it. The third would have shipped as a
+> quietly-wrong mip chain.
+
 ### The adversarial review that M11–M15 never got (2026-08-31)
 
 Kimi's last review ran 2026-08-12 and Fable was out of credits through M13–M15, so **every line of
