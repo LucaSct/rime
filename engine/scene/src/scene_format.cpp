@@ -491,7 +491,14 @@ struct Reader {
 
 } // namespace
 
-std::string save_scene_to_string(const ecs::World& world) {
+std::string save_scene_to_string(const ecs::World& world, std::size_t* excluded_derived) {
+    std::size_t excluded = 0;
+    // The tag that says "the engine computed some of this entity's state" (m16.8). Absent from a
+    // world nothing derived into, in which case no exclusion happens at all and a hand-authored
+    // scene round-trips exactly as it always did.
+    const ecs::ComponentId derived_tag = world.components().is_registered<ecs::DerivedComponents>()
+                                             ? world.components().id_of<ecs::DerivedComponents>()
+                                             : ecs::kInvalidComponentId;
     const ecs::ComponentRegistry& registry = world.components();
 
     // Pass 1: walk the world in a stable order, numbering each entity 0..N-1 and mapping its handle
@@ -523,15 +530,31 @@ std::string save_scene_to_string(const ecs::World& world) {
         const Row& rw = rows[li];
         fmt::format_to(std::back_inserter(out), "entity {} {{\n", li);
         const ecs::Chunk& chunk = rw.arch->chunk(rw.chunk);
+        // Was any of this entity's state computed rather than authored? Checked per ARCHETYPE, so
+        // it costs one signature test per row rather than a component lookup per component.
+        const bool entity_has_derived =
+            derived_tag != ecs::kInvalidComponentId && rw.arch->signature().contains(derived_tag);
         for (const ecs::ComponentId id : rw.arch->signature().ids()) {
             const ecs::ComponentInfo& info = registry.info(id);
             if (info.type_info == nullptr) {
                 continue; // unreflected component: no inspectable state to author
             }
+            if (info.derived && entity_has_derived) {
+                // Runtime-derived state (m16.8): a dense registry index, meaningful only in the
+                // process that minted it. Writing one bakes this session's indices into an
+                // authored file — saving the block after the viewport resolved it wrote ~150 of
+                // them with no edit made. Counted, not silently dropped: an exclusion that stops
+                // working looks exactly like one that had nothing to exclude.
+                ++excluded;
+                continue;
+            }
             const auto* comp = static_cast<const std::byte*>(chunk.component(id, rw.row));
             emit_component(out, *info.type_info, comp, 1, to_local);
         }
         out += "}\n\n";
+    }
+    if (excluded_derived != nullptr) {
+        *excluded_derived = excluded;
     }
     return out;
 }

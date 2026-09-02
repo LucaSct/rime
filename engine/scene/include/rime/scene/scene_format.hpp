@@ -99,7 +99,13 @@ inline constexpr std::size_t kMaxReportedUnknownTypes = 16;
 // local id (or `null` for kNullEntity / a reference outside the saved set). Unreflected components
 // carry no inspectable state and are skipped — a documented property, not a silent data loss (a
 // component with nothing reflected has nothing to author).
-[[nodiscard]] std::string save_scene_to_string(const ecs::World& world);
+// `excluded_derived`, when non-null, receives the number of DERIVED components the writer refused
+// to serialize (see `ecs::kDerivedComponent`). A counter rather than silence, because an exclusion
+// that quietly stops working is indistinguishable from one that had nothing to exclude — and the
+// failure it prevents (a scene carrying this session's registry indices) is invisible until the
+// next run draws the wrong thing.
+[[nodiscard]] std::string save_scene_to_string(const ecs::World& world,
+                                               std::size_t* excluded_derived = nullptr);
 
 // Parse `.rscene` text into `world`. By default every component type named in the file must be
 // registered in `world` with a matching `type_hash` — register your component set first, and
