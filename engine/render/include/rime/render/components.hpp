@@ -143,6 +143,27 @@ template <> inline constexpr bool kDerivedComponent<rime::render::MaterialSet> =
 
 namespace rime::render {
 
+// The scene's sky (m17.0). One entity in a world carries this and the renderer uses it; absent, the
+// renderer's own SkyParams stand (off by default). It is a component rather than a renderer setting
+// because the sky belongs to the SCENE -- a .rscene that names a coastline should carry the weather
+// over it, and the editor should be able to edit it in the Inspector like anything else.
+//
+// The field set is deliberately the tunable subset of render::SkyParams, flattened to scalars
+// because components are trivially-copyable PODs the reflection walks field by field.
+struct Sky {
+    float zenith_r = 0.13f, zenith_g = 0.29f, zenith_b = 0.66f;
+    float horizon_r = 0.62f, horizon_g = 0.72f, horizon_b = 0.86f;
+    float intensity = 1.0f;
+    float sun_angular_radius = 0.012f;
+    float cloud_coverage = 0.45f;
+    float cloud_density = 1.0f;
+    float cloud_altitude = 1400.0f;
+    float cloud_scale = 0.00035f;
+    float cloud_sharpness = 0.28f;
+    float wind_x = 0.0f, wind_z = 0.0f;
+    bool clouds = true;
+};
+
 inline void register_render_components(ecs::World& world) {
     (void)world.register_component<MeshRef>();
     (void)world.register_component<MeshAsset>();
@@ -153,6 +174,7 @@ inline void register_render_components(ecs::World& world) {
     (void)world.register_component<PointLight>();
     (void)world.register_component<SpotLight>();
     (void)world.register_component<SdfRef>();
+    (void)world.register_component<Sky>();
 }
 
 } // namespace rime::render
@@ -183,6 +205,25 @@ RIME_REFLECT_FIELD(color_r)
 RIME_REFLECT_FIELD(color_g)
 RIME_REFLECT_FIELD(color_b)
 RIME_REFLECT_FIELD(intensity)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rime::render::Sky)
+RIME_REFLECT_FIELD(zenith_r)
+RIME_REFLECT_FIELD(zenith_g)
+RIME_REFLECT_FIELD(zenith_b)
+RIME_REFLECT_FIELD(horizon_r)
+RIME_REFLECT_FIELD(horizon_g)
+RIME_REFLECT_FIELD(horizon_b)
+RIME_REFLECT_FIELD(intensity)
+RIME_REFLECT_FIELD(sun_angular_radius)
+RIME_REFLECT_FIELD(cloud_coverage)
+RIME_REFLECT_FIELD(cloud_density)
+RIME_REFLECT_FIELD(cloud_altitude)
+RIME_REFLECT_FIELD(cloud_scale)
+RIME_REFLECT_FIELD(cloud_sharpness)
+RIME_REFLECT_FIELD(wind_x)
+RIME_REFLECT_FIELD(wind_z)
+RIME_REFLECT_FIELD(clouds)
 RIME_REFLECT_END()
 
 RIME_REFLECT_BEGIN(rime::render::PointLight)
