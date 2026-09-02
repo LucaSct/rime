@@ -113,7 +113,99 @@ enum class Format : std::uint32_t {
     R8Snorm, // the 8-bit sibling of R16Snorm (int8 / 127). Reserved for a coarser/cheaper
              // clipmap level or a lower-precision instance field if profiling ever asks for
              // one; m10.4b ships every level as R16Snorm and does not use this yet.
+
+    // ── Block-compressed formats (m16.1, ADR-0039) ────────────────────────────────────────────
+    //
+    // Fixed-rate GPU-native compression: the hardware samples these directly, so they cost a
+    // quarter (BC7) or half (BC5) of RGBA8 in memory AND in bandwidth, permanently — unlike a PNG,
+    // which is only small on disk. This is the one lever that makes a town's worth of 2048² texture
+    // sets fit.
+    //
+    // Sizes are per 4x4 BLOCK, not per texel, which is why the cooked-texture reader's
+    // `size == width * height * 4` rule has to become a per-format block computation, and why an
+    // extent that is not a multiple of 4 rounds up to whole blocks.
+    //
+    // Availability is NOT guaranteed — see `AdapterInfo::block_compression`.
+    BC7Unorm, // 16 bytes/block. High-quality RGBA. The default for base colour and ORM.
+    BC7Srgb,  // the sRGB view of the same bits, for colour rather than data
+    BC5Unorm, // 16 bytes/block, TWO channels (RG). The normal-map format: store X and Y, and
+              // reconstruct Z = sqrt(1 - x² - y²) in the shader, since a tangent-space normal is
+              // unit-length by construction. NOTE the current shader reads z from the texture
+              // (`pbr_forward_shadowed.frag`), so adopting BC5 for normals requires that change —
+              // which is why BC7 is the zero-shader-churn option for normals in the meantime.
 };
+
+// How a format is laid out in memory: the size of one addressable block and its byte cost.
+//
+// Uncompressed formats are 1x1 blocks, so `bytes_per_block` is simply bytes per texel and the size
+// maths below degenerates to the familiar `width * height * bpp`. Block-compressed formats are 4x4,
+// which is why they need this at all: a 5-texel-wide BC7 image occupies TWO blocks per row, not
+// 1.25, and a reader that computes `width * height * bytes` for one would reject a correct file.
+struct FormatBlockInfo {
+    std::uint32_t block_width = 1;
+    std::uint32_t block_height = 1;
+    std::uint32_t bytes_per_block = 0; // 0 ⇒ this format has no defined image size (see below)
+};
+
+[[nodiscard]] constexpr FormatBlockInfo format_block_info(Format f) noexcept {
+    switch (f) {
+        case Format::R8Unorm:
+        case Format::R8Snorm:
+            return {1, 1, 1};
+        case Format::R16Snorm:
+            return {1, 1, 2};
+        case Format::RGBA8Unorm:
+        case Format::RGBA8Srgb:
+        case Format::BGRA8Unorm:
+        case Format::BGRA8Srgb:
+        case Format::R32Uint:
+        case Format::D32Float:
+            return {1, 1, 4};
+        case Format::D32FloatS8:
+            return {1, 1, 5}; // packed depth+stencil; sized for completeness, never image-copied
+        case Format::RG32Float:
+        case Format::RGBA16Float:
+            return {1, 1, 8};
+        case Format::RGB32Float:
+            return {1, 1, 12};
+        case Format::RGBA32Float:
+            return {1, 1, 16};
+        case Format::BC7Unorm:
+        case Format::BC7Srgb:
+        case Format::BC5Unorm:
+            return {4, 4, 16}; // 16 bytes per 4x4 block ⇒ 8 bpp for BC7, and the same for BC5
+        case Format::Undefined:
+            break;
+    }
+    // Vertex-attribute-only and undefined formats have no image size. Returning 0 rather than
+    // guessing is deliberate: a caller sizing an allocation gets an obviously wrong answer it can
+    // check, instead of a plausible one it cannot.
+    return {1, 1, 0};
+}
+
+// Bytes one mip level of `format` at `width` x `height` occupies, tightly packed.
+//
+// Block formats round UP to whole blocks, which is the rule that makes a 1x1 mip of a BC7 chain
+// still cost a full 16-byte block — the single most common way a block-compressed size computation
+// goes wrong. Returns 0 for a format with no defined image size.
+[[nodiscard]] constexpr std::uint64_t
+format_image_size(Format format, std::uint32_t width, std::uint32_t height) noexcept {
+    const FormatBlockInfo info = format_block_info(format);
+    if (info.bytes_per_block == 0) {
+        return 0;
+    }
+    const std::uint64_t bw =
+        (static_cast<std::uint64_t>(width) + info.block_width - 1) / info.block_width;
+    const std::uint64_t bh =
+        (static_cast<std::uint64_t>(height) + info.block_height - 1) / info.block_height;
+    return bw * bh * info.bytes_per_block;
+}
+
+// Is this a block-compressed format? Consumers gate on `AdapterInfo::block_compression` before
+// creating a texture with one.
+[[nodiscard]] constexpr bool is_block_compressed(Format f) noexcept {
+    return format_block_info(f).block_width > 1;
+}
 
 // What a buffer can be used for. Bit flags: OR them together (see RIME_RHI_FLAGS below). The
 // backend always adds TransferDst to device-local buffers so they can be uploaded into.
@@ -284,6 +376,23 @@ struct AdapterInfo {
     // and have translation-specific sharp edges; callers that hit one (e.g. GPU tests) can gate on
     // this.
     bool portability = false;
+
+    // ── Capabilities (m16.1) ──────────────────────────────────────────────────────────────────
+    //
+    // The first thing on this struct that is not a human-facing fact but a decision input. It lives
+    // here rather than behind a new `Device::capabilities()` virtual because `adapter()` is already
+    // the "what am I running on" query and `portability` already sets the precedent of a flag
+    // callers gate behind.
+    //
+    // `block_compression` is Vulkan's `textureCompressionBC`: the BC1-BC7 family, which the asset
+    // pipeline emits for base colour, ORM and normals. It is NOT universal — the Vulkan spec
+    // requires a device to support BC *or* ETC2 *or* ASTC, not all three — so a mobile-class or
+    // software driver may legitimately say no.
+    //
+    // The rule for consumers, ratified in ADR-0039: a device without this must FAIL a
+    // block-compressed load with a named counter and a warn-once. It must never silently substitute
+    // the placeholder, because a fallback path nothing exercises is a fallback that does not work.
+    bool block_compression = false;
 };
 
 // ── Bit-flag operators ──────────────────────────────────────────────────────────────────────

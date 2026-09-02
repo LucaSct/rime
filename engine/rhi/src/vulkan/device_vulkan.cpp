@@ -380,6 +380,14 @@ bool VulkanDevice::create_logical_device() {
     // The spec *requires* enabling portability_subset whenever a device exposes it (MoltenVK does).
     const bool portability = has_ext(exts, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     adapter_.portability = portability; // surfaced to callers via adapter() (see AdapterInfo)
+
+    // Block-compression support (m16.1). The Vulkan spec requires a device to support BC *or* ETC2
+    // *or* ASTC — not all three — so this is a real question rather than a formality, and a
+    // software or mobile-class driver may legitimately answer no. Probed here, once, and surfaced
+    // through AdapterInfo so the asset path can refuse a BC load loudly instead of guessing.
+    VkPhysicalDeviceFeatures probed_features{};
+    vkGetPhysicalDeviceFeatures(physical_, &probed_features);
+    adapter_.block_compression = probed_features.textureCompressionBC == VK_TRUE;
     if (portability) {
         enabled_exts.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     }
