@@ -332,3 +332,48 @@ fn cube_sdf_cook_is_byte_stable() {
     );
     assert_eq!(a.1, b.1);
 }
+
+#[test]
+fn two_sources_sharing_a_stem_are_refused_rather_than_silently_overwriting() {
+    // Cooked filenames derive from the source STEM alone, so `quad.gltf` beside `quad.stl` both
+    // want to write `quad.rmesh`. Before this check the second simply overwrote the first while
+    // BOTH kept their own content ids in the manifest — so resolving the first id loaded the
+    // second asset's bytes. And it was permanent: the freshness check only verifies that a cooked
+    // file exists, never that its bytes match the recorded id, so the wrong mapping was re-emitted
+    // from cache on every later run.
+    let out = std::env::temp_dir().join("rime-cook-collision-test");
+    let src = out.join("src");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::copy(fixtures().join("quad.gltf"), src.join("quad.gltf")).unwrap();
+    std::fs::copy(fixtures().join("cube.stl"), src.join("quad.stl")).unwrap();
+
+    let text = match asset_pipeline::cook_path(&src, &out.join("cooked"), ColorSpace::Srgb) {
+        Ok(_) => panic!("a stem collision must be refused, not silently resolved by overwriting"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        text.contains("quad.rmesh"),
+        "message names the file: {text}"
+    );
+    assert!(
+        text.contains("quad.gltf"),
+        "message names one source: {text}"
+    );
+    assert!(text.contains("quad.stl"), "message names the other: {text}");
+
+    // The sidecars are the permanent half of the damage, so they must not have been written.
+    assert!(
+        !out.join("cooked").join("manifest.txt").exists(),
+        "a refused cook must not leave a manifest behind"
+    );
+
+    // NEGATIVE CONTROL: the same directory without the colliding file cooks fine. Without this the
+    // test passes just as well against a cook_path that refuses everything.
+    std::fs::remove_file(src.join("quad.stl")).unwrap();
+    asset_pipeline::cook_path(&src, &out.join("cooked2"), ColorSpace::Srgb)
+        .expect("a directory with no stem collision must still cook");
+    assert!(out.join("cooked2").join("manifest.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&out);
+}

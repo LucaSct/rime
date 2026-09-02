@@ -47,6 +47,13 @@ pub enum PipelineError {
     Io(std::io::Error),
     /// The source is valid but uses something v1 does not cook (with a human message).
     Unsupported(String),
+    /// Two sources in one cook claim the same cooked filename. Cooked names derive from the source
+    /// STEM alone, so `foo.gltf` beside `foo.stl` (or `bar.png` beside `bar.jpg`) collide: the
+    /// second overwrites the first, while both keep their own content ids in the manifest, which
+    /// then maps one id to another asset's bytes. Refused rather than warned, because the freshness
+    /// check only verifies that a cooked file EXISTS -- so the wrong mapping is re-emitted from
+    /// cache on every subsequent run and nothing ever repairs it.
+    NameCollision(String),
 }
 
 impl fmt::Display for PipelineError {
@@ -56,6 +63,7 @@ impl fmt::Display for PipelineError {
             PipelineError::Image(e) => write!(f, "image decode error: {e}"),
             PipelineError::Io(e) => write!(f, "I/O error: {e}"),
             PipelineError::Unsupported(msg) => write!(f, "unsupported: {msg}"),
+            PipelineError::NameCollision(msg) => write!(f, "cooked name collision: {msg}"),
         }
     }
 }
@@ -66,7 +74,7 @@ impl std::error::Error for PipelineError {
             PipelineError::Gltf(e) => Some(e),
             PipelineError::Image(e) => Some(e),
             PipelineError::Io(e) => Some(e),
-            PipelineError::Unsupported(_) => None,
+            PipelineError::Unsupported(_) | PipelineError::NameCollision(_) => None,
         }
     }
 }
@@ -480,6 +488,32 @@ pub fn cook_path(
         );
         combined.cooked_files.extend(out.cooked_files);
         combined.manifest.extend(out.manifest);
+    }
+
+    // COOKED NAMES MUST BE UNIQUE, and nothing above enforces it. Every cooked filename derives
+    // from the source STEM (`{stem}.rmesh`, `{stem}.rtex`, ...), directory entries cook in sorted
+    // order, and cook_one just writes -- so `cube.gltf` beside `cube.stl` both produce `cube.rmesh`
+    // and the second silently overwrites the first. The manifest keeps BOTH entries with their own
+    // content ids, so resolving the first id loads the second asset's bytes.
+    //
+    // It is checked here, before the sidecars are written, because the sidecars are the permanent
+    // half of the damage: `CacheRecord::is_fresh` only verifies that the cooked file still EXISTS,
+    // never that its bytes match the recorded id, so a lying manifest is re-emitted from cache
+    // forever and touching a source merely flips which of the two records is wrong.
+    //
+    // An error rather than a warning: this breaks the invariant the whole identity design rests on
+    // (an asset IS its cooked bytes), the failure is silent at every later stage, and the fix is
+    // for the author to rename one file.
+    let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
+    for entry in &combined.manifest {
+        if let Some(first) = claimed.insert(entry.cooked_file.as_str(), entry.source_path.as_str())
+        {
+            return Err(PipelineError::NameCollision(format!(
+                "'{}' would be written by both '{}' and '{}' — cooked names come from the source \
+                 stem, so these two sources cannot live in one cook. Rename one.",
+                entry.cooked_file, first, entry.source_path
+            )));
+        }
     }
 
     std::fs::create_dir_all(out_dir)?; // ensure the sidecars can be written even for an empty dir
