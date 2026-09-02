@@ -372,7 +372,20 @@ TEST_CASE("m16.3: a scene-placed mesh gets its COOKED material, not neutral grey
     CHECK(desc.alpha_cutoff == doctest::Approx(0.3f));
 
     // And its base-colour map is a real uploaded texture, not the magenta placeholder.
+    //
+    // `is_valid()` alone does NOT say that: the placeholder is itself a perfectly valid handle, so
+    // that assertion passed for a barrel rendering solid magenta on screen. The bug it could not
+    // see was in the "already built this material" cache in resolve_scene_materials: a material
+    // assembled in round 1, while its textures were still streaming, was handed back unchanged on
+    // every later round WITHOUT re-checking residency and without touching `pending` — so settle
+    // reported "converged, 0 pending" over a descriptor holding magenta in every slot. Compare
+    // against the placeholder itself, which is the only form of this check that can fail.
     CHECK(desc.base_color_texture.is_valid());
+    CHECK(desc.base_color_texture != bridge.placeholder_texture());
+    CHECK(desc.normal_texture != bridge.placeholder_texture());
+    // The counter must agree with the pixels. If any slot were still a placeholder, settle owed us
+    // a nonzero `pending` — a skip path that does not count is indistinguishable from success.
+    CHECK(bridge.material_stats().pending == 0);
 
     // NEGATIVE CONTROL. Everything above would pass just as well against a bridge that invented a
     // material out of nothing, so: the same world, the same cooked files, and NO catalog. Nothing

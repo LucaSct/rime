@@ -214,6 +214,12 @@ private:
     std::unordered_map<std::uint64_t, assets::MaterialAssetHandle> mat_by_id_; // AssetId → request
     std::unordered_map<std::uint64_t, assets::TextureAssetHandle> tex_by_id_;
     std::unordered_map<std::uint64_t, MaterialId> material_of_id_; // content id → registry material
+    // Materials built in an earlier round whose textures had not finished streaming, so their
+    // registry entry is still holding the magenta placeholder in at least one slot. Keyed by cooked
+    // content id, same as material_of_id_. Without this the "already built it" cache below is a
+    // never-revisit short-circuit: the material resolves once, renders magenta forever, and — the
+    // part that actually hurts — `pending` reads 0 because the skip path never touches it.
+    std::unordered_set<std::uint64_t> material_incomplete_;
     std::unordered_map<std::uint32_t, MaterialSetId> set_of_entity_; // entity index → its set
     MaterialStats material_stats_{};
     std::size_t meshes_resolved_ = 0;
