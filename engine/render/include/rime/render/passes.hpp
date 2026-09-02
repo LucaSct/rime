@@ -239,6 +239,14 @@ private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
     rhi::PipelineHandle pipeline_;
+
+    // The alpha-testing variant (m16.4). A SECOND pipeline rather than a replacement: opaque
+    // geometry — nearly all of it — keeps a fragment-shader-free pass, which is most of what a
+    // depth pre-pass is for. The vertex module is this same shader compiled with -DMASKED, so
+    // `invariant gl_Position` still holds across the pair.
+    rhi::ShaderHandle masked_vertex_shader_;
+    rhi::ShaderHandle masked_fragment_shader_;
+    rhi::PipelineHandle masked_pipeline_;
 };
 
 // ── Forward PBR pass ──────────────────────────────────────────────────────────────────────────
