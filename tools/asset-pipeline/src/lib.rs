@@ -420,6 +420,28 @@ fn cook_one(
     }
 }
 
+/// Fingerprint of the cook REQUEST — everything that changes the output but is not the input bytes.
+///
+/// The cook cache used to key on source bytes plus cooker version, which answers "did the input
+/// change" and "did the cooker change" but not "did the *request* change" — and the request decides
+/// the output just as surely. `--srgb` and `--linear` produce different bytes and different content
+/// ids from the same PNG, so cooking with the flag flipped into an existing directory served the
+/// stale ones and reported them as a cache hit.
+///
+/// A tagged byte encoding rather than a bare discriminant, so that appending a parameter later
+/// (block-compression format, alpha-coverage cutoff) cannot alias an existing combination: the tag
+/// changes with the encoding, and a longer buffer hashes differently from a shorter one.
+fn cook_params_hash(color_space: ColorSpace) -> u64 {
+    let bytes = [
+        1u8, // params-encoding tag; bump when the layout below changes
+        match color_space {
+            ColorSpace::Srgb => 0,
+            ColorSpace::Linear => 1,
+        },
+    ];
+    cooked::fnv1a_64(&bytes)
+}
+
 /// Cook a single source file or every cookable file in a directory, then write a `manifest.txt` into
 /// `out_dir`. Directory entries are cooked in sorted order so the run is deterministic. For textures,
 /// `color_space` (the CLI's `--srgb`/`--linear`) says whether the image is colour or data; meshes
@@ -447,6 +469,10 @@ pub fn cook_path(
         .map(|t| cook_cache::parse(&t))
         .unwrap_or_default();
 
+    // The cook request's own fingerprint, constant across this invocation's sources: two cooks of
+    // the same bytes with different flags must not serve each other's output.
+    let params_hash = cook_params_hash(color_space);
+
     let mut combined = CookOutput::default();
     let mut records: BTreeMap<String, CacheRecord> = BTreeMap::new();
     for source in &inputs {
@@ -457,7 +483,7 @@ pub fn cook_path(
         // manifest entries and leave the cooked files on disk untouched — no write, so it is fast and
         // mtime-independent.
         if let Some(rec) = prior.get(&src_key) {
-            if rec.is_fresh(src_hash, out_dir) {
+            if rec.is_fresh(src_hash, params_hash, out_dir) {
                 combined.manifest.extend(rec.entries.iter().cloned());
                 combined
                     .cooked_files
@@ -467,6 +493,7 @@ pub fn cook_path(
                     src_key,
                     CacheRecord {
                         src_hash,
+                        params_hash,
                         cooker_version: cooked::COOKER_VERSION,
                         entries: rec.entries.clone(),
                     },
@@ -482,6 +509,7 @@ pub fn cook_path(
             src_key,
             CacheRecord {
                 src_hash,
+                params_hash,
                 cooker_version: cooked::COOKER_VERSION,
                 entries: out.manifest.clone(),
             },
