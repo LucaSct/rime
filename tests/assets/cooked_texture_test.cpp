@@ -143,7 +143,7 @@ TEST_CASE("negative battery: texture envelope errors") {
 TEST_CASE("negative battery: texture header/format errors") {
     SUBCASE("an unknown pixel format") {
         TextureFileBuilder b;
-        b.format = 2; // 0/1 are the only v1 formats; BC values are reserved, not yet cooked
+        b.format = 7; // past the last defined value (Bc7Srgb = 6)
         expect_error(b.build(), AssetError::InvalidTexture);
     }
     SUBCASE("a zero extent") {
@@ -181,6 +181,75 @@ TEST_CASE("negative battery: texture header/format errors") {
         REQUIRE_MESSAGE(tex.has_value(), "a legal maximum-size texture must still decode");
         CHECK(tex->width == 16384);
         CHECK(tex->height == 1);
+    }
+}
+
+TEST_CASE("m16.7: a block-compressed texture is sized in whole 4x4 blocks, not texels") {
+    // The reader validated every level as `width * height * 4`, which a block format breaks in the
+    // quiet way: it yields a plausible wrong number rather than an obvious error. A 4x4-block
+    // format rounds UP — a 2x2 level and a 1x1 level each still cost one whole 16-byte block, which
+    // is the case a naive computation gets wrong at the tail of every mip chain.
+    const auto block_bytes = [](std::uint32_t w, std::uint32_t h) {
+        return ((w + 3) / 4) * ((h + 3) / 4) * 16u;
+    };
+
+    TextureFileBuilder b;
+    b.width = 16;
+    b.height = 16;
+    b.format = static_cast<std::uint32_t>(TextureFormat::Bc7Srgb);
+
+    std::vector<TextureFileBuilder::Mip> table;
+    std::uint32_t offset = 0;
+    for (std::uint32_t level = 0; level < full_mip_count(b.width, b.height); ++level) {
+        const std::uint32_t w = mip_extent(b.width, level);
+        const std::uint32_t h = mip_extent(b.height, level);
+        const std::uint32_t size = block_bytes(w, h);
+        table.push_back({w, h, offset, size});
+        offset += size;
+    }
+    b.mip_table = table;
+    b.pixels = std::vector<std::byte>(offset, std::byte{0x7F});
+
+    AssetError err{};
+    const std::optional<TextureAsset> tex = read_texture(b.build(), err);
+    REQUIRE_MESSAGE(tex.has_value(), "a correctly-sized BC7 file must load: " << to_string(err));
+    CHECK(tex->format == TextureFormat::Bc7Srgb);
+    REQUIRE(tex->mips.size() == 5); // 16, 8, 4, 2, 1
+    // The tail is the point: both the 2x2 and the 1x1 level cost a full block.
+    CHECK(tex->mips[3].size == 16u);
+    CHECK(tex->mips[4].size == 16u);
+    // …and the whole chain is far smaller than the RGBA8 equivalent. Not exactly a quarter: the
+    // tail levels round up to whole blocks, so the smallest ones cost proportionally more.
+    std::uint32_t rgba8_total = 0;
+    for (std::uint32_t level = 0; level < full_mip_count(b.width, b.height); ++level) {
+        rgba8_total += mip_extent(b.width, level) * mip_extent(b.height, level) * 4;
+    }
+    CHECK(offset < rgba8_total / 2);
+
+    SUBCASE("NEGATIVE CONTROL: the old texel-based size is now rejected") {
+        // Sizing a BC7 level as width*height*4 is exactly the bug this fixes. It must fail, or the
+        // format-aware rule above is not actually being applied.
+        TextureFileBuilder bad = b;
+        std::vector<TextureFileBuilder::Mip> wrong;
+        std::uint32_t off = 0;
+        for (std::uint32_t level = 0; level < full_mip_count(b.width, b.height); ++level) {
+            const std::uint32_t w = mip_extent(b.width, level);
+            const std::uint32_t h = mip_extent(b.height, level);
+            const std::uint32_t size = w * h * 4;
+            wrong.push_back({w, h, off, size});
+            off += size;
+        }
+        bad.mip_table = wrong;
+        bad.pixels = std::vector<std::byte>(off, std::byte{0x7F});
+        expect_error(bad.build(), AssetError::InvalidTexture);
+    }
+
+    SUBCASE("the reserved BC1/BC3 slots are still refused") {
+        // ADR-0024 reserved 2 and 3 and m16.7 did not implement them; accepting one would mean
+        // sizing a payload by a rule that does not exist.
+        TextureFileBuilder reserved = b;
+        reserved.format = 2;
+        expect_error(reserved.build(), AssetError::InvalidTexture);
     }
 }
 

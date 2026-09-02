@@ -42,6 +42,12 @@ enum Command {
         /// Treat texture inputs as linear data (normal / metallic-roughness / occlusion maps).
         #[arg(long)]
         linear: bool,
+        /// Block-compress textures as BC7 (m16.7): a quarter the memory AND bandwidth, sampled
+        /// directly by the GPU. Lossy — see `bcn.rs` for what the mode-6 encoder does and does not
+        /// do. The cook cache keys on this, so flipping it re-cooks rather than serving the
+        /// uncompressed bytes back.
+        #[arg(long)]
+        bc: bool,
     },
     /// Fracture a source box into a Destructible (M8.1): a wall/column/slab pre-split into convex
     /// parts with a bond/anchor graph, for the destruction runtime.
@@ -115,6 +121,7 @@ fn main() -> ExitCode {
             out,
             srgb: _,
             linear,
+            bc,
         }) => {
             // sRGB is the default; --linear flips a texture cook to data (the flags conflict, so at
             // most one is set). Meshes ignore the colour space.
@@ -123,7 +130,7 @@ fn main() -> ExitCode {
             } else {
                 ColorSpace::Srgb
             };
-            run_cook(&input, &out, color_space)
+            run_cook(&input, &out, color_space, bc)
         }
         Some(Command::Fracture {
             size,
@@ -254,8 +261,8 @@ fn run_sdf(input: &Path, out: &Path, name: Option<&str>, coarse: bool) -> ExitCo
     }
 }
 
-fn run_cook(input: &Path, out: &Path, color_space: ColorSpace) -> ExitCode {
-    match asset_pipeline::cook_path(input, out, color_space) {
+fn run_cook(input: &Path, out: &Path, color_space: ColorSpace, bc: bool) -> ExitCode {
+    match asset_pipeline::cook_path(input, out, color_space, bc) {
         Ok(result) => {
             for entry in &result.manifest {
                 println!(

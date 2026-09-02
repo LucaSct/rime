@@ -511,8 +511,10 @@ std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
     // either: a legitimate 20000x10000 source image cooks without complaint. Same reasoning and
     // same shape as decode_mesh_sdf's ceilings below; the per-axis bound alone is not enough,
     // because 16384x16384 passes it and is a 1 GiB base mip, so the texel total is bounded too.
-    if (format_raw > static_cast<std::uint32_t>(TextureFormat::Rgba8Srgb) || width == 0 ||
-        height == 0 || width > kMaxTextureExtentPerAxis || height > kMaxTextureExtentPerAxis ||
+    if (format_raw > static_cast<std::uint32_t>(TextureFormat::Bc7Srgb) || format_raw == 2 ||
+        format_raw == 3 || // still reserved: Bc1/Bc3 are not implemented
+        width == 0 || height == 0 || width > kMaxTextureExtentPerAxis ||
+        height > kMaxTextureExtentPerAxis ||
         std::uint64_t{width} * std::uint64_t{height} > kMaxTextureTexels ||
         mip_count != full_mip_count(width, height)) {
         out_error = AssetError::InvalidTexture;
@@ -542,7 +544,9 @@ std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
         }
         const std::uint32_t ew = mip_extent(width, level);
         const std::uint32_t eh = mip_extent(height, level);
-        const std::uint64_t esize = std::uint64_t{ew} * eh * kTextureBytesPerPixel;
+        // Format-aware (m16.7): a block format's level rounds up to whole 4x4 blocks, so the old
+        // `w * h * 4` would reject every correct BC file and accept nothing.
+        const std::uint64_t esize = texture_level_bytes(tex.format, ew, eh);
         if (mw != ew || mh != eh || msize != esize || moffset != running) {
             out_error = AssetError::InvalidTexture;
             return std::nullopt;

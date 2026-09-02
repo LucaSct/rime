@@ -21,8 +21,33 @@ namespace rime::assets {
 enum class TextureFormat : std::uint32_t {
     Rgba8Unorm = 0, // linear data (normal / metallic-roughness / occlusion)
     Rgba8Srgb = 1,  // perceptual colour (baseColor / emissive)
-    // Reserved (decide by measurement, M6 non-goal): Bc1 = 2, Bc3 = 3, Bc5 = 4, Bc7 = 5.
+    // 2 and 3 stay reserved for Bc1/Bc3 (ADR-0024's original list); m16.7 makes 4 and 5 real and
+    // appends 6, because BC7 needs both colour spaces exactly as RGBA8 does.
+    Bc5Unorm = 4, // two channels, 8 bpp — normal maps, with Z reconstructed in the shader
+    Bc7Unorm = 5, // RGBA, 8 bpp, linear data
+    Bc7Srgb = 6,  // RGBA, 8 bpp, perceptual colour
 };
+
+// Is this format stored as 4x4 blocks rather than individual texels? Block formats round their
+// extents UP to whole blocks, which is the rule a size computation has to obey — a 5-wide image is
+// two blocks per row, not 1.25, and a 1x1 mip still costs a whole block.
+[[nodiscard]] constexpr bool is_block_format(TextureFormat f) noexcept {
+    return f == TextureFormat::Bc5Unorm || f == TextureFormat::Bc7Unorm ||
+           f == TextureFormat::Bc7Srgb;
+}
+
+// Bytes one mip level of `format` at `width` x `height` occupies, tightly packed. This is the
+// single definition the reader validates against and the uploader sizes from; before m16.7 it was
+// the literal `width * height * 4` spelled out at each site, which a block format silently breaks.
+[[nodiscard]] constexpr std::uint64_t
+texture_level_bytes(TextureFormat format, std::uint32_t width, std::uint32_t height) noexcept {
+    if (!is_block_format(format)) {
+        return std::uint64_t{width} * height * 4;
+    }
+    const std::uint64_t bw = (std::uint64_t{width} + 3) / 4;
+    const std::uint64_t bh = (std::uint64_t{height} + 3) / 4;
+    return bw * bh * 16; // every BC format here is 16 bytes per 4x4 block
+}
 
 // One mip level: its extent and the byte range of its pixels within TextureAsset::pixels.
 struct TextureMip {
