@@ -39,6 +39,16 @@ struct QueryFilter {
     bool statics = true;
     bool dynamics = true;
 
+    // SENSORS (trigger volumes). False — the default — means queries pass straight through them,
+    // which is what almost every caller wants: a trigger is scenery to a bullet, a footstep and a
+    // depenetration push. It defaults to skipping rather than hitting because the alternative was
+    // the shipped behaviour and it was wrong in every consumer — `Collider::sensor` reached the
+    // solver in m15.6b but never the query layer, so a static trigger volume stopped shape_casts
+    // at its surface (an invisible wall the character could never enter), was pushed out of by
+    // `penetration()`, and swallowed hitscan shots. Set it true when you specifically want to find
+    // triggers by query — "which volumes is this point inside" — rather than to collide with them.
+    bool sensors = false;
+
     // SELF-EXCLUSION (m12.2): a body this query pretends is not there. Null (the default) excludes
     // nothing, so every existing call site keeps its exact meaning.
     //

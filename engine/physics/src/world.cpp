@@ -257,8 +257,19 @@ struct PhysicsWorld::Impl {
     // slot afterwards. Matching on the index alone would turn a stale self-id into a silent,
     // wandering hole in every query — the kind of bug that shows up as one crate in a hundred being
     // invisible to hitscan.
+    // SENSORS ARE EXCLUDED BY DEFAULT, which is the other half of what m15.6b started. A sensor is
+    // a body the solver refuses to push against — that is what `Collider::sensor` buys — but until
+    // this check the QUERY layer had never heard of the flag, so a trigger volume was a trigger to
+    // the solver and a SOLID WALL to every raycast, shape_cast, penetration and overlap_sphere.
+    // Tick `sensor` on a doorway volume to detect the player walking through it (exactly the case
+    // #165 fixed at the event stage) and the player bonks into an invisible box, can never enter
+    // it, and shots stop at its face. Default true rather than false: a trigger is scenery to a
+    // bullet and to a footstep, and every existing call site wants that without being edited.
     [[nodiscard]] bool is_excluded(const QueryFilter& f, std::uint32_t slot) const noexcept {
-        return f.exclude.index == slot && f.exclude.generation == slots[slot].generation;
+        if (f.exclude.index == slot && f.exclude.generation == slots[slot].generation) {
+            return true;
+        }
+        return !f.sensors && sensor[slots[slot].dense] != 0;
     }
 
     // Resolve a shape's hull reference to its store entry — nullptr for primitives and for an
