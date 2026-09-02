@@ -59,22 +59,38 @@ struct ExtractedScene {
     std::vector<SpotLightData> spot_lights; // m10.2: CPU-shaped (the shadow fit needs pos/dir/cone)
 };
 
-// Drop every draw whose mesh id this registry cannot resolve, and return how many were dropped.
+struct ResolveDrawStats {
+    std::size_t dropped = 0;  // draws whose mesh id the registry could not resolve
+    std::size_t expanded = 0; // extra draws produced by splitting meshes into their submeshes
+};
+
+// Turn an entity-level draw list into a submesh-level one, dropping anything unresolvable.
 //
-// WHY THIS EXISTS, AND WHY IT IS NOT INSIDE extract_scene. `extract_scene` is deliberately
-// registry-free — it turns a World into a flat draw list and knows nothing about GPU state — so it
-// can only filter the SENTINEL. But a `MeshRef` is a dense index into a runtime registry, and it
-// can reach the World from a `.rscene` on disk (untrusted input; the scene reader validates the
-// field is a u32, never that it names a real mesh) or from a scene saved in a session whose
-// registry differed. Indexing with such an id is an out-of-bounds read of a GpuMesh, whose garbage
-// buffer handles then reach the RHI.
+// THE MANDATORY PRE-PASS. Every consumer of an `ExtractedScene` that touches the registry must call
+// this exactly once, before anything else. It is one function rather than two because the two jobs
+// have the same precondition and the same failure mode — a path that remembered one and forgot the
+// other would either index out of bounds or silently draw a multi-material object in one material.
 //
-// Every consumer of an ExtractedScene that indexes the registry must call this first. The count is
-// returned rather than silently swallowed because a scene that quietly stops drawing is the single
-// hardest bug class in this engine to notice — an unresolvable ref is a content error worth
-// reporting, not a rendering strategy.
-[[nodiscard]] std::size_t drop_unresolvable_draws(ExtractedScene& scene,
-                                                  const MeshRegistry& meshes);
+// It cannot live inside `extract_scene`, which is deliberately registry-free: extraction turns a
+// World into a flat list and knows nothing about GPU state, so it can filter only the sentinel
+// MeshId. Both jobs need the registry:
+//
+//   DROPPING — a `MeshRef` is a dense index into a runtime registry and can reach the World from a
+//   `.rscene` on disk (untrusted input: the reader validates the field is a u32, never that it
+//   names a real mesh) or from a scene saved in a session whose registry differed. Indexing with
+//   one is an out-of-bounds read of a GpuMesh whose garbage buffer handles then reach the RHI.
+//
+//   EXPANDING — a mesh cooked from a multi-material glTF carries a submesh table, and each range
+//   is a separate draw. `MeshRegistry::add` guarantees every mesh has at least one range, so a
+//   single-material mesh expands to exactly one draw covering the whole index buffer and renders
+//   byte-identically to the pre-m16.2 path.
+//
+// Both counts are returned rather than swallowed: a scene that quietly stops drawing, or quietly
+// draws half of itself, is the hardest bug class in this engine to notice.
+//
+// The parallel `draw_entities` array is kept in step — an entity is repeated once per submesh — so
+// the pick pass still maps a rasterised pixel back to the right entity.
+[[nodiscard]] ResolveDrawStats resolve_draws(ExtractedScene& scene, const MeshRegistry& meshes);
 
 // Pull the renderable view of a World: draws, the active camera, lights. Reads WorldTransform —
 // run ecs::propagate_transforms first or camera/meshes/lights sit at stale poses. Conventions
@@ -307,7 +323,7 @@ private:
     float ambient_[3] = {0.02f, 0.02f, 0.02f};
     bool warned_lights_ = false;
     bool warned_no_camera_ = false;
-    // Draws refused by drop_unresolvable_draws, cumulative, plus a warn-once latch so a scene with
+    // Draws refused by resolve_draws, cumulative, plus a warn-once latch so a scene with
     // a bad ref does not print per frame. A content error, surfaced rather than silently absorbed.
     std::size_t unresolvable_draws_ = 0;
     bool warned_unresolvable_mesh_ = false;

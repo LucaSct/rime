@@ -142,7 +142,7 @@ TEST_CASE("an out-of-range MeshRef is dropped and counted, not used to index the
     scene.draws.push_back({1, 0, core::Mat4{}});
     scene.draw_entities.push_back(ecs::Entity{});
 
-    const std::size_t dropped = drop_unresolvable_draws(scene, meshes);
+    const std::size_t dropped = resolve_draws(scene, meshes).dropped;
 
     CHECK(dropped == 2);
     REQUIRE(scene.draws.size() == 1);
@@ -155,7 +155,7 @@ TEST_CASE("an out-of-range MeshRef is dropped and counted, not used to index the
     ExtractedScene clean;
     clean.draws.push_back({only, 0, core::Mat4{}});
     clean.draw_entities.push_back(ecs::Entity{});
-    CHECK(drop_unresolvable_draws(clean, meshes) == 0);
+    CHECK(resolve_draws(clean, meshes).dropped == 0);
     CHECK(clean.draws.size() == 1);
 }
 

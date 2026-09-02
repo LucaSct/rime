@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// m16.1 — the SceneRenderer's per-frame uniform ring.
+// m16 — the draw path: the per-frame uniform ring (m16.1) and per-submesh draws (m16.2).
 //
 // WHAT THIS FILE CAN AND CANNOT PROVE, STATED UP FRONT, because the gap is the whole reason the bug
 // survived to be found by a review rather than by CI.
@@ -148,4 +148,102 @@ TEST_CASE("m16.1: the uniform ring is frames_in_flight + 1 deep, and every slot 
     // …and the two scenes must NOT be identical to each other, or the comparison above is vacuous:
     // it would pass just as well against a renderer that drew nothing at all.
     CHECK(last_small != last_big);
+}
+
+TEST_CASE("m16.2: a mesh split into submeshes draws identically, and the split is real") {
+    // The cook has emitted one submesh per glTF primitive since `Mesh::from_primitives` existed,
+    // and the reader has always validated the table — but `mesh_from_cooked` dropped it, because
+    // `CpuMesh` had no field it could live in. A multi-material object therefore rendered entirely
+    // in one material, and "split by material" was something the author had to do at the
+    // Blender-object level.
+    //
+    // The proof is the culling brick's own discipline turned on submeshes: SPLIT IS IDENTICAL TO
+    // WHOLE when both halves name the same material. A tolerance would accept a split that dropped
+    // or duplicated triangles, which is exactly the failure to rule out.
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the submesh proof");
+        return;
+    }
+
+    MaterialRegistry materials;
+    const MaterialId mat = materials.add({{0.8f, 0.8f, 0.8f, 1.0f}, 0.0f, 0.5f});
+
+    const CpuMesh cube = make_cube(0.5f);
+    REQUIRE(cube.indices.size() % 6 == 0); // needs an even split into two whole-triangle halves
+    const auto half = static_cast<std::uint32_t>(cube.indices.size() / 2);
+
+    MeshRegistry meshes(*device);
+
+    // The control: no table at all. `add` must synthesise exactly one whole-mesh range, so every
+    // pre-m16.2 mesh keeps working with no special case anywhere in the draw path.
+    const MeshId whole = meshes.add(cube, "whole");
+    REQUIRE(whole != kInvalidMeshId);
+    REQUIRE(meshes.get(whole).submeshes.size() == 1);
+    CHECK(meshes.get(whole).submeshes[0].first_index == 0);
+    CHECK(meshes.get(whole).submeshes[0].index_count == cube.indices.size());
+
+    // The same geometry, declared as two ranges that tile the index buffer exactly.
+    CpuMesh split_mesh = cube;
+    split_mesh.submeshes = {{0, half, 0}, {half, half, 1}};
+    const MeshId split = meshes.add(split_mesh, "split");
+    REQUIRE(split != kInvalidMeshId);
+    REQUIRE(meshes.get(split).submeshes.size() == 2);
+
+    const auto frame = [&](MeshId id) {
+        ecs::World world;
+        register_render_components(world);
+        core::Transform tf{};
+        tf.translation = {0.0f, 0.0f, -3.0f};
+        (void)world.spawn_with(ecs::WorldTransform{tf}, MeshRef{id}, MaterialRef{mat});
+        core::Transform cam_tf{};
+        (void)world.spawn_with(ecs::WorldTransform{cam_tf}, Camera{});
+        core::Transform light_tf{};
+        light_tf.translation = {2.0f, 3.0f, 2.0f};
+        (void)world.spawn_with(ecs::WorldTransform{light_tf},
+                               PointLight{1.0f, 1.0f, 1.0f, 60.0f, 40.0f});
+
+        SceneRenderer renderer(*device, meshes, materials);
+        RenderGraph graph(*device);
+        const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize}, true);
+        REQUIRE(out.ldr.is_valid());
+        graph.export_texture(out.ldr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        return read_texture(*device, graph.physical(out.ldr), kSize, kSize, 4);
+    };
+
+    // THE HEADLINE: byte-identical, not merely similar.
+    CHECK(frame(whole) == frame(split));
+
+    // …and the split actually happened. Without this the identity check passes perfectly against a
+    // renderer that ignored the table and drew the whole mesh both times — which is precisely the
+    // bug being fixed.
+    ExtractedScene probe;
+    probe.draws.push_back({split, mat, core::Mat4{}});
+    probe.draw_entities.push_back(ecs::Entity{});
+    const ResolveDrawStats stats = resolve_draws(probe, meshes);
+    CHECK(stats.dropped == 0);
+    CHECK(stats.expanded == 1); // one EXTRA draw beyond the first
+    REQUIRE(probe.draws.size() == 2);
+    CHECK(probe.draws[0].first_index == 0);
+    CHECK(probe.draws[0].index_count == half);
+    CHECK(probe.draws[1].first_index == half);
+    // The entity is repeated once per submesh, or the pick pass maps a pixel to the wrong entity.
+    CHECK(probe.draw_entities.size() == probe.draws.size());
+    CHECK(probe.draw_entities[0] == probe.draw_entities[1]);
+
+    // A range outside the index buffer is DROPPED AND COUNTED, never clamped: clamping would
+    // silently draw the wrong triangles, which is the harder failure to notice.
+    const std::size_t rejected_before = meshes.rejected_submeshes();
+    CpuMesh bad = cube;
+    bad.submeshes = {{0, half, 0}, {half, half * 4, 1}}; // second range runs off the end
+    const MeshId partly_bad = meshes.add(bad, "partly-bad");
+    REQUIRE(partly_bad != kInvalidMeshId);
+    CHECK(meshes.rejected_submeshes() == rejected_before + 1);
+    CHECK(meshes.get(partly_bad).submeshes.size() == 1); // only the good range survived
 }

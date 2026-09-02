@@ -243,7 +243,39 @@ MeshId MeshRegistry::add(const CpuMesh& mesh, std::string_view debug_name) {
         return kInvalidMeshId;
     }
     g.index_count = static_cast<std::uint32_t>(mesh.indices.size());
-    meshes_.push_back(g);
+
+    // The submesh table (m16.2). Two jobs here, and both matter downstream.
+    //
+    // VALIDATE, so a draw built from a range is in bounds by construction rather than by hope. The
+    // cooked reader already range-checks its table, but a CpuMesh can also be hand-built, and this
+    // is the one place that has both the table and the true index count. A bad range is DROPPED and
+    // COUNTED rather than clamped: clamping would silently draw the wrong triangles, which is the
+    // harder failure to notice.
+    //
+    // SYNTHESISE when the table is empty, so every uploaded mesh has at least one range. That is
+    // what lets extraction loop over submeshes unconditionally instead of branching on "does this
+    // mesh have a table" — the branch that, forgotten in one of the several draw paths, would draw
+    // nothing at all.
+    for (const SubmeshRange& sm : mesh.submeshes) {
+        const std::uint64_t end =
+            static_cast<std::uint64_t>(sm.first_index) + static_cast<std::uint64_t>(sm.index_count);
+        if (sm.index_count == 0 || end > g.index_count) {
+            ++rejected_submeshes_;
+            RIME_ERROR("render: MeshRegistry::add('{}') dropping submesh [{}, {}) outside its {} "
+                       "indices",
+                       debug_name,
+                       sm.first_index,
+                       end,
+                       g.index_count);
+            continue;
+        }
+        g.submeshes.push_back(sm);
+    }
+    if (g.submeshes.empty()) {
+        g.submeshes.push_back({0, g.index_count, 0});
+    }
+
+    meshes_.push_back(std::move(g));
     return static_cast<MeshId>(meshes_.size() - 1);
 }
 
@@ -294,6 +326,15 @@ CpuMesh mesh_from_cooked(const assets::MeshAsset& asset) {
     using A = assets::VertexAttribs;
     CpuMesh out;
     out.indices = asset.indices;
+    // Carry the cook's submesh table through (m16.2). It has been in the cooked format since
+    // `Mesh::from_primitives` existed and the reader has always validated it; this function simply
+    // had nowhere to put it, so a multi-material glTF rendered in one material. `MeshRegistry::add`
+    // re-validates against the real index count and synthesises a whole-mesh range if this is
+    // empty, so a mesh cooked before submeshes existed still draws.
+    out.submeshes.reserve(asset.submeshes.size());
+    for (const assets::Submesh& sm : asset.submeshes) {
+        out.submeshes.push_back({sm.first_index, sm.index_count, sm.material_slot});
+    }
     out.vertices.resize(asset.vertex_count);
 
     const bool has_n = assets::has_attrib(asset.attribs, A::Normal);

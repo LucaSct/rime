@@ -112,11 +112,13 @@ void ScenePicker::begin_pick(ecs::World& world,
     }
 
     ExtractedScene scene = extract_scene(world);
-    // Same guarantee the SceneRenderer establishes, for the same reason: the draw loop below
-    // indexes the mesh registry, and an unresolvable MeshRef out of a scene file would make that
-    // an out-of-bounds read. Dropping here also keeps the pick consistent with what was drawn —
-    // an entity the renderer refused must not be pickable.
-    (void)drop_unresolvable_draws(scene, meshes_);
+    // The same mandatory pre-pass the SceneRenderer runs, for the same two reasons: the draw loop
+    // below indexes the registry (an unresolvable MeshRef out of a scene file would be an
+    // out-of-bounds read), and the pick must rasterise EXACTLY what the forward pass rasterised —
+    // same submesh split, same drops — or a click is answered by a different picture than the one
+    // on screen. `pick_entities_` repeats an entity once per submesh, which is what keeps the
+    // 1-based draw id a correct index into it.
+    (void)resolve_draws(scene, meshes_);
     if (!scene.camera.found || scene.draws.empty()) {
         return; // nothing rendered ⇒ nothing pickable
     }
@@ -181,7 +183,11 @@ void ScenePicker::begin_pick(ecs::World& world,
                 cmd.bind_vertex_buffer(mesh.vertices);
                 cmd.bind_index_buffer(mesh.indices, rhi::IndexType::Uint32);
                 cmd.push_constants(&pushes[i], sizeof(DrawPush));
-                cmd.draw_indexed(mesh.index_count);
+                // The SUBMESH range, matching the forward pass exactly (m16.2). If the picker kept
+                // rasterising whole meshes while the forward pass drew submeshes, a click would be
+                // answered by a different rasterisation than the one on screen — a wrong answer
+                // with no wrong pixel anywhere, which is the hardest kind to notice.
+                cmd.draw_indexed(draws[i].index_count, 1, draws[i].first_index);
             }
         });
 
