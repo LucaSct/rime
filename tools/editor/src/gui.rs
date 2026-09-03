@@ -983,10 +983,10 @@ fn kind_glyph(kind: AssetKind) -> &'static str {
 /// about where the view is. That falls out of the viewport camera BEING an ordinary world entity.
 ///
 /// Two deliberate choices worth naming. Movement is scaled by the frame's delta time, so the camera
-/// covers the same ground per second whether the engine is streaming at 60 fps or at 3 -- and the
-/// cove scene genuinely does run at 3 in a Debug build, which is exactly when a per-frame step
-/// would crawl. And LOOK is on the RIGHT button because the left one already means pick-and-gizmo;
-/// stealing it would have cost the editor its selection gesture.
+/// covers the same ground per second whether the engine is streaming at 60 fps or at 3 -- and a
+/// landscape-scale scene in a Debug build genuinely does reach single-digit frame rates, which is
+/// exactly when a per-frame step would crawl. And LOOK is on the RIGHT button because the left one
+/// already means pick-and-gizmo; stealing it would have cost the editor its selection gesture.
 fn viewport_fly(
     ui: &egui::Ui,
     response: &egui::Response,

@@ -2275,6 +2275,37 @@ Blender-authored proof. Cut order: m16.7 → m16.6 → m16.5. **Never cut:** m16
 > a step function and a midpoint lands on the wrong side of it. The third would have shipped as a
 > quietly-wrong mip chain.
 
+**M17 — "The Visual Bar."** *Started 2026-09-03.* The UE5 column of [VISION](../VISION.md) §3, plus
+M13's frame-rate clause carried here with its number: `frame` p99 **35.60 ms** against a ratified
+16.6, of which the whole M10 render stack is 5.23 ms and the remainder is physics at 667 debris
+(m13.p). The budget does not move.
+
+> **This milestone started without its planning brick, and that is recorded rather than tidied
+> away.** Every milestone since M12 opened with an ADR and a brick ladder; M17 opened with two
+> bricks. [ADR-0040](adr/0040-sky-and-atmosphere.md) was written afterwards to close the five code
+> sites that already cited it, and it covers **the sky decision only** — not the milestone. **A
+> ladder for M17 is still owed**, and until it exists there is nothing in the repository that says
+> what "The Visual Bar" is made of or in what order.
+>
+> | brick | state | what landed |
+> |---|---|---|
+> | m17.0 | ✅ | a procedural sky — gradient, sun disc, fBm cloud — composited where the depth buffer says nothing was drawn; a `Sky` *component*, so a scene owns its own weather; the sun coupled to the world's first `DirectionalLight`. Off allocates nothing (ADR-0032 §11) |
+> | m17.0's proof | ✅ | `tests/render/sky_test.cpp` — four structural cases. Added **after** the brick: m17.0 shipped with no test, so CI could not see the feature at all |
+> | m17.1 | ✅ | the editor viewport camera flies (right-drag look, WASD/QE, shift-sprint). No new protocol message: the viewport camera **is** the world's `Camera` entity, so flying it is an ordinary `SetComponent` on the same edit path the inspector and gizmo use |
+>
+> **The sky does not light the scene, and no test can currently see that it doesn't.** All three
+> consumers of a sky's radiance — forward ambient, the DDGI miss, the SSR miss — still read one
+> constant (`SceneRenderer::ambient_`, whose own comment still calls it "the crude GI stand-in until
+> M10"). ADR-0040 §6 names the replacement and deliberately does not schedule it.
+>
+> Smaller things named so they are not rediscovered: the cloud layer's per-pixel cost is
+> **unmeasured** (ten value-noise evaluations per background pixel) and M17 is the milestone with a
+> frame-rate clause; a `.rscene` can author its sky's colours and clouds but **not** its sun's
+> colour or the below-horizon ground term, which stay host-level in `SkyParams`; and the editor
+> smoke's background pixel is now found by a 9×9 emptiness test, because the old near-black scan
+> could land on a deeply shadowed rock — with a sky in the frame it reports "no background pixel to
+> miss-test" instead of inventing a test it cannot run.
+
 ### The adversarial review that M11–M15 never got (2026-08-31)
 
 Kimi's last review ran 2026-08-12 and Fable was out of credits through M13–M15, so **every line of

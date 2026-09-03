@@ -61,3 +61,7 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0034](0034-svt-av1-4x-bump.md) — SVT-AV1 4.2.0 (a local Conan recipe, and low-delay's picture-in/picture-out contract)
 - [ADR-0035](0035-vision-demo-m12.md) — the vision demo, M12 (a falsifiable "feels right"; the work ledger + a self-gating hardware perf run; the character controller and client-side prediction)
 - [ADR-0036](0036-milestone-split-player-and-block.md) — splitting M12 into "The Player" (M12) and "The Block" (M13), at the seam ADR-0035 left for it
+- [ADR-0037](0037-authoring-loop-m14.md) — M14 "The Authoring Loop" (open the shipped block in the editor, change it, save it, run the changed scene)
+- [ADR-0038](0038-platform-proof-m15.md) — M15 "The Platform Proof" (a game that is not the block, with no engine edit to support it), and where M13's frame-rate debt goes
+- [ADR-0039](0039-authored-surfaces-m16.md) — M16 "Authored Surfaces" (the material half of the asset bridge; the mesh→material edge, masked depth, BC formats, one asset runtime)
+- [ADR-0040](0040-sky-and-atmosphere.md) — the sky (an analytic background now, a Hillaire-2020 LUT atmosphere later; the sky as a scene component, coupled to the world's sun)
