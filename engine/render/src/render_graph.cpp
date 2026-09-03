@@ -466,13 +466,13 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
 
         // Timestamps bracket every pass while slots last (64 slots = 32 timed passes; a bigger
         // frame times its first 32 and says so once).
-        const bool timed = timed_passes_ < rhi::kMaxTimestamps / 2;
+        const bool timed = timed_passes_ < max_timed_passes();
         if (timed) {
             cmd.write_timestamp(timed_passes_ * 2);
         } else if (!timing_overflow_warned_) {
             RIME_WARN("render: more than {} passes — timing only the first {}",
-                      rhi::kMaxTimestamps / 2,
-                      rhi::kMaxTimestamps / 2);
+                      max_timed_passes(),
+                      max_timed_passes());
             timing_overflow_warned_ = true;
         }
 

@@ -229,6 +229,14 @@ public:
 
     [[nodiscard]] std::vector<PassTiming> resolve_timings(rhi::CommandBuffer& cmd) const;
 
+    // How many passes a frame can time before the timestamp pool runs out — two slots per pass, so
+    // half of `rhi::kMaxTimestamps`. Exposed (m17.3b) because a caller that silently reports fewer
+    // passes than the frame declared is reporting UNATTRIBUTED GPU time as if it were absent, and
+    // `execute()`'s log warning is not in the committed artifact anyone later reads.
+    [[nodiscard]] static constexpr std::uint32_t max_timed_passes() noexcept {
+        return rhi::kMaxTimestamps / 2;
+    }
+
 private:
     // One declared use of one resource: the state the pass needs it in, and whether it writes.
     // This little record is the whole input to ordering, culling, AND barriers — the payoff of

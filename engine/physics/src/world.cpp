@@ -16,6 +16,7 @@
 #include "islands.hpp"
 #include "narrowphase.hpp"
 #include "rime/core/containers/handle.hpp"
+#include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/hash.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/quat.hpp"
@@ -838,6 +839,22 @@ core::Vec3 PhysicsWorld::gravity() const noexcept {
 }
 
 void PhysicsWorld::step(float dt) {
+    // THE STEP'S STAGES ARE MEASURED (m17.3b, ADR-0041 Ruling 2). Before this, the entire engine
+    // held ten profile zones and every one of them was in `application.cpp` — nothing in physics,
+    // destruction, render or net. So `99-the-block`'s largest cost, `sim.block` at a p99 of
+    // 25.49 ms against a ratified 6.0, had no attribution of any kind, and ADR-0035 §6's prediction
+    // that the narrowphase is the hot spot has been quoted as measured for two milestones without
+    // ever being measured.
+    //
+    // The zones sit at STAGE granularity, which is the same rule `Application` follows and for the
+    // same reason: `report_zone` takes a lock, so a zone inside a per-body loop would cost more
+    // than it measures. They also stay on the CALLING thread — none goes inside `solve_island`,
+    // which the job system runs on workers, because the sink is a single global slot with no
+    // per-thread accumulation behind it.
+    //
+    // With no sink installed each zone is two clock reads, one uncontended lock and an early
+    // return, which is every shipping run and every CI run.
+    RIME_PROFILE_ZONE("physics.step");
     Impl& p = *impl_;
     const std::size_t n = p.count();
     const auto is_dynamic = [&](std::size_t i) {
@@ -867,14 +884,17 @@ void PhysicsWorld::step(float dt) {
     // 1/(1+c·dt) form, unconditionally stable. Asleep bodies are frozen — skipping them here is the
     // whole point of sleeping: a resting stack costs nothing. (Kinematic push-in is M7.6; the
     // gyroscopic ω×Iω term stays dropped, ADR-0026.)
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!is_dynamic(i) || p.asleep[i] != 0) {
-            continue;
+    {
+        RIME_PROFILE_ZONE("physics.integrate_velocity");
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!is_dynamic(i) || p.asleep[i] != 0) {
+                continue;
+            }
+            core::Vec3 v = p.linear_velocity[i] + p.gravity * (p.gravity_factor[i] * dt);
+            v *= 1.0f / (1.0f + p.linear_damping[i] * dt);
+            p.linear_velocity[i] = v;
+            p.angular_velocity[i] *= 1.0f / (1.0f + p.angular_damping[i] * dt);
         }
-        core::Vec3 v = p.linear_velocity[i] + p.gravity * (p.gravity_factor[i] * dt);
-        v *= 1.0f / (1.0f + p.linear_damping[i] * dt);
-        p.linear_velocity[i] = v;
-        p.angular_velocity[i] *= 1.0f / (1.0f + p.angular_damping[i] * dt);
     }
 
     // ---- 1.5 Sweep CCD proxies (M7.10). A body opted into continuous collision gets its
@@ -886,6 +906,7 @@ void PhysicsWorld::step(float dt) {
     // region; move_proxy adds the fat margin on top, and the stage-8 refit later restores the tight
     // box at the body's real resting position for external queries.
     if (dt > 0.0f) {
+        RIME_PROFILE_ZONE("physics.ccd_sweep");
         for (std::size_t i = 0; i < n; ++i) {
             if (p.ccd[i] == 0 || !is_dynamic(i) || p.asleep[i] != 0) {
                 continue; // CCD only helps a moving, awake, dynamic body (see docs/design)
@@ -903,8 +924,13 @@ void PhysicsWorld::step(float dt) {
     // exactly how the stack learns to wake — stage 4 merges them into one island, stage 5
     // reactivates it. With CCD (M7.10), dt > 0 also lets an approaching fast pair get a speculative
     // contact from the swept bounds set just above.
+    // The stage ADR-0035 §6 predicted would dominate at 400+ debris. This zone is what turns that
+    // prediction into a measurement — or refutes it.
     std::vector<Manifold> manifolds;
-    p.build_contacts(manifolds, dt);
+    {
+        RIME_PROFILE_ZONE("physics.contacts");
+        p.build_contacts(manifolds, dt);
+    }
 
     // ---- 3. Prepare the contact constraints (solver.hpp). prepare_contact_constraint reads the
     // post-gravity velocities to fix each restitution bias, so it must precede any warm-start
@@ -921,67 +947,78 @@ void PhysicsWorld::step(float dt) {
                         p.restitution.data()};
     std::vector<ContactConstraint> constraints;
     constraints.reserve(manifolds.size());
-    for (std::size_t mi = 0; mi < manifolds.size(); ++mi) {
-        const Manifold& m = manifolds[mi];
-        const std::uint32_t da = p.dense_of(m.a);
-        const std::uint32_t db = p.dense_of(m.b);
-        if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
-            continue; // defensive: build_contacts only emits live pairs
+    {
+        RIME_PROFILE_ZONE("physics.constraints");
+        for (std::size_t mi = 0; mi < manifolds.size(); ++mi) {
+            const Manifold& m = manifolds[mi];
+            const std::uint32_t da = p.dense_of(m.a);
+            const std::uint32_t db = p.dense_of(m.b);
+            if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
+                continue; // defensive: build_contacts only emits live pairs
+            }
+            if (p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
+                continue; // no dynamic member — immovable pair, nothing solvable
+            }
+            // A SENSOR EXCHANGES NO IMPULSE (m15.6). Skipping it here, and only here, is what makes
+            // a trigger a trigger: it still runs through the broadphase and the exact narrowphase —
+            // the overlap is real geometry, not an AABB guess — but it never becomes a constraint,
+            // so it never joins an island, never wakes a stack, and cannot push anything. The
+            // manifold survives to the event stage below, where it is reported as a trigger
+            // instead.
+            if (p.sensor[da] != 0 || p.sensor[db] != 0) {
+                continue;
+            }
+            constraints.push_back(
+                prepare_contact_constraint(bodies, m, da, db, static_cast<std::uint32_t>(mi), dt));
         }
-        if (p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
-            continue; // no dynamic member — immovable pair, nothing solvable
-        }
-        // A SENSOR EXCHANGES NO IMPULSE (m15.6). Skipping it here, and only here, is what makes a
-        // trigger a trigger: it still runs through the broadphase and the exact narrowphase — the
-        // overlap is real geometry, not an AABB guess — but it never becomes a constraint, so it
-        // never joins an island, never wakes a stack, and cannot push anything. The manifold
-        // survives to the event stage below, where it is reported as a trigger instead.
-        if (p.sensor[da] != 0 || p.sensor[db] != 0) {
-            continue;
-        }
-        constraints.push_back(
-            prepare_contact_constraint(bodies, m, da, db, static_cast<std::uint32_t>(mi), dt));
-    }
+    } // physics.constraints
 
     // ---- 4. Partition into ISLANDS (islands.hpp): connected components of the dynamic-body
     // contact graph. Every awake dynamic body lands in exactly one island (a contactless body is a
     // singleton); static/kinematic bodies are shared anchors, not island members.
-    build_islands(n, p.motion, constraints, p.islands);
-    const IslandSet& isl = p.islands;
-
+    //
     // Gather the constraints into island-contiguous order so each island solves a plain span (the
     // solver stays index-free). Within-island order is preserved, so an island's solve is
     // bit-identical to M7.4's flat solve restricted to that island's bodies — the flat solve's
     // other constraints never touched them, so interleaving them or not cannot change the result.
-    std::vector<ContactConstraint> ordered(isl.constraints.size());
-    for (std::size_t i = 0; i < isl.constraints.size(); ++i) {
-        ordered[i] = constraints[isl.constraints[i]];
+    std::vector<ContactConstraint> ordered;
+    {
+        RIME_PROFILE_ZONE("physics.islands");
+        build_islands(n, p.motion, constraints, p.islands);
+        ordered.resize(p.islands.constraints.size());
+        for (std::size_t i = 0; i < p.islands.constraints.size(); ++i) {
+            ordered[i] = constraints[p.islands.constraints[i]];
+        }
     }
+    const IslandSet& isl = p.islands;
 
     // ---- 5. Decide which islands are ACTIVE this tick. An island is active unless every one of
     // its bodies is still asleep; a single awake member (e.g. a body that just fell in and merged
     // at stage 4) reactivates the whole island, and reactivated bodies restart their sleep timer.
     // With sleeping disabled no body is ever asleep, so every island is active — same code path.
     std::vector<std::uint8_t> active(isl.island_count, 1);
-    for (std::size_t k = 0; k < isl.island_count; ++k) {
-        bool any_awake = false;
-        for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
-            if (p.asleep[isl.bodies[bi]] == 0) {
-                any_awake = true;
-                break;
-            }
-        }
-        active[k] = any_awake ? std::uint8_t{1} : std::uint8_t{0};
-        if (any_awake) {
+    {
+        RIME_PROFILE_ZONE("physics.wake");
+        for (std::size_t k = 0; k < isl.island_count; ++k) {
+            bool any_awake = false;
             for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
-                const std::uint32_t b = isl.bodies[bi];
-                if (p.asleep[b] != 0) { // a neighbour is moving — rejoin the simulation
-                    p.asleep[b] = 0;
-                    p.sleep_timer[b] = 0.0f;
+                if (p.asleep[isl.bodies[bi]] == 0) {
+                    any_awake = true;
+                    break;
+                }
+            }
+            active[k] = any_awake ? std::uint8_t{1} : std::uint8_t{0};
+            if (any_awake) {
+                for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
+                    const std::uint32_t b = isl.bodies[bi];
+                    if (p.asleep[b] != 0) { // a neighbour is moving — rejoin the simulation
+                        p.asleep[b] = 0;
+                        p.sleep_timer[b] = 0.0f;
+                    }
                 }
             }
         }
-    }
+    } // physics.wake
 
     // ---- 6. Solve the ACTIVE islands. Per island, the exact M7.4 sequence — warm-start, fixed
     // velocity iterations, store impulses, integrate positions with the post-solve velocities, then
@@ -1017,19 +1054,25 @@ void PhysicsWorld::step(float dt) {
         solve_positions(bodies, cs, kPositionIterations);
     };
 
-    if (p.jobs != nullptr && isl.island_count > 1) {
-        // Over-decompose to ~4 chunks per participant so work-stealing balances the (wildly uneven)
-        // island sizes. Any chunking is correct — islands are independent — so the RESULT never
-        // depends on the chunk size or the worker count, only the timing does.
-        const std::size_t participants = p.jobs->participant_count();
-        const std::size_t chunk = std::max<std::size_t>(
-            1, (isl.island_count + participants * 4 - 1) / (participants * 4));
-        p.jobs->parallel_for(isl.island_count, chunk, solve_island);
-    } else {
-        for (std::size_t k = 0; k < isl.island_count; ++k) {
-            solve_island(k);
+    // The zone wraps the DISPATCH, on the calling thread — deliberately not inside `solve_island`,
+    // which the job system runs on workers. The zone sink is one global slot with no per-thread
+    // accumulation, so a zone on a worker would serialize the parallel region it is measuring.
+    {
+        RIME_PROFILE_ZONE("physics.solve");
+        if (p.jobs != nullptr && isl.island_count > 1) {
+            // Over-decompose to ~4 chunks per participant so work-stealing balances the (wildly
+            // uneven) island sizes. Any chunking is correct — islands are independent — so the
+            // RESULT never depends on the chunk size or the worker count, only the timing does.
+            const std::size_t participants = p.jobs->participant_count();
+            const std::size_t chunk = std::max<std::size_t>(
+                1, (isl.island_count + participants * 4 - 1) / (participants * 4));
+            p.jobs->parallel_for(isl.island_count, chunk, solve_island);
+        } else {
+            for (std::size_t k = 0; k < isl.island_count; ++k) {
+                solve_island(k);
+            }
         }
-    }
+    } // physics.solve
 
     // ---- 7. Update SLEEPING, measured on the POST-solve velocities (a resting body's pre-solve
     // velocity still holds the g·dt its contact just cancelled, so only now is it near rest). Each
@@ -1038,6 +1081,7 @@ void PhysicsWorld::step(float dt) {
     // velocities zeroed, and from next tick skipped. Sequential and deterministic, so sleeping
     // never perturbs the cross-thread world hash.
     if (p.sleeping_enabled) {
+        RIME_PROFILE_ZONE("physics.sleep");
         constexpr float lin2 = kLinearSleepThreshold * kLinearSleepThreshold;
         constexpr float ang2 = kAngularSleepThreshold * kAngularSleepThreshold;
         for (std::size_t k = 0; k < isl.island_count; ++k) {
@@ -1078,160 +1122,170 @@ void PhysicsWorld::step(float dt) {
     // report). A region that has a dynamic member but whose every dynamic member is now asleep is
     // recorded `suppressed`: kept present (so it is not falsely reported as Ended — an asleep pair
     // never separated) but emitting no event, which is what makes a settled pile silent.
-    p.contact_cur.clear();
-    for (const Manifold& m : manifolds) {
-        const std::uint32_t da = p.dense_of(m.a);
-        const std::uint32_t db = p.dense_of(m.b);
-        if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
-            continue; // defensive: build_contacts only emits live pairs
-        }
-        const bool is_trigger = p.sensor[da] != 0 || p.sensor[db] != 0;
-        // A CONTACT needs a dynamic member — an immovable pair exchanges no impulse, so there is
-        // nothing to report. A TRIGGER does not: overlap is the whole event, and the archetypal
-        // case is a STATIC volume watching for a KINEMATIC character, where both inverse masses are
-        // zero. Dropping trigger pairs here was silent — the volume simply never fired — and it is
-        // the reason this exception is spelled out rather than folded into the condition (m15.6).
-        if (!is_trigger && p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
-            continue; // no dynamic member — not an evented contact
-        }
-        // Representative point = the deepest (first max, strict >, so ties resolve
-        // deterministically); impulses = the region's total exchanged momentum this tick.
-        std::uint8_t best = 0;
-        float normal_impulse = 0.0f;
-        float tangent_impulse = 0.0f;
-        for (std::uint8_t k = 0; k < m.count; ++k) {
-            if (m.points[k].penetration > m.points[best].penetration) {
-                best = k;
-            }
-            normal_impulse += m.points[k].normal_impulse;
-            tangent_impulse += m.points[k].tangent_impulse;
-        }
-        const bool awake_dyn_a = p.inv_mass[da] > 0.0f && p.asleep[da] == 0;
-        const bool awake_dyn_b = p.inv_mass[db] > 0.0f && p.asleep[db] == 0;
-        p.contact_cur.push_back(Impl::ContactRecord{
-            (static_cast<std::uint64_t>(m.a.index) << 32) | static_cast<std::uint64_t>(m.b.index),
-            (static_cast<std::uint32_t>(m.child_a) << 16) | static_cast<std::uint32_t>(m.child_b),
-            m.a,
-            m.b,
-            m.points[best].position,
-            m.normal,
-            normal_impulse,
-            tangent_impulse,
-            // A TRIGGER IS NEVER SUPPRESSED, and that is a real difference rather than an
-            // oversight. Contacts suppress a pair whose every dynamic member is asleep, because a
-            // resting stack exchanging no new impulse has nothing to report. An overlap does not
-            // stop being an overlap when the body inside it falls asleep — and, more to the point,
-            // a KINEMATIC character has zero inverse mass and is never "an awake dynamic member"
-            // at all, so the contact rule would silence exactly the case triggers exist for.
-            /*suppressed=*/is_trigger ? false : !(awake_dyn_a || awake_dyn_b),
-            /*trigger=*/is_trigger});
-    }
-
-    // Classify by a linear merge of the two key-sorted lists (cur = this tick, prev = last tick):
-    // a region only in cur is Began, only in prev is Ended, in both is Persisted. The merge key is
-    // (pair key, child sub-pair) compared lexicographically — plain pairs all carry sub-pair 0,
-    // so their merge is exactly the M7.9 pair merge. Suppressed cur records still consume their
-    // merge position (so a matching prev record is not reported Ended) but emit nothing. The
-    // result is naturally in canonical region order.
-    p.contact_events_back.clear();
-    p.trigger_events_back.clear();
-    const auto emit_contact = [&](const Impl::ContactRecord& r, ContactPhase phase) {
-        if (r.trigger) {
-            // Same lifecycle, different family. A trigger carries only WHO and WHICH PHASE —
-            // there is no contact point, no normal and no impulse to report, because nothing was
-            // solved. Reporting a manifold's geometry here would hand a consumer numbers that look
-            // like a contact and are not one.
-            TriggerEvent t;
-            t.a = r.a;
-            t.b = r.b;
-            t.phase = phase;
-            t.child_a = static_cast<std::uint16_t>(r.children >> 16);
-            t.child_b = static_cast<std::uint16_t>(r.children & 0xFFFFu);
-            p.trigger_events_back.push_back(t);
-            return;
-        }
-        ContactEvent e;
-        e.a = r.a;
-        e.b = r.b;
-        e.point = r.point;
-        e.normal = r.normal;
-        // An Ended region exchanged nothing this tick; its record is last tick's, so ignore its
-        // stored impulses and report zero.
-        e.normal_impulse = phase == ContactPhase::Ended ? 0.0f : r.normal_impulse;
-        e.tangent_impulse = phase == ContactPhase::Ended ? 0.0f : r.tangent_impulse;
-        e.phase = phase;
-        e.child_a = static_cast<std::uint16_t>(r.children >> 16);
-        e.child_b = static_cast<std::uint16_t>(r.children & 0xFFFFu);
-        p.contact_events_back.push_back(e);
-    };
-    const auto record_less = [](const Impl::ContactRecord& x, const Impl::ContactRecord& y) {
-        return x.key < y.key || (x.key == y.key && x.children < y.children);
-    };
     {
-        const std::vector<Impl::ContactRecord>& cur = p.contact_cur;
-        const std::vector<Impl::ContactRecord>& prev = p.contact_prev;
-        std::size_t i = 0;
-        std::size_t j = 0;
-        while (i < cur.size() && j < prev.size()) {
-            if (record_less(cur[i], prev[j])) {
+        RIME_PROFILE_ZONE("physics.events");
+        p.contact_cur.clear();
+        for (const Manifold& m : manifolds) {
+            const std::uint32_t da = p.dense_of(m.a);
+            const std::uint32_t db = p.dense_of(m.b);
+            if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
+                continue; // defensive: build_contacts only emits live pairs
+            }
+            const bool is_trigger = p.sensor[da] != 0 || p.sensor[db] != 0;
+            // A CONTACT needs a dynamic member — an immovable pair exchanges no impulse, so there
+            // is nothing to report. A TRIGGER does not: overlap is the whole event, and the
+            // archetypal case is a STATIC volume watching for a KINEMATIC character, where both
+            // inverse masses are zero. Dropping trigger pairs here was silent — the volume simply
+            // never fired — and it is the reason this exception is spelled out rather than folded
+            // into the condition (m15.6).
+            if (!is_trigger && p.inv_mass[da] + p.inv_mass[db] <= 0.0f) {
+                continue; // no dynamic member — not an evented contact
+            }
+            // Representative point = the deepest (first max, strict >, so ties resolve
+            // deterministically); impulses = the region's total exchanged momentum this tick.
+            std::uint8_t best = 0;
+            float normal_impulse = 0.0f;
+            float tangent_impulse = 0.0f;
+            for (std::uint8_t k = 0; k < m.count; ++k) {
+                if (m.points[k].penetration > m.points[best].penetration) {
+                    best = k;
+                }
+                normal_impulse += m.points[k].normal_impulse;
+                tangent_impulse += m.points[k].tangent_impulse;
+            }
+            const bool awake_dyn_a = p.inv_mass[da] > 0.0f && p.asleep[da] == 0;
+            const bool awake_dyn_b = p.inv_mass[db] > 0.0f && p.asleep[db] == 0;
+            p.contact_cur.push_back(Impl::ContactRecord{
+                (static_cast<std::uint64_t>(m.a.index) << 32) |
+                    static_cast<std::uint64_t>(m.b.index),
+                (static_cast<std::uint32_t>(m.child_a) << 16) |
+                    static_cast<std::uint32_t>(m.child_b),
+                m.a,
+                m.b,
+                m.points[best].position,
+                m.normal,
+                normal_impulse,
+                tangent_impulse,
+                // A TRIGGER IS NEVER SUPPRESSED, and that is a real difference rather than an
+                // oversight. Contacts suppress a pair whose every dynamic member is asleep, because
+                // a resting stack exchanging no new impulse has nothing to report. An overlap does
+                // not stop being an overlap when the body inside it falls asleep — and, more to the
+                // point, a KINEMATIC character has zero inverse mass and is never "an awake dynamic
+                // member" at all, so the contact rule would silence exactly the case triggers exist
+                // for.
+                /*suppressed=*/is_trigger ? false : !(awake_dyn_a || awake_dyn_b),
+                /*trigger=*/is_trigger});
+        }
+
+        // Classify by a linear merge of the two key-sorted lists (cur = this tick, prev = last
+        // tick): a region only in cur is Began, only in prev is Ended, in both is Persisted. The
+        // merge key is (pair key, child sub-pair) compared lexicographically — plain pairs all
+        // carry sub-pair 0, so their merge is exactly the M7.9 pair merge. Suppressed cur records
+        // still consume their merge position (so a matching prev record is not reported Ended) but
+        // emit nothing. The result is naturally in canonical region order.
+        p.contact_events_back.clear();
+        p.trigger_events_back.clear();
+        const auto emit_contact = [&](const Impl::ContactRecord& r, ContactPhase phase) {
+            if (r.trigger) {
+                // Same lifecycle, different family. A trigger carries only WHO and WHICH PHASE —
+                // there is no contact point, no normal and no impulse to report, because nothing
+                // was solved. Reporting a manifold's geometry here would hand a consumer numbers
+                // that look like a contact and are not one.
+                TriggerEvent t;
+                t.a = r.a;
+                t.b = r.b;
+                t.phase = phase;
+                t.child_a = static_cast<std::uint16_t>(r.children >> 16);
+                t.child_b = static_cast<std::uint16_t>(r.children & 0xFFFFu);
+                p.trigger_events_back.push_back(t);
+                return;
+            }
+            ContactEvent e;
+            e.a = r.a;
+            e.b = r.b;
+            e.point = r.point;
+            e.normal = r.normal;
+            // An Ended region exchanged nothing this tick; its record is last tick's, so ignore its
+            // stored impulses and report zero.
+            e.normal_impulse = phase == ContactPhase::Ended ? 0.0f : r.normal_impulse;
+            e.tangent_impulse = phase == ContactPhase::Ended ? 0.0f : r.tangent_impulse;
+            e.phase = phase;
+            e.child_a = static_cast<std::uint16_t>(r.children >> 16);
+            e.child_b = static_cast<std::uint16_t>(r.children & 0xFFFFu);
+            p.contact_events_back.push_back(e);
+        };
+        const auto record_less = [](const Impl::ContactRecord& x, const Impl::ContactRecord& y) {
+            return x.key < y.key || (x.key == y.key && x.children < y.children);
+        };
+        {
+            const std::vector<Impl::ContactRecord>& cur = p.contact_cur;
+            const std::vector<Impl::ContactRecord>& prev = p.contact_prev;
+            std::size_t i = 0;
+            std::size_t j = 0;
+            while (i < cur.size() && j < prev.size()) {
+                if (record_less(cur[i], prev[j])) {
+                    if (!cur[i].suppressed) {
+                        emit_contact(cur[i], ContactPhase::Began);
+                    }
+                    ++i;
+                } else if (record_less(prev[j], cur[i])) {
+                    emit_contact(prev[j], ContactPhase::Ended);
+                    ++j;
+                } else {
+                    if (!cur[i].suppressed) {
+                        emit_contact(cur[i], ContactPhase::Persisted);
+                    }
+                    ++i;
+                    ++j;
+                }
+            }
+            for (; i < cur.size(); ++i) {
                 if (!cur[i].suppressed) {
                     emit_contact(cur[i], ContactPhase::Began);
                 }
-                ++i;
-            } else if (record_less(prev[j], cur[i])) {
+            }
+            for (; j < prev.size(); ++j) {
                 emit_contact(prev[j], ContactPhase::Ended);
-                ++j;
-            } else {
-                if (!cur[i].suppressed) {
-                    emit_contact(cur[i], ContactPhase::Persisted);
-                }
-                ++i;
-                ++j;
             }
         }
-        for (; i < cur.size(); ++i) {
-            if (!cur[i].suppressed) {
-                emit_contact(cur[i], ContactPhase::Began);
+        p.contact_prev.swap(p.contact_cur); // this tick becomes next tick's baseline
+
+        // Sleep/wake events: the bodies whose sleep state changed during this step, in dense order.
+        p.sleep_events_back.clear();
+        for (std::size_t i = 0; i < n; ++i) {
+            if (p.asleep_snapshot[i] == p.asleep[i]) {
+                continue;
             }
+            SleepEvent e;
+            e.body = BodyId{p.dense_to_slot[i], p.slots[p.dense_to_slot[i]].generation};
+            e.phase = p.asleep[i] != 0 ? SleepPhase::Slept : SleepPhase::Woke;
+            p.sleep_events_back.push_back(e);
         }
-        for (; j < prev.size(); ++j) {
-            emit_contact(prev[j], ContactPhase::Ended);
-        }
-    }
-    p.contact_prev.swap(p.contact_cur); // this tick becomes next tick's baseline
 
-    // Sleep/wake events: the bodies whose sleep state changed during this step, in dense order.
-    p.sleep_events_back.clear();
-    for (std::size_t i = 0; i < n; ++i) {
-        if (p.asleep_snapshot[i] == p.asleep[i]) {
-            continue;
-        }
-        SleepEvent e;
-        e.body = BodyId{p.dense_to_slot[i], p.slots[p.dense_to_slot[i]].generation};
-        e.phase = p.asleep[i] != 0 ? SleepPhase::Slept : SleepPhase::Woke;
-        p.sleep_events_back.push_back(e);
-    }
-
-    // Publish: swap the filled back buffers to front, so the accessors return this tick's events,
-    // stable until the next step() refills and swaps again (the double buffer).
-    p.contact_events_front.swap(p.contact_events_back);
-    p.trigger_events_front.swap(p.trigger_events_back);
-    p.sleep_events_front.swap(p.sleep_events_back);
+        // Publish: swap the filled back buffers to front, so the accessors return this tick's
+        // events, stable until the next step() refills and swaps again (the double buffer).
+        p.contact_events_front.swap(p.contact_events_back);
+        p.trigger_events_front.swap(p.trigger_events_back);
+        p.sleep_events_front.swap(p.sleep_events_back);
+    } // physics.events
 
     // ---- 8. Commit the contact cache from the SOLVED manifolds (closing the warm-start loop),
     // then refit the broadphase proxy of every body that actually moved — the dynamic members of
     // ACTIVE islands (which includes any body that only just went to sleep this tick). Asleep
     // islands did not move, so their proxies and the tree are left untouched; move_proxy mutates
     // the shared tree, so this stays sequential.
-    p.commit_contact_cache(manifolds);
-    for (std::size_t k = 0; k < isl.island_count; ++k) {
-        if (active[k] == 0) {
-            continue;
-        }
-        for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
-            const std::uint32_t i = isl.bodies[bi];
-            const Aabb tight = p.aabb_of(p.shape[i], p.position[i], p.orientation[i]);
-            p.dynamic_tree.move_proxy(p.proxy[i], tight);
+    {
+        RIME_PROFILE_ZONE("physics.commit");
+        p.commit_contact_cache(manifolds);
+        for (std::size_t k = 0; k < isl.island_count; ++k) {
+            if (active[k] == 0) {
+                continue;
+            }
+            for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
+                const std::uint32_t i = isl.bodies[bi];
+                const Aabb tight = p.aabb_of(p.shape[i], p.position[i], p.orientation[i]);
+                p.dynamic_tree.move_proxy(p.proxy[i], tight);
+            }
         }
     }
 
@@ -1241,6 +1295,7 @@ void PhysicsWorld::step(float dt) {
     // untouched, and the numbers themselves are thread-count-invariant (they derive only from the
     // canonical manifolds and the pure-function island partition). Cheap: one O(n) pass over the
     // bodies plus the O(manifolds)/O(islands) walks the tick already made.
+    RIME_PROFILE_ZONE("physics.stats");
     WorldStats& st = p.last_stats;
     st = WorldStats{};
     st.body_count = static_cast<std::uint32_t>(n);

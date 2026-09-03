@@ -2322,6 +2322,7 @@ exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: m17.9 �
 > | m17.0's proof | ✅ | `tests/render/sky_test.cpp` — four structural cases. Added **after** the brick: m17.0 shipped with no test, so CI could not see the feature at all |
 > | m17.1 | ✅ | the editor viewport camera flies (right-drag look, WASD/QE, shift-sprint). No new protocol message: the viewport camera **is** the world's `Camera` entity, so flying it is an ordinary `SetComponent` on the same edit path the inspector and gizmo use |
 > | m17.2 | ✅ | [ADR-0041](adr/0041-the-visual-bar-m17.md) and this ladder — plus five findings, verified against the tree, that decide its order |
+> | m17.3b | ✅ | **the simulation is measured.** Eleven stage zones inside `PhysicsWorld::step` — the engine's first outside `application.cpp` — and every zone is now recorded twice: `<name>` per call (unchanged, the meaning ADR-0035's per-tick budget ratified) and `<name>.per_frame`, the sum within one frame, because a per-call percentile times a call count is not a per-frame percentile. `99-the-block --perf` prints the ranked per-frame totals, and says out loud when a frame declares more passes than the 32-slot timestamp pool can time |
 > | m17.3a | ✅ | **a pass name is an identity, not a label.** `DepthPrepass::add` takes a label; CSM declares `csm-cascade-N` and local shadows `spot-shadow-N`, so a report has rows for shadow work for the first time. `RenderGraph` uniquifies any remaining collision and `PerfReport::observe_frame` does the same at its own seam, so the artifact's keys are keys whoever feeds it. Both halves falsified: with the uniquifier off the graph hands out three passes called `twin`; with the labels reverted the cascades vanish and `depth-prepass#1..#3` appear |
 >
 > **Planning found that the frame cannot currently be attributed, which is why m17.3 is first and
@@ -2352,6 +2353,21 @@ exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: m17.9 �
 > Two smaller ones: the ratified **collapse-tick max ≤ 12 ms has no rule** in the block's gate (it
 > gates `frame.collapse` max at 33, the *frame* budget during the window), and the committed block
 > baseline was measured on a **dirty tree** (`run.commit` is `68bcfd7-dirty`).
+>
+> **A third, found by m17.3b's own instrumentation: the block declares more passes than the frame
+> can time.** The timestamp pool is `rhi::kMaxTimestamps / 2` = **32**, and the block hits it — so
+> every pass past the 32nd is GPU time no report has ever contained. `execute()` logs a warning
+> once; nothing in the committed artifact says it. The sample now prints it, and raising the pool is
+> m17.3c's problem.
+>
+> **First signal on where the simulation goes — and it is NOT yet the answer.** A 40-frame **Debug**
+> probe at 640×360 ranks `physics.solve.per_frame` p99 at 96 ms against `physics.contacts.per_frame`
+> at 50 ms, with every other stage under 12 ms and `physics.step.per_frame` (159 ms) accounting for
+> essentially all of `sim.block` (161 ms). That would put the *solver* ahead of ADR-0035 §6's
+> predicted narrowphase by ~2×. **It is not quotable**: a Debug build penalises the solver's tight
+> unoptimised float loops far more than the broadphase's tree walk, which is exactly the kind of
+> distortion that turns a probe into a wrong finding. **m17.3d's Release re-baseline settles it**,
+> and until then §6's prediction stays unconfirmed rather than replaced.
 >
 > **The ladder's first omission, found in review and added as m17.8: there is no ground.** What the
 > block stands on is **two triangles** (`make_plane`, four vertices) scaled to a 76 m square

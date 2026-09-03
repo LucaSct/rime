@@ -174,6 +174,26 @@ public:
     // One sample on any other timeline: "sim_tick", "frame.collapse", "gpu.total".
     void observe(std::string_view timeline, double ms);
 
+    // One CLOSED PROFILE ZONE, which is not the same shape of measurement as `observe` (m17.3b).
+    //
+    // A zone fires once per SCOPE ENTRY, and the scopes that matter run many times per frame: a
+    // frame steps the simulation several times, and each step runs every physics stage. So the
+    // timeline a zone feeds is a distribution over CALLS — `sim.tick p99` is "the 99th-percentile
+    // tick", which is exactly right against ADR-0035's ratified per-tick budget and exactly wrong
+    // for the question M17 has to answer, which is where a FRAME's 35.6 ms went. Multiplying a
+    // per-call percentile by a call count does not give a per-frame percentile.
+    //
+    // So a zone is recorded twice, under two names that cannot be confused:
+    //
+    //   `<name>`            — every call, unchanged, still the ratified per-tick meaning
+    //   `<name>.per_frame`  — the SUM of that zone's calls within one frame, one sample per frame
+    //
+    // The per-frame half is flushed by `observe_frame`, which is the only thing in this class that
+    // knows where a frame ends. A run that never calls `observe_frame` (a pure-sim app) simply
+    // accumulates and never flushes: bounded by the number of distinct zone names, and reported by
+    // nobody, which is the honest outcome for a run that has no frames.
+    void observe_zone(std::string_view name, double ms);
+
     void set_machine(MachineFingerprint machine) { machine_ = std::move(machine); }
 
     void set_run(RunInfo run) { run_ = std::move(run); }
@@ -253,8 +273,23 @@ private:
 
     [[nodiscard]] Timeline& timeline_for(std::string_view name);
 
+    // The in-flight frame's zone totals (m17.3b). `total_ms` accumulates every close of that zone
+    // since the last `observe_frame`; `per_frame_name` is `<name>.per_frame`, built once per name
+    // rather than once per frame so the flush allocates nothing.
+    // A frame in which a known zone never ran records a ZERO, not nothing. "This frame spent no
+    // time in physics.solve" is a true and useful statement — it is how a skipped sim shows up —
+    // and it keeps every per-frame timeline's sample count aligned with `frame`'s, which is the
+    // precondition for ever comparing them frame-for-frame. Zones discovered late carry fewer
+    // samples than `frame`; that asymmetry is visible in `count` rather than hidden.
+    struct ZoneAccumulator {
+        std::string name;
+        std::string per_frame_name;
+        double total_ms = 0.0;
+    };
+
     std::vector<Timeline> timelines_;
     std::vector<PassAccumulator> pass_acc_; // recording side
+    std::vector<ZoneAccumulator> zone_acc_; // recording side, flushed per frame
     std::vector<PassCost> parsed_passes_;   // parse side
     WorstFrame worst_;
     MachineFingerprint machine_;

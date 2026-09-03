@@ -586,8 +586,32 @@ void PerfReport::observe(std::string_view timeline, double ms) {
     t.measured = true;
 }
 
+void PerfReport::observe_zone(std::string_view name, double ms) {
+    observe(name, ms); // the per-call timeline, unchanged — see the header
+
+    for (ZoneAccumulator& z : zone_acc_) {
+        if (z.name == name) {
+            z.total_ms += ms;
+            return;
+        }
+    }
+    ZoneAccumulator fresh;
+    fresh.name.assign(name);
+    fresh.per_frame_name = fresh.name + ".per_frame";
+    fresh.total_ms = ms;
+    zone_acc_.push_back(std::move(fresh));
+}
+
 void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes) {
     observe("frame", ms);
+
+    // The frame boundary, and therefore where a zone's per-frame total is banked (m17.3b). Every
+    // known zone flushes, including the ones that did not run this frame — a zero is a measurement,
+    // and omitting it would bias the percentile upward by dropping exactly the cheap frames.
+    for (ZoneAccumulator& z : zone_acc_) {
+        observe(z.per_frame_name, z.total_ms);
+        z.total_ms = 0.0;
+    }
 
     // A PASS NAME IS A KEY, AND KEYS MUST BE UNIQUE WITHIN A FRAME (m17.3). Two passes sharing a
     // name in one frame broke this two ways at once, and the 2026-08-30 block baseline shows both:
@@ -1003,7 +1027,7 @@ ZoneTimelines::ZoneTimelines(PerfReport& report) : report_(&report) {
     // sink copy inside report_zone() costs no allocation — which matters because this fires on
     // every stage of every tick of the run being measured.
     PerfReport* target = report_;
-    set_zone_sink([target](std::string_view name, double ms) { target->observe(name, ms); });
+    set_zone_sink([target](std::string_view name, double ms) { target->observe_zone(name, ms); });
 }
 
 void ZoneTimelines::stop() {

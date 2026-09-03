@@ -75,6 +75,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "rime/app/application.hpp"
@@ -1845,12 +1846,18 @@ int run_perf(const std::filesystem::path& cooked,
 
     std::vector<core::PassTiming> passes;
     bool timestamps_seen = false;
+    // The HIGH WATER MARK across the run, not the last frame's count (m17.3b). Which passes a frame
+    // declares varies — local shadows only re-render invalidated slots — so testing the final
+    // frame's count against the timestamp pool would report "everything was timed" whenever the run
+    // happened to end quiet.
+    std::size_t max_passes_timed = 0;
     demo.app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer& cmd) {
         passes.clear();
         for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(cmd)) {
             passes.push_back(core::PassTiming{std::string(t.name), t.gpu_ms});
             timestamps_seen = true;
         }
+        max_passes_timed = std::max(max_passes_timed, passes.size());
     });
     demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
 
@@ -2005,11 +2012,55 @@ int run_perf(const std::filesystem::path& cooked,
         std::printf(
             "  sim.server p50 %.3f  p99 %.3f  max %.3f ms\n", sv->p50_ms, sv->p99_ms, sv->max_ms);
     }
+    // WHERE THE SIMULATION WENT (m17.3b). Until this brick the answer was "nowhere in particular":
+    // the engine's only profile zones were the Application's stage hooks, which this demo does not
+    // use, so `sim.block`'s p99 had no breakdown of any kind and ADR-0035 §6's narrowphase
+    // prediction was quoted as measured without ever being one.
+    //
+    // Ranked by the PER-FRAME total rather than the per-call one, because a frame steps the sim
+    // several times and each step runs every stage: a per-call percentile times a call count is not
+    // a per-frame percentile. Chosen by suffix rather than by a hardcoded list of stage names, so a
+    // zone added anywhere in the engine shows up here without this sample being edited — the same
+    // reason the work ledger prints itself whole.
+    {
+        std::vector<std::pair<std::string_view, double>> zones;
+        for (const std::string_view name : report.timelines()) {
+            constexpr std::string_view kSuffix = ".per_frame";
+            if (name.size() <= kSuffix.size() || !name.ends_with(kSuffix))
+                continue;
+            if (const auto d = report.distribution(name))
+                zones.emplace_back(name, d->p99_ms);
+        }
+        std::sort(zones.begin(), zones.end(), [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+        if (!zones.empty()) {
+            std::printf("  where the CPU frame went (per-frame totals, p99, top %zu of %zu):\n",
+                        std::min<std::size_t>(zones.size(), 6),
+                        zones.size());
+            for (std::size_t i = 0; i < zones.size() && i < 6; ++i) {
+                std::printf("    %-34.*s %8.3f ms\n",
+                            static_cast<int>(zones[i].first.size()),
+                            zones[i].first.data(),
+                            zones[i].second);
+            }
+        }
+    }
+
     std::printf("  worst frame #%llu at %.2f ms\n",
                 static_cast<unsigned long long>(report.worst_frame().index),
                 report.worst_frame().ms);
     if (!timestamps_seen) {
         std::printf("  (this device reports no GPU timestamps — the per-pass table is empty)\n");
+    }
+    // A frame that declares more than 32 passes leaves the rest UNTIMED (kMaxTimestamps / 2), and
+    // the block declares more than that. Say so, because an unattributed pass is indistinguishable
+    // in the report from a pass that cost nothing — the exact confusion m17.3 exists to end.
+    if (max_passes_timed >= render::RenderGraph::max_timed_passes()) {
+        std::printf("  (%zu passes timed at peak — the timestamp pool holds %u, so a frame "
+                    "declaring more leaves the rest as UNATTRIBUTED GPU time)\n",
+                    max_passes_timed,
+                    render::RenderGraph::max_timed_passes());
     }
     std::printf("  work ledger: %s\n", ledger.to_json(-1).c_str());
 

@@ -194,6 +194,70 @@ TEST_CASE("m17.3: two passes with one name are two keys, not one key written twi
     }
 }
 
+TEST_CASE(
+    "m17.3b: a zone is measured per call AND per frame, because they answer different questions") {
+    // A profile zone fires once per SCOPE ENTRY, and the scopes that matter run many times per
+    // frame — a frame steps the simulation several times and each step runs every physics stage.
+    // So the timeline a zone feeds is a distribution over CALLS. That is exactly right against
+    // ADR-0035's ratified per-TICK budget and exactly wrong for M17's question, which is where a
+    // frame's 35.6 ms went: a per-call percentile times a call count is not a per-frame percentile.
+    PerfReport r;
+
+    // Frame 0: the zone runs three times, 1 + 2 + 3 ms.
+    r.observe_zone("physics.solve", 1.0);
+    r.observe_zone("physics.solve", 2.0);
+    r.observe_zone("physics.solve", 3.0);
+    r.observe_frame(0, 10.0);
+
+    // Frame 1: once, 4 ms.
+    r.observe_zone("physics.solve", 4.0);
+    r.observe_frame(1, 10.0);
+
+    // Frame 2: the zone does not run at all.
+    r.observe_frame(2, 10.0);
+
+    SUBCASE("the per-call timeline keeps its old meaning, one sample per call") {
+        const auto per_call = r.distribution("physics.solve");
+        REQUIRE(per_call.has_value());
+        CHECK(per_call->count == 4);
+        CHECK(per_call->max_ms == doctest::Approx(4.0));
+    }
+
+    SUBCASE("the per-frame timeline sums the calls, one sample per frame") {
+        const auto per_frame = r.distribution("physics.solve.per_frame");
+        REQUIRE(per_frame.has_value());
+        // Three frames, three samples: 6.0, 4.0 and — the one that is easy to get wrong — 0.0.
+        CHECK(per_frame->count == 3);
+        CHECK(per_frame->max_ms == doctest::Approx(6.0));
+        CHECK(per_frame->min_ms == doctest::Approx(0.0));
+        // The distinction the whole thing exists for: the worst CALL was 4 ms, the worst FRAME
+        // spent 6. Reading the per-call max as a frame cost understates it by a third here, and by
+        // far more in the block, where a frame runs several steps of a many-stage pipeline.
+        CHECK(per_frame->max_ms > r.distribution("physics.solve")->max_ms);
+    }
+
+    SUBCASE("a frame in which the zone never ran records a zero, not nothing") {
+        // Dropping it would bias the percentile upward by discarding exactly the cheap frames, and
+        // would leave the per-frame timeline with a different sample count from `frame` — which is
+        // the precondition for ever comparing them frame-for-frame.
+        const auto per_frame = r.distribution("physics.solve.per_frame");
+        const auto frames = r.distribution("frame");
+        REQUIRE(per_frame.has_value());
+        REQUIRE(frames.has_value());
+        CHECK(per_frame->count == frames->count);
+    }
+
+    SUBCASE("the per-frame totals survive the round trip to a committed report") {
+        std::string json = r.to_json();
+        PerfReport back;
+        std::string error;
+        REQUIRE_MESSAGE(PerfReport::parse(json, back, error), error);
+        REQUIRE(back.distribution("physics.solve.per_frame").has_value());
+        CHECK(back.distribution("physics.solve.per_frame")->max_ms == doctest::Approx(6.0));
+        CHECK(back.to_json() == json);
+    }
+}
+
 TEST_CASE("the committed JSON round-trips exactly") {
     const PerfReport r = make_report();
     const std::string first = r.to_json();
