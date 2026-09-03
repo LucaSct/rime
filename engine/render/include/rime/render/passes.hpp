@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 #include "rime/core/math/mat.hpp"
@@ -235,10 +236,19 @@ public:
     // selects which array layer of a layered depth target to render into (m10.1: a CSM reuses this
     // once per cascade, layer = cascade index); 0 (default) is an ordinary single-layer depth
     // image.
+    //
+    // `label` names the pass in the graph, and therefore in `resolve_timings` and in every
+    // committed `docs/perf/` report (m17.3). It exists because this pass is the one the shadow
+    // systems reuse: a frame that declares it once for the camera and four more times for cascades
+    // reported five rows called "depth-prepass", which the perf report folded into one and the JSON
+    // writer emitted as four identical keys. Callers that render something OTHER than the primary
+    // view must say so — `CascadedShadowMap` passes `csm-cascade-N`, `LocalShadowMap` passes
+    // `spot-shadow-N` — so the report has a row for shadow work, which it previously did not.
     void add(RenderGraph& graph,
              RGTexture depth,
              const SceneDrawData& data,
-             std::uint32_t layer = 0) const;
+             std::uint32_t layer = 0,
+             std::string_view label = "depth-prepass") const;
 
 private:
     rhi::Device& device_;

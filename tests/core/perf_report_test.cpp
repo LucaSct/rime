@@ -144,6 +144,56 @@ TEST_CASE("a report records frames, per-pass cost, and the single worst frame") 
     }
 }
 
+TEST_CASE("m17.3: two passes with one name are two keys, not one key written twice") {
+    // THE BUG THIS PINS SHIPPED, AND IT IS IN THE REPOSITORY. A CSM declares the depth pre-pass
+    // once per cascade, so `docs/perf/2026-08-30-99-the-block-*.json` contains FOUR
+    // `"depth-prepass"` keys in one object. Every ordinary JSON reader keeps one of them, so the
+    // committed artifact under-reports its own worst frame by 0.32 ms and no reader can tell.
+    // Meanwhile the fold below put four different renders into one distribution, making
+    // `depth-prepass p50` the median of individual cascades rather than a per-frame cost — a number
+    // that reads as the latter.
+    PerfReport r;
+    const PassTiming frame_passes[] = {{"shadow", 1.0}, {"forward", 4.0}, {"shadow", 2.0}};
+    r.observe_frame(0, 9.0, frame_passes);
+
+    SUBCASE("the worst frame keeps BOTH, under names that differ") {
+        REQUIRE(r.worst_frame().passes.size() == 3);
+        CHECK(r.worst_frame().passes[0].name == "shadow");
+        CHECK(r.worst_frame().passes[1].name == "forward");
+        CHECK(r.worst_frame().passes[2].name == "shadow#1");
+        CHECK(r.worst_frame().passes[2].ms == doctest::Approx(2.0));
+    }
+
+    SUBCASE("the two renders get two distributions, so neither is a median of the other") {
+        const auto passes = r.passes();
+        REQUIRE(passes.size() == 3);
+        CHECK(passes[0].name == "shadow");
+        CHECK(passes[0].max_ms == doctest::Approx(1.0));
+        CHECK(passes[2].name == "shadow#1");
+        CHECK(passes[2].max_ms == doctest::Approx(2.0));
+    }
+
+    SUBCASE("the emitted JSON has unique keys — the property the committed file violates") {
+        const std::string json = r.to_json();
+        // Count occurrences of the quoted key. Two would mean the artifact is still unreadable by
+        // anything that is not this file's own parser, which is the whole failure.
+        std::size_t at = 0;
+        int shadow_keys = 0;
+        while ((at = json.find("\"shadow\":", at)) != std::string::npos) {
+            ++shadow_keys;
+            at += 9;
+        }
+        CHECK(shadow_keys == 2); // once in `passes`, once in `worst_frame.passes`
+        CHECK(json.find("\"shadow#1\":") != std::string::npos);
+
+        PerfReport back;
+        std::string error;
+        REQUIRE_MESSAGE(PerfReport::parse(json, back, error), error);
+        CHECK(back.worst_frame().passes.size() == 3);
+        CHECK(back.to_json() == json);
+    }
+}
+
 TEST_CASE("the committed JSON round-trips exactly") {
     const PerfReport r = make_report();
     const std::string first = r.to_json();

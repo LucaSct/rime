@@ -14,6 +14,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <string_view>
 
 namespace rime::render {
 
@@ -200,13 +201,28 @@ LocalShadowBinding LocalShadowMap::add(RenderGraph& graph,
     // The extent/layers let the graph aim each depth pass's viewport at the right layer.
     const RGTexture map = graph.import_texture(
         depth_array_, array_state_, {resolution_, resolution_}, kDepthFormat, kMaxLocalShadows);
+    // Each slot names itself (m17.3) — see the note in shadows.cpp. It matters more here than for
+    // cascades: local shadows are CACHED, so which slots declare a pass varies frame to frame, and
+    // under one shared name the report could not distinguish "nine spots re-rendered" from "one did
+    // and it was slow". The slot index is in the name, so `stats_.rendered` and the report agree.
+    static constexpr std::array<std::string_view, kMaxLocalShadows> kSlotLabels{"spot-shadow-0",
+                                                                                "spot-shadow-1",
+                                                                                "spot-shadow-2",
+                                                                                "spot-shadow-3",
+                                                                                "spot-shadow-4",
+                                                                                "spot-shadow-5",
+                                                                                "spot-shadow-6",
+                                                                                "spot-shadow-7"};
+    static_assert(kSlotLabels.back() != std::string_view{},
+                  "raising kMaxLocalShadows without naming the new slot leaves it unnamed, and an "
+                  "empty name collides with the next one");
     for (std::uint32_t i = 0; i < count; ++i) {
         if (!render_slot[i])
             continue;
         SceneDrawData spot_data = scene_data;
         spot_data.frame_ubo = spot_vp_ubo_;
         spot_data.frame_ubo_offset = i * kSpotStride;
-        prepass.add(graph, map, spot_data, i);
+        prepass.add(graph, map, spot_data, i, kSlotLabels[i]);
     }
     // After this frame the forward pass samples the array, leaving it in ShaderRead — the state the
     // next frame imports it at, so the cached depth survives with no redundant transition.

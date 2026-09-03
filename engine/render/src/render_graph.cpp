@@ -11,6 +11,7 @@
 #include "rime/render/render_graph.hpp"
 
 #include <algorithm>
+#include <string>
 
 #include "rime/core/diagnostics/assert.hpp"
 #include "rime/core/diagnostics/log.hpp"
@@ -158,6 +159,38 @@ void RenderGraph::add_pass_common(std::string_view name, bool is_raster, Execute
     p.name.assign(name);
     p.is_raster = is_raster;
     p.fn = std::move(fn);
+
+    // A PASS NAME IS AN IDENTITY, NOT A LABEL (m17.3). One system may declare the same pass many
+    // times in a frame — a CSM renders the pre-pass once per cascade, local shadows once per
+    // invalidated slot — and everything downstream keys on the name: `resolve_timings` reports it,
+    // `PerfReport` folds same-named timings into one distribution, and the committed `docs/perf/`
+    // JSON writes one object key per pass. Duplicates therefore did not merely read oddly; the
+    // 2026-08-30 block baseline contains four `"depth-prepass"` keys, so every ordinary JSON reader
+    // keeps one of the four and silently drops 0.32 ms of shadow work.
+    //
+    // The real fix is upstream — callers now pass names that say what the work is (`csm-cascade-2`)
+    // — and this is the backstop that stops the CLASS from coming back the next time a pass is
+    // reused. O(passes²) in the declare phase, which is ~20 passes and 0.3 ms; the alternative (a
+    // hash set) would cost an allocation to save nothing measurable.
+    const auto taken = [this](const std::string& candidate) {
+        for (const Pass& existing : passes_) {
+            if (existing.name == candidate)
+                return true;
+        }
+        return false;
+    };
+    if (taken(p.name)) {
+        // Bump until nothing answers to it. Testing the CANDIDATE rather than counting prefix
+        // matches is what makes this airtight: counting would hand out `a#1` twice if some caller
+        // had already declared a literal `a#1` by hand.
+        const std::string base = p.name;
+        for (std::uint32_t n = 1;; ++n) {
+            p.name = base + '#' + std::to_string(n);
+            if (!taken(p.name))
+                break;
+        }
+    }
+
     passes_.push_back(std::move(p));
 }
 

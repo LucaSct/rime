@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <string_view>
 
 namespace rime::render {
 
@@ -175,11 +176,22 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
 
     // One depth pass per cascade, reusing the pre-pass verbatim but aimed from the light: the same
     // draw list, binding 0 pointed at cascade c's view_proj slice, rendering into layer c.
+    //
+    // Each cascade names itself (m17.3). Before this, all four declared "depth-prepass" alongside
+    // the camera's, so the perf report folded five different pieces of work into one distribution
+    // and NO row in a committed report was named for shadows at all — in the milestone that has to
+    // decide what shadows cost. A fixed table rather than a formatted string: kMaxCascades is 4 and
+    // this runs every frame, so the names are literals and cost nothing.
+    static constexpr std::array<std::string_view, kMaxCascades> kCascadeLabels{
+        "csm-cascade-0", "csm-cascade-1", "csm-cascade-2", "csm-cascade-3"};
+    static_assert(kCascadeLabels.back() != std::string_view{},
+                  "raising kMaxCascades without naming the new cascade leaves it unnamed, and an "
+                  "empty name collides with the next one");
     for (std::uint32_t c = 0; c < fit.count; ++c) {
         SceneDrawData cascade_data = scene_data;
         cascade_data.frame_ubo = cascade_vp_ubo_;
         cascade_data.frame_ubo_offset = c * kCascadeStride;
-        prepass.add(graph, cascades, cascade_data, c);
+        prepass.add(graph, cascades, cascade_data, c, kCascadeLabels[c]);
     }
 
     return ShadowBinding{cascades, shadow_ubo_, compare_sampler_};

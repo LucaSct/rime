@@ -11,6 +11,9 @@
 #include <ctime>
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "rime/core/diagnostics/profile.hpp"
 
@@ -586,7 +589,39 @@ void PerfReport::observe(std::string_view timeline, double ms) {
 void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes) {
     observe("frame", ms);
 
+    // A PASS NAME IS A KEY, AND KEYS MUST BE UNIQUE WITHIN A FRAME (m17.3). Two passes sharing a
+    // name in one frame broke this two ways at once, and the 2026-08-30 block baseline shows both:
+    // the fold below put four different cascade renders into ONE distribution, so `depth-prepass
+    // p50` was the median of individual renders rather than a per-frame cost; and the worst-frame
+    // writer emitted the key four times, producing JSON whose every ordinary reader keeps one value
+    // and silently drops the rest.
+    //
+    // The RenderGraph now hands out unique names, so this normally does nothing and allocates
+    // nothing. It is here because `observe_frame` is a public seam any caller may feed, and closing
+    // only the render path would close the instance and not the class.
+    std::vector<PassTiming> unique;
+    const auto seen_before = [&](std::string_view candidate, std::size_t upto) {
+        for (std::size_t i = 0; i < upto; ++i) {
+            if (unique[i].name == candidate)
+                return true;
+        }
+        return false;
+    };
+    unique.reserve(passes.size());
     for (const PassTiming& p : passes) {
+        PassTiming entry = p;
+        if (seen_before(entry.name, unique.size())) {
+            const std::string base = entry.name;
+            for (std::uint32_t n = 1;; ++n) {
+                entry.name = base + '#' + std::to_string(n);
+                if (!seen_before(entry.name, unique.size()))
+                    break;
+            }
+        }
+        unique.push_back(std::move(entry));
+    }
+
+    for (const PassTiming& p : unique) {
         auto it = std::find_if(pass_acc_.begin(), pass_acc_.end(), [&p](const PassAccumulator& a) {
             return a.name == p.name;
         });
@@ -609,7 +644,7 @@ void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const P
     if (first || ms > worst_.ms) {
         worst_.index = index;
         worst_.ms = ms;
-        worst_.passes.assign(passes.begin(), passes.end());
+        worst_.passes = std::move(unique); // the uniquified names, so the JSON keys are keys
     }
 }
 

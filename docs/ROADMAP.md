@@ -2322,6 +2322,7 @@ exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: m17.9 �
 > | m17.0's proof | ✅ | `tests/render/sky_test.cpp` — four structural cases. Added **after** the brick: m17.0 shipped with no test, so CI could not see the feature at all |
 > | m17.1 | ✅ | the editor viewport camera flies (right-drag look, WASD/QE, shift-sprint). No new protocol message: the viewport camera **is** the world's `Camera` entity, so flying it is an ordinary `SetComponent` on the same edit path the inspector and gizmo use |
 > | m17.2 | ✅ | [ADR-0041](adr/0041-the-visual-bar-m17.md) and this ladder — plus five findings, verified against the tree, that decide its order |
+> | m17.3a | ✅ | **a pass name is an identity, not a label.** `DepthPrepass::add` takes a label; CSM declares `csm-cascade-N` and local shadows `spot-shadow-N`, so a report has rows for shadow work for the first time. `RenderGraph` uniquifies any remaining collision and `PerfReport::observe_frame` does the same at its own seam, so the artifact's keys are keys whoever feeds it. Both halves falsified: with the uniquifier off the graph hands out three passes called `twin`; with the labels reverted the cascades vanish and `depth-prepass#1..#3` appear |
 >
 > **Planning found that the frame cannot currently be attributed, which is why m17.3 is first and
 > uncuttable.** Each was verified against the tree:

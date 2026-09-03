@@ -163,7 +163,8 @@ DepthPrepass::~DepthPrepass() {
 void DepthPrepass::add(RenderGraph& graph,
                        RGTexture depth,
                        const SceneDrawData& data,
-                       std::uint32_t layer) const {
+                       std::uint32_t layer,
+                       std::string_view label) const {
     // Clear to the far plane, STORE the result — the whole point is that the forward pass (or, for
     // a CSM cascade, the shadow sample) loads this depth back. `layer` aims the pass at one cascade
     // of a layered depth target (m10.1); 0 is the ordinary single-layer case.
@@ -176,9 +177,7 @@ void DepthPrepass::add(RenderGraph& graph,
     RenderGraph::RasterPassDesc desc{};
     desc.depth = &depth_att;
     graph.add_raster_pass(
-        "depth-prepass",
-        desc,
-        [pipe = pipeline_, masked = masked_pipeline_, data](rhi::CommandBuffer& cmd) {
+        label, desc, [pipe = pipeline_, masked = masked_pipeline_, data](rhi::CommandBuffer& cmd) {
             // Two partitions, one pipeline switch. Opaque first (the overwhelming majority, and
             // the byte-identical old path), then the masked draws through the alpha-testing
             // variant. Without the second half, depth is written for texels the forward pass
