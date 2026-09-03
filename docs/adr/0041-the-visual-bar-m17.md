@@ -209,12 +209,12 @@ M17 delivers **three of the four** and defers the fourth by name:
   extension plus a page-table allocator plus a sparse depth atlas, and we do not yet know what the
   shadows we have cost. The brick is scoped by m17.3's numbers, and the ADR that rules on VSM proper
   is written when they exist.
-- **Virtualized geometry — deferred to M18, with its own ADR.** Nanite-style rendering is a cluster
-  hierarchy in the cook, a LOD DAG, GPU-driven culling, and a visibility-buffer path with software
-  rasterization for sub-pixel triangles. It is a milestone, not a brick.
-  [ADR-0035](0035-vision-demo-m12.md) §6 already parked it as "m10.i virtualized geometry" under
-  *After M12* and it has never been scheduled since. Attempting it inside a milestone that also owes
-  a 2.1× frame-time reduction is how both get done badly.
+- **Virtualized geometry — deferred to M18, with its own ADR. Approved by Luca, 2026-09-03.**
+  Nanite-style rendering is a cluster hierarchy in the cook, a LOD DAG, GPU-driven culling, and a
+  visibility-buffer path with software rasterization for sub-pixel triangles. It is a milestone, not
+  a brick. [ADR-0035](0035-vision-demo-m12.md) §6 already parked it as "m10.i virtualized geometry"
+  under *After M12* and it has never been scheduled since. Attempting it inside a milestone that
+  also owes a 2.1× frame-time reduction is how both get done badly.
 
 Saying this out loud is the point. M17's "done when" is now three of four plus the budget, and
 VISION §3 is not satisfied at the end of M17. A milestone that quietly reinterprets its own scope is
@@ -238,7 +238,55 @@ three samples on the current driver before it optimises anything. That re-baseli
 deliverable, not a chore attached to a later brick — a fresh baseline measured *after* an
 optimisation cannot prove the optimisation.
 
-## The brick ladder (m17.2–m17.9)
+### Ruling 5 — the ground is a *surface* in M17; a ground *module* is not
+
+Raised by Luca while reviewing the ladder, and the ladder was wrong to omit it. What the block
+stands on today, verified:
+
+- **The visual ground is two triangles.** `make_plane(0.5f, 24.0f)` (`engine/render/src/mesh.cpp:22`,
+  four vertices, six indices), scaled to a 76 m square by a `LocalTransform`
+  (`engine/blockkit/src/block.cpp:315-326`).
+- **It has no textures at all.** `palette.street` is `opaque(0.10f, 0.10f, 0.11f, kStreetRoughness)`
+  — a `PbrMaterialDesc` carrying base colour, metallic and roughness and nothing else
+  (`palette.cpp:16-24, 48`). The mesh's `uv_tiles = 24` addresses a texture that does not exist.
+- **The collider is a different object, authored by hand, once per sample.** `99-the-block` builds a
+  44 m half-extent static box in `add_street` (`main.cpp:273-279`) and says in its own comment that
+  the street "is NOT in the scene file". `13-networked-player` builds a 3×3 grid of 10 m boxes
+  because "10 m per box is a measured GJK limit" (`main.cpp:112-114`) — a limit review pass 2
+  **measured as gone** (168 configurations, half-extents 10 m to 500 m, zero misses), and which the
+  block's own single 44 m box already contradicts in the same repository.
+- **No module owns the concept.** `engine/worldkit` is the component profile, not a world.
+
+That is the wrong surface to judge a visual bar on, and it is wrong in a way that flatters. The
+ground is the largest thing in almost every frame — it is what a fly camera mostly sees, what every
+shadow lands on, what SSR reflects and what the sky's ambient term (m17.7) most visibly changes. A
+flat untextured plane makes DDGI bounce, SSR and shadow quality all *unjudgeable*: there is no
+normal variation for a reflection to bend around, no albedo for a bounce to tint, and no detail for
+a shadow to read against. It also flatters the measurement — two triangles cost nothing, so every
+render number in this ADR was taken over a floor no game would ship.
+
+**So M17 gets a ground brick (m17.8), and it lands after the budget bricks**, which is Ruling 1's
+first real test: a tessellated, textured ground *adds* cost, so it may not precede m17.5 and m17.6.
+The brick's scope is deliberately modest — one owned ground surface with a cooked material, and a
+collider derived from it instead of hand-authored beside it. It is the first thing to use M16's
+asset path over a large area, which is a proof M16 never got.
+
+**A terrain module is NOT in M17, and its ADR is not written here.** A real
+`engine/terrain` — heightfield, quadtree or clipmap LOD, splat/material blending, a heightfield
+collider, streaming — is a milestone, not a brick, and adding the largest new GPU *and* CPU cost
+source to the milestone that owes a 2.1× reduction is exactly the mistake Ruling 1 exists to
+prevent. There is also a genuine ordering dependency: **terrain LOD is the part of terrain that
+virtualized geometry most naturally subsumes**, and building a bespoke terrain LOD in M17 and a
+virtualized-geometry pipeline in M18 risks building the same thing twice. The ground module is
+therefore ranked with M18 and the question "does virtualized geometry subsume terrain LOD?" is
+answered in *that* ADR, from a geometry pipeline that exists, rather than guessed at here.
+
+What m17.8 must not do is foreclose it. The ground gets an owner and a seam — one place that
+answers "what is the ground", producing both the drawn surface and the collider — so that a later
+heightfield replaces an implementation rather than being retrofitted into eight call sites. That is
+guardrail 3 applied to ground the way it is already applied to destruction: leave the seam.
+
+## The brick ladder (m17.2–m17.10)
 
 m17.0, its proof, and m17.1 are already on the branch; the table in `docs/ROADMAP.md` records what
 they were and that they preceded this plan.
@@ -251,17 +299,19 @@ they were and that they preceded this plan.
 | **m17.5** | **the simulation budget** — `sim.block` p99 25.49 against a ratified 6.0, the largest breach on the board. What lands is decided by m17.3's zones, not by ADR-0035 §6's guess |
 | **m17.6** | **the GPU budget** — `frame.submit` p99 10.60. `ssr-resolve` (max 4.455) and `forward-pbr shadowed` (max 4.051) are the attributed half; ~5 ms is not attributed at all until m17.3. Hi-Z SSR is ADR-0035 §6's named candidate, *iff* the measurement agrees |
 | **m17.7** | **the sky lights the scene** — ADR-0040 §6, scheduled. The three `ambient_` consumers read a sky radiance |
-| **m17.8** | **the shadow bar** — scoped by m17.3's shadow numbers, which do not exist yet. Its own ADR if it reaches virtual shadow maps |
-| **m17.9** | **the re-measured demo** — a fresh `docs/perf/` run on a clean tree against the ratified budget, and M13's frame-rate clause closed or its number restated with the reason |
+| **m17.8** | **the ground becomes a surface** — see Ruling 5. Two triangles and a flat colour today; a tessellated, cooked-material ground owned in one place, with the collider derived from it rather than hand-authored beside it |
+| **m17.9** | **the shadow bar** — scoped by m17.3's shadow numbers, which do not exist yet. Its own ADR if it reaches virtual shadow maps |
+| **m17.10** | **the re-measured demo** — a fresh `docs/perf/` run on a clean tree against the ratified budget, and M13's frame-rate clause closed or its number restated with the reason |
 
-**Cut order: m17.8 → m17.7.** **Never cut: m17.3, m17.5, m17.9.** A milestone that cut the
-measurement, the largest breach, or the final re-measurement would be claiming a visual bar it never
-weighed.
+**Cut order: m17.9 → m17.7.** **Never cut: m17.3, m17.5, m17.8, m17.10.** A milestone that cut the
+measurement, the largest breach, the surface most of its pixels land on, or the final re-measurement
+would be claiming a visual bar it never weighed.
 
 **The ordering is load-bearing.** m17.3 comes first because every brick after it is a decision that
 needs a number, and three of those numbers do not currently exist. m17.4 comes before the windowed
 work because a hazard that only appears under `present()` will otherwise be found by looking at the
-bar and mistaking corruption for a rendering bug. m17.9 comes last because a baseline measured
+bar and mistaking corruption for a rendering bug. m17.8 comes after the two budget bricks because it
+adds cost and Ruling 1 forbids spending before earning. m17.10 comes last because a baseline measured
 before the optimisations cannot judge them, and one measured on a dirty tree — as the current block
 baseline was — cannot be reproduced.
 
@@ -269,6 +319,10 @@ baseline was — cannot be reproduced.
 
 - **VISION §3's UE5 column is not complete at the end of M17.** Virtualized geometry is deferred to
   M18 by Ruling 3.
+- **There is no terrain at the end of M17.** m17.8 gives the ground an owner, a cooked material and
+  a derived collider; it does not give it height, LOD, material blending or streaming. A scene whose
+  ground is not flat is not authorable, and `docs/authoring-blender.md:138` already tells authors to
+  "split by material at the object level instead" of blending — that instruction stands through M17.
 - **Nothing here addresses the two review passes' open findings**, which live on their own list in
   `docs/ROADMAP.md` — the heap-write from a network packet, the out-of-range `MeshRef`, the cook
   cache's colorspace bug, and the rest. Several are more urgent than anything in this ladder. They
@@ -292,8 +346,17 @@ baseline was — cannot be reproduced.
 - Per-instance pass names change the shape of `docs/perf/` JSON. The in-tree parser reads duplicate
   keys into a vector and is unaffected; anything downstream that keyed on `"depth-prepass"` is not.
   Nothing in the tree does today.
-- Deferring virtualized geometry means M18 is now spoken for before M17 finishes. Written down here
-  so the next planning brick inherits it rather than rediscovering it.
+- Deferring virtualized geometry means M18 is now spoken for before M17 finishes — and Ruling 5
+  ranks the ground module alongside it, so M18 opens with two candidate tracks and an ordering
+  question between them. Written down here so the next planning brick inherits it rather than
+  rediscovering it.
+- **m17.8 will make the numbers worse before m17.10 measures them.** A tessellated, textured ground
+  costs more than two triangles; it lands after m17.5 and m17.6 precisely so that the budget is met
+  first and the ground's cost is visible as a delta rather than absorbed into an unmet budget. If
+  the ground alone breaks the budget again, that is a result about the budget worth having.
+- `13-networked-player`'s 3×3 tiled floor exists for a GJK limit that no longer exists. Whether
+  m17.8 unpicks it is out of scope for this ADR — it is a physics fixture, not a rendered surface —
+  but the ground's new owner is where that decision will land.
 
 ## Alternatives considered
 

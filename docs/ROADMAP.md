@@ -1672,7 +1672,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M15** | **"The Platform Proof"** | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
 | **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) |
 | **M17** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3 *minus virtualized geometry*, plus M13's unmet frame-rate clause — budget first, bar second, and the frame made attributable before either ([ADR-0041](adr/0041-the-visual-bar-m17.md) is the plan; [ADR-0038](adr/0038-platform-proof-m15.md) ruled the split, renumbered from M16 by [ADR-0039](adr/0039-authored-surfaces-m16.md)) |
-| **M18** | **virtualized geometry** | Nanite-style: cluster hierarchy in the cook, a LOD DAG, GPU-driven culling, a visibility buffer. Parked as "m10.i" by [ADR-0035](adr/0035-vision-demo-m12.md) §6 and never scheduled; deferred here by [ADR-0041](adr/0041-the-visual-bar-m17.md) because it is a milestone, not a brick |
+| **M18** | **virtualized geometry, and the ground** | Nanite-style: cluster hierarchy in the cook, a LOD DAG, GPU-driven culling, a visibility buffer. Parked as "m10.i" by [ADR-0035](adr/0035-vision-demo-m12.md) §6 and never scheduled; deferred here by [ADR-0041](adr/0041-the-visual-bar-m17.md) §3 because it is a milestone, not a brick — **approved 2026-09-03**. **A terrain module is ranked here too** ([ADR-0041](adr/0041-the-visual-bar-m17.md) §5): heightfield, LOD, splat blending, a heightfield collider and streaming, with the ordering question — *does virtualized geometry subsume terrain LOD?* — answered in M18's ADR from a pipeline that exists, rather than guessed at now. M17's m17.8 leaves the seam |
 
 ### Detail
 
@@ -2304,10 +2304,11 @@ on the current driver · **m17.4** the pass-owned buffer ring — 14 host-visibl
 seven lighting passes, *before* the windowed work that would otherwise chase its artifacts as a
 shading bug · **m17.5** **the simulation budget** — `sim.block` p99 25.49 against a ratified 6.0, the
 largest breach on the board · **m17.6** the GPU budget — `frame.submit` p99 10.60, of which
-`ssr-resolve` (max 4.455) and `forward-pbr shadowed` (max 4.051) are the attributed half · **m17.7** **the
-sky lights the scene** (ADR-0040 §6, scheduled) · **m17.8** the shadow bar, scoped by numbers that
-do not exist yet · **m17.9** the re-measured demo on a clean tree. Cut order: m17.8 → m17.7.
-**Never cut:** m17.3, m17.5, m17.9.
+`ssr-resolve` (max 4.455) and `forward-pbr shadowed` (max 4.051) are the attributed half · **m17.7**
+**the sky lights the scene** (ADR-0040 §6, scheduled) · **m17.8** **the ground becomes a surface**
+— two triangles and a flat colour today · **m17.9** the shadow bar, scoped by numbers that do not
+exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: m17.9 → m17.7.
+**Never cut:** m17.3, m17.5, m17.8, m17.10.
 
 > **This milestone started without its planning brick, and that is recorded rather than tidied
 > away.** Every milestone since M12 opened with an ADR and a brick ladder; M17 opened with two
@@ -2350,6 +2351,26 @@ do not exist yet · **m17.9** the re-measured demo on a clean tree. Cut order: m
 > Two smaller ones: the ratified **collapse-tick max ≤ 12 ms has no rule** in the block's gate (it
 > gates `frame.collapse` max at 33, the *frame* budget during the window), and the committed block
 > baseline was measured on a **dirty tree** (`run.commit` is `68bcfd7-dirty`).
+>
+> **The ladder's first omission, found in review and added as m17.8: there is no ground.** What the
+> block stands on is **two triangles** (`make_plane`, four vertices) scaled to a 76 m square
+> (`blockkit/src/block.cpp:315-326`), wearing a material with **no textures at all** — `opaque(0.10,
+> 0.10, 0.11, roughness)` is base colour, metallic and roughness and nothing else, so the mesh's
+> `uv_tiles = 24` addresses a texture that does not exist. The **collider is a separate object
+> authored by hand, once per sample**: a 44 m half-extent box in `99-the-block`'s `add_street`, and
+> a 3×3 grid of 10 m boxes in `13-networked-player` "because 10 m per box is a measured GJK limit" —
+> a limit review pass 2 **measured as gone**, contradicted by the block's own 44 m box in the same
+> repository. **No module owns the concept**; `engine/worldkit` is the component profile, not a
+> world.
+>
+> That is the wrong surface to judge a visual bar on, and it flatters: a flat untextured plane gives
+> reflections no normals to bend around, bounce no albedo to tint and shadows no detail to read
+> against — so DDGI, SSR and shadow quality are all unjudgeable on it — while two triangles make
+> every render number above cheaper than a shipped floor would be. m17.8 gives the ground **one
+> owner**, a cooked material, and a collider *derived* from the surface rather than authored beside
+> it. It lands **after** the budget bricks, which is ADR-0041 Ruling 1's first real test: a textured,
+> tessellated ground adds cost and may not precede m17.5/m17.6. **A terrain module is a separate
+> question and is ranked with M18** — see that row.
 >
 > **The sky does not light the scene, and no test can currently see that it doesn't.** All three
 > consumers of a sky's radiance — forward ambient, the DDGI miss, the SSR miss — still read one
