@@ -2298,6 +2298,17 @@ M13's frame-rate clause carried here with its number: `frame` p99 **35.60 ms** a
 > constant (`SceneRenderer::ambient_`, whose own comment still calls it "the crude GI stand-in until
 > M10"). ADR-0040 §6 names the replacement and deliberately does not schedule it.
 >
+> **Three render passes still write a single uniform buffer per frame, with no frame-in-flight
+> ring** — `clustered` (m10.3), `ssr` (m10.7b) and now `sky` (m17.0). This is the exact hazard
+> m16.1 fixed for the renderer's own frame/draw UBOs, and the reasoning is already written down at
+> `scene_renderer.cpp:332-338`: the buffer handle is baked into a descriptor set, so `write_buffer`
+> overwrites mapped memory the GPU may still be reading, "ordered by nothing a pipeline barrier can
+> express". The fix one level up was a ring of `frames_in_flight + 1`; the pass-owned UBOs never got
+> it. It cannot show up under `submit_blocking`, which is every test — only under `present()`, which
+> is the editor viewport and every `--windowed` sample, i.e. exactly where a *visual* bar gets
+> judged. **Reasoned, not reproduced**, and it is its own brick: the ring depth is owned by
+> `SceneRenderer`, so fixing it means threading a slot index into three passes.
+>
 > Smaller things named so they are not rediscovered: the cloud layer's per-pixel cost is
 > **unmeasured** (ten value-noise evaluations per background pixel) and M17 is the milestone with a
 > frame-rate clause; a `.rscene` can author its sky's colours and clouds but **not** its sun's
