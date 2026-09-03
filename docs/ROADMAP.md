@@ -30,6 +30,13 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > the SDF clipmap, DDGI and SSR — costs **5.23 ms** at 1080p on a 3060, drawing 1,830 of 2,051. The
 > time is in simulation, and the split is what says so.
 >
+> > **Corrected 2026-09-03 (m17.2).** 5.23 ms is `frame.render`'s **p50** quoted against a **p99**
+> > budget. At p99 the renderer costs **12.69 ms** of a 16.6 ms frame — 76% of it — and the summed
+> > GPU pass timestamps account for only about half of `frame.submit`, so even that is a floor. The
+> > simulation is still the larger breach (`sim.block` p99 25.49 against a ratified 6.0, 4.25×), and
+> > that ranking is unchanged; "the renderer is not the problem" is not. See
+> > [ADR-0041](adr/0041-the-visual-bar-m17.md).
+>
 > **One measured fix, and it was worth 2.1×.** The client's destruction catch-up drained *every*
 > queued batch in one tick, each with a full `physics.step` — `12-networked-destruction`'s "one batch
 > per update, never two merged" rule, which is right for fidelity and unbounded in cost. Measured:
@@ -1660,11 +1667,12 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M10** | Advanced lighting | dynamic GI updates as the scene changes — *including when walls fall* |
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
-| **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). The renderer costs 5.2 ms; the remainder is physics at 667 debris |
+| **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). Carried to M17, where [ADR-0041](adr/0041-the-visual-bar-m17.md) ranks the breaches: `sim.block` 4.25× over, `frame.render` p99 12.69 of 16.6 |
 | **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 | **M15** | **"The Platform Proof"** | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
 | **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) |
-| **M17** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3, plus M13's unmet frame-rate clause and the physics-at-debris-scale cost m13.p measured ([ADR-0038](adr/0038-platform-proof-m15.md) rules the split; renumbered from M16 by [ADR-0039](adr/0039-authored-surfaces-m16.md)) |
+| **M17** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3 *minus virtualized geometry*, plus M13's unmet frame-rate clause — budget first, bar second, and the frame made attributable before either ([ADR-0041](adr/0041-the-visual-bar-m17.md) is the plan; [ADR-0038](adr/0038-platform-proof-m15.md) ruled the split, renumbered from M16 by [ADR-0039](adr/0039-authored-surfaces-m16.md)) |
+| **M18** | **virtualized geometry** | Nanite-style: cluster hierarchy in the cook, a LOD DAG, GPU-driven culling, a visibility buffer. Parked as "m10.i" by [ADR-0035](adr/0035-vision-demo-m12.md) §6 and never scheduled; deferred here by [ADR-0041](adr/0041-the-visual-bar-m17.md) because it is a milestone, not a brick |
 
 ### Detail
 
@@ -2275,39 +2283,91 @@ Blender-authored proof. Cut order: m16.7 → m16.6 → m16.5. **Never cut:** m16
 > a step function and a midpoint lands on the wrong side of it. The third would have shipped as a
 > quietly-wrong mip chain.
 
-**M17 — "The Visual Bar."** *Started 2026-09-03.* The UE5 column of [VISION](../VISION.md) §3, plus
-M13's frame-rate clause carried here with its number: `frame` p99 **35.60 ms** against a ratified
-16.6, of which the whole M10 render stack is 5.23 ms and the remainder is physics at 667 debris
-(m13.p). The budget does not move.
+**M17 — "The Visual Bar."** *Started 2026-09-03; [ADR-0041](adr/0041-the-visual-bar-m17.md) is the
+plan, written third.* The UE5 column of [VISION](../VISION.md) §3, plus M13's frame-rate clause
+carried here with its number: `frame` p99 **35.60 ms** against a ratified 16.6. The budget does not
+move.
+
+The two clauses are the same clause read twice. Every technique in the UE5 column is a *scaling*
+technique — Nanite is geometry whose cost stops scaling with triangle count, VSM is shadow
+resolution that stops scaling with cascade area, MegaLights is many lights that stop scaling
+linearly — so a frame that misses its budget by 2.1× cannot demonstrate any of them: there is
+nothing to compare the scaling against. **ADR-0041 rules the budget first and the bar second**, and
+defers virtualized geometry to M18 by name rather than reinterpreting the milestone's scope
+quietly.
+
+*Bricks:* **m17.2** the ADR + this ladder (decision brick, no engine code) · **m17.3** **the frame
+becomes attributable** — per-instance pass identity and unique report keys, zones inside the
+simulation and the submit gap, a gate rule that fails an unaccounted frame (falsified against the
+committed report), `perf.sh` failing a non-comparable baseline, and all three samples re-baselined
+on the current driver · **m17.4** the pass-owned buffer ring — 14 host-visible buffers across all
+seven lighting passes, *before* the windowed work that would otherwise chase its artifacts as a
+shading bug · **m17.5** **the simulation budget** — `sim.block` p99 25.49 against a ratified 6.0, the
+largest breach on the board · **m17.6** the GPU budget — `frame.submit` p99 10.60, of which
+`ssr-resolve` (max 4.455) and `forward-pbr shadowed` (max 4.051) are the attributed half · **m17.7** **the
+sky lights the scene** (ADR-0040 §6, scheduled) · **m17.8** the shadow bar, scoped by numbers that
+do not exist yet · **m17.9** the re-measured demo on a clean tree. Cut order: m17.8 → m17.7.
+**Never cut:** m17.3, m17.5, m17.9.
 
 > **This milestone started without its planning brick, and that is recorded rather than tidied
 > away.** Every milestone since M12 opened with an ADR and a brick ladder; M17 opened with two
-> bricks. [ADR-0040](adr/0040-sky-and-atmosphere.md) was written afterwards to close the five code
-> sites that already cited it, and it covers **the sky decision only** — not the milestone. **A
-> ladder for M17 is still owed**, and until it exists there is nothing in the repository that says
-> what "The Visual Bar" is made of or in what order.
+> bricks and got its ladder third. [ADR-0040](adr/0040-sky-and-atmosphere.md) was written afterwards
+> to close the five code sites that already cited it, and it covers **the sky decision only** — not
+> the milestone.
 >
 > | brick | state | what landed |
 > |---|---|---|
 > | m17.0 | ✅ | a procedural sky — gradient, sun disc, fBm cloud — composited where the depth buffer says nothing was drawn; a `Sky` *component*, so a scene owns its own weather; the sun coupled to the world's first `DirectionalLight`. Off allocates nothing (ADR-0032 §11) |
 > | m17.0's proof | ✅ | `tests/render/sky_test.cpp` — four structural cases. Added **after** the brick: m17.0 shipped with no test, so CI could not see the feature at all |
 > | m17.1 | ✅ | the editor viewport camera flies (right-drag look, WASD/QE, shift-sprint). No new protocol message: the viewport camera **is** the world's `Camera` entity, so flying it is an ordinary `SetComponent` on the same edit path the inspector and gizmo use |
+> | m17.2 | ✅ | [ADR-0041](adr/0041-the-visual-bar-m17.md) and this ladder — plus five findings, verified against the tree, that decide its order |
+>
+> **Planning found that the frame cannot currently be attributed, which is why m17.3 is first and
+> uncuttable.** Each was verified against the tree:
+>
+> 1. **The engine has ten profile zones and none is inside the work.** `RIME_PROFILE_ZONE` appears
+>    only in `engine/app/src/application.cpp` — nothing in `physics`, `destruction`, `render`, `net`
+>    or `ecs`. So `sim.pre`/`sim.schedule`/`sim.transforms`/`sim.post`/`sim.publish` all read
+>    **0.000 ms** at p50, p99 *and* max while `sim.block` reads 25.49 at p99 (the demo drives a
+>    `Session`, not the `Application` schedule — `main.cpp:1878-1880` says so). The frame's largest
+>    cost has **no attribution of any kind**, so ADR-0035 §6's narrowphase prediction has never been
+>    measured — and the note below this block has been quoting it as though it had.
+> 2. **Same-named passes collapse, and the committed report has duplicate JSON keys.** CSM renders
+>    each cascade through `DepthPrepass::add` (`shadows.cpp:178-183`), so a frame declares several
+>    `"depth-prepass"` passes; `observe_frame` folds them by name and the writer emits the key once
+>    per instance. Worst frame #558 literally contains four `"depth-prepass"` lines. Summed they are
+>    **5.604 ms**; as any ordinary JSON reader takes it, **5.284 ms**. And **no pass in the report is
+>    named for shadows** — the milestone that must decide whether to build VSM cannot see what the
+>    shadow maps it already has cost.
+> 3. **Roughly half the GPU's wall time is unattributed** — `frame.submit` ~10.87 ms in worst frame
+>    #558 against 5.60 ms of summed pass timestamps.
+> 4. **The regression gate's protection has already lapsed here, silently.** `comparable_to`
+>    requires string equality on `driver`; this workstation moved **610.43.03 → 610.57.04** between
+>    2026-08-20 and 2026-08-30, so the two 2026-08-20 baselines `perf.sh --all` re-runs now report
+>    `FingerprintMismatch` — which adds no violation. ADR-0035's amendment says that comparison is
+>    "where the real protection lives"; a driver update turns it off and prints a note.
+>
+> Two smaller ones: the ratified **collapse-tick max ≤ 12 ms has no rule** in the block's gate (it
+> gates `frame.collapse` max at 33, the *frame* budget during the window), and the committed block
+> baseline was measured on a **dirty tree** (`run.commit` is `68bcfd7-dirty`).
 >
 > **The sky does not light the scene, and no test can currently see that it doesn't.** All three
 > consumers of a sky's radiance — forward ambient, the DDGI miss, the SSR miss — still read one
 > constant (`SceneRenderer::ambient_`, whose own comment still calls it "the crude GI stand-in until
-> M10"). ADR-0040 §6 names the replacement and deliberately does not schedule it.
+> M10"). ADR-0040 §6 names the replacement; **m17.7 schedules it.**
 >
-> **Three render passes still write a single uniform buffer per frame, with no frame-in-flight
-> ring** — `clustered` (m10.3), `ssr` (m10.7b) and now `sky` (m17.0). This is the exact hazard
-> m16.1 fixed for the renderer's own frame/draw UBOs, and the reasoning is already written down at
-> `scene_renderer.cpp:332-338`: the buffer handle is baked into a descriptor set, so `write_buffer`
+> **Every lighting pass writes pass-owned buffers per frame with no frame-in-flight ring** — the
+> finding opened at three passes and closed at seven. `write_buffer` calls sit inside the per-frame
+> `add()` of `clustered` (2 buffers), `ssr` (1), `sky` (1), `shadows`/CSM (2), `local_shadows` (2),
+> `sdf_clipmap` (1) and `ddgi` (5): **14 host-visible buffers, none ringed.** This is the exact
+> hazard m16.1 fixed for the renderer's own frame/draw UBOs, and the reasoning is already written
+> down at `scene_renderer.cpp:332-338`: the handle is baked into a descriptor set, so `write_buffer`
 > overwrites mapped memory the GPU may still be reading, "ordered by nothing a pipeline barrier can
-> express". The fix one level up was a ring of `frames_in_flight + 1`; the pass-owned UBOs never got
-> it. It cannot show up under `submit_blocking`, which is every test — only under `present()`, which
-> is the editor viewport and every `--windowed` sample, i.e. exactly where a *visual* bar gets
-> judged. **Reasoned, not reproduced**, and it is its own brick: the ring depth is owned by
-> `SceneRenderer`, so fixing it means threading a slot index into three passes.
+> express". The fix one level up was a ring of `frames_in_flight + 1`; the pass-owned buffers never
+> got it. It cannot show up under `submit_blocking`, which is every test — only under `present()`,
+> which is the editor viewport and every `--windowed` sample, i.e. exactly where a *visual* bar gets
+> judged. **Reasoned, not reproduced**, and it is **m17.4**: the ring depth is owned by
+> `SceneRenderer`, so fixing it means threading a slot index into seven passes.
 >
 > Smaller things named so they are not rediscovered: the cloud layer's per-pixel cost is
 > **unmeasured** (ten value-noise evaluations per background pixel) and M17 is the milestone with a
@@ -2511,6 +2571,16 @@ measurement.
 > inserts "Authored Surfaces" as M16, because a visual bar cannot be judged on content that renders
 > grey. The frame-rate clause travels with "The Visual Bar" and is unchanged — same 35.60 ms against
 > the same ratified 16.6.
+>
+> **Corrected 2026-09-03 (m17.2), on two counts.** *"The whole M10 stack renders in 5.23 ms"* is a
+> **p50** quoted against a **p99** budget; at p99 it is **12.69 ms** of 16.6, and about half of the
+> GPU's wall time is not attributed to any pass at all. And *"ADR-0035 §6's predicted narrowphase
+> cache, now with its measurement"* claims a measurement that does not exist: the engine has ten
+> profile zones, all in `application.cpp`, none inside `physics`, `destruction`, `render` or `net`,
+> so the report's five `sim.*` sub-zones read **0.000 ms** while `sim.block` reads 25.49 at p99. What
+> is measured is that the simulation costs 25 ms at 667 debris. *Which part* of it is unmeasured, and
+> repeating §6's prediction as its own confirmation is how a guess becomes a fact. Both corrections
+> are why [ADR-0041](adr/0041-the-visual-bar-m17.md) puts attribution first and uncuttable.
 
 **M14 starts after M13 closes.** `99-the-block` has one open defect (the collapse does not stay
 local), and starting the editor work while an integration bug is open is how integration bugs get

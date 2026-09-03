@@ -65,3 +65,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0038](0038-platform-proof-m15.md) — M15 "The Platform Proof" (a game that is not the block, with no engine edit to support it), and where M13's frame-rate debt goes
 - [ADR-0039](0039-authored-surfaces-m16.md) — M16 "Authored Surfaces" (the material half of the asset bridge; the mesh→material edge, masked depth, BC formats, one asset runtime)
 - [ADR-0040](0040-sky-and-atmosphere.md) — the sky (an analytic background now, a Hillaire-2020 LUT atmosphere later; the sky as a scene component, coupled to the world's sun)
+- [ADR-0041](0041-the-visual-bar-m17.md) — M17 "The Visual Bar" (the budget is earned before the bar is spent; the frame becomes attributable first; virtualized geometry deferred to M18)
