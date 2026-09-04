@@ -29,6 +29,7 @@ rime_add_test(rime_render_tests
     ssr_test.cpp
     sky_test.cpp
     pass_identity_test.cpp
+    frame_scratch_test.cpp
     render_transform_test.cpp
     draw_path_test.cpp
     viewer_frame_graph_test.cpp)

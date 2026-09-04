@@ -251,6 +251,56 @@ public:
 
     [[nodiscard]] std::vector<PassTiming> resolve_timings(rhi::CommandBuffer& cmd) const;
 
+    // ── Per-frame CPU→GPU scratch (m17.4) ─────────────────────────────────────────────────
+    //
+    // THE ONE HAZARD THAT PIPELINING CANNOT ORDER FOR YOU. Submissions on the graphics queue are
+    // GPU work, and GPU work is ordered against GPU work by barriers and submission order. A CPU
+    // write to host-visible memory is not on the queue at all: when the loop stops waiting for the
+    // GPU, frame N+1's `write_buffer` into a system's own uniform buffer lands while frame N is
+    // still reading it, and the frame renders with next frame's numbers. `submit_blocking` hid
+    // this completely — it is the reason all seven lighting systems could own fourteen unringed
+    // host-visible buffers for a milestone and nothing ever looked wrong.
+    //
+    // The fix is a ring, and it lives HERE rather than fourteen times over in the systems. m16.1
+    // gave `SceneRenderer` its own ring and the invariant behind it is subtle enough — "grow only
+    // the slot the ring has come back round to, because its previous submission has been waited
+    // on" — that copying it into every system is how one copy ends up subtly wrong. The graph is
+    // already the owner of per-frame resource knowledge (it owns the transient caches and it owns
+    // `reset()`, which IS the frame boundary), so a per-frame allocator belongs beside them.
+    //
+    // Transients deliberately do NOT need this: they are GPU-only, so the barriers the graph
+    // already emits and the queue's own ordering cover them. Only the CPU-written ones are exposed.
+    struct FrameSlice {
+        rhi::BufferHandle buffer;
+        std::uint32_t offset = 0;
+    };
+
+    // Ring depth, as the swapchain's rule: one more slot than the frames the backend keeps in
+    // flight, so the slot being written is never one the GPU can still be reading. Call once,
+    // before the first frame — it destroys and rebuilds the ring, which is only legal while
+    // nothing is in flight. The default (3 slots) is safe for every path the engine has today,
+    // including a blocking one that needs only 1.
+    void set_frames_in_flight(std::uint32_t frames);
+
+    [[nodiscard]] std::uint32_t frame_slot_count() const noexcept {
+        return static_cast<std::uint32_t>(frame_slots_.size());
+    }
+
+    // Copy `bytes` of `data` into this frame's scratch and say where it landed. The slice is valid
+    // until this frame's GPU work completes, and its memory is not handed out again until the ring
+    // returns to this slot. Offsets are 256-byte aligned — the universal uniform-offset alignment
+    // this engine already assumes everywhere it strides a uniform array — so a slice is always a
+    // legal `bind_uniform_buffer` offset.
+    //
+    // Never invalidates a slice already handed out this frame: a push that does not fit takes a
+    // fresh block rather than growing the current one, because growing means destroying a buffer
+    // that earlier passes in this same frame are still pointing at.
+    [[nodiscard]] FrameSlice push_frame_data(const void* data, std::size_t bytes);
+
+    // How many bytes this frame has pushed so far — the number a caller would print if it wanted
+    // to size the block, and what the test asserts the ring is actually recycling.
+    [[nodiscard]] std::uint64_t frame_bytes_pushed() const noexcept { return frame_pushed_; }
+
     // How many passes a frame can time before the timestamp pool runs out — two slots per pass, so
     // half of `rhi::kMaxTimestamps`. Exposed (m17.3b) because a caller that silently reports fewer
     // passes than the frame declared is reporting UNATTRIBUTED GPU time as if it were absent, and
@@ -335,6 +385,25 @@ private:
     std::vector<Pass> passes_;
     std::vector<Resource> resources_;
     std::vector<std::uint32_t> order_; // live passes, execution order (built by compile())
+
+    // One ring slot: a chain of host-visible blocks, filled linearly. A chain rather than one
+    // grown buffer because growth destroys, and destroying mid-frame would pull the memory out
+    // from under slices already handed to earlier passes.
+    struct FrameBlock {
+        rhi::BufferHandle handle{};
+        std::uint64_t size = 0;
+    };
+
+    struct FrameSlot {
+        std::vector<FrameBlock> blocks;
+        std::size_t block = 0;    // which block the next push lands in
+        std::uint64_t offset = 0; // where in that block
+    };
+
+    std::vector<FrameSlot> frame_slots_;
+    std::uint32_t frame_slot_ = 0;
+    std::uint64_t frame_pushed_ = 0;
+
     std::vector<CachedTexture> cache_;
     std::vector<CachedBuffer> buffer_cache_;
     std::uint32_t timed_passes_ = 0; // how many passes got a timestamp pair this frame

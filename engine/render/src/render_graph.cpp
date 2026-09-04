@@ -25,9 +25,95 @@ RenderGraph::~RenderGraph() {
     for (const CachedBuffer& b : buffer_cache_) {
         device_.destroy(b.handle);
     }
+    for (const FrameSlot& s : frame_slots_) {
+        for (const FrameBlock& b : s.blocks)
+            device_.destroy(b.handle);
+    }
+}
+
+namespace {
+// The universal uniform-buffer offset alignment. Not queried from the device: every stride in this
+// engine already assumes it (the cascade, spot and SDF-compose arrays all use 256), and the RHI
+// exposes no alignment query to disagree with. If a device ever needs more, this is the one place.
+constexpr std::uint64_t kFrameSliceAlign = 256;
+
+// Each block starts here and every later block is at least this big. 64 KiB holds every uniform a
+// frame of the block pushes many times over; the chain exists for correctness, not for the common
+// case, and a slot that never needs a second block never allocates one.
+constexpr std::uint64_t kFrameBlockBytes = 64 * 1024;
+
+constexpr std::uint32_t kDefaultFrameSlots = 3;
+} // namespace
+
+void RenderGraph::set_frames_in_flight(std::uint32_t frames) {
+    const std::uint32_t slots = frames + 1; // the swapchain.hpp rule, applied to CPU-written data
+    if (slots == frame_slots_.size())
+        return;
+
+    // Rebuilding destroys buffers, so this is only legal while nothing is in flight — at
+    // construction or before the first frame, which is what the header tells callers.
+    for (const FrameSlot& s : frame_slots_) {
+        for (const FrameBlock& b : s.blocks)
+            device_.destroy(b.handle);
+    }
+    frame_slots_.assign(slots, FrameSlot{});
+    frame_slot_ = 0;
+}
+
+RenderGraph::FrameSlice RenderGraph::push_frame_data(const void* data, std::size_t bytes) {
+    if (frame_slots_.empty())
+        frame_slots_.assign(kDefaultFrameSlots, FrameSlot{});
+    FrameSlot& slot = frame_slots_[frame_slot_];
+    frame_pushed_ += bytes;
+
+    // Take a fresh block when this push does not fit the current one. Deliberately NOT "grow the
+    // current block": growing destroys it, and earlier passes this frame already hold slices
+    // pointing into it. A block is only ever recycled when the ring comes back to this slot.
+    const std::uint64_t need = static_cast<std::uint64_t>(bytes);
+    while (slot.block < slot.blocks.size() && slot.offset + need > slot.blocks[slot.block].size) {
+        ++slot.block;
+        slot.offset = 0;
+    }
+    if (slot.block >= slot.blocks.size()) {
+        rhi::BufferDesc bd{};
+        bd.size = std::max(kFrameBlockBytes, need);
+        // Both usages on one buffer: eleven of the fourteen callers bind a uniform and three bind
+        // a storage buffer, and splitting the ring by usage would double the bookkeeping to save
+        // nothing — the memory is host-visible either way.
+        bd.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Storage;
+        bd.memory = rhi::MemoryUsage::CpuToGpu;
+        bd.debug_name = "frame-scratch";
+        const rhi::BufferHandle handle = device_.create_buffer(bd);
+        if (!handle.is_valid()) {
+            RIME_ERROR("render: frame-scratch allocation of {} bytes failed", bd.size);
+            return {};
+        }
+        slot.blocks.push_back(FrameBlock{handle, bd.size});
+        slot.block = slot.blocks.size() - 1;
+        slot.offset = 0;
+    }
+
+    const FrameBlock& block = slot.blocks[slot.block];
+    const std::uint32_t offset = static_cast<std::uint32_t>(slot.offset);
+    device_.write_buffer(block.handle, data, bytes, slot.offset);
+    // Align the NEXT push, not this one: offset 0 is already aligned, so aligning afterwards keeps
+    // the first slice of every block at 0 and never wastes a leading gap.
+    slot.offset = (slot.offset + need + kFrameSliceAlign - 1) / kFrameSliceAlign * kFrameSliceAlign;
+    return FrameSlice{block.handle, offset};
 }
 
 void RenderGraph::reset() {
+    // THE FRAME BOUNDARY, and therefore where the CPU-scratch ring turns over (m17.4). Advancing
+    // here rather than at the end of the frame is what makes the slot the previous frame wrote
+    // stay untouched while its GPU work is still in flight.
+    if (!frame_slots_.empty()) {
+        frame_slot_ = (frame_slot_ + 1) % static_cast<std::uint32_t>(frame_slots_.size());
+        FrameSlot& slot = frame_slots_[frame_slot_];
+        slot.block = 0;
+        slot.offset = 0;
+    }
+    frame_pushed_ = 0;
+
     passes_.clear();
     resources_.clear();
     order_.clear();
