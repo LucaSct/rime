@@ -245,11 +245,35 @@ public:
     // passes that declared `fold_repeats` are summed into one entry here. A consumer may therefore
     // treat a name as a key — which `PerfReport` and the committed JSON both do.
     struct PassTiming {
-        std::string_view name;
+        // OWNED (m17.5), where it used to be a `string_view` into the graph with a "consume before
+        // reset()" caveat attached. A pipelined frame's timestamps are read two frames after the
+        // graph moved on, so a view into the graph is a dangling read by construction — and the
+        // three samples that consume this all copied to a string immediately anyway.
+        std::string name;
         double gpu_ms = 0.0;
     };
 
     [[nodiscard]] std::vector<PassTiming> resolve_timings(rhi::CommandBuffer& cmd) const;
+
+    // A frame's timing SHAPE, taken at submit and resolved after the GPU catches up (m17.5).
+    //
+    // The pipelined loop's answer to a problem the blocking one never had: by the time frame N's
+    // fence signals, the graph holds frame N+2's passes, so "which pass is timing slot 3" is a
+    // question only frame N can answer and only while it is still the current frame. Snapshot the
+    // answer at submit; pair it with the timestamps later.
+    struct TimingPlan {
+        std::vector<std::string> names; // one per timed pass, in timing-slot order
+        std::vector<char> fold;         // did that pass declare fold_repeats
+        std::uint32_t timed = 0;
+    };
+
+    [[nodiscard]] TimingPlan timing_plan() const;
+
+    // Resolve a plan against the command buffer that produced it — which the caller must have
+    // borrowed (`Device::wait_and_borrow`), since a reclaimed submission has already freed the
+    // query pool these numbers live in.
+    [[nodiscard]] static std::vector<PassTiming> resolve_timings(const TimingPlan& plan,
+                                                                 rhi::CommandBuffer& cmd);
 
     // ── Per-frame CPU→GPU scratch (m17.4) ─────────────────────────────────────────────────
     //

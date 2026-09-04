@@ -189,6 +189,20 @@ public:
     // invites a caller to update two of the three.
     void observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes = {});
 
+    // Per-pass GPU times for a frame whose wall clock was ALREADY recorded (m17.5).
+    //
+    // `observe_frame` takes its passes alongside the frame because, under `submit_blocking`, both
+    // are known at the same instant. Pipelined they are not: a frame's timestamps become readable
+    // two frames after its wall clock was banked, and handing them to whichever `observe_frame`
+    // happens to be next would put frame N's GPU cost on frame N+2's row — a number that looks
+    // right and is not.
+    //
+    // So this is the same recording keyed by the frame it BELONGS to rather than by "now": the
+    // pass table gets its sample, and the worst frame gets its breakdown if this is that frame.
+    // A frame that never becomes the worst simply contributes to the table, which is all it did
+    // before.
+    void observe_passes(std::uint64_t frame_index, std::span<const PassTiming> passes);
+
     // One sample on any other timeline: "sim_tick", "frame.collapse", "gpu.total".
     void observe(std::string_view timeline, double ms);
 
@@ -344,6 +358,11 @@ private:
     };
 
     [[nodiscard]] Timeline& timeline_for(std::string_view name);
+
+    // Uniquify a frame's pass names and fold each into the run's per-pass table. Shared by
+    // `observe_frame` and `observe_passes` so the two entry points cannot drift apart on the one
+    // rule that matters here — that a pass name is a key.
+    [[nodiscard]] std::vector<PassTiming> accumulate_passes(std::span<const PassTiming> passes);
 
     // The in-flight frame's zone totals (m17.3b). `total_ms` accumulates every close of that zone
     // since the last `observe_frame`; `per_frame_name` is `<name>.per_frame`, built once per name

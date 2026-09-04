@@ -638,27 +638,7 @@ void PerfReport::observe_zone(std::string_view name, double ms) {
     zone_acc_.push_back(std::move(fresh));
 }
 
-void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes) {
-    observe("frame", ms);
-
-    // A PASS NAME IS A KEY, AND KEYS MUST BE UNIQUE WITHIN A FRAME (m17.3). Two passes sharing a
-    // name in one frame broke this two ways at once, and the 2026-08-30 block baseline shows both:
-    // the fold below put four different cascade renders into ONE distribution, so `depth-prepass
-    // p50` was the median of individual renders rather than a per-frame cost; and the worst-frame
-    // writer emitted the key four times, producing JSON whose every ordinary reader keeps one value
-    // and silently drops the rest.
-    //
-    // The RenderGraph now hands out unique names, so this normally does nothing and allocates
-    // nothing. It is here because `observe_frame` is a public seam any caller may feed, and closing
-    // only the render path would close the instance and not the class.
-    //
-    // What a `#` suffix is NOT: a stable identity. It is positional — `foo#1` means "whichever
-    // same-named pass arrived second THIS frame" — so a distribution keyed on it mixes work that
-    // merely shared a queue position. That is strictly better than the merge it replaces (nothing
-    // is dropped, and the sum over a frame stays right, which is what the accounting residual
-    // below needs), and strictly worse than a name. So a `#` in a committed report is a BUG REPORT
-    // about the declaring code, not a feature; `tests/render/pass_identity_test.cpp` asserts a real
-    // frame produces none.
+std::vector<PassTiming> PerfReport::accumulate_passes(std::span<const PassTiming> passes) {
     std::vector<PassTiming> unique;
     const auto seen_before = [&](std::string_view candidate, std::size_t upto) {
         for (std::size_t i = 0; i < upto; ++i) {
@@ -691,6 +671,40 @@ void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const P
         }
         it->samples.add(p.ms);
     }
+    return unique;
+}
+
+void PerfReport::observe_passes(std::uint64_t frame_index, std::span<const PassTiming> passes) {
+    std::vector<PassTiming> unique = accumulate_passes(passes);
+    // Only the frame these passes actually belong to may take them. A pipelined run delivers them
+    // late, so "is this still the worst frame" is a real question rather than a formality — and
+    // answering it with "now" is how frame N's GPU cost ends up on frame N+2's row.
+    if (frame_index == worst_.index)
+        worst_.passes = std::move(unique);
+}
+
+void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes) {
+    observe("frame", ms);
+
+    // A PASS NAME IS A KEY, AND KEYS MUST BE UNIQUE WITHIN A FRAME (m17.3). Two passes sharing a
+    // name in one frame broke this two ways at once, and the 2026-08-30 block baseline shows both:
+    // the fold below put four different cascade renders into ONE distribution, so `depth-prepass
+    // p50` was the median of individual renders rather than a per-frame cost; and the worst-frame
+    // writer emitted the key four times, producing JSON whose every ordinary reader keeps one value
+    // and silently drops the rest.
+    //
+    // The RenderGraph now hands out unique names, so this normally does nothing and allocates
+    // nothing. It is here because `observe_frame` is a public seam any caller may feed, and closing
+    // only the render path would close the instance and not the class.
+    //
+    // What a `#` suffix is NOT: a stable identity. It is positional — `foo#1` means "whichever
+    // same-named pass arrived second THIS frame" — so a distribution keyed on it mixes work that
+    // merely shared a queue position. That is strictly better than the merge it replaces (nothing
+    // is dropped, and the sum over a frame stays right, which is what the accounting residual
+    // below needs), and strictly worse than a name. So a `#` in a committed report is a BUG REPORT
+    // about the declaring code, not a feature; `tests/render/pass_identity_test.cpp` asserts a real
+    // frame produces none.
+    std::vector<PassTiming> unique = accumulate_passes(passes);
 
     // The worst frame keeps its own breakdown, so a failed gate can say WHICH pass blew the frame
     // rather than only that some frame did. The first frame always wins outright — otherwise a run

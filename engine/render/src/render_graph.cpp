@@ -717,37 +717,53 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
     }
 }
 
+RenderGraph::TimingPlan RenderGraph::timing_plan() const {
+    TimingPlan plan;
+    plan.timed = timed_passes_;
+    plan.names.reserve(timed_passes_);
+    plan.fold.reserve(timed_passes_);
+    std::uint32_t slot = 0;
+    for (const std::uint32_t pi : order_) {
+        if (slot >= timed_passes_)
+            break;
+        plan.names.push_back(passes_[pi].name);
+        plan.fold.push_back(passes_[pi].fold_repeats ? 1 : 0);
+        ++slot;
+    }
+    return plan;
+}
+
 std::vector<RenderGraph::PassTiming> RenderGraph::resolve_timings(rhi::CommandBuffer& cmd) const {
+    return resolve_timings(timing_plan(), cmd);
+}
+
+std::vector<RenderGraph::PassTiming> RenderGraph::resolve_timings(const TimingPlan& plan,
+                                                                  rhi::CommandBuffer& cmd) {
     std::vector<PassTiming> out;
-    if (timed_passes_ == 0)
+    if (plan.timed == 0)
         return out;
-    std::vector<std::uint64_t> ns(static_cast<std::size_t>(timed_passes_) * 2);
+    std::vector<std::uint64_t> ns(static_cast<std::size_t>(plan.timed) * 2);
     if (!cmd.read_timestamps(ns))
         return out; // device cannot timestamp — documented degrade
-    out.reserve(timed_passes_);
-    std::uint32_t timing_slot = 0;
-    for (const std::uint32_t pi : order_) {
-        if (timing_slot >= timed_passes_)
-            break;
-        const Pass& pass = passes_[pi];
+    out.reserve(plan.timed);
+    for (std::uint32_t timing_slot = 0; timing_slot < plan.names.size(); ++timing_slot) {
         const double ms = static_cast<double>(ns[timing_slot * 2 + 1] - ns[timing_slot * 2]) / 1e6;
-        ++timing_slot;
         // Fold the declared repeats (m17.3c). Only a pass that ASKED to be folded may add into an
         // earlier entry — anything else already has a unique name, so the linear scan finds
         // nothing and the entry is new. Summing rather than keeping the largest because the
         // question a report answers is "what did this frame spend", and the frame paid for all of
         // them; a folded entry's `count` in the report is still one sample per frame, so the
         // percentile stays a per-frame percentile.
-        if (pass.fold_repeats) {
-            const auto it = std::find_if(out.begin(), out.end(), [&pass](const PassTiming& t) {
-                return t.name == pass.name;
-            });
+        if (plan.fold[timing_slot] != 0) {
+            const std::string& name = plan.names[timing_slot];
+            const auto it = std::find_if(
+                out.begin(), out.end(), [&name](const PassTiming& t) { return t.name == name; });
             if (it != out.end()) {
                 it->gpu_ms += ms;
                 continue;
             }
         }
-        out.push_back({pass.name, ms});
+        out.push_back({plan.names[timing_slot], ms});
     }
     return out;
 }

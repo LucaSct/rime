@@ -1811,6 +1811,9 @@ struct PerfOptions {
     std::uint32_t height = 1080;
     const char* out = nullptr;
     const char* baseline = nullptr;
+    // Frames the GPU may be behind the CPU. 1 = `submit_blocking`, which is what every committed
+    // baseline was measured under and therefore the default (m17.5).
+    std::uint32_t pipelined = 1;
 };
 
 int run_perf(const std::filesystem::path& cooked,
@@ -1833,12 +1836,24 @@ int run_perf(const std::filesystem::path& cooked,
     }
     demo.use_authored_camera = true; // see the note above
 
+    // PIPELINE THE LOOP, if asked (m17.5). Set before the first frame: it resizes the per-frame
+    // rings (the graph's CPU scratch, the SceneRenderer's uniforms) that the depth is what makes
+    // safe, and resizing those under live GPU work is the bug they exist to prevent.
+    demo.app.set_headless_frames_in_flight(opt.pipelined);
+
     core::PerfReport report;
     core::MachineFingerprint fp = core::MachineFingerprint::detect();
     const rhi::AdapterInfo& adapter = demo.app.device()->adapter();
     fp.gpu = adapter.name;
     fp.driver = adapter.driver_name + " " + adapter.driver_info;
+    // The preset is part of the FINGERPRINT, so what goes in it decides what may be compared
+    // (ADR-0035 decision 3). Pipelining belongs in it: a pipelined `frame` measures CPU wall with
+    // the GPU alongside, a serialized one measures both in series, and comparing the two would be
+    // exactly the quiet-wrong-comparison ADR-0041 Ruling 4 refuses. Naming it here means the gate
+    // REFUSES that comparison by itself rather than relying on anyone noticing.
     fp.preset = "block-all-lighting-gates"; // csm + local shadows + clustered + sdf + ddgi + ssr
+    if (opt.pipelined > 1)
+        fp.preset += "+pipelined-" + std::to_string(opt.pipelined);
     fp.width = opt.width;
     fp.height = opt.height;
     report.set_machine(fp);
@@ -1874,6 +1889,8 @@ int run_perf(const std::filesystem::path& cooked,
     report.declare_accounting("sim.block", {"physics.step.per_frame"});
 
     std::vector<core::PassTiming> passes;
+    std::uint64_t passes_frame = 0;
+    bool passes_pending = false;
     bool timestamps_seen = false;
     // The HIGH WATER MARK across the run, not the last frame's count (m17.3b). Which passes a frame
     // declares varies — local shadows only re-render invalidated slots — so testing the final
@@ -1886,12 +1903,26 @@ int run_perf(const std::filesystem::path& cooked,
     // larger than the cap, and now cannot see one at all. `pass_count()` is the declaration, which
     // is the number that has to fit.
     std::size_t max_passes_declared = 0;
-    demo.app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer& cmd) {
-        passes.clear();
-        for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(cmd)) {
-            passes.push_back(core::PassTiming{std::string(t.name), t.gpu_ms});
-            timestamps_seen = true;
-        }
+    // `on_frame_timings` rather than `on_post_submit` (m17.5), because it is the only one of the
+    // two that survives pipelining: it hands over resolved, OWNED timings tagged with the frame
+    // they describe, instead of a graph and a command buffer whose lifetimes stopped lining up
+    // with "now" the moment the loop stopped waiting for the GPU. Under `submit_blocking` it fires
+    // inside `step()`; pipelined it fires when the ring retires that frame, two frames later —
+    // which is why nothing below keys on the loop counter.
+    demo.app.on_frame_timings(
+        [&](std::uint64_t index, std::span<const render::RenderGraph::PassTiming> timings) {
+            passes.clear();
+            for (const render::RenderGraph::PassTiming& t : timings) {
+                passes.push_back(core::PassTiming{t.name, t.gpu_ms});
+                timestamps_seen = true;
+            }
+            passes_frame = index;
+            passes_pending = !passes.empty();
+        });
+    demo.app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer&) {
+        // The declared-pass high-water still needs the graph itself, and this fires only on the
+        // blocking path — which is the path the committed baselines are measured on, so the
+        // headroom line keeps meaning what it meant.
         max_passes_declared = std::max(max_passes_declared, graph.pass_count());
     });
     demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
@@ -1910,6 +1941,13 @@ int run_perf(const std::filesystem::path& cooked,
         demo.step_sim(scripted_tape(tick));
         demo.app.step(demo.app.fixed_dt());
     }
+
+    // THE TWO INDEX SPACES, and they are not the same one. `Application` counts every frame it has
+    // ever rendered, warmup included; this loop counts measured frames from zero, and that is the
+    // index the report is keyed on. The timings callback speaks the former. Translating here is
+    // what makes `observe_passes` land on the frame it describes — without it the worst frame's
+    // breakdown is silently empty, which is exactly how it looked before this line existed.
+    const std::uint64_t frame_base = demo.app.frame_index();
 
     core::ZoneTimelines zones(report);
     for (int i = 0; i < opt.frames; ++i, ++tick) {
@@ -1965,7 +2003,15 @@ int run_perf(const std::filesystem::path& cooked,
             report.observe("frame.collapse", ms);
             report.observe("sim.collapse", sim_ms);
         }
-        report.observe_frame(static_cast<std::uint64_t>(i), ms, passes);
+        report.observe_frame(static_cast<std::uint64_t>(i), ms);
+        // The passes go in SEPARATELY, keyed by the frame they belong to. Handing them to the
+        // observe_frame above would be right under `submit_blocking` and wrong pipelined, where
+        // what just arrived describes a frame two back — and it is recorded after, not before, so
+        // the worst-frame record exists to receive its own breakdown.
+        if (passes_pending && passes_frame >= frame_base) {
+            report.observe_passes(passes_frame - frame_base, passes);
+            passes_pending = false;
+        }
     }
     zones.stop();
     demo.app.finish_gpu();
@@ -2181,9 +2227,18 @@ int run_perf(const std::filesystem::path& cooked,
     // exact confusion m17.3 exists to end. Printed unconditionally as a ratio rather than only on
     // overflow: "36 of 128" is how the next reader sees the headroom shrinking before it runs out,
     // which is the failure this line exists to prevent rather than to announce.
-    std::printf("  passes: %zu declared at peak, timestamp pool brackets %u\n",
-                max_passes_declared,
-                render::RenderGraph::max_timed_passes());
+    if (opt.pipelined > 1) {
+        // `on_post_submit` — the only hook that can see the graph itself — does not fire on the
+        // pipelined path, so this run genuinely does not know. Say that, rather than print the 0
+        // an unmeasured counter happens to hold: an unmeasured number that looks measured is the
+        // failure this whole milestone is about.
+        std::printf("  passes: not measured on the pipelined path (pool brackets %u)\n",
+                    render::RenderGraph::max_timed_passes());
+    } else {
+        std::printf("  passes: %zu declared at peak, timestamp pool brackets %u\n",
+                    max_passes_declared,
+                    render::RenderGraph::max_timed_passes());
+    }
     if (max_passes_declared > render::RenderGraph::max_timed_passes()) {
         std::printf("  (!) the peak frame OVERFLOWS the pool — everything past the first %u passes "
                     "is UNATTRIBUTED GPU time\n",
@@ -2328,6 +2383,8 @@ int main(int argc, char** argv) {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
             perf.frames = std::atoi(argv[++i]);
+        } else if (a == "--pipelined" && i + 1 < argc) {
+            perf.pipelined = static_cast<std::uint32_t>(std::atoi(argv[++i]));
         } else if (a == "--warmup" && i + 1 < argc) {
             perf.warmup = std::atoi(argv[++i]);
         } else if (a == "--width" && i + 1 < argc) {
