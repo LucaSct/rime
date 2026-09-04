@@ -585,6 +585,41 @@ void PerfReport::observe(std::string_view timeline, double ms) {
     Timeline& t = timeline_for(timeline);
     t.samples.add(ms);
     t.measured = true;
+    t.last_frame = frames_closed_; // the frame now being recorded into; see value_this_frame
+}
+
+void PerfReport::declare_accounting(std::string_view parent,
+                                    std::initializer_list<std::string_view> children) {
+    AccountingRule rule;
+    rule.parent.assign(parent);
+    rule.residual_name = rule.parent + ".unaccounted";
+    rule.children.reserve(children.size());
+    for (const std::string_view child : children)
+        rule.children.emplace_back(child);
+    accounting_.push_back(std::move(rule));
+}
+
+double PerfReport::value_this_frame(const std::string& name) {
+    for (const Timeline& t : timelines_) {
+        if (t.name != name)
+            continue;
+        if (t.last_frame == frames_closed_)
+            return t.samples.raw().back();
+        break; // the timeline exists, but nothing landed in it this frame
+    }
+    // A gap is counted rather than papered over. The residual it produces is too LARGE by exactly
+    // the missing part, which is the safe direction — a gate fires and someone looks — but a
+    // reader who does not know it happened would read that inflation as unattributed work.
+    ++accounting_gaps_;
+    if (!accounting_gap_warned_) {
+        accounting_gap_warned_ = true;
+        RIME_WARN("perf: accounting child '{}' had no sample for frame {} — every residual from "
+                  "here is an overestimate; record each part before the observe_frame that closes "
+                  "the frame",
+                  name,
+                  frames_closed_);
+    }
+    return 0.0;
 }
 
 void PerfReport::observe_zone(std::string_view name, double ms) {
@@ -605,14 +640,6 @@ void PerfReport::observe_zone(std::string_view name, double ms) {
 
 void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes) {
     observe("frame", ms);
-
-    // The frame boundary, and therefore where a zone's per-frame total is banked (m17.3b). Every
-    // known zone flushes, including the ones that did not run this frame — a zero is a measurement,
-    // and omitting it would bias the percentile upward by dropping exactly the cheap frames.
-    for (ZoneAccumulator& z : zone_acc_) {
-        observe(z.per_frame_name, z.total_ms);
-        z.total_ms = 0.0;
-    }
 
     // A PASS NAME IS A KEY, AND KEYS MUST BE UNIQUE WITHIN A FRAME (m17.3). Two passes sharing a
     // name in one frame broke this two ways at once, and the 2026-08-30 block baseline shows both:
@@ -668,6 +695,11 @@ void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const P
     // The worst frame keeps its own breakdown, so a failed gate can say WHICH pass blew the frame
     // rather than only that some frame did. The first frame always wins outright — otherwise a run
     // whose every frame took 0 ms would report a worst frame it never observed.
+    //
+    // This runs BEFORE the zone flush below, which is the whole reason it moved here (m17.3c): the
+    // flush zeroes every accumulator, so a worst-frame check after it can only ever see zeros, and
+    // the one frame a human opens after a failure had a GPU story and no CPU one. Capturing costs
+    // an allocation only on the frames that actually take the record.
     const Timeline* frames = nullptr;
     for (const Timeline& t : timelines_) {
         if (t.name == "frame")
@@ -678,7 +710,32 @@ void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const P
         worst_.index = index;
         worst_.ms = ms;
         worst_.passes = std::move(unique); // the uniquified names, so the JSON keys are keys
+        worst_.zones.clear();
+        for (const ZoneAccumulator& z : zone_acc_) {
+            if (z.total_ms > 0.0)
+                worst_.zones.push_back(ZoneTotal{z.name, z.total_ms});
+        }
     }
+
+    // The frame boundary, and therefore where a zone's per-frame total is banked (m17.3b). Every
+    // known zone flushes, including the ones that did not run this frame — a zero is a measurement,
+    // and omitting it would bias the percentile upward by dropping exactly the cheap frames.
+    for (ZoneAccumulator& z : zone_acc_) {
+        observe(z.per_frame_name, z.total_ms);
+        z.total_ms = 0.0;
+    }
+
+    // The accounting residuals, last, because the flush above is what makes a `.per_frame` child
+    // current for this frame (m17.3c). Each is recorded as its own timeline, so the remainder gets
+    // a name a gate can hold rather than staying an identity nobody evaluates.
+    for (const AccountingRule& rule : accounting_) {
+        double residual = value_this_frame(rule.parent);
+        for (const std::string& child : rule.children)
+            residual -= value_this_frame(child);
+        observe(rule.residual_name, residual);
+    }
+
+    ++frames_closed_;
 }
 
 void PerfReport::set_ledger(const WorkLedger& ledger) {
@@ -788,7 +845,20 @@ std::string PerfReport::to_json(int indent) const {
     {
         bool f = true;
         w.open('{');
-        for (const Timeline& t : timelines_) {
+        // Written in NAME order, not discovery order (m17.3c). Two reasons, both about the file
+        // rather than the run: a `<zone>` and its `<zone>.per_frame` twin land next to each other
+        // instead of in two distant blocks, and the key order stops depending on which frame each
+        // stage happened to fire in first — so `git diff` between two committed reports shows the
+        // numbers that changed rather than a reshuffle.
+        std::vector<const Timeline*> ordered;
+        ordered.reserve(timelines_.size());
+        for (const Timeline& t : timelines_)
+            ordered.push_back(&t);
+        std::sort(ordered.begin(), ordered.end(), [](const Timeline* a, const Timeline* b) {
+            return a->name < b->name;
+        });
+        for (const Timeline* tp : ordered) {
+            const Timeline& t = *tp;
             const Distribution d = t.measured ? t.samples.summarize() : t.parsed;
             w.item(f);
             w.key(t.name);
@@ -853,6 +923,22 @@ std::string PerfReport::to_json(int indent) const {
                 w.item(g);
                 w.key(p.name);
                 w.out += ms_text(p.ms);
+            }
+            w.close('}', !g);
+        }
+        // The CPU half of the same frame (m17.3c). Always written, and OPTIONAL on read — see the
+        // parser — because the reports already in `docs/perf/` predate it and must keep loading as
+        // baselines. Adding a required field would have meant bumping the schema version, which
+        // would have made every committed file unreadable to close a gap in one of them.
+        w.item(f);
+        w.key("zones");
+        {
+            bool g = true;
+            w.open('{');
+            for (const ZoneTotal& z : worst_.zones) {
+                w.item(g);
+                w.key(z.name);
+                w.out += ms_text(z.ms);
             }
             w.close('}', !g);
         }
@@ -993,6 +1079,29 @@ bool PerfReport::parse(std::string_view text, PerfReport& out, std::string& erro
             return false;
         }
         r.worst_.passes.push_back(PassTiming{name, node.as_double()});
+    }
+
+    // `zones` is OPTIONAL, and it is the only optional field in this reader. Everything else is
+    // strict on purpose — a parser that defaults a field to 0.0 makes the regression gate compare
+    // against zero and pass everything. This one is different in kind: it was added in m17.3c, and
+    // every report committed before it is a legitimate baseline that simply has no CPU breakdown
+    // for its worst frame. Absent therefore means "this report predates the field", which is a
+    // true statement about the file, not a guess about a number. A `zones` that IS present is
+    // parsed strictly.
+    if (const JsonValue* worst_zones = worst->find("zones")) {
+        if (worst_zones->type != JsonValue::Type::Object) {
+            error = "worst_frame 'zones' is not an object";
+            return false;
+        }
+        for (std::size_t i = 0; i < worst_zones->member_count(); ++i) {
+            const std::string& name = worst_zones->keys[i];
+            const JsonValue& node = worst_zones->values[i];
+            if (node.type != JsonValue::Type::Number) {
+                error = fmt::format("worst_frame zone '{}' is not a number", name);
+                return false;
+            }
+            r.worst_.zones.push_back(ZoneTotal{name, node.as_double()});
+        }
     }
 
     const JsonValue* ledger = nullptr;

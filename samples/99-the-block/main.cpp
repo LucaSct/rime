@@ -1844,20 +1844,55 @@ int run_perf(const std::filesystem::path& cooked,
     report.set_machine(fp);
     report.set_run(core::RunInfo::detect("99-the-block"));
 
+    // WHAT MUST ADD UP (m17.3c, ADR-0041 Ruling 2). m17.3a gave every pass a name and m17.3b gave
+    // the simulation eleven, but "the frame is attributable" was still an unchecked belief: nothing
+    // said the named parts account for the whole, so a subsystem added tomorrow without a zone
+    // would simply be absent, and absent looks exactly like free.
+    //
+    // Three nestings, each one a real containment rather than a plausible grouping — a residual
+    // over parts that are not inside their parent measures nothing:
+    //
+    //   frame        = sim.block + frame.render        (the two halves of the loop below)
+    //   frame.render = the Application's own stage zones inside `app.step`
+    //   sim.block    = the physics inside the Session's tick
+    //
+    // The third is the interesting one and the reason to do this before m17.5 rather than after:
+    // `sim.block` p99 is 25.49 ms against a ratified 6.0, `physics.step.per_frame` is the only part
+    // of it anything measures, and the difference — replication, destruction, debris, transforms —
+    // has never had a number. `sim.block.unaccounted` is that number.
+    //
+    // `frame.present` is deliberately not a child: `--perf` runs headless, so the present zone
+    // never fires, and naming a child that cannot record would count a gap on every frame. When
+    // the bar moves windowed (m17.4 onward) it becomes one, and until then present time is
+    // genuinely unaccounted rather than pretend-accounted.
+    report.declare_accounting("frame", {"sim.block", "frame.render"});
+    report.declare_accounting("frame.render",
+                              {"sim.tick.per_frame",
+                               "frame.declare.per_frame",
+                               "frame.execute.per_frame",
+                               "frame.submit.per_frame"});
+    report.declare_accounting("sim.block", {"physics.step.per_frame"});
+
     std::vector<core::PassTiming> passes;
     bool timestamps_seen = false;
     // The HIGH WATER MARK across the run, not the last frame's count (m17.3b). Which passes a frame
     // declares varies — local shadows only re-render invalidated slots — so testing the final
     // frame's count against the timestamp pool would report "everything was timed" whenever the run
     // happened to end quiet.
-    std::size_t max_passes_timed = 0;
+    // …and it counts what the frame DECLARED, not what came back timed (m17.3c). m17.3b compared
+    // `passes.size()` against the pool, which is the count AFTER the cap has already truncated it
+    // and (since the clipmap's repeats fold) after several passes have merged into one row — a
+    // check that reads the output of the thing it is trying to detect can never see an overflow
+    // larger than the cap, and now cannot see one at all. `pass_count()` is the declaration, which
+    // is the number that has to fit.
+    std::size_t max_passes_declared = 0;
     demo.app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer& cmd) {
         passes.clear();
         for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(cmd)) {
             passes.push_back(core::PassTiming{std::string(t.name), t.gpu_ms});
             timestamps_seen = true;
         }
-        max_passes_timed = std::max(max_passes_timed, passes.size());
+        max_passes_declared = std::max(max_passes_declared, graph.pass_count());
     });
     demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
 
@@ -1887,7 +1922,8 @@ int run_perf(const std::filesystem::path& cooked,
         // Application's schedule, which this demo does not use — its simulation is the Session.
         const core::Stopwatch sim_watch;
         demo.step_sim(scripted_tape(tick));
-        report.observe("sim.block", sim_watch.elapsed_ms());
+        const double sim_ms = sim_watch.elapsed_ms();
+        report.observe("sim.block", sim_ms);
         // The split that decides whether the ENGINE misses the budget or this DEMO's topology does.
         report.observe("sim.client", demo.session.last_client_ms);
         report.observe("sim.server", demo.session.last_server_ms);
@@ -1895,7 +1931,11 @@ int run_perf(const std::filesystem::path& cooked,
         demo.app.step(demo.app.fixed_dt());
         const double render_ms = render_watch.elapsed_ms();
         const double ms = watch.elapsed_ms();
-        report.observe_frame(static_cast<std::uint64_t>(i), ms, passes);
+        // EVERY PART IS RECORDED BEFORE THE `observe_frame` THAT CLOSES THE FRAME. That ordering is
+        // the accounting contract (m17.3c), not a style preference: a part recorded one line later
+        // has no sample for the frame being closed, so it counts as a gap and the residual is
+        // inflated by exactly its own cost. `frame.render` was observed after `observe_frame` until
+        // this brick, which would have made `frame.unaccounted` read as the entire render cost.
         report.observe("frame.render", render_ms);
         // WHAT A PLAYER'S MACHINE WOULD PAY, and it is a diagnostic rather than the gate.
         //
@@ -1907,11 +1947,25 @@ int run_perf(const std::filesystem::path& cooked,
         // ENGINE too slow, or is this demo's topology?
         report.observe("frame.player", demo.session.last_client_ms + render_ms);
         if (i >= opt.charge_frame && i < opt.charge_frame + opt.collapse) {
-            // The collapse, on its own timeline. A hitch there is invisible in a 600-frame p99 —
-            // 90 frames cannot move the 594th — and obvious in a 90-frame one. That is exactly why
+            // The collapse, on TWO timelines. A hitch there is invisible in a 600-frame p99 — 90
+            // frames cannot move the 594th — and obvious in a 90-frame one, which is exactly why
             // ADR-0035 asks for the window separately.
+            //
+            // `sim.collapse` is new (m17.3c) and it closes a hole the review found: ADR-0035
+            // ratified TWO collapse numbers, "frame max ≤ 33 ms" and "collapse-tick max ≤ 12 ms",
+            // and only the first had a timeline. So the gate below held the collapse to the frame
+            // budget while the tick budget — the tighter, more specific one — went unenforced
+            // through two milestones that quoted it as ratified.
+            //
+            // The interpretation, said out loud because it is one: `sim.block` is the sim's
+            // per-FRAME wall clock for both peers, not one tick in isolation, and this reads the
+            // ratified per-tick number against it. That is the same equivalence the existing
+            // `sim.block p99 ≤ 6.0` rule already makes; making it twice without saying so is how
+            // a budget quietly changes meaning.
             report.observe("frame.collapse", ms);
+            report.observe("sim.collapse", sim_ms);
         }
+        report.observe_frame(static_cast<std::uint64_t>(i), ms, passes);
     }
     zones.stop();
     demo.app.finish_gpu();
@@ -1943,9 +1997,30 @@ int run_perf(const std::filesystem::path& cooked,
     gate.at_most("frame", core::PerfStat::P99, 16.6)
         .at_most("frame", core::PerfStat::Max, 33.0)
         .at_most("frame.collapse", core::PerfStat::Max, 33.0)
+        // ADR-0035's OTHER ratified collapse number, gated for the first time (m17.3c).
+        .at_most("sim.collapse", core::PerfStat::Max, 12.0)
         .at_most("sim.block", core::PerfStat::P99, 6.0)
+        // THE ATTRIBUTION RATCHET (m17.3c). A rule on the remainder is what stops the frame from
+        // becoming un-attributable again: add a subsystem without a zone and its cost lands here,
+        // where a number is watching, instead of vanishing into a frame total that still adds up.
+        //
+        // Two of the three limits are structural rather than measured, and they are honest about
+        // it. `frame.unaccounted` is the loop's own bookkeeping between two stopwatches and
+        // `frame.render.unaccounted` is `app.step`'s outside its four zones — both should be a
+        // fraction of a millisecond, so 1.0 is generous by design: it must not fail on noise, only
+        // on something real arriving unnamed. `sim.block.unaccounted` gets the ratified sim budget
+        // itself, which says the weakest useful thing — no single unnamed remainder may be as
+        // large as the entire simulation is allowed to be — and m17.3d tightens it against a
+        // measured value, which is the first number this ladder produces that nobody has yet seen.
+        .at_most("frame.unaccounted", core::PerfStat::P99, 1.0)
+        .at_most("frame.render.unaccounted", core::PerfStat::P99, 1.0)
+        .at_most("sim.block.unaccounted", core::PerfStat::P99, 6.0)
         .require_samples("frame", 200)
         .require_samples("frame.collapse", 45)
+        .require_samples("sim.collapse", 45)
+        .require_samples("frame.unaccounted", 200)
+        .require_samples("frame.render.unaccounted", 200)
+        .require_samples("sim.block.unaccounted", 200)
         .max_regression(0.10);
     // The vacuity guard, and every floor here is a thing that was actually found switched off at
     // some point in M13.
@@ -2047,19 +2122,71 @@ int run_perf(const std::filesystem::path& cooked,
         }
     }
 
+    // WHAT THE FRAME COULD NOT NAME (m17.3c). Printed next to the breakdown it is the complement
+    // of, because a decomposition read without its residual is the one that looks complete.
+    {
+        static constexpr std::string_view kResiduals[] = {
+            "frame.unaccounted", "frame.render.unaccounted", "sim.block.unaccounted"};
+        std::printf("  what the frame could NOT name (residual = parent - its named parts):\n");
+        for (const std::string_view name : kResiduals) {
+            const auto d = report.distribution(name);
+            if (!d) {
+                std::printf(
+                    "    %-26.*s NOT RECORDED\n", static_cast<int>(name.size()), name.data());
+                continue;
+            }
+            // `min` is in there deliberately: a NEGATIVE residual is not noise, it means the
+            // declared tree is wrong — a part that is not actually inside its parent, or counted
+            // twice — and nothing else in this printout would show it.
+            std::printf("    %-26.*s p50 %7.3f  p99 %7.3f  max %7.3f  min %7.3f ms\n",
+                        static_cast<int>(name.size()),
+                        name.data(),
+                        d->p50_ms,
+                        d->p99_ms,
+                        d->max_ms,
+                        d->min_ms);
+        }
+        if (report.accounting_gaps() != 0) {
+            std::printf("    (!) %llu accounting gaps — a declared part had no sample for its "
+                        "frame, so every residual above is an OVERESTIMATE\n",
+                        static_cast<unsigned long long>(report.accounting_gaps()));
+        }
+        if (zones.foreign_zones() != 0) {
+            std::printf("    (!) %llu zone closes dropped from another thread — this report is "
+                        "short by that many measurements\n",
+                        static_cast<unsigned long long>(zones.foreign_zones()));
+        }
+    }
+
     std::printf("  worst frame #%llu at %.2f ms\n",
                 static_cast<unsigned long long>(report.worst_frame().index),
                 report.worst_frame().ms);
+    // The CPU half of that frame, which the report carried nowhere until m17.3c: the worst frame is
+    // the one a human opens after a failure, and it had a per-pass GPU breakdown and no answer at
+    // all to "what was the CPU doing".
+    {
+        std::vector<core::ZoneTotal> worst_zones = report.worst_frame().zones;
+        std::sort(worst_zones.begin(),
+                  worst_zones.end(),
+                  [](const core::ZoneTotal& a, const core::ZoneTotal& b) { return a.ms > b.ms; });
+        for (std::size_t i = 0; i < worst_zones.size() && i < 4; ++i) {
+            std::printf("    %-26s %8.3f ms\n", worst_zones[i].name.c_str(), worst_zones[i].ms);
+        }
+    }
     if (!timestamps_seen) {
         std::printf("  (this device reports no GPU timestamps — the per-pass table is empty)\n");
     }
-    // A frame that declares more than 32 passes leaves the rest UNTIMED (kMaxTimestamps / 2), and
-    // the block declares more than that. Say so, because an unattributed pass is indistinguishable
-    // in the report from a pass that cost nothing — the exact confusion m17.3 exists to end.
-    if (max_passes_timed >= render::RenderGraph::max_timed_passes()) {
-        std::printf("  (%zu passes timed at peak — the timestamp pool holds %u, so a frame "
-                    "declaring more leaves the rest as UNATTRIBUTED GPU time)\n",
-                    max_passes_timed,
+    // A frame declaring more passes than the pool can bracket leaves the rest UNTIMED, and an
+    // unattributed pass is indistinguishable in the report from a pass that cost nothing — the
+    // exact confusion m17.3 exists to end. Printed unconditionally as a ratio rather than only on
+    // overflow: "36 of 128" is how the next reader sees the headroom shrinking before it runs out,
+    // which is the failure this line exists to prevent rather than to announce.
+    std::printf("  passes: %zu declared at peak, timestamp pool brackets %u\n",
+                max_passes_declared,
+                render::RenderGraph::max_timed_passes());
+    if (max_passes_declared > render::RenderGraph::max_timed_passes()) {
+        std::printf("  (!) the peak frame OVERFLOWS the pool — everything past the first %u passes "
+                    "is UNATTRIBUTED GPU time\n",
                     render::RenderGraph::max_timed_passes());
     }
     std::printf("  work ledger: %s\n", ledger.to_json(-1).c_str());
@@ -2112,14 +2239,14 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 
     if (demo.app.windowed()) {
         // ASK for the cursor, then believe the ANSWER (m15.5). A compositor that does not advertise
-        // pointer constraints hands back a weaker mode, and a build that assumed otherwise would put
-        // the player in free-look with a cursor still free to walk off the window — a camera that
-        // stops steering mid-turn, blamed on the camera. The control scheme and the help text both
-        // come from what was actually granted.
-        // Asking is not getting, and it is not getting YET either. On Wayland a surface can only
-        // lock a pointer that is already over it, so this request is routinely refused at startup
-        // and granted a moment later when the mouse enters the window — which is why the answer is
-        // re-read every frame below rather than believed once here.
+        // pointer constraints hands back a weaker mode, and a build that assumed otherwise would
+        // put the player in free-look with a cursor still free to walk off the window — a camera
+        // that stops steering mid-turn, blamed on the camera. The control scheme and the help text
+        // both come from what was actually granted. Asking is not getting, and it is not getting
+        // YET either. On Wayland a surface can only lock a pointer that is already over it, so this
+        // request is routinely refused at startup and granted a moment later when the mouse enters
+        // the window — which is why the answer is re-read every frame below rather than believed
+        // once here.
         const platform::CursorMode cursor =
             demo.app.window()->set_cursor_mode(platform::CursorMode::Locked);
         bindings.look_requires_drag = gameplay::look_requires_drag_for(cursor);

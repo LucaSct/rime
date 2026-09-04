@@ -291,6 +291,190 @@ TEST_CASE("a zone closing on another thread is DROPPED and counted, not raced (m
     CHECK_FALSE(r.distribution("worker.stage.per_frame").has_value());
 }
 
+TEST_CASE("accounting: the remainder gets a NAME, computed per frame (m17.3c)") {
+    // "The frame is attributable" was an unchecked belief until this: every pass had a name and
+    // every physics stage had one, and nothing said the named parts add up to the whole. A
+    // subsystem added without a zone was simply absent — and absent is indistinguishable from free.
+    //
+    // Why per frame and not from the summaries afterwards: percentiles are not subadditive in
+    // either direction (the frames that are worst for one part need not be worst for another), and
+    // this schema deliberately cannot store a mean, so the one summary-level check that would have
+    // been sound is the one it refuses to hold. Record time or never.
+    PerfReport r;
+    r.declare_accounting("frame", {"sim", "render"});
+
+    // Frame 0: 10 = 4 + 5 + 1 unnamed.
+    r.observe("sim", 4.0);
+    r.observe("render", 5.0);
+    r.observe_frame(0, 10.0);
+
+    // Frame 1: 10 = 4 + 6, nothing left over.
+    r.observe("sim", 4.0);
+    r.observe("render", 6.0);
+    r.observe_frame(1, 10.0);
+
+    SUBCASE("the residual is exact for each frame, not a difference of percentiles") {
+        const auto d = r.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        CHECK(d->count == 2);
+        CHECK(d->max_ms == doctest::Approx(1.0));
+        CHECK(d->min_ms == doctest::Approx(0.0));
+        CHECK(r.accounting_gaps() == 0);
+    }
+
+    SUBCASE("a part recorded for no frame counts a gap and INFLATES the residual, never hides it") {
+        // The failure this guards: name a child that never records and the residual quietly grows
+        // by its whole cost, which reads as unattributed work rather than as a broken declaration.
+        PerfReport g;
+        g.declare_accounting("frame", {"sim", "typo.render"});
+        g.observe("sim", 4.0);
+        g.observe("render", 5.0);
+        g.observe_frame(0, 10.0);
+
+        const auto d = g.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        CHECK(d->max_ms == doctest::Approx(6.0)); // 10 - 4, with `render` never claimed
+        CHECK(g.accounting_gaps() == 1);
+    }
+
+    SUBCASE("a part recorded AFTER observe_frame belongs to the next frame, and is counted") {
+        // The ordering contract, stated as a test because it is the easy mistake: the sample's
+        // `frame.render` was observed one line after `observe_frame` before m17.3c.
+        PerfReport late;
+        late.declare_accounting("frame", {"render"});
+        late.observe_frame(0, 10.0);
+        late.observe("render", 9.0);
+        late.observe_frame(1, 10.0);
+
+        const auto d = late.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        // Frame 0 saw nothing (gap, residual 10) and frame 1 saw the sample recorded between them.
+        CHECK(d->max_ms == doctest::Approx(10.0));
+        CHECK(d->min_ms == doctest::Approx(1.0));
+        CHECK(late.accounting_gaps() == 1);
+    }
+
+    SUBCASE("a wrong tree goes NEGATIVE rather than clamping to a tidy zero") {
+        // A child that is not really inside its parent is a modelling error, and max(0, …) would
+        // launder it into a number that looks like perfect attribution. `min_ms` is where it shows.
+        PerfReport bad;
+        bad.declare_accounting("frame", {"not-inside"});
+        bad.observe("not-inside", 12.0);
+        bad.observe_frame(0, 10.0);
+
+        const auto d = bad.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        CHECK(d->min_ms == doctest::Approx(-2.0));
+        CHECK(bad.accounting_gaps() == 0); // the part WAS there; the tree is what is wrong
+    }
+
+    SUBCASE("zones qualify as parts without any per-frame plumbing of their own") {
+        PerfReport z;
+        z.declare_accounting("frame", {"stage.per_frame"});
+        z.observe_zone("stage", 3.0);
+        z.observe_zone("stage", 2.0); // twice in one frame — the per-call/per-frame split (m17.3b)
+        z.observe_frame(0, 10.0);
+        const auto d = z.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        CHECK(d->max_ms == doctest::Approx(5.0));
+        CHECK(z.accounting_gaps() == 0);
+    }
+}
+
+TEST_CASE("accounting: the gate FAILS on the last committed block report (m17.3c)") {
+    // The falsification, run against the real artifact rather than an invented one. The
+    // 2026-08-30 block baseline is the file ADR-0041 quotes throughout — `frame` p99 35.598 over
+    // 600 frames — and it contains no residual timeline, because none existed when it was written.
+    //
+    // Nothing new was needed to make that fail: a rule naming a timeline nobody recorded is
+    // `Missing`, and `Missing` is a failure for the same reason a work budget's is. So the gate
+    // this brick adds cannot pass on a report that predates the instrumentation — which is exactly
+    // the property that makes it a gate rather than a decoration.
+    const std::string path = std::string(RIME_PERF_BASELINE_DIR) +
+                             "/2026-08-30-99-the-block-nvidia-geforce-rtx-3060.json";
+    PerfReport committed;
+    std::string error;
+    REQUIRE_MESSAGE(PerfReport::load_file(path, committed, error), error);
+    // The file is the one the ADR quotes — assert that before asserting anything about it, or a
+    // renamed baseline would make every check below pass over the wrong numbers.
+    REQUIRE(committed.distribution("frame").has_value());
+    CHECK(committed.distribution("frame")->count == 600);
+    CHECK(committed.distribution("frame")->p99_ms == doctest::Approx(35.598));
+
+    PerfGate gate;
+    gate.at_most("frame.unaccounted", PerfStat::P99, 1.0)
+        .at_most("sim.collapse", PerfStat::Max, 12.0);
+    const PerfGate::Result result = gate.check(committed);
+    CHECK_FALSE(result.ok());
+    REQUIRE(result.violations.size() == 2);
+    CHECK(result.violations[0].outcome == PerfOutcome::Missing);
+    CHECK(result.violations[1].outcome == PerfOutcome::Missing);
+
+    SUBCASE("and an old report still LOADS — the new worst-frame field is optional on read") {
+        // The one optional field in an otherwise strict reader. Absent means "this file predates
+        // m17.3c", which is a true statement about the file rather than a guess about a number;
+        // making it required would have meant bumping the schema and orphaning every baseline.
+        CHECK(committed.worst_frame().zones.empty());
+        CHECK(committed.worst_frame().ms > 0.0);
+    }
+
+    SUBCASE("the same shape, recorded through the new path, breaches QUANTITATIVELY") {
+        // `Missing` proves the rule fires on an old file; it does not prove the number means
+        // anything. So replay that file's shape — ~35.6 ms frames with a sim and a render half
+        // that do not add up — and watch the residual itself breach.
+        PerfReport replay;
+        replay.declare_accounting("frame", {"sim.block", "frame.render"});
+        for (int i = 0; i < 200; ++i) {
+            replay.observe("sim.block", 25.0);
+            replay.observe("frame.render", 8.0);
+            replay.observe_frame(static_cast<std::uint64_t>(i), 35.6);
+        }
+        PerfGate quantitative;
+        quantitative.at_most("frame.unaccounted", PerfStat::P99, 1.0);
+        const PerfGate::Result r2 = quantitative.check(replay);
+        REQUIRE(r2.violations.size() == 1);
+        CHECK(r2.violations[0].outcome == PerfOutcome::Breach);
+        CHECK(r2.violations[0].value_ms == doctest::Approx(2.6));
+    }
+}
+
+TEST_CASE("the worst frame carries its CPU story, not only its GPU one (m17.3c)") {
+    // The worst frame is the one frame a human opens after a gate fails, and it used to arrive
+    // with a per-pass GPU breakdown and no answer to "what was the CPU doing" — because the zone
+    // totals are zeroed at every frame boundary and the worst-frame check ran after the flush.
+    PerfReport r;
+    const PassTiming passes[] = {{"forward-pbr", 2.0}};
+
+    r.observe_zone("physics.solve", 1.0);
+    r.observe_frame(0, 5.0, passes);
+
+    r.observe_zone("physics.solve", 7.0);
+    r.observe_zone("physics.contacts", 3.0);
+    r.observe_frame(1, 40.0, passes); // the worst
+
+    r.observe_zone("physics.solve", 1.0);
+    r.observe_frame(2, 5.0, passes);
+
+    CHECK(r.worst_frame().index == 1);
+    REQUIRE(r.worst_frame().zones.size() == 2);
+    double solve = 0.0;
+    for (const rime::core::ZoneTotal& z : r.worst_frame().zones) {
+        if (z.name == "physics.solve")
+            solve = z.ms;
+    }
+    // 7.0, the worst frame's own total — not 1.0 from a later frame and not 9.0 for the run.
+    CHECK(solve == doctest::Approx(7.0));
+
+    SUBCASE("and survives the round trip to a committed report") {
+        const std::string json = r.to_json();
+        PerfReport back;
+        std::string error;
+        REQUIRE_MESSAGE(PerfReport::parse(json, back, error), error);
+        REQUIRE(back.worst_frame().zones.size() == 2);
+        CHECK(back.to_json() == json);
+    }
+}
+
 TEST_CASE("the committed JSON round-trips exactly") {
     const PerfReport r = make_report();
     const std::string first = r.to_json();

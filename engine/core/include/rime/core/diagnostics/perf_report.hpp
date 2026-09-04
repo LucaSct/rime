@@ -108,12 +108,28 @@ struct PassCost {
     double max_ms = 0.0;
 };
 
-// The single worst frame of the run, with its per-pass breakdown — the one frame a human actually
-// wants to look at after a gate fails, because "p99 went up" does not say which pass did it.
+// One named CPU cost inside one frame: a profile zone's total for that frame. Deliberately its
+// own type rather than a reuse of `PassTiming` — a pass is GPU time read from a timestamp pair, a
+// zone is CPU wall time from a stopwatch, and a struct whose name lies about which one it holds is
+// how the two get compared as if they were the same clock.
+struct ZoneTotal {
+    std::string name;
+    double ms = 0.0;
+};
+
+// The single worst frame of the run — the one frame a human actually wants to look at after a gate
+// fails, because "p99 went up" does not say what did it.
+//
+// It carries BOTH breakdowns (m17.3c). It used to carry only `passes`, which meant the frame a
+// reader opens after a failure had its GPU story and none of its CPU one — and since the zone
+// totals are zeroed at every frame boundary, the information was gone by the time anyone asked.
+// Captured before the flush, and only when this frame actually takes the record, so the cost is
+// paid a handful of times per run rather than 600.
 struct WorstFrame {
     std::uint64_t index = 0;
     double ms = 0.0;
     std::vector<PassTiming> passes;
+    std::vector<ZoneTotal> zones; // non-zero zone totals only; a zero explains nothing here
 };
 
 // What must agree before two reports may be compared. See decision 3.
@@ -196,6 +212,44 @@ public:
     // nobody, which is the honest outcome for a run that has no frames.
     void observe_zone(std::string_view name, double ms);
 
+    // ── Accounting: "the parts account for the whole", made checkable (m17.3c) ────────────────
+    //
+    // A frame is attributable only if the named parts add up to it, and nothing in this report
+    // could state that relationship. It also cannot be recovered afterwards from the committed
+    // summaries, for two reasons that are worth knowing before anyone tries: percentiles are not
+    // subadditive in either direction — p99 of a sum is neither the sum of the p99s nor bounded by
+    // it, because the frames that are worst for one part need not be worst for another — and
+    // decision 1 above deliberately makes a mean unrepresentable, so the one summary-level check
+    // that WOULD have been sound is the one this schema refuses to store. The residual therefore
+    // has to be computed per frame, at record time, or never.
+    //
+    //     declare_accounting("frame", {"sim.block", "frame.render"});
+    //
+    // says the frame's wall clock should be explained by those two, and makes `observe_frame`
+    // record `frame.unaccounted = frame − (sim.block + frame.render)` as a timeline of its own,
+    // one sample per frame. Giving the remainder a NAME is the whole point: a name is what a gate
+    // can hold (`at_most("frame.unaccounted", …)`), what a percentile can be taken over, and what
+    // a human reads in `docs/perf/` — where an arithmetic identity nobody evaluates would be a
+    // comment.
+    //
+    // Two rules for children. Each must be recorded BEFORE the `observe_frame` that closes the
+    // frame — a `<zone>.per_frame` total qualifies automatically, since the flush banks it first —
+    // and each must genuinely be nested inside its parent, or the residual is measuring the
+    // difference between two unrelated things. A child that recorded nothing this frame counts
+    // zero and increments `accounting_gaps()`: the residual is then inflated by exactly the
+    // missing part, which fails loudly rather than quietly, and the counter says it happened.
+    //
+    // The residual is NOT clamped at zero. Negative means the declared tree is wrong — a child
+    // that is not inside its parent, or double-counted — and a max() would launder a modelling
+    // error into a tidy zero. `Distribution::min_ms` is where it shows.
+    void declare_accounting(std::string_view parent,
+                            std::initializer_list<std::string_view> children);
+
+    // How many times a declared child contributed nothing because it had no sample for that frame.
+    // Non-zero means every residual above is an overestimate by an unknown amount — read it before
+    // believing a residual, and print it beside them.
+    [[nodiscard]] std::uint64_t accounting_gaps() const noexcept { return accounting_gaps_; }
+
     void set_machine(MachineFingerprint machine) { machine_ = std::move(machine); }
 
     void set_run(RunInfo run) { run_ = std::move(run); }
@@ -266,7 +320,23 @@ private:
         DurationSamples samples;
         Distribution parsed;
         bool measured = false;
+        // Which frame index last wrote here, for accounting (m17.3c). "Was this recorded during
+        // the frame now closing?" is the exact question, and it is not the same as comparing
+        // sample counts: a zone discovered at frame 50 is one sample short of `frame` forever
+        // afterwards while still being perfectly current.
+        std::uint64_t last_frame = kNeverRecorded;
     };
+
+    static constexpr std::uint64_t kNeverRecorded = ~std::uint64_t{0};
+
+    struct AccountingRule {
+        std::string parent;
+        std::vector<std::string> children;
+        std::string residual_name; // "<parent>.unaccounted", built once at declaration
+    };
+
+    // The value a timeline recorded for the frame now closing, or 0.0 with a counted gap.
+    [[nodiscard]] double value_this_frame(const std::string& name);
 
     struct PassAccumulator {
         std::string name;
@@ -290,9 +360,13 @@ private:
     };
 
     std::vector<Timeline> timelines_;
-    std::vector<PassAccumulator> pass_acc_; // recording side
-    std::vector<ZoneAccumulator> zone_acc_; // recording side, flushed per frame
-    std::vector<PassCost> parsed_passes_;   // parse side
+    std::vector<PassAccumulator> pass_acc_;  // recording side
+    std::vector<ZoneAccumulator> zone_acc_;  // recording side, flushed per frame
+    std::vector<AccountingRule> accounting_; // recording side, evaluated per frame
+    std::vector<PassCost> parsed_passes_;    // parse side
+    std::uint64_t frames_closed_ = 0;        // how many observe_frame calls have completed
+    std::uint64_t accounting_gaps_ = 0;
+    bool accounting_gap_warned_ = false;
     WorstFrame worst_;
     MachineFingerprint machine_;
     RunInfo run_;
