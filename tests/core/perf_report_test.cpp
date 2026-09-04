@@ -291,6 +291,47 @@ TEST_CASE("a zone closing on another thread is DROPPED and counted, not raced (m
     CHECK_FALSE(r.distribution("worker.stage.per_frame").has_value());
 }
 
+TEST_CASE("the thread pin holds under REAL concurrency, which is the only version TSan can judge") {
+    // The case above spawns and joins, so the worker's access is fully ordered against the main
+    // thread's by the join itself — which means a ThreadSanitizer run over it proves nothing about
+    // the hazard, however green it comes back. Vacuity of exactly the kind this file keeps catching
+    // in itself: the guard was never actually asked to prevent a concurrent entry.
+    //
+    // Here four threads report WHILE the owner does. With the pin, every foreign close is turned
+    // away before it touches the report, so under TSan this is clean *because of the guard*. With
+    // the pin removed it is a genuine data race on `timelines_` — which is the claim
+    // `PhysicsWorld::step`'s comment now makes, and the reason no zone may go on a worker.
+    constexpr int kWorkers = 4;
+    constexpr int kPerWorker = 50;
+    constexpr int kOwner = 25;
+
+    PerfReport r;
+    std::uint64_t foreign = 0;
+    {
+        rime::core::ZoneTimelines zones(r);
+        std::vector<std::thread> workers;
+        workers.reserve(kWorkers);
+        for (int w = 0; w < kWorkers; ++w) {
+            workers.emplace_back([] {
+                for (int i = 0; i < kPerWorker; ++i)
+                    rime::core::report_zone("worker.stage", 1.0);
+            });
+        }
+        for (int i = 0; i < kOwner; ++i)
+            rime::core::report_zone("owner.stage", 1.0);
+        for (std::thread& t : workers)
+            t.join();
+        foreign = zones.foreign_zones();
+    }
+
+    // Exact, not approximate: the counter is atomic, so "some were dropped" is not the claim —
+    // every one of them was, and the report is short by precisely that many measurements.
+    CHECK(foreign == static_cast<std::uint64_t>(kWorkers * kPerWorker));
+    REQUIRE(r.distribution("owner.stage").has_value());
+    CHECK(r.distribution("owner.stage")->count == kOwner);
+    CHECK_FALSE(r.distribution("worker.stage").has_value());
+}
+
 TEST_CASE("accounting: the remainder gets a NAME, computed per frame (m17.3c)") {
     // "The frame is attributable" was an unchecked belief until this: every pass had a name and
     // every physics stage had one, and nothing said the named parts add up to the whole. A
