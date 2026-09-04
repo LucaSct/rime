@@ -58,6 +58,61 @@ done
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# ── The GPU must not be allowed to park itself (m17.3d) ──────────────────────────────────────
+#
+# Found the hard way while taking M17's re-baseline. `99-the-block` is CPU-bound — the simulation is
+# ~24 ms of a ~35 ms frame — so the GPU is idle most of every frame and the driver's power governor
+# concludes it has nothing to do. Measured directly during a 600-frame run: core 1837 -> 210 MHz and
+# MEMORY 7501 -> 405 MHz, an 18x collapse in bandwidth, part-way through the run and staying there.
+#
+# What that does to a report is worse than making it slow, because it makes it INCONSISTENT. Two
+# identical 600-frame runs minutes apart agreed on frame p99 (41.48 / 41.58) and disagreed by 2x on
+# the same pass: `ssr-resolve` p50 1.842 vs 0.856 ms. A committed baseline measured like that
+# encodes the governor's mood, and every future comparison against it inherits that.
+#
+# So this refuses to run rather than producing a number nobody can trust — the same ruling
+# ADR-0041 Ruling 4 makes about an incomparable baseline, applied one step earlier to an
+# unmeasurable machine. Override deliberately if you are measuring something the parking cannot
+# reach (a GPU-bound sample) or on a machine where clocks cannot be pinned.
+check_gpu_clocks() {
+    command -v nvidia-smi >/dev/null 2>&1 || return 0   # not an NVIDIA box; nothing to check
+    local cur max
+    cur="$(nvidia-smi --query-gpu=clocks.current.graphics --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+    max="$(nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+    case "$cur$max" in ''|*[!0-9]*) return 0 ;; esac    # unreadable: do not invent a verdict
+    [ "$max" -gt 0 ] || return 0
+    # A pinned GPU sits at its locked floor even while idle, so a clock far below max means the
+    # governor is still in charge.
+    if [ $((cur * 2)) -ge "$max" ]; then
+        return 0
+    fi
+    # Deliberately BELOW the maximum boost clock. Pinning at max invites the thermal governor to
+    # take over instead of the idle one, which reintroduces exactly the variance being removed; a
+    # clock the card can hold indefinitely is what makes two runs comparable.
+    local pin=$(( max * 85 / 100 ))
+    cat >&2 <<EOF
+perf.sh: the GPU is not clock-pinned (${cur} MHz of ${max} MHz max).
+
+  This sample is CPU-bound, so the driver parks the GPU mid-run and the report becomes a
+  measurement of the power governor rather than of the engine. Pin the clocks first:
+
+      sudo nvidia-smi -pm 1
+      sudo nvidia-smi -lgc ${pin},${pin}
+
+  and afterwards, to hand the GPU back to the governor:
+
+      sudo nvidia-smi -rgc
+
+  Set RIME_PERF_ALLOW_UNPINNED_CLOCKS=1 to measure anyway — and say so in the PR, because the
+  numbers are not comparable against a pinned baseline.
+EOF
+    return 1
+}
+
+if [ -z "${RIME_PERF_ALLOW_UNPINNED_CLOCKS:-}" ]; then
+    check_gpu_clocks || exit 3
+fi
+
 bin="build/${preset}/bin"
 if [ ! -x "${bin}/lit_rooms" ]; then
     echo "perf.sh: no ${preset} build at ${bin} — run scripts/build.sh --preset ${preset} first" >&2
