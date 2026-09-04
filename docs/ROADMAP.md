@@ -2307,8 +2307,10 @@ largest breach on the board · **m17.6** the GPU budget — `frame.submit` p99 1
 `ssr-resolve` (max 4.455) and `forward-pbr shadowed` (max 4.051) are the attributed half · **m17.7**
 **the sky lights the scene** (ADR-0040 §6, scheduled) · **m17.8** **the ground becomes a surface**
 — two triangles and a flat colour today · **m17.9** the shadow bar, scoped by numbers that do not
-exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: m17.9 → m17.7.
-**Never cut:** m17.3, m17.5, m17.8, m17.10.
+exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: **m17.9 only**
+(amended 2026-09-04 — cutting m17.7 re-defers exactly what ADR-0040 §6 already deferred once, and
+a ground nothing lights well is the worse half-milestone). **Never cut:** m17.3, m17.5, m17.7,
+m17.8, m17.10.
 
 > **This milestone started without its planning brick, and that is recorded rather than tidied
 > away.** Every milestone since M12 opened with an ADR and a brick ladder; M17 opened with two
@@ -2324,6 +2326,8 @@ exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: m17.9 �
 > | m17.2 | ✅ | [ADR-0041](adr/0041-the-visual-bar-m17.md) and this ladder — plus five findings, verified against the tree, that decide its order |
 > | m17.3b | ✅ | **the simulation is measured.** Eleven stage zones inside `PhysicsWorld::step` — the engine's first outside `application.cpp` — and every zone is now recorded twice: `<name>` per call (unchanged, the meaning ADR-0035's per-tick budget ratified) and `<name>.per_frame`, the sum within one frame, because a per-call percentile times a call count is not a per-frame percentile. `99-the-block --perf` prints the ranked per-frame totals, and says out loud when a frame declares more passes than the 32-slot timestamp pool can time |
 > | m17.3a | ✅ | **a pass name is an identity, not a label.** `DepthPrepass::add` takes a label; CSM declares `csm-cascade-N` and local shadows `spot-shadow-N`, so a report has rows for shadow work for the first time. `RenderGraph` uniquifies any remaining collision and `PerfReport::observe_frame` does the same at its own seam, so the artifact's keys are keys whoever feeds it. Both halves falsified: with the uniquifier off the graph hands out three passes called `twin`; with the labels reverted the cascades vanish and `depth-prepass#1..#3` appear |
+> | m17.3 review | ✅ | an adversarial pass over the ADR and both bricks ([ADR-0041 amendment](adr/0041-the-visual-bar-m17.md)). No landed bug. Fixed first: `PhysicsWorld::step`'s threading comment named contention where the hazard is a **data race** — `report_zone` calls its sink with the lock released, and `ZoneTimelines` now pins itself to the installing thread and counts what it drops; and the SDF clipmap declared a pass name **per dispatch**, so `#`-suffixed positional keys were headed for m17.3d's artifact — dispatches now name their level and declare the repeat (`fold_repeats`), which the graph sums into one row |
+> | m17.3c | ✅ | **the parts account for the whole.** `declare_accounting(parent, children)` records `<parent>.unaccounted` as a timeline of its own, one sample per frame, computed at record time — percentiles are not subadditive and the schema deliberately cannot store a mean, so a residual recovered from committed summaries is unavailable by construction. Gated through the existing `Missing` machinery, so it fails on the committed 2026-08-30 report, which the test asserts against the real file. Also: `sim.collapse` closes ADR-0035's second ratified collapse number, the worst frame carries its zone totals, timeline keys are written in name order, and `kMaxTimestamps` 64 → 256 |
 >
 > **Planning found that the frame cannot currently be attributed, which is why m17.3 is first and
 > uncuttable.** Each was verified against the tree:
@@ -2357,8 +2361,17 @@ exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: m17.9 �
 > **A third, found by m17.3b's own instrumentation: the block declares more passes than the frame
 > can time.** The timestamp pool is `rhi::kMaxTimestamps / 2` = **32**, and the block hits it — so
 > every pass past the 32nd is GPU time no report has ever contained. `execute()` logs a warning
-> once; nothing in the committed artifact says it. The sample now prints it, and raising the pool is
-> m17.3c's problem.
+> once; nothing in the committed artifact says it.
+>
+> **m17.3c measured that claim rather than acting on it, and it needed narrowing.** The peak frame
+> declares **36** passes, confirmed by putting `kMaxTimestamps` back to 64 and watching the warning
+> return — but that frame is the SDF clipmap's *initial fill*, which lands in warmup, so no
+> committed number was ever wrong. The steady-state frame declares 12. The pool went to 256 anyway,
+> because m17.7, m17.8 and m17.9 all add passes and a ceiling re-crossed mid-milestone would
+> silently un-attribute the frame exactly when the numbers start being spent. **And m17.3b's own
+> check could not have caught it**: it compared `passes.size()` — the count *after* the cap
+> truncated it — against the cap, so it could never see an overflow larger than the cap. It now
+> reads `pass_count()`, the declaration, and prints the ratio on every run.
 >
 > **First signal on where the simulation goes — and it is NOT yet the answer.** A 40-frame **Debug**
 > probe at 640×360 ranks `physics.solve.per_frame` p99 at 96 ms against `physics.contacts.per_frame`
@@ -2368,6 +2381,36 @@ exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: m17.9 �
 > unoptimised float loops far more than the broadphase's tree walk, which is exactly the kind of
 > distortion that turns a probe into a wrong finding. **m17.3d's Release re-baseline settles it**,
 > and until then §6's prediction stays unconfirmed rather than replaced.
+>
+> **The refusal was right, and the review measured why.** A PC-sampled Release profile of the
+> *2026-08-30* block binary (7,084 samples over the same 600-frame tape, ledger reproduced exactly)
+> puts the two stages in the **same order of magnitude** — solver chain ~31%, contacts+broadphase
+> ~28% — with ~32% in **shared out-of-line math**: a not-inlined `core::rotate` (`quat.hpp:99`) and
+> its `cross`, reached from the solver's `apply_inv_inertia` *and* the narrowphase's `PolySupport`.
+> So m17.5's target is still open, and the shared math is a third candidate that helps both stages
+> at once. (The sample counts are the reviewer's measurement, not independently reproduced here;
+> that `rotate` is plain `inline` and reached from `solver.hpp`, `support.hpp`, `narrowphase.hpp`
+> and `hull.hpp` is verified.)
+>
+> **Two more findings, both m17.5 inputs, both from the review:**
+>
+> 1. **The block never gives its `PhysicsWorld` a job system.** `set_job_system` is called by
+>    samples 09 and 10 and by seven tests; the block's `Peer` builds a `JobSystem` for
+>    `propagate_transforms` and never hands it to either world. The reviewer's sampler confirms the
+>    consequence: **zero** solver samples on worker threads across 600 frames, while two full worker
+>    pools spin-wait. An unknown part of the 4.25× `sim.block` breach is therefore demo wiring, not
+>    engine speed — and the parallel path's bit-identity across worker counts is already proven by
+>    the ADR-0026 witnesses. Establish which part before optimising; wiring it would move every
+>    number m17.3d is about to commit, so it lands **after** the re-baseline.
+> 2. **The zones fold client and server together.** `physics.*` merges both worlds while
+>    `sim.client`/`sim.server` split them, so the two decompositions do not compose — m17.5 would be
+>    optimising a merged distribution. Zones need a per-world tag first.
+>
+> **And one question ADR-0041 must answer before m17.5 and does not: may the gated `frame` be a
+> serialized loop?** It measures sim, declare, execute and `submit_blocking` in series, so 16.6 ms
+> means CPU + GPU without pipelining — materially harder than "60 FPS windowed". Pipelining is the
+> largest single lever toward the number (roughly `max(25, 11)` at today's costs). It needs a
+> written ruling either way, so m17.10 cannot relitigate what `frame` meant.
 >
 > **The ladder's first omission, found in review and added as m17.8: there is no ground.** What the
 > block stands on is **two triangles** (`make_plane`, four vertices) scaled to a 76 m square

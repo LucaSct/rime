@@ -385,3 +385,113 @@ exists to control for.
 has been observed. Rejected because m17.5 onward is judged by *looking at* a windowed frame, and an
 un-ringed UBO under `present()` produces exactly the kind of intermittent artifact that would be
 chased as a shading bug. The brick is small; the misdiagnosis it prevents is not.
+
+---
+
+## Amendment (2026-09-04, m17.3c): an adversarial review of this ADR and of m17.3a/b
+
+The plan above and the two bricks that followed it went out for an adversarial pass (Fable 5,
+read-only, its own judgement rather than a grade on mine). It found no landed bug and it found six
+things worth writing down. Recorded here rather than folded into the text above, because ADRs are
+append-only and a ruling that quietly changes is a ruling nobody can audit.
+
+**What the reviewer actually ran**, since the strongest item below is an empirical one: the two new
+doctest cases, all fifteen physics determinism witnesses on the m17.3b binary (5866/5866), and a
+600-frame run of the *2026-08-30 RelWithDebInfo* `the_block --perf` under an LD_PRELOAD SIGPROF
+PC-sampler (7,084 samples, resolved against the binary's own DWARF). That run reproduced the
+committed baseline's work ledger exactly, which is what makes its profile a measurement of the same
+tape rather than of a different run.
+
+### Four corrections to the rulings above
+
+1. **Ruling 1's headline argument is overclaimed, and its real support is stated more quietly.**
+   "A frame that misses its budget by 2.1× cannot demonstrate a scaling technique" conflates two
+   prerequisites. A scaling claim needs an *attributable, stable* baseline — you can show "cost
+   stops scaling with triangle count" on a 35 ms frame by sweeping the count and getting a flat
+   curve. What it strictly requires is **m17.3**, not m17.5/m17.6. The load-bearing arguments for
+   budget-first are the two the Alternatives section makes: the clause is debt already carried
+   across two renumberings, and ADR-0039's precedent. The conclusion stands; the argument for it
+   is narrower than written.
+
+2. **Ruling 1 never addresses replace-vs-optimise**, and it should, because the next milestone will
+   inherit whichever it finds. The test is: *optimise only what the bar will not replace.* M17
+   happens to pass it — m17.5 targets the simulation, which no UE5 technique touches; m17.6's named
+   candidate (Hi-Z SSR) survives any VSM/Nanite future; shadow-path spending waits for m17.9 — but
+   that is luck of the targets, not reasoning, and luck does not transfer.
+
+3. **The cut order is inverted.** `m17.9 → m17.7` makes the sky-lighting brick cuttable while m17.8
+   is not, and Ruling 3 itself calls that brick "the single largest visual change available for its
+   cost". Cutting it re-defers exactly what ADR-0040 §6 already deferred once — which is the same
+   debt argument Ruling 1 uses to justify its own ordering, applied against it. **Amended: the cut
+   order is m17.9 only; m17.7 joins m17.3, m17.5, m17.8 and m17.10 as never-cut.** A ground that
+   nothing lights well is the worse of the two half-milestones.
+
+4. **M18 is at risk of being two milestones wearing one label** — the overload M17 just refused.
+   Ruling 3's premise that virtualized geometry "most naturally subsumes terrain LOD" is a
+   hypothesis with mixed industry evidence: UE5 shipped Nanite for years while Landscape kept its
+   own LOD, and Frostbite keeps terrain dedicated. The epistemic posture (answer it in M18's ADR,
+   from a pipeline that exists) is right. **Added as a pre-commitment: if both tracks survive M18's
+   opening ADR, terrain becomes M19.** Ranking is a scheduling statement, not a promise, and saying
+   so now is what stops the deferral becoming a pile-up.
+
+### Two findings the ladder did not have, both inputs to m17.5
+
+5. **The block never hands its `PhysicsWorld` a job system.** `set_job_system` is called by samples
+   09 and 10 and by seven tests; the block's `Peer` builds a `JobSystem` for `propagate_transforms`
+   and never gives it to either world. Verified by grep here, and by the reviewer's sampler: across
+   600 frames, **zero** solver samples on worker threads, while two full worker pools spin-wait
+   through the run. So an unknown part of the 4.25× `sim.block` breach is demo wiring rather than
+   engine speed — and the engine's parallel solve path already has its bit-identity across worker
+   counts proven by the ADR-0026 witnesses. m17.5 must establish which part before it optimises
+   anything; a fix here would also move every number m17.3d is about to commit, so it lands after
+   the re-baseline, not before.
+
+6. **The zone decomposition folds client and server together.** `physics.*` merges both worlds while
+   `sim.client`/`sim.server` split them, so the two decompositions do not compose and m17.5 would be
+   optimising a merged distribution. Zones need a per-world tag or prefix before that work starts.
+
+### What was refused, and what the profile settled
+
+The m17.3b summary declined to state that its Debug probe puts the solver ~2× ahead of ADR-0035 §6's
+predicted narrowphase. The refusal was right, and the reviewer's Release profile says why twice
+over. In RelWithDebInfo the two stages are the **same order of magnitude** — direct solver chain
+~31%, direct contacts+broadphase ~28%, with ~32% in shared out-of-line math, dominated by a
+not-inlined `rime::core::rotate` (`quat.hpp:99`) and its interior `cross`, which `apply_inv_inertia`
+in the solver and `PolySupport` in the narrowphase both hammer. (`rotate` is `inline`, not forced,
+and is reached from `solver.hpp`, `support.hpp`, `narrowphase.hpp` and `hull.hpp` — verified here;
+the sample counts are the reviewer's measurement and are not independently reproduced.) The Debug
+ranking was an artifact of the build type *and* of the mix: at 40 frames `charge_frame` clamps to
+20, so half the probe sat inside the collapse window, and under 100 samples nearest-rank p99 *is*
+max. Quoting it would have planted a wrong finding in the same place ADR-0035 §6's last one was
+planted. **m17.5's target is therefore still open, and the shared math is a third candidate** — a
+flattening or SoA pass there helps both stages at once.
+
+### One question this ADR must answer before m17.5, and does not
+
+**Is the gated `frame` allowed to be a serialized loop?** It measures sim, declare, execute and
+`submit_blocking` *in series*, so meeting 16.6 means CPU + GPU ≤ 16.6 with no pipelining — a
+materially harder bar than "60 FPS windowed". That may be deliberate honesty; no ADR says. Pipelining
+(sim of frame N+1 overlapping the GPU of N) is the largest single architectural lever toward the
+number and at today's costs would turn 35.6 into roughly max(25, 11) on its own. **Ruled on in
+writing before m17.5 commits effort, either way** — accepted as the definition of `frame`, or taken
+as a brick — so that m17.10 cannot relitigate what the number meant.
+
+### Accepted, rejected, and carried
+
+Accepted and landed in m17.3c: the per-frame residual as a first-class named timeline gated through
+the existing `Missing` machinery; the worst frame carrying its zone totals; the collapse-tick gate
+(ADR-0035 ratified two collapse numbers and only one had a timeline); the timestamp pool raised
+before the re-baseline rather than after; the SDF clipmap's per-dispatch names.
+
+Rejected: **suppressing the all-zero `.per_frame` rows.** They double the report's zero-noise, which
+is a real cost, but an all-zero row is the *proof* that a stage never ran — and a subsystem quietly
+reporting no work is this engine's most repeated silent failure. The readability half was taken
+instead: timeline keys are written in name order, so a zone sits beside its `.per_frame` twin.
+
+Carried to m17.3d: **the GPU-side residual.** `frame.submit` is CPU wall and Σpass is GPU clock, so
+their difference mixes domains and its margin has to absorb calibration skew; it must also stay off
+any path a timestampless device reaches. Now that the pool brackets 128 passes the question is at
+least clean, and the ~5 ms that ADR-0041's own §"five facts" could not attribute is worth a name.
+Also carried: **pass-level gates** (m17.6 would otherwise optimise passes with nothing holding them
+afterwards), and **m17.8 naming the heightfield-collider shape** its "derived collider" is a
+placeholder for, so the physics side is not retrofitted later.
