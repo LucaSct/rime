@@ -187,6 +187,61 @@ TEST_CASE("rhi: submissions run in flight together, and each keeps its own work 
         CHECK(mismatches == 0);
     }
 
+    SUBCASE("borrow/release opens the window where a pipelined frame's TIMESTAMPS still exist") {
+        // The reason the seam was added (m17.5). A command buffer owns its timestamp query pool,
+        // so a frame's per-pass GPU times are readable only between "the GPU finished" and "the
+        // submission was reclaimed". `wait()` collapses those into one call — fine for a caller
+        // that wants nothing back, fatal for a pipelined loop, where every row of `docs/perf/`
+        // would be freed before anyone could read it.
+        auto cmd = device->begin_commands();
+        cmd->write_timestamp(0);
+        cmd->bind_compute_pipeline(pipe);
+        cmd->bind_storage_buffer(0, buffers[0]);
+        cmd->dispatch(kInFlight, 1, 1);
+        cmd->write_timestamp(1);
+        const SubmitTicket t = device->submit(std::move(cmd));
+        REQUIRE(t.is_valid());
+
+        CommandBuffer* borrowed = device->wait_and_borrow(t);
+        if (borrowed == nullptr) {
+            MESSAGE("device cannot timestamp — the borrow half is skipped");
+            device->release(t);
+        } else {
+            std::array<std::uint64_t, 2> ns{};
+            const bool read = borrowed->read_timestamps(ns);
+            if (!read) {
+                MESSAGE("device reports no timestamps — nothing to assert about them");
+            } else {
+                // The end stamp cannot precede the start one. Deliberately not a duration bound:
+                // a GPU proof here is a property the hardware guarantees, with no golden number.
+                CHECK(ns[1] >= ns[0]);
+            }
+            // A BORROW OUTRANKS COMPLETION, and this is the case that caught it. The work really
+            // has finished, so `is_complete` answers true — but answering true must not RECLAIM,
+            // or any other subsystem politely polling its own tickets would free the command
+            // buffer this borrower is still reading out of. Assert the honest answer, then assert
+            // the buffer survived it.
+            CHECK(device->is_complete(t));
+            std::array<std::uint64_t, 2> again{};
+            CHECK(borrowed->read_timestamps(again) == read);
+            device->wait(t); // same rule for the blocking poll
+            CHECK(borrowed->read_timestamps(again) == read);
+            device->release(t);
+        }
+
+        // …and after release there is nothing left: the ticket answers "complete" like any
+        // reclaimed one, and borrowing again gets nothing rather than a dangling pointer.
+        CHECK(device->is_complete(t));
+        CHECK(device->wait_and_borrow(t) == nullptr);
+        device->release(t); // idempotent
+    }
+
+    SUBCASE("release is safe on a ticket nobody borrowed, and on nothing at all") {
+        device->release(SubmitTicket{});
+        device->release(SubmitTicket{~std::uint64_t{0}});
+        CHECK(device->is_complete(SubmitTicket{}));
+    }
+
     for (std::uint32_t k = 0; k < kInFlight; ++k)
         device->destroy(buffers[k]);
     device->destroy(pipe);
