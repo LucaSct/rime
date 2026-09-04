@@ -186,6 +186,7 @@ public:
         // buffer yet, and leaving the write set out keeps the "who produced this?" question
         // answerable by looking only at compute passes.
         std::span<const RGBuffer> buffer_reads = {};
+        bool fold_repeats = false; // see ComputePassDesc::fold_repeats
     };
 
     void add_raster_pass(std::string_view name, const RasterPassDesc& desc, ExecuteFn fn);
@@ -196,6 +197,23 @@ public:
         std::span<const RGTexture> storage_write = {}; // imageStore (or both) — the write set
         std::span<const RGBuffer> buffer_reads = {};   // storage buffers read (m10.3)
         std::span<const RGBuffer> buffer_writes = {};  // storage buffers written — the write set
+
+        // THE ONE DECLARED EXCEPTION TO "A PASS NAME IS AN IDENTITY" (m17.3c).
+        //
+        // m17.3a's rule is that two passes in one frame may not share a name, and the graph
+        // uniquifies any collision to `name#1`. That rule assumes the repeats are DISTINGUISHABLE —
+        // cascade 2 is a different thing from cascade 3, so each gets a name. Some repeats are not:
+        // the SDF clipmap stamps every dirty instance into a level with the same shader, the same
+        // pipeline and the same target, and how many arrive depends on what the player just broke.
+        // There, the k-th stamp is not a stable identity across frames, so `#1` would key a
+        // distribution on nothing more than queue position.
+        //
+        // Setting this says "this name is declared several times per frame ON PURPOSE, and the
+        // honest measurement is their SUM". The graph then leaves the name alone and
+        // `resolve_timings` reports one entry carrying the total. It is opt-in because the default
+        // must stay the strict rule: a repeat nobody declared is a bug, and folding by default is
+        // exactly the silent merge the 2026-08-30 baseline's four `depth-prepass` keys were.
+        bool fold_repeats = false;
     };
 
     void add_compute_pass(std::string_view name, const ComputePassDesc& desc, ExecuteFn fn);
@@ -222,6 +240,10 @@ public:
     // Per-pass GPU time, readable once the submission execute() recorded into has completed
     // (e.g. after submit_blocking returns). Empty when the device cannot timestamp. Names point
     // into the graph — consume before reset().
+    //
+    // NAMES ARE UNIQUE in the returned list: the graph uniquified collisions at declaration, and
+    // passes that declared `fold_repeats` are summed into one entry here. A consumer may therefore
+    // treat a name as a key — which `PerfReport` and the committed JSON both do.
     struct PassTiming {
         std::string_view name;
         double gpu_ms = 0.0;
@@ -256,6 +278,7 @@ private:
         std::vector<Access> accesses;
         ExecuteFn fn;
         bool culled = false;
+        bool fold_repeats = false; // this name is declared several times per frame on purpose
     };
 
     // Textures and buffers share ONE resource table (and therefore one index space, one versioning
@@ -303,7 +326,7 @@ private:
         bool in_use = false;
     };
 
-    void add_pass_common(std::string_view name, bool is_raster, ExecuteFn fn);
+    void add_pass_common(std::string_view name, bool is_raster, bool fold_repeats, ExecuteFn fn);
     void declare_access(std::uint32_t resource, rhi::ResourceState state, bool write);
     void compile();
     void assign_physicals();

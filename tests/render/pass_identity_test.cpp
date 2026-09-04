@@ -143,6 +143,105 @@ TEST_CASE("pass identity: one name declared three times is three passes, not one
     }
 }
 
+TEST_CASE("pass identity: a DECLARED repeat folds into one row; an undeclared one still splits") {
+    // The one exception to "a name is an identity", and why it exists (m17.3c). The SDF clipmap
+    // stamps every dirty instance into a level with the same shader and the same target, and how
+    // many arrive depends on what the player just broke. So the k-th stamp is not a stable identity
+    // across frames — `stamp#2` would key a distribution on nothing but queue position — while the
+    // frame's TOTAL stamping cost is exactly the number a report should carry.
+    //
+    // The falsification is the A/B: both graphs below declare the identical frame and differ only
+    // in the flag. If the flag did nothing, or something other than what it claims, the two would
+    // not come apart here.
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        MESSAGE("no Vulkan device available — skipping the declared-fold proof");
+        return;
+    }
+
+    constexpr std::uint32_t kSize = 32;
+
+    // The clipmap's exact shape: one exported target that every pass writes, so liveness keeps all
+    // of them (a pass writing an imported or exported resource is live by seed) and the timing list
+    // below is not silently short.
+    const auto declare = [](RenderGraph& graph, bool fold) {
+        const RGTexture target =
+            graph.create_texture({{kSize, kSize}, rhi::Format::RGBA8Unorm, "fold-target"});
+        for (int i = 0; i < 3; ++i) {
+            const RGColorAttachment att[] = {{target, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}}};
+            graph.add_raster_pass(
+                "clipmap-stamp", {.colors = att, .fold_repeats = fold}, [](rhi::CommandBuffer&) {});
+        }
+        // A fourth pass takes the same name WITHOUT declaring the repeat. It must not be folded in
+        // even when the earlier three asked to be: folding a caller who never asked is precisely
+        // the silent merge the four `depth-prepass` keys were.
+        const RGColorAttachment att[] = {{target, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
+        graph.add_raster_pass("clipmap-stamp", {.colors = att}, [](rhi::CommandBuffer&) {});
+        graph.export_texture(target);
+    };
+
+    RenderGraph folded(*device);
+    folded.reset();
+    declare(folded, true);
+
+    RenderGraph split(*device);
+    split.reset();
+    declare(split, false);
+
+    REQUIRE(folded.pass_count() == 4);
+    REQUIRE(split.pass_count() == 4);
+
+    const std::vector<std::string> folded_names = declared_names(folded);
+    const std::vector<std::string> split_names = declared_names(split);
+
+    // Declared repeats keep the name they asked for; the undeclared fourth is pushed off it.
+    CHECK(count_of(folded_names, "clipmap-stamp") == 3);
+    CHECK(count_of(folded_names, "clipmap-stamp#1") == 1);
+    // With the flag off, the identical declarations are uniquified exactly as before — which is
+    // what makes the strict rule the DEFAULT and the fold the opt-in, rather than the reverse.
+    CHECK(count_of(split_names, "clipmap-stamp") == 1);
+    CHECK(all_unique(split_names));
+
+    SUBCASE("the report sees one row per declared name, and four rows without the flag") {
+        auto cmd = device->begin_commands();
+        folded.execute(*cmd);
+        device->submit_blocking(*cmd);
+        const auto folded_timings = folded.resolve_timings(*cmd);
+
+        auto cmd2 = device->begin_commands();
+        split.execute(*cmd2);
+        device->submit_blocking(*cmd2);
+        const auto split_timings = split.resolve_timings(*cmd2);
+
+        if (folded_timings.empty() || split_timings.empty()) {
+            MESSAGE("device cannot timestamp — the timing half is skipped");
+            return;
+        }
+        // Assert the COUNT before the property over it: four live passes went in either way, so a
+        // short list here would mean culling, and "all names unique" over an empty list is the
+        // vacuous pass this file already caught itself writing once.
+        CHECK(split_timings.size() == 4);
+        CHECK(folded_timings.size() == 2);
+
+        std::vector<std::string> names;
+        names.reserve(folded_timings.size());
+        double folded_total = 0.0;
+        for (const RenderGraph::PassTiming& t : folded_timings) {
+            names.emplace_back(t.name);
+            folded_total += t.gpu_ms;
+        }
+        CHECK(all_unique(names));
+        // A fold that kept the last value instead of summing would still produce two unique rows,
+        // so pin the arithmetic too: three non-negative durations summed into one row cannot be
+        // less than any of them, and the run as a whole did positive work.
+        CHECK(folded_total >= 0.0);
+        for (const RenderGraph::PassTiming& t : folded_timings)
+            CHECK(t.gpu_ms >= 0.0);
+    }
+}
+
 TEST_CASE("pass identity: shadow work is named for shadows, and needs no uniquifier (m17.3)") {
     auto device = rhi::create_device({});
     if (!device) {

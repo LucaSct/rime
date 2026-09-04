@@ -10,9 +10,11 @@
 #include "rime/render/lighting/sdf_clipmap.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <string_view>
 
 #include "rime/core/diagnostics/log.hpp"
 #include "sdf_compose.comp.spv.h"
@@ -532,6 +534,30 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
         level_rg[w.level] = graph.import_texture(lvl.info.texture, lvl.texture_state);
     }
 
+    // EACH DISPATCH NAMES THE LEVEL IT TOUCHES, AND THE REPEATS ARE DECLARED (m17.3c).
+    //
+    // Before this, every dispatch in the loop below declared one of two names, so a frame that
+    // dirtied two levels with three instances declared `sdf-clipmap-stamp` four times. m17.3a's
+    // backstop would have minted `sdf-clipmap-stamp#1…#3` and put positional keys — "whichever
+    // stamp came second" — into a committed `docs/perf/` report, which is identity in name only.
+    //
+    // Two halves to the fix, because there are two different multiplicities here. WHICH LEVEL is a
+    // real identity: level 0 is the fine ring around the camera and level 2 the coarse one, they
+    // cost different amounts, and a reader wants them apart — so the level is in the name, exactly
+    // as a cascade names itself. WHICH INSTANCE within a level is not: how many arrive depends on
+    // what the player just broke, and the third stamp of one frame is unrelated to the third of the
+    // next. So the per-level name is declared `fold_repeats`, and the report gets one row per
+    // level carrying the frame's total stamping cost — one sample per frame, a real per-frame
+    // percentile. Fixed tables rather than formatted strings: this runs every frame.
+    static constexpr std::array<std::string_view, kSdfClipmapLevels> kStampLabels{
+        "sdf-clipmap-stamp-L0", "sdf-clipmap-stamp-L1", "sdf-clipmap-stamp-L2"};
+    static constexpr std::array<std::string_view, kSdfClipmapLevels> kClearLabels{
+        "sdf-clipmap-clear-L0", "sdf-clipmap-clear-L1", "sdf-clipmap-clear-L2"};
+    static_assert(kStampLabels.back() != std::string_view{} &&
+                      kClearLabels.back() != std::string_view{},
+                  "raising kSdfClipmapLevels without naming the new level leaves it unnamed, and "
+                  "an empty name collides with the next one");
+
     for (const Dispatch& d : dispatches) {
         const RGTexture rg = level_rg[d.level];
         const rhi::TextureHandle level_texture = levels_[d.level].info.texture;
@@ -541,8 +567,9 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
         const RGTexture writes[] = {rg};
         RenderGraph::ComputePassDesc desc{};
         desc.storage_write = writes;
+        desc.fold_repeats = true;
         graph.add_compute_pass(
-            d.is_stamp ? "sdf-clipmap-stamp" : "sdf-clipmap-clear",
+            d.is_stamp ? kStampLabels[d.level] : kClearLabels[d.level],
             desc,
             [this, level_texture, instance_texture, offset, groups](rhi::CommandBuffer& cmd) {
                 cmd.bind_compute_pipeline(compose_pipeline_);

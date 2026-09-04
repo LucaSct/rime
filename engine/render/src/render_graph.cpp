@@ -154,10 +154,14 @@ void RenderGraph::declare_access(std::uint32_t resource, rhi::ResourceState stat
     }
 }
 
-void RenderGraph::add_pass_common(std::string_view name, bool is_raster, ExecuteFn fn) {
+void RenderGraph::add_pass_common(std::string_view name,
+                                  bool is_raster,
+                                  bool fold_repeats,
+                                  ExecuteFn fn) {
     Pass p;
     p.name.assign(name);
     p.is_raster = is_raster;
+    p.fold_repeats = fold_repeats;
     p.fn = std::move(fn);
 
     // A PASS NAME IS AN IDENTITY, NOT A LABEL (m17.3). One system may declare the same pass many
@@ -172,6 +176,17 @@ void RenderGraph::add_pass_common(std::string_view name, bool is_raster, Execute
     // — and this is the backstop that stops the CLASS from coming back the next time a pass is
     // reused. O(passes²) in the declare phase, which is ~20 passes and 0.3 ms; the alternative (a
     // hash set) would cost an allocation to save nothing measurable.
+    // The declared exception: a caller that set `fold_repeats` is saying the repeat is deliberate
+    // and its measurement is the SUM (see ComputePassDesc::fold_repeats). Both sides must agree —
+    // folding a repeat onto a pass that did NOT ask for it would merge unrelated work under one
+    // key, which is the bug this whole block exists to prevent, so that case still uniquifies.
+    const auto folds_onto = [this](const std::string& candidate) {
+        for (const Pass& existing : passes_) {
+            if (existing.name == candidate)
+                return existing.fold_repeats;
+        }
+        return false;
+    };
     const auto taken = [this](const std::string& candidate) {
         for (const Pass& existing : passes_) {
             if (existing.name == candidate)
@@ -179,6 +194,10 @@ void RenderGraph::add_pass_common(std::string_view name, bool is_raster, Execute
         }
         return false;
     };
+    if (fold_repeats && folds_onto(p.name)) {
+        passes_.push_back(std::move(p));
+        return;
+    }
     if (taken(p.name)) {
         // Bump until nothing answers to it. Testing the CANDIDATE rather than counting prefix
         // matches is what makes this airtight: counting would hand out `a#1` twice if some caller
@@ -206,7 +225,7 @@ void RenderGraph::add_raster_pass(std::string_view name, const RasterPassDesc& d
                    rhi::kMaxColorAttachments);
         return;
     }
-    add_pass_common(name, true, std::move(fn));
+    add_pass_common(name, true, desc.fold_repeats, std::move(fn));
     Pass& p = passes_.back();
     p.colors.assign(desc.colors.begin(), desc.colors.end());
     if (desc.depth != nullptr) {
@@ -241,7 +260,7 @@ void RenderGraph::add_raster_pass(std::string_view name, const RasterPassDesc& d
 void RenderGraph::add_compute_pass(std::string_view name,
                                    const ComputePassDesc& desc,
                                    ExecuteFn fn) {
-    add_pass_common(name, false, std::move(fn));
+    add_pass_common(name, false, desc.fold_repeats, std::move(fn));
     for (const RGTexture& t : desc.sampled) {
         declare_access(t.index, rhi::ResourceState::ShaderRead, false);
     }
@@ -574,9 +593,25 @@ std::vector<RenderGraph::PassTiming> RenderGraph::resolve_timings(rhi::CommandBu
     for (const std::uint32_t pi : order_) {
         if (timing_slot >= timed_passes_)
             break;
+        const Pass& pass = passes_[pi];
         const double ms = static_cast<double>(ns[timing_slot * 2 + 1] - ns[timing_slot * 2]) / 1e6;
-        out.push_back({passes_[pi].name, ms});
         ++timing_slot;
+        // Fold the declared repeats (m17.3c). Only a pass that ASKED to be folded may add into an
+        // earlier entry — anything else already has a unique name, so the linear scan finds
+        // nothing and the entry is new. Summing rather than keeping the largest because the
+        // question a report answers is "what did this frame spend", and the frame paid for all of
+        // them; a folded entry's `count` in the report is still one sample per frame, so the
+        // percentile stays a per-frame percentile.
+        if (pass.fold_repeats) {
+            const auto it = std::find_if(out.begin(), out.end(), [&pass](const PassTiming& t) {
+                return t.name == pass.name;
+            });
+            if (it != out.end()) {
+                it->gpu_ms += ms;
+                continue;
+            }
+        }
+        out.push_back({pass.name, ms});
     }
     return out;
 }
