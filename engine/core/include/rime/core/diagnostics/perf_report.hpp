@@ -2,12 +2,14 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -302,10 +304,22 @@ private:
 // …) reaches the hardware report without any sample writing per-stage plumbing of its own.
 //
 // RAII because installing a zone sink is a global side effect, and one that outlived its report
-// would write into a destroyed object. Two constraints, documented rather than defended against:
-// the collector must outlive every zone that could still fire (today all zones are on the main
-// thread, between `Application` stages), and it must not be nested with another collector — the
-// sink is a single global slot, so the inner one would silently replace the outer.
+// would write into a destroyed object. One constraint is documented rather than defended against —
+// the collector must not be nested with another, since the sink is a single global slot and the
+// inner one would silently replace the outer.
+//
+// THE THREAD CONSTRAINT IS ENFORCED, not documented, because the failure mode is undefined
+// behaviour and the guardrail it violates ("assume a data-parallel world") is one the engine takes
+// seriously. `report_zone` invokes its sink WITH THE LOCK RELEASED, on purpose; `PerfReport` has
+// no synchronization of its own; so a zone closing on a job-system worker would race on the
+// report's vectors and, at the first reallocation, corrupt or crash the very numbers a milestone
+// is deciding from. This collector therefore pins itself to the thread that constructed it and
+// DROPS foreign zones — and counts them, because the rule that runs through this engine is that a
+// skip nobody counted is indistinguishable from work that never happened.
+//
+// The pin itself is race-free by construction: `owner_` is written before `set_zone_sink`, which
+// takes the sink mutex, and a foreign thread can only reach `on_zone` by taking that same mutex to
+// fetch the sink — so the write happens-before every read of it.
 class ZoneTimelines {
 public:
     explicit ZoneTimelines(PerfReport& report);
@@ -320,8 +334,19 @@ public:
     // summarize while the app it measured is still alive.
     void stop();
 
+    // Zones dropped because they closed on a thread other than this collector's. Non-zero means
+    // the report is INCOMPLETE by exactly that many zone closes — read it, print it, and if it is
+    // large the answer is a per-thread sink, not a lock around this one.
+    [[nodiscard]] std::uint64_t foreign_zones() const noexcept {
+        return foreign_.load(std::memory_order_relaxed);
+    }
+
 private:
+    void on_zone(std::string_view name, double ms);
+
     PerfReport* report_;
+    std::thread::id owner_;
+    std::atomic<std::uint64_t> foreign_{0};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

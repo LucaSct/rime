@@ -23,9 +23,11 @@
 
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "rime/core/diagnostics/perf_report.hpp"
+#include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/diagnostics/work_ledger.hpp"
 
 using rime::core::BaselineStatus;
@@ -256,6 +258,37 @@ TEST_CASE(
         CHECK(back.distribution("physics.solve.per_frame")->max_ms == doctest::Approx(6.0));
         CHECK(back.to_json() == json);
     }
+}
+
+TEST_CASE("a zone closing on another thread is DROPPED and counted, not raced (m17.3c)") {
+    // `report_zone` copies the sink out under a mutex and then invokes it with the lock RELEASED —
+    // deliberately, so a sink doing real work cannot serialize whatever called it. The consequence
+    // is easy to state wrongly: the hazard for a zone on a job-system worker is not contention, it
+    // is a DATA RACE, because `PerfReport` synchronizes nothing and two threads inside
+    // `observe_zone` share its vectors. The m17.3b review caught `PhysicsWorld::step`'s comment
+    // naming the cheap hazard instead of the real one — which is how someone later accepts "just a
+    // bit of lock contention" for a debug session and gets undefined behaviour.
+    //
+    // So `ZoneTimelines` pins itself to the thread that installed it. Dropping is the safe answer;
+    // COUNTING the drop is what stops a short report from reading like a quiet one.
+    PerfReport r;
+    std::uint64_t foreign = 0;
+    {
+        rime::core::ZoneTimelines zones(r);
+        rime::core::report_zone("owner.stage", 1.0);
+        std::thread worker([] { rime::core::report_zone("worker.stage", 99.0); });
+        worker.join();
+        rime::core::report_zone("owner.stage", 2.0);
+        foreign = zones.foreign_zones();
+    }
+
+    CHECK(foreign == 1);
+    // The owning thread's zones landed…
+    REQUIRE(r.distribution("owner.stage").has_value());
+    CHECK(r.distribution("owner.stage")->count == 2);
+    // …and the worker's did not, under any name. Absent rather than zero: nothing measured it.
+    CHECK_FALSE(r.distribution("worker.stage").has_value());
+    CHECK_FALSE(r.distribution("worker.stage.per_frame").has_value());
 }
 
 TEST_CASE("the committed JSON round-trips exactly") {

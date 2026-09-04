@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/core/diagnostics/profile.hpp"
 
 namespace rime::core {
@@ -623,6 +624,14 @@ void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const P
     // The RenderGraph now hands out unique names, so this normally does nothing and allocates
     // nothing. It is here because `observe_frame` is a public seam any caller may feed, and closing
     // only the render path would close the instance and not the class.
+    //
+    // What a `#` suffix is NOT: a stable identity. It is positional — `foo#1` means "whichever
+    // same-named pass arrived second THIS frame" — so a distribution keyed on it mixes work that
+    // merely shared a queue position. That is strictly better than the merge it replaces (nothing
+    // is dropped, and the sum over a frame stays right, which is what the accounting residual
+    // below needs), and strictly worse than a name. So a `#` in a committed report is a BUG REPORT
+    // about the declaring code, not a feature; `tests/render/pass_identity_test.cpp` asserts a real
+    // frame produces none.
     std::vector<PassTiming> unique;
     const auto seen_before = [&](std::string_view candidate, std::size_t upto) {
         for (std::size_t i = 0; i < upto; ++i) {
@@ -1022,18 +1031,39 @@ bool PerfReport::load_file(const std::string& path, PerfReport& out, std::string
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-ZoneTimelines::ZoneTimelines(PerfReport& report) : report_(&report) {
-    // The lambda captures one pointer, so it fits a std::function's small-object buffer and the
-    // sink copy inside report_zone() costs no allocation — which matters because this fires on
-    // every stage of every tick of the run being measured.
-    PerfReport* target = report_;
-    set_zone_sink([target](std::string_view name, double ms) { target->observe_zone(name, ms); });
+ZoneTimelines::ZoneTimelines(PerfReport& report)
+    : report_(&report), owner_(std::this_thread::get_id()) {
+    // The lambda captures ONE pointer — this collector, not the report — so it still fits a
+    // std::function's small-object buffer and the sink copy inside report_zone() costs no
+    // allocation, which matters because this fires on every stage of every tick of the run being
+    // measured. Capturing the report plus the owning thread plus the counter would have been three
+    // words, overflowed the 16-byte buffer on libstdc++, and put a malloc/free on the measured
+    // path. `this` is stable: the class is non-copyable and non-movable, and `stop()` clears the
+    // sink before the object can die.
+    ZoneTimelines* self = this;
+    set_zone_sink([self](std::string_view name, double ms) { self->on_zone(name, ms); });
+}
+
+void ZoneTimelines::on_zone(std::string_view name, double ms) {
+    if (std::this_thread::get_id() != owner_) {
+        // See the class comment: dropping is the only safe answer here, and counting it is what
+        // stops the drop from reading like an absence of work.
+        foreign_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    report_->observe_zone(name, ms);
 }
 
 void ZoneTimelines::stop() {
     if (report_) {
         set_zone_sink({});
         report_ = nullptr;
+        const std::uint64_t dropped = foreign_.load(std::memory_order_relaxed);
+        if (dropped != 0) {
+            RIME_WARN("perf: {} zone closes were dropped — they fired on a thread other than the "
+                      "one collecting, so this report is short by that many measurements",
+                      dropped);
+        }
     }
 }
 

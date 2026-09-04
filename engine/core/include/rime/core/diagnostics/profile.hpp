@@ -7,9 +7,15 @@
 #include <string_view>
 
 // Timing and a lightweight profiling hook. `Stopwatch` measures durations; `ScopedZone`
-// (via RIME_PROFILE_ZONE) times a scope and reports it to a swappable sink. This is the hook
-// the job system (M1.6) uses to surface per-worker busy time. With no sink installed a zone
-// costs only a Stopwatch, so the hook can stay in hot code.
+// (via RIME_PROFILE_ZONE) times a scope and reports it to a swappable sink. With no sink installed
+// a zone costs only a Stopwatch, so the hook can stay in hot code.
+//
+// Who actually uses it, as of m17.3b: the `Application`'s ten frame/sim stage zones and
+// `PhysicsWorld::step`'s eleven, with `PerfReport`'s `ZoneTimelines` as the only shipping sink.
+// The job system does NOT — an earlier version of this comment said it did, which was aspiration
+// rather than fact (ADR-0035 A3 found the macro had no callers at all), and a stale claim about
+// who calls a hook is how the next reader concludes the threading question was already settled.
+// It is not; see the sink contract on `report_zone`.
 namespace rime::core {
 
 // A monotonic wall-clock stopwatch. steady_clock never jumps backward (unlike system_clock,
@@ -36,6 +42,14 @@ private:
 using ZoneSink = std::function<void(std::string_view name, double ms)>;
 
 void set_zone_sink(ZoneSink sink);
+
+// Report one closed zone. THE SINK CONTRACT, because getting this wrong is undefined behaviour
+// rather than a slow frame: the sink slot is guarded by a mutex, but the sink is CALLED WITH THE
+// LOCK RELEASED (see profile.cpp for why). So `report_zone` is safe to call from any thread, and
+// the SINK is what must decide whether it is — a sink with no internal synchronization may only
+// be fed from one thread, and it is the sink's job to enforce that rather than to hope. Today's
+// shipping sink (`ZoneTimelines`) pins itself to the thread that installed it and counts what it
+// turns away.
 void report_zone(std::string_view name, double ms);
 
 // RAII zone: times from construction to destruction, reports on scope exit. The name must

@@ -847,10 +847,21 @@ void PhysicsWorld::step(float dt) {
     // ever being measured.
     //
     // The zones sit at STAGE granularity, which is the same rule `Application` follows and for the
-    // same reason: `report_zone` takes a lock, so a zone inside a per-body loop would cost more
-    // than it measures. They also stay on the CALLING thread — none goes inside `solve_island`,
-    // which the job system runs on workers, because the sink is a single global slot with no
-    // per-thread accumulation behind it.
+    // same reason: `report_zone` takes a lock to fetch the sink, so a zone inside a per-body loop
+    // would cost more than it measures.
+    //
+    // They also stay on the CALLING thread — none goes inside `solve_island`, which the job system
+    // runs on workers — and the reason is stronger than cost, so say it exactly. `report_zone`
+    // copies the sink out under its mutex and then **invokes it unlocked** (profile.cpp), on
+    // purpose: a sink may do real work and holding a global lock across it would serialize whatever
+    // called it. So the lock protects the sink SLOT, not the sink's own state, and the sink
+    // installed here — `ZoneTimelines`, feeding `PerfReport::observe_zone` — mutates plain vectors
+    // with no synchronization at all. A zone on a worker would therefore not be "contended and
+    // slow"; it would be a DATA RACE on the report, and the first vector reallocation under it is
+    // a crash or silent corruption of the numbers the milestone is about to trust. Do not accept
+    // it "just for a debug session": undefined behaviour does not become safe by being temporary.
+    // `ZoneTimelines` refuses foreign-thread zones and counts them, so the hazard is enforced
+    // rather than merely written down here.
     //
     // With no sink installed each zone is two clock reads, one uncontended lock and an early
     // return, which is every shipping run and every CI run.
