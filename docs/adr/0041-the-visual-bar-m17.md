@@ -495,3 +495,73 @@ least clean, and the ~5 ms that ADR-0041's own §"five facts" could not attribut
 Also carried: **pass-level gates** (m17.6 would otherwise optimise passes with nothing holding them
 afterwards), and **m17.8 naming the heightfield-collider shape** its "derived collider" is a
 placeholder for, so the physics side is not retrofitted later.
+
+---
+
+## Amendment (2026-09-04, m17.4/m17.5a): the pipelining question is answered — build it
+
+The previous amendment left one question open: *may the gated `frame` be a serialized loop?* Luca
+ruled to build the pipelining. What that ruling cost, and what it bought, both belong here.
+
+### It was not a one-brick change, and the order was forced
+
+`submit_blocking` was hiding two things, not one.
+
+**m17.4 came first because it had to.** Seven lighting systems owned **fourteen** host-visible
+buffers they rewrote every frame. GPU work is ordered against GPU work by the graph's barriers and
+by queue order; a CPU write to host-visible memory is on neither. The moment the loop stops waiting,
+frame N+1's `write_buffer` lands while the GPU still reads frame N — and the frame renders with next
+frame's numbers. This ADR called that hazard "reasoned, not reproduced"; pipelining makes it
+structural rather than hypothetical. `RenderGraph::push_frame_data` / `push_frame_buffer` is the
+ring, owned once by the graph rather than copied into seven systems, and thirteen of the fourteen
+moved onto it. The fourteenth — `ClusteredLights::empty_lists_` — stays owned, because it is written
+once at construction and never again, and that distinction is the whole design: ring what the CPU
+rewrites, not everything.
+
+**The measurement problem was the real work.** `post_submit_`'s contract is "submitted AND
+completed, with the graph still holding this frame's passes", and pipelining breaks it by
+construction: when frame N's fence signals, the graph holds frame N+2's passes. Worse, a command
+buffer OWNS its timestamp query pool, so `Device::wait()` — which waits and reclaims in one call —
+would free every number in `docs/perf/` before anyone could read it. Two seams close that:
+`Device::wait_and_borrow`/`release` opens the window between "the GPU finished" and "the submission
+was reclaimed", and `RenderGraph::TimingPlan` snapshots at submit what only the current frame can
+answer. A borrow deliberately **outranks completion** — `is_complete()` still answers true but no
+longer reclaims — because otherwise any other subsystem politely polling its own ticket would free a
+buffer a borrower is reading.
+
+### Opt-in, and the fingerprint is why
+
+Pipelining is `set_headless_frames_in_flight(n)`, default 1. Not caution — governance. Pipelined,
+`frame` stops meaning "sim + render + GPU wall in series" and starts meaning "CPU wall, with the GPU
+alongside". ADR-0035 decision 3 says the fingerprint decides what may be compared, and it has no
+field for this, so the block writes `+pipelined-N` into its preset. A pipelined run therefore
+**fails comparison against a serialized baseline by itself** — Ruling 4's refusal, applied to the
+variable this ruling introduced, rather than left to whoever reads the diff.
+
+### What it buys, stated before anyone hopes for more
+
+From the committed 2026-08-30 baseline: `frame` p99 **35.60**, of which `frame.submit` — the CPU's
+wait for the GPU — is **10.60**. Perfect overlap therefore lands near **max(CPU, GPU) ≈ 25 ms**.
+
+> **Pipelining does not meet the budget, and was never going to.** 35.6 → ~25 still misses 16.6 by
+> 1.5×, because `sim.block` p99 is 25.49 and the CPU frame very nearly *is* the simulation. This
+> ruling removes the GPU from the critical path; it does not touch the thing on it. **m17.5 proper —
+> the simulation budget — remains the brick that decides whether M13's clause closes**, and the
+> review's finding that the block never hands its `PhysicsWorld` a job system is still the first
+> thing it should check.
+
+A Debug run of the block (120 frames, ratios only — Debug inflates the CPU far more than the GPU)
+shows the mechanism doing what it claims: `render` p99 118.33 → 106.79 ms, the GPU wall disappearing
+behind CPU work, with both runs producing a complete artifact.
+
+### Consequences for the ladder
+
+- **m17.4 is done, early**, and its scope grew: it was "the pass-owned buffer ring", and it also
+  had to become the RHI's borrow seam and the graph's timing plan.
+- **m17.3d's re-baseline must be taken SERIALIZED**, before any pipelined number is quoted. It is
+  the before-picture, and a before-picture measured after the optimisation proves nothing — this
+  ADR's own Ruling 4 note, applied to itself.
+- **`on_post_submit` is superseded for measurement** by `on_frame_timings`, which hands over
+  resolved, owned timings tagged with the frame they describe. The old hook remains for callers
+  that want the graph itself; it simply does not fire on the pipelined path, and the block now says
+  so out loud rather than printing the zero its unmeasured counter holds.

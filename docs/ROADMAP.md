@@ -2406,11 +2406,13 @@ m17.8, m17.10.
 >    `sim.client`/`sim.server` split them, so the two decompositions do not compose — m17.5 would be
 >    optimising a merged distribution. Zones need a per-world tag first.
 >
-> **And one question ADR-0041 must answer before m17.5 and does not: may the gated `frame` be a
-> serialized loop?** It measures sim, declare, execute and `submit_blocking` in series, so 16.6 ms
-> means CPU + GPU without pipelining — materially harder than "60 FPS windowed". Pipelining is the
-> largest single lever toward the number (roughly `max(25, 11)` at today's costs). It needs a
-> written ruling either way, so m17.10 cannot relitigate what `frame` meant.
+> **RULED (2026-09-04): the loop pipelines.** `frame` was sim + declare + execute + `submit_blocking`
+> in series, so 16.6 ms meant CPU + GPU with no overlap. Built as m17.4 + m17.5a — opt-in
+> (`--pipelined N`), default unchanged, and the block writes `+pipelined-N` into its fingerprint
+> preset so a pipelined run cannot be compared against a serialized baseline by accident. **But the
+> arithmetic is the headline: 35.6 → ~25 ms still misses 16.6 by 1.5×**, because `sim.block` p99 is
+> 25.49 and the CPU frame very nearly IS the simulation. Pipelining takes the GPU off the critical
+> path; it does not touch what is on it. See the 2026-09-04 amendment in ADR-0041.
 >
 > **The ladder's first omission, found in review and added as m17.8: there is no ground.** What the
 > block stands on is **two triangles** (`make_plane`, four vertices) scaled to a 76 m square
