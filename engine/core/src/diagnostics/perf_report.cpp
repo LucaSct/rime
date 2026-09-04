@@ -1367,6 +1367,12 @@ std::string PerfGate::format(const Result& result) {
     out += WorkBudget::format(result.work_violations);
     out += fmt::format(
         "  baseline: {} — {}\n", baseline_status_name(result.baseline), result.baseline_note);
+    if (result.baseline == BaselineStatus::FingerprintMismatch) {
+        out += "  A baseline exists for this sample and this run could not be judged against it, "
+               "so the\n  regression check did not run. That is a FAILURE, not a note "
+               "(ADR-0041 Ruling 4):\n  re-baseline deliberately, or say why this run may skip "
+               "the comparison.\n";
+    }
     return out;
 }
 

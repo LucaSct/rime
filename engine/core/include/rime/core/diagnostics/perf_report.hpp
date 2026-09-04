@@ -506,8 +506,22 @@ public:
         BaselineStatus baseline = BaselineStatus::NotProvided;
         std::string baseline_note; // why, when `baseline` is not Compared
 
+        // A BASELINE THAT CANNOT BE COMPARED IS A FAILURE, NOT A NOTE (m17.3d, ADR-0041 Ruling 4).
+        //
+        // `FingerprintMismatch` means a committed report EXISTS for this sample and the run was
+        // asked to judge itself against it, and could not — different GPU, driver, resolution,
+        // build or sanitizer. Before this it printed a line and passed on the absolute rules alone,
+        // which quietly disables the regression check exactly when it is most needed: a driver
+        // update is precisely the event that moves performance, and it is the event that turns the
+        // comparison off. ADR-0035's own amendment calls the regression check "where the real
+        // protection lives"; protection that lapses silently is not protection.
+        //
+        // `NotProvided` deliberately still passes. No baseline at all is the honest state of a
+        // first run on a new machine — and of the re-baseline runs that establish one. The
+        // distinction is "nobody asked" versus "asked, and the answer was refused".
         [[nodiscard]] bool ok() const noexcept {
-            return violations.empty() && work_violations.empty();
+            return violations.empty() && work_violations.empty() &&
+                   baseline != BaselineStatus::FingerprintMismatch;
         }
     };
 

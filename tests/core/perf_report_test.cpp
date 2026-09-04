@@ -700,6 +700,21 @@ TEST_CASE("regression against a committed baseline") {
         CHECK(result.baseline == BaselineStatus::FingerprintMismatch);
         CHECK(result.violations.empty()); // no regression claim can be made…
         CHECK(PerfGate::format(result).find("fingerprint-mismatch") != std::string::npos);
+        // …AND THE RUN FAILS ANYWAY (m17.3d, ADR-0041 Ruling 4). `slower` is 30× the baseline and
+        // sails through every absolute rule; before this, the one check that would have caught it
+        // was silently skipped and the run passed with a note. A driver update is exactly the
+        // event that moves performance, and it was exactly the event that turned the comparison
+        // off.
+        CHECK_FALSE(result.ok());
+    }
+
+    SUBCASE("but no baseline AT ALL still passes — that is what a re-baseline run looks like") {
+        // The distinction Ruling 4 turns on: "asked, and refused" fails; "nobody asked" does not.
+        // Every first run on a new machine, and every deliberate re-baseline, is the second one.
+        const PerfReport fresh = make_report(1.0);
+        const PerfGate::Result result = gate.check(fresh, nullptr);
+        CHECK(result.baseline == BaselineStatus::NotProvided);
+        CHECK(result.ok());
     }
 
     SUBCASE("a sanitizer build never compares against a clean baseline") {
