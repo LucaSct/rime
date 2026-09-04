@@ -141,14 +141,9 @@ public:
     [[nodiscard]] std::uint32_t last_light_count() const noexcept { return last_light_count_; }
 
 private:
-    void ensure_light_capacity(std::uint32_t count);
-
     rhi::Device& device_;
     rhi::ShaderHandle cull_shader_;
     rhi::PipelineHandle cull_pipeline_;
-    rhi::BufferHandle light_buffer_; // packed GpuPointLight array, grown on demand
-    std::uint32_t light_capacity_ = 0;
-    rhi::BufferHandle uniforms_;    // GpuClusterUniforms
     rhi::BufferHandle empty_lists_; // a one-froxel, count-0 list buffer for the off path
     std::uint32_t last_light_count_ = 0;
 };

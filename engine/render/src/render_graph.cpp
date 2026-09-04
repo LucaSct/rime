@@ -29,6 +29,12 @@ RenderGraph::~RenderGraph() {
         for (const FrameBlock& b : s.blocks)
             device_.destroy(b.handle);
     }
+    for (const FrameBufferPool& p : frame_buffers_) {
+        for (const FrameBlock& b : p.buffers) {
+            if (b.handle.is_valid())
+                device_.destroy(b.handle);
+        }
+    }
 }
 
 namespace {
@@ -56,13 +62,55 @@ void RenderGraph::set_frames_in_flight(std::uint32_t frames) {
         for (const FrameBlock& b : s.blocks)
             device_.destroy(b.handle);
     }
+    for (const FrameBufferPool& p : frame_buffers_) {
+        for (const FrameBlock& b : p.buffers) {
+            if (b.handle.is_valid())
+                device_.destroy(b.handle);
+        }
+    }
     frame_slots_.assign(slots, FrameSlot{});
+    frame_buffers_.assign(slots, FrameBufferPool{});
     frame_slot_ = 0;
 }
 
+// Both halves of the ring come up together, at the default depth, the first time anything asks.
+// Getting this wrong is how `push_frame_buffer` indexed an empty pool: the two containers were
+// sized independently, and "they disagree" is not the same condition as "neither exists yet".
+void RenderGraph::ensure_frame_ring() {
+    const std::size_t slots = frame_slots_.empty() ? kDefaultFrameSlots : frame_slots_.size();
+    if (frame_slots_.size() != slots)
+        frame_slots_.assign(slots, FrameSlot{});
+    if (frame_buffers_.size() != slots)
+        frame_buffers_.assign(slots, FrameBufferPool{});
+}
+
+rhi::BufferHandle RenderGraph::push_frame_buffer(const void* data, std::size_t bytes) {
+    ensure_frame_ring();
+    FrameBufferPool& pool = frame_buffers_[frame_slot_];
+    if (pool.next >= pool.buffers.size())
+        pool.buffers.push_back(FrameBlock{});
+    FrameBlock& entry = pool.buffers[pool.next++];
+    if (!entry.handle.is_valid() || entry.size < bytes) {
+        if (entry.handle.is_valid())
+            device_.destroy(entry.handle);
+        rhi::BufferDesc bd{};
+        bd.size = std::max<std::uint64_t>(bytes, 1);
+        bd.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Storage;
+        bd.memory = rhi::MemoryUsage::CpuToGpu;
+        bd.debug_name = "frame-scratch-buffer";
+        entry = FrameBlock{device_.create_buffer(bd), bd.size};
+        if (!entry.handle.is_valid()) {
+            RIME_ERROR("render: frame-scratch buffer of {} bytes failed", bd.size);
+            return {};
+        }
+    }
+    if (bytes > 0)
+        device_.write_buffer(entry.handle, data, bytes);
+    return entry.handle;
+}
+
 RenderGraph::FrameSlice RenderGraph::push_frame_data(const void* data, std::size_t bytes) {
-    if (frame_slots_.empty())
-        frame_slots_.assign(kDefaultFrameSlots, FrameSlot{});
+    ensure_frame_ring();
     FrameSlot& slot = frame_slots_[frame_slot_];
     frame_pushed_ += bytes;
 
@@ -99,7 +147,7 @@ RenderGraph::FrameSlice RenderGraph::push_frame_data(const void* data, std::size
     // Align the NEXT push, not this one: offset 0 is already aligned, so aligning afterwards keeps
     // the first slice of every block at 0 and never wastes a leading gap.
     slot.offset = (slot.offset + need + kFrameSliceAlign - 1) / kFrameSliceAlign * kFrameSliceAlign;
-    return FrameSlice{block.handle, offset};
+    return FrameSlice{block.handle, offset, static_cast<std::uint32_t>(bytes)};
 }
 
 void RenderGraph::reset() {
@@ -111,6 +159,8 @@ void RenderGraph::reset() {
         FrameSlot& slot = frame_slots_[frame_slot_];
         slot.block = 0;
         slot.offset = 0;
+        if (frame_slot_ < frame_buffers_.size())
+            frame_buffers_[frame_slot_].next = 0;
     }
     frame_pushed_ = 0;
 

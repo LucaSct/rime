@@ -87,28 +87,12 @@ LocalShadowMap::LocalShadowMap(rhi::Device& device) : device_(device) {
     sd.debug_name = "local-shadow-compare-sampler";
     compare_sampler_ = device.create_sampler(sd);
 
-    rhi::BufferDesc vp{};
-    vp.size = static_cast<std::uint64_t>(kMaxLocalShadows) * kSpotStride;
-    vp.usage = rhi::BufferUsage::Uniform;
-    vp.memory = rhi::MemoryUsage::CpuToGpu;
-    vp.debug_name = "local-shadow-viewproj";
-    spot_vp_ubo_ = device.create_buffer(vp);
-
-    rhi::BufferDesc lu{};
-    lu.size = sizeof(GpuLocalShadows);
-    lu.usage = rhi::BufferUsage::Uniform;
-    lu.memory = rhi::MemoryUsage::CpuToGpu;
-    lu.debug_name = "local-shadow-ubo";
-    local_ubo_ = device.create_buffer(lu);
-
     slots_.resize(kMaxLocalShadows);
 }
 
 LocalShadowMap::~LocalShadowMap() {
     if (depth_array_.is_valid())
         device_.destroy(depth_array_);
-    device_.destroy(local_ubo_);
-    device_.destroy(spot_vp_ubo_);
     device_.destroy(compare_sampler_);
 }
 
@@ -188,13 +172,15 @@ LocalShadowBinding LocalShadowMap::add(RenderGraph& graph,
     for (std::uint32_t i = count; i < kMaxLocalShadows; ++i)
         slots_[i].rendered = false;
 
-    device_.write_buffer(spot_vp_ubo_, vp_staging.data(), vp_staging.size());
+    // This frame's scratch (m17.4); a slot's own 256-byte slice is still an offset within it.
+    const RenderGraph::FrameSlice vp_slice =
+        graph.push_frame_data(vp_staging.data(), vp_staging.size());
     lu.params[0] = static_cast<float>(count);
     lu.params[1] = settings.shadow_pcf_radius;
     lu.params[2] = settings.shadow_depth_bias;
     lu.params[3] = settings.shadow_normal_bias;
     lu.texel[0] = 1.0f / static_cast<float>(settings.local_shadow_resolution);
-    device_.write_buffer(local_ubo_, &lu, sizeof(lu));
+    const RenderGraph::FrameSlice lu_slice = graph.push_frame_data(&lu, sizeof(lu));
 
     // Import the PERSISTENT array (not a transient): its depth from earlier frames is the cache.
     // Only the invalidated slots get a depth pass this frame; the rest keep what they already hold.
@@ -220,15 +206,15 @@ LocalShadowBinding LocalShadowMap::add(RenderGraph& graph,
         if (!render_slot[i])
             continue;
         SceneDrawData spot_data = scene_data;
-        spot_data.frame_ubo = spot_vp_ubo_;
-        spot_data.frame_ubo_offset = i * kSpotStride;
+        spot_data.frame_ubo = vp_slice.buffer;
+        spot_data.frame_ubo_offset = vp_slice.offset + i * kSpotStride;
         prepass.add(graph, map, spot_data, i, kSlotLabels[i]);
     }
     // After this frame the forward pass samples the array, leaving it in ShaderRead — the state the
     // next frame imports it at, so the cached depth survives with no redundant transition.
     array_state_ = rhi::ResourceState::ShaderRead;
 
-    return LocalShadowBinding{map, local_ubo_, compare_sampler_};
+    return LocalShadowBinding{map, lu_slice, compare_sampler_};
 }
 
 LocalShadowBinding LocalShadowMap::empty_binding(RenderGraph& graph, rhi::TextureHandle dummy) {
@@ -236,13 +222,13 @@ LocalShadowBinding LocalShadowMap::empty_binding(RenderGraph& graph, rhi::Textur
     // depth array so binding 9 still points at a real 2-D-array image. Import at Undefined — its
     // contents are never sampled, so the graph may discard whatever layout it was in.
     GpuLocalShadows lu{}; // params[0] (count) defaults to 0
-    device_.write_buffer(local_ubo_, &lu, sizeof(lu));
+    const RenderGraph::FrameSlice lu_slice = graph.push_frame_data(&lu, sizeof(lu));
     // The dummy sits permanently in ShaderRead (the SceneRenderer transitions it once), so
     // importing it there — not at Undefined — keeps the graph's barrier bookkeeping in step with
     // the backend.
     const RGTexture map =
         graph.import_texture(dummy, rhi::ResourceState::ShaderRead, {1, 1}, kDepthFormat, 2);
-    return LocalShadowBinding{map, local_ubo_, compare_sampler_};
+    return LocalShadowBinding{map, lu_slice, compare_sampler_};
 }
 
 void LocalShadowMap::invalidate(const WorldAabb& region) {

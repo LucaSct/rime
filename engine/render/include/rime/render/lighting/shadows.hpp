@@ -94,8 +94,6 @@ public:
 private:
     rhi::Device& device_;
     rhi::SamplerHandle compare_sampler_; // sampler2DArrayShadow: LessEqual hardware PCF
-    rhi::BufferHandle cascade_vp_ubo_;   // kMaxCascades × 256-byte slices, each a light view_proj
-    rhi::BufferHandle shadow_ubo_;       // GpuShadowUniforms for the forward pass
     std::uint32_t resolution_ = 0;       // the array texture's current per-cascade size
 };
 

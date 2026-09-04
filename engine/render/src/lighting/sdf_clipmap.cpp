@@ -207,8 +207,6 @@ SdfClipmap::~SdfClipmap() {
     }
     device_.destroy(instance_sampler_);
     device_.destroy(placeholder_instance_sdf_);
-    if (compose_ubo_.is_valid())
-        device_.destroy(compose_ubo_);
     device_.destroy(compose_pipeline_);
     device_.destroy(compose_shader_);
 }
@@ -235,23 +233,6 @@ void SdfClipmap::ensure_level_texture(std::uint32_t index) {
     lvl.info.band = kSdfClipmapBandVoxels * voxel_size;
     lvl.texture_state = rhi::ResourceState::Undefined;
     lvl.origin_initialized = false;
-}
-
-void SdfClipmap::ensure_job_capacity(std::uint32_t count) {
-    if (count <= job_capacity_)
-        return;
-    std::uint32_t capacity = std::max<std::uint32_t>(job_capacity_, 8);
-    while (capacity < count)
-        capacity *= 2;
-    if (compose_ubo_.is_valid())
-        device_.destroy(compose_ubo_);
-    rhi::BufferDesc bd{};
-    bd.size = static_cast<std::uint64_t>(capacity) * kComposeStride;
-    bd.usage = rhi::BufferUsage::Uniform;
-    bd.memory = rhi::MemoryUsage::CpuToGpu;
-    bd.debug_name = "sdf-clipmap-compose-jobs";
-    compose_ubo_ = device_.create_buffer(bd);
-    job_capacity_ = capacity;
 }
 
 rhi::TextureHandle SdfClipmap::upload_instance_sdf(const assets::MeshSdfAsset& sdf) const {
@@ -442,7 +423,6 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
     std::uint32_t job_count = 0;
     for (const LevelWork& w : work)
         job_count += 1 + static_cast<std::uint32_t>(w.stampers.size());
-    ensure_job_capacity(job_count);
 
     std::vector<std::byte> staging(static_cast<std::size_t>(job_count) * kComposeStride,
                                    std::byte{0});
@@ -518,8 +498,11 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
         return; // every region clipped away to nothing (float roundoff at a shared boundary) —
                 // nothing was written to `staging`, nothing to declare
 
-    device_.write_buffer(
-        compose_ubo_, staging.data(), static_cast<std::size_t>(slot) * kComposeStride);
+    // This frame's scratch, sized by the push itself — which is why the grow-on-demand job
+    // capacity this file used to carry is gone (m17.4). Each dispatch's 256-byte job is still just
+    // an offset within the one push.
+    const RenderGraph::FrameSlice jobs_slice =
+        graph.push_frame_data(staging.data(), static_cast<std::size_t>(slot) * kComposeStride);
 
     // ── Pass 3: declare the graph passes ───────────────────────────────────────────────────────
     // Import each touched level EXACTLY ONCE this frame; every dispatch against it below reuses
@@ -568,16 +551,19 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
         RenderGraph::ComputePassDesc desc{};
         desc.storage_write = writes;
         desc.fold_repeats = true;
-        graph.add_compute_pass(
-            d.is_stamp ? kStampLabels[d.level] : kClearLabels[d.level],
-            desc,
-            [this, level_texture, instance_texture, offset, groups](rhi::CommandBuffer& cmd) {
-                cmd.bind_compute_pipeline(compose_pipeline_);
-                cmd.bind_storage_image(0, level_texture);
-                cmd.bind_texture(1, instance_texture, instance_sampler_);
-                cmd.bind_uniform_buffer(2, compose_ubo_, offset, sizeof(GpuComposeJob));
-                cmd.dispatch(groups[0], groups[1], groups[2]);
-            });
+        graph.add_compute_pass(d.is_stamp ? kStampLabels[d.level] : kClearLabels[d.level],
+                               desc,
+                               [this, level_texture, instance_texture, jobs_slice, offset, groups](
+                                   rhi::CommandBuffer& cmd) {
+                                   cmd.bind_compute_pipeline(compose_pipeline_);
+                                   cmd.bind_storage_image(0, level_texture);
+                                   cmd.bind_texture(1, instance_texture, instance_sampler_);
+                                   cmd.bind_uniform_buffer(2,
+                                                           jobs_slice.buffer,
+                                                           jobs_slice.offset + offset,
+                                                           sizeof(GpuComposeJob));
+                                   cmd.dispatch(groups[0], groups[1], groups[2]);
+                               });
     }
 
     for (const LevelWork& w : work)

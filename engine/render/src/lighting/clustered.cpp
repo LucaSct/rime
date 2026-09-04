@@ -24,7 +24,6 @@ constexpr std::uint32_t kCullGroupSize = 64;
 
 // The initial light-buffer capacity. Big enough that ordinary scenes never reallocate, small
 // enough (2 KB) to be free.
-constexpr std::uint32_t kInitialLightCapacity = 64;
 
 // The projection's x/y scale terms, re-derived from the lens exactly as core::perspective builds
 // them: p00 = 1/(aspect·tan(fov/2)), p11 = −1/tan(fov/2). p11 is negative because our clip space
@@ -115,13 +114,6 @@ ClusteredLights::ClusteredLights(rhi::Device& device) : device_(device) {
     pd.debug_name = "cluster-cull";
     cull_pipeline_ = device.create_compute_pipeline(pd);
 
-    rhi::BufferDesc ub{};
-    ub.size = sizeof(GpuClusterUniforms);
-    ub.usage = rhi::BufferUsage::Uniform;
-    ub.memory = rhi::MemoryUsage::CpuToGpu;
-    ub.debug_name = "cluster-uniforms";
-    uniforms_ = device.create_buffer(ub);
-
     // The off-path placeholder: one froxel's worth of list storage so binding 12 always points at a
     // real buffer. The shader's `enabled` flag means it is never read — but it is ZEROED anyway, so
     // that even if it were, froxel 0's count reads 0 and the light loop runs zero iterations.
@@ -137,36 +129,15 @@ ClusteredLights::ClusteredLights(rhi::Device& device) : device_(device) {
     empty_lists_ = device.create_buffer(eb);
     const std::vector<std::uint32_t> zeros(kClusterListStride, 0u);
     device.write_buffer(empty_lists_, zeros.data(), zeros.size() * sizeof(std::uint32_t));
-
-    ensure_light_capacity(kInitialLightCapacity);
 }
 
 ClusteredLights::~ClusteredLights() {
+    // `empty_lists_` stays owned here, and it is the one buffer in this file that may: it is
+    // written ONCE at construction and never again, so no CPU write of it can ever race a frame
+    // the GPU is still reading. Everything the CPU rewrites per frame moved to the graph's ring.
     device_.destroy(empty_lists_);
-    device_.destroy(uniforms_);
-    if (light_buffer_.is_valid())
-        device_.destroy(light_buffer_);
     device_.destroy(cull_pipeline_);
     device_.destroy(cull_shader_);
-}
-
-void ClusteredLights::ensure_light_capacity(std::uint32_t count) {
-    if (count <= light_capacity_)
-        return;
-    // Grow geometrically so a scene ramping its light count up does not reallocate every frame
-    // (the ensure_draw_capacity pattern from the scene renderer).
-    std::uint32_t capacity = std::max(light_capacity_, kInitialLightCapacity);
-    while (capacity < count)
-        capacity *= 2;
-    if (light_buffer_.is_valid())
-        device_.destroy(light_buffer_);
-    rhi::BufferDesc bd{};
-    bd.size = static_cast<std::uint64_t>(capacity) * sizeof(GpuPointLight);
-    bd.usage = rhi::BufferUsage::Storage;
-    bd.memory = rhi::MemoryUsage::CpuToGpu; // the CPU packs it every frame
-    bd.debug_name = "cluster-lights";
-    light_buffer_ = device_.create_buffer(bd);
-    light_capacity_ = capacity;
 }
 
 ClusterBinding ClusteredLights::add(RenderGraph& graph,
@@ -174,12 +145,14 @@ ClusterBinding ClusteredLights::add(RenderGraph& graph,
                                     const ClusterInputs& inputs) {
     const auto light_count = static_cast<std::uint32_t>(lights.size());
     last_light_count_ = light_count;
-    ensure_light_capacity(std::max(light_count, 1u));
-    if (light_count > 0) {
-        device_.write_buffer(light_buffer_,
-                             lights.data(),
-                             static_cast<std::size_t>(light_count) * sizeof(GpuPointLight));
-    }
+    // A WHOLE buffer from the graph's ring rather than a slice (m17.4): the light array enters the
+    // graph as an imported RGBuffer, and `import_buffer` addresses a buffer by handle with no
+    // offset. The ring sizes it, so the grow-on-demand bookkeeping this system used to carry is
+    // gone with it. At least one element, so binding 11 always points at a real buffer.
+    const std::size_t light_bytes = std::max<std::size_t>(light_count, 1u) * sizeof(GpuPointLight);
+    const rhi::BufferHandle lights_buffer =
+        graph.push_frame_buffer(light_count > 0 ? static_cast<const void*>(lights.data()) : nullptr,
+                                light_count > 0 ? light_bytes : 0);
 
     GpuClusterUniforms cu{};
     cu.view = inputs.view;
@@ -194,12 +167,12 @@ ClusterBinding ClusteredLights::add(RenderGraph& graph,
     const ProjScale ps = proj_scale(inputs.fov_y, inputs.aspect);
     cu.proj[0] = ps.p00;
     cu.proj[1] = ps.p11;
-    device_.write_buffer(uniforms_, &cu, sizeof(cu));
+    const RenderGraph::FrameSlice ubo_slice = graph.push_frame_data(&cu, sizeof(cu));
 
     // The light array is host-written and persistent, so it enters the graph as an IMPORT already
     // in ShaderRead (Vulkan's submission guarantee covers the host write). The lists are a pure
     // per-frame product: a transient, rebuilt from scratch by the dispatch below.
-    const RGBuffer light_res = graph.import_buffer(light_buffer_, rhi::ResourceState::ShaderRead);
+    const RGBuffer light_res = graph.import_buffer(lights_buffer, rhi::ResourceState::ShaderRead);
     const RGBuffer lists = graph.create_buffer({kClusterListBytes, "cluster-lists"});
 
     const RGBuffer reads[] = {light_res};
@@ -209,12 +182,12 @@ ClusterBinding ClusteredLights::add(RenderGraph& graph,
     desc.buffer_writes = writes;
     graph.add_compute_pass("cluster-cull",
                            desc,
-                           [pipe = cull_pipeline_, ubo = uniforms_, light_res, lists, &graph](
+                           [pipe = cull_pipeline_, ubo = ubo_slice, light_res, lists, &graph](
                                rhi::CommandBuffer& cmd) {
                                cmd.bind_compute_pipeline(pipe);
                                cmd.bind_storage_buffer(0, graph.physical_buffer(light_res));
                                cmd.bind_storage_buffer(1, graph.physical_buffer(lists));
-                               cmd.bind_uniform_buffer(2, ubo);
+                               cmd.bind_uniform_buffer(2, ubo.buffer, ubo.offset, ubo.size);
                                // One invocation per froxel, rounded up to whole workgroups; the
                                // tail invocations run the same code and simply never write (see the
                                // shader's barrier note).
@@ -222,7 +195,7 @@ ClusterBinding ClusteredLights::add(RenderGraph& graph,
                                    (kClusterCount + kCullGroupSize - 1) / kCullGroupSize, 1, 1);
                            });
 
-    return {light_res, lists, uniforms_};
+    return {light_res, lists, ubo_slice};
 }
 
 ClusterBinding ClusteredLights::empty_binding(RenderGraph& graph) {
@@ -233,10 +206,13 @@ ClusterBinding ClusteredLights::empty_binding(RenderGraph& graph) {
     // which is the only run the 260-byte placeholder buffer actually has.
     GpuClusterUniforms cu{};
     cu.grid[0] = cu.grid[1] = cu.grid[2] = 1;
-    device_.write_buffer(uniforms_, &cu, sizeof(cu));
-    return {graph.import_buffer(light_buffer_, rhi::ResourceState::ShaderRead),
+    const RenderGraph::FrameSlice ubo_slice = graph.push_frame_data(&cu, sizeof(cu));
+    // One zeroed light, so binding 11 still points at a real storage buffer on the off path.
+    const GpuPointLight none{};
+    return {graph.import_buffer(graph.push_frame_buffer(&none, sizeof(none)),
+                                rhi::ResourceState::ShaderRead),
             graph.import_buffer(empty_lists_, rhi::ResourceState::ShaderRead),
-            uniforms_};
+            ubo_slice};
 }
 
 } // namespace rime::render

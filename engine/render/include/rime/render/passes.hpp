@@ -177,9 +177,9 @@ struct SceneDrawData {
 // CascadedShadowMap::add (lighting/shadows.hpp) and handed to ForwardPbrPass::add_shadowed. Kept
 // here (not in shadows.hpp) so passes.hpp stays free of any lighting-technique dependency.
 struct ShadowBinding {
-    RGTexture map;              // the cascade depth array (a graph transient this frame)
-    rhi::BufferHandle ubo;      // GpuShadowUniforms
-    rhi::SamplerHandle sampler; // the depth-compare sampler
+    RGTexture map;               // the cascade depth array (a graph transient this frame)
+    RenderGraph::FrameSlice ubo; // GpuShadowUniforms, in this frame's scratch (m17.4)
+    rhi::SamplerHandle sampler;  // the depth-compare sampler
 };
 
 // m10.2: the spot-light equivalent — the local-shadow depth array (a sampler2DArrayShadow at
@@ -188,9 +188,9 @@ struct ShadowBinding {
 // the cascade map this is an IMPORTED persistent texture (the cache holds it across frames), but
 // the pass treats it identically — an RGTexture is an RGTexture.
 struct LocalShadowBinding {
-    RGTexture map;              // the persistent per-spot depth array (imported into the graph)
-    rhi::BufferHandle ubo;      // GpuLocalShadows
-    rhi::SamplerHandle sampler; // the depth-compare sampler (shared with the cascades)
+    RGTexture map;               // the persistent per-spot depth array (imported into the graph)
+    RenderGraph::FrameSlice ubo; // GpuLocalShadows, in this frame's scratch (m17.4)
+    rhi::SamplerHandle sampler;  // the depth-compare sampler (shared with the cascades)
 };
 
 // m10.3: what the clustered forward pass reads — the packed light array (a storage buffer at
@@ -199,9 +199,11 @@ struct LocalShadowBinding {
 // (lighting/clustered.hpp). Both storage buffers are RGBuffers, which is what puts the cull
 // dispatch and this pass in a producer/consumer relationship the graph can see and order.
 struct ClusterBinding {
-    RGBuffer lights;       // packed GpuPointLight array (uncapped — that is the point)
-    RGBuffer lists;        // per-froxel [count, index…] runs
-    rhi::BufferHandle ubo; // GpuClusterUniforms; its `enabled` flag picks the shader's light path
+    RGBuffer lights; // packed GpuPointLight array (uncapped — that is the point)
+    RGBuffer lists;  // per-froxel [count, index…] runs
+    // GpuClusterUniforms, in this frame's scratch (m17.4); its `enabled` flag picks the
+    // shader's light path.
+    RenderGraph::FrameSlice ubo;
 };
 
 // m10.5b: what the forward pass samples for the DDGI indirect-diffuse term — the octahedral
@@ -213,10 +215,10 @@ struct ClusterBinding {
 // placeholder. Both atlases share ONE sampler (linear + ClampToEdge; the sampler IS the thing that
 // makes the octahedral border ring do its job, docs/math/ddgi.md §3).
 struct DdgiBinding {
-    RGTexture irradiance;       // octahedral irradiance atlas (RGBA16Float)
-    RGTexture visibility;       // octahedral visibility atlas (RG32Float; the Chebyshev moments)
-    rhi::BufferHandle ubo;      // GpuDdgiSampleParams
-    rhi::SamplerHandle sampler; // shared linear + ClampToEdge sampler for both atlases
+    RGTexture irradiance;        // octahedral irradiance atlas (RGBA16Float)
+    RGTexture visibility;        // octahedral visibility atlas (RG32Float; the Chebyshev moments)
+    RenderGraph::FrameSlice ubo; // GpuDdgiSampleParams, in this frame's scratch (m17.4)
+    rhi::SamplerHandle sampler;  // shared linear + ClampToEdge sampler for both atlases
 };
 
 // ── Depth pre-pass ────────────────────────────────────────────────────────────────────────────

@@ -84,7 +84,6 @@ private:
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
-    rhi::BufferHandle uniforms_;
     rhi::SamplerHandle sampler_;
 };
 

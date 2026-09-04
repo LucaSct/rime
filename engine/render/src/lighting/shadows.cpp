@@ -119,25 +119,9 @@ CascadedShadowMap::CascadedShadowMap(rhi::Device& device) : device_(device) {
     sd.compare_op = rhi::CompareOp::LessEqual;
     sd.debug_name = "csm-compare-sampler";
     compare_sampler_ = device.create_sampler(sd);
-
-    rhi::BufferDesc vp{};
-    vp.size = static_cast<std::uint64_t>(kMaxCascades) * kCascadeStride;
-    vp.usage = rhi::BufferUsage::Uniform;
-    vp.memory = rhi::MemoryUsage::CpuToGpu;
-    vp.debug_name = "csm-cascade-viewproj";
-    cascade_vp_ubo_ = device.create_buffer(vp);
-
-    rhi::BufferDesc su{};
-    su.size = sizeof(GpuShadowUniforms);
-    su.usage = rhi::BufferUsage::Uniform;
-    su.memory = rhi::MemoryUsage::CpuToGpu;
-    su.debug_name = "csm-shadow-ubo";
-    shadow_ubo_ = device.create_buffer(su);
 }
 
 CascadedShadowMap::~CascadedShadowMap() {
-    device_.destroy(shadow_ubo_);
-    device_.destroy(cascade_vp_ubo_);
     device_.destroy(compare_sampler_);
 }
 
@@ -160,14 +144,18 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
                     sizeof(core::Mat4));
         su.cascade_view_proj[c] = fit.view_proj[c];
     }
-    device_.write_buffer(cascade_vp_ubo_, vp_staging.data(), vp_staging.size());
+    // This frame's scratch, not a buffer this pass owns (m17.4). The whole strided array is one
+    // push, so a cascade's own 256-byte slice is still just an offset within it — the slice's base
+    // simply moves each frame instead of being overwritten under the GPU.
+    const RenderGraph::FrameSlice vp_slice =
+        graph.push_frame_data(vp_staging.data(), vp_staging.size());
 
     su.params[0] = static_cast<float>(fit.count);
     su.params[1] = settings.shadow_pcf_radius;
     su.params[2] = settings.shadow_depth_bias;
     su.params[3] = settings.shadow_normal_bias;
     su.texel[0] = 1.0f / static_cast<float>(settings.shadow_map_resolution);
-    device_.write_buffer(shadow_ubo_, &su, sizeof(su));
+    const RenderGraph::FrameSlice su_slice = graph.push_frame_data(&su, sizeof(su));
 
     // The cascade depth array — one layered transient (m10.1a): DepthStencil (rendered per cascade)
     // + Sampled (the forward pass reads it), both accumulated by the graph from the declarations.
@@ -189,12 +177,12 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
                   "empty name collides with the next one");
     for (std::uint32_t c = 0; c < fit.count; ++c) {
         SceneDrawData cascade_data = scene_data;
-        cascade_data.frame_ubo = cascade_vp_ubo_;
-        cascade_data.frame_ubo_offset = c * kCascadeStride;
+        cascade_data.frame_ubo = vp_slice.buffer;
+        cascade_data.frame_ubo_offset = vp_slice.offset + c * kCascadeStride;
         prepass.add(graph, cascades, cascade_data, c, kCascadeLabels[c]);
     }
 
-    return ShadowBinding{cascades, shadow_ubo_, compare_sampler_};
+    return ShadowBinding{cascades, su_slice, compare_sampler_};
 }
 
 ShadowBinding CascadedShadowMap::empty_binding(RenderGraph& graph, rhi::TextureHandle dummy) {
@@ -202,12 +190,12 @@ ShadowBinding CascadedShadowMap::empty_binding(RenderGraph& graph, rhi::TextureH
     // dummy depth array so binding 7 still points at a real 2-D-array image. Import at Undefined —
     // never sampled, so the graph may discard whatever layout it was in.
     GpuShadowUniforms su{}; // params[0] (cascade count) defaults to 0
-    device_.write_buffer(shadow_ubo_, &su, sizeof(su));
+    const RenderGraph::FrameSlice su_slice = graph.push_frame_data(&su, sizeof(su));
     // The dummy sits permanently in ShaderRead (the SceneRenderer transitions it once) — import it
     // there so the graph's barrier bookkeeping matches the backend's tracked layout.
     const RGTexture map =
         graph.import_texture(dummy, rhi::ResourceState::ShaderRead, {1, 1}, kDepthFormat, 2);
-    return ShadowBinding{map, shadow_ubo_, compare_sampler_};
+    return ShadowBinding{map, su_slice, compare_sampler_};
 }
 
 } // namespace rime::render

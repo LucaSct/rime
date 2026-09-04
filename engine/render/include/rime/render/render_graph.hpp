@@ -273,6 +273,11 @@ public:
     struct FrameSlice {
         rhi::BufferHandle buffer;
         std::uint32_t offset = 0;
+        // Carried so a consumer can bind the slice without knowing the producing system's struct.
+        // It also matters for correctness: binding with size 0 means "to the end of the buffer",
+        // which on a shared block is both wrong in intent and capable of exceeding a device's
+        // maxUniformBufferRange.
+        std::uint32_t size = 0;
     };
 
     // Ring depth, as the swapchain's rule: one more slot than the frames the backend keeps in
@@ -296,6 +301,13 @@ public:
     // fresh block rather than growing the current one, because growing means destroying a buffer
     // that earlier passes in this same frame are still pointing at.
     [[nodiscard]] FrameSlice push_frame_data(const void* data, std::size_t bytes);
+
+    // The same ring, handing out a WHOLE buffer rather than a slice of a shared one. Needed
+    // because a buffer that enters the graph as an imported `RGBuffer` — the clustered light array
+    // is the one — is addressed by handle alone: `import_buffer` carries no offset, so a slice
+    // cannot be imported. Rather than let that one system grow its own ring and its own copy of
+    // the recycling invariant, the ring serves both shapes.
+    [[nodiscard]] rhi::BufferHandle push_frame_buffer(const void* data, std::size_t bytes);
 
     // How many bytes this frame has pushed so far — the number a caller would print if it wanted
     // to size the block, and what the test asserts the ring is actually recycling.
@@ -376,6 +388,7 @@ private:
         bool in_use = false;
     };
 
+    void ensure_frame_ring();
     void add_pass_common(std::string_view name, bool is_raster, bool fold_repeats, ExecuteFn fn);
     void declare_access(std::uint32_t resource, rhi::ResourceState state, bool write);
     void compile();
@@ -400,7 +413,16 @@ private:
         std::uint64_t offset = 0; // where in that block
     };
 
+    // Whole-buffer pool, one entry per push per slot. Recreated only when a lap's push needs more
+    // than the entry holds — safe for the same reason the blocks are: the ring has come back
+    // round, so nothing this frame is pointing at it yet.
+    struct FrameBufferPool {
+        std::vector<FrameBlock> buffers;
+        std::size_t next = 0;
+    };
+
     std::vector<FrameSlot> frame_slots_;
+    std::vector<FrameBufferPool> frame_buffers_;
     std::uint32_t frame_slot_ = 0;
     std::uint64_t frame_pushed_ = 0;
 

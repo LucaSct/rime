@@ -62,13 +62,6 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
     pd.debug_name = "sky";
     pipeline_ = device.create_graphics_pipeline(pd);
 
-    rhi::BufferDesc ub{};
-    ub.size = sizeof(GpuSkyUniforms);
-    ub.usage = rhi::BufferUsage::Uniform;
-    ub.memory = rhi::MemoryUsage::CpuToGpu;
-    ub.debug_name = "sky-uniforms";
-    uniforms_ = device.create_buffer(ub);
-
     // Point + clamp: the pass reads both inputs with texelFetch at the fragment's own pixel, so
     // filtering would be meaningless and a blended DEPTH in particular is a fictional surface.
     rhi::SamplerDesc ss{};
@@ -81,7 +74,6 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
 
 SkyPass::~SkyPass() {
     device_.destroy(sampler_);
-    device_.destroy(uniforms_);
     device_.destroy(pipeline_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
@@ -146,7 +138,11 @@ void SkyPass::add(RenderGraph& graph,
     u.wind[2] = params.sharpness;
     u.wind[3] = params.clouds_enabled ? 1.0f : 0.0f;
 
-    device_.write_buffer(uniforms_, &u, sizeof(u));
+    // This frame's slice of the graph's scratch ring, not a buffer this pass owns (m17.4). A
+    // pass-owned host-visible buffer is written by the CPU every frame with nothing ordering that
+    // write against the GPU still reading last frame's — invisible under `submit_blocking`, a
+    // corrupt frame the moment the loop pipelines.
+    const RenderGraph::FrameSlice ubo_slice = graph.push_frame_data(&u, sizeof(u));
 
     // DontCare load: the fullscreen triangle writes every pixel. Declaring the sampled reads is
     // what orders this after the forward pass and transitions depth from DepthAttachment to
@@ -156,17 +152,21 @@ void SkyPass::add(RenderGraph& graph,
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.sampled = sampled;
-    graph.add_raster_pass(
-        "sky",
-        desc,
-        [pipe = pipeline_, ubo = uniforms_, smp = sampler_, scene_color, depth, &graph](
-            rhi::CommandBuffer& cmd) {
-            cmd.bind_pipeline(pipe);
-            cmd.bind_texture(0, graph.physical(scene_color), smp);
-            cmd.bind_texture(1, graph.physical(depth), smp);
-            cmd.bind_uniform_buffer(2, ubo);
-            cmd.draw(3);
-        });
+    graph.add_raster_pass("sky",
+                          desc,
+                          [pipe = pipeline_,
+                           ubo = ubo_slice.buffer,
+                           ubo_offset = ubo_slice.offset,
+                           smp = sampler_,
+                           scene_color,
+                           depth,
+                           &graph](rhi::CommandBuffer& cmd) {
+                              cmd.bind_pipeline(pipe);
+                              cmd.bind_texture(0, graph.physical(scene_color), smp);
+                              cmd.bind_texture(1, graph.physical(depth), smp);
+                              cmd.bind_uniform_buffer(2, ubo, ubo_offset, sizeof(GpuSkyUniforms));
+                              cmd.draw(3);
+                          });
 }
 
 } // namespace rime::render

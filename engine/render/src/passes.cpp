@@ -451,15 +451,16 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             // record_draws re-binds only per-draw state on top. The resources' physical handles
             // resolve now (assign_physicals has run), the same late-resolve the tonemap pass uses.
             cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
-            cmd.bind_uniform_buffer(8, shadow.ubo);
+            cmd.bind_uniform_buffer(8, shadow.ubo.buffer, shadow.ubo.offset, shadow.ubo.size);
             cmd.bind_texture(9, graph.physical(local.map), local.sampler);
-            cmd.bind_uniform_buffer(10, local.ubo);
+            cmd.bind_uniform_buffer(10, local.ubo.buffer, local.ubo.offset, local.ubo.size);
             cmd.bind_storage_buffer(11, graph.physical_buffer(clusters.lights));
             cmd.bind_storage_buffer(12, graph.physical_buffer(clusters.lists));
-            cmd.bind_uniform_buffer(13, clusters.ubo);
+            cmd.bind_uniform_buffer(
+                13, clusters.ubo.buffer, clusters.ubo.offset, clusters.ubo.size);
             cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
             cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
-            cmd.bind_uniform_buffer(16, ddgi.ubo);
+            cmd.bind_uniform_buffer(16, ddgi.ubo.buffer, ddgi.ubo.offset, ddgi.ubo.size);
             // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
             // overwhelming majority and the byte-identical old path — then the double-sided draws
             // with culling off. Dynamic state rather than a second pipeline: the forward pass
