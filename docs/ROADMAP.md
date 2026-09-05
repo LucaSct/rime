@@ -2414,6 +2414,62 @@ m17.8, m17.10.
 > 25.49 and the CPU frame very nearly IS the simulation. Pipelining takes the GPU off the critical
 > path; it does not touch what is on it. See the 2026-09-04 amendment in ADR-0041.
 >
+> **MEASURED (2026-09-05): the block's solver now has a job system, and it buys nothing.** Finding 1
+> above is closed, and it closes the way the roadmap asked — by establishing which part of the
+> `sim.block` breach was demo wiring *before* optimising anything. The wiring was the one-liner it
+> looked like (`set_job_system` per peer, against **one** process-wide pool: two per-peer pools would
+> have put ~62 workers on 32 cores). Measured interleaved with a control, both clock domains pinned,
+> box idle, 600 frames each:
+>
+> | | run A | run B |
+> |---|---|---|
+> | `frame` p99, control | 28.565 | 28.681 ms |
+> | `frame` p99, job system | 28.453 | 28.944 ms |
+> | `physics.solve` p99, control | 11.225 | 11.333 ms |
+> | `physics.solve` p99, job system | 11.071 | 11.431 ms |
+>
+> **+0.27% on the mean, inside the within-arm spread.** The wiring stays — it is correct, it costs
+> nothing, and every other sample does it — but it is not where the breach lives. (An earlier A/B
+> read "6% slower" and was **withdrawn**: it was measured against a sibling session's build, and the
+> guard that would have caught it is now in `scripts/perf.sh`.)
+>
+> **The mechanism is the useful half.** The block's ledger could report a peak of 106 active islands
+> and a peak largest island of 612; read together those suggest a ~3x parallel ceiling, and they are
+> two maxima from two different moments that describe no single frame. The tick that actually sets
+> the p99 has **one active island, of 362 bodies**. Islands are the solver's only unit of
+> parallelism, so at the tail there is no width to divide and no worker count that helps: a block
+> collapsing as one connected building is one island. The ledger now records the worst tick's
+> structure instead of the two peaks, plus `physics.solve_parallel_ticks` (473 of 600) — the
+> **handoff**, not the pool. Falsified at 0 by deleting the two `use_jobs` calls while
+> `physics.job_workers` still read 32, which is exactly why a counter that reads the pool could never
+> have caught the omission it was added to catch. `WorldStats` carries both witnesses now
+> (`islands_solved_parallel`, and `largest_active_island` — because a *sleeping* 612-body pile is not
+> the serial tail of anything, though the old field's own comment called it that).
+>
+> **So the remaining budget is engine speed, and the arithmetic says one lever will not do it.** On
+> the re-baselined tape, `physics.step` is 23.9-24.8 ms of a ~28.7 ms frame, split almost evenly
+> between `physics.contacts` (11.45-11.82) and `physics.solve` (11.07-11.44) — narrowphase and the
+> solve are the *same size*, so **an infinitely fast solve still leaves ~17.5 ms**, over budget on
+> its own. That matches the review's PC-sampled 31%/28%/32% split and promotes its third candidate:
+> the shared out-of-line math both stages reach through is the only lever that moves both at once.
+>
+> **Finding 2 is now the blocking one, and is the next brick.** `physics.*` merges the two worlds
+> while `sim.client` p99 (15.88) and `sim.server` p99 (8.63) split them — and the expensive half is
+> the client *re-simulating*: `net.client_physics_steps` is 794 over 600 frames. Optimising the
+> merged distribution would be optimising a shape that belongs to neither world.
+>
+> **One number kept separate from the gate, because it is the honest one for a player:**
+> `frame.player` p99 is **20.09 ms** — client + render, i.e. what a single machine pays. The 28.65 ms
+> `frame` is this demo hosting a server *and* a predicting client in one process, which no shipped
+> configuration does. The clause is missed either way; on one machine it is missed by 1.21x, not
+> 1.73x.
+>
+> *Precision, so these numbers are read at the right width:* ten 600-frame runs in one sitting on an
+> idle, clock-pinned box gave `frame` p99 **28.32-29.23 ms, mean 28.68, sd 0.26 (0.9%)**. Cross-
+> sitting drift on an identical tree measured ~2% earlier the same day, so **an A/B is only
+> meaningful against a control taken in the same sitting** — which is what voided the first attempt
+> at this one. The committed baseline is the run closest to that sitting's median, not its best.
+>
 > **The ladder's first omission, found in review and added as m17.8: there is no ground.** What the
 > block stands on is **two triangles** (`make_plane`, four vertices) scaled to a 76 m square
 > (`blockkit/src/block.cpp:315-326`), wearing a material with **no textures at all** — `opaque(0.10,
