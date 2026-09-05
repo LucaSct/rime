@@ -70,38 +70,61 @@ cd "$root"
 # the same pass: `ssr-resolve` p50 1.842 vs 0.856 ms. A committed baseline measured like that
 # encodes the governor's mood, and every future comparison against it inherits that.
 #
+# BOTH clock domains have to be checked, and the memory one is the one that bites. `nvidia-smi -lgc`
+# pins the graphics clock and says nothing about memory: measured on this box with -lgc 1785 held
+# rock-steady for a whole run, the memory clock sat at 810 MHz of 7501 from the first sample to the
+# last, never boosting even while the GPU reported 44% utilisation. That is ~11% of peak bandwidth,
+# and the passes this report is about (SSR, DDGI, the g-buffer resolves at 1080p) are bandwidth-bound.
+# A guard that watched only the core would have passed that machine and called the result a baseline.
+#
 # So this refuses to run rather than producing a number nobody can trust — the same ruling
 # ADR-0041 Ruling 4 makes about an incomparable baseline, applied one step earlier to an
 # unmeasurable machine. Override deliberately if you are measuring something the parking cannot
 # reach (a GPU-bound sample) or on a machine where clocks cannot be pinned.
 check_gpu_clocks() {
     command -v nvidia-smi >/dev/null 2>&1 || return 0   # not an NVIDIA box; nothing to check
-    local cur max
-    cur="$(nvidia-smi --query-gpu=clocks.current.graphics --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
-    max="$(nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
-    case "$cur$max" in ''|*[!0-9]*) return 0 ;; esac    # unreadable: do not invent a verdict
-    [ "$max" -gt 0 ] || return 0
-    # A pinned GPU sits at its locked floor even while idle, so a clock far below max means the
-    # governor is still in charge.
-    if [ $((cur * 2)) -ge "$max" ]; then
-        return 0
-    fi
-    # Deliberately BELOW the maximum boost clock. Pinning at max invites the thermal governor to
-    # take over instead of the idle one, which reintroduces exactly the variance being removed; a
-    # clock the card can hold indefinitely is what makes two runs comparable.
-    local pin=$(( max * 85 / 100 ))
+
+    # A pinned domain sits at its locked floor even while idle, so a clock far below its own maximum
+    # means the governor is still in charge of that domain. Reported per domain, because being told
+    # "the GPU is not pinned" when the core is fine and the memory is not sends you to the wrong fix.
+    local unpinned=""
+    local cur_gr max_gr cur_mem max_mem
+    read -r cur_gr max_gr cur_mem max_mem <<<"$(nvidia-smi \
+        --query-gpu=clocks.current.graphics,clocks.max.graphics,clocks.current.memory,clocks.max.memory \
+        --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' | tr ',' ' ')"
+
+    domain_unpinned() {   # $1=name $2=current $3=max -> echoes a description when the governor owns it
+        case "$2$3" in ''|*[!0-9]*) return 0 ;; esac    # unreadable: do not invent a verdict
+        [ "$3" -gt 0 ] || return 0
+        [ $(( $2 * 2 )) -ge "$3" ] && return 0
+        printf '  %s clock: %s MHz of %s MHz max\n' "$1" "$2" "$3"
+    }
+    unpinned+="$(domain_unpinned graphics "$cur_gr"  "$max_gr")"
+    unpinned+="$(domain_unpinned memory   "$cur_mem" "$max_mem")"
+    [ -z "$unpinned" ] && return 0
+
+    # Deliberately BELOW the maximum boost clock for the core. Pinning at max invites the thermal
+    # governor to take over instead of the idle one, which reintroduces exactly the variance being
+    # removed; a clock the card can hold indefinitely is what makes two runs comparable. Memory gets
+    # no such treatment — GDDR6 has one supported clock on this class of card, and it is the top one.
+    local pin=$(( max_gr * 85 / 100 ))
     cat >&2 <<EOF
-perf.sh: the GPU is not clock-pinned (${cur} MHz of ${max} MHz max).
+perf.sh: the GPU is not clock-pinned.
+
+${unpinned}
 
   This sample is CPU-bound, so the driver parks the GPU mid-run and the report becomes a
-  measurement of the power governor rather than of the engine. Pin the clocks first:
+  measurement of the power governor rather than of the engine. Pin BOTH domains first — locking
+  the graphics clock alone leaves memory free to sit at its idle state all run:
 
       sudo nvidia-smi -pm 1
       sudo nvidia-smi -lgc ${pin},${pin}
+      sudo nvidia-smi -lmc ${max_mem}
 
   and afterwards, to hand the GPU back to the governor:
 
       sudo nvidia-smi -rgc
+      sudo nvidia-smi -rmc
 
   Set RIME_PERF_ALLOW_UNPINNED_CLOCKS=1 to measure anyway — and say so in the PR, because the
   numbers are not comparable against a pinned baseline.
