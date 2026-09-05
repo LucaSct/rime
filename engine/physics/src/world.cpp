@@ -131,6 +131,9 @@ struct PhysicsWorld::Impl {
     core::JobSystem* jobs = nullptr;
     bool sleeping_enabled = true;
     IslandSet islands;
+    // How many islands the last step() handed to `jobs`; 0 when it solved them itself. The witness
+    // that the parallel path was actually taken — see WorldStats::islands_solved_parallel.
+    std::uint32_t parallel_islands_last = 0;
 
     // The most recent step()'s instrument panel (M7.13, WorldStats). Populated in the sequential
     // tail as a pure read of the just-computed tick — so, like the event emission, it never touches
@@ -1078,10 +1081,12 @@ void PhysicsWorld::step(float dt) {
             const std::size_t chunk = std::max<std::size_t>(
                 1, (isl.island_count + participants * 4 - 1) / (participants * 4));
             p.jobs->parallel_for(isl.island_count, chunk, solve_island);
+            p.parallel_islands_last = static_cast<std::uint32_t>(isl.island_count);
         } else {
             for (std::size_t k = 0; k < isl.island_count; ++k) {
                 solve_island(k);
             }
+            p.parallel_islands_last = 0;
         }
     } // physics.solve
 
@@ -1335,10 +1340,14 @@ void PhysicsWorld::step(float dt) {
     }
     st.contacts_warm_started = p.warm_started_last;
     st.islands = static_cast<std::uint32_t>(isl.island_count);
+    st.islands_solved_parallel = p.parallel_islands_last;
     for (std::size_t k = 0; k < isl.island_count; ++k) {
-        st.active_islands += (active[k] != 0) ? 1u : 0u;
         const std::uint32_t sz = isl.body_offsets[k + 1] - isl.body_offsets[k];
         st.largest_island = std::max(st.largest_island, sz);
+        if (active[k] != 0) {
+            ++st.active_islands;
+            st.largest_active_island = std::max(st.largest_active_island, sz);
+        }
     }
 }
 

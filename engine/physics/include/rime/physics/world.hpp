@@ -128,6 +128,23 @@ struct WorldStats {
     std::uint32_t islands = 0;
     std::uint32_t active_islands = 0;
     std::uint32_t largest_island = 0;
+
+    // The solve's actual serial tail, and whether it was allowed to go wide at all (m17.5).
+    //
+    // largest_island counts the biggest island whether or not it was SOLVED, so a resting 600-body
+    // pile — skipped entirely by stage 6 — still reads as "the critical path". It is not one.
+    // largest_active_island is the tail a load balancer actually watches: Amdahl's serial fraction
+    // of this tick's solve, against active_islands as the width available to divide it.
+    //
+    // islands_solved_parallel records the HANDOFF rather than a value: how many islands were handed
+    // to the job system this tick, and 0 whenever the solve ran on the calling thread (no job
+    // system, or a single island not worth dispatching). It exists because set_job_system() takes a
+    // nullable pointer nobody is obliged to call, so "we parallelised the solve and it did not
+    // help" and "the solve was never parallelised" otherwise produce the identical report — and
+    // 99-the-block, the one sample M13's frame-rate clause is about, spent its whole life in the
+    // second state while looking like the first.
+    std::uint32_t largest_active_island = 0;
+    std::uint32_t islands_solved_parallel = 0;
 };
 
 class PhysicsWorld {
