@@ -684,6 +684,33 @@ TEST_CASE("regression against a committed baseline") {
         CHECK(gate.check(noisy, &baseline).ok());
     }
 
+    SUBCASE("a residual near zero does not 'regress' on noise finer than the timer") {
+        // `frame.unaccounted` is a RESIDUAL — parent minus its named parts — so it lands at a few
+        // hundred nanoseconds when the accounting is good. A percentage of that is finer than the
+        // timer can resolve, and a purely relative check duly reported "0.000 ms vs baseline
+        // 0.000 ms — REGRESSED" between two runs of the same binary on a pinned machine. That is
+        // how a gate teaches the people reading it to stop believing it, which costs exactly as
+        // much as a gate that cannot fail.
+        PerfReport quiet_base = make_report();
+        PerfReport quiet_now = make_report();
+        for (int i = 0; i < 200; ++i) {
+            quiet_base.observe("frame.unaccounted", 0.0002);
+            quiet_now.observe("frame.unaccounted",
+                              0.0006); // 3x relative, 0.4 MICROseconds absolute
+        }
+        PerfGate residual;
+        residual.at_most("frame.unaccounted", PerfStat::P99, 1.0).max_regression(0.10);
+        CHECK(residual.check(quiet_now, &quiet_base).ok());
+
+        // ...and the floor does not become a place to hide: a move that clears it still fails.
+        PerfReport really_slower = make_report();
+        for (int i = 0; i < 200; ++i)
+            really_slower.observe("frame.unaccounted", 0.30);
+        const PerfGate::Result moved = residual.check(really_slower, &quiet_base);
+        REQUIRE(moved.violations.size() == 1);
+        CHECK(moved.violations[0].outcome == PerfOutcome::Regressed);
+    }
+
     SUBCASE("a faster run passes, and so does an equal one") {
         const PerfReport faster = make_report(12.0);
         CHECK(gate.check(faster, &baseline).ok());

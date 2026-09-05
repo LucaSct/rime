@@ -1299,7 +1299,21 @@ PerfGate::Result PerfGate::check(const PerfReport& report, const PerfReport* bas
             absent.push_back(rule.timeline);
             continue;
         }
-        const double limit = base->stat(rule.stat) * (1.0 + regression_);
+        // A regression has to clear BOTH the relative tolerance and an absolute noise floor.
+        // Relative alone is meaningless as the baseline approaches zero: `frame.unaccounted` p99 is
+        // a residual that lands at a few hundred NANOseconds, and a percentage of that is smaller
+        // than the timer's own resolution — so two runs of the same binary reported
+        // "0.000 ms vs baseline 0.000 ms — REGRESSED", which is how a gate teaches people to ignore
+        // it. A gate that cries wolf is disbelieved exactly as fast as one that cannot fail.
+        //
+        // The floor is measured, not chosen: pinned, two 600-frame runs of `99-the-block` agreed to
+        // within 1.5% on every pass above 0.05 ms and drifted 20-25% on the ones below it (4-9 us,
+        // reading timestamp quantisation). 0.05 ms is where this machine stops being able to tell
+        // two identical runs apart, and it is 0.3% of a 16.6 ms frame — far below anything worth
+        // acting on.
+        constexpr double kRegressionFloorMs = 0.05;
+        const double base_ms = base->stat(rule.stat);
+        const double limit = base_ms + std::max(base_ms * regression_, kRegressionFloorMs);
         const double value = cur->stat(rule.stat);
         if (value > limit) {
             result.violations.push_back(PerfViolation{rule.timeline,
