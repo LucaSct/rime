@@ -349,9 +349,9 @@ struct Peer {
     //
     // BORROWED, one per process, which is what `set_job_system` documents ("the engine constructs
     // one job system and hands it to every subsystem") and what this demo got wrong twice over: a
-    // Peer that owned one meant TWO, each sized to the machine, so a 32-core box ran ~62 workers.
-    // Wiring them naively that way measured SLOWER than no job system at all (frame p99 28.69 ->
-    // 30.51 ms) — the parallel solve was real, and it was competing with itself.
+    // Peer that owned one meant TWO, each sized to the machine, so a 32-core box would run ~62
+    // workers on 32 cores and the parallel solve would compete with itself. That configuration was
+    // AVOIDED, not measured — the run that appeared to measure it was contaminated and withdrawn.
     //
     // It is a nullable pointer, which is what let the original omission be silent: nothing fails,
     // nothing warns, the solve is just slower. Hence `physics.job_workers` in the work ledger — a
@@ -630,27 +630,66 @@ struct Session {
     std::size_t peak_live_debris = 0;
     std::size_t peak_visual_debris = 0;
     // The solver's PARALLELISM, not just its cost (m17.5). `physics.solve` being slow says nothing
-    // about whether it CAN be spread: active-island count is the width available and the largest
-    // ACTIVE island is the critical path through it, and a block that is still mostly one connected
-    // building is one enormous island no number of workers can divide. Recorded so the report
-    // answers that instead of inviting the guess.
+    // about whether it CAN be spread: the active-island count is the width available and the
+    // largest ACTIVE island is the critical path through it, and a block that is still mostly one
+    // connected building is one enormous island no number of workers can divide.
     //
-    // Two forms, because they answer different questions and only one of them is honest about a
-    // p99. The peaks bound the whole run; `worst_tick_stats` is the structure of the single most
-    // expensive server tick, which is what a tail budget is actually about. Independent maxima
-    // cannot be combined — "106 islands at some moment" and "an island of 612 at some moment" say
-    // nothing about any one frame, and reading them as if they did is how a 3x parallel ceiling
-    // gets inferred from a run that never had one.
-    std::uint32_t peak_islands = 0;
-    std::uint32_t peak_largest_island = 0;
-    double worst_server_ms = 0.0;
-    physics::WorldStats worst_tick_stats{};
-    // Ticks whose solve actually went through the job system. THE HANDOFF, not the value: a pool
+    // Three deliberate choices here, each of them a wrong version this brick shipped first:
+    //
+    // 1. KEYED ON THE STEP, not on the peer's half of the tick. `last_server_ms` also covers
+    //    gameplay, sync, the shot -> apply_damage loop and `destruction.update`, so the most
+    //    expensive server TICK can easily be the tick the charge went off rather than the tick the
+    //    solver was widest — and an island count sampled there answers a question nobody asked.
+    // 2. PER WORLD, because there are two of them. The client re-simulates (bounded catch-up, up
+    //    to `kMaxCatchUpBatchesPerTick` steps in a tick), and `sim.client` p99 runs to roughly
+    //    twice `sim.server`, so a statement about "the frame" that samples only the server's world
+    //    covers well under half of it.
+    // 3. CO-SAMPLED, not two independent maxima. "106 active islands at some moment" and "an
+    //    island of 612 at some moment" describe no single tick, and reading them together is how a
+    //    3x parallel ceiling gets inferred from a run that never had one. `max_active_islands` is
+    //    kept as a genuine CEILING — the widest the solve ever got — and everything else about the
+    //    expensive moment comes from one struct sampled at one instant.
+    // 4. And keyed on the TICK, not on one step, because that is the shape the tail actually has.
+    //    A tick runs one server step plus up to `kMaxCatchUpBatchesPerTick` client ones, and
+    //    `physics.step.per_frame` — the 24 ms that nearly IS the frame — is their SUM. The single
+    //    most expensive step in this run is ~9 ms; no per-step maximum can explain a 24 ms tick,
+    //    and reading one as if it did is the same error as reading two peaks as one moment.
+    struct TickSolve {
+        double ms = 0.0;                        // every physics.step in the tick, both worlds
+        std::uint64_t tick = 0;
+        std::uint32_t steps = 0;
+        std::uint32_t min_active_islands = 0;   // the NARROWEST step in the tick
+        std::uint32_t max_active_islands = 0;
+        std::uint32_t largest_active_island = 0;
+        std::uint32_t parallel_steps = 0;
+    };
+    TickSolve tick_solve;       // accumulating, this tick
+    TickSolve worst_tick_solve; // the most expensive one so far
+    std::uint32_t max_active_islands = 0;
+
+    // One physics step, folded into this tick's total. Called from BOTH worlds — the client
+    // re-simulates and the server does not, so a panel that saw only one of them described well
+    // under half of the tick it was being used to explain.
+    void note_step(double step_ms, const physics::WorldStats& s) {
+        tick_solve.ms += step_ms;
+        ++tick_solve.steps;
+        tick_solve.min_active_islands = (tick_solve.steps == 1)
+                                            ? s.active_islands
+                                            : std::min(tick_solve.min_active_islands,
+                                                       s.active_islands);
+        tick_solve.max_active_islands = std::max(tick_solve.max_active_islands, s.active_islands);
+        tick_solve.largest_active_island =
+            std::max(tick_solve.largest_active_island, s.largest_active_island);
+        tick_solve.parallel_steps += (s.islands_solved_parallel > 0) ? 1u : 0u;
+        max_active_islands = std::max(max_active_islands, s.active_islands);
+    }
+    // Steps whose solve actually went through the job system. THE HANDOFF, not the value: a pool
     // reporting 32 workers proves a pool exists, not that anything was ever handed to it, and
-    // `set_job_system` is a nullable pointer nobody is obliged to call. This counter is 0 for the
-    // entire run if the wiring is missing, which is the only way the report can tell "parallelism
-    // did not help here" from "parallelism was never switched on".
-    std::uint64_t ticks_solved_parallel = 0;
+    // `set_job_system` is a nullable pointer nobody is obliged to call. These are 0 for the entire
+    // run if the wiring is missing, which is the only way the report can tell "parallelism did not
+    // help here" from "parallelism was never switched on".
+    std::uint64_t server_parallel_steps = 0;
+    std::uint64_t client_parallel_steps = 0;
     destruction::BindStats client_bound{};
 
     // The two halves of a tick, timed apart (m13.p). This demo is a server AND a client in one
@@ -674,6 +713,35 @@ struct Session {
     float max_op_amount = 0.0f;   // largest single damage op; parts stand at 1.0 health
     std::uint64_t lethal_ops = 0; // ops that killed their part outright
     std::uint64_t total_ops = 0;
+
+    // Start the measured window (m17.5). Every running total above accumulates from the first tick
+    // of the process, and a `--perf` run steps the whole simulation `--warmup` times before the
+    // report's zone collector is even installed — so a ledger read at the end describes a longer
+    // run than the distributions beside it, and the two disagree in a way nothing announces.
+    //
+    // It was wrong by exactly the warmup: `net.client_physics_steps` read 794 against a
+    // `physics.step` zone count of 1304 = 600 server + 704 client, and "473 of 600 ticks solved in
+    // parallel" was 473 of 690. A denominator that quietly includes warmup makes every ratio in
+    // the write-up wrong in the flattering direction, which is the worst kind of wrong.
+    //
+    // Perf only: the headless proof has no warmup and reads these counters over its whole run.
+    void begin_measured_window() {
+        tick_solve = {};
+        worst_tick_solve = {};
+        max_active_islands = 0;
+        server_parallel_steps = 0;
+        client_parallel_steps = 0;
+        peak_live_debris = 0;
+        peak_visual_debris = 0;
+        max_batches_per_tick = 0;
+        total_client_steps = 0;
+        shots_fired = 0;
+        shots_hit = 0;
+        damage_ops = 0;
+        max_op_amount = 0.0f;
+        lethal_ops = 0;
+        total_ops = 0;
+    }
 
     explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {
         // Both peers solve on the SAME job system (m17.5) — see Peer::use_jobs.
@@ -756,6 +824,7 @@ struct Session {
     // and `12-networked-destruction` established. Splicing them together is most of this sample's
     // risk, so the two halves are kept in their original sequence rather than interleaved cleverly.
     void tick(const replication::InputCommand& intent) {
+        tick_solve = {};
         now_ms += kTickMs;
         ++tick_index;
         network.advance_time(now_ms);
@@ -851,7 +920,13 @@ struct Session {
         do {
             (void)client.destruction_net_client.apply_next_batch(
                 client.world, client.replicator->map(), client.destruction);
+            const core::Stopwatch client_step_watch;
             client.physics.step(kDt);
+            {
+                const physics::WorldStats cs = client.physics.stats();
+                note_step(client_step_watch.elapsed_ms(), cs);
+                client_parallel_steps += (cs.islands_solved_parallel > 0) ? 1u : 0u;
+            }
             client.destruction.update(client.physics);
             ++batches_this_tick;
         } while (client.destruction_net_client.pending_batches() > 0 &&
@@ -868,7 +943,9 @@ struct Session {
         ecs::propagate_transforms(server.world, jobs);
         server.sync.reconcile(server.world, server.physics);
         server.sync.push_in(server.world, server.physics, kDt);
+        const core::Stopwatch server_step_watch;
         server.physics.step(kDt);
+        note_step(server_step_watch.elapsed_ms(), server.physics.stats());
         server.sync.write_back(server.world, server.physics);
 
         // The weapon → destruction glue: the consumer's job, kept out of the engine so that
@@ -940,13 +1017,10 @@ struct Session {
         peak_live_debris =
             std::max(peak_live_debris, live_debris(server.destruction, server.physics));
         peak_visual_debris = std::max(peak_visual_debris, server.destruction.visual_debris_count());
-        const physics::WorldStats ps = server.physics.stats();
-        peak_islands = std::max(peak_islands, ps.active_islands);
-        peak_largest_island = std::max(peak_largest_island, ps.largest_active_island);
-        ticks_solved_parallel += (ps.islands_solved_parallel > 0) ? 1u : 0u;
-        if (last_server_ms > worst_server_ms) {
-            worst_server_ms = last_server_ms;
-            worst_tick_stats = ps;
+        server_parallel_steps += (server.physics.stats().islands_solved_parallel > 0) ? 1u : 0u;
+        tick_solve.tick = tick_index;
+        if (tick_solve.ms > worst_tick_solve.ms) {
+            worst_tick_solve = tick_solve;
         }
     }
 
@@ -2022,6 +2096,9 @@ int run_perf(const std::filesystem::path& cooked,
         demo.step_sim(scripted_tape(tick));
         demo.app.step(demo.app.fixed_dt());
     }
+    // The ledger counts the same window the distributions do — see Session::begin_measured_window.
+    demo.session.begin_measured_window();
+    const std::uint64_t measure_from_tick = tick;
 
     // THE TWO INDEX SPACES, and they are not the same one. `Application` counts every frame it has
     // ever rendered, warmup included; this loop counts measured frames from zero, and that is the
@@ -2125,21 +2202,38 @@ int run_perf(const std::filesystem::path& cooked,
     ledger.set("shadow.spot_maps", demo.visuals->spot_maps_total);
     ledger.set("net.max_batches_per_tick", demo.session.max_batches_per_tick);
     ledger.set("net.client_physics_steps", demo.session.total_client_steps);
-    ledger.set("physics.active_islands_peak", demo.session.peak_islands);
-    ledger.set("physics.largest_active_island_peak", demo.session.peak_largest_island);
-    // The structure of the tick the tail is made of — width available, and the serial island
-    // through it — rather than two maxima from two different moments.
-    ledger.set("physics.worst_tick_active_islands", demo.session.worst_tick_stats.active_islands);
-    ledger.set("physics.worst_tick_largest_island",
-               demo.session.worst_tick_stats.largest_active_island);
-    // Whether the solve was even ALLOWED to go wide, and whether it actually went. A ledger that
-    // records the work but not the wiring cannot distinguish "parallelism did not help" from
-    // "parallelism was never switched on" — the exact confusion that let this demo run its solver
-    // single-threaded unnoticed. `job_workers` is the pool; `solve_parallel_ticks` is the handoff,
-    // and only the second one can fall to zero when the wiring is dropped.
-    ledger.set("physics.job_workers",
+    // ── The solver's parallelism panel (m17.5), per world and co-sampled ────────────────────
+    //
+    // Whether the solve was even ALLOWED to go wide, whether it actually went, and how much width
+    // there was at the moment it cost the most. A ledger that records the work but not the wiring
+    // cannot distinguish "parallelism did not help" from "parallelism was never switched on" — the
+    // exact confusion that let this demo run its solver single-threaded unnoticed. `job_workers`
+    // is the pool and cannot fall to zero when the wiring is dropped; the `parallel_steps` pair is
+    // the handoff and does.
+    //
+    // Both worlds appear because both simulate. Reporting the server's alone described under half
+    // of the frame it was being used to explain.
+    // PARTICIPANTS, not workers: `JobSystem::participant_count()` counts the calling thread too,
+    // so a pool of 31 workers reports 32. Naming it `job_workers` was off by one in the direction
+    // that flatters, and a ledger key is read years later by someone who will not check.
+    ledger.set("physics.job_participants",
                static_cast<std::uint64_t>(demo.session.jobs.participant_count()));
-    ledger.set("physics.solve_parallel_ticks", demo.session.ticks_solved_parallel);
+    ledger.set("physics.server.parallel_steps", demo.session.server_parallel_steps);
+    ledger.set("physics.client.parallel_steps", demo.session.client_parallel_steps);
+    // The CEILING: the widest the solve ever got, in either world. Not to be combined with
+    // anything below it — it is a different tick.
+    ledger.set("physics.max_active_islands", demo.session.max_active_islands);
+    // …and the tick the tail is made of, co-sampled. `min_islands` is the number that decides
+    // whether a job system could have helped: it is the narrowest step in the most expensive tick,
+    // and a 1 there means at least one of that tick's steps had nothing to divide.
+    const auto& wt = demo.session.worst_tick_solve;
+    ledger.set("physics.worst_tick_index", wt.tick - measure_from_tick);
+    ledger.set("physics.worst_tick_us", static_cast<std::uint64_t>(wt.ms * 1000.0));
+    ledger.set("physics.worst_tick_steps", wt.steps);
+    ledger.set("physics.worst_tick_min_islands", wt.min_active_islands);
+    ledger.set("physics.worst_tick_max_islands", wt.max_active_islands);
+    ledger.set("physics.worst_tick_largest", wt.largest_active_island);
+    ledger.set("physics.worst_tick_parallel_steps", wt.parallel_steps);
     report.set_ledger(ledger);
 
     core::PerfGate gate;
