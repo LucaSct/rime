@@ -108,6 +108,17 @@ public:
     // HUD costs nothing — not even a pass.
     void declare(RenderGraph& graph, RGTexture target);
 
+    // Size the vertex ring to the loop that will drive it: slots = frames + 1, the same rule
+    // Application applies to `presented_cmds_` and SceneRenderer to its uniforms. Call it once,
+    // before the first frame — it destroys and rebuilds the buffers, which is only legal while
+    // nothing is in flight.
+    //
+    // It exists because a ring that CANNOT be resized is not safe, it is merely safe by default:
+    // this one was a hardcoded 3, "comfortably above the backend's two frames in flight", which
+    // stopped being true the moment m17.5a let a headless loop ask for more (the graph's ring
+    // resized, this one did not, and frame K overwrote vertices frame K-3 was still reading).
+    void set_frames_in_flight(std::uint32_t frames);
+
     // What the frame queued. `quads` is the honest cost number; a HUD that silently stopped drawing
     // reads exactly like one with nothing to say, and this is the difference.
     [[nodiscard]] std::size_t quad_count() const noexcept { return quads_; }
@@ -136,9 +147,9 @@ private:
 
     // A RING of vertex buffers, not one. Writing a host-visible buffer the GPU is still reading is
     // the same class of bug m13.3a spent four fixes on: `Swapchain::present` does not wait, so the
-    // previous frame can still be consuming last frame's vertices. Three is comfortably above the
-    // backend's two frames in flight, and the cost is three small buffers.
-    static constexpr std::size_t kRing = 3;
+    // previous frame can still be consuming last frame's vertices. The depth is `frames + 1`; see
+    // set_frames_in_flight, and prefer telling it the truth over trusting this default.
+    static constexpr std::uint32_t kDefaultFramesInFlight = 2; // the Vulkan swapchain's own number
     std::vector<rhi::BufferHandle> buffers_;
     std::size_t ring_slot_ = 0;
     std::size_t capacity_ = 0; // vertices per buffer

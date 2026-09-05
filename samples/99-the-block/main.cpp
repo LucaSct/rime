@@ -1816,6 +1816,12 @@ struct PerfOptions {
     std::uint32_t pipelined = 1;
 };
 
+// An upper bound on --pipelined, because every frame in flight costs a full set of per-frame rings
+// and, past a couple, the image trails the simulation by long enough that what the report measures
+// stops resembling what a player would see. It is not a safety limit — the rings resize now — it is
+// a limit on what this sample is willing to claim it measured.
+constexpr std::uint32_t kMaxPipelineDepth = 4;
+
 int run_perf(const std::filesystem::path& cooked,
              std::string_view scene_path,
              const PerfOptions& opt) {
@@ -1836,10 +1842,22 @@ int run_perf(const std::filesystem::path& cooked,
     }
     demo.use_authored_camera = true; // see the note above
 
-    // PIPELINE THE LOOP, if asked (m17.5). Set before the first frame: it resizes the per-frame
-    // rings (the graph's CPU scratch, the SceneRenderer's uniforms) that the depth is what makes
-    // safe, and resizing those under live GPU work is the bug they exist to prevent.
+    // PIPELINE THE LOOP, if asked (m17.5). Set before the first frame, because every ring sized
+    // from this number is rebuilt by the call and doing that under live GPU work is the bug the
+    // rings exist to prevent.
+    //
+    // `set_headless_frames_in_flight` resizes the ring the Application OWNS — the graph's CPU
+    // scratch — and it cannot reach the ones it does not own. This comment used to claim it resized
+    // "the SceneRenderer's uniforms" too. It did not, and at a depth of 3 that was a live race:
+    // the graph grew to 4 slots while the SceneRenderer and the HUD stayed at 3, so frame K wrote
+    // the slot frame K-3 was still being read out of. The contract is stated on
+    // Application::frames_in_flight() — every owner of a per-frame resource sizes it from that —
+    // and this is the sample honouring it rather than a comment asserting someone else did.
     demo.app.set_headless_frames_in_flight(opt.pipelined);
+    if (demo.visuals) {
+        demo.visuals->renderer.set_frames_in_flight(demo.app.frames_in_flight());
+        demo.visuals->hud.set_frames_in_flight(demo.app.frames_in_flight());
+    }
 
     core::PerfReport report;
     core::MachineFingerprint fp = core::MachineFingerprint::detect();
@@ -2384,7 +2402,20 @@ int main(int argc, char** argv) {
         } else if (a == "--frames" && i + 1 < argc) {
             perf.frames = std::atoi(argv[++i]);
         } else if (a == "--pipelined" && i + 1 < argc) {
-            perf.pipelined = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+            // Checked as a SIGNED int before the cast. `--pipelined -1` used to become 4294967295,
+            // which is not merely a big ring: `in_flight_.size() >= headless_in_flight_` is then
+            // permanently false, so nothing is ever retired, the in-flight deque grows without
+            // bound, and every submission's timestamp pool leaks along with it. A flag that turns a
+            // typo into an unbounded allocation is the parser's bug, not the caller's.
+            const int depth = std::atoi(argv[++i]);
+            if (depth < 1 || depth > static_cast<int>(kMaxPipelineDepth)) {
+                std::fprintf(stderr,
+                             "99-the-block: --pipelined must be 1..%u (got '%s')\n",
+                             kMaxPipelineDepth,
+                             argv[i]);
+                return 2;
+            }
+            perf.pipelined = static_cast<std::uint32_t>(depth);
         } else if (a == "--warmup" && i + 1 < argc) {
             perf.warmup = std::atoi(argv[++i]);
         } else if (a == "--width" && i + 1 < argc) {
