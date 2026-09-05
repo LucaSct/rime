@@ -184,24 +184,45 @@ foreign_busy() {
     if ! foreign_sampler_available; then
         return 0
     fi
-    local hz; hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
     local a b; a="$(mktemp)"; b="$(mktemp)"
     proc_cpu_snapshot > "$a"; sleep 1; proc_cpu_snapshot > "$b"
-    awk -v hz="$hz" -v mine="$foreign_mine" '
+    foreign_compare "$a" "$b" 1
+    rm -f "$a" "$b"
+}
+
+# The same comparison, over an interval the CALLER paced. Split out so the watcher can keep one
+# rolling snapshot and sweep /proc ONCE per interval instead of twice — a watcher that reads six
+# hundred files every second, inside the measurement it exists to keep clean, is a competitor for
+# the cache if not for a core. The one-shot form above still pays for two, because a pre-check runs
+# before anything is being measured.
+foreign_compare() {
+    local hz; hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+    awk -v hz="$hz" -v mine="$foreign_mine" -v secs="$3" '
         BEGIN { n = split(mine, m, " ") }
         NR == FNR { was[$1] = $3; next }
         {
             d = $3 - (($1 in was) ? was[$1] : $3)   # a process born during the window: no delta
             if (d <= 0) next
-            pct = 100.0 * d / hz                    # one second of wall clock per sample pair
+            pct = 100.0 * d / (hz * secs)
             if (pct <= 50) next
             for (i = 1; i <= n; ++i) {
                 # comm is truncated to 15 chars, so compare against a truncated allow-list entry.
                 if (index($2, substr(m[i], 1, 15)) == 1) next
             }
             printf "  %s at %.0f%% CPU\n", $2, pct
-        }' "$a" "$b"
-    rm -f "$a" "$b"
+        }' "$1" "$2"
+}
+
+# One /proc sweep per interval, forever. The rolling snapshot is what makes it cheap.
+watch_box() {
+    local prev cur; prev="$(mktemp)"; cur="$(mktemp)"
+    proc_cpu_snapshot > "$prev"
+    while true; do
+        sleep 2
+        proc_cpu_snapshot > "$cur"
+        foreign_compare "$prev" "$cur" 2
+        mv -f "$cur" "$prev"
+    done
 }
 
 # pid, comm, cpu-ticks — one line per process, from ONE awk. Deliberately not a shell loop over
@@ -347,7 +368,7 @@ run_one() {
 # runs that happened to land in a gap") could not tell a gap from a collision. Overridden, a dirty
 # run is reported and not failed; unoverridden, it is failed.
 contention_log="$(mktemp)"
-( while true; do foreign_busy; sleep 2; done ) > "$contention_log" 2>/dev/null &
+watch_box > "$contention_log" 2>/dev/null &
 contention_watcher=$!
 trap 'kill "$contention_watcher" 2>/dev/null' EXIT
 

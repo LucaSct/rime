@@ -661,6 +661,7 @@ struct Session {
         std::uint32_t min_active_islands = 0;   // the NARROWEST step in the tick
         std::uint32_t max_active_islands = 0;
         std::uint32_t largest_active_island = 0;
+        std::uint32_t awake_bodies = 0;         // the DENOMINATOR the largest island is a share of
         std::uint32_t parallel_steps = 0;
     };
     TickSolve tick_solve;       // accumulating, this tick
@@ -680,6 +681,11 @@ struct Session {
         tick_solve.max_active_islands = std::max(tick_solve.max_active_islands, s.active_islands);
         tick_solve.largest_active_island =
             std::max(tick_solve.largest_active_island, s.largest_active_island);
+        // Without this the largest island is a number with no scale. "One island of 605" is a
+        // statement about parallelism only against how many bodies were awake at all: 605 of 1900
+        // caps the speedup near 3x, 605 of 650 caps it at nothing, and the two look identical in a
+        // report that records only the island.
+        tick_solve.awake_bodies = std::max(tick_solve.awake_bodies, s.awake_bodies);
         tick_solve.parallel_steps += (s.islands_solved_parallel > 0) ? 1u : 0u;
         max_active_islands = std::max(max_active_islands, s.active_islands);
     }
@@ -2233,6 +2239,7 @@ int run_perf(const std::filesystem::path& cooked,
     ledger.set("physics.worst_tick_min_islands", wt.min_active_islands);
     ledger.set("physics.worst_tick_max_islands", wt.max_active_islands);
     ledger.set("physics.worst_tick_largest", wt.largest_active_island);
+    ledger.set("physics.worst_tick_awake_bodies", wt.awake_bodies);
     ledger.set("physics.worst_tick_parallel_steps", wt.parallel_steps);
     report.set_ledger(ledger);
 
