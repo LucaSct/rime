@@ -179,6 +179,7 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
         SceneDrawData cascade_data = scene_data;
         cascade_data.frame_ubo = vp_slice.buffer;
         cascade_data.frame_ubo_offset = vp_slice.offset + c * kCascadeStride;
+        cascade_data.frame_ubo_size = kCascadeStride; // this cascade's slice, not the whole block
         prepass.add(graph, cascades, cascade_data, c, kCascadeLabels[c]);
     }
 

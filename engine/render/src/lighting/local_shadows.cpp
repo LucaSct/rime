@@ -208,6 +208,7 @@ LocalShadowBinding LocalShadowMap::add(RenderGraph& graph,
         SceneDrawData spot_data = scene_data;
         spot_data.frame_ubo = vp_slice.buffer;
         spot_data.frame_ubo_offset = vp_slice.offset + i * kSpotStride;
+        spot_data.frame_ubo_size = kSpotStride; // this slot's slice, not the whole block
         prepass.add(graph, map, spot_data, i, kSlotLabels[i]);
     }
     // After this frame the forward pass samples the array, leaving it in ShaderRead — the state the

@@ -164,6 +164,20 @@ struct SceneDrawData {
     // camera pass; a CSM cascade points it at that cascade's 256-byte light-view_proj slice, so the
     // one shared draw loop renders the scene from any view without a bespoke pass.
     std::uint32_t frame_ubo_offset = 0;
+    // How many bytes at that offset the binding covers. 0 means "through the end of the buffer",
+    // which was the only behaviour until m17.4 made `frame_ubo` a SHARED per-frame block instead of
+    // a buffer sized to its own contents: the range then became `block_size - offset`, which is
+    // legal only while the block happens to be no larger than the device's `maxUniformBufferRange`.
+    // That is an accident (65536 on the reference GPU, and `push_frame_data` will allocate a bigger
+    // block whenever one push needs it), not a guarantee, so every caller that points this at a
+    // slice of a shared block states its own size.
+    //
+    // The floor is the SHADER's declared block, not the struct: `depth_only.vert` declares a
+    // truncated `FrameUniforms { mat4 view_proj; }` (64 bytes) against the same buffer the forward
+    // shaders read in full (752), so a 256-byte cascade stride covers the depth path while the
+    // forward path needs all of GpuFrameUniforms. A range SHORTER than the declared block is its
+    // own bug, so this is per call site rather than one constant.
+    std::uint64_t frame_ubo_size = 0;
     rhi::BufferHandle draw_ubo;
     rhi::SamplerHandle material_sampler;
     // The ClampToEdge sibling (m16.5), selected per draw by DrawItem::ClampUv. Two samplers rather

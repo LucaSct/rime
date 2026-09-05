@@ -53,7 +53,7 @@ void record_draws(rhi::CommandBuffer& cmd,
     // Binding 0 is FrameUniforms at data.frame_ubo_offset — 0 for the camera pass, cascade c's
     // 256-byte view_proj slice for a CSM depth pass (m10.1). depth_only.vert / the forward shaders
     // read only the leading members of whatever block sits there, so one loop serves every view.
-    cmd.bind_uniform_buffer(0, data.frame_ubo, data.frame_ubo_offset);
+    cmd.bind_uniform_buffer(0, data.frame_ubo, data.frame_ubo_offset, data.frame_ubo_size);
     for (std::size_t i = 0; i < data.draws.size(); ++i) {
         const DrawItem& item = data.draws[i];
         if ((item.flags & flag_filter) != flag_match) {
