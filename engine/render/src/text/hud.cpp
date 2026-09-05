@@ -103,6 +103,12 @@ HudRenderer::HudRenderer(rhi::Device& device, rhi::Format target_format, const F
 }
 
 void HudRenderer::set_frames_in_flight(std::uint32_t frames) {
+    // A HUD whose constructor bailed (no font atlas) has capacity_ == 0 and never made a buffer.
+    // Resizing its ring here would ask the driver for zero-byte buffers, which is not a degraded
+    // HUD but a validation error (VUID-VkBufferCreateInfo-size-00912). Until this brick the only
+    // caller was the constructor, one line after capacity_ was set, so the path did not exist.
+    if (capacity_ == 0)
+        return;
     const std::size_t slots = static_cast<std::size_t>(frames) + 1u;
     if (slots == buffers_.size())
         return;
