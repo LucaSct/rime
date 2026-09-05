@@ -132,8 +132,49 @@ EOF
     return 1
 }
 
+# ── …and the CPU must not be shared either (m17.5) ───────────────────────────────────────────
+#
+# The sibling to the clock guard, and learned the same way: `99-the-block` is CPU-bound, so a rival
+# for cores is a rival for the number. A second Claude session on this machine ran a determinism
+# sweep — three CPU-bound demos at once, touching nothing in this repo — while an A/B series was
+# being taken. It produced a clean-looking, monotonic 1-3 ms drift across five runs that read
+# exactly like a regression, and a HEAD control taken afterwards on the IDENTICAL committed tree
+# came back at 52.37 ms p99 against the 28.69 it had measured twenty minutes earlier. p50 barely
+# moved; the tail was destroyed. A blown tail with a healthy median and pinned, cool clocks is the
+# signature.
+#
+# Named processes are excluded because they are this script's own work; everything else above the
+# threshold is a competitor, whoever started it.
+foreign_busy() {
+    ps -eo pcpu,comm --no-headers 2>/dev/null | awk '
+        $1 > 50 && $2 !~ /^(the_block|lit_rooms|destructible_wall|rime_|nvidia-smi|perf\.sh)/ {
+            printf "  %s at %s%% CPU\n", $2, $1
+        }'
+}
+
+check_box_quiet() {
+    local busy; busy="$(foreign_busy)"
+    [ -z "$busy" ] && return 0
+    cat >&2 <<EOF
+perf.sh: this machine is not idle — something else is using the CPU.
+
+${busy}
+
+  These samples are CPU-bound, so another process at full tilt does not merely slow the run, it
+  moves the TAIL while leaving the median about where it was — which is indistinguishable from a
+  real regression in the committed report.
+
+  Wait for the box to go quiet, or set RIME_PERF_ALLOW_BUSY_BOX=1 to measure anyway and say so in
+  the PR, because the numbers are not comparable against a report taken on an idle machine.
+EOF
+    return 1
+}
+
 if [ -z "${RIME_PERF_ALLOW_UNPINNED_CLOCKS:-}" ]; then
     check_gpu_clocks || exit 3
+fi
+if [ -z "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
+    check_box_quiet || exit 4
 fi
 
 bin="build/${preset}/bin"
@@ -205,6 +246,17 @@ run_one() {
     fi
 }
 
+# Checking once, before the run, would have caught today's case only by luck: the contention began
+# part-way through a series. So the box is watched for the WHOLE run and a report measured against a
+# competitor is failed rather than filed — the same ruling as an incomparable baseline, applied to a
+# machine that stopped being fit to measure half-way through.
+contention_log="$(mktemp)"
+if [ -z "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
+    ( while true; do foreign_busy; sleep 2; done ) > "$contention_log" 2>/dev/null &
+    contention_watcher=$!
+    trap 'kill "$contention_watcher" 2>/dev/null' EXIT
+fi
+
 case "$sample" in
     lit-rooms)         run_one lit_rooms 11-lit-rooms ;;
     destructible-wall) run_one destructible_wall 10-destructible-wall ;;
@@ -220,6 +272,20 @@ case "$sample" in
         ;;
     *) echo "perf.sh: unknown sample '$sample' (try --help)" >&2; exit 2 ;;
 esac
+
+if [ -n "${contention_watcher:-}" ]; then
+    kill "$contention_watcher" 2>/dev/null || true
+    trap - EXIT
+    if [ -s "$contention_log" ]; then
+        echo "" >&2
+        echo "perf.sh: THE BOX DID NOT STAY IDLE. These reports are not trustworthy:" >&2
+        sort -u "$contention_log" | head -10 >&2
+        echo "  Re-run once the machine is free. A number measured against a competitor for the" >&2
+        echo "  CPU is a measurement of the competitor." >&2
+        status=1
+    fi
+fi
+rm -f "$contention_log"
 
 if [ "$status" -ne 0 ]; then
     echo "perf.sh: at least one run failed its perf gate." >&2
