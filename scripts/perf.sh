@@ -250,12 +250,17 @@ run_one() {
 # part-way through a series. So the box is watched for the WHOLE run and a report measured against a
 # competitor is failed rather than filed — the same ruling as an incomparable baseline, applied to a
 # machine that stopped being fit to measure half-way through.
+#
+# The watcher runs even when RIME_PERF_ALLOW_BUSY_BOX is set. The override is a decision to measure
+# a busy machine anyway; it is not a decision to stop KNOWING the machine was busy. Gating the
+# watch on the same variable as the refusal made every overridden run report itself as clean — so
+# the one strategy the override exists for ("run repeatedly through someone else's build, keep the
+# runs that happened to land in a gap") could not tell a gap from a collision. Overridden, a dirty
+# run is reported and not failed; unoverridden, it is failed.
 contention_log="$(mktemp)"
-if [ -z "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
-    ( while true; do foreign_busy; sleep 2; done ) > "$contention_log" 2>/dev/null &
-    contention_watcher=$!
-    trap 'kill "$contention_watcher" 2>/dev/null' EXIT
-fi
+( while true; do foreign_busy; sleep 2; done ) > "$contention_log" 2>/dev/null &
+contention_watcher=$!
+trap 'kill "$contention_watcher" 2>/dev/null' EXIT
 
 case "$sample" in
     lit-rooms)         run_one lit_rooms 11-lit-rooms ;;
@@ -282,7 +287,14 @@ if [ -n "${contention_watcher:-}" ]; then
         sort -u "$contention_log" | head -10 >&2
         echo "  Re-run once the machine is free. A number measured against a competitor for the" >&2
         echo "  CPU is a measurement of the competitor." >&2
-        status=1
+        if [ -z "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
+            status=1
+        else
+            echo "  (RIME_PERF_ALLOW_BUSY_BOX is set, so this is a warning and not a failure —" >&2
+            echo "   discard this run yourself, or say in the PR why it stands.)" >&2
+        fi
+    elif [ -n "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
+        echo "perf.sh: RIME_PERF_ALLOW_BUSY_BOX was set, but the box stayed idle for the whole run."
     fi
 fi
 rm -f "$contention_log"
