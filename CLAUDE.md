@@ -153,7 +153,10 @@ Verify proportionately to the change — don't re-run the whole world for every 
   holding a `std::vector<std::pair<std::string, T>>` — legal-looking, accepted by libstdc++, and
   ill-formed (`std::vector` permits an incomplete element type; `std::pair` does not). A
   GCC-only loop cannot see that class of bug. Reconstruct the flags from
-  `build/dev/compile_commands.json` so the check uses the real include paths.
+  `build/dev/compile_commands.json` so the check uses the real include paths. On this workstation (clang 22 +
+  libstdc++ 16) a **test** TU needs `-Wno-c2y-extensions -Wno-#warnings` added, or doctest's own
+  `__COUNTER__` and its `<ciso646>` include bury your diff under ~15 `-Werror` errors that fire on
+  every untouched test file too — check an untouched file before believing the report.
 - **A `.ps1` is only verified by RUNNING it under `powershell.exe`** — a parse check is not the
   proof. Why, and the 10 weeks `setup.ps1` was dead: [`scripts/CLAUDE.md`](scripts/CLAUDE.md).
 - **A red `format, lint & license` on a PR that touched no Rust is probably not yours.** CI pins
