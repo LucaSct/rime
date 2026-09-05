@@ -99,15 +99,27 @@ check_gpu_clocks() {
         [ $(( $2 * 2 )) -ge "$3" ] && return 0
         printf '  %s clock: %s MHz of %s MHz max\n' "$1" "$2" "$3"
     }
-    unpinned+="$(domain_unpinned graphics "$cur_gr"  "$max_gr")"
-    unpinned+="$(domain_unpinned memory   "$cur_mem" "$max_mem")"
+    # Joined with an explicit newline: $(...) strips the trailing one, so appending both straight
+    # into a string printed two flagged domains on a single line.
+    local gr_line mem_line
+    gr_line="$(domain_unpinned graphics "$cur_gr" "$max_gr")"
+    mem_line="$(domain_unpinned memory "$cur_mem" "$max_mem")"
+    if [ -n "$gr_line" ] && [ -n "$mem_line" ]; then
+        unpinned="${gr_line}"$'\n'"${mem_line}"
+    else
+        unpinned="${gr_line}${mem_line}"
+    fi
     [ -z "$unpinned" ] && return 0
 
     # Deliberately BELOW the maximum boost clock for the core. Pinning at max invites the thermal
     # governor to take over instead of the idle one, which reintroduces exactly the variance being
     # removed; a clock the card can hold indefinitely is what makes two runs comparable. Memory gets
     # no such treatment — GDDR6 has one supported clock on this class of card, and it is the top one.
-    local pin=$(( max_gr * 85 / 100 ))
+    # Only arithmetic on a number. A domain can report [N/A] (a vGPU, a locked-down driver), and
+    # `$(( ))` on a non-numeric string yields 0 — printing a recipe that says `-lgc 0,0`.
+    local pin="<85% of the max graphics clock>"
+    case "$max_gr" in ''|*[!0-9]*) ;; *) pin=$(( max_gr * 85 / 100 )) ;; esac
+    case "$max_mem" in ''|*[!0-9]*) max_mem="<max memory clock>" ;; esac
     cat >&2 <<EOF
 perf.sh: the GPU is not clock-pinned.
 
@@ -145,14 +157,82 @@ EOF
 #
 # Named processes are excluded because they are this script's own work; everything else above the
 # threshold is a competitor, whoever started it.
+#
+# TWO THINGS THIS GETS RIGHT THAT THE OBVIOUS `ps -eo pcpu,comm` VERSION DID NOT.
+#
+# It samples an INTERVAL. `ps`'s %CPU is cputime/elapsed over the process's whole LIFETIME, which
+# is the wrong question twice over: a long-lived process (an editor's language server, a browser,
+# a sibling session's node) that starts spinning right now climbs towards 50 over minutes and may
+# never reach it during a 20-second run, while a process that burned a core an hour ago and has
+# been idle since still reads high and fails an innocent run. Deltas of utime+stime over one second
+# are the instantaneous number the guard is actually asking for.
+#
+# And it compares against TRUNCATED names. The kernel stores comm in 16 bytes, so `ps -o comm`
+# prints at most 15 characters: this script's own `destructible_wall` (17) appears as
+# `destructible_wa` and an allow-list containing the full name never matches it — which would have
+# made every `--sample destructible-wall` and every `--sample all` run report ITSELF as a
+# competitor and fail. Found in review before the path was ever exercised, because the reports
+# committed so far predate the watcher.
+foreign_mine="the_block lit_rooms destructible_wall rime_ nvidia-smi perf.sh"
+
+# Linux only today: the sampler reads /proc. Kept as its own predicate so that "no contention was
+# detected" and "contention could not be detected" are never the same answer — an absent sampler
+# produces an empty log, and an empty log is exactly what a quiet machine looks like.
+foreign_sampler_available() { [ -r /proc/stat ]; }
+
 foreign_busy() {
-    ps -eo pcpu,comm --no-headers 2>/dev/null | awk '
-        $1 > 50 && $2 !~ /^(the_block|lit_rooms|destructible_wall|rime_|nvidia-smi|perf\.sh)/ {
-            printf "  %s at %s%% CPU\n", $2, $1
-        }'
+    if ! foreign_sampler_available; then
+        return 0
+    fi
+    local hz; hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+    local a b; a="$(mktemp)"; b="$(mktemp)"
+    proc_cpu_snapshot > "$a"; sleep 1; proc_cpu_snapshot > "$b"
+    awk -v hz="$hz" -v mine="$foreign_mine" '
+        BEGIN { n = split(mine, m, " ") }
+        NR == FNR { was[$1] = $3; next }
+        {
+            d = $3 - (($1 in was) ? was[$1] : $3)   # a process born during the window: no delta
+            if (d <= 0) next
+            pct = 100.0 * d / hz                    # one second of wall clock per sample pair
+            if (pct <= 50) next
+            for (i = 1; i <= n; ++i) {
+                # comm is truncated to 15 chars, so compare against a truncated allow-list entry.
+                if (index($2, substr(m[i], 1, 15)) == 1) next
+            }
+            printf "  %s at %.0f%% CPU\n", $2, pct
+        }' "$a" "$b"
+    rm -f "$a" "$b"
+}
+
+# pid, comm, cpu-ticks — one line per process, from ONE awk. Deliberately not a shell loop over
+# `/proc/*/stat`: that forks a process per process, twice a second, inside the very measurement it
+# is supposed to leave undisturbed. A watcher that costs a core is a competitor.
+proc_cpu_snapshot() {
+    awk 'BEGIN {
+        while (("ls -d /proc/[0-9]*/stat 2>/dev/null" | getline f) > 0) {
+            if ((getline line < f) > 0) {
+                n = split(line, F, " ")
+                # utime and stime are the 12th and 13th fields AFTER comm. Indexed from the closing
+                # paren rather than from the start, because comm may itself contain spaces.
+                base = 0
+                for (i = 1; i <= n; ++i) if (F[i] ~ /\)$/) { base = i; break }
+                if (base > 0) {
+                    comm = F[2]; sub(/^\(/, "", comm); sub(/\)$/, "", comm)
+                    print F[1], comm, F[base + 12] + F[base + 13]
+                }
+            }
+            close(f)
+        }
+    }'
 }
 
 check_box_quiet() {
+    if ! foreign_sampler_available; then
+        echo "perf.sh: this platform has no /proc, so the CPU-contention guard is INACTIVE." >&2
+        echo "  Nothing here can tell you the box was idle — check it yourself before believing" >&2
+        echo "  the numbers, and say in the PR that the run was unguarded." >&2
+        return 0
+    fi
     local busy; busy="$(foreign_busy)"
     [ -z "$busy" ] && return 0
     cat >&2 <<EOF
@@ -191,11 +271,17 @@ if ! git diff --quiet HEAD 2>/dev/null; then
 fi
 export RIME_PERF_COMMIT="$sha"
 
+# EVERY run writes to a staging directory first, `--commit` or not. The verdict on whether the box
+# stayed idle only exists once the run is over, and `run_one` writes its report before that — so
+# committing straight into docs/perf/ meant a contaminated run failed with exit 1 AND left the
+# contaminated report filed, overwriting the good one it was meant to be compared against. The
+# comment above says "failed rather than filed"; this is what makes that true.
+outdir="$(mktemp -d)"
 if [ "$commit" -eq 1 ]; then
-    outdir="docs/perf"
-    mkdir -p "$outdir"
+    final_dir="docs/perf"
+    mkdir -p "$final_dir"
 else
-    outdir="$(mktemp -d)"
+    final_dir=""
     echo "perf.sh: writing to ${outdir} (pass --commit to write into docs/perf/)"
 fi
 date_tag="$(date -u +%Y-%m-%d)"
@@ -230,9 +316,12 @@ run_one() {
     local slug; slug="$(slug_of "$gpu")"
 
     local out="${outdir}/${date_tag}-${name}-${slug}.json"
+    # Exclude the report this run is about to FILE, not the staging path — otherwise a second run
+    # on the same date would judge itself against the copy of itself it is about to replace.
+    local self="${baseline_dir}/${date_tag}-${name}-${slug}.json"
     local latest
     latest="$(ls -1 "${baseline_dir}"/*-"${name}"-"${slug}".json 2>/dev/null \
-              | grep -vxF -- "$out" | tail -1 || true)"
+              | grep -vxF -- "$self" | tail -1 || true)"
 
     echo "── ${name} on ${gpu} ──"
     if [ -n "$latest" ]; then
@@ -278,7 +367,22 @@ case "$sample" in
     *) echo "perf.sh: unknown sample '$sample' (try --help)" >&2; exit 2 ;;
 esac
 
+contended=0
 if [ -n "${contention_watcher:-}" ]; then
+    # A DEAD WATCHER MUST NOT READ AS AN IDLE BOX. The watch is a subshell; if it ever died — a
+    # failed `ps`, an OOM kill, a stray signal — its log is empty, and an empty log is exactly what
+    # "the machine stayed quiet" looks like. So its liveness is checked before its silence is
+    # believed, and an absent watcher is reported as unknown rather than as clean.
+    if ! foreign_sampler_available; then
+        echo "" >&2
+        echo "perf.sh: the box was NOT watched (no sampler on this platform)." >&2
+        echo "  The reports are filed, but nothing checked for a competitor for the CPU." >&2
+    elif ! kill -0 "$contention_watcher" 2>/dev/null; then
+        echo "" >&2
+        echo "perf.sh: the contention watcher died during this run — the box was NOT watched." >&2
+        echo "  Treat these reports as unverified for CPU contention and re-run." >&2
+        contended=1
+    fi
     kill "$contention_watcher" 2>/dev/null || true
     trap - EXIT
     if [ -s "$contention_log" ]; then
@@ -287,6 +391,7 @@ if [ -n "${contention_watcher:-}" ]; then
         sort -u "$contention_log" | head -10 >&2
         echo "  Re-run once the machine is free. A number measured against a competitor for the" >&2
         echo "  CPU is a measurement of the competitor." >&2
+        contended=1
         if [ -z "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
             status=1
         else
@@ -298,6 +403,22 @@ if [ -n "${contention_watcher:-}" ]; then
     fi
 fi
 rm -f "$contention_log"
+
+# File the staged reports — or don't. A report the box was not quiet for is left where it was
+# written and named, so it can still be looked at, but it does not become the committed history.
+if [ -n "$final_dir" ]; then
+    if [ "$contended" -eq 0 ] || [ -n "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
+        for f in "$outdir"/*.json; do
+            [ -e "$f" ] || continue
+            mv "$f" "$final_dir/"
+            echo "  filed $final_dir/$(basename "$f")"
+        done
+    else
+        echo "" >&2
+        echo "perf.sh: NOT filing into ${final_dir} — the box was not quiet for this run." >&2
+        echo "  The reports are in ${outdir} if you want to look at them." >&2
+    fi
+fi
 
 if [ "$status" -ne 0 ]; then
     echo "perf.sh: at least one run failed its perf gate." >&2
