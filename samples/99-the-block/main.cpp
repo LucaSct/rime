@@ -1906,9 +1906,15 @@ int run_perf(const std::filesystem::path& cooked,
                                "frame.submit.per_frame"});
     report.declare_accounting("sim.block", {"physics.step.per_frame"});
 
-    std::vector<core::PassTiming> passes;
-    std::uint64_t passes_frame = 0;
-    bool passes_pending = false;
+    // Deliveries QUEUE rather than overwrite, and are drained after the loop rather than inside it.
+    // A single slot consumed in the loop body loses the tail: pipelined, the frames still in flight
+    // when the loop ends are retired by `finish_gpu()` AFTERWARDS, so their timings arrive with
+    // nothing left to consume them — and arrive within one call, so each would overwrite the last
+    // anyway. At `--pipelined 2` that silently cost every per-pass distribution two of its samples
+    // and left the worst frame's breakdown empty whenever the worst frame was one of the last two.
+    // (Blocking, timings resolve inline in the same frame and none were ever lost, which is exactly
+    // why the default path could not see this.)
+    std::vector<std::pair<std::uint64_t, std::vector<core::PassTiming>>> passes_queue;
     bool timestamps_seen = false;
     // The HIGH WATER MARK across the run, not the last frame's count (m17.3b). Which passes a frame
     // declares varies — local shadows only re-render invalidated slots — so testing the final
@@ -1929,13 +1935,15 @@ int run_perf(const std::filesystem::path& cooked,
     // which is why nothing below keys on the loop counter.
     demo.app.on_frame_timings(
         [&](std::uint64_t index, std::span<const render::RenderGraph::PassTiming> timings) {
-            passes.clear();
+            if (timings.empty())
+                return;
+            std::vector<core::PassTiming> owned;
+            owned.reserve(timings.size());
             for (const render::RenderGraph::PassTiming& t : timings) {
-                passes.push_back(core::PassTiming{t.name, t.gpu_ms});
+                owned.push_back(core::PassTiming{t.name, t.gpu_ms});
                 timestamps_seen = true;
             }
-            passes_frame = index;
-            passes_pending = !passes.empty();
+            passes_queue.emplace_back(index, std::move(owned));
         });
     demo.app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer&) {
         // The declared-pass high-water still needs the graph itself, and this fires only on the
@@ -2022,17 +2030,24 @@ int run_perf(const std::filesystem::path& cooked,
             report.observe("sim.collapse", sim_ms);
         }
         report.observe_frame(static_cast<std::uint64_t>(i), ms);
-        // The passes go in SEPARATELY, keyed by the frame they belong to. Handing them to the
-        // observe_frame above would be right under `submit_blocking` and wrong pipelined, where
-        // what just arrived describes a frame two back — and it is recorded after, not before, so
-        // the worst-frame record exists to receive its own breakdown.
-        if (passes_pending && passes_frame >= frame_base) {
-            report.observe_passes(passes_frame - frame_base, passes);
-            passes_pending = false;
-        }
     }
     zones.stop();
+    // Drains the ring, delivering the timings of every frame still in flight — which is why the
+    // queue is drained AFTER this and not in the loop.
     demo.app.finish_gpu();
+
+    // The passes go in SEPARATELY, keyed by the frame they belong to. Handing them to observe_frame
+    // would be right under `submit_blocking` and wrong pipelined, where what arrives describes a
+    // frame two back. Recorded after every observe_frame, so the worst-frame record already exists
+    // to receive its own breakdown, whichever frame turned out to be the worst.
+    //
+    // `index` is the Application's frame counter and `i` was the loop's; they differ by the warmup,
+    // which is what frame_base subtracts. A frame below frame_base is a warmup frame and is
+    // dropped.
+    for (const auto& [index, timings] : passes_queue) {
+        if (index >= frame_base)
+            report.observe_passes(index - frame_base, timings);
+    }
 
     // The ledger travels WITH the timings, so a report can never be read as "fast" without also
     // being read as "…and here is the work it did" (ADR-0035 §2b's vacuity guard). A run that was
