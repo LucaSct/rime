@@ -1011,6 +1011,7 @@ void PhysicsWorld::step(float dt) {
     // at stage 4) reactivates the whole island, and reactivated bodies restart their sleep timer.
     // With sleeping disabled no body is ever asleep, so every island is active — same code path.
     std::vector<std::uint8_t> active(isl.island_count, 1);
+    std::size_t active_count = 0;
     {
         RIME_PROFILE_ZONE("physics.wake");
         for (std::size_t k = 0; k < isl.island_count; ++k) {
@@ -1022,6 +1023,7 @@ void PhysicsWorld::step(float dt) {
                 }
             }
             active[k] = any_awake ? std::uint8_t{1} : std::uint8_t{0};
+            active_count += any_awake ? 1u : 0u;
             if (any_awake) {
                 for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
                     const std::uint32_t b = isl.bodies[bi];
@@ -1073,15 +1075,22 @@ void PhysicsWorld::step(float dt) {
     // accumulation, so a zone on a worker would serialize the parallel region it is measuring.
     {
         RIME_PROFILE_ZONE("physics.solve");
-        if (p.jobs != nullptr && isl.island_count > 1) {
+        // The gate is the ACTIVE island count, not the island count (m17.5). An asleep island is a
+        // no-op inside solve_island, so a tick holding one awake pile beside fifty resting ones has
+        // exactly one island's worth of work and no way to divide it — dispatching it still costs a
+        // parallel_for's full wake-and-join across every worker, paid for nothing. That case is not
+        // rare in a destruction scene: it is what most of a collapse's aftermath looks like.
+        if (p.jobs != nullptr && active_count > 1) {
             // Over-decompose to ~4 chunks per participant so work-stealing balances the (wildly
             // uneven) island sizes. Any chunking is correct — islands are independent — so the
             // RESULT never depends on the chunk size or the worker count, only the timing does.
+            // Chunked over ALL islands, because solve_island is indexed by island: the asleep ones
+            // return immediately and work-stealing absorbs the empty chunks.
             const std::size_t participants = p.jobs->participant_count();
             const std::size_t chunk = std::max<std::size_t>(
                 1, (isl.island_count + participants * 4 - 1) / (participants * 4));
             p.jobs->parallel_for(isl.island_count, chunk, solve_island);
-            p.parallel_islands_last = static_cast<std::uint32_t>(isl.island_count);
+            p.parallel_islands_last = static_cast<std::uint32_t>(active_count);
         } else {
             for (std::size_t k = 0; k < isl.island_count; ++k) {
                 solve_island(k);

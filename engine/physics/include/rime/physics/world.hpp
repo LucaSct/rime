@@ -136,13 +136,18 @@ struct WorldStats {
     // largest_active_island is the tail a load balancer actually watches: Amdahl's serial fraction
     // of this tick's solve, against active_islands as the width available to divide it.
     //
-    // islands_solved_parallel records the HANDOFF rather than a value: how many islands were handed
-    // to the job system this tick, and 0 whenever the solve ran on the calling thread (no job
-    // system, or a single island not worth dispatching). It exists because set_job_system() takes a
-    // nullable pointer nobody is obliged to call, so "we parallelised the solve and it did not
-    // help" and "the solve was never parallelised" otherwise produce the identical report — and
-    // 99-the-block, the one sample M13's frame-rate clause is about, spent its whole life in the
-    // second state while looking like the first.
+    // islands_solved_parallel records the HANDOFF rather than a value: how many islands the job
+    // system actually solved this tick, and 0 whenever the solve ran on the calling thread (no job
+    // system, or too little width to be worth dispatching). It exists because set_job_system()
+    // takes a nullable pointer nobody is obliged to call, so "we parallelised the solve and it did
+    // not help" and "the solve was never parallelised" otherwise produce the identical report —
+    // and 99-the-block, the one sample M13's frame-rate clause is about, spent its whole life in
+    // the second state while looking like the first.
+    //
+    // It counts ACTIVE islands, so it is bounded by active_islands and not merely by islands. That
+    // distinction is the whole value of the number: a tick that hands fifty sleeping piles and one
+    // awake one to the pool has dispatched fifty-one islands and parallelised nothing, and a
+    // counter that reported fifty-one would say the solve went wide on a tick that could not.
     std::uint32_t largest_active_island = 0;
     std::uint32_t islands_solved_parallel = 0;
 };
