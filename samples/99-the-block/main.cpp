@@ -337,10 +337,27 @@ struct Peer {
     ecs::World world;
     physics::PhysicsWorld physics;
     physics::PhysicsSync sync;
-    core::JobSystem jobs{0};
     destruction::DestructionWorld destruction;
     std::unordered_map<std::uint64_t, destruction::PatternId> patterns;
     MeasuredScene measured;
+
+    // HAND THE PHYSICS A JOB SYSTEM (m17.5). Without this pointer `PhysicsWorld` takes the
+    // sequential island solve — same answer, one thread — and it had been taking it here since the
+    // demo was written: each peer owned a job system and spent it only on
+    // `ecs::propagate_transforms`. `09-physics-playground` and `10-destructible-wall` both wire it;
+    // the one sample M13's frame-rate clause is actually about did not.
+    //
+    // BORROWED, one per process, which is what `set_job_system` documents ("the engine constructs
+    // one job system and hands it to every subsystem") and what this demo got wrong twice over: a
+    // Peer that owned one meant TWO, each sized to the machine, so a 32-core box ran ~62 workers.
+    // Wiring them naively that way measured SLOWER than no job system at all (frame p99 28.69 ->
+    // 30.51 ms) — the parallel solve was real, and it was competing with itself.
+    //
+    // It is a nullable pointer, which is what let the original omission be silent: nothing fails,
+    // nothing warns, the solve is just slower. Hence `physics.job_workers` in the work ledger — a
+    // report that records the work but not the wiring cannot tell "parallelism did not help" from
+    // "parallelism was never switched on".
+    void use_jobs(core::JobSystem& shared) { physics.set_job_system(&shared); }
 
     [[nodiscard]] bool register_patterns(const std::filesystem::path& cooked,
                                          destruction_render::PartLeafRenderer* leaves = nullptr,
@@ -593,6 +610,10 @@ struct ClientPeer : Peer {
 // latency and loss are real numbers though — 80 ms RTT and 5% loss — so the prediction path is
 // genuinely exercised rather than bypassed by a zero-latency link.
 struct Session {
+    // Declared FIRST so it is destroyed LAST: both peers' PhysicsWorlds hold a borrowed pointer to
+    // it, and members die in reverse declaration order.
+    core::JobSystem jobs{0};
+
     net::ScriptedNetwork network;
     net::Endpoint server_endpoint{0x7F000001u, 7901};
     ServerPeer server;
@@ -608,6 +629,28 @@ struct Session {
     // Running maxima the proof reads. Peaks, not final values: a budget is about the worst moment.
     std::size_t peak_live_debris = 0;
     std::size_t peak_visual_debris = 0;
+    // The solver's PARALLELISM, not just its cost (m17.5). `physics.solve` being slow says nothing
+    // about whether it CAN be spread: active-island count is the width available and the largest
+    // ACTIVE island is the critical path through it, and a block that is still mostly one connected
+    // building is one enormous island no number of workers can divide. Recorded so the report
+    // answers that instead of inviting the guess.
+    //
+    // Two forms, because they answer different questions and only one of them is honest about a
+    // p99. The peaks bound the whole run; `worst_tick_stats` is the structure of the single most
+    // expensive server tick, which is what a tail budget is actually about. Independent maxima
+    // cannot be combined — "106 islands at some moment" and "an island of 612 at some moment" say
+    // nothing about any one frame, and reading them as if they did is how a 3x parallel ceiling
+    // gets inferred from a run that never had one.
+    std::uint32_t peak_islands = 0;
+    std::uint32_t peak_largest_island = 0;
+    double worst_server_ms = 0.0;
+    physics::WorldStats worst_tick_stats{};
+    // Ticks whose solve actually went through the job system. THE HANDOFF, not the value: a pool
+    // reporting 32 workers proves a pool exists, not that anything was ever handed to it, and
+    // `set_job_system` is a nullable pointer nobody is obliged to call. This counter is 0 for the
+    // entire run if the wiring is missing, which is the only way the report can tell "parallelism
+    // did not help here" from "parallelism was never switched on".
+    std::uint64_t ticks_solved_parallel = 0;
     destruction::BindStats client_bound{};
 
     // The two halves of a tick, timed apart (m13.p). This demo is a server AND a client in one
@@ -632,7 +675,11 @@ struct Session {
     std::uint64_t lethal_ops = 0; // ops that killed their part outright
     std::uint64_t total_ops = 0;
 
-    explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {}
+    explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {
+        // Both peers solve on the SAME job system (m17.5) — see Peer::use_jobs.
+        server.use_jobs(jobs);
+        client.use_jobs(jobs);
+    }
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked,
                              std::string_view scene_path,
@@ -754,7 +801,7 @@ struct Session {
         }
 
         const core::Stopwatch client_watch;
-        ecs::propagate_transforms(client.world, client.jobs);
+        ecs::propagate_transforms(client.world, jobs);
         // Stand up whatever replication just delivered, BEFORE anything can damage it. Idempotent,
         // so this is one query on the overwhelming majority of ticks where nothing new arrived.
         client_bound = client.bind(destruction::Authority::Remote);
@@ -818,7 +865,7 @@ struct Session {
         const core::Stopwatch server_watch;
         server.world.advance_version();
         server.gameplay.consume(server.world, server.physics, server.input, kDt);
-        ecs::propagate_transforms(server.world, server.jobs);
+        ecs::propagate_transforms(server.world, jobs);
         server.sync.reconcile(server.world, server.physics);
         server.sync.push_in(server.world, server.physics, kDt);
         server.physics.step(kDt);
@@ -893,6 +940,14 @@ struct Session {
         peak_live_debris =
             std::max(peak_live_debris, live_debris(server.destruction, server.physics));
         peak_visual_debris = std::max(peak_visual_debris, server.destruction.visual_debris_count());
+        const physics::WorldStats ps = server.physics.stats();
+        peak_islands = std::max(peak_islands, ps.active_islands);
+        peak_largest_island = std::max(peak_largest_island, ps.largest_active_island);
+        ticks_solved_parallel += (ps.islands_solved_parallel > 0) ? 1u : 0u;
+        if (last_server_ms > worst_server_ms) {
+            worst_server_ms = last_server_ms;
+            worst_tick_stats = ps;
+        }
     }
 
     // Parts still standing, per building. A single total cannot tell a LOCAL collapse from a global
@@ -2070,6 +2125,21 @@ int run_perf(const std::filesystem::path& cooked,
     ledger.set("shadow.spot_maps", demo.visuals->spot_maps_total);
     ledger.set("net.max_batches_per_tick", demo.session.max_batches_per_tick);
     ledger.set("net.client_physics_steps", demo.session.total_client_steps);
+    ledger.set("physics.active_islands_peak", demo.session.peak_islands);
+    ledger.set("physics.largest_active_island_peak", demo.session.peak_largest_island);
+    // The structure of the tick the tail is made of — width available, and the serial island
+    // through it — rather than two maxima from two different moments.
+    ledger.set("physics.worst_tick_active_islands", demo.session.worst_tick_stats.active_islands);
+    ledger.set("physics.worst_tick_largest_island",
+               demo.session.worst_tick_stats.largest_active_island);
+    // Whether the solve was even ALLOWED to go wide, and whether it actually went. A ledger that
+    // records the work but not the wiring cannot distinguish "parallelism did not help" from
+    // "parallelism was never switched on" — the exact confusion that let this demo run its solver
+    // single-threaded unnoticed. `job_workers` is the pool; `solve_parallel_ticks` is the handoff,
+    // and only the second one can fall to zero when the wiring is dropped.
+    ledger.set("physics.job_workers",
+               static_cast<std::uint64_t>(demo.session.jobs.participant_count()));
+    ledger.set("physics.solve_parallel_ticks", demo.session.ticks_solved_parallel);
     report.set_ledger(ledger);
 
     core::PerfGate gate;
