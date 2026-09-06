@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "rime/core/math/quat.hpp"
@@ -263,6 +264,23 @@ public:
     // ADR-0026; see world_hash()). The world does not take ownership — the engine owns the one job
     // system and hands it to each subsystem.
     void set_job_system(core::JobSystem* jobs) noexcept;
+
+    // Tag this world's profile zones, so a process running more than one can tell them apart
+    // (m17.5). With a label the twelve step zones report as `physics.<label>.<stage>`; without one
+    // — the default — they keep the original `physics.<stage>` names, so nothing that has not asked
+    // for a label sees any change to its report or its committed baseline.
+    //
+    // It exists because a merged distribution cannot be optimised. `99-the-block` runs an
+    // authoritative server AND a predicting client in one process; the client re-simulates on
+    // bounded catch-up and costs roughly twice what the server does, so a single `physics.step`
+    // timeline is one shape belonging to neither of them — while `sim.client`/`sim.server`, timed
+    // by the demo, split the very same work. The two decompositions did not compose, which is
+    // exactly the state in which "the narrowphase is the hot spot" gets quoted as measured.
+    //
+    // Cheap and not hot: the names are composed once here, not per step. Call it before the first
+    // step() a report will read; calling it mid-run simply renames the zones from that point on,
+    // which splits one world's timeline across two keys.
+    void set_profile_label(std::string_view label);
 
     // Enable or disable sleeping (on by default). A resting island deactivates so it costs nothing
     // to step; disabling immediately wakes every body — useful for a test that wants pure

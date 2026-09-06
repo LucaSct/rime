@@ -753,6 +753,13 @@ struct Session {
         // Both peers solve on the SAME job system (m17.5) — see Peer::use_jobs.
         server.use_jobs(jobs);
         client.use_jobs(jobs);
+        // …and report their step zones apart. Until this, `physics.step` was one distribution over
+        // two simulations: an authoritative server and a client that re-simulates on catch-up and
+        // costs roughly twice as much. `sim.client`/`sim.server` already split the same work, so
+        // the report carried two decompositions that did not compose — and the merged one is the
+        // shape m17.5 would otherwise have gone off and optimised.
+        server.physics.set_profile_label("server");
+        client.physics.set_profile_label("client");
     }
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked,
@@ -2039,7 +2046,11 @@ int run_perf(const std::filesystem::path& cooked,
                                "frame.declare.per_frame",
                                "frame.execute.per_frame",
                                "frame.submit.per_frame"});
-    report.declare_accounting("sim.block", {"physics.step.per_frame"});
+    // Both worlds, because the tick runs both and the accounting must add up to the tick. Naming
+    // only one leaves the other as unaccounted residual, which is the failure m17.3c's gate exists
+    // to catch — it would read as "the simulation spends 8 ms somewhere nobody named".
+    report.declare_accounting(
+        "sim.block", {"physics.server.step.per_frame", "physics.client.step.per_frame"});
 
     // Deliveries QUEUE rather than overwrite, and are drained after the loop rather than inside it.
     // A single slot consumed in the loop body loses the tail: pipelined, the frames still in flight

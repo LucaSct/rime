@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -59,6 +61,48 @@ constexpr float kChildCullMargin = 1e-3f;
 // `static_tree` (bodies that never move) and a `dynamic_tree` (dynamic/kinematic). Splitting them
 // means the static world is built once and only movers are ever re-inserted — and it makes "both
 // static" pairs (which we don't want) impossible by construction.
+// The step's profile zones, named once per WORLD rather than once per site (m17.5). A process can
+// run more than one PhysicsWorld — `99-the-block` runs a server and a predicting client, and the
+// client re-simulates, so it costs roughly twice what the server does — and with one set of names
+// `physics.*` is a single distribution over two simulations that are optimised differently. The
+// review that opened m17.5 named this as blocking: optimising the merged shape is optimising
+// something that belongs to neither world.
+//
+// Owned as strings because ScopedZone borrows a string_view for the life of the scope and the
+// composed name has to outlive it. Built once per label change, never per step.
+enum class StepZone : std::uint8_t {
+    Step,
+    IntegrateVelocity,
+    CcdSweep,
+    Contacts,
+    Constraints,
+    Islands,
+    Wake,
+    Solve,
+    Sleep,
+    Events,
+    Commit,
+    Stats,
+    Count,
+};
+
+constexpr std::string_view kStepZoneSuffix[] = {
+    "step",
+    "integrate_velocity",
+    "ccd_sweep",
+    "contacts",
+    "constraints",
+    "islands",
+    "wake",
+    "solve",
+    "sleep",
+    "events",
+    "commit",
+    "stats",
+};
+static_assert(std::size(kStepZoneSuffix) == static_cast<std::size_t>(StepZone::Count),
+              "every StepZone needs a name, or a zone silently reports as an empty string");
+
 struct PhysicsWorld::Impl {
     struct Slot {
         std::uint32_t dense = core::kInvalidSlotIndex; // kInvalidSlotIndex ⇒ free
@@ -131,6 +175,28 @@ struct PhysicsWorld::Impl {
     core::JobSystem* jobs = nullptr;
     bool sleeping_enabled = true;
     IslandSet islands;
+
+    // This world's profile-zone names (see StepZone). Unlabelled worlds keep the original
+    // `physics.<stage>` names, so every existing sample, test and committed baseline is unaffected
+    // — only a caller that asks for a label pays the rename.
+    std::array<std::string, static_cast<std::size_t>(StepZone::Count)> zone_names;
+
+    void set_zone_label(std::string_view label) {
+        for (std::size_t i = 0; i < zone_names.size(); ++i) {
+            std::string name = "physics.";
+            if (!label.empty()) {
+                name += label;
+                name += '.';
+            }
+            name += kStepZoneSuffix[i];
+            zone_names[i] = std::move(name);
+        }
+    }
+
+    [[nodiscard]] std::string_view zone(StepZone z) const noexcept {
+        return zone_names[static_cast<std::size_t>(z)];
+    }
+
     // How many islands the last step() handed to `jobs`; 0 when it solved them itself. The witness
     // that the parallel path was actually taken — see WorldStats::islands_solved_parallel.
     std::uint32_t parallel_islands_last = 0;
@@ -614,7 +680,9 @@ void PhysicsWorld::Impl::commit_contact_cache(const std::vector<Manifold>& manif
     contact_cache.swap(next);
 }
 
-PhysicsWorld::PhysicsWorld() : impl_(std::make_unique<Impl>()) {}
+PhysicsWorld::PhysicsWorld() : impl_(std::make_unique<Impl>()) {
+    impl_->set_zone_label({}); // the unlabelled `physics.<stage>` names, unchanged since m17.3b
+}
 
 PhysicsWorld::~PhysicsWorld() = default;
 
@@ -868,7 +936,7 @@ void PhysicsWorld::step(float dt) {
     //
     // With no sink installed each zone is two clock reads, one uncontended lock and an early
     // return, which is every shipping run and every CI run.
-    RIME_PROFILE_ZONE("physics.step");
+    RIME_PROFILE_ZONE(impl_->zone(StepZone::Step));
     Impl& p = *impl_;
     const std::size_t n = p.count();
     const auto is_dynamic = [&](std::size_t i) {
@@ -899,7 +967,7 @@ void PhysicsWorld::step(float dt) {
     // whole point of sleeping: a resting stack costs nothing. (Kinematic push-in is M7.6; the
     // gyroscopic ω×Iω term stays dropped, ADR-0026.)
     {
-        RIME_PROFILE_ZONE("physics.integrate_velocity");
+        RIME_PROFILE_ZONE(p.zone(StepZone::IntegrateVelocity));
         for (std::size_t i = 0; i < n; ++i) {
             if (!is_dynamic(i) || p.asleep[i] != 0) {
                 continue;
@@ -920,7 +988,7 @@ void PhysicsWorld::step(float dt) {
     // region; move_proxy adds the fat margin on top, and the stage-8 refit later restores the tight
     // box at the body's real resting position for external queries.
     if (dt > 0.0f) {
-        RIME_PROFILE_ZONE("physics.ccd_sweep");
+        RIME_PROFILE_ZONE(p.zone(StepZone::CcdSweep));
         for (std::size_t i = 0; i < n; ++i) {
             if (p.ccd[i] == 0 || !is_dynamic(i) || p.asleep[i] != 0) {
                 continue; // CCD only helps a moving, awake, dynamic body (see docs/design)
@@ -942,7 +1010,7 @@ void PhysicsWorld::step(float dt) {
     // prediction into a measurement — or refutes it.
     std::vector<Manifold> manifolds;
     {
-        RIME_PROFILE_ZONE("physics.contacts");
+        RIME_PROFILE_ZONE(p.zone(StepZone::Contacts));
         p.build_contacts(manifolds, dt);
     }
 
@@ -962,7 +1030,7 @@ void PhysicsWorld::step(float dt) {
     std::vector<ContactConstraint> constraints;
     constraints.reserve(manifolds.size());
     {
-        RIME_PROFILE_ZONE("physics.constraints");
+        RIME_PROFILE_ZONE(p.zone(StepZone::Constraints));
         for (std::size_t mi = 0; mi < manifolds.size(); ++mi) {
             const Manifold& m = manifolds[mi];
             const std::uint32_t da = p.dense_of(m.a);
@@ -997,7 +1065,7 @@ void PhysicsWorld::step(float dt) {
     // other constraints never touched them, so interleaving them or not cannot change the result.
     std::vector<ContactConstraint> ordered;
     {
-        RIME_PROFILE_ZONE("physics.islands");
+        RIME_PROFILE_ZONE(p.zone(StepZone::Islands));
         build_islands(n, p.motion, constraints, p.islands);
         ordered.resize(p.islands.constraints.size());
         for (std::size_t i = 0; i < p.islands.constraints.size(); ++i) {
@@ -1013,7 +1081,7 @@ void PhysicsWorld::step(float dt) {
     std::vector<std::uint8_t> active(isl.island_count, 1);
     std::size_t active_count = 0;
     {
-        RIME_PROFILE_ZONE("physics.wake");
+        RIME_PROFILE_ZONE(p.zone(StepZone::Wake));
         for (std::size_t k = 0; k < isl.island_count; ++k) {
             bool any_awake = false;
             for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
@@ -1074,7 +1142,7 @@ void PhysicsWorld::step(float dt) {
     // which the job system runs on workers. The zone sink is one global slot with no per-thread
     // accumulation, so a zone on a worker would serialize the parallel region it is measuring.
     {
-        RIME_PROFILE_ZONE("physics.solve");
+        RIME_PROFILE_ZONE(p.zone(StepZone::Solve));
         // The gate is the ACTIVE island count, not the island count (m17.5). An asleep island is a
         // no-op inside solve_island, so a tick holding one awake pile beside fifty resting ones has
         // exactly one island's worth of work and no way to divide it — dispatching it still costs a
@@ -1106,7 +1174,7 @@ void PhysicsWorld::step(float dt) {
     // velocities zeroed, and from next tick skipped. Sequential and deterministic, so sleeping
     // never perturbs the cross-thread world hash.
     if (p.sleeping_enabled) {
-        RIME_PROFILE_ZONE("physics.sleep");
+        RIME_PROFILE_ZONE(p.zone(StepZone::Sleep));
         constexpr float lin2 = kLinearSleepThreshold * kLinearSleepThreshold;
         constexpr float ang2 = kAngularSleepThreshold * kAngularSleepThreshold;
         for (std::size_t k = 0; k < isl.island_count; ++k) {
@@ -1148,7 +1216,7 @@ void PhysicsWorld::step(float dt) {
     // recorded `suppressed`: kept present (so it is not falsely reported as Ended — an asleep pair
     // never separated) but emitting no event, which is what makes a settled pile silent.
     {
-        RIME_PROFILE_ZONE("physics.events");
+        RIME_PROFILE_ZONE(p.zone(StepZone::Events));
         p.contact_cur.clear();
         for (const Manifold& m : manifolds) {
             const std::uint32_t da = p.dense_of(m.a);
@@ -1300,7 +1368,7 @@ void PhysicsWorld::step(float dt) {
     // islands did not move, so their proxies and the tree are left untouched; move_proxy mutates
     // the shared tree, so this stays sequential.
     {
-        RIME_PROFILE_ZONE("physics.commit");
+        RIME_PROFILE_ZONE(p.zone(StepZone::Commit));
         p.commit_contact_cache(manifolds);
         for (std::size_t k = 0; k < isl.island_count; ++k) {
             if (active[k] == 0) {
@@ -1320,7 +1388,7 @@ void PhysicsWorld::step(float dt) {
     // untouched, and the numbers themselves are thread-count-invariant (they derive only from the
     // canonical manifolds and the pure-function island partition). Cheap: one O(n) pass over the
     // bodies plus the O(manifolds)/O(islands) walks the tick already made.
-    RIME_PROFILE_ZONE("physics.stats");
+    RIME_PROFILE_ZONE(p.zone(StepZone::Stats));
     WorldStats& st = p.last_stats;
     st = WorldStats{};
     st.body_count = static_cast<std::uint32_t>(n);
@@ -1387,6 +1455,10 @@ void PhysicsWorld::compute_contacts(std::vector<Manifold>& out) const {
 
 std::uint32_t PhysicsWorld::contacts_warm_started_last() const noexcept {
     return impl_->warm_started_last;
+}
+
+void PhysicsWorld::set_profile_label(std::string_view label) {
+    impl_->set_zone_label(label);
 }
 
 void PhysicsWorld::set_job_system(core::JobSystem* jobs) noexcept {
