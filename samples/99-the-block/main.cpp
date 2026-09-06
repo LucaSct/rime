@@ -668,6 +668,17 @@ struct Session {
     TickSolve worst_tick_solve; // the most expensive one so far
     std::uint32_t max_active_islands = 0;
 
+    // Per-world POPULATION, because the split zones raised a question the split zones cannot
+    // answer. The two worlds' `physics.solve` costs the same per call (2.744 vs 2.737 ms — the
+    // same constraint load, as replication promises), while the client's `physics.contacts` costs
+    // 1.25x the server's. Contacts is broadphase + narrowphase, so the difference has to be in how
+    // many bodies each world carries into the pair search, not in how many actually touch. These
+    // are the two numbers that say so instead of inviting the inference.
+    std::uint32_t server_max_bodies = 0;
+    std::uint32_t client_max_bodies = 0;
+    std::uint32_t server_max_pairs = 0;
+    std::uint32_t client_max_pairs = 0;
+
     // One physics step, folded into this tick's total. Called from BOTH worlds — the client
     // re-simulates and the server does not, so a panel that saw only one of them described well
     // under half of the tick it was being used to explain.
@@ -735,6 +746,10 @@ struct Session {
         tick_solve = {};
         worst_tick_solve = {};
         max_active_islands = 0;
+        server_max_bodies = 0;
+        client_max_bodies = 0;
+        server_max_pairs = 0;
+        client_max_pairs = 0;
         server_parallel_steps = 0;
         client_parallel_steps = 0;
         peak_live_debris = 0;
@@ -939,6 +954,8 @@ struct Session {
                 const physics::WorldStats cs = client.physics.stats();
                 note_step(client_step_watch.elapsed_ms(), cs);
                 client_parallel_steps += (cs.islands_solved_parallel > 0) ? 1u : 0u;
+                client_max_bodies = std::max(client_max_bodies, cs.body_count);
+                client_max_pairs = std::max(client_max_pairs, cs.broadphase_pairs);
             }
             client.destruction.update(client.physics);
             ++batches_this_tick;
@@ -958,7 +975,12 @@ struct Session {
         server.sync.push_in(server.world, server.physics, kDt);
         const core::Stopwatch server_step_watch;
         server.physics.step(kDt);
-        note_step(server_step_watch.elapsed_ms(), server.physics.stats());
+        {
+            const physics::WorldStats ss = server.physics.stats();
+            note_step(server_step_watch.elapsed_ms(), ss);
+            server_max_bodies = std::max(server_max_bodies, ss.body_count);
+            server_max_pairs = std::max(server_max_pairs, ss.broadphase_pairs);
+        }
         server.sync.write_back(server.world, server.physics);
 
         // The weapon → destruction glue: the consumer's job, kept out of the engine so that
@@ -2240,6 +2262,10 @@ int run_perf(const std::filesystem::path& cooked,
     // The CEILING: the widest the solve ever got, in either world. Not to be combined with
     // anything below it — it is a different tick.
     ledger.set("physics.max_active_islands", demo.session.max_active_islands);
+    ledger.set("physics.server.max_bodies", demo.session.server_max_bodies);
+    ledger.set("physics.client.max_bodies", demo.session.client_max_bodies);
+    ledger.set("physics.server.max_broadphase_pairs", demo.session.server_max_pairs);
+    ledger.set("physics.client.max_broadphase_pairs", demo.session.client_max_pairs);
     // …and the tick the tail is made of, co-sampled. `min_islands` is the number that decides
     // whether a job system could have helped: it is the narrowest step in the most expensive tick,
     // and a 1 there means at least one of that tick's steps had nothing to divide.
