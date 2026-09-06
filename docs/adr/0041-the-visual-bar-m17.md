@@ -565,3 +565,118 @@ behind CPU work, with both runs producing a complete artifact.
   resolved, owned timings tagged with the frame they describe. The old hook remains for callers
   that want the graph itself; it simply does not fire on the pipelined path, and the block now says
   so out loud rather than printing the zero its unmeasured counter holds.
+
+## Amendment (2026-09-06, m17.5): the budget is earned, and two ladder entries change
+
+m17.5 is answered. Ruling 1 said the budget is earned before the bar is spent; this records what
+earning it cost, and the two consequences Luca ruled on afterwards.
+
+### What m17.5 found, in the order it found it
+
+Four candidate levers, each settled with an interleaved A/B on a clock-pinned, guarded box, and
+three of the four came back negative:
+
+| lever | result |
+|---|---|
+| wire the block's `PhysicsWorld` to a job system | **nothing** (+0.27%) |
+| gate the island dispatch on ACTIVE islands | nothing (+0.07%), kept for correctness |
+| force-inline `core::rotate` | **−19.6% on `physics.solve`**, bit-identical |
+| one physics step per TICK, not per destruction batch | **−6.4 ms `frame`, −6.7 ms `frame.player`** |
+
+**The job-system finding is the one worth keeping, because the obvious reading of it is wrong.**
+The previous amendment's finding 1 — the block never hands its `PhysicsWorld` a job system — was
+true, and wiring it changes nothing measurable. Not because there is no parallelism available: at
+the tick that sets the tail there are 25–31 active islands and every step is dispatched. It is that
+**~92% of the awake bodies are in ONE island** (602 of 656 when first measured, 628 of 678 on the
+committed baseline). Amdahl's ceiling on island-level parallelism there is **1.09×** — under a
+millisecond of a 29 ms frame, at the edge of the rig's run-to-run spread. A measurement finding
+nothing is exactly what that ceiling predicts.
+
+**So island-level parallelism cannot close `sim.block`, and that is a structural fact rather than a
+tuning one.** A collapsing building is one island *because its parts are in contact*, and contact is
+what the partition is made of. Splitting the tail means splitting *within* an island — graph
+colouring, or a Jacobi/hybrid velocity solver — which carries ADR-0026's determinism contract.
+**Ranked with M18.**
+
+**The lever that worked was not a physics optimisation at all.** The client took a full
+`physics.step` per queued destruction batch, so the frames setting its p99 ran one server step plus
+two client steps of ~8 ms. The fracture boundary that ADR-0033 A12 forbids merging is the
+`DestructionWorld::update()`, **not** the step: two mirrors fed an identical pair of *remote* batches
+— one stepping between them, one not — produce equal composition hashes and equal debris rosters,
+while merging both into a single `update()` still hashes differently. The step belongs to the wall
+clock, not to the batch; taking one per batch also ran the client's physics permanently *ahead* of
+the server's (704 steps against 600).
+
+*A correction worth recording, because it nearly went the other way.* The first version of that test
+used `apply_damage` and **failed**, 13 chunks against 14 — local damage carries a world POINT that
+`update()` resolves against the current pose, so for a Local instance a step between the blast and
+the update genuinely does change which parts are hit. The client never takes that path. Testing the
+convenient path rather than the real one would have "proved" the step load-bearing while measuring
+something else entirely.
+
+### The result against the clause
+
+Committed baseline, median of three guard-passed 600-frame runs (`docs/perf/2026-09-06-99-the-block-…`):
+
+| | opening | now |
+|---|---|---|
+| `frame` p99 | 28.915 | **20.976** |
+| `frame.player` p99 (client + render) | ~20.2 | **12.556** |
+
+**`frame.player` meets the ratified 16.6 ms.** M13's playable-frame-rate clause is met **for one
+machine**. The gated `frame` is 20.976 — 1.26× over — and it **stays** the gated number: it hosts an
+authoritative server *and* a predicting client in one process, which no shipped configuration does,
+and moving the goalposts to the flattering measurement is what a ratified budget exists to prevent.
+The two numbers now say different things, and the ADR says which is which rather than choosing the
+kinder one.
+
+### Ruling 6 — m17.6's premise no longer exists; it is re-scoped, not cut
+
+Every number scoping m17.6 in the ladder above was measured on a GPU the driver was parking mid-run:
+
+| | m17.6's premise | clock-pinned |
+|---|---|---|
+| `frame.submit` p99 | 10.600 | 2.785 |
+| `ssr-resolve` max | 4.455 | 0.902 |
+| `forward-pbr shadowed` max | 4.051 | 0.664 |
+
+All twelve GPU passes together are **1.841 ms at p50 and 2.407 ms at max against a 16.600 ms
+budget — 8% of the frame.** There is no GPU budget breach to close, and there never was one on a
+machine whose clocks were pinned; m17.3d's guard is what made that visible.
+
+**m17.6 is therefore re-pointed from cost to correctness.** Its brick is no longer "reduce the GPU
+budget" but "the passes are right, and the headroom is recorded" — the cloud layer's unmeasured
+per-pixel cost (named in ADR-0040's consequences) belongs here, and so does establishing what
+headroom m17.8's textured ground and any later sky work are spending *into*. Cutting it outright was
+considered and refused: the ladder is ratified, and a milestone entry that vanishes without a record
+is exactly what Ruling 4 objects to elsewhere.
+
+### Ruling 7 — m17.7 defers behind m17.8; the ground comes first
+
+The ladder ordered the sky (m17.7) before the ground (m17.8). That order is reversed.
+
+ADR-0040 §6 — the decision m17.7 was scheduled to take — says of the Hillaire atmosphere that it
+"is not scheduled here… a milestone-sized brick" which "should not land before there is authored
+content worth judging it against." **The ground is that content.** Ruling 5 already says why: the
+ground is the largest thing in almost every frame, it is what every shadow lands on and what SSR
+reflects, and a flat untextured plane makes DDGI bounce, SSR and shadow quality *unjudgeable* —
+"there is no normal variation for a reflection to bend around, no albedo for a bounce to tint, and
+no detail for a shadow to read against." Making the sky light that surface first would be tuning a
+light against a floor that cannot show what the light does.
+
+The dependency Ruling 5 asserted also now resolves the other way round: it said a textured ground
+"may not precede m17.5 and m17.6" because it *adds* cost. m17.5 is closed with 7.9 ms of headroom on
+the gated frame and the GPU at 8% of it, so Ruling 1's test is passed and the ground brick is
+unblocked. m17.7's scope — minimal analytic radiance versus the full four-LUT model — is deferred
+with it and decided against a ground worth judging.
+
+### Consequences for the ladder
+
+- **m17.5 is done**, and it closed the clause on one machine rather than on the gated number.
+- **m17.6 is re-scoped** to pass correctness and headroom accounting. Its original budget target is
+  recorded as met-on-arrival once the clocks were pinned.
+- **m17.7 moves behind m17.8** and its scope is decided later, against authored ground.
+- **m17.8 is next**, at Ruling 5's scope: one owned ground surface with a cooked material, a
+  collider *derived* from that surface rather than authored beside it, and a seam that a later
+  heightfield replaces rather than is retrofitted into.
+- Cut order and never-cut list are unchanged.

@@ -2303,9 +2303,12 @@ committed report), `perf.sh` failing a non-comparable baseline, and all three sa
 on the current driver · **m17.4** the pass-owned buffer ring — 14 host-visible buffers across all
 seven lighting passes, *before* the windowed work that would otherwise chase its artifacts as a
 shading bug · **m17.5** **the simulation budget** — `sim.block` p99 25.49 against a ratified 6.0, the
-largest breach on the board · **m17.6** the GPU budget — `frame.submit` p99 10.60, of which
-`ssr-resolve` (max 4.455) and `forward-pbr shadowed` (max 4.051) are the attributed half · **m17.7**
-**the sky lights the scene** (ADR-0040 §6, scheduled) · **m17.8** **the ground becomes a surface**
+largest breach on the board · **m17.6** ~~the GPU budget~~ **the GPU passes, re-scoped**
+(ADR-0041 Ruling 6, 2026-09-06): its budget premise was measured on an unparked GPU and no longer
+exists — pinned, all twelve passes are 2.407 ms max against 16.6 — so the brick is now pass
+correctness plus the cloud layer's unmeasured per-pixel cost and the headroom m17.8 spends into · **m17.7**
+**the sky lights the scene** (ADR-0040 §6) — **moved behind m17.8** (Ruling 7): §6 says it must not
+land "before there is authored content worth judging it against", and the ground IS that content · **m17.8** **the ground becomes a surface**
 — two triangles and a flat colour today · **m17.9** the shadow bar, scoped by numbers that do not
 exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: **m17.9 only**
 (amended 2026-09-04 — cutting m17.7 re-defers exactly what ADR-0040 §6 already deferred once, and
