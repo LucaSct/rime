@@ -1902,7 +1902,23 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
         // 3. The peers agree — the composition claim that a silent divergence would break.
         {"net: destruction replicated to the client", dc.ops_applied() > 0},
         {"net: composition checks all matched", dc.composition_mismatches() == 0},
-        {"net: no debris left unresolved", dc.debris_unresolved() == 0},
+        // REMOVED (m17.5): {"net: no debris left unresolved", dc.debris_unresolved() == 0}.
+        //
+        // It could not fail. `debris_unresolved_` and `debris_bound_` are incremented in exactly
+        // one place — inside `DestructionClient::sync_debris` — and this demo's client never calls
+        // it. Only the SERVER's `sync_debris` is wired (the debris bridge above), so both counters
+        // are structurally 0 for the whole run and the check read as evidence while asserting
+        // nothing. Deleting a proof is worse than keeping it only if the proof was doing work; this
+        // one was doing the opposite, by making a gap look covered.
+        //
+        // THE GAP IT WAS HIDING, recorded rather than quietly fixed: no sample binds replicated
+        // debris on the client — not this one and not `12-networked-destruction`. The three
+        // `destruction_client.sync_debris` call sites in the repository are all in
+        // `tests/destruction_net`. So the client-side half of m11.4b's addressing proof (mirrors
+        // resolving to the chunks the client derived) is exercised by tests and by nothing that
+        // ships. Wiring it here would add per-tick client cost to the very number m17.5 is
+        // measuring, so it is a scope decision rather than a drive-by: see the m17.5 notes in
+        // docs/ROADMAP.md.
         {"net: the peers' destruction state hashes agree", server_hash == client_hash},
         {"net: they agreed WITHIN the settle bound", settled_after < kSettleBound},
         // The claim m13.5 shipped as a KNOWN DEFECT and m13.6 earned. Before the fix this read
