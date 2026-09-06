@@ -2475,10 +2475,44 @@ m17.8, m17.10.
 > 31%/28%/32% split and promotes its third candidate: the shared out-of-line math both stages reach
 > through is the only lever that moves both at once.
 >
-> **Finding 2 is now partly answered and still the next brick.** `physics.*` merges the two worlds;
-> `sim.client` p99 (15.91–16.23) is nearly twice `sim.server` (8.57–8.83), and the client is the
-> expensive half because it *re-simulates* — 704 physics steps over 600 frames, up to two in a
-> tick. Zones still need a per-world tag before anything in there is optimised.
+> **MEASURED (2026-09-06): finding 2 is built, and it names the biggest lever in the milestone.**
+> `PhysicsWorld::set_profile_label` renames a world's twelve step zones to
+> `physics.<label>.<stage>`; unlabelled worlds keep the old names, so no other sample, test or
+> committed baseline moves. The block labels its two worlds and declares **both** in `sim.block`'s
+> accounting — naming one would have left the other as ~8 ms of unaccounted residual, which is
+> exactly what m17.3c's ratchet exists to catch. `sim.block.unaccounted` p99 stays at 0.43–0.46 ms,
+> so the split accounting closes.
+>
+> | per-frame p99 | client | server | ratio |
+> |---|---|---|---|
+> | `physics.*.step` | 15.99 / 15.69 | 8.61 / 8.55 | 1.85x |
+> | `physics.*.contacts` | 7.65 / 7.49 | 4.04 / 4.11 | 1.86x |
+> | `physics.*.solve` | 7.53 / 7.45 | 3.99 / 3.95 | 1.89x |
+>
+> **The client is not slower. It steps twice.** Per CALL the two worlds are the same simulation:
+> `physics.solve` 2.744 ms client against 2.737 server, and no single client step exceeds 9.116 ms
+> — against a client per-FRAME p99 of 15.991. The server's per-call and per-frame numbers are
+> identical (it always steps once); the client's differ by 1.89x. So the tail frame is one server
+> step plus **two** client catch-up steps, each an ordinary ~8 ms, and `net.client_physics_steps` is
+> 704 over 600 frames with `net.max_batches_per_tick` = 2.
+>
+> **That is the largest single lever m17.5 has found.** A client that stepped once per frame would
+> drop `physics.client.step.per_frame` p99 from ~15.8 to ~8.5, `frame` p99 from ~28.7 to ~21.2, and
+> `frame.player` p99 from ~20.2 to **~12.7 — under the 16.6 ms budget**. Whether it *can* is a
+> replication-contract question, not a physics one: today each queued destruction batch costs
+> `apply_next_batch` → a full `physics.step` → `destruction.update`, and the loop's comment defends
+> never merging two batches on fracture-boundary grounds. **What must not be skipped — the
+> `destruction.update` or the `physics.step` — is the open question, and it is worth ~7.5 ms.**
+>
+> **A trap recorded so it is not rediscovered: the client's `physics.contacts` looked 1.25x the
+> server's, and that reading is wrong.** Both worlds carry identical populations — 507 bodies and
+> 2134 broadphase pairs, to the unit — and across the distribution the client is *cheaper*: p50
+> 1.25x, p95 0.97x, p99 0.98x, max 0.97x. The median is pulled up because the client has 104
+> samples the server does not and every one is a catch-up step taken during the collapse, when any
+> step is expensive. **Comparing two distributions at the median when their sample populations
+> differ compares the populations, not the code.** The population counters stay in the ledger so a
+> real divergence would show as a count rather than be inferred from a timing difference that means
+> something else.
 >
 > **One number kept separate from the gate, because it is the honest one for a player:**
 > `frame.player` p99 is **20.21–20.42 ms** — client + render, i.e. what a single machine pays. The
