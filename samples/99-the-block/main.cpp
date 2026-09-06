@@ -724,6 +724,7 @@ struct Session {
     // that is happening or whether the spike is something else.
     std::size_t max_batches_per_tick = 0;
     std::uint64_t total_client_steps = 0;
+    std::uint64_t total_client_batches = 0;
     std::uint64_t shots_fired = 0;
     std::uint64_t shots_hit = 0;
     std::uint64_t damage_ops = 0;
@@ -756,6 +757,7 @@ struct Session {
         peak_visual_debris = 0;
         max_batches_per_tick = 0;
         total_client_steps = 0;
+        total_client_batches = 0;
         shots_fired = 0;
         shots_hit = 0;
         damage_ops = 0;
@@ -928,29 +930,44 @@ struct Session {
         }
         client.sync.push_in(client.world, client.physics, kDt);
 
-        // ONE queued batch per destruction update — never two merged, which would skip the fracture
-        // boundary between them and make two waves of debris look like one island.
-        // BOUNDED CATCH-UP (m13.p, and it is a measured fix rather than a precaution).
+        // ONE DESTRUCTION UPDATE PER BATCH, AND ONE PHYSICS STEP PER TICK (m17.5).
         //
-        // 12-networked-destruction drains EVERY queued batch in one tick — "one batch per
-        // destruction update, never two merged", which is right: merging skips the fracture
-        // boundary between them and makes two waves of debris look like one island. But each batch
-        // costs a full `physics.step`, and during a collapse the client falls behind, so the whole
-        // cost of catching up serialises into one frame. Measured on this demo before the cap:
-        // **10 physics steps in a single tick**, and `sim.client` p99 = 58 ms against a server that
-        // never exceeded 9.5 ms doing the same work. The physics was never the problem.
+        // The fracture boundary that must not be skipped is the `update()`, not the `step()`, and
+        // that is measured rather than argued: `tests/destruction_net` "the fracture boundary is
+        // the destruction update, not the physics step" feeds two mirrors the identical pair of
+        // remote batches, one with a step between them and one without, and their composition
+        // hashes and debris rosters are equal — while merging both batches into a SINGLE update
+        // still hashes differently, which is the divergence ADR-0033 A12 actually names. So the
+        // boundary is preserved here and the second step is not.
         //
-        // DEFERRING IS NOT MERGING. Batches stay queued and are still applied one at a time, in
-        // order, with their fracture boundaries intact — the client simply spreads the catch-up
-        // over several ticks and lags a little longer. That it still converges is not assumed: the
-        // headless proof drains to quiescence with a BOUND and fails if the peers never agree.
+        // The step is the WALL CLOCK's, so it belongs to the tick and not to the batch. Taking one
+        // per batch also ran the client's physics permanently ahead of the server's — 704 steps
+        // against 600 over the measured window, 1.73 s of extra simulated flight by the end.
+        //
+        // WHY THIS IS SAFE ONLY FOR REMOTE OPS, because it is not safe in general. A `DamageOp` off
+        // the wire carries an already-resolved `part` index. LOCAL damage carries a world POINT
+        // that `update()` resolves against the current pose, so for a Local instance a step between
+        // the blast and the update genuinely changes which parts are hit — the first version of the
+        // test above measured exactly that and came out at 13 chunks against 14. Every instance on
+        // this client is bound Remote, and a Remote instance refuses local damage outright.
+        //
+        // What it is worth: the frames that set this demo's p99 ran one server step plus TWO client
+        // steps of ~8 ms each. Now they run one apiece.
+        //
+        // BOUNDED CATCH-UP still applies (m13.p). Before the cap this demo drained every queued
+        // batch in one tick — 10 physics steps in a single tick and `sim.client` p99 = 58 ms — and
+        // deferring is still not merging: batches stay queued and are applied one at a time, in
+        // order, with their boundaries intact. That it converges is not assumed; the headless proof
+        // drains to quiescence with a BOUND and fails if the peers never agree.
         std::size_t batches_this_tick = 0;
         do {
             (void)client.destruction_net_client.apply_next_batch(
                 client.world, client.replicator->map(), client.destruction);
-            const core::Stopwatch client_step_watch;
-            client.physics.step(kDt);
-            {
+            if (batches_this_tick == 0) {
+                // The tick's one step, in exactly the place it has always been — so a tick that
+                // drains a single batch, which is 496 of 600 here, is the sequence it always was.
+                const core::Stopwatch client_step_watch;
+                client.physics.step(kDt);
                 const physics::WorldStats cs = client.physics.stats();
                 note_step(client_step_watch.elapsed_ms(), cs);
                 client_parallel_steps += (cs.islands_solved_parallel > 0) ? 1u : 0u;
@@ -962,7 +979,12 @@ struct Session {
         } while (client.destruction_net_client.pending_batches() > 0 &&
                  batches_this_tick < kMaxCatchUpBatchesPerTick);
         max_batches_per_tick = std::max(max_batches_per_tick, batches_this_tick);
-        total_client_steps += batches_this_tick;
+        // Steps and batches STOPPED BEING THE SAME NUMBER at m17.5, so they stopped sharing a
+        // counter. `total_client_steps += batches_this_tick` was true only while the loop took a
+        // step per batch, and left uncorrected it would have reported the saving as though it had
+        // never happened — the ledger claiming 704 steps for a client that now takes 600.
+        total_client_steps += 1; // exactly one per tick: the wall clock's
+        total_client_batches += batches_this_tick;
         client.sync.write_back(client.world, client.physics);
         last_client_ms = client_watch.elapsed_ms();
 
@@ -2241,6 +2263,10 @@ int run_perf(const std::filesystem::path& cooked,
     ledger.set("shadow.spot_maps", demo.visuals->spot_maps_total);
     ledger.set("net.max_batches_per_tick", demo.session.max_batches_per_tick);
     ledger.set("net.client_physics_steps", demo.session.total_client_steps);
+    // Separate from the steps since m17.5: the client applies a destruction batch per queued
+    // fracture boundary but steps physics once per tick, so one number can no longer stand for
+    // both. Their RATIO is the catch-up backlog, which is the thing worth watching.
+    ledger.set("net.client_batches_applied", demo.session.total_client_batches);
     // ── The solver's parallelism panel (m17.5), per world and co-sampled ────────────────────
     //
     // Whether the solve was even ALLOWED to go wide, whether it actually went, and how much width
