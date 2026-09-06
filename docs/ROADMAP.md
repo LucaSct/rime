@@ -2414,12 +2414,12 @@ m17.8, m17.10.
 > 25.49 and the CPU frame very nearly IS the simulation. Pipelining takes the GPU off the critical
 > path; it does not touch what is on it. See the 2026-09-04 amendment in ADR-0041.
 >
-> **MEASURED (2026-09-05): the block's solver now has a job system, and it buys nothing.** Finding 1
-> above is closed, and it closes the way the roadmap asked — by establishing which part of the
-> `sim.block` breach was demo wiring *before* optimising anything. The wiring was the one-liner it
-> looked like (`set_job_system` per peer, against **one** process-wide pool: two per-peer pools would
-> have put ~62 workers on 32 cores). Measured interleaved with a control, both clock domains pinned,
-> box idle, 600 frames each:
+> **MEASURED (2026-09-05/06): the block's solver has a job system now, and island-level
+> parallelism cannot close this budget.** Finding 1 above is closed the way the roadmap asked — by
+> establishing which part of the `sim.block` breach was demo wiring *before* optimising anything.
+> The wiring was the one-liner it looked like (`set_job_system` per peer, against **one**
+> process-wide pool: two per-peer pools would have put ~62 workers on 32 cores). Measured
+> interleaved with a control, both clock domains pinned, box idle, 600 frames each:
 >
 > | | run A | run B |
 > |---|---|---|
@@ -2428,47 +2428,72 @@ m17.8, m17.10.
 > | `physics.solve` p99, control | 11.225 | 11.333 ms |
 > | `physics.solve` p99, job system | 11.071 | 11.431 ms |
 >
-> **+0.27% on the mean, inside the within-arm spread.** The wiring stays — it is correct, it costs
-> nothing, and every other sample does it — but it is not where the breach lives. (An earlier A/B
-> read "6% slower" and was **withdrawn**: it was measured against a sibling session's build, and the
+> **+0.27% on the mean, inside the within-arm spread**, and a second interleaved A/B on the
+> dispatch gate below came in at +0.07%. Eight runs, no effect either way. (An earlier A/B read
+> "6% slower" and was **withdrawn**: it was measured against a sibling session's build, and the
 > guard that would have caught it is now in `scripts/perf.sh`.)
 >
-> **The mechanism is the useful half.** The block's ledger could report a peak of 106 active islands
-> and a peak largest island of 612; read together those suggest a ~3x parallel ceiling, and they are
-> two maxima from two different moments that describe no single frame. The tick that actually sets
-> the p99 has **one active island, of 362 bodies**. Islands are the solver's only unit of
-> parallelism, so at the tail there is no width to divide and no worker count that helps: a block
-> collapsing as one connected building is one island. The ledger now records the worst tick's
-> structure instead of the two peaks, plus `physics.solve_parallel_ticks` (473 of 600) — the
-> **handoff**, not the pool. Falsified at 0 by deleting the two `use_jobs` calls while
-> `physics.job_workers` still read 32, which is exactly why a counter that reads the pool could never
-> have caught the omission it was added to catch. `WorldStats` carries both witnesses now
-> (`islands_solved_parallel`, and `largest_active_island` — because a *sleeping* 612-body pile is not
-> the serial tail of anything, though the old field's own comment called it that).
+> **THE FIRST EXPLANATION OF WHY WAS WRONG, AND THE CORRECTION IS THE USEFUL PART.** This note
+> originally said "the tick that sets the p99 has exactly one active island, of 362 bodies". That
+> was an instrument keyed on `last_server_ms` — the server's *whole* half-tick, gameplay and sync
+> and the shot→`apply_damage` loop and `destruction.update` included — reading only the *server's*
+> world while the client re-simulates at roughly twice the cost, and reporting a per-STEP maximum
+> to explain a per-TICK total. The tail is not one 24 ms step: it is **three** ordinary ones summed
+> (one server, two client catch-up), and no single step in the run exceeds 9.4 ms. The denominators
+> were wrong too — every Session counter accumulated from process start while the distributions
+> began after warmup, so "473 of 600 ticks" was 473 of 690.
 >
-> **So the remaining budget is engine speed, and the arithmetic says one lever will not do it.** On
-> the re-baselined tape, `physics.step` is 23.9-24.8 ms of a ~28.7 ms frame, split almost evenly
-> between `physics.contacts` (11.45-11.82) and `physics.solve` (11.07-11.44) — narrowphase and the
-> solve are the *same size*, so **an infinitely fast solve still leaves ~17.5 ms**, over budget on
-> its own. That matches the review's PC-sampled 31%/28%/32% split and promotes its third candidate:
-> the shared out-of-line math both stages reach through is the only lever that moves both at once.
+> Keyed on the steps themselves, both worlds, co-sampled per tick, three clean runs agree:
 >
-> **Finding 2 is now the blocking one, and is the next brick.** `physics.*` merges the two worlds
-> while `sim.client` p99 (15.88) and `sim.server` p99 (8.63) split them — and the expensive half is
-> the client *re-simulating*: `net.client_physics_steps` is 794 over 600 frames. Optimising the
-> merged distribution would be optimising a shape that belongs to neither world.
+> | | run 1 | run 2 | run 3 |
+> |---|---|---|---|
+> | `worst_tick_index` | 588 | 588 | 589 |
+> | `worst_tick_steps` | 3 | 3 | 3 |
+> | active islands, narrowest→widest step | 25→28 | 25→28 | 27→31 |
+> | `worst_tick_largest` | 602 | 602 | 605 |
+> | `worst_tick_awake_bodies` | 656 | 656 | 658 |
+> | steps dispatched in parallel | 3 of 3 | 3 of 3 | 3 of 3 |
+>
+> **92% of the awake bodies at the tail are in ONE island** (602 of 656), across 25–31 islands with
+> every step going wide. So the width was never the problem and neither was the wiring: Amdahl's
+> ceiling on island-level parallelism at that tick is **1.09x**, worth ~0.96 ms of an 11.4 ms solve
+> and ~3% of a 29 ms frame — at the edge of this rig's run-to-run spread. **A measurement finding
+> nothing is what a 1.09x ceiling looks like.** The residual (a perfectly realised 1.09x should
+> have been just detectable, and was not) is dispatch overhead and the fact that solve cost tracks
+> contact constraints rather than body count; it is not worth another run.
+>
+> **The ruling that follows: `sim.block` cannot be fixed by parallelising islands.** A collapsing
+> building is one island because its parts are in contact, and contact is what the partition is
+> made of — no scheduler divides that. Splitting the tail means splitting *within* an island (graph
+> colouring, or a Jacobi/hybrid velocity solver), which is an engine design question with a
+> determinism contract attached (ADR-0026), not a wiring one. **Ranked for M18, not for m17.5.**
+>
+> **What is left for m17.5, and it is not one lever.** `physics.step` is 24.2–24.5 ms of a ~28.9 ms
+> frame, split almost evenly between `physics.contacts` (11.40–11.64) and `physics.solve`
+> (11.29–11.49) — narrowphase and the solve are the *same size*, so **an infinitely fast solve
+> still leaves ~17.5 ms**, over budget on its own. That matches the review's PC-sampled
+> 31%/28%/32% split and promotes its third candidate: the shared out-of-line math both stages reach
+> through is the only lever that moves both at once.
+>
+> **Finding 2 is now partly answered and still the next brick.** `physics.*` merges the two worlds;
+> `sim.client` p99 (15.91–16.23) is nearly twice `sim.server` (8.57–8.83), and the client is the
+> expensive half because it *re-simulates* — 704 physics steps over 600 frames, up to two in a
+> tick. Zones still need a per-world tag before anything in there is optimised.
 >
 > **One number kept separate from the gate, because it is the honest one for a player:**
-> `frame.player` p99 is **20.09 ms** — client + render, i.e. what a single machine pays. The 28.65 ms
-> `frame` is this demo hosting a server *and* a predicting client in one process, which no shipped
-> configuration does. The clause is missed either way; on one machine it is missed by 1.21x, not
-> 1.73x.
+> `frame.player` p99 is **20.21–20.42 ms** — client + render, i.e. what a single machine pays. The
+> ~28.9 ms `frame` is this demo hosting a server *and* a predicting client in one process, which no
+> shipped configuration does. The clause is missed either way; on one machine it is missed by
+> 1.22x, not 1.74x.
 >
-> *Precision, so these numbers are read at the right width:* ten 600-frame runs in one sitting on an
-> idle, clock-pinned box gave `frame` p99 **28.32-29.23 ms, mean 28.68, sd 0.26 (0.9%)**. Cross-
-> sitting drift on an identical tree measured ~2% earlier the same day, so **an A/B is only
-> meaningful against a control taken in the same sitting** — which is what voided the first attempt
-> at this one. The committed baseline is the run closest to that sitting's median, not its best.
+> *Precision, so these numbers are read at the right width:* ten 600-frame runs in one sitting on
+> an idle, clock-pinned box gave `frame` p99 **28.32–29.23 ms, mean 28.68, sd 0.26 (0.9%)**. Cross-
+> sitting drift on an identical tree measured ~2% the same day, so **an A/B is only meaningful
+> against a control taken in the same sitting** — which is what voided the first attempt at this
+> one. The committed baseline is the median of three guard-passed runs; collecting those three took
+> **fourteen attempts**, ten refused outright and one discarded for going dirty mid-run, because a
+> sibling session held four cores for most of an hour. That is the guard working, and it is also
+> the honest cost of measuring on a shared desk.
 >
 > **The ladder's first omission, found in review and added as m17.8: there is no ground.** What the
 > block stands on is **two triangles** (`make_plane`, four vertices) scaled to a 76 m square
