@@ -382,6 +382,7 @@ add_subdirectory(engine/destruction_net) # networked destruction: the damage-op 
 add_subdirectory(engine/gameplay)  # character controller: collide-and-slide on a kinematic capsule (m12.2)
 add_subdirectory(engine/gameplay_net) # the networked player: consume loop + LastProcessedInput (m12.3)
 add_subdirectory(engine/destruction_render) # per-part render leaves for destructibles: the destruction<->render bridge (m13.2d)
+add_subdirectory(engine/ground)   # the one answer to "what is the ground": drawn surface + derived collider (m17.8)
 add_subdirectory(engine/blockkit)  # the vision demo's block as content: prefab, assembly, palette (m13.2c)
 add_subdirectory(engine/worldkit)  # the component profile: one answer to "what components does a world have" (m14.1)
 
