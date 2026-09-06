@@ -4,6 +4,7 @@
 
 #include <cmath>
 
+#include "rime/core/force_inline.hpp"
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/scalar.hpp"
 #include "rime/core/math/vec.hpp"
@@ -92,7 +93,11 @@ struct alignas(16) Quat {
 // but we use the algebraically equivalent, cheaper form
 //     t = 2 (q_xyz x v),   v' = v + q_w t + q_xyz x t,
 // which avoids building the two-product sandwich. (Derivation note, §"rotating a vector".)
-[[nodiscard]] inline Vec3 rotate(const Quat& q, Vec3 v) noexcept {
+// FORCED INLINE, and the number is in force_inline.hpp: GCC declined to inline this at -O2 and it
+// cost 19.6% of the physics solve, which calls it three times per contact point per velocity
+// iteration. Bit-identical arithmetic — this changes what the compiler emits, never what it
+// computes.
+[[nodiscard]] RIME_FORCE_INLINE inline Vec3 rotate(const Quat& q, Vec3 v) noexcept {
     const Vec3 u{q.x, q.y, q.z};
     const Vec3 t = 2.0f * cross(u, v);
     return v + q.w * t + cross(u, t);

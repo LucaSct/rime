@@ -2468,6 +2468,30 @@ m17.8, m17.10.
 > colouring, or a Jacobi/hybrid velocity solver), which is an engine design question with a
 > determinism contract attached (ADR-0026), not a wiring one. **Ranked for M18, not for m17.5.**
 >
+> **MEASURED (2026-09-06): one attribute takes 19.6% off the solve.** `core::rotate` is three lines
+> and marked `inline`, and GCC 15 at -O2 emitted it **out of line** anyway — a single
+> `rime::core::rotate [clone .isra.0]` in the release binary, reached from the solver's velocity
+> iteration (three calls per contact point per iteration) and from the narrowphase's support
+> functions. `cross` and `normalize` beside it were inlined; only this one was stranded. Forcing it
+> (`RIME_FORCE_INLINE`, `core/force_inline.hpp`), interleaved, three runs an arm, **bit-identical
+> trajectory** — `parts.alive_end` 1227 in all six runs, so both arms simulate exactly the same
+> work:
+>
+> | `physics.server.*` p50 | control | forced | |
+> |---|---|---|---|
+> | `solve` | 2.757 / 2.757 / 2.790 | 2.232 / 2.260 / 2.184 | **−19.6%** |
+> | `step` | 5.513 / 5.552 / 5.558 | 5.078 / 5.027 / 5.037 | **−8.9%** |
+> | `contacts` | 2.482 / 2.428 / 2.375 | 2.463 / 2.478 / 2.484 | none |
+>
+> No overlap between arms on the solve, and the narrowphase does not move — the shape you would
+> predict, since its calls are per pair and the solver's are per contact point per iteration. This
+> is the review's "shared out-of-line math" candidate, and it turns out to be **one function and one
+> attribute**, not a refactor. It also partly answers the sampled 32%: the samples were real, the
+> remedy was a compiler decision rather than a code shape. Judged on the SERVER's per-call medians
+> deliberately — its timeline has a fixed 600 samples a run, while the client's varies with
+> catch-up, and comparing two timelines with different sample counts at the median compares the
+> populations (see the trap recorded above).
+>
 > **What is left for m17.5, and it is not one lever.** `physics.step` is 24.2–24.5 ms of a ~28.9 ms
 > frame, split almost evenly between `physics.contacts` (11.40–11.64) and `physics.solve`
 > (11.29–11.49) — narrowphase and the solve are the *same size*, so **an infinitely fast solve
@@ -2519,6 +2543,24 @@ m17.8, m17.10.
 > ~28.9 ms `frame` is this demo hosting a server *and* a predicting client in one process, which no
 > shipped configuration does. The clause is missed either way; on one machine it is missed by
 > 1.22x, not 1.74x.
+>
+> **MEASURED (2026-09-06): m17.6's premise no longer exists, and the ladder should be re-read
+> before it is built.** Every number scoping m17.6 above — `frame.submit` p99 10.60, `ssr-resolve`
+> max 4.455, `forward-pbr shadowed` max 4.051 — was taken on a GPU the driver was parking mid-run.
+> With both clock domains pinned, from the committed baseline:
+>
+> | | m17.6's premise | pinned | |
+> |---|---|---|---|
+> | `frame.submit` p99 | 10.600 | 2.785 | 3.8x |
+> | `ssr-resolve` max | 4.455 | 0.902 | 4.9x |
+> | `forward-pbr shadowed` max | 4.051 | 0.664 | 6.1x |
+>
+> **All twelve GPU passes together are 1.841 ms at p50 and 2.407 ms at max, against a 16.600 ms
+> budget — 8% of a 28.9 ms frame.** There is no GPU budget breach to close. That does not delete
+> m17.6 by itself: the passes still have to be *correct* and the visual bar (m17.7, m17.8) will add
+> cost that has to land somewhere. But m17.6 as written is a budget brick whose budget is already
+> met, so its scope is a decision to take deliberately — an ADR-0041 amendment — rather than a
+> ladder entry to work through. **Flagged, not cut.**
 >
 > *Precision, so these numbers are read at the right width:* ten 600-frame runs in one sitting on
 > an idle, clock-pinned box gave `frame` p99 **28.32–29.23 ms, mean 28.68, sd 0.26 (0.9%)**. Cross-
