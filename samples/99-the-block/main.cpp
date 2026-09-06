@@ -671,9 +671,16 @@ struct Session {
     // Per-world POPULATION, because the split zones raised a question the split zones cannot
     // answer. The two worlds' `physics.solve` costs the same per call (2.744 vs 2.737 ms — the
     // same constraint load, as replication promises), while the client's `physics.contacts` costs
-    // 1.25x the server's. Contacts is broadphase + narrowphase, so the difference has to be in how
-    // many bodies each world carries into the pair search, not in how many actually touch. These
-    // are the two numbers that say so instead of inviting the inference.
+    // 1.25x the server's. Contacts is broadphase + narrowphase, so the difference would have to be
+    // in how many bodies each world carries into the pair search, not in how many actually touch.
+    // (It was not: the 1.25x is a sampling artifact — see the whole-distribution note in the m17.5
+    // roadmap entry. These counters are what ruled the population explanation out.)
+    //
+    // READ THEM AS BOUNDS, NOT AS AN EQUALITY. They are per-world PEAKS over the run, and two
+    // maxima from two different ticks are not a claim about any one tick — the same mistake the
+    // island peaks invited one brick ago, and the first draft of this very comment made it again.
+    // A large or growing gap means one world is retaining bodies the other reclaimed and is worth
+    // chasing; server 762 against client 774 is two peaks landing on different frames.
     std::uint32_t server_max_bodies = 0;
     std::uint32_t client_max_bodies = 0;
     std::uint32_t server_max_pairs = 0;
