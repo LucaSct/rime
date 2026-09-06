@@ -102,6 +102,8 @@
 #include "rime/ecs/schema_hash.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/ground/bind.hpp"
+#include "rime/ground/derive.hpp"
 #include "rime/gameplay/character.hpp"
 #include "rime/gameplay/components.hpp"
 #include "rime/gameplay/first_person.hpp"
@@ -267,19 +269,6 @@ struct MeasuredScene {
     return m;
 }
 
-// The ground the block stands on and the player walks along. It is NOT in the scene file: blockkit
-// authors the block, and a street slab is level geometry every peer stands up for itself — the same
-// split `13-networked-player` makes with its floor, and the reason a client can predict standing on
-// something without waiting for the server to tell it the floor exists.
-physics::BodyId add_street(physics::PhysicsWorld& w, const blockkit::BlockParams& p) {
-    physics::BodyDesc d;
-    d.motion = physics::MotionType::Static;
-    d.shape.type = physics::ShapeType::Box;
-    d.shape.half_extents = {p.street_length(), 0.5f, p.street_length()};
-    d.position = {p.street_length() * 0.5f, -0.5f, 0.0f};
-    return w.create_body(d);
-}
-
 // Pull an RGBA8 texture back to the CPU (the 06/07 samples' helper). Only the headless self-check
 // uses it — a windowed run has no reason to stall the pipeline reading its own frame.
 [[nodiscard]] std::vector<std::uint8_t>
@@ -418,7 +407,6 @@ struct Peer {
                                 bool own_destructibles,
                                 std::string_view scene_path) {
         register_all(world);
-        (void)add_street(physics, blockkit::BlockParams{});
 
         // `--scene <file>` runs A SCENE SOMEONE AUTHORED rather than the one blockgen produces —
         // M14's "done when": open the shipped block in the editor, change it, save it, and run the
@@ -447,6 +435,25 @@ struct Peer {
             }
         }
         (void)blockkit::derive_world_transforms(world);
+
+        // THE GROUND, from the scene rather than from a formula (m17.8). It used to be a static box
+        // built here, before the load, from `BlockParams` — half-extent 44 against a drawn surface
+        // of 38, so six metres of the world were standable and invisible. Now the surface is
+        // authored in the scene and the collider is derived from it, which is why this runs AFTER
+        // the load and takes no parameters.
+        //
+        // Still level geometry every peer stands up for itself: a client binds its own ground
+        // rather than waiting to be told the floor exists, and the derivation being pure is what
+        // makes the two agree.
+        const ground::BindStats ground_bound = ground::bind_ground(world, physics);
+        if (ground_bound.bound == 0 || ground_bound.scaled_refused != 0) {
+            std::fprintf(stderr,
+                         "99-the-block: the scene has no usable ground (%zu bound, %zu refused for "
+                         "a scaled transform)\n",
+                         ground_bound.bound,
+                         ground_bound.scaled_refused);
+            return false;
+        }
         measured = measure_scene(world);
 
         // C6's budget, at block scale. 10-destructible-wall runs 48 live; this needs an order of
@@ -1405,15 +1412,35 @@ struct Visuals {
         palette = blockkit::build_palette(materials);
         blockkit::upload_prop_meshes(palette, meshes);
         (void)blockkit::apply_palette(world, palette);
+        // The drawn ground, derived from the same surface the collider came from (m17.8). After
+        // the palette, which has already given the street its material by role — `apply_ground`
+        // supplies the mesh and leaves an existing material alone.
+        (void)ground::apply_ground(world, meshes, palette.street);
 
         // The field the DDGI probes trace (m13.L). Ids 1..N are the buildings, 0 is the street.
+        //
+        // SIZED FROM THE GROUND ITSELF since m17.8, and it was the third of three disagreeing
+        // extents: this proxy used to compute its own half from `BlockParams` and came out at
+        // 26 x 14 against a surface drawn at 38 x 38, so the probes lit a street a third the size
+        // of the one on screen. Now it asks the surface, like everything else that needs to know
+        // how big the ground is.
         const blockkit::BlockParams p;
-        const core::Vec3 street_half{
-            p.street_length() * 0.5f + p.building_gap, 0.25f, p.street_width * 0.5f + p.footprint};
+        core::Vec3 street_half{p.street_length() * 0.5f + p.building_gap, 0.25f,
+                               p.street_width * 0.5f + p.footprint};
+        core::Vec3 street_at{p.street_length() * 0.5f, -0.25f, 0.0f};
+        world.query<ground::GroundSurface>().for_each(
+            [&](ecs::Entity e, ground::GroundSurface& surface) {
+                const core::Vec3 half = ground::half_extents(surface);
+                street_half = {half.x, 0.25f, half.z};
+                const ecs::WorldTransform* wt = world.get<ecs::WorldTransform>(e);
+                const ecs::LocalTransform* lt = world.get<ecs::LocalTransform>(e);
+                const core::Transform placement = wt != nullptr  ? wt->value
+                                                  : lt != nullptr ? lt->value
+                                                                  : core::Transform{};
+                street_at = {placement.translation.x, -0.25f, placement.translation.z};
+            });
         renderer.sdf_clipmap().update_instance(
-            0,
-            build_box_sdf(street_half, 24),
-            core::mat4_translation({p.street_length() * 0.5f, -0.25f, 0.0f}));
+            0, build_box_sdf(street_half, 24), core::mat4_translation(street_at));
         const core::Vec3 building_half{p.footprint * 0.5f,
                                        static_cast<float>(p.storeys) * p.storey_height * 0.5f,
                                        p.footprint * 0.5f};

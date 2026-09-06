@@ -87,7 +87,13 @@ apply_ground(ecs::World& world, render::MeshRegistry& meshes, render::MaterialId
 
     for (const Pending& p : pending) {
         (void)world.add_component(p.entity, render::MeshRef{p.mesh});
-        (void)world.add_component(p.entity, render::MaterialRef{material});
+        // The material is only a FALLBACK. A consumer that already answers "what does this wear"
+        // by another route — blockkit's palette does, from the entity's SlabRole — has said so
+        // before this runs, and overwriting it here would make the ground the one prop whose look
+        // is decided somewhere else from all the others.
+        if (world.get<render::MaterialRef>(p.entity) == nullptr) {
+            (void)world.add_component(p.entity, render::MaterialRef{material});
+        }
     }
     return pending.size();
 }

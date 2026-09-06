@@ -69,7 +69,6 @@ void upload_prop_meshes(BlockPalette& palette, render::MeshRegistry& meshes) {
     // dimension coupling role.hpp exists to avoid. `pbr_forward.vert` builds a real inverse-
     // transpose normal matrix, so non-uniform scale shades correctly.
     palette.unit_cube = meshes.add(render::make_cube(0.5f), "blockkit_unit_cube");
-    palette.street_plane = meshes.add(render::make_plane(0.5f, 24.0f), "blockkit_street");
 }
 
 PaletteStats apply_palette(ecs::World& world, const BlockPalette& palette) {
@@ -103,8 +102,12 @@ PaletteStats apply_palette(ecs::World& world, const BlockPalette& palette) {
                 material = palette.crate;
                 break;
             case slab_kind::kStreet:
+                // MATERIAL ONLY since m17.8: the street's MESH is derived from its
+                // `ground::GroundSurface` by `ground::apply_ground`, because the surface's size is
+                // authored data now rather than a scale on its transform. The palette still answers
+                // what the street WEARS — that is the role's job — it just no longer decides how
+                // big it is.
                 material = palette.street;
-                mesh = palette.street_plane;
                 break;
             case slab_kind::kKerb:
                 material = palette.kerb;

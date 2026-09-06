@@ -128,7 +128,10 @@ struct BlockPalette {
     // run headless on every CI OS and under the sanitizers, with only the drawing half needing a
     // device.
     render::MeshId unit_cube = render::kInvalidMeshId; // scaled per prop by its LocalTransform
-    render::MeshId street_plane = render::kInvalidMeshId;
+    // No street plane since m17.8: the street's mesh is DERIVED from its `ground::GroundSurface`
+    // by `ground::apply_ground`, because a surface that carried its size in a transform scale was
+    // a surface whose collider could not be derived from it. The palette still says what the
+    // street wears; it no longer says how big it is.
 
     // How many materials this palette added. The proof asserts the registry grew by exactly this,
     // which is what catches a palette that silently reused a caller's material id.

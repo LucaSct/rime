@@ -10,11 +10,15 @@
 # across a language boundary — a drifted hash is a clean load error on this side and an invisible
 # mis-author on that one. See block.hpp.
 #
-# Layer-cake position: a CONTENT module. It depends on ecs (the world it fills), destruction and
-# render (the components it writes — interfaces only, never internals) and core (math). Nothing
-# depends on it: delete the directory and the engine still builds (guardrail 2). It deliberately
-# does NOT depend on physics or rhi — assembly is pure data, which is what lets m13.2c's proof run
-# GPU-free on every CI OS and under the sanitizers.
+# Layer-cake position: a CONTENT module. It depends on ecs (the world it fills), destruction, ground
+# and render (the components it writes — interfaces only, never internals) and core (math). Nothing
+# depends on it: delete the directory and the engine still builds (guardrail 2).
+#
+# It deliberately does NOT depend on RHI, and that — not physics — is the constraint that keeps
+# m13.2c's proof running GPU-free on every CI OS and under the sanitizers. rime::physics has been in
+# this target's link graph since it existed, transitively through rime::destruction; what makes
+# assembly safe to prove headless is that it is pure DATA, calling into neither. m17.8's
+# rime::ground is the same shape: blockkit authors a `GroundSurface` component and never binds it.
 
 add_library(rime_blockkit STATIC
     src/block.cpp
@@ -32,7 +36,7 @@ target_include_directories(rime_blockkit
 # `Destructible` component blockkit writes comes from rime::destruction. rime::render is always a
 # valid link target — RIME_RHI_VULKAN gates the backend *inside* rhi, not the module.
 target_link_libraries(rime_blockkit
-    PUBLIC rime::core rime::ecs rime::render rime::destruction)
+    PUBLIC rime::core rime::ecs rime::render rime::destruction rime::ground)
 
 # Project-wide build policy (C++20 + warnings-as-errors + any sanitizer); from the top-level CMake.
 rime_apply_common_target_options(rime_blockkit)
