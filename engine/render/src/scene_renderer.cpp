@@ -633,8 +633,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     shadow_data.normal_textures = frame_normal_;
     shadow_data.occlusion_textures = frame_occlusion_;
     shadow_data.emissive_textures = frame_emissive_;
-    shadow_data.frame_ubo = frame_ubos_[ubo_slot_];
-    shadow_data.frame_ubo_size = sizeof(GpuFrameUniforms);
+    shadow_data.bind_frame_ubo(frame_ubos_[ubo_slot_], 0, sizeof(GpuFrameUniforms));
     shadow_data.draw_ubo = draw_ubos_[ubo_slot_];
     shadow_data.material_sampler = material_sampler_;
     shadow_data.clamp_sampler = clamp_sampler_;
@@ -655,8 +654,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         std::span<const rhi::TextureHandle>{frame_occlusion_}.subspan(0, visible_count);
     data.emissive_textures =
         std::span<const rhi::TextureHandle>{frame_emissive_}.subspan(0, visible_count);
-    data.frame_ubo = frame_ubos_[ubo_slot_];
-    data.frame_ubo_size = sizeof(GpuFrameUniforms);
+    data.bind_frame_ubo(frame_ubos_[ubo_slot_], 0, sizeof(GpuFrameUniforms));
     data.draw_ubo = draw_ubos_[ubo_slot_];
     data.material_sampler = material_sampler_;
     data.clamp_sampler = clamp_sampler_;

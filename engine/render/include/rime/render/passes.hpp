@@ -178,6 +178,19 @@ struct SceneDrawData {
     // forward path needs all of GpuFrameUniforms. A range SHORTER than the declared block is its
     // own bug, so this is per call site rather than one constant.
     std::uint64_t frame_ubo_size = 0;
+
+    // Set the three together, because they are one fact. Passes take a COPY of this struct and
+    // re-point it at their own slice (`SceneDrawData cascade_data = scene_data;`), so a caller that
+    // assigns the handle and the offset but forgets the size inherits the copy's — 752 bytes aimed
+    // at a 256-byte cascade slice, which is the mirror image of the bug this field was added to
+    // fix and reads at the driver as an unrelated descriptor error. Assigning the members
+    // individually still compiles; this is the way that cannot be half-done.
+    void bind_frame_ubo(rhi::BufferHandle buffer, std::uint32_t offset, std::uint64_t size) {
+        frame_ubo = buffer;
+        frame_ubo_offset = offset;
+        frame_ubo_size = size;
+    }
+
     rhi::BufferHandle draw_ubo;
     rhi::SamplerHandle material_sampler;
     // The ClampToEdge sibling (m16.5), selected per draw by DrawItem::ClampUv. Two samplers rather

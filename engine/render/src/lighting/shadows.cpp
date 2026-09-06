@@ -177,9 +177,9 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
                   "empty name collides with the next one");
     for (std::uint32_t c = 0; c < fit.count; ++c) {
         SceneDrawData cascade_data = scene_data;
-        cascade_data.frame_ubo = vp_slice.buffer;
-        cascade_data.frame_ubo_offset = vp_slice.offset + c * kCascadeStride;
-        cascade_data.frame_ubo_size = kCascadeStride; // this cascade's slice, not the whole block
+        // This cascade's slice, not the whole block.
+        cascade_data.bind_frame_ubo(
+            vp_slice.buffer, vp_slice.offset + c * kCascadeStride, kCascadeStride);
         prepass.add(graph, cascades, cascade_data, c, kCascadeLabels[c]);
     }
 
