@@ -63,12 +63,20 @@ inline constexpr core::Vec3 kUp{0.0f, 1.0f, 0.0f};
 //     20 m                 1.4 cm
 //     30 m and beyond      10 cm
 //
-// A 200 m floor therefore swallows a character up to its knees and reports nothing. That is a
+// A 200 m floor therefore swallowed a character up to its knees and reported nothing. That was a
 // defect in the collision core (the same family as the GJK work on #131/#132), not in the
-// controller, and no amount of care above the seam can recover a contact the query denies. Sizing
-// the fixtures inside the regime where the answers are trustworthy is what lets these tests assert
-// the CONTROLLER's behaviour rather than the collision core's error budget; the limitation itself
-// is reported upward rather than papered over.
+// controller, and no amount of care above the seam could recover a contact the query denied.
+//
+// RE-MEASURED 2026-09-06 (m17.8), AND IT IS GONE. Before putting a 76 m ground collider on top of
+// this claim, the sweep above was repeated over 324 configurations — half-extents 10, 20, 30, 38,
+// 44 and 50 m; depths 1 mm to 20 cm; aim points from the box centre out to 99% of the half-extent —
+// with ZERO misses at every size. The stall-certificate and double-precision-polish work that
+// closed the cast-side numerics appears to have closed this too.
+//
+// The 10 m cap therefore stays as a fixture CONVENTION, not as a constraint: these tests want small
+// deterministic geometry and gain nothing from a large floor. What is no longer true is the reason
+// — so do not cite this table as evidence that large static geometry is unsafe.
+// `13-networked-player` still tiles its floor at 10 m per box for exactly that superseded reason.
 inline constexpr float kMaxTestExtent = 10.0f;
 
 // A floor whose TOP SURFACE is exactly y = 0 — the reference plane every height assertion in this
