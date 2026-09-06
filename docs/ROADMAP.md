@@ -2528,6 +2528,62 @@ m17.8, m17.10.
 > never merging two batches on fracture-boundary grounds. **What must not be skipped — the
 > `destruction.update` or the `physics.step` — is the open question, and it is worth ~7.5 ms.**
 >
+> **RULED (2026-09-06): the step belongs to the tick, not to the batch — and that closes the
+> clause on one machine.** The fracture boundary that must not be skipped is the `update()`, not
+> the `step()`, and it is measured rather than argued. `tests/destruction_net` "the fracture
+> boundary is the destruction update, not the physics step" feeds two mirrors an identical pair of
+> **remote** batches, one stepping between them and one not: equal composition hashes, equal debris
+> rosters — while merging both batches into a SINGLE update still hashes differently, which is the
+> divergence ADR-0033 A12 actually names.
+>
+> *The first version of that test failed, 13 chunks against 14, and the failure is worth keeping.*
+> Written against `apply_damage` it measured a different mechanism: local damage carries a world
+> POINT that `update()` resolves against the current pose, so for a **Local** instance a step
+> between the blast and the update genuinely changes which parts are hit. The client never takes
+> that path — a `DamageOp` off the wire carries an already-resolved `part` index and a Remote
+> instance refuses local damage outright — so testing the wrong path would have "proved" the step
+> load-bearing while measuring pose-dependent damage resolution.
+>
+> Interleaved A/B, two runs an arm, 600 frames each:
+>
+> | p99 | step per batch | one step per tick |
+> |---|---|---|
+> | `frame` | 27.615 / 27.988 | **21.186 / 21.687** |
+> | `frame.player` | 19.396 / 19.760 | **12.725 / 13.078** |
+> | `sim.client` | 14.846 / 15.423 | 8.521 / 8.629 |
+> | `net.client_physics_steps` | 704 | 600 |
+> | `net.client_batches_applied` | — | 704 |
+> | `parts.alive_end` | 1227 | 1227 |
+>
+> **Predicted 21.2 and 12.7 before the run; measured 21.186 and 12.725.** Every batch is still
+> applied (704 either way, so the saving is not dropped work) and the server is untouched, which
+> `parts.alive_end` witnesses. Convergence is not assumed: the headless proof drains to quiescence
+> under 5% loss and 80 ms RTT and passes.
+>
+> **`frame.player` p99 is 12.7 ms against the ratified 16.6 — M13's playable-frame-rate clause is
+> MET on one machine.** The gated `frame` is 21.2, still 1.28x over, and it stays the gated number
+> because moving the goalposts to the flattering measurement is what a ratified budget exists to
+> prevent. But the two numbers now say different things, and the difference is this demo hosting an
+> authoritative server *and* a predicting client in one process, which no shipped configuration
+> does.
+>
+> Follow-ups this opens, none of them taken here: `kMaxCatchUpBatchesPerTick` is still 2 and a batch
+> now costs an `update()` rather than a step, so the cap can rise — that is a catch-up-latency
+> improvement, not a budget one, and it deserves its own measurement. Debris age advances per
+> `update()` (`damage.cpp:429`), so it still runs at the batch rate during a burst. And
+> `DestructionWorld::events()` is valid only until the next `update()` while the block reads it once
+> a tick, so on a multi-batch tick the first batch's `PartDied`/`IslandDetached` never reach the
+> audio loop — pre-existing, unchanged by this brick, and real.
+>
+> **A vacuous proof found in the same pass and deleted rather than left green.**
+> `{"net: no debris left unresolved", dc.debris_unresolved() == 0}` could not fail: both that
+> counter and `debris_bound_` increment in exactly one place, inside
+> `DestructionClient::sync_debris`, and no sample calls the client's `sync_debris` — not this one,
+> not `12-networked-destruction`. All three call sites in the repository are in tests. So the
+> client-side half of m11.4b's addressing proof ships in no sample, and the check that looked like
+> it covered that was reading 0 == 0. Wiring it would add per-tick client cost to the number this
+> brick is about, so it is named as a scope decision rather than folded in.
+>
 > **A trap recorded so it is not rediscovered: the client's `physics.contacts` looked 1.25x the
 > server's, and that reading is wrong.** Both worlds carry identical populations — 507 bodies and
 > 2134 broadphase pairs, to the unit — and across the distribution the client is *cheaper*: p50
