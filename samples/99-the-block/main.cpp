@@ -2461,26 +2461,26 @@ int run_perf(const std::filesystem::path& cooked,
     // zone added anywhere in the engine shows up here without this sample being edited — the same
     // reason the work ledger prints itself whole.
     {
-        std::vector<std::pair<std::string_view, double>> zones;
+        std::vector<std::pair<std::string_view, double>> per_frame_zones;
         for (const std::string_view name : report.timelines()) {
             constexpr std::string_view kSuffix = ".per_frame";
             if (name.size() <= kSuffix.size() || !name.ends_with(kSuffix))
                 continue;
             if (const auto d = report.distribution(name))
-                zones.emplace_back(name, d->p99_ms);
+                per_frame_zones.emplace_back(name, d->p99_ms);
         }
-        std::sort(zones.begin(), zones.end(), [](const auto& a, const auto& b) {
+        std::sort(per_frame_zones.begin(), per_frame_zones.end(), [](const auto& a, const auto& b) {
             return a.second > b.second;
         });
-        if (!zones.empty()) {
+        if (!per_frame_zones.empty()) {
             std::printf("  where the CPU frame went (per-frame totals, p99, top %zu of %zu):\n",
-                        std::min<std::size_t>(zones.size(), 6),
-                        zones.size());
-            for (std::size_t i = 0; i < zones.size() && i < 6; ++i) {
+                        std::min<std::size_t>(per_frame_zones.size(), 6),
+                        per_frame_zones.size());
+            for (std::size_t i = 0; i < per_frame_zones.size() && i < 6; ++i) {
                 std::printf("    %-34.*s %8.3f ms\n",
-                            static_cast<int>(zones[i].first.size()),
-                            zones[i].first.data(),
-                            zones[i].second);
+                            static_cast<int>(per_frame_zones[i].first.size()),
+                            per_frame_zones[i].first.data(),
+                            per_frame_zones[i].second);
             }
         }
     }
