@@ -175,6 +175,33 @@ TEST_CASE("m17.8: binding twice binds nothing, and a scaled surface is refused a
     CHECK(second.scaled_refused == 1);
 }
 
+TEST_CASE("m17.8: a handle from a destroyed world does not count as bound") {
+    // The editor's Play builds a BRAND-NEW PhysicsWorld while the entity keeps the `GroundBody`
+    // written against the old one, and a BodyId is an index plus a generation — so a handle from a
+    // world that no longer exists still answers `is_valid()`. Believing it would skip the bind and
+    // leave the new world with no ground at all: a floor that is plainly drawn and falls through.
+    ecs::World world;
+    ground::register_ground_components(world);
+    ecs::register_transform_components(world);
+
+    ground::GroundSurface s;
+    s.half_x = s.half_z = 12.0f;
+    (void)world.spawn_with(ecs::LocalTransform{}, s);
+
+    physics::PhysicsWorld first;
+    CHECK(ground::bind_ground(world, first).bound == 1);
+    CHECK(ground::bind_ground(world, first).bound == 0); // same world: still idempotent
+
+    // Play pressed: a new world, and the component still holds the old world's handle.
+    physics::PhysicsWorld second;
+    CHECK(ground::bind_ground(world, second).bound == 1);
+
+    // …and it really is standing in the NEW world, not merely re-stamped.
+    physics::RayHit hit{};
+    const physics::Ray down{{0.0f, 10.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 50.0f};
+    CHECK(second.raycast(down, hit));
+}
+
 TEST_CASE("m17.8: every peer derives the same ground, bit for bit") {
     // Level geometry is stood up independently by the server and by each client rather than
     // replicated, so two peers agreeing about where the floor is rests entirely on the derivation

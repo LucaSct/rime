@@ -37,8 +37,14 @@ BindStats bind_ground(ecs::World& world, physics::PhysicsWorld& physics) {
     std::vector<Pending> pending;
 
     world.query<GroundSurface>().for_each([&](ecs::Entity e, GroundSurface& surface) {
+        // ALREADY STANDING IN *THIS* WORLD, which is a stronger question than "has a handle", and
+        // the editor is what makes the difference load-bearing: pressing Play builds a brand-new
+        // `PhysicsWorld`, while the entity keeps the `GroundBody` written against the old one. A
+        // BodyId is an index and a generation, so a handle from a destroyed world still answers
+        // `is_valid()` — trusting it would skip the bind and leave the new world with no ground at
+        // all, which presents as the ball falling through a floor that is plainly drawn.
         const GroundBody* existing = world.get<GroundBody>(e);
-        if (existing != nullptr && existing->body.is_valid()) {
+        if (existing != nullptr && existing->body.is_valid() && physics.is_alive(existing->body)) {
             return; // already standing — idempotent
         }
         const ecs::WorldTransform* wt = world.get<ecs::WorldTransform>(e);
@@ -61,9 +67,14 @@ BindStats bind_ground(ecs::World& world, physics::PhysicsWorld& physics) {
     });
 
     // Stamped in a second pass: `query().for_each` hands out references into the storage the
-    // add would reallocate.
+    // add would reallocate. An entity re-bound into a new world already carries the component, so
+    // the stale handle is overwritten rather than duplicated.
     for (const Pending& p : pending) {
-        (void)world.add_component(p.entity, GroundBody{p.body});
+        if (GroundBody* existing = world.get<GroundBody>(p.entity); existing != nullptr) {
+            existing->body = p.body;
+        } else {
+            (void)world.add_component(p.entity, GroundBody{p.body});
+        }
         ++stats.bound;
     }
     return stats;
