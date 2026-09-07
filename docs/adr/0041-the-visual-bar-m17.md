@@ -680,3 +680,52 @@ with it and decided against a ground worth judging.
   collider *derived* from that surface rather than authored beside it, and a seam that a later
   heightfield replaces rather than is retrofitted into.
 - Cut order and never-cut list are unchanged.
+
+## Amendment (2026-09-07, m17.8): Ruling 5's title, and what the ground brick actually found
+
+**Ruling 5's title says "a ground *module* is not [in M17]" and its body asks for "one place that
+answers 'what is the ground', producing both the drawn surface and the collider", shared by two
+samples and the editor. In this repository those cannot both be satisfied**: `samples/` has no
+shared code, and a thing two samples and an engine host all link is a library. The title is read as
+what its own next paragraph says it means — *"A **terrain** module is NOT in M17"* — and the brick
+was built on the body. `engine/ground` is deliberately named `ground` rather than `terrain` so M18's
+question (does virtualized geometry subsume terrain LOD?) stays open, and it holds no heights, no
+LOD, no splat blending and no streaming.
+
+**The defect was worse than Ruling 5 counted.** It listed three places; there were five, and three
+of them were live in `99-the-block` at once:
+
+| | half-extents | spans |
+|---|---|---|
+| drawn | 38 x 38 | x[-16, 60] z[-38, 38] |
+| collided | 44 x 44 | x[-22, 66] z[-44, 44] |
+| GI-traced (SDF clipmap instance 0) | 26 x 14 | x[ -4, 48] z[-14, 14] |
+
+So a player could stand six metres past the visible edge of the world, and the DDGI probes lit a
+street a third the size of the one being drawn. The fourth was `13-networked-player`'s 3x3 grid of
+10 m boxes; the fifth was the editor host's own floor, where the comment reads
+`make_plane(half_extent, uv_tiles)` as width/depth — there is no depth argument — so a 20 m square
+plane sat over a 10 x 4 m collider whose top face was 10 cm *above* it.
+
+**Ruling 5's other factual claim checked out, and was worth checking.** It says the "10 m per box is
+a measured GJK limit" justifying `13`'s tiling was "measured as gone". This machine's own notes said
+the opposite — an open collision-core defect losing 10 cm of overlap at ≥30 m half-extents — and a
+76 m ground collider was about to be built on the answer. Re-measured over 324 configurations
+(half-extents 10 to 50 m, depths 1 mm to 20 cm, aim points from the box centre to 99% of the
+half-extent): **zero misses**. Ruling 5 is right and the notes were stale;
+`tests/gameplay/character_fixture.hpp` now says so rather than arming the next reader with a
+superseded constraint.
+
+**Two things the ladder did not name, recorded so they are not rediscovered as surprises.**
+`99-the-block` has no asset runtime at all — no `AssetServer`, `Manifest` or `GpuAssetBridge` — so
+"the first thing to use M16's asset path over a large area" means standing that path up in the demo
+for the first time, which is plausibly a larger job than the ground module was. And M16 cannot
+express a standalone material (a carrier glTF is mandatory) or a uv transform in the material
+record, which is why tiling lives on `GroundSurface::tile_metres` and not on the material.
+
+**A follow-up this brick declined to fold in.** Adding one component to blockkit broke *three*
+private component-registration lists (`blockkit_test`, `block_standup_test`, `block_render_test`),
+and `editor_host_app.cpp`'s `build_viewport_scene` keeps a fourth. That is precisely the drift
+ADR-0037 built `worldkit` to end, still live in the places worldkit does not reach. Registering the
+new component in each was the small fix; switching them to the profile is the right one, and it is
+its own brick rather than a rider on this one.
