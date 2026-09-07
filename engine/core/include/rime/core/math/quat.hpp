@@ -97,7 +97,7 @@ struct alignas(16) Quat {
 // cost 19.6% of the physics solve, which calls it three times per contact point per velocity
 // iteration. Bit-identical arithmetic — this changes what the compiler emits, never what it
 // computes.
-[[nodiscard]] RIME_FORCE_INLINE inline Vec3 rotate(const Quat& q, Vec3 v) noexcept {
+[[nodiscard]] RIME_FORCE_INLINE Vec3 rotate(const Quat& q, Vec3 v) noexcept {
     const Vec3 u{q.x, q.y, q.z};
     const Vec3 t = 2.0f * cross(u, v);
     return v + q.w * t + cross(u, t);

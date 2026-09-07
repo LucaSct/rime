@@ -22,13 +22,22 @@
 //
 // USE IT SPARINGLY AND ONLY WITH A NUMBER. Forcing inline costs code size (this one cost 70 KB of
 // 40 MB) and can hurt by evicting a hot loop from the instruction cache, so it is not a decoration
-// to sprinkle on small functions — it is a fix for a specific call site the profile named. On MSVC
-// `__forceinline` replaces `inline` entirely; on GCC/Clang the attribute augments it, so callers
-// write `RIME_FORCE_INLINE inline` and get the right thing on all three.
+// to sprinkle on small functions — it is a fix for a specific call site the profile named.
+//
+// THE MACRO CARRIES `inline` ITSELF, so a caller writes `RIME_FORCE_INLINE T f()` and never spells
+// `inline` beside it. That is not a style preference — it is the portability bug this header
+// shipped with for one CI round. MSVC's `__forceinline` already IMPLIES inline, so
+// `RIME_FORCE_INLINE inline`, which the first version of this very comment instructed, expands to
+// `__forceinline inline` and MSVC raises C4141 "'inline': used more than once" — fatal under /WX.
+// GCC and Clang accept the doubled spelling silently, so nothing on this machine could see it, and
+// MSVC is the one compiler not in its matrix. Spelling `inline` at a call site reintroduces it;
+// the macro is the only place that word belongs. Equally, REMOVING it from the macro would make
+// every user a non-inline function defined in a header — an ODR violation the linker finds, not
+// the compiler — which is why all three branches carry it.
 #if defined(_MSC_VER)
-#define RIME_FORCE_INLINE __forceinline
+#define RIME_FORCE_INLINE __forceinline // implies inline; spelling it again is C4141
 #elif defined(__GNUC__) || defined(__clang__)
-#define RIME_FORCE_INLINE [[gnu::always_inline]]
+#define RIME_FORCE_INLINE inline __attribute__((always_inline))
 #else
-#define RIME_FORCE_INLINE
+#define RIME_FORCE_INLINE inline
 #endif
