@@ -40,6 +40,7 @@
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/ground/surface.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/passes.hpp"
@@ -55,6 +56,7 @@ void register_block_components(ecs::World& world) {
     blockkit::register_blockkit_components(world);
     destruction::register_destruction_components(world);
     render::register_render_components(world);
+    ground::register_ground_components(world); // the street, since m17.8
 }
 
 // A placement + role, keyed so two worlds can be compared without depending on entity ids matching.
@@ -245,7 +247,6 @@ TEST_CASE("blockkit: the palette covers every role it is handed") {
 
     // Mesh ids stay invalid without a device — the GPU-free half of the palette, deliberately.
     CHECK(palette.unit_cube == render::kInvalidMeshId);
-    CHECK(palette.street_plane == render::kInvalidMeshId);
 
     const blockkit::PaletteStats stats = blockkit::apply_palette(world, palette);
 

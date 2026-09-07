@@ -44,6 +44,7 @@
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/ground/surface.hpp"
 #include "rime/physics/physics.hpp"
 #include "rime/platform/filesystem.hpp"
 #include "rime/render/components.hpp"
@@ -101,6 +102,7 @@ TEST_CASE("m13.2d: the block draws — shared part meshes, a working cull, and l
     blockkit::register_blockkit_components(world);
     destruction::register_destruction_components(world);
     render::register_render_components(world);
+    ground::register_ground_components(world); // the street, since m17.8
 
     // The cooks: one DestructionWorld pattern and one leaf-mesh set each.
     std::unordered_map<std::uint64_t, destruction::PatternId> patterns;

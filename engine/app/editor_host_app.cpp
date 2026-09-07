@@ -58,6 +58,7 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
+#include "rime/ground/bind.hpp"
 #include "rime/physics/physics.hpp" // umbrella: body/shape/world/components/sync (m9.7 Play)
 #include "rime/platform/socket.hpp"
 #include "rime/render/components.hpp"
@@ -327,9 +328,9 @@ void build_viewport_scene(ecs::World& world,
     // spawn, so the schema advertises them in the inspector's "+ add component" menu from the
     // start — the same reasoning WorldTransform gets pre-registered above.
     physics::register_physics_components(world);
+    ground::register_ground_components(world);
 
     const render::MeshId sphere = meshes.add(render::make_uv_sphere(0.8f, 32, 64), "sphere");
-    const render::MeshId floor = meshes.add(render::make_plane(10.0f, 4.0f), "floor");
 
     const auto place = [&world](const core::Transform& tf, auto&&... comps) {
         // local == world at spawn (flat scene, no Parent); propagate keeps them equal thereafter.
@@ -381,20 +382,25 @@ void build_viewport_scene(ecs::World& world,
     floor_mat.roughness = 0.8f;
     core::Transform floor_tf{};
     floor_tf.translation = {0.0f, -1.6f, 0.0f};
-    // A thin static box under the visual plane (10x4, ADR-... M5.5 shape) so the ball has
-    // something to land on; half-extents match make_plane's width/depth below.
-    physics::RigidBody floor_rb;
-    floor_rb.motion = static_cast<std::uint32_t>(physics::MotionType::Static);
-    physics::Collider floor_col;
-    floor_col.shape_type = static_cast<std::uint32_t>(physics::ShapeType::Box);
-    floor_col.half_x = 5.0f;
-    floor_col.half_y = 0.1f;
-    floor_col.half_z = 2.0f;
-    place(floor_tf,
-          render::MeshRef{floor},
-          render::MaterialRef{materials.add(floor_mat)},
-          floor_rb,
-          floor_col);
+    // THE FLOOR, owned (m17.8). It was a drawn plane beside a hand-written box, and they did not
+    // match in either axis. The old comment claimed "half-extents match make_plane's width/depth",
+    // but `make_plane(half_extent, uv_tiles)` HAS NO DEPTH ARGUMENT — `make_plane(10, 4)` is a 20 m
+    // square with 4 uv repeats, and the collider under it was 10 x 4 m. Worse vertically: a
+    // `physics::Collider` is centred on its entity, so a half_y of 0.1 put the box's TOP FACE 10 cm
+    // ABOVE the plane it was supposed to be under, and the ball came to rest floating.
+    //
+    // A `GroundSurface` cannot express either mistake. The size is authored once, the collider is
+    // derived from it, and `derive_collider` hangs the slab BELOW the surface so the drawn plane is
+    // its top face — which is the property `tests/ground` asserts with a raycast.
+    ground::GroundSurface floor_surface;
+    floor_surface.half_x = 10.0f; // what make_plane(10.0f, …) actually drew
+    floor_surface.half_z = 10.0f;
+    floor_surface.cells_x = 10;
+    floor_surface.cells_z = 10;
+    floor_surface.tile_metres = 5.0f; // 4 repeats across the 20 m span, as before
+    floor_surface.thickness = 0.2f;   // the old box's 0.1 half-depth, now hanging below the surface
+    const render::MaterialId floor_material = materials.add(floor_mat);
+    place(floor_tf, floor_surface, render::MaterialRef{floor_material});
 
     core::Transform cam{};
     cam.translation = {0.0f, 1.2f, 8.0f};
@@ -404,6 +410,11 @@ void build_viewport_scene(ecs::World& world,
     core::Transform light{};
     light.translation = {3.0f, 4.0f, 4.0f};
     place(light, render::PointLight{1.0f, 0.94f, 0.85f, 120.0f, 30.0f});
+
+    // The floor's mesh, derived from the surface above rather than uploaded beside it. Its collider
+    // is created in the fixed tick, because it needs a PhysicsWorld and this scene is built before
+    // one exists — see the `ground::bind_ground` call there.
+    (void)ground::apply_ground(world, meshes, floor_material);
 }
 
 // The `--scene` viewport path: load a .rscene into the world so the editor hosts a REAL saved scene
@@ -592,6 +603,10 @@ int serve_viewport(std::string_view socket_path,
     // frame_dt), so an Edit/Paused iteration renders without ever touching physics_world.
     app.on_fixed_tick([&](ecs::World& w, double dt) {
         if (physics_world) {
+            // Level geometry first: a `GroundSurface` — the built-in floor, or one in a scene the
+            // editor just opened — becomes a static body before anything is asked to stand on it.
+            // Idempotent, so this is one query on every tick after the first.
+            (void)ground::bind_ground(w, *physics_world);
             physics_sync.step(w, *physics_world, static_cast<float>(dt));
         }
         play_session.record_tick();

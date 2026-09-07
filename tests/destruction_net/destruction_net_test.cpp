@@ -733,6 +733,107 @@ TEST_CASE("the composition hash discriminates the divergence it exists to catch"
     CHECK(h_two == destruction_net::debris_composition_hash(two_waves.destruction, a));
 }
 
+TEST_CASE("m17.5: the fracture boundary is the destruction update, not the physics step") {
+    // The block's client pays a FULL physics step per queued destruction batch — on the frames that
+    // set its p99 that is two ~8 ms steps in one tick, and it is where ~7.5 ms of `frame` p99
+    // lives. The catch-up loop's comment justifies the step as preserving the fracture boundary
+    // ADR-0033 A12 forbids merging. This asks the fingerprint which call actually IS the boundary.
+    //
+    // IT MUST BE THE REMOTE PATH. A first version of this test used `apply_damage` and failed —
+    // 13 chunks against 14 — because local damage carries a world POINT that `update()` resolves
+    // against the current pose, so a step between the blast and the update genuinely changes which
+    // parts are hit. That is a real effect and it has nothing to do with the client, which never
+    // takes that path: a `DamageOp` off the wire carries an already-resolved `part` index, and a
+    // Remote instance refuses local damage outright. Testing the wrong path would have "proved"
+    // the step is load-bearing when what it was measuring is pose-dependent damage resolution.
+    const assets::DestructibleAsset asset = load_asset("wall.rdest");
+
+    // The authority produces the two batches, exactly as a server would.
+    Peer authority;
+    authority.register_components();
+    authority.register_pattern(asset, 0xABCDull);
+    const destruction::InstanceId src =
+        authority.destruction.spawn(authority.pattern, core::Transform{}, authority.physics);
+    REQUIRE(src.is_valid());
+
+    const auto blast = [](destruction::DestructionWorld& d, destruction::InstanceId i, float y) {
+        d.apply_damage(i, core::Vec3{0.0f, y, 0.0f}, 0.45f, 3.0f, core::Vec3{0.0f, 0.0f, 4.0f});
+    };
+    blast(authority.destruction, src, 0.4f);
+    authority.physics.step(kDt);
+    authority.destruction.update(authority.physics);
+    const std::vector<destruction::DamageOp> batch1(authority.destruction.committed_ops().begin(),
+                                                    authority.destruction.committed_ops().end());
+    blast(authority.destruction, src, -0.4f);
+    authority.physics.step(kDt);
+    authority.destruction.update(authority.physics);
+    const std::vector<destruction::DamageOp> batch2(authority.destruction.committed_ops().begin(),
+                                                    authority.destruction.committed_ops().end());
+    REQUIRE(!batch1.empty());
+    REQUIRE(!batch2.empty());
+
+    // Three mirrors, identical ops, differing only in what runs between the two batches.
+    struct Mirror {
+        Peer peer;
+        destruction::InstanceId id{};
+    };
+
+    std::array<Mirror, 3> m;
+    for (Mirror& mi : m) {
+        mi.peer.register_components();
+        mi.peer.register_pattern(asset, 0xABCDull);
+        mi.id = mi.peer.destruction.spawn(mi.peer.pattern, core::Transform{}, mi.peer.physics);
+        REQUIRE(mi.id.is_valid());
+        mi.peer.destruction.set_authority(mi.id, destruction::Authority::Remote);
+    }
+    const auto retarget = [](std::vector<destruction::DamageOp> ops, destruction::InstanceId to) {
+        for (destruction::DamageOp& op : ops) {
+            op.instance = to;
+        }
+        return ops;
+    };
+
+    // [0] today's shape: a step per batch.
+    m[0].peer.destruction.apply_remote_ops(retarget(batch1, m[0].id));
+    m[0].peer.physics.step(kDt);
+    m[0].peer.destruction.update(m[0].peer.physics);
+    m[0].peer.destruction.apply_remote_ops(retarget(batch2, m[0].id));
+    m[0].peer.physics.step(kDt);
+    m[0].peer.destruction.update(m[0].peer.physics);
+
+    // [1] the proposal: one step for the tick, an update per batch.
+    m[1].peer.destruction.apply_remote_ops(retarget(batch1, m[1].id));
+    m[1].peer.physics.step(kDt);
+    m[1].peer.destruction.update(m[1].peer.physics);
+    m[1].peer.destruction.apply_remote_ops(retarget(batch2, m[1].id));
+    m[1].peer.destruction.update(m[1].peer.physics); // the boundary, WITHOUT a step
+
+    // [2] the divergence A12 actually names: both batches into ONE update.
+    m[2].peer.destruction.apply_remote_ops(retarget(batch1, m[2].id));
+    m[2].peer.destruction.apply_remote_ops(retarget(batch2, m[2].id));
+    m[2].peer.physics.step(kDt);
+    m[2].peer.destruction.update(m[2].peer.physics);
+
+    const std::uint64_t h_step =
+        destruction_net::debris_composition_hash(m[0].peer.destruction, m[0].id);
+    const std::uint64_t h_nostep =
+        destruction_net::debris_composition_hash(m[1].peer.destruction, m[1].id);
+    const std::uint64_t h_merged =
+        destruction_net::debris_composition_hash(m[2].peer.destruction, m[2].id);
+
+    // Non-vacuous: the ops really landed, rubble really came off, and the merge really is
+    // distinguishable — without this the equality below could pass on two empty worlds.
+    REQUIRE(m[0].peer.destruction.rejected_remote_ops() == 0);
+    REQUIRE(m[1].peer.destruction.rejected_remote_ops() == 0);
+    REQUIRE(m[0].peer.destruction.debris_count() > 0);
+    REQUIRE(h_step != h_merged);
+
+    // THE CLAIM: dropping the step BETWEEN two batches changes neither the roster nor its grouping.
+    CHECK(h_nostep == h_step);
+    CHECK(h_nostep != h_merged);
+    CHECK(m[1].peer.destruction.debris_count() == m[0].peer.destruction.debris_count());
+}
+
 TEST_CASE("debris bind to the chunks the client derived, and corrections pull drift back") {
     // The m11.4b proof. Two halves, because they test opposite things:
     //   1. With both peers simulating faithfully, the mirrors must BIND — every chunk's

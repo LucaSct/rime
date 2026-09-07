@@ -122,6 +122,18 @@ fn schema_decodes_field_layout_and_re_encodes_byte_exact() {
     assert_eq!(mesh.fields.len(), 1);
     assert_eq!(mesh.fields[0].kind, FieldKind::U32);
 
+    // Exactly the three types the fixture world registers by hand, and this count is a GUARD, not a
+    // detail. `serialize_schema` walks every registered type, so a C++ fixture world built from a
+    // bulk `register_*_components` call grows this golden every time the engine gains a component —
+    // which is how m17.0's Sky component turned a sky brick into a red cross-language conformance
+    // test. If this number moves, the C++ side re-coupled to a bulk registration; fix that rather
+    // than regenerating the golden.
+    assert_eq!(
+        schema.types.len(),
+        3,
+        "schema fixture should hold exactly Camera, MeshRef and MaterialRef"
+    );
+
     assert_eq!(schema.encode(), golden);
 }
 

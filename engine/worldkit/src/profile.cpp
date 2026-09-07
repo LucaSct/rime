@@ -11,6 +11,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/gameplay/components.hpp"
 #include "rime/gameplay_net/components.hpp"
+#include "rime/ground/surface.hpp"
 #include "rime/physics/components.hpp"
 #include "rime/render/components.hpp"
 
@@ -41,6 +42,7 @@ std::size_t register_engine_components(ecs::World& world) {
     destruction_net::register_destruction_net_components(world);
     gameplay::register_gameplay_components(world);
     gameplay_net::register_gameplay_net_components(world);
+    ground::register_ground_components(world);
 
     return world.registered_component_count();
 }

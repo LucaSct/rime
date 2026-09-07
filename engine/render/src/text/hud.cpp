@@ -98,16 +98,34 @@ HudRenderer::HudRenderer(rhi::Device& device, rhi::Format target_format, const F
     pipeline_ = device.create_graphics_pipeline(pd);
 
     capacity_ = kMaxQuads * 6u; // two triangles a quad, unindexed
-    buffers_.resize(kRing);
-    for (std::size_t i = 0; i < kRing; ++i) {
+    set_frames_in_flight(kDefaultFramesInFlight);
+    vertices_.reserve(capacity_ * kFloatsPerVertex);
+}
+
+void HudRenderer::set_frames_in_flight(std::uint32_t frames) {
+    // A HUD whose constructor bailed (no font atlas) has capacity_ == 0 and never made a buffer.
+    // Resizing its ring here would ask the driver for zero-byte buffers, which is not a degraded
+    // HUD but a validation error (VUID-VkBufferCreateInfo-size-00912). Until this brick the only
+    // caller was the constructor, one line after capacity_ was set, so the path did not exist.
+    if (capacity_ == 0)
+        return;
+    const std::size_t slots = static_cast<std::size_t>(frames) + 1u;
+    if (slots == buffers_.size())
+        return;
+    for (const rhi::BufferHandle b : buffers_) {
+        if (b.is_valid())
+            device_.destroy(b);
+    }
+    buffers_.assign(slots, rhi::BufferHandle{});
+    for (std::size_t i = 0; i < slots; ++i) {
         rhi::BufferDesc bd{};
         bd.size = capacity_ * kStride;
         bd.usage = rhi::BufferUsage::Vertex;
         bd.memory = rhi::MemoryUsage::CpuToGpu;
         bd.debug_name = "hud-vertices";
-        buffers_[i] = device.create_buffer(bd);
+        buffers_[i] = device_.create_buffer(bd);
     }
-    vertices_.reserve(capacity_ * kFloatsPerVertex);
+    ring_slot_ = 0;
 }
 
 HudRenderer::~HudRenderer() {

@@ -9,7 +9,7 @@ add_executable(the_block main.cpp)
 target_link_libraries(the_block
     PRIVATE rime::app
             rime::worldkit
-            rime::blockkit
+            rime::blockkit rime::ground
             rime::scene
             rime::destruction
             rime::destruction_net

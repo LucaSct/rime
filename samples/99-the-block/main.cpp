@@ -75,6 +75,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "rime/app/application.hpp"
@@ -101,6 +102,8 @@
 #include "rime/ecs/schema_hash.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/ground/bind.hpp"
+#include "rime/ground/derive.hpp"
 #include "rime/gameplay/character.hpp"
 #include "rime/gameplay/components.hpp"
 #include "rime/gameplay/first_person.hpp"
@@ -266,19 +269,6 @@ struct MeasuredScene {
     return m;
 }
 
-// The ground the block stands on and the player walks along. It is NOT in the scene file: blockkit
-// authors the block, and a street slab is level geometry every peer stands up for itself — the same
-// split `13-networked-player` makes with its floor, and the reason a client can predict standing on
-// something without waiting for the server to tell it the floor exists.
-physics::BodyId add_street(physics::PhysicsWorld& w, const blockkit::BlockParams& p) {
-    physics::BodyDesc d;
-    d.motion = physics::MotionType::Static;
-    d.shape.type = physics::ShapeType::Box;
-    d.shape.half_extents = {p.street_length(), 0.5f, p.street_length()};
-    d.position = {p.street_length() * 0.5f, -0.5f, 0.0f};
-    return w.create_body(d);
-}
-
 // Pull an RGBA8 texture back to the CPU (the 06/07 samples' helper). Only the headless self-check
 // uses it — a windowed run has no reason to stall the pipeline reading its own frame.
 [[nodiscard]] std::vector<std::uint8_t>
@@ -336,10 +326,27 @@ struct Peer {
     ecs::World world;
     physics::PhysicsWorld physics;
     physics::PhysicsSync sync;
-    core::JobSystem jobs{0};
     destruction::DestructionWorld destruction;
     std::unordered_map<std::uint64_t, destruction::PatternId> patterns;
     MeasuredScene measured;
+
+    // HAND THE PHYSICS A JOB SYSTEM (m17.5). Without this pointer `PhysicsWorld` takes the
+    // sequential island solve — same answer, one thread — and it had been taking it here since the
+    // demo was written: each peer owned a job system and spent it only on
+    // `ecs::propagate_transforms`. `09-physics-playground` and `10-destructible-wall` both wire it;
+    // the one sample M13's frame-rate clause is actually about did not.
+    //
+    // BORROWED, one per process, which is what `set_job_system` documents ("the engine constructs
+    // one job system and hands it to every subsystem") and what this demo got wrong twice over: a
+    // Peer that owned one meant TWO, each sized to the machine, so a 32-core box would run ~62
+    // workers on 32 cores and the parallel solve would compete with itself. That configuration was
+    // AVOIDED, not measured — the run that appeared to measure it was contaminated and withdrawn.
+    //
+    // It is a nullable pointer, which is what let the original omission be silent: nothing fails,
+    // nothing warns, the solve is just slower. Hence `physics.job_workers` in the work ledger — a
+    // report that records the work but not the wiring cannot tell "parallelism did not help" from
+    // "parallelism was never switched on".
+    void use_jobs(core::JobSystem& shared) { physics.set_job_system(&shared); }
 
     [[nodiscard]] bool register_patterns(const std::filesystem::path& cooked,
                                          destruction_render::PartLeafRenderer* leaves = nullptr,
@@ -400,7 +407,6 @@ struct Peer {
                                 bool own_destructibles,
                                 std::string_view scene_path) {
         register_all(world);
-        (void)add_street(physics, blockkit::BlockParams{});
 
         // `--scene <file>` runs A SCENE SOMEONE AUTHORED rather than the one blockgen produces —
         // M14's "done when": open the shipped block in the editor, change it, save it, and run the
@@ -429,6 +435,25 @@ struct Peer {
             }
         }
         (void)blockkit::derive_world_transforms(world);
+
+        // THE GROUND, from the scene rather than from a formula (m17.8). It used to be a static box
+        // built here, before the load, from `BlockParams` — half-extent 44 against a drawn surface
+        // of 38, so six metres of the world were standable and invisible. Now the surface is
+        // authored in the scene and the collider is derived from it, which is why this runs AFTER
+        // the load and takes no parameters.
+        //
+        // Still level geometry every peer stands up for itself: a client binds its own ground
+        // rather than waiting to be told the floor exists, and the derivation being pure is what
+        // makes the two agree.
+        const ground::BindStats ground_bound = ground::bind_ground(world, physics);
+        if (ground_bound.bound == 0 || ground_bound.scaled_refused != 0) {
+            std::fprintf(stderr,
+                         "99-the-block: the scene has no usable ground (%zu bound, %zu refused for "
+                         "a scaled transform)\n",
+                         ground_bound.bound,
+                         ground_bound.scaled_refused);
+            return false;
+        }
         measured = measure_scene(world);
 
         // C6's budget, at block scale. 10-destructible-wall runs 48 live; this needs an order of
@@ -592,6 +617,10 @@ struct ClientPeer : Peer {
 // latency and loss are real numbers though — 80 ms RTT and 5% loss — so the prediction path is
 // genuinely exercised rather than bypassed by a zero-latency link.
 struct Session {
+    // Declared FIRST so it is destroyed LAST: both peers' PhysicsWorlds hold a borrowed pointer to
+    // it, and members die in reverse declaration order.
+    core::JobSystem jobs{0};
+
     net::ScriptedNetwork network;
     net::Endpoint server_endpoint{0x7F000001u, 7901};
     ServerPeer server;
@@ -607,6 +636,91 @@ struct Session {
     // Running maxima the proof reads. Peaks, not final values: a budget is about the worst moment.
     std::size_t peak_live_debris = 0;
     std::size_t peak_visual_debris = 0;
+    // The solver's PARALLELISM, not just its cost (m17.5). `physics.solve` being slow says nothing
+    // about whether it CAN be spread: the active-island count is the width available and the
+    // largest ACTIVE island is the critical path through it, and a block that is still mostly one
+    // connected building is one enormous island no number of workers can divide.
+    //
+    // Three deliberate choices here, each of them a wrong version this brick shipped first:
+    //
+    // 1. KEYED ON THE STEP, not on the peer's half of the tick. `last_server_ms` also covers
+    //    gameplay, sync, the shot -> apply_damage loop and `destruction.update`, so the most
+    //    expensive server TICK can easily be the tick the charge went off rather than the tick the
+    //    solver was widest — and an island count sampled there answers a question nobody asked.
+    // 2. PER WORLD, because there are two of them. The client re-simulates (bounded catch-up, up
+    //    to `kMaxCatchUpBatchesPerTick` steps in a tick), and `sim.client` p99 runs to roughly
+    //    twice `sim.server`, so a statement about "the frame" that samples only the server's world
+    //    covers well under half of it.
+    // 3. CO-SAMPLED, not two independent maxima. "106 active islands at some moment" and "an
+    //    island of 612 at some moment" describe no single tick, and reading them together is how a
+    //    3x parallel ceiling gets inferred from a run that never had one. `max_active_islands` is
+    //    kept as a genuine CEILING — the widest the solve ever got — and everything else about the
+    //    expensive moment comes from one struct sampled at one instant.
+    // 4. And keyed on the TICK, not on one step, because that is the shape the tail actually has.
+    //    A tick runs one server step plus up to `kMaxCatchUpBatchesPerTick` client ones, and
+    //    `physics.step.per_frame` — the 24 ms that nearly IS the frame — is their SUM. The single
+    //    most expensive step in this run is ~9 ms; no per-step maximum can explain a 24 ms tick,
+    //    and reading one as if it did is the same error as reading two peaks as one moment.
+    struct TickSolve {
+        double ms = 0.0;                        // every physics.step in the tick, both worlds
+        std::uint64_t tick = 0;
+        std::uint32_t steps = 0;
+        std::uint32_t min_active_islands = 0;   // the NARROWEST step in the tick
+        std::uint32_t max_active_islands = 0;
+        std::uint32_t largest_active_island = 0;
+        std::uint32_t awake_bodies = 0;         // the DENOMINATOR the largest island is a share of
+        std::uint32_t parallel_steps = 0;
+    };
+    TickSolve tick_solve;       // accumulating, this tick
+    TickSolve worst_tick_solve; // the most expensive one so far
+    std::uint32_t max_active_islands = 0;
+
+    // Per-world POPULATION, because the split zones raised a question the split zones cannot
+    // answer. The two worlds' `physics.solve` costs the same per call (2.744 vs 2.737 ms — the
+    // same constraint load, as replication promises), while the client's `physics.contacts` costs
+    // 1.25x the server's. Contacts is broadphase + narrowphase, so the difference would have to be
+    // in how many bodies each world carries into the pair search, not in how many actually touch.
+    // (It was not: the 1.25x is a sampling artifact — see the whole-distribution note in the m17.5
+    // roadmap entry. These counters are what ruled the population explanation out.)
+    //
+    // READ THEM AS BOUNDS, NOT AS AN EQUALITY. They are per-world PEAKS over the run, and two
+    // maxima from two different ticks are not a claim about any one tick — the same mistake the
+    // island peaks invited one brick ago, and the first draft of this very comment made it again.
+    // A large or growing gap means one world is retaining bodies the other reclaimed and is worth
+    // chasing; server 762 against client 774 is two peaks landing on different frames.
+    std::uint32_t server_max_bodies = 0;
+    std::uint32_t client_max_bodies = 0;
+    std::uint32_t server_max_pairs = 0;
+    std::uint32_t client_max_pairs = 0;
+
+    // One physics step, folded into this tick's total. Called from BOTH worlds — the client
+    // re-simulates and the server does not, so a panel that saw only one of them described well
+    // under half of the tick it was being used to explain.
+    void note_step(double step_ms, const physics::WorldStats& s) {
+        tick_solve.ms += step_ms;
+        ++tick_solve.steps;
+        tick_solve.min_active_islands = (tick_solve.steps == 1)
+                                            ? s.active_islands
+                                            : std::min(tick_solve.min_active_islands,
+                                                       s.active_islands);
+        tick_solve.max_active_islands = std::max(tick_solve.max_active_islands, s.active_islands);
+        tick_solve.largest_active_island =
+            std::max(tick_solve.largest_active_island, s.largest_active_island);
+        // Without this the largest island is a number with no scale. "One island of 605" is a
+        // statement about parallelism only against how many bodies were awake at all: 605 of 1900
+        // caps the speedup near 3x, 605 of 650 caps it at nothing, and the two look identical in a
+        // report that records only the island.
+        tick_solve.awake_bodies = std::max(tick_solve.awake_bodies, s.awake_bodies);
+        tick_solve.parallel_steps += (s.islands_solved_parallel > 0) ? 1u : 0u;
+        max_active_islands = std::max(max_active_islands, s.active_islands);
+    }
+    // Steps whose solve actually went through the job system. THE HANDOFF, not the value: a pool
+    // reporting 32 workers proves a pool exists, not that anything was ever handed to it, and
+    // `set_job_system` is a nullable pointer nobody is obliged to call. These are 0 for the entire
+    // run if the wiring is missing, which is the only way the report can tell "parallelism did not
+    // help here" from "parallelism was never switched on".
+    std::uint64_t server_parallel_steps = 0;
+    std::uint64_t client_parallel_steps = 0;
     destruction::BindStats client_bound{};
 
     // The two halves of a tick, timed apart (m13.p). This demo is a server AND a client in one
@@ -624,6 +738,7 @@ struct Session {
     // that is happening or whether the spike is something else.
     std::size_t max_batches_per_tick = 0;
     std::uint64_t total_client_steps = 0;
+    std::uint64_t total_client_batches = 0;
     std::uint64_t shots_fired = 0;
     std::uint64_t shots_hit = 0;
     std::uint64_t damage_ops = 0;
@@ -631,7 +746,52 @@ struct Session {
     std::uint64_t lethal_ops = 0; // ops that killed their part outright
     std::uint64_t total_ops = 0;
 
-    explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {}
+    // Start the measured window (m17.5). Every running total above accumulates from the first tick
+    // of the process, and a `--perf` run steps the whole simulation `--warmup` times before the
+    // report's zone collector is even installed — so a ledger read at the end describes a longer
+    // run than the distributions beside it, and the two disagree in a way nothing announces.
+    //
+    // It was wrong by exactly the warmup: `net.client_physics_steps` read 794 against a
+    // `physics.step` zone count of 1304 = 600 server + 704 client, and "473 of 600 ticks solved in
+    // parallel" was 473 of 690. A denominator that quietly includes warmup makes every ratio in
+    // the write-up wrong in the flattering direction, which is the worst kind of wrong.
+    //
+    // Perf only: the headless proof has no warmup and reads these counters over its whole run.
+    void begin_measured_window() {
+        tick_solve = {};
+        worst_tick_solve = {};
+        max_active_islands = 0;
+        server_max_bodies = 0;
+        client_max_bodies = 0;
+        server_max_pairs = 0;
+        client_max_pairs = 0;
+        server_parallel_steps = 0;
+        client_parallel_steps = 0;
+        peak_live_debris = 0;
+        peak_visual_debris = 0;
+        max_batches_per_tick = 0;
+        total_client_steps = 0;
+        total_client_batches = 0;
+        shots_fired = 0;
+        shots_hit = 0;
+        damage_ops = 0;
+        max_op_amount = 0.0f;
+        lethal_ops = 0;
+        total_ops = 0;
+    }
+
+    explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {
+        // Both peers solve on the SAME job system (m17.5) — see Peer::use_jobs.
+        server.use_jobs(jobs);
+        client.use_jobs(jobs);
+        // …and report their step zones apart. Until this, `physics.step` was one distribution over
+        // two simulations: an authoritative server and a client that re-simulates on catch-up and
+        // costs roughly twice as much. `sim.client`/`sim.server` already split the same work, so
+        // the report carried two decompositions that did not compose — and the merged one is the
+        // shape m17.5 would otherwise have gone off and optimised.
+        server.physics.set_profile_label("server");
+        client.physics.set_profile_label("client");
+    }
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked,
                              std::string_view scene_path,
@@ -708,6 +868,7 @@ struct Session {
     // and `12-networked-destruction` established. Splicing them together is most of this sample's
     // risk, so the two halves are kept in their original sequence rather than interleaved cleverly.
     void tick(const replication::InputCommand& intent) {
+        tick_solve = {};
         now_ms += kTickMs;
         ++tick_index;
         network.advance_time(now_ms);
@@ -753,7 +914,7 @@ struct Session {
         }
 
         const core::Stopwatch client_watch;
-        ecs::propagate_transforms(client.world, client.jobs);
+        ecs::propagate_transforms(client.world, jobs);
         // Stand up whatever replication just delivered, BEFORE anything can damage it. Idempotent,
         // so this is one query on the overwhelming majority of ticks where nothing new arrived.
         client_bound = client.bind(destruction::Authority::Remote);
@@ -783,33 +944,61 @@ struct Session {
         }
         client.sync.push_in(client.world, client.physics, kDt);
 
-        // ONE queued batch per destruction update — never two merged, which would skip the fracture
-        // boundary between them and make two waves of debris look like one island.
-        // BOUNDED CATCH-UP (m13.p, and it is a measured fix rather than a precaution).
+        // ONE DESTRUCTION UPDATE PER BATCH, AND ONE PHYSICS STEP PER TICK (m17.5).
         //
-        // 12-networked-destruction drains EVERY queued batch in one tick — "one batch per
-        // destruction update, never two merged", which is right: merging skips the fracture
-        // boundary between them and makes two waves of debris look like one island. But each batch
-        // costs a full `physics.step`, and during a collapse the client falls behind, so the whole
-        // cost of catching up serialises into one frame. Measured on this demo before the cap:
-        // **10 physics steps in a single tick**, and `sim.client` p99 = 58 ms against a server that
-        // never exceeded 9.5 ms doing the same work. The physics was never the problem.
+        // The fracture boundary that must not be skipped is the `update()`, not the `step()`, and
+        // that is measured rather than argued: `tests/destruction_net` "the fracture boundary is
+        // the destruction update, not the physics step" feeds two mirrors the identical pair of
+        // remote batches, one with a step between them and one without, and their composition
+        // hashes and debris rosters are equal — while merging both batches into a SINGLE update
+        // still hashes differently, which is the divergence ADR-0033 A12 actually names. So the
+        // boundary is preserved here and the second step is not.
         //
-        // DEFERRING IS NOT MERGING. Batches stay queued and are still applied one at a time, in
-        // order, with their fracture boundaries intact — the client simply spreads the catch-up
-        // over several ticks and lags a little longer. That it still converges is not assumed: the
-        // headless proof drains to quiescence with a BOUND and fails if the peers never agree.
+        // The step is the WALL CLOCK's, so it belongs to the tick and not to the batch. Taking one
+        // per batch also ran the client's physics permanently ahead of the server's — 704 steps
+        // against 600 over the measured window, 1.73 s of extra simulated flight by the end.
+        //
+        // WHY THIS IS SAFE ONLY FOR REMOTE OPS, because it is not safe in general. A `DamageOp` off
+        // the wire carries an already-resolved `part` index. LOCAL damage carries a world POINT
+        // that `update()` resolves against the current pose, so for a Local instance a step between
+        // the blast and the update genuinely changes which parts are hit — the first version of the
+        // test above measured exactly that and came out at 13 chunks against 14. Every instance on
+        // this client is bound Remote, and a Remote instance refuses local damage outright.
+        //
+        // What it is worth: the frames that set this demo's p99 ran one server step plus TWO client
+        // steps of ~8 ms each. Now they run one apiece.
+        //
+        // BOUNDED CATCH-UP still applies (m13.p). Before the cap this demo drained every queued
+        // batch in one tick — 10 physics steps in a single tick and `sim.client` p99 = 58 ms — and
+        // deferring is still not merging: batches stay queued and are applied one at a time, in
+        // order, with their boundaries intact. That it converges is not assumed; the headless proof
+        // drains to quiescence with a BOUND and fails if the peers never agree.
         std::size_t batches_this_tick = 0;
         do {
             (void)client.destruction_net_client.apply_next_batch(
                 client.world, client.replicator->map(), client.destruction);
-            client.physics.step(kDt);
+            if (batches_this_tick == 0) {
+                // The tick's one step, in exactly the place it has always been — so a tick that
+                // drains a single batch, which is 496 of 600 here, is the sequence it always was.
+                const core::Stopwatch client_step_watch;
+                client.physics.step(kDt);
+                const physics::WorldStats cs = client.physics.stats();
+                note_step(client_step_watch.elapsed_ms(), cs);
+                client_parallel_steps += (cs.islands_solved_parallel > 0) ? 1u : 0u;
+                client_max_bodies = std::max(client_max_bodies, cs.body_count);
+                client_max_pairs = std::max(client_max_pairs, cs.broadphase_pairs);
+            }
             client.destruction.update(client.physics);
             ++batches_this_tick;
         } while (client.destruction_net_client.pending_batches() > 0 &&
                  batches_this_tick < kMaxCatchUpBatchesPerTick);
         max_batches_per_tick = std::max(max_batches_per_tick, batches_this_tick);
-        total_client_steps += batches_this_tick;
+        // Steps and batches STOPPED BEING THE SAME NUMBER at m17.5, so they stopped sharing a
+        // counter. `total_client_steps += batches_this_tick` was true only while the loop took a
+        // step per batch, and left uncorrected it would have reported the saving as though it had
+        // never happened — the ledger claiming 704 steps for a client that now takes 600.
+        total_client_steps += 1; // exactly one per tick: the wall clock's
+        total_client_batches += batches_this_tick;
         client.sync.write_back(client.world, client.physics);
         last_client_ms = client_watch.elapsed_ms();
 
@@ -817,10 +1006,17 @@ struct Session {
         const core::Stopwatch server_watch;
         server.world.advance_version();
         server.gameplay.consume(server.world, server.physics, server.input, kDt);
-        ecs::propagate_transforms(server.world, server.jobs);
+        ecs::propagate_transforms(server.world, jobs);
         server.sync.reconcile(server.world, server.physics);
         server.sync.push_in(server.world, server.physics, kDt);
+        const core::Stopwatch server_step_watch;
         server.physics.step(kDt);
+        {
+            const physics::WorldStats ss = server.physics.stats();
+            note_step(server_step_watch.elapsed_ms(), ss);
+            server_max_bodies = std::max(server_max_bodies, ss.body_count);
+            server_max_pairs = std::max(server_max_pairs, ss.broadphase_pairs);
+        }
         server.sync.write_back(server.world, server.physics);
 
         // The weapon → destruction glue: the consumer's job, kept out of the engine so that
@@ -892,6 +1088,11 @@ struct Session {
         peak_live_debris =
             std::max(peak_live_debris, live_debris(server.destruction, server.physics));
         peak_visual_debris = std::max(peak_visual_debris, server.destruction.visual_debris_count());
+        server_parallel_steps += (server.physics.stats().islands_solved_parallel > 0) ? 1u : 0u;
+        tick_solve.tick = tick_index;
+        if (tick_solve.ms > worst_tick_solve.ms) {
+            worst_tick_solve = tick_solve;
+        }
     }
 
     // Parts still standing, per building. A single total cannot tell a LOCAL collapse from a global
@@ -1211,15 +1412,35 @@ struct Visuals {
         palette = blockkit::build_palette(materials);
         blockkit::upload_prop_meshes(palette, meshes);
         (void)blockkit::apply_palette(world, palette);
+        // The drawn ground, derived from the same surface the collider came from (m17.8). After
+        // the palette, which has already given the street its material by role — `apply_ground`
+        // supplies the mesh and leaves an existing material alone.
+        (void)ground::apply_ground(world, meshes, palette.street);
 
         // The field the DDGI probes trace (m13.L). Ids 1..N are the buildings, 0 is the street.
+        //
+        // SIZED FROM THE GROUND ITSELF since m17.8, and it was the third of three disagreeing
+        // extents: this proxy used to compute its own half from `BlockParams` and came out at
+        // 26 x 14 against a surface drawn at 38 x 38, so the probes lit a street a third the size
+        // of the one on screen. Now it asks the surface, like everything else that needs to know
+        // how big the ground is.
         const blockkit::BlockParams p;
-        const core::Vec3 street_half{
-            p.street_length() * 0.5f + p.building_gap, 0.25f, p.street_width * 0.5f + p.footprint};
+        core::Vec3 street_half{p.street_length() * 0.5f + p.building_gap, 0.25f,
+                               p.street_width * 0.5f + p.footprint};
+        core::Vec3 street_at{p.street_length() * 0.5f, -0.25f, 0.0f};
+        world.query<ground::GroundSurface>().for_each(
+            [&](ecs::Entity e, ground::GroundSurface& surface) {
+                const core::Vec3 half = ground::half_extents(surface);
+                street_half = {half.x, 0.25f, half.z};
+                const ecs::WorldTransform* wt = world.get<ecs::WorldTransform>(e);
+                const ecs::LocalTransform* lt = world.get<ecs::LocalTransform>(e);
+                const core::Transform placement = wt != nullptr  ? wt->value
+                                                  : lt != nullptr ? lt->value
+                                                                  : core::Transform{};
+                street_at = {placement.translation.x, -0.25f, placement.translation.z};
+            });
         renderer.sdf_clipmap().update_instance(
-            0,
-            build_box_sdf(street_half, 24),
-            core::mat4_translation({p.street_length() * 0.5f, -0.25f, 0.0f}));
+            0, build_box_sdf(street_half, 24), core::mat4_translation(street_at));
         const core::Vec3 building_half{p.footprint * 0.5f,
                                        static_cast<float>(p.storeys) * p.storey_height * 0.5f,
                                        p.footprint * 0.5f};
@@ -1715,7 +1936,23 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
         // 3. The peers agree — the composition claim that a silent divergence would break.
         {"net: destruction replicated to the client", dc.ops_applied() > 0},
         {"net: composition checks all matched", dc.composition_mismatches() == 0},
-        {"net: no debris left unresolved", dc.debris_unresolved() == 0},
+        // REMOVED (m17.5): {"net: no debris left unresolved", dc.debris_unresolved() == 0}.
+        //
+        // It could not fail. `debris_unresolved_` and `debris_bound_` are incremented in exactly
+        // one place — inside `DestructionClient::sync_debris` — and this demo's client never calls
+        // it. Only the SERVER's `sync_debris` is wired (the debris bridge above), so both counters
+        // are structurally 0 for the whole run and the check read as evidence while asserting
+        // nothing. Deleting a proof is worse than keeping it only if the proof was doing work; this
+        // one was doing the opposite, by making a gap look covered.
+        //
+        // THE GAP IT WAS HIDING, recorded rather than quietly fixed: no sample binds replicated
+        // debris on the client — not this one and not `12-networked-destruction`. The three
+        // `destruction_client.sync_debris` call sites in the repository are all in
+        // `tests/destruction_net`. So the client-side half of m11.4b's addressing proof (mirrors
+        // resolving to the chunks the client derived) is exercised by tests and by nothing that
+        // ships. Wiring it here would add per-tick client cost to the very number m17.5 is
+        // measuring, so it is a scope decision rather than a drive-by: see the m17.5 notes in
+        // docs/ROADMAP.md.
         {"net: the peers' destruction state hashes agree", server_hash == client_hash},
         {"net: they agreed WITHIN the settle bound", settled_after < kSettleBound},
         // The claim m13.5 shipped as a KNOWN DEFECT and m13.6 earned. Before the fix this read
@@ -1810,7 +2047,16 @@ struct PerfOptions {
     std::uint32_t height = 1080;
     const char* out = nullptr;
     const char* baseline = nullptr;
+    // Frames the GPU may be behind the CPU. 1 = `submit_blocking`, which is what every committed
+    // baseline was measured under and therefore the default (m17.5).
+    std::uint32_t pipelined = 1;
 };
+
+// An upper bound on --pipelined, because every frame in flight costs a full set of per-frame rings
+// and, past a couple, the image trails the simulation by long enough that what the report measures
+// stops resembling what a player would see. It is not a safety limit — the rings resize now — it is
+// a limit on what this sample is willing to claim it measured.
+constexpr std::uint32_t kMaxPipelineDepth = 4;
 
 int run_perf(const std::filesystem::path& cooked,
              std::string_view scene_path,
@@ -1832,25 +2078,118 @@ int run_perf(const std::filesystem::path& cooked,
     }
     demo.use_authored_camera = true; // see the note above
 
+    // PIPELINE THE LOOP, if asked (m17.5). Set before the first frame, because every ring sized
+    // from this number is rebuilt by the call and doing that under live GPU work is the bug the
+    // rings exist to prevent.
+    //
+    // `set_headless_frames_in_flight` resizes the ring the Application OWNS — the graph's CPU
+    // scratch — and it cannot reach the ones it does not own. This comment used to claim it resized
+    // "the SceneRenderer's uniforms" too. It did not, and at a depth of 3 that was a live race:
+    // the graph grew to 4 slots while the SceneRenderer and the HUD stayed at 3, so frame K wrote
+    // the slot frame K-3 was still being read out of. The contract is stated on
+    // Application::frames_in_flight() — every owner of a per-frame resource sizes it from that —
+    // and this is the sample honouring it rather than a comment asserting someone else did.
+    demo.app.set_headless_frames_in_flight(opt.pipelined);
+    if (demo.visuals) {
+        demo.visuals->renderer.set_frames_in_flight(demo.app.frames_in_flight());
+        demo.visuals->hud.set_frames_in_flight(demo.app.frames_in_flight());
+    }
+
     core::PerfReport report;
     core::MachineFingerprint fp = core::MachineFingerprint::detect();
     const rhi::AdapterInfo& adapter = demo.app.device()->adapter();
     fp.gpu = adapter.name;
     fp.driver = adapter.driver_name + " " + adapter.driver_info;
+    // The preset is part of the FINGERPRINT, so what goes in it decides what may be compared
+    // (ADR-0035 decision 3). Pipelining belongs in it: a pipelined `frame` measures CPU wall with
+    // the GPU alongside, a serialized one measures both in series, and comparing the two would be
+    // exactly the quiet-wrong-comparison ADR-0041 Ruling 4 refuses. Naming it here means the gate
+    // REFUSES that comparison by itself rather than relying on anyone noticing.
     fp.preset = "block-all-lighting-gates"; // csm + local shadows + clustered + sdf + ddgi + ssr
+    if (opt.pipelined > 1)
+        fp.preset += "+pipelined-" + std::to_string(opt.pipelined);
     fp.width = opt.width;
     fp.height = opt.height;
     report.set_machine(fp);
     report.set_run(core::RunInfo::detect("99-the-block"));
 
-    std::vector<core::PassTiming> passes;
+    // WHAT MUST ADD UP (m17.3c, ADR-0041 Ruling 2). m17.3a gave every pass a name and m17.3b gave
+    // the simulation eleven, but "the frame is attributable" was still an unchecked belief: nothing
+    // said the named parts account for the whole, so a subsystem added tomorrow without a zone
+    // would simply be absent, and absent looks exactly like free.
+    //
+    // Three nestings, each one a real containment rather than a plausible grouping — a residual
+    // over parts that are not inside their parent measures nothing:
+    //
+    //   frame        = sim.block + frame.render        (the two halves of the loop below)
+    //   frame.render = the Application's own stage zones inside `app.step`
+    //   sim.block    = the physics inside the Session's tick
+    //
+    // The third is the interesting one and the reason to do this before m17.5 rather than after:
+    // `sim.block` p99 is 25.49 ms against a ratified 6.0, `physics.step.per_frame` is the only part
+    // of it anything measures, and the difference — replication, destruction, debris, transforms —
+    // has never had a number. `sim.block.unaccounted` is that number.
+    //
+    // `frame.present` is deliberately not a child: `--perf` runs headless, so the present zone
+    // never fires, and naming a child that cannot record would count a gap on every frame. When
+    // the bar moves windowed (m17.4 onward) it becomes one, and until then present time is
+    // genuinely unaccounted rather than pretend-accounted.
+    report.declare_accounting("frame", {"sim.block", "frame.render"});
+    report.declare_accounting("frame.render",
+                              {"sim.tick.per_frame",
+                               "frame.declare.per_frame",
+                               "frame.execute.per_frame",
+                               "frame.submit.per_frame"});
+    // Both worlds, because the tick runs both and the accounting must add up to the tick. Naming
+    // only one leaves the other as unaccounted residual, which is the failure m17.3c's gate exists
+    // to catch — it would read as "the simulation spends 8 ms somewhere nobody named".
+    report.declare_accounting(
+        "sim.block", {"physics.server.step.per_frame", "physics.client.step.per_frame"});
+
+    // Deliveries QUEUE rather than overwrite, and are drained after the loop rather than inside it.
+    // A single slot consumed in the loop body loses the tail: pipelined, the frames still in flight
+    // when the loop ends are retired by `finish_gpu()` AFTERWARDS, so their timings arrive with
+    // nothing left to consume them — and arrive within one call, so each would overwrite the last
+    // anyway. At `--pipelined 2` that silently cost every per-pass distribution two of its samples
+    // and left the worst frame's breakdown empty whenever the worst frame was one of the last two.
+    // (Blocking, timings resolve inline in the same frame and none were ever lost, which is exactly
+    // why the default path could not see this.)
+    std::vector<std::pair<std::uint64_t, std::vector<core::PassTiming>>> passes_queue;
     bool timestamps_seen = false;
-    demo.app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer& cmd) {
-        passes.clear();
-        for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(cmd)) {
-            passes.push_back(core::PassTiming{std::string(t.name), t.gpu_ms});
-            timestamps_seen = true;
-        }
+    // The HIGH WATER MARK across the run, not the last frame's count (m17.3b). Which passes a frame
+    // declares varies — local shadows only re-render invalidated slots — so testing the final
+    // frame's count against the timestamp pool would report "everything was timed" whenever the run
+    // happened to end quiet.
+    // …and it counts what the frame DECLARED, not what came back timed (m17.3c). m17.3b compared
+    // `passes.size()` against the pool, which is the count AFTER the cap has already truncated it
+    // and (since the clipmap's repeats fold) after several passes have merged into one row — a
+    // check that reads the output of the thing it is trying to detect can never see an overflow
+    // larger than the cap, and now cannot see one at all. `pass_count()` is the declaration, which
+    // is the number that has to fit.
+    std::size_t max_passes_declared = 0;
+    // `on_frame_timings` rather than `on_post_submit` (m17.5), because it is the only one of the
+    // two that survives pipelining: it hands over resolved, OWNED timings tagged with the frame
+    // they describe, instead of a graph and a command buffer whose lifetimes stopped lining up
+    // with "now" the moment the loop stopped waiting for the GPU. Under `submit_blocking` it fires
+    // inside `step()`; pipelined it fires when the ring retires that frame, two frames later —
+    // which is why nothing below keys on the loop counter.
+    demo.app.on_frame_timings(
+        [&](std::uint64_t index, std::span<const render::RenderGraph::PassTiming> timings) {
+            if (timings.empty())
+                return;
+            std::vector<core::PassTiming> owned;
+            owned.reserve(timings.size());
+            for (const render::RenderGraph::PassTiming& t : timings) {
+                owned.push_back(core::PassTiming{t.name, t.gpu_ms});
+                timestamps_seen = true;
+            }
+            passes_queue.emplace_back(index, std::move(owned));
+        });
+    demo.app.on_post_submit([&](render::RenderGraph& graph, rhi::CommandBuffer&) {
+        // The declared-pass high-water still needs the graph itself, and this fires only on the
+        // blocking path — which is the path the committed baselines are measured on, so the
+        // headroom line keeps meaning what it meant.
+        max_passes_declared = std::max(max_passes_declared, graph.pass_count());
     });
     demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
 
@@ -1868,6 +2207,16 @@ int run_perf(const std::filesystem::path& cooked,
         demo.step_sim(scripted_tape(tick));
         demo.app.step(demo.app.fixed_dt());
     }
+    // The ledger counts the same window the distributions do — see Session::begin_measured_window.
+    demo.session.begin_measured_window();
+    const std::uint64_t measure_from_tick = tick;
+
+    // THE TWO INDEX SPACES, and they are not the same one. `Application` counts every frame it has
+    // ever rendered, warmup included; this loop counts measured frames from zero, and that is the
+    // index the report is keyed on. The timings callback speaks the former. Translating here is
+    // what makes `observe_passes` land on the frame it describes — without it the worst frame's
+    // breakdown is silently empty, which is exactly how it looked before this line existed.
+    const std::uint64_t frame_base = demo.app.frame_index();
 
     core::ZoneTimelines zones(report);
     for (int i = 0; i < opt.frames; ++i, ++tick) {
@@ -1880,7 +2229,8 @@ int run_perf(const std::filesystem::path& cooked,
         // Application's schedule, which this demo does not use — its simulation is the Session.
         const core::Stopwatch sim_watch;
         demo.step_sim(scripted_tape(tick));
-        report.observe("sim.block", sim_watch.elapsed_ms());
+        const double sim_ms = sim_watch.elapsed_ms();
+        report.observe("sim.block", sim_ms);
         // The split that decides whether the ENGINE misses the budget or this DEMO's topology does.
         report.observe("sim.client", demo.session.last_client_ms);
         report.observe("sim.server", demo.session.last_server_ms);
@@ -1888,7 +2238,11 @@ int run_perf(const std::filesystem::path& cooked,
         demo.app.step(demo.app.fixed_dt());
         const double render_ms = render_watch.elapsed_ms();
         const double ms = watch.elapsed_ms();
-        report.observe_frame(static_cast<std::uint64_t>(i), ms, passes);
+        // EVERY PART IS RECORDED BEFORE THE `observe_frame` THAT CLOSES THE FRAME. That ordering is
+        // the accounting contract (m17.3c), not a style preference: a part recorded one line later
+        // has no sample for the frame being closed, so it counts as a gap and the residual is
+        // inflated by exactly its own cost. `frame.render` was observed after `observe_frame` until
+        // this brick, which would have made `frame.unaccounted` read as the entire render cost.
         report.observe("frame.render", render_ms);
         // WHAT A PLAYER'S MACHINE WOULD PAY, and it is a diagnostic rather than the gate.
         //
@@ -1900,14 +2254,43 @@ int run_perf(const std::filesystem::path& cooked,
         // ENGINE too slow, or is this demo's topology?
         report.observe("frame.player", demo.session.last_client_ms + render_ms);
         if (i >= opt.charge_frame && i < opt.charge_frame + opt.collapse) {
-            // The collapse, on its own timeline. A hitch there is invisible in a 600-frame p99 —
-            // 90 frames cannot move the 594th — and obvious in a 90-frame one. That is exactly why
+            // The collapse, on TWO timelines. A hitch there is invisible in a 600-frame p99 — 90
+            // frames cannot move the 594th — and obvious in a 90-frame one, which is exactly why
             // ADR-0035 asks for the window separately.
+            //
+            // `sim.collapse` is new (m17.3c) and it closes a hole the review found: ADR-0035
+            // ratified TWO collapse numbers, "frame max ≤ 33 ms" and "collapse-tick max ≤ 12 ms",
+            // and only the first had a timeline. So the gate below held the collapse to the frame
+            // budget while the tick budget — the tighter, more specific one — went unenforced
+            // through two milestones that quoted it as ratified.
+            //
+            // The interpretation, said out loud because it is one: `sim.block` is the sim's
+            // per-FRAME wall clock for both peers, not one tick in isolation, and this reads the
+            // ratified per-tick number against it. That is the same equivalence the existing
+            // `sim.block p99 ≤ 6.0` rule already makes; making it twice without saying so is how
+            // a budget quietly changes meaning.
             report.observe("frame.collapse", ms);
+            report.observe("sim.collapse", sim_ms);
         }
+        report.observe_frame(static_cast<std::uint64_t>(i), ms);
     }
     zones.stop();
+    // Drains the ring, delivering the timings of every frame still in flight — which is why the
+    // queue is drained AFTER this and not in the loop.
     demo.app.finish_gpu();
+
+    // The passes go in SEPARATELY, keyed by the frame they belong to. Handing them to observe_frame
+    // would be right under `submit_blocking` and wrong pipelined, where what arrives describes a
+    // frame two back. Recorded after every observe_frame, so the worst-frame record already exists
+    // to receive its own breakdown, whichever frame turned out to be the worst.
+    //
+    // `index` is the Application's frame counter and `i` was the loop's; they differ by the warmup,
+    // which is what frame_base subtracts. A frame below frame_base is a warmup frame and is
+    // dropped.
+    for (const auto& [index, timings] : passes_queue) {
+        if (index >= frame_base)
+            report.observe_passes(index - frame_base, timings);
+    }
 
     // The ledger travels WITH the timings, so a report can never be read as "fast" without also
     // being read as "…and here is the work it did" (ADR-0035 §2b's vacuity guard). A run that was
@@ -1930,15 +2313,77 @@ int run_perf(const std::filesystem::path& cooked,
     ledger.set("shadow.spot_maps", demo.visuals->spot_maps_total);
     ledger.set("net.max_batches_per_tick", demo.session.max_batches_per_tick);
     ledger.set("net.client_physics_steps", demo.session.total_client_steps);
+    // Separate from the steps since m17.5: the client applies a destruction batch per queued
+    // fracture boundary but steps physics once per tick, so one number can no longer stand for
+    // both. Their RATIO is the catch-up backlog, which is the thing worth watching.
+    ledger.set("net.client_batches_applied", demo.session.total_client_batches);
+    // ── The solver's parallelism panel (m17.5), per world and co-sampled ────────────────────
+    //
+    // Whether the solve was even ALLOWED to go wide, whether it actually went, and how much width
+    // there was at the moment it cost the most. A ledger that records the work but not the wiring
+    // cannot distinguish "parallelism did not help" from "parallelism was never switched on" — the
+    // exact confusion that let this demo run its solver single-threaded unnoticed. `job_workers`
+    // is the pool and cannot fall to zero when the wiring is dropped; the `parallel_steps` pair is
+    // the handoff and does.
+    //
+    // Both worlds appear because both simulate. Reporting the server's alone described under half
+    // of the frame it was being used to explain.
+    // PARTICIPANTS, not workers: `JobSystem::participant_count()` counts the calling thread too,
+    // so a pool of 31 workers reports 32. Naming it `job_workers` was off by one in the direction
+    // that flatters, and a ledger key is read years later by someone who will not check.
+    ledger.set("physics.job_participants",
+               static_cast<std::uint64_t>(demo.session.jobs.participant_count()));
+    ledger.set("physics.server.parallel_steps", demo.session.server_parallel_steps);
+    ledger.set("physics.client.parallel_steps", demo.session.client_parallel_steps);
+    // The CEILING: the widest the solve ever got, in either world. Not to be combined with
+    // anything below it — it is a different tick.
+    ledger.set("physics.max_active_islands", demo.session.max_active_islands);
+    ledger.set("physics.server.max_bodies", demo.session.server_max_bodies);
+    ledger.set("physics.client.max_bodies", demo.session.client_max_bodies);
+    ledger.set("physics.server.max_broadphase_pairs", demo.session.server_max_pairs);
+    ledger.set("physics.client.max_broadphase_pairs", demo.session.client_max_pairs);
+    // …and the tick the tail is made of, co-sampled. `min_islands` is the number that decides
+    // whether a job system could have helped: it is the narrowest step in the most expensive tick,
+    // and a 1 there means at least one of that tick's steps had nothing to divide.
+    const auto& wt = demo.session.worst_tick_solve;
+    ledger.set("physics.worst_tick_index", wt.tick - measure_from_tick);
+    ledger.set("physics.worst_tick_us", static_cast<std::uint64_t>(wt.ms * 1000.0));
+    ledger.set("physics.worst_tick_steps", wt.steps);
+    ledger.set("physics.worst_tick_min_islands", wt.min_active_islands);
+    ledger.set("physics.worst_tick_max_islands", wt.max_active_islands);
+    ledger.set("physics.worst_tick_largest", wt.largest_active_island);
+    ledger.set("physics.worst_tick_awake_bodies", wt.awake_bodies);
+    ledger.set("physics.worst_tick_parallel_steps", wt.parallel_steps);
     report.set_ledger(ledger);
 
     core::PerfGate gate;
     gate.at_most("frame", core::PerfStat::P99, 16.6)
         .at_most("frame", core::PerfStat::Max, 33.0)
         .at_most("frame.collapse", core::PerfStat::Max, 33.0)
+        // ADR-0035's OTHER ratified collapse number, gated for the first time (m17.3c).
+        .at_most("sim.collapse", core::PerfStat::Max, 12.0)
         .at_most("sim.block", core::PerfStat::P99, 6.0)
+        // THE ATTRIBUTION RATCHET (m17.3c). A rule on the remainder is what stops the frame from
+        // becoming un-attributable again: add a subsystem without a zone and its cost lands here,
+        // where a number is watching, instead of vanishing into a frame total that still adds up.
+        //
+        // Two of the three limits are structural rather than measured, and they are honest about
+        // it. `frame.unaccounted` is the loop's own bookkeeping between two stopwatches and
+        // `frame.render.unaccounted` is `app.step`'s outside its four zones — both should be a
+        // fraction of a millisecond, so 1.0 is generous by design: it must not fail on noise, only
+        // on something real arriving unnamed. `sim.block.unaccounted` gets the ratified sim budget
+        // itself, which says the weakest useful thing — no single unnamed remainder may be as
+        // large as the entire simulation is allowed to be — and m17.3d tightens it against a
+        // measured value, which is the first number this ladder produces that nobody has yet seen.
+        .at_most("frame.unaccounted", core::PerfStat::P99, 1.0)
+        .at_most("frame.render.unaccounted", core::PerfStat::P99, 1.0)
+        .at_most("sim.block.unaccounted", core::PerfStat::P99, 6.0)
         .require_samples("frame", 200)
         .require_samples("frame.collapse", 45)
+        .require_samples("sim.collapse", 45)
+        .require_samples("frame.unaccounted", 200)
+        .require_samples("frame.render.unaccounted", 200)
+        .require_samples("sim.block.unaccounted", 200)
         .max_regression(0.10);
     // The vacuity guard, and every floor here is a thing that was actually found switched off at
     // some point in M13.
@@ -2005,11 +2450,116 @@ int run_perf(const std::filesystem::path& cooked,
         std::printf(
             "  sim.server p50 %.3f  p99 %.3f  max %.3f ms\n", sv->p50_ms, sv->p99_ms, sv->max_ms);
     }
+    // WHERE THE SIMULATION WENT (m17.3b). Until this brick the answer was "nowhere in particular":
+    // the engine's only profile zones were the Application's stage hooks, which this demo does not
+    // use, so `sim.block`'s p99 had no breakdown of any kind and ADR-0035 §6's narrowphase
+    // prediction was quoted as measured without ever being one.
+    //
+    // Ranked by the PER-FRAME total rather than the per-call one, because a frame steps the sim
+    // several times and each step runs every stage: a per-call percentile times a call count is not
+    // a per-frame percentile. Chosen by suffix rather than by a hardcoded list of stage names, so a
+    // zone added anywhere in the engine shows up here without this sample being edited — the same
+    // reason the work ledger prints itself whole.
+    {
+        std::vector<std::pair<std::string_view, double>> per_frame_zones;
+        for (const std::string_view name : report.timelines()) {
+            constexpr std::string_view kSuffix = ".per_frame";
+            if (name.size() <= kSuffix.size() || !name.ends_with(kSuffix))
+                continue;
+            if (const auto d = report.distribution(name))
+                per_frame_zones.emplace_back(name, d->p99_ms);
+        }
+        std::sort(per_frame_zones.begin(), per_frame_zones.end(), [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+        if (!per_frame_zones.empty()) {
+            std::printf("  where the CPU frame went (per-frame totals, p99, top %zu of %zu):\n",
+                        std::min<std::size_t>(per_frame_zones.size(), 6),
+                        per_frame_zones.size());
+            for (std::size_t i = 0; i < per_frame_zones.size() && i < 6; ++i) {
+                std::printf("    %-34.*s %8.3f ms\n",
+                            static_cast<int>(per_frame_zones[i].first.size()),
+                            per_frame_zones[i].first.data(),
+                            per_frame_zones[i].second);
+            }
+        }
+    }
+
+    // WHAT THE FRAME COULD NOT NAME (m17.3c). Printed next to the breakdown it is the complement
+    // of, because a decomposition read without its residual is the one that looks complete.
+    {
+        static constexpr std::string_view kResiduals[] = {
+            "frame.unaccounted", "frame.render.unaccounted", "sim.block.unaccounted"};
+        std::printf("  what the frame could NOT name (residual = parent - its named parts):\n");
+        for (const std::string_view name : kResiduals) {
+            const auto d = report.distribution(name);
+            if (!d) {
+                std::printf(
+                    "    %-26.*s NOT RECORDED\n", static_cast<int>(name.size()), name.data());
+                continue;
+            }
+            // `min` is in there deliberately: a NEGATIVE residual is not noise, it means the
+            // declared tree is wrong — a part that is not actually inside its parent, or counted
+            // twice — and nothing else in this printout would show it.
+            std::printf("    %-26.*s p50 %7.3f  p99 %7.3f  max %7.3f  min %7.3f ms\n",
+                        static_cast<int>(name.size()),
+                        name.data(),
+                        d->p50_ms,
+                        d->p99_ms,
+                        d->max_ms,
+                        d->min_ms);
+        }
+        if (report.accounting_gaps() != 0) {
+            std::printf("    (!) %llu accounting gaps — a declared part had no sample for its "
+                        "frame, so every residual above is an OVERESTIMATE\n",
+                        static_cast<unsigned long long>(report.accounting_gaps()));
+        }
+        if (zones.foreign_zones() != 0) {
+            std::printf("    (!) %llu zone closes dropped from another thread — this report is "
+                        "short by that many measurements\n",
+                        static_cast<unsigned long long>(zones.foreign_zones()));
+        }
+    }
+
     std::printf("  worst frame #%llu at %.2f ms\n",
                 static_cast<unsigned long long>(report.worst_frame().index),
                 report.worst_frame().ms);
+    // The CPU half of that frame, which the report carried nowhere until m17.3c: the worst frame is
+    // the one a human opens after a failure, and it had a per-pass GPU breakdown and no answer at
+    // all to "what was the CPU doing".
+    {
+        std::vector<core::ZoneTotal> worst_zones = report.worst_frame().zones;
+        std::sort(worst_zones.begin(),
+                  worst_zones.end(),
+                  [](const core::ZoneTotal& a, const core::ZoneTotal& b) { return a.ms > b.ms; });
+        for (std::size_t i = 0; i < worst_zones.size() && i < 4; ++i) {
+            std::printf("    %-26s %8.3f ms\n", worst_zones[i].name.c_str(), worst_zones[i].ms);
+        }
+    }
     if (!timestamps_seen) {
         std::printf("  (this device reports no GPU timestamps — the per-pass table is empty)\n");
+    }
+    // A frame declaring more passes than the pool can bracket leaves the rest UNTIMED, and an
+    // unattributed pass is indistinguishable in the report from a pass that cost nothing — the
+    // exact confusion m17.3 exists to end. Printed unconditionally as a ratio rather than only on
+    // overflow: "36 of 128" is how the next reader sees the headroom shrinking before it runs out,
+    // which is the failure this line exists to prevent rather than to announce.
+    if (opt.pipelined > 1) {
+        // `on_post_submit` — the only hook that can see the graph itself — does not fire on the
+        // pipelined path, so this run genuinely does not know. Say that, rather than print the 0
+        // an unmeasured counter happens to hold: an unmeasured number that looks measured is the
+        // failure this whole milestone is about.
+        std::printf("  passes: not measured on the pipelined path (pool brackets %u)\n",
+                    render::RenderGraph::max_timed_passes());
+    } else {
+        std::printf("  passes: %zu declared at peak, timestamp pool brackets %u\n",
+                    max_passes_declared,
+                    render::RenderGraph::max_timed_passes());
+    }
+    if (max_passes_declared > render::RenderGraph::max_timed_passes()) {
+        std::printf("  (!) the peak frame OVERFLOWS the pool — everything past the first %u passes "
+                    "is UNATTRIBUTED GPU time\n",
+                    render::RenderGraph::max_timed_passes());
     }
     std::printf("  work ledger: %s\n", ledger.to_json(-1).c_str());
 
@@ -2061,14 +2611,14 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 
     if (demo.app.windowed()) {
         // ASK for the cursor, then believe the ANSWER (m15.5). A compositor that does not advertise
-        // pointer constraints hands back a weaker mode, and a build that assumed otherwise would put
-        // the player in free-look with a cursor still free to walk off the window — a camera that
-        // stops steering mid-turn, blamed on the camera. The control scheme and the help text both
-        // come from what was actually granted.
-        // Asking is not getting, and it is not getting YET either. On Wayland a surface can only
-        // lock a pointer that is already over it, so this request is routinely refused at startup
-        // and granted a moment later when the mouse enters the window — which is why the answer is
-        // re-read every frame below rather than believed once here.
+        // pointer constraints hands back a weaker mode, and a build that assumed otherwise would
+        // put the player in free-look with a cursor still free to walk off the window — a camera
+        // that stops steering mid-turn, blamed on the camera. The control scheme and the help text
+        // both come from what was actually granted. Asking is not getting, and it is not getting
+        // YET either. On Wayland a surface can only lock a pointer that is already over it, so this
+        // request is routinely refused at startup and granted a moment later when the mouse enters
+        // the window — which is why the answer is re-read every frame below rather than believed
+        // once here.
         const platform::CursorMode cursor =
             demo.app.window()->set_cursor_mode(platform::CursorMode::Locked);
         bindings.look_requires_drag = gameplay::look_requires_drag_for(cursor);
@@ -2150,6 +2700,21 @@ int main(int argc, char** argv) {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
             perf.frames = std::atoi(argv[++i]);
+        } else if (a == "--pipelined" && i + 1 < argc) {
+            // Checked as a SIGNED int before the cast. `--pipelined -1` used to become 4294967295,
+            // which is not merely a big ring: `in_flight_.size() >= headless_in_flight_` is then
+            // permanently false, so nothing is ever retired, the in-flight deque grows without
+            // bound, and every submission's timestamp pool leaks along with it. A flag that turns a
+            // typo into an unbounded allocation is the parser's bug, not the caller's.
+            const int depth = std::atoi(argv[++i]);
+            if (depth < 1 || depth > static_cast<int>(kMaxPipelineDepth)) {
+                std::fprintf(stderr,
+                             "99-the-block: --pipelined must be 1..%u (got '%s')\n",
+                             kMaxPipelineDepth,
+                             argv[i]);
+                return 2;
+            }
+            perf.pipelined = static_cast<std::uint32_t>(depth);
         } else if (a == "--warmup" && i + 1 < argc) {
             perf.warmup = std::atoi(argv[++i]);
         } else if (a == "--width" && i + 1 < argc) {

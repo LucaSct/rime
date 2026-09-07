@@ -82,12 +82,25 @@ std::vector<std::byte> frame_bytes() {
 
 // A small, fixed world for the editor schema/snapshot fixtures: a camera entity and a two-component
 // mesh entity (MeshRef + MaterialRef). Deterministic — fixed registration + spawn order, hashes
-// folded from field names — so the bytes are identical across runs and platforms. Kept to the
-// render components on purpose, so this cross-language fixture (and the M9.3 protocol crate) does
-// not depend on any later brick's component set — the protocol conformance is about bytes, not
-// which types exist.
+// folded from field names — so the bytes are identical across runs and platforms.
+//
+// THE THREE TYPES ARE REGISTERED BY HAND, and that is the point. This used to call
+// `register_render_components`, which was meant to keep the fixture "not depending on any later
+// brick's component set" — but it does exactly the opposite: `serialize_schema` walks every
+// REGISTERED type, so the golden grew with every render component ever added, and the drift landed
+// on a cross-language fixture that has to be regenerated in two languages to fix. m17.0's `Sky`
+// component is what finally proved it: +369 bytes to schema.bin, from a brick that never went near
+// the protocol, and a red test the sky brick could not have predicted it would cause.
+//
+// Registering only what the fixtures assert on makes the original intent true. The trade-off,
+// stated rather than hidden: the schema fixture no longer exercises a large type list, so it covers
+// the field KINDS the conformance test reads (f32, bool, u32) rather than a realistic component
+// census. That is the right cut — this fixture's job is byte-level agreement between the C++ and
+// Rust codecs, and "which types exist" is a question about the engine, not about the wire.
 void build_world(ecs::World& w) {
-    render::register_render_components(w);
+    (void)w.register_component<render::Camera>();
+    (void)w.register_component<render::MeshRef>();
+    (void)w.register_component<render::MaterialRef>();
     (void)w.spawn_with(render::Camera{0.9f, 0.1f, 500.0f, true});
     (void)w.spawn_with(render::MeshRef{7}, render::MaterialRef{3});
 }
@@ -327,8 +340,13 @@ TEST_CASE("protocol fixtures: committed goldens match the C++ encoders") {
             const std::optional<std::vector<std::byte>> golden = read_file(path);
             REQUIRE_MESSAGE(golden.has_value(),
                             "missing fixture (bootstrap it): " << path.string());
+            // std::string, not the raw const char*: doctest stringifies a bare pointer as its
+            // ADDRESS, so this message used to report a drift as "0x55eea965ff47" and name nothing.
+            // A diagnostic that cannot say which fixture broke costs more than the failure does.
             CHECK_MESSAGE(*golden == f.bytes,
-                          "C++ encoder drifted from committed golden: " << f.name);
+                          "C++ encoder drifted from committed golden: "
+                              << std::string(f.name) << " (expected " << golden->size()
+                              << " bytes, encoded " << f.bytes.size() << ")");
         }
     }
 }

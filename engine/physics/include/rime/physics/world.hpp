@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "rime/core/math/quat.hpp"
@@ -128,6 +129,28 @@ struct WorldStats {
     std::uint32_t islands = 0;
     std::uint32_t active_islands = 0;
     std::uint32_t largest_island = 0;
+
+    // The solve's actual serial tail, and whether it was allowed to go wide at all (m17.5).
+    //
+    // largest_island counts the biggest island whether or not it was SOLVED, so a resting 600-body
+    // pile — skipped entirely by stage 6 — still reads as "the critical path". It is not one.
+    // largest_active_island is the tail a load balancer actually watches: Amdahl's serial fraction
+    // of this tick's solve, against active_islands as the width available to divide it.
+    //
+    // islands_solved_parallel records the HANDOFF rather than a value: how many islands the job
+    // system actually solved this tick, and 0 whenever the solve ran on the calling thread (no job
+    // system, or too little width to be worth dispatching). It exists because set_job_system()
+    // takes a nullable pointer nobody is obliged to call, so "we parallelised the solve and it did
+    // not help" and "the solve was never parallelised" otherwise produce the identical report —
+    // and 99-the-block, the one sample M13's frame-rate clause is about, spent its whole life in
+    // the second state while looking like the first.
+    //
+    // It counts ACTIVE islands, so it is bounded by active_islands and not merely by islands. That
+    // distinction is the whole value of the number: a tick that hands fifty sleeping piles and one
+    // awake one to the pool has dispatched fifty-one islands and parallelised nothing, and a
+    // counter that reported fifty-one would say the solve went wide on a tick that could not.
+    std::uint32_t largest_active_island = 0;
+    std::uint32_t islands_solved_parallel = 0;
 };
 
 class PhysicsWorld {
@@ -241,6 +264,23 @@ public:
     // ADR-0026; see world_hash()). The world does not take ownership — the engine owns the one job
     // system and hands it to each subsystem.
     void set_job_system(core::JobSystem* jobs) noexcept;
+
+    // Tag this world's profile zones, so a process running more than one can tell them apart
+    // (m17.5). With a label the twelve step zones report as `physics.<label>.<stage>`; without one
+    // — the default — they keep the original `physics.<stage>` names, so nothing that has not asked
+    // for a label sees any change to its report or its committed baseline.
+    //
+    // It exists because a merged distribution cannot be optimised. `99-the-block` runs an
+    // authoritative server AND a predicting client in one process; the client re-simulates on
+    // bounded catch-up and costs roughly twice what the server does, so a single `physics.step`
+    // timeline is one shape belonging to neither of them — while `sim.client`/`sim.server`, timed
+    // by the demo, split the very same work. The two decompositions did not compose, which is
+    // exactly the state in which "the narrowphase is the hot spot" gets quoted as measured.
+    //
+    // Cheap and not hot: the names are composed once here, not per step. Call it before the first
+    // step() a report will read; calling it mid-run simply renames the zones from that point on,
+    // which splits one world's timeline across two keys.
+    void set_profile_label(std::string_view label);
 
     // Enable or disable sleeping (on by default). A resting island deactivates so it costs nothing
     // to step; disabling immediately wakes every body — useful for a test that wants pure

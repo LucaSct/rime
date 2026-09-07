@@ -10,7 +10,7 @@
 add_executable(networked_player main.cpp)
 
 target_link_libraries(networked_player
-    PRIVATE rime::gameplay_net rime::gameplay rime::replication rime::net
+    PRIVATE rime::gameplay_net rime::ground rime::gameplay rime::replication rime::net
             rime::destruction rime::physics rime::ecs
             rime::assets rime::platform rime::core)
 

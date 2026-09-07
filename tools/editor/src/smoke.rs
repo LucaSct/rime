@@ -763,13 +763,44 @@ mod imp {
     /// The (x, y) of a pixel that is the black clear colour — background, nothing drawn on it — or
     /// None if the scene covers the whole frame. The negative half of the pick proof: picking here
     /// must report empty space. Scans from the top, where sky is likeliest.
+    ///
+    /// A single near-black pixel is NOT enough evidence, and assuming it was is what this used to
+    /// get wrong: a deeply shadowed rock is near-black too, so the scan could land on real geometry
+    /// and then "fail" because picking correctly reported a hit. The sky pass (m17.0) made that
+    /// routine by removing the real background the scan used to find first. So require the whole
+    /// neighbourhood to be empty — background comes in large flat regions, a shadowed crevice does
+    /// not. When a scene genuinely has no background left (any scene with a sky), this returns None
+    /// and the caller says so out loud rather than inventing a test it cannot run.
     fn background_pixel(rgba: &[u8], width: u32) -> Option<(i32, i32)> {
-        let w = width.max(1) as usize;
-        rgba.as_chunks::<4>()
-            .0
-            .iter()
-            .position(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 <= 12)
-            .map(|i| ((i % w) as i32, (i / w) as i32))
+        const EMPTY: u32 = 12; // the same near-black threshold coverage_pct uses
+        const R: i32 = 4; // half-width of the block that must ALSO be empty
+        let w = width.max(1) as i32;
+        let px = rgba.as_chunks::<4>().0;
+        let h = px.len() as i32 / w.max(1);
+        let empty_at = |x: i32, y: i32| -> bool {
+            if x < 0 || y < 0 || x >= w || y >= h {
+                return false; // off-frame is unknown, so treat it as not-empty and move on
+            }
+            let p = px[(y * w + x) as usize];
+            p[0] as u32 + p[1] as u32 + p[2] as u32 <= EMPTY
+        };
+        for y in 0..h {
+            for x in 0..w {
+                if !empty_at(x, y) {
+                    continue;
+                }
+                let mut all = true;
+                for dy in -R..=R {
+                    for dx in -R..=R {
+                        all &= empty_at(x + dx, y + dy);
+                    }
+                }
+                if all {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
     }
 
     /// The share of pixels (0-100) that are not the black clear colour — i.e. that some draw

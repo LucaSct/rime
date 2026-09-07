@@ -23,6 +23,7 @@ add_library(rime_render STATIC
     src/lighting/sdf_clipmap.cpp
     src/lighting/ddgi.cpp
     src/lighting/ssr.cpp
+    src/lighting/sky.cpp
     src/fx_pass.cpp
     src/culling.cpp)
 
@@ -40,6 +41,7 @@ rime_add_shaders(rime_render
     shaders/ddgi_blend_irradiance.comp
     shaders/ddgi_blend_visibility.comp
     shaders/ssr_resolve.frag
+    shaders/sky.frag
     shaders/fullscreen.vert
     shaders/tonemap.frag
     shaders/present.frag

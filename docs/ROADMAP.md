@@ -30,6 +30,13 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > the SDF clipmap, DDGI and SSR — costs **5.23 ms** at 1080p on a 3060, drawing 1,830 of 2,051. The
 > time is in simulation, and the split is what says so.
 >
+> > **Corrected 2026-09-03 (m17.2).** 5.23 ms is `frame.render`'s **p50** quoted against a **p99**
+> > budget. At p99 the renderer costs **12.69 ms** of a 16.6 ms frame — 76% of it — and the summed
+> > GPU pass timestamps account for only about half of `frame.submit`, so even that is a floor. The
+> > simulation is still the larger breach (`sim.block` p99 25.49 against a ratified 6.0, 4.25×), and
+> > that ranking is unchanged; "the renderer is not the problem" is not. See
+> > [ADR-0041](adr/0041-the-visual-bar-m17.md).
+>
 > **One measured fix, and it was worth 2.1×.** The client's destruction catch-up drained *every*
 > queued batch in one tick, each with a full `physics.step` — `12-networked-destruction`'s "one batch
 > per update, never two merged" rule, which is right for fidelity and unbounded in cost. Measured:
@@ -1660,11 +1667,12 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M10** | Advanced lighting | dynamic GI updates as the scene changes — *including when walls fall* |
 | **M11** | Networking + networked destruction | two clients see synchronized destruction at meaningful scale |
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
-| **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). The renderer costs 5.2 ms; the remainder is physics at 667 debris |
+| **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). Carried to M17, where [ADR-0041](adr/0041-the-visual-bar-m17.md) ranks the breaches: `sim.block` 4.25× over, `frame.render` p99 12.69 of 16.6 |
 | **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 | **M15** | **"The Platform Proof"** | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
 | **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) |
-| **M17** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3, plus M13's unmet frame-rate clause and the physics-at-debris-scale cost m13.p measured ([ADR-0038](adr/0038-platform-proof-m15.md) rules the split; renumbered from M16 by [ADR-0039](adr/0039-authored-surfaces-m16.md)) |
+| **M17** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3 *minus virtualized geometry*, plus M13's unmet frame-rate clause — budget first, bar second, and the frame made attributable before either ([ADR-0041](adr/0041-the-visual-bar-m17.md) is the plan; [ADR-0038](adr/0038-platform-proof-m15.md) ruled the split, renumbered from M16 by [ADR-0039](adr/0039-authored-surfaces-m16.md)) |
+| **M18** | **virtualized geometry, and the ground** | Nanite-style: cluster hierarchy in the cook, a LOD DAG, GPU-driven culling, a visibility buffer. Parked as "m10.i" by [ADR-0035](adr/0035-vision-demo-m12.md) §6 and never scheduled; deferred here by [ADR-0041](adr/0041-the-visual-bar-m17.md) §3 because it is a milestone, not a brick — **approved 2026-09-03**. **A terrain module is ranked here too** ([ADR-0041](adr/0041-the-visual-bar-m17.md) §5): heightfield, LOD, splat blending, a heightfield collider and streaming, with the ordering question — *does virtualized geometry subsume terrain LOD?* — answered in M18's ADR from a pipeline that exists, rather than guessed at now. M17's m17.8 leaves the seam |
 
 ### Detail
 
@@ -2275,6 +2283,399 @@ Blender-authored proof. Cut order: m16.7 → m16.6 → m16.5. **Never cut:** m16
 > a step function and a midpoint lands on the wrong side of it. The third would have shipped as a
 > quietly-wrong mip chain.
 
+**M17 — "The Visual Bar."** *Started 2026-09-03; [ADR-0041](adr/0041-the-visual-bar-m17.md) is the
+plan, written third.* The UE5 column of [VISION](../VISION.md) §3, plus M13's frame-rate clause
+carried here with its number: `frame` p99 **35.60 ms** against a ratified 16.6. The budget does not
+move.
+
+The two clauses are the same clause read twice. Every technique in the UE5 column is a *scaling*
+technique — Nanite is geometry whose cost stops scaling with triangle count, VSM is shadow
+resolution that stops scaling with cascade area, MegaLights is many lights that stop scaling
+linearly — so a frame that misses its budget by 2.1× cannot demonstrate any of them: there is
+nothing to compare the scaling against. **ADR-0041 rules the budget first and the bar second**, and
+defers virtualized geometry to M18 by name rather than reinterpreting the milestone's scope
+quietly.
+
+*Bricks:* **m17.2** the ADR + this ladder (decision brick, no engine code) · **m17.3** **the frame
+becomes attributable** — per-instance pass identity and unique report keys, zones inside the
+simulation and the submit gap, a gate rule that fails an unaccounted frame (falsified against the
+committed report), `perf.sh` failing a non-comparable baseline, and all three samples re-baselined
+on the current driver · **m17.4** the pass-owned buffer ring — 14 host-visible buffers across all
+seven lighting passes, *before* the windowed work that would otherwise chase its artifacts as a
+shading bug · **m17.5** **the simulation budget** — `sim.block` p99 25.49 against a ratified 6.0, the
+largest breach on the board · **m17.6** ~~the GPU budget~~ **the GPU passes, re-scoped**
+(ADR-0041 Ruling 6, 2026-09-06): its budget premise was measured on an unparked GPU and no longer
+exists — pinned, all twelve passes are 2.407 ms max against 16.6 — so the brick is now pass
+correctness plus the cloud layer's unmeasured per-pixel cost and the headroom m17.8 spends into · **m17.7**
+**the sky lights the scene** (ADR-0040 §6) — **moved behind m17.8** (Ruling 7): §6 says it must not
+land "before there is authored content worth judging it against", and the ground IS that content · **m17.8** **the ground becomes a surface**
+— two triangles and a flat colour today · **m17.9** the shadow bar, scoped by numbers that do not
+exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: **m17.9 only**
+(amended 2026-09-04 — cutting m17.7 re-defers exactly what ADR-0040 §6 already deferred once, and
+a ground nothing lights well is the worse half-milestone). **Never cut:** m17.3, m17.5, m17.7,
+m17.8, m17.10.
+
+> **This milestone started without its planning brick, and that is recorded rather than tidied
+> away.** Every milestone since M12 opened with an ADR and a brick ladder; M17 opened with two
+> bricks and got its ladder third. [ADR-0040](adr/0040-sky-and-atmosphere.md) was written afterwards
+> to close the five code sites that already cited it, and it covers **the sky decision only** — not
+> the milestone.
+>
+> | brick | state | what landed |
+> |---|---|---|
+> | m17.0 | ✅ | a procedural sky — gradient, sun disc, fBm cloud — composited where the depth buffer says nothing was drawn; a `Sky` *component*, so a scene owns its own weather; the sun coupled to the world's first `DirectionalLight`. Off allocates nothing (ADR-0032 §11) |
+> | m17.0's proof | ✅ | `tests/render/sky_test.cpp` — four structural cases. Added **after** the brick: m17.0 shipped with no test, so CI could not see the feature at all |
+> | m17.1 | ✅ | the editor viewport camera flies (right-drag look, WASD/QE, shift-sprint). No new protocol message: the viewport camera **is** the world's `Camera` entity, so flying it is an ordinary `SetComponent` on the same edit path the inspector and gizmo use |
+> | m17.2 | ✅ | [ADR-0041](adr/0041-the-visual-bar-m17.md) and this ladder — plus five findings, verified against the tree, that decide its order |
+> | m17.3b | ✅ | **the simulation is measured.** Eleven stage zones inside `PhysicsWorld::step` — the engine's first outside `application.cpp` — and every zone is now recorded twice: `<name>` per call (unchanged, the meaning ADR-0035's per-tick budget ratified) and `<name>.per_frame`, the sum within one frame, because a per-call percentile times a call count is not a per-frame percentile. `99-the-block --perf` prints the ranked per-frame totals, and says out loud when a frame declares more passes than the 32-slot timestamp pool can time |
+> | m17.3a | ✅ | **a pass name is an identity, not a label.** `DepthPrepass::add` takes a label; CSM declares `csm-cascade-N` and local shadows `spot-shadow-N`, so a report has rows for shadow work for the first time. `RenderGraph` uniquifies any remaining collision and `PerfReport::observe_frame` does the same at its own seam, so the artifact's keys are keys whoever feeds it. Both halves falsified: with the uniquifier off the graph hands out three passes called `twin`; with the labels reverted the cascades vanish and `depth-prepass#1..#3` appear |
+> | m17.3 review | ✅ | an adversarial pass over the ADR and both bricks ([ADR-0041 amendment](adr/0041-the-visual-bar-m17.md)). No landed bug. Fixed first: `PhysicsWorld::step`'s threading comment named contention where the hazard is a **data race** — `report_zone` calls its sink with the lock released, and `ZoneTimelines` now pins itself to the installing thread and counts what it drops; and the SDF clipmap declared a pass name **per dispatch**, so `#`-suffixed positional keys were headed for m17.3d's artifact — dispatches now name their level and declare the repeat (`fold_repeats`), which the graph sums into one row |
+> | m17.3c | ✅ | **the parts account for the whole.** `declare_accounting(parent, children)` records `<parent>.unaccounted` as a timeline of its own, one sample per frame, computed at record time — percentiles are not subadditive and the schema deliberately cannot store a mean, so a residual recovered from committed summaries is unavailable by construction. Gated through the existing `Missing` machinery, so it fails on the committed 2026-08-30 report, which the test asserts against the real file. Also: `sim.collapse` closes ADR-0035's second ratified collapse number, the worst frame carries its zone totals, timeline keys are written in name order, and `kMaxTimestamps` 64 → 256 |
+>
+> **Planning found that the frame cannot currently be attributed, which is why m17.3 is first and
+> uncuttable.** Each was verified against the tree:
+>
+> 1. **The engine has ten profile zones and none is inside the work.** `RIME_PROFILE_ZONE` appears
+>    only in `engine/app/src/application.cpp` — nothing in `physics`, `destruction`, `render`, `net`
+>    or `ecs`. So `sim.pre`/`sim.schedule`/`sim.transforms`/`sim.post`/`sim.publish` all read
+>    **0.000 ms** at p50, p99 *and* max while `sim.block` reads 25.49 at p99 (the demo drives a
+>    `Session`, not the `Application` schedule — `main.cpp:1878-1880` says so). The frame's largest
+>    cost has **no attribution of any kind**, so ADR-0035 §6's narrowphase prediction has never been
+>    measured — and the note below this block has been quoting it as though it had.
+> 2. **Same-named passes collapse, and the committed report has duplicate JSON keys.** CSM renders
+>    each cascade through `DepthPrepass::add` (`shadows.cpp:178-183`), so a frame declares several
+>    `"depth-prepass"` passes; `observe_frame` folds them by name and the writer emits the key once
+>    per instance. Worst frame #558 literally contains four `"depth-prepass"` lines. Summed they are
+>    **5.604 ms**; as any ordinary JSON reader takes it, **5.284 ms**. And **no pass in the report is
+>    named for shadows** — the milestone that must decide whether to build VSM cannot see what the
+>    shadow maps it already has cost.
+> 3. **Roughly half the GPU's wall time is unattributed** — `frame.submit` ~10.87 ms in worst frame
+>    #558 against 5.60 ms of summed pass timestamps.
+> 4. **The regression gate's protection has already lapsed here, silently.** `comparable_to`
+>    requires string equality on `driver`; this workstation moved **610.43.03 → 610.57.04** between
+>    2026-08-20 and 2026-08-30, so the two 2026-08-20 baselines `perf.sh --all` re-runs now report
+>    `FingerprintMismatch` — which adds no violation. ADR-0035's amendment says that comparison is
+>    "where the real protection lives"; a driver update turns it off and prints a note.
+>
+> Two smaller ones: the ratified **collapse-tick max ≤ 12 ms has no rule** in the block's gate (it
+> gates `frame.collapse` max at 33, the *frame* budget during the window), and the committed block
+> baseline was measured on a **dirty tree** (`run.commit` is `68bcfd7-dirty`).
+>
+> **A third, found by m17.3b's own instrumentation: the block declares more passes than the frame
+> can time.** The timestamp pool is `rhi::kMaxTimestamps / 2` = **32**, and the block hits it — so
+> every pass past the 32nd is GPU time no report has ever contained. `execute()` logs a warning
+> once; nothing in the committed artifact says it.
+>
+> **m17.3c measured that claim rather than acting on it, and it needed narrowing.** The peak frame
+> declares **36** passes, confirmed by putting `kMaxTimestamps` back to 64 and watching the warning
+> return — but that frame is the SDF clipmap's *initial fill*, which lands in warmup, so no
+> committed number was ever wrong. The steady-state frame declares 12. The pool went to 256 anyway,
+> because m17.7, m17.8 and m17.9 all add passes and a ceiling re-crossed mid-milestone would
+> silently un-attribute the frame exactly when the numbers start being spent. **And m17.3b's own
+> check could not have caught it**: it compared `passes.size()` — the count *after* the cap
+> truncated it — against the cap, so it could never see an overflow larger than the cap. It now
+> reads `pass_count()`, the declaration, and prints the ratio on every run.
+>
+> **First signal on where the simulation goes — and it is NOT yet the answer.** A 40-frame **Debug**
+> probe at 640×360 ranks `physics.solve.per_frame` p99 at 96 ms against `physics.contacts.per_frame`
+> at 50 ms, with every other stage under 12 ms and `physics.step.per_frame` (159 ms) accounting for
+> essentially all of `sim.block` (161 ms). That would put the *solver* ahead of ADR-0035 §6's
+> predicted narrowphase by ~2×. **It is not quotable**: a Debug build penalises the solver's tight
+> unoptimised float loops far more than the broadphase's tree walk, which is exactly the kind of
+> distortion that turns a probe into a wrong finding. **m17.3d's Release re-baseline settles it**,
+> and until then §6's prediction stays unconfirmed rather than replaced.
+>
+> **The refusal was right, and the review measured why.** A PC-sampled Release profile of the
+> *2026-08-30* block binary (7,084 samples over the same 600-frame tape, ledger reproduced exactly)
+> puts the two stages in the **same order of magnitude** — solver chain ~31%, contacts+broadphase
+> ~28% — with ~32% in **shared out-of-line math**: a not-inlined `core::rotate` (`quat.hpp:99`) and
+> its `cross`, reached from the solver's `apply_inv_inertia` *and* the narrowphase's `PolySupport`.
+> So m17.5's target is still open, and the shared math is a third candidate that helps both stages
+> at once. (The sample counts are the reviewer's measurement, not independently reproduced here;
+> that `rotate` is plain `inline` and reached from `solver.hpp`, `support.hpp`, `narrowphase.hpp`
+> and `hull.hpp` is verified.)
+>
+> **Two more findings, both m17.5 inputs, both from the review:**
+>
+> 1. **The block never gives its `PhysicsWorld` a job system.** `set_job_system` is called by
+>    samples 09 and 10 and by seven tests; the block's `Peer` builds a `JobSystem` for
+>    `propagate_transforms` and never hands it to either world. The reviewer's sampler confirms the
+>    consequence: **zero** solver samples on worker threads across 600 frames, while two full worker
+>    pools spin-wait. An unknown part of the 4.25× `sim.block` breach is therefore demo wiring, not
+>    engine speed — and the parallel path's bit-identity across worker counts is already proven by
+>    the ADR-0026 witnesses. Establish which part before optimising; wiring it would move every
+>    number m17.3d is about to commit, so it lands **after** the re-baseline.
+> 2. **The zones fold client and server together.** `physics.*` merges both worlds while
+>    `sim.client`/`sim.server` split them, so the two decompositions do not compose — m17.5 would be
+>    optimising a merged distribution. Zones need a per-world tag first.
+>
+> **RULED (2026-09-04): the loop pipelines.** `frame` was sim + declare + execute + `submit_blocking`
+> in series, so 16.6 ms meant CPU + GPU with no overlap. Built as m17.4 + m17.5a — opt-in
+> (`--pipelined N`), default unchanged, and the block writes `+pipelined-N` into its fingerprint
+> preset so a pipelined run cannot be compared against a serialized baseline by accident. **But the
+> arithmetic is the headline: 35.6 → ~25 ms still misses 16.6 by 1.5×**, because `sim.block` p99 is
+> 25.49 and the CPU frame very nearly IS the simulation. Pipelining takes the GPU off the critical
+> path; it does not touch what is on it. See the 2026-09-04 amendment in ADR-0041.
+>
+> **MEASURED (2026-09-05/06): the block's solver has a job system now, and island-level
+> parallelism cannot close this budget.** Finding 1 above is closed the way the roadmap asked — by
+> establishing which part of the `sim.block` breach was demo wiring *before* optimising anything.
+> The wiring was the one-liner it looked like (`set_job_system` per peer, against **one**
+> process-wide pool: two per-peer pools would have put ~62 workers on 32 cores). Measured
+> interleaved with a control, both clock domains pinned, box idle, 600 frames each:
+>
+> | | run A | run B |
+> |---|---|---|
+> | `frame` p99, control | 28.565 | 28.681 ms |
+> | `frame` p99, job system | 28.453 | 28.944 ms |
+> | `physics.solve` p99, control | 11.225 | 11.333 ms |
+> | `physics.solve` p99, job system | 11.071 | 11.431 ms |
+>
+> **+0.27% on the mean, inside the within-arm spread**, and a second interleaved A/B on the
+> dispatch gate below came in at +0.07%. Eight runs, no effect either way. (An earlier A/B read
+> "6% slower" and was **withdrawn**: it was measured against a sibling session's build, and the
+> guard that would have caught it is now in `scripts/perf.sh`.)
+>
+> **THE FIRST EXPLANATION OF WHY WAS WRONG, AND THE CORRECTION IS THE USEFUL PART.** This note
+> originally said "the tick that sets the p99 has exactly one active island, of 362 bodies". That
+> was an instrument keyed on `last_server_ms` — the server's *whole* half-tick, gameplay and sync
+> and the shot→`apply_damage` loop and `destruction.update` included — reading only the *server's*
+> world while the client re-simulates at roughly twice the cost, and reporting a per-STEP maximum
+> to explain a per-TICK total. The tail is not one 24 ms step: it is **three** ordinary ones summed
+> (one server, two client catch-up), and no single step in the run exceeds 9.4 ms. The denominators
+> were wrong too — every Session counter accumulated from process start while the distributions
+> began after warmup, so "473 of 600 ticks" was 473 of 690.
+>
+> Keyed on the steps themselves, both worlds, co-sampled per tick, three clean runs agree:
+>
+> | | run 1 | run 2 | run 3 |
+> |---|---|---|---|
+> | `worst_tick_index` | 588 | 588 | 589 |
+> | `worst_tick_steps` | 3 | 3 | 3 |
+> | active islands, narrowest→widest step | 25→28 | 25→28 | 27→31 |
+> | `worst_tick_largest` | 602 | 602 | 605 |
+> | `worst_tick_awake_bodies` | 656 | 656 | 658 |
+> | steps dispatched in parallel | 3 of 3 | 3 of 3 | 3 of 3 |
+>
+> **92% of the awake bodies at the tail are in ONE island** (602 of 656), across 25–31 islands with
+> every step going wide. So the width was never the problem and neither was the wiring: Amdahl's
+> ceiling on island-level parallelism at that tick is **1.09x**, worth ~0.96 ms of an 11.4 ms solve
+> and ~3% of a 29 ms frame — at the edge of this rig's run-to-run spread. **A measurement finding
+> nothing is what a 1.09x ceiling looks like.** The residual (a perfectly realised 1.09x should
+> have been just detectable, and was not) is dispatch overhead and the fact that solve cost tracks
+> contact constraints rather than body count; it is not worth another run.
+>
+> **The ruling that follows: `sim.block` cannot be fixed by parallelising islands.** A collapsing
+> building is one island because its parts are in contact, and contact is what the partition is
+> made of — no scheduler divides that. Splitting the tail means splitting *within* an island (graph
+> colouring, or a Jacobi/hybrid velocity solver), which is an engine design question with a
+> determinism contract attached (ADR-0026), not a wiring one. **Ranked for M18, not for m17.5.**
+>
+> **MEASURED (2026-09-06): one attribute takes 19.6% off the solve.** `core::rotate` is three lines
+> and marked `inline`, and GCC 15 at -O2 emitted it **out of line** anyway — a single
+> `rime::core::rotate [clone .isra.0]` in the release binary, reached from the solver's velocity
+> iteration (three calls per contact point per iteration) and from the narrowphase's support
+> functions. `cross` and `normalize` beside it were inlined; only this one was stranded. Forcing it
+> (`RIME_FORCE_INLINE`, `core/force_inline.hpp`), interleaved, three runs an arm, **bit-identical
+> trajectory** — `parts.alive_end` 1227 in all six runs, so both arms simulate exactly the same
+> work:
+>
+> | `physics.server.*` p50 | control | forced | |
+> |---|---|---|---|
+> | `solve` | 2.757 / 2.757 / 2.790 | 2.232 / 2.260 / 2.184 | **−19.6%** |
+> | `step` | 5.513 / 5.552 / 5.558 | 5.078 / 5.027 / 5.037 | **−8.9%** |
+> | `contacts` | 2.482 / 2.428 / 2.375 | 2.463 / 2.478 / 2.484 | none |
+>
+> No overlap between arms on the solve, and the narrowphase does not move — the shape you would
+> predict, since its calls are per pair and the solver's are per contact point per iteration. This
+> is the review's "shared out-of-line math" candidate, and it turns out to be **one function and one
+> attribute**, not a refactor. It also partly answers the sampled 32%: the samples were real, the
+> remedy was a compiler decision rather than a code shape. Judged on the SERVER's per-call medians
+> deliberately — its timeline has a fixed 600 samples a run, while the client's varies with
+> catch-up, and comparing two timelines with different sample counts at the median compares the
+> populations (see the trap recorded above).
+>
+> **What is left for m17.5, and it is not one lever.** `physics.step` is 24.2–24.5 ms of a ~28.9 ms
+> frame, split almost evenly between `physics.contacts` (11.40–11.64) and `physics.solve`
+> (11.29–11.49) — narrowphase and the solve are the *same size*, so **an infinitely fast solve
+> still leaves ~17.5 ms**, over budget on its own. That matches the review's PC-sampled
+> 31%/28%/32% split and promotes its third candidate: the shared out-of-line math both stages reach
+> through is the only lever that moves both at once.
+>
+> **MEASURED (2026-09-06): finding 2 is built, and it names the biggest lever in the milestone.**
+> `PhysicsWorld::set_profile_label` renames a world's twelve step zones to
+> `physics.<label>.<stage>`; unlabelled worlds keep the old names, so no other sample, test or
+> committed baseline moves. The block labels its two worlds and declares **both** in `sim.block`'s
+> accounting — naming one would have left the other as ~8 ms of unaccounted residual, which is
+> exactly what m17.3c's ratchet exists to catch. `sim.block.unaccounted` p99 stays at 0.43–0.46 ms,
+> so the split accounting closes.
+>
+> | per-frame p99 | client | server | ratio |
+> |---|---|---|---|
+> | `physics.*.step` | 15.99 / 15.69 | 8.61 / 8.55 | 1.85x |
+> | `physics.*.contacts` | 7.65 / 7.49 | 4.04 / 4.11 | 1.86x |
+> | `physics.*.solve` | 7.53 / 7.45 | 3.99 / 3.95 | 1.89x |
+>
+> **The client is not slower. It steps twice.** Per CALL the two worlds are the same simulation:
+> `physics.solve` 2.744 ms client against 2.737 server, and no single client step exceeds 9.116 ms
+> — against a client per-FRAME p99 of 15.991. The server's per-call and per-frame numbers are
+> identical (it always steps once); the client's differ by 1.89x. So the tail frame is one server
+> step plus **two** client catch-up steps, each an ordinary ~8 ms, and `net.client_physics_steps` is
+> 704 over 600 frames with `net.max_batches_per_tick` = 2.
+>
+> **That is the largest single lever m17.5 has found.** A client that stepped once per frame would
+> drop `physics.client.step.per_frame` p99 from ~15.8 to ~8.5, `frame` p99 from ~28.7 to ~21.2, and
+> `frame.player` p99 from ~20.2 to **~12.7 — under the 16.6 ms budget**. Whether it *can* is a
+> replication-contract question, not a physics one: today each queued destruction batch costs
+> `apply_next_batch` → a full `physics.step` → `destruction.update`, and the loop's comment defends
+> never merging two batches on fracture-boundary grounds. **What must not be skipped — the
+> `destruction.update` or the `physics.step` — is the open question, and it is worth ~7.5 ms.**
+>
+> **RULED (2026-09-06): the step belongs to the tick, not to the batch — and that closes the
+> clause on one machine.** The fracture boundary that must not be skipped is the `update()`, not
+> the `step()`, and it is measured rather than argued. `tests/destruction_net` "the fracture
+> boundary is the destruction update, not the physics step" feeds two mirrors an identical pair of
+> **remote** batches, one stepping between them and one not: equal composition hashes, equal debris
+> rosters — while merging both batches into a SINGLE update still hashes differently, which is the
+> divergence ADR-0033 A12 actually names.
+>
+> *The first version of that test failed, 13 chunks against 14, and the failure is worth keeping.*
+> Written against `apply_damage` it measured a different mechanism: local damage carries a world
+> POINT that `update()` resolves against the current pose, so for a **Local** instance a step
+> between the blast and the update genuinely changes which parts are hit. The client never takes
+> that path — a `DamageOp` off the wire carries an already-resolved `part` index and a Remote
+> instance refuses local damage outright — so testing the wrong path would have "proved" the step
+> load-bearing while measuring pose-dependent damage resolution.
+>
+> Interleaved A/B, two runs an arm, 600 frames each:
+>
+> | p99 | step per batch | one step per tick |
+> |---|---|---|
+> | `frame` | 27.615 / 27.988 | **21.186 / 21.687** |
+> | `frame.player` | 19.396 / 19.760 | **12.725 / 13.078** |
+> | `sim.client` | 14.846 / 15.423 | 8.521 / 8.629 |
+> | `net.client_physics_steps` | 704 | 600 |
+> | `net.client_batches_applied` | — | 704 |
+> | `parts.alive_end` | 1227 | 1227 |
+>
+> **Predicted 21.2 and 12.7 before the run; measured 21.186 and 12.725.** Every batch is still
+> applied (704 either way, so the saving is not dropped work) and the server is untouched, which
+> `parts.alive_end` witnesses. Convergence is not assumed: the headless proof drains to quiescence
+> under 5% loss and 80 ms RTT and passes.
+>
+> **`frame.player` p99 is 12.7 ms against the ratified 16.6 — M13's playable-frame-rate clause is
+> MET on one machine.** The gated `frame` is 21.2, still 1.28x over, and it stays the gated number
+> because moving the goalposts to the flattering measurement is what a ratified budget exists to
+> prevent. But the two numbers now say different things, and the difference is this demo hosting an
+> authoritative server *and* a predicting client in one process, which no shipped configuration
+> does.
+>
+> Follow-ups this opens, none of them taken here: `kMaxCatchUpBatchesPerTick` is still 2 and a batch
+> now costs an `update()` rather than a step, so the cap can rise — that is a catch-up-latency
+> improvement, not a budget one, and it deserves its own measurement. Debris age advances per
+> `update()` (`damage.cpp:429`), so it still runs at the batch rate during a burst. And
+> `DestructionWorld::events()` is valid only until the next `update()` while the block reads it once
+> a tick, so on a multi-batch tick the first batch's `PartDied`/`IslandDetached` never reach the
+> audio loop — pre-existing, unchanged by this brick, and real.
+>
+> **A vacuous proof found in the same pass and deleted rather than left green.**
+> `{"net: no debris left unresolved", dc.debris_unresolved() == 0}` could not fail: both that
+> counter and `debris_bound_` increment in exactly one place, inside
+> `DestructionClient::sync_debris`, and no sample calls the client's `sync_debris` — not this one,
+> not `12-networked-destruction`. All three call sites in the repository are in tests. So the
+> client-side half of m11.4b's addressing proof ships in no sample, and the check that looked like
+> it covered that was reading 0 == 0. Wiring it would add per-tick client cost to the number this
+> brick is about, so it is named as a scope decision rather than folded in.
+>
+> **A trap recorded so it is not rediscovered: the client's `physics.contacts` looked 1.25x the
+> server's, and that reading is wrong.** Both worlds carry identical populations — 507 bodies and
+> 2134 broadphase pairs, to the unit — and across the distribution the client is *cheaper*: p50
+> 1.25x, p95 0.97x, p99 0.98x, max 0.97x. The median is pulled up because the client has 104
+> samples the server does not and every one is a catch-up step taken during the collapse, when any
+> step is expensive. **Comparing two distributions at the median when their sample populations
+> differ compares the populations, not the code.** The population counters stay in the ledger so a
+> real divergence would show as a count rather than be inferred from a timing difference that means
+> something else.
+>
+> **One number kept separate from the gate, because it is the honest one for a player:**
+> `frame.player` p99 is **20.21–20.42 ms** — client + render, i.e. what a single machine pays. The
+> ~28.9 ms `frame` is this demo hosting a server *and* a predicting client in one process, which no
+> shipped configuration does. The clause is missed either way; on one machine it is missed by
+> 1.22x, not 1.74x.
+>
+> **MEASURED (2026-09-06): m17.6's premise no longer exists, and the ladder should be re-read
+> before it is built.** Every number scoping m17.6 above — `frame.submit` p99 10.60, `ssr-resolve`
+> max 4.455, `forward-pbr shadowed` max 4.051 — was taken on a GPU the driver was parking mid-run.
+> With both clock domains pinned, from the committed baseline:
+>
+> | | m17.6's premise | pinned | |
+> |---|---|---|---|
+> | `frame.submit` p99 | 10.600 | 2.785 | 3.8x |
+> | `ssr-resolve` max | 4.455 | 0.902 | 4.9x |
+> | `forward-pbr shadowed` max | 4.051 | 0.664 | 6.1x |
+>
+> **All twelve GPU passes together are 1.841 ms at p50 and 2.407 ms at max, against a 16.600 ms
+> budget — 8% of a 28.9 ms frame.** There is no GPU budget breach to close. That does not delete
+> m17.6 by itself: the passes still have to be *correct* and the visual bar (m17.7, m17.8) will add
+> cost that has to land somewhere. But m17.6 as written is a budget brick whose budget is already
+> met, so its scope is a decision to take deliberately — an ADR-0041 amendment — rather than a
+> ladder entry to work through. **Flagged, not cut.**
+>
+> *Precision, so these numbers are read at the right width:* ten 600-frame runs in one sitting on
+> an idle, clock-pinned box gave `frame` p99 **28.32–29.23 ms, mean 28.68, sd 0.26 (0.9%)**. Cross-
+> sitting drift on an identical tree measured ~2% the same day, so **an A/B is only meaningful
+> against a control taken in the same sitting** — which is what voided the first attempt at this
+> one. The committed baseline is the median of three guard-passed runs; collecting those three took
+> **fourteen attempts**, ten refused outright and one discarded for going dirty mid-run, because a
+> sibling session held four cores for most of an hour. That is the guard working, and it is also
+> the honest cost of measuring on a shared desk.
+>
+> **The ladder's first omission, found in review and added as m17.8: there is no ground.** What the
+> block stands on is **two triangles** (`make_plane`, four vertices) scaled to a 76 m square
+> (`blockkit/src/block.cpp:315-326`), wearing a material with **no textures at all** — `opaque(0.10,
+> 0.10, 0.11, roughness)` is base colour, metallic and roughness and nothing else, so the mesh's
+> `uv_tiles = 24` addresses a texture that does not exist. The **collider is a separate object
+> authored by hand, once per sample**: a 44 m half-extent box in `99-the-block`'s `add_street`, and
+> a 3×3 grid of 10 m boxes in `13-networked-player` "because 10 m per box is a measured GJK limit" —
+> a limit review pass 2 **measured as gone**, contradicted by the block's own 44 m box in the same
+> repository. **No module owns the concept**; `engine/worldkit` is the component profile, not a
+> world.
+>
+> That is the wrong surface to judge a visual bar on, and it flatters: a flat untextured plane gives
+> reflections no normals to bend around, bounce no albedo to tint and shadows no detail to read
+> against — so DDGI, SSR and shadow quality are all unjudgeable on it — while two triangles make
+> every render number above cheaper than a shipped floor would be. m17.8 gives the ground **one
+> owner**, a cooked material, and a collider *derived* from the surface rather than authored beside
+> it. It lands **after** the budget bricks, which is ADR-0041 Ruling 1's first real test: a textured,
+> tessellated ground adds cost and may not precede m17.5/m17.6. **A terrain module is a separate
+> question and is ranked with M18** — see that row.
+>
+> **The sky does not light the scene, and no test can currently see that it doesn't.** All three
+> consumers of a sky's radiance — forward ambient, the DDGI miss, the SSR miss — still read one
+> constant (`SceneRenderer::ambient_`, whose own comment still calls it "the crude GI stand-in until
+> M10"). ADR-0040 §6 names the replacement; **m17.7 schedules it.**
+>
+> **Every lighting pass writes pass-owned buffers per frame with no frame-in-flight ring** — the
+> finding opened at three passes and closed at seven. `write_buffer` calls sit inside the per-frame
+> `add()` of `clustered` (2 buffers), `ssr` (1), `sky` (1), `shadows`/CSM (2), `local_shadows` (2),
+> `sdf_clipmap` (1) and `ddgi` (5): **14 host-visible buffers, none ringed.** This is the exact
+> hazard m16.1 fixed for the renderer's own frame/draw UBOs, and the reasoning is already written
+> down at `scene_renderer.cpp:332-338`: the handle is baked into a descriptor set, so `write_buffer`
+> overwrites mapped memory the GPU may still be reading, "ordered by nothing a pipeline barrier can
+> express". The fix one level up was a ring of `frames_in_flight + 1`; the pass-owned buffers never
+> got it. It cannot show up under `submit_blocking`, which is every test — only under `present()`,
+> which is the editor viewport and every `--windowed` sample, i.e. exactly where a *visual* bar gets
+> judged. **Reasoned, not reproduced**, and it is **m17.4**: the ring depth is owned by
+> `SceneRenderer`, so fixing it means threading a slot index into seven passes.
+>
+> Smaller things named so they are not rediscovered: the cloud layer's per-pixel cost is
+> **unmeasured** (ten value-noise evaluations per background pixel) and M17 is the milestone with a
+> frame-rate clause; a `.rscene` can author its sky's colours and clouds but **not** its sun's
+> colour or the below-horizon ground term, which stay host-level in `SkyParams`; and the editor
+> smoke's background pixel is now found by a 9×9 emptiness test, because the old near-black scan
+> could land on a deeply shadowed rock — with a sky in the frame it reports "no background pixel to
+> miss-test" instead of inventing a test it cannot run.
+
 ### The adversarial review that M11–M15 never got (2026-08-31)
 
 Kimi's last review ran 2026-08-12 and Fable was out of credits through M13–M15, so **every line of
@@ -2469,6 +2870,16 @@ measurement.
 > inserts "Authored Surfaces" as M16, because a visual bar cannot be judged on content that renders
 > grey. The frame-rate clause travels with "The Visual Bar" and is unchanged — same 35.60 ms against
 > the same ratified 16.6.
+>
+> **Corrected 2026-09-03 (m17.2), on two counts.** *"The whole M10 stack renders in 5.23 ms"* is a
+> **p50** quoted against a **p99** budget; at p99 it is **12.69 ms** of 16.6, and about half of the
+> GPU's wall time is not attributed to any pass at all. And *"ADR-0035 §6's predicted narrowphase
+> cache, now with its measurement"* claims a measurement that does not exist: the engine has ten
+> profile zones, all in `application.cpp`, none inside `physics`, `destruction`, `render` or `net`,
+> so the report's five `sim.*` sub-zones read **0.000 ms** while `sim.block` reads 25.49 at p99. What
+> is measured is that the simulation costs 25 ms at 667 debris. *Which part* of it is unmeasured, and
+> repeating §6's prediction as its own confirmation is how a guess becomes a fact. Both corrections
+> are why [ADR-0041](adr/0041-the-visual-bar-m17.md) puts attribution first and uncuttable.
 
 **M14 starts after M13 closes.** `99-the-block` has one open defect (the collapse does not stay
 local), and starting the editor work while an integration bug is open is how integration bugs get

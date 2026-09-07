@@ -11,7 +11,11 @@
 #include <ctime>
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/core/diagnostics/profile.hpp"
 
 namespace rime::core {
@@ -581,12 +585,83 @@ void PerfReport::observe(std::string_view timeline, double ms) {
     Timeline& t = timeline_for(timeline);
     t.samples.add(ms);
     t.measured = true;
+    t.last_frame = frames_closed_; // the frame now being recorded into; see value_this_frame
 }
 
-void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes) {
-    observe("frame", ms);
+void PerfReport::declare_accounting(std::string_view parent,
+                                    std::initializer_list<std::string_view> children) {
+    AccountingRule rule;
+    rule.parent.assign(parent);
+    rule.residual_name = rule.parent + ".unaccounted";
+    rule.children.reserve(children.size());
+    for (const std::string_view child : children)
+        rule.children.emplace_back(child);
+    accounting_.push_back(std::move(rule));
+}
 
+double PerfReport::value_this_frame(const std::string& name) {
+    for (const Timeline& t : timelines_) {
+        if (t.name != name)
+            continue;
+        if (t.last_frame == frames_closed_)
+            return t.samples.raw().back();
+        break; // the timeline exists, but nothing landed in it this frame
+    }
+    // A gap is counted rather than papered over. The residual it produces is too LARGE by exactly
+    // the missing part, which is the safe direction — a gate fires and someone looks — but a
+    // reader who does not know it happened would read that inflation as unattributed work.
+    ++accounting_gaps_;
+    if (!accounting_gap_warned_) {
+        accounting_gap_warned_ = true;
+        RIME_WARN("perf: accounting child '{}' had no sample for frame {} — every residual from "
+                  "here is an overestimate; record each part before the observe_frame that closes "
+                  "the frame",
+                  name,
+                  frames_closed_);
+    }
+    return 0.0;
+}
+
+void PerfReport::observe_zone(std::string_view name, double ms) {
+    observe(name, ms); // the per-call timeline, unchanged — see the header
+
+    for (ZoneAccumulator& z : zone_acc_) {
+        if (z.name == name) {
+            z.total_ms += ms;
+            return;
+        }
+    }
+    ZoneAccumulator fresh;
+    fresh.name.assign(name);
+    fresh.per_frame_name = fresh.name + ".per_frame";
+    fresh.total_ms = ms;
+    zone_acc_.push_back(std::move(fresh));
+}
+
+std::vector<PassTiming> PerfReport::accumulate_passes(std::span<const PassTiming> passes) {
+    std::vector<PassTiming> unique;
+    const auto seen_before = [&](std::string_view candidate, std::size_t upto) {
+        for (std::size_t i = 0; i < upto; ++i) {
+            if (unique[i].name == candidate)
+                return true;
+        }
+        return false;
+    };
+    unique.reserve(passes.size());
     for (const PassTiming& p : passes) {
+        PassTiming entry = p;
+        if (seen_before(entry.name, unique.size())) {
+            const std::string base = entry.name;
+            for (std::uint32_t n = 1;; ++n) {
+                entry.name = base + '#' + std::to_string(n);
+                if (!seen_before(entry.name, unique.size()))
+                    break;
+            }
+        }
+        unique.push_back(std::move(entry));
+    }
+
+    for (const PassTiming& p : unique) {
         auto it = std::find_if(pass_acc_.begin(), pass_acc_.end(), [&p](const PassAccumulator& a) {
             return a.name == p.name;
         });
@@ -596,10 +671,49 @@ void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const P
         }
         it->samples.add(p.ms);
     }
+    return unique;
+}
+
+void PerfReport::observe_passes(std::uint64_t frame_index, std::span<const PassTiming> passes) {
+    std::vector<PassTiming> unique = accumulate_passes(passes);
+    // Only the frame these passes actually belong to may take them. A pipelined run delivers them
+    // late, so "is this still the worst frame" is a real question rather than a formality — and
+    // answering it with "now" is how frame N's GPU cost ends up on frame N+2's row.
+    if (frame_index == worst_.index)
+        worst_.passes = std::move(unique);
+}
+
+void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes) {
+    observe("frame", ms);
+
+    // A PASS NAME IS A KEY, AND KEYS MUST BE UNIQUE WITHIN A FRAME (m17.3). Two passes sharing a
+    // name in one frame broke this two ways at once, and the 2026-08-30 block baseline shows both:
+    // the fold below put four different cascade renders into ONE distribution, so `depth-prepass
+    // p50` was the median of individual renders rather than a per-frame cost; and the worst-frame
+    // writer emitted the key four times, producing JSON whose every ordinary reader keeps one value
+    // and silently drops the rest.
+    //
+    // The RenderGraph now hands out unique names, so this normally does nothing and allocates
+    // nothing. It is here because `observe_frame` is a public seam any caller may feed, and closing
+    // only the render path would close the instance and not the class.
+    //
+    // What a `#` suffix is NOT: a stable identity. It is positional — `foo#1` means "whichever
+    // same-named pass arrived second THIS frame" — so a distribution keyed on it mixes work that
+    // merely shared a queue position. That is strictly better than the merge it replaces (nothing
+    // is dropped, and the sum over a frame stays right, which is what the accounting residual
+    // below needs), and strictly worse than a name. So a `#` in a committed report is a BUG REPORT
+    // about the declaring code, not a feature; `tests/render/pass_identity_test.cpp` asserts a real
+    // frame produces none.
+    std::vector<PassTiming> unique = accumulate_passes(passes);
 
     // The worst frame keeps its own breakdown, so a failed gate can say WHICH pass blew the frame
     // rather than only that some frame did. The first frame always wins outright — otherwise a run
     // whose every frame took 0 ms would report a worst frame it never observed.
+    //
+    // This runs BEFORE the zone flush below, which is the whole reason it moved here (m17.3c): the
+    // flush zeroes every accumulator, so a worst-frame check after it can only ever see zeros, and
+    // the one frame a human opens after a failure had a GPU story and no CPU one. Capturing costs
+    // an allocation only on the frames that actually take the record.
     const Timeline* frames = nullptr;
     for (const Timeline& t : timelines_) {
         if (t.name == "frame")
@@ -609,8 +723,33 @@ void PerfReport::observe_frame(std::uint64_t index, double ms, std::span<const P
     if (first || ms > worst_.ms) {
         worst_.index = index;
         worst_.ms = ms;
-        worst_.passes.assign(passes.begin(), passes.end());
+        worst_.passes = std::move(unique); // the uniquified names, so the JSON keys are keys
+        worst_.zones.clear();
+        for (const ZoneAccumulator& z : zone_acc_) {
+            if (z.total_ms > 0.0)
+                worst_.zones.push_back(ZoneTotal{z.name, z.total_ms});
+        }
     }
+
+    // The frame boundary, and therefore where a zone's per-frame total is banked (m17.3b). Every
+    // known zone flushes, including the ones that did not run this frame — a zero is a measurement,
+    // and omitting it would bias the percentile upward by dropping exactly the cheap frames.
+    for (ZoneAccumulator& z : zone_acc_) {
+        observe(z.per_frame_name, z.total_ms);
+        z.total_ms = 0.0;
+    }
+
+    // The accounting residuals, last, because the flush above is what makes a `.per_frame` child
+    // current for this frame (m17.3c). Each is recorded as its own timeline, so the remainder gets
+    // a name a gate can hold rather than staying an identity nobody evaluates.
+    for (const AccountingRule& rule : accounting_) {
+        double residual = value_this_frame(rule.parent);
+        for (const std::string& child : rule.children)
+            residual -= value_this_frame(child);
+        observe(rule.residual_name, residual);
+    }
+
+    ++frames_closed_;
 }
 
 void PerfReport::set_ledger(const WorkLedger& ledger) {
@@ -720,7 +859,20 @@ std::string PerfReport::to_json(int indent) const {
     {
         bool f = true;
         w.open('{');
-        for (const Timeline& t : timelines_) {
+        // Written in NAME order, not discovery order (m17.3c). Two reasons, both about the file
+        // rather than the run: a `<zone>` and its `<zone>.per_frame` twin land next to each other
+        // instead of in two distant blocks, and the key order stops depending on which frame each
+        // stage happened to fire in first — so `git diff` between two committed reports shows the
+        // numbers that changed rather than a reshuffle.
+        std::vector<const Timeline*> ordered;
+        ordered.reserve(timelines_.size());
+        for (const Timeline& t : timelines_)
+            ordered.push_back(&t);
+        std::sort(ordered.begin(), ordered.end(), [](const Timeline* a, const Timeline* b) {
+            return a->name < b->name;
+        });
+        for (const Timeline* tp : ordered) {
+            const Timeline& t = *tp;
             const Distribution d = t.measured ? t.samples.summarize() : t.parsed;
             w.item(f);
             w.key(t.name);
@@ -785,6 +937,22 @@ std::string PerfReport::to_json(int indent) const {
                 w.item(g);
                 w.key(p.name);
                 w.out += ms_text(p.ms);
+            }
+            w.close('}', !g);
+        }
+        // The CPU half of the same frame (m17.3c). Always written, and OPTIONAL on read — see the
+        // parser — because the reports already in `docs/perf/` predate it and must keep loading as
+        // baselines. Adding a required field would have meant bumping the schema version, which
+        // would have made every committed file unreadable to close a gap in one of them.
+        w.item(f);
+        w.key("zones");
+        {
+            bool g = true;
+            w.open('{');
+            for (const ZoneTotal& z : worst_.zones) {
+                w.item(g);
+                w.key(z.name);
+                w.out += ms_text(z.ms);
             }
             w.close('}', !g);
         }
@@ -927,6 +1095,29 @@ bool PerfReport::parse(std::string_view text, PerfReport& out, std::string& erro
         r.worst_.passes.push_back(PassTiming{name, node.as_double()});
     }
 
+    // `zones` is OPTIONAL, and it is the only optional field in this reader. Everything else is
+    // strict on purpose — a parser that defaults a field to 0.0 makes the regression gate compare
+    // against zero and pass everything. This one is different in kind: it was added in m17.3c, and
+    // every report committed before it is a legitimate baseline that simply has no CPU breakdown
+    // for its worst frame. Absent therefore means "this report predates the field", which is a
+    // true statement about the file, not a guess about a number. A `zones` that IS present is
+    // parsed strictly.
+    if (const JsonValue* worst_zones = worst->find("zones")) {
+        if (worst_zones->type != JsonValue::Type::Object) {
+            error = "worst_frame 'zones' is not an object";
+            return false;
+        }
+        for (std::size_t i = 0; i < worst_zones->member_count(); ++i) {
+            const std::string& name = worst_zones->keys[i];
+            const JsonValue& node = worst_zones->values[i];
+            if (node.type != JsonValue::Type::Number) {
+                error = fmt::format("worst_frame zone '{}' is not a number", name);
+                return false;
+            }
+            r.worst_.zones.push_back(ZoneTotal{name, node.as_double()});
+        }
+    }
+
     const JsonValue* ledger = nullptr;
     if (!need_object(root, "ledger", ledger, error))
         return false;
@@ -963,18 +1154,39 @@ bool PerfReport::load_file(const std::string& path, PerfReport& out, std::string
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-ZoneTimelines::ZoneTimelines(PerfReport& report) : report_(&report) {
-    // The lambda captures one pointer, so it fits a std::function's small-object buffer and the
-    // sink copy inside report_zone() costs no allocation — which matters because this fires on
-    // every stage of every tick of the run being measured.
-    PerfReport* target = report_;
-    set_zone_sink([target](std::string_view name, double ms) { target->observe(name, ms); });
+ZoneTimelines::ZoneTimelines(PerfReport& report)
+    : report_(&report), owner_(std::this_thread::get_id()) {
+    // The lambda captures ONE pointer — this collector, not the report — so it still fits a
+    // std::function's small-object buffer and the sink copy inside report_zone() costs no
+    // allocation, which matters because this fires on every stage of every tick of the run being
+    // measured. Capturing the report plus the owning thread plus the counter would have been three
+    // words, overflowed the 16-byte buffer on libstdc++, and put a malloc/free on the measured
+    // path. `this` is stable: the class is non-copyable and non-movable, and `stop()` clears the
+    // sink before the object can die.
+    ZoneTimelines* self = this;
+    set_zone_sink([self](std::string_view name, double ms) { self->on_zone(name, ms); });
+}
+
+void ZoneTimelines::on_zone(std::string_view name, double ms) {
+    if (std::this_thread::get_id() != owner_) {
+        // See the class comment: dropping is the only safe answer here, and counting it is what
+        // stops the drop from reading like an absence of work.
+        foreign_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    report_->observe_zone(name, ms);
 }
 
 void ZoneTimelines::stop() {
     if (report_) {
         set_zone_sink({});
         report_ = nullptr;
+        const std::uint64_t dropped = foreign_.load(std::memory_order_relaxed);
+        if (dropped != 0) {
+            RIME_WARN("perf: {} zone closes were dropped — they fired on a thread other than the "
+                      "one collecting, so this report is short by that many measurements",
+                      dropped);
+        }
     }
 }
 
@@ -1087,7 +1299,21 @@ PerfGate::Result PerfGate::check(const PerfReport& report, const PerfReport* bas
             absent.push_back(rule.timeline);
             continue;
         }
-        const double limit = base->stat(rule.stat) * (1.0 + regression_);
+        // A regression has to clear BOTH the relative tolerance and an absolute noise floor.
+        // Relative alone is meaningless as the baseline approaches zero: `frame.unaccounted` p99 is
+        // a residual that lands at a few hundred NANOseconds, and a percentage of that is smaller
+        // than the timer's own resolution — so two runs of the same binary reported
+        // "0.000 ms vs baseline 0.000 ms — REGRESSED", which is how a gate teaches people to ignore
+        // it. A gate that cries wolf is disbelieved exactly as fast as one that cannot fail.
+        //
+        // The floor is measured, not chosen: pinned, two 600-frame runs of `99-the-block` agreed to
+        // within 1.5% on every pass above 0.05 ms and drifted 20-25% on the ones below it (4-9 us,
+        // reading timestamp quantisation). 0.05 ms is where this machine stops being able to tell
+        // two identical runs apart, and it is 0.3% of a 16.6 ms frame — far below anything worth
+        // acting on.
+        constexpr double kRegressionFloorMs = 0.05;
+        const double base_ms = base->stat(rule.stat);
+        const double limit = base_ms + std::max(base_ms * regression_, kRegressionFloorMs);
         const double value = cur->stat(rule.stat);
         if (value > limit) {
             result.violations.push_back(PerfViolation{rule.timeline,
@@ -1155,6 +1381,12 @@ std::string PerfGate::format(const Result& result) {
     out += WorkBudget::format(result.work_violations);
     out += fmt::format(
         "  baseline: {} — {}\n", baseline_status_name(result.baseline), result.baseline_note);
+    if (result.baseline == BaselineStatus::FingerprintMismatch) {
+        out += "  A baseline exists for this sample and this run could not be judged against it, "
+               "so the\n  regression check did not run. That is a FAILURE, not a note "
+               "(ADR-0041 Ruling 4):\n  re-baseline deliberately, or say why this run may skip "
+               "the comparison.\n";
+    }
     return out;
 }
 

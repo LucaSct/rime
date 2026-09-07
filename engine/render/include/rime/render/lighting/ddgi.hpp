@@ -341,16 +341,13 @@ private:
     rhi::TextureHandle dummy_irradiance_;
     rhi::TextureHandle dummy_visibility_;
 
-    rhi::BufferHandle
-        clipmap_levels_ubo_; // this frame's clipmap.gpu_levels(), re-uploaded each add()
-    rhi::BufferHandle trace_params_ubo_;  // GpuDdgiTraceParams
-    rhi::BufferHandle blend_params_ubo_;  // GpuDdgiBlendParams
-    rhi::BufferHandle hysteresis_buffer_; // per-probe-this-frame effective hysteresis (std430)
-    rhi::BufferHandle ray_buffer_;        // this frame's GpuDdgiRay[probes_this_update*rays]
+    // The ray buffer stays owned here: it is GPU-only, written by the trace pass and read by the
+    // blends within the SAME frame, so the graph's barriers order it and no CPU write races it.
+    // Everything this system used to own that the CPU rewrote each frame is now a per-frame slice
+    // from the graph's scratch ring (m17.4).
+    rhi::BufferHandle ray_buffer_; // this frame's GpuDdgiRay[probes_this_update*rays]
     rhi::ResourceState ray_buffer_state_ = rhi::ResourceState::Undefined; // carried across frames
     std::uint32_t ray_capacity_ = 0;
-    rhi::BufferHandle sample_params_ubo_; // GpuDdgiSampleParams (m10.5b), re-uploaded each add()/
-                                          // empty_binding()
 
     // The lattice snap state (mirrors SdfClipmap::Level exactly).
     core::Vec3 origin_{0.0f, 0.0f, 0.0f};

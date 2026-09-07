@@ -16,6 +16,7 @@
 #include "rime/render/lighting/sdf_clipmap.hpp"
 #include "rime/render/lighting/settings.hpp"
 #include "rime/render/lighting/shadows.hpp"
+#include "rime/render/lighting/sky.hpp"
 #include "rime/render/lighting/ssr.hpp"
 #include "rime/render/passes.hpp"
 
@@ -57,6 +58,11 @@ struct ExtractedScene {
     std::vector<GpuDirectionalLight> dir_lights; // already GPU-shaped (uncapped; see render())
     std::vector<GpuPointLight> point_lights;
     std::vector<SpotLightData> spot_lights; // m10.2: CPU-shaped (the shadow fit needs pos/dir/cone)
+    // m17.0: the FIRST Sky component found, if any. Optional by design — a world with no Sky entity
+    // leaves this clear and the renderer keeps whatever set_sky() was given, which is off by
+    // default. Same "first one wins" rule as the camera, for the same reason.
+    bool has_sky = false;
+    Sky sky{};
 };
 
 struct ResolveDrawStats {
@@ -182,6 +188,17 @@ public:
 
     [[nodiscard]] const LightingSettings& lighting() const noexcept { return lighting_; }
 
+    // ── The sky (m17.0) ───────────────────────────────────────────────────────────────────────
+    //
+    // Off by default, and gated the same way every M10 technique is: with `enabled` clear no target
+    // is allocated and no pass is declared, so the frame is byte-identical to the pre-sky renderer.
+    // On, it composites ONLY where the depth buffer is still at the far plane, so shaded pixels are
+    // untouched -- see sky.hpp for what this sky is (analytic background) and is not (the scene's
+    // light source), and ADR-0040 for the physical model that replaces its internals later.
+    void set_sky(const SkyParams& sky) { sky_params_ = sky; }
+
+    [[nodiscard]] const SkyParams& sky() const noexcept { return sky_params_; }
+
     // The C2 destruction hook (m10.2): tell the local-shadow cache that geometry in `region` (a
     // destruction event's world_bounds) changed, so any spot whose shadow frustum it touches
     // re-renders next frame. An app/sample bridges the destruction event stream to this call. Cheap
@@ -291,6 +308,7 @@ private:
     SdfClipmap sdf_clipmap_;       // m10.4b: the traceable field (only stepped when enabled)
     DdgiProbes ddgi_; // m10.5a: irradiance/visibility probes (only stepped when enabled)
     SsrPass ssr_;     // m10.7b: screen-space reflections resolve (only added when enabled)
+    SkyPass sky_;     // m17.0: procedural sky + clouds (only added when enabled)
 
     // The m10.4b/m10.5a extraction bridge: which SdfRef entities are currently registered with
     // sdf_clipmap_, and the change-detection watermark sync_sdf_instances reads from.
@@ -300,6 +318,7 @@ private:
     ecs::Version sdf_instances_since_ = 0;
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
+    SkyParams sky_params_{};      // m17.0; enabled=false == the pre-sky baseline
     bool cull_enabled_ = true;
     CullStats cull_stats_{};
 
