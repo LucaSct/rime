@@ -1631,14 +1631,24 @@ milestone boundary; time estimates come at brick-decomposition, not here.
   particle substrate with fire and dust/smoke as effect families (spawned from the M8 destruction event
   fan-out; fire drives lights, smoke reads the M10 lighting data); it replaces M8.4's dust stub and
   hard-gates M12's block — **scoped at m12.0** to its true size: fx1a's GPU draw pass for the existing
-  deterministic CPU sim is load-bearing, fx1b's compute scale-up is contingent on the ledger, and
-  fire-as-light is deferred behind its seam. **Track FL** (`engine/fluids`) — CPU heightfield water
-  with two-way buoyancy coupling into physics; *decided at M12.0, and the decision was **no**:* no
-  water in the block ([ADR-0035](adr/0035-vision-demo-m12.md) §5). A whole module plus a two-way
-  physics coupling does not earn a slot in a demo whose thesis is destruction, lighting and
-  networking at scale; the ADR-0026 substrate seams stay intact for whenever it opens. Both are
-  cross-cutting (interleave under mainline-first), not
-  milestones; most of both is provable GPU-free/structural on lavapipe. *Inspired by: Frostbite/Niagara
+  deterministic CPU sim is load-bearing; fx1b's compute scale-up was written contingent on "the ledger
+  showing the CPU sim binding," which never happened and cannot — the CPU sim is capped at 200
+  particles and was left contingent twice (M12.0, and again at the M12/M13 split) without ever being
+  measured. [ADR-0042](adr/0042-fluids-track-reopened.md) transfers the criterion from the clock to
+  the caps: fx1b.1 wires the block to the pass and counts the stub's silent drops, and fx1b.2's
+  compute move lands once that counter shows the caps (200 CPU particles, a 4096 draw cap) binding
+  the owner's ask to watch smoke — a counter, not an appetite. Fire-as-light stays deferred behind
+  its seam until fx1c. **Track FL** (`engine/fluids`) — CPU
+  heightfield water with two-way buoyancy coupling into physics; *decided at M12.0, and the decision
+  was **no**:* no water in the block ([ADR-0035](adr/0035-vision-demo-m12.md) §5). **Reopened
+  2026-09-17** by the owner's ask, at exactly the scope ADR-0035 §5 ratified — see
+  [ADR-0042](adr/0042-fluids-track-reopened.md), which also rules that a unified particle-grid
+  substrate (PIC/FLIP/APIC/MPM) is this track's recorded destination, gated on a trigger, not built
+  now. Three bricks carry the reopening: **fx1b** (the compute scale-up above), **fl1a** (the
+  heightfield and two-way buoy, Track FL's ratified scope), **fx1c** (fire drives lights, the
+  deferred clause landed) — all three queue **strictly after M18 finishes**, interleaved with neither
+  M17 nor M18. Both tracks are cross-cutting (interleave under mainline-first once M18 has closed),
+  not milestones; most of both is provable GPU-free/structural on lavapipe. *Inspired by: Frostbite/Niagara
   effects; shallow-water + SPH literature.*
 - **Graphics streaming (Track S):** the engine renders → captures → encodes → transports → a thin
   client presents and sends input back. **S0** (LAN/loopback dev-stream — TCP, JPEG/LZ4, a thin

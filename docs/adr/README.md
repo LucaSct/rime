@@ -66,3 +66,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0039](0039-authored-surfaces-m16.md) — M16 "Authored Surfaces" (the material half of the asset bridge; the mesh→material edge, masked depth, BC formats, one asset runtime)
 - [ADR-0040](0040-sky-and-atmosphere.md) — the sky (an analytic background now, a Hillaire-2020 LUT atmosphere later; the sky as a scene component, coupled to the world's sun)
 - [ADR-0041](0041-the-visual-bar-m17.md) — M17 "The Visual Bar" (the budget is earned before the bar is spent; the frame becomes attributable first; virtualized geometry deferred to M18)
+- [ADR-0042](0042-fluids-track-reopened.md) — Track FL reopens (water, fire, smoke: the particle + heightfield fork now, a unified particle-grid substrate gated for later; all three bricks strictly after M18)
