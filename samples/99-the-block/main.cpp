@@ -2134,7 +2134,7 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
         // first surface the day a second one appears, depending only on iteration order.
         if (demo.bridge) {
             std::size_t surfaces = 0;
-            std::size_t cooked = 0;
+            std::size_t surfaces_cooked = 0;
             ecs::World& cw = demo.session.client.world;
             cw.query<ground::GroundSurface>().for_each([&](ecs::Entity e, ground::GroundSurface&) {
                 ++surfaces;
@@ -2145,11 +2145,11 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
                 const render::PbrMaterialDesc& d = demo.visuals->materials.get(ref->material);
                 if (d.base_color_texture.is_valid() &&
                     d.base_color_texture != demo.bridge->placeholder_texture()) {
-                    ++cooked;
+                    ++surfaces_cooked;
                 }
             });
             claims.push_back({"render: the street wears its COOKED material",
-                              surfaces > 0 && cooked == surfaces});
+                              surfaces > 0 && surfaces_cooked == surfaces});
         }
 
         // ── The M10 clause of M13's "done when" (m13.L) ──────────────────────────────────────
