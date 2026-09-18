@@ -5,6 +5,7 @@
 #include <cmath>
 #include <vector>
 
+#include "rime/ecs/component.hpp"
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ground/derive.hpp"
@@ -104,6 +105,17 @@ apply_ground(ecs::World& world, render::MeshRegistry& meshes, render::MaterialId
         // is decided somewhere else from all the others.
         if (world.get<render::MaterialRef>(p.entity) == nullptr) {
             (void)world.add_component(p.entity, render::MaterialRef{material});
+        }
+        // TAG IT DERIVED (m17.8b), or a save bakes this dressing into the scene file.
+        //
+        // `MeshRef` and `MaterialRef` are dense registry indices, meaningful only to the world that
+        // minted them; `save_scene` drops them from an entity carrying this tag (m16.8) and keeps
+        // them otherwise. The editor host calls `apply_ground` on the world it then saves, so
+        // without the tag an edited block comes back with `MeshRef{2}`/`MaterialRef{1}` frozen in —
+        // indices from the *editor's* registries. The game would then find the surface already
+        // dressed, skip it, and draw whatever its own mesh 2 happens to be.
+        if (world.get<ecs::DerivedComponents>(p.entity) == nullptr) {
+            (void)world.add_component(p.entity, ecs::DerivedComponents{});
         }
     }
     return pending.size();

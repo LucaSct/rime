@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -136,16 +137,59 @@ public:
     // Ready → read its five texture ids → textures Ready → final desc. Each level needs a pump and
     // a drain before the next can even be requested, so one blocking round cannot converge.
     struct MaterialStats {
-        std::size_t resolved = 0;        // entities that gained (or updated) a material set
-        std::size_t pending = 0;         // waiting on a material or one of its textures
-        std::size_t unresolved = 0;      // no `#materialN` line for a slot the mesh names
-        std::size_t slots_defaulted = 0; // a submesh slot no material could be found for
+        std::size_t resolved = 0; // entities that gained (or updated) a material set
+        std::size_t pending = 0;  // waiting on a material or one of its textures
+        // A material OR texture id the manifest does not know. Counts per slot per round and
+        // mixes the two levels, so it answers "something was missing" rather than "how many
+        // distinct assets are missing" — `unresolved_count()` is the deduplicated set of ids.
+        std::size_t unresolved = 0;
+        std::size_t slots_defaulted = 0; // no `#materialN` line for a slot the mesh names
     };
 
     MaterialStats resolve_scene_materials(ecs::World& world);
 
+    // Give every entity that names a material IN ITS OWN RIGHT (`MaterialAsset`) the `MaterialRef`
+    // it resolves to (m17.8b).
+    //
+    // The third resolver, and the first that does not start from a mesh. `resolve_scene_materials`
+    // finds a material through the mesh that owns it; a surface whose mesh is DERIVED rather than
+    // cooked — the ground, whose `derive_mesh` writes its own vertices — has no cooked mesh to join
+    // through, so it names the material by content id directly. Same chain from the material
+    // down (material Ready → its textures Ready → a sharpened registry entry), same cache
+    // (`material_of_id_`), so an entity-owned reference and a mesh-owned slot naming the same
+    // cooked bytes share one registry material and one set of uploads.
+    //
+    // The resolved `MaterialRef` OUTRANKS a derived one: this overwrites whatever a palette or a
+    // fallback stamped, and anything that derives a look must skip entities carrying a
+    // `MaterialAsset` (blockkit's palette does) or the two would fight every frame. Idempotent in
+    // the steady state — an entity whose MaterialRef already names the resolved material costs one
+    // lookup. Tags the entity `DerivedComponents`, so a save keeps the authored reference and drops
+    // the index (ADR-0039 ruling 4).
+    struct MaterialAssetStats {
+        std::size_t resolved = 0;   // entities that gained (or updated) a MaterialRef this call
+        std::size_t pending = 0;    // waiting on the material or one of its textures
+        std::size_t unresolved = 0; // no catalog, or an id the manifest does not know
+        // Entities already wearing the material their `MaterialAsset` names — the steady state.
+        //
+        // Counted because `resolved` alone goes to ZERO once everything has converged (this
+        // resolver skips an entity whose MaterialRef is already right, to avoid churning the
+        // archetype every frame), and a caller asking "did the cooked ground actually take?" after
+        // `settle` would read 0 and conclude nothing had. `resolved + steady` is the number of
+        // entity-owned materials standing. Note the mesh-owned resolver differs deliberately: its
+        // `resolved` restamps and so stays nonzero forever, which is what `settle`'s comment about
+        // not checking it means.
+        std::size_t steady = 0;
+    };
+
+    MaterialAssetStats resolve_material_assets(ecs::World& world);
+
+    [[nodiscard]] const MaterialAssetStats& material_asset_stats() const noexcept {
+        return material_asset_stats_;
+    }
+
     // Drive the whole four-level chain to quiescence: pump, drain, resolve meshes, resolve
-    // materials, repeat — until a round changes nothing or `max_rounds` is spent.
+    // materials (mesh-owned and entity-owned), repeat — until a round changes nothing or
+    // `max_rounds` is spent.
     //
     // Returns the number of rounds actually taken. A caller that gets `max_rounds` back should
     // treat it as "did not converge" and look at the pending counters, NOT as success: silently
@@ -170,6 +214,13 @@ public:
     // asserts).
     [[nodiscard]] std::size_t uploaded_count() const noexcept { return uploaded_.size(); }
 
+    // Block-compressed textures this adapter could not accept (m17.8b). Nonzero means the cook and
+    // the device disagree: the pixels are magenta and re-cooking without `--bc` is the fix. Counted
+    // rather than merely logged, so a proof can assert on it.
+    [[nodiscard]] std::size_t textures_refused_unsupported() const noexcept {
+        return refused_unsupported_.size();
+    }
+
     // Where per-submesh material sets are minted. Null until set_mesh_sink; exposed so the renderer
     // can resolve a submesh's slot when it builds the draw list.
     [[nodiscard]] const MaterialSetRegistry* material_sets() const noexcept {
@@ -186,9 +237,33 @@ private:
 
     // Build the final desc for a Ready material: factors from the cook, textures requested and
     // resolved to placeholders until they drain. Returns false while any texture is still pending.
-    bool build_material(const assets::MaterialAsset& cooked, PbrMaterialDesc& out);
+    // `unresolved_textures` counts slots whose texture id the catalog does not know — handed back
+    // rather than counted into a member, because the caller owns the stats for its own call and
+    // used to overwrite the member's count at the end of the same call (a pre-m17.8b defect: a
+    // material naming a texture the manifest lacked reported `unresolved == 0`).
+    bool build_material(const assets::MaterialAsset& cooked,
+                        PbrMaterialDesc& out,
+                        std::size_t& unresolved_textures);
+
+    // The ONE place a cooked material id becomes a registry MaterialId (m17.8b), shared by the
+    // mesh-owned `#materialN` path and the entity-owned `MaterialAsset` path so they cannot drift.
+    // `Resolved` writes `out` and may clear `complete` — the registry entry exists but still holds
+    // the magenta placeholder in a slot whose texture has not drained, and a later call sharpens it
+    // in place (MaterialRegistry::update mints no id, so every MaterialRef stays valid across the
+    // swap). `Loading` means the material record itself is not Ready yet; `Unresolved` means the
+    // catalog cannot turn the id into a file at all.
+    enum class MaterialResolve { Unresolved, Loading, Resolved };
+    MaterialResolve resolve_material(assets::AssetId id,
+                                     MaterialId& out,
+                                     bool& complete,
+                                     std::size_t& unresolved_textures);
     // Create an RHI texture from a cooked TextureAsset and upload its whole mip chain verbatim.
-    [[nodiscard]] rhi::TextureHandle upload(const assets::TextureAsset& texture);
+    // `tracked_index` is the streaming index the texture is tracked under, when there is one, and
+    // exists purely so a refusal can be counted ONCE PER TEXTURE. The constructor's placeholder
+    // upload has no index and needs none: it is never block-compressed.
+    [[nodiscard]] rhi::TextureHandle
+    upload(const assets::TextureAsset& texture,
+           std::optional<std::uint32_t> tracked_index = std::nullopt);
 
     rhi::Device& device_;
     assets::AssetServer& server_;
@@ -222,7 +297,15 @@ private:
     std::unordered_set<std::uint64_t> material_incomplete_;
     std::unordered_map<std::uint32_t, MaterialSetId> set_of_entity_; // entity index → its set
     MaterialStats material_stats_{};
+    MaterialAssetStats material_asset_stats_{}; // m17.8b: the entity-owned resolver's last call
     std::size_t meshes_resolved_ = 0;
+    // m17.8b: BC asked of a device without BC, DEDUPLICATED BY TEXTURE. `drain` retries every
+    // non-resident tracked index on every call, so a plain counter here counted retries rather than
+    // textures — three textures over eight settle rounds would read as "24 textures refused", and
+    // the editor's per-frame drain would grow it without bound. A set makes the number mean what
+    // its name says.
+    std::unordered_set<std::uint32_t> refused_unsupported_;
+    bool warned_no_bc_ = false; // the warn-once, no longer inferred from a count of 1
 };
 
 } // namespace rime::render

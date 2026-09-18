@@ -152,11 +152,21 @@ struct PaletteStats {
     std::size_t materialed = 0; // entities given a MaterialRef
     std::size_t meshed = 0;     // entities given a MeshRef (props only)
     std::size_t missing = 0;    // roles the palette did not cover
+    // Entities whose role the palette covers but whose material it LEFT ALONE, because they name
+    // one by content id (`render::MaterialAsset`, m17.8b). Counted so a proof can tell "the
+    // palette skipped the street on purpose" from "the palette forgot the street".
+    std::size_t authored = 0;
 };
 
 // Stamp MeshRef/MaterialRef onto every entity carrying a SlabRole, deriving both from the role.
 // Registers the render components it writes. Idempotent: re-running restamps the same values, which
 // is what makes "edit the palette, re-apply" a live operation rather than a reload.
+//
+// AUTHORED OUTRANKS DERIVED (m17.8b). An entity carrying a `render::MaterialAsset` has said what it
+// wears — a cooked material the asset bridge resolves — and the palette does not overrule it. This
+// is load-bearing rather than polite: 99-the-block re-applies the palette on every tick that binds
+// new destructibles, and a palette that restamped the street's MaterialRef would undo the bridge's
+// resolution each time, so the ground would flicker between its cooked look and the flat one.
 PaletteStats apply_palette(ecs::World& world, const BlockPalette& palette);
 
 } // namespace rime::blockkit

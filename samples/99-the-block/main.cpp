@@ -72,6 +72,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -79,7 +80,9 @@
 #include <vector>
 
 #include "rime/app/application.hpp"
+#include "rime/assets/asset_server.hpp"
 #include "rime/assets/cooked_reader.hpp"
+#include "rime/assets/manifest.hpp"
 #include "rime/assets/sdf_asset.hpp"
 #include "rime/audio/mixer.hpp"
 #include "rime/blockkit/block.hpp"
@@ -102,8 +105,6 @@
 #include "rime/ecs/schema_hash.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
-#include "rime/ground/bind.hpp"
-#include "rime/ground/derive.hpp"
 #include "rime/gameplay/character.hpp"
 #include "rime/gameplay/components.hpp"
 #include "rime/gameplay/first_person.hpp"
@@ -113,12 +114,15 @@
 #include "rime/gameplay_net/gameplay_client.hpp"
 #include "rime/gameplay_net/gameplay_server.hpp"
 #include "rime/gameplay_net/predictor.hpp"
+#include "rime/ground/bind.hpp"
+#include "rime/ground/derive.hpp"
 #include "rime/net/link.hpp"
 #include "rime/net/net_driver.hpp"
 #include "rime/physics/physics.hpp"
 #include "rime/platform/filesystem.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/culling.hpp"
+#include "rime/render/gpu_asset_bridge.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/render/text/hud.hpp"
@@ -405,7 +409,8 @@ struct Peer {
     // there forever, which draws as a building that never falls behind the one that does.
     [[nodiscard]] bool stand_up(destruction::Authority authority,
                                 bool own_destructibles,
-                                std::string_view scene_path) {
+                                std::string_view scene_path,
+                                std::uint64_t ground_material) {
         register_all(world);
 
         // `--scene <file>` runs A SCENE SOMEONE AUTHORED rather than the one blockgen produces —
@@ -427,7 +432,13 @@ struct Peer {
             }
         } else {
             ecs::World authoring;
-            (void)blockkit::assemble(authoring, blockkit::BlockParams{});
+            // The street's cooked material rides the generated scene as authored data (m17.8b): a
+            // content id names cooked bytes, so unlike every other look in the block it survives
+            // the save/load round trip instead of being re-derived from the role. 0 when the cook
+            // did not run, and then the block is byte-identical to the one before this existed.
+            blockkit::BlockParams params;
+            params.ground_material = ground_material;
+            (void)blockkit::assemble(authoring, params);
             if (!scene::load_scene_from_string(world, scene::save_scene_to_string(authoring)).ok) {
                 std::fprintf(stderr,
                              "99-the-block: the block's own scene file did not load back\n");
@@ -636,6 +647,7 @@ struct Session {
     // Running maxima the proof reads. Peaks, not final values: a budget is about the worst moment.
     std::size_t peak_live_debris = 0;
     std::size_t peak_visual_debris = 0;
+
     // The solver's PARALLELISM, not just its cost (m17.5). `physics.solve` being slow says nothing
     // about whether it CAN be spread: the active-island count is the width available and the
     // largest ACTIVE island is the critical path through it, and a block that is still mostly one
@@ -662,15 +674,16 @@ struct Session {
     //    most expensive step in this run is ~9 ms; no per-step maximum can explain a 24 ms tick,
     //    and reading one as if it did is the same error as reading two peaks as one moment.
     struct TickSolve {
-        double ms = 0.0;                        // every physics.step in the tick, both worlds
+        double ms = 0.0; // every physics.step in the tick, both worlds
         std::uint64_t tick = 0;
         std::uint32_t steps = 0;
-        std::uint32_t min_active_islands = 0;   // the NARROWEST step in the tick
+        std::uint32_t min_active_islands = 0; // the NARROWEST step in the tick
         std::uint32_t max_active_islands = 0;
         std::uint32_t largest_active_island = 0;
-        std::uint32_t awake_bodies = 0;         // the DENOMINATOR the largest island is a share of
+        std::uint32_t awake_bodies = 0; // the DENOMINATOR the largest island is a share of
         std::uint32_t parallel_steps = 0;
     };
+
     TickSolve tick_solve;       // accumulating, this tick
     TickSolve worst_tick_solve; // the most expensive one so far
     std::uint32_t max_active_islands = 0;
@@ -699,10 +712,9 @@ struct Session {
     void note_step(double step_ms, const physics::WorldStats& s) {
         tick_solve.ms += step_ms;
         ++tick_solve.steps;
-        tick_solve.min_active_islands = (tick_solve.steps == 1)
-                                            ? s.active_islands
-                                            : std::min(tick_solve.min_active_islands,
-                                                       s.active_islands);
+        tick_solve.min_active_islands =
+            (tick_solve.steps == 1) ? s.active_islands
+                                    : std::min(tick_solve.min_active_islands, s.active_islands);
         tick_solve.max_active_islands = std::max(tick_solve.max_active_islands, s.active_islands);
         tick_solve.largest_active_island =
             std::max(tick_solve.largest_active_island, s.largest_active_island);
@@ -714,6 +726,7 @@ struct Session {
         tick_solve.parallel_steps += (s.islands_solved_parallel > 0) ? 1u : 0u;
         max_active_islands = std::max(max_active_islands, s.active_islands);
     }
+
     // Steps whose solve actually went through the job system. THE HANDOFF, not the value: a pool
     // reporting 32 workers proves a pool exists, not that anything was ever handed to it, and
     // `set_job_system` is a nullable pointer nobody is obliged to call. These are 0 for the entire
@@ -796,7 +809,8 @@ struct Session {
     [[nodiscard]] bool start(const std::filesystem::path& cooked,
                              std::string_view scene_path,
                              destruction_render::PartLeafRenderer* leaves,
-                             render::MeshRegistry* meshes) {
+                             render::MeshRegistry* meshes,
+                             std::uint64_t ground_material) {
         // A rifle, not a demolition charge: cooked parts stand at 1.0 health, so the damage number
         // is expressed against that scale and a building takes sustained fire rather than one shot.
         server.weapon.damage = 0.34f;
@@ -813,8 +827,8 @@ struct Session {
         // A server binds Local (it owns them, and every damage source feeds them); a client binds
         // Remote, which is what stops its own solver's contact impulses from eroding a wall the
         // server is already eroding for it.
-        if (!server.stand_up(destruction::Authority::Local, true, scene_path) ||
-            !client.stand_up(destruction::Authority::Remote, false, scene_path)) {
+        if (!server.stand_up(destruction::Authority::Local, true, scene_path, ground_material) ||
+            !client.stand_up(destruction::Authority::Remote, false, scene_path, ground_material)) {
             return false;
         }
 
@@ -1425,8 +1439,8 @@ struct Visuals {
         // of the one on screen. Now it asks the surface, like everything else that needs to know
         // how big the ground is.
         const blockkit::BlockParams p;
-        core::Vec3 street_half{p.street_length() * 0.5f + p.building_gap, 0.25f,
-                               p.street_width * 0.5f + p.footprint};
+        core::Vec3 street_half{
+            p.street_length() * 0.5f + p.building_gap, 0.25f, p.street_width * 0.5f + p.footprint};
         core::Vec3 street_at{p.street_length() * 0.5f, -0.25f, 0.0f};
         world.query<ground::GroundSurface>().for_each(
             [&](ecs::Entity e, ground::GroundSurface& surface) {
@@ -1434,7 +1448,7 @@ struct Visuals {
                 street_half = {half.x, 0.25f, half.z};
                 const ecs::WorldTransform* wt = world.get<ecs::WorldTransform>(e);
                 const ecs::LocalTransform* lt = world.get<ecs::LocalTransform>(e);
-                const core::Transform placement = wt != nullptr  ? wt->value
+                const core::Transform placement = wt != nullptr   ? wt->value
                                                   : lt != nullptr ? lt->value
                                                                   : core::Transform{};
                 street_at = {placement.translation.x, -0.25f, placement.translation.z};
@@ -1475,6 +1489,25 @@ struct Demo {
     Session session{0x13B10Cull};
     std::unique_ptr<Visuals> visuals;
 
+    // ── The cooked catalog (m17.8b) ─────────────────────────────────────────────────────────────
+    // Held HERE, not in `Visuals`, because `GpuAssetBridge::set_catalog` keeps a REFERENCE to the
+    // manifest: it has to outlive every resolve, and a temporary parsed inside `start` would leave
+    // the bridge reading freed memory the moment the first texture landed.
+    //
+    // All three are optional on purpose. This sample loads its `.rdest` patterns by FILENAME and
+    // has never needed an asset runtime; the ground's material is the first thing in it that comes
+    // through M16's asset path, and a run whose cook has not happened must still work — it simply
+    // keeps the palette's flat street, exactly as it looked before this brick.
+    std::optional<assets::Manifest> catalog;
+    std::unique_ptr<assets::AssetServer> asset_server;
+    std::unique_ptr<render::GpuAssetBridge> bridge;
+
+    // `settle`'s own contract: a caller handed back `max_rounds` "should treat it as 'did not
+    // converge' and look at the pending counters, NOT as success". Named so the check below and the
+    // call site cannot drift apart — comparing `rounds >= 8` against a literal 8 elsewhere is
+    // exactly how that check stops meaning anything.
+    static constexpr std::size_t kSettleRounds = 8;
+
     // m13.4 measured 0.35 against 10-destructible-wall's 43 voices from 18 events. A collapsing
     // city block is an order of magnitude past that — nearly a thousand events — and at 0.35 the
     // mixdown peaks at 1.05 and clips. The gain is a property of the SCENE's density, not a
@@ -1508,10 +1541,23 @@ struct Demo {
         if (app.device() != nullptr) {
             visuals = std::make_unique<Visuals>(*app.device());
         }
+        // THE STREET'S COOKED MATERIAL, if `rime ground` has run into the cooked directory. The
+        // id is the hash of the cooked bytes, so only the manifest can say what it is — which is
+        // why it is read here and handed to the assembly rather than being a constant anywhere.
+        std::uint64_t ground_material = 0;
+        if (const auto text = platform::read_file(cooked / "manifest.txt")) {
+            catalog = assets::Manifest::parse(
+                std::string_view(reinterpret_cast<const char*>(text->data()), text->size()));
+            if (catalog) {
+                ground_material = blockkit::ground_material_id(*catalog);
+            }
+        }
+
         if (!session.start(cooked,
                            scene_path,
                            visuals ? &visuals->leaves : nullptr,
-                           visuals ? &visuals->meshes : nullptr)) {
+                           visuals ? &visuals->meshes : nullptr,
+                           ground_material)) {
             return false;
         }
         if (visuals) {
@@ -1519,6 +1565,94 @@ struct Demo {
             if (visuals->camera == ecs::kNullEntity) {
                 std::fprintf(stderr, "99-the-block: the block's scene carries no camera\n");
                 return false;
+            }
+
+            // AFTER `dress`, which stamps the palette's flat street on everything with a role.
+            // The bridge then overrules it on the one entity that named a cooked material, which
+            // is the ordering `apply_palette`'s "authored outranks derived" rule exists to make
+            // safe — the palette re-runs on every tick that binds new destructibles, and it must
+            // leave that entity alone or the ground would flicker between the two looks.
+            // GATED ON WHAT THE WORLD ASKS FOR, not on what the cook offers.
+            //
+            // The first version of this gated on `catalog && ground_material != 0` — i.e. on the
+            // manifest existing — and then treated "nothing resolved" as fatal. That is wrong for
+            // every scene that simply does not name a cooked material: `rime-blockgen` without
+            // `--assets`, any scene authored before this brick, any editor save of one. Once a tree
+            // has run `ctest -R block_demo_cook` the manifest always exists, so `--scene` on an
+            // ordinary block failed at the door — including in `scripts/authoring-round-trip.sh`,
+            // which CI runs. The cook's presence says nothing about whether this scene wants it.
+            bool scene_names_a_material = false;
+            session.client.world.query<render::MaterialAsset>().for_each(
+                [&](ecs::Entity, render::MaterialAsset& a) {
+                    scene_names_a_material = scene_names_a_material || a.asset != 0;
+                });
+            if (scene_names_a_material && !catalog) {
+                // The scene ASKED for a cooked material and there is no manifest to answer with.
+                // In `--perf` this is the deliberate flat arm of the A/B, where the ledger's
+                // `ground.materials_bound` records it as 0 — but everywhere else it is a cook that
+                // did not happen, and it used to pass in total silence: one claim fewer and no line
+                // of output. A skip path with no counter is a skip nobody can see.
+                std::fprintf(stderr,
+                             "99-the-block: the scene names a cooked material but no manifest was "
+                             "found in %s — the street keeps the palette's flat look\n",
+                             cooked.string().c_str());
+            }
+            if (catalog && scene_names_a_material) {
+                asset_server = std::make_unique<assets::AssetServer>(session.jobs);
+                bridge = std::make_unique<render::GpuAssetBridge>(*app.device(), *asset_server);
+                bridge->set_mesh_sink(visuals->meshes, visuals->materials);
+                bridge->set_catalog(*catalog, cooked);
+                // Settle now, before any measured frame: the chain is asynchronous and the cost of
+                // waiting for it belongs to start-up, not to the frame-time distribution.
+                const std::size_t rounds = bridge->settle(session.client.world, kSettleRounds);
+                const auto& st = bridge->material_asset_stats();
+
+                // THE ORDER OF THESE THREE CHECKS MATTERS, and it was wrong. A device without BC
+                // support refuses every block-compressed upload; the material is left holding the
+                // placeholder, so `settle` never reaches quiescence — which means the generic "did
+                // not settle" check would fire first and return, and this specific, actionable
+                // diagnosis (the one ADR-0039 asked for by name) could never print in the single
+                // situation it was written for. Most specific explanation first.
+                if (bridge->textures_refused_unsupported() != 0) {
+                    std::fprintf(stderr,
+                                 "99-the-block: this adapter cannot sample the block-compressed "
+                                 "ground cook (%zu textures refused) — re-cook without --bc\n",
+                                 bridge->textures_refused_unsupported());
+                    return false;
+                }
+                // The scene NAMED a cooked material and nothing ended up wearing it: a broken
+                // pipeline rather than a missing one, and it would otherwise show up only as a
+                // street that looks a bit flat.
+                //
+                // `unresolved_count()`, NOT `st.unresolved`. The stats are per-CALL: an id the
+                // manifest does not know is counted on the round `build_material` runs, but that
+                // material is cached afterwards, and every later round takes the cache-hit path and
+                // reports `steady` with `unresolved == 0`. Reading the LAST round's stats therefore
+                // says "nothing unresolved" about a material permanently missing a texture slot —
+                // it draws on the shader's 1x1 fallback and start-up says nothing. The bridge's
+                // `unresolved_count()` is the deduplicated set that never clears, and exists (as
+                // its own comment says) so "which asset did you not find" stays answerable later.
+                if (st.resolved + st.steady == 0 || bridge->unresolved_count() != 0) {
+                    std::fprintf(
+                        stderr,
+                        "99-the-block: the scene's cooked ground material resolved onto no "
+                        "entity (%zu rounds, %zu unresolved ids, %zu unresolved this "
+                        "round)\n",
+                        rounds,
+                        bridge->unresolved_count(),
+                        st.unresolved);
+                    return false;
+                }
+                // `settle` returning `max_rounds` means it never reached quiescence, which its own
+                // contract says to treat as "did not converge" rather than as success.
+                if (rounds >= kSettleRounds || st.pending != 0) {
+                    std::fprintf(stderr,
+                                 "99-the-block: the cooked ground material did not settle (%zu "
+                                 "rounds, %zu still pending)\n",
+                                 rounds,
+                                 st.pending);
+                    return false;
+                }
             }
         }
         return true;
@@ -1982,6 +2116,42 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
         // cannot see. block_render_test makes the sharper comparative claim.
         claims.push_back({"render: the frame came back lit", intact_luma > 1.0});
 
+        // ── THE COOKED GROUND (m17.8b, ADR-0041 Ruling 5) ────────────────────────────────────
+        // Only when the cook ran: `rime ground` is a build fixture, and a tree without it must
+        // still pass with the palette's flat street. That is the degradation `apply_ground`'s
+        // fallback exists for, so making this claim unconditional would turn a supported
+        // configuration into a red run.
+        //
+        // Reported rather than inferred. `start` already refuses if nothing wore the material, but
+        // that only proves a MaterialRef changed. The property worth asserting is one step further
+        // down: the surface most of the frame is made of must wear a material whose base-colour
+        // map is RESIDENT. `is_valid()` alone cannot say that — the magenta placeholder is a
+        // perfectly valid handle, which is how a barrel once shipped rendering solid magenta past
+        // a green assertion — so the comparison is against the placeholder itself.
+        //
+        // EVERY surface must pass, and there must be one. The block spawns a single street today,
+        // but a claim that let the last surface visited overwrite the verdict would pass a broken
+        // first surface the day a second one appears, depending only on iteration order.
+        if (demo.bridge) {
+            std::size_t surfaces = 0;
+            std::size_t cooked = 0;
+            ecs::World& cw = demo.session.client.world;
+            cw.query<ground::GroundSurface>().for_each([&](ecs::Entity e, ground::GroundSurface&) {
+                ++surfaces;
+                const render::MaterialRef* ref = cw.get<render::MaterialRef>(e);
+                if (ref == nullptr) {
+                    return;
+                }
+                const render::PbrMaterialDesc& d = demo.visuals->materials.get(ref->material);
+                if (d.base_color_texture.is_valid() &&
+                    d.base_color_texture != demo.bridge->placeholder_texture()) {
+                    ++cooked;
+                }
+            });
+            claims.push_back({"render: the street wears its COOKED material",
+                              surfaces > 0 && cooked == surfaces});
+        }
+
         // ── The M10 clause of M13's "done when" (m13.L) ──────────────────────────────────────
         //
         // m13.5 shipped this demo with only `clustered_enabled` and every claim green, because
@@ -2143,8 +2313,8 @@ int run_perf(const std::filesystem::path& cooked,
     // Both worlds, because the tick runs both and the accounting must add up to the tick. Naming
     // only one leaves the other as unaccounted residual, which is the failure m17.3c's gate exists
     // to catch — it would read as "the simulation spends 8 ms somewhere nobody named".
-    report.declare_accounting(
-        "sim.block", {"physics.server.step.per_frame", "physics.client.step.per_frame"});
+    report.declare_accounting("sim.block",
+                              {"physics.server.step.per_frame", "physics.client.step.per_frame"});
 
     // Deliveries QUEUE rather than overwrite, and are drained after the loop rather than inside it.
     // A single slot consumed in the loop body loses the tail: pipelined, the frames still in flight
@@ -2311,6 +2481,34 @@ int run_perf(const std::filesystem::path& cooked,
     ledger.set("sdf.stamps", demo.visuals->sdf_stamps_total);
     ledger.set("ddgi.probes_updated", demo.visuals->ddgi_probes_total);
     ledger.set("shadow.spot_maps", demo.visuals->spot_maps_total);
+    // ── The cooked ground material, counted rather than inferred (m17.8b) ─────────────────
+    //
+    // The A/B this brick is measured by differs in exactly ONE thing: whether `manifest.txt` was
+    // present when the run started. Binary, scene, frame count and draw count are identical by
+    // construction — which is what makes the comparison worth anything, and equally what makes the
+    // two arms indistinguishable once the run is over. Without this counter the only record of
+    // which arm a report came from is which file the operator happened to move, and an operator's
+    // memory is not evidence. A skip path with no counter is a skip nobody can see.
+    //
+    // `resolved + steady`, not `resolved`: the entity-owned resolver skips an entity already
+    // wearing the right material, so `resolved` falls to ZERO once everything converges. A run
+    // that bound the ground perfectly would report 0 and read exactly like one that never bound it
+    // at all (see MaterialAssetStats). The flat arm reads 0 here by construction — no manifest, no
+    // catalog, no bridge object at all — so the counter separates the arms rather than describing
+    // only one of them.
+    std::uint64_t ground_materials_bound = 0;
+    std::uint64_t ground_textures_refused = 0;
+    if (demo.bridge) {
+        const auto& mat = demo.bridge->material_asset_stats();
+        ground_materials_bound = static_cast<std::uint64_t>(mat.resolved + mat.steady);
+        // The device-capability refusal ADR-0039 ratified and m16.7 never implemented: a BC7 cook
+        // asked of an adapter that cannot sample it. Nonzero means the ground drew untextured
+        // while every structural claim in the run still passed.
+        ground_textures_refused =
+            static_cast<std::uint64_t>(demo.bridge->textures_refused_unsupported());
+    }
+    ledger.set("ground.materials_bound", ground_materials_bound);
+    ledger.set("ground.textures_refused_unsupported", ground_textures_refused);
     ledger.set("net.max_batches_per_tick", demo.session.max_batches_per_tick);
     ledger.set("net.client_physics_steps", demo.session.total_client_steps);
     // Separate from the steps since m17.5: the client applies a destruction batch per queued

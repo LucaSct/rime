@@ -35,8 +35,11 @@ target_include_directories(rime_blockkit
 # MaterialRegistry/MeshRegistry/MaterialId (render), Vec3/Transform (core, also transitively). The
 # `Destructible` component blockkit writes comes from rime::destruction. rime::render is always a
 # valid link target — RIME_RHI_VULKAN gates the backend *inside* rhi, not the module.
+# rime::assets joins at m17.8b for one reason: `ground_material_id` reads a cook manifest. It is
+# the GPU-free, physics-free bottom of the asset layer, so blockkit's "content only" position in
+# the layer cake is unchanged — the id it finds is a number the `.rscene` carries.
 target_link_libraries(rime_blockkit
-    PUBLIC rime::core rime::ecs rime::render rime::destruction rime::ground)
+    PUBLIC rime::core rime::ecs rime::assets rime::render rime::destruction rime::ground)
 
 # Project-wide build policy (C++20 + warnings-as-errors + any sanitizer); from the top-level CMake.
 rime_apply_common_target_options(rime_blockkit)

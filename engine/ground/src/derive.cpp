@@ -36,10 +36,8 @@ render::CpuMesh derive_mesh(const GroundSurface& s) {
             v.nz = 0.0f;
             v.u = (x + s.half_x) / tile;
             v.v = (z + s.half_z) / tile;
-            v.tx = 1.0f;
-            v.ty = 0.0f;
-            v.tz = 0.0f;
-            v.tw = 1.0f;
+            // The tangent frame is DERIVED below rather than written here — see the
+            // `compute_tangents` call after the index buffer.
             m.vertices.push_back(v);
         }
     }
@@ -57,6 +55,23 @@ render::CpuMesh derive_mesh(const GroundSurface& s) {
             m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
         }
     }
+
+    // THE TANGENT FRAME IS DERIVED, for the same reason the collider is (m17.8b).
+    //
+    // This used to write a hand-picked `(+X, w = +1)` per vertex, which was invisible while the
+    // ground had no normal map — the shader forms `B = w * cross(N, T)` and then never uses B,
+    // because with no normal texture the sampled tangent-space normal is (0,0,1) and the TBN
+    // multiply returns N unchanged. m17.8b gives the ground a normal map, and the hand-picked `w`
+    // was the WRONG SIGN: u grows with world +X and v with world +Z, so dp/dv is +Z, while
+    // `+1 * cross(+Y, +X)` is -Z. Every bump would have lit as though the sun were on the far side
+    // of it, and no counter anywhere would have moved.
+    //
+    // `compute_tangents` is what `make_plane` — the two-triangle ground this replaced — has always
+    // used, so this is the engine's own convention rather than a second opinion about it. Deriving
+    // it also survives M18: ADR-0041 records that a flat grid IS a heightfield of zero heights and
+    // that M18 "changes `derive_mesh` and nothing else", at which point per-vertex normals stop
+    // being +Y and a constant tangent is not merely mis-signed but meaningless.
+    render::compute_tangents(m);
     return m;
 }
 

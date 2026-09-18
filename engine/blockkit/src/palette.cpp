@@ -136,8 +136,17 @@ PaletteStats apply_palette(ecs::World& world, const BlockPalette& palette) {
                 continue;
         }
 
-        (void)world.add_component(entity, render::MaterialRef{material});
-        ++stats.materialed;
+        // Authored outranks derived (m17.8b): an entity that names its material by content id is
+        // the asset bridge's to dress, and restamping it here would fight that resolution on every
+        // re-apply. Counted, so the skip is visible to the proof rather than indistinguishable
+        // from a role the palette forgot.
+        const render::MaterialAsset* authored = world.get<render::MaterialAsset>(entity);
+        if (authored != nullptr && authored->asset != 0) {
+            ++stats.authored;
+        } else {
+            (void)world.add_component(entity, render::MaterialRef{material});
+            ++stats.materialed;
+        }
         if (mesh != render::kInvalidMeshId) {
             (void)world.add_component(entity, render::MeshRef{mesh});
             ++stats.meshed;

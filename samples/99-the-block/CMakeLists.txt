@@ -90,6 +90,17 @@ foreach(cook IN LISTS BLOCK_DEMO_COOKS)
     set_tests_properties(block_demo_cook_${c_name} PROPERTIES FIXTURES_SETUP block_demo_cook)
 endforeach()
 
+# THE STREET'S MATERIAL (m17.8b). Generated rather than imported: this repository holds no texture
+# art at all, so `rime ground` synthesises a tiling asphalt albedo/normal/roughness set and cooks it
+# with a standalone material, writing the `manifest.txt` the demo resolves `ground:street#material0`
+# through. Same fixture as the fracture cooks above, so a run that skips them skips this too and the
+# demo falls back to the palette's flat street.
+add_test(NAME block_demo_cook_ground
+    COMMAND cargo run --quiet --manifest-path tools/Cargo.toml --bin rime --
+            ground --out "${BLOCK_DEMO_COOKED}" --name street --bc
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(block_demo_cook_ground PROPERTIES FIXTURES_SETUP block_demo_cook)
+
 # M13's "done when", in CI. The sim half runs anywhere (it is GPU-free); the render assertions are
 # self-guarded on a device, and a host without one is an honest skip rather than a red build —
 # unless RIME_REQUIRE_VULKAN says otherwise.

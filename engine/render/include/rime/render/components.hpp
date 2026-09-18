@@ -42,6 +42,46 @@ struct MaterialRef {
     MaterialId material = kInvalidMaterialId;
 };
 
+// An **authoring** reference to a cooked material by its content id — `MeshAsset`'s sibling, and
+// the component ADR-0039 considered and deferred (m17.8b).
+//
+// WHY IT WAS DEFERRED, AND WHY THAT NO LONGER APPLIES. ADR-0039 rejected an authored material
+// reference because the one UI that would populate it could not do so correctly: a material that
+// belongs to a MESH is found through the manifest's `#materialN` convention from the mesh's own
+// submesh table, and the asset browser never reads the cooked bytes where `material_slot` lives,
+// so it would have had to guess `#material0`. That objection is about DERIVING a material from a
+// mesh. It does not apply to a material referenced in its own right: a cooked `.rmat` has its own
+// manifest line, its own content id, and no slot to guess — dragging that line onto an entity is
+// correct by construction. The ground is the first surface that needs exactly this: it derives its
+// own mesh (`ground::derive_mesh`) and so has no cooked mesh to hang a `#materialN` join off.
+//
+// RESOLUTION: `GpuAssetBridge::resolve_material_assets` turns this into a `MaterialRef` (a dense
+// registry index, derived, never saved) exactly as `resolve_scene_meshes` turns a `MeshAsset` into
+// a `MeshRef`. It outranks a look derived from a ROLE: a palette that would otherwise decide the
+// material must leave an entity carrying one of these alone, or the two would fight every frame.
+//
+// IT DOES NOT OUTRANK A COOKED MESH'S OWN MATERIALS, and that limit is worth stating because it is
+// the opposite of what "override the material per entity" sounds like. An entity with a cooked
+// `MeshAsset` also gets a `MaterialSet` from the `#materialN` join, and `resolve_draws`
+// (`scene_renderer.cpp:76-79`) reads the SET first, using `MaterialRef` only as the fallback for a
+// slot the set does not answer. So on a mesh-owning entity the set wins and this component is
+// inert. It is meaningful exactly where it was introduced for: a surface whose mesh is derived
+// rather than cooked, which therefore has no set. Making it a true per-entity override means
+// teaching the mesh-owned resolver to yield, which is a different brick.
+//
+// A content id, not a source-path hash. ADR-0024 is explicit that an asset IS its cooked bytes and
+// the path hash "is not the identity"; carrying a second identity scheme for one component would
+// be worse than the known cost this shares with `MeshAsset` — re-cooking the material (a texture
+// recompressed, a factor changed) churns the id and the scene must be re-pointed at it.
+//
+// Structurally identical to `MeshAsset { uint64 }` and safe only because the reflection type hash
+// folds the type NAME in (ADR-0033 amendment A2). `type_info.hpp:131-135` illustrates the hazard
+// with `render::MeshAsset` vs `destruction::Destructible` rather than with this pair — A2 fixed the
+// class, not those two names — so this component is safe for the same reason, not by being listed.
+struct MaterialAsset {
+    std::uint64_t asset = 0; // == assets::AssetId::value; 0 = unset
+};
+
 // Shade each of the mesh's submeshes with the corresponding entry of that material SET (m16.3).
 //
 // DERIVED, AND DELIBERATELY NOT REFLECTED. Like MeshRef and MaterialRef this is a dense index into
@@ -168,6 +208,7 @@ inline void register_render_components(ecs::World& world) {
     (void)world.register_component<MeshRef>();
     (void)world.register_component<MeshAsset>();
     (void)world.register_component<MaterialRef>();
+    (void)world.register_component<MaterialAsset>();
     (void)world.register_component<MaterialSet>();
     (void)world.register_component<Camera>();
     (void)world.register_component<DirectionalLight>();
@@ -191,6 +232,10 @@ RIME_REFLECT_END()
 
 RIME_REFLECT_BEGIN(rime::render::MaterialRef)
 RIME_REFLECT_FIELD(material)
+RIME_REFLECT_END()
+
+RIME_REFLECT_BEGIN(rime::render::MaterialAsset)
+RIME_REFLECT_FIELD(asset)
 RIME_REFLECT_END()
 
 RIME_REFLECT_BEGIN(rime::render::Camera)

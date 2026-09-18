@@ -233,3 +233,42 @@ TEST_CASE("m17.8: every peer derives the same ground, bit for bit") {
     CHECK(ca.shape.half_extents.x == doctest::Approx(ground::half_extents(s).x));
     CHECK(ca.shape.half_extents.z == doctest::Approx(ground::half_extents(s).z));
 }
+
+TEST_CASE("m17.8b: the derived ground's tangent frame matches its own uv layout") {
+    // Latent until m17.8b, and load-bearing from it on. `derive_mesh` used to write a hand-picked
+    // tangent (+X, w = +1), which cost nothing while the ground had no normal map: the shader forms
+    // `B = w * cross(N, T)` and never uses B, because with no normal texture the sampled
+    // tangent-space normal is (0,0,1) and the TBN multiply returns N unchanged. The sign was wrong,
+    // and only a normal map could show it.
+    //
+    // Asserted as the GEOMETRIC CONTRACT rather than against `compute_tangents`, which
+    // `derive_mesh` now calls — comparing a function against itself would pass no matter which
+    // convention it implemented. The contract is the one the shader relies on: T points along
+    // increasing u, and `w * cross(N, T)` points along increasing v. Here u grows with world +X and
+    // v with world +Z, so T must be +X and the bitangent must be +Z.
+    ground::GroundSurface s;
+    s.half_x = 19.0f;
+    s.half_z = 19.0f;
+    s.cells_x = 4;
+    s.cells_z = 4;
+    s.tile_metres = 4.0f;
+
+    const render::CpuMesh m = ground::derive_mesh(s);
+    REQUIRE(!m.vertices.empty());
+
+    for (const render::MeshVertex& v : m.vertices) {
+        const core::Vec3 n{v.nx, v.ny, v.nz};
+        const core::Vec3 t{v.tx, v.ty, v.tz};
+        // dp/du is +X for this layout, and the tangent is it.
+        CHECK(t.x == doctest::Approx(1.0f));
+        CHECK(t.y == doctest::Approx(0.0f));
+        CHECK(t.z == doctest::Approx(0.0f));
+        // The bitangent the shader will build, and where it has to point. A flipped `w` mirrors the
+        // normal map's green channel: every bump lights as though the sun had moved to the far side
+        // of it, with no counter anywhere to notice.
+        const core::Vec3 b = core::cross(n, t) * v.tw;
+        CHECK(b.x == doctest::Approx(0.0f));
+        CHECK(b.y == doctest::Approx(0.0f));
+        CHECK(b.z == doctest::Approx(1.0f));
+    }
+}

@@ -10,6 +10,7 @@
 #include "rime/assets/material_asset.hpp"
 #include "rime/assets/mesh_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
@@ -45,13 +46,35 @@ rhi::Format to_rhi_format(assets::TextureFormat format) noexcept {
     // The cook tags each texture sRGB or linear by *semantic* (base-color/emissive vs
     // normal/metallic-roughness/occlusion); the RHI format must match so the GPU sampler
     // sRGB-decodes colour but not data (the M6.3 colour-space rule, now enforced at upload).
+    //
+    // THE BLOCK-COMPRESSED CASES WERE MISSING UNTIL m17.8b, and the way they failed is worth
+    // keeping. m16.7 shipped the BC7 encoder, the reader and an RHI test, but nothing had yet
+    // *cooked* a compressed texture into a scene — so this function's `default:` quietly answered
+    // "RGBA8Unorm" for all three block formats. The first consumer was the cooked ground, whose
+    // cook runs with `--bc`: a 512x512 BC7 payload is 350 KB and the RGBA8 image the GPU was then
+    // told to fill is 1 MB, so `write_texture_mips` read a megabyte out of a 350 KB staging buffer
+    // (VUID-vkCmdCopyBufferToImage-pRegions-00171, ten of them per run) and sampled whatever
+    // followed it in host memory.
+    //
+    // Nothing caught it. The proof asserted the material's texture was resident and not the magenta
+    // placeholder, which was TRUE — the upload happened, it just read past its source and decoded
+    // the wrong bytes. A `default:` that silently answers for a case it has never seen is how a
+    // switch stops being exhaustive without anyone editing it, so the block cases are spelled out
+    // and `default:` is gone: adding a seventh format is now a compile error here, not a wrong
+    // texture at runtime.
     switch (format) {
         case assets::TextureFormat::Rgba8Srgb:
             return rhi::Format::RGBA8Srgb;
+        case assets::TextureFormat::Bc7Srgb:
+            return rhi::Format::BC7Srgb;
+        case assets::TextureFormat::Bc7Unorm:
+            return rhi::Format::BC7Unorm;
+        case assets::TextureFormat::Bc5Unorm:
+            return rhi::Format::BC5Unorm;
         case assets::TextureFormat::Rgba8Unorm:
-        default:
-            return rhi::Format::RGBA8Unorm;
+            break;
     }
+    return rhi::Format::RGBA8Unorm;
 }
 
 } // namespace
@@ -79,7 +102,14 @@ std::size_t GpuAssetBridge::drain() {
         // simply never uploads, and texture_or_placeholder() keeps returning magenta for it — the
         // honest "this texture is missing" signal.
         if (const assets::TextureAsset* texture = server_.get(assets::TextureAssetHandle{index})) {
-            uploaded_.emplace(index, upload(*texture));
+            // A refused upload (see `upload`) returns an invalid handle and must NOT be recorded:
+            // `texture_or_placeholder` answers from `uploaded_` first, so caching the invalid
+            // handle would hand a broken texture to the sampler instead of the magenta placeholder.
+            const rhi::TextureHandle uploaded = upload(*texture, index);
+            if (!uploaded.is_valid()) {
+                continue;
+            }
+            uploaded_.emplace(index, uploaded);
             ++newly_uploaded;
         }
     }
@@ -106,13 +136,39 @@ rhi::TextureHandle GpuAssetBridge::texture_or_placeholder(assets::TextureAssetHa
     return it != uploaded_.end() ? it->second : placeholder_;
 }
 
-rhi::TextureHandle GpuAssetBridge::upload(const assets::TextureAsset& texture) {
+rhi::TextureHandle GpuAssetBridge::upload(const assets::TextureAsset& texture,
+                                          std::optional<std::uint32_t> tracked_index) {
     rhi::TextureDesc desc{};
     desc.extent = {texture.width, texture.height};
     desc.mip_levels = static_cast<std::uint32_t>(texture.mips.size());
     desc.format = to_rhi_format(texture.format);
     desc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
     desc.debug_name = "cooked-texture";
+
+    // BC is not universal: the Vulkan spec requires a device to support BC *or* ETC2 *or* ASTC, so
+    // a mobile-class or software driver may legitimately refuse. ADR-0039's ratified rule, restated
+    // on `AdapterInfo::block_compression` itself, is that such a device must FAIL the load "with a
+    // named counter and a warn-once... never silently substitute the placeholder, because a
+    // fallback path nothing exercises is a fallback that does not work". So: refuse, say so once,
+    // and count it. Returning an invalid handle keeps the texture out of `uploaded_`, which is what
+    // makes `texture_or_placeholder` keep answering magenta — visible, and now also countable.
+    if (rhi::is_block_compressed(desc.format) && !device_.adapter().block_compression) {
+        // Count the TEXTURE, not the attempt. `drain` retries every tracked index that is not yet
+        // resident on every call, and a refused upload is deliberately never recorded as resident —
+        // so it is retried and re-refused forever. Incrementing here counted those retries.
+        if (tracked_index) {
+            refused_unsupported_.insert(*tracked_index);
+        }
+        if (!warned_no_bc_) {
+            warned_no_bc_ = true;
+            RIME_WARN(
+                "gpu_asset_bridge: this adapter has no BC texture support, so block-compressed "
+                "cooked textures cannot be uploaded — they will sample as the magenta placeholder. "
+                "Re-cook without --bc for this device.");
+        }
+        return {};
+    }
+
     const rhi::TextureHandle handle = device_.create_texture(desc);
 
     // The cook laid the chain out level-0-first, each mip a byte slice of `pixels` — exactly what
@@ -278,7 +334,9 @@ assets::TextureAssetHandle GpuAssetBridge::request_texture_by_id(assets::AssetId
     return handle;
 }
 
-bool GpuAssetBridge::build_material(const assets::MaterialAsset& cooked, PbrMaterialDesc& out) {
+bool GpuAssetBridge::build_material(const assets::MaterialAsset& cooked,
+                                    PbrMaterialDesc& out,
+                                    std::size_t& unresolved_textures) {
     out = material_from_cooked(cooked);
 
     // The second level of the dependency: the material's texture ids are only knowable now that it
@@ -291,7 +349,7 @@ bool GpuAssetBridge::build_material(const assets::MaterialAsset& cooked, PbrMate
         }
         const assets::TextureAssetHandle h = request_texture_by_id(id);
         if (!h.is_valid()) {
-            ++material_stats_.unresolved;
+            ++unresolved_textures;
             return;
         }
         dest = texture_or_placeholder(h);
@@ -305,6 +363,54 @@ bool GpuAssetBridge::build_material(const assets::MaterialAsset& cooked, PbrMate
     slot(cooked.occlusion_tex, out.occlusion_texture);
     slot(cooked.emissive_tex, out.emissive_texture);
     return all_resident;
+}
+
+GpuAssetBridge::MaterialResolve GpuAssetBridge::resolve_material(assets::AssetId id,
+                                                                 MaterialId& out,
+                                                                 bool& complete,
+                                                                 std::size_t& unresolved_textures) {
+    if (const auto known = material_of_id_.find(id.value); known != material_of_id_.end()) {
+        out = known->second;
+        // Built already — but "built" is not "resident". A material assembled in an earlier round
+        // can still be holding the magenta placeholder in any slot whose texture had not finished
+        // uploading, and only build_material can tell. Re-run it until every slot is real,
+        // sharpening the registry entry in place (MaterialRegistry::update mints no id, so every
+        // MaterialRef and MaterialSet naming it stays valid across the swap).
+        if (material_incomplete_.count(id.value) != 0) {
+            const assets::MaterialAsset* ready = server_.get(request_material(id));
+            if (ready == nullptr) {
+                complete = false;
+                return MaterialResolve::Resolved;
+            }
+            PbrMaterialDesc sharpened{};
+            if (build_material(*ready, sharpened, unresolved_textures)) {
+                material_incomplete_.erase(id.value);
+            } else {
+                complete = false;
+            }
+            material_sink_->update(known->second, sharpened);
+        }
+        return MaterialResolve::Resolved;
+    }
+    const assets::MaterialAssetHandle mh = request_material(id);
+    if (!mh.is_valid()) {
+        return MaterialResolve::Unresolved;
+    }
+    const assets::MaterialAsset* cooked = server_.get(mh);
+    if (cooked == nullptr) {
+        complete = false; // still loading — level two
+        return MaterialResolve::Loading;
+    }
+    PbrMaterialDesc desc{};
+    if (!build_material(*cooked, desc, unresolved_textures)) {
+        complete = false; // a texture is still streaming — level three
+        // Remember that this one is unfinished, or the cache hit above will hand its
+        // placeholder-holding descriptor back on every later round without ever noticing.
+        material_incomplete_.insert(id.value);
+    }
+    out = material_sink_->add(desc);
+    material_of_id_.emplace(id.value, out);
+    return MaterialResolve::Resolved;
 }
 
 GpuAssetBridge::MaterialStats GpuAssetBridge::resolve_scene_materials(ecs::World& world) {
@@ -358,51 +464,20 @@ GpuAssetBridge::MaterialStats GpuAssetBridge::resolve_scene_materials(ecs::World
                 ++stats.slots_defaulted;
                 continue; // no material cooked for this slot — the fallback MaterialRef stands
             }
-            if (const auto known = material_of_id_.find(mat_entry->id.value);
-                known != material_of_id_.end()) {
-                materials[slot] = known->second;
-                // Built already — but "built" is not "resident". A material assembled in an earlier
-                // round can still be holding the magenta placeholder in any slot whose texture had
-                // not finished uploading, and only build_material can tell. Re-run it until every
-                // slot is real, sharpening the registry entry in place (MaterialRegistry::update
-                // mints no id, so the entity's MaterialSet stays valid across the swap).
-                if (material_incomplete_.count(mat_entry->id.value) != 0) {
-                    const assets::MaterialAsset* ready =
-                        server_.get(request_material(mat_entry->id));
-                    if (ready == nullptr) {
-                        complete = false;
-                        continue;
-                    }
-                    PbrMaterialDesc sharpened{};
-                    if (build_material(*ready, sharpened)) {
-                        material_incomplete_.erase(mat_entry->id.value);
-                    } else {
-                        complete = false;
-                    }
-                    material_sink_->update(known->second, sharpened);
-                }
-                continue;
+            // From here down the chain is the same one an entity-owned reference walks, so it is
+            // one function (m17.8b): material Ready, its textures Ready, a registry entry that
+            // sharpens in place.
+            MaterialId resolved = kInvalidMaterialId;
+            switch (resolve_material(mat_entry->id, resolved, complete, stats.unresolved)) {
+                case MaterialResolve::Unresolved:
+                    ++stats.unresolved;
+                    break;
+                case MaterialResolve::Loading:
+                    break; // counted through `complete`; the slot stays invalid this round
+                case MaterialResolve::Resolved:
+                    materials[slot] = resolved;
+                    break;
             }
-            const assets::MaterialAssetHandle mh = request_material(mat_entry->id);
-            if (!mh.is_valid()) {
-                ++stats.unresolved;
-                continue;
-            }
-            const assets::MaterialAsset* cooked = server_.get(mh);
-            if (cooked == nullptr) {
-                complete = false; // still loading — level two
-                continue;
-            }
-            PbrMaterialDesc desc{};
-            if (!build_material(*cooked, desc)) {
-                complete = false; // a texture is still streaming — level three
-                // Remember that this one is unfinished, or the cache hit above will hand its
-                // placeholder-holding descriptor back on every later round without ever noticing.
-                material_incomplete_.insert(mat_entry->id.value);
-            }
-            const MaterialId id = material_sink_->add(desc);
-            material_of_id_.emplace(mat_entry->id.value, id);
-            materials[slot] = id;
         }
 
         if (!complete) {
@@ -447,6 +522,66 @@ GpuAssetBridge::MaterialStats GpuAssetBridge::resolve_scene_materials(ecs::World
     return stats;
 }
 
+GpuAssetBridge::MaterialAssetStats GpuAssetBridge::resolve_material_assets(ecs::World& world) {
+    MaterialAssetStats stats;
+    if (material_sink_ == nullptr) {
+        return stats; // no registry to resolve into — nothing can be built, and saying so beats
+                      // pretending
+    }
+
+    struct Pending {
+        ecs::Entity entity;
+        MaterialId material;
+    };
+
+    std::vector<Pending> pending;
+    world.query<MaterialAsset>().for_each([&](ecs::Entity e, MaterialAsset& asset) {
+        if (asset.asset == 0) {
+            return; // unset is not unresolved: the entity simply has not named anything
+        }
+        bool complete = true;
+        MaterialId resolved = kInvalidMaterialId;
+        // A missing catalog lands here as Unresolved through `request_material`, which records
+        // the id in `unresolved_` as well — so "which id could you not find" stays answerable.
+        switch (
+            resolve_material(assets::AssetId{asset.asset}, resolved, complete, stats.unresolved)) {
+            case MaterialResolve::Unresolved:
+                ++stats.unresolved;
+                return; // whatever MaterialRef the entity has — a palette's, a fallback's — stands
+            case MaterialResolve::Loading:
+                ++stats.pending;
+                return;
+            case MaterialResolve::Resolved:
+                break;
+        }
+        if (!complete) {
+            ++stats.pending; // drawable now (placeholder in a slot), sharpened on a later call
+        }
+        const MaterialRef* existing = world.get<MaterialRef>(e);
+        if (existing != nullptr && existing->material == resolved) {
+            ++stats.steady; // the steady state: one query, no structural change — but counted,
+            return;         // or a converged resolver is indistinguishable from an idle one
+        }
+        pending.push_back(Pending{e, resolved});
+    });
+
+    // Collect, then mutate — add_component moves an entity between archetypes and would
+    // reallocate the chunks the query above is walking.
+    for (const Pending& p : pending) {
+        if (MaterialRef* ref = world.get<MaterialRef>(p.entity)) {
+            ref->material = p.material; // outranks the derived look that was there
+        } else {
+            world.add_component(p.entity, MaterialRef{p.material});
+        }
+        if (world.get<ecs::DerivedComponents>(p.entity) == nullptr) {
+            world.add_component(p.entity, ecs::DerivedComponents{});
+        }
+        ++stats.resolved;
+    }
+    material_asset_stats_ = stats;
+    return stats;
+}
+
 std::size_t GpuAssetBridge::settle(ecs::World& world, std::size_t max_rounds) {
     std::size_t round = 0;
     for (; round < max_rounds; ++round) {
@@ -455,9 +590,10 @@ std::size_t GpuAssetBridge::settle(ecs::World& world, std::size_t max_rounds) {
         (void)drain();
         const ResolveStats meshes = resolve_scene_meshes(world);
         const MaterialStats mats = resolve_scene_materials(world);
+        const MaterialAssetStats owned = resolve_material_assets(world);
         // Quiescent: nothing is waiting on a level below it. Note this deliberately does NOT check
         // `resolved`, which stays nonzero in the steady state.
-        if (meshes.pending == 0 && mats.pending == 0) {
+        if (meshes.pending == 0 && mats.pending == 0 && owned.pending == 0) {
             return round + 1;
         }
     }

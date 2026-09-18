@@ -343,8 +343,16 @@ BlockStats assemble(ecs::World& world, const BlockParams& p) {
         surface.cells_z = surface.cells_x;
         surface.tile_metres = 4.0f;
         surface.thickness = 1.0f;
-        (void)world.spawn_with(
+        const ecs::Entity street = world.spawn_with(
             LocalTransform{t}, surface, SlabRole{kNoBuilding, 0, slab_kind::kStreet, 0});
+        // WHAT THE STREET WEARS, as authored data (m17.8b). A content id is the one kind of
+        // material reference that is safe to put in a scene file — it names cooked bytes, not a
+        // registry slot — so unlike every other look in the block it rides the `.rscene` rather
+        // than being derived from the role at load. Only when it was supplied: a block assembled
+        // without its material cook is byte-identical to the block before this existed.
+        if (p.ground_material != 0) {
+            (void)world.add_component(street, render::MaterialAsset{p.ground_material});
+        }
         ++stats.entities;
         ++stats.props;
     }
@@ -445,6 +453,22 @@ BlockStats assemble(ecs::World& world, const BlockParams& p) {
     }
 
     return stats;
+}
+
+std::uint64_t ground_material_id(const assets::Manifest& manifest) noexcept {
+    for (const assets::ManifestEntry& e : manifest.entries()) {
+        // Kind first: the same cook emits `ground:street#albedo`, `#normal` and `#mr` as TEXTURES,
+        // and those three share every part of the label but the suffix. Comparing the kind before
+        // the string means a mistyped suffix yields nothing rather than a texture id silently
+        // standing in for a material.
+        if (e.kind != assets::AssetKind::Material) {
+            continue;
+        }
+        if (e.source_path == kGroundMaterialLabel) {
+            return e.id.value;
+        }
+    }
+    return 0;
 }
 
 } // namespace rime::blockkit

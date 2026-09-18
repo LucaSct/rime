@@ -7,6 +7,7 @@
 #include <span>
 #include <string_view>
 
+#include "rime/assets/manifest.hpp"
 #include "rime/blockkit/role.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/ecs/world.hpp"
@@ -96,6 +97,14 @@ struct BlockParams {
     std::uint32_t barriers = 8;
     std::uint32_t lamps_per_side = 6;
 
+    // The street's COOKED material, by content id (m17.8b); 0 leaves the street to the palette's
+    // flat look, exactly as before. This is the first content id in the block that is REAL — the
+    // hash of cooked bytes a manifest lists — rather than a caller-chosen constant like the
+    // `CookSpec` ids above, which is why it is a parameter filled in from a manifest by whoever
+    // assembles the block (`ground_material_id`) rather than a constant in this header: the id
+    // changes whenever the material is re-cooked, and a constant would be stale by construction.
+    std::uint64_t ground_material = 0;
+
     [[nodiscard]] std::uint32_t building_count() const noexcept { return buildings_per_side * 2; }
 
     // The street runs +X from 0 to here: n footprints plus (n-1) gaps.
@@ -130,8 +139,34 @@ struct BlockStats {
 // cooked slabs and crates, the lights, and the camera. Registers the component set it writes.
 //
 // It deliberately does NOT touch meshes, materials or WorldTransform — those are derived
-// (palette.hpp), which is what lets the same scene file be re-tinted without regenerating it.
+// (palette.hpp), which is what lets the same scene file be re-tinted without regenerating it. The
+// one exception is `params.ground_material`: a content id is AUTHORED data (it survives any
+// registry order, which is the whole reason `render::MaterialAsset` exists beside `MaterialRef`),
+// so when it is set the street carries it, and the palette leaves that entity's material alone.
 BlockStats assemble(ecs::World& world, const BlockParams& params = {});
+
+// ── The street's material, in the cook ───────────────────────────────────────────────────────────
+// `rime ground --out <dir>` GENERATES the street's material rather than importing one, and writes a
+// `manifest.txt` listing it (m17.8b). There is no source file: this repository contains no texture
+// art at all, so a carrier glTF would need images nobody has authored, and the maps are synthesised
+// instead — a tiling asphalt albedo/normal/roughness set whose seam-free wrap is a property the
+// cooker proves (`tools/asset-pipeline/src/ground.rs`).
+//
+// The `ground:` scheme follows the cooker's existing `fracture:` one: a synthetic source label for
+// an asset whose source is a config rather than a file.
+//
+// MATCHED EXACTLY, because a synthetic label has no path to vary. A material imported from a glTF
+// is labelled `<input path>#material<N>`, and the input path depends on how the cook was invoked —
+// relative, absolute, backslashed on Windows — which is why such a label could only be matched by
+// its tail. This one is minted by the cooker from a fixed string, so an exact comparison is both
+// simpler and stricter: it cannot be satisfied by some other asset that happens to end the same
+// way.
+inline constexpr std::string_view kGroundMaterialLabel = "ground:street#material0";
+
+// The content id of the street's material in `manifest`, or 0 when the manifest lists none — a
+// block generated without its material cook simply keeps the palette's flat street, which is what
+// `BlockParams::ground_material == 0` means.
+[[nodiscard]] std::uint64_t ground_material_id(const assets::Manifest& manifest) noexcept;
 
 // Derive the WorldTransform the renderer consumes from each entity's authored LocalTransform, and
 // return how many were written.

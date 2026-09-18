@@ -453,12 +453,22 @@ void load_viewport_scene(ecs::World& world,
     floor_mat.base_color[2] = 0.33f;
     floor_mat.metallic = 0.0f;
     floor_mat.roughness = 0.8f;
-    (void)materials.add(floor_mat); // MaterialRef 1
+    const render::MaterialId floor_material = materials.add(floor_mat); // MaterialRef 1
 
     // Leaves the world as whatever loaded on failure: the editor still connects and shows an
     // empty/partial outliner rather than the host dying on a bad path.
     (void)load_scene_for_editor(world, scene_path, hosted);
     derive_world_transforms(world);
+
+    // THE GROUND IS ENGINE CONTENT, so the engine dresses it (m17.8b). m17.8 made the block's
+    // street a `ground::GroundSurface` whose mesh is derived rather than uploaded — and this path
+    // never derived it, so a block opened in the editor stood on a street that collided (the fixed
+    // tick binds it) and did not draw. Neither route above could have caught that: the bridge
+    // resolves `MeshAsset`, and a game's preparer answers for the game's own components, not for an
+    // engine module's. Before the bridge settles, so the fallback material here is what an authored
+    // `MaterialAsset` on the surface then outranks; the floor material minted above is the
+    // fallback, which keeps a scene with no cooked ground material looking as it did.
+    (void)ground::apply_ground(world, meshes, floor_material);
 }
 
 int serve_viewport(std::string_view socket_path,
@@ -622,6 +632,11 @@ int serve_viewport(std::string_view socket_path,
         if (asset_server.pump() != 0 || bridge.drain() != 0) {
             (void)bridge.resolve_scene_meshes(ctx.world);
             (void)bridge.resolve_scene_materials(ctx.world);
+            // The entity-owned path too (m17.8b), or this loop and `settle` disagree about what
+            // "resolve" means: a `MaterialAsset` placed after start-up — the asset browser's
+            // `place`, or a scene opened into a live session — would request its material, drain
+            // it, and never be given the `MaterialRef` that makes it draw.
+            (void)bridge.resolve_material_assets(ctx.world);
         }
         last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
         // One lens per frame, shared by the gizmo pass and the ViewportCamera message — computed
