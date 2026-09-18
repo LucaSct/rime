@@ -26,6 +26,35 @@ scripts/perf.sh --sample lit-rooms --frames 1200           # one sample, into a 
 report `<date>-<sample>-<gpu-slug>.json` so two machines' histories coexist here without colliding.
 A dirty tree is recorded as `<sha>-dirty` rather than attributed to a commit it does not match.
 
+### Pin the GPU clocks first — `perf.sh` will refuse otherwise
+
+`scripts/perf.sh` exits 3 on a GPU whose clocks the driver is still free to move, and prints the
+commands for the card it found. On the reference machine:
+
+```bash
+sudo nvidia-smi -pm 1
+sudo nvidia-smi -lgc 1785,1785   # 85% of max: a clock the card holds, so the THERMAL governor
+sudo nvidia-smi -lmc 7501        # does not take over from the idle one
+# afterwards
+sudo nvidia-smi -rgc && sudo nvidia-smi -rmc
+```
+
+Both domains, and the memory one is the one that bites. `99-the-block` is CPU-bound — the
+simulation is most of the frame — so the GPU is idle most of every frame and the power governor
+concludes it has nothing to do. Measured mid-run: core 1837 → 210 MHz and memory 7501 → 405 MHz.
+Pinning only the core is not enough: with `-lgc` held rock-steady, memory still sat at 810 MHz of
+7501 for an entire run, never boosting, at ~11% of peak bandwidth — and SSR, DDGI and the 1080p
+resolves are bandwidth-bound.
+
+The damage is inconsistency rather than slowness, which is why it survives a sanity check. Two
+identical 600-frame runs minutes apart agreed on frame p99 (41.48 / 41.58 ms) and disagreed by 2x on
+the same pass: `ssr-resolve` p50 1.842 vs 0.856 ms. Pinned, the same pair agrees to 0.1% (0.880 vs
+0.879 ms) and every pass above 0.05 ms lands within 1.5%. A baseline taken unpinned encodes the
+governor's mood, and every future comparison against it inherits that.
+
+`RIME_PERF_ALLOW_UNPINNED_CLOCKS=1` overrides the refusal — say so in the PR, because the numbers
+are not comparable against a pinned baseline.
+
 The samples can also be driven directly:
 
 ```bash

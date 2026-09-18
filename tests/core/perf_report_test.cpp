@@ -23,9 +23,11 @@
 
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "rime/core/diagnostics/perf_report.hpp"
+#include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/diagnostics/work_ledger.hpp"
 
 using rime::core::BaselineStatus;
@@ -141,6 +143,376 @@ TEST_CASE("a report records frames, per-pass cost, and the single worst frame") 
 
     SUBCASE("a timeline nobody recorded is absent, which is not the same as zero") {
         CHECK_FALSE(r.distribution("sim.tick").has_value());
+    }
+}
+
+TEST_CASE("m17.3: two passes with one name are two keys, not one key written twice") {
+    // THE BUG THIS PINS SHIPPED, AND IT IS IN THE REPOSITORY. A CSM declares the depth pre-pass
+    // once per cascade, so `docs/perf/2026-08-30-99-the-block-*.json` contains FOUR
+    // `"depth-prepass"` keys in one object. Every ordinary JSON reader keeps one of them, so the
+    // committed artifact under-reports its own worst frame by 0.32 ms and no reader can tell.
+    // Meanwhile the fold below put four different renders into one distribution, making
+    // `depth-prepass p50` the median of individual cascades rather than a per-frame cost — a number
+    // that reads as the latter.
+    PerfReport r;
+    const PassTiming frame_passes[] = {{"shadow", 1.0}, {"forward", 4.0}, {"shadow", 2.0}};
+    r.observe_frame(0, 9.0, frame_passes);
+
+    SUBCASE("the worst frame keeps BOTH, under names that differ") {
+        REQUIRE(r.worst_frame().passes.size() == 3);
+        CHECK(r.worst_frame().passes[0].name == "shadow");
+        CHECK(r.worst_frame().passes[1].name == "forward");
+        CHECK(r.worst_frame().passes[2].name == "shadow#1");
+        CHECK(r.worst_frame().passes[2].ms == doctest::Approx(2.0));
+    }
+
+    SUBCASE("the two renders get two distributions, so neither is a median of the other") {
+        const auto passes = r.passes();
+        REQUIRE(passes.size() == 3);
+        CHECK(passes[0].name == "shadow");
+        CHECK(passes[0].max_ms == doctest::Approx(1.0));
+        CHECK(passes[2].name == "shadow#1");
+        CHECK(passes[2].max_ms == doctest::Approx(2.0));
+    }
+
+    SUBCASE("the emitted JSON has unique keys — the property the committed file violates") {
+        const std::string json = r.to_json();
+        // Count occurrences of the quoted key. Two would mean the artifact is still unreadable by
+        // anything that is not this file's own parser, which is the whole failure.
+        std::size_t at = 0;
+        int shadow_keys = 0;
+        while ((at = json.find("\"shadow\":", at)) != std::string::npos) {
+            ++shadow_keys;
+            at += 9;
+        }
+        CHECK(shadow_keys == 2); // once in `passes`, once in `worst_frame.passes`
+        CHECK(json.find("\"shadow#1\":") != std::string::npos);
+
+        PerfReport back;
+        std::string error;
+        REQUIRE_MESSAGE(PerfReport::parse(json, back, error), error);
+        CHECK(back.worst_frame().passes.size() == 3);
+        CHECK(back.to_json() == json);
+    }
+}
+
+TEST_CASE(
+    "m17.3b: a zone is measured per call AND per frame, because they answer different questions") {
+    // A profile zone fires once per SCOPE ENTRY, and the scopes that matter run many times per
+    // frame — a frame steps the simulation several times and each step runs every physics stage.
+    // So the timeline a zone feeds is a distribution over CALLS. That is exactly right against
+    // ADR-0035's ratified per-TICK budget and exactly wrong for M17's question, which is where a
+    // frame's 35.6 ms went: a per-call percentile times a call count is not a per-frame percentile.
+    PerfReport r;
+
+    // Frame 0: the zone runs three times, 1 + 2 + 3 ms.
+    r.observe_zone("physics.solve", 1.0);
+    r.observe_zone("physics.solve", 2.0);
+    r.observe_zone("physics.solve", 3.0);
+    r.observe_frame(0, 10.0);
+
+    // Frame 1: once, 4 ms.
+    r.observe_zone("physics.solve", 4.0);
+    r.observe_frame(1, 10.0);
+
+    // Frame 2: the zone does not run at all.
+    r.observe_frame(2, 10.0);
+
+    SUBCASE("the per-call timeline keeps its old meaning, one sample per call") {
+        const auto per_call = r.distribution("physics.solve");
+        REQUIRE(per_call.has_value());
+        CHECK(per_call->count == 4);
+        CHECK(per_call->max_ms == doctest::Approx(4.0));
+    }
+
+    SUBCASE("the per-frame timeline sums the calls, one sample per frame") {
+        const auto per_frame = r.distribution("physics.solve.per_frame");
+        REQUIRE(per_frame.has_value());
+        // Three frames, three samples: 6.0, 4.0 and — the one that is easy to get wrong — 0.0.
+        CHECK(per_frame->count == 3);
+        CHECK(per_frame->max_ms == doctest::Approx(6.0));
+        CHECK(per_frame->min_ms == doctest::Approx(0.0));
+        // The distinction the whole thing exists for: the worst CALL was 4 ms, the worst FRAME
+        // spent 6. Reading the per-call max as a frame cost understates it by a third here, and by
+        // far more in the block, where a frame runs several steps of a many-stage pipeline.
+        CHECK(per_frame->max_ms > r.distribution("physics.solve")->max_ms);
+    }
+
+    SUBCASE("a frame in which the zone never ran records a zero, not nothing") {
+        // Dropping it would bias the percentile upward by discarding exactly the cheap frames, and
+        // would leave the per-frame timeline with a different sample count from `frame` — which is
+        // the precondition for ever comparing them frame-for-frame.
+        const auto per_frame = r.distribution("physics.solve.per_frame");
+        const auto frames = r.distribution("frame");
+        REQUIRE(per_frame.has_value());
+        REQUIRE(frames.has_value());
+        CHECK(per_frame->count == frames->count);
+    }
+
+    SUBCASE("the per-frame totals survive the round trip to a committed report") {
+        std::string json = r.to_json();
+        PerfReport back;
+        std::string error;
+        REQUIRE_MESSAGE(PerfReport::parse(json, back, error), error);
+        REQUIRE(back.distribution("physics.solve.per_frame").has_value());
+        CHECK(back.distribution("physics.solve.per_frame")->max_ms == doctest::Approx(6.0));
+        CHECK(back.to_json() == json);
+    }
+}
+
+TEST_CASE("a zone closing on another thread is DROPPED and counted, not raced (m17.3c)") {
+    // `report_zone` copies the sink out under a mutex and then invokes it with the lock RELEASED —
+    // deliberately, so a sink doing real work cannot serialize whatever called it. The consequence
+    // is easy to state wrongly: the hazard for a zone on a job-system worker is not contention, it
+    // is a DATA RACE, because `PerfReport` synchronizes nothing and two threads inside
+    // `observe_zone` share its vectors. The m17.3b review caught `PhysicsWorld::step`'s comment
+    // naming the cheap hazard instead of the real one — which is how someone later accepts "just a
+    // bit of lock contention" for a debug session and gets undefined behaviour.
+    //
+    // So `ZoneTimelines` pins itself to the thread that installed it. Dropping is the safe answer;
+    // COUNTING the drop is what stops a short report from reading like a quiet one.
+    PerfReport r;
+    std::uint64_t foreign = 0;
+    {
+        rime::core::ZoneTimelines zones(r);
+        rime::core::report_zone("owner.stage", 1.0);
+        std::thread worker([] { rime::core::report_zone("worker.stage", 99.0); });
+        worker.join();
+        rime::core::report_zone("owner.stage", 2.0);
+        foreign = zones.foreign_zones();
+    }
+
+    CHECK(foreign == 1);
+    // The owning thread's zones landed…
+    REQUIRE(r.distribution("owner.stage").has_value());
+    CHECK(r.distribution("owner.stage")->count == 2);
+    // …and the worker's did not, under any name. Absent rather than zero: nothing measured it.
+    CHECK_FALSE(r.distribution("worker.stage").has_value());
+    CHECK_FALSE(r.distribution("worker.stage.per_frame").has_value());
+}
+
+TEST_CASE("the thread pin holds under REAL concurrency, which is the only version TSan can judge") {
+    // The case above spawns and joins, so the worker's access is fully ordered against the main
+    // thread's by the join itself — which means a ThreadSanitizer run over it proves nothing about
+    // the hazard, however green it comes back. Vacuity of exactly the kind this file keeps catching
+    // in itself: the guard was never actually asked to prevent a concurrent entry.
+    //
+    // Here four threads report WHILE the owner does. With the pin, every foreign close is turned
+    // away before it touches the report, so under TSan this is clean *because of the guard*. With
+    // the pin removed it is a genuine data race on `timelines_` — which is the claim
+    // `PhysicsWorld::step`'s comment now makes, and the reason no zone may go on a worker.
+    constexpr int kWorkers = 4;
+    constexpr int kPerWorker = 50;
+    constexpr int kOwner = 25;
+
+    PerfReport r;
+    std::uint64_t foreign = 0;
+    {
+        rime::core::ZoneTimelines zones(r);
+        std::vector<std::thread> workers;
+        workers.reserve(kWorkers);
+        for (int w = 0; w < kWorkers; ++w) {
+            workers.emplace_back([] {
+                for (int i = 0; i < kPerWorker; ++i)
+                    rime::core::report_zone("worker.stage", 1.0);
+            });
+        }
+        for (int i = 0; i < kOwner; ++i)
+            rime::core::report_zone("owner.stage", 1.0);
+        for (std::thread& t : workers)
+            t.join();
+        foreign = zones.foreign_zones();
+    }
+
+    // Exact, not approximate: the counter is atomic, so "some were dropped" is not the claim —
+    // every one of them was, and the report is short by precisely that many measurements.
+    CHECK(foreign == static_cast<std::uint64_t>(kWorkers * kPerWorker));
+    REQUIRE(r.distribution("owner.stage").has_value());
+    CHECK(r.distribution("owner.stage")->count == kOwner);
+    CHECK_FALSE(r.distribution("worker.stage").has_value());
+}
+
+TEST_CASE("accounting: the remainder gets a NAME, computed per frame (m17.3c)") {
+    // "The frame is attributable" was an unchecked belief until this: every pass had a name and
+    // every physics stage had one, and nothing said the named parts add up to the whole. A
+    // subsystem added without a zone was simply absent — and absent is indistinguishable from free.
+    //
+    // Why per frame and not from the summaries afterwards: percentiles are not subadditive in
+    // either direction (the frames that are worst for one part need not be worst for another), and
+    // this schema deliberately cannot store a mean, so the one summary-level check that would have
+    // been sound is the one it refuses to hold. Record time or never.
+    PerfReport r;
+    r.declare_accounting("frame", {"sim", "render"});
+
+    // Frame 0: 10 = 4 + 5 + 1 unnamed.
+    r.observe("sim", 4.0);
+    r.observe("render", 5.0);
+    r.observe_frame(0, 10.0);
+
+    // Frame 1: 10 = 4 + 6, nothing left over.
+    r.observe("sim", 4.0);
+    r.observe("render", 6.0);
+    r.observe_frame(1, 10.0);
+
+    SUBCASE("the residual is exact for each frame, not a difference of percentiles") {
+        const auto d = r.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        CHECK(d->count == 2);
+        CHECK(d->max_ms == doctest::Approx(1.0));
+        CHECK(d->min_ms == doctest::Approx(0.0));
+        CHECK(r.accounting_gaps() == 0);
+    }
+
+    SUBCASE("a part recorded for no frame counts a gap and INFLATES the residual, never hides it") {
+        // The failure this guards: name a child that never records and the residual quietly grows
+        // by its whole cost, which reads as unattributed work rather than as a broken declaration.
+        PerfReport g;
+        g.declare_accounting("frame", {"sim", "typo.render"});
+        g.observe("sim", 4.0);
+        g.observe("render", 5.0);
+        g.observe_frame(0, 10.0);
+
+        const auto d = g.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        CHECK(d->max_ms == doctest::Approx(6.0)); // 10 - 4, with `render` never claimed
+        CHECK(g.accounting_gaps() == 1);
+    }
+
+    SUBCASE("a part recorded AFTER observe_frame belongs to the next frame, and is counted") {
+        // The ordering contract, stated as a test because it is the easy mistake: the sample's
+        // `frame.render` was observed one line after `observe_frame` before m17.3c.
+        PerfReport late;
+        late.declare_accounting("frame", {"render"});
+        late.observe_frame(0, 10.0);
+        late.observe("render", 9.0);
+        late.observe_frame(1, 10.0);
+
+        const auto d = late.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        // Frame 0 saw nothing (gap, residual 10) and frame 1 saw the sample recorded between them.
+        CHECK(d->max_ms == doctest::Approx(10.0));
+        CHECK(d->min_ms == doctest::Approx(1.0));
+        CHECK(late.accounting_gaps() == 1);
+    }
+
+    SUBCASE("a wrong tree goes NEGATIVE rather than clamping to a tidy zero") {
+        // A child that is not really inside its parent is a modelling error, and max(0, …) would
+        // launder it into a number that looks like perfect attribution. `min_ms` is where it shows.
+        PerfReport bad;
+        bad.declare_accounting("frame", {"not-inside"});
+        bad.observe("not-inside", 12.0);
+        bad.observe_frame(0, 10.0);
+
+        const auto d = bad.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        CHECK(d->min_ms == doctest::Approx(-2.0));
+        CHECK(bad.accounting_gaps() == 0); // the part WAS there; the tree is what is wrong
+    }
+
+    SUBCASE("zones qualify as parts without any per-frame plumbing of their own") {
+        PerfReport z;
+        z.declare_accounting("frame", {"stage.per_frame"});
+        z.observe_zone("stage", 3.0);
+        z.observe_zone("stage", 2.0); // twice in one frame — the per-call/per-frame split (m17.3b)
+        z.observe_frame(0, 10.0);
+        const auto d = z.distribution("frame.unaccounted");
+        REQUIRE(d.has_value());
+        CHECK(d->max_ms == doctest::Approx(5.0));
+        CHECK(z.accounting_gaps() == 0);
+    }
+}
+
+TEST_CASE("accounting: the gate FAILS on the last committed block report (m17.3c)") {
+    // The falsification, run against the real artifact rather than an invented one. The
+    // 2026-08-30 block baseline is the file ADR-0041 quotes throughout — `frame` p99 35.598 over
+    // 600 frames — and it contains no residual timeline, because none existed when it was written.
+    //
+    // Nothing new was needed to make that fail: a rule naming a timeline nobody recorded is
+    // `Missing`, and `Missing` is a failure for the same reason a work budget's is. So the gate
+    // this brick adds cannot pass on a report that predates the instrumentation — which is exactly
+    // the property that makes it a gate rather than a decoration.
+    const std::string path = std::string(RIME_PERF_BASELINE_DIR) +
+                             "/2026-08-30-99-the-block-nvidia-geforce-rtx-3060.json";
+    PerfReport committed;
+    std::string error;
+    REQUIRE_MESSAGE(PerfReport::load_file(path, committed, error), error);
+    // The file is the one the ADR quotes — assert that before asserting anything about it, or a
+    // renamed baseline would make every check below pass over the wrong numbers.
+    REQUIRE(committed.distribution("frame").has_value());
+    CHECK(committed.distribution("frame")->count == 600);
+    CHECK(committed.distribution("frame")->p99_ms == doctest::Approx(35.598));
+
+    PerfGate gate;
+    gate.at_most("frame.unaccounted", PerfStat::P99, 1.0)
+        .at_most("sim.collapse", PerfStat::Max, 12.0);
+    const PerfGate::Result result = gate.check(committed);
+    CHECK_FALSE(result.ok());
+    REQUIRE(result.violations.size() == 2);
+    CHECK(result.violations[0].outcome == PerfOutcome::Missing);
+    CHECK(result.violations[1].outcome == PerfOutcome::Missing);
+
+    SUBCASE("and an old report still LOADS — the new worst-frame field is optional on read") {
+        // The one optional field in an otherwise strict reader. Absent means "this file predates
+        // m17.3c", which is a true statement about the file rather than a guess about a number;
+        // making it required would have meant bumping the schema and orphaning every baseline.
+        CHECK(committed.worst_frame().zones.empty());
+        CHECK(committed.worst_frame().ms > 0.0);
+    }
+
+    SUBCASE("the same shape, recorded through the new path, breaches QUANTITATIVELY") {
+        // `Missing` proves the rule fires on an old file; it does not prove the number means
+        // anything. So replay that file's shape — ~35.6 ms frames with a sim and a render half
+        // that do not add up — and watch the residual itself breach.
+        PerfReport replay;
+        replay.declare_accounting("frame", {"sim.block", "frame.render"});
+        for (int i = 0; i < 200; ++i) {
+            replay.observe("sim.block", 25.0);
+            replay.observe("frame.render", 8.0);
+            replay.observe_frame(static_cast<std::uint64_t>(i), 35.6);
+        }
+        PerfGate quantitative;
+        quantitative.at_most("frame.unaccounted", PerfStat::P99, 1.0);
+        const PerfGate::Result r2 = quantitative.check(replay);
+        REQUIRE(r2.violations.size() == 1);
+        CHECK(r2.violations[0].outcome == PerfOutcome::Breach);
+        CHECK(r2.violations[0].value_ms == doctest::Approx(2.6));
+    }
+}
+
+TEST_CASE("the worst frame carries its CPU story, not only its GPU one (m17.3c)") {
+    // The worst frame is the one frame a human opens after a gate fails, and it used to arrive
+    // with a per-pass GPU breakdown and no answer to "what was the CPU doing" — because the zone
+    // totals are zeroed at every frame boundary and the worst-frame check ran after the flush.
+    PerfReport r;
+    const PassTiming passes[] = {{"forward-pbr", 2.0}};
+
+    r.observe_zone("physics.solve", 1.0);
+    r.observe_frame(0, 5.0, passes);
+
+    r.observe_zone("physics.solve", 7.0);
+    r.observe_zone("physics.contacts", 3.0);
+    r.observe_frame(1, 40.0, passes); // the worst
+
+    r.observe_zone("physics.solve", 1.0);
+    r.observe_frame(2, 5.0, passes);
+
+    CHECK(r.worst_frame().index == 1);
+    REQUIRE(r.worst_frame().zones.size() == 2);
+    double solve = 0.0;
+    for (const rime::core::ZoneTotal& z : r.worst_frame().zones) {
+        if (z.name == "physics.solve")
+            solve = z.ms;
+    }
+    // 7.0, the worst frame's own total — not 1.0 from a later frame and not 9.0 for the run.
+    CHECK(solve == doctest::Approx(7.0));
+
+    SUBCASE("and survives the round trip to a committed report") {
+        const std::string json = r.to_json();
+        PerfReport back;
+        std::string error;
+        REQUIRE_MESSAGE(PerfReport::parse(json, back, error), error);
+        REQUIRE(back.worst_frame().zones.size() == 2);
+        CHECK(back.to_json() == json);
     }
 }
 
@@ -312,6 +684,33 @@ TEST_CASE("regression against a committed baseline") {
         CHECK(gate.check(noisy, &baseline).ok());
     }
 
+    SUBCASE("a residual near zero does not 'regress' on noise finer than the timer") {
+        // `frame.unaccounted` is a RESIDUAL — parent minus its named parts — so it lands at a few
+        // hundred nanoseconds when the accounting is good. A percentage of that is finer than the
+        // timer can resolve, and a purely relative check duly reported "0.000 ms vs baseline
+        // 0.000 ms — REGRESSED" between two runs of the same binary on a pinned machine. That is
+        // how a gate teaches the people reading it to stop believing it, which costs exactly as
+        // much as a gate that cannot fail.
+        PerfReport quiet_base = make_report();
+        PerfReport quiet_now = make_report();
+        for (int i = 0; i < 200; ++i) {
+            quiet_base.observe("frame.unaccounted", 0.0002);
+            quiet_now.observe("frame.unaccounted",
+                              0.0006); // 3x relative, 0.4 MICROseconds absolute
+        }
+        PerfGate residual;
+        residual.at_most("frame.unaccounted", PerfStat::P99, 1.0).max_regression(0.10);
+        CHECK(residual.check(quiet_now, &quiet_base).ok());
+
+        // ...and the floor does not become a place to hide: a move that clears it still fails.
+        PerfReport really_slower = make_report();
+        for (int i = 0; i < 200; ++i)
+            really_slower.observe("frame.unaccounted", 0.30);
+        const PerfGate::Result moved = residual.check(really_slower, &quiet_base);
+        REQUIRE(moved.violations.size() == 1);
+        CHECK(moved.violations[0].outcome == PerfOutcome::Regressed);
+    }
+
     SUBCASE("a faster run passes, and so does an equal one") {
         const PerfReport faster = make_report(12.0);
         CHECK(gate.check(faster, &baseline).ok());
@@ -328,6 +727,21 @@ TEST_CASE("regression against a committed baseline") {
         CHECK(result.baseline == BaselineStatus::FingerprintMismatch);
         CHECK(result.violations.empty()); // no regression claim can be made…
         CHECK(PerfGate::format(result).find("fingerprint-mismatch") != std::string::npos);
+        // …AND THE RUN FAILS ANYWAY (m17.3d, ADR-0041 Ruling 4). `slower` is 30× the baseline and
+        // sails through every absolute rule; before this, the one check that would have caught it
+        // was silently skipped and the run passed with a note. A driver update is exactly the
+        // event that moves performance, and it was exactly the event that turned the comparison
+        // off.
+        CHECK_FALSE(result.ok());
+    }
+
+    SUBCASE("but no baseline AT ALL still passes — that is what a re-baseline run looks like") {
+        // The distinction Ruling 4 turns on: "asked, and refused" fails; "nobody asked" does not.
+        // Every first run on a new machine, and every deliberate re-baseline, is the second one.
+        const PerfReport fresh = make_report(1.0);
+        const PerfGate::Result result = gate.check(fresh, nullptr);
+        CHECK(result.baseline == BaselineStatus::NotProvided);
+        CHECK(result.ok());
     }
 
     SUBCASE("a sanitizer build never compares against a clean baseline") {

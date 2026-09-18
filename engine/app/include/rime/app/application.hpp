@@ -149,8 +149,42 @@ public:
     // uniform buffers are exactly that kind of resource: hand this to
     // `SceneRenderer::set_frames_in_flight` so its ring matches the backend rather than a default.
     [[nodiscard]] std::uint32_t frames_in_flight() const noexcept {
-        return swapchain_ != nullptr ? swapchain_->frames_in_flight() : 1u;
+        return swapchain_ != nullptr ? swapchain_->frames_in_flight() : headless_in_flight_;
     }
+
+    // PIPELINE THE HEADLESS LOOP (m17.5). 1 — the default — keeps `submit_blocking`: the frame is
+    // over before the next line runs, which is the simplest correct model and the one every
+    // committed `docs/perf/` number was measured under. Above 1, the frame is submitted
+    // ASYNCHRONOUSLY and the CPU walks straight into the next one, waiting only when the ring is
+    // full, so the simulation of frame N+1 overlaps the GPU of frame N.
+    //
+    // OPT-IN ON PURPOSE, and the reason is governance rather than caution. `frame` stops meaning
+    // "sim + render + GPU wall in series" and starts meaning "CPU wall, with the GPU alongside" —
+    // a different measurement of a different thing. ADR-0035's fingerprint decides what may be
+    // compared and has no field for it, so a pipelined run silently compared against a serialized
+    // baseline is precisely the quiet-wrong-comparison ADR-0041 Ruling 4 exists to refuse. Leaving
+    // the default alone keeps every existing baseline honest; a run that opts in says so.
+    //
+    // Windowed presentation ignores this: `Swapchain::present` already pipelines, on its own fence
+    // ring, and that path is unchanged.
+    void set_headless_frames_in_flight(std::uint32_t frames);
+
+    // Frame N's per-pass GPU times, resolved and OWNED, delivered once the GPU has finished it.
+    //
+    // The pipelined counterpart to `on_post_submit`, and a better contract than it for everyone:
+    // it hands over the answer instead of a graph and a command buffer whose lifetimes the caller
+    // has to reason about. Under `submit_blocking` it fires within the frame; pipelined it fires
+    // when the ring retires that frame, up to `frames_in_flight()` frames later — so a consumer
+    // must key on the INDEX it is handed rather than on "now". Never called when the device cannot
+    // timestamp, which is absence rather than a list of zeroes.
+    //
+    // The index is not decoration. Pipelined, these timings describe a frame that finished two
+    // frames ago, and attributing them to the current one is exactly the kind of plausible-looking
+    // wrong number this engine's perf machinery keeps refusing to produce.
+    using FrameTimingsFn = std::function<void(std::uint64_t frame_index,
+                                              std::span<const render::RenderGraph::PassTiming>)>;
+
+    void on_frame_timings(FrameTimingsFn fn) { frame_timings_ = std::move(fn); }
 
     // The window, or nullptr when not windowed. Exposed so an app can read its framebuffer size or
     // title it; the loop owns its lifetime and its event pump.
@@ -297,6 +331,7 @@ private:
     FixedTimestep timestep_;
     RenderFn render_;
     PostSubmitFn post_submit_;
+    FrameTimingsFn frame_timings_;
     std::array<std::vector<TickFn>, kSimStageCount> stages_;
     // Where on_fixed_tick's entry lives inside stages_[PostSim], or -1 if it was never set. Keeping
     // the index is what preserves the old REPLACING semantics on top of a list: a second
@@ -322,6 +357,22 @@ private:
     // Empty (and unused) headless, where submit_blocking has already finished the frame.
     std::vector<std::unique_ptr<rhi::CommandBuffer>> presented_cmds_;
     std::size_t presented_slot_ = 0;
+
+    // The headless pipeline (m17.5). One entry per submitted-but-unretired frame: the ticket that
+    // says when its GPU work finished, and the timing plan that says what its passes were — which
+    // the graph itself can no longer answer, having moved on.
+    struct InFlightFrame {
+        rhi::SubmitTicket ticket;
+        render::RenderGraph::TimingPlan plan;
+        std::uint64_t frame_index = 0;
+    };
+
+    std::vector<InFlightFrame> in_flight_;
+    std::uint32_t headless_in_flight_ = 1; // 1 == submit_blocking, the default
+
+    // Retire the oldest in-flight frame: wait for its GPU work, hand its timings to the callback
+    // while the command buffer is still borrowed, then release it.
+    void retire_oldest_frame();
 
     std::vector<platform::Event> pending_input_; // queued for the next frame
     std::vector<platform::Event> frame_input_;   // this frame's snapshot (what systems see)

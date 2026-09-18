@@ -4,7 +4,7 @@
 // rime-blockgen — the vision demo's procedural assembly, emitting a `.rscene` (m13.2c, ADR-0035
 // §1).
 //
-//   rime-blockgen --out block.rscene [--stats] [--cooks]
+//   rime-blockgen --out block.rscene [--assets <manifest.txt>] [--stats] [--cooks]
 //
 // This is the "procedural assembly script" ADR-0035 named, and it is C++ rather than Rust tooling
 // for a reason the format forces: `.rscene` keys every component record by its C++ reflection
@@ -20,9 +20,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 
+#include "rime/assets/manifest.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/scene/scene_format.hpp"
@@ -68,19 +72,23 @@ void print_stats(const blockkit::BlockStats& s) {
 
 int main(int argc, char** argv) {
     std::filesystem::path out;
+    std::filesystem::path assets_path;
     bool stats = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
         if (a == "--out" && i + 1 < argc) {
             out = argv[++i];
+        } else if (a == "--assets" && i + 1 < argc) {
+            assets_path = argv[++i];
         } else if (a == "--stats") {
             stats = true;
         } else if (a == "--cooks") {
             print_cooks();
             return EXIT_SUCCESS;
         } else if (a == "--help" || a == "-h") {
-            std::printf("usage: rime-blockgen --out <file.rscene> [--stats] [--cooks]\n");
+            std::printf("usage: rime-blockgen --out <file.rscene> [--assets <manifest.txt>] "
+                        "[--stats] [--cooks]\n");
             return EXIT_SUCCESS;
         } else {
             std::fprintf(stderr,
@@ -97,7 +105,40 @@ int main(int argc, char** argv) {
     }
 
     ecs::World world;
-    const blockkit::BlockParams params;
+    blockkit::BlockParams params;
+
+    // THE STREET'S MATERIAL comes from a cook manifest (m17.8b), because it is a content id and a
+    // content id is the hash of cooked bytes: nothing but the cook can say what it is. `--assets`
+    // is optional — a block generated without it keeps the palette's flat street — but a manifest
+    // that was ASKED for and does not list the material is refused rather than silently ignored,
+    // since the resulting scene would look exactly like a correct one with the cook missing.
+    if (!assets_path.empty()) {
+        std::ifstream in(assets_path, std::ios::binary);
+        if (!in) {
+            std::fprintf(stderr,
+                         "rime-blockgen: could not open --assets '%s'\n",
+                         assets_path.string().c_str());
+            return EXIT_FAILURE;
+        }
+        const std::string text((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+        const std::optional<assets::Manifest> manifest = assets::Manifest::parse(text);
+        if (!manifest) {
+            std::fprintf(stderr,
+                         "rime-blockgen: --assets '%s' is not a manifest\n",
+                         assets_path.string().c_str());
+            return EXIT_FAILURE;
+        }
+        params.ground_material = blockkit::ground_material_id(*manifest);
+        if (params.ground_material == 0) {
+            std::fprintf(stderr,
+                         "rime-blockgen: --assets '%s' lists no '%.*s' material\n",
+                         assets_path.string().c_str(),
+                         static_cast<int>(blockkit::kGroundMaterialLabel.size()),
+                         blockkit::kGroundMaterialLabel.data());
+            return EXIT_FAILURE;
+        }
+    }
     const blockkit::BlockStats produced = blockkit::assemble(world, params);
 
     // Two independent routes to the same counts: `assemble` reports what it spawned, `predict`

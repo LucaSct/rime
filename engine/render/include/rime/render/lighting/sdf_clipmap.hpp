@@ -218,15 +218,12 @@ private:
     };
 
     void ensure_level_texture(std::uint32_t index);
-    void ensure_job_capacity(std::uint32_t count);
     [[nodiscard]] rhi::TextureHandle upload_instance_sdf(const assets::MeshSdfAsset& sdf) const;
 
     rhi::Device& device_;
 
     rhi::ShaderHandle compose_shader_;
     rhi::PipelineHandle compose_pipeline_;
-    rhi::BufferHandle compose_ubo_; // grow-on-demand array of per-dispatch job slices
-    std::uint32_t job_capacity_ = 0;
     rhi::TextureHandle placeholder_instance_sdf_; // 1x1x1 R16Snorm=0; bound for a "clear" dispatch
     rhi::SamplerHandle instance_sampler_;         // linear + ClampToEdge, shared by every instance
 

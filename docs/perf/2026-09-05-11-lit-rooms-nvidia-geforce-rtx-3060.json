@@ -1,0 +1,289 @@
+{
+  "schema": 1,
+  "run": {
+    "sample": "11-lit-rooms",
+    "commit": "5ae7458",
+    "date": "2026-09-05"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "driver": "NVIDIA 610.57.04",
+    "os": "linux",
+    "build": "RelWithDebInfo",
+    "sanitizer": "off",
+    "preset": "all-lighting-gates",
+    "width": 1920,
+    "height": 1080
+  },
+  "distributions": {
+    "frame": {
+      "count": 600,
+      "min_ms": 1.770,
+      "p50_ms": 1.863,
+      "p95_ms": 2.089,
+      "p99_ms": 2.250,
+      "max_ms": 2.599
+    },
+    "frame.collapse": {
+      "count": 60,
+      "min_ms": 1.770,
+      "p50_ms": 1.878,
+      "p95_ms": 2.111,
+      "p99_ms": 2.599,
+      "max_ms": 2.599
+    },
+    "frame.declare": {
+      "count": 600,
+      "min_ms": 0.004,
+      "p50_ms": 0.005,
+      "p95_ms": 0.009,
+      "p99_ms": 0.011,
+      "max_ms": 0.012
+    },
+    "frame.declare.per_frame": {
+      "count": 600,
+      "min_ms": 0.004,
+      "p50_ms": 0.005,
+      "p95_ms": 0.009,
+      "p99_ms": 0.011,
+      "max_ms": 0.012
+    },
+    "frame.execute": {
+      "count": 600,
+      "min_ms": 0.021,
+      "p50_ms": 0.024,
+      "p95_ms": 0.042,
+      "p99_ms": 0.048,
+      "max_ms": 0.055
+    },
+    "frame.execute.per_frame": {
+      "count": 600,
+      "min_ms": 0.021,
+      "p50_ms": 0.024,
+      "p95_ms": 0.042,
+      "p99_ms": 0.048,
+      "max_ms": 0.055
+    },
+    "frame.submit": {
+      "count": 600,
+      "min_ms": 1.737,
+      "p50_ms": 1.829,
+      "p95_ms": 2.053,
+      "p99_ms": 2.214,
+      "max_ms": 2.565
+    },
+    "frame.submit.per_frame": {
+      "count": 600,
+      "min_ms": 1.737,
+      "p50_ms": 1.829,
+      "p95_ms": 2.053,
+      "p99_ms": 2.214,
+      "max_ms": 2.565
+    },
+    "sim.post": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.post.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.pre": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.pre.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.schedule": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.schedule.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.tick": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.006
+    },
+    "sim.tick.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.006
+    },
+    "sim.transforms": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.005
+    },
+    "sim.transforms.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.005
+    }
+  },
+  "passes": {
+    "ddgi-trace": {
+      "p50_ms": 0.058,
+      "max_ms": 0.077
+    },
+    "ddgi-blend-irradiance": {
+      "p50_ms": 0.013,
+      "max_ms": 0.026
+    },
+    "ddgi-blend-visibility": {
+      "p50_ms": 0.023,
+      "max_ms": 0.034
+    },
+    "depth-prepass": {
+      "p50_ms": 0.014,
+      "max_ms": 0.024
+    },
+    "csm-cascade-0": {
+      "p50_ms": 0.007,
+      "max_ms": 0.008
+    },
+    "csm-cascade-1": {
+      "p50_ms": 0.005,
+      "max_ms": 0.025
+    },
+    "csm-cascade-2": {
+      "p50_ms": 0.003,
+      "max_ms": 0.016
+    },
+    "cluster-cull": {
+      "p50_ms": 0.006,
+      "max_ms": 0.007
+    },
+    "forward-pbr shadowed": {
+      "p50_ms": 0.384,
+      "max_ms": 0.586
+    },
+    "ssr-resolve": {
+      "p50_ms": 0.488,
+      "max_ms": 0.740
+    },
+    "tonemap": {
+      "p50_ms": 0.034,
+      "max_ms": 0.444
+    },
+    "sdf-clipmap-clear-L0": {
+      "p50_ms": 0.005,
+      "max_ms": 0.005
+    },
+    "sdf-clipmap-stamp-L0": {
+      "p50_ms": 0.005,
+      "max_ms": 0.005
+    },
+    "sdf-clipmap-clear-L1": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-stamp-L1": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-clear-L2": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-stamp-L2": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "spot-shadow-0": {
+      "p50_ms": 0.005,
+      "max_ms": 0.005
+    }
+  },
+  "worst_frame": {
+    "index": 338,
+    "ms": 2.599,
+    "passes": {
+      "ddgi-trace": 0.061,
+      "ddgi-blend-irradiance": 0.013,
+      "ddgi-blend-visibility": 0.022,
+      "depth-prepass": 0.011,
+      "csm-cascade-0": 0.007,
+      "csm-cascade-1": 0.005,
+      "csm-cascade-2": 0.003,
+      "cluster-cull": 0.006,
+      "forward-pbr shadowed": 0.365,
+      "ssr-resolve": 0.707,
+      "tonemap": 0.034
+    },
+    "zones": {
+      "sim.pre": 0.000,
+      "sim.schedule": 0.000,
+      "sim.transforms": 0.000,
+      "sim.post": 0.000,
+      "sim.publish": 0.000,
+      "sim.tick": 0.001,
+      "frame.declare": 0.005,
+      "frame.execute": 0.026,
+      "frame.submit": 2.565
+    }
+  },
+  "ledger": {
+    "frames.measured": 600,
+    "ddgi.probes_updated_static": 300,
+    "sdf.stamps_on_break": 3,
+    "shadow.rendered_on_break": 1,
+    "ddgi.fast_tracked_on_break": 60
+  }
+}

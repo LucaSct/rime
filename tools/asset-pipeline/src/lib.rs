@@ -18,6 +18,7 @@ pub mod cooked;
 pub mod fracture;
 pub mod gltf_import;
 pub mod gltf_material;
+pub mod ground;
 pub mod manifest;
 pub mod material;
 pub mod math;
@@ -378,6 +379,75 @@ pub fn cook_fracture(
         }],
         ..Default::default()
     })
+}
+
+/// Cook the ground's material (m17.8b, [ADR-0041](../../../docs/adr/0041-the-visual-bar-m17.md)
+/// Ruling 5): synthesise the three maps, cook each as a texture, and cook a **standalone** material
+/// that references them.
+///
+/// Standalone is the novel part. Every material this pipeline emitted before now belonged to a glTF
+/// mesh and was labelled `<mesh source>#materialN`, because that label was the only anchor the
+/// engine's `resolve_scene_materials` knew how to follow — it walks entities that own a *cooked
+/// mesh* and builds each material label from that mesh's source path. The ground has no cooked
+/// mesh: `rime::ground::derive_mesh` generates its geometry at runtime from an authored
+/// `GroundSurface` extent, which is the whole point of m17.8. So the ground's material needs a
+/// label of its own, and the engine needs to be able to resolve one without a mesh to hang it off.
+///
+/// The `ground:` scheme follows `fracture:` above — a synthetic source label for an asset whose
+/// source is a config rather than a file, so there is nothing for the cook cache to stat.
+pub fn cook_ground(
+    name: &str,
+    out_dir: &Path,
+    block_compress: bool,
+) -> Result<CookOutput, PipelineError> {
+    let maps = ground::generate(ground::DEFAULT_RESOLUTION, ground::DEFAULT_SEED);
+    std::fs::create_dir_all(out_dir)?;
+    let mut out = CookOutput::default();
+
+    // Each map: cook, write, record. The material references these by ID, so the labels only have
+    // to be unique — the engine resolves a material's textures through the manifest's *id* index
+    // (`find_by_id`), never through these strings.
+    let slots: [(&str, &Texture); 3] = [
+        ("albedo", &maps.albedo),
+        ("normal", &maps.normal),
+        ("mr", &maps.metallic_roughness),
+    ];
+    let mut ids = [0u64; 3];
+    for (slot, (suffix, tex)) in slots.iter().enumerate() {
+        let (bytes, id) = tex.cook_with(block_compress);
+        let file = format!("{name}_{suffix}.rtex");
+        std::fs::write(out_dir.join(&file), &bytes)?;
+        out.cooked_files.push(out_dir.join(&file));
+        out.manifest.push(ManifestEntry {
+            source_path: format!("ground:{name}#{suffix}"),
+            kind: "texture",
+            id,
+            cooked_file: file,
+        });
+        ids[slot] = id;
+    }
+
+    // Every factor stays at its glTF default of 1.0 so the textures speak for themselves: final
+    // roughness is `roughness_factor * texture.g` and final metallic `metallic_factor * texture.b`,
+    // so a factor of 1 against a map carrying 0 metallic everywhere yields a dielectric road.
+    let mat = material::Material {
+        base_color_tex: ids[0],
+        normal_tex: ids[1],
+        metallic_roughness_tex: ids[2],
+        ..Default::default()
+    };
+    let (bytes, id) = mat.cook();
+    let file = format!("{name}.rmat");
+    std::fs::write(out_dir.join(&file), &bytes)?;
+    out.cooked_files.push(out_dir.join(&file));
+    out.manifest.push(ManifestEntry {
+        source_path: format!("ground:{name}#material0"),
+        kind: "material",
+        id,
+        cooked_file: file,
+    });
+
+    Ok(out)
 }
 
 /// The kinds of source file the pipeline cooks today. Meshes come from glTF or binary STL (each with

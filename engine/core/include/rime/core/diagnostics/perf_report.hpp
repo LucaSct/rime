@@ -2,12 +2,14 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -106,12 +108,28 @@ struct PassCost {
     double max_ms = 0.0;
 };
 
-// The single worst frame of the run, with its per-pass breakdown — the one frame a human actually
-// wants to look at after a gate fails, because "p99 went up" does not say which pass did it.
+// One named CPU cost inside one frame: a profile zone's total for that frame. Deliberately its
+// own type rather than a reuse of `PassTiming` — a pass is GPU time read from a timestamp pair, a
+// zone is CPU wall time from a stopwatch, and a struct whose name lies about which one it holds is
+// how the two get compared as if they were the same clock.
+struct ZoneTotal {
+    std::string name;
+    double ms = 0.0;
+};
+
+// The single worst frame of the run — the one frame a human actually wants to look at after a gate
+// fails, because "p99 went up" does not say what did it.
+//
+// It carries BOTH breakdowns (m17.3c). It used to carry only `passes`, which meant the frame a
+// reader opens after a failure had its GPU story and none of its CPU one — and since the zone
+// totals are zeroed at every frame boundary, the information was gone by the time anyone asked.
+// Captured before the flush, and only when this frame actually takes the record, so the cost is
+// paid a handful of times per run rather than 600.
 struct WorstFrame {
     std::uint64_t index = 0;
     double ms = 0.0;
     std::vector<PassTiming> passes;
+    std::vector<ZoneTotal> zones; // non-zero zone totals only; a zero explains nothing here
 };
 
 // What must agree before two reports may be compared. See decision 3.
@@ -171,8 +189,80 @@ public:
     // invites a caller to update two of the three.
     void observe_frame(std::uint64_t index, double ms, std::span<const PassTiming> passes = {});
 
+    // Per-pass GPU times for a frame whose wall clock was ALREADY recorded (m17.5).
+    //
+    // `observe_frame` takes its passes alongside the frame because, under `submit_blocking`, both
+    // are known at the same instant. Pipelined they are not: a frame's timestamps become readable
+    // two frames after its wall clock was banked, and handing them to whichever `observe_frame`
+    // happens to be next would put frame N's GPU cost on frame N+2's row — a number that looks
+    // right and is not.
+    //
+    // So this is the same recording keyed by the frame it BELONGS to rather than by "now": the
+    // pass table gets its sample, and the worst frame gets its breakdown if this is that frame.
+    // A frame that never becomes the worst simply contributes to the table, which is all it did
+    // before.
+    void observe_passes(std::uint64_t frame_index, std::span<const PassTiming> passes);
+
     // One sample on any other timeline: "sim_tick", "frame.collapse", "gpu.total".
     void observe(std::string_view timeline, double ms);
+
+    // One CLOSED PROFILE ZONE, which is not the same shape of measurement as `observe` (m17.3b).
+    //
+    // A zone fires once per SCOPE ENTRY, and the scopes that matter run many times per frame: a
+    // frame steps the simulation several times, and each step runs every physics stage. So the
+    // timeline a zone feeds is a distribution over CALLS — `sim.tick p99` is "the 99th-percentile
+    // tick", which is exactly right against ADR-0035's ratified per-tick budget and exactly wrong
+    // for the question M17 has to answer, which is where a FRAME's 35.6 ms went. Multiplying a
+    // per-call percentile by a call count does not give a per-frame percentile.
+    //
+    // So a zone is recorded twice, under two names that cannot be confused:
+    //
+    //   `<name>`            — every call, unchanged, still the ratified per-tick meaning
+    //   `<name>.per_frame`  — the SUM of that zone's calls within one frame, one sample per frame
+    //
+    // The per-frame half is flushed by `observe_frame`, which is the only thing in this class that
+    // knows where a frame ends. A run that never calls `observe_frame` (a pure-sim app) simply
+    // accumulates and never flushes: bounded by the number of distinct zone names, and reported by
+    // nobody, which is the honest outcome for a run that has no frames.
+    void observe_zone(std::string_view name, double ms);
+
+    // ── Accounting: "the parts account for the whole", made checkable (m17.3c) ────────────────
+    //
+    // A frame is attributable only if the named parts add up to it, and nothing in this report
+    // could state that relationship. It also cannot be recovered afterwards from the committed
+    // summaries, for two reasons that are worth knowing before anyone tries: percentiles are not
+    // subadditive in either direction — p99 of a sum is neither the sum of the p99s nor bounded by
+    // it, because the frames that are worst for one part need not be worst for another — and
+    // decision 1 above deliberately makes a mean unrepresentable, so the one summary-level check
+    // that WOULD have been sound is the one this schema refuses to store. The residual therefore
+    // has to be computed per frame, at record time, or never.
+    //
+    //     declare_accounting("frame", {"sim.block", "frame.render"});
+    //
+    // says the frame's wall clock should be explained by those two, and makes `observe_frame`
+    // record `frame.unaccounted = frame − (sim.block + frame.render)` as a timeline of its own,
+    // one sample per frame. Giving the remainder a NAME is the whole point: a name is what a gate
+    // can hold (`at_most("frame.unaccounted", …)`), what a percentile can be taken over, and what
+    // a human reads in `docs/perf/` — where an arithmetic identity nobody evaluates would be a
+    // comment.
+    //
+    // Two rules for children. Each must be recorded BEFORE the `observe_frame` that closes the
+    // frame — a `<zone>.per_frame` total qualifies automatically, since the flush banks it first —
+    // and each must genuinely be nested inside its parent, or the residual is measuring the
+    // difference between two unrelated things. A child that recorded nothing this frame counts
+    // zero and increments `accounting_gaps()`: the residual is then inflated by exactly the
+    // missing part, which fails loudly rather than quietly, and the counter says it happened.
+    //
+    // The residual is NOT clamped at zero. Negative means the declared tree is wrong — a child
+    // that is not inside its parent, or double-counted — and a max() would launder a modelling
+    // error into a tidy zero. `Distribution::min_ms` is where it shows.
+    void declare_accounting(std::string_view parent,
+                            std::initializer_list<std::string_view> children);
+
+    // How many times a declared child contributed nothing because it had no sample for that frame.
+    // Non-zero means every residual above is an overestimate by an unknown amount — read it before
+    // believing a residual, and print it beside them.
+    [[nodiscard]] std::uint64_t accounting_gaps() const noexcept { return accounting_gaps_; }
 
     void set_machine(MachineFingerprint machine) { machine_ = std::move(machine); }
 
@@ -244,7 +334,23 @@ private:
         DurationSamples samples;
         Distribution parsed;
         bool measured = false;
+        // Which frame index last wrote here, for accounting (m17.3c). "Was this recorded during
+        // the frame now closing?" is the exact question, and it is not the same as comparing
+        // sample counts: a zone discovered at frame 50 is one sample short of `frame` forever
+        // afterwards while still being perfectly current.
+        std::uint64_t last_frame = kNeverRecorded;
     };
+
+    static constexpr std::uint64_t kNeverRecorded = ~std::uint64_t{0};
+
+    struct AccountingRule {
+        std::string parent;
+        std::vector<std::string> children;
+        std::string residual_name; // "<parent>.unaccounted", built once at declaration
+    };
+
+    // The value a timeline recorded for the frame now closing, or 0.0 with a counted gap.
+    [[nodiscard]] double value_this_frame(const std::string& name);
 
     struct PassAccumulator {
         std::string name;
@@ -253,9 +359,33 @@ private:
 
     [[nodiscard]] Timeline& timeline_for(std::string_view name);
 
+    // Uniquify a frame's pass names and fold each into the run's per-pass table. Shared by
+    // `observe_frame` and `observe_passes` so the two entry points cannot drift apart on the one
+    // rule that matters here — that a pass name is a key.
+    [[nodiscard]] std::vector<PassTiming> accumulate_passes(std::span<const PassTiming> passes);
+
+    // The in-flight frame's zone totals (m17.3b). `total_ms` accumulates every close of that zone
+    // since the last `observe_frame`; `per_frame_name` is `<name>.per_frame`, built once per name
+    // rather than once per frame so the flush allocates nothing.
+    // A frame in which a known zone never ran records a ZERO, not nothing. "This frame spent no
+    // time in physics.solve" is a true and useful statement — it is how a skipped sim shows up —
+    // and it keeps every per-frame timeline's sample count aligned with `frame`'s, which is the
+    // precondition for ever comparing them frame-for-frame. Zones discovered late carry fewer
+    // samples than `frame`; that asymmetry is visible in `count` rather than hidden.
+    struct ZoneAccumulator {
+        std::string name;
+        std::string per_frame_name;
+        double total_ms = 0.0;
+    };
+
     std::vector<Timeline> timelines_;
-    std::vector<PassAccumulator> pass_acc_; // recording side
-    std::vector<PassCost> parsed_passes_;   // parse side
+    std::vector<PassAccumulator> pass_acc_;  // recording side
+    std::vector<ZoneAccumulator> zone_acc_;  // recording side, flushed per frame
+    std::vector<AccountingRule> accounting_; // recording side, evaluated per frame
+    std::vector<PassCost> parsed_passes_;    // parse side
+    std::uint64_t frames_closed_ = 0;        // how many observe_frame calls have completed
+    std::uint64_t accounting_gaps_ = 0;
+    bool accounting_gap_warned_ = false;
     WorstFrame worst_;
     MachineFingerprint machine_;
     RunInfo run_;
@@ -267,10 +397,22 @@ private:
 // …) reaches the hardware report without any sample writing per-stage plumbing of its own.
 //
 // RAII because installing a zone sink is a global side effect, and one that outlived its report
-// would write into a destroyed object. Two constraints, documented rather than defended against:
-// the collector must outlive every zone that could still fire (today all zones are on the main
-// thread, between `Application` stages), and it must not be nested with another collector — the
-// sink is a single global slot, so the inner one would silently replace the outer.
+// would write into a destroyed object. One constraint is documented rather than defended against —
+// the collector must not be nested with another, since the sink is a single global slot and the
+// inner one would silently replace the outer.
+//
+// THE THREAD CONSTRAINT IS ENFORCED, not documented, because the failure mode is undefined
+// behaviour and the guardrail it violates ("assume a data-parallel world") is one the engine takes
+// seriously. `report_zone` invokes its sink WITH THE LOCK RELEASED, on purpose; `PerfReport` has
+// no synchronization of its own; so a zone closing on a job-system worker would race on the
+// report's vectors and, at the first reallocation, corrupt or crash the very numbers a milestone
+// is deciding from. This collector therefore pins itself to the thread that constructed it and
+// DROPS foreign zones — and counts them, because the rule that runs through this engine is that a
+// skip nobody counted is indistinguishable from work that never happened.
+//
+// The pin itself is race-free by construction: `owner_` is written before `set_zone_sink`, which
+// takes the sink mutex, and a foreign thread can only reach `on_zone` by taking that same mutex to
+// fetch the sink — so the write happens-before every read of it.
 class ZoneTimelines {
 public:
     explicit ZoneTimelines(PerfReport& report);
@@ -285,8 +427,19 @@ public:
     // summarize while the app it measured is still alive.
     void stop();
 
+    // Zones dropped because they closed on a thread other than this collector's. Non-zero means
+    // the report is INCOMPLETE by exactly that many zone closes — read it, print it, and if it is
+    // large the answer is a per-thread sink, not a lock around this one.
+    [[nodiscard]] std::uint64_t foreign_zones() const noexcept {
+        return foreign_.load(std::memory_order_relaxed);
+    }
+
 private:
+    void on_zone(std::string_view name, double ms);
+
     PerfReport* report_;
+    std::thread::id owner_;
+    std::atomic<std::uint64_t> foreign_{0};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -353,8 +506,22 @@ public:
         BaselineStatus baseline = BaselineStatus::NotProvided;
         std::string baseline_note; // why, when `baseline` is not Compared
 
+        // A BASELINE THAT CANNOT BE COMPARED IS A FAILURE, NOT A NOTE (m17.3d, ADR-0041 Ruling 4).
+        //
+        // `FingerprintMismatch` means a committed report EXISTS for this sample and the run was
+        // asked to judge itself against it, and could not — different GPU, driver, resolution,
+        // build or sanitizer. Before this it printed a line and passed on the absolute rules alone,
+        // which quietly disables the regression check exactly when it is most needed: a driver
+        // update is precisely the event that moves performance, and it is the event that turns the
+        // comparison off. ADR-0035's own amendment calls the regression check "where the real
+        // protection lives"; protection that lapses silently is not protection.
+        //
+        // `NotProvided` deliberately still passes. No baseline at all is the honest state of a
+        // first run on a new machine — and of the re-baseline runs that establish one. The
+        // distinction is "nobody asked" versus "asked, and the answer was refused".
         [[nodiscard]] bool ok() const noexcept {
-            return violations.empty() && work_violations.empty();
+            return violations.empty() && work_violations.empty() &&
+                   baseline != BaselineStatus::FingerprintMismatch;
         }
     };
 

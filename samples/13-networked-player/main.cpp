@@ -57,6 +57,7 @@
 #include "rime/ecs/schema_hash.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/ground/bind.hpp"
 #include "rime/gameplay/character.hpp"
 #include "rime/gameplay/components.hpp"
 #include "rime/gameplay/weapon.hpp"
@@ -109,32 +110,33 @@ constexpr std::uint64_t kStopTick = 330; // …then quiesce, which is where exac
 constexpr std::uint64_t kAssetId = 0x5741'4C4Cull; // 'WALL'
 constexpr float kWallZ = -14.0f;                   // well clear of where the tape walks
 
-// The floor is TILED: 10 m per box is a measured GJK limit (a larger box swallows shallow overlaps
-// and reports nothing), not a limit on level size.
-constexpr float kTileHalf = 10.0f;
-constexpr int kTilesPerAxis = 3;
+// The floor is ONE SURFACE (m17.8). It was a 3x3 grid of overlapping 10 m boxes, justified by "10 m
+// per box is a measured GJK limit (a larger box swallows shallow overlaps and reports nothing)".
+// That limit was real at m12.2 and it is GONE: re-measured over 324 configurations — half-extents
+// 10 to 50 m, depths 1 mm to 20 cm, aim points from the box centre out to 99% of the half-extent —
+// with zero misses (see the note in tests/gameplay/character_fixture.hpp). The extent below is the
+// span the nine tiles covered, so the tape walks over exactly the same ground.
+constexpr float kLevelHalf = 29.8f;
 
 // ── Small helpers ────────────────────────────────────────────────────────────────────────────
 
-physics::BodyId add_static_box(physics::PhysicsWorld& w, core::Vec3 half, core::Vec3 pos) {
-    physics::BodyDesc d;
-    d.motion = physics::MotionType::Static;
-    d.shape.type = physics::ShapeType::Box;
-    d.shape.half_extents = half;
-    d.position = pos;
-    return w.create_body(d);
-}
-
-void stand_level(physics::PhysicsWorld& w) {
-    const float pitch = 2.0f * kTileHalf - 0.2f; // overlap, so there is no seam to fall through
-    const int half = kTilesPerAxis / 2;
-    for (int ix = -half; ix <= half; ++ix) {
-        for (int iz = -half; iz <= half; ++iz) {
-            (void)add_static_box(
-                w,
-                {kTileHalf, 0.5f, kTileHalf},
-                {static_cast<float>(ix) * pitch, -0.5f, static_cast<float>(iz) * pitch});
-        }
+// One authored surface, one derived collider. Every peer stands its own level up — that is what
+// lets a client predict standing on something without waiting to be told the floor exists — and the
+// derivation being a pure function is what makes the peers agree about where it is.
+void stand_level(ecs::World& world, physics::PhysicsWorld& physics) {
+    ground::GroundSurface surface;
+    surface.half_x = kLevelHalf;
+    surface.half_z = kLevelHalf;
+    surface.cells_x = 15;
+    surface.cells_z = 15;
+    surface.tile_metres = 4.0f;
+    (void)world.spawn_with(ecs::LocalTransform{}, surface);
+    const ground::BindStats bound = ground::bind_ground(world, physics);
+    if (bound.bound != 1 || bound.scaled_refused != 0) {
+        std::fprintf(stderr,
+                     "13-networked-player: the level did not stand up (%zu bound, %zu refused)\n",
+                     bound.bound,
+                     bound.scaled_refused);
     }
 }
 
@@ -145,6 +147,7 @@ float rest_y(const gameplay::CharacterConfig& c) {
 void register_all(ecs::World& world) {
     ecs::register_transform_components(world);
     physics::register_physics_components(world);
+    ground::register_ground_components(world);
     destruction::register_destruction_components(world);
     gameplay::register_gameplay_components(world);
     gameplay_net::register_gameplay_net_components(world);
@@ -291,7 +294,7 @@ struct Match {
 
     explicit Match(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {
         register_all(world);
-        stand_level(physics);
+        stand_level(world, physics);
         link = &network.add_node(server_endpoint);
 
         net::NetDriver::Config config;
@@ -312,7 +315,8 @@ struct Match {
     ClientPeer& add_client(bool predict, std::uint16_t port, std::uint64_t salt) {
         auto peer = std::make_unique<ClientPeer>();
         register_all(peer->world);
-        stand_level(peer->physics); // the same level, loaded independently — as a game would
+        // the same level, stood up independently — as a game would
+        stand_level(peer->world, peer->physics);
         peer->predict = predict;
 
         const net::Endpoint endpoint{0x7F000001u, port};

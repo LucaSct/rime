@@ -515,3 +515,71 @@ TEST_CASE("m16.8: a save never writes derived components back into the authored 
     CHECK(scene::save_scene_to_string(dst, &second_excluded) == text);
     CHECK(second_excluded == 0); // nothing derived survived the load to be excluded again
 }
+
+TEST_CASE("m17.0: a scene carries its own weather — every Sky field round-trips") {
+    // The Sky component's whole justification (ADR-0040 §3) is that a `.rscene` owns its weather
+    // rather than the host owning it. That claim is only true if the component actually survives a
+    // save, and the way it silently would not is specific: the writer and reader walk the
+    // RIME_REFLECT block, NOT the struct, and the schema hash comes from that block too. A field
+    // added to `struct Sky` but forgotten in the reflect list therefore changes no hash, breaks no
+    // test that checks the hash, and simply comes back as its DEFAULT.
+    //
+    // So every field here is set to something that is not its default — including `clouds = false`,
+    // the bool whose wrong value looks exactly like an absent one. A dropped field fails this case
+    // on that field alone, which is what makes it a proof rather than a smoke test.
+    ecs::World src;
+    ecs::register_transform_components(src);
+    render::register_render_components(src);
+
+    render::Sky authored{};
+    authored.zenith_r = 0.11f;
+    authored.zenith_g = 0.22f;
+    authored.zenith_b = 0.33f;
+    authored.horizon_r = 0.44f;
+    authored.horizon_g = 0.55f;
+    authored.horizon_b = 0.77f;
+    authored.intensity = 2.5f;
+    authored.sun_angular_radius = 0.031f;
+    authored.cloud_coverage = 0.8125f;
+    authored.cloud_density = 1.75f;
+    authored.cloud_altitude = 950.0f;
+    authored.cloud_scale = 0.00125f;
+    authored.cloud_sharpness = 0.5f;
+    authored.wind_x = 3.5f;
+    authored.wind_z = -2.25f;
+    authored.clouds = false;
+    (void)src.spawn_with(authored);
+
+    const std::string text = scene::save_scene_to_string(src);
+    CHECK(text.find("rime::render::Sky") != std::string::npos);
+
+    ecs::World dst;
+    ecs::register_transform_components(dst);
+    render::register_render_components(dst);
+    const scene::LoadReport r = scene::load_scene_from_string(dst, text);
+    REQUIRE(r.ok);
+
+    int skies = 0;
+    dst.query<render::Sky>().for_each([&](ecs::Entity, render::Sky& s) {
+        ++skies;
+        CHECK(s.zenith_r == 0.11f);
+        CHECK(s.zenith_g == 0.22f);
+        CHECK(s.zenith_b == 0.33f);
+        CHECK(s.horizon_r == 0.44f);
+        CHECK(s.horizon_g == 0.55f);
+        CHECK(s.horizon_b == 0.77f);
+        CHECK(s.intensity == 2.5f);
+        CHECK(s.sun_angular_radius == 0.031f);
+        CHECK(s.cloud_coverage == 0.8125f);
+        CHECK(s.cloud_density == 1.75f);
+        CHECK(s.cloud_altitude == 950.0f);
+        CHECK(s.cloud_scale == 0.00125f);
+        CHECK(s.cloud_sharpness == 0.5f);
+        CHECK(s.wind_x == 3.5f);
+        CHECK(s.wind_z == -2.25f);
+        CHECK(s.clouds == false);
+    });
+    // Exactly one, matching the renderer's first-one-wins rule: a scene with two skies is an
+    // authoring mistake the format has no reason to invent on load.
+    CHECK(skies == 1);
+}

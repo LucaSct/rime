@@ -16,6 +16,7 @@
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/ground/surface.hpp"
 #include "rime/render/components.hpp"
 
 namespace rime::blockkit {
@@ -213,6 +214,10 @@ BlockStats assemble(ecs::World& world, const BlockParams& p) {
     register_blockkit_components(world);
     destruction::register_destruction_components(world);
     render::register_render_components(world);
+    // The street is a `ground::GroundSurface` since m17.8, and an unregistered component is not an
+    // error until something asks for it — a strict scene load asks, which is exactly how this was
+    // caught rather than shipped.
+    ground::register_ground_components(world);
 
     BlockStats stats;
     stats.buildings = p.building_count();
@@ -315,14 +320,41 @@ BlockStats assemble(ecs::World& world, const BlockParams& p) {
     // ── The street surface ───────────────────────────────────────────────────────────────────────
     const float length = p.street_length();
     {
-        // A unit plane scaled out past the block on every side, so the ground never ends inside
-        // the frame. Scaling here rather than baking a sized mesh keeps the street's dimensions
-        // out of the palette (palette.hpp's unit-primitive note).
+        // THE GROUND, and it now has an OWNER (m17.8, ADR-0041 Ruling 5). This used to be a unit
+        // plane carrying its size in `t.scale`, with the matching collider hand-authored in the
+        // sample and a third extent inside the SDF proxy — three numbers derived from three
+        // formulas, no two of which agreed. `ground::GroundSurface` is the authored description;
+        // the collider and the GI proxy are derived from it, so they cannot drift again.
+        //
+        // THE SCALE STAYS 1 and the size lives in the component, which is the whole point: a
+        // physics body cannot be scaled, so a surface whose extent hid in its transform was a
+        // surface whose collider could not be derived. That trick is what made this a bug.
         const float span = length + 4.0f * p.footprint;
         core::Transform t;
         t.translation = {length * 0.5f, 0.0f, 0.0f};
-        t.scale = {span, 1.0f, span};
-        spawn_prop(t, SlabRole{kNoBuilding, 0, slab_kind::kStreet, 0});
+        ground::GroundSurface surface;
+        surface.half_x = span * 0.5f;
+        surface.half_z = span * 0.5f;
+        // One cell per four metres. Flat geometry gains nothing visually from tessellation; it is
+        // here because a flat grid IS a heightfield of zero heights (so M18 changes `derive_mesh`
+        // and nothing else) and because it makes the cost of a tessellated ground a number the
+        // perf run measures today rather than discovers later. 19x19 quads on the default block.
+        surface.cells_x = static_cast<std::uint32_t>(std::max(1.0f, std::round(span / 4.0f)));
+        surface.cells_z = surface.cells_x;
+        surface.tile_metres = 4.0f;
+        surface.thickness = 1.0f;
+        const ecs::Entity street = world.spawn_with(
+            LocalTransform{t}, surface, SlabRole{kNoBuilding, 0, slab_kind::kStreet, 0});
+        // WHAT THE STREET WEARS, as authored data (m17.8b). A content id is the one kind of
+        // material reference that is safe to put in a scene file — it names cooked bytes, not a
+        // registry slot — so unlike every other look in the block it rides the `.rscene` rather
+        // than being derived from the role at load. Only when it was supplied: a block assembled
+        // without its material cook is byte-identical to the block before this existed.
+        if (p.ground_material != 0) {
+            (void)world.add_component(street, render::MaterialAsset{p.ground_material});
+        }
+        ++stats.entities;
+        ++stats.props;
     }
 
     // Kerbs: low strips just inside the building line, so rubble that reaches the road has an edge
@@ -421,6 +453,22 @@ BlockStats assemble(ecs::World& world, const BlockParams& p) {
     }
 
     return stats;
+}
+
+std::uint64_t ground_material_id(const assets::Manifest& manifest) noexcept {
+    for (const assets::ManifestEntry& e : manifest.entries()) {
+        // Kind first: the same cook emits `ground:street#albedo`, `#normal` and `#mr` as TEXTURES,
+        // and those three share every part of the label but the suffix. Comparing the kind before
+        // the string means a mistyped suffix yields nothing rather than a texture id silently
+        // standing in for a material.
+        if (e.kind != assets::AssetKind::Material) {
+            continue;
+        }
+        if (e.source_path == kGroundMaterialLabel) {
+            return e.id.value;
+        }
+    }
+    return 0;
 }
 
 } // namespace rime::blockkit

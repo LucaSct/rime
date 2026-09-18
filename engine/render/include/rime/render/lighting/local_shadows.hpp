@@ -145,8 +145,6 @@ private:
 
     rhi::Device& device_;
     rhi::SamplerHandle compare_sampler_; // sampler2DArrayShadow: LessEqual hardware PCF
-    rhi::BufferHandle spot_vp_ubo_;      // kMaxLocalShadows × 256-byte light view_proj slices
-    rhi::BufferHandle local_ubo_;        // GpuLocalShadows for the forward pass
     rhi::TextureHandle depth_array_{};   // the persistent per-spot depth array (lazy)
     rhi::ResourceState array_state_ = rhi::ResourceState::Undefined; // carried across frames
     std::uint32_t resolution_ = 0; // the array's per-layer size once created

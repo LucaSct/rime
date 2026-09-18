@@ -186,6 +186,7 @@ public:
         // buffer yet, and leaving the write set out keeps the "who produced this?" question
         // answerable by looking only at compute passes.
         std::span<const RGBuffer> buffer_reads = {};
+        bool fold_repeats = false; // see ComputePassDesc::fold_repeats
     };
 
     void add_raster_pass(std::string_view name, const RasterPassDesc& desc, ExecuteFn fn);
@@ -196,6 +197,23 @@ public:
         std::span<const RGTexture> storage_write = {}; // imageStore (or both) — the write set
         std::span<const RGBuffer> buffer_reads = {};   // storage buffers read (m10.3)
         std::span<const RGBuffer> buffer_writes = {};  // storage buffers written — the write set
+
+        // THE ONE DECLARED EXCEPTION TO "A PASS NAME IS AN IDENTITY" (m17.3c).
+        //
+        // m17.3a's rule is that two passes in one frame may not share a name, and the graph
+        // uniquifies any collision to `name#1`. That rule assumes the repeats are DISTINGUISHABLE —
+        // cascade 2 is a different thing from cascade 3, so each gets a name. Some repeats are not:
+        // the SDF clipmap stamps every dirty instance into a level with the same shader, the same
+        // pipeline and the same target, and how many arrive depends on what the player just broke.
+        // There, the k-th stamp is not a stable identity across frames, so `#1` would key a
+        // distribution on nothing more than queue position.
+        //
+        // Setting this says "this name is declared several times per frame ON PURPOSE, and the
+        // honest measurement is their SUM". The graph then leaves the name alone and
+        // `resolve_timings` reports one entry carrying the total. It is opt-in because the default
+        // must stay the strict rule: a repeat nobody declared is a bug, and folding by default is
+        // exactly the silent merge the 2026-08-30 baseline's four `depth-prepass` keys were.
+        bool fold_repeats = false;
     };
 
     void add_compute_pass(std::string_view name, const ComputePassDesc& desc, ExecuteFn fn);
@@ -222,12 +240,110 @@ public:
     // Per-pass GPU time, readable once the submission execute() recorded into has completed
     // (e.g. after submit_blocking returns). Empty when the device cannot timestamp. Names point
     // into the graph — consume before reset().
+    //
+    // NAMES ARE UNIQUE in the returned list: the graph uniquified collisions at declaration, and
+    // passes that declared `fold_repeats` are summed into one entry here. A consumer may therefore
+    // treat a name as a key — which `PerfReport` and the committed JSON both do.
     struct PassTiming {
-        std::string_view name;
+        // OWNED (m17.5), where it used to be a `string_view` into the graph with a "consume before
+        // reset()" caveat attached. A pipelined frame's timestamps are read two frames after the
+        // graph moved on, so a view into the graph is a dangling read by construction — and the
+        // three samples that consume this all copied to a string immediately anyway.
+        std::string name;
         double gpu_ms = 0.0;
     };
 
     [[nodiscard]] std::vector<PassTiming> resolve_timings(rhi::CommandBuffer& cmd) const;
+
+    // A frame's timing SHAPE, taken at submit and resolved after the GPU catches up (m17.5).
+    //
+    // The pipelined loop's answer to a problem the blocking one never had: by the time frame N's
+    // fence signals, the graph holds frame N+2's passes, so "which pass is timing slot 3" is a
+    // question only frame N can answer and only while it is still the current frame. Snapshot the
+    // answer at submit; pair it with the timestamps later.
+    struct TimingPlan {
+        std::vector<std::string> names; // one per timed pass, in timing-slot order
+        std::vector<char> fold;         // did that pass declare fold_repeats
+        std::uint32_t timed = 0;
+    };
+
+    [[nodiscard]] TimingPlan timing_plan() const;
+
+    // Resolve a plan against the command buffer that produced it — which the caller must have
+    // borrowed (`Device::wait_and_borrow`), since a reclaimed submission has already freed the
+    // query pool these numbers live in.
+    [[nodiscard]] static std::vector<PassTiming> resolve_timings(const TimingPlan& plan,
+                                                                 rhi::CommandBuffer& cmd);
+
+    // ── Per-frame CPU→GPU scratch (m17.4) ─────────────────────────────────────────────────
+    //
+    // THE ONE HAZARD THAT PIPELINING CANNOT ORDER FOR YOU. Submissions on the graphics queue are
+    // GPU work, and GPU work is ordered against GPU work by barriers and submission order. A CPU
+    // write to host-visible memory is not on the queue at all: when the loop stops waiting for the
+    // GPU, frame N+1's `write_buffer` into a system's own uniform buffer lands while frame N is
+    // still reading it, and the frame renders with next frame's numbers. `submit_blocking` hid
+    // this completely — it is the reason all seven lighting systems could own fourteen unringed
+    // host-visible buffers for a milestone and nothing ever looked wrong.
+    //
+    // The fix is a ring, and it lives HERE rather than fourteen times over in the systems. m16.1
+    // gave `SceneRenderer` its own ring and the invariant behind it is subtle enough — "grow only
+    // the slot the ring has come back round to, because its previous submission has been waited
+    // on" — that copying it into every system is how one copy ends up subtly wrong. The graph is
+    // already the owner of per-frame resource knowledge (it owns the transient caches and it owns
+    // `reset()`, which IS the frame boundary), so a per-frame allocator belongs beside them.
+    //
+    // Transients deliberately do NOT need this: they are GPU-only, so the barriers the graph
+    // already emits and the queue's own ordering cover them. Only the CPU-written ones are exposed.
+    struct FrameSlice {
+        rhi::BufferHandle buffer;
+        std::uint32_t offset = 0;
+        // Carried so a consumer can bind the slice without knowing the producing system's struct.
+        // It also matters for correctness: binding with size 0 means "to the end of the buffer",
+        // which on a shared block is both wrong in intent and capable of exceeding a device's
+        // maxUniformBufferRange.
+        std::uint32_t size = 0;
+    };
+
+    // Ring depth, as the swapchain's rule: one more slot than the frames the backend keeps in
+    // flight, so the slot being written is never one the GPU can still be reading. Call once,
+    // before the first frame — it destroys and rebuilds the ring, which is only legal while
+    // nothing is in flight. The default (3 slots) is safe for every path the engine has today,
+    // including a blocking one that needs only 1.
+    void set_frames_in_flight(std::uint32_t frames);
+
+    [[nodiscard]] std::uint32_t frame_slot_count() const noexcept {
+        return static_cast<std::uint32_t>(frame_slots_.size());
+    }
+
+    // Copy `bytes` of `data` into this frame's scratch and say where it landed. The slice is valid
+    // until this frame's GPU work completes, and its memory is not handed out again until the ring
+    // returns to this slot. Offsets are 256-byte aligned — the universal uniform-offset alignment
+    // this engine already assumes everywhere it strides a uniform array — so a slice is always a
+    // legal `bind_uniform_buffer` offset.
+    //
+    // Never invalidates a slice already handed out this frame: a push that does not fit takes a
+    // fresh block rather than growing the current one, because growing means destroying a buffer
+    // that earlier passes in this same frame are still pointing at.
+    [[nodiscard]] FrameSlice push_frame_data(const void* data, std::size_t bytes);
+
+    // The same ring, handing out a WHOLE buffer rather than a slice of a shared one. Needed
+    // because a buffer that enters the graph as an imported `RGBuffer` — the clustered light array
+    // is the one — is addressed by handle alone: `import_buffer` carries no offset, so a slice
+    // cannot be imported. Rather than let that one system grow its own ring and its own copy of
+    // the recycling invariant, the ring serves both shapes.
+    [[nodiscard]] rhi::BufferHandle push_frame_buffer(const void* data, std::size_t bytes);
+
+    // How many bytes this frame has pushed so far — the number a caller would print if it wanted
+    // to size the block, and what the test asserts the ring is actually recycling.
+    [[nodiscard]] std::uint64_t frame_bytes_pushed() const noexcept { return frame_pushed_; }
+
+    // How many passes a frame can time before the timestamp pool runs out — two slots per pass, so
+    // half of `rhi::kMaxTimestamps`. Exposed (m17.3b) because a caller that silently reports fewer
+    // passes than the frame declared is reporting UNATTRIBUTED GPU time as if it were absent, and
+    // `execute()`'s log warning is not in the committed artifact anyone later reads.
+    [[nodiscard]] static constexpr std::uint32_t max_timed_passes() noexcept {
+        return rhi::kMaxTimestamps / 2;
+    }
 
 private:
     // One declared use of one resource: the state the pass needs it in, and whether it writes.
@@ -248,6 +364,7 @@ private:
         std::vector<Access> accesses;
         ExecuteFn fn;
         bool culled = false;
+        bool fold_repeats = false; // this name is declared several times per frame on purpose
     };
 
     // Textures and buffers share ONE resource table (and therefore one index space, one versioning
@@ -295,7 +412,8 @@ private:
         bool in_use = false;
     };
 
-    void add_pass_common(std::string_view name, bool is_raster, ExecuteFn fn);
+    void ensure_frame_ring();
+    void add_pass_common(std::string_view name, bool is_raster, bool fold_repeats, ExecuteFn fn);
     void declare_access(std::uint32_t resource, rhi::ResourceState state, bool write);
     void compile();
     void assign_physicals();
@@ -304,6 +422,34 @@ private:
     std::vector<Pass> passes_;
     std::vector<Resource> resources_;
     std::vector<std::uint32_t> order_; // live passes, execution order (built by compile())
+
+    // One ring slot: a chain of host-visible blocks, filled linearly. A chain rather than one
+    // grown buffer because growth destroys, and destroying mid-frame would pull the memory out
+    // from under slices already handed to earlier passes.
+    struct FrameBlock {
+        rhi::BufferHandle handle{};
+        std::uint64_t size = 0;
+    };
+
+    struct FrameSlot {
+        std::vector<FrameBlock> blocks;
+        std::size_t block = 0;    // which block the next push lands in
+        std::uint64_t offset = 0; // where in that block
+    };
+
+    // Whole-buffer pool, one entry per push per slot. Recreated only when a lap's push needs more
+    // than the entry holds — safe for the same reason the blocks are: the ring has come back
+    // round, so nothing this frame is pointing at it yet.
+    struct FrameBufferPool {
+        std::vector<FrameBlock> buffers;
+        std::size_t next = 0;
+    };
+
+    std::vector<FrameSlot> frame_slots_;
+    std::vector<FrameBufferPool> frame_buffers_;
+    std::uint32_t frame_slot_ = 0;
+    std::uint64_t frame_pushed_ = 0;
+
     std::vector<CachedTexture> cache_;
     std::vector<CachedBuffer> buffer_cache_;
     std::uint32_t timed_passes_ = 0; // how many passes got a timestamp pair this frame

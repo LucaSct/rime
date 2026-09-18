@@ -10,9 +10,11 @@
 #include "rime/render/lighting/sdf_clipmap.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <string_view>
 
 #include "rime/core/diagnostics/log.hpp"
 #include "sdf_compose.comp.spv.h"
@@ -205,8 +207,6 @@ SdfClipmap::~SdfClipmap() {
     }
     device_.destroy(instance_sampler_);
     device_.destroy(placeholder_instance_sdf_);
-    if (compose_ubo_.is_valid())
-        device_.destroy(compose_ubo_);
     device_.destroy(compose_pipeline_);
     device_.destroy(compose_shader_);
 }
@@ -233,23 +233,6 @@ void SdfClipmap::ensure_level_texture(std::uint32_t index) {
     lvl.info.band = kSdfClipmapBandVoxels * voxel_size;
     lvl.texture_state = rhi::ResourceState::Undefined;
     lvl.origin_initialized = false;
-}
-
-void SdfClipmap::ensure_job_capacity(std::uint32_t count) {
-    if (count <= job_capacity_)
-        return;
-    std::uint32_t capacity = std::max<std::uint32_t>(job_capacity_, 8);
-    while (capacity < count)
-        capacity *= 2;
-    if (compose_ubo_.is_valid())
-        device_.destroy(compose_ubo_);
-    rhi::BufferDesc bd{};
-    bd.size = static_cast<std::uint64_t>(capacity) * kComposeStride;
-    bd.usage = rhi::BufferUsage::Uniform;
-    bd.memory = rhi::MemoryUsage::CpuToGpu;
-    bd.debug_name = "sdf-clipmap-compose-jobs";
-    compose_ubo_ = device_.create_buffer(bd);
-    job_capacity_ = capacity;
 }
 
 rhi::TextureHandle SdfClipmap::upload_instance_sdf(const assets::MeshSdfAsset& sdf) const {
@@ -440,7 +423,6 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
     std::uint32_t job_count = 0;
     for (const LevelWork& w : work)
         job_count += 1 + static_cast<std::uint32_t>(w.stampers.size());
-    ensure_job_capacity(job_count);
 
     std::vector<std::byte> staging(static_cast<std::size_t>(job_count) * kComposeStride,
                                    std::byte{0});
@@ -516,8 +498,11 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
         return; // every region clipped away to nothing (float roundoff at a shared boundary) —
                 // nothing was written to `staging`, nothing to declare
 
-    device_.write_buffer(
-        compose_ubo_, staging.data(), static_cast<std::size_t>(slot) * kComposeStride);
+    // This frame's scratch, sized by the push itself — which is why the grow-on-demand job
+    // capacity this file used to carry is gone (m17.4). Each dispatch's 256-byte job is still just
+    // an offset within the one push.
+    const RenderGraph::FrameSlice jobs_slice =
+        graph.push_frame_data(staging.data(), static_cast<std::size_t>(slot) * kComposeStride);
 
     // ── Pass 3: declare the graph passes ───────────────────────────────────────────────────────
     // Import each touched level EXACTLY ONCE this frame; every dispatch against it below reuses
@@ -532,6 +517,30 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
         level_rg[w.level] = graph.import_texture(lvl.info.texture, lvl.texture_state);
     }
 
+    // EACH DISPATCH NAMES THE LEVEL IT TOUCHES, AND THE REPEATS ARE DECLARED (m17.3c).
+    //
+    // Before this, every dispatch in the loop below declared one of two names, so a frame that
+    // dirtied two levels with three instances declared `sdf-clipmap-stamp` four times. m17.3a's
+    // backstop would have minted `sdf-clipmap-stamp#1…#3` and put positional keys — "whichever
+    // stamp came second" — into a committed `docs/perf/` report, which is identity in name only.
+    //
+    // Two halves to the fix, because there are two different multiplicities here. WHICH LEVEL is a
+    // real identity: level 0 is the fine ring around the camera and level 2 the coarse one, they
+    // cost different amounts, and a reader wants them apart — so the level is in the name, exactly
+    // as a cascade names itself. WHICH INSTANCE within a level is not: how many arrive depends on
+    // what the player just broke, and the third stamp of one frame is unrelated to the third of the
+    // next. So the per-level name is declared `fold_repeats`, and the report gets one row per
+    // level carrying the frame's total stamping cost — one sample per frame, a real per-frame
+    // percentile. Fixed tables rather than formatted strings: this runs every frame.
+    static constexpr std::array<std::string_view, kSdfClipmapLevels> kStampLabels{
+        "sdf-clipmap-stamp-L0", "sdf-clipmap-stamp-L1", "sdf-clipmap-stamp-L2"};
+    static constexpr std::array<std::string_view, kSdfClipmapLevels> kClearLabels{
+        "sdf-clipmap-clear-L0", "sdf-clipmap-clear-L1", "sdf-clipmap-clear-L2"};
+    static_assert(kStampLabels.back() != std::string_view{} &&
+                      kClearLabels.back() != std::string_view{},
+                  "raising kSdfClipmapLevels without naming the new level leaves it unnamed, and "
+                  "an empty name collides with the next one");
+
     for (const Dispatch& d : dispatches) {
         const RGTexture rg = level_rg[d.level];
         const rhi::TextureHandle level_texture = levels_[d.level].info.texture;
@@ -541,16 +550,20 @@ void SdfClipmap::add(RenderGraph& graph, core::Vec3 camera_pos) {
         const RGTexture writes[] = {rg};
         RenderGraph::ComputePassDesc desc{};
         desc.storage_write = writes;
-        graph.add_compute_pass(
-            d.is_stamp ? "sdf-clipmap-stamp" : "sdf-clipmap-clear",
-            desc,
-            [this, level_texture, instance_texture, offset, groups](rhi::CommandBuffer& cmd) {
-                cmd.bind_compute_pipeline(compose_pipeline_);
-                cmd.bind_storage_image(0, level_texture);
-                cmd.bind_texture(1, instance_texture, instance_sampler_);
-                cmd.bind_uniform_buffer(2, compose_ubo_, offset, sizeof(GpuComposeJob));
-                cmd.dispatch(groups[0], groups[1], groups[2]);
-            });
+        desc.fold_repeats = true;
+        graph.add_compute_pass(d.is_stamp ? kStampLabels[d.level] : kClearLabels[d.level],
+                               desc,
+                               [this, level_texture, instance_texture, jobs_slice, offset, groups](
+                                   rhi::CommandBuffer& cmd) {
+                                   cmd.bind_compute_pipeline(compose_pipeline_);
+                                   cmd.bind_storage_image(0, level_texture);
+                                   cmd.bind_texture(1, instance_texture, instance_sampler_);
+                                   cmd.bind_uniform_buffer(2,
+                                                           jobs_slice.buffer,
+                                                           jobs_slice.offset + offset,
+                                                           sizeof(GpuComposeJob));
+                                   cmd.dispatch(groups[0], groups[1], groups[2]);
+                               });
     }
 
     for (const LevelWork& w : work)

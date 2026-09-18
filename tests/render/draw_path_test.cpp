@@ -587,3 +587,165 @@ TEST_CASE("m16.5: double-sided draws its back face, and a clamped sampler stops 
     CHECK(frame(false, 3.0f) == frame(true, 3.0f));
     CHECK(frame(false, 3.0f) > 0); // …and the front view is not simply empty
 }
+
+TEST_CASE("m17.8b: a surface with no cooked mesh still gets its cooked material") {
+    // The ground's problem, and the reason ADR-0039's deferral lapsed.
+    //
+    // `resolve_scene_materials` finds a material THROUGH THE MESH THAT OWNS IT: it walks entities
+    // carrying a `MeshAsset`, reads the uploaded submesh table for the slot count, and builds each
+    // label as `<mesh source path>#materialN` (ruling 1). A surface whose mesh is *derived* has no
+    // cooked mesh and therefore no anchor to hang that join off — `ground::derive_mesh` writes the
+    // street's vertices from an authored `GroundSurface` extent, which is the whole point of m17.8.
+    //
+    // ADR-0039 rejected an authored `MaterialAsset{u64}` because the asset browser "would have to
+    // guess `#material0`" — an objection about DERIVING a material from a mesh, which does not
+    // apply to a material referenced in its own right. `render::MaterialAsset` is that reference,
+    // and `resolve_material_assets` is what turns it into the `MaterialRef` the draw path reads.
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the entity-owned material proof");
+        return;
+    }
+
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "rime-m17-8b-entity-material";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    const auto write = [&](const std::string& name, const std::vector<std::byte>& bytes) {
+        std::ofstream f(dir / name, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    };
+
+    constexpr std::uint64_t kMeshId = 0x00c0ffee0000cafeull;
+    constexpr std::uint64_t kMatId = 0x00c0ffee0000aa70ull;
+    constexpr std::uint64_t kTexId = 0x00c0ffee00007e00ull;
+
+    rime_test::TextureFileBuilder tex;
+    write("quad.img0.srgb.rtex", tex.build());
+    rime_test::MaterialFileBuilder mat;
+    mat.base_color_tex = kTexId;
+    mat.metallic_roughness_tex = 0;
+    mat.normal_tex = 0;
+    mat.occlusion_tex = 0;
+    mat.emissive_tex = 0;
+    write("quad.mat0.rmat", mat.build());
+    {
+        const std::filesystem::path src =
+            std::filesystem::path(RIME_ASSETS_FIXTURE_DIR) / "quad.rmesh";
+        std::filesystem::copy_file(src, dir / "quad.rmesh");
+    }
+
+    std::ostringstream mf;
+    mf << "# rime-manifest v1\n"
+       << "quad.gltf\tmesh\t" << std::hex << std::setw(16) << std::setfill('0') << kMeshId
+       << "\tquad.rmesh\n"
+       << "quad.gltf#material0\tmaterial\t" << std::setw(16) << std::setfill('0') << kMatId
+       << "\tquad.mat0.rmat\n"
+       << "quad.gltf#image0.srgb\ttexture\t" << std::setw(16) << std::setfill('0') << kTexId
+       << "\tquad.img0.srgb.rtex\n";
+    const std::optional<assets::Manifest> manifest = assets::Manifest::parse(mf.str());
+    REQUIRE(manifest.has_value());
+
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    GpuAssetBridge bridge(*device, server);
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    bridge.set_mesh_sink(meshes, materials);
+    bridge.set_catalog(*manifest, dir);
+
+    ecs::World world;
+    register_render_components(world);
+    const core::Transform placed{};
+
+    // The derived look a palette would stamp — the flat street `blockkit::build_palette` mints.
+    // Present BEFORE anything resolves, because that is the case that matters: the ground is
+    // dressed by role every time the block re-applies its palette.
+    PbrMaterialDesc flat{};
+    flat.base_color[0] = 0.10f;
+    flat.base_color[1] = 0.10f;
+    flat.base_color[2] = 0.11f;
+    flat.roughness = 0.45f;
+    const MaterialId palette_street = materials.add(flat);
+
+    // The ground: names a cooked material by content id, and carries NO `MeshAsset` at all.
+    const ecs::Entity ground = world.spawn_with(
+        ecs::WorldTransform{placed}, MaterialAsset{kMatId}, MaterialRef{palette_street});
+    // A conventional entity reaching the SAME cooked bytes the other way — through its mesh's
+    // submesh slot. Both paths must land on one registry material; see below.
+    const ecs::Entity meshed = world.spawn_with(ecs::WorldTransform{placed}, MeshAsset{kMeshId});
+
+    const std::size_t rounds = bridge.settle(world, 8);
+    CHECK(rounds > 1); // the chain is still asynchronous; a one-round stub would not converge
+
+    // ── 1. The authored reference won, and it is not the palette's flat street ──
+    const MaterialRef* gref = world.get<MaterialRef>(ground);
+    REQUIRE(gref != nullptr);
+    CHECK(gref->material != palette_street);
+
+    // ── 2. ONE registry material, reached two ways ──
+    // This is the structural half of the proof and the reason `resolve_material` is one function.
+    // If the entity-owned path had grown its own copy of "cooked id → registry material", both
+    // entities would still draw correctly and every other assertion here would pass — while the
+    // scene quietly held two materials, two descriptor sets and two uploads of the same texture.
+    // Comparing the ids is the only form of this check that can fail.
+    const MaterialSet* set = world.get<MaterialSet>(meshed);
+    REQUIRE(set != nullptr);
+    const MaterialSetRegistry* sets = bridge.material_sets();
+    REQUIRE(sets != nullptr);
+    const MaterialId via_mesh = sets->material_for(set->set, 0, kInvalidMaterialId);
+    REQUIRE(via_mesh != kInvalidMaterialId);
+    CHECK(gref->material == via_mesh);
+
+    // ── 3. Its textures are RESIDENT, not the magenta placeholder ──
+    // `is_valid()` alone cannot say this: the placeholder is a perfectly valid handle, which is how
+    // a barrel once shipped rendering solid magenta past a green assertion.
+    const PbrMaterialDesc& desc = materials.get(gref->material);
+    CHECK(desc.base_color_texture.is_valid());
+    CHECK(desc.base_color_texture != bridge.placeholder_texture());
+
+    // ── 4. And the counters agree with the pixels ──
+    // `resolved + steady`, not `resolved`: by the time settle converges the entity is already
+    // wearing the right material, so the last call counts it as steady and resolves nothing.
+    // Asserting on `resolved` alone would fail here for a resolver that worked perfectly.
+    CHECK(bridge.material_asset_stats().resolved + bridge.material_asset_stats().steady >= 1);
+    CHECK(bridge.material_asset_stats().pending == 0);
+    CHECK(bridge.material_asset_stats().unresolved == 0);
+
+    // ── NEGATIVE CONTROL ──
+    // Everything above would pass against a bridge that invented a material from nothing. Same
+    // world shape, same cooked files, NO catalog: the authored reference must resolve to nothing,
+    // the palette's flat street must SURVIVE, and the failure must be counted. A ground that
+    // quietly keeps its old look when the cook is missing is exactly the degradation the block
+    // sample relies on — but it has to be visible, or "the cook did not run" is indistinguishable
+    // from "the cook ran and produced this".
+    {
+        assets::AssetServer bare_server(jobs);
+        GpuAssetBridge bare(*device, bare_server);
+        MeshRegistry bare_meshes(*device);
+        MaterialRegistry bare_materials;
+        bare.set_mesh_sink(bare_meshes, bare_materials);
+        // deliberately no set_catalog
+
+        ecs::World bare_world;
+        register_render_components(bare_world);
+        PbrMaterialDesc bare_flat{};
+        bare_flat.base_color[0] = 0.10f;
+        const MaterialId bare_street = bare_materials.add(bare_flat);
+        const ecs::Entity be = bare_world.spawn_with(
+            ecs::WorldTransform{placed}, MaterialAsset{kMatId}, MaterialRef{bare_street});
+        (void)bare.settle(bare_world, 4);
+
+        REQUIRE(bare_world.get<MaterialRef>(be) != nullptr);
+        CHECK(bare_world.get<MaterialRef>(be)->material == bare_street); // the fallback stands
+        CHECK(bare.material_asset_stats().resolved == 0);
+        CHECK(bare.material_asset_stats().unresolved >= 1); // and it SAYS so
+    }
+
+    std::filesystem::remove_all(dir);
+}

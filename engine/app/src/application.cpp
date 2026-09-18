@@ -112,7 +112,44 @@ void Application::open_window() {
 // still lets every one of those be freed out from under a frame in flight — which the validation
 // layer reports as a wall of "currently in use by VkCommandBuffer", and which is silent corruption
 // without it.
+void Application::set_headless_frames_in_flight(std::uint32_t frames) {
+    // Drain first: shrinking the ring while frames are outstanding would strand their tickets, and
+    // the per-frame rings sized from this number must not be resized under live GPU work either.
+    while (!in_flight_.empty())
+        retire_oldest_frame();
+    headless_in_flight_ = std::max(frames, 1u);
+    if (graph_)
+        graph_->set_frames_in_flight(frames_in_flight());
+}
+
+void Application::retire_oldest_frame() {
+    if (in_flight_.empty())
+        return;
+    InFlightFrame frame = std::move(in_flight_.front());
+    in_flight_.erase(in_flight_.begin());
+    {
+        // The CPU's wait for a frame it submitted N frames ago — and in a loop that is actually
+        // keeping the GPU busy this is near zero, which is the measurement that says the pipeline
+        // is working. Named apart from `frame.submit` because it is a different thing: that zone
+        // was the GPU's whole wall time, this one is only whatever is left of it.
+        RIME_PROFILE_ZONE("frame.retire");
+        rhi::CommandBuffer* cmd = device_->wait_and_borrow(frame.ticket);
+        if (cmd != nullptr && frame_timings_) {
+            // Borrowed, so the query pool is still alive — the only window in which these numbers
+            // exist. See Device::wait_and_borrow.
+            const auto timings = render::RenderGraph::resolve_timings(frame.plan, *cmd);
+            if (!timings.empty())
+                frame_timings_(frame.frame_index, timings);
+        }
+    }
+    device_->release(frame.ticket);
+}
+
 void Application::finish_gpu() {
+    // Retire before idling: a frame still in flight owns a borrowable submission whose timings
+    // nobody has read yet, and `wait_idle` would leave them unreclaimed rather than delivered.
+    while (!in_flight_.empty())
+        retire_oldest_frame();
     if (device_) {
         device_->wait_idle();
     }
@@ -314,7 +351,7 @@ void Application::render_frame(double alpha, double frame_dt) {
             // completed", which is what makes RenderGraph::resolve_timings readable; a present is
             // pipelined and has not completed when it returns, so calling it would hand the perf
             // report timestamps from a frame still in flight. Silence beats plausible numbers.
-        } else {
+        } else if (headless_in_flight_ <= 1) {
             {
                 // Blocking, so this zone is the GPU's wall time as the CPU experiences it — the
                 // honest number for a headless run, and the reason a `frame` timeline built from it
@@ -327,6 +364,29 @@ void Application::render_frame(double alpha, double frame_dt) {
             if (post_submit_) {
                 post_submit_(*graph_, *cmd);
             }
+            if (frame_timings_) {
+                const auto timings = graph_->resolve_timings(*cmd);
+                if (!timings.empty())
+                    frame_timings_(frame_index_, timings);
+            }
+        } else {
+            // THE PIPELINED HEADLESS PATH (m17.5). The submission does not wait, so the CPU walks
+            // straight into the next frame's simulation while this one's GPU work runs — which is
+            // the whole point, and the reason `frame.submit` is not the zone here: nothing is
+            // being waited for. The wait moved to `retire_oldest_frame`, on its own timeline,
+            // where it belongs.
+            //
+            // Retiring BEFORE submitting rather than after is what bounds the ring: at most
+            // `headless_in_flight_` frames are ever outstanding, so the per-frame resources sized
+            // by that number (the graph's scratch ring, the SceneRenderer's uniform ring) are
+            // provably not being written while the GPU reads them.
+            if (in_flight_.size() >= headless_in_flight_)
+                retire_oldest_frame();
+            // The plan must be taken NOW: two frames from now the graph holds someone else's
+            // passes, and "which pass is timing slot 3" is a question only this frame can answer.
+            render::RenderGraph::TimingPlan plan = graph_->timing_plan();
+            const rhi::SubmitTicket ticket = device_->submit(std::move(cmd));
+            in_flight_.push_back(InFlightFrame{ticket, std::move(plan), frame_index_});
         }
     } else {
         // GPU-free: the callback still runs (it might do a CPU capture, drive a headless probe, or

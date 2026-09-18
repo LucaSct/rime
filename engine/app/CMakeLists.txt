@@ -65,7 +65,8 @@ target_include_directories(rime_editorhost_app
 
 target_link_libraries(rime_editorhost_app
     PUBLIC rime::ecs
-    PRIVATE rime::editorhost rime::scene rime::assets rime::app rime::physics rime::render
+    PRIVATE rime::editorhost rime::scene rime::assets rime::app rime::physics rime::ground
+            rime::render
             rime::rhi rime::stream rime::platform rime::core fmt::fmt)
 
 rime_apply_common_target_options(rime_editorhost_app)
