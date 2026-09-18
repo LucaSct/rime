@@ -641,7 +641,10 @@ Every number scoping m17.6 in the ladder above was measured on a GPU the driver 
 | `forward-pbr shadowed` max | 4.051 | 0.664 |
 
 All twelve GPU passes together are **1.841 ms at p50 and 2.407 ms at max against a 16.600 ms
-budget — 8% of the frame.** There is no GPU budget breach to close, and there never was one on a
+budget — 11% of the frame at p50 (1.841 / 16.600), 14% at max.** [Corrected 2026-09-17: the prior
+text said "8%", which does not follow from the 1.841/16.600 figures stated in the same sentence —
+an arithmetic slip, not a re-measurement; the 1.841 and 2.407 ms figures themselves are unchanged
+and are not in question.] There is no GPU budget breach to close, and there never was one on a
 machine whose clocks were pinned; m17.3d's guard is what made that visible.
 
 **m17.6 is therefore re-pointed from cost to correctness.** Its brick is no longer "reduce the GPU
@@ -666,9 +669,9 @@ light against a floor that cannot show what the light does.
 
 The dependency Ruling 5 asserted also now resolves the other way round: it said a textured ground
 "may not precede m17.5 and m17.6" because it *adds* cost. m17.5 is closed with 7.9 ms of headroom on
-the gated frame and the GPU at 8% of it, so Ruling 1's test is passed and the ground brick is
-unblocked. m17.7's scope — minimal analytic radiance versus the full four-LUT model — is deferred
-with it and decided against a ground worth judging.
+the gated frame and the GPU at 11% of it (§ above, corrected 2026-09-17), so Ruling 1's test is
+passed and the ground brick is unblocked. m17.7's scope — minimal analytic radiance versus the full
+four-LUT model — is deferred with it and decided against a ground worth judging.
 
 ### Consequences for the ladder
 
