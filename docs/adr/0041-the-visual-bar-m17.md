@@ -897,3 +897,199 @@ The committed baseline for this brick is filed by its own `--commit` run on the 
 than on a dirty tree, the convention every report here but `2026-08-30` follows. The A/B above stands
 on its own regardless: six runs, one workload, both guards green, and the arms proved apart by a
 counter rather than by recollection.
+
+## Amendment (2026-09-17, m17.8b): the table above is superseded — clock pinning is gone, the
+re-take needed a different method
+
+Luca withdrew clock pinning (`-lgc`/`-lmc`, both root-only) between the previous amendment and this
+one: the workstation is now genuinely shared, and re-pinning it for every perf run was costing more
+than the milestone could ask for. The table two sections up was taken clock-pinned; it is **not
+reproducible as measured** and the driver script that took it is gone (wiped `/tmp`). This amendment
+does not retract its finding — see below, it confirms the same effect — but the table itself is
+superseded rather than re-typed, per this ADR's own append-only rule.
+
+**Unpinned, the standard `--perf` loop does not separate the arms.** Three independent interleaved
+T/F sessions were run on the unpinned box (`h1`: 8 runs, `h2`: 8 runs, both 2026-09-16 (`h2`'s last
+two completed 2026-09-17, continuing the same series — see the h2-completion note below); `r2`: 8
+runs, 2026-09-17). Taking the adjacent-pair T-F difference on `frame` p50 the same way the withdrawn
+table did:
+
+| session | `frame` p50 A/B median (T−F) | `frame` p50 A/A noise floor (median \|Δ\|) |
+|---|---|---|
+| h1 | −0.276 ms | 1.348–2.124 ms |
+| h2 | +1.934 ms | 2.073–3.387 ms |
+| r2 | +0.984 ms | 0.014–1.599 ms |
+
+The sign is not even consistent across sessions, and the effect is smaller than or comparable to the
+same-arm noise floor in all three. **This is not the ground's material being free — it is the
+unpinned GPU's boost/park behaviour dominating a 0.1 ms effect inside a 15–20 ms frame that also
+carries a full physics step.** A table built from this data would be reporting noise.
+
+**The fix a Fable-designed, Qwen-audited harness proposes: freeze the simulation and force the GPU
+to stay busy.** `--hold N` (a scratch-only patch to `samples/99-the-block/main.cpp`, applied in a
+disposable worktree, never in this tree — see below) appends N render-only frames after the measured
+loop, with the simulation not stepped, so every hold frame re-renders the same post-collapse scene.
+This is what makes the GPU boost at all on this box: the sim-bound `--perf` loop parks it between
+frames, and a park-to-boost transition costs far more than the 0.1 ms this brick is trying to see.
+Full design and its own audit: [`docs/perf/m17.8b-hold/QWEN-ESTIMATOR-VERDICT.md`](../perf/m17.8b-hold/QWEN-ESTIMATOR-VERDICT.md).
+
+**Where the evidence lives.** The raw per-frame data — 24 runs, 13 MB of hold-loop CSVs plus clock
+and contention traces — stays on the reference workstation at `~/rime-perf-harness-m17.8b/`: too big
+for the repository, and outside it by size rather than by accident. What *is* committed, in
+[`docs/perf/m17.8b-hold/`](../perf/m17.8b-hold/), is a per-run summary (`runs.csv`, one row per
+run) from which `pool.py` regenerates every number in this amendment, plus the original drivers and
+analysis scripts verbatim. `docs/perf/`'s own rule (ADR-0035 §2c) is that the numbers live in the
+repo; the summary is how they do without the megabytes.
+
+**The clock-boost filter that harness first shipped with is a collider, but the bias it introduces is
+small enough to ignore, and `r2` confirms that finding on fresh data rather than re-quoting it.**
+Filtering hold frames on a `.clk`-trace boost gate (kept `gr≥1700 ∧ mem≥7000`) selects differently
+by arm — F drops more frames than T, because the flat arm's lighter GPU load lets the card park more
+readily — which is exactly the shape that can bias an estimate. The audit measured how much on
+`h1`/`h2`; `r2` re-measures it independently. This table's estimator is the **difference of per-arm
+medians** (all four T runs against all four F runs), not the adjacent-pair estimator the pooled table
+below uses, which is why its unfiltered `frame_p50` and `submit_p50` do not equal that table's `r2`
+column:
+
+| metric | r2 filtered (clock-gated), median(T) − median(F) | r2 unfiltered (all post-settling frames), median(T) − median(F) |
+|---|---|---|
+| `gpu_sum_p50` | +0.1021 ms | +0.1025 ms |
+| `frame_p50` (hold) | +0.1072 ms | +0.1026 ms |
+| `submit_p50` (hold) | +0.1096 ms | +0.1084 ms |
+| `ssr_p50` | +0.0973 ms | +0.0973 ms |
+
+Filtered and unfiltered agree to within 0.005 ms on every row — the same order-of-magnitude agreement
+the audit found on `h1`/`h2`. **The primary estimator adopted here, per the audit's recommendation, is
+the unfiltered one**: per-run median over all frames after a 100-frame settling skip (no clock
+conditioning, so no collider bias), with the adjacent-pair T-F difference as the effect and adjacent
+same-arm pairs as the empirical noise floor. The clock trace is kept as a per-run diagnostic only —
+no run in any session was boosted by that gate for more than half its hold frames (40–50% across all
+24, `pct_boosted` in `runs.csv`), which is reported, not filtered on; it is the unpinned box's
+ordinary behaviour, not a bad run.
+
+### The re-taken table (hold-loop, render-only, sim frozen)
+
+Three interleaved sessions, all on the unpinned box, all analysed by the same unfiltered estimator.
+Each session's rows are in `runs.csv`; the raw data sits in the named directory under
+`~/rime-perf-harness-m17.8b/` on the reference workstation (see *Where the evidence lives*, above):
+
+| session | order | runs | date | raw data | original analysis |
+|---|---|---|---|---|---|
+| h1 | T F F T T F F T | 8 | 2026-09-16 | `h1/` | `analyze_unfiltered.py h1 100` |
+| h2 | F T T F F T T F | 8 | 2026-09-16 + 2026-09-17 (last 2 runs) | `h2/` | `analyze_unfiltered.py h2 100` |
+| r2 | T F F T T F F T | 8 | 2026-09-17 | `r2/` | `analyze_unfiltered.py r2 100` |
+
+All three sessions ran the identical workload in every run (`draws.submitted` 1834, `parts.alive_end`
+1314) and separate cleanly on `ground.materials_bound` (1 in every T run, 0 in every F run) — the same
+control this ADR's withdrawn table used, still doing its job. `h2` was completed to its full designed
+8-run order (`F T T F F T T F`, matching `h1`'s design mirrored) on 2026-09-17 — see the h2-completion
+note at the end of this amendment for the two added runs' own details.
+
+Per-session and pooled effect (12 adjacent T/F pairs across all three now-complete 8-run sessions)
+against the pooled noise floor (9 adjacent same-arm pairs):
+
+| metric | h1 effect | h2 effect | r2 effect | **pooled effect (n=12)** | **pooled \|noise\| (n=9)** | ratio |
+|---|---|---|---|---|---|---|
+| `gpu_sum_p50` | +0.1087 | +0.1065 | +0.1025 | **+0.1058 ms** | **0.0089 ms** | 11.9× |
+| `frame_p50` (hold) | +0.1150 | +0.1078 | +0.1272 | **+0.1087 ms** | **0.0383 ms** | 2.8× |
+| `submit_p50` (hold) | +0.1089 | +0.1077 | +0.1116 | **+0.1089 ms** | **0.0171 ms** | 6.4× |
+| `ssr_p50` | +0.1009 | +0.0988 | +0.0973 | **+0.0983 ms** | **0.0020 ms** | 48.0× |
+
+Every cell regenerates from the committed summary (`python3 docs/perf/m17.8b-hold/pool.py`). The
+ratios are at full precision. The original `pool_sessions.py` pooled per-pair deltas that had already
+been rounded to four decimals; at this table's precision that moves exactly one cell, `ssr_p50`'s
+ratio, which its saved output (`pooled-analysis.txt`) prints as 49.1×. `pool.py` reproduces that
+output byte-for-byte by replicating the rounding, and says so in its comments.
+
+Every row's pooled effect is a small positive number, consistent across three independently-run
+sessions — within 0.004–0.006 ms of each other on `gpu_sum_p50`, `submit_p50` and `ssr_p50`, and
+within 0.019 ms on the hold loop's `frame_p50` — and at least 2.8× its own noise floor. **This confirms the
+withdrawn table's headline finding — a real, separable ~0.10–0.11 ms GPU cost for the cooked BC7
+ground material — by an independent method, on an unpinned and genuinely shared box, across three
+separate sessions on two different days, not merely by re-quoting the pinned-box number.** (Completing
+`h2` to 8 runs moved the pooled ratios by ≤2 points on every row except `ssr_p50`, whose noise floor
+happened to shrink — see the h2-completion note for the reproduction command; the conclusion is
+unchanged, this is the same effect measured with one more independent pair.)
+
+### The claim this table supports, and the one it does not
+
+**This is a render-only, hold-loop measurement.** The hold frames are produced with the simulation
+frozen in its post-collapse state — no physics step, no collapse, no destruction. It measures the
+GPU pass-time cost of the material under those conditions. It does **not**, by itself, measure the
+cost as it reaches a gameplay frame, which also carries culling variance, frame-pacing and a live
+simulation the hold loop deliberately removes.
+
+The non-hold `--perf` data gathered in the same three sessions was checked for whether it could
+independently support the stronger "reaches the gameplay frame" claim the withdrawn table made. It
+cannot, on this unpinned box: pooling the same adjacent-pair method over `frame` p50 from the
+standard (non-hold) loop across all three now-complete sessions gives a pooled effect of **+0.98 ms**
+against a pooled same-arm noise floor of **1.60 ms** — the purported effect is smaller than the noise
+it would have to be measured against. The same pattern holds for `frame.submit` p50 (effect +0.31 ms,
+noise 0.58 ms) and `frame.render` p50 (effect +0.54 ms, noise 0.99 ms). **The wording is therefore
+scoped to what was actually measured:**
+
+> The hold-loop protocol measures the GPU pass-time cost of the cooked BC7 ground material under
+> render-only conditions (simulation frozen, scene static): approximately **0.11 ms** per frame
+> (`gpu_sum_p50` +0.1058 ms, `frame_p50` +0.1087 ms, pooled over 12 T/F pairs across three sessions),
+> against a same-arm noise floor an order of magnitude smaller for the GPU-side metrics. **This is
+> the material's isolated rendering cost. It is not, on the data gathered so far, shown to reach the
+> gameplay frame** — the non-hold measurement on this unpinned box cannot currently separate a
+> ~0.1 ms effect from its own noise, which is a statement about this measurement's resolution on a
+> shared, unpinned machine, not a claim that the cost disappears.
+
+This requalifies the withdrawn table's "and it reaches the frame" claim. That claim was made on a
+clock-pinned box where the non-hold frame noise floor was much smaller; unpinned, the same claim is
+not currently supported and is not repeated here. Closing that gap — either by re-pinning for a
+single confirming run, or by a longer non-hold series whose noise floor the pooled 0.1 ms effect can
+clear — is left as an open item, not asserted.
+
+### Methodology notes, so the numbers are not re-derived from a different tree by accident
+
+- **The binary measured is not the tree's own `build/release`.** The `--hold`/`--hold-out` flags are
+  a scratch-only source patch (`docs/perf/m17.8b-hold/patch_hold.py`), applied to a disposable
+  `git worktree` built from this branch's tip *plus* the uncommitted m17.8b brick patch, never to the
+  tracked tree. `r2`'s worktree was built at commit `4a8383a` (this branch's tip at measurement time)
+  with the dirty brick's 22 files applied on top; `h1`/`h2` were built the same way in now-deleted
+  session-scoped worktrees — `h2`'s last 2 runs (2026-09-17) used a freshly rebuilt worktree at the
+  same commit and patch, since the original had not survived (see the h2-completion note). The real
+  `build/release/samples/99-the-block/cooked/manifest.txt` was never moved — every run reads a
+  `cooked_T`/`cooked_F` directory **copy**.
+- **Every run's identical `draws.submitted`/`parts.alive_end`** is what makes the pairing valid: three
+  sessions, twenty-four runs (12 T, 12 F), one workload — the withdrawn table's own guard against a
+  run silently measuring less, still holding.
+- **`ground.materials_bound` separates every run correctly** (1 for all 12 T runs, 0 for all 12 F
+  runs across h1+h2+r2) — the toggle did not silently stop working in any of the three sessions.
+- **This sample always exits 1** on the perf gate (`frame`/`sim.block` breach the ratified budget
+  regardless of arm) — every run above exited 1, and that is expected, not a failure of the run.
+
+### h2 completion note (2026-09-17)
+
+`h2` was left at 6 of its designed 8 runs (`F T T F F T`) when the 2026-09-16 series stopped — a
+fresh `r2` series was judged higher value at the time. The 2 remaining runs were taken on 2026-09-17
+to complete `h2`'s original design (`F T T F F T T F`, mirroring `h1`'s `T F F T T F F T`), in a
+freshly rebuilt disposable worktree (the original had not survived, like every other worktree from
+2026-09-16 — see the methodology note above):
+
+- `r07-T` — textured arm (raw: `h2/r07-T.{json,clk,cpu,hold.csv,log,meta}` on the workstation;
+  row `h2,r07-T` in `runs.csv`). `ground.materials_bound=1`, `draws.submitted=1834`,
+  `parts.alive_end=1314`, `foreign_max=211`, 43% clock-boosted.
+- `r08-F` — flat arm (raw: `h2/r08-F.*`; row `h2,r08-F`). `ground.materials_bound=0`,
+  `draws.submitted=1834`, `parts.alive_end=1314`, `foreign_max=127`, 45% clock-boosted.
+
+Both runs used the same worktree binary, the same `--frames 600 --hold 1500` parameters, and the same
+`cooked_T`/`cooked_F` directory copies (byte-identical to the fresh worktree's own `cooked/` output,
+verified by checksum before use) as every other run in this amendment. The control properties and
+clock-boost percentage are in the same range as the other 22 runs — nothing about these 2 runs looks
+different from the rest of the dataset.
+
+Completing `h2` added one same-arm pair (`r06-T`, `r07-T`) and one T/F pair (`r07-T`, `r08-F`),
+moving the pooled hold-loop numbers from n=11 A/B pairs / n=8 A/A pairs to n=12/9. Every pooled
+number above is the pooling script's output, not a hand-edit of an earlier draft's numbers
+(reproduce: `python3 docs/perf/m17.8b-hold/pool.py`; the original script's saved output is
+`pooled-analysis.txt` beside it). As `pool_sessions.py` computed them, the shift was small:
+`gpu_sum_p50` +0.1065→+0.1058 ms, `frame_p50` +0.1092→+0.1087 ms, `submit_p50` +0.1122→+0.1089 ms,
+`ssr_p50` +0.0983→+0.0983 ms (unchanged to 4 decimals); ratios moved by ≤2 points except `ssr_p50`'s,
+whose pooled noise floor shrank from 0.0036 to 0.0020 ms once the new, very low-noise same-arm pair
+joined the pool, taking that ratio from 27.7× to 49.1× (48.0× at full precision — see the note under
+the table). **None of this changes the amendment's conclusion or its blockquoted claim** — the same
+effect, now measured with one more independent T/F pair.
