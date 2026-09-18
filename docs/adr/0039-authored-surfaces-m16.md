@@ -215,3 +215,59 @@ regimes. This milestone's proof is a cooked asset rendering in two hosts and is 
 visual bar's can only be judged on hardware. Bundling them yields one milestone whose "done when" is
 two sentences joined by "and" — and M16 already carries M13's unmet frame-rate clause, which this
 work would inherit for no reason.
+
+## Amendment (2026-09-07, m17.8b): the authored `MaterialAsset` lands, for the case the objection never covered
+
+This ADR rejected an authored `MaterialAsset{u64}` component. m17.8b adds it. The reversal is
+narrower than it looks, and the difference is worth stating precisely.
+
+**The objection was about deriving a material FROM A MESH.** In full: the asset browser "holds only
+`{source_path, kind, id}` per manifest line and never reads the cooked bytes where `material_slot`
+lives, so it would have to guess `#material0`". Every word of that is still true. It is an argument
+about a material that *belongs to a mesh* — where the right answer depends on a submesh table the
+one UI that would populate the component cannot read.
+
+It says nothing about a material referenced **in its own right**. A standalone cooked `.rmat` has
+its own manifest line, its own content id, and no slot to guess: there is exactly one material and
+naming it is correct by construction. That case did not exist when this ADR was written, because
+nothing cooked a material that did not come from a glTF. `rime ground` does now.
+
+**What forced it.** m17.8 gave the ground an owner whose mesh is *derived* — `ground::derive_mesh`
+writes the street's vertices from an authored `GroundSurface` extent, so the surface can be any size
+without a scale on its transform. That is the brick's whole point, and it costs the ground the only
+anchor `resolve_scene_materials` knows: with no cooked mesh there is no source path, and with no
+source path there is no `#materialN` label. ADR-0041 Ruling 5 requires the ground to have a cooked
+material and calls it "the first thing to use M16's asset path over a large area". Those two
+requirements cannot both hold through the mesh-owned path.
+
+**The safety condition this ADR named still holds, and is now load-bearing.** `MaterialAsset{uint64
+asset}` is structurally identical to `MeshAsset{uint64 asset}`; it is safe only because ADR-0033's
+amendment A2 folds the type *name* into the reflection type hash. That was a note for whoever
+revisited. It is now the thing standing between two components and a silent scene-format collision.
+(One correction to this ADR's own wording while quoting it: `type_info.hpp:131-135` illustrates the
+collision class with `render::MeshAsset` vs `destruction::Destructible`, not with the
+MeshAsset/MaterialAsset pair. A2 fixed the class, so the conclusion is unchanged.)
+
+**What it does NOT buy, which is the half that sounds bigger than it is.** This ADR's rejected
+alternative called the component "overridable per entity, which is eventually wanted". It is not
+that yet. `resolve_draws` (`scene_renderer.cpp`) reads an entity's `MaterialSet` — the `#materialN`
+join a cooked mesh brings with it — before falling back to `MaterialRef`, so on any entity that owns
+a cooked mesh the set still wins and a `MaterialAsset` is inert. The override is real only for
+surfaces with no cooked mesh, which is the ground and the reason it was built. Turning it into a general per-entity override
+means teaching the mesh-owned resolver to yield to it, and that is a separate brick with its own
+question (what should a scene mean when it names both?).
+
+**What came with it.** Resolution is `GpuAssetBridge::resolve_material_assets`, sharing one
+`resolve_material` step with the mesh-owned path so both reach the same registry material for the
+same cooked bytes — asserted directly (`m17.8b: a surface with no cooked mesh still gets its cooked
+material` compares the two `MaterialId`s, the only form of that check that can fail). A resolved
+reference **outranks** a derived look, so anything that dresses by role must skip such an entity;
+blockkit's palette does, and counts the skip, because 99-the-block re-applies its palette on every
+tick that binds new destructibles and a restamp would fight the bridge every frame.
+
+**What this does NOT fix.** Reflection still has no asset-reference field type, so an inspector
+still cannot offer this as a drag target — the debt m15.3 named for `Name` and this ADR named again
+is untouched. The component is populated by an assembly step that reads a cook manifest
+(`blockkit::ground_material_id`), not by a UI. The original objection is therefore **sidestepped for
+engine-populated references, not answered for authored ones**; a material a *person* picks in the
+editor still waits on that field type.

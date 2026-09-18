@@ -2309,7 +2309,13 @@ exists — pinned, all twelve passes are 2.407 ms max against 16.6 — so the br
 correctness plus the cloud layer's unmeasured per-pixel cost and the headroom m17.8 spends into · **m17.7**
 **the sky lights the scene** (ADR-0040 §6) — **moved behind m17.8** (Ruling 7): §6 says it must not
 land "before there is authored content worth judging it against", and the ground IS that content · **m17.8** **the ground becomes a surface**
-— two triangles and a flat colour today · **m17.9** the shadow bar, scoped by numbers that do not
+— two triangles and a flat colour today; **landed in two halves**, `m17.8` the owned surface with
+the collider and GI proxy derived from it (five copies of "the ground" unified, a phantom 6 m ledge
+per side removed), and `m17.8b` the generated cooked material — `rime ground` synthesises a tiling
+asphalt set because the repository holds no texture art, and the ground names it through the new
+authored `render::MaterialAsset` because a derived mesh has no `#materialN` anchor
+([ADR-0039](adr/0039-authored-surfaces-m16.md) and [ADR-0041](adr/0041-the-visual-bar-m17.md) amendments,
+2026-09-07) · **m17.9** the shadow bar, scoped by numbers that do not
 exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: **m17.9 only**
 (amended 2026-09-04 — cutting m17.7 re-defers exactly what ADR-0040 §6 already deferred once, and
 a ground nothing lights well is the worse half-milestone). **Never cut:** m17.3, m17.5, m17.7,

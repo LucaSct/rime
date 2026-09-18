@@ -729,3 +729,168 @@ and `editor_host_app.cpp`'s `build_viewport_scene` keeps a fourth. That is preci
 ADR-0037 built `worldkit` to end, still live in the places worldkit does not reach. Registering the
 new component in each was the small fix; switching them to the profile is the right one, and it is
 its own brick rather than a rider on this one.
+
+## Amendment (2026-09-07, m17.8b): the ground's material is generated, not authored
+
+Ruling 5 asked for "one owned ground surface with a cooked material" and called it "the first thing
+to use M16's asset path over a large area, which is a proof M16 never got". It did not say where the
+material would come from, and the answer turned out to be a decision rather than a lookup.
+
+**There is no texture art in this repository.** The whole of the tree's source art is four
+hand-authored glTF files — `cube`, `sphere`, `rig`, and three test fixtures — and not one image.
+So "the ground gets a cooked material" had three possible readings, and two of them are bad:
+
+1. **A factors-only material.** Cooked, and satisfies the letter. But Ruling 5's argument is that a
+   constant surface makes SSR, DDGI bounce and shadow quality *unjudgeable* — "no normal variation
+   for a reflection to bend around, no albedo for a bounce to tint". A cooked flat colour is the
+   same flat colour with more steps, and would have closed the brick while changing nothing the
+   ruling cared about.
+2. **Commit authored art.** A carrier glTF plus PNGs, cooked through the existing `#materialN`
+   path — the smallest engine change, and the first design tried. It needs images nobody has
+   authored, and a hand-painted tiling asphalt is *worse* than a generated one at the property that
+   actually matters here: whether it wraps.
+3. **Generate it in the cook.** Taken.
+
+`rime ground` (`tools/asset-pipeline/src/ground.rs`) synthesises albedo, normal and
+metallic-roughness from a periodic value-noise height field and cooks them with a standalone
+material. It follows the `fracture:` precedent exactly — the *config is the source*, so there is no
+input file and nothing for the cook cache to stat — and it keeps the ground derived data the
+manifest can regenerate rather than binary art the repository has to carry.
+
+**Wrapping is the property, and it is proved rather than eyeballed.** The ground tiles every
+`tile_metres` (4 m on the block), so a texture that does not wrap does not show *a* seam, it shows a
+grid of dozens across the frame — visibly worse than the flat colour it replaced. Every octave is
+therefore value noise on a lattice wrapped modulo its own period, and `seam_is_invisible` measures
+the step across the wrap against the texture's own largest interior step. Comparing against the
+interior rather than a fixed tolerance is what makes it falsifiable in both directions: it fails for
+a non-wrapping generator at any noise amplitude, and it cannot be passed by making the texture
+flatter. Removing the wrap fails it (seam 10 against interior 5); the other three generator tests
+still pass, which is what says the seam test is testing the seam.
+
+**The mean is deliberately unchanged.** Albedo and roughness are centred on the palette's old flat
+values (`0.10, 0.10, 0.11` at roughness `0.45`). `palette.cpp` records why the road is dark and
+comparatively smooth — "at dusk the road is what carries the lamp highlights, and a matte road at
+this light level is a black hole with buildings floating on it" — and moving the mean would have
+quietly invalidated that tuning together with every lighting number measured against it. This brick
+adds variation; it does not relight the scene.
+
+**The entity-owned reference it needed:** see
+[ADR-0039](0039-authored-surfaces-m16.md)'s m17.8b amendment. The short version is that a derived
+mesh has no cooked mesh to hang a `#materialN` join off, so the ground names its material directly.
+
+### What the brick found: m16.7's BC7 never reached the GPU
+
+The most valuable thing m17.8b produced is not the ground. It is that **the ground was the first
+scene asset ever cooked with `--bc`**, and doing so revealed that block compression had never worked
+end to end.
+
+m16.7 shipped the BC7 encoder, the container support, the reader and an RHI test. What it did not
+ship was the one line joining them: `GpuAssetBridge`'s `to_rhi_format` mapped only `Rgba8Srgb` and
+`Rgba8Unorm`, and answered `RGBA8Unorm` from a `default:` label for the three block formats. So a
+512x512 BC7 texture — 350 KB of blocks — was described to the GPU as a 1 MB RGBA8 image, and
+`write_texture_mips` copied a megabyte out of a 350 KB staging buffer, level after level. The
+validation layer said so ten times per run (`VUID-vkCmdCopyBufferToImage-pRegions-00171`), the
+albedo lost its sRGB decode, and the sampler read whatever followed the staging buffer in host
+memory.
+
+**Every proof stayed green**, including this brick's own. `render: the street wears its COOKED
+material` asserts that the material's base-colour texture is resident and is not the magenta
+placeholder — both true. The upload happened; it just read past its source. This is one level
+deeper than the failure the placeholder check was written for (`valid-is-not-resident`): the handle
+was valid *and* not the placeholder *and* the pixels were garbage. A structural claim about
+residency cannot see a byte-level error, and the only thing that did see it was the validation layer
+writing into a log nobody was reading.
+
+Three things follow, and they are the general lesson rather than the specific fix:
+
+1. **A `default:` label in a format switch is a silent wrong answer waiting for its first caller.**
+   The block cases are now spelled out and `default:` is gone, so a seventh texture format is a
+   compile error rather than a mis-described image.
+2. **A capability shipped without a consumer is a capability that has not been tested.** m16.7's RHI
+   test proved the RHI could create a BC7 texture; nothing proved the asset path could deliver one.
+   The gap survived a milestone.
+3. **Validation-layer output belongs in the pass/fail decision.** The evidence was sitting in
+   `build/dev/Testing/Temporary/LastTest.log` through every green run of this brick.
+
+The device-capability half of ADR-0039's rule is now honoured too: `AdapterInfo::block_compression`
+is checked before a block-compressed upload, and a device without BC gets a warn-once and a named
+counter (`GpuAssetBridge::textures_refused_unsupported`) rather than a silent placeholder, with
+`99-the-block` refusing to start rather than measuring a magenta road.
+
+### What it cost: real on the GPU, and it reaches the frame — Ruling 1 was right
+
+The A/B is unusually clean because the brick shipped its own control: the ground falls back to the
+palette's flat material when no cook is present, so **the same binary, the same scene and the same
+frame** can be run with the cooked material on and off by adding or removing one `manifest.txt`.
+Three interleaved pairs on a clock-pinned RTX 3060, 600 frames each, `parts.alive_end` 1314 and
+`draws.submitted` 1834 in all six runs — an identical workload, not merely a similar one.
+
+**Which arm a report came from is now recorded rather than remembered.** `ground.materials_bound`
+is in the work ledger: 1 in all three textured runs, 0 in all three flat ones. Before it, the only
+evidence of which arm a report belonged to was which file the operator had moved — and a toggle that
+silently stopped working would have published as "the cost is nil", which is the exact shape of the
+wrong answer this section carried in its first draft. The summariser voids the comparison if the
+arms do not separate.
+
+| | flat | textured | delta |
+|---|---|---|---|
+| `frame.submit` p50 | 2.509 | 2.639 | **+5.18%** |
+| `frame.submit` p99 | 2.873 | 3.067 | +6.75% |
+| `frame.render` p50 | 4.215 | 4.337 | **+2.89%** |
+| `frame.render` p99 | 4.616 | 4.769 | **+3.31%** |
+| `frame` p99 | 19.717 | 19.849 | **+0.67%** |
+| `frame.player` p99 | 11.879 | 12.080 | **+1.69%** |
+| `sim.block` p99 | 15.454 | 15.468 | +0.09% |
+
+Median of three per arm. **Bold** marks the rows whose flat and textured ranges do not overlap at
+all — a stronger statement than any percentage, because it does not depend on a noise model. Only
+`frame.submit` p99 and the `sim.block` control overlap.
+
+**The GPU cost is real and separable.** `frame.submit` p50 moves +0.130 ms and `frame.render` p50
++0.122 ms, both with disjoint ranges: about **0.13 ms of GPU time** for three BC7 samples over the
+largest surface in the frame. That is the cost Ruling 1 predicted would exist, and it does.
+
+**And it reaches the frame. An earlier draft of this section said it did not, and that was wrong.**
+`frame` p99 moves +0.132 ms with disjoint ranges — the worst flat run (19.727) is faster than the
+best textured one (19.832). To within a thousandth of a millisecond, the delta on the whole frame is
+the delta on `frame.submit`: the GPU cost passes **through** to the frame rather than being absorbed
+by it. The earlier draft claimed the opposite — "`frame` p99 moves 0.23% and its ranges overlap
+completely… the block is CPU-bound, so 0.14 ms of extra GPU work disappears into it" — and that was
+an artefact of a run measured while another process saturated the CPU. Contention inflates tails, and
+inflated tails swallowed a real 0.13 ms effect. The *mechanism* was wrong, not merely the number, and
+it was wrong in the direction that flattered the brick.
+
+**`sim.block` is the control, and it behaves.** The ground's material cannot touch physics; its p99
+moves +0.09% with overlapping ranges. That is a direct read of the noise floor, and it is why the
+frame-level separation above can be believed.
+
+**So Ruling 1's ordering was correct, and for the reason it gave.** A tessellated, textured ground
+does add cost; it may not precede the budget bricks. What the measurement adds is *where* the cost
+lands — on `frame.submit`, m17.6's budget, not on the simulation — and that it does not stop there.
+`frame.player` carries +0.201 ms of it, which is the number m17.10 should be re-measured against.
+
+**Two methodological notes, because this section went the wrong way twice.**
+
+*The first measurement was taken on a broken configuration.* It said the ground was free
+(`frame.submit` p50 2.526 flat against 2.533 textured), and it was taken while BC7 was being
+uploaded as RGBA8 (see above): the sampler was reading a broken mip chain, which is not the work the
+shipped path does. **A perf result measured on a broken configuration is not conservative, it is
+meaningless** — it happened to under-report here, but it could as easily have over-reported. What
+caught it was reading the validation log, not re-reading the numbers.
+
+*The second was taken on a contended box, and nothing in its exit code said so.* `99-the-block`
+always fails `perf.sh`'s budget gate (`sim.block` p99 ~15 ms against a 6 ms budget), so **every** run
+exits 1 — and a run abandoned for CPU contention also exits 1. The two are distinguishable only by a
+line in the log, and the numbers reached this ADR before anyone read that line. The A/B is now driven
+by a script that checks for the contention marker and refuses to accept a run that filed no report;
+all six runs above are certified by it, and by a clock trace that never left 1785/7501.
+
+The sample remains gated for the reasons this ADR already records, and this brick does not change
+them: `frame` p99 19.849 against 16.600 and `sim.block` p99 15.468 against 6.000, neither of which
+this brick touches. `frame.player` — one machine's share — is 12.080 against the ratified 16.600, and
+still meets it.
+
+The committed baseline for this brick is filed by its own `--commit` run on the brick commit rather
+than on a dirty tree, the convention every report here but `2026-08-30` follows. The A/B above stands
+on its own regardless: six runs, one workload, both guards green, and the arms proved apart by a
+counter rather than by recollection.
