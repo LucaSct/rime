@@ -1093,3 +1093,80 @@ whose pooled noise floor shrank from 0.0036 to 0.0020 ms once the new, very low-
 joined the pool, taking that ratio from 27.7× to 49.1× (48.0× at full precision — see the note under
 the table). **None of this changes the amendment's conclusion or its blockquoted claim** — the same
 effect, now measured with one more independent T/F pair.
+
+## Amendment (2026-09-20, m17.7): Ruling 7's deferred scope, decided — the full Hillaire model, staged
+
+Ruling 7 deferred m17.7's scope on purpose: *"minimal analytic radiance versus the full four-LUT
+model — is deferred with it and decided against a ground worth judging."* m17.8b landed the ground
+and its cooked BC7 material, so the deferral is discharged and the decision is due. **Luca's call:
+the full Hillaire-2020 four-LUT model is the destination, with the sky-view LUT + SH irradiance
+built first as its foundation.**
+
+Recorded plainly, because the decision was taken with the cost in front of it and a later reader
+should see that: [ADR-0040](0040-sky-and-atmosphere.md) §6 calls the Hillaire model "a
+milestone-sized brick" and explicitly does **not** schedule it, and aerial perspective touches every
+lit pixel against a frame whose p99 already misses 16.600 ms unpinned. A published figure for a
+complete atmosphere of this shape — multiple scattering, aerial perspective, dynamic volumetric
+clouds, god rays — is **under 1.5 ms on an RTX 4080**; this workstation is a 3060, so the
+aerial-perspective brick should expect to be arguing for several milliseconds it does not currently
+have. That is why m17.7 is a **ladder of five**, and why the expensive tail is last and separately
+cuttable rather than bundled into one brick that can only be taken whole.
+
+| brick | what lands | cuttable? |
+|---|---|---|
+| **m17.7a** | **shader `#include`** — the enabling brick. `-I` plus a **depfile**, so a shared `.glsl` cannot leave dependent SPIR-V stale | no (blocks everything after) |
+| **m17.7b** | **the sky lights the scene** — a sky-view LUT and SH irradiance, filled by the *existing analytic* sky. All three `ambient_` reads become sky-derived. Delivers the milestone's visual claim on its own | no |
+| **m17.7c** | transmittance + multiple-scattering LUTs — the two view-independent ones | no |
+| **m17.7d** | the sky-view LUT's body becomes physical. Nothing downstream moves — this is m17.7b's payoff | no |
+| **m17.7e** | aerial perspective (the froxel volume) — touches every lit pixel | **yes, first** |
+
+**If the frame cannot afford the whole model, m17.7e is what gets cut**, and the claim lost is "the
+landscape reads as kilometres deep" — not "the sky lights the scene", which m17.7b already owns.
+That separation is the point of the staging.
+
+### Why the ladder gained an enabling brick it did not have when the plan was approved
+
+The plan as approved put shader includes *second*. Writing the SH projection showed that wrong: the
+sky-view mapping — direction ↔ texel and its solid-angle weight — is needed by **both** the LUT-fill
+shader and the SH-projection shader, so the copy-paste hazard the includes brick exists to prevent
+bites one brick earlier than written. `ssr_resolve.frag:52` already records what that costs in this
+repo ("a verbatim COPY of the forward shader's… no shader-include mechanism exists"); `oct_decode`
+has three copies, `fibonacci_direction` three, `ddgi_sample_irradiance` two, `sdf_sample` two.
+ADR-0040 §2's promise — that a physical atmosphere replaces `sky_radiance()`'s **body** "without any
+other file moving" — only holds while there is exactly one body to replace.
+
+The **depfile** is the half that makes includes safe, and omitting it would have been the real
+defect: without it, editing a shared `.glsl` leaves every dependent `.spv` stale while the build
+still reports success, which is the stale-artifact failure this repo already paid for once with a
+stale executable in m15.6.
+
+### One correctness finding, recorded because it would not have looked like a bug
+
+`sky_radiance()` includes the sun's **disc**. The sun already reaches every shaded pixel as the
+world's first `DirectionalLight` — by ADR-0040 §4 the *same* light the sky couples its disc to — so
+feeding that function into ambient, DDGI and SSR would have lit every frame with the sun **twice**,
+with the error growing with the sun's brightness. It would have read as "the new sky lighting is a
+bit strong" and been tuned away rather than fixed.
+
+The split is now named at the seam: `sky_full_radiance()` is the sky you **see** (disc included),
+`sky_lighting_radiance()` is what the scene is **lit by** (disc excluded). The forward-scatter glow
+stays in both, and the distinction is physical — the glow is light the atmosphere scattered *out* of
+the beam, which no directional light accounts for. `sky_radiance(vec3)` keeps its exact signature,
+because it is the seam §2 names. The disc is independently the one term a 192×108 table cannot
+resolve (~0.7° against a ~1.8° texel), which is why Hillaire also keeps it analytic in the final
+pass.
+
+### The descriptor-slot budget, spent deliberately
+
+`passes.cpp:308` recorded that the forward pipeline holds 17 of `rhi::kMaxBindings` = 24 slots, and
+named 18 as the trigger for "a second descriptor set or a bindless table". m17.7b spends the 18th on
+the SH storage buffer and updates that comment rather than doing the refactor: 18 < 24, the refactor
+is milestone-scale, and doing it here would bury the brick's actual claim. The `enabled` flag folds
+into the SH buffer's own payload rather than costing a 19th.
+
+### Consequences for the ladder
+
+- **m17.7's scope is decided** and is no longer a deferred question.
+- The never-cut list gains nothing and loses nothing: m17.7 was already never-cut, and its
+  **m17.7e** sub-brick is the one cuttable piece.
+- m17.9 (the shadow bar) remains the milestone's first cut, ahead of m17.7e.

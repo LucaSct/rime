@@ -2318,7 +2318,15 @@ largest breach on the board · **m17.6** ~~the GPU budget~~ **the GPU passes, re
 exists — pinned, all twelve passes are 2.407 ms max against 16.6 — so the brick is now pass
 correctness plus the cloud layer's unmeasured per-pixel cost and the headroom m17.8 spends into · **m17.7**
 **the sky lights the scene** (ADR-0040 §6) — **moved behind m17.8** (Ruling 7): §6 says it must not
-land "before there is authored content worth judging it against", and the ground IS that content · **m17.8** **the ground becomes a surface**
+land "before there is authored content worth judging it against", and the ground IS that content.
+**Scope decided 2026-09-20** (ADR-0041 amendment): the full Hillaire-2020 four-LUT model is the
+destination, staged as five bricks so the expensive tail is separately cuttable — **m17.7a** shader
+`#include` with a depfile (the enabling brick: one `sky_radiance()` body, and an edited include
+cannot leave stale SPIR-V) · **m17.7b** the sky-view LUT + SH irradiance, filled by the existing
+analytic sky, which is what turns all three `ambient_` reads sky-derived and delivers the visual
+claim on its own · **m17.7c** transmittance + multiple-scattering LUTs · **m17.7d** the sky-view
+LUT's body becomes physical, nothing downstream moving · **m17.7e** aerial perspective, the only
+cuttable one, and the one that touches every lit pixel · **m17.8** **the ground becomes a surface**
 — two triangles and a flat colour today; **landed in two halves**, `m17.8` the owned surface with
 the collider and GI proxy derived from it (five copies of "the ground" unified, a phantom 6 m ledge
 per side removed), and `m17.8b` the generated cooked material — `rime ground` synthesises a tiling
