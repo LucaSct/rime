@@ -236,6 +236,25 @@ Entries are grouped roughly by area and kept short on purpose.
   the frame or belong to rough surfaces, and fades reflections at the screen edge. A screen-space
   *approximation*, not a solution — the reflection of anything off-screen is genuinely absent (the
   probe fallback fills, but does not perfectly reconstruct, the gap). See [math/ssr.md](math/ssr.md).
+- **SH — Spherical harmonics.** The Fourier basis of the sphere: a set of functions you can expand
+  any directional signal in, low orders capturing the smooth part and high orders the detail. Their
+  use in lighting rests on Ramamoorthi & Hanrahan (2001): a Lambertian surface's response is the
+  incoming light convolved with a clamped cosine, and that kernel kills almost everything above
+  order 2 — so **nine** coefficients reproduce the irradiance of *any* environment to about 1%.
+  Rime projects the sky onto those nine (m17.7b) and the forward pass evaluates a quadratic in the
+  surface normal, which is how an entire sky lights a scene for the cost of a few multiply-adds.
+  See [math/sky-lighting.md](math/sky-lighting.md).
+- **Sky-view LUT.** A small table holding the sky's radiance as a function of direction, so a ray
+  that leaves the screen (SSR) or escapes the scene (DDGI) can ask what is out there with one
+  texture fetch instead of re-evaluating the sky. Named for its role in Hillaire's 2020 atmosphere,
+  where it is one of four LUTs; Rime fills the slot analytically first (m17.7b) so the physical
+  model later replaces a shader body rather than a pass. Its elevation axis carries a **square-root
+  warp** that concentrates texels near the horizon, where a sky's detail actually is.
+- **Irradiance vs radiance.** *Radiance* is light arriving along ONE direction — what a ray sees.
+  *Irradiance* is the cosine-weighted integral of radiance over a hemisphere — what a surface
+  receives. The distinction decides data structures: a ray miss wants a directional lookup (a
+  table), a shaded surface wants the integral (the nine coefficients). Rime builds both, from one
+  shared definition of the sky, for exactly this reason.
 - **Barrier / synchronization.** Explicit instructions that make the GPU wait until a
   resource is safe to use. Modern APIs (Vulkan) make these the programmer's job; the
   render graph automates them. Vulkan's modern form is *synchronization2*
