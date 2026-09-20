@@ -42,6 +42,8 @@ rime_add_shaders(rime_render
     shaders/ddgi_blend_visibility.comp
     shaders/ssr_resolve.frag
     shaders/sky.frag
+    shaders/sky_skyview.comp
+    shaders/sky_sh.comp
     shaders/fullscreen.vert
     shaders/tonemap.frag
     shaders/present.frag

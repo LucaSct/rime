@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The sky's irradiance, projected onto second-order spherical harmonics (m17.7b).
+//
+// WHAT PROBLEM THIS SOLVES. The forward pass needs "how much light arrives at a surface facing n",
+// for every n, every pixel. That is a cosine-weighted integral of the sky over a hemisphere, and no
+// frame can afford it per pixel. The classical answer is Ramamoorthi & Hanrahan 2001, "An Efficient
+// Representation for Irradiance Environment Maps": the irradiance of ANY environment is captured to
+// about 1% by just NINE coefficients, because the cosine kernel is a brutal low-pass filter — it
+// annihilates almost everything above order 2. So we integrate once, here, into nine RGB numbers,
+// and the forward shader evaluates a quadratic polynomial in n.
+//
+// WHY A FIBONACCI SPHERE, AND NOT THE LUT'S TEXELS. Integrating over the sky-view LUT would mean
+// weighting every texel by its own solid angle, which under that table's square-root horizon warp
+// is a Jacobian it would be easy to get subtly wrong — and a wrong weight does not look wrong, it
+// just makes the scene quietly too bright or too blue. A spherical Fibonacci set has no such
+// problem: its points are spaced uniformly in y, and by Archimedes' hat-box theorem uniform y on a
+// sphere IS uniform AREA. So every sample carries exactly the same solid angle, 4*pi/N, and the
+// weight is a constant rather than a derivation. Sampling the analytic sky directly also keeps this
+// independent of the LUT's angular resolution.
+//
+// THE SUN IS NOT IN HERE. sky_lighting_radiance() excludes the sun's disc, because the world's
+// DirectionalLight already delivers it to every shaded pixel — see sky_common.glsl.
+//
+// THE UNITS ARE PINNED BY A CHECK YOU CAN DO IN YOUR HEAD. Under a uniform sky of radiance L, only
+// the L0 term survives: c0 = L * Y00 * 4*pi = L * 0.282095 * 4*pi, and the evaluation multiplies by
+// Y00 again, giving L * 0.282095^2 * 4*pi = L * 1.0 = L. So a uniform sky of radiance L produces
+// exactly L, which is precisely what SceneRenderer::ambient_ meant as a constant. The replacement
+// is unit-for-unit, and sky_lighting_test.cpp asserts that number rather than trusting this note.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "sky_common.glsl" // SkyParams (binding 2) + sky_lighting_radiance()
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) writeonly buffer SkySh {
+    // [0..8].xyz — the nine coefficients, ALREADY convolved with the cosine lobe and divided by pi,
+    //              so the forward shader evaluates a plain dot product and is done.
+    // [9].x      — 1.0 when this holds a live sky; the sky-off placeholder is all zeros.
+    vec4 coeff[10];
+}
+out_sh;
+
+const uint kThreads = 64u;
+// 4096 samples for nine smooth coefficients is generous by a wide margin; it costs one dispatch on
+// the frames where the sky actually changed, and buys a quiet integral with no visible sampling
+// noise in the ambient term when the wind moves the clouds.
+const uint kSamples = 4096u;
+const float kPi = 3.14159265358979;
+
+// vec4 rather than vec3: a shared array of vec3 invites padding and bank-conflict surprises across
+// drivers, and 64 * 9 * 16 = 9216 bytes still sits inside the 16 KB every Vulkan device guarantees.
+shared vec4 s_acc[kThreads * 9u];
+
+// Spherical Fibonacci direction i of n — the same formula as ddgi_trace.comp's
+// fibonacci_direction() and ddgi_fibonacci_direction() in lighting/ddgi.cpp. Uniform in y, hence
+// uniform in area, which is the property the constant solid angle above depends on.
+vec3 fibonacci_direction(uint i, uint n) {
+    float golden = kPi * (3.0 - sqrt(5.0));
+    float y = 1.0 - 2.0 * (float(i) + 0.5) / float(n);
+    float r = sqrt(max(0.0, 1.0 - y * y));
+    float theta = golden * float(i);
+    return vec3(cos(theta) * r, y, sin(theta) * r);
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+
+    // The real spherical harmonics through order 2, as polynomials in the direction's components.
+    // Which axis one calls "up" is irrelevant: the basis is orthonormal on the sphere whatever the
+    // labelling, and projection and evaluation here use the SAME polynomials, which is the only
+    // thing that has to be true.
+    vec3 acc[9];
+    for (uint i = 0u; i < 9u; ++i) {
+        acc[i] = vec3(0.0);
+    }
+
+    for (uint k = tid; k < kSamples; k += kThreads) {
+        const vec3 d = fibonacci_direction(k, kSamples);
+        const vec3 L = sky_lighting_radiance(d);
+
+        acc[0] += L * 0.2820948;                            // Y(0, 0)  = 1/(2*sqrt(pi))
+        acc[1] += L * (0.4886025 * d.y);                    // Y(1,-1)
+        acc[2] += L * (0.4886025 * d.z);                    // Y(1, 0)
+        acc[3] += L * (0.4886025 * d.x);                    // Y(1, 1)
+        acc[4] += L * (1.0925484 * d.x * d.y);              // Y(2,-2)
+        acc[5] += L * (1.0925484 * d.y * d.z);              // Y(2,-1)
+        acc[6] += L * (0.3153916 * (3.0 * d.z * d.z - 1.0)); // Y(2, 0)
+        acc[7] += L * (1.0925484 * d.x * d.z);              // Y(2, 1)
+        acc[8] += L * (0.5462742 * (d.x * d.x - d.y * d.y)); // Y(2, 2)
+    }
+
+    for (uint i = 0u; i < 9u; ++i) {
+        s_acc[tid * 9u + i] = vec4(acc[i], 0.0);
+    }
+    barrier();
+
+    // Tree reduction: each step folds the upper half of the active threads into the lower half, so
+    // after log2(64) = 6 steps thread 0 holds the total. The barrier sits OUTSIDE the `if` because
+    // every invocation in the group must reach every barrier — a barrier inside divergent control
+    // flow is undefined behaviour, and the kind that works on one driver and hangs on another.
+    for (uint stride = kThreads / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            for (uint i = 0u; i < 9u; ++i) {
+                s_acc[tid * 9u + i] += s_acc[(tid + stride) * 9u + i];
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        // Every sample carries the same solid angle — see the header.
+        const float dw = 4.0 * kPi / float(kSamples);
+
+        // Ramamoorthi & Hanrahan's cosine-lobe coefficients, A0 = pi, A1 = 2pi/3, A2 = pi/4, each
+        // already divided by the pi that turns irradiance into the outgoing radiance of a Lambertian
+        // surface. Baking both here means the per-pixel path in the forward shader is nine multiply-
+        // adds and nothing else — and it makes the stored numbers directly comparable to the flat
+        // constant they replace.
+        const float a0 = 1.0;           // pi     / pi
+        const float a1 = 2.0 / 3.0;     // (2pi/3)/ pi
+        const float a2 = 0.25;          // (pi/4) / pi
+
+        out_sh.coeff[0] = vec4(s_acc[0].xyz * (dw * a0), 0.0);
+        out_sh.coeff[1] = vec4(s_acc[1].xyz * (dw * a1), 0.0);
+        out_sh.coeff[2] = vec4(s_acc[2].xyz * (dw * a1), 0.0);
+        out_sh.coeff[3] = vec4(s_acc[3].xyz * (dw * a1), 0.0);
+        out_sh.coeff[4] = vec4(s_acc[4].xyz * (dw * a2), 0.0);
+        out_sh.coeff[5] = vec4(s_acc[5].xyz * (dw * a2), 0.0);
+        out_sh.coeff[6] = vec4(s_acc[6].xyz * (dw * a2), 0.0);
+        out_sh.coeff[7] = vec4(s_acc[7].xyz * (dw * a2), 0.0);
+        out_sh.coeff[8] = vec4(s_acc[8].xyz * (dw * a2), 0.0);
+        out_sh.coeff[9] = vec4(1.0, 0.0, 0.0, 0.0); // this buffer holds a live sky
+    }
+}

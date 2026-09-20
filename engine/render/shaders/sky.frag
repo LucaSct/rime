@@ -53,16 +53,7 @@ void main() {
     vec4 far = sky.inv_view_proj * vec4(ndc, 1.0, 1.0);
     vec3 dir = normalize(far.xyz / far.w - sky.camera_pos.xyz);
 
-    vec3 col = sky_radiance(dir);
-
-    vec2 c = clouds(dir);
-    if (c.x > 0.0) {
-        // Cloud colour is white scaled by the sun, shaded by the pseudo-self-shadow term, with a
-        // little of the sky's own colour mixed into the shadowed side so they sit in the air rather
-        // than on top of it.
-        vec3 cloud_col = sky.sun_radiance.rgb * c.y * 0.85 + sky.zenith.rgb * 0.25;
-        col = mix(col, cloud_col, c.x);
-    }
-
-    out_color = vec4(col, 1.0);
+    // The gradient, the sun and the clouds, from the one function the LUT and the SH projection
+    // also evaluate -- so what this pixel shows and what the scene is lit BY cannot drift apart.
+    out_color = vec4(sky_full_radiance(dir), 1.0);
 }

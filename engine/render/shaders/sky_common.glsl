@@ -68,7 +68,20 @@ float fbm(vec2 p) {
 }
 
 // --- the sky itself ------------------------------------------------------------------------------
-vec3 sky_radiance(vec3 dir) {
+// `disc_scale` scales the sun's OWN DISC, and it is 1.0 for the background picture and 0.0 for
+// anything that LIGHTS the scene.
+//
+// This is not a tuning knob, it is a double-counting guard (m17.7b). The sun's direct contribution
+// already reaches every shaded pixel as the world's first DirectionalLight -- which is the same
+// light this sky couples its disc to, by ADR-0040 Section 4. So a sky-derived ambient that also
+// carried the disc would add the sun to the frame a SECOND time, and the brighter the sun the worse
+// the error. The forward-scatter glow below is a different matter and is deliberately KEPT in both:
+// it is light the atmosphere scattered out of the beam, which no DirectionalLight accounts for.
+//
+// The disc is also the one term a 192x108 sky-view LUT cannot represent -- it subtends ~0.7 deg
+// against a ~1.8 deg texel -- so excluding it from the baked path is what the resolution wanted
+// anyway. Hillaire keeps the disc analytic in the final pass for exactly this reason.
+vec3 sky_radiance_ex(vec3 dir, float disc_scale) {
     // Gradient: saturated blue overhead easing to a pale, slightly warm horizon. pow() on the
     // upward component puts the transition where the eye expects it rather than halfway up.
     float up = clamp(dir.y, -1.0, 1.0);
@@ -92,9 +105,14 @@ vec3 sky_radiance(vec3 dir) {
     float ang = acos(mu);
     float r = sky.sun_radiance.a;
     float disc = 1.0 - smoothstep(r * 0.85, r * 1.15, ang);
-    col += sky.sun_radiance.rgb * disc * 12.0;
+    col += sky.sun_radiance.rgb * disc * 12.0 * disc_scale;
 
     return col * sky.zenith.a;
+}
+
+// The seam ADR-0040 Section 2 names, unchanged in signature and meaning: the sky you SEE.
+vec3 sky_radiance(vec3 dir) {
+    return sky_radiance_ex(dir, 1.0);
 }
 
 // Cloud cover along `dir`, returned as (coverage, lit) so the caller can composite.
@@ -119,6 +137,39 @@ vec2 clouds(vec3 dir) {
     float toward_sun = fbm(p + sky.sun_dir.xz * 2.4);
     float lit = clamp(1.15 - (toward_sun - n) * 1.8, 0.35, 1.25);
     return vec2(cov, lit);
+}
+
+// The WHOLE sky along `dir` -- the gradient, the sun, and the cloud layer composited over them.
+//
+// This is the function that answers "what radiance arrives from this direction", and it exists so
+// that the three things which need that answer cannot disagree: the background composite paints it
+// per pixel, the sky-view LUT bakes it for the rays that miss the screen, and the SH projection
+// integrates it into the irradiance the forward pass shades with. Before m17.7b only the composite
+// existed, and the cloud blend below lived inline in sky.frag's main().
+vec3 sky_full_radiance_ex(vec3 dir, float disc_scale) {
+    vec3 col = sky_radiance_ex(dir, disc_scale);
+
+    vec2 c = clouds(dir);
+    if (c.x > 0.0) {
+        // Cloud colour is white scaled by the sun, shaded by the pseudo-self-shadow term, with a
+        // little of the sky's own colour mixed into the shadowed side so they sit in the air rather
+        // than on top of it.
+        vec3 cloud_col = sky.sun_radiance.rgb * c.y * 0.85 + sky.zenith.rgb * 0.25;
+        col = mix(col, cloud_col, c.x);
+    }
+    return col;
+}
+
+// What a pixel of background shows: the whole sky, sun disc included.
+vec3 sky_full_radiance(vec3 dir) {
+    return sky_full_radiance_ex(dir, 1.0);
+}
+
+// What the scene is LIT by from this direction: the same sky with the sun's disc removed, because
+// the DirectionalLight already delivers it. This is what the sky-view LUT bakes and what the SH
+// projection integrates.
+vec3 sky_lighting_radiance(vec3 dir) {
+    return sky_full_radiance_ex(dir, 0.0);
 }
 
 #endif // RIME_SKY_COMMON_GLSL
