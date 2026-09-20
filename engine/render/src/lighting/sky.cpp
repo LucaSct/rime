@@ -388,13 +388,11 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
     // The SH buffer is written here and READ by the forward pass in this same frame (it is in that
     // pass's buffer_reads), so the graph transitions it and it ends in ShaderRead.
     //
-    // The LUT is written here and, for now, read by nobody — the passes that will sample it are
-    // the second half of m17.7b — so it ends in the general layout the compute write left it in.
-    // Claiming ShaderRead here instead produced a real, visible symptom: `texture_barrier 'from'
-    // disagrees with the tracked layout` on every frame after the first, because next frame's
-    // import declared a state the texture was not in. DdgiProbes records StorageReadWrite after
-    // its own blend pass for exactly this reason (ddgi.cpp:606). When SSR and DDGI start sampling
-    // the LUT, this becomes ShaderRead and the warning is how you will know you forgot.
+    // The LUT ends in whatever its compute WRITE left it in — unless a consumer samples it later
+    // this frame, which moves it to ShaderRead. This class cannot see that, so the consumers
+    // report back through note_skyview_state() and SceneRenderer makes the call once both are
+    // declared. Guessing here instead is what produced `texture_barrier 'from' disagrees with the
+    // tracked layout` twice, first when nothing sampled the LUT and again when SSR started to.
     skyview_state_ = rhi::ResourceState::StorageReadWrite;
     sh_state_ = rhi::ResourceState::ShaderRead;
     baked_ = params;

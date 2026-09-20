@@ -124,6 +124,17 @@ public:
     // The persistent LUT, for a test that wants to read back what was baked.
     [[nodiscard]] rhi::TextureHandle skyview_lut() const noexcept { return skyview_lut_; }
 
+    // Tell the sky what state a CONSUMER left the LUT in — the same owner/reporter pair
+    // SdfClipmap::note_level_state exists for, and for the same reason. This class owns the
+    // texture and imports it every frame, but whether it ends the frame in ShaderRead or in the
+    // general layout its own compute write left it in depends on something this class cannot see:
+    // whether SSR or DDGI sampled it. Guessing produced exactly the symptom that comment predicts
+    // — `texture_barrier 'from' disagrees with the tracked layout` from the second frame on. Not a
+    // correctness bug (the backend falls back to its tracked layout and still emits a correct
+    // barrier), but noise that means two systems are guessing at shared state instead of one
+    // owning it.
+    void note_skyview_state(rhi::ResourceState state) noexcept { skyview_state_ = state; }
+
 private:
     // Everything the bake depends on. If none of it moved, the bake did not either -- the
     // cached-parameters test LocalShadowMap uses to decide a shadow slot can be reused.

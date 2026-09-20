@@ -41,6 +41,10 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
         {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
         {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
         {6, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
+        // The baked sky (m17.7b): what a ray leaving the screen reflects, in its own direction
+        // rather than as one flat colour. Always bound (SkyPass::empty_binding's 1x1 dummy when
+        // there is no sky) for the same fixed-layout reason as the DDGI pair above.
+        {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
     };
     rhi::GraphicsPipelineDesc pd{};
     pd.vertex_shader = vertex_shader_;
@@ -77,7 +81,10 @@ void SsrPass::add(RenderGraph& graph,
                   RGTexture ddgi_irradiance,
                   RGTexture ddgi_visibility,
                   RenderGraph::FrameSlice ddgi_params,
-                  rhi::SamplerHandle ddgi_sampler) {
+                  rhi::SamplerHandle ddgi_sampler,
+                  RGTexture skyview_lut,
+                  rhi::SamplerHandle skyview_sampler,
+                  bool sky_enabled) {
     // The inverse projection is what turns a uv + depth back into a view-space position — computed
     // once here, on the CPU, rather than every one of the march's steps re-inverting it on the GPU.
     // inv_view (m10.7c) does the same job for the probe fallback: view space back to the WORLD the
@@ -97,6 +104,9 @@ void SsrPass::add(RenderGraph& graph,
     u.ambient[0] = inputs.ambient[0];
     u.ambient[1] = inputs.ambient[1];
     u.ambient[2] = inputs.ambient[2];
+    // The flag the shader branches on. The flat ambient above stays in the block as the fallback
+    // for a frame with no sky, so turning the sky off returns m10.7b's exact behaviour.
+    u.ambient[3] = sky_enabled ? 1.0f : 0.0f;
     // The graph's per-frame scratch, not a pass-owned buffer — see sky.cpp for why (m17.4).
     const RenderGraph::FrameSlice ubo_slice = graph.push_frame_data(&u, sizeof(u));
 
@@ -108,7 +118,8 @@ void SsrPass::add(RenderGraph& graph,
     // that makes the octahedral border ring do its job, ddgi.md §3), distinct from SSR's own
     // point+clamp; depth/colour must not interpolate, the atlases must.
     const RGColorAttachment colors[] = {{out_hdr, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
-    const RGTexture sampled[] = {scene_color, gbuffer, depth, ddgi_irradiance, ddgi_visibility};
+    const RGTexture sampled[] = {
+        scene_color, gbuffer, depth, ddgi_irradiance, ddgi_visibility, skyview_lut};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.sampled = sampled;
@@ -125,6 +136,8 @@ void SsrPass::add(RenderGraph& graph,
                            ddgi_visibility,
                            ddgi_params,
                            ddgi_sampler,
+                           skyview_lut,
+                           skyview_sampler,
                            &graph](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipe);
                               cmd.bind_texture(0, graph.physical(scene_color), smp);
@@ -135,6 +148,7 @@ void SsrPass::add(RenderGraph& graph,
                               cmd.bind_texture(5, graph.physical(ddgi_visibility), ddgi_sampler);
                               cmd.bind_uniform_buffer(
                                   6, ddgi_params.buffer, ddgi_params.offset, ddgi_params.size);
+                              cmd.bind_texture(7, graph.physical(skyview_lut), skyview_sampler);
                               cmd.draw(3);
                           });
 }

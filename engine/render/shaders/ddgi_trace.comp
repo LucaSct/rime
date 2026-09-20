@@ -13,6 +13,9 @@
 // engine, the same constraint sdf_compose.comp lives with, so every consumer of this math carries
 // its own copy rather than #including one).
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "sky_mapping.glsl" // skyview_uv_from_direction -- shared with the pass that BAKES the LUT
 
 layout(local_size_x = 64) in;
 
@@ -36,7 +39,7 @@ layout(std140, set = 0, binding = 4) uniform DdgiParams {
     uvec4 probes_rays_total;    // x probes_this_update, y rays_per_probe, z total_probes
     vec4 sun_dir_maxdist;       // xyz sun TRAVEL direction, w max trace distance
     vec4 sun_radiance_albedo;   // rgb sun radiance, w grey-world albedo
-    vec4 sky_radiance_pad;      // rgb sky/ambient radiance (a miss), w unused
+    vec4 sky_radiance_pad;      // rgb flat fallback radiance (a miss), w = sky-LUT enabled
 } params;
 
 struct DdgiRay {
@@ -44,6 +47,11 @@ struct DdgiRay {
     vec4 radiance_pad;   // rgb = shaded radiance, w unused
 };
 layout(std430, set = 0, binding = 5) writeonly buffer Rays { DdgiRay r[]; } out_rays;
+
+// The baked sky (m17.7b). A probe ray that escapes the scene used to take one flat constant no
+// matter which way it was pointing, which meant a probe under an open sky and a probe under a dark
+// overhang disagreed about nothing. It now reads the sky in the ray's own direction.
+layout(set = 0, binding = 6) uniform sampler2D skyview_lut;
 
 // ── Sphere-trace helpers (lifted from tests/render/sdf_probe_trace.comp — see that file's own
 // derivation comments for why each piece is shaped this way; not repeated here). ─────────────────
@@ -140,7 +148,9 @@ void main() {
         // Escaped: the sky/ambient term. Not multiplied by albedo — this is not a reflection off
         // a surface, it is literally "the ray flew off into the sky", so it carries the sky's own
         // radiance directly (SceneRenderer's flat ambient constant, until a real sky model exists).
-        radiance = params.sky_radiance_pad.rgb;
+        radiance = params.sky_radiance_pad.w != 0.0
+                       ? texture(skyview_lut, skyview_uv_from_direction(dir)).rgb
+                       : params.sky_radiance_pad.rgb;
         dist_out = max_dist;
     } else {
         vec3 hit_pos = probe_pos + dir * t;

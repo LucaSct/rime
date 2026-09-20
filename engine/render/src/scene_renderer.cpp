@@ -670,7 +670,14 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         ddgi_inputs.sky_radiance[0] = ambient_[0];
         ddgi_inputs.sky_radiance[1] = ambient_[1];
         ddgi_inputs.sky_radiance[2] = ambient_[2];
-        ddgi_binding = ddgi_.add(graph, sdf_clipmap_, camera_pos, ddgi_inputs, lighting_);
+        ddgi_inputs.sky_enabled = sky_on;
+        ddgi_binding = ddgi_.add(graph,
+                                 sdf_clipmap_,
+                                 camera_pos,
+                                 ddgi_inputs,
+                                 lighting_,
+                                 sky_binding.skyview,
+                                 sky_binding.sampler);
     } else {
         ddgi_binding = ddgi_.empty_binding(graph);
     }
@@ -850,9 +857,25 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                  ddgi_binding.irradiance,
                  ddgi_binding.visibility,
                  ddgi_binding.ubo,
-                 ddgi_binding.sampler);
+                 ddgi_binding.sampler,
+                 sky_binding.skyview,
+                 sky_binding.sampler,
+                 sky_on);
         tonemap_src = hdr_ssr;
     }
+
+    // Tell the sky where its LUT ended up (m17.7b). Both readers are declared by now, so this is
+    // the first point that can answer it: a frame where SSR or the DDGI trace sampled the table
+    // leaves it in ShaderRead, and a frame where neither did leaves it in the general layout its
+    // own compute write produced. SkyPass owns the texture but cannot see its readers, so they
+    // report back — the same owner/reporter split SdfClipmap::note_level_state exists for, and
+    // guessing either answer here produces barrier noise on every frame after the first.
+    if (sky_on) {
+        const bool lut_sampled = has_ddgi || (has_ssr && gbuffer.is_valid());
+        sky_.note_skyview_state(lut_sampled ? rhi::ResourceState::ShaderRead
+                                            : rhi::ResourceState::StorageReadWrite);
+    }
+
     tonemap_.add(graph, tonemap_src, ldr);
     graph.export_texture(ldr); // the frame output; hdr is exportable by the caller when needed
     // Report the HDR the tonemap actually consumed as `hdr`: with SSR on that is the resolved,

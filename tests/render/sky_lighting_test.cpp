@@ -357,3 +357,59 @@ TEST_CASE("sky lighting: on the shadowed path, the GATE is what keeps the old am
                                                         << " expected=" << kAlbedo * 0.40f);
     CHECK(floor_on.r == doctest::Approx(kAlbedo * 0.40f).epsilon(0.02));
 }
+
+TEST_CASE(
+    "sky lighting: a reflection that leaves the screen finds the SKY, not a flat colour (m17.7b)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the SSR sky fallback proof");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "skylight-mirror");
+    MaterialRegistry materials;
+    PbrMaterialDesc md{};
+    // A dark, smooth, metallic floor: dark so the ambient term cannot dominate the reading,
+    // smooth so SSR takes the sharp end of its roughness cone, metallic so what it shows is
+    // reflection rather than diffuse.
+    md.base_color[0] = md.base_color[1] = md.base_color[2] = 0.02f;
+    md.metallic = 1.0f;
+    md.roughness = 0.05f;
+    const MaterialId mat = materials.add(md);
+
+    // This case is also what keeps the LUT's resource-state bookkeeping honest. Until SSR sampled
+    // it, the table ended each frame in the general layout its compute write left it in; now that
+    // something reads it, it ends in ShaderRead, and claiming the wrong one produces
+    // `texture_barrier 'from' disagrees with the tracked layout` from the second frame onward.
+    // Several frames are rendered below precisely so that a wrong claim has somewhere to show up.
+    LightingSettings ls;
+    ls.ssr_enabled = true;
+    ls.ssr_max_distance = 8.0f;
+    ls.ssr_thickness = 0.5f;
+    ls.ssr_max_steps = 64;
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_lighting(ls);
+
+    const auto build = [&](ecs::World& w) { build_floor(w, floor, mat); };
+
+    // Two skies whose ZENITH differs — the part of the sky a floor's reflection rays point at.
+    // Most of those rays leave the screen, which is exactly the path that used to return one flat
+    // colour regardless of direction.
+    renderer.set_sky(split_sky({0.9f, 0.05f, 0.05f}, {0.05f, 0.05f, 0.05f}));
+    (void)render_hdr(*device, renderer, build); // warm the bake, then measure a steady frame
+    const Rgb red = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+
+    renderer.set_sky(split_sky({0.05f, 0.05f, 0.9f}, {0.05f, 0.05f, 0.05f}));
+    (void)render_hdr(*device, renderer, build);
+    const Rgb blue = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+
+    MESSAGE("mirror floor — red zenith: r=" << red.r << " b=" << red.b
+                                            << " | blue zenith: r=" << blue.r << " b=" << blue.b);
+    // The reflection carries the sky's colour, and swapping the sky swaps it. A flat fallback
+    // could not do this: it would return the same constant in both frames.
+    CHECK(red.r > red.b);
+    CHECK(blue.b > blue.r);
+}
