@@ -194,25 +194,49 @@ TEST_CASE("sky: fills the background, and leaves every shaded pixel bit-identica
     // sky-on frame must carry through unchanged. Denormals are the one thing that could make an
     // exact fp16 comparison fragile, so the block is required to be genuinely lit first — which
     // also keeps "identical" from being a claim about black.
+    //
+    // CHANGED BY m17.7b, deliberately, and this is the one assertion in the file that moved.
+    // Until m17.7b the claim here was `differing == 0` — every shaded pixel BIT-IDENTICAL with the
+    // sky on. That was the honest claim for a sky that was a background and nothing else, and it
+    // is exactly the property m17.7b overturns on purpose: the sky now also LIGHTS the scene, so
+    // switching it on legitimately changes every lit pixel through the ambient term. Keeping the
+    // old assertion would have meant reverting the feature; loosening it to "roughly equal" would
+    // have thrown away what it was actually protecting.
+    //
+    // What it was protecting is still worth a proof, and it survives in a sharper form: the
+    // composite must not PAINT OVER geometry. So instead of "nothing changed", the claim is now
+    // "everything changed by the SAME FACTOR". The floor is one material with uniform albedo and
+    // no occlusion map, so a pure ambient shift scales every one of its pixels by an identical
+    // ratio. A composite that bled onto geometry could not do that — the sky it would bleed is a
+    // GRADIENT, so the ratio would vary across the block, and the spread below would blow up.
     std::uint32_t compared = 0;
-    std::uint32_t differing = 0;
     float min_lum = 1e30f;
+    float min_ratio = 1e30f;
+    float max_ratio = 0.0f;
     for (std::uint32_t y = kSize * 80 / 100; y < kSize * 95 / 100; ++y) {
         for (std::uint32_t x = kSize * 35 / 100; x < kSize * 65 / 100; ++x) {
             const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 3;
             min_lum = std::min(min_lum, off.luminance(x, y));
             ++compared;
-            if (off.rgb[i] != on.rgb[i] || off.rgb[i + 1] != on.rgb[i + 1] ||
-                off.rgb[i + 2] != on.rgb[i + 2]) {
-                ++differing;
+            // Green: the brightest channel of the test's sky and light, so the least
+            // quantisation-noisy of the three to take a ratio in.
+            if (off.rgb[i + 1] > 1e-3f) {
+                const float ratio = on.rgb[i + 1] / off.rgb[i + 1];
+                min_ratio = std::min(min_ratio, ratio);
+                max_ratio = std::max(max_ratio, ratio);
             }
         }
     }
-    MESSAGE("shaded block: " << compared << " px, min lum=" << min_lum
-                             << ", differing=" << differing);
+    MESSAGE("shaded block: " << compared << " px, min lum=" << min_lum << ", sky-on/sky-off ratio ["
+                             << min_ratio << ", " << max_ratio << "]");
     REQUIRE(compared > 0);
     REQUIRE(min_lum > 1e-3f); // genuinely lit, and far above the fp16 denormal floor
-    CHECK(differing == 0);
+    // The sky DOES light the scene now, so the ratio must not be 1 — otherwise this case would
+    // pass just as happily against a renderer where m17.7b never landed.
+    CHECK(max_ratio > 1.01f);
+    // And it lights it UNIFORMLY across one flat material: the spread is the composite-bleed
+    // detector. fp16 storage is what sets the tolerance, not the technique.
+    CHECK(max_ratio - min_ratio < 0.02f);
 }
 
 TEST_CASE("sky: the sun disc sits where the light comes FROM, not where it travels (m17.0)") {

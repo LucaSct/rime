@@ -2,6 +2,8 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <cstdint>
+
 #include "rime/core/math.hpp"
 #include "rime/render/render_graph.hpp"
 #include "rime/rhi/device.hpp"
@@ -62,6 +64,28 @@ struct SkyInputs {
     rhi::Extent2D extent{};
 };
 
+// What the sky hands to the passes it LIGHTS (m17.7b), as opposed to the frame it paints.
+//
+// Both members are always valid — `empty_binding()` stands in when there is no sky — because the
+// consuming pipelines' descriptor layouts are fixed. Which state we are in is carried INSIDE the
+// data (the SH buffer's tenth vec4 is a flag, and the shaders branch on it), never by a handle
+// being absent. That is the same contract DdgiBinding/ShadowBinding/ClusterBinding already keep,
+// and it is what lets ADR-0032 §11's "off is byte-identical" claim rest on a shader branch rather
+// than on what happens to be bound.
+struct SkyLightBinding {
+    RGTexture skyview;          // the baked sky-view LUT (RGBA16Float), sampled by SSR and DDGI
+    RGBuffer sh;                // ten vec4: nine SH coefficients, then the live flag
+    rhi::SamplerHandle sampler; // linear; wraps in azimuth, clamps in elevation
+};
+
+// How the LUT/SH pair was serviced this frame. CLAUDE.md requires every skip path to carry a
+// counter: a cache that silently stopped refilling looks exactly like a cache that is working, and
+// a proof that cannot see what it skipped still reads as passing.
+struct SkyLightingStats {
+    std::uint32_t filled = 0; // frames that re-baked because the sky changed
+    std::uint32_t reused = 0; // frames served from the existing bake
+};
+
 class SkyPass {
 public:
     explicit SkyPass(rhi::Device& device);
@@ -79,12 +103,59 @@ public:
              const SkyParams& params,
              const SkyInputs& inputs);
 
+    // Bake the sky into the LUT and project it onto SH, and return what the lit passes read.
+    //
+    // Declares two compute passes -- `sky-view-lut` and `sky-sh` -- but ONLY when the sky actually
+    // changed since the last call. The resources are persistent and imported either way, so a
+    // frame under an unchanging sky pays nothing; `stats()` is how you tell the two cases apart.
+    //
+    // MUST be called before anything that reads the result: the forward pass, the DDGI trace and
+    // the SSR resolve all consume it, so the graph needs these passes declared first for its
+    // dependency edges to order them. See scene_renderer.cpp.
+    [[nodiscard]] SkyLightBinding
+    add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInputs& inputs);
+
+    // The no-sky placeholder: a 1x1 dummy LUT and an all-zero SH buffer, so `sky_sh_enabled()`
+    // reads false and every consumer takes the constant-ambient path it took before m17.7b.
+    [[nodiscard]] SkyLightBinding empty_binding(RenderGraph& graph);
+
+    [[nodiscard]] const SkyLightingStats& stats() const noexcept { return stats_; }
+
+    // The persistent LUT, for a test that wants to read back what was baked.
+    [[nodiscard]] rhi::TextureHandle skyview_lut() const noexcept { return skyview_lut_; }
+
 private:
+    // Everything the bake depends on. If none of it moved, the bake did not either -- the
+    // cached-parameters test LocalShadowMap uses to decide a shadow slot can be reused.
+    [[nodiscard]] static bool bake_inputs_equal(const SkyParams& a, const SkyParams& b) noexcept;
+    void ensure_lighting_resources();
+
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
     rhi::SamplerHandle sampler_;
+
+    // ── The lighting half (m17.7b) ────────────────────────────────────────────────────────────
+    rhi::ShaderHandle skyview_shader_;
+    rhi::ShaderHandle sh_shader_;
+    rhi::PipelineHandle skyview_pipeline_;
+    rhi::PipelineHandle sh_pipeline_;
+    rhi::SamplerHandle lut_sampler_;
+
+    // Persistent, not transient: the whole point is that a frame which did not change the sky
+    // reuses last frame's bake, and a graph-owned transient does not survive to be reused.
+    rhi::TextureHandle skyview_lut_;
+    rhi::BufferHandle sh_buffer_;
+    rhi::ResourceState skyview_state_ = rhi::ResourceState::Undefined;
+    rhi::ResourceState sh_state_ = rhi::ResourceState::Undefined;
+
+    rhi::TextureHandle dummy_skyview_;
+    rhi::BufferHandle dummy_sh_;
+
+    SkyParams baked_{};     // what the current bake was made from
+    bool has_bake_ = false; // false until the first bake, so the first call always fills
+    SkyLightingStats stats_{};
 };
 
 } // namespace rime::render

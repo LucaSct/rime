@@ -593,6 +593,59 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         sdf_clipmap_.add(graph, camera_pos);
     }
 
+    // ── The sky, resolved once and BAKED before anything reads it (m17.7b) ────────────────────
+    //
+    // This sits above the DDGI trace and the forward pass because both consume what it produces:
+    // the nine SH coefficients the forward pass shades ambient with, and the sky-view LUT a probe
+    // ray samples when it escapes. The graph derives its order from declared accesses, so these
+    // passes have to be declared first for the edges to exist at all.
+    //
+    // The SAME resolved SkyParams then feeds the background composite further down. That is the
+    // point of resolving here rather than twice: a scene lit by one sky and painted with another
+    // would be wrong in a way no screenshot could show you.
+    const bool sky_on = sky_params_.enabled || scene.has_sky;
+    SkyParams sp = sky_params_;
+    if (scene.has_sky) {
+        const Sky& a = scene.sky;
+        sp.enabled = true;
+        sp.zenith[0] = a.zenith_r;
+        sp.zenith[1] = a.zenith_g;
+        sp.zenith[2] = a.zenith_b;
+        sp.horizon[0] = a.horizon_r;
+        sp.horizon[1] = a.horizon_g;
+        sp.horizon[2] = a.horizon_b;
+        sp.intensity = a.intensity;
+        sp.angular_radius = a.sun_angular_radius;
+        sp.clouds_enabled = a.clouds;
+        sp.coverage = a.cloud_coverage;
+        sp.density = a.cloud_density;
+        sp.altitude = a.cloud_altitude;
+        sp.scale = a.cloud_scale;
+        sp.sharpness = a.cloud_sharpness;
+        sp.wind[0] = a.wind_x;
+        sp.wind[1] = a.wind_z;
+    }
+    // The sun couples to the scene's first directional light unless a caller pinned it. Note
+    // the SIGN: DirectionalLight::direction is the direction light TRAVELS, and the shader
+    // wants the direction it comes FROM, which is what "toward the sun" means.
+    if (sp.use_scene_sun && ndir > 0) {
+        sp.sun_direction[0] = -fu.dir_lights[0].direction[0];
+        sp.sun_direction[1] = -fu.dir_lights[0].direction[1];
+        sp.sun_direction[2] = -fu.dir_lights[0].direction[2];
+    }
+    SkyInputs ski{};
+    ski.view = scene.camera.view;
+    ski.proj =
+        core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far);
+    ski.camera_pos =
+        core::Vec3{scene.camera.position[0], scene.camera.position[1], scene.camera.position[2]};
+    ski.extent = extent;
+
+    // Either way a SkyLightBinding comes out — the real bake, or the all-zero placeholder whose
+    // flag makes every consumer take its pre-m17.7b constant-ambient path (ADR-0032 §11).
+    const SkyLightBinding sky_binding =
+        sky_on ? sky_.add_lighting(graph, sp, ski) : sky_.empty_binding(graph);
+
     // DDGI probes (m10.5a trace-and-store, m10.5b consume): a fifth, independent gate, NESTED
     // inside sdf_clipmap_enabled — DDGI sphere-traces the SAME field the block above steps, so it
     // structurally cannot run against a clipmap nobody is updating (settings.hpp's "requires
@@ -684,7 +737,14 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // onto the shadowed shader on its own, no light required (an empty scene => empty, valid
     // G-buffer). The march that consumes it is m10.7b.
     const bool has_ssr = lighting_.ssr_enabled;
-    if (has_sun || has_local || has_clusters || has_ddgi || has_ssr) {
+    // A sky that LIGHTS the scene pulls the frame onto the shadowed shader on its own, exactly as
+    // SSR does above and for the same reason: only that pipeline carries the binding the feature
+    // needs (17, the SH coefficients). Without this a world whose only lighting is its sky would
+    // fall to the M5.6 baseline path and be lit by the flat constant — the one case the brick
+    // exists to fix. The baseline path itself is deliberately left untouched, so its
+    // byte-identity guarantee is unchanged.
+    const bool has_sky_light = sky_on;
+    if (has_sun || has_local || has_clusters || has_ddgi || has_ssr || has_sky_light) {
         // The cascade binding: the real fit when there is a sun, else a valid count-0 placeholder
         // so the shadowed pipeline's binding 7/8 is always satisfied (a spot-only scene).
         ShadowBinding shadow;
@@ -732,6 +792,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                               local,
                               clusters,
                               ddgi_binding,
+                              sky_binding,
                               gbuffer);
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
@@ -748,44 +809,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // A Sky COMPONENT in the world turns the sky on and supplies its tuning: the scene owns its own
     // weather, and set_sky() is then only the host-level default for a world that authored none.
     RGTexture sky_src = hdr;
-    const bool sky_on = sky_params_.enabled || scene.has_sky;
     if (sky_on) {
-        SkyParams sp = sky_params_;
-        if (scene.has_sky) {
-            const Sky& a = scene.sky;
-            sp.enabled = true;
-            sp.zenith[0] = a.zenith_r;
-            sp.zenith[1] = a.zenith_g;
-            sp.zenith[2] = a.zenith_b;
-            sp.horizon[0] = a.horizon_r;
-            sp.horizon[1] = a.horizon_g;
-            sp.horizon[2] = a.horizon_b;
-            sp.intensity = a.intensity;
-            sp.angular_radius = a.sun_angular_radius;
-            sp.clouds_enabled = a.clouds;
-            sp.coverage = a.cloud_coverage;
-            sp.density = a.cloud_density;
-            sp.altitude = a.cloud_altitude;
-            sp.scale = a.cloud_scale;
-            sp.sharpness = a.cloud_sharpness;
-            sp.wind[0] = a.wind_x;
-            sp.wind[1] = a.wind_z;
-        }
-        // The sun couples to the scene's first directional light unless a caller pinned it. Note
-        // the SIGN: DirectionalLight::direction is the direction light TRAVELS, and the shader
-        // wants the direction it comes FROM, which is what "toward the sun" means.
-        if (sp.use_scene_sun && ndir > 0) {
-            sp.sun_direction[0] = -fu.dir_lights[0].direction[0];
-            sp.sun_direction[1] = -fu.dir_lights[0].direction[1];
-            sp.sun_direction[2] = -fu.dir_lights[0].direction[2];
-        }
-        SkyInputs ski{};
-        ski.view = scene.camera.view;
-        ski.proj =
-            core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far);
-        ski.camera_pos = core::Vec3{
-            scene.camera.position[0], scene.camera.position[1], scene.camera.position[2]};
-        ski.extent = extent;
         const RGTexture hdr_sky = graph.create_texture({extent, kHdrFormat, "scene-hdr-sky"});
         sky_.add(graph, hdr, depth, hdr_sky, sp, ski);
         sky_src = hdr_sky;

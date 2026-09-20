@@ -28,6 +28,7 @@ rime_add_test(rime_render_tests
     gbuffer_test.cpp
     ssr_test.cpp
     sky_test.cpp
+    sky_lighting_test.cpp
     pass_identity_test.cpp
     frame_scratch_test.cpp
     render_transform_test.cpp
