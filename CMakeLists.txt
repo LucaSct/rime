@@ -254,10 +254,25 @@ function(rime_add_shaders target)
         string(MAKE_C_IDENTIFIER "${_name}" _ident)     # e.g. triangle_vert
         set(_spv "${_gen}/${_name}.spv")
         set(_hdr "${_gen}/${_name}.spv.h")
+        set(_dep "${_gen}/${_name}.spv.d")
+        get_filename_component(_srcdir "${_srcpath}" DIRECTORY)
+        # -I<the shader's own directory> turns on `#include` (the shader must also declare
+        # `#extension GL_GOOGLE_include_directive : require`), so a function two shaders both need
+        # can live in ONE .glsl instead of being copy-pasted -- which is what ssr_resolve.frag's
+        # own comment records having had to do for the four DDGI functions.
+        #
+        # DEPFILE is the half that makes it SAFE, and leaving it out is the trap. glslang writes
+        # the list of files it actually opened; Ninja reads it and rebuilds this .spv when an
+        # INCLUDED file changes, not just when the top-level source does. Without it an edit to a
+        # shared .glsl leaves every dependent .spv stale, the build reports success, and the tests
+        # that follow run green against shader bytes from before the edit -- the same
+        # stale-artifact failure the repo already learned from a stale executable in m15.6.
         add_custom_command(
             OUTPUT "${_spv}"
-            COMMAND "${RIME_GLSL_COMPILER}" -V --target-env vulkan1.3 -o "${_spv}" "${_srcpath}"
+            COMMAND "${RIME_GLSL_COMPILER}" -V --target-env vulkan1.3
+                    -I"${_srcdir}" --depfile "${_dep}" -o "${_spv}" "${_srcpath}"
             DEPENDS "${_srcpath}"
+            DEPFILE "${_dep}"
             COMMENT "glsl -> spirv: ${_name}"
             VERBATIM)
         add_custom_command(
@@ -294,11 +309,17 @@ function(rime_add_shader_variant target src define out_name)
     string(MAKE_C_IDENTIFIER "${out_name}" _ident)
     set(_spv "${_gen}/${out_name}.spv")
     set(_hdr "${_gen}/${out_name}.spv.h")
+    set(_dep "${_gen}/${out_name}.spv.d")
+    get_filename_component(_srcdir "${_srcpath}" DIRECTORY)
+    # Same include path and same depfile as rime_add_shaders -- see the comment there for why the
+    # depfile is not optional. A variant that could go stale on an included file would be worse
+    # than the base shader doing so, because nothing in its name says which source it came from.
     add_custom_command(
         OUTPUT "${_spv}"
-        COMMAND "${RIME_GLSL_COMPILER}" -V --target-env vulkan1.3 "-D${define}" -o "${_spv}"
-                "${_srcpath}"
+        COMMAND "${RIME_GLSL_COMPILER}" -V --target-env vulkan1.3 "-D${define}"
+                -I"${_srcdir}" --depfile "${_dep}" -o "${_spv}" "${_srcpath}"
         DEPENDS "${_srcpath}"
+        DEPFILE "${_dep}"
         COMMENT "glsl -> spirv: ${out_name} (-D${define})"
         VERBATIM)
     add_custom_command(
