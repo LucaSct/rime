@@ -53,7 +53,7 @@ void record_draws(rhi::CommandBuffer& cmd,
     // Binding 0 is FrameUniforms at data.frame_ubo_offset — 0 for the camera pass, cascade c's
     // 256-byte view_proj slice for a CSM depth pass (m10.1). depth_only.vert / the forward shaders
     // read only the leading members of whatever block sits there, so one loop serves every view.
-    cmd.bind_uniform_buffer(0, data.frame_ubo, data.frame_ubo_offset);
+    cmd.bind_uniform_buffer(0, data.frame_ubo, data.frame_ubo_offset, data.frame_ubo_size);
     for (std::size_t i = 0; i < data.draws.size(); ++i) {
         const DrawItem& item = data.draws[i];
         if ((item.flags & flag_filter) != flag_match) {
@@ -163,7 +163,8 @@ DepthPrepass::~DepthPrepass() {
 void DepthPrepass::add(RenderGraph& graph,
                        RGTexture depth,
                        const SceneDrawData& data,
-                       std::uint32_t layer) const {
+                       std::uint32_t layer,
+                       std::string_view label) const {
     // Clear to the far plane, STORE the result — the whole point is that the forward pass (or, for
     // a CSM cascade, the shadow sample) loads this depth back. `layer` aims the pass at one cascade
     // of a layered depth target (m10.1); 0 is the ordinary single-layer case.
@@ -176,9 +177,7 @@ void DepthPrepass::add(RenderGraph& graph,
     RenderGraph::RasterPassDesc desc{};
     desc.depth = &depth_att;
     graph.add_raster_pass(
-        "depth-prepass",
-        desc,
-        [pipe = pipeline_, masked = masked_pipeline_, data](rhi::CommandBuffer& cmd) {
+        label, desc, [pipe = pipeline_, masked = masked_pipeline_, data](rhi::CommandBuffer& cmd) {
             // Two partitions, one pipeline switch. Opaque first (the overwhelming majority, and
             // the byte-identical old path), then the masked draws through the alpha-testing
             // variant. Without the second half, depth is written for texels the forward pass
@@ -452,15 +451,16 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             // record_draws re-binds only per-draw state on top. The resources' physical handles
             // resolve now (assign_physicals has run), the same late-resolve the tonemap pass uses.
             cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
-            cmd.bind_uniform_buffer(8, shadow.ubo);
+            cmd.bind_uniform_buffer(8, shadow.ubo.buffer, shadow.ubo.offset, shadow.ubo.size);
             cmd.bind_texture(9, graph.physical(local.map), local.sampler);
-            cmd.bind_uniform_buffer(10, local.ubo);
+            cmd.bind_uniform_buffer(10, local.ubo.buffer, local.ubo.offset, local.ubo.size);
             cmd.bind_storage_buffer(11, graph.physical_buffer(clusters.lights));
             cmd.bind_storage_buffer(12, graph.physical_buffer(clusters.lists));
-            cmd.bind_uniform_buffer(13, clusters.ubo);
+            cmd.bind_uniform_buffer(
+                13, clusters.ubo.buffer, clusters.ubo.offset, clusters.ubo.size);
             cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
             cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
-            cmd.bind_uniform_buffer(16, ddgi.ubo);
+            cmd.bind_uniform_buffer(16, ddgi.ubo.buffer, ddgi.ubo.offset, ddgi.ubo.size);
             // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
             // overwhelming majority and the byte-identical old path — then the double-sided draws
             // with culling off. Dynamic state rather than a second pipeline: the forward pass

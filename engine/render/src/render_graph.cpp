@@ -11,6 +11,7 @@
 #include "rime/render/render_graph.hpp"
 
 #include <algorithm>
+#include <string>
 
 #include "rime/core/diagnostics/assert.hpp"
 #include "rime/core/diagnostics/log.hpp"
@@ -24,9 +25,145 @@ RenderGraph::~RenderGraph() {
     for (const CachedBuffer& b : buffer_cache_) {
         device_.destroy(b.handle);
     }
+    for (const FrameSlot& s : frame_slots_) {
+        for (const FrameBlock& b : s.blocks)
+            device_.destroy(b.handle);
+    }
+    for (const FrameBufferPool& p : frame_buffers_) {
+        for (const FrameBlock& b : p.buffers) {
+            if (b.handle.is_valid())
+                device_.destroy(b.handle);
+        }
+    }
+}
+
+namespace {
+// The universal uniform-buffer offset alignment. Not queried from the device: every stride in this
+// engine already assumes it (the cascade, spot and SDF-compose arrays all use 256), and the RHI
+// exposes no alignment query to disagree with. If a device ever needs more, this is the one place.
+constexpr std::uint64_t kFrameSliceAlign = 256;
+
+// Each block starts here and every later block is at least this big. 64 KiB holds every uniform a
+// frame of the block pushes many times over; the chain exists for correctness, not for the common
+// case, and a slot that never needs a second block never allocates one.
+constexpr std::uint64_t kFrameBlockBytes = 64 * 1024;
+
+constexpr std::uint32_t kDefaultFrameSlots = 3;
+} // namespace
+
+void RenderGraph::set_frames_in_flight(std::uint32_t frames) {
+    const std::uint32_t slots = frames + 1; // the swapchain.hpp rule, applied to CPU-written data
+    if (slots == frame_slots_.size())
+        return;
+
+    // Rebuilding destroys buffers, so this is only legal while nothing is in flight — at
+    // construction or before the first frame, which is what the header tells callers.
+    for (const FrameSlot& s : frame_slots_) {
+        for (const FrameBlock& b : s.blocks)
+            device_.destroy(b.handle);
+    }
+    for (const FrameBufferPool& p : frame_buffers_) {
+        for (const FrameBlock& b : p.buffers) {
+            if (b.handle.is_valid())
+                device_.destroy(b.handle);
+        }
+    }
+    frame_slots_.assign(slots, FrameSlot{});
+    frame_buffers_.assign(slots, FrameBufferPool{});
+    frame_slot_ = 0;
+}
+
+// Both halves of the ring come up together, at the default depth, the first time anything asks.
+// Getting this wrong is how `push_frame_buffer` indexed an empty pool: the two containers were
+// sized independently, and "they disagree" is not the same condition as "neither exists yet".
+void RenderGraph::ensure_frame_ring() {
+    const std::size_t slots = frame_slots_.empty() ? kDefaultFrameSlots : frame_slots_.size();
+    if (frame_slots_.size() != slots)
+        frame_slots_.assign(slots, FrameSlot{});
+    if (frame_buffers_.size() != slots)
+        frame_buffers_.assign(slots, FrameBufferPool{});
+}
+
+rhi::BufferHandle RenderGraph::push_frame_buffer(const void* data, std::size_t bytes) {
+    ensure_frame_ring();
+    FrameBufferPool& pool = frame_buffers_[frame_slot_];
+    if (pool.next >= pool.buffers.size())
+        pool.buffers.push_back(FrameBlock{});
+    FrameBlock& entry = pool.buffers[pool.next++];
+    if (!entry.handle.is_valid() || entry.size < bytes) {
+        if (entry.handle.is_valid())
+            device_.destroy(entry.handle);
+        rhi::BufferDesc bd{};
+        bd.size = std::max<std::uint64_t>(bytes, 1);
+        bd.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Storage;
+        bd.memory = rhi::MemoryUsage::CpuToGpu;
+        bd.debug_name = "frame-scratch-buffer";
+        entry = FrameBlock{device_.create_buffer(bd), bd.size};
+        if (!entry.handle.is_valid()) {
+            RIME_ERROR("render: frame-scratch buffer of {} bytes failed", bd.size);
+            return {};
+        }
+    }
+    if (bytes > 0)
+        device_.write_buffer(entry.handle, data, bytes);
+    return entry.handle;
+}
+
+RenderGraph::FrameSlice RenderGraph::push_frame_data(const void* data, std::size_t bytes) {
+    ensure_frame_ring();
+    FrameSlot& slot = frame_slots_[frame_slot_];
+    frame_pushed_ += bytes;
+
+    // Take a fresh block when this push does not fit the current one. Deliberately NOT "grow the
+    // current block": growing destroys it, and earlier passes this frame already hold slices
+    // pointing into it. A block is only ever recycled when the ring comes back to this slot.
+    const std::uint64_t need = static_cast<std::uint64_t>(bytes);
+    while (slot.block < slot.blocks.size() && slot.offset + need > slot.blocks[slot.block].size) {
+        ++slot.block;
+        slot.offset = 0;
+    }
+    if (slot.block >= slot.blocks.size()) {
+        rhi::BufferDesc bd{};
+        bd.size = std::max(kFrameBlockBytes, need);
+        // Both usages on one buffer: eleven of the fourteen callers bind a uniform and three bind
+        // a storage buffer, and splitting the ring by usage would double the bookkeeping to save
+        // nothing — the memory is host-visible either way.
+        bd.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Storage;
+        bd.memory = rhi::MemoryUsage::CpuToGpu;
+        bd.debug_name = "frame-scratch";
+        const rhi::BufferHandle handle = device_.create_buffer(bd);
+        if (!handle.is_valid()) {
+            RIME_ERROR("render: frame-scratch allocation of {} bytes failed", bd.size);
+            return {};
+        }
+        slot.blocks.push_back(FrameBlock{handle, bd.size});
+        slot.block = slot.blocks.size() - 1;
+        slot.offset = 0;
+    }
+
+    const FrameBlock& block = slot.blocks[slot.block];
+    const std::uint32_t offset = static_cast<std::uint32_t>(slot.offset);
+    device_.write_buffer(block.handle, data, bytes, slot.offset);
+    // Align the NEXT push, not this one: offset 0 is already aligned, so aligning afterwards keeps
+    // the first slice of every block at 0 and never wastes a leading gap.
+    slot.offset = (slot.offset + need + kFrameSliceAlign - 1) / kFrameSliceAlign * kFrameSliceAlign;
+    return FrameSlice{block.handle, offset, static_cast<std::uint32_t>(bytes)};
 }
 
 void RenderGraph::reset() {
+    // THE FRAME BOUNDARY, and therefore where the CPU-scratch ring turns over (m17.4). Advancing
+    // here rather than at the end of the frame is what makes the slot the previous frame wrote
+    // stay untouched while its GPU work is still in flight.
+    if (!frame_slots_.empty()) {
+        frame_slot_ = (frame_slot_ + 1) % static_cast<std::uint32_t>(frame_slots_.size());
+        FrameSlot& slot = frame_slots_[frame_slot_];
+        slot.block = 0;
+        slot.offset = 0;
+        if (frame_slot_ < frame_buffers_.size())
+            frame_buffers_[frame_slot_].next = 0;
+    }
+    frame_pushed_ = 0;
+
     passes_.clear();
     resources_.clear();
     order_.clear();
@@ -153,11 +290,62 @@ void RenderGraph::declare_access(std::uint32_t resource, rhi::ResourceState stat
     }
 }
 
-void RenderGraph::add_pass_common(std::string_view name, bool is_raster, ExecuteFn fn) {
+void RenderGraph::add_pass_common(std::string_view name,
+                                  bool is_raster,
+                                  bool fold_repeats,
+                                  ExecuteFn fn) {
     Pass p;
     p.name.assign(name);
     p.is_raster = is_raster;
+    p.fold_repeats = fold_repeats;
     p.fn = std::move(fn);
+
+    // A PASS NAME IS AN IDENTITY, NOT A LABEL (m17.3). One system may declare the same pass many
+    // times in a frame — a CSM renders the pre-pass once per cascade, local shadows once per
+    // invalidated slot — and everything downstream keys on the name: `resolve_timings` reports it,
+    // `PerfReport` folds same-named timings into one distribution, and the committed `docs/perf/`
+    // JSON writes one object key per pass. Duplicates therefore did not merely read oddly; the
+    // 2026-08-30 block baseline contains four `"depth-prepass"` keys, so every ordinary JSON reader
+    // keeps one of the four and silently drops 0.32 ms of shadow work.
+    //
+    // The real fix is upstream — callers now pass names that say what the work is (`csm-cascade-2`)
+    // — and this is the backstop that stops the CLASS from coming back the next time a pass is
+    // reused. O(passes²) in the declare phase, which is ~20 passes and 0.3 ms; the alternative (a
+    // hash set) would cost an allocation to save nothing measurable.
+    // The declared exception: a caller that set `fold_repeats` is saying the repeat is deliberate
+    // and its measurement is the SUM (see ComputePassDesc::fold_repeats). Both sides must agree —
+    // folding a repeat onto a pass that did NOT ask for it would merge unrelated work under one
+    // key, which is the bug this whole block exists to prevent, so that case still uniquifies.
+    const auto folds_onto = [this](const std::string& candidate) {
+        for (const Pass& existing : passes_) {
+            if (existing.name == candidate)
+                return existing.fold_repeats;
+        }
+        return false;
+    };
+    const auto taken = [this](const std::string& candidate) {
+        for (const Pass& existing : passes_) {
+            if (existing.name == candidate)
+                return true;
+        }
+        return false;
+    };
+    if (fold_repeats && folds_onto(p.name)) {
+        passes_.push_back(std::move(p));
+        return;
+    }
+    if (taken(p.name)) {
+        // Bump until nothing answers to it. Testing the CANDIDATE rather than counting prefix
+        // matches is what makes this airtight: counting would hand out `a#1` twice if some caller
+        // had already declared a literal `a#1` by hand.
+        const std::string base = p.name;
+        for (std::uint32_t n = 1;; ++n) {
+            p.name = base + '#' + std::to_string(n);
+            if (!taken(p.name))
+                break;
+        }
+    }
+
     passes_.push_back(std::move(p));
 }
 
@@ -173,7 +361,7 @@ void RenderGraph::add_raster_pass(std::string_view name, const RasterPassDesc& d
                    rhi::kMaxColorAttachments);
         return;
     }
-    add_pass_common(name, true, std::move(fn));
+    add_pass_common(name, true, desc.fold_repeats, std::move(fn));
     Pass& p = passes_.back();
     p.colors.assign(desc.colors.begin(), desc.colors.end());
     if (desc.depth != nullptr) {
@@ -208,7 +396,7 @@ void RenderGraph::add_raster_pass(std::string_view name, const RasterPassDesc& d
 void RenderGraph::add_compute_pass(std::string_view name,
                                    const ComputePassDesc& desc,
                                    ExecuteFn fn) {
-    add_pass_common(name, false, std::move(fn));
+    add_pass_common(name, false, desc.fold_repeats, std::move(fn));
     for (const RGTexture& t : desc.sampled) {
         declare_access(t.index, rhi::ResourceState::ShaderRead, false);
     }
@@ -433,13 +621,13 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
 
         // Timestamps bracket every pass while slots last (64 slots = 32 timed passes; a bigger
         // frame times its first 32 and says so once).
-        const bool timed = timed_passes_ < rhi::kMaxTimestamps / 2;
+        const bool timed = timed_passes_ < max_timed_passes();
         if (timed) {
             cmd.write_timestamp(timed_passes_ * 2);
         } else if (!timing_overflow_warned_) {
             RIME_WARN("render: more than {} passes — timing only the first {}",
-                      rhi::kMaxTimestamps / 2,
-                      rhi::kMaxTimestamps / 2);
+                      max_timed_passes(),
+                      max_timed_passes());
             timing_overflow_warned_ = true;
         }
 
@@ -529,21 +717,53 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
     }
 }
 
+RenderGraph::TimingPlan RenderGraph::timing_plan() const {
+    TimingPlan plan;
+    plan.timed = timed_passes_;
+    plan.names.reserve(timed_passes_);
+    plan.fold.reserve(timed_passes_);
+    std::uint32_t slot = 0;
+    for (const std::uint32_t pi : order_) {
+        if (slot >= timed_passes_)
+            break;
+        plan.names.push_back(passes_[pi].name);
+        plan.fold.push_back(passes_[pi].fold_repeats ? 1 : 0);
+        ++slot;
+    }
+    return plan;
+}
+
 std::vector<RenderGraph::PassTiming> RenderGraph::resolve_timings(rhi::CommandBuffer& cmd) const {
+    return resolve_timings(timing_plan(), cmd);
+}
+
+std::vector<RenderGraph::PassTiming> RenderGraph::resolve_timings(const TimingPlan& plan,
+                                                                  rhi::CommandBuffer& cmd) {
     std::vector<PassTiming> out;
-    if (timed_passes_ == 0)
+    if (plan.timed == 0)
         return out;
-    std::vector<std::uint64_t> ns(static_cast<std::size_t>(timed_passes_) * 2);
+    std::vector<std::uint64_t> ns(static_cast<std::size_t>(plan.timed) * 2);
     if (!cmd.read_timestamps(ns))
         return out; // device cannot timestamp — documented degrade
-    out.reserve(timed_passes_);
-    std::uint32_t timing_slot = 0;
-    for (const std::uint32_t pi : order_) {
-        if (timing_slot >= timed_passes_)
-            break;
+    out.reserve(plan.timed);
+    for (std::uint32_t timing_slot = 0; timing_slot < plan.names.size(); ++timing_slot) {
         const double ms = static_cast<double>(ns[timing_slot * 2 + 1] - ns[timing_slot * 2]) / 1e6;
-        out.push_back({passes_[pi].name, ms});
-        ++timing_slot;
+        // Fold the declared repeats (m17.3c). Only a pass that ASKED to be folded may add into an
+        // earlier entry — anything else already has a unique name, so the linear scan finds
+        // nothing and the entry is new. Summing rather than keeping the largest because the
+        // question a report answers is "what did this frame spend", and the frame paid for all of
+        // them; a folded entry's `count` in the report is still one sample per frame, so the
+        // percentile stays a per-frame percentile.
+        if (plan.fold[timing_slot] != 0) {
+            const std::string& name = plan.names[timing_slot];
+            const auto it = std::find_if(
+                out.begin(), out.end(), [&name](const PassTiming& t) { return t.name == name; });
+            if (it != out.end()) {
+                it->gpu_ms += ms;
+                continue;
+            }
+        }
+        out.push_back({plan.names[timing_slot], ms});
     }
     return out;
 }

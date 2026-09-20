@@ -51,13 +51,6 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
     pd.debug_name = "ssr-resolve";
     pipeline_ = device.create_graphics_pipeline(pd);
 
-    rhi::BufferDesc ub{};
-    ub.size = sizeof(GpuSsrUniforms);
-    ub.usage = rhi::BufferUsage::Uniform;
-    ub.memory = rhi::MemoryUsage::CpuToGpu;
-    ub.debug_name = "ssr-uniforms";
-    uniforms_ = device.create_buffer(ub);
-
     // Point + clamp: a blended depth is a fictional surface (the march must read exact depths), and
     // a ray that walks off the screen must read the border pixel, not wrap to the far side.
     rhi::SamplerDesc ss{};
@@ -70,7 +63,6 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
 
 SsrPass::~SsrPass() {
     device_.destroy(sampler_);
-    device_.destroy(uniforms_);
     device_.destroy(pipeline_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
@@ -84,7 +76,7 @@ void SsrPass::add(RenderGraph& graph,
                   const SsrInputs& inputs,
                   RGTexture ddgi_irradiance,
                   RGTexture ddgi_visibility,
-                  rhi::BufferHandle ddgi_params,
+                  RenderGraph::FrameSlice ddgi_params,
                   rhi::SamplerHandle ddgi_sampler) {
     // The inverse projection is what turns a uv + depth back into a view-space position — computed
     // once here, on the CPU, rather than every one of the march's steps re-inverting it on the GPU.
@@ -105,7 +97,8 @@ void SsrPass::add(RenderGraph& graph,
     u.ambient[0] = inputs.ambient[0];
     u.ambient[1] = inputs.ambient[1];
     u.ambient[2] = inputs.ambient[2];
-    device_.write_buffer(uniforms_, &u, sizeof(u));
+    // The graph's per-frame scratch, not a pass-owned buffer — see sky.cpp for why (m17.4).
+    const RenderGraph::FrameSlice ubo_slice = graph.push_frame_data(&u, sizeof(u));
 
     // out_hdr is the colour attachment (DontCare load: the fullscreen triangle writes every pixel);
     // declaring the sampled reads orders this pass after the passes that wrote them — the forward
@@ -122,7 +115,8 @@ void SsrPass::add(RenderGraph& graph,
     graph.add_raster_pass("ssr-resolve",
                           desc,
                           [pipe = pipeline_,
-                           ubo = uniforms_,
+                           ubo = ubo_slice.buffer,
+                           ubo_offset = ubo_slice.offset,
                            smp = sampler_,
                            scene_color,
                            gbuffer,
@@ -136,10 +130,11 @@ void SsrPass::add(RenderGraph& graph,
                               cmd.bind_texture(0, graph.physical(scene_color), smp);
                               cmd.bind_texture(1, graph.physical(gbuffer), smp);
                               cmd.bind_texture(2, graph.physical(depth), smp);
-                              cmd.bind_uniform_buffer(3, ubo);
+                              cmd.bind_uniform_buffer(3, ubo, ubo_offset, sizeof(GpuSsrUniforms));
                               cmd.bind_texture(4, graph.physical(ddgi_irradiance), ddgi_sampler);
                               cmd.bind_texture(5, graph.physical(ddgi_visibility), ddgi_sampler);
-                              cmd.bind_uniform_buffer(6, ddgi_params);
+                              cmd.bind_uniform_buffer(
+                                  6, ddgi_params.buffer, ddgi_params.offset, ddgi_params.size);
                               cmd.draw(3);
                           });
 }

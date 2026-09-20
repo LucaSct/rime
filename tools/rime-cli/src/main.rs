@@ -84,6 +84,24 @@ enum Command {
         #[arg(long, default_value_t = 1.0)]
         damage_scale: f32,
     },
+    /// Generate and cook the GROUND's material (m17.8b, ADR-0041 Ruling 5): a tiling asphalt
+    /// albedo / normal / metallic-roughness set, plus the standalone material that references them.
+    ///
+    /// There is no input file. The generator is the source, exactly as for `fracture` — this
+    /// repository has no texture art at all, and Ruling 5 wants the largest surface in the frame to
+    /// stop being a constant colour that makes SSR, DDGI and shadows unjudgeable.
+    Ground {
+        /// Output directory for the cooked files and `manifest.txt`.
+        #[arg(long)]
+        out: PathBuf,
+        /// Output file stem: writes `<name>.rmat` and `<name>_{albedo,normal,mr}.rtex`, labelled
+        /// `ground:<name>#material0` and `ground:<name>#<map>` in the manifest.
+        #[arg(long, default_value = "street")]
+        name: String,
+        /// Block-compress the maps as BC7 (m16.7): a quarter the memory and bandwidth.
+        #[arg(long)]
+        bc: bool,
+    },
     /// Cook a triangle mesh's signed-distance field (M10.4a, ADR-0032 §2): the offline, cook-side
     /// half of the SDF-traced GI pipeline. Reads geometry from a glTF/GLB or binary STL source (no
     /// materials/textures — an SDF is geometry only) and writes `<name>.rsdf`.
@@ -155,6 +173,7 @@ fn main() -> ExitCode {
             name,
             coarse,
         }) => run_sdf(&input, &out, name.as_deref(), coarse),
+        Some(Command::Ground { out, name, bc }) => run_ground(&out, &name, bc),
         Some(Command::Inspect { file }) => run_inspect(&file),
     }
 }
@@ -186,6 +205,37 @@ fn run_fracture(
         }
         Err(e) => {
             eprintln!("rime fracture: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Cook the ground's material into `out`, writing `manifest.txt` beside the cooked files so the
+/// engine can resolve `ground:<name>#material0` by label.
+///
+/// KNOWN LIMITATION: this *writes* the manifest rather than merging into an existing one, so the
+/// ground wants an output directory of its own. There is no manifest parser on the Rust side to
+/// merge against, and inventing one for a directory that today holds exactly one asset would be
+/// guessing at the shape of a problem no caller has yet. The brick that cooks a second asset into
+/// the same directory is the one that should add the merge.
+fn run_ground(out: &Path, name: &str, bc: bool) -> ExitCode {
+    match asset_pipeline::cook_ground(name, out, bc) {
+        Ok(result) => {
+            let text = asset_pipeline::manifest::render(&result.manifest);
+            if let Err(e) = std::fs::write(out.join("manifest.txt"), text) {
+                eprintln!("rime ground: writing manifest.txt: {e}");
+                return ExitCode::FAILURE;
+            }
+            for entry in &result.manifest {
+                println!(
+                    "cooked {} -> {} (id {:016x})",
+                    entry.source_path, entry.cooked_file, entry.id
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("rime ground: {e}");
             ExitCode::FAILURE
         }
     }

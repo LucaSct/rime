@@ -648,6 +648,8 @@ bool VulkanDevice::is_complete(SubmitTicket ticket) {
     if (it == in_flight_submits_.end())
         return true; // invalid, unknown, or already reclaimed — nothing left in flight
     if (vkGetFenceStatus(device_, it->second.fence) == VK_SUCCESS) {
+        if (it->second.borrowed)
+            return true; // finished, but someone is holding it — see InFlightSubmit::borrowed
         reclaim_submit(it->second);
         in_flight_submits_.erase(it);
         return true;
@@ -659,6 +661,31 @@ void VulkanDevice::wait(SubmitTicket ticket) {
     auto it = in_flight_submits_.find(ticket.id);
     if (it == in_flight_submits_.end())
         return; // invalid/unknown/already reclaimed
+    VK_CHECK(vkWaitForFences(device_, 1, &it->second.fence, VK_TRUE, UINT64_MAX));
+    if (it->second.borrowed)
+        return; // the borrower still needs it; release() is what reclaims
+    reclaim_submit(it->second);
+    in_flight_submits_.erase(it);
+}
+
+CommandBuffer* VulkanDevice::wait_and_borrow(SubmitTicket ticket) {
+    auto it = in_flight_submits_.find(ticket.id);
+    if (it == in_flight_submits_.end())
+        return nullptr; // invalid/unknown/already reclaimed
+    VK_CHECK(vkWaitForFences(device_, 1, &it->second.fence, VK_TRUE, UINT64_MAX));
+    // Deliberately NOT reclaimed here — that is the whole difference from wait(). The encoder
+    // stays alive, and with it the timestamp query pool the caller came for. Marking the borrow is
+    // what stops anyone else's `is_complete()` from reclaiming it in the meantime.
+    it->second.borrowed = true;
+    return it->second.commands.get();
+}
+
+void VulkanDevice::release(SubmitTicket ticket) {
+    auto it = in_flight_submits_.find(ticket.id);
+    if (it == in_flight_submits_.end())
+        return;
+    // The fence is already signalled if the caller borrowed first; waiting again is a no-op
+    // backstop for a caller that releases a ticket it never borrowed.
     VK_CHECK(vkWaitForFences(device_, 1, &it->second.fence, VK_TRUE, UINT64_MAX));
     reclaim_submit(it->second);
     in_flight_submits_.erase(it);

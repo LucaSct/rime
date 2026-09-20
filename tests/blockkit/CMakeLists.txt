@@ -7,7 +7,8 @@
 # cooked `.rdest` files and is the sibling proof, block_standup_test.
 rime_add_test(blockkit_test blockkit_test.cpp)
 target_link_libraries(blockkit_test
-    PRIVATE rime::blockkit rime::scene rime::destruction rime::render rime::ecs rime::core)
+    PRIVATE rime::blockkit rime::scene rime::destruction rime::ground rime::render rime::ecs
+            rime::core)
 
 # ── block_standup_test — the block standing in a real physics world (m13.2c) ─────────────────────
 # Needs the nine cooked `.rdest` files, so it is driven by a cook fixture rather than a checked-in
@@ -16,7 +17,7 @@ target_link_libraries(blockkit_test
 # geometry in, physics bodies out — so it runs on every CI OS and under both sanitizers.
 rime_add_test(block_standup_test block_standup_test.cpp)
 target_link_libraries(block_standup_test
-    PRIVATE rime::blockkit rime::scene rime::destruction rime::physics rime::assets
+    PRIVATE rime::blockkit rime::scene rime::destruction rime::ground rime::physics rime::assets
             rime::platform rime::render rime::ecs rime::core)
 
 # Its own cooked dir, per preset, so dev/asan/tsan never share cooked bytes and this proof can be
@@ -91,7 +92,7 @@ if(RIME_RHI_VULKAN)
     rime_add_test(block_render_test block_render_test.cpp)
     target_link_libraries(block_render_test
         PRIVATE rime::blockkit rime::destruction_render rime::scene rime::destruction
-                rime::physics rime::assets rime::platform rime::render rime::rhi
+                rime::ground rime::physics rime::assets rime::platform rime::render rime::rhi
                 rime::ecs rime::core)
     target_include_directories(block_render_test PRIVATE ${CMAKE_SOURCE_DIR}/tests/render)
     target_compile_definitions(block_render_test PRIVATE RIME_BLOCK_COOKED_DIR="${BLOCK_COOKED_DIR}")

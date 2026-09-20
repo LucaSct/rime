@@ -132,6 +132,17 @@ ExtractedScene extract_scene(ecs::World& world) {
             scene.camera.z_far = cam.z_far;
         });
 
+    // The scene's sky (m17.0), first one wins — the camera's rule. A world with no Sky entity
+    // leaves has_sky clear, and the renderer then keeps its own (off-by-default) parameters, so
+    // every world that predates this component renders exactly as it did.
+    world.query<Sky>().for_each([&](ecs::Entity, Sky& s) {
+        if (scene.has_sky) {
+            return;
+        }
+        scene.has_sky = true;
+        scene.sky = s;
+    });
+
     // Lights, already GPU-shaped. A directional light travels along its entity's −z (the camera
     // convention — aim a light exactly like a camera); transform_vector then normalize keeps it
     // unit under any (positive) scale. Radiance = color × intensity, folded here so the shader
@@ -198,7 +209,7 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
       forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device),
-      sdf_clipmap_(device), ddgi_(device), ssr_(device) {
+      sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device) {
     // Default ring depth: kFramesInFlight (2, private to the Vulkan swapchain) + 1. See
     // set_frames_in_flight for why the default is the safe maximum rather than the headless
     // minimum.
@@ -622,7 +633,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     shadow_data.normal_textures = frame_normal_;
     shadow_data.occlusion_textures = frame_occlusion_;
     shadow_data.emissive_textures = frame_emissive_;
-    shadow_data.frame_ubo = frame_ubos_[ubo_slot_];
+    shadow_data.bind_frame_ubo(frame_ubos_[ubo_slot_], 0, sizeof(GpuFrameUniforms));
     shadow_data.draw_ubo = draw_ubos_[ubo_slot_];
     shadow_data.material_sampler = material_sampler_;
     shadow_data.clamp_sampler = clamp_sampler_;
@@ -643,7 +654,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         std::span<const rhi::TextureHandle>{frame_occlusion_}.subspan(0, visible_count);
     data.emissive_textures =
         std::span<const rhi::TextureHandle>{frame_emissive_}.subspan(0, visible_count);
-    data.frame_ubo = frame_ubos_[ubo_slot_];
+    data.bind_frame_ubo(frame_ubos_[ubo_slot_], 0, sizeof(GpuFrameUniforms));
     data.draw_ubo = draw_ubos_[ubo_slot_];
     data.material_sampler = material_sampler_;
     data.clamp_sampler = clamp_sampler_;
@@ -726,10 +737,64 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }
 
+    // Sky (m17.0): composite the procedural sky into the background — the pixels the depth buffer
+    // says nothing was drawn on — writing a THIRD HDR target the next stage reads. It goes here,
+    // before SSR rather than after, so a reflected ray that misses the screen still finds sky
+    // instead of the clear colour: SSR reads whatever `sky_src` ends up being.
+    //
+    // Off allocates nothing and declares no pass, so the frame stays byte-identical to the pre-sky
+    // renderer (ADR-0032 §11), the same gate every M10 technique sits behind.
+    //
+    // A Sky COMPONENT in the world turns the sky on and supplies its tuning: the scene owns its own
+    // weather, and set_sky() is then only the host-level default for a world that authored none.
+    RGTexture sky_src = hdr;
+    const bool sky_on = sky_params_.enabled || scene.has_sky;
+    if (sky_on) {
+        SkyParams sp = sky_params_;
+        if (scene.has_sky) {
+            const Sky& a = scene.sky;
+            sp.enabled = true;
+            sp.zenith[0] = a.zenith_r;
+            sp.zenith[1] = a.zenith_g;
+            sp.zenith[2] = a.zenith_b;
+            sp.horizon[0] = a.horizon_r;
+            sp.horizon[1] = a.horizon_g;
+            sp.horizon[2] = a.horizon_b;
+            sp.intensity = a.intensity;
+            sp.angular_radius = a.sun_angular_radius;
+            sp.clouds_enabled = a.clouds;
+            sp.coverage = a.cloud_coverage;
+            sp.density = a.cloud_density;
+            sp.altitude = a.cloud_altitude;
+            sp.scale = a.cloud_scale;
+            sp.sharpness = a.cloud_sharpness;
+            sp.wind[0] = a.wind_x;
+            sp.wind[1] = a.wind_z;
+        }
+        // The sun couples to the scene's first directional light unless a caller pinned it. Note
+        // the SIGN: DirectionalLight::direction is the direction light TRAVELS, and the shader
+        // wants the direction it comes FROM, which is what "toward the sun" means.
+        if (sp.use_scene_sun && ndir > 0) {
+            sp.sun_direction[0] = -fu.dir_lights[0].direction[0];
+            sp.sun_direction[1] = -fu.dir_lights[0].direction[1];
+            sp.sun_direction[2] = -fu.dir_lights[0].direction[2];
+        }
+        SkyInputs ski{};
+        ski.view = scene.camera.view;
+        ski.proj =
+            core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far);
+        ski.camera_pos = core::Vec3{
+            scene.camera.position[0], scene.camera.position[1], scene.camera.position[2]};
+        ski.extent = extent;
+        const RGTexture hdr_sky = graph.create_texture({extent, kHdrFormat, "scene-hdr-sky"});
+        sky_.add(graph, hdr, depth, hdr_sky, sp, ski);
+        sky_src = hdr_sky;
+    }
+
     // SSR resolve (m10.7b): reflect the frame off itself into a second HDR target the tonemap then
     // reads. Runs only when ssr_enabled (which is also what allocated the G-buffer above), so
     // otherwise the tonemap reads the raw HDR and the frame is byte-identical (ADR-0032 §11).
-    RGTexture tonemap_src = hdr;
+    RGTexture tonemap_src = sky_src;
     if (has_ssr && gbuffer.is_valid()) {
         SsrInputs si{};
         si.view = scene.camera.view;
@@ -753,7 +818,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         // the enabled=0 empty_binding otherwise) — the two passes are just two readers of one
         // field.
         ssr_.add(graph,
-                 hdr,
+                 sky_src,
                  gbuffer,
                  depth,
                  hdr_ssr,

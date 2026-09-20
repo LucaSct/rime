@@ -72,10 +72,18 @@ void build_pile(physics::PhysicsWorld& w, int stacks, int height) {
     REQUIRE(made == stacks * height);
 }
 
-// Fold a WorldStats into a running FNV-1a hash (core/hash.hpp) by its 13 fields, packed into an
-// array so the hash never depends on struct padding — the same discipline world_hash() uses.
+// Fold a WorldStats into a running FNV-1a hash (core/hash.hpp) by its 14 DETERMINISTIC fields,
+// packed into an array so the hash never depends on struct padding — the same discipline
+// world_hash() uses.
+//
+// islands_solved_parallel is deliberately NOT in here, and it is the one field that must not be:
+// it records how the tick was EXECUTED, not what the tick computed, so it is 0 on the sequential
+// reference and the island count at every worker count. Hashing it would fail the determinism
+// proof below for the one reason that is not a determinism failure — and the tempting repair,
+// deleting the field to make the hash green, would delete the only witness that the parallel path
+// ran at all.
 std::uint64_t hash_stats(const physics::WorldStats& s, std::uint64_t seed) {
-    const std::array<std::uint32_t, 13> f = {s.body_count,
+    const std::array<std::uint32_t, 14> f = {s.body_count,
                                              s.dynamic_bodies,
                                              s.static_bodies,
                                              s.kinematic_bodies,
@@ -87,7 +95,8 @@ std::uint64_t hash_stats(const physics::WorldStats& s, std::uint64_t seed) {
                                              s.contacts_warm_started,
                                              s.islands,
                                              s.active_islands,
-                                             s.largest_island};
+                                             s.largest_island,
+                                             s.largest_active_island};
     return core::fnv1a_64(std::as_bytes(std::span<const std::uint32_t>{f}), seed);
 }
 
@@ -102,6 +111,13 @@ void check_invariants(const physics::WorldStats& s) {
     CHECK(s.contact_points >= s.manifolds);   // every manifold carries at least one point
     CHECK(s.manifolds <= s.broadphase_pairs); // box-only scene: no compound pair fans out
     CHECK(s.contacts_warm_started <= s.contact_points);
+    // The solved tail is a subset of the biggest island, and vanishes when nothing is solved.
+    CHECK(s.largest_active_island <= s.largest_island);
+    CHECK((s.active_islands > 0) == (s.largest_active_island > 0));
+    // Bounded by the ACTIVE count, not by the island count — `<= islands` would be tautological
+    // (the dispatch can only hand out islands that exist) and would pass for a counter that
+    // reported fifty sleeping piles as fifty islands solved in parallel.
+    CHECK(s.islands_solved_parallel <= s.active_islands);
 }
 
 } // namespace
@@ -228,4 +244,90 @@ TEST_CASE("M7.13: the whole stats stream is bit-identical across worker counts")
     CHECK(run(1) == sequential);
     CHECK(run(2) == sequential);
     CHECK(run(4) == sequential);
+}
+
+// ── m17.5: the two things a report needs before it may conclude anything about parallelism ──
+
+TEST_CASE("m17.5: the serial tail is the largest SOLVED island, not the largest one") {
+    physics::PhysicsWorld w;
+    constexpr int kStacks = 4;
+    constexpr int kHeight = 5;
+    build_pile(w, kStacks, kHeight);
+    for (int i = 0; i < 400; ++i) {
+        w.step(kDt); // long enough for every column to settle and fall asleep
+    }
+    const physics::WorldStats s = w.stats();
+
+    // Everything is at rest. The islands are still THERE — the resting contacts persist, which is
+    // what lets a faller wake the pile — but stage 6 solves none of them, so the solver's critical
+    // path this tick is zero work. largest_island still reports the biggest pile, which is the
+    // trap: read as "the serial tail" it over-states the critical path by the whole sleeping world,
+    // and a load balancer told to optimise it would be chasing bodies that cost nothing.
+    REQUIRE(s.active_islands == 0);
+    CHECK(s.largest_island == static_cast<std::uint32_t>(kHeight));
+    CHECK(s.largest_active_island == 0);
+}
+
+TEST_CASE("m17.5: islands_solved_parallel records the HANDOFF, not the pool") {
+    // Two worlds identical but for one call. The point of the field is that NOTHING ELSE in the
+    // stats can tell them apart — the parallel solve is bit-identical by contract (ADR-0026) — so
+    // without it a report cannot distinguish "parallelism did not help" from "parallelism was
+    // never switched on". 99-the-block was in the second state for its whole life while its ledger,
+    // which recorded the job system's worker count, made it look like the first.
+    auto measure = [](core::JobSystem* jobs) {
+        physics::PhysicsWorld w;
+        w.set_sleeping_enabled(false); // keep every island live, so every tick has work to hand out
+        w.set_job_system(jobs);
+        build_pile(w, /*stacks=*/4, /*height=*/3);
+        for (int i = 0; i < 120; ++i) {
+            w.step(kDt);
+        }
+        return w.stats();
+    };
+    core::JobSystem jobs{4};
+    const physics::WorldStats seq = measure(nullptr);
+    const physics::WorldStats par = measure(&jobs);
+
+    REQUIRE(par.active_islands > 1); // the dispatch declines a tick with no width; this has four
+    CHECK(seq.islands_solved_parallel == 0);
+    CHECK(par.islands_solved_parallel == par.active_islands);
+
+    // …and the two are otherwise the same tick, which is exactly why the field has to exist.
+    CHECK(seq.islands == par.islands);
+    CHECK(seq.active_islands == par.active_islands);
+    CHECK(seq.largest_active_island == par.largest_active_island);
+    CHECK(seq.contact_points == par.contact_points);
+    CHECK(hash_stats(seq, core::kFnv1a64OffsetBasis) == hash_stats(par, core::kFnv1a64OffsetBasis));
+}
+
+TEST_CASE("m17.5: the tail is the largest island that was AWAKE, not the largest one present") {
+    // The case the two tests above cannot see, and the one the field exists for: a big resting pile
+    // beside a small moving thing. With everything asleep both numbers are 0, and with sleeping off
+    // they are equal — so either alone is satisfied by `active_islands ? largest_island : 0`, which
+    // is precisely the wrong answer here.
+    physics::PhysicsWorld w;
+    core::JobSystem jobs{4};
+    w.set_job_system(&jobs);
+    constexpr int kHeight = 5;
+    build_pile(w, /*stacks=*/1, kHeight);
+    for (int i = 0; i < 400; ++i) {
+        w.step(kDt); // the column settles and the whole island falls asleep
+    }
+    REQUIRE(w.stats().active_islands == 0);
+
+    // One box dropped four columns away — its own island, and the only one being solved.
+    add_body(w, box({0.5f, 0.5f, 0.5f}), {16.0f, 4.0f, 0.0f});
+    w.step(kDt);
+
+    const physics::WorldStats s = w.stats();
+    CHECK(s.islands == 2);
+    CHECK(s.active_islands == 1);
+    CHECK(s.largest_island == static_cast<std::uint32_t>(kHeight)); // the sleeping column
+    CHECK(s.largest_active_island == 1);                            // the faller, and only it
+
+    // …and with one island of real work and one of none, there is nothing to divide. Handing the
+    // pair to the job system would pay a full wake-and-join to run one island on one worker, so
+    // the dispatch declines and says so — the counter reports what was SOLVED in parallel, which
+    // here is nothing, even though a job system is attached and two islands exist.
+    CHECK(s.islands_solved_parallel == 0);
 }

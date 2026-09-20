@@ -43,4 +43,8 @@ desktop.ini
 
 # ─── Local-only / secrets ────────────────────────────────────────────────────
 *.local
+# Note `*.local` above does NOT cover this one — gitignore matches whole filenames, and
+# `settings.local.json` ends in `.json`. It is a per-developer tool-permission allowlist full of
+# machine-specific paths; the repo-wide `.claude/skills/` beside it IS checked in on purpose.
+.claude/settings.local.json
 .env

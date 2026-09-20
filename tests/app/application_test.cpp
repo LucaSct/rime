@@ -17,8 +17,11 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <span>
+#include <string>
 #include <vector>
 
 #include "rime/app/application.hpp"
@@ -259,6 +262,99 @@ TEST_CASE("app: the GPU-owning loop drives a render callback each frame (M5.7)")
     CHECK(renders == 3);
     CHECK(app.frame_index() == 3);
     CHECK(app.tick_count() == 3);
+}
+
+TEST_CASE("app: the pipelined headless loop loses no frame's timings (m17.5)") {
+    // Pipelining stops the loop waiting for the GPU, so frame N's per-pass timestamps become
+    // readable around frame N+2 — long after the graph that named those passes has moved on. Every
+    // way of getting that wrong looks like success from a distance: timings that silently stop
+    // arriving, arrive twice, or arrive labelled with whichever frame happened to be current.
+    //
+    // So the claim is about IDENTITY, not about count. Render K frames and require the delivered
+    // frame indices to be exactly {0 … K-1} — each once, none missing, none invented. A ring that
+    // dropped its tail, double-retired, or mislabelled a frame fails one of those three.
+    AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {64, 48};
+    Application app(cfg);
+
+    if (!app.device()) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but the app could not create a Vulkan device");
+        MESSAGE("no Vulkan device available — skipping the pipelined-loop proof");
+        return;
+    }
+
+    app.on_render([&](FrameContext& ctx) {
+        const render::RGTexture target =
+            ctx.graph->create_texture({ctx.extent, rhi::Format::RGBA16Float, "pipelined-frame"});
+        const render::RGColorAttachment color{
+            target, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.1f, 0.2f, 0.3f, 1.0f}};
+        render::RenderGraph::RasterPassDesc desc{};
+        desc.colors = {&color, 1};
+        ctx.graph->add_raster_pass("pipelined-clear", desc, [](rhi::CommandBuffer&) {});
+        ctx.graph->export_texture(target);
+    });
+
+    std::vector<std::uint64_t> delivered;
+    std::vector<std::string> names;
+    app.on_frame_timings(
+        [&](std::uint64_t index, std::span<const render::RenderGraph::PassTiming> timings) {
+            delivered.push_back(index);
+            for (const render::RenderGraph::PassTiming& t : timings)
+                names.push_back(t.name);
+        });
+
+    constexpr int kFrames = 6;
+    app.set_headless_frames_in_flight(2);
+    const double fd = app.fixed_dt();
+    for (int i = 0; i < kFrames; ++i)
+        app.step(fd);
+
+    // Before the drain the ring is deliberately BEHIND — that is what pipelining means, and
+    // asserting it is what stops this test passing against a loop that secretly still blocks.
+    const std::size_t before_drain = delivered.size();
+    CHECK(before_drain < static_cast<std::size_t>(kFrames));
+
+    // finish_gpu must retire what is still in flight rather than idling past it.
+    app.finish_gpu();
+
+    if (delivered.empty()) {
+        MESSAGE("device reports no timestamps — nothing was deliverable");
+        return;
+    }
+    CHECK(delivered.size() == static_cast<std::size_t>(kFrames));
+    std::vector<std::uint64_t> sorted = delivered;
+    std::sort(sorted.begin(), sorted.end());
+    for (int i = 0; i < kFrames; ++i)
+        CHECK(sorted[static_cast<std::size_t>(i)] == static_cast<std::uint64_t>(i));
+
+    // And the names survived the trip: the plan was snapshotted from the right frame, not read
+    // back off a graph that had moved on. Owned strings, so nothing here points into the graph.
+    CHECK(names.size() == static_cast<std::size_t>(kFrames));
+    for (const std::string& n : names)
+        CHECK(n == "pipelined-clear");
+
+    SUBCASE("the default depth still delivers inside the frame that made them") {
+        Application blocking(cfg);
+        if (!blocking.device())
+            return;
+        blocking.on_render([&](FrameContext& ctx) {
+            const render::RGTexture t =
+                ctx.graph->create_texture({ctx.extent, rhi::Format::RGBA16Float, "blocking"});
+            const render::RGColorAttachment c{t, rhi::LoadOp::Clear, rhi::StoreOp::Store, {}};
+            render::RenderGraph::RasterPassDesc d{};
+            d.colors = {&c, 1};
+            ctx.graph->add_raster_pass("blocking-clear", d, [](rhi::CommandBuffer&) {});
+            ctx.graph->export_texture(t);
+        });
+        std::size_t seen = 0;
+        blocking.on_frame_timings(
+            [&](std::uint64_t, std::span<const render::RenderGraph::PassTiming>) { ++seen; });
+        blocking.step(blocking.fixed_dt());
+        // No drain needed: submit_blocking finished the frame before step() returned.
+        CHECK(seen == 1);
+    }
 }
 
 } // namespace

@@ -1,0 +1,12 @@
+=== Pooled HOLD-LOOP estimator (unfiltered, primary) — h1+h2+r2 ===
+metric          n_ab  pooled effect  n_aa  pooled |noise|    ratio
+gpu_sum_p50       12        +0.1058     9          0.0089    11.9x
+frame_p50         12        +0.1087     9          0.0383     2.8x
+submit_p50        12        +0.1089     9          0.0171     6.4x
+ssr_p50           12        +0.0983     9          0.0020    49.1x
+
+=== Pooled NON-HOLD --perf estimator (sim included) — h1+h2+r2 ===
+metric          n_ab  pooled effect  n_aa  pooled |noise|    ratio
+frame_p50         12        +0.9840     9          1.5990    0.62x
+submit_p50        12        +0.3085     9          0.5810    0.53x
+render_p50        12        +0.5390     9          0.9940    0.54x

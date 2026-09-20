@@ -40,6 +40,7 @@
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/ground/surface.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/passes.hpp"
@@ -55,6 +56,7 @@ void register_block_components(ecs::World& world) {
     blockkit::register_blockkit_components(world);
     destruction::register_destruction_components(world);
     render::register_render_components(world);
+    ground::register_ground_components(world); // the street, since m17.8
 }
 
 // A placement + role, keyed so two worlds can be compared without depending on entity ids matching.
@@ -245,7 +247,6 @@ TEST_CASE("blockkit: the palette covers every role it is handed") {
 
     // Mesh ids stay invalid without a device — the GPU-free half of the palette, deliberately.
     CHECK(palette.unit_cube == render::kInvalidMeshId);
-    CHECK(palette.street_plane == render::kInvalidMeshId);
 
     const blockkit::PaletteStats stats = blockkit::apply_palette(world, palette);
 
@@ -392,4 +393,89 @@ TEST_CASE("blockkit: cook ids are unique, and every slab names one") {
     CHECK(by_name.size() == blockkit::cook_specs().size());
     CHECK(blockkit::find_cook_by_asset(0) == nullptr);
     CHECK(blockkit::find_cook("no_such_cook") == nullptr);
+}
+
+TEST_CASE("m17.8b: the street's cooked material is found by label, carried, and left alone") {
+    // Three joins that had no test between them, each of which fails silently: a manifest lookup
+    // that returns 0 leaves the flat street (looks fine), an `assemble` that drops the id leaves
+    // the flat street (looks fine), and a palette that restamps the street's MaterialRef undoes the
+    // bridge's resolution every time it re-runs (looks fine for one frame).
+
+    SUBCASE("ground_material_id picks the material, and only the material") {
+        // The same cook emits three TEXTURES whose labels differ from the material's only by
+        // suffix, so a lookup that matched on the string alone could return a texture id — which
+        // would resolve to nothing and leave the street flat, with no error anywhere.
+        const std::string text =
+            "# rime-manifest v1\n"
+            "ground:street#albedo\ttexture\t4777d0cb38ee2f54\tstreet_albedo.rtex\n"
+            "ground:street#material0\tmaterial\te85bbfa9f2f8b888\tstreet.rmat\n"
+            "ground:street#mr\ttexture\t2230a7daa82fcc31\tstreet_mr.rtex\n"
+            "ground:street#normal\ttexture\t591c0e12ef224061\tstreet_normal.rtex\n";
+        const auto manifest = assets::Manifest::parse(text);
+        REQUIRE(manifest.has_value());
+        CHECK(blockkit::ground_material_id(*manifest) == 0xe85bbfa9f2f8b888ull);
+
+        // A manifest that lists no ground material answers 0 — "keep the palette's street" — rather
+        // than guessing at the nearest thing.
+        const auto other = assets::Manifest::parse(
+            "# rime-manifest v1\n"
+            "quad.gltf#material0\tmaterial\t00c0ffee0000aa70\tquad.mat0.rmat\n");
+        REQUIRE(other.has_value());
+        CHECK(blockkit::ground_material_id(*other) == 0);
+    }
+
+    SUBCASE("assemble carries the id onto the street, and only when given one") {
+        ecs::World with;
+        register_block_components(with);
+        blockkit::BlockParams p;
+        p.ground_material = 0xe85bbfa9f2f8b888ull;
+        (void)blockkit::assemble(with, p);
+
+        std::size_t carried = 0;
+        with.query<ground::GroundSurface>().for_each([&](ecs::Entity e, ground::GroundSurface&) {
+            const render::MaterialAsset* a = with.get<render::MaterialAsset>(e);
+            if (a != nullptr && a->asset == 0xe85bbfa9f2f8b888ull) {
+                ++carried;
+            }
+        });
+        CHECK(carried == 1);
+
+        // Without one, the block is what it was before this brick existed — no component at all,
+        // not a component holding 0, so a scene generated without a cook is byte-identical.
+        ecs::World without;
+        register_block_components(without);
+        (void)blockkit::assemble(without, blockkit::BlockParams{});
+        std::size_t any = 0;
+        without.query<render::MaterialAsset>().for_each(
+            [&](ecs::Entity, render::MaterialAsset&) { ++any; });
+        CHECK(any == 0);
+    }
+
+    SUBCASE("the palette leaves an authored material alone, and says that it did") {
+        // Load-bearing rather than polite: 99-the-block re-applies its palette on every tick that
+        // binds new destructibles. A palette that restamped the street would undo the bridge's
+        // resolution each time, and the ground would alternate between its cooked look and the flat
+        // one for as long as the demo ran.
+        ecs::World world;
+        register_block_components(world);
+        blockkit::BlockParams p;
+        p.ground_material = 0xe85bbfa9f2f8b888ull;
+        (void)blockkit::assemble(world, p);
+
+        render::MaterialRegistry materials;
+        const blockkit::BlockPalette palette = blockkit::build_palette(materials);
+        const blockkit::PaletteStats stats = blockkit::apply_palette(world, palette);
+
+        // Exactly the street: it is the one entity carrying a MaterialAsset.
+        CHECK(stats.authored == 1);
+        world.query<ground::GroundSurface>().for_each([&](ecs::Entity e, ground::GroundSurface&) {
+            // No MaterialRef at all — the bridge will install one, and until it does the ground has
+            // nothing to draw with rather than the wrong thing.
+            CHECK(world.get<render::MaterialRef>(e) == nullptr);
+        });
+
+        // And the skip is a skip, not a hole: every other role still got dressed.
+        CHECK(stats.materialed > 0);
+        CHECK(stats.missing == 0);
+    }
 }

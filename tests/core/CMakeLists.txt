@@ -25,3 +25,10 @@ find_package(Threads REQUIRED)
 
 target_link_libraries(rime_core_tests
     PRIVATE rime::core Threads::Threads)
+
+# The perf gate's falsification reads a REAL committed report (m17.3c): the point of
+# "a rule naming a timeline nobody recorded fails" is weaker if the report it fails on is one the
+# test just invented. Pointing it at docs/perf/ also means the day someone renames or deletes a
+# baseline, this test says so instead of the next perf run finding out.
+target_compile_definitions(rime_core_tests
+    PRIVATE RIME_PERF_BASELINE_DIR="${CMAKE_SOURCE_DIR}/docs/perf")

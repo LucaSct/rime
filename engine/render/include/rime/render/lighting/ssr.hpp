@@ -111,7 +111,7 @@ public:
              const SsrInputs& inputs,
              RGTexture ddgi_irradiance,
              RGTexture ddgi_visibility,
-             rhi::BufferHandle ddgi_params,
+             RenderGraph::FrameSlice ddgi_params,
              rhi::SamplerHandle ddgi_sampler);
 
 private:
@@ -119,7 +119,6 @@ private:
     rhi::ShaderHandle vertex_shader_;   // fullscreen.vert — the oversized-triangle idiom
     rhi::ShaderHandle fragment_shader_; // ssr_resolve.frag
     rhi::PipelineHandle pipeline_;
-    rhi::BufferHandle uniforms_;
     rhi::SamplerHandle sampler_; // point + clamp: depth must not interpolate, edges must not wrap
 };
 

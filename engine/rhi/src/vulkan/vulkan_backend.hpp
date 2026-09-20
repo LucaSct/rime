@@ -130,6 +130,8 @@ public:
     [[nodiscard]] SubmitTicket submit(std::unique_ptr<CommandBuffer> commands) override;
     [[nodiscard]] bool is_complete(SubmitTicket ticket) override;
     void wait(SubmitTicket ticket) override;
+    [[nodiscard]] CommandBuffer* wait_and_borrow(SubmitTicket ticket) override;
+    void release(SubmitTicket ticket) override;
     void wait_idle() override;
 
     [[nodiscard]] std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
@@ -229,6 +231,11 @@ private:
     struct InFlightSubmit {
         VkFence fence = VK_NULL_HANDLE;
         std::unique_ptr<CommandBuffer> commands;
+        // A borrow OUTRANKS completion. Without this an unrelated `is_complete()` — the ordinary
+        // way any other subsystem polls its own ticket — would see the fence signalled, reclaim
+        // this submission, and free the command buffer a borrower is still reading timestamps out
+        // of. Only `release()` reclaims a borrowed submission.
+        bool borrowed = false;
     };
 
     std::unordered_map<std::uint64_t, InFlightSubmit> in_flight_submits_;

@@ -32,6 +32,7 @@ rime_add_test(rime_rhi_tests
     ubo_test.cpp
     blend_mrt_test.cpp
     compute_test.cpp
+    async_submit_test.cpp
     mip_timestamp_test.cpp
     cooked_mip_test.cpp
     texture_array_test.cpp

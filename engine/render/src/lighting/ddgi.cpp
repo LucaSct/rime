@@ -223,56 +223,16 @@ DdgiProbes::DdgiProbes(rhi::Device& device) : device_(device) {
         device.write_texture(dummy_visibility_, zero_float2, sizeof(zero_float2));
     }
 
-    rhi::BufferDesc lb{};
-    lb.size = sizeof(GpuSdfClipmapLevels);
-    lb.usage = rhi::BufferUsage::Uniform;
-    lb.memory = rhi::MemoryUsage::CpuToGpu;
-    lb.debug_name = "ddgi-clipmap-levels";
-    clipmap_levels_ubo_ = device.create_buffer(lb);
-
-    rhi::BufferDesc tpd{};
-    tpd.size = sizeof(GpuDdgiTraceParams);
-    tpd.usage = rhi::BufferUsage::Uniform;
-    tpd.memory = rhi::MemoryUsage::CpuToGpu;
-    tpd.debug_name = "ddgi-trace-params";
-    trace_params_ubo_ = device.create_buffer(tpd);
-
-    rhi::BufferDesc bpd{};
-    bpd.size = sizeof(GpuDdgiBlendParams);
-    bpd.usage = rhi::BufferUsage::Uniform;
-    bpd.memory = rhi::MemoryUsage::CpuToGpu;
-    bpd.debug_name = "ddgi-blend-params";
-    blend_params_ubo_ = device.create_buffer(bpd);
-
-    // Fixed-size and created once: `probes_this_update` is bounded by kMaxDdgiProbesPerUpdate
-    // regardless of how large the configured lattice grows (that bound is the whole point of the
-    // round-robin), so unlike the ray buffer this one never needs to grow.
-    rhi::BufferDesc hb{};
-    hb.size = static_cast<std::uint64_t>(kMaxDdgiProbesPerUpdate) * sizeof(float);
-    hb.usage = rhi::BufferUsage::Storage;
-    hb.memory = rhi::MemoryUsage::CpuToGpu;
-    hb.debug_name = "ddgi-hysteresis";
-    hysteresis_buffer_ = device.create_buffer(hb);
-
-    // m10.5b: the forward pass's sample-time uniform block (GpuDdgiSampleParams) — written by
-    // BOTH add() (the real lattice + enabled=1) and empty_binding() (enabled=0), so it needs to
-    // exist before either can run.
-    rhi::BufferDesc spd{};
-    spd.size = sizeof(GpuDdgiSampleParams);
-    spd.usage = rhi::BufferUsage::Uniform;
-    spd.memory = rhi::MemoryUsage::CpuToGpu;
-    spd.debug_name = "ddgi-sample-params";
-    sample_params_ubo_ = device.create_buffer(spd);
+    // The five CPU-written-per-frame blocks that used to live here — clipmap levels, trace
+    // params, blend params, hysteresis and sample params — are gone (m17.4). Every one was
+    // rewritten by the CPU each frame with nothing ordering that write against the GPU still
+    // reading the previous frame's, which is fine under `submit_blocking` and corrupt the moment
+    // the loop pipelines. They come from the graph's per-frame scratch ring now.
 }
 
 DdgiProbes::~DdgiProbes() {
-    device_.destroy(sample_params_ubo_);
     if (ray_buffer_.is_valid())
         device_.destroy(ray_buffer_);
-    device_.destroy(hysteresis_buffer_);
-    device_.destroy(blend_params_ubo_);
-    device_.destroy(trace_params_ubo_);
-    device_.destroy(clipmap_levels_ubo_);
     device_.destroy(dummy_visibility_);
     device_.destroy(dummy_irradiance_);
     if (visibility_atlas_.is_valid())
@@ -506,10 +466,11 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
         }
     }
     stats_.fast_tracked = fast_tracked_this_update;
-    device_.write_buffer(hysteresis_buffer_, hysteresis.data(), hysteresis.size() * sizeof(float));
+    const RenderGraph::FrameSlice hyst_slice =
+        graph.push_frame_data(hysteresis.data(), hysteresis.size() * sizeof(float));
 
     const GpuSdfClipmapLevels levels = clipmap.gpu_levels();
-    device_.write_buffer(clipmap_levels_ubo_, &levels, sizeof(levels));
+    const RenderGraph::FrameSlice levels_slice = graph.push_frame_data(&levels, sizeof(levels));
 
     GpuDdgiTraceParams tp{};
     tp.ray_rotation = next_ray_rotation();
@@ -537,14 +498,14 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     tp.sky_radiance_pad[0] = lighting.sky_radiance[0];
     tp.sky_radiance_pad[1] = lighting.sky_radiance[1];
     tp.sky_radiance_pad[2] = lighting.sky_radiance[2];
-    device_.write_buffer(trace_params_ubo_, &tp, sizeof(tp));
+    const RenderGraph::FrameSlice tp_slice = graph.push_frame_data(&tp, sizeof(tp));
 
     GpuDdgiBlendParams bp{};
     bp.base_total_perrow_rays[0] = round_robin_base;
     bp.base_total_perrow_rays[1] = total_probes;
     bp.base_total_perrow_rays[2] = probes_per_row;
     bp.base_total_perrow_rays[3] = rays_per_probe;
-    device_.write_buffer(blend_params_ubo_, &bp, sizeof(bp));
+    const RenderGraph::FrameSlice bp_slice = graph.push_frame_data(&bp, sizeof(bp));
 
     // ── Declare the graph passes ─────────────────────────────────────────────────────────────
     // Import the clipmap's 3 levels as SAMPLED inputs, using their ACTUAL current state (not a
@@ -563,27 +524,27 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
         RenderGraph::ComputePassDesc desc{};
         desc.sampled = sampled;
         desc.buffer_writes = writes;
-        graph.add_compute_pass("ddgi-trace",
-                               desc,
-                               [pipe = trace_pipeline_,
-                                sampler = clipmap_sampler_,
-                                l0 = clipmap.level(0).texture,
-                                l1 = clipmap.level(1).texture,
-                                l2 = clipmap.level(2).texture,
-                                levels_ubo = clipmap_levels_ubo_,
-                                params = trace_params_ubo_,
-                                rays = ray_buffer_,
-                                ray_count](rhi::CommandBuffer& cmd) {
-                                   cmd.bind_compute_pipeline(pipe);
-                                   cmd.bind_texture(0, l0, sampler);
-                                   cmd.bind_texture(1, l1, sampler);
-                                   cmd.bind_texture(2, l2, sampler);
-                                   cmd.bind_uniform_buffer(3, levels_ubo);
-                                   cmd.bind_uniform_buffer(4, params);
-                                   cmd.bind_storage_buffer(5, rays);
-                                   cmd.dispatch(
-                                       (ray_count + kTraceGroupSize - 1) / kTraceGroupSize, 1, 1);
-                               });
+        graph.add_compute_pass(
+            "ddgi-trace",
+            desc,
+            [pipe = trace_pipeline_,
+             sampler = clipmap_sampler_,
+             l0 = clipmap.level(0).texture,
+             l1 = clipmap.level(1).texture,
+             l2 = clipmap.level(2).texture,
+             levels_ubo = levels_slice,
+             params = tp_slice,
+             rays = ray_buffer_,
+             ray_count](rhi::CommandBuffer& cmd) {
+                cmd.bind_compute_pipeline(pipe);
+                cmd.bind_texture(0, l0, sampler);
+                cmd.bind_texture(1, l1, sampler);
+                cmd.bind_texture(2, l2, sampler);
+                cmd.bind_uniform_buffer(3, levels_ubo.buffer, levels_ubo.offset, levels_ubo.size);
+                cmd.bind_uniform_buffer(4, params.buffer, params.offset, params.size);
+                cmd.bind_storage_buffer(5, rays);
+                cmd.dispatch((ray_count + kTraceGroupSize - 1) / kTraceGroupSize, 1, 1);
+            });
     }
     // The trace pass just declared above is a SAMPLED read of all 3 levels, so the graph will
     // transition (and leave) each in ShaderRead — tell the clipmap that is where they now sit
@@ -602,14 +563,15 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
                                desc,
                                [pipe = blend_irradiance_pipeline_,
                                 rays = ray_buffer_,
-                                params = blend_params_ubo_,
-                                hyst = hysteresis_buffer_,
+                                params = bp_slice,
+                                hyst = hyst_slice,
                                 atlas = irradiance_atlas_,
                                 probes_this_update](rhi::CommandBuffer& cmd) {
                                    cmd.bind_compute_pipeline(pipe);
                                    cmd.bind_storage_buffer(0, rays);
-                                   cmd.bind_uniform_buffer(1, params);
-                                   cmd.bind_storage_buffer(2, hyst);
+                                   cmd.bind_uniform_buffer(
+                                       1, params.buffer, params.offset, params.size);
+                                   cmd.bind_storage_buffer(2, hyst.buffer, hyst.offset, hyst.size);
                                    cmd.bind_storage_image(3, atlas);
                                    cmd.dispatch(1, 1, probes_this_update);
                                });
@@ -626,14 +588,15 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
                                desc,
                                [pipe = blend_visibility_pipeline_,
                                 rays = ray_buffer_,
-                                params = blend_params_ubo_,
-                                hyst = hysteresis_buffer_,
+                                params = bp_slice,
+                                hyst = hyst_slice,
                                 atlas = visibility_atlas_,
                                 probes_this_update](rhi::CommandBuffer& cmd) {
                                    cmd.bind_compute_pipeline(pipe);
                                    cmd.bind_storage_buffer(0, rays);
-                                   cmd.bind_uniform_buffer(1, params);
-                                   cmd.bind_storage_buffer(2, hyst);
+                                   cmd.bind_uniform_buffer(
+                                       1, params.buffer, params.offset, params.size);
+                                   cmd.bind_storage_buffer(2, hyst.buffer, hyst.offset, hyst.size);
                                    cmd.bind_storage_image(3, atlas);
                                    cmd.dispatch(1, 1, probes_this_update);
                                });
@@ -661,9 +624,9 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     sp.grid_dims_perrow[2] = count_z;
     sp.grid_dims_perrow[3] = probes_per_row;
     sp.enabled_pad[0] = 1u;
-    device_.write_buffer(sample_params_ubo_, &sp, sizeof(sp));
+    const RenderGraph::FrameSlice sp_slice = graph.push_frame_data(&sp, sizeof(sp));
 
-    return DdgiBinding{irradiance_rg, visibility_rg, sample_params_ubo_, atlas_sampler_};
+    return DdgiBinding{irradiance_rg, visibility_rg, sp_slice, atlas_sampler_};
 }
 
 DdgiBinding DdgiProbes::empty_binding(RenderGraph& graph) {
@@ -673,13 +636,13 @@ DdgiBinding DdgiProbes::empty_binding(RenderGraph& graph) {
     // read it anyway would at worst index atlas texel (0,0) of a 1x1 dummy, never out of bounds.
     GpuDdgiSampleParams sp{};
     sp.enabled_pad[0] = 0u;
-    device_.write_buffer(sample_params_ubo_, &sp, sizeof(sp));
+    const RenderGraph::FrameSlice sp_slice = graph.push_frame_data(&sp, sizeof(sp));
     // Both dummies sit permanently in ShaderRead (write_texture's own post-condition at
     // construction, never touched again) — import at that state, exactly the dummy_shadow_array_
     // pattern SceneRenderer's own shadow empty_binding()s already use.
     return DdgiBinding{graph.import_texture(dummy_irradiance_, rhi::ResourceState::ShaderRead),
                        graph.import_texture(dummy_visibility_, rhi::ResourceState::ShaderRead),
-                       sample_params_ubo_,
+                       sp_slice,
                        atlas_sampler_};
 }
 

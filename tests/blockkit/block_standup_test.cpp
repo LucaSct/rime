@@ -46,6 +46,7 @@
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/ground/surface.hpp"
 #include "rime/physics/physics.hpp"
 #include "rime/platform/filesystem.hpp"
 #include "rime/render/components.hpp"
@@ -75,6 +76,7 @@ struct Peer {
         blockkit::register_blockkit_components(world);
         destruction::register_destruction_components(world);
         render::register_render_components(world);
+        ground::register_ground_components(world); // the street, since m17.8
     }
 
     // Register every cook up front. Binding deliberately does not do this itself (bind.hpp: pattern

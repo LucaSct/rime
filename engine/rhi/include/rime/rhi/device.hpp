@@ -115,6 +115,33 @@ public:
     // Block until `ticket`'s work finishes, then reclaim it. A no-op for an invalid/unknown ticket.
     virtual void wait(SubmitTicket ticket) = 0;
 
+    // Block until `ticket` finishes and hand back a BORROWED pointer to its command buffer, which
+    // stays alive until `release(ticket)`. Null for an invalid, unknown or already-reclaimed
+    // ticket.
+    //
+    // This exists for exactly one thing, and it is not a convenience (m17.5). A command buffer OWNS
+    // its timestamp query pool, so a frame's per-pass GPU times are readable only in the window
+    // between "the GPU finished" and "the submission was reclaimed". `wait()` collapses those two
+    // moments into one call, which is fine for a caller that wants nothing back and fatal for a
+    // pipelined frame loop: the numbers every row of `docs/perf/` is built from would be freed
+    // before anyone could read them. Borrow, read, release.
+    //
+    // The borrow is not ownership: releasing is what frees the VkCommandBuffer back to its pool
+    // and recycles the descriptor pools it baked, and the encoder's own destructor deliberately
+    // does neither. Dropping the pointer without releasing leaks the submission until the device
+    // dies.
+    [[nodiscard]] virtual CommandBuffer* wait_and_borrow(SubmitTicket ticket) = 0;
+
+    // Reclaim a submission taken with `wait_and_borrow`. Idempotent, and safe on a ticket that was
+    // never borrowed — both are "there is nothing left in flight", the same answer `is_complete`
+    // gives.
+    //
+    // While a ticket is borrowed it is the ONLY thing that reclaims it: `is_complete()` still
+    // answers true (the work really did finish) and `wait()` still returns, but neither frees the
+    // command buffer, because either one doing so would pull the query pool out from under the
+    // borrower. So a borrow must be released, and forgetting is a leak rather than a crash.
+    virtual void release(SubmitTicket ticket) = 0;
+
     // Block until the GPU is idle. Used before tearing down resources.
     virtual void wait_idle() = 0;
 

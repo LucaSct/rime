@@ -286,9 +286,23 @@ enum class BlendMode : std::uint8_t { None, Alpha, Additive };
 // nowhere yet (measure/need first).
 inline constexpr std::uint32_t kMaxColorAttachments = 8;
 
-// Timestamp slots per command buffer (M5.3): enough for begin/end pairs around every pass of a
-// far bigger frame than M5 draws, while keeping the backend's query pool fixed-size.
-inline constexpr std::uint32_t kMaxTimestamps = 64;
+// Timestamp slots per command buffer (M5.3): begin/end pairs around every pass, so a frame can be
+// fully timed up to `kMaxTimestamps / 2` passes.
+//
+// 64 was "far bigger than M5 draws" when M5 drew a handful of passes. m17.3b measured the claim
+// and it had quietly stopped being true: `99-the-block` declares more than 32 passes, so every
+// pass past the 32nd went UNTIMED — and unattributed GPU time is indistinguishable in a report
+// from a pass that cost nothing, which is the exact confusion M17 exists to end. The overflow
+// warned once to the log and said nothing in the committed artifact, so no `docs/perf/` file has
+// ever contained the block's full GPU frame.
+//
+// 256 (128 timed passes) is the raise, not 64 (32) doubled to just clear today's frame: m17.7's
+// sky lighting, m17.8's ground and m17.9's shadow work all add passes, and a ceiling re-crossed
+// mid-milestone would silently un-attribute the frame again exactly when the numbers start being
+// spent. The cost is a 2 KB query pool per command buffer and a `vkCmdResetQueryPool` over 256
+// slots once per encoder; the per-frame readback is sized by the passes actually timed, not by
+// this constant, so a small frame pays nothing for the headroom.
+inline constexpr std::uint32_t kMaxTimestamps = 256;
 
 // What a texture is being used AS at a point in the frame — the RHI's abstract spelling of
 // Vulkan's image layout + stage/access pairs (M5.4, ADR-0019). The render graph derives one
