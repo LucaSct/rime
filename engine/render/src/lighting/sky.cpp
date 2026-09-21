@@ -165,14 +165,14 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
         {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene depth
         {2, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // SkyParams
     };
-    rhi::GraphicsPipelineDesc pd{};
-    pd.vertex_shader = vertex_shader_;
-    pd.fragment_shader = fragment_shader_;
-    pd.color_format = kHdrFormat;  // writes the second HDR target the next stage reads
-    pd.cull = rhi::CullMode::None; // one oversized triangle; nothing to cull
-    pd.bindings = bindings;
-    pd.debug_name = "sky";
-    pipeline_ = device.create_graphics_pipeline(pd);
+    rhi::GraphicsPipelineDesc graphics_pd{};
+    graphics_pd.vertex_shader = vertex_shader_;
+    graphics_pd.fragment_shader = fragment_shader_;
+    graphics_pd.color_format = kHdrFormat;  // writes the second HDR target the next stage reads
+    graphics_pd.cull = rhi::CullMode::None; // one oversized triangle; nothing to cull
+    graphics_pd.bindings = bindings;
+    graphics_pd.debug_name = "sky";
+    pipeline_ = device.create_graphics_pipeline(graphics_pd);
 
     // Point + clamp: the pass reads both inputs with texelFetch at the fragment's own pixel, so
     // filtering would be meaningless and a blended DEPTH in particular is a fictional surface.
