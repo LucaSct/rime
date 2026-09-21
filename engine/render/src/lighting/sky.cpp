@@ -14,8 +14,10 @@
 #include "rime/core/math/mat.hpp"
 #include "rime/render/passes.hpp" // kHdrFormat — the composited target's format
 #include "sky.frag.spv.h"
+#include "sky_multiple_scattering.comp.spv.h"
 #include "sky_sh.comp.spv.h"
 #include "sky_skyview.comp.spv.h"
+#include "sky_transmittance.comp.spv.h"
 
 namespace rime::render {
 namespace {
@@ -33,6 +35,19 @@ struct GpuSkyUniforms {
     float wind[4]{};
 };
 
+// Unlike GpuSkyUniforms this block is deliberately free of camera and art-direction data.  The
+// two view-independent tables are functions of the medium, not of the weather controls used by
+// the analytic sky that currently draws the frame.  Every field is a vec4 so std140 has no hidden
+// padding rule for the CPU and GLSL sides to disagree about.
+struct GpuAtmosphereUniforms {
+    float radii[4]{};             // planet radius, top height, Rayleigh height, Mie height (km)
+    float rayleigh_scattering[4]; // 1/km
+    float mie_scattering[4];      // 1/km
+    float mie_absorption[4];      // 1/km
+    float ground_albedo[4]{};
+    float solar_irradiance[4]{}; // unit white: a physical LUT must not inherit an authored sun
+};
+
 // The sky-view LUT's size. 192x108 is Hillaire 2020's published figure, and it is generous here:
 // the table holds a gradient, a broad scatter lobe and a cloud layer, all of which are smooth. The
 // one thing it CANNOT hold is the sun's disc (~0.7 deg against a ~1.8 deg texel), which is why
@@ -40,6 +55,12 @@ struct GpuSkyUniforms {
 constexpr std::uint32_t kSkyViewWidth = 192;
 constexpr std::uint32_t kSkyViewHeight = 108;
 constexpr std::uint32_t kSkyViewGroup = 8; // must match sky_skyview.comp's local_size
+constexpr std::uint32_t kTransmittanceWidth = 256;
+constexpr std::uint32_t kTransmittanceHeight = 64;
+constexpr std::uint32_t kTransmittanceGroup = 8; // must match sky_transmittance.comp's local_size
+constexpr std::uint32_t kMultipleScatteringSize = 32;
+constexpr std::uint32_t kMultipleScatteringGroup =
+    8; // must match sky_multiple_scattering.comp's local_size
 
 // Ten vec4: nine SH coefficients, then the live flag. Must match sky_sh.comp and sky_sh_eval.glsl.
 constexpr std::uint64_t kSkyShBytes = 10 * 4 * sizeof(float);
@@ -105,6 +126,23 @@ constexpr std::uint64_t kSkyShBytes = 10 * 4 * sizeof(float);
     return u;
 }
 
+[[nodiscard]] GpuAtmosphereUniforms fill_atmosphere_uniforms(const SkyParams& params) {
+    const SkyParams::Atmosphere& a = params.atmosphere;
+    GpuAtmosphereUniforms u{};
+    u.radii[0] = a.planet_radius_km;
+    u.radii[1] = a.atmosphere_height_km;
+    u.radii[2] = a.rayleigh_scale_height_km;
+    u.radii[3] = a.mie_scale_height_km;
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        u.rayleigh_scattering[i] = a.rayleigh_scattering[i];
+        u.mie_scattering[i] = a.mie_scattering[i];
+        u.mie_absorption[i] = a.mie_absorption[i];
+        u.ground_albedo[i] = a.ground_albedo[i];
+        u.solar_irradiance[i] = 1.0f;
+    }
+    return u;
+}
+
 } // namespace
 
 SkyPass::SkyPass(rhi::Device& device) : device_(device) {
@@ -160,10 +198,27 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
     sh_cs.debug_name = "sky_sh.comp";
     sh_shader_ = device.create_shader(sh_cs);
 
+    rhi::ShaderDesc transmittance_cs{};
+    transmittance_cs.stage = rhi::ShaderStage::Compute;
+    transmittance_cs.spirv = sky_transmittance_comp_spv;
+    transmittance_cs.spirv_size_bytes = sizeof(sky_transmittance_comp_spv);
+    transmittance_cs.debug_name = "sky_transmittance.comp";
+    transmittance_shader_ = device.create_shader(transmittance_cs);
+
+    rhi::ShaderDesc multiple_scattering_cs{};
+    multiple_scattering_cs.stage = rhi::ShaderStage::Compute;
+    multiple_scattering_cs.spirv = sky_multiple_scattering_comp_spv;
+    multiple_scattering_cs.spirv_size_bytes = sizeof(sky_multiple_scattering_comp_spv);
+    multiple_scattering_cs.debug_name = "sky_multiple_scattering.comp";
+    multiple_scattering_shader_ = device.create_shader(multiple_scattering_cs);
+
     {
         const rhi::BindingDesc b[] = {
             {0, rhi::BindingType::StorageImage, rhi::StageMask::Compute},  // the LUT being written
             {2, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute}, // SkyParams
+            {3, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute}, // physical atmosphere
+            {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Compute},
+            {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Compute},
         };
         rhi::ComputePipelineDesc pd{};
         pd.shader = skyview_shader_;
@@ -175,12 +230,38 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
         const rhi::BindingDesc b[] = {
             {0, rhi::BindingType::StorageBuffer, rhi::StageMask::Compute}, // the nine coefficients
             {2, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute}, // SkyParams
+            {3, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute}, // physical atmosphere
+            {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Compute},
+            {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Compute},
         };
         rhi::ComputePipelineDesc pd{};
         pd.shader = sh_shader_;
         pd.bindings = b;
         pd.debug_name = "sky-sh";
         sh_pipeline_ = device.create_compute_pipeline(pd);
+    }
+    {
+        const rhi::BindingDesc b[] = {
+            {0, rhi::BindingType::StorageImage, rhi::StageMask::Compute},
+            {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute},
+        };
+        rhi::ComputePipelineDesc pd{};
+        pd.shader = transmittance_shader_;
+        pd.bindings = b;
+        pd.debug_name = "sky-transmittance-lut";
+        transmittance_pipeline_ = device.create_compute_pipeline(pd);
+    }
+    {
+        const rhi::BindingDesc b[] = {
+            {0, rhi::BindingType::StorageImage, rhi::StageMask::Compute},
+            {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Compute},
+            {2, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute},
+        };
+        rhi::ComputePipelineDesc pd{};
+        pd.shader = multiple_scattering_shader_;
+        pd.bindings = b;
+        pd.debug_name = "sky-multiple-scattering-lut";
+        multiple_scattering_pipeline_ = device.create_compute_pipeline(pd);
     }
 
     // Linear, because a consumer looks up a direction that falls between texels and a nearest
@@ -200,6 +281,11 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
     ls.address_mode = rhi::AddressMode::ClampToEdge;
     ls.debug_name = "sky-view-lut-sampler";
     lut_sampler_ = device.create_sampler(ls);
+
+    // The physical LUTs have no azimuth seam and are parameter tables, so clamp is correct on
+    // both axes.  This is separate from the sky-view sampler because its azimuth really wraps.
+    ls.debug_name = "sky-atmosphere-lut-sampler";
+    atmosphere_sampler_ = device.create_sampler(ls);
 
     // The no-sky placeholders. Both are created once and never written again: the shaders gate on
     // the SH buffer's flag (which is zero here), so their contents are never consulted for real
@@ -227,15 +313,24 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
 }
 
 SkyPass::~SkyPass() {
+    if (multiple_scattering_lut_.is_valid())
+        device_.destroy(multiple_scattering_lut_);
+    if (transmittance_lut_.is_valid())
+        device_.destroy(transmittance_lut_);
     if (skyview_lut_.is_valid())
         device_.destroy(skyview_lut_);
     if (sh_buffer_.is_valid())
         device_.destroy(sh_buffer_);
     device_.destroy(dummy_sh_);
     device_.destroy(dummy_skyview_);
+    device_.destroy(atmosphere_sampler_);
     device_.destroy(lut_sampler_);
+    device_.destroy(multiple_scattering_pipeline_);
+    device_.destroy(transmittance_pipeline_);
     device_.destroy(sh_pipeline_);
     device_.destroy(skyview_pipeline_);
+    device_.destroy(multiple_scattering_shader_);
+    device_.destroy(transmittance_shader_);
     device_.destroy(sh_shader_);
     device_.destroy(skyview_shader_);
     device_.destroy(sampler_);
@@ -307,6 +402,39 @@ bool SkyPass::bake_inputs_equal(const SkyParams& a, const SkyParams& b) noexcept
            a.wind[1] == b.wind[1];
 }
 
+bool SkyPass::transmittance_inputs_equal(const SkyParams& a, const SkyParams& b) noexcept {
+    const auto v3 = [](const float (&x)[3], const float (&y)[3]) {
+        return x[0] == y[0] && x[1] == y[1] && x[2] == y[2];
+    };
+    const SkyParams::Atmosphere& x = a.atmosphere;
+    const SkyParams::Atmosphere& y = b.atmosphere;
+    // Ground albedo is absent: it cannot change the optical depth from a point to the top of the
+    // atmosphere.  Keeping it out makes a ground-only edit visibly reuse this table.
+    return x.planet_radius_km == y.planet_radius_km &&
+           x.atmosphere_height_km == y.atmosphere_height_km &&
+           x.rayleigh_scale_height_km == y.rayleigh_scale_height_km &&
+           x.mie_scale_height_km == y.mie_scale_height_km &&
+           v3(x.rayleigh_scattering, y.rayleigh_scattering) &&
+           v3(x.mie_scattering, y.mie_scattering) && v3(x.mie_absorption, y.mie_absorption);
+}
+
+bool SkyPass::multiple_scattering_inputs_equal(const SkyParams& a, const SkyParams& b) noexcept {
+    const auto v3 = [](const float (&x)[3], const float (&y)[3]) {
+        return x[0] == y[0] && x[1] == y[1] && x[2] == y[2];
+    };
+    const SkyParams::Atmosphere& x = a.atmosphere;
+    const SkyParams::Atmosphere& y = b.atmosphere;
+    // This table samples transmittance, so every physical input that can change that source is a
+    // dependency too.  Nothing authored by the analytic sky, its sun, or the camera belongs here.
+    return x.planet_radius_km == y.planet_radius_km &&
+           x.atmosphere_height_km == y.atmosphere_height_km &&
+           x.rayleigh_scale_height_km == y.rayleigh_scale_height_km &&
+           x.mie_scale_height_km == y.mie_scale_height_km &&
+           v3(x.rayleigh_scattering, y.rayleigh_scattering) &&
+           v3(x.mie_scattering, y.mie_scattering) && v3(x.mie_absorption, y.mie_absorption) &&
+           v3(x.ground_albedo, y.ground_albedo);
+}
+
 void SkyPass::ensure_lighting_resources() {
     if (skyview_lut_.is_valid())
         return;
@@ -322,6 +450,16 @@ void SkyPass::ensure_lighting_resources() {
     skyview_lut_ = device_.create_texture(td);
     skyview_state_ = rhi::ResourceState::Undefined; // fresh allocation; the bake writes it whole
 
+    td.extent = {kTransmittanceWidth, kTransmittanceHeight};
+    td.debug_name = "sky-transmittance-lut";
+    transmittance_lut_ = device_.create_texture(td);
+    transmittance_state_ = rhi::ResourceState::Undefined;
+
+    td.extent = {kMultipleScatteringSize, kMultipleScatteringSize};
+    td.debug_name = "sky-multiple-scattering-lut";
+    multiple_scattering_lut_ = device_.create_texture(td);
+    multiple_scattering_state_ = rhi::ResourceState::Undefined;
+
     rhi::BufferDesc bd{};
     bd.size = kSkyShBytes;
     bd.usage = rhi::BufferUsage::Storage;
@@ -336,49 +474,164 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
     ensure_lighting_resources();
 
     const RGTexture lut_rg = graph.import_texture(skyview_lut_, skyview_state_);
+    const RGTexture transmittance_rg =
+        graph.import_texture(transmittance_lut_, transmittance_state_);
+    const RGTexture multiple_scattering_rg =
+        graph.import_texture(multiple_scattering_lut_, multiple_scattering_state_);
     const RGBuffer sh_rg = graph.import_buffer(sh_buffer_, sh_state_);
 
-    // Nothing the bake depends on moved, so last frame's bake is still correct. Declare no passes
-    // at all -- the imported resources carry forward and the consumers read exactly what they read
-    // last frame. This is the whole reason the LUT and the SH buffer are persistent rather than
-    // graph transients.
-    if (has_bake_ && bake_inputs_equal(baked_, params)) {
+    const bool transmittance_dirty =
+        !has_transmittance_ || !transmittance_inputs_equal(transmittance_baked_, params);
+    const bool multiple_scattering_dirty =
+        !has_multiple_scattering_ ||
+        !multiple_scattering_inputs_equal(multiple_scattering_baked_, params);
+    // m17.7d makes this bake sample both tables. Invalidate it from their dirty flags already, so
+    // that body replacement cannot turn a physical edit into a stale visible sky or SH buffer.
+    const bool lighting_dirty = !has_bake_ || !bake_inputs_equal(baked_, params) ||
+                                transmittance_dirty || multiple_scattering_dirty;
+
+    // A physical table is persistent for exactly the same reason as the m17.7b sky-view table:
+    // it represents an unchanging medium, and a frame with no relevant edit must not pay its
+    // integration again.  The two keys are deliberately separate; a ground-albedo edit leaves
+    // transmittance alone, while neither key has an analytic colour/cloud/camera/sun dependency.
+    if (!transmittance_dirty) {
+        ++atmosphere_stats_.transmittance_reused;
+    } else {
+        const GpuAtmosphereUniforms u = fill_atmosphere_uniforms(params);
+        const RenderGraph::FrameSlice ubo = graph.push_frame_data(&u, sizeof(u));
+        const RGTexture writes[] = {transmittance_rg};
+        RenderGraph::ComputePassDesc desc{};
+        desc.storage_write = writes;
+        graph.add_compute_pass(
+            "sky-transmittance-lut",
+            desc,
+            [pipe = transmittance_pipeline_, transmittance_rg, ubo, &graph](
+                rhi::CommandBuffer& cmd) {
+                cmd.bind_compute_pipeline(pipe);
+                cmd.bind_storage_image(0, graph.physical(transmittance_rg));
+                cmd.bind_uniform_buffer(1, ubo.buffer, ubo.offset, sizeof(GpuAtmosphereUniforms));
+                cmd.dispatch((kTransmittanceWidth + kTransmittanceGroup - 1) / kTransmittanceGroup,
+                             (kTransmittanceHeight + kTransmittanceGroup - 1) / kTransmittanceGroup,
+                             1);
+            });
+        transmittance_baked_ = params;
+        has_transmittance_ = true;
+        ++atmosphere_stats_.transmittance_filled;
+    }
+
+    if (!multiple_scattering_dirty) {
+        ++atmosphere_stats_.multiple_scattering_reused;
+    } else {
+        const GpuAtmosphereUniforms u = fill_atmosphere_uniforms(params);
+        const RenderGraph::FrameSlice ubo = graph.push_frame_data(&u, sizeof(u));
+        const RGTexture sampled[] = {transmittance_rg};
+        const RGTexture writes[] = {multiple_scattering_rg};
+        RenderGraph::ComputePassDesc desc{};
+        desc.sampled = sampled;
+        desc.storage_write = writes;
+        graph.add_compute_pass(
+            "sky-multiple-scattering-lut",
+            desc,
+            [pipe = multiple_scattering_pipeline_,
+             transmittance_rg,
+             multiple_scattering_rg,
+             ubo,
+             smp = atmosphere_sampler_,
+             &graph](rhi::CommandBuffer& cmd) {
+                cmd.bind_compute_pipeline(pipe);
+                cmd.bind_storage_image(0, graph.physical(multiple_scattering_rg));
+                cmd.bind_texture(1, graph.physical(transmittance_rg), smp);
+                cmd.bind_uniform_buffer(2, ubo.buffer, ubo.offset, sizeof(GpuAtmosphereUniforms));
+                cmd.dispatch((kMultipleScatteringSize + kMultipleScatteringGroup - 1) /
+                                 kMultipleScatteringGroup,
+                             (kMultipleScatteringSize + kMultipleScatteringGroup - 1) /
+                                 kMultipleScatteringGroup,
+                             1);
+            });
+        multiple_scattering_baked_ = params;
+        has_multiple_scattering_ = true;
+        ++atmosphere_stats_.multiple_scattering_filled;
+    }
+
+    // Nothing the lighting bake depends on moved, so last frame's sky-view and SH are still
+    // correct.  Physical LUT work above remains live because writes to imported persistent
+    // resources are observable, even before m17.7d consumes their values in the analytic body.
+    if (!lighting_dirty) {
         ++stats_.reused;
+        // The multiple-scattering solve samples transmittance even on a frame where sky-view/SH
+        // are reused.  Its read therefore owns transmittance's final state; only a lone direct
+        // transmittance fill remains in general layout.
+        if (multiple_scattering_dirty) {
+            transmittance_state_ = rhi::ResourceState::ShaderRead;
+            multiple_scattering_state_ = rhi::ResourceState::StorageReadWrite;
+        } else if (transmittance_dirty) {
+            transmittance_state_ = rhi::ResourceState::StorageReadWrite;
+        }
         return SkyLightBinding{lut_rg, sh_rg, lut_sampler_};
     }
 
     const GpuSkyUniforms u = fill_uniforms(params, inputs);
+    const GpuAtmosphereUniforms au = fill_atmosphere_uniforms(params);
     const RenderGraph::FrameSlice ubo = graph.push_frame_data(&u, sizeof(u));
+    const RenderGraph::FrameSlice atmosphere_ubo = graph.push_frame_data(&au, sizeof(au));
 
     {
+        const RGTexture sampled[] = {transmittance_rg, multiple_scattering_rg};
         const RGTexture writes[] = {lut_rg};
         RenderGraph::ComputePassDesc desc{};
+        desc.sampled = sampled;
         desc.storage_write = writes;
         graph.add_compute_pass(
             "sky-view-lut",
             desc,
-            [pipe = skyview_pipeline_, lut_rg, ubo, &graph](rhi::CommandBuffer& cmd) {
+            [pipe = skyview_pipeline_,
+             lut_rg,
+             transmittance_rg,
+             multiple_scattering_rg,
+             ubo,
+             atmosphere_ubo,
+             smp = atmosphere_sampler_,
+             &graph](rhi::CommandBuffer& cmd) {
                 cmd.bind_compute_pipeline(pipe);
                 cmd.bind_storage_image(0, graph.physical(lut_rg));
                 cmd.bind_uniform_buffer(2, ubo.buffer, ubo.offset, sizeof(GpuSkyUniforms));
+                cmd.bind_uniform_buffer(
+                    3, atmosphere_ubo.buffer, atmosphere_ubo.offset, sizeof(GpuAtmosphereUniforms));
+                cmd.bind_texture(4, graph.physical(transmittance_rg), smp);
+                cmd.bind_texture(5, graph.physical(multiple_scattering_rg), smp);
                 cmd.dispatch((kSkyViewWidth + kSkyViewGroup - 1) / kSkyViewGroup,
                              (kSkyViewHeight + kSkyViewGroup - 1) / kSkyViewGroup,
                              1);
             });
     }
     {
-        // Note what this pass does NOT declare: it does not read the LUT. sky_sh.comp integrates
-        // sky_lighting_radiance() directly over a spherical Fibonacci set, so its accuracy does not
-        // inherit the table's angular resolution and -- more to the point -- there is no per-texel
-        // solid angle to get subtly wrong. docs/math/sky-lighting.md §3 has the argument.
+        // sky_sh.comp still integrates the analytic body directly, rather than inheriting the
+        // sky-view table's angular resolution.  The physical tables are nevertheless real sampled
+        // dependencies now: m17.7d changes only that body, so graph order and bindings already
+        // tell the truth before the replacement lands.
+        const RGTexture sampled[] = {transmittance_rg, multiple_scattering_rg};
         const RGBuffer writes[] = {sh_rg};
         RenderGraph::ComputePassDesc desc{};
+        desc.sampled = sampled;
         desc.buffer_writes = writes;
         graph.add_compute_pass(
-            "sky-sh", desc, [pipe = sh_pipeline_, sh_rg, ubo, &graph](rhi::CommandBuffer& cmd) {
+            "sky-sh",
+            desc,
+            [pipe = sh_pipeline_,
+             sh_rg,
+             transmittance_rg,
+             multiple_scattering_rg,
+             ubo,
+             atmosphere_ubo,
+             smp = atmosphere_sampler_,
+             &graph](rhi::CommandBuffer& cmd) {
                 cmd.bind_compute_pipeline(pipe);
                 cmd.bind_storage_buffer(0, graph.physical_buffer(sh_rg));
                 cmd.bind_uniform_buffer(2, ubo.buffer, ubo.offset, sizeof(GpuSkyUniforms));
+                cmd.bind_uniform_buffer(
+                    3, atmosphere_ubo.buffer, atmosphere_ubo.offset, sizeof(GpuAtmosphereUniforms));
+                cmd.bind_texture(4, graph.physical(transmittance_rg), smp);
+                cmd.bind_texture(5, graph.physical(multiple_scattering_rg), smp);
                 cmd.dispatch(1, 1, 1); // one workgroup reduces the whole set
             });
     }
@@ -394,6 +647,10 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
     // declared. Guessing here instead is what produced `texture_barrier 'from' disagrees with the
     // tracked layout` twice, first when nothing sampled the LUT and again when SSR started to.
     skyview_state_ = rhi::ResourceState::StorageReadWrite;
+    // Both LUTs were sampled by both existing compute passes above, so their final state is known
+    // here rather than guessed by a downstream consumer as sky-view's state must be.
+    transmittance_state_ = rhi::ResourceState::ShaderRead;
+    multiple_scattering_state_ = rhi::ResourceState::ShaderRead;
     sh_state_ = rhi::ResourceState::ShaderRead;
     baked_ = params;
     has_bake_ = true;

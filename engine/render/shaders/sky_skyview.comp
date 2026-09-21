@@ -23,7 +23,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-#include "sky_common.glsl"  // SkyParams (binding 2) + sky_lighting_radiance()
+#include "sky_atmosphere_bindings.glsl" // physical inputs declared before the shared body
+#include "sky_common.glsl"              // SkyParams (binding 2) + sky_lighting_radiance()
 #include "sky_mapping.glsl" // skyview_direction_from_uv()
 
 // 8x8 tiles over a 192x108 table. The table is small enough that the launch is a rounding error;

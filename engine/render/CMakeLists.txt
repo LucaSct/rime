@@ -44,6 +44,8 @@ rime_add_shaders(rime_render
     shaders/sky.frag
     shaders/sky_skyview.comp
     shaders/sky_sh.comp
+    shaders/sky_transmittance.comp
+    shaders/sky_multiple_scattering.comp
     shaders/fullscreen.vert
     shaders/tonemap.frag
     shaders/present.frag

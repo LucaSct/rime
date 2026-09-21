@@ -264,6 +264,18 @@ public:
         return sky_.stats();
     }
 
+    [[nodiscard]] const SkyAtmosphereStats& sky_atmosphere_stats() const noexcept {
+        return sky_.atmosphere_stats();
+    }
+
+    [[nodiscard]] rhi::TextureHandle sky_transmittance_lut() const noexcept {
+        return sky_.transmittance_lut();
+    }
+
+    [[nodiscard]] rhi::TextureHandle sky_multiple_scattering_lut() const noexcept {
+        return sky_.multiple_scattering_lut();
+    }
+
     // How many draws render() has refused because their MeshRef named a mesh this registry does
     // not hold, cumulative. Nonzero means content is wrong — a scene saved against a different
     // registry, or a hand-edited `.rscene` — and the entities concerned are not being drawn.

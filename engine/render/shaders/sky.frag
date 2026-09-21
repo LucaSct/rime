@@ -26,6 +26,10 @@
 // BAKE this sky evaluate the same body this one composites rather than a copy of it. What stays
 // here is only what makes this the COMPOSITE pass: the scene inputs, and the main() that decides
 // per pixel whether the sky is allowed to touch it.
+// These inputs are declared before the shared body in every compilation unit. This analytic
+// composite does not sample them yet, but m17.7d can replace sky_lighting_radiance() without
+// turning the fragment compile into a declaration-order failure.
+#include "sky_atmosphere_bindings.glsl"
 #include "sky_common.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D scene_color; // the lit HDR frame
