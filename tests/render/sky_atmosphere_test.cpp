@@ -24,10 +24,13 @@ constexpr std::uint32_t kTransmittanceWidth = 256;
 constexpr std::uint32_t kTransmittanceHeight = 64;
 constexpr std::uint32_t kMultipleScatteringSize = 32;
 
-void run_lighting_frame(rhi::Device& device, SkyPass& sky, const SkyParams& params) {
+void run_lighting_frame(rhi::Device& device,
+                        SkyPass& sky,
+                        const SkyParams& params,
+                        const SkyInputs& inputs = {}) {
     RenderGraph graph(device);
     graph.reset();
-    const SkyLightBinding binding = sky.add_lighting(graph, params, {});
+    const SkyLightBinding binding = sky.add_lighting(graph, params, inputs);
     // Keeping sky-view makes its physical sampled dependencies a visible producer chain.  The
     // atmosphere tables are persistent imports too, so their direct writes survive even on a
     // physical-only edit before m17.7d uses their values in the sky body.
@@ -74,7 +77,7 @@ TEST_CASE("sky atmosphere: physical LUTs are finite, cached independently, and d
     params.clouds_enabled = false;
 
     // First use creates both persistent physical tables and fills them.  This must precede the
-    // analytic sky-view/SH passes: their declared sampled reads pin the graph edge for m17.7d.
+    // physical sky-view/SH passes: their declared sampled reads pin the graph edge for m17.7d.
     run_lighting_frame(*device, sky, params);
     const SkyAtmosphereStats first = sky.atmosphere_stats();
     CHECK(first.transmittance_filled == 1);
@@ -117,7 +120,7 @@ TEST_CASE("sky atmosphere: physical LUTs are finite, cached independently, and d
     CHECK(reused.transmittance_reused == 1);
     CHECK(reused.multiple_scattering_reused == 1);
 
-    // These all repaint/rebake the ANALYTIC sky, but physical-medium tables must not notice them.
+    // These are authored controls, not medium inputs, so physical-medium tables must not notice.
     SkyParams authored = params;
     authored.zenith[0] = 0.91f;
     authored.horizon[2] = 0.13f;
@@ -193,4 +196,40 @@ TEST_CASE("sky atmosphere: off creates no physical LUT work (m17.7c)") {
     const SkyAtmosphereStats stats = sky.atmosphere_stats();
     CHECK(stats.transmittance_filled == 0);
     CHECK(stats.multiple_scattering_filled == 0);
+}
+
+TEST_CASE("sky atmosphere: clouds rebake with camera x/z, not fixed-observer height (m17.7d)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the cloud camera-cache proof");
+        return;
+    }
+
+    SkyPass sky(*device);
+    SkyParams params{};
+    params.enabled = true;
+    params.clouds_enabled = true;
+    params.coverage = 0.6f;
+    SkyInputs inputs{};
+    run_lighting_frame(*device, sky, params, inputs);
+    CHECK(sky.stats().filled == 1);
+    CHECK(sky.stats().reused == 0);
+
+    // An identical camera reuses.  The cloud slab samples x/z only; y is deliberately absent while
+    // m17.7d's clear-air observer remains a fixed 2 m point rather than a flight-capable camera.
+    run_lighting_frame(*device, sky, params, inputs);
+    inputs.camera_pos.y = 25.0f;
+    run_lighting_frame(*device, sky, params, inputs);
+    CHECK(sky.stats().filled == 1);
+    CHECK(sky.stats().reused == 2);
+
+    inputs.camera_pos.x = 10.0f;
+    run_lighting_frame(*device, sky, params, inputs);
+    inputs.camera_pos.z = -6.0f;
+    run_lighting_frame(*device, sky, params, inputs);
+    CHECK(sky.stats().filled == 3);
+    CHECK(sky.stats().reused == 2);
 }

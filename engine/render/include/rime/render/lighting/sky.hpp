@@ -13,11 +13,11 @@ namespace rime::render {
 // The sky (m17.0): a procedural daytime sky with a sun disc and a cloud layer, composited over the
 // frame wherever the depth buffer says nothing was drawn.
 //
-// This is an ANALYTIC sky and it is the scene's BACKGROUND, not its light source. ADR-0040 records
-// where this is going -- a Hillaire-2020 precomputed-LUT atmosphere whose transmittance reddens the
-// sun, whose sky-view LUT feeds ambient/DDGI, and whose froxel volume gives aerial perspective --
-// and the seam here is deliberately the one that design asks for, so the physical model replaces
-// the shader body without moving the pass, the parameters, or the sun coupling.
+// Its full-resolution BACKGROUND remains authored and analytic, while m17.7d makes the separate
+// sky-view/SH LIGHTING body a precomputed physical atmosphere. ADR-0040 records the remaining
+// path: the background may later sample that same table, and a froxel volume adds aerial
+// perspective. Keeping those presentation changes separate lets the medium replace its lighting
+// body without moving the pass, the parameters, or the sun coupling.
 //
 // Structurally this is the SSR pattern (m10.7b): read the forward pass's HDR + depth, write a
 // SECOND HDR target the next stage reads. With the sky off, nothing allocates and the tonemap reads
@@ -225,8 +225,9 @@ private:
     rhi::TextureHandle dummy_skyview_;
     rhi::BufferHandle dummy_sh_;
 
-    SkyParams baked_{};     // what the current bake was made from
-    bool has_bake_ = false; // false until the first bake, so the first call always fills
+    SkyParams baked_{};        // what the current bake was made from
+    SkyInputs baked_inputs_{}; // camera x/z matter only to the cached cloud slab
+    bool has_bake_ = false;    // false until the first bake, so the first call always fills
     SkyParams transmittance_baked_{};
     SkyParams multiple_scattering_baked_{};
     bool has_transmittance_ = false;

@@ -109,16 +109,16 @@ and the evaluation multiplies by $Y_{0,0}$ again:
 $$ E(\mathbf{n}) = c_0 Y_{0,0} = L \cdot 0.282095^2 \cdot 4\pi = L \cdot 1.0 = L $$
 
 A uniform sky of radiance $L$ produces exactly $L$ — which is precisely what the flat constant
-meant. Measured against the real code path the error is $4.9\times10^{-6}$ over 97 directions. A
-bright-above / dark-below sky gives 1.0000 facing up, 0.5003 facing sideways and 0.0000 facing
-down, which is the analytic truth exactly. `sky_lighting_test.cpp` asserts these rather than
-trusting this page, and the up/side ratio of ~2.0 is the specific number that separates a working
-directional term from an isotropic bug, which would give exactly 1.0.
+meant. That normalization identity still pins the SH projection itself, but m17.7d's runtime body
+is not uniform: it is physical single scattering. Its structural tests therefore assert solar
+scale, atmospheric colour, source occlusion and the sky-off gate instead of pretending an authored
+gradient can still manufacture the old uniform fixture.
 
 ## 5. The table, and its horizon warp
 
-SSR and DDGI need radiance along a *direction*, per ray. Evaluating the analytic sky there would
-mean two five-octave fBm samples per ray, so the sky is baked once into a small table and sampled.
+SSR and DDGI need radiance along a *direction*, per ray. Evaluating the sky body there would mean
+a spherical scattering integral plus the cloud layer per ray, so the sky is baked once into a small
+table and sampled.
 
 The parameterisation is Hillaire 2020's sky-view LUT mapping: azimuth linear, elevation stored
 through a **signed square root**,
@@ -155,16 +155,19 @@ SSR is left open, not taken.
 
 ## 7. What this is not, yet
 
-The sky being integrated is still the **analytic** one of m17.0 — a gradient fit, a glow lobe and a
-cloud slab. There is no Rayleigh or Mie integral, no transmittance, no aerial perspective. What
-m17.7b builds is the *shape* the physical model drops into: when the Hillaire LUTs land, only the
-body of `sky_lighting_radiance()` changes, and this page's §2–§4 are untouched because they are
-about the cosine kernel, not about where the radiance came from.
+m17.7d replaces `sky_lighting_radiance()` with a 24-segment spherical single-scattering integral:
+Rayleigh and Henyey–Greenstein Mie phase terms sample the precomputed transmittance LUT, and the
+small multiple-scattering table contributes a bounded ambient approximation. The full-resolution
+background remains the authored m17.0 gradient/glow/cloud picture in this brick, so its art controls
+do not contaminate the sky-view LUT or SH. The multiple-scattering producer is not Hillaire's full
+closure, and there is still no froxel aerial perspective; those limits are intentional and visible
+in the shader comments rather than being presented as a completed four-LUT model.
 
 Two approximations are worth naming as limitations rather than discovering later:
 
-- **The table is camera-centric.** A DDGI probe some metres away samples a sky computed for the
-  camera's position. Exact for the gradient, approximate for the cloud slab.
+- **The observer is fixed near ground.** The first physical body has no planet-centre camera
+  coordinate, so sky-view and every DDGI probe use the same 2 m observer. That keeps the cache
+  medium-only today; camera altitude must become a bake dependency before flight can be correct.
 - **Clouds are in the integral.** That is what makes an overcast sky actually dim the scene, but it
   also means the coefficients change whenever the wind moves the clouds, so the dirty check has to
   treat wind as a parameter and not as animation it can ignore.

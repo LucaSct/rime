@@ -1480,10 +1480,10 @@ struct Visuals {
         // judged by looking at, was lit by a single hand-picked constant.
         //
         // This does two things at once and the second is the one to know about: it paints a dusk
-        // sky ABOVE the horizon, and it becomes what LIGHTS the street. `set_ambient` above is now
-        // the sky-less fallback. The values are tuned so the ambient the sky delivers matches the
-        // constant it displaces to within 2.5% — see palette.hpp for the measurement and why the
-        // intensity is as low as it is.
+        // sky ABOVE the horizon, and its physical solar source becomes what LIGHTS the street.
+        // `set_ambient` above is now the sky-less fallback. m17.7d deliberately retired the
+        // analytic gradient's old ambient-match calibration; palette.hpp records that this exposure
+        // now needs a physical visual-bar measurement rather than a copied number.
         //
         // `use_scene_sun` is left ON, so the disc follows the authored DirectionalLight rather than
         // being pointed a second time. ADR-0040 §4: two authored sun directions that drift apart is
@@ -1492,7 +1492,7 @@ struct Visuals {
     }
 
     // The block's sky, in one place so the headless A/B below can put back exactly what it took
-    // away. See palette.hpp for how these numbers were measured rather than chosen.
+    // away. palette.hpp records which controls remain background art and which feed physical light.
     [[nodiscard]] static render::SkyParams authored_sky() {
         render::SkyParams sky{};
         sky.enabled = true;
@@ -1953,7 +1953,7 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
     double intact_luma = 0.0;
     double intact_street = 0.0;   // the STREET only — no sky pixels, so the claim is about light
     double intact_rb = 0.0;       // its red/blue tint under the authored sky
-    double red_sky_rb = 0.0;      // and under a deliberately red one (m17.7b)
+    double red_sun_rb = 0.0;      // and under a deliberately red physical source (m17.7d)
     std::uint32_t sky_filled = 0; // how many times the sky was actually baked
 
     // What the M10 stack did on the frames the render claims are made about.
@@ -2010,24 +2010,21 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
             // the street change. A claim that cannot fail is not a claim — if these two numbers
             // come out equal, the sky is not reaching the shading and the claim below says so.
             if (render::RenderGraph* graph = demo.app.graph()) {
-                // Arm two: the SAME frame under a deliberately red sky. Nothing else changes — same
-                // camera, same sun, same materials, same tick. If the street's tint follows, the
-                // only thing it can be following is the sky, because the flat constant this
-                // replaced is a single colour that does not know what the sky looks like.
+                // Arm two: the SAME frame under a deliberately red physical solar source. Nothing
+                // else changes — same camera, direction, materials and tick. m17.7d deliberately
+                // leaves zenith/horizon as background-only art controls, so changing those would
+                // be a false A/B; this source is what the physical sky-view/SH body actually uses.
                 render::SkyParams red = Visuals::authored_sky();
-                red.zenith[0] = 0.60f;
-                red.zenith[1] = 0.02f;
-                red.zenith[2] = 0.02f;
-                red.horizon[0] = 0.60f;
-                red.horizon[1] = 0.02f;
-                red.horizon[2] = 0.02f;
+                red.sun_radiance[0] = 1.0f;
+                red.sun_radiance[1] = 0.03f;
+                red.sun_radiance[2] = 0.03f;
                 demo.visuals->renderer.set_sky(red);
                 demo.app.run_frames(4);
                 const rhi::TextureHandle tex = graph->physical(demo.visuals->last_ldr);
                 if (tex.is_valid()) {
                     const std::vector<std::uint8_t> red_px =
                         read_rgba8(*demo.app.device(), tex, kWidth, kHeight);
-                    red_sky_rb = mean_rb_ratio_lower(red_px, kWidth, kHeight, 0.35);
+                    red_sun_rb = mean_rb_ratio_lower(red_px, kWidth, kHeight, 0.35);
                 }
                 demo.app.finish_gpu();
                 demo.visuals->renderer.set_sky(Visuals::authored_sky()); // the scene as authored
@@ -2292,16 +2289,16 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
         claims.push_back({"lighting: spot shadow maps were produced", lit.spot_maps > 0});
         claims.push_back({"lighting: the SDF field was composed", lit.sdf_stamps > 0});
         claims.push_back({"lighting: DDGI probes were traced", lit.ddgi_probes > 0});
-        // The sky (m17.7b). Work done, not a flag set — `filled` counts bakes that actually ran,
+        // The sky (m17.7d). Work done, not a flag set — `filled` counts bakes that actually ran,
         // and the luminance pair is the sky's effect on the STREET rather than on the horizon.
         claims.push_back({"sky: the sky was baked", sky_filled > 0});
-        claims.push_back({"sky: the street is tinted by the sky, not by a constant",
-                          intact_rb > 0.0 && red_sky_rb > intact_rb * 1.10});
+        claims.push_back({"sky: the street is tinted by the physical sky, not by a constant",
+                          intact_rb > 0.0 && red_sun_rb > intact_rb * 1.10});
         std::printf("  sky       : baked %u time(s); street r/b %.3f under the authored sky vs "
-                    "%.3f under a red one (street luma %.2f)\n",
+                    "%.3f under a red physical sun (street luma %.2f)\n",
                     sky_filled,
                     intact_rb,
-                    red_sky_rb,
+                    red_sun_rb,
                     intact_street);
         std::printf("  lighting  : %llu spot maps, %llu sdf stamps, %llu probe updates\n",
                     static_cast<unsigned long long>(lit.spot_maps),

@@ -1,35 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// The sky LIGHTS the scene (m17.7b) — the structural proof. No golden images, the M5.6/M6.4
-// pattern: every claim below is a property the technique guarantees, checked against a control
-// that isolates it.
-//
-//   1. UNITS. Under a sky of uniform radiance L, a white Lambertian surface must come out at
-//      exactly `albedo * L` — no factor of pi either way. This is the sharpest claim in the file
-//      and the reason it is first: the SH path is nine coefficients, a cosine convolution and a
-//      solid-angle weight, and getting any one of them wrong scales the whole scene by a constant
-//      that looks like a tuning choice rather than a bug. It is also what makes m17.7b a
-//      REPLACEMENT for the flat ambient constant rather than a re-tuning of it: feed the old
-//      constant's value in as a uniform sky and the frame does not move.
-//      (docs/math/sky-lighting.md §4 derives it: 0.282095^2 * 4*pi = 1.)
-//
-//   2. DIRECTION. An up-facing surface under a sky that is bright ABOVE must receive more than the
-//      same surface under a sky of the same colours arranged bright at the HORIZON. This is what
-//      "the sky lights the scene" means beyond "the scene got brighter" — and the specific bug it
-//      catches is an SH path that collapsed to its l=0 term, which would light both identically.
-//
-//   3. COLOUR. The light a surface receives carries the SKY's colour, not the ambient constant's.
-//      A red-zenith sky must tint an up-facing surface red; swapping zenith and horizon must flip
-//      the tint. Asserted in both directions, so a hardcoded constant cannot pass it.
-//
-//   4. OFF IS THE OLD PATH. With no sky, a lit surface reads exactly `albedo * ambient * ao` — the
-//      pre-m17.7b constant, unchanged. ADR-0032 §11's rule, asserted at the far end rather than by
-//      inspecting which branch ran.
-//
-//   5. THE BAKE IS CACHED, AND THE CACHE CAN BE SEEN TO WORK. An unchanged sky must REUSE, a
-//      changed one must REFILL. A cache that silently never refills renders a stale sky and looks
-//      like a working one, so the counters are asserted rather than trusted.
+// The sky LIGHTS the scene — the structural proof. m17.7d replaces the authored gradient in the
+// sky-view/SH body with physical single scattering, so these controls prove source scale, solar
+// colour, cache visibility, the sky-off gate, and escaped-ray reflection. The m17.0 background
+// remains authored on purpose; this file explicitly proves its zenith/horizon colours no longer
+// leak into physical lighting. No golden images: every claim is a transport property isolated by a
+// control, following the M5.6/M6.4 pattern.
 #include <doctest/doctest.h>
 
 #include <cmath>
@@ -62,6 +39,8 @@ constexpr float kAlbedo = 0.6f;
 
 struct Rgb {
     float r = 0.0f, g = 0.0f, b = 0.0f;
+
+    [[nodiscard]] float luminance() const { return 0.2126f * r + 0.7152f * g + 0.0722f * b; }
 };
 
 [[nodiscard]] Rgb
@@ -103,34 +82,27 @@ template <typename Build>
     return decode_hdr(read_texture(device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
 }
 
-// A sky of ONE radiance in every direction. Zenith == horizon makes the gradient constant;
-// `ground = 1` stops the below-horizon darkening; a black sun kills the forward-scatter glow (the
-// disc is already excluded from the lighting path by construction); clouds off removes the noise.
-// What is left is a sky whose sky_lighting_radiance() is exactly `L` for every direction — the one
-// case whose correct answer can be written down.
-[[nodiscard]] SkyParams uniform_sky(float L) {
+// A clear physical sky lit by an authored unit-scale sun.  The LUT medium remains independent of
+// this value; m17.7d applies the sun after its physical single-scattering integral so a colour or
+// intensity edit re-bakes sky-view/SH without rebuilding the medium tables.
+[[nodiscard]] SkyParams physical_sky(float solar) {
     SkyParams sp{};
     sp.enabled = true;
     sp.clouds_enabled = false;
     sp.intensity = 1.0f;
-    sp.ground = 1.0f;
-    sp.zenith[0] = sp.zenith[1] = sp.zenith[2] = L;
-    sp.horizon[0] = sp.horizon[1] = sp.horizon[2] = L;
-    sp.sun_radiance[0] = sp.sun_radiance[1] = sp.sun_radiance[2] = 0.0f;
+    sp.sun_direction[0] = 0.0f;
+    sp.sun_direction[1] = 0.8f;
+    sp.sun_direction[2] = -0.6f;
+    sp.sun_radiance[0] = sp.sun_radiance[1] = sp.sun_radiance[2] = solar;
     sp.use_scene_sun = false;
     return sp;
 }
 
-// A two-colour sky with the glow and clouds removed, so the only thing varying is WHERE each
-// colour sits on the sphere.
-[[nodiscard]] SkyParams split_sky(Rgb zenith, Rgb horizon) {
-    SkyParams sp = uniform_sky(1.0f);
-    sp.zenith[0] = zenith.r;
-    sp.zenith[1] = zenith.g;
-    sp.zenith[2] = zenith.b;
-    sp.horizon[0] = horizon.r;
-    sp.horizon[1] = horizon.g;
-    sp.horizon[2] = horizon.b;
+[[nodiscard]] SkyParams coloured_sun(Rgb colour) {
+    SkyParams sp = physical_sky(1.0f);
+    sp.sun_radiance[0] = colour.r;
+    sp.sun_radiance[1] = colour.g;
+    sp.sun_radiance[2] = colour.b;
     return sp;
 }
 
@@ -150,8 +122,7 @@ ecs::Entity world_spawn_dark_sun(ecs::World& world, const core::Transform& t) {
 
 } // namespace
 
-TEST_CASE(
-    "sky lighting: a uniform sky of radiance L lights a surface at exactly albedo*L (m17.7b)") {
+TEST_CASE("sky lighting: physical single scattering is live and tracks solar scale (m17.7d)") {
     auto device = rhi::create_device({});
     if (!device) {
         if (vulkan_required()) {
@@ -181,26 +152,33 @@ TEST_CASE(
     MESSAGE("sky off: floor=" << floor_off.r << " expected=" << kAlbedo * 0.11f);
     CHECK(floor_off.r == doctest::Approx(kAlbedo * 0.11f).epsilon(0.02));
 
-    // ── (1) Units ───────────────────────────────────────────────────────────────────────────────
-    // The SAME value, delivered as a uniform sky instead of as the constant, must produce the SAME
-    // frame. That is what "unit-for-unit replacement" means, and it is the strongest form of the
-    // claim: not "close to", but "the number you already had".
-    renderer.set_sky(uniform_sky(0.11f));
-    const HdrImage same = render_hdr(*device, renderer, build);
-    const Rgb floor_same = block_mean(same, kSize / 2, kSize * 3 / 4, 5);
-    MESSAGE("uniform sky L=0.11: floor=" << floor_same.r << " (constant path gave " << floor_off.r
-                                         << ")");
-    CHECK(floor_same.r == doctest::Approx(floor_off.r).epsilon(0.02));
-
-    // And it tracks L, so the agreement above is not two constants coinciding.
-    renderer.set_sky(uniform_sky(0.40f));
-    const HdrImage bright = render_hdr(*device, renderer, build);
-    const Rgb floor_bright = block_mean(bright, kSize / 2, kSize * 3 / 4, 5);
-    MESSAGE("uniform sky L=0.40: floor=" << floor_bright.r << " expected=" << kAlbedo * 0.40f);
-    CHECK(floor_bright.r == doctest::Approx(kAlbedo * 0.40f).epsilon(0.02));
+    // ── (1) Physical source and scale ───────────────────────────────────────────────────────────
+    // A black sun gives the integral no incident light.  A clear white one then gives the same
+    // surface a finite sky-derived ambient; doubling that source doubles a linear transport solve.
+    renderer.set_sky(physical_sky(0.0f));
+    const Rgb dark = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    renderer.set_sky(physical_sky(1.0f));
+    const Rgb day = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    renderer.set_sky(physical_sky(2.0f));
+    const Rgb bright =
+        block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    SkyParams overcast_black = physical_sky(1.0f);
+    overcast_black.clouds_enabled = true;
+    overcast_black.coverage = 0.9f;
+    overcast_black.intensity = 0.0f;
+    renderer.set_sky(overcast_black);
+    const Rgb overcast_black_floor =
+        block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    MESSAGE("physical sky: dark=" << dark.r << " day rgb=(" << day.r << ", " << day.g << ", "
+                                  << day.b << ") bright=" << bright.r
+                                  << " cloudy intensity-0=" << overcast_black_floor.r);
+    CHECK(dark.luminance() < 1e-4f);
+    CHECK(day.luminance() > 0.002f);
+    CHECK(bright.luminance() > day.luminance() * 1.8f);
+    CHECK(overcast_black_floor.luminance() < 1e-4f);
 }
 
-TEST_CASE("sky lighting: WHERE the sky is bright changes what a surface receives (m17.7b)") {
+TEST_CASE("sky lighting: physical light follows the sun, not authored gradient colours (m17.7d)") {
     auto device = rhi::create_device({});
     if (!device) {
         if (vulkan_required()) {
@@ -220,38 +198,52 @@ TEST_CASE("sky lighting: WHERE the sky is bright changes what a surface receives
     SceneRenderer renderer(*device, meshes, materials);
     const auto build = [&](ecs::World& w) { build_floor(w, floor, mat); };
 
-    // ── (2) Direction ───────────────────────────────────────────────────────────────────────────
-    // Two skies built from the SAME two colours, swapped. An up-facing floor weights the zenith far
-    // more than the horizon (that is what the cosine in the integral does), so the bright-above sky
-    // must deliver materially more light. An SH path that collapsed to its l=0 term would average
-    // the sphere and light these two nearly identically — which is exactly the failure this
-    // catches.
-    renderer.set_sky(split_sky({1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f}));
-    const Rgb up_bright =
-        block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    // The visible background is still the authored m17.0 gradient in this brick, but the LUT/SH
+    // path is not allowed to inherit it.  Altering those colours must leave the lit floor alone.
+    renderer.set_sky(physical_sky(1.0f));
+    const Rgb white = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    SkyParams gradient_edit = physical_sky(1.0f);
+    gradient_edit.zenith[0] = 0.95f;
+    gradient_edit.zenith[1] = 0.02f;
+    gradient_edit.zenith[2] = 0.01f;
+    gradient_edit.horizon[0] = 0.01f;
+    gradient_edit.horizon[1] = 0.02f;
+    gradient_edit.horizon[2] = 0.95f;
+    // A fresh renderer forces a distinct bake; reusing the white LUT here would make a shader that
+    // accidentally read zenith/horizon appear correct merely because the cache hid the new body.
+    SceneRenderer gradient_renderer(*device, meshes, materials);
+    gradient_renderer.set_sky(gradient_edit);
+    const Rgb gradient =
+        block_mean(render_hdr(*device, gradient_renderer, build), kSize / 2, kSize * 3 / 4, 5);
 
-    renderer.set_sky(split_sky({0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}));
-    const Rgb horizon_bright =
+    // In contrast, the solar colour is applied to the physical source exactly once, so red and blue
+    // suns must tint the same up-facing surface in opposite directions.
+    renderer.set_sky(coloured_sun({1.0f, 0.08f, 0.08f}));
+    const Rgb red = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    renderer.set_sky(coloured_sun({0.08f, 0.08f, 1.0f}));
+    const Rgb blue = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    SkyParams below_horizon = physical_sky(1.0f);
+    below_horizon.sun_direction[1] = -0.8f;
+    renderer.set_sky(below_horizon);
+    const Rgb night = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
+    SkyParams denser_rayleigh = physical_sky(1.0f);
+    denser_rayleigh.atmosphere.rayleigh_scattering[0] *= 3.0f;
+    denser_rayleigh.atmosphere.rayleigh_scattering[1] *= 3.0f;
+    denser_rayleigh.atmosphere.rayleigh_scattering[2] *= 3.0f;
+    renderer.set_sky(denser_rayleigh);
+    const Rgb denser =
         block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
-
-    MESSAGE("bright above=" << up_bright.r << "  bright at horizon=" << horizon_bright.r
-                            << "  ratio=" << up_bright.r / std::max(horizon_bright.r, 1e-6f));
-    CHECK(up_bright.r > horizon_bright.r * 1.5f);
-
-    // ── (3) Colour, asserted in both directions ────────────────────────────────────────────────
-    // A red zenith over a blue horizon must tint the floor RED; swapping the two must flip it. One
-    // direction alone could be passed by any constant that happens to be reddish.
-    renderer.set_sky(split_sky({1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}));
-    const Rgb red_up =
-        block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
-    renderer.set_sky(split_sky({0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}));
-    const Rgb blue_up =
-        block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
-
-    MESSAGE("red zenith: r=" << red_up.r << " b=" << red_up.b << "   blue zenith: r=" << blue_up.r
-                             << " b=" << blue_up.b);
-    CHECK(red_up.r > red_up.b);
-    CHECK(blue_up.b > blue_up.r);
+    MESSAGE("white=" << white.r << "," << white.g << "," << white.b << " gradient=" << gradient.r
+                     << "," << gradient.g << "," << gradient.b << " red r/b=" << red.r << "/"
+                     << red.b << " blue r/b=" << blue.r << "/" << blue.b
+                     << " denser blue=" << denser.b << " below-horizon=" << night.luminance());
+    CHECK(gradient.r == doctest::Approx(white.r).epsilon(0.03));
+    CHECK(gradient.g == doctest::Approx(white.g).epsilon(0.03));
+    CHECK(gradient.b == doctest::Approx(white.b).epsilon(0.03));
+    CHECK(red.r > red.b * 2.0f);
+    CHECK(blue.b > blue.r * 2.0f);
+    CHECK(night.luminance() < white.luminance() * 0.01f);
+    CHECK(denser.b > white.b * 1.2f);
 }
 
 TEST_CASE(
@@ -274,7 +266,7 @@ TEST_CASE(
     SceneRenderer renderer(*device, meshes, materials);
     const auto build = [&](ecs::World& w) { build_floor(w, floor, mat); };
 
-    renderer.set_sky(uniform_sky(0.2f));
+    renderer.set_sky(physical_sky(0.2f));
     (void)render_hdr(*device, renderer, build);
     const auto after_first = renderer.sky_lighting_stats();
     CHECK(after_first.filled == 1);
@@ -292,15 +284,26 @@ TEST_CASE(
     CHECK(after_reuse.filled == 1);
     CHECK(after_reuse.reused == 3);
 
-    // Change the sky: it must notice. The other half of the claim — a cache that never refills
-    // passes the assertion above perfectly.
-    renderer.set_sky(uniform_sky(0.5f));
+    // A background-only gradient edit is deliberately invisible to physical lighting and must not
+    // pay another sky-view/SH bake. This catches the tempting but wrong old cache key directly.
+    SkyParams background_only = physical_sky(0.2f);
+    background_only.zenith[0] = 0.91f;
+    background_only.horizon[2] = 0.17f;
+    renderer.set_sky(background_only);
+    (void)render_hdr(*device, renderer, build);
+    const auto after_background_only = renderer.sky_lighting_stats();
+    CHECK(after_background_only.filled == 1);
+    CHECK(after_background_only.reused == 4);
+
+    // A physical lighting-source edit must still refill. The other half of the claim — a cache
+    // that never refills — passes the unchanged-frame assertion perfectly.
+    renderer.set_sky(physical_sky(0.5f));
     (void)render_hdr(*device, renderer, build);
     const auto after_change = renderer.sky_lighting_stats();
     MESSAGE("after changing the sky: filled=" << after_change.filled
                                               << " reused=" << after_change.reused);
     CHECK(after_change.filled == 2);
-    CHECK(after_change.reused == 3);
+    CHECK(after_change.reused == 4);
 }
 
 TEST_CASE("sky lighting: on the shadowed path, the GATE is what keeps the old ambient (m17.7b)") {
@@ -350,12 +353,12 @@ TEST_CASE("sky lighting: on the shadowed path, the GATE is what keeps the old am
 
     // And with a sky, the same pipeline must switch to the sky's value — so the check above is the
     // gate holding, not the binding being broken in both directions.
-    renderer.set_sky(uniform_sky(0.40f));
+    renderer.set_sky(physical_sky(1.0f));
     const HdrImage on = render_hdr(*device, renderer, build);
     const Rgb floor_on = block_mean(on, kSize / 2, kSize * 3 / 4, 5);
-    MESSAGE("shadowed path, uniform sky L=0.40: floor=" << floor_on.r
-                                                        << " expected=" << kAlbedo * 0.40f);
-    CHECK(floor_on.r == doctest::Approx(kAlbedo * 0.40f).epsilon(0.02));
+    MESSAGE("shadowed path, physical sky floor=" << floor_on.r << ", " << floor_on.g << ", "
+                                                 << floor_on.b);
+    CHECK(floor_on.luminance() > 0.002f);
 }
 
 TEST_CASE(
@@ -395,19 +398,19 @@ TEST_CASE(
 
     const auto build = [&](ecs::World& w) { build_floor(w, floor, mat); };
 
-    // Two skies whose ZENITH differs — the part of the sky a floor's reflection rays point at.
-    // Most of those rays leave the screen, which is exactly the path that used to return one flat
-    // colour regardless of direction.
-    renderer.set_sky(split_sky({0.9f, 0.05f, 0.05f}, {0.05f, 0.05f, 0.05f}));
+    // Two skies whose physical solar source differs. Most of the floor's reflection rays leave the
+    // screen, which is exactly the path that used to return one flat colour regardless of
+    // direction; m17.7d must carry the physical sky-view table's colour through it.
+    renderer.set_sky(coloured_sun({0.9f, 0.05f, 0.05f}));
     (void)render_hdr(*device, renderer, build); // warm the bake, then measure a steady frame
     const Rgb red = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
 
-    renderer.set_sky(split_sky({0.05f, 0.05f, 0.9f}, {0.05f, 0.05f, 0.05f}));
+    renderer.set_sky(coloured_sun({0.05f, 0.05f, 0.9f}));
     (void)render_hdr(*device, renderer, build);
     const Rgb blue = block_mean(render_hdr(*device, renderer, build), kSize / 2, kSize * 3 / 4, 5);
 
-    MESSAGE("mirror floor — red zenith: r=" << red.r << " b=" << red.b
-                                            << " | blue zenith: r=" << blue.r << " b=" << blue.b);
+    MESSAGE("mirror floor — red sun: r=" << red.r << " b=" << red.b << " | blue sun: r=" << blue.r
+                                         << " b=" << blue.b);
     // The reflection carries the sky's colour, and swapping the sky swaps it. A flat fallback
     // could not do this: it would return the same constant in both frames.
     CHECK(red.r > red.b);

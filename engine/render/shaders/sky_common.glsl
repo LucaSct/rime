@@ -110,7 +110,10 @@ vec3 sky_radiance_ex(vec3 dir, float disc_scale) {
     return col * sky.zenith.a;
 }
 
-// The seam ADR-0040 Section 2 names, unchanged in signature and meaning: the sky you SEE.
+// The seam ADR-0040 Section 2 names, unchanged in signature and meaning: the authored sky the
+// background pass SEEes.  m17.7d deliberately leaves this full-resolution art control alone while
+// replacing the lower-frequency sky-view/SH lighting body below; sampling that LUT in the final
+// composite is a later presentation change, not an accidental consequence of changing the light.
 vec3 sky_radiance(vec3 dir) {
     return sky_radiance_ex(dir, 1.0);
 }
@@ -165,11 +168,139 @@ vec3 sky_full_radiance(vec3 dir) {
     return sky_full_radiance_ex(dir, 1.0);
 }
 
-// What the scene is LIT by from this direction: the same sky with the sun's disc removed, because
-// the DirectionalLight already delivers it. This is what the sky-view LUT bakes and what the SH
-// projection integrates.
+// What the scene is LIT by from this direction.  m17.7b began with the authored sky above so the
+// cache/resource shape could be proven independently; m17.7d replaces only this body with a
+// compact spherical-atmosphere single-scattering integral.  The physical declarations are gated
+// because sky.frag still draws the authored background and deliberately owns no atmosphere
+// descriptors.  Both compute callers define the gate before including this file.
+#ifdef RIME_SKY_PHYSICAL_LIGHTING
+
+const float kAtmospherePi = 3.14159265358979;
+
+// Distance to the forward intersection with a sphere.  The starting point is inside the top shell,
+// so the positive root is the atmospheric exit even for a ray initially aimed toward the ground.
+float atmosphere_distance_to_sphere(float radius, float mu, float sphere_radius) {
+    const float d = radius * radius * (mu * mu - 1.0) + sphere_radius * sphere_radius;
+    return max(0.0, -radius * mu + sqrt(max(d, 0.0)));
+}
+
+// A negative-or-zero answer means the ray misses the solid planet in its forward half. Keeping this
+// separate from the texture lookup is important: linear filtering of an alpha=0 LUT texel would
+// otherwise leak a little sun through the terminator.
+float atmosphere_distance_to_ground(float radius, float mu, float planet_radius) {
+    const float d = radius * radius * (mu * mu - 1.0) + planet_radius * planet_radius;
+    return d >= 0.0 ? -radius * mu - sqrt(d) : -1.0;
+}
+
+vec3 atmosphere_sun_transmittance(vec3 p, vec3 sun_dir) {
+    const float planet_radius = max(atmosphere.radii.x, 1.0);
+    const float top_height = max(atmosphere.radii.y, 0.001);
+    const float radius = length(p);
+    const vec3 up = p / max(radius, 1e-4);
+    const float mu = clamp(dot(up, sun_dir), -1.0, 1.0);
+    if (atmosphere_distance_to_ground(radius, mu, planet_radius) > 0.0) {
+        return vec3(0.0);
+    }
+    // The transmittance producer stores height as v^2, so sampling it needs the inverse sqrt warp.
+    const float height = clamp(radius - planet_radius, 0.0, top_height);
+    const vec2 uv = vec2(0.5 + 0.5 * mu, sqrt(height / top_height));
+    const vec4 t = textureLod(transmittance_lut, uv, 0.0);
+    return t.rgb * t.a;
+}
+
+vec3 physical_sky_lighting_radiance(vec3 direction) {
+    // The frame has no planet-centre coordinate, so this first physical body fixes the observer at
+    // a 2 m ground-level eye.  That makes the medium camera-independent, which is what the
+    // persistent cache currently promises.  Altitude-dependent camera flight is a later parameter
+    // and must join the bake key when it lands.
+    const float planet_radius = max(atmosphere.radii.x, 1.0);
+    const float top_radius = planet_radius + max(atmosphere.radii.y, 0.001);
+    const vec3 dir = normalize(direction);
+    const vec3 sun_dir = normalize(sky.sun_dir.xyz);
+    const vec3 observer = vec3(0.0, planet_radius + 0.002, 0.0); // kilometres
+    const float observer_radius = length(observer);
+    const float view_mu = dot(observer / observer_radius, dir);
+    const float top_distance = atmosphere_distance_to_sphere(observer_radius, view_mu, top_radius);
+    const float ground_distance =
+        atmosphere_distance_to_ground(observer_radius, view_mu, planet_radius);
+    const float distance = min(top_distance, ground_distance > 0.0 ? ground_distance : top_distance);
+    if (distance <= 0.0) {
+        return vec3(0.0);
+    }
+
+    // Twenty-four midpoint segments, quadratically distributed toward the observer where density
+    // changes fastest.  This is single scattering with a tabulated bounded ambient term, not a
+    // complete Hillaire multiple-scattering closure (that producer remains deliberately modest).
+    const int steps = 24;
+    const float cos_theta = clamp(dot(dir, sun_dir), -1.0, 1.0);
+    const float rayleigh_phase = 3.0 * (1.0 + cos_theta * cos_theta) / (16.0 * kAtmospherePi);
+    const float mie_g = 0.8;
+    const float mie_phase = (1.0 - mie_g * mie_g) /
+                            (4.0 * kAtmospherePi *
+                             pow(1.0 + mie_g * mie_g - 2.0 * mie_g * cos_theta, 1.5));
+    vec3 view_transmittance = vec3(1.0);
+    vec3 radiance = vec3(0.0);
+    for (int i = 0; i < steps; ++i) {
+        const float t0 = float(i) / float(steps);
+        const float t1 = float(i + 1) / float(steps);
+        const float s0 = distance * t0 * t0;
+        const float s1 = distance * t1 * t1;
+        const float ds = s1 - s0;
+        const vec3 p = observer + dir * (0.5 * (s0 + s1));
+        const float radius = length(p);
+        const float height = max(0.0, radius - planet_radius);
+        const float rayleigh_density = exp(-height / max(atmosphere.radii.z, 0.001));
+        const float mie_density = exp(-height / max(atmosphere.radii.w, 0.001));
+        const vec3 beta_r = atmosphere.rayleigh_scattering.rgb * rayleigh_density;
+        const vec3 beta_m = atmosphere.mie_scattering.rgb * mie_density;
+        const vec3 sigma_s = beta_r + beta_m;
+        const vec3 sigma_t = sigma_s + atmosphere.mie_absorption.rgb * mie_density;
+        const vec3 segment_t = exp(-sigma_t * ds);
+        const vec3 segment_integral = mix(vec3(ds),
+                                           (vec3(1.0) - segment_t) / sigma_t,
+                                           greaterThan(sigma_t, vec3(1e-5)));
+        const vec3 up = p / max(radius, 1e-4);
+        const vec2 uv = vec2(0.5 + 0.5 * dot(up, sun_dir),
+                             sqrt(clamp(height / max(atmosphere.radii.y, 0.001), 0.0, 1.0)));
+        const vec3 sun_transmittance = atmosphere_sun_transmittance(p, sun_dir);
+        const vec3 multiple = textureLod(multiple_scattering_lut, uv, 0.0).rgb;
+        const vec3 source = sun_transmittance *
+                                (beta_r * rayleigh_phase + beta_m * mie_phase) +
+                            sigma_s * multiple;
+        radiance += view_transmittance * source * segment_integral;
+        view_transmittance *= segment_t;
+    }
+
+    // The physical tables use a unit-white solar source so they cache independently of art.  The
+    // scene's authored sun colour and sky intensity are applied once, here, rather than baked in.
+    // Scene lights use a compact author-facing unit around one, whereas radiometric solar
+    // irradiance is orders of magnitude larger.  This fixed conversion is intentionally outside
+    // the cached medium: it maps that existing scene unit into the physical integral without
+    // smuggling an authored sun value into either LUT producer.
+    const float scene_solar_scale = 100.0;
+    const vec3 illumination = max(sky.sun_radiance.rgb, vec3(0.0)) *
+                              (max(sky.zenith.a, 0.0) * scene_solar_scale);
+    vec3 col = radiance * illumination;
+    const vec2 c = clouds(dir);
+    if (c.x > 0.0) {
+        const vec3 cloud_col = illumination * c.y * 0.85 + col * 0.25;
+        col = mix(col, cloud_col, c.x);
+    }
+    return col;
+}
+
+vec3 sky_lighting_radiance(vec3 dir) {
+    return physical_sky_lighting_radiance(dir);
+}
+
+#else
+
+// sky.frag uses the authored background only in this brick.  Keeping the fallback makes the shared
+// include stage-safe while the compute-only physical descriptors stay out of its pipeline layout.
 vec3 sky_lighting_radiance(vec3 dir) {
     return sky_full_radiance_ex(dir, 0.0);
 }
+
+#endif // RIME_SKY_PHYSICAL_LIGHTING
 
 #endif // RIME_SKY_COMMON_GLSL

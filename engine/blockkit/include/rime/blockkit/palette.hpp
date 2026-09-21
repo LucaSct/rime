@@ -79,33 +79,23 @@ inline constexpr float kSunIntensity = 1.4f;
 //
 // Since m17.7b this is the FALLBACK, not the fill: with a sky in the world the forward pass shades
 // ambient from the sky's own SH irradiance and this constant is what a sky-less frame gets. It is
-// kept, and kept at this value, because it is also the number the sky below was tuned against.
+// kept as the deliberately sky-less control used by the render proofs.
 inline constexpr float kAmbient[3] = {0.030f, 0.035f, 0.055f};
 
 // ── The sky (m17.7b) ─────────────────────────────────────────────────────────────────────────────
 //
-// A dusk sky for a dusk street, and its values are MEASURED rather than picked to look right in
-// isolation. The reason is that the sky's irradiance replaces kAmbient above for every lit surface,
-// so a sky chosen only for how the background reads will silently re-expose the whole block and
-// move the margin of every render claim that was tuned under the constant.
-//
-// The rule used (docs/math/sky-lighting.md §4): a uniform sky of radiance L delivers exactly L. So
-// these were tuned by rendering a white surface under candidate skies and reading the ambient back.
-// As set here the sky delivers (0.0358, 0.0331, 0.0450), luminance 0.0345 against kAmbient's
-// 0.0354 — within 2.5%, and blue-dominant the way kAmbient is.
-//
-// The intensity looks low because it is doing more work than the colours: the authored sun is warm
-// and only ~8 degrees up, so sky_radiance()'s forward-scatter lobe covers a large part of the dome
-// and dominates the integral. Intensity scales the whole radiance linearly (`col * zenith.a` in
-// sky_common.glsl), so at 1.0 these same colours would deliver ~2.7x kAmbient rather than matching
-// it — the tuning is in the intensity, not in the hues.
+// A dusk background for a dusk street. m17.7b's former 2.5%-against-kAmbient calibration applied
+// to the analytic gradient and is deliberately retired: m17.7d's physical lighting body is driven
+// by its solar source, while these zenith/horizon colours now affect only the background picture.
+// `kSkyIntensity` remains the demo's presentation exposure and scales that physical source plus
+// clouds consistently; a future visual-bar remeasurement can tune it against a chosen exposure,
+// but must not present the old gradient measurement as evidence for this different transport.
 inline constexpr float kSkyZenith[3] = {0.012f, 0.020f, 0.075f};
 inline constexpr float kSkyHorizon[3] = {0.032f, 0.036f, 0.068f};
 inline constexpr float kSkyIntensity = 0.36f;
-// Evening cloud: enough to break the gradient up without reading as overcast. Clouds are lit by the
-// sun, so coverage is not free ambient-wise: measured on these colours, dropping it to 0.25 took
-// the delivered luminance from 0.0316 to 0.0191, so coverage moves the integral a long way and is
-// part of the tuning rather than a look knob that can be turned afterwards.
+// Evening cloud: enough to break the background up without reading as overcast. It also enters the
+// physical lighting body, so coverage is an exposure control as well as a presentation control;
+// the obsolete analytic-gradient luminance numbers are intentionally not reused here.
 inline constexpr float kSkyCloudCoverage = 0.40f;
 
 // One warm point per storey per building, hung near the ceiling. Radius 6 keeps a light inside the

@@ -394,8 +394,10 @@ bool SkyPass::bake_inputs_equal(const SkyParams& a, const SkyParams& b) noexcept
     const auto v3 = [](const float (&x)[3], const float (&y)[3]) {
         return x[0] == y[0] && x[1] == y[1] && x[2] == y[2];
     };
-    return v3(a.zenith, b.zenith) && v3(a.horizon, b.horizon) && a.intensity == b.intensity &&
-           a.ground == b.ground && v3(a.sun_direction, b.sun_direction) &&
+    // zenith, horizon and ground belong solely to the still-authored background composite.  The
+    // m17.7d sky-view/SH body no longer reads them, so letting any of them refill this cache would
+    // waste a physical integration and conceal a dependency regression in the opposite direction.
+    return a.intensity == b.intensity && v3(a.sun_direction, b.sun_direction) &&
            v3(a.sun_radiance, b.sun_radiance) && a.clouds_enabled == b.clouds_enabled &&
            a.coverage == b.coverage && a.density == b.density && a.altitude == b.altitude &&
            a.scale == b.scale && a.sharpness == b.sharpness && a.wind[0] == b.wind[0] &&
@@ -487,8 +489,15 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
         !multiple_scattering_inputs_equal(multiple_scattering_baked_, params);
     // m17.7d makes this bake sample both tables. Invalidate it from their dirty flags already, so
     // that body replacement cannot turn a physical edit into a stale visible sky or SH buffer.
+    // The physical clear-air body fixes its observer height and is camera-independent, but the
+    // deliberately cheap cloud slab samples camera x/z.  Do not let a moving camera reuse clouds
+    // baked for a different world position while the analytic background visibly scrolls.
+    const bool cloud_camera_dirty =
+        params.clouds_enabled && (!has_bake_ || inputs.camera_pos.x != baked_inputs_.camera_pos.x ||
+                                  inputs.camera_pos.z != baked_inputs_.camera_pos.z);
     const bool lighting_dirty = !has_bake_ || !bake_inputs_equal(baked_, params) ||
-                                transmittance_dirty || multiple_scattering_dirty;
+                                transmittance_dirty || multiple_scattering_dirty ||
+                                cloud_camera_dirty;
 
     // A physical table is persistent for exactly the same reason as the m17.7b sky-view table:
     // it represents an unchanging medium, and a frame with no relevant edit must not pay its
@@ -555,7 +564,7 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
 
     // Nothing the lighting bake depends on moved, so last frame's sky-view and SH are still
     // correct.  Physical LUT work above remains live because writes to imported persistent
-    // resources are observable, even before m17.7d consumes their values in the analytic body.
+    // resources are observable even without a sky-view/SH refill this frame.
     if (!lighting_dirty) {
         ++stats_.reused;
         // The multiple-scattering solve samples transmittance even on a frame where sky-view/SH
@@ -605,10 +614,9 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
             });
     }
     {
-        // sky_sh.comp still integrates the analytic body directly, rather than inheriting the
-        // sky-view table's angular resolution.  The physical tables are nevertheless real sampled
-        // dependencies now: m17.7d changes only that body, so graph order and bindings already
-        // tell the truth before the replacement lands.
+        // sky_sh.comp integrates the physical body directly rather than inheriting sky-view's
+        // angular resolution.  The Fibonacci integration therefore remains independent of LUT
+        // texel density while both physical sampled dependencies keep graph ordering explicit.
         const RGTexture sampled[] = {transmittance_rg, multiple_scattering_rg};
         const RGBuffer writes[] = {sh_rg};
         RenderGraph::ComputePassDesc desc{};
@@ -653,6 +661,7 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
     multiple_scattering_state_ = rhi::ResourceState::ShaderRead;
     sh_state_ = rhi::ResourceState::ShaderRead;
     baked_ = params;
+    baked_inputs_ = inputs;
     has_bake_ = true;
     ++stats_.filled;
     return SkyLightBinding{lut_rg, sh_rg, lut_sampler_};

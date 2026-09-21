@@ -17,8 +17,8 @@
 // just makes the scene quietly too bright or too blue. A spherical Fibonacci set has no such
 // problem: its points are spaced uniformly in y, and by Archimedes' hat-box theorem uniform y on a
 // sphere IS uniform AREA. So every sample carries exactly the same solid angle, 4*pi/N, and the
-// weight is a constant rather than a derivation. Sampling the analytic sky directly also keeps this
-// independent of the LUT's angular resolution.
+// weight is a constant rather than a derivation. Evaluating the physical body directly also keeps
+// this independent of the LUT's angular resolution.
 //
 // THE SUN IS NOT IN HERE. sky_lighting_radiance() excludes the sun's disc, because the world's
 // DirectionalLight already delivers it to every shaded pixel — see sky_common.glsl.
@@ -32,7 +32,8 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "sky_atmosphere_bindings.glsl" // physical inputs declared before the shared body
-#include "sky_common.glsl"              // SkyParams (binding 2) + sky_lighting_radiance()
+#define RIME_SKY_PHYSICAL_LIGHTING
+#include "sky_common.glsl" // SkyParams (binding 2) + physical sky_lighting_radiance()
 
 layout(local_size_x = 64) in;
 
