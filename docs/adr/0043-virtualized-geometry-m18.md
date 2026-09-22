@@ -60,6 +60,10 @@ the milestone's final hybrid path, not something a hardware-only prototype may s
    memory plateaus, and submitted pages cannot be evicted.
 6. Hybrid software rasterization: hardware and software paths agree on depth/identity winners,
    near-plane clipping and ties, and the split earns a measured micro-triangle gain.
+7. The consolidated M17/M13 frame-budget clause: a fresh, clean-tree, clock-pinned `99-the-block`
+   report meets the unchanged ratified `frame` p99/max and simulation gates. Virtual geometry may
+   replace measurable geometry cost, but it must not hide a miss by moving the goalposts or by
+   reporting only the client-only `frame.player` number.
 
 ## Consequences
 
@@ -67,3 +71,19 @@ M18 gains a reversible asset/render seam and a conventional fallback instead of 
 that only works for a demo mesh. It does not claim terrain or a completed Nanite-style pipeline at
 the first resident-leaf slice. Terrain is M19; M18 must not consume its collision or streaming
 scope merely to make the word "geometry" sound broader.
+
+## Amendment (2026-09-22): M17 is consolidated into M18; detailed geometry is non-optional
+
+Luca chose to deliver the remaining M17 work with M18 instead of treating the unclosed block budget
+as a separate merge boundary. The M18 delivery branch therefore contains the M17 visual work and
+inherits its **unchanged** ratified performance clause as gate 7 above. This is consolidation, not
+a waiver: the M13/M17 budget is not relaxed, and M18 cannot be called complete on a visual-only or
+client-only measurement.
+
+Luca also confirmed that M18 must preserve detailed shapes. The hybrid micro-triangle path is thus
+mandatory, not a stretch goal: hardware rasterization owns triangles that cover enough pixels;
+software rasterization owns the sub-pixel path where fixed-function setup loses detail or becomes
+inefficient. The final proof must show that the two paths agree on silhouette/depth/visibility
+winners at their boundary and that micro detail remains visible rather than disappearing through a
+coarse fallback. Terrain remains M19; this amendment moves no heightfield, collider, blending or
+world-streaming scope into M18.
