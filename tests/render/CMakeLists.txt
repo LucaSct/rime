@@ -12,6 +12,7 @@ rime_add_test(rime_render_tests
     render_graph_test.cpp
     fx_particle_test.cpp
     culling_test.cpp
+    micro_triangle_test.cpp
     virtual_geometry_selection_test.cpp
     virtual_geometry_residency_test.cpp
     virtual_geometry_visibility_id_test.cpp
