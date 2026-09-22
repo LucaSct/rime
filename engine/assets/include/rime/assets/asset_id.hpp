@@ -27,11 +27,12 @@ enum class AssetKind : std::uint16_t {
     Mesh = 1,
     Texture = 2,
     Material = 3,
-    Skeleton = 4,      // joint hierarchy + bind pose (M6.7)
-    AnimationClip = 5, // keyframed TRS tracks (M6.7)
-    Destructible = 6,  // fracture pattern: convex parts + bond/anchor graph (M8.1, ADR-0029)
-    MeshSdf = 7,       // cooked signed-distance volume: whole mesh or one destructible part
-                       // (M10.4a, ADR-0032 §2)
+    Skeleton = 4,        // joint hierarchy + bind pose (M6.7)
+    AnimationClip = 5,   // keyframed TRS tracks (M6.7)
+    Destructible = 6,    // fracture pattern: convex parts + bond/anchor graph (M8.1, ADR-0029)
+    MeshSdf = 7,         // cooked signed-distance volume: whole mesh or one destructible part
+                         // (M10.4a, ADR-0032 §2)
+    VirtualGeometry = 8, // clustered rigid-mesh companion payload (M18, ADR-0043)
 };
 
 // A content-hashed asset identity. A struct (not a bare u64) so it cannot be confused with an
