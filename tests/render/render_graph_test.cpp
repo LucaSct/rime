@@ -399,3 +399,49 @@ TEST_CASE("render graph v0: multi-pass frames, culling, transients, order, timin
         CHECK(graph.execution_order().size() == 100);
     }
 }
+
+TEST_CASE("render graph: compute-written indirect arguments get an IndirectRead barrier (M18)") {
+    using namespace rime::rhi;
+    using namespace rime::render;
+
+    auto device = create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        MESSAGE("no Vulkan device available — skipping indirect render-graph proof");
+        return;
+    }
+
+    Kit kit(*device);
+    RenderGraph graph(*device);
+    graph.reset();
+
+    const RGBuffer arguments = graph.create_buffer({256, "rg-indirect-arguments"});
+    const RGTexture output = graph.create_texture({{8, 8}, Format::RGBA8Unorm, "rg-indirect-out"});
+
+    const RGBuffer writes[] = {arguments};
+    graph.add_compute_pass(
+        "write-indirect-arguments", {.buffer_writes = writes}, [](CommandBuffer&) {});
+
+    const RGColorAttachment output_attachment[] = {{output, LoadOp::Clear, StoreOp::Store, {}}};
+    const RGBuffer indirect_reads[] = {arguments};
+    graph.add_raster_pass("consume-indirect-arguments",
+                          {.colors = output_attachment, .indirect_reads = indirect_reads},
+                          [&](CommandBuffer& cmd) {
+                              cmd.bind_pipeline(kit.fill);
+                              const float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                              cmd.push_constants(color, sizeof(color));
+                              cmd.draw(3);
+                          });
+    graph.export_texture(output);
+
+    auto cmd = device->begin_commands();
+    graph.execute(*cmd);
+    device->submit_blocking(*cmd);
+
+    const auto order = graph.execution_order();
+    REQUIRE(order.size() == 2);
+    CHECK(order[0] == 0);
+    CHECK(order[1] == 1);
+    CHECK_FALSE(graph.was_culled(0));
+}
