@@ -50,6 +50,9 @@ pub const ASSET_KIND_DESTRUCTIBLE: u16 = 6;
 /// `asset_kind` wire value for a cooked mesh signed-distance field (matches
 /// `engine/assets/asset_id.hpp`; M10.4a, ADR-0032 §2).
 pub const ASSET_KIND_MESH_SDF: u16 = 7;
+/// `asset_kind` wire value for a virtualized-geometry companion payload (matches
+/// `engine/assets/asset_id.hpp`; M18, ADR-0043).
+pub const ASSET_KIND_VIRTUAL_GEOMETRY: u16 = 8;
 
 /// The mesh schema fingerprint: the reflection `type_hash` of the v1 position/normal/uv vertex
 /// layout, computed and pinned by the C++ engine (`engine/assets`). The cooker embeds the same
@@ -100,6 +103,9 @@ pub const DESTRUCTIBLE_SCHEMA_HASH: u64 = 0xC6C5_6F5B_9A22_D179;
 /// record), this mirrors Material: the header IS the whole structured part of the payload — the
 /// trailing distances blob is bare f32 scalars with no per-element layout of its own to protect.
 pub const MESH_SDF_SCHEMA_HASH: u64 = 0x1872_8B40_F4DC_4FA3;
+
+/// The versioned virtual-geometry companion payload fingerprint pinned by the C++ reader.
+pub const VIRTUAL_GEOMETRY_SCHEMA_HASH: u64 = 0xD3F3_C3A1_A18E_0042;
 
 /// A little-endian byte sink. Every multi-byte value is decomposed to its LE bytes explicitly, so
 /// the output never depends on the host's endianness — the same discipline as the reader's cursor.
