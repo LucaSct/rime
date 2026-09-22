@@ -718,6 +718,35 @@ void VulkanCommandBuffer::draw_indexed(std::uint32_t index_count,
     vkCmdDrawIndexed(cmd_, index_count, instance_count, first_index, vertex_offset, first_instance);
 }
 
+void VulkanCommandBuffer::draw_indexed_indirect(BufferHandle buffer,
+                                                std::uint32_t draw_count,
+                                                std::uint64_t offset,
+                                                std::uint32_t stride) {
+    VulkanBuffer* b = device_.lookup(buffer);
+    if (!b) {
+        RIME_ERROR("rhi: draw_indexed_indirect with an invalid buffer handle");
+        return;
+    }
+    if (!has(b->usage, BufferUsage::Indirect)) {
+        RIME_ERROR("rhi: draw_indexed_indirect on a buffer created without BufferUsage::Indirect");
+        return;
+    }
+    constexpr std::uint32_t command_size = sizeof(VkDrawIndexedIndirectCommand);
+    const std::uint32_t actual_stride = stride == 0 ? command_size : stride;
+    if (actual_stride < command_size || actual_stride % 4 != 0 || offset % 4 != 0) {
+        RIME_ERROR("rhi: draw_indexed_indirect requires a 4-byte aligned offset and stride >= {}",
+                   command_size);
+        return;
+    }
+    const std::uint64_t bytes = static_cast<std::uint64_t>(actual_stride) * draw_count;
+    if (offset > b->size || bytes > b->size - offset) {
+        RIME_ERROR("rhi: draw_indexed_indirect range exceeds the indirect buffer");
+        return;
+    }
+    flush_bindings();
+    vkCmdDrawIndexedIndirect(cmd_, b->buffer, offset, draw_count, actual_stride);
+}
+
 void VulkanCommandBuffer::copy_texture_to_buffer(TextureHandle src,
                                                  BufferHandle dst,
                                                  std::uint32_t base_layer) {

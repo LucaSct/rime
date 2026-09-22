@@ -206,6 +206,8 @@ template <class Dst, class Src>
         out |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     if (has(u, BufferUsage::TransferDst))
         out |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (has(u, BufferUsage::Indirect))
+        out |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     return out;
 }
 
@@ -408,6 +410,12 @@ struct StateInfo {
                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+        // IndirectRead is meaningful only for buffers; buffer barriers use to_vk_buffer below.
+        // Keep this exhaustive so an accidental texture declaration remains defined and visible.
+        case ResourceState::IndirectRead:
+            return {VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                    VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
         case ResourceState::TransferSrc:
             return {VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT,
@@ -444,6 +452,8 @@ struct BufferStateInfo {
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+        case ResourceState::IndirectRead:
+            return {VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
         case ResourceState::TransferSrc:
             return {VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT};
         case ResourceState::TransferDst:

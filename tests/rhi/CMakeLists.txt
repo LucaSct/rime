@@ -12,6 +12,7 @@ rime_add_test(rime_rhi_tests
     device_test.cpp
     block_format_test.cpp
     offscreen_triangle_test.cpp
+    indexed_indirect_test.cpp
     textured_quad_test.cpp
     depth_test.cpp
     pushconst_test.cpp
