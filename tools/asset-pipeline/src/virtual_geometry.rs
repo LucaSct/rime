@@ -16,6 +16,10 @@ use crate::mesh::{
 /// Version of the kind-specific virtual-geometry payload (independent of the RMA1 envelope).
 pub const PAYLOAD_VERSION: u32 = 1;
 
+/// Conservative leaf-cluster triangle cap for the first M18 cook stage. The partitioner only
+/// cuts between complete source triangles, so an indexed submesh's material range is preserved.
+pub const MAX_TRIANGLES_PER_CLUSTER: usize = 128;
+
 /// One page in the cooked companion payload.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Page {
@@ -90,9 +94,10 @@ pub enum LeafCookError {
 /// teaching it a second mesh format.
 impl Asset {
     /// Build one permanently resident page and replacement group from an already-cooked mesh.
-    /// Each source submesh becomes one cluster so material slots and index ranges survive intact.
-    /// The helper intentionally does not merge primitives or invent a material when the source
-    /// record is malformed.
+    /// Each source submesh is split into deterministic contiguous triangle ranges no larger than
+    /// [`MAX_TRIANGLES_PER_CLUSTER`]. Splitting never crosses a source submesh, so material slots
+    /// remain intact. The helper intentionally does not merge primitives or invent a material when
+    /// the source record is malformed.
     pub fn from_mesh(source_mesh: u64, mesh: &Mesh) -> Result<Self, LeafCookError> {
         if mesh.vertices.is_empty() || mesh.indices.is_empty() {
             return Err(LeafCookError::EmptyMesh);
@@ -186,23 +191,39 @@ impl Asset {
             page_bytes.u32(index);
         }
 
-        let (bounds_min, bounds_max) = mesh.aabb();
-        let clusters = mesh
-            .submeshes
-            .iter()
-            .map(|submesh| Cluster {
-                bounds_min,
-                bounds_max,
-                lod_error_m: 0.0,
-                page: 0,
-                vertex_offset: 0,
-                vertex_count: mesh.vertices.len() as u32,
-                first_index: submesh.first_index,
-                index_count: submesh.index_count,
-                material_slot: submesh.material_slot,
-                replacement_group: 0,
-            })
-            .collect::<Vec<_>>();
+        let vertex_count =
+            u32::try_from(mesh.vertices.len()).map_err(|_| LeafCookError::OversizedPayload)?;
+        let mut clusters = Vec::new();
+        for submesh in &mesh.submeshes {
+            let triangle_count = submesh.index_count as usize / 3;
+            for triangle_start in (0..triangle_count).step_by(MAX_TRIANGLES_PER_CLUSTER) {
+                let cluster_triangle_count =
+                    (triangle_count - triangle_start).min(MAX_TRIANGLES_PER_CLUSTER);
+                let first_index = submesh.first_index as usize + triangle_start * 3;
+                let index_count = cluster_triangle_count * 3;
+                let mut bounds_min = [f32::INFINITY; 3];
+                let mut bounds_max = [f32::NEG_INFINITY; 3];
+                for &index in &mesh.indices[first_index..first_index + index_count] {
+                    let position = mesh.vertices[index as usize].position;
+                    for axis in 0..3 {
+                        bounds_min[axis] = bounds_min[axis].min(position[axis]);
+                        bounds_max[axis] = bounds_max[axis].max(position[axis]);
+                    }
+                }
+                clusters.push(Cluster {
+                    bounds_min,
+                    bounds_max,
+                    lod_error_m: 0.0,
+                    page: 0,
+                    vertex_offset: 0,
+                    vertex_count,
+                    first_index: first_index as u32,
+                    index_count: index_count as u32,
+                    material_slot: submesh.material_slot,
+                    replacement_group: 0,
+                });
+            }
+        }
         Ok(Self {
             source_mesh,
             attribs,
@@ -437,6 +458,116 @@ mod tests {
         assert_eq!(asset.clusters[1].material_slot, 11);
         assert_eq!(asset.clusters[1].first_index, 3);
         assert_eq!(asset.pages[0].cluster_count, 2);
+    }
+
+    #[test]
+    fn from_mesh_partitions_triangles_deterministically_with_local_bounds() {
+        let triangle_count = MAX_TRIANGLES_PER_CLUSTER + 1;
+        let mut mesh = Mesh::default();
+        for triangle in 0..triangle_count {
+            let x = triangle as f32;
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.extend([
+                Vertex {
+                    position: [x, -1.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [x + 0.5, 2.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [x + 1.0, 0.0, 3.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 1.0],
+                },
+            ]);
+            mesh.indices.extend([base, base + 1, base + 2]);
+        }
+        mesh.submeshes.push(Submesh {
+            first_index: 0,
+            index_count: mesh.indices.len() as u32,
+            material_slot: 9,
+        });
+
+        let first = Asset::from_mesh(0x55, &mesh).unwrap();
+        let second = Asset::from_mesh(0x55, &mesh).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.clusters.len(), 2);
+        assert_eq!(
+            first.clusters[0].index_count,
+            (MAX_TRIANGLES_PER_CLUSTER * 3) as u32
+        );
+        assert_eq!(
+            first.clusters[1].first_index,
+            (MAX_TRIANGLES_PER_CLUSTER * 3) as u32
+        );
+        assert_eq!(first.clusters[1].index_count, 3);
+        assert!(first
+            .clusters
+            .iter()
+            .all(|cluster| cluster.index_count / 3 <= MAX_TRIANGLES_PER_CLUSTER as u32));
+        assert_eq!(first.clusters[0].material_slot, 9);
+        assert_eq!(first.clusters[1].material_slot, 9);
+        assert_eq!(first.clusters[0].bounds_min, [0.0, -1.0, 0.0]);
+        assert_eq!(first.clusters[0].bounds_max, [128.0, 2.0, 3.0]);
+        assert_eq!(first.clusters[1].bounds_min, [128.0, -1.0, 0.0]);
+        assert_eq!(first.clusters[1].bounds_max, [129.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn from_mesh_never_crosses_material_boundaries_when_partitioning() {
+        let mut mesh = Mesh::default();
+        for triangle in 0..(MAX_TRIANGLES_PER_CLUSTER + 1) {
+            let base = mesh.vertices.len() as u32;
+            let z = if triangle < MAX_TRIANGLES_PER_CLUSTER {
+                0.0
+            } else {
+                10.0
+            };
+            mesh.vertices.extend([
+                Vertex {
+                    position: [0.0, 0.0, z],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [1.0, 0.0, z],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [0.0, 1.0, z],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 1.0],
+                },
+            ]);
+            mesh.indices.extend([base, base + 1, base + 2]);
+        }
+        let first_submesh_indices = (MAX_TRIANGLES_PER_CLUSTER * 3) as u32;
+        mesh.submeshes = vec![
+            Submesh {
+                first_index: 0,
+                index_count: first_submesh_indices,
+                material_slot: 4,
+            },
+            Submesh {
+                first_index: first_submesh_indices,
+                index_count: 3,
+                material_slot: 5,
+            },
+        ];
+
+        let asset = Asset::from_mesh(0x55, &mesh).unwrap();
+        assert_eq!(asset.clusters.len(), 2);
+        assert_eq!(asset.clusters[0].material_slot, 4);
+        assert_eq!(asset.clusters[0].index_count, first_submesh_indices);
+        assert_eq!(asset.clusters[1].material_slot, 5);
+        assert_eq!(asset.clusters[1].first_index, first_submesh_indices);
+        assert_eq!(asset.clusters[1].bounds_min[2], 10.0);
+        assert_eq!(asset.clusters[1].bounds_max[2], 10.0);
     }
 
     #[test]
