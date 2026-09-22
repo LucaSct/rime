@@ -29,8 +29,8 @@ namespace {
     asset.source_mesh = AssetId{1};
     asset.attribs = kMeshV1Attribs;
     asset.vertex_stride = expected_vertex_stride(asset.attribs);
-    asset.page_bytes.resize(64);
-    asset.pages.push_back({0, 64, 0, 1, 0, 0, true});
+    asset.page_bytes.resize(108);
+    asset.pages.push_back({0, 108, 0, 1, 0, 0, true});
 
     VirtualGeometryCluster cluster{};
     cluster.bounds.min = {-1.0f, -1.0f, -1.0f};
@@ -135,7 +135,7 @@ TEST_CASE("virtual geometry: versioned RMA1 payload round-trips") {
     CHECK(decoded->attribs == source.attribs);
     CHECK(decoded->vertex_stride == source.vertex_stride);
     CHECK(decoded->pages.size() == 1);
-    CHECK(decoded->pages[0].byte_size == 64);
+    CHECK(decoded->pages[0].byte_size == 108);
     CHECK(decoded->clusters[0].bounds.max.x == doctest::Approx(1.0f));
     CHECK(decoded->groups[0].permanently_resident);
     CHECK(decoded->page_bytes == source.page_bytes);
@@ -194,7 +194,7 @@ TEST_CASE("virtual geometry: registry preserves typed reader failures") {
     }
     SUBCASE("malformed payload") {
         VirtualGeometryAsset malformed = source;
-        malformed.pages[0].byte_size = 65;
+        malformed.pages[0].byte_size = 109;
         AssetError error = AssetError::Io;
         const VirtualGeometryHandle handle =
             registry.load_virtual_geometry_from_memory(write_file(malformed), error);
@@ -238,7 +238,7 @@ TEST_CASE("virtual geometry: corrupt version, schema, truncation, and graph are 
 TEST_CASE("virtual geometry: malformed pages and replacement DAGs never reach a renderer (M18)") {
     SUBCASE("a page byte range cannot extend beyond the payload") {
         VirtualGeometryAsset asset = valid_asset();
-        asset.pages[0].byte_size = 65;
+        asset.pages[0].byte_size = 109;
         CHECK(validate_virtual_geometry(asset) == VirtualGeometryError::InvalidPage);
     }
     SUBCASE("a page cannot claim a cluster that names another page") {
@@ -269,5 +269,57 @@ TEST_CASE("virtual geometry: malformed pages and replacement DAGs never reach a 
         VirtualGeometryAsset asset = valid_asset();
         asset.pages[0].permanently_resident = false;
         CHECK(validate_virtual_geometry(asset) == VirtualGeometryError::MissingCoarseCut);
+    }
+}
+
+TEST_CASE("virtual geometry: page view exposes checked vertex and index ranges") {
+    VirtualGeometryAsset asset = valid_asset();
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        const std::size_t offset = 96 + i * 4;
+        asset.page_bytes[offset] = static_cast<std::byte>(i + 1);
+    }
+    VirtualGeometryPageView view;
+    CHECK(view_virtual_geometry_page(asset, 0, view) == VirtualGeometryPageViewError::None);
+    CHECK(view.page.size() == 108);
+    CHECK(view.vertices.size() == 96);
+    CHECK(view.indices.size() == 12);
+    CHECK(view.vertex_offset == 0);
+    CHECK(view.index_offset == 96);
+    CHECK(view.index_count == 3);
+    std::uint32_t decoded = 0;
+    CHECK(read_virtual_geometry_index(view, 0, decoded));
+    CHECK(decoded == 1);
+    CHECK(read_virtual_geometry_index(view, 2, decoded));
+    CHECK(decoded == 3);
+    CHECK_FALSE(read_virtual_geometry_index(view, 3, decoded));
+}
+
+TEST_CASE("virtual geometry: page view rejects malformed layout ranges") {
+    SUBCASE("vertex range exceeds page") {
+        VirtualGeometryAsset asset = valid_asset();
+        asset.clusters[0].vertex_count = 4;
+        VirtualGeometryPageView view;
+        CHECK(view_virtual_geometry_page(asset, 0, view) ==
+              VirtualGeometryPageViewError::OutOfBounds);
+    }
+    SUBCASE("index range exceeds inferred index section") {
+        VirtualGeometryAsset asset = valid_asset();
+        asset.clusters[0].first_index = 2;
+        asset.clusters[0].index_count = 3;
+        VirtualGeometryPageView view;
+        CHECK(view_virtual_geometry_page(asset, 0, view) ==
+              VirtualGeometryPageViewError::OutOfBounds);
+    }
+    SUBCASE("vertex offset is not stride aligned") {
+        VirtualGeometryAsset asset = valid_asset();
+        asset.clusters[0].vertex_offset = 1;
+        VirtualGeometryPageView view;
+        CHECK(view_virtual_geometry_page(asset, 0, view) ==
+              VirtualGeometryPageViewError::InvalidLayout);
+    }
+    SUBCASE("unknown cluster is rejected") {
+        VirtualGeometryPageView view;
+        CHECK(view_virtual_geometry_page(valid_asset(), 1, view) ==
+              VirtualGeometryPageViewError::InvalidCluster);
     }
 }

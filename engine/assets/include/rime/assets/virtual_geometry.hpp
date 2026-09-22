@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -87,6 +88,123 @@ enum class VirtualGeometryError : std::uint8_t {
     CyclicGroups,
     MissingCoarseCut,
 };
+
+enum class VirtualGeometryPageViewError : std::uint8_t {
+    None,
+    InvalidCluster,
+    InvalidPage,
+    InvalidLayout,
+    MisalignedIndices,
+    OutOfBounds,
+};
+
+// A checked, non-owning view of one cluster's page data. The page format is the cooker contract:
+// interleaved vertex bytes first, followed immediately by little-endian u32 indices. Offsets are
+// relative to the page, while `page` and `vertices`/`indices` are bounded spans into page_bytes.
+struct VirtualGeometryPageView {
+    std::span<const std::byte> page{};
+    std::span<const std::byte> vertices{};
+    std::span<const std::byte> indices{};
+    std::uint32_t vertex_stride = 0;
+    std::uint32_t vertex_offset = 0;
+    std::uint32_t vertex_count = 0;
+    std::uint32_t index_offset = 0;
+    std::uint32_t first_index = 0;
+    std::uint32_t index_count = 0;
+};
+
+// Resolve a cluster's upload ranges without allocating or trusting cooked offsets. The vertex
+// section is inferred from every cluster assigned to the page, so a cluster cannot make the index
+// section overlap another cluster's vertices. This function intentionally returns byte spans:
+// page storage is serialized bytes and need not meet uint32_t alignment for a typed C++ view.
+[[nodiscard]] inline VirtualGeometryPageViewError
+view_virtual_geometry_page(const VirtualGeometryAsset& asset,
+                           std::uint32_t cluster_index,
+                           VirtualGeometryPageView& out) noexcept {
+    out = {};
+    if (cluster_index >= asset.clusters.size()) {
+        return VirtualGeometryPageViewError::InvalidCluster;
+    }
+    const VirtualGeometryCluster& cluster = asset.clusters[cluster_index];
+    if (cluster.page >= asset.pages.size()) {
+        return VirtualGeometryPageViewError::InvalidCluster;
+    }
+    const VirtualGeometryPage& page = asset.pages[cluster.page];
+    if (asset.vertex_stride == 0) {
+        return VirtualGeometryPageViewError::InvalidLayout;
+    }
+    const auto inside = [](std::uint64_t first, std::uint64_t count, std::uint64_t size) {
+        return first <= size && count <= size - first;
+    };
+    if (page.byte_offset > asset.page_bytes.size() ||
+        page.byte_size > asset.page_bytes.size() - page.byte_offset || page.byte_size == 0 ||
+        !inside(page.first_cluster, page.cluster_count, asset.clusters.size()) ||
+        cluster_index < page.first_cluster ||
+        cluster_index >= page.first_cluster + page.cluster_count) {
+        return VirtualGeometryPageViewError::InvalidPage;
+    }
+    const std::span<const std::byte> page_bytes =
+        std::span<const std::byte>(asset.page_bytes)
+            .subspan(static_cast<std::size_t>(page.byte_offset), page.byte_size);
+
+    std::uint64_t vertex_end = 0;
+    for (std::uint32_t i = 0; i < page.cluster_count; ++i) {
+        const VirtualGeometryCluster& candidate = asset.clusters[page.first_cluster + i];
+        if (candidate.page != cluster.page || candidate.vertex_count == 0 ||
+            candidate.index_count == 0 || candidate.index_count % 3 != 0 ||
+            candidate.vertex_offset % asset.vertex_stride != 0) {
+            return VirtualGeometryPageViewError::InvalidLayout;
+        }
+        const std::uint64_t candidate_vertex_end =
+            std::uint64_t{candidate.vertex_offset} +
+            std::uint64_t{candidate.vertex_count} * asset.vertex_stride;
+        if (candidate_vertex_end > page.byte_size) {
+            return VirtualGeometryPageViewError::OutOfBounds;
+        }
+        vertex_end = std::max(vertex_end, candidate_vertex_end);
+    }
+    if (asset.vertex_stride == 0 || vertex_end > page.byte_size || vertex_end % 4 != 0) {
+        return VirtualGeometryPageViewError::InvalidLayout;
+    }
+    const std::uint64_t index_bytes = std::uint64_t{page.byte_size} - vertex_end;
+    if (vertex_end % 4 != 0 || index_bytes % 4 != 0) {
+        return VirtualGeometryPageViewError::MisalignedIndices;
+    }
+    if (!inside(cluster.vertex_offset,
+                std::uint64_t{cluster.vertex_count} * asset.vertex_stride,
+                vertex_end) ||
+        !inside(std::uint64_t{cluster.first_index} * 4,
+                std::uint64_t{cluster.index_count} * 4,
+                index_bytes)) {
+        return VirtualGeometryPageViewError::OutOfBounds;
+    }
+
+    out.page = page_bytes;
+    out.vertices = page_bytes.subspan(0, static_cast<std::size_t>(vertex_end));
+    out.indices = page_bytes.subspan(static_cast<std::size_t>(vertex_end));
+    out.vertex_stride = asset.vertex_stride;
+    out.vertex_offset = cluster.vertex_offset;
+    out.vertex_count = cluster.vertex_count;
+    out.index_offset = static_cast<std::uint32_t>(vertex_end);
+    out.first_index = cluster.first_index;
+    out.index_count = cluster.index_count;
+    return VirtualGeometryPageViewError::None;
+}
+
+[[nodiscard]] inline bool read_virtual_geometry_index(const VirtualGeometryPageView& view,
+                                                      std::uint32_t index,
+                                                      std::uint32_t& out) noexcept {
+    if (index >= view.index_count ||
+        (std::uint64_t{view.first_index} + index) * 4 + 4 > view.indices.size()) {
+        return false;
+    }
+    const std::size_t offset = (std::size_t{view.first_index} + index) * 4;
+    const auto byte = [&view, offset](std::size_t i) {
+        return std::to_integer<std::uint32_t>(view.indices[offset + i]);
+    };
+    out = byte(0) | (byte(1) << 8) | (byte(2) << 16) | (byte(3) << 24);
+    return true;
+}
 
 [[nodiscard]] inline bool virtual_geometry_finite_bounds(const Aabb& bounds) noexcept {
     return std::isfinite(bounds.min.x) && std::isfinite(bounds.min.y) &&
