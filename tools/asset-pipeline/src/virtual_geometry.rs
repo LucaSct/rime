@@ -8,6 +8,10 @@
 use crate::cooked::{
     wrap_container, ByteWriter, ASSET_KIND_VIRTUAL_GEOMETRY, VIRTUAL_GEOMETRY_SCHEMA_HASH,
 };
+use crate::mesh::{
+    Mesh, ATTR_JOINTS, ATTR_NORMAL, ATTR_POSITION, ATTR_TANGENT, ATTR_UV, ATTR_WEIGHTS, SKIN_BYTES,
+    STRIDE_NO_TANGENT, TANGENT_BYTES,
+};
 
 /// Version of the kind-specific virtual-geometry payload (independent of the RMA1 envelope).
 pub const PAYLOAD_VERSION: u32 = 1;
@@ -63,6 +67,170 @@ pub struct Asset {
     pub page_dependencies: Vec<u32>,
     pub page_bytes: Vec<u8>,
     pub coarse_group: u32,
+}
+
+/// A failure while making the first, rigid leaf companion from a cooked mesh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeafCookError {
+    EmptyMesh,
+    MissingSubmeshes,
+    MalformedOptionalArray,
+    InvalidIndex,
+    InvalidSubmesh,
+    NonFiniteVertex,
+    OversizedPayload,
+}
+
+/// The page-byte contract for the M18 leaf cook is deliberately simple and stable: the page starts
+/// with the mesh's interleaved vertex records in the exact attribute/stride order used by `Mesh::cook`,
+/// followed immediately by little-endian u32 indices. `Cluster::vertex_offset` and
+/// `Cluster::first_index` are respectively byte and index offsets within this page. There is no
+/// padding or private header in the page; the companion header carries the attribute flags and
+/// vertex stride. This makes the first resident leaf consumable by a future renderer without
+/// teaching it a second mesh format.
+impl Asset {
+    /// Build one permanently resident page and replacement group from an already-cooked mesh.
+    /// Each source submesh becomes one cluster so material slots and index ranges survive intact.
+    /// The helper intentionally does not merge primitives or invent a material when the source
+    /// record is malformed.
+    pub fn from_mesh(source_mesh: u64, mesh: &Mesh) -> Result<Self, LeafCookError> {
+        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+            return Err(LeafCookError::EmptyMesh);
+        }
+        if mesh.submeshes.is_empty() {
+            return Err(LeafCookError::MissingSubmeshes);
+        }
+        if mesh
+            .tangents
+            .as_ref()
+            .is_some_and(|v| v.len() != mesh.vertices.len())
+            || mesh.skin.as_ref().is_some_and(|s| {
+                s.joints.len() != mesh.vertices.len() || s.weights.len() != mesh.vertices.len()
+            })
+        {
+            return Err(LeafCookError::MalformedOptionalArray);
+        }
+        for vertex in &mesh.vertices {
+            if vertex
+                .position
+                .into_iter()
+                .chain(vertex.normal)
+                .chain(vertex.uv)
+                .any(|v| !v.is_finite())
+            {
+                return Err(LeafCookError::NonFiniteVertex);
+            }
+        }
+        for &index in &mesh.indices {
+            if index as usize >= mesh.vertices.len() {
+                return Err(LeafCookError::InvalidIndex);
+            }
+        }
+        for submesh in &mesh.submeshes {
+            if submesh.index_count == 0
+                || submesh.index_count % 3 != 0
+                || u64::from(submesh.first_index) + u64::from(submesh.index_count)
+                    > mesh.indices.len() as u64
+            {
+                return Err(LeafCookError::InvalidSubmesh);
+            }
+        }
+
+        let mut attribs = ATTR_POSITION | ATTR_NORMAL | ATTR_UV;
+        let mut vertex_stride = STRIDE_NO_TANGENT;
+        if mesh.tangents.is_some() {
+            attribs |= ATTR_TANGENT;
+            vertex_stride += TANGENT_BYTES;
+        }
+        if mesh.skin.is_some() {
+            attribs |= ATTR_JOINTS | ATTR_WEIGHTS;
+            vertex_stride += SKIN_BYTES;
+        }
+
+        let vertex_bytes = u64::from(vertex_stride) * mesh.vertices.len() as u64;
+        let index_bytes = 4u64 * mesh.indices.len() as u64;
+        let page_size = vertex_bytes + index_bytes;
+        if page_size > u64::from(u32::MAX) {
+            return Err(LeafCookError::OversizedPayload);
+        }
+
+        let mut page_bytes = ByteWriter::new();
+        for (i, vertex) in mesh.vertices.iter().enumerate() {
+            for value in vertex.position {
+                page_bytes.f32(value);
+            }
+            for value in vertex.normal {
+                page_bytes.f32(value);
+            }
+            for value in vertex.uv {
+                page_bytes.f32(value);
+            }
+            if let Some(tangents) = &mesh.tangents {
+                for value in tangents[i] {
+                    page_bytes.f32(value);
+                }
+            }
+            if let Some(skin) = &mesh.skin {
+                for joint in skin.joints[i] {
+                    page_bytes.u16(joint);
+                }
+                for weight in skin.weights[i] {
+                    if !weight.is_finite() {
+                        return Err(LeafCookError::NonFiniteVertex);
+                    }
+                    page_bytes.f32(weight);
+                }
+            }
+        }
+        for &index in &mesh.indices {
+            page_bytes.u32(index);
+        }
+
+        let (bounds_min, bounds_max) = mesh.aabb();
+        let clusters = mesh
+            .submeshes
+            .iter()
+            .map(|submesh| Cluster {
+                bounds_min,
+                bounds_max,
+                lod_error_m: 0.0,
+                page: 0,
+                vertex_offset: 0,
+                vertex_count: mesh.vertices.len() as u32,
+                first_index: submesh.first_index,
+                index_count: submesh.index_count,
+                material_slot: submesh.material_slot,
+                replacement_group: 0,
+            })
+            .collect::<Vec<_>>();
+        Ok(Self {
+            source_mesh,
+            attribs,
+            vertex_stride,
+            pages: vec![Page {
+                byte_offset: 0,
+                byte_size: page_size as u32,
+                first_cluster: 0,
+                cluster_count: clusters.len() as u32,
+                first_dependency: 0,
+                dependency_count: 0,
+                permanently_resident: true,
+            }],
+            clusters,
+            groups: vec![Group {
+                first_cluster: 0,
+                cluster_count: mesh.submeshes.len() as u32,
+                first_child: 0,
+                child_count: 0,
+                lod_error_m: 0.0,
+                permanently_resident: true,
+            }],
+            child_groups: Vec::new(),
+            page_dependencies: Vec::new(),
+            page_bytes: page_bytes.into_vec(),
+            coarse_group: 0,
+        })
+    }
 }
 
 fn count(value: usize, field: &str) -> u32 {
@@ -143,6 +311,7 @@ impl Asset {
 mod tests {
     use super::*;
     use crate::cooked::fnv1a_64;
+    use crate::mesh::{Submesh, Vertex};
 
     fn fixture() -> Asset {
         Asset {
@@ -183,6 +352,106 @@ mod tests {
             page_bytes: vec![0xaa, 0xbb, 0xcc],
             coarse_group: 0,
         }
+    }
+
+    fn leaf_mesh() -> Mesh {
+        Mesh {
+            vertices: vec![
+                Vertex {
+                    position: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 0.0],
+                },
+                Vertex {
+                    position: [1.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [1.0, 0.0],
+                },
+                Vertex {
+                    position: [0.0, 1.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    uv: [0.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+            submeshes: vec![Submesh {
+                first_index: 0,
+                index_count: 3,
+                material_slot: 7,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn from_mesh_is_deterministic_and_preserves_leaf_ranges() {
+        let mesh = leaf_mesh();
+        let first = Asset::from_mesh(0x55, &mesh).unwrap();
+        let second = Asset::from_mesh(0x55, &mesh).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.attribs, 1 | 2 | 4);
+        assert_eq!(first.vertex_stride, 32);
+        assert_eq!(first.pages[0].byte_size as usize, first.page_bytes.len());
+        assert!(first.pages[0].permanently_resident);
+        assert_eq!(first.clusters.len(), 1);
+        assert_eq!(first.clusters[0].material_slot, 7);
+        assert_eq!(first.clusters[0].first_index, 0);
+        assert_eq!(first.clusters[0].index_count, 3);
+        assert_eq!(first.groups[0].cluster_count, 1);
+        assert!(first.groups[0].permanently_resident);
+        assert_eq!(
+            &first.page_bytes[32 * 3..],
+            &[0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn from_mesh_keeps_multiple_material_ranges_as_clusters() {
+        let mut mesh = leaf_mesh();
+        mesh.vertices.extend([
+            Vertex {
+                position: [0.0, 0.0, 1.0],
+                normal: [0.0, 0.0, 1.0],
+                uv: [0.0, 0.0],
+            },
+            Vertex {
+                position: [1.0, 0.0, 1.0],
+                normal: [0.0, 0.0, 1.0],
+                uv: [1.0, 0.0],
+            },
+            Vertex {
+                position: [0.0, 1.0, 1.0],
+                normal: [0.0, 0.0, 1.0],
+                uv: [0.0, 1.0],
+            },
+        ]);
+        mesh.indices.extend([3, 4, 5]);
+        mesh.submeshes.push(Submesh {
+            first_index: 3,
+            index_count: 3,
+            material_slot: 11,
+        });
+        let asset = Asset::from_mesh(0x55, &mesh).unwrap();
+        assert_eq!(asset.clusters.len(), 2);
+        assert_eq!(asset.clusters[0].material_slot, 7);
+        assert_eq!(asset.clusters[1].material_slot, 11);
+        assert_eq!(asset.clusters[1].first_index, 3);
+        assert_eq!(asset.pages[0].cluster_count, 2);
+    }
+
+    #[test]
+    fn from_mesh_rejects_malformed_ranges() {
+        let mut mesh = leaf_mesh();
+        mesh.indices[2] = 99;
+        assert_eq!(Asset::from_mesh(1, &mesh), Err(LeafCookError::InvalidIndex));
+        let mut mesh = leaf_mesh();
+        mesh.submeshes[0].index_count = 2;
+        assert_eq!(
+            Asset::from_mesh(1, &mesh),
+            Err(LeafCookError::InvalidSubmesh)
+        );
+        let mesh = Mesh::default();
+        assert_eq!(Asset::from_mesh(1, &mesh), Err(LeafCookError::EmptyMesh));
     }
 
     #[test]
