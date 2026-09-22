@@ -1170,3 +1170,41 @@ into the SH buffer's own payload rather than costing a 19th.
 - The never-cut list gains nothing and loses nothing: m17.7 was already never-cut, and its
   **m17.7e** sub-brick is the one cuttable piece.
 - m17.9 (the shadow bar) remains the milestone's first cut, ahead of m17.7e.
+
+## Amendment (2026-09-22, m17.10): closeout measurement — the two optional rendering bricks are cut,
+but the ratified budget remains open
+
+The clean-tree Release measurement is filed as
+[`2026-09-22-99-the-block-nvidia-geforce-rtx-3060.json`](../perf/2026-09-22-99-the-block-nvidia-geforce-rtx-3060.json)
+at `793c6ab`, after the m17.7a–d physical-sky work. The fixture cook ran in that same worktree
+before the sample. The workstation's clock-pinning access is intentionally gone, so the harness ran
+only with its explicit `RIME_PERF_ALLOW_UNPINNED_CLOCKS=1` escape hatch. It remains fingerprinted
+and reports the comparison, but this is an unpinned observation, not a substitute for the withdrawn
+clock-pinned tables.
+
+**m17.9 is cut.** The current CSM numbers do not establish a shadow-scaling breach, whereas a true
+virtual shadow map still needs sparse binding, a page allocator and a sparse depth atlas. That work
+cannot be honestly presented as the measured remedy for this sample.
+
+**m17.7e is cut.** Aerial perspective is an every-lit-pixel froxel-volume pass. The measured frame
+already misses its 16.600 ms p99 budget by 11.776 ms before that unmeasured cost is added, so taking
+the ladder's explicitly cuttable tail would spend budget the demo does not have. This cuts only the
+"landscape reads as kilometres deep" claim: m17.7a–d still provide the physical transmittance and
+multiple-scattering tables, physical sky-view table, SH lighting, and visible background.
+
+The measurement closes m17.10's required act of measurement but **does not close the milestone's
+budget clause**:
+
+| gate | result | ratified limit | outcome |
+|---|---:|---:|---|
+| `frame` p99 | 28.376 ms | <= 16.600 ms | miss |
+| `frame` max | 31.296 ms | <= 33.000 ms | pass |
+| `frame.collapse` max | 27.049 ms | <= 33.000 ms | pass |
+| `sim.collapse` max | 15.121 ms | <= 12.000 ms | miss |
+| `sim.block` p99 | 15.692 ms | <= 6.000 ms | miss |
+
+The report's named time leaves no unaccounted-frame mystery (`frame.unaccounted` p99 0.001 ms): the
+largest tails remain the paired server/client physics steps and contacts, while render p99 is 13.521
+ms. M17 therefore ends with its visual work and required re-measurement honestly recorded, but its
+frame-rate clause remains unpaid; it transfers as measured optimisation debt, not as a relaxed
+budget.
