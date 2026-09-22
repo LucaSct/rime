@@ -295,12 +295,36 @@ TEST_CASE("virtual geometry: page view exposes checked vertex and index ranges")
 }
 
 TEST_CASE("virtual geometry: page view rejects malformed layout ranges") {
+    SUBCASE("an unaligned page byte offset remains a byte-span view") {
+        VirtualGeometryAsset asset = valid_asset();
+        asset.page_bytes.insert(asset.page_bytes.begin(), std::byte{0x7f});
+        asset.pages[0].byte_offset = 1;
+        VirtualGeometryPageView view;
+        CHECK(view_virtual_geometry_page(asset, 0, view) == VirtualGeometryPageViewError::None);
+        CHECK(view.page.data() == asset.page_bytes.data() + 1);
+        CHECK(view.page.size() == 108);
+    }
     SUBCASE("vertex range exceeds page") {
         VirtualGeometryAsset asset = valid_asset();
         asset.clusters[0].vertex_count = 4;
         VirtualGeometryPageView view;
         CHECK(view_virtual_geometry_page(asset, 0, view) ==
               VirtualGeometryPageViewError::OutOfBounds);
+    }
+    SUBCASE("a non-multiple-of-four index tail is rejected") {
+        VirtualGeometryAsset asset = valid_asset();
+        asset.page_bytes.push_back(std::byte{0});
+        asset.pages[0].byte_size = 109;
+        VirtualGeometryPageView view;
+        CHECK(view_virtual_geometry_page(asset, 0, view) ==
+              VirtualGeometryPageViewError::MisalignedIndices);
+    }
+    SUBCASE("a vertex range with an overflowing offset is rejected") {
+        VirtualGeometryAsset asset = valid_asset();
+        asset.clusters[0].vertex_offset = UINT32_MAX - 3;
+        VirtualGeometryPageView view;
+        CHECK(view_virtual_geometry_page(asset, 0, view) ==
+              VirtualGeometryPageViewError::InvalidLayout);
     }
     SUBCASE("index range exceeds inferred index section") {
         VirtualGeometryAsset asset = valid_asset();
@@ -321,5 +345,14 @@ TEST_CASE("virtual geometry: page view rejects malformed layout ranges") {
         VirtualGeometryPageView view;
         CHECK(view_virtual_geometry_page(valid_asset(), 1, view) ==
               VirtualGeometryPageViewError::InvalidCluster);
+    }
+    SUBCASE("a malformed little-endian index offset is rejected") {
+        const VirtualGeometryAsset asset = valid_asset();
+        VirtualGeometryPageView view;
+        view.indices = std::span<const std::byte>(asset.page_bytes).subspan(96);
+        view.first_index = UINT32_MAX;
+        view.index_count = 1;
+        std::uint32_t decoded = 0;
+        CHECK_FALSE(read_virtual_geometry_index(view, 0, decoded));
     }
 }
