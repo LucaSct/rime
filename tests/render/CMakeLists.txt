@@ -13,6 +13,7 @@ rime_add_test(rime_render_tests
     fx_particle_test.cpp
     culling_test.cpp
     virtual_geometry_selection_test.cpp
+    virtual_geometry_residency_test.cpp
     present_test.cpp
     font_test.cpp
     hud_test.cpp
