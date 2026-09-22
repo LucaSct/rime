@@ -62,8 +62,61 @@ MeshHandle AssetRegistry::load_mesh(const std::filesystem::path& path) {
     return handle;
 }
 
+VirtualGeometryHandle
+AssetRegistry::load_virtual_geometry_from_memory(std::span<const std::byte> file,
+                                                 AssetError& out_error) {
+    std::span<const std::byte> payload;
+    const std::optional<CookedHeader> header = read_header(file, payload, out_error);
+    if (!header) {
+        return VirtualGeometryHandle{};
+    }
+    if (header->kind != AssetKind::VirtualGeometry) {
+        out_error = AssetError::WrongKind;
+        return VirtualGeometryHandle{};
+    }
+    if (header->type_schema_hash != virtual_geometry_schema_hash()) {
+        out_error = AssetError::SchemaMismatch;
+        return VirtualGeometryHandle{};
+    }
+
+    const AssetId id = content_hash(payload);
+    if (const auto it = virtual_geometry_by_id_.find(id.value);
+        it != virtual_geometry_by_id_.end()) {
+        return it->second;
+    }
+
+    std::optional<VirtualGeometryAsset> asset = decode_virtual_geometry(payload, out_error);
+    if (!asset) {
+        return VirtualGeometryHandle{};
+    }
+
+    const VirtualGeometryHandle handle = virtual_geometry_.insert(std::move(*asset));
+    virtual_geometry_by_id_.emplace(id.value, handle);
+    return handle;
+}
+
+VirtualGeometryHandle AssetRegistry::load_virtual_geometry(const std::filesystem::path& path) {
+    const std::optional<std::vector<std::byte>> bytes = platform::read_file(path);
+    if (!bytes) {
+        RIME_ERROR("assets: cannot open virtual geometry file '{}'", path.string());
+        return VirtualGeometryHandle{};
+    }
+
+    AssetError error = AssetError::Io;
+    const VirtualGeometryHandle handle = load_virtual_geometry_from_memory(*bytes, error);
+    if (!handle.is_valid()) {
+        RIME_ERROR(
+            "assets: failed to load virtual geometry '{}': {}", path.string(), to_string(error));
+    }
+    return handle;
+}
+
 const MeshAsset* AssetRegistry::get(MeshHandle handle) const noexcept {
     return meshes_.get(handle);
+}
+
+const VirtualGeometryAsset* AssetRegistry::get(VirtualGeometryHandle handle) const noexcept {
+    return virtual_geometry_.get(handle);
 }
 
 } // namespace rime::assets

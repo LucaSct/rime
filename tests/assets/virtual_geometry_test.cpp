@@ -9,12 +9,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <span>
+#include <system_error>
 #include <vector>
 
 #include "rime/assets/cooked_reader.hpp"
+#include "rime/assets/registry.hpp"
 #include "rime/assets/virtual_geometry.hpp"
 #include "rime/core/byte_cursor.hpp"
+#include "rime/platform/filesystem.hpp"
 
 using namespace rime::assets;
 
@@ -136,6 +140,68 @@ TEST_CASE("virtual geometry: versioned RMA1 payload round-trips") {
     CHECK(decoded->groups[0].permanently_resident);
     CHECK(decoded->page_bytes == source.page_bytes);
     CHECK(id == content_hash(write_payload(source)));
+}
+
+TEST_CASE("virtual geometry: registry content-addresses the companion payload") {
+    const VirtualGeometryAsset source = valid_asset();
+    const std::vector<std::byte> file = write_file(source);
+    AssetRegistry registry;
+    AssetError first_error = AssetError::Io;
+    AssetError second_error = AssetError::Io;
+
+    const VirtualGeometryHandle first =
+        registry.load_virtual_geometry_from_memory(file, first_error);
+    const VirtualGeometryHandle second =
+        registry.load_virtual_geometry_from_memory(file, second_error);
+
+    REQUIRE(first.is_valid());
+    CHECK(first_error == AssetError::Io);
+    CHECK(second == first);
+    CHECK(second_error == AssetError::Io);
+    CHECK(registry.virtual_geometry_count() == 1);
+    REQUIRE(registry.get(first) != nullptr);
+    CHECK(registry.get(first)->source_mesh == source.source_mesh);
+    CHECK(registry.get(first)->page_bytes == source.page_bytes);
+}
+
+TEST_CASE("virtual geometry: registry loads a companion from disk") {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "rime_m18_virtual_geometry_registry.rvg";
+    std::error_code ec;
+    const std::vector<std::byte> file = write_file(valid_asset());
+    REQUIRE(rime::platform::write_file(path, file));
+
+    AssetRegistry registry;
+    const VirtualGeometryHandle handle = registry.load_virtual_geometry(path);
+    REQUIRE(handle.is_valid());
+    CHECK(registry.get(handle) != nullptr);
+    CHECK(registry.get(handle)->coarse_group == 0);
+
+    std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("virtual geometry: registry preserves typed reader failures") {
+    const VirtualGeometryAsset source = valid_asset();
+    AssetRegistry registry;
+
+    SUBCASE("schema mismatch") {
+        AssetError error = AssetError::Io;
+        const VirtualGeometryHandle handle =
+            registry.load_virtual_geometry_from_memory(write_file(source, 0x1234), error);
+        CHECK_FALSE(handle.is_valid());
+        CHECK(error == AssetError::SchemaMismatch);
+        CHECK(registry.virtual_geometry_count() == 0);
+    }
+    SUBCASE("malformed payload") {
+        VirtualGeometryAsset malformed = source;
+        malformed.pages[0].byte_size = 65;
+        AssetError error = AssetError::Io;
+        const VirtualGeometryHandle handle =
+            registry.load_virtual_geometry_from_memory(write_file(malformed), error);
+        CHECK_FALSE(handle.is_valid());
+        CHECK(error == AssetError::InvalidVirtualGeometry);
+        CHECK(registry.virtual_geometry_count() == 0);
+    }
 }
 
 TEST_CASE("virtual geometry: corrupt version, schema, truncation, and graph are rejected") {

@@ -11,6 +11,7 @@
 #include "rime/assets/asset_id.hpp"
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/assets/mesh_asset.hpp"
+#include "rime/assets/virtual_geometry.hpp"
 #include "rime/core/containers/slot_map.hpp"
 
 // The runtime owner of loaded assets. One registry holds every loaded asset of a kind in a SlotMap
@@ -27,6 +28,7 @@ namespace rime::assets {
 // A generational handle to a mesh owned by an AssetRegistry. Phantom-typed on MeshAsset so it
 // cannot be mixed up with other handle kinds.
 using MeshHandle = core::Handle<MeshAsset>;
+using VirtualGeometryHandle = core::Handle<VirtualGeometryAsset>;
 
 class AssetRegistry {
 public:
@@ -48,17 +50,32 @@ public:
     [[nodiscard]] MeshHandle load_mesh_from_memory(std::span<const std::byte> file,
                                                    AssetError& out_error);
 
+    // Load a cooked virtual-geometry companion payload from memory. The companion is content
+    // addressed independently of its source mesh: repeated loads of identical payload bytes
+    // return the same handle, while the reader's typed AssetError reaches the caller unchanged.
+    [[nodiscard]] VirtualGeometryHandle
+    load_virtual_geometry_from_memory(std::span<const std::byte> file, AssetError& out_error);
+
+    [[nodiscard]] VirtualGeometryHandle load_virtual_geometry(const std::filesystem::path& path);
+
     // The mesh a handle names, or nullptr if the handle is stale/invalid. The pointer is valid only
     // until the next load (the backing store may relocate) — hold the handle, not the pointer.
     [[nodiscard]] const MeshAsset* get(MeshHandle handle) const noexcept;
+    [[nodiscard]] const VirtualGeometryAsset* get(VirtualGeometryHandle handle) const noexcept;
 
     [[nodiscard]] std::size_t mesh_count() const noexcept { return meshes_.size(); }
+
+    [[nodiscard]] std::size_t virtual_geometry_count() const noexcept {
+        return virtual_geometry_.size();
+    }
 
 private:
     core::SlotMap<MeshAsset> meshes_;
     // content-hash id -> handle, for load de-duplication. Keyed on the raw u64 so the map needs no
     // custom hash for AssetId.
     std::unordered_map<std::uint64_t, MeshHandle> mesh_by_id_;
+    core::SlotMap<VirtualGeometryAsset> virtual_geometry_;
+    std::unordered_map<std::uint64_t, VirtualGeometryHandle> virtual_geometry_by_id_;
 };
 
 } // namespace rime::assets
