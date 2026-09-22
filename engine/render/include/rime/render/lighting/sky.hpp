@@ -13,11 +13,10 @@ namespace rime::render {
 // The sky (m17.0): a procedural daytime sky with a sun disc and a cloud layer, composited over the
 // frame wherever the depth buffer says nothing was drawn.
 //
-// Its full-resolution BACKGROUND remains authored and analytic, while m17.7d makes the separate
-// sky-view/SH LIGHTING body a precomputed physical atmosphere. ADR-0040 records the remaining
-// path: the background may later sample that same table, and a froxel volume adds aerial
-// perspective. Keeping those presentation changes separate lets the medium replace its lighting
-// body without moving the pass, the parameters, or the sun coupling.
+// m17.7d makes sky-view/SH a precomputed physical atmosphere and composites that same sky-view
+// table into the full-resolution BACKGROUND. The only analytic presentation term left is the sharp
+// solar disc, because the table cannot resolve it and the DirectionalLight owns direct light on
+// geometry. A froxel volume remains the later aerial-perspective brick.
 //
 // Structurally this is the SSR pattern (m10.7b): read the forward pass's HDR + depth, write a
 // SECOND HDR target the next stage reads. With the sky off, nothing allocates and the tonemap reads
@@ -26,12 +25,14 @@ namespace rime::render {
 struct SkyParams {
     bool enabled = false;
 
-    // Colours are linear HDR radiance, not sRGB. `intensity` scales the whole sky at once, which is
-    // the knob to reach for when the scene's exposure changes rather than re-tuning both colours.
+    // Legacy authored-gradient colours, retained so existing .rscene files round-trip. The m17.7d
+    // physical background and lighting path derives its colour from the atmosphere and solar
+    // source instead; use `sun_radiance`, atmosphere parameters and `intensity` to tune it.
+    // They remain linear HDR radiance, not sRGB, for the legacy compute-only fallback.
     float zenith[3] = {0.13f, 0.29f, 0.66f};
     float horizon[3] = {0.62f, 0.72f, 0.86f};
     float intensity = 1.0f;
-    float ground = 0.35f; // how far the below-horizon colour is darkened toward the ground
+    float ground = 0.35f; // legacy fallback's below-horizon darkening
 
     // The sun disc. `angular_radius` is in radians -- the real sun subtends about 0.0047, but a
     // slightly larger disc reads better at 960x540 and in a small editor viewport.
@@ -125,7 +126,8 @@ public:
              RGTexture depth,
              RGTexture out_hdr,
              const SkyParams& params,
-             const SkyInputs& inputs);
+             const SkyInputs& inputs,
+             const SkyLightBinding& lighting);
 
     // Bake the sky into the LUT and project it onto SH, and return what the lit passes read.
     //

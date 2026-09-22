@@ -86,7 +86,8 @@ inline constexpr float kAmbient[3] = {0.030f, 0.035f, 0.055f};
 //
 // A dusk background for a dusk street. m17.7b's former 2.5%-against-kAmbient calibration applied
 // to the analytic gradient and is deliberately retired: m17.7d's physical lighting body is driven
-// by its solar source, while these zenith/horizon colours now affect only the background picture.
+// by its solar source, while these legacy zenith/horizon colours are retained only for compatible
+// scene data and the compute-only analytic fallback.
 // `kSkyIntensity` remains the demo's presentation exposure and scales that physical source plus
 // clouds consistently; a future visual-bar remeasurement can tune it against a chosen exposure,
 // but must not present the old gradient measurement as evidence for this different transport.

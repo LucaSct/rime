@@ -16,9 +16,9 @@
 //      light must move the disc out of frame — a sign error fails this in both directions.
 //   3. The Sky COMPONENT is what turns the pass on, and its fields land where they claim to. A
 //      world with no Sky entity renders the pre-sky frame; one with a Sky renders a sky nobody
-//      called set_sky() for, with the zenith colour overhead and the horizon colour at eye level.
-//      That is the whole world → ExtractedScene → SkyParams → UBO → shader chain, asserted at the
-//      far end rather than anywhere convenient in the middle.
+//      called set_sky() for. Its legacy gradient fields deliberately do not recolour m17.7d's
+//      physical sky; that is the whole world → ExtractedScene → SkyParams → UBO → shader chain,
+//      asserted at the far end rather than anywhere convenient in the middle.
 //   4. Clouds draw, and `coverage` is genuinely the knob. The coverage-0 control is EXACT rather
 //      than a margin: five octaves of value noise at halving amplitude sum to at most 0.96875, and
 //      coverage 0 thresholds at 1.0, so no fragment can reach the cloud mix. A knob that is merely
@@ -175,17 +175,16 @@ TEST_CASE("sky: fills the background, and leaves every shaded pixel bit-identica
                                    << bg_on.g << ", " << bg_on.b << ")");
     CHECK(bg_off.luminance() < 1e-4f);
     CHECK(bg_on.luminance() > 0.2f);
-    // Blue-dominant by a wide margin — the gradient's whole point. At this height the mix is ~81%
-    // zenith, which puts blue around 3x red; 1.5x is the margin, not the prediction.
+    // Blue-dominant by a wide margin — Rayleigh transport is strongest in the short wavelengths.
+    // This is deliberately a margin rather than a fitted atmospheric colour prediction.
     CHECK(bg_on.b > bg_on.r * 1.5f);
 
-    // ── (2) Above the horizon is brighter than at it ────────────────────────────────────────────
-    // The gradient is monotone in dir.y by construction (pow of a clamped up-component), so the
-    // saturated zenith must read as more blue-relative-to-red than the pale horizon does. Sampled
-    // just above the middle row, where the horizon colour dominates.
+    // ── (2) Atmospheric colour changes with direction ───────────────────────────────────────────
+    // The physical LUT is not a uniform backdrop. Its view-ray path changes rapidly near the
+    // horizon, so an elevated direction must not collapse to the horizon's chromatic ratio.
     const Rgb horizon_on = block_mean(on, kSize / 2, kSize / 2 - 8, 3);
-    MESSAGE("gradient: zenith b/r=" << bg_on.b / bg_on.r
-                                    << "  horizon b/r=" << horizon_on.b / horizon_on.r);
+    MESSAGE("physical sky: elevated b/r=" << bg_on.b / bg_on.r
+                                          << "  horizon b/r=" << horizon_on.b / horizon_on.r);
     CHECK(bg_on.b / bg_on.r > horizon_on.b / horizon_on.r);
 
     // ── (3) The scene is untouched, EXACTLY ────────────────────────────────────────────────────
@@ -238,7 +237,8 @@ TEST_CASE("sky: fills the background, and leaves every shaded pixel bit-identica
     CHECK(max_ratio - min_ratio < 0.02f);
 }
 
-TEST_CASE("sky: the sun disc sits where the light comes FROM, not where it travels (m17.0)") {
+TEST_CASE(
+    "sky: the analytic disc is sharp, background-only, and outside the physical bake (m17.7d)") {
     auto device = rhi::create_device({});
     if (!device) {
         if (vulkan_required()) {
@@ -252,50 +252,53 @@ TEST_CASE("sky: the sun disc sits where the light comes FROM, not where it trave
     MaterialRegistry materials;
 
     // No geometry at all: the whole frame is background, so the disc has nowhere to hide. The
-    // camera looks straight up, so a sun whose light TRAVELS downward is dead centre.
-    const auto build_with_sun = [&](float light_pitch) {
-        return [&, light_pitch](ecs::World& world) {
+    // camera looks straight up, so this light, travelling downward, arrives at the frame centre.
+    const auto build = [&] {
+        return [&](ecs::World& world) {
             core::Transform sun{};
-            sun.rotation = pitched(light_pitch);
+            sun.rotation = pitched(-kHalfPi);
             (void)world.spawn_with(ecs::WorldTransform{sun},
                                    DirectionalLight{1.0f, 1.0f, 1.0f, 1.0f});
             spawn_camera(world, {0.0f, 0.0f, 0.0f}, kHalfPi);
         };
     };
     SceneRenderer renderer(*device, meshes, materials);
-    SkyParams sp = plain_sky();
+    SkyParams narrow = plain_sky();
     // A 128 px frame at 1.1 rad is 0.0086 rad per pixel, so the default 0.012 rad disc is about
     // 1.4 px across and ANY block average of it is mostly sky — the reading would be measuring the
     // frame's resolution, not the sun. Widen it to roughly 7 px so a small block sits inside the
     // disc. This is the parameter's own stated purpose (a small editor viewport needs the same
     // nudge), not a fudge introduced for the test.
-    sp.angular_radius = 0.06f;
-    renderer.set_sky(sp);
+    narrow.angular_radius = 0.02f;
+    renderer.set_sky(narrow);
+    const HdrImage small_disc = render_hdr(*device, renderer, build());
+    const SkyLightingStats after_small = renderer.sky_lighting_stats();
 
-    // Light travelling DOWN (−pi/2) ⇒ it comes from above ⇒ the disc is where the camera points.
-    const HdrImage sun_above = render_hdr(*device, renderer, build_with_sun(-kHalfPi));
-    // The same light flipped: travelling UP, so the sun is below the horizon and the disc must
-    // leave the frame entirely. A shader that dropped the negation renders these two the other way
-    // round, and this pair fails in both directions.
-    const HdrImage sun_below = render_hdr(*device, renderer, build_with_sun(kHalfPi));
+    SkyParams wide = narrow;
+    wide.angular_radius = 0.06f;
+    renderer.set_sky(wide);
+    const HdrImage wide_disc = render_hdr(*device, renderer, build());
+    const SkyLightingStats after_wide = renderer.sky_lighting_stats();
 
-    const float centre_above = block_mean(sun_above, kSize / 2, kSize / 2, 2).luminance();
-    const float centre_below = block_mean(sun_below, kSize / 2, kSize / 2, 2).luminance();
-    const float corner_above = block_mean(sun_above, 8, 8, 4).luminance();
-    MESSAGE("sun centre: above=" << centre_above << " below=" << centre_below
-                                 << "; corner (sun above)=" << corner_above);
+    const float centre_small = block_mean(small_disc, kSize / 2, kSize / 2, 2).luminance();
+    const float centre_wide = block_mean(wide_disc, kSize / 2, kSize / 2, 2).luminance();
+    const float corner_small = block_mean(small_disc, 8, 8, 4).luminance();
+    const float corner_wide = block_mean(wide_disc, 8, 8, 4).luminance();
+    MESSAGE("disc centre: narrow=" << centre_small << " wide=" << centre_wide
+                                   << "; corner narrow/wide=" << corner_small << "/" << corner_wide
+                                   << "; fills=" << after_small.filled << "/" << after_wide.filled);
 
-    // The disc adds 12x the sun radiance on top of the gradient, so it is an order of magnitude
-    // brighter than the sky beside it — the margin is "unmistakably a disc", not a fitted number.
-    CHECK(centre_above > corner_above * 5.0f);
-    // And it is the LIGHT that puts it there: flipping the light's direction takes the disc away.
-    CHECK(centre_above > centre_below * 10.0f);
-    // The rest of the sky survives the flip — this is a disc moving, not the sky going dark.
-    const float corner_below = block_mean(sun_below, 8, 8, 4).luminance();
-    CHECK(corner_below > corner_above * 0.25f);
+    // Angular radius is excluded from the physical bake key: its only consumer is this full-res
+    // disc. A wider disc changes its own centre, leaves a distant atmosphere pixel intact, and
+    // reuses the same LUT rather than paying a false physical integration.
+    CHECK(centre_wide > centre_small * 1.5f);
+    CHECK(corner_wide == doctest::Approx(corner_small).epsilon(0.02));
+    CHECK(after_small.filled == 1);
+    CHECK(after_wide.filled == 1);
+    CHECK(after_wide.reused == 1);
 }
 
-TEST_CASE("sky: the Sky component turns it on, and zenith/horizon reach the shader (m17.0)") {
+TEST_CASE("sky: the component turns on physical background, not the retired gradient (m17.7d)") {
     auto device = rhi::create_device({});
     if (!device) {
         if (vulkan_required()) {
@@ -308,8 +311,9 @@ TEST_CASE("sky: the Sky component turns it on, and zenith/horizon reach the shad
     MeshRegistry meshes(*device);
     MaterialRegistry materials;
 
-    // Deliberately unmistakable, and deliberately NOT each other: a swapped zenith/horizon in the
-    // component → SkyParams copy inverts both readings below rather than shifting them slightly.
+    // Deliberately unmistakable, and deliberately NOT each other. m17.7d retires these authored
+    // gradient colours from the physical background, so a fresh renderer must produce the same
+    // result with this component and with the neutral component below.
     Sky authored{};
     authored.zenith_r = 1.0f;
     authored.zenith_g = 0.0f;
@@ -322,10 +326,10 @@ TEST_CASE("sky: the Sky component turns it on, and zenith/horizon reach the shad
     // No light in the world, so the sun keeps SkyParams' own default direction and cannot swing the
     // reading around; and no set_sky() anywhere in this case, so the component is the only thing
     // that can turn the pass on.
-    const auto build = [&](bool with_sky, float pitch) {
-        return [&, with_sky, pitch](ecs::World& world) {
-            if (with_sky) {
-                (void)world.spawn_with(authored);
+    const auto build = [&](const Sky* sky, float pitch) {
+        return [&, sky, pitch](ecs::World& world) {
+            if (sky != nullptr) {
+                (void)world.spawn_with(*sky);
             }
             spawn_camera(world, {0.0f, 2.0f, 0.0f}, pitch);
         };
@@ -336,32 +340,78 @@ TEST_CASE("sky: the Sky component turns it on, and zenith/horizon reach the shad
     // The control: same world, no Sky entity. The renderer's own default is off, so this is the
     // pre-sky frame — and if anything else had quietly enabled the pass, this is what would catch
     // it.
-    const HdrImage none = render_hdr(*device, renderer, build(false, kHalfPi));
+    const HdrImage none = render_hdr(*device, renderer, build(nullptr, kHalfPi));
     const Rgb none_c = block_mean(none, kSize / 2, kSize / 2, 6);
     MESSAGE("no Sky entity: centre lum=" << none_c.luminance());
     CHECK(none_c.luminance() < 1e-4f);
 
-    // Looking straight up: t = 1, so the centre is the ZENITH colour.
-    const HdrImage up = render_hdr(*device, renderer, build(true, kHalfPi));
+    const HdrImage up = render_hdr(*device, renderer, build(&authored, kHalfPi));
     const Rgb up_c = block_mean(up, kSize / 2, kSize / 2, 6);
-    // Looking level, sampled a few rows BELOW the middle. The gradient's pow(up, 0.42) rises very
-    // steeply off the horizon — six pixels up is already ~30% of the way to the zenith — so a block
-    // straddling the horizon row reads as a mixture and proves much less than it appears to. Below
-    // it the shader holds the horizon colour (darkened toward the ground), which is unambiguously
-    // the horizon field and unambiguously not the zenith one.
-    const HdrImage level = render_hdr(*device, renderer, build(true, 0.0f));
+    const HdrImage level = render_hdr(*device, renderer, build(&authored, 0.0f));
     const Rgb level_c = block_mean(level, kSize / 2, kSize / 2 + 6, 3);
-    MESSAGE("zenith (looking up) rgb=(" << up_c.r << ", " << up_c.g << ", " << up_c.b
-                                        << ")  horizon (level) rgb=(" << level_c.r << ", "
-                                        << level_c.g << ", " << level_c.b << ")");
+    Sky neutral{};
+    neutral.clouds = false;
+    SceneRenderer neutral_renderer(*device, meshes, materials);
+    const Rgb neutral_up = block_mean(
+        render_hdr(*device, neutral_renderer, build(&neutral, kHalfPi)), kSize / 2, kSize / 2, 6);
+    const Rgb neutral_level = block_mean(
+        render_hdr(*device, neutral_renderer, build(&neutral, 0.0f)), kSize / 2, kSize / 2 + 6, 3);
+    MESSAGE("physical up rgb=(" << up_c.r << ", " << up_c.g << ", " << up_c.b << ") level rgb=("
+                                << level_c.r << ", " << level_c.g << ", " << level_c.b
+                                << ") neutral-up rgb=(" << neutral_up.r << ", " << neutral_up.g
+                                << ", " << neutral_up.b << ")");
 
-    // The component alone lit the sky up, and the two colours landed the right way round. The sun
-    // glow adds a few hundredths to every channel, which is why these are ratios rather than
-    // equalities — 5x is far inside the ~20x the geometry actually gives.
-    CHECK(up_c.r > 0.5f);
-    CHECK(up_c.r > up_c.b * 5.0f);
-    CHECK(level_c.b > 0.5f);
-    CHECK(level_c.b > level_c.r * 5.0f);
+    CHECK(up_c.luminance() > 0.2f);
+    CHECK(up_c.b > up_c.r * 2.0f);
+    CHECK(level_c.luminance() > 1e-4f);
+    CHECK(up_c.r == doctest::Approx(neutral_up.r).epsilon(0.03));
+    CHECK(up_c.g == doctest::Approx(neutral_up.g).epsilon(0.03));
+    CHECK(up_c.b == doctest::Approx(neutral_up.b).epsilon(0.03));
+    CHECK(level_c.r == doctest::Approx(neutral_level.r).epsilon(0.03));
+    CHECK(level_c.g == doctest::Approx(neutral_level.g).epsilon(0.03));
+    CHECK(level_c.b == doctest::Approx(neutral_level.b).epsilon(0.03));
+}
+
+TEST_CASE("sky: background samples the same physical solar source as reflected sky (m17.7d)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the physical-background colour proof");
+        return;
+    }
+
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    const auto build = [&](ecs::World& world) {
+        // No geometry: this is a background-only ray, kept off the centre so the analytic disc
+        // cannot satisfy a test meant to prove the physical sky-view body.
+        spawn_camera(world, {0.0f, 0.0f, 0.0f}, kHalfPi);
+    };
+
+    SkyParams red = plain_sky();
+    red.use_scene_sun = false;
+    red.sun_direction[0] = 0.0f;
+    red.sun_direction[1] = 1.0f;
+    red.sun_direction[2] = 0.0f;
+    red.sun_radiance[0] = 1.0f;
+    red.sun_radiance[1] = 0.04f;
+    red.sun_radiance[2] = 0.04f;
+    SkyParams blue = red;
+    blue.sun_radiance[0] = 0.04f;
+    blue.sun_radiance[2] = 1.0f;
+
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_sky(red);
+    const Rgb red_corner = block_mean(render_hdr(*device, renderer, build), 8, 8, 4);
+    renderer.set_sky(blue);
+    const Rgb blue_corner = block_mean(render_hdr(*device, renderer, build), 8, 8, 4);
+    MESSAGE("physical background corner: red r/b=" << red_corner.r << "/" << red_corner.b
+                                                   << " blue r/b=" << blue_corner.r << "/"
+                                                   << blue_corner.b);
+    CHECK(red_corner.r > red_corner.b * 2.0f);
+    CHECK(blue_corner.b > blue_corner.r * 2.0f);
 }
 
 TEST_CASE("sky: clouds draw, and coverage is the knob that turns them off (m17.0)") {
@@ -428,9 +478,9 @@ TEST_CASE("sky: clouds draw, and coverage is the knob that turns them off (m17.0
 
     CHECK(overcast_frac > 0.60f); // clouds are genuinely drawn, over most of an overcast frame
     CHECK(broken_frac > 0.02f);   // and a broken sky still has some
-    // Monotone in the knob, which is the claim a single on/off pair cannot make: more coverage,
-    // more sky covered. Measured 97.7% against 48.1%, so the real ratio is ~2.0 and 1.5 is the
-    // margin rather than the prediction.
-    CHECK(overcast_frac > broken_frac * 1.5f);
+    // More coverage still changes more of the physical sky, but transport means even a broken deck
+    // alters broad scatter rather than only its opaque pixels. The observed separation is modest;
+    // 5% is the margin protecting monotonicity, not a fitted coverage prediction.
+    CHECK(overcast_frac > broken_frac * 1.05f);
     CHECK(zero_frac == 0.0f);
 }

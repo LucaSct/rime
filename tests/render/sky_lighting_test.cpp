@@ -3,10 +3,10 @@
 //
 // The sky LIGHTS the scene — the structural proof. m17.7d replaces the authored gradient in the
 // sky-view/SH body with physical single scattering, so these controls prove source scale, solar
-// colour, cache visibility, the sky-off gate, and escaped-ray reflection. The m17.0 background
-// remains authored on purpose; this file explicitly proves its zenith/horizon colours no longer
-// leak into physical lighting. No golden images: every claim is a transport property isolated by a
-// control, following the M5.6/M6.4 pattern.
+// colour, cache visibility, the sky-off gate, and escaped-ray reflection. The m17.7d background
+// samples that same physical body; this file explicitly proves legacy zenith/horizon colours do
+// not leak into either physical path. No golden images: every claim is a transport property
+// isolated by a control, following the M5.6/M6.4 pattern.
 #include <doctest/doctest.h>
 
 #include <cmath>

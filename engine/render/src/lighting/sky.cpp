@@ -164,6 +164,7 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
         {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene colour (HDR)
         {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene depth
         {2, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // SkyParams
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // physical sky-view
     };
     rhi::GraphicsPipelineDesc graphics_pd{};
     graphics_pd.vertex_shader = vertex_shader_;
@@ -267,18 +268,14 @@ SkyPass::SkyPass(rhi::Device& device) : device_(device) {
     // Linear, because a consumer looks up a direction that falls between texels and a nearest
     // lookup would quantise the sky into visible facets in a reflection.
     //
-    // KNOWN LIMITATION, recorded rather than discovered later: the LUT's u axis is azimuth and
-    // genuinely WRAPS, while v is elevation and must not. rhi::SamplerDesc carries ONE address
-    // mode for both axes, so the two cannot be served at once. ClampToEdge is the lesser evil:
-    // clamping v is correct, and the cost is a one-texel seam at the +/-180 degree azimuth where
-    // filtering cannot blend across the join. Repeat would fix that seam and break the POLES,
-    // blending the zenith into the nadir -- and straight-up is exactly where a floor's reflection
-    // rays point, so it is the worse trade. The real fix is per-axis address modes in the RHI, or
-    // a duplicated border column; neither is worth an RHI change inside this brick.
+    // Sky-view wraps around azimuth but terminates at real elevation poles. Its first full-screen
+    // reader makes that distinction visible, so use the RHI's axis overrides rather than accepting
+    // a clamp seam at +/-180 degrees or blending zenith into the nadir.
     rhi::SamplerDesc ls{};
     ls.mag_filter = rhi::Filter::Linear;
     ls.min_filter = rhi::Filter::Linear;
     ls.address_mode = rhi::AddressMode::ClampToEdge;
+    ls.address_mode_u = rhi::AddressMode::Repeat;
     ls.debug_name = "sky-view-lut-sampler";
     lut_sampler_ = device.create_sampler(ls);
 
@@ -344,7 +341,8 @@ void SkyPass::add(RenderGraph& graph,
                   RGTexture depth,
                   RGTexture out_hdr,
                   const SkyParams& params,
-                  const SkyInputs& inputs) {
+                  const SkyInputs& inputs,
+                  const SkyLightBinding& lighting) {
     const GpuSkyUniforms u = fill_uniforms(params, inputs);
 
     // This frame's slice of the graph's scratch ring, not a buffer this pass owns (m17.4). A
@@ -357,7 +355,7 @@ void SkyPass::add(RenderGraph& graph,
     // what orders this after the forward pass and transitions depth from DepthAttachment to
     // ShaderRead.
     const RGColorAttachment colors[] = {{out_hdr, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
-    const RGTexture sampled[] = {scene_color, depth};
+    const RGTexture sampled[] = {scene_color, depth, lighting.skyview};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.sampled = sampled;
@@ -367,13 +365,16 @@ void SkyPass::add(RenderGraph& graph,
                            ubo = ubo_slice.buffer,
                            ubo_offset = ubo_slice.offset,
                            smp = sampler_,
+                           sky_sampler = lighting.sampler,
                            scene_color,
                            depth,
+                           skyview = lighting.skyview,
                            &graph](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipe);
                               cmd.bind_texture(0, graph.physical(scene_color), smp);
                               cmd.bind_texture(1, graph.physical(depth), smp);
                               cmd.bind_uniform_buffer(2, ubo, ubo_offset, sizeof(GpuSkyUniforms));
+                              cmd.bind_texture(3, graph.physical(skyview), sky_sampler);
                               cmd.draw(3);
                           });
 }
@@ -394,9 +395,10 @@ bool SkyPass::bake_inputs_equal(const SkyParams& a, const SkyParams& b) noexcept
     const auto v3 = [](const float (&x)[3], const float (&y)[3]) {
         return x[0] == y[0] && x[1] == y[1] && x[2] == y[2];
     };
-    // zenith, horizon and ground belong solely to the still-authored background composite.  The
-    // m17.7d sky-view/SH body no longer reads them, so letting any of them refill this cache would
-    // waste a physical integration and conceal a dependency regression in the opposite direction.
+    // zenith, horizon and ground belong only to the retained legacy fallback. The m17.7d
+    // sky-view/SH/background body no longer reads them, so letting any of them refill this cache
+    // would waste a physical integration and conceal a dependency regression in the opposite
+    // direction.
     return a.intensity == b.intensity && v3(a.sun_direction, b.sun_direction) &&
            v3(a.sun_radiance, b.sun_radiance) && a.clouds_enabled == b.clouds_enabled &&
            a.coverage == b.coverage && a.density == b.density && a.altitude == b.altitude &&

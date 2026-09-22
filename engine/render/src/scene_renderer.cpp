@@ -818,7 +818,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     RGTexture sky_src = hdr;
     if (sky_on) {
         const RGTexture hdr_sky = graph.create_texture({extent, kHdrFormat, "scene-hdr-sky"});
-        sky_.add(graph, hdr, depth, hdr_sky, sp, ski);
+        sky_.add(graph, hdr, depth, hdr_sky, sp, ski, sky_binding);
         sky_src = hdr_sky;
     }
 
@@ -864,16 +864,12 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         tonemap_src = hdr_ssr;
     }
 
-    // Tell the sky where its LUT ended up (m17.7b). Both readers are declared by now, so this is
-    // the first point that can answer it: a frame where SSR or the DDGI trace sampled the table
-    // leaves it in ShaderRead, and a frame where neither did leaves it in the general layout its
-    // own compute write produced. SkyPass owns the texture but cannot see its readers, so they
-    // report back — the same owner/reporter split SdfClipmap::note_level_state exists for, and
-    // guessing either answer here produces barrier noise on every frame after the first.
+    // The composite itself now samples sky-view on every sky-on frame, so it always leaves the
+    // persistent LUT ShaderRead even when SSR and DDGI are off. Report the real consumer state to
+    // the owner; importing it as the compute-write layout next frame would otherwise cause a
+    // validation barrier disagreement.
     if (sky_on) {
-        const bool lut_sampled = has_ddgi || (has_ssr && gbuffer.is_valid());
-        sky_.note_skyview_state(lut_sampled ? rhi::ResourceState::ShaderRead
-                                            : rhi::ResourceState::StorageReadWrite);
+        sky_.note_skyview_state(rhi::ResourceState::ShaderRead);
     }
 
     tonemap_.add(graph, tonemap_src, ldr);

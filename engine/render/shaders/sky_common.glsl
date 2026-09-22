@@ -68,6 +68,26 @@ float fbm(vec2 p) {
 }
 
 // --- the sky itself ------------------------------------------------------------------------------
+// Existing scene lights use a compact author-facing solar unit around one; the physical sky
+// integral needs a radiometric-scale source. Keep that conversion named and shared with the visible
+// disc so the two presentations cannot silently disagree by two orders of magnitude.
+const float kSceneSolarScale = 100.0;
+
+float sky_sun_disc_mask(vec3 dir) {
+    const float mu = clamp(dot(normalize(dir), sky.sun_dir.xyz), -1.0, 1.0);
+    const float ang = acos(mu);
+    const float r = sky.sun_radiance.a;
+    return 1.0 - smoothstep(r * 0.85, r * 1.15, ang);
+}
+
+// The disc is deliberately outside the low-resolution sky-view LUT. `source_scale` is one for the
+// legacy authored picture and kSceneSolarScale for the physical picture. It is background-only:
+// the DirectionalLight already supplies this direct solar term to shaded geometry.
+vec3 sky_sun_disc_radiance(vec3 dir, float source_scale) {
+    return max(sky.sun_radiance.rgb, vec3(0.0)) * max(sky.zenith.a, 0.0) * source_scale *
+           sky_sun_disc_mask(dir) * 12.0;
+}
+
 // `disc_scale` scales the sun's OWN DISC, and it is 1.0 for the background picture and 0.0 for
 // anything that LIGHTS the scene.
 //
@@ -102,18 +122,14 @@ vec3 sky_radiance_ex(vec3 dir, float disc_scale) {
 
     // The sun disc. Angular radius comes in as a parameter (the real sun is ~0.0047 rad); the outer
     // few percent are feathered so the edge does not alias into a hexagon at low resolution.
-    float ang = acos(mu);
-    float r = sky.sun_radiance.a;
-    float disc = 1.0 - smoothstep(r * 0.85, r * 1.15, ang);
-    col += sky.sun_radiance.rgb * disc * 12.0 * disc_scale;
+    col += sky_sun_disc_radiance(dir, 1.0) * disc_scale / max(sky.zenith.a, 1e-6);
 
     return col * sky.zenith.a;
 }
 
-// The seam ADR-0040 Section 2 names, unchanged in signature and meaning: the authored sky the
-// background pass SEEes.  m17.7d deliberately leaves this full-resolution art control alone while
-// replacing the lower-frequency sky-view/SH lighting body below; sampling that LUT in the final
-// composite is a later presentation change, not an accidental consequence of changing the light.
+// The seam ADR-0040 Section 2 names, unchanged in signature and meaning: the legacy authored sky
+// body. Compute-only fallback callers retain it, but the sky composite now samples the physical
+// sky-view LUT instead, with only the separately resolved disc remaining analytic.
 vec3 sky_radiance(vec3 dir) {
     return sky_radiance_ex(dir, 1.0);
 }
@@ -170,9 +186,9 @@ vec3 sky_full_radiance(vec3 dir) {
 
 // What the scene is LIT by from this direction.  m17.7b began with the authored sky above so the
 // cache/resource shape could be proven independently; m17.7d replaces only this body with a
-// compact spherical-atmosphere single-scattering integral.  The physical declarations are gated
-// because sky.frag still draws the authored background and deliberately owns no atmosphere
-// descriptors.  Both compute callers define the gate before including this file.
+// compact spherical-atmosphere single-scattering integral. The declarations remain gated because
+// the physical table inputs belong to the compute producers; sky.frag samples their finished
+// sky-view result rather than taking those descriptors itself.
 #ifdef RIME_SKY_PHYSICAL_LIGHTING
 
 const float kAtmospherePi = 3.14159265358979;
@@ -277,9 +293,8 @@ vec3 physical_sky_lighting_radiance(vec3 direction) {
     // irradiance is orders of magnitude larger.  This fixed conversion is intentionally outside
     // the cached medium: it maps that existing scene unit into the physical integral without
     // smuggling an authored sun value into either LUT producer.
-    const float scene_solar_scale = 100.0;
     const vec3 illumination = max(sky.sun_radiance.rgb, vec3(0.0)) *
-                              (max(sky.zenith.a, 0.0) * scene_solar_scale);
+                              (max(sky.zenith.a, 0.0) * kSceneSolarScale);
     vec3 col = radiance * illumination;
     const vec2 c = clouds(dir);
     if (c.x > 0.0) {
@@ -295,8 +310,8 @@ vec3 sky_lighting_radiance(vec3 dir) {
 
 #else
 
-// sky.frag uses the authored background only in this brick.  Keeping the fallback makes the shared
-// include stage-safe while the compute-only physical descriptors stay out of its pipeline layout.
+// Keeping the fallback makes the shared include stage-safe while compute-only physical descriptors
+// stay out of the fragment pipeline layout.
 vec3 sky_lighting_radiance(vec3 dir) {
     return sky_full_radiance_ex(dir, 0.0);
 }

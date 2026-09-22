@@ -158,10 +158,12 @@ SSR is left open, not taken.
 m17.7d replaces `sky_lighting_radiance()` with a 24-segment spherical single-scattering integral:
 Rayleigh and Henyey–Greenstein Mie phase terms sample the precomputed transmittance LUT, and the
 small multiple-scattering table contributes a bounded ambient approximation. The full-resolution
-background remains the authored m17.0 gradient/glow/cloud picture in this brick, so its art controls
-do not contaminate the sky-view LUT or SH. The multiple-scattering producer is not Hillaire's full
-closure, and there is still no froxel aerial perspective; those limits are intentional and visible
-in the shader comments rather than being presented as a completed four-LUT model.
+background samples that same sky-view LUT, so the visible atmosphere, SSR/DDGI misses and SH now
+agree. The sharp solar disc remains an analytic background-only term because the table cannot
+resolve it and the DirectionalLight already supplies direct light to geometry. The
+multiple-scattering producer is not Hillaire's full closure, and there is still no froxel aerial
+perspective; those limits are intentional and visible in the shader comments rather than being
+presented as a completed four-LUT model.
 
 Two approximations are worth naming as limitations rather than discovering later:
 

@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// The sky (m17.0) — a procedural daytime sky with a sun disc and a layer of cloud, composited over
-// the scene wherever nothing was drawn.
+// The sky — the physical sky-view LUT plus a separately resolved sun disc, composited over the
+// scene wherever nothing was drawn.
 //
-// WHAT THIS IS, AND WHAT IT IS NOT. This is an ANALYTIC sky, not a physical one. The colours come
-// from a gradient fit and a Henyey-Greenstein-ish forward-scatter lobe around the sun; there is no
-// Rayleigh/Mie integral, no transmittance function, no aerial perspective, and the sky does not
-// light the scene. ADR-0040 records the intended end state -- a Hillaire-2020 precomputed-LUT
-// atmosphere that IS the scene's light source -- and this pass is deliberately shaped so that model
-// can replace the body of sky_radiance() without any other file moving: the pass seam (read scene
-// colour + depth, write a second HDR target), the parameter block, and the sun coupling are the
-// ones that design calls for.
+// The LUT is the same physical single-scattering-plus-bounded-MS body that lights forward shading,
+// DDGI and SSR. It deliberately excludes the sub-texel solar disc; the disc stays analytic here so
+// its edge remains sharp and cannot double-light geometry. Full aerial perspective is still the
+// later m17.7e froxel brick, not implied by this background replacement.
 //
 // The technique for the clouds is the standard one: fractional Brownian motion (fBm) over a
 // value-noise basis, evaluated where the view ray pierces a flat cloud slab, thresholded by a
@@ -27,9 +23,11 @@
 // here is only what makes this the COMPOSITE pass: the scene inputs, and the main() that decides
 // per pixel whether the sky is allowed to touch it.
 #include "sky_common.glsl"
+#include "sky_mapping.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D scene_color; // the lit HDR frame
 layout(set = 0, binding = 1) uniform sampler2D scene_depth; // D32, Vulkan NDC z in [0,1]
+layout(set = 0, binding = 3) uniform sampler2D skyview_lut;
 
 layout(location = 0) out vec4 out_color;
 
@@ -53,7 +51,11 @@ void main() {
     vec4 far = sky.inv_view_proj * vec4(ndc, 1.0, 1.0);
     vec3 dir = normalize(far.xyz / far.w - sky.camera_pos.xyz);
 
-    // The gradient, the sun and the clouds, from the one function the LUT and the SH projection
-    // also evaluate -- so what this pixel shows and what the scene is lit BY cannot drift apart.
-    out_color = vec4(sky_full_radiance(dir), 1.0);
+    // The physical LUT carries the broad atmosphere and clouds. It cannot resolve the ~0.7 degree
+    // sun disc, so the disc is added separately and muted where the authored cloud slab covers it.
+    // That disc is presentation-only: direct sunlight still comes from DirectionalLight.
+    const vec3 atmosphere = texture(skyview_lut, skyview_uv_from_direction(dir)).rgb;
+    const float disc_visibility = 1.0 - clouds(dir).x;
+    out_color = vec4(atmosphere + sky_sun_disc_radiance(dir, kSceneSolarScale) * disc_visibility,
+                     1.0);
 }
