@@ -17,6 +17,7 @@
 #include "rime/assets/sdf_asset.hpp"
 #include "rime/assets/skeleton_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
+#include "rime/assets/virtual_geometry.hpp"
 
 // The RMA1 cooked-container reader (ADR-0024, decision 3). A cooked file is bytes off disk, and the
 // engine trusts nothing it reads: cooked data is treated exactly like network data, the discipline
@@ -67,7 +68,8 @@ enum class AssetError {
                          // face-vertex count outside 3..16, or a non-finite geometry value
     InvalidMeshSdf, // sdf: unknown encoding, a non-finite/non-positive header value, a resolution
                     // outside the sanity ceiling, or a distance sample exceeding max_abs_distance
-    Io,             // the file could not be opened/read (load-from-path only)
+    InvalidVirtualGeometry, // virtual geometry: malformed versioned page/cluster/group payload
+    Io,                     // the file could not be opened/read (load-from-path only)
 };
 
 // A short human-readable tag for an error (logging, test messages).
@@ -254,5 +256,23 @@ read_destructible(std::span<const std::byte> file,
 [[nodiscard]] std::optional<MeshSdfAsset> read_mesh_sdf(std::span<const std::byte> file,
                                                         AssetError& out_error,
                                                         AssetId* out_id = nullptr) noexcept;
+
+// The schema fingerprint for the v1 virtual-geometry payload. Unlike MeshAsset this is a
+// companion payload, so its own versioned table layout is kept separate from the stable mesh ABI.
+[[nodiscard]] std::uint64_t virtual_geometry_schema_hash() noexcept;
+
+// Decode a versioned virtual-geometry payload. The payload begins with its own u32 payload version
+// and contains only CPU-side page/cluster/group metadata and page bytes; GPU addresses and
+// residency are runtime concerns. Every count and graph edge is checked before allocation, then the
+// completed contract is passed through validate_virtual_geometry().
+[[nodiscard]] std::optional<VirtualGeometryAsset>
+decode_virtual_geometry(std::span<const std::byte> payload, AssetError& out_error) noexcept;
+
+// The one-call virtual-geometry path: read a whole RMA1 file, confirm it is the companion payload
+// with the expected schema, and decode it. `out_id`, if non-null, receives the payload hash.
+[[nodiscard]] std::optional<VirtualGeometryAsset>
+read_virtual_geometry(std::span<const std::byte> file,
+                      AssetError& out_error,
+                      AssetId* out_id = nullptr) noexcept;
 
 } // namespace rime::assets
