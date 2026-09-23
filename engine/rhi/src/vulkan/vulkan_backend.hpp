@@ -312,6 +312,10 @@ public:
                       std::uint32_t first_index,
                       std::int32_t vertex_offset,
                       std::uint32_t first_instance) override;
+    void draw_indexed_indirect(BufferHandle buffer,
+                               std::uint32_t draw_count,
+                               std::uint64_t offset,
+                               std::uint32_t stride) override;
     void
     copy_texture_to_buffer(TextureHandle src, BufferHandle dst, std::uint32_t base_layer) override;
     void copy_buffer(BufferHandle src, BufferHandle dst, std::uint64_t size) override;

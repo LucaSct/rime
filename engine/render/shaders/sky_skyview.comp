@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The sky-view LUT (m17.7b) — the sky baked once into a small table, so the rays that leave the
+// screen can ask what is out there without re-evaluating five octaves of noise apiece.
+//
+// WHY A LUT AT ALL. Two passes need "what radiance arrives from direction d" for rays they cannot
+// otherwise shade: SSR, when a reflection ray walks off the edge of the screen, and DDGI, when a
+// probe ray escapes the scene entirely. Both previously answered with ONE constant
+// (SceneRenderer::ambient_, the "crude GI stand-in until M10" that outlived M10). Evaluating
+// sky_lighting_radiance() per ray instead would be honest but costly — the cloud layer alone is two
+// five-octave fBm samples — so the sky is baked into a table once per change and sampled per ray.
+//
+// WHAT IS IN IT, AND WHAT IS NOT. The gradient, the forward-scatter glow and the cloud layer, with
+// the sun's DISC deliberately excluded (sky_lighting_radiance, not sky_full_radiance). The disc is
+// the world's DirectionalLight, which already reaches every shaded pixel; baking it here too would
+// light the scene with the sun twice. See sky_common.glsl for the full argument.
+//
+// This is the slot Hillaire 2020 calls the sky-view LUT. m17.7d replaces only the BODY of
+// sky_lighting_radiance() with physical single scattering plus the bounded MS approximation, so
+// this pass, its consumers and its proof stay exactly as they were designed to. That is the seam
+// ADR-0040 §2 was bought to leave.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "sky_atmosphere_bindings.glsl" // physical inputs declared before the shared body
+#define RIME_SKY_PHYSICAL_LIGHTING
+#include "sky_common.glsl" // SkyParams (binding 2) + physical sky_lighting_radiance()
+#include "sky_mapping.glsl" // skyview_direction_from_uv()
+
+// 8x8 tiles over a 192x108 table. The table is small enough that the launch is a rounding error;
+// the guard below is what lets the dispatch round up without writing outside it.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba16f, set = 0, binding = 0) writeonly uniform image2D skyview_lut;
+
+void main() {
+    const ivec2 size = imageSize(skyview_lut);
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= size.x || px.y >= size.y) {
+        return;
+    }
+
+    // Texel CENTRE, not corner: the +0.5 is what makes this the exact inverse of the uv a sampler
+    // produces when a consumer looks the same direction up again. Without it every lookup is off by
+    // half a texel, which reads as a sky subtly rotated against its own background.
+    const vec2 uv = (vec2(px) + 0.5) / vec2(size);
+    const vec3 dir = skyview_direction_from_uv(uv);
+
+    imageStore(skyview_lut, px, vec4(sky_lighting_radiance(dir), 1.0));
+}

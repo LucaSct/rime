@@ -127,6 +127,7 @@ DdgiProbes::DdgiProbes(rhi::Device& device) : device_(device) {
             {3, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute},        // clipmap Levels
             {4, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute},        // DdgiParams
             {5, rhi::BindingType::StorageBuffer, rhi::StageMask::Compute},        // out Rays
+            {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Compute}, // sky-view LUT
         };
         rhi::ComputePipelineDesc pd{};
         pd.shader = trace_shader_;
@@ -354,7 +355,9 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
                             SdfClipmap& clipmap,
                             core::Vec3 camera_pos,
                             const DdgiLightingInputs& lighting,
-                            const LightingSettings& settings) {
+                            const LightingSettings& settings,
+                            RGTexture skyview_lut,
+                            rhi::SamplerHandle skyview_sampler) {
     stats_ = DdgiStats{};
 
     const std::uint32_t count_x = std::max<std::uint32_t>(settings.ddgi_probe_count_x, 1u);
@@ -498,6 +501,7 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     tp.sky_radiance_pad[0] = lighting.sky_radiance[0];
     tp.sky_radiance_pad[1] = lighting.sky_radiance[1];
     tp.sky_radiance_pad[2] = lighting.sky_radiance[2];
+    tp.sky_radiance_pad[3] = lighting.sky_enabled ? 1.0f : 0.0f;
     const RenderGraph::FrameSlice tp_slice = graph.push_frame_data(&tp, sizeof(tp));
 
     GpuDdgiBlendParams bp{};
@@ -519,7 +523,15 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     const RGBuffer rays_rg = graph.import_buffer(ray_buffer_, ray_buffer_state_);
 
     {
-        const RGTexture sampled[] = {level_rg[0], level_rg[1], level_rg[2]};
+        // A caller that passed no sky gets this class's existing 1x1 dummy — already RGBA16Float,
+        // already permanently in ShaderRead, and unreachable because sky_enabled gates the sample.
+        const RGTexture sky_rg =
+            skyview_lut.is_valid()
+                ? skyview_lut
+                : graph.import_texture(dummy_irradiance_, rhi::ResourceState::ShaderRead);
+        const rhi::SamplerHandle sky_smp =
+            skyview_sampler.is_valid() ? skyview_sampler : atlas_sampler_;
+        const RGTexture sampled[] = {level_rg[0], level_rg[1], level_rg[2], sky_rg};
         const RGBuffer writes[] = {rays_rg};
         RenderGraph::ComputePassDesc desc{};
         desc.sampled = sampled;
@@ -535,6 +547,9 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
              levels_ubo = levels_slice,
              params = tp_slice,
              rays = ray_buffer_,
+             sky_rg,
+             sky_smp,
+             &graph,
              ray_count](rhi::CommandBuffer& cmd) {
                 cmd.bind_compute_pipeline(pipe);
                 cmd.bind_texture(0, l0, sampler);
@@ -543,6 +558,7 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
                 cmd.bind_uniform_buffer(3, levels_ubo.buffer, levels_ubo.offset, levels_ubo.size);
                 cmd.bind_uniform_buffer(4, params.buffer, params.offset, params.size);
                 cmd.bind_storage_buffer(5, rays);
+                cmd.bind_texture(6, graph.physical(sky_rg), sky_smp);
                 cmd.dispatch((ray_count + kTraceGroupSize - 1) / kTraceGroupSize, 1, 1);
             });
     }

@@ -187,6 +187,10 @@ public:
         // answerable by looking only at compute passes.
         std::span<const RGBuffer> buffer_reads = {};
         bool fold_repeats = false; // see ComputePassDesc::fold_repeats
+        // Indirect draw/dispatch arguments read by the GPU's indirect-command stage (m18). This
+        // is deliberately separate from shader buffer reads: the RHI needs IndirectRead so a
+        // compute writer is made visible to the command processor as well as to shader stages.
+        std::span<const RGBuffer> indirect_reads = {};
     };
 
     void add_raster_pass(std::string_view name, const RasterPassDesc& desc, ExecuteFn fn);
@@ -197,7 +201,6 @@ public:
         std::span<const RGTexture> storage_write = {}; // imageStore (or both) — the write set
         std::span<const RGBuffer> buffer_reads = {};   // storage buffers read (m10.3)
         std::span<const RGBuffer> buffer_writes = {};  // storage buffers written — the write set
-
         // THE ONE DECLARED EXCEPTION TO "A PASS NAME IS AN IDENTITY" (m17.3c).
         //
         // m17.3a's rule is that two passes in one frame may not share a name, and the graph
@@ -214,6 +217,9 @@ public:
         // must stay the strict rule: a repeat nobody declared is a bug, and folding by default is
         // exactly the silent merge the 2026-08-30 baseline's four `depth-prepass` keys were.
         bool fold_repeats = false;
+        // Arguments consumed by an indirect dispatch/draw command. Kept distinct from
+        // buffer_reads so the graph can request ResourceState::IndirectRead.
+        std::span<const RGBuffer> indirect_reads = {};
     };
 
     void add_compute_pass(std::string_view name, const ComputePassDesc& desc, ExecuteFn fn);
@@ -383,8 +389,9 @@ private:
         std::string debug_name;
         bool imported = false;
         bool exported = false;
-        rhi::TextureUsage usage = rhi::TextureUsage::None;        // accumulated from accesses
-        rhi::ResourceState state = rhi::ResourceState::Undefined; // tracked while recording
+        rhi::TextureUsage usage = rhi::TextureUsage::None;         // accumulated from accesses
+        rhi::BufferUsage buffer_usage = rhi::BufferUsage::Storage; // accumulated for buffers
+        rhi::ResourceState state = rhi::ResourceState::Undefined;  // tracked while recording
         rhi::TextureHandle physical{}; // imported handle, or cache-assigned at execute()
         rhi::BufferHandle buffer{};    // the buffer twin of `physical` (kind == Buffer)
     };

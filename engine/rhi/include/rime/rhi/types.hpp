@@ -217,6 +217,7 @@ enum class BufferUsage : std::uint32_t {
     Storage = 1u << 3,
     TransferSrc = 1u << 4,
     TransferDst = 1u << 5,
+    Indirect = 1u << 6,
 };
 
 // What a texture can be used for. ColorAttachment = rendered into; Sampled = read in a shader;
@@ -316,6 +317,7 @@ enum class ResourceState : std::uint8_t {
     DepthTarget,      // written/tested as the depth(-stencil) attachment
     ShaderRead,       // sampled or uniform-read by any shader stage
     StorageReadWrite, // imageLoad/imageStore or storage-buffer access (general layout)
+    IndirectRead,     // indexed draw arguments read by the GPU's indirect-command stage
     TransferSrc,      // blit/copy source
     TransferDst,      // blit/copy destination
     Present,          // handed to the swapchain for presentation

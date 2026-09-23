@@ -19,6 +19,7 @@
 // The techniques are derived in docs/math/shadow-mapping.md (the shadow test, cascade selection,
 // PCF and bias) and docs/math/clustered-shading.md (the froxel grid and its log-z partition).
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 struct DirLight {
     vec4 direction; // xyz = the direction the light TRAVELS (world), w unused
@@ -118,6 +119,12 @@ layout(std140, set = 0, binding = 13) uniform ClusterUniforms {
 // DdgiSampleParams (mirroring GpuDdgiTraceParams field-for-field, m10.5a) is what locates it.
 layout(set = 0, binding = 14) uniform sampler2D ddgi_irradiance_atlas;
 layout(set = 0, binding = 15) uniform sampler2D ddgi_visibility_atlas;
+
+// The sky's nine SH coefficients (m17.7b). `N` is the shading world normal, and with a sky present
+// the ambient term becomes what the SKY delivers to a surface facing that way instead of one flat
+// number for every direction. Gated, so a frame with no sky is byte-identical to the pre-m17.7b one.
+#define SKY_SH_BINDING 17
+#include "sky_sh_eval.glsl"
 
 layout(std140, set = 0, binding = 16) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
@@ -473,7 +480,15 @@ void main() {
         vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal));
         out_radiance = indirect * albedo * ao;
     } else {
-        out_radiance = albedo * frame.ambient.rgb * ao;
+        // The sky's own irradiance when a sky is present, else M5.6's flat constant. Like DDGI
+        // above this uses the GEOMETRIC normal rather than the normal-mapped `n`, and for a
+        // stronger version of the same reason: nine coefficients describe a field far smoother
+        // than a probe lattice, so a micro-detail bump cannot meaningfully change what the sky
+        // delivers to this surface. It REPLACES the constant rather than adding to it, for the
+        // same no-double-counting reason the DDGI branch does.
+        const vec3 sky_ambient =
+            sky_sh_enabled() ? sky_sh_irradiance(normalize(v_world_normal)) : frame.ambient.rgb;
+        out_radiance = albedo * sky_ambient * ao;
     }
 
     // The sun (light 0) is the shadow caster; its contribution is scaled by the cascade shadow

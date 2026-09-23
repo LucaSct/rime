@@ -233,7 +233,10 @@ struct DdgiLightingInputs {
     bool has_sun = false;
     core::Vec3 sun_direction{0.0f, -1.0f, 0.0f};   // TRAVEL direction (matches GpuDirectionalLight)
     float sun_radiance[3] = {0.0f, 0.0f, 0.0f};    // color * intensity, linear
-    float sky_radiance[3] = {0.02f, 0.02f, 0.02f}; // SceneRenderer's ambient constant
+    float sky_radiance[3] = {0.02f, 0.02f, 0.02f}; // the flat fallback (no sky)
+    // The baked sky (m17.7b): what an escaping ray sees, in the direction it was going. With
+    // `sky_enabled` false the flat constant above is used and the frame matches m10.5a.
+    bool sky_enabled = false;
 };
 
 // Owns the DDGI GPU resources — the trace/blend-irradiance/blend-visibility pipelines, the two
@@ -268,7 +271,15 @@ public:
                                   SdfClipmap& clipmap,
                                   core::Vec3 camera_pos,
                                   const DdgiLightingInputs& lighting,
-                                  const LightingSettings& settings);
+                                  const LightingSettings& settings,
+                                  // The sky-view LUT an escaping ray samples (m17.7b). Defaulted
+                                  // so a caller with no sky at all (the m10.5a proofs) needs no
+                                  // SkyPass just to satisfy a binding: an invalid handle falls
+                                  // back to this class's own 1x1 dummy, which
+                                  // DdgiLightingInputs::sky_enabled (false by default) guarantees
+                                  // is never actually sampled.
+                                  RGTexture skyview_lut = {},
+                                  rhi::SamplerHandle skyview_sampler = {});
 
     // The valid-but-empty binding for a frame that shades WITHOUT DDGI (ddgi_enabled off, or its
     // gate sdf_clipmap_enabled off): a 1x1 dummy atlas pair (so the shadowed pipeline's fixed

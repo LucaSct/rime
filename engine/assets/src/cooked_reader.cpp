@@ -300,6 +300,8 @@ std::string_view to_string(AssetError error) noexcept {
         case AssetError::InvalidMeshSdf:
             return "invalid mesh SDF (unknown encoding, a non-finite/non-positive header value, "
                    "resolution outside the sanity ceiling, or a sample exceeding max_abs_distance)";
+        case AssetError::InvalidVirtualGeometry:
+            return "invalid virtual geometry payload";
         case AssetError::Io:
             return "I/O error";
     }
@@ -1265,6 +1267,173 @@ read_mesh_sdf(std::span<const std::byte> file, AssetError& out_error, AssetId* o
         *out_id = content_hash(payload);
     }
     return decode_mesh_sdf(payload, out_error);
+}
+
+namespace {
+
+inline constexpr std::uint32_t kVirtualGeometryPayloadVersion = 1;
+inline constexpr std::uint32_t kVirtualGeometryPageRecordBytes = 29;
+inline constexpr std::uint32_t kVirtualGeometryClusterRecordBytes = 56;
+inline constexpr std::uint32_t kVirtualGeometryGroupRecordBytes = 21;
+
+} // namespace
+
+std::uint64_t virtual_geometry_schema_hash() noexcept {
+    // This is the first versioned companion payload. Keep the hash explicit until a reflected
+    // record is introduced; all fields are still written individually below, never by memcpy.
+    return 0xD3F3C3A1A18E0042ull;
+}
+
+std::optional<VirtualGeometryAsset> decode_virtual_geometry(std::span<const std::byte> payload,
+                                                            AssetError& out_error) noexcept {
+    core::ByteReader reader(payload);
+    std::uint32_t version = 0;
+    std::uint64_t source_mesh = 0;
+    std::uint32_t attribs_raw = 0;
+    std::uint32_t stride = 0;
+    std::uint32_t page_count = 0;
+    std::uint32_t cluster_count = 0;
+    std::uint32_t group_count = 0;
+    std::uint32_t child_count = 0;
+    std::uint32_t dependency_count = 0;
+    std::uint32_t page_bytes_count = 0;
+    std::uint32_t coarse_group = kInvalidVirtualGeometryIndex;
+    if (!reader.u32(version) || !reader.u64(source_mesh) || !reader.u32(attribs_raw) ||
+        !reader.u32(stride) || !reader.u32(page_count) || !reader.u32(cluster_count) ||
+        !reader.u32(group_count) || !reader.u32(child_count) || !reader.u32(dependency_count) ||
+        !reader.u32(page_bytes_count) || !reader.u32(coarse_group)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+    if (version != kVirtualGeometryPayloadVersion) {
+        out_error = AssetError::UnsupportedVersion;
+        return std::nullopt;
+    }
+
+    // Check each fixed table against the bytes still available before reserve/resize. The final
+    // page-byte count is checked after the tables, since it is the only variable-size tail.
+    const std::uint64_t table_bytes =
+        std::uint64_t{page_count} * kVirtualGeometryPageRecordBytes +
+        std::uint64_t{cluster_count} * kVirtualGeometryClusterRecordBytes +
+        std::uint64_t{group_count} * kVirtualGeometryGroupRecordBytes;
+    if (table_bytes > reader.remaining()) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+    const std::uint64_t edge_bytes =
+        (std::uint64_t{child_count} + dependency_count) * sizeof(std::uint32_t);
+    if (edge_bytes > reader.remaining() || page_bytes_count > reader.remaining() - edge_bytes) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+    VirtualGeometryAsset asset;
+    asset.source_mesh = AssetId{source_mesh};
+    asset.attribs = static_cast<VertexAttribs>(attribs_raw);
+    asset.vertex_stride = stride;
+    asset.coarse_group = coarse_group;
+    asset.pages.reserve(page_count);
+    asset.clusters.reserve(cluster_count);
+    asset.groups.reserve(group_count);
+    asset.child_groups.reserve(child_count);
+    asset.page_dependencies.reserve(dependency_count);
+
+    for (std::uint32_t i = 0; i < page_count; ++i) {
+        VirtualGeometryPage page;
+        std::uint8_t resident = 0;
+        if (!reader.u64(page.byte_offset) || !reader.u32(page.byte_size) ||
+            !reader.u32(page.first_cluster) || !reader.u32(page.cluster_count) ||
+            !reader.u32(page.first_dependency) || !reader.u32(page.dependency_count) ||
+            !reader.u8(resident)) {
+            out_error = AssetError::Truncated;
+            return std::nullopt;
+        }
+        if (resident > 1) {
+            out_error = AssetError::InvalidVirtualGeometry;
+            return std::nullopt;
+        }
+        page.permanently_resident = resident != 0;
+        asset.pages.push_back(page);
+    }
+    for (std::uint32_t i = 0; i < cluster_count; ++i) {
+        VirtualGeometryCluster cluster;
+        if (!reader.f32(cluster.bounds.min.x) || !reader.f32(cluster.bounds.min.y) ||
+            !reader.f32(cluster.bounds.min.z) || !reader.f32(cluster.bounds.max.x) ||
+            !reader.f32(cluster.bounds.max.y) || !reader.f32(cluster.bounds.max.z) ||
+            !reader.f32(cluster.lod_error_m) || !reader.u32(cluster.page) ||
+            !reader.u32(cluster.vertex_offset) || !reader.u32(cluster.vertex_count) ||
+            !reader.u32(cluster.first_index) || !reader.u32(cluster.index_count) ||
+            !reader.u32(cluster.material_slot) || !reader.u32(cluster.replacement_group)) {
+            out_error = AssetError::Truncated;
+            return std::nullopt;
+        }
+        asset.clusters.push_back(cluster);
+    }
+    for (std::uint32_t i = 0; i < group_count; ++i) {
+        VirtualGeometryGroup group;
+        std::uint8_t resident = 0;
+        if (!reader.u32(group.first_cluster) || !reader.u32(group.cluster_count) ||
+            !reader.u32(group.first_child) || !reader.u32(group.child_count) ||
+            !reader.f32(group.lod_error_m) || !reader.u8(resident)) {
+            out_error = AssetError::Truncated;
+            return std::nullopt;
+        }
+        if (resident > 1) {
+            out_error = AssetError::InvalidVirtualGeometry;
+            return std::nullopt;
+        }
+        group.permanently_resident = resident != 0;
+        asset.groups.push_back(group);
+    }
+
+    for (std::uint32_t i = 0; i < child_count; ++i) {
+        std::uint32_t child = 0;
+        if (!reader.u32(child)) {
+            out_error = AssetError::Truncated;
+            return std::nullopt;
+        }
+        asset.child_groups.push_back(child);
+    }
+    for (std::uint32_t i = 0; i < dependency_count; ++i) {
+        std::uint32_t dependency = 0;
+        if (!reader.u32(dependency)) {
+            out_error = AssetError::Truncated;
+            return std::nullopt;
+        }
+        asset.page_dependencies.push_back(dependency);
+    }
+    std::span<const std::byte> page_bytes;
+    if (!reader.bytes(page_bytes, page_bytes_count) || reader.remaining() != 0) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+    asset.page_bytes.assign(page_bytes.begin(), page_bytes.end());
+    if (validate_virtual_geometry(asset) != VirtualGeometryError::None) {
+        out_error = AssetError::InvalidVirtualGeometry;
+        return std::nullopt;
+    }
+    return asset;
+}
+
+std::optional<VirtualGeometryAsset> read_virtual_geometry(std::span<const std::byte> file,
+                                                          AssetError& out_error,
+                                                          AssetId* out_id) noexcept {
+    std::span<const std::byte> payload;
+    const std::optional<CookedHeader> header = read_header(file, payload, out_error);
+    if (!header) {
+        return std::nullopt;
+    }
+    if (header->kind != AssetKind::VirtualGeometry) {
+        out_error = AssetError::WrongKind;
+        return std::nullopt;
+    }
+    if (header->type_schema_hash != virtual_geometry_schema_hash()) {
+        out_error = AssetError::SchemaMismatch;
+        return std::nullopt;
+    }
+    if (out_id != nullptr) {
+        *out_id = content_hash(payload);
+    }
+    return decode_virtual_geometry(payload, out_error);
 }
 
 } // namespace rime::assets

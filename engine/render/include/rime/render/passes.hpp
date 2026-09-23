@@ -9,6 +9,7 @@
 #include <type_traits>
 
 #include "rime/core/math/mat.hpp"
+#include "rime/render/lighting/sky.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/render_graph.hpp"
@@ -331,6 +332,11 @@ public:
                       const LocalShadowBinding& local,
                       const ClusterBinding& clusters,
                       const DdgiBinding& ddgi,
+                      // The sky's lighting half (m17.7b): nine SH coefficients for the ambient
+                      // term, plus the baked sky-view LUT. Always valid — SkyPass::empty_binding
+                      // stands in when there is no sky, and its zero flag is what makes the
+                      // shader keep taking FrameUniforms::ambient.
+                      const SkyLightBinding& sky,
                       // The thin SSR G-buffer (m10.7a). Invalid (the default) = the baseline
                       // single-attachment path. Valid = a second colour attachment the shadowed
                       // shader writes world-normal + roughness into, using a pipeline variant that

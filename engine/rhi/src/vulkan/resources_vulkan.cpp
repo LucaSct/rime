@@ -230,9 +230,9 @@ SamplerHandle VulkanDevice::create_sampler(const SamplerDesc& desc) {
     sci.magFilter = to_vk(desc.mag_filter);
     sci.minFilter = to_vk(desc.min_filter);
     sci.mipmapMode = to_vk_mipmap(desc.mip_filter); // across-level blend (trilinear when Linear)
-    sci.addressModeU = to_vk(desc.address_mode);
-    sci.addressModeV = to_vk(desc.address_mode);
-    sci.addressModeW = to_vk(desc.address_mode);
+    sci.addressModeU = to_vk(desc.address_mode_u.value_or(desc.address_mode));
+    sci.addressModeV = to_vk(desc.address_mode_v.value_or(desc.address_mode));
+    sci.addressModeW = to_vk(desc.address_mode_w.value_or(desc.address_mode));
     sci.maxLod = VK_LOD_CLAMP_NONE;
     // Anisotropy (M5.3): on when the caller asks for >1 and the device has the feature; clamped
     // to the hardware limit. Absent feature = plain trilinear (documented degrade, not an error).

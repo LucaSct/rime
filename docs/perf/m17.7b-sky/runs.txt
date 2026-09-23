@@ -1,0 +1,6 @@
+on 1 render_p50=4.30 render_p99=5.11 player_p99=10.11
+off 1 render_p50=4.20 render_p99=4.76 player_p99=10.29
+on 2 render_p50=4.32 render_p99=4.68 player_p99=10.43
+off 2 render_p50=4.19 render_p99=4.65 player_p99=10.18
+on 3 render_p50=4.27 render_p99=5.05 player_p99=10.05
+off 3 render_p50=4.22 render_p99=4.68 player_p99=10.13

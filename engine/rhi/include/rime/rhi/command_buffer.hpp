@@ -164,6 +164,14 @@ public:
                               std::int32_t vertex_offset = 0,
                               std::uint32_t first_instance = 0) = 0;
 
+    // Draw indexed commands read from a BufferUsage::Indirect buffer. Each command is laid out
+    // like VkDrawIndexedIndirectCommand: index_count, instance_count, first_index, vertex_offset,
+    // first_instance. `stride` must be at least that structure's size and a multiple of 4.
+    virtual void draw_indexed_indirect(BufferHandle buffer,
+                                       std::uint32_t draw_count,
+                                       std::uint64_t offset = 0,
+                                       std::uint32_t stride = 0) = 0;
+
     // Copy a (TransferSrc) texture's pixels into a (TransferDst, host-visible) buffer, tightly
     // packed. This is how the M3 proof gets rendered pixels back to the CPU to verify them. The
     // backend transitions the texture to a transfer-source layout first. `base_layer` picks which
@@ -230,8 +238,9 @@ public:
     // "the writes of everything doing `from` are visible to everything doing `to`". The render
     // graph emits it between a compute pass that FILLS a storage buffer and the pass that READS
     // it (clustered forward's froxel light lists are the forcing case). Meaningful states here are
-    // StorageReadWrite (an SSBO a shader writes), ShaderRead (a read-only SSBO/UBO access) and the
-    // Transfer pair; the layout half of ResourceState is simply unused.
+    // StorageReadWrite (an SSBO a shader writes), ShaderRead (a read-only SSBO/UBO access),
+    // IndirectRead (GPU draw arguments), and the Transfer pair; the layout half of ResourceState is
+    // simply unused.
     //
     // Note the overlap with dispatch()'s v0 blanket barrier, which already makes every dispatch's
     // writes visible to everything after it: today that blanket alone would keep the clustered

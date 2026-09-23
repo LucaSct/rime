@@ -264,8 +264,11 @@ void RenderGraph::declare_access(std::uint32_t resource, rhi::ResourceState stat
     // how it is actually used (RGTextureDesc deliberately has no usage field). Buffers need no
     // such accumulation — every declarable buffer access is a storage access.
     Resource& r = resources_[resource];
-    if (r.kind == ResourceKind::Buffer)
+    if (r.kind == ResourceKind::Buffer) {
+        if (state == rhi::ResourceState::IndirectRead)
+            r.buffer_usage |= rhi::BufferUsage::Indirect;
         return;
+    }
     switch (state) {
         case rhi::ResourceState::ColorTarget:
             r.usage |= rhi::TextureUsage::ColorAttachment;
@@ -391,6 +394,9 @@ void RenderGraph::add_raster_pass(std::string_view name, const RasterPassDesc& d
     for (const RGBuffer& b : desc.buffer_reads) {
         declare_access(b.index, rhi::ResourceState::ShaderRead, false);
     }
+    for (const RGBuffer& b : desc.indirect_reads) {
+        declare_access(b.index, rhi::ResourceState::IndirectRead, false);
+    }
 }
 
 void RenderGraph::add_compute_pass(std::string_view name,
@@ -411,6 +417,9 @@ void RenderGraph::add_compute_pass(std::string_view name,
     }
     for (const RGBuffer& b : desc.buffer_writes) {
         declare_access(b.index, rhi::ResourceState::StorageReadWrite, true);
+    }
+    for (const RGBuffer& b : desc.indirect_reads) {
+        declare_access(b.index, rhi::ResourceState::IndirectRead, false);
     }
 }
 
@@ -543,7 +552,7 @@ void RenderGraph::assign_physicals() {
 
         // ── Transient buffers (m10.3): the same cache-or-create dance, keyed by size + usage ──
         if (r.kind == ResourceKind::Buffer) {
-            rhi::BufferUsage usage = rhi::BufferUsage::Storage;
+            rhi::BufferUsage usage = r.buffer_usage;
             if (r.exported)
                 usage |= rhi::BufferUsage::TransferSrc; // exported == someone reads it back
             CachedBuffer* hit = nullptr;

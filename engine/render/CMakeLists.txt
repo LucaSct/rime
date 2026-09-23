@@ -25,7 +25,8 @@ add_library(rime_render STATIC
     src/lighting/ssr.cpp
     src/lighting/sky.cpp
     src/fx_pass.cpp
-    src/culling.cpp)
+    src/culling.cpp
+    src/virtual_geometry_residency.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
 # library, the same offline model the tests/samples use (ADR-0008). The generated headers are
@@ -42,6 +43,10 @@ rime_add_shaders(rime_render
     shaders/ddgi_blend_visibility.comp
     shaders/ssr_resolve.frag
     shaders/sky.frag
+    shaders/sky_skyview.comp
+    shaders/sky_sh.comp
+    shaders/sky_transmittance.comp
+    shaders/sky_multiple_scattering.comp
     shaders/fullscreen.vert
     shaders/tonemap.frag
     shaders/present.frag

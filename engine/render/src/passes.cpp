@@ -304,10 +304,19 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
         {14, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
         {15, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
         {16, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
+        {17, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},        // sky SH (m17.7b)
     };
-    // 17 of the RHI's 24 descriptor slots (rhi::kMaxBindings) are now spoken for. The next
-    // technique that wants its own buffers — SSR (m10.7) — is the trigger for a second descriptor
-    // set or a bindless table rather than an 18th binding.
+    // 18 of the RHI's 24 descriptor slots (rhi::kMaxBindings, vulkan_backend.hpp:355) are now
+    // spoken for. The previous note here named 18 as the trigger for a second descriptor set or a
+    // bindless table, and expected SSR to be what spent it; SSR did not, because it resolves in a
+    // pass with its own pipeline and never joined this layout. m17.7b is what spent it, on the
+    // sky's nine SH coefficients — and it was spent deliberately rather than doing the refactor
+    // here: 18 is still comfortably under 24, splitting the set is milestone-scale work, and
+    // doing it inside a lighting brick would bury that brick's actual claim. The sky's on/off flag
+    // rides INSIDE this buffer rather than taking a 19th slot.
+    //
+    // The trigger stands, just moved: the next technique that wants its own bindings on the
+    // forward pipeline should split the set rather than take a 19th.
     pd.fragment_shader = shadowed_fragment_shader_;
     pd.bindings = shadowed_bindings;
     pd.depth_write = false;
@@ -405,6 +414,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   const LocalShadowBinding& local,
                                   const ClusterBinding& clusters,
                                   const DdgiBinding& ddgi,
+                                  const SkyLightBinding& sky,
                                   RGTexture gbuffer) const {
     // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
     // is the "no geometry" the shader overwrites with 1 where it shades), rendered by the matching
@@ -430,7 +440,11 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     const RGTexture sampled[] = {shadow.map, local.map, ddgi.irradiance, ddgi.visibility};
     // Declaring the two cluster buffers is what orders this pass after the cull dispatch that
     // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
-    const RGBuffer buffers[] = {clusters.lights, clusters.lists};
+    // The sky's SH buffer joins the cluster buffers here for the same reason they are declared:
+    // it is written by a compute pass earlier in this frame, and declaring the read is what makes
+    // the graph order this pass after that dispatch and emit the storage-write -> shader-read
+    // barrier. An undeclared read would work right up until the frame that actually re-baked.
+    const RGBuffer buffers[] = {clusters.lights, clusters.lists, sky.sh};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = write_gbuffer ? std::span<const RGColorAttachment>{colors, 2}
                                 : std::span<const RGColorAttachment>{colors, 1};
@@ -445,7 +459,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     graph.add_raster_pass(
         "forward-pbr shadowed",
         desc,
-        [pipe, data, shadow, local, clusters, ddgi, &graph](rhi::CommandBuffer& cmd) {
+        [pipe, data, shadow, local, clusters, ddgi, sky, &graph](rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipe);
             // Bindings 7–16 are attached once (they persist across draws — ADR-0020);
             // record_draws re-binds only per-draw state on top. The resources' physical handles
@@ -461,6 +475,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
             cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
             cmd.bind_uniform_buffer(16, ddgi.ubo.buffer, ddgi.ubo.offset, ddgi.ubo.size);
+            cmd.bind_storage_buffer(17, graph.physical_buffer(sky.sh));
             // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
             // overwhelming majority and the byte-identical old path — then the double-sided draws
             // with culling off. Dynamic state rather than a second pipeline: the forward pass

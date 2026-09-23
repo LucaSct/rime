@@ -165,3 +165,33 @@ carry its own weather pushes the weather into host code, which is exactly the fo
 **Volumetric ray-marched clouds.** Deferred, not rejected. The 2-D slab is the right cost for a
 background; a volume becomes worth it when a camera can reach cloud altitude, which nothing in the
 roadmap currently does.
+
+## Amendment (2026-09-20, m17.7): §6 is now scheduled, and §2's seam is load-bearing for the first time
+
+§6 says of the Hillaire-2020 atmosphere: *"It is not scheduled here."* **It is scheduled now** — as
+the m17.7a–e ladder recorded in [ADR-0041](0041-the-visual-bar-m17.md)'s 2026-09-20 amendment, which
+holds the decision, its cost and its cut order. This ADR's §6 stands unchanged as the description of
+the *end state*; only the "not scheduled" clause is superseded.
+
+**§2 was the right seam, and m17.7b is the first thing to lean on it.** The claim was that a
+physical model replaces `sky_radiance()`'s body "without any other file moving", and that the three
+`ambient_` reads are the only other surface. Both held up when tested against real work: the three
+consumers are still exactly the three sites this ADR tabulated, at the same lines, and the new
+passes needed no change to the sky pass's position, its parameter block or its sun coupling.
+
+Two things the seam did **not** anticipate, both now fixed rather than worked around:
+
+1. **One body requires one file.** The promise only holds while `sky_radiance()` has a single
+   definition, and until m17.7a the repo had no way to share a function between shaders — so the
+   LUT-fill and SH-projection shaders would each have needed a copy, retiring the promise on the day
+   it was first needed. Shader `#include` (with a depfile, so an edited include cannot leave stale
+   SPIR-V) is now the enabling brick under this ADR's end state.
+2. **The disc must not light the scene.** §4 couples the sun disc to the world's first
+   `DirectionalLight`, which is right for the picture and wrong for the lighting: that same light
+   already delivers the sun to every shaded pixel, so a sky-derived ambient carrying the disc would
+   count the sun twice. `sky_radiance(vec3)` keeps its signature and meaning; a new
+   `sky_lighting_radiance()` is what the LUT bakes and the SH integrates. The forward-scatter glow
+   stays in both — it is light scattered *out* of the beam, which no directional light accounts for.
+
+The derivation, the unit check that pins the replacement to the constant it replaces, and the
+limitations that remain are in [docs/math/sky-lighting.md](../math/sky-lighting.md).

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -87,6 +88,13 @@ struct SamplerDesc {
     // the device lacks the feature (a documented degrade, not an error).
     float max_anisotropy = 0.0f;
     AddressMode address_mode = AddressMode::Repeat;
+    // Most textures use one addressing rule on every axis, which `address_mode` keeps concise.
+    // A few parameterisations are mixed, though: the sky-view LUT is periodic in azimuth (u) but
+    // has physical poles in elevation (v). Optional axis overrides express that without making
+    // every ordinary sampler spell the same mode three times.
+    std::optional<AddressMode> address_mode_u;
+    std::optional<AddressMode> address_mode_v;
+    std::optional<AddressMode> address_mode_w;
     // Depth-compare sampling (m10.1a, ADR-0032 §10). When enabled the sampler compares each fetched
     // depth texel against a reference the shader supplies — a `sampler2DShadow`/`samplerCubeShadow`
     // read — and returns the (bilinearly-filtered) fraction that passed, i.e. hardware PCF, instead

@@ -189,7 +189,9 @@ namespace rime::render {
 // over it, and the editor should be able to edit it in the Inspector like anything else.
 //
 // The field set is deliberately the tunable subset of render::SkyParams, flattened to scalars
-// because components are trivially-copyable PODs the reflection walks field by field.
+// because components are trivially-copyable PODs the reflection walks field by field. The
+// zenith/horizon fields remain for scene-format compatibility, but m17.7d's physical background
+// derives colour from its solar source and atmosphere rather than this retired gradient pair.
 struct Sky {
     float zenith_r = 0.13f, zenith_g = 0.29f, zenith_b = 0.66f;
     float horizon_r = 0.62f, horizon_g = 0.72f, horizon_b = 0.86f;

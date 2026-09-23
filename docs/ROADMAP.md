@@ -1681,8 +1681,8 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 | **M15** | **"The Platform Proof"** | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
 | **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) |
-| **M17** | **"The Visual Bar"** | the UE5 column of [VISION](../VISION.md) §3 *minus virtualized geometry*, plus M13's unmet frame-rate clause — budget first, bar second, and the frame made attributable before either ([ADR-0041](adr/0041-the-visual-bar-m17.md) is the plan; [ADR-0038](adr/0038-platform-proof-m15.md) ruled the split, renumbered from M16 by [ADR-0039](adr/0039-authored-surfaces-m16.md)) |
-| **M18** | **virtualized geometry, and the ground** | Nanite-style: cluster hierarchy in the cook, a LOD DAG, GPU-driven culling, a visibility buffer. Parked as "m10.i" by [ADR-0035](adr/0035-vision-demo-m12.md) §6 and never scheduled; deferred here by [ADR-0041](adr/0041-the-visual-bar-m17.md) §3 because it is a milestone, not a brick — **approved 2026-09-03**. **A terrain module is ranked here too** ([ADR-0041](adr/0041-the-visual-bar-m17.md) §5): heightfield, LOD, splat blending, a heightfield collider and streaming, with the ordering question — *does virtualized geometry subsume terrain LOD?* — answered in M18's ADR from a pipeline that exists, rather than guessed at now. M17's m17.8 leaves the seam |
+| **M17** | **"The Visual Bar"** | visual work delivered on the consolidated M18 branch; its remaining M13 frame-budget clause is inherited unchanged by M18 rather than waived ([ADR-0041](adr/0041-the-visual-bar-m17.md), [ADR-0043](adr/0043-virtualized-geometry-m18.md)) |
+| **M18** | **virtualized geometry + the consolidated visual bar** | Nanite-style rigid opaque meshes: a separately versioned clustered payload, replacement DAG, GPU-driven culling, visibility buffer and **mandatory hybrid sub-pixel rasterization** so detailed shapes survive. M18 inherits M17/M13's unchanged clean-tree block budget; it is not complete until both the detailed geometry path and that measured gate hold ([ADR-0043](adr/0043-virtualized-geometry-m18.md)). Terrain's heightfield, collision, splat blending and streaming are **M19**, rather than silently folded into cluster rendering. |
 
 ### Detail
 
@@ -2318,7 +2318,15 @@ largest breach on the board · **m17.6** ~~the GPU budget~~ **the GPU passes, re
 exists — pinned, all twelve passes are 2.407 ms max against 16.6 — so the brick is now pass
 correctness plus the cloud layer's unmeasured per-pixel cost and the headroom m17.8 spends into · **m17.7**
 **the sky lights the scene** (ADR-0040 §6) — **moved behind m17.8** (Ruling 7): §6 says it must not
-land "before there is authored content worth judging it against", and the ground IS that content · **m17.8** **the ground becomes a surface**
+land "before there is authored content worth judging it against", and the ground IS that content.
+**Scope decided 2026-09-20** (ADR-0041 amendment): the full Hillaire-2020 four-LUT model is the
+destination, staged as five bricks so the expensive tail is separately cuttable — **m17.7a** shader
+`#include` with a depfile (the enabling brick: one `sky_radiance()` body, and an edited include
+cannot leave stale SPIR-V) · **m17.7b** the sky-view LUT + SH irradiance, filled by the existing
+analytic sky, which is what turns all three `ambient_` reads sky-derived and delivers the visual
+claim on its own · **m17.7c** transmittance + multiple-scattering LUTs · **m17.7d** the sky-view
+LUT's body becomes physical, nothing downstream moving · **m17.7e** aerial perspective, the only
+cuttable one, and the one that touches every lit pixel · **m17.8** **the ground becomes a surface**
 — two triangles and a flat colour today; **landed in two halves**, `m17.8` the owned surface with
 the collider and GI proxy derived from it (five copies of "the ground" unified, a phantom 6 m ledge
 per side removed), and `m17.8b` the generated cooked material — `rime ground` synthesises a tiling

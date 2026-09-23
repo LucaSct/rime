@@ -1,0 +1,4 @@
+metric        on median  off median    delta  on spread  off spread  separated
+render_p50        4.300       4.200   +0.100      0.050       0.030        yes
+render_p99        5.050       4.680   +0.370      0.430       0.110         NO
+player_p99       10.110      10.180   -0.070      0.380       0.160         NO

@@ -12,6 +12,10 @@ rime_add_test(rime_render_tests
     render_graph_test.cpp
     fx_particle_test.cpp
     culling_test.cpp
+    micro_triangle_test.cpp
+    virtual_geometry_selection_test.cpp
+    virtual_geometry_residency_test.cpp
+    virtual_geometry_visibility_id_test.cpp
     present_test.cpp
     font_test.cpp
     hud_test.cpp
@@ -28,6 +32,8 @@ rime_add_test(rime_render_tests
     gbuffer_test.cpp
     ssr_test.cpp
     sky_test.cpp
+    sky_lighting_test.cpp
+    sky_atmosphere_test.cpp
     pass_identity_test.cpp
     frame_scratch_test.cpp
     render_transform_test.cpp

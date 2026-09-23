@@ -28,6 +28,7 @@ pub mod skin;
 pub mod stl;
 pub mod tangent;
 pub mod texture;
+pub mod virtual_geometry;
 
 use std::collections::BTreeMap;
 use std::fmt;

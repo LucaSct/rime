@@ -123,6 +123,7 @@
 #include "rime/render/components.hpp"
 #include "rime/render/culling.hpp"
 #include "rime/render/gpu_asset_bridge.hpp"
+#include "rime/render/lighting/sky.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/render/text/hud.hpp"
@@ -319,6 +320,61 @@ void write_ppm(const char* path,
         sum += 0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2];
     }
     return rgba.empty() ? 0.0 : sum / static_cast<double>(rgba.size() / 4);
+}
+
+// Mean luminance over the BOTTOM `fraction` of the frame (m17.7b).
+//
+// The sky A/B needs this rather than the whole-frame mean above, and the difference matters: with
+// the sky switched off the background reverts to the clear colour, so a whole-frame mean moves for
+// two quite different reasons — the street being lit differently, and the sky simply not being
+// painted. Only the first is the claim. The block's authored camera looks slightly down at the
+// street, so the bottom of the frame is the surface the claim is about and carries no sky at all.
+// Mean RED/BLUE ratio over the bottom `fraction` of the frame (m17.7b) — how the street is TINTED.
+//
+// This is the measurement the sky claim rests on, and it is deliberately a ratio rather than a
+// brightness. The block's sky was tuned so its irradiance matches the flat constant it displaces to
+// within a few percent, which is what keeps the demo's exposure stable — but it also means
+// switching the sky OFF barely moves the street's brightness, so a luminance test would mostly be
+// measuring the tuning error. Colour is immune to that: a flat constant delivers one tint no matter
+// what the sky looks like, so a street whose tint FOLLOWS the sky can only be lit by the sky.
+[[nodiscard]] double mean_rb_ratio_lower(const std::vector<std::uint8_t>& rgba,
+                                         std::uint32_t width,
+                                         std::uint32_t height,
+                                         double fraction) {
+    const auto first_row = static_cast<std::size_t>(static_cast<double>(height) * (1.0 - fraction));
+    double r = 0.0;
+    double b = 0.0;
+    for (std::size_t y = first_row; y < height; ++y) {
+        for (std::size_t x = 0; x < width; ++x) {
+            const std::size_t i = (y * width + x) * 4;
+            if (i + 3 >= rgba.size()) {
+                break;
+            }
+            r += rgba[i];
+            b += rgba[i + 2];
+        }
+    }
+    return b <= 0.0 ? 0.0 : r / b;
+}
+
+[[nodiscard]] double mean_luma_lower(const std::vector<std::uint8_t>& rgba,
+                                     std::uint32_t width,
+                                     std::uint32_t height,
+                                     double fraction) {
+    const auto first_row = static_cast<std::size_t>(static_cast<double>(height) * (1.0 - fraction));
+    double sum = 0.0;
+    std::size_t n = 0;
+    for (std::size_t y = first_row; y < height; ++y) {
+        for (std::size_t x = 0; x < width; ++x) {
+            const std::size_t i = (y * width + x) * 4;
+            if (i + 3 >= rgba.size()) {
+                break;
+            }
+            sum += 0.2126 * rgba[i] + 0.7152 * rgba[i + 1] + 0.0722 * rgba[i + 2];
+            ++n;
+        }
+    }
+    return n == 0 ? 0.0 : sum / static_cast<double>(n);
 }
 
 // ── The block, as content every peer loads for itself ───────────────────────────────────────────
@@ -1418,6 +1474,36 @@ struct Visuals {
 
         renderer.set_lighting(lighting);
         renderer.set_ambient(blockkit::kAmbient[0], blockkit::kAmbient[1], blockkit::kAmbient[2]);
+
+        // The sky (m17.7b). Until now nothing in any sample ever created one, so the milestone's
+        // sky had never been seen outside a test — and the block, which is what "The Visual Bar" is
+        // judged by looking at, was lit by a single hand-picked constant.
+        //
+        // This does two things at once and the second is the one to know about: it paints a dusk
+        // sky ABOVE the horizon, and its physical solar source becomes what LIGHTS the street.
+        // `set_ambient` above is now the sky-less fallback. m17.7d deliberately retired the
+        // analytic gradient's old ambient-match calibration; palette.hpp records that this exposure
+        // now needs a physical visual-bar measurement rather than a copied number.
+        //
+        // `use_scene_sun` is left ON, so the disc follows the authored DirectionalLight rather than
+        // being pointed a second time. ADR-0040 §4: two authored sun directions that drift apart is
+        // a bug class closed by construction.
+        renderer.set_sky(authored_sky());
+    }
+
+    // The block's sky, in one place so the headless A/B below can put back exactly what it took
+    // away. palette.hpp records which controls remain background art and which feed physical light.
+    [[nodiscard]] static render::SkyParams authored_sky() {
+        render::SkyParams sky{};
+        sky.enabled = true;
+        for (int i = 0; i < 3; ++i) {
+            sky.zenith[i] = blockkit::kSkyZenith[i];
+            sky.horizon[i] = blockkit::kSkyHorizon[i];
+        }
+        sky.intensity = blockkit::kSkyIntensity;
+        sky.clouds_enabled = true;
+        sky.coverage = blockkit::kSkyCloudCoverage;
+        return sky;
     }
 
     // Derive the look from the roles the scene file carries, and find the camera the block
@@ -1865,6 +1951,10 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
     bool intact_captured = false;
     render::CullStats intact_cull{};
     double intact_luma = 0.0;
+    double intact_street = 0.0;   // the STREET only — no sky pixels, so the claim is about light
+    double intact_rb = 0.0;       // its red/blue tint under the authored sky
+    double red_sun_rb = 0.0;      // and under a deliberately red physical source (m17.7d)
+    std::uint32_t sky_filled = 0; // how many times the sky was actually baked
 
     // What the M10 stack did on the frames the render claims are made about.
     struct LightingWork {
@@ -1905,12 +1995,44 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
                     const std::vector<std::uint8_t> px =
                         read_rgba8(*demo.app.device(), tex, kWidth, kHeight);
                     intact_luma = mean_luma(px);
+                    intact_street = mean_luma_lower(px, kWidth, kHeight, 0.35);
+                    intact_rb = mean_rb_ratio_lower(px, kWidth, kHeight, 0.35);
                     if (!g_ppm.empty()) {
                         write_ppm(g_ppm.c_str(), px, kWidth, kHeight);
                     }
                 }
             }
             demo.app.finish_gpu();
+
+            // The sky's own A/B (m17.7b), taken on the SAME frame and the same camera. Before this
+            // brick the sky was a background and changed no lit pixel; now it is what lights the
+            // street, and the only way to show that from the outside is to take it away and watch
+            // the street change. A claim that cannot fail is not a claim — if these two numbers
+            // come out equal, the sky is not reaching the shading and the claim below says so.
+            if (render::RenderGraph* graph = demo.app.graph()) {
+                // Arm two: the SAME frame under a deliberately red physical solar source. Nothing
+                // else changes — same camera, direction, materials and tick. m17.7d deliberately
+                // leaves zenith/horizon as background-only art controls, so changing those would
+                // be a false A/B; this source is what the physical sky-view/SH body actually uses.
+                render::SkyParams red = Visuals::authored_sky();
+                red.sun_radiance[0] = 1.0f;
+                red.sun_radiance[1] = 0.03f;
+                red.sun_radiance[2] = 0.03f;
+                demo.visuals->renderer.set_sky(red);
+                demo.app.run_frames(4);
+                const rhi::TextureHandle tex = graph->physical(demo.visuals->last_ldr);
+                if (tex.is_valid()) {
+                    const std::vector<std::uint8_t> red_px =
+                        read_rgba8(*demo.app.device(), tex, kWidth, kHeight);
+                    red_sun_rb = mean_rb_ratio_lower(red_px, kWidth, kHeight, 0.35);
+                }
+                demo.app.finish_gpu();
+                demo.visuals->renderer.set_sky(Visuals::authored_sky()); // the scene as authored
+                demo.app.run_frames(1);
+                demo.app.finish_gpu();
+            }
+            sky_filled = demo.visuals->renderer.sky_lighting_stats().filled;
+
             demo.use_authored_camera = false; // back to the player for the rest of the run
         }
         if (t % 100 == 0 || t == g_ticks - 1) {
@@ -2167,6 +2289,17 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
         claims.push_back({"lighting: spot shadow maps were produced", lit.spot_maps > 0});
         claims.push_back({"lighting: the SDF field was composed", lit.sdf_stamps > 0});
         claims.push_back({"lighting: DDGI probes were traced", lit.ddgi_probes > 0});
+        // The sky (m17.7d). Work done, not a flag set — `filled` counts bakes that actually ran,
+        // and the luminance pair is the sky's effect on the STREET rather than on the horizon.
+        claims.push_back({"sky: the sky was baked", sky_filled > 0});
+        claims.push_back({"sky: the street is tinted by the physical sky, not by a constant",
+                          intact_rb > 0.0 && red_sun_rb > intact_rb * 1.10});
+        std::printf("  sky       : baked %u time(s); street r/b %.3f under the authored sky vs "
+                    "%.3f under a red physical sun (street luma %.2f)\n",
+                    sky_filled,
+                    intact_rb,
+                    red_sun_rb,
+                    intact_street);
         std::printf("  lighting  : %llu spot maps, %llu sdf stamps, %llu probe updates\n",
                     static_cast<unsigned long long>(lit.spot_maps),
                     static_cast<unsigned long long>(lit.sdf_stamps),

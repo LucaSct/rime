@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// View-independent optical transmittance (m17.7c).  This intentionally has its own physical UBO:
+// it is a property of the spherical medium, not of SkyParams' authored gradient, clouds or sun.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba16f, set = 0, binding = 0) writeonly uniform image2D transmittance_lut;
+
+layout(std140, set = 0, binding = 1) uniform AtmosphereParams {
+    vec4 radii;             // planet radius, top height, Rayleigh height, Mie height (km)
+    vec4 rayleigh_scattering;
+    vec4 mie_scattering;
+    vec4 mie_absorption;
+    vec4 ground_albedo;
+    vec4 solar_irradiance; // fixed unit-white input; never an authored scene sun
+}
+atmosphere;
+
+// The positive ray/sphere root.  The ray starts inside the top shell, so this is the distance to
+// the exit even when it initially points toward the ground.
+float distance_to_sphere(float radius, float mu, float sphere_radius) {
+    const float d = radius * radius * (mu * mu - 1.0) + sphere_radius * sphere_radius;
+    return max(0.0, -radius * mu + sqrt(max(d, 0.0)));
+}
+
+void main() {
+    const ivec2 size = imageSize(transmittance_lut);
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(px, size))) {
+        return;
+    }
+
+    const vec2 uv = (vec2(px) + 0.5) / vec2(size);
+    const float planet_radius = max(atmosphere.radii.x, 1.0);
+    const float top_radius = planet_radius + max(atmosphere.radii.y, 0.001);
+    // Squaring gives the dense lower atmosphere more rows without increasing the table size.
+    const float height = uv.y * uv.y * max(atmosphere.radii.y, 0.0);
+    const float radius = planet_radius + height;
+    const float mu = uv.x * 2.0 - 1.0; // cosine of the sun zenith angle
+    const float top_distance = distance_to_sphere(radius, mu, top_radius);
+
+    // A sun ray which enters the planet has no direct transmittance.  Testing the near root avoids
+    // integrating through the solid Earth and is what makes the horizon transition physically sane.
+    const float ground_d = radius * radius * (mu * mu - 1.0) + planet_radius * planet_radius;
+    const float ground_distance = ground_d >= 0.0 ? -radius * mu - sqrt(ground_d) : 1e30;
+    if (ground_distance > 0.0 && ground_distance < top_distance) {
+        // Alpha retains the distinction the RGB extinction cannot: direct light is absent because
+        // a solid planet blocked it, not because the atmosphere scattered it. The MS solve needs
+        // that signal so night-side pixels cannot become its brightest artificial light source.
+        imageStore(transmittance_lut, px, vec4(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    // Midpoint ray marching is a compact Beer-Lam optical-depth integral.  Thirty-two samples is
+    // enough for exponential density profiles at this table's resolution; clamping tau prevents
+    // half-float underflow from turning a perfectly valid opaque path into a NaN on weak drivers.
+    const int steps = 32;
+    const float ds = top_distance / float(steps);
+    vec3 tau = vec3(0.0);
+    for (int i = 0; i < steps; ++i) {
+        const float s = (float(i) + 0.5) * ds;
+        const float sample_radius = sqrt(max(0.0, radius * radius + s * s + 2.0 * radius * mu * s));
+        const float sample_height = max(0.0, sample_radius - planet_radius);
+        const float rayleigh_density = exp(-sample_height / max(atmosphere.radii.z, 0.001));
+        const float mie_density = exp(-sample_height / max(atmosphere.radii.w, 0.001));
+        const vec3 extinction = atmosphere.rayleigh_scattering.rgb * rayleigh_density +
+                                (atmosphere.mie_scattering.rgb + atmosphere.mie_absorption.rgb) *
+                                    mie_density;
+        tau += extinction * ds;
+    }
+
+    const vec3 transmittance = exp(-min(tau, vec3(80.0))) * atmosphere.solar_irradiance.rgb;
+    imageStore(transmittance_lut, px, vec4(max(transmittance, vec3(0.0)), 1.0));
+}

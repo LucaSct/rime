@@ -30,6 +30,9 @@
 // behind this same SsrInputs/GpuSsrUniforms seam.
 
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "sky_mapping.glsl" // skyview_uv_from_direction -- shared with the pass that BAKES the LUT
 
 layout(set = 0, binding = 0) uniform sampler2D scene_color; // the lit HDR frame (reflection source)
 layout(set = 0, binding = 1) uniform sampler2D gbuffer;     // RG oct world normal, B roughness, A mask
@@ -42,7 +45,7 @@ layout(std140, set = 0, binding = 3) uniform SsrParams {
     mat4 inv_view;         // view→world, to sample the probe field where the DDGI lattice lives
     vec4 extent_near_far;  // xy = render size (px), z = near, w = far
     vec4 params;           // x = max_steps, y = thickness (view units), z = unused, w = max_distance
-    vec4 ambient;          // rgb = the flat sky/ambient a missed ray reflects when DDGI is off
+    vec4 ambient;          // rgb = the flat fallback a missed ray reflects; a = sky-LUT enabled
 } ssr;
 
 // ── DDGI probe fallback bindings (m10.7c) ────────────────────────────────────────────────────────
@@ -55,6 +58,13 @@ layout(std140, set = 0, binding = 3) uniform SsrParams {
 // derivation lives in that shader and docs/math/ddgi.md §12, cited not repeated.
 layout(set = 0, binding = 4) uniform sampler2D ddgi_irradiance_atlas;
 layout(set = 0, binding = 5) uniform sampler2D ddgi_visibility_atlas;
+
+// The baked sky (m17.7b). A reflection ray that walks off the edge of the screen used to return
+// ssr.ambient.rgb -- one flat colour for every direction, which is why a mirror floor reflected a
+// uniform grey wash. It now reads the sky in the direction the ray was actually going. The sun's
+// DISC is deliberately absent from the table (sky_common.glsl explains why), so what a mirror
+// gains is the sky and its glow, not a second sun.
+layout(set = 0, binding = 7) uniform sampler2D skyview_lut;
 
 layout(std140, set = 0, binding = 6) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
@@ -225,7 +235,13 @@ void main() {
     // hemisphere integral) as directional specular radiance is the documented approximation — it
     // over-blurs, which is exactly right for the rough end of the cone and an acceptable gap-filler
     // for a mirror miss (docs/math/ssr.md §5/§6).
+    // Precedence: a live DDGI field wins (it knows about the actual scene), else the baked sky in
+    // the ray's own direction, else m10.7b's flat constant. Each step is strictly more informed
+    // than the one below it.
     vec3 probe = ssr.ambient.rgb;
+    if (ssr.ambient.a != 0.0) {
+        probe = texture(skyview_lut, skyview_uv_from_direction(r_world)).rgb;
+    }
     if (ddgi.enabled_pad.x != 0u) {
         probe = ddgi_sample_irradiance(world_pos, r_world);
     }

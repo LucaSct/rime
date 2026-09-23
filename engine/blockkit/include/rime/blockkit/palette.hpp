@@ -76,7 +76,28 @@ inline constexpr float kSunColor[3] = {0.95f, 0.78f, 0.58f};
 inline constexpr float kSunIntensity = 1.4f;
 
 // The cool sky fill that keeps the shadow side readable without lighting the interiors.
+//
+// Since m17.7b this is the FALLBACK, not the fill: with a sky in the world the forward pass shades
+// ambient from the sky's own SH irradiance and this constant is what a sky-less frame gets. It is
+// kept as the deliberately sky-less control used by the render proofs.
 inline constexpr float kAmbient[3] = {0.030f, 0.035f, 0.055f};
+
+// ── The sky (m17.7b) ─────────────────────────────────────────────────────────────────────────────
+//
+// A dusk background for a dusk street. m17.7b's former 2.5%-against-kAmbient calibration applied
+// to the analytic gradient and is deliberately retired: m17.7d's physical lighting body is driven
+// by its solar source, while these legacy zenith/horizon colours are retained only for compatible
+// scene data and the compute-only analytic fallback.
+// `kSkyIntensity` remains the demo's presentation exposure and scales that physical source plus
+// clouds consistently; a future visual-bar remeasurement can tune it against a chosen exposure,
+// but must not present the old gradient measurement as evidence for this different transport.
+inline constexpr float kSkyZenith[3] = {0.012f, 0.020f, 0.075f};
+inline constexpr float kSkyHorizon[3] = {0.032f, 0.036f, 0.068f};
+inline constexpr float kSkyIntensity = 0.36f;
+// Evening cloud: enough to break the background up without reading as overcast. It also enters the
+// physical lighting body, so coverage is an exposure control as well as a presentation control;
+// the obsolete analytic-gradient luminance numbers are intentionally not reused here.
+inline constexpr float kSkyCloudCoverage = 0.40f;
 
 // One warm point per storey per building, hung near the ceiling. Radius 6 keeps a light inside the
 // room it belongs to (the footprint is 8 m), which is what makes a breach visible: the light was

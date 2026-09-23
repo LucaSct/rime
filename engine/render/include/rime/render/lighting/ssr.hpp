@@ -112,7 +112,13 @@ public:
              RGTexture ddgi_irradiance,
              RGTexture ddgi_visibility,
              RenderGraph::FrameSlice ddgi_params,
-             rhi::SamplerHandle ddgi_sampler);
+             rhi::SamplerHandle ddgi_sampler,
+             // The baked sky (m17.7b): what a ray that leaves the screen reflects, in the
+             // direction it was going. `sky_enabled` false leaves the flat-ambient path of m10.7b,
+             // so a frame with no sky is unchanged.
+             RGTexture skyview_lut,
+             rhi::SamplerHandle skyview_sampler,
+             bool sky_enabled);
 
 private:
     rhi::Device& device_;
