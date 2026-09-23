@@ -69,7 +69,7 @@ public:
     VirtualGeometryResolvePass& operator=(const VirtualGeometryResolvePass&) = delete;
 
     // Declare one fullscreen raster pass that clears the three outputs to zero and, if the
-    // request is usable, resolves every pixel of `visibility` (R32Uint, sampled). A rejected
+    // request is usable, resolves every pixel of `visibility` (RG32Uint, sampled). A rejected
     // request bumps exactly one skip counter and leaves the outputs cleared. Returns whether it
     // resolved. `extent` is the visibility target's size in pixels.
     bool declare(RenderGraph& graph,

@@ -17,9 +17,9 @@
 // The technique (a "visibility buffer", Burns & Hunt 2013, the idea Nanite builds on): instead of
 // shading while rasterizing, write only *which triangle* covers each pixel into an integer target,
 // and let a later pass fetch attributes and shade exactly once per pixel. Here the integer is the
-// packed R32Uint visibility-ID ABI (virtual_geometry_visibility_id.hpp, version 2) — triangle,
-// cluster slot, generation and format version — so a recycled slot cannot be confused with an
-// old pixel and the resolve pass (virtual_geometry_resolve_pass.hpp) can find the triangle.
+// packed 64-bit RG32Uint visibility-ID ABI (virtual_geometry_visibility_id.hpp, version 3) —
+// triangle, cluster slot, generation and format version — so a recycled slot cannot be confused
+// with an old pixel and the resolve pass (virtual_geometry_resolve_pass.hpp) can find the triangle.
 //
 // **Vertex pulling** (M18 step 2). The vertex stage has no vertex or index buffer bound: it reads
 // the cluster's u32 indices and interleaved vertices from storage buffers by gl_VertexIndex and
@@ -39,7 +39,7 @@ namespace rime::render {
 
 // One cluster to draw. The residency slot and allocation generation are what the upload
 // scheduler would assign; until that scheduler exists the caller supplies them, and they are
-// packed into the pixel verbatim (version-2 bounds: slot < 65,536, generation < 32).
+// packed into the pixel verbatim (version-3 bounds: slot < 2^25, generation < 2^28).
 struct VirtualGeometryClusterDraw {
     std::uint32_t cluster = assets::kInvalidVirtualGeometryIndex;
     std::uint32_t cluster_slot = 0;
@@ -108,7 +108,7 @@ public:
     VirtualGeometryVisibilityPass(const VirtualGeometryVisibilityPass&) = delete;
     VirtualGeometryVisibilityPass& operator=(const VirtualGeometryVisibilityPass&) = delete;
 
-    // Declare one raster pass into `graph` that clears `visibility` (R32Uint) and `depth_bits`
+    // Declare one raster pass into `graph` that clears `visibility` (RG32Uint) and `depth_bits`
     // (R32Uint, floatBitsToUint of window-space depth) to zero and draws every accepted cluster.
     // A rejected cluster bumps exactly one skip counter; if all are rejected the clearing pass is
     // still declared — the target must be "nothing" rather than stale. Returns whether anything

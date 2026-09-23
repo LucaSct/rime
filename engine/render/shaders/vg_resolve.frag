@@ -2,8 +2,8 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // The virtual-geometry material resolve (M18 step 2), a fullscreen pass over the visibility
-// target. Per pixel: decode the visibility ID (ABI version 2: triangle [6:0], slot [22:7],
-// generation [27:23], version [31:28]), find the cluster record by slot, fetch the triangle's
+// target. Per pixel: decode the visibility ID (ABI version 3: .x = triangle [6:0], slot [31:7];
+// .y = generation [27:0], version [31:28]), find the cluster record by slot, fetch the triangle's
 // three vertices from the same storage buffers the visibility pass pulled them from, and
 // reconstruct everything a forward pass would have got from the rasterizer's interpolators.
 //
@@ -27,7 +27,7 @@
 // texture() is not (non-uniform control flow).
 #version 450
 
-layout(set = 0, binding = 0) uniform usampler2D visibility;
+layout(set = 0, binding = 0) uniform usampler2D visibility; // RG32Uint, v3 IDs
 layout(std430, set = 0, binding = 1) readonly buffer Vertices { uint words[]; } vertices;
 layout(std430, set = 0, binding = 2) readonly buffer Indices { uint indices[]; } index_data;
 
@@ -114,16 +114,16 @@ void main() {
     out_uv = vec4(0.0);
     out_albedo = vec4(0.0);
 
-    uint id = texelFetch(visibility, ivec2(gl_FragCoord.xy), 0).r;
-    if (id == 0u) {
+    uvec2 id = texelFetch(visibility, ivec2(gl_FragCoord.xy), 0).rg;
+    if (id == uvec2(0u)) {
         return; // the ABI's empty sentinel: nothing was drawn here
     }
-    uint version = id >> 28;
-    uint triangle = id & 0x7fu;
-    uint slot = (id >> 7) & 0xffffu;
-    uint generation = (id >> 23) & 0x1fu;
+    uint version = id.y >> 28;
+    uint triangle = id.x & 0x7fu;
+    uint slot = id.x >> 7;
+    uint generation = id.y & 0x0fffffffu;
     // Every way a covered pixel can fail to resolve is VISIBLE (kStale), never silently empty.
-    if (version != 2u || slot >= pc.cluster_count) {
+    if (version != 3u || slot >= pc.cluster_count) {
         out_material = kStale;
         return;
     }

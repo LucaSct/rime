@@ -14,7 +14,7 @@ layout(std430, set = 0, binding = 1) readonly buffer Indices { uint indices[]; }
 
 layout(push_constant) uniform Pc {
     mat4 mvp;          // clip-from-object
-    uint id;           // packed visibility ID with triangle = 0; the fragment stage ORs it in
+    uvec2 id;          // packed v3 visibility ID (lo, hi) with triangle = 0; frag ORs it in
     uint index_base;   // this cluster's first index in `indices`
     uint vertex_base;  // this cluster's first vertex in `vertices`
     uint stride_words; // cooked vertex stride in u32 words; position is the first three

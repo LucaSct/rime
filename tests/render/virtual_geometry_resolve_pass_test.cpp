@@ -335,7 +335,7 @@ TEST_CASE("vg resolve: visibility buffer + resolve matches a forward draw (M18.2
                                     VirtualGeometryVisibilityRequest vis) {
         RenderGraph graph(*device);
         const RGTexture ids =
-            graph.create_texture({{kSize, kSize}, rhi::Format::R32Uint, "vg-ids"});
+            graph.create_texture({{kSize, kSize}, rhi::Format::RG32Uint, "vg-ids"});
         const RGTexture depth_bits =
             graph.create_texture({{kSize, kSize}, rhi::Format::R32Uint, "vg-depth-bits"});
         const RGTexture depth = graph.create_texture({{kSize, kSize}, kDepthFormat, "vg-depth"});
@@ -494,7 +494,7 @@ TEST_CASE("vg resolve: visibility buffer + resolve matches a forward draw (M18.2
         // render_resolve re-declares the visibility pass (new buffers); swap only the table.
         RenderGraph graph(*device);
         const RGTexture ids =
-            graph.create_texture({{kSize, kSize}, rhi::Format::R32Uint, "vg-ids"});
+            graph.create_texture({{kSize, kSize}, rhi::Format::RG32Uint, "vg-ids"});
         const RGTexture depth_bits =
             graph.create_texture({{kSize, kSize}, rhi::Format::R32Uint, "vg-depth-bits"});
         const RGTexture depth = graph.create_texture({{kSize, kSize}, kDepthFormat, "vg-depth"});

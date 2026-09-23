@@ -23,15 +23,16 @@ namespace {
 // ScenePicker's DrawPush: core::Mat4 is alignas(16) and would pad the block past its GLSL size.
 struct VisibilityPush {
     float mvp[16];
-    std::uint32_t id;
+    std::uint32_t id_lo; // v3 ID words, triangle field zero
+    std::uint32_t id_hi;
     std::uint32_t index_base;
     std::uint32_t vertex_base;
     std::uint32_t stride_words;
 };
 
-static_assert(sizeof(VisibilityPush) == 80, "VisibilityPush must match the shaders");
+static_assert(sizeof(VisibilityPush) == 84, "VisibilityPush must match the shaders");
 
-constexpr rhi::Format kTargetFormats[] = {rhi::Format::R32Uint, rhi::Format::R32Uint};
+constexpr rhi::Format kTargetFormats[] = {rhi::Format::RG32Uint, rhi::Format::R32Uint};
 constexpr rhi::BindingDesc kBindings[] = {
     {0, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
     {1, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
@@ -171,10 +172,10 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
                     *asset, request.asset_id, *request.residency, cluster.page)) {
                 return &stats_.skipped_not_resident;
             }
-            if (!pack_virtual_geometry_visibility_id({item.cluster_slot, item.generation})) {
+            if (!pack_virtual_geometry_visibility_id64({item.cluster_slot, item.generation})) {
                 return &stats_.skipped_bad_id;
             }
-            if (cluster.index_count / 3u > kVirtualGeometryVisibilityV2MaxTriangle + 1u) {
+            if (cluster.index_count / 3u > kVirtualGeometryVisibilityV3MaxTriangle + 1u) {
                 return &stats_.skipped_too_many_triangles;
             }
             if (item.cluster_slot < table.size() && table[item.cluster_slot].valid != 0) {
@@ -236,7 +237,10 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
 
         ClusterDraw draw{};
         std::memcpy(draw.push.mvp, request.clip_from_object.m, sizeof(draw.push.mvp));
-        draw.push.id = *pack_virtual_geometry_visibility_id({item.cluster_slot, item.generation});
+        const VirtualGeometryVisibilityWords id =
+            *pack_virtual_geometry_visibility_id64({item.cluster_slot, item.generation});
+        draw.push.id_lo = id.lo;
+        draw.push.id_hi = id.hi;
         draw.push.index_base = index_base;
         draw.push.vertex_base = vertex_base;
         draw.push.stride_words = stride_words;

@@ -5,75 +5,68 @@
 #include <cstdint>
 #include <optional>
 
-// A render-owned identity for one visible virtual-geometry triangle. The value is intended for an
-// R32Uint visibility target; assets and the upload scheduler own the mapping from this identity to
-// GPU addresses. Keeping the generation in the pixel makes a recycled cluster slot distinguishable
-// from an old pixel that is still being consumed by a later frame.
+// A render-owned identity for one visible virtual-geometry triangle. assets and the upload
+// scheduler own the mapping from this identity to GPU addresses. Keeping the generation in the
+// pixel makes a recycled cluster slot distinguishable from an old pixel still being consumed.
 namespace rime::render {
 
-// The top four bits are ALWAYS the format version, in every layout, so a reader can tell which
-// layout the other 28 bits use before it interprets them. Version zero is reserved, and zero as a
-// whole is the invalid/empty sentinel. A version's layout is frozen once shipped; a new layout
-// takes a new version and must never reinterpret an old one. Versions without a layout below are
-// rejected by both pack and unpack.
+// Two layouts exist. The version always lives in the TOP NIBBLE of the word that holds it, so a
+// reader identifies the layout before it interprets anything else. A shipped layout is frozen;
+// a new layout takes a new version. Zero (every word) is the invalid/empty sentinel.
 //
-// Version 1 (M18 step 1) — which cluster, but not which triangle:
+// Version 1 (M18 step 1, 32-bit, R32Uint) — which cluster, not which triangle. Frozen:
 //
-//   [19:0]  cluster slot           (1,048,576 slots)
-//   [27:20] allocation generation  (256 generations)
+//   [19:0]  cluster slot           (1,048,576)
+//   [27:20] allocation generation  (256)
 //   [31:28] version = 1
 //
-// Version 2 (M18 step 2) — adds the triangle within the cluster, which is what a material
-// resolve needs to fetch the three vertices a pixel came from. The 32 bits were already full, so
-// the triangle's 7 bits are paid for by the slot and generation fields:
+// Version 3 (M18 step 2, 64-bit, RG32Uint — the current format):
 //
-//   [6:0]   triangle within cluster (128 — the usual cluster triangle cap, Nanite's included)
-//   [22:7]  cluster slot           (65,536 resident clusters)
-//   [27:23] allocation generation  (32 generations)
-//   [31:28] version = 2
+//   .x (low word)   [6:0]   triangle within cluster (128 — the usual cluster cap, Nanite's too)
+//                   [31:7]  cluster slot            (33,554,432 resident clusters)
+//   .y (high word)  [27:0]  allocation generation   (268,435,456)
+//                   [31:28] version = 3
 //
-// 65,536 slots bound the *resident drawable* cluster pool, not the asset's cluster count; 32
-// generations is enough because a slot only needs to differ from the pixel of the previous few
-// frames still in flight. A wider ID (a 64-bit target, depth in the high word) is the known exit
-// if either bound ever binds.
+// Version 2 (a 32-bit layout that squeezed a triangle field in by shrinking the slot to 16 bits
+// and the generation to 5) existed only on an unmerged branch and was withdrawn before shipping:
+// 65,536 resident clusters is too few for a town-scale scene. Its number is retired, never reused.
+//
+// Why widen instead of squeeze: the visibility buffer is the one target every pixel writes, and
+// its bits bound the whole virtual-geometry system (resident clusters, how long a slot can be
+// recycled before an old pixel aliases). 64 bits removes both bounds for the foreseeable future
+// at 4 extra bytes per pixel.
 struct VirtualGeometryVisibilityId {
     std::uint32_t cluster = 0;
     std::uint32_t generation = 0;
-    std::uint32_t version = 2;
+    std::uint32_t version = 3;
     std::uint32_t triangle = 0; // must be 0 in version 1, which has no triangle field
 
     friend constexpr bool operator==(const VirtualGeometryVisibilityId&,
                                      const VirtualGeometryVisibilityId&) = default;
 };
 
+// The 64-bit form is a {lo, hi} word pair rather than a std::uint64_t because that is exactly
+// what the GPU stores and reads (one uvec2 of an RG32Uint texel, .x then .y): no byte-order or
+// shift convention sits between the C++ value and the shader's, and a readback of the target is
+// an array of these with no reinterpretation.
+struct VirtualGeometryVisibilityWords {
+    std::uint32_t lo = 0; // .x
+    std::uint32_t hi = 0; // .y
+
+    friend constexpr bool operator==(const VirtualGeometryVisibilityWords&,
+                                     const VirtualGeometryVisibilityWords&) = default;
+};
+
 inline constexpr std::uint32_t kInvalidVirtualGeometryVisibilityId = 0;
+inline constexpr VirtualGeometryVisibilityWords kInvalidVirtualGeometryVisibilityWords{};
 inline constexpr std::uint32_t kVirtualGeometryVisibilityVersionBits = 4;
 inline constexpr std::uint32_t kVirtualGeometryVisibilityVersionShift = 28;
 inline constexpr std::uint32_t kVirtualGeometryVisibilityMinVersion = 1;
-inline constexpr std::uint32_t kVirtualGeometryVisibilityCurrentVersion = 2;
+inline constexpr std::uint32_t kVirtualGeometryVisibilityCurrentVersion = 3;
 inline constexpr std::uint32_t kVirtualGeometryVisibilityMaxVersion =
     (1u << kVirtualGeometryVisibilityVersionBits) - 1u;
 
-// Per-version field layout. `triangle_bits == 0` means the version carries no triangle.
-struct VirtualGeometryVisibilityLayout {
-    std::uint32_t triangle_bits;
-    std::uint32_t cluster_bits;
-    std::uint32_t generation_bits;
-};
-
-[[nodiscard]] constexpr std::optional<VirtualGeometryVisibilityLayout>
-virtual_geometry_visibility_layout(std::uint32_t version) noexcept {
-    switch (version) {
-        case 1:
-            return VirtualGeometryVisibilityLayout{0, 20, 8};
-        case 2:
-            return VirtualGeometryVisibilityLayout{7, 16, 5};
-        default:
-            return std::nullopt;
-    }
-}
-
-// Version-1 bounds, kept under their original names (step 1's contract).
+// Version-1 bounds (step 1's contract, unchanged).
 inline constexpr std::uint32_t kVirtualGeometryVisibilityClusterBits = 20;
 inline constexpr std::uint32_t kVirtualGeometryVisibilityGenerationBits = 8;
 inline constexpr std::uint32_t kVirtualGeometryVisibilityMaxCluster =
@@ -81,59 +74,66 @@ inline constexpr std::uint32_t kVirtualGeometryVisibilityMaxCluster =
 inline constexpr std::uint32_t kVirtualGeometryVisibilityMaxGeneration =
     (1u << kVirtualGeometryVisibilityGenerationBits) - 1u;
 
-// Version-2 bounds. The shaders (vg_visibility.frag, vg_resolve.frag) hard-code the same shifts;
-// the pass tests decode GPU-written pixels with unpack_*, which is what keeps the two in step.
-inline constexpr std::uint32_t kVirtualGeometryVisibilityV2TriangleBits = 7;
-inline constexpr std::uint32_t kVirtualGeometryVisibilityV2ClusterBits = 16;
-inline constexpr std::uint32_t kVirtualGeometryVisibilityV2GenerationBits = 5;
-inline constexpr std::uint32_t kVirtualGeometryVisibilityV2MaxTriangle =
-    (1u << kVirtualGeometryVisibilityV2TriangleBits) - 1u;
-inline constexpr std::uint32_t kVirtualGeometryVisibilityV2MaxCluster =
-    (1u << kVirtualGeometryVisibilityV2ClusterBits) - 1u;
-inline constexpr std::uint32_t kVirtualGeometryVisibilityV2MaxGeneration =
-    (1u << kVirtualGeometryVisibilityV2GenerationBits) - 1u;
+// Version-3 bounds. vg_visibility.frag and vg_resolve.frag hard-code the same shifts; the pass
+// tests decode GPU-written pixels with unpack_*, which is what keeps the two in step.
+inline constexpr std::uint32_t kVirtualGeometryVisibilityV3TriangleBits = 7;
+inline constexpr std::uint32_t kVirtualGeometryVisibilityV3ClusterBits = 25;
+inline constexpr std::uint32_t kVirtualGeometryVisibilityV3GenerationBits = 28;
+inline constexpr std::uint32_t kVirtualGeometryVisibilityV3MaxTriangle =
+    (1u << kVirtualGeometryVisibilityV3TriangleBits) - 1u;
+inline constexpr std::uint32_t kVirtualGeometryVisibilityV3MaxCluster =
+    (1u << kVirtualGeometryVisibilityV3ClusterBits) - 1u;
+inline constexpr std::uint32_t kVirtualGeometryVisibilityV3MaxGeneration =
+    (1u << kVirtualGeometryVisibilityV3GenerationBits) - 1u;
+
+// ── Version 1: the 32-bit API ─────────────────────────────────────────────────────────────────
 
 [[nodiscard]] constexpr std::optional<std::uint32_t>
 pack_virtual_geometry_visibility_id(VirtualGeometryVisibilityId id) noexcept {
-    const auto layout = virtual_geometry_visibility_layout(id.version);
-    if (!layout) {
+    if (id.version != 1 || id.triangle != 0 || id.cluster > kVirtualGeometryVisibilityMaxCluster ||
+        id.generation > kVirtualGeometryVisibilityMaxGeneration) {
         return std::nullopt;
     }
-    const auto fits = [](std::uint32_t value, std::uint32_t bits) {
-        return bits == 0 ? value == 0 : value <= (1u << bits) - 1u;
-    };
-    if (!fits(id.triangle, layout->triangle_bits) || !fits(id.cluster, layout->cluster_bits) ||
-        !fits(id.generation, layout->generation_bits)) {
-        return std::nullopt;
-    }
-
-    const std::uint32_t cluster_shift = layout->triangle_bits;
-    const std::uint32_t generation_shift = cluster_shift + layout->cluster_bits;
-    const std::uint32_t packed = id.triangle | (id.cluster << cluster_shift) |
-                                 (id.generation << generation_shift) |
-                                 (id.version << kVirtualGeometryVisibilityVersionShift);
-    return packed == kInvalidVirtualGeometryVisibilityId ? std::nullopt : std::optional{packed};
+    return id.cluster | (id.generation << kVirtualGeometryVisibilityClusterBits) |
+           (1u << kVirtualGeometryVisibilityVersionShift);
 }
 
 [[nodiscard]] constexpr std::optional<VirtualGeometryVisibilityId>
 unpack_virtual_geometry_visibility_id(std::uint32_t packed) noexcept {
-    if (packed == kInvalidVirtualGeometryVisibilityId) {
+    if ((packed >> kVirtualGeometryVisibilityVersionShift) != 1u) {
+        return std::nullopt; // empty, reserved, or not a 32-bit layout
+    }
+    return VirtualGeometryVisibilityId{packed & kVirtualGeometryVisibilityMaxCluster,
+                                       (packed >> kVirtualGeometryVisibilityClusterBits) &
+                                           kVirtualGeometryVisibilityMaxGeneration,
+                                       1u,
+                                       0u};
+}
+
+// ── Version 3: the 64-bit API ─────────────────────────────────────────────────────────────────
+
+[[nodiscard]] constexpr std::optional<VirtualGeometryVisibilityWords>
+pack_virtual_geometry_visibility_id64(VirtualGeometryVisibilityId id) noexcept {
+    if (id.version != 3 || id.triangle > kVirtualGeometryVisibilityV3MaxTriangle ||
+        id.cluster > kVirtualGeometryVisibilityV3MaxCluster ||
+        id.generation > kVirtualGeometryVisibilityV3MaxGeneration) {
         return std::nullopt;
     }
-    const std::uint32_t version = packed >> kVirtualGeometryVisibilityVersionShift;
-    const auto layout = virtual_geometry_visibility_layout(version);
-    if (!layout) {
-        return std::nullopt; // version 0 or a layout this build does not know
+    // The version makes hi nonzero, so a valid ID can never equal the empty sentinel.
+    return VirtualGeometryVisibilityWords{
+        id.triangle | (id.cluster << kVirtualGeometryVisibilityV3TriangleBits),
+        id.generation | (3u << kVirtualGeometryVisibilityVersionShift)};
+}
+
+[[nodiscard]] constexpr std::optional<VirtualGeometryVisibilityId>
+unpack_virtual_geometry_visibility_id64(VirtualGeometryVisibilityWords words) noexcept {
+    if ((words.hi >> kVirtualGeometryVisibilityVersionShift) != 3u) {
+        return std::nullopt; // empty, reserved, or not a 64-bit layout
     }
-    const auto field = [packed](std::uint32_t shift, std::uint32_t bits) {
-        return bits == 0 ? 0u : (packed >> shift) & ((1u << bits) - 1u);
-    };
-    const std::uint32_t cluster_shift = layout->triangle_bits;
-    const std::uint32_t generation_shift = cluster_shift + layout->cluster_bits;
-    return VirtualGeometryVisibilityId{field(cluster_shift, layout->cluster_bits),
-                                       field(generation_shift, layout->generation_bits),
-                                       version,
-                                       field(0, layout->triangle_bits)};
+    return VirtualGeometryVisibilityId{words.lo >> kVirtualGeometryVisibilityV3TriangleBits,
+                                       words.hi & kVirtualGeometryVisibilityV3MaxGeneration,
+                                       3u,
+                                       words.lo & kVirtualGeometryVisibilityV3MaxTriangle};
 }
 
 } // namespace rime::render
