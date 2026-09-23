@@ -15,6 +15,7 @@ rime_add_test(rime_render_tests
     micro_triangle_test.cpp
     virtual_geometry_selection_test.cpp
     virtual_geometry_residency_test.cpp
+    virtual_geometry_gpu_selection_test.cpp
     virtual_geometry_visibility_id_test.cpp
     virtual_geometry_visibility_pass_test.cpp
     virtual_geometry_resolve_pass_test.cpp
