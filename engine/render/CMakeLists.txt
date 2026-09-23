@@ -27,7 +27,8 @@ add_library(rime_render STATIC
     src/fx_pass.cpp
     src/culling.cpp
     src/virtual_geometry_residency.cpp
-    src/virtual_geometry_visibility_pass.cpp)
+    src/virtual_geometry_visibility_pass.cpp
+    src/virtual_geometry_resolve_pass.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
 # library, the same offline model the tests/samples use (ADR-0008). The generated headers are
@@ -57,6 +58,7 @@ rime_add_shaders(rime_render
     shaders/pick_id.frag
     shaders/vg_visibility.vert
     shaders/vg_visibility.frag
+    shaders/vg_resolve.frag
     shaders/gizmo.vert
     shaders/gizmo.frag
     shaders/particle.vert

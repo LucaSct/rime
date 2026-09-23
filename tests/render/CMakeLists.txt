@@ -17,6 +17,7 @@ rime_add_test(rime_render_tests
     virtual_geometry_residency_test.cpp
     virtual_geometry_visibility_id_test.cpp
     virtual_geometry_visibility_pass_test.cpp
+    virtual_geometry_resolve_pass_test.cpp
     present_test.cpp
     font_test.cpp
     hud_test.cpp
@@ -72,4 +73,6 @@ rime_add_shaders(rime_render_tests
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/cap.frag
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/ui.vert
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/ui.frag
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sdf_probe_trace.comp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sdf_probe_trace.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/vg_forward_reference.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/vg_forward_reference.frag)
