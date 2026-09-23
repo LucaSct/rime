@@ -49,6 +49,7 @@ TEST_CASE("virtual geometry selection: refinement is an all-or-nothing replaceme
             {.pixels_per_metre = 2.0f, .max_projected_error_px = 1.0f, .page_resident = residency});
         CHECK(selection.groups == std::vector<std::uint32_t>{0});
         CHECK(selection.refinement_blocked_by_residency == 1);
+        CHECK(selection.rejected_invalid_input == 0);
     }
     SUBCASE("only a complete resident replacement may replace its ancestor") {
         const std::array<std::uint8_t, 3> residency = {1, 1, 1};
@@ -57,6 +58,7 @@ TEST_CASE("virtual geometry selection: refinement is an all-or-nothing replaceme
             {.pixels_per_metre = 2.0f, .max_projected_error_px = 1.0f, .page_resident = residency});
         CHECK(selection.groups == std::vector<std::uint32_t>{1, 2});
         CHECK(selection.refinement_blocked_by_residency == 0);
+        CHECK(selection.rejected_invalid_input == 0);
     }
     SUBCASE("within the error threshold the resident coarse cut remains selected") {
         const std::array<std::uint8_t, 3> residency = {1, 1, 1};
@@ -66,6 +68,7 @@ TEST_CASE("virtual geometry selection: refinement is an all-or-nothing replaceme
                                              .max_projected_error_px = 1.0f,
                                              .page_resident = residency});
         CHECK(selection.groups == std::vector<std::uint32_t>{0});
+        CHECK(selection.rejected_invalid_input == 0);
     }
 }
 
@@ -78,6 +81,7 @@ TEST_CASE("virtual geometry selection: degenerate inputs return an empty selecti
             render::select_virtual_geometry(empty_asset, {});
         CHECK(selection.groups.empty());
         CHECK(selection.refinement_blocked_by_residency == 0);
+        CHECK(selection.rejected_invalid_input == 1);
     }
 
     SUBCASE("negative pixels-per-metre is rejected") {
@@ -89,6 +93,7 @@ TEST_CASE("virtual geometry selection: degenerate inputs return an empty selecti
                                              .page_resident = residency});
         CHECK(selection.groups.empty());
         CHECK(selection.refinement_blocked_by_residency == 0);
+        CHECK(selection.rejected_invalid_input == 1);
     }
 
     SUBCASE("non-finite error threshold is rejected") {
@@ -100,6 +105,7 @@ TEST_CASE("virtual geometry selection: degenerate inputs return an empty selecti
              .page_resident = residency});
         CHECK(selection.groups.empty());
         CHECK(selection.refinement_blocked_by_residency == 0);
+        CHECK(selection.rejected_invalid_input == 1);
     }
 
     SUBCASE("mismatched residency span size is rejected") {
@@ -109,6 +115,7 @@ TEST_CASE("virtual geometry selection: degenerate inputs return an empty selecti
             {.pixels_per_metre = 2.0f, .max_projected_error_px = 1.0f, .page_resident = residency});
         CHECK(selection.groups.empty());
         CHECK(selection.refinement_blocked_by_residency == 0);
+        CHECK(selection.rejected_invalid_input == 1);
     }
 }
 
@@ -122,6 +129,7 @@ TEST_CASE("virtual geometry selection: empty residency span uses permanent pages
             {.pixels_per_metre = 0.25f, .max_projected_error_px = 1.0f, .page_resident = {}});
         CHECK(selection.groups == std::vector<std::uint32_t>{0});
         CHECK(selection.refinement_blocked_by_residency == 0);
+        CHECK(selection.rejected_invalid_input == 0);
     }
 
     SUBCASE("missing non-permanent children block refinement and are counted") {
@@ -129,6 +137,7 @@ TEST_CASE("virtual geometry selection: empty residency span uses permanent pages
             asset, {.pixels_per_metre = 2.0f, .max_projected_error_px = 1.0f, .page_resident = {}});
         CHECK(selection.groups == std::vector<std::uint32_t>{0});
         CHECK(selection.refinement_blocked_by_residency == 1);
+        CHECK(selection.rejected_invalid_input == 0);
     }
 }
 
@@ -145,6 +154,7 @@ TEST_CASE("virtual geometry selection: error threshold boundary is non-strict") 
             {.pixels_per_metre = 2.0f, .max_projected_error_px = 4.0f, .page_resident = residency});
         CHECK(selection.groups == std::vector<std::uint32_t>{0});
         CHECK(selection.refinement_blocked_by_residency == 0);
+        CHECK(selection.rejected_invalid_input == 0);
     }
 
     SUBCASE("just above the boundary value refines") {
@@ -155,6 +165,7 @@ TEST_CASE("virtual geometry selection: error threshold boundary is non-strict") 
                                              .page_resident = residency});
         CHECK(selection.groups == std::vector<std::uint32_t>{1, 2});
         CHECK(selection.refinement_blocked_by_residency == 0);
+        CHECK(selection.rejected_invalid_input == 0);
     }
 }
 
@@ -171,4 +182,6 @@ TEST_CASE("virtual geometry selection: identical inputs produce identical output
 
     CHECK(first.groups == second.groups);
     CHECK(first.refinement_blocked_by_residency == second.refinement_blocked_by_residency);
+    CHECK(first.rejected_invalid_input == 0);
+    CHECK(second.rejected_invalid_input == 0);
 }
