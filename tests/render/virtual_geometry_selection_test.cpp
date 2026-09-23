@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <limits>
 
 #include "rime/render/virtual_geometry_selection.hpp"
 
@@ -66,4 +67,108 @@ TEST_CASE("virtual geometry selection: refinement is an all-or-nothing replaceme
                                              .page_resident = residency});
         CHECK(selection.groups == std::vector<std::uint32_t>{0});
     }
+}
+
+TEST_CASE("virtual geometry selection: degenerate inputs return an empty selection") {
+    const assets::VirtualGeometryAsset valid_asset = hierarchy_asset();
+
+    SUBCASE("invalid asset fails validation and returns empty") {
+        assets::VirtualGeometryAsset empty_asset{};
+        const render::VirtualGeometrySelection selection =
+            render::select_virtual_geometry(empty_asset, {});
+        CHECK(selection.groups.empty());
+        CHECK(selection.refinement_blocked_by_residency == 0);
+    }
+
+    SUBCASE("negative pixels-per-metre is rejected") {
+        const std::array<std::uint8_t, 3> residency = {1, 1, 1};
+        const render::VirtualGeometrySelection selection =
+            render::select_virtual_geometry(valid_asset,
+                                            {.pixels_per_metre = -1.0f,
+                                             .max_projected_error_px = 1.0f,
+                                             .page_resident = residency});
+        CHECK(selection.groups.empty());
+        CHECK(selection.refinement_blocked_by_residency == 0);
+    }
+
+    SUBCASE("non-finite error threshold is rejected") {
+        const std::array<std::uint8_t, 3> residency = {1, 1, 1};
+        const render::VirtualGeometrySelection selection = render::select_virtual_geometry(
+            valid_asset,
+            {.pixels_per_metre = 2.0f,
+             .max_projected_error_px = std::numeric_limits<float>::infinity(),
+             .page_resident = residency});
+        CHECK(selection.groups.empty());
+        CHECK(selection.refinement_blocked_by_residency == 0);
+    }
+
+    SUBCASE("mismatched residency span size is rejected") {
+        const std::array<std::uint8_t, 2> residency = {1, 1};
+        const render::VirtualGeometrySelection selection = render::select_virtual_geometry(
+            valid_asset,
+            {.pixels_per_metre = 2.0f, .max_projected_error_px = 1.0f, .page_resident = residency});
+        CHECK(selection.groups.empty());
+        CHECK(selection.refinement_blocked_by_residency == 0);
+    }
+}
+
+TEST_CASE("virtual geometry selection: empty residency span uses permanent pages only") {
+    const assets::VirtualGeometryAsset asset = hierarchy_asset();
+    REQUIRE(assets::validate_virtual_geometry(asset) == assets::VirtualGeometryError::None);
+
+    SUBCASE("permanent coarse fallback is selected when refinement is not needed") {
+        const render::VirtualGeometrySelection selection = render::select_virtual_geometry(
+            asset,
+            {.pixels_per_metre = 0.25f, .max_projected_error_px = 1.0f, .page_resident = {}});
+        CHECK(selection.groups == std::vector<std::uint32_t>{0});
+        CHECK(selection.refinement_blocked_by_residency == 0);
+    }
+
+    SUBCASE("missing non-permanent children block refinement and are counted") {
+        const render::VirtualGeometrySelection selection = render::select_virtual_geometry(
+            asset, {.pixels_per_metre = 2.0f, .max_projected_error_px = 1.0f, .page_resident = {}});
+        CHECK(selection.groups == std::vector<std::uint32_t>{0});
+        CHECK(selection.refinement_blocked_by_residency == 1);
+    }
+}
+
+TEST_CASE("virtual geometry selection: error threshold boundary is non-strict") {
+    const assets::VirtualGeometryAsset asset = hierarchy_asset();
+    REQUIRE(assets::validate_virtual_geometry(asset) == assets::VirtualGeometryError::None);
+
+    const std::array<std::uint8_t, 3> residency = {1, 1, 1};
+
+    SUBCASE("exactly the boundary value keeps the coarser group") {
+        // group 0 has lod_error_m = 2.0 m, pixels_per_metre = 2.0 px/m -> 4.0 px == max.
+        const render::VirtualGeometrySelection selection = render::select_virtual_geometry(
+            asset,
+            {.pixels_per_metre = 2.0f, .max_projected_error_px = 4.0f, .page_resident = residency});
+        CHECK(selection.groups == std::vector<std::uint32_t>{0});
+        CHECK(selection.refinement_blocked_by_residency == 0);
+    }
+
+    SUBCASE("just above the boundary value refines") {
+        const render::VirtualGeometrySelection selection =
+            render::select_virtual_geometry(asset,
+                                            {.pixels_per_metre = 2.0f,
+                                             .max_projected_error_px = 3.999f,
+                                             .page_resident = residency});
+        CHECK(selection.groups == std::vector<std::uint32_t>{1, 2});
+        CHECK(selection.refinement_blocked_by_residency == 0);
+    }
+}
+
+TEST_CASE("virtual geometry selection: identical inputs produce identical outputs") {
+    const assets::VirtualGeometryAsset asset = hierarchy_asset();
+    REQUIRE(assets::validate_virtual_geometry(asset) == assets::VirtualGeometryError::None);
+
+    const std::array<std::uint8_t, 3> residency = {1, 0, 1};
+    const render::VirtualGeometrySelectionInput input = {
+        .pixels_per_metre = 2.0f, .max_projected_error_px = 1.0f, .page_resident = residency};
+
+    const render::VirtualGeometrySelection first = render::select_virtual_geometry(asset, input);
+    const render::VirtualGeometrySelection second = render::select_virtual_geometry(asset, input);
+
+    CHECK(first.groups == second.groups);
+    CHECK(first.refinement_blocked_by_residency == second.refinement_blocked_by_residency);
 }
