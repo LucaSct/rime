@@ -143,7 +143,8 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
                 *asset, request.asset_id, *request.residency, cluster.page)) {
             return &stats_.skipped_not_resident;
         }
-        if (!pack_virtual_geometry_visibility_id({request.cluster_slot, request.generation, 1})) {
+        if (!pack_virtual_geometry_visibility_id(
+                {request.cluster_slot, request.generation, kVirtualGeometryVisibilityMinVersion})) {
             return &stats_.skipped_bad_id;
         }
         return nullptr;
