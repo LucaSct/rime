@@ -102,6 +102,13 @@ enum class Format : std::uint32_t {
                  // pick pass (m9.6) rasterizes entity ids into it so "what is under this pixel?"
                  // is answered by the depth test instead of CPU ray casting. Color-attachment
                  // support for R32_UINT is spec-mandatory; integer targets never blend.
+    // Two 32-bit unsigned integers per pixel (M18, visibility-ID v3). A 64-bit ID written as one
+    // uvec2 by a single fragment: the virtual-geometry visibility buffer needs more than 32 bits
+    // (7 triangle + 25 cluster-slot bits in .x, 28 generation + 4 version bits in .y), and one
+    // RG target keeps both halves under the SAME depth test — two R32 targets would too, but cost
+    // a second attachment and let a reader pair halves from different frames. Colour-attachment,
+    // sampled and transfer support for R32G32_UINT are all spec-mandatory, so no device query.
+    RG32Uint,
     // One 16-bit SIGNED-NORMALIZED channel: the GPU decodes the stored int16 as
     // clamp(int16 / 32767, -1, 1) on sample/imageLoad and encodes the inverse on imageStore. This
     // is the SDF clipmap's narrow-band storage (m10.4b, ADR-0032 §10) — a signed distance there is
@@ -164,6 +171,7 @@ struct FormatBlockInfo {
         case Format::D32FloatS8:
             return {1, 1, 5}; // packed depth+stencil; sized for completeness, never image-copied
         case Format::RG32Float:
+        case Format::RG32Uint:
         case Format::RGBA16Float:
             return {1, 1, 8};
         case Format::RGB32Float:

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // The M18 step-1 visibility pass. See the header for the technique; the notes here are about the
-// gate order (every rejection is counted exactly once) and the per-cluster upload.
+// gate order (every rejection is counted exactly once) and the per-request upload.
 
 #include "rime/render/virtual_geometry_visibility_pass.hpp"
 
@@ -10,29 +10,33 @@
 #include <cstring>
 #include <vector>
 
-#include "pick_id.vert.spv.h"
 #include "rime/render/passes.hpp"
 #include "rime/render/virtual_geometry_visibility_id.hpp"
 #include "vg_visibility.frag.spv.h"
+#include "vg_visibility.vert.spv.h"
 
 namespace rime::render {
 
 namespace {
 
-// Mirrors the pick_id.vert / vg_visibility.frag push block. Flat float[16] for the same reason as
+// Mirrors the vg_visibility.{vert,frag} push block. Flat float[16] for the same reason as
 // ScenePicker's DrawPush: core::Mat4 is alignas(16) and would pad the block past its GLSL size.
 struct VisibilityPush {
     float mvp[16];
-    std::uint32_t id;
+    std::uint32_t id_lo; // v3 ID words, triangle field zero
+    std::uint32_t id_hi;
+    std::uint32_t index_base;
+    std::uint32_t vertex_base;
+    std::uint32_t stride_words;
 };
 
-static_assert(sizeof(VisibilityPush) == 68, "VisibilityPush must match the shaders");
+static_assert(sizeof(VisibilityPush) == 84, "VisibilityPush must match the shaders");
 
-// Only the position is consumed; like the depth pre-pass, the pipeline reads the full interleaved
-// vertex at the cooked stride and ignores the rest. Position is always first in the cooked layout
-// (validate_virtual_geometry requires the Position bit, and attributes are written in bit order).
-constexpr rhi::VertexAttribute kPositionOnly[] = {{0, rhi::Format::RGB32Float, 0}};
-constexpr rhi::Format kTargetFormats[] = {rhi::Format::R32Uint, rhi::Format::R32Uint};
+constexpr rhi::Format kTargetFormats[] = {rhi::Format::RG32Uint, rhi::Format::R32Uint};
+constexpr rhi::BindingDesc kBindings[] = {
+    {0, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
+    {1, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
+};
 
 // Residency is transitive: a page is drawable only if it and every page it depends on is resident
 // (the same rule select_virtual_geometry applies). Permanent pages are resident by contract.
@@ -60,15 +64,32 @@ bool page_and_dependencies_resident(const assets::VirtualGeometryAsset& asset,
     return true;
 }
 
+rhi::BufferHandle
+make_storage(rhi::Device& device, const void* data, std::size_t size, std::string_view name) {
+    rhi::BufferDesc bd{};
+    bd.size = size;
+    bd.usage = rhi::BufferUsage::Storage;
+    bd.memory = rhi::MemoryUsage::CpuToGpu;
+    bd.initial_data = data;
+    bd.debug_name = name;
+    return device.create_buffer(bd);
+}
+
+// One accepted cluster's draw, recorded at declare time and replayed in the pass body.
+struct ClusterDraw {
+    VisibilityPush push;
+    std::uint32_t index_count;
+};
+
 } // namespace
 
 VirtualGeometryVisibilityPass::VirtualGeometryVisibilityPass(rhi::Device& device)
     : device_(device) {
     rhi::ShaderDesc vs{};
     vs.stage = rhi::ShaderStage::Vertex;
-    vs.spirv = pick_id_vert_spv;
-    vs.spirv_size_bytes = sizeof(pick_id_vert_spv);
-    vs.debug_name = "pick_id.vert";
+    vs.spirv = vg_visibility_vert_spv;
+    vs.spirv_size_bytes = sizeof(vg_visibility_vert_spv);
+    vs.debug_name = "vg_visibility.vert";
     vertex_shader_ = device.create_shader(vs);
 
     rhi::ShaderDesc fs{};
@@ -79,18 +100,17 @@ VirtualGeometryVisibilityPass::VirtualGeometryVisibilityPass(rhi::Device& device
     fragment_shader_ = device.create_shader(fs);
 
     // The picker's visibility decisions (back-face cull, Less depth) so a cluster is "visible"
-    // here exactly when the forward pass would have drawn it.
+    // here exactly when the forward pass would have drawn it. No vertex layout: vertex pulling.
     rhi::GraphicsPipelineDesc pd{};
     pd.vertex_shader = vertex_shader_;
     pd.fragment_shader = fragment_shader_;
-    pd.vertex_layout.stride = assets::expected_vertex_stride(assets::kMeshV1Attribs);
-    pd.vertex_layout.attributes = kPositionOnly;
     pd.color_formats = kTargetFormats;
     pd.cull = rhi::CullMode::Back;
     pd.depth_test = true;
     pd.depth_write = true;
     pd.depth_compare = rhi::CompareOp::Less;
     pd.depth_format = kDepthFormat;
+    pd.bindings = kBindings;
     pd.push_constant_size = sizeof(VisibilityPush);
     pd.debug_name = "vg-visibility";
     pipeline_ = device.create_graphics_pipeline(pd);
@@ -104,14 +124,12 @@ VirtualGeometryVisibilityPass::~VirtualGeometryVisibilityPass() {
 }
 
 void VirtualGeometryVisibilityPass::release_cluster_buffers() noexcept {
-    if (vertices_.is_valid()) {
-        device_.destroy(vertices_);
+    for (rhi::BufferHandle* b : {&buffers_.vertices, &buffers_.indices, &buffers_.clusters}) {
+        if (b->is_valid()) {
+            device_.destroy(*b);
+        }
     }
-    if (indices_.is_valid()) {
-        device_.destroy(indices_);
-    }
-    vertices_ = {};
-    indices_ = {};
+    buffers_ = {};
 }
 
 bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
@@ -121,88 +139,128 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
                                             const VirtualGeometryVisibilityRequest& request) {
     release_cluster_buffers();
 
-    // Gate order matters only for which counter a doubly-bad request lands in; each rejection
-    // bumps exactly one counter and falls through to the clear-only pass below.
-    const auto gate = [&]() -> std::uint32_t* {
-        const assets::VirtualGeometryAsset* asset = request.asset;
-        if (asset == nullptr || request.residency == nullptr || request.selection == nullptr ||
-            assets::validate_virtual_geometry(*asset) != assets::VirtualGeometryError::None ||
-            asset->vertex_stride != assets::expected_vertex_stride(assets::kMeshV1Attribs) ||
-            request.cluster >= asset->clusters.size()) {
-            return &stats_.skipped_invalid_request;
-        }
-        const assets::VirtualGeometryCluster& cluster = asset->clusters[request.cluster];
-        const auto& groups = request.selection->groups;
-        if (std::find(groups.begin(), groups.end(), cluster.replacement_group) == groups.end()) {
-            return &stats_.skipped_not_selected;
-        }
-        if (asset->groups[cluster.replacement_group].child_count != 0) {
-            return &stats_.skipped_not_leaf;
-        }
-        if (!page_and_dependencies_resident(
-                *asset, request.asset_id, *request.residency, cluster.page)) {
-            return &stats_.skipped_not_resident;
-        }
-        if (!pack_virtual_geometry_visibility_id(
-                {request.cluster_slot, request.generation, kVirtualGeometryVisibilityMinVersion})) {
-            return &stats_.skipped_bad_id;
-        }
-        return nullptr;
-    };
+    const assets::VirtualGeometryAsset* asset = request.asset;
+    const bool request_ok =
+        asset != nullptr && request.residency != nullptr && request.selection != nullptr &&
+        assets::validate_virtual_geometry(*asset) == assets::VirtualGeometryError::None &&
+        asset->vertex_stride == assets::expected_vertex_stride(assets::kMeshV1Attribs);
+    const std::uint32_t stride_words = request_ok ? asset->vertex_stride / 4u : 0u;
 
-    std::uint32_t* rejected = gate();
-    VisibilityPush push{};
-    std::uint32_t index_count = 0;
-    if (rejected == nullptr) {
+    // Everything accepted is appended to these three host arrays and uploaded once.
+    std::vector<std::byte> vertex_bytes;
+    std::vector<std::uint32_t> all_indices;
+    std::vector<VirtualGeometryGpuCluster> table;
+    std::vector<ClusterDraw> draws;
+
+    for (const VirtualGeometryClusterDraw& item : request.clusters) {
+        // Gate order matters only for which counter a doubly-bad cluster lands in; each rejection
+        // bumps exactly one counter and the cluster is simply not drawn.
+        const auto gate = [&]() -> std::uint32_t* {
+            if (!request_ok || item.cluster >= asset->clusters.size()) {
+                return &stats_.skipped_invalid_request;
+            }
+            const assets::VirtualGeometryCluster& cluster = asset->clusters[item.cluster];
+            const auto& groups = request.selection->groups;
+            if (std::find(groups.begin(), groups.end(), cluster.replacement_group) ==
+                groups.end()) {
+                return &stats_.skipped_not_selected;
+            }
+            if (asset->groups[cluster.replacement_group].child_count != 0) {
+                return &stats_.skipped_not_leaf;
+            }
+            if (!page_and_dependencies_resident(
+                    *asset, request.asset_id, *request.residency, cluster.page)) {
+                return &stats_.skipped_not_resident;
+            }
+            if (!pack_virtual_geometry_visibility_id64({item.cluster_slot, item.generation})) {
+                return &stats_.skipped_bad_id;
+            }
+            if (cluster.index_count / 3u > kVirtualGeometryVisibilityV3MaxTriangle + 1u) {
+                return &stats_.skipped_too_many_triangles;
+            }
+            if (item.cluster_slot < table.size() && table[item.cluster_slot].valid != 0) {
+                return &stats_.skipped_duplicate_slot;
+            }
+            return nullptr;
+        };
+
+        std::uint32_t* rejected = gate();
         assets::VirtualGeometryPageView view{};
-        if (assets::view_virtual_geometry_page(*request.asset, request.cluster, view) !=
-            assets::VirtualGeometryPageViewError::None) {
-            rejected = &stats_.skipped_page_view;
-        } else {
-            // Decode indices through the checked reader (page bytes need not be u32-aligned) and
-            // reject any index outside the cluster's own vertices: the GPU would otherwise read
-            // another cluster's (or no) vertex memory, which no validation layer reports.
-            std::vector<std::uint32_t> indices(view.index_count);
-            for (std::uint32_t i = 0; i < view.index_count && rejected == nullptr; ++i) {
-                if (!assets::read_virtual_geometry_index(view, i, indices[i]) ||
-                    indices[i] >= view.vertex_count) {
+        std::vector<std::uint32_t> indices;
+        if (rejected == nullptr) {
+            if (assets::view_virtual_geometry_page(*asset, item.cluster, view) !=
+                assets::VirtualGeometryPageViewError::None) {
+                rejected = &stats_.skipped_page_view;
+            } else {
+                // Decode indices through the checked reader (page bytes need not be u32-aligned)
+                // and reject any index outside the cluster's own vertices, or a partial triangle:
+                // the GPU would otherwise read another cluster's (or no) vertex memory, which no
+                // validation layer reports for a storage-buffer fetch.
+                indices.resize(view.index_count);
+                if (view.index_count % 3u != 0) {
                     rejected = &stats_.skipped_bad_index;
                 }
-            }
-            if (rejected == nullptr) {
-                // Upload just this cluster: its vertex slice becomes vertex 0.., so its
-                // cluster-local indices need no base-vertex rebasing.
-                const std::span<const std::byte> vertex_bytes = view.vertices.subspan(
-                    view.vertex_offset, std::size_t{view.vertex_count} * view.vertex_stride);
-                rhi::BufferDesc vbd{};
-                vbd.size = vertex_bytes.size();
-                vbd.usage = rhi::BufferUsage::Vertex;
-                vbd.memory = rhi::MemoryUsage::CpuToGpu;
-                vbd.initial_data = vertex_bytes.data();
-                vbd.debug_name = "vg-visibility-vertices";
-                vertices_ = device_.create_buffer(vbd);
-
-                rhi::BufferDesc ibd{};
-                ibd.size = indices.size() * sizeof(std::uint32_t);
-                ibd.usage = rhi::BufferUsage::Index;
-                ibd.memory = rhi::MemoryUsage::CpuToGpu;
-                ibd.initial_data = indices.data();
-                ibd.debug_name = "vg-visibility-indices";
-                indices_ = device_.create_buffer(ibd);
-
-                std::memcpy(push.mvp, request.clip_from_object.m, sizeof(push.mvp));
-                push.id =
-                    *pack_virtual_geometry_visibility_id({request.cluster_slot,
-                                                          request.generation,
-                                                          kVirtualGeometryVisibilityMinVersion});
-                index_count = view.index_count;
+                for (std::uint32_t i = 0; i < view.index_count && rejected == nullptr; ++i) {
+                    if (!assets::read_virtual_geometry_index(view, i, indices[i]) ||
+                        indices[i] >= view.vertex_count) {
+                        rejected = &stats_.skipped_bad_index;
+                    }
+                }
             }
         }
-    }
-    if (rejected != nullptr) {
-        ++*rejected;
-    } else {
+        if (rejected != nullptr) {
+            ++*rejected;
+            continue;
+        }
         ++stats_.drawn;
+
+        // Append: this cluster's vertices start at vertex_base, its indices at index_base, and
+        // its indices stay cluster-local — the shaders add vertex_base, so no CPU rebasing.
+        const auto vertex_base =
+            static_cast<std::uint32_t>(vertex_bytes.size() / view.vertex_stride);
+        const auto index_base = static_cast<std::uint32_t>(all_indices.size());
+        const std::span<const std::byte> slice = view.vertices.subspan(
+            view.vertex_offset, std::size_t{view.vertex_count} * view.vertex_stride);
+        vertex_bytes.insert(vertex_bytes.end(), slice.begin(), slice.end());
+        all_indices.insert(all_indices.end(), indices.begin(), indices.end());
+
+        if (table.size() <= item.cluster_slot) {
+            table.resize(std::size_t{item.cluster_slot} + 1);
+        }
+        table[item.cluster_slot] = {vertex_base,
+                                    index_base,
+                                    view.index_count / 3u,
+                                    asset->clusters[item.cluster].material_slot,
+                                    item.generation,
+                                    1u,
+                                    {}};
+
+        ClusterDraw draw{};
+        std::memcpy(draw.push.mvp, request.clip_from_object.m, sizeof(draw.push.mvp));
+        const VirtualGeometryVisibilityWords id =
+            *pack_virtual_geometry_visibility_id64({item.cluster_slot, item.generation});
+        draw.push.id_lo = id.lo;
+        draw.push.id_hi = id.hi;
+        draw.push.index_base = index_base;
+        draw.push.vertex_base = vertex_base;
+        draw.push.stride_words = stride_words;
+        draw.index_count = view.index_count;
+        draws.push_back(draw);
+    }
+
+    if (!draws.empty()) {
+        buffers_.vertices =
+            make_storage(device_, vertex_bytes.data(), vertex_bytes.size(), "vg-cluster-vertices");
+        buffers_.indices = make_storage(device_,
+                                        all_indices.data(),
+                                        all_indices.size() * sizeof(std::uint32_t),
+                                        "vg-cluster-indices");
+        buffers_.clusters = make_storage(device_,
+                                         table.data(),
+                                         table.size() * sizeof(VirtualGeometryGpuCluster),
+                                         "vg-cluster-table");
+        buffers_.cluster_count = static_cast<std::uint32_t>(table.size());
+        buffers_.vertex_stride_words = stride_words;
     }
 
     // Both integer targets clear to all-zero bits: the invalid visibility ID and +0.0 depth.
@@ -215,21 +273,23 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
     desc.colors = colors;
     desc.depth = &depth_att;
 
-    const bool draw = rejected == nullptr;
     graph.add_raster_pass(
         "vg-visibility",
         desc,
-        [this, draw, push, index_count, vb = vertices_, ib = indices_](rhi::CommandBuffer& cmd) {
-            if (!draw) {
-                return; // the attachment clears alone are the "nothing visible" answer
+        [this, draws = std::move(draws), vb = buffers_.vertices, ib = buffers_.indices](
+            rhi::CommandBuffer& cmd) {
+            if (draws.empty()) {
+                return; // the attachment clears alone are "nothing visible"
             }
             cmd.bind_pipeline(pipeline_);
-            cmd.bind_vertex_buffer(vb);
-            cmd.bind_index_buffer(ib, rhi::IndexType::Uint32);
-            cmd.push_constants(&push, sizeof(push));
-            cmd.draw_indexed(index_count);
+            cmd.bind_storage_buffer(0, vb);
+            cmd.bind_storage_buffer(1, ib);
+            for (const ClusterDraw& d : draws) {
+                cmd.push_constants(&d.push, sizeof(d.push));
+                cmd.draw(d.index_count); // one invocation per triangle corner
+            }
         });
-    return draw;
+    return buffers_.clusters.is_valid();
 }
 
 } // namespace rime::render
