@@ -9,8 +9,10 @@
 #include "rime/render/virtual_geometry_gpu_selection.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "rime/core/diagnostics/log.hpp"
@@ -21,6 +23,8 @@ namespace rime::render {
 namespace {
 
 constexpr std::uint32_t kWorkgroupSize = 64;
+
+static_assert(kVirtualGeometryGpuSelectionMaxDepth == 256u);
 
 struct GpuGroup {
     std::uint32_t first_cluster = 0;
@@ -42,6 +46,53 @@ struct PushConstants {
     std::uint32_t coarse_group = 0;
 };
 
+// Longest path length, in groups, from any source of the child DAG. This is a conservative bound on
+// the ancestry chain any shader invocation will try to walk, because the GPU follows the first
+// parent it finds and that parent must be at least as close to a source as the coarse root.
+std::uint32_t longest_group_chain(const assets::VirtualGeometryAsset& asset) {
+    const std::uint32_t group_count = static_cast<std::uint32_t>(asset.groups.size());
+    std::vector<std::vector<std::uint32_t>> children(group_count);
+    std::vector<std::uint32_t> in_degree(group_count, 0u);
+    for (std::uint32_t g = 0; g < group_count; ++g) {
+        const assets::VirtualGeometryGroup& group = asset.groups[g];
+        for (std::uint32_t i = 0; i < group.child_count; ++i) {
+            const std::uint32_t child = asset.child_groups[group.first_child + i];
+            if (child < group_count) {
+                children[g].push_back(child);
+                ++in_degree[child];
+            }
+        }
+    }
+
+    std::vector<std::uint32_t> queue;
+    queue.reserve(group_count);
+    for (std::uint32_t g = 0; g < group_count; ++g) {
+        if (in_degree[g] == 0u)
+            queue.push_back(g);
+    }
+
+    std::vector<std::uint32_t> depth(group_count, 1u);
+    std::uint32_t max_depth = group_count == 0u ? 0u : 1u;
+    std::size_t head = 0;
+    while (head < queue.size()) {
+        const std::uint32_t g = queue[head++];
+        for (const std::uint32_t child : children[g]) {
+            if (depth[child] < depth[g] + 1u)
+                depth[child] = depth[g] + 1u;
+            if (max_depth < depth[child])
+                max_depth = depth[child];
+            if (--in_degree[child] == 0u)
+                queue.push_back(child);
+        }
+    }
+
+    // A cycle is impossible here because validation rejects it, but if the graph somehow became
+    // malformed we would rather fall back than dispatch an unbounded shader traversal.
+    if (queue.size() < group_count)
+        return std::numeric_limits<std::uint32_t>::max();
+    return max_depth;
+}
+
 } // namespace
 
 VirtualGeometrySelection
@@ -57,6 +108,25 @@ select_virtual_geometry_on_gpu(rhi::Device& device,
         !std::isfinite(input.max_projected_error_px) || input.max_projected_error_px < 0.0f ||
         (!input.page_resident.empty() && input.page_resident.size() != asset.pages.size())) {
         out.rejected_invalid_input = 1;
+        return out;
+    }
+
+    // Conservative pre-check: the shader uses fixed-size arrays of size
+    // kVirtualGeometryGpuSelectionMaxDepth for the parent chain and the dependency walk. If the
+    // asset needs more space than the shader has, fall back to the CPU oracle rather than risk
+    // silent divergence.
+    const std::uint32_t group_chain_depth = longest_group_chain(asset);
+    // The dependency walk pushes each edge of a page's dependency DAG onto its explicit stack. The
+    // worst-case live stack is bounded by the total number of dependency edges plus the starting
+    // page; if that fits, the walk can never run out of room.
+    const std::uint32_t dependency_stack_bound =
+        static_cast<std::uint32_t>(asset.page_dependencies.size()) + 1u;
+    if (group_chain_depth > kVirtualGeometryGpuSelectionMaxDepth ||
+        dependency_stack_bound > kVirtualGeometryGpuSelectionMaxDepth) {
+        out = select_virtual_geometry(asset, input);
+        out.gpu_depth_fallback = 1;
+        // The CPU oracle never touches the GPU counters, so an overflow witness is zero here.
+        out.gpu_depth_overflow = 0;
         return out;
     }
 
@@ -221,12 +291,14 @@ select_virtual_geometry_on_gpu(rhi::Device& device,
                     selected_init.data(),
                     "vg-select-selected");
 
-    std::uint32_t counter_init = 0u;
-    const rhi::BufferHandle counter_buffer = make_buffer(sizeof(std::uint32_t),
-                                                         rhi::BufferUsage::Storage,
-                                                         rhi::MemoryUsage::GpuToCpu,
-                                                         &counter_init,
-                                                         "vg-select-counters");
+    // Counters layout must match the Counters block in vg_select.comp.
+    const std::array<std::uint32_t, 2> counter_init{0u, 0u};
+    const rhi::BufferHandle counter_buffer =
+        make_buffer(counter_init.size() * sizeof(std::uint32_t),
+                    rhi::BufferUsage::Storage,
+                    rhi::MemoryUsage::GpuToCpu,
+                    counter_init.data(),
+                    "vg-select-counters");
 
     PushConstants pc{};
     pc.pixels_per_metre = input.pixels_per_metre;
@@ -252,8 +324,8 @@ select_virtual_geometry_on_gpu(rhi::Device& device,
     std::vector<std::uint32_t> selected(group_count);
     device.read_buffer(
         selected_buffer, selected.data(), selected.size() * sizeof(std::uint32_t), 0);
-    std::uint32_t blocked = 0u;
-    device.read_buffer(counter_buffer, &blocked, sizeof(blocked), 0);
+    std::array<std::uint32_t, 2> counters{0u, 0u};
+    device.read_buffer(counter_buffer, counters.data(), sizeof(counters), 0);
 
     for (std::uint32_t g = 0; g < group_count; ++g) {
         if (selected[g] != 0u) {
@@ -261,7 +333,8 @@ select_virtual_geometry_on_gpu(rhi::Device& device,
         }
     }
     std::sort(out.groups.begin(), out.groups.end());
-    out.refinement_blocked_by_residency = blocked;
+    out.refinement_blocked_by_residency = counters[0];
+    out.gpu_depth_overflow = counters[1];
 
     device.destroy(selected_buffer);
     device.destroy(counter_buffer);

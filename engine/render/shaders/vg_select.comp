@@ -57,6 +57,7 @@ layout(std430, set = 0, binding = 7) buffer Selected {
 
 layout(std430, set = 0, binding = 8) buffer Counters {
     uint refinement_blocked_by_residency;
+    uint depth_overflow;
 };
 
 layout(push_constant) uniform PushConstants {
@@ -68,6 +69,7 @@ layout(push_constant) uniform PushConstants {
 
 // Maximum ancestry/dependency depth this shader handles. The test asset is tiny; this bound is
 // large enough for practical cooked graphs while keeping the stack in register/scratch memory.
+// Must match rime::render::kVirtualGeometryGpuSelectionMaxDepth in C++.
 const uint kMaxDepth = 256u;
 
 // Mirrors the CPU oracle's page_and_dependencies_ready(): a page is ready only when it and every
@@ -84,9 +86,12 @@ bool page_and_dependencies_ready(uint page_index) {
         uint first = pages[current].first_dependency;
         uint count = pages[current].dependency_count;
         // Push dependencies; if the graph is deeper than kMaxDepth we conservatively report not
-        // ready, which blocks refinement just like a missing page would.
-        if (count > kMaxDepth - stack_size)
+        // ready, which blocks refinement just like a missing page would, and count the event so a
+        // test that cannot see what was skipped still reads a passing result.
+        if (count > kMaxDepth - stack_size) {
+            atomicAdd(depth_overflow, 1u);
             return false;
+        }
         for (uint i = 0u; i < count; ++i) {
             stack[stack_size++] = dependencies[first + i];
         }
@@ -117,8 +122,13 @@ void main() {
     uint cur = gid;
     bool reachable = false;
     for (uint step = 0u; step < pc.group_count; ++step) {
-        if (chain_len >= kMaxDepth)
+        if (chain_len >= kMaxDepth) {
+            // The parent chain is too deep for the fixed-size stack. Count the event so a test
+            // that cannot see what was skipped still reads a passing result, then give up on
+            // this group.
+            atomicAdd(depth_overflow, 1u);
             break;
+        }
         chain[chain_len++] = cur;
         if (cur == pc.coarse_group) {
             reachable = true;

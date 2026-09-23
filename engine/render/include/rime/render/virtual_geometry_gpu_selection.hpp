@@ -14,6 +14,10 @@
 // oracle by sorting both sides.
 namespace rime::render {
 
+// Maximum ancestry/dependency depth the GPU flat-parallel selector handles. This value is mirrored
+// in engine/render/shaders/vg_select.comp as kMaxDepth; the two must be kept in lock-step.
+inline constexpr std::uint32_t kVirtualGeometryGpuSelectionMaxDepth = 256u;
+
 // Run the CPU oracle's selection algorithm on the GPU. The input and output structs are the same
 // as the CPU path; invalid inputs are rejected on the CPU before any dispatch, setting
 // rejected_invalid_input = 1 and leaving the other fields empty.

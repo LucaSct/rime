@@ -35,6 +35,11 @@ struct VirtualGeometrySelection {
     // dropped; this counter is a witness that the oracle rejected something, so tests cannot
     // pass by silently ignoring bad inputs.
     std::uint32_t rejected_invalid_input = 0;
+    // GPU-only witnesses. The CPU oracle never falls back or overflows the GPU's fixed-size
+    // stacks, so it leaves these at zero. A test that cannot see what was skipped still reads
+    // a passing result because every path that gives up writes a counter.
+    std::uint32_t gpu_depth_fallback = 0;
+    std::uint32_t gpu_depth_overflow = 0;
 };
 
 [[nodiscard]] inline VirtualGeometrySelection
