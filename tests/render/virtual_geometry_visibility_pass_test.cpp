@@ -254,3 +254,180 @@ TEST_CASE("vg visibility: a resident selected leaf writes its packed id and dept
         CHECK(pass.stats().skipped_invalid_request == 1);
     }
 }
+
+namespace {
+
+// Two leaf clusters sharing ONE page, the layout a real cooker emits: both clusters' vertices
+// first, then both clusters' cluster-local indices. Cluster 2 therefore lives at a nonzero
+// vertex_offset (128 bytes) and first_index (12), which is what exercises the pass's vertex slice
+// and index decode. Left quad x ∈ [-0.75, -0.25] → pixels [8, 24); right quad x ∈ [0.25, 0.75] →
+// pixels [40, 56); both y ∈ [-0.5, 0.5] → pixels [16, 48). Winding is doubled as above.
+assets::VirtualGeometryAsset shared_page_fixture(std::uint32_t bad_index = 0) {
+    constexpr std::uint32_t stride = 32;
+    const auto quad = [](float x0, float x1) {
+        return std::array<std::array<float, 3>, 4>{
+            {{x0, -0.5f, 0.5f}, {x1, -0.5f, 0.5f}, {x1, 0.5f, 0.5f}, {x0, 0.5f, 0.5f}}};
+    };
+    const std::array<std::array<std::array<float, 3>, 4>, 3> quads = {
+        quad(-0.5f, 0.5f), quad(-0.75f, -0.25f), quad(0.25f, 0.75f)};
+    const std::uint32_t local_indices[6] = {0, 1, 2, 0, 2, 3};
+
+    assets::VirtualGeometryAsset asset{};
+    asset.source_mesh = assets::AssetId{1};
+    asset.attribs = assets::kMeshV1Attribs;
+    asset.vertex_stride = assets::expected_vertex_stride(asset.attribs);
+    const auto append_vertices = [&](const std::array<std::array<float, 3>, 4>& q) {
+        for (const auto& p : q) {
+            const std::size_t at_byte = asset.page_bytes.size();
+            asset.page_bytes.resize(at_byte + stride);
+            std::memcpy(asset.page_bytes.data() + at_byte, p.data(), sizeof(float) * 3);
+        }
+    };
+    const auto append_indices = [&](bool reversed, std::uint32_t poison) {
+        for (std::uint32_t i = 0; i < 6; ++i) {
+            std::uint32_t index = reversed ? local_indices[5 - i] : local_indices[i];
+            if (poison != 0 && i == 0) {
+                index = poison;
+            }
+            const std::size_t at_byte = asset.page_bytes.size();
+            asset.page_bytes.resize(at_byte + sizeof(index));
+            std::memcpy(asset.page_bytes.data() + at_byte, &index, sizeof(index));
+        }
+    };
+
+    // Page 0: the permanent coarse quad (cluster 0), 12 indices from index 0.
+    append_vertices(quads[0]);
+    append_indices(false, 0);
+    append_indices(true, 0);
+    const auto page0_size = static_cast<std::uint32_t>(asset.page_bytes.size());
+    // Page 1: clusters 1 and 2. Vertices [1][2], then indices: cluster 1 = [0, 12),
+    // cluster 2 = [12, 24) — so cluster 2's first_index is 12 and vertex_offset is 128.
+    append_vertices(quads[1]);
+    append_vertices(quads[2]);
+    append_indices(false, 0);
+    append_indices(true, 0);
+    append_indices(false, bad_index);
+    append_indices(true, 0);
+    const auto page1_size = static_cast<std::uint32_t>(asset.page_bytes.size()) - page0_size;
+
+    asset.pages = {{0, page0_size, 0, 1, 0, 0, true}, {page0_size, page1_size, 1, 2, 0, 0, false}};
+    const std::array<std::array<std::uint32_t, 4>, 3> layout = {{
+        // page, vertex_offset (bytes), first_index, group
+        {0, 0, 0, 0},
+        {1, 0, 0, 1},
+        {1, 4 * stride, 12, 1},
+    }};
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        assets::VirtualGeometryCluster cluster{};
+        cluster.bounds.min = {-1.0f, -1.0f, 0.5f};
+        cluster.bounds.max = {1.0f, 1.0f, 0.5f};
+        cluster.page = layout[i][0];
+        cluster.vertex_offset = layout[i][1];
+        cluster.first_index = layout[i][2];
+        cluster.vertex_count = 4;
+        cluster.index_count = 12;
+        cluster.replacement_group = layout[i][3];
+        asset.clusters.push_back(cluster);
+    }
+    asset.groups = {{0, 1, 0, 1, 2.0f, true}, {1, 2, 0, 0, 0.1f, false}};
+    asset.child_groups = {1};
+    asset.coarse_group = 0;
+    return asset;
+}
+
+std::size_t count_in_rect(const std::vector<std::uint32_t>& ids,
+                          std::uint32_t id,
+                          std::uint32_t x0,
+                          std::uint32_t x1,
+                          std::uint32_t y0,
+                          std::uint32_t y1) {
+    std::size_t n = 0;
+    for (std::uint32_t y = y0; y < y1; ++y) {
+        for (std::uint32_t x = x0; x < x1; ++x) {
+            n += at(ids, x, y) == id ? 1 : 0;
+        }
+    }
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("vg visibility: a cluster at nonzero page offsets draws its own pixels (M18.1)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (std::getenv("RIME_REQUIRE_VULKAN") != nullptr) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping visibility pass proofs");
+        return;
+    }
+
+    SUBCASE("the second cluster of a shared page covers exactly its own rectangle") {
+        const assets::VirtualGeometryAsset asset = shared_page_fixture();
+        REQUIRE(assets::validate_virtual_geometry(asset) == assets::VirtualGeometryError::None);
+        VirtualGeometryResidency residency;
+        REQUIRE(residency.register_asset(kAssetId, asset));
+        REQUIRE(residency.request_page(kAssetId, 1));
+        REQUIRE(residency.complete_page(kAssetId, 1));
+        const VirtualGeometrySelection selection{{1}, 0};
+
+        VirtualGeometryVisibilityRequest request{};
+        request.asset = &asset;
+        request.asset_id = kAssetId;
+        request.residency = &residency;
+        request.selection = &selection;
+        request.cluster_slot = 11;
+        request.generation = 2;
+        request.clip_from_object = core::identity();
+        const std::uint32_t id = *pack_virtual_geometry_visibility_id({11, 2, 1});
+
+        VirtualGeometryVisibilityPass pass(*device);
+        request.cluster = 2;
+        const Readback right = render_cluster(*device, pass, request);
+        CHECK(right.drew);
+        CHECK(count_in_rect(right.ids, id, 40, 56, 16, 48) == 16u * 32u);
+        std::size_t total = 0;
+        for (const std::uint32_t v : right.ids) {
+            total += v != 0 ? 1 : 0;
+        }
+        CHECK(total == 16u * 32u); // nothing from cluster 1's vertices or the coarse page
+        CHECK(at(right.depth_bits, 48, 32) == std::bit_cast<std::uint32_t>(0.5f));
+        CHECK(at(right.ids, 16, 32) == 0u); // cluster 1's rectangle stays clear
+
+        // The sibling at offset zero, drawn from the same page, lands on the other rectangle —
+        // the pair proves the offset, not just "something was drawn".
+        request.cluster = 1;
+        const Readback left = render_cluster(*device, pass, request);
+        CHECK(count_in_rect(left.ids, id, 8, 24, 16, 48) == 16u * 32u);
+        CHECK(at(left.ids, 48, 32) == 0u);
+        CHECK(pass.stats().drawn == 2);
+    }
+
+    SUBCASE("an index past the cluster's vertices is rejected, counted, and draws nothing") {
+        // validate_virtual_geometry checks cluster/page ranges but never decodes index values,
+        // so a cooked index of 4 in a 4-vertex cluster reaches the pass; only its gate stops it.
+        const assets::VirtualGeometryAsset asset = shared_page_fixture(4);
+        REQUIRE(assets::validate_virtual_geometry(asset) == assets::VirtualGeometryError::None);
+        VirtualGeometryResidency residency;
+        REQUIRE(residency.register_asset(kAssetId, asset));
+        REQUIRE(residency.request_page(kAssetId, 1));
+        REQUIRE(residency.complete_page(kAssetId, 1));
+        const VirtualGeometrySelection selection{{1}, 0};
+
+        VirtualGeometryVisibilityRequest request{};
+        request.asset = &asset;
+        request.asset_id = kAssetId;
+        request.residency = &residency;
+        request.selection = &selection;
+        request.cluster = 2;
+        request.cluster_slot = 11;
+        request.clip_from_object = core::identity();
+
+        VirtualGeometryVisibilityPass pass(*device);
+        const Readback r = render_cluster(*device, pass, request);
+        CHECK_FALSE(r.drew);
+        check_all_clear(r);
+        CHECK(pass.stats().skipped_bad_index == 1);
+        CHECK(pass.stats().drawn == 0);
+    }
+}
