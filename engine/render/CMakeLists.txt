@@ -55,6 +55,7 @@ rime_add_shaders(rime_render
     shaders/hud.frag
     shaders/pick_id.vert
     shaders/pick_id.frag
+    shaders/vg_visibility.vert
     shaders/vg_visibility.frag
     shaders/gizmo.vert
     shaders/gizmo.frag

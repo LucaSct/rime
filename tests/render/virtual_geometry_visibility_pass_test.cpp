@@ -125,6 +125,11 @@ std::uint32_t at(const std::vector<std::uint32_t>& image, std::uint32_t x, std::
     return image[y * kSize + x];
 }
 
+// A pixel's ID with the triangle field masked off: which cluster, generation and version.
+std::uint32_t cluster_bits(std::uint32_t id) {
+    return id & ~kVirtualGeometryVisibilityV2MaxTriangle;
+}
+
 void check_all_clear(const Readback& r) {
     std::size_t nonzero = 0;
     for (std::size_t i = 0; i < r.ids.size(); ++i) {
@@ -164,11 +169,10 @@ TEST_CASE("vg visibility: a resident selected leaf writes its packed id and dept
     request.asset_id = kAssetId;
     request.residency = &residency;
     request.selection = &selection;
-    request.cluster = 1;
-    request.cluster_slot = 7;
-    request.generation = 3;
+    VirtualGeometryClusterDraw draw{1, 7, 3};
+    request.clusters = {&draw, 1};
     request.clip_from_object = core::identity();
-    const std::uint32_t expected_id = *pack_virtual_geometry_visibility_id({7, 3, 1});
+    const std::uint32_t expected_id = *pack_virtual_geometry_visibility_id({7, 3}); // triangle 0
 
     VirtualGeometryVisibilityPass pass(*device);
 
@@ -179,13 +183,14 @@ TEST_CASE("vg visibility: a resident selected leaf writes its packed id and dept
         const std::array<std::array<std::uint32_t, 2>, 5> covered = {
             {{32, 32}, {24, 24}, {40, 24}, {24, 40}, {40, 40}}};
         for (const auto& p : covered) {
-            CHECK(at(r.ids, p[0], p[1]) == expected_id);
+            CHECK(cluster_bits(at(r.ids, p[0], p[1])) == expected_id);
             CHECK(at(r.depth_bits, p[0], p[1]) == std::bit_cast<std::uint32_t>(0.5f));
         }
         const auto unpacked = unpack_virtual_geometry_visibility_id(at(r.ids, 32, 32));
         REQUIRE(unpacked.has_value());
         CHECK(unpacked->cluster == 7);
         CHECK(unpacked->generation == 3);
+        CHECK(unpacked->version == kVirtualGeometryVisibilityCurrentVersion);
         const std::array<std::array<std::uint32_t, 2>, 5> uncovered = {
             {{2, 2}, {61, 2}, {2, 61}, {61, 61}, {32, 4}}};
         for (const auto& p : uncovered) {
@@ -196,13 +201,26 @@ TEST_CASE("vg visibility: a resident selected leaf writes its packed id and dept
         // pixel centres never land on x/y = 16 or 48 exactly.
         std::size_t covered_count = 0;
         for (const std::uint32_t id : r.ids) {
-            covered_count += id == expected_id ? 1 : 0;
+            covered_count += cluster_bits(id) == expected_id ? 1 : 0;
         }
         CHECK(covered_count == 32u * 32u);
+        // The triangle field is real: one winding's two triangles (0,1 or the reversed copies
+        // 2,3 — which depends on the front-face convention) each own half, the other is culled.
+        std::array<std::size_t, 4> per_triangle{};
+        for (const std::uint32_t id : r.ids) {
+            if (id != 0) {
+                ++per_triangle[unpack_virtual_geometry_visibility_id(id)->triangle & 3u];
+            }
+        }
+        CHECK(per_triangle[0] + per_triangle[1] + per_triangle[2] + per_triangle[3] == 32u * 32u);
+        const bool first_winding = per_triangle[0] != 0;
+        CHECK(per_triangle[first_winding ? 0 : 2] > 400u);
+        CHECK(per_triangle[first_winding ? 1 : 3] > 400u);
+        CHECK(per_triangle[first_winding ? 2 : 0] + per_triangle[first_winding ? 3 : 1] == 0u);
     }
 
     SUBCASE("an invalid cluster index draws nothing and is counted") {
-        request.cluster = 99;
+        draw.cluster = 99;
         const Readback r = render_cluster(*device, pass, request);
         CHECK_FALSE(r.drew);
         check_all_clear(r);
@@ -211,7 +229,7 @@ TEST_CASE("vg visibility: a resident selected leaf writes its packed id and dept
     }
 
     SUBCASE("a cluster outside the selected cut draws nothing and is counted") {
-        request.cluster = 0; // the coarse group was replaced by its leaf
+        draw.cluster = 0; // the coarse group was replaced by its leaf
         const Readback r = render_cluster(*device, pass, request);
         CHECK_FALSE(r.drew);
         check_all_clear(r);
@@ -221,7 +239,7 @@ TEST_CASE("vg visibility: a resident selected leaf writes its packed id and dept
     SUBCASE("a selected non-leaf group draws nothing and is counted") {
         const VirtualGeometrySelection coarse{{0}, 0};
         request.selection = &coarse;
-        request.cluster = 0;
+        draw.cluster = 0;
         const Readback r = render_cluster(*device, pass, request);
         CHECK_FALSE(r.drew);
         check_all_clear(r);
@@ -238,7 +256,7 @@ TEST_CASE("vg visibility: a resident selected leaf writes its packed id and dept
     }
 
     SUBCASE("an id that does not fit the ABI draws nothing and is counted") {
-        request.cluster_slot = kVirtualGeometryVisibilityMaxCluster + 1;
+        draw.cluster_slot = kVirtualGeometryVisibilityV2MaxCluster + 1;
         const Readback r = render_cluster(*device, pass, request);
         CHECK_FALSE(r.drew);
         check_all_clear(r);
@@ -247,7 +265,7 @@ TEST_CASE("vg visibility: a resident selected leaf writes its packed id and dept
 
     SUBCASE("a drawn frame followed by a rejected one is cleared, not stale") {
         (void)render_cluster(*device, pass, request);
-        request.cluster = 99;
+        draw.cluster = 99;
         const Readback r = render_cluster(*device, pass, request);
         check_all_clear(r);
         CHECK(pass.stats().drawn == 1);
@@ -344,7 +362,7 @@ std::size_t count_in_rect(const std::vector<std::uint32_t>& ids,
     std::size_t n = 0;
     for (std::uint32_t y = y0; y < y1; ++y) {
         for (std::uint32_t x = x0; x < x1; ++x) {
-            n += at(ids, x, y) == id ? 1 : 0;
+            n += cluster_bits(at(ids, x, y)) == id ? 1 : 0;
         }
     }
     return n;
@@ -376,13 +394,12 @@ TEST_CASE("vg visibility: a cluster at nonzero page offsets draws its own pixels
         request.asset_id = kAssetId;
         request.residency = &residency;
         request.selection = &selection;
-        request.cluster_slot = 11;
-        request.generation = 2;
+        VirtualGeometryClusterDraw draw{2, 11, 2};
+        request.clusters = {&draw, 1};
         request.clip_from_object = core::identity();
-        const std::uint32_t id = *pack_virtual_geometry_visibility_id({11, 2, 1});
+        const std::uint32_t id = *pack_virtual_geometry_visibility_id({11, 2});
 
         VirtualGeometryVisibilityPass pass(*device);
-        request.cluster = 2;
         const Readback right = render_cluster(*device, pass, request);
         CHECK(right.drew);
         CHECK(count_in_rect(right.ids, id, 40, 56, 16, 48) == 16u * 32u);
@@ -396,7 +413,7 @@ TEST_CASE("vg visibility: a cluster at nonzero page offsets draws its own pixels
 
         // The sibling at offset zero, drawn from the same page, lands on the other rectangle —
         // the pair proves the offset, not just "something was drawn".
-        request.cluster = 1;
+        draw.cluster = 1;
         const Readback left = render_cluster(*device, pass, request);
         CHECK(count_in_rect(left.ids, id, 8, 24, 16, 48) == 16u * 32u);
         CHECK(at(left.ids, 48, 32) == 0u);
@@ -419,8 +436,8 @@ TEST_CASE("vg visibility: a cluster at nonzero page offsets draws its own pixels
         request.asset_id = kAssetId;
         request.residency = &residency;
         request.selection = &selection;
-        request.cluster = 2;
-        request.cluster_slot = 11;
+        const VirtualGeometryClusterDraw draw{2, 11, 0};
+        request.clusters = {&draw, 1};
         request.clip_from_object = core::identity();
 
         VirtualGeometryVisibilityPass pass(*device);
