@@ -31,6 +31,10 @@ struct VirtualGeometrySelectionInput {
 struct VirtualGeometrySelection {
     std::vector<std::uint32_t> groups;
     std::uint32_t refinement_blocked_by_residency = 0;
+    // Inputs that fail asset validation or have nonsensical camera/ residency parameters are
+    // dropped; this counter is a witness that the oracle rejected something, so tests cannot
+    // pass by silently ignoring bad inputs.
+    std::uint32_t rejected_invalid_input = 0;
 };
 
 [[nodiscard]] inline VirtualGeometrySelection
@@ -41,6 +45,7 @@ select_virtual_geometry(const assets::VirtualGeometryAsset& asset,
         !std::isfinite(input.pixels_per_metre) || input.pixels_per_metre < 0.0f ||
         !std::isfinite(input.max_projected_error_px) || input.max_projected_error_px < 0.0f ||
         (!input.page_resident.empty() && input.page_resident.size() != asset.pages.size())) {
+        selected.rejected_invalid_input = 1;
         return selected;
     }
 
