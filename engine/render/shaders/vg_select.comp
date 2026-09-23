@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// Flat parallel LOD cut selection for virtual geometry (M18.3 slice A). One compute invocation
+// evaluates one group; the group walks its parent chain from the root to itself and writes 1 to
+// selected[group] iff every ancestor refined and this group does not. Because each invocation only
+// reads immutable asset data and frame constants, no inter-thread barrier or shared memory is
+// needed — the parallelism is embarrassingly flat.
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct GpuGroup {
+    uint first_cluster;
+    uint cluster_count;
+    uint first_child;
+    uint child_count;
+    float lod_error_m;
+};
+
+struct GpuPage {
+    uint first_dependency;
+    uint dependency_count;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Groups {
+    GpuGroup groups[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer Clusters {
+    uint cluster_pages[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer Pages {
+    GpuPage pages[];
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer Dependencies {
+    uint dependencies[];
+};
+
+layout(std430, set = 0, binding = 4) readonly buffer PageReady {
+    uint page_ready[]; // 0 = not resident, 1 = resident (permanent or resident byte != 0)
+};
+
+layout(std430, set = 0, binding = 5) readonly buffer Parents {
+    uint parents[]; // 0xffffffff for the coarse root
+};
+
+layout(std430, set = 0, binding = 6) readonly buffer ChildGroups {
+    uint child_groups[];
+};
+
+layout(std430, set = 0, binding = 7) buffer Selected {
+    uint selected[];
+};
+
+layout(std430, set = 0, binding = 8) buffer Counters {
+    uint refinement_blocked_by_residency;
+};
+
+layout(push_constant) uniform PushConstants {
+    float pixels_per_metre;
+    float max_projected_error_px;
+    uint group_count;
+    uint coarse_group;
+} pc;
+
+// Maximum ancestry/dependency depth this shader handles. The test asset is tiny; this bound is
+// large enough for practical cooked graphs while keeping the stack in register/scratch memory.
+const uint kMaxDepth = 256u;
+
+// Mirrors the CPU oracle's page_and_dependencies_ready(): a page is ready only when it and every
+// page it transitively depends on are resident. Uses an explicit stack so the dependency graph may
+// be a DAG.
+bool page_and_dependencies_ready(uint page_index) {
+    uint stack[kMaxDepth];
+    uint stack_size = 0u;
+    stack[stack_size++] = page_index;
+    while (stack_size > 0u) {
+        uint current = stack[--stack_size];
+        if (page_ready[current] == 0u)
+            return false;
+        uint first = pages[current].first_dependency;
+        uint count = pages[current].dependency_count;
+        // Push dependencies; if the graph is deeper than kMaxDepth we conservatively report not
+        // ready, which blocks refinement just like a missing page would.
+        if (count > kMaxDepth - stack_size)
+            return false;
+        for (uint i = 0u; i < count; ++i) {
+            stack[stack_size++] = dependencies[first + i];
+        }
+    }
+    return true;
+}
+
+// Mirrors the CPU oracle's group_ready(): every cluster in the group must have its page (and the
+// page's dependencies) resident.
+bool group_ready(uint group_index) {
+    GpuGroup g = groups[group_index];
+    for (uint i = 0u; i < g.cluster_count; ++i) {
+        uint page = cluster_pages[g.first_cluster + i];
+        if (!page_and_dependencies_ready(page))
+            return false;
+    }
+    return true;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.group_count)
+        return;
+
+    // Walk up parent pointers until we either reach the coarse root or run out of chain.
+    uint chain[kMaxDepth];
+    uint chain_len = 0u;
+    uint cur = gid;
+    bool reachable = false;
+    for (uint step = 0u; step < pc.group_count; ++step) {
+        if (chain_len >= kMaxDepth)
+            break;
+        chain[chain_len++] = cur;
+        if (cur == pc.coarse_group) {
+            reachable = true;
+            break;
+        }
+        uint p = parents[cur];
+        if (p == 0xffffffffu)
+            break;
+        cur = p;
+    }
+    if (!reachable)
+        return;
+
+    // Evaluate from the root down to this invocation's group. Every ancestor must refine; this
+    // group must be the cut (not refined).
+    for (int i = int(chain_len) - 1; i >= 0; --i) {
+        uint gidx = chain[i];
+        GpuGroup g = groups[gidx];
+
+        // Same floating-point comparison as the CPU oracle: projected error strictly greater than
+        // the threshold refines; equality keeps the coarser group.
+        bool needs_refinement = g.lod_error_m * pc.pixels_per_metre > pc.max_projected_error_px;
+
+        bool children_ready = g.child_count != 0u;
+        if (needs_refinement) {
+            for (uint c = 0u; c < g.child_count; ++c) {
+                uint child = child_groups[g.first_child + c];
+                if (!group_ready(child)) {
+                    children_ready = false;
+                    break;
+                }
+            }
+        }
+        bool refined = needs_refinement && children_ready;
+
+        if (i > 0) {
+            // An ancestor failed to refine: this leaf of the DAG is not on the selected cut.
+            if (!refined)
+                return;
+        } else {
+            // This is the invocation's own group.
+            if (refined) {
+                selected[gid] = 0u;
+            } else {
+                selected[gid] = 1u;
+                if (needs_refinement && g.child_count != 0u) {
+                    atomicAdd(refinement_blocked_by_residency, 1u);
+                }
+            }
+        }
+    }
+}
