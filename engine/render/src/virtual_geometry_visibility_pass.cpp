@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <numeric>
 #include <vector>
 
 #include "rime/render/passes.hpp"
@@ -19,23 +20,19 @@ namespace rime::render {
 
 namespace {
 
-// Mirrors the vg_visibility.{vert,frag} push block. Flat float[16] for the same reason as
-// ScenePicker's DrawPush: core::Mat4 is alignas(16) and would pad the block past its GLSL size.
+// Mirrors the vg_visibility.{vert,frag} push block. The MVP is the only value that is the same
+// across every cluster in a request; per-cluster data moved to VirtualGeometryDrawRecord.
 struct VisibilityPush {
     float mvp[16];
-    std::uint32_t id_lo; // v3 ID words, triangle field zero
-    std::uint32_t id_hi;
-    std::uint32_t index_base;
-    std::uint32_t vertex_base;
-    std::uint32_t stride_words;
 };
 
-static_assert(sizeof(VisibilityPush) == 84, "VisibilityPush must match the shaders");
+static_assert(sizeof(VisibilityPush) == 64, "VisibilityPush must match the shaders");
 
 constexpr rhi::Format kTargetFormats[] = {rhi::Format::RG32Uint, rhi::Format::R32Uint};
 constexpr rhi::BindingDesc kBindings[] = {
     {0, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
     {1, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
+    {2, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
 };
 
 // Residency is transitive: a page is drawable only if it and every page it depends on is resident
@@ -77,9 +74,20 @@ make_storage(rhi::Device& device, const void* data, std::size_t size, std::strin
 
 // One accepted cluster's draw, recorded at declare time and replayed in the pass body.
 struct ClusterDraw {
-    VisibilityPush push;
-    std::uint32_t index_count;
+    VirtualGeometryDrawRecord record;
+    std::uint32_t index_count = 0;
 };
+
+// Vulkan VkDrawIndexedIndirectCommand layout, mirrored here so the CPU can fill the buffer.
+struct IndexedIndirectCommand {
+    std::uint32_t index_count;
+    std::uint32_t instance_count;
+    std::uint32_t first_index;
+    std::int32_t vertex_offset;
+    std::uint32_t first_instance;
+};
+
+static_assert(sizeof(IndexedIndirectCommand) == 20, "must match VkDrawIndexedIndirectCommand");
 
 } // namespace
 
@@ -124,7 +132,12 @@ VirtualGeometryVisibilityPass::~VirtualGeometryVisibilityPass() {
 }
 
 void VirtualGeometryVisibilityPass::release_cluster_buffers() noexcept {
-    for (rhi::BufferHandle* b : {&buffers_.vertices, &buffers_.indices, &buffers_.clusters}) {
+    for (rhi::BufferHandle* b : {&buffers_.vertices,
+                                 &buffers_.indices,
+                                 &buffers_.clusters,
+                                 &buffers_.records,
+                                 &buffers_.indirect,
+                                 &buffers_.identity_index}) {
         if (b->is_valid()) {
             device_.destroy(*b);
         }
@@ -212,6 +225,10 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
             ++*rejected;
             continue;
         }
+        if (draws.size() >= kVirtualGeometryMaxIndirectDraws) {
+            ++stats_.skipped_over_capacity;
+            continue;
+        }
         ++stats_.drawn;
 
         // Append: this cluster's vertices start at vertex_base, its indices at index_base, and
@@ -236,19 +253,42 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
                                     {}};
 
         ClusterDraw draw{};
-        std::memcpy(draw.push.mvp, request.clip_from_object.m, sizeof(draw.push.mvp));
         const VirtualGeometryVisibilityWords id =
             *pack_virtual_geometry_visibility_id64({item.cluster_slot, item.generation});
-        draw.push.id_lo = id.lo;
-        draw.push.id_hi = id.hi;
-        draw.push.index_base = index_base;
-        draw.push.vertex_base = vertex_base;
-        draw.push.stride_words = stride_words;
+        draw.record.id_lo = id.lo;
+        draw.record.id_hi = id.hi;
+        draw.record.index_base = index_base;
+        draw.record.vertex_base = vertex_base;
+        draw.record.stride_words = stride_words;
+        draw.record.cluster_slot = item.cluster_slot;
         draw.index_count = view.index_count;
         draws.push_back(draw);
     }
 
     if (!draws.empty()) {
+        // Identity index buffer trick: we want gl_VertexIndex to keep naming the merged cluster
+        // index so the vertex shader can keep pulling from storage. By binding an identity
+        // sequence 0,1,2,...,total_indices-1 and setting first_index to each cluster's index_base,
+        // gl_VertexIndex becomes the global cluster index. This avoids gl_PrimitiveID, which would
+        // need the geometryShader feature and is not available on MoltenVK.
+        std::vector<std::uint32_t> identity(all_indices.size());
+        std::iota(identity.begin(), identity.end(), 0u);
+
+        std::vector<VirtualGeometryDrawRecord> records;
+        records.reserve(draws.size());
+        for (const ClusterDraw& d : draws) {
+            records.push_back(d.record);
+        }
+
+        // Fixed-capacity indirect buffer. A later brick will build these commands on the GPU;
+        // keeping the CPU draw_count constant lets a GPU-decided visible count reach the draw
+        // without a same-frame readback. Entries past the accepted clusters are zero-initialized,
+        // so their instance_count is 0 and they are legal no-ops.
+        std::vector<IndexedIndirectCommand> indirect_cmds(kVirtualGeometryMaxIndirectDraws);
+        for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(draws.size()); ++i) {
+            indirect_cmds[i] = {draws[i].index_count, 1u, draws[i].record.index_base, 0, 0};
+        }
+
         buffers_.vertices =
             make_storage(device_, vertex_bytes.data(), vertex_bytes.size(), "vg-cluster-vertices");
         buffers_.indices = make_storage(device_,
@@ -259,6 +299,27 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
                                          table.data(),
                                          table.size() * sizeof(VirtualGeometryGpuCluster),
                                          "vg-cluster-table");
+        buffers_.records = make_storage(device_,
+                                        records.data(),
+                                        records.size() * sizeof(VirtualGeometryDrawRecord),
+                                        "vg-draw-records");
+
+        rhi::BufferDesc id_desc{};
+        id_desc.size = identity.size() * sizeof(std::uint32_t);
+        id_desc.usage = rhi::BufferUsage::Index | rhi::BufferUsage::TransferDst;
+        id_desc.memory = rhi::MemoryUsage::CpuToGpu;
+        id_desc.initial_data = identity.data();
+        id_desc.debug_name = "vg-identity-index";
+        buffers_.identity_index = device_.create_buffer(id_desc);
+
+        rhi::BufferDesc ind_desc{};
+        ind_desc.size = kVirtualGeometryMaxIndirectDraws * sizeof(IndexedIndirectCommand);
+        ind_desc.usage = rhi::BufferUsage::Indirect;
+        ind_desc.memory = rhi::MemoryUsage::CpuToGpu;
+        ind_desc.initial_data = indirect_cmds.data();
+        ind_desc.debug_name = "vg-indirect-commands";
+        buffers_.indirect = device_.create_buffer(ind_desc);
+
         buffers_.cluster_count = static_cast<std::uint32_t>(table.size());
         buffers_.vertex_stride_words = stride_words;
     }
@@ -273,22 +334,37 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
     desc.colors = colors;
     desc.depth = &depth_att;
 
-    graph.add_raster_pass(
-        "vg-visibility",
-        desc,
-        [this, draws = std::move(draws), vb = buffers_.vertices, ib = buffers_.indices](
-            rhi::CommandBuffer& cmd) {
-            if (draws.empty()) {
-                return; // the attachment clears alone are "nothing visible"
-            }
-            cmd.bind_pipeline(pipeline_);
-            cmd.bind_storage_buffer(0, vb);
-            cmd.bind_storage_buffer(1, ib);
-            for (const ClusterDraw& d : draws) {
-                cmd.push_constants(&d.push, sizeof(d.push));
-                cmd.draw(d.index_count); // one invocation per triangle corner
-            }
-        });
+    VisibilityPush push{};
+    std::memcpy(push.mvp, request.clip_from_object.m, sizeof(push.mvp));
+    const RGBuffer indirect_rg =
+        draws.empty() ? RGBuffer{}
+                      : graph.import_buffer(buffers_.indirect, rhi::ResourceState::IndirectRead);
+    const RGBuffer indirect_reads[] = {indirect_rg};
+    if (!draws.empty()) {
+        desc.indirect_reads = indirect_reads;
+    }
+
+    graph.add_raster_pass("vg-visibility",
+                          desc,
+                          [this,
+                           draws = std::move(draws),
+                           push,
+                           vb = buffers_.vertices,
+                           ib = buffers_.indices,
+                           rb = buffers_.records,
+                           identity = buffers_.identity_index,
+                           indirect = buffers_.indirect](rhi::CommandBuffer& cmd) {
+                              if (draws.empty()) {
+                                  return; // the attachment clears alone are "nothing visible"
+                              }
+                              cmd.bind_pipeline(pipeline_);
+                              cmd.bind_storage_buffer(0, vb);
+                              cmd.bind_storage_buffer(1, ib);
+                              cmd.bind_storage_buffer(2, rb);
+                              cmd.bind_index_buffer(identity, rhi::IndexType::Uint32);
+                              cmd.push_constants(&push, sizeof(push));
+                              cmd.draw_indexed_indirect(indirect, kVirtualGeometryMaxIndirectDraws);
+                          });
     return buffers_.clusters.is_valid();
 }
 

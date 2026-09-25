@@ -400,8 +400,22 @@ bool VulkanDevice::create_logical_device() {
     VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
+
+    // shaderDrawParameters (Vulkan 1.1) is required for gl_DrawIDARB in the virtual-geometry
+    // visibility pass. Enable it only when the physical device reports support.
+    VkPhysicalDeviceVulkan11Features v11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    VkPhysicalDeviceVulkan11Features v11_supported{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    {
+        VkPhysicalDeviceFeatures2 probe{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        probe.pNext = &v11_supported;
+        vkGetPhysicalDeviceFeatures2(physical_, &probe);
+    }
+    v11.shaderDrawParameters = v11_supported.shaderDrawParameters;
+    v11.pNext = &f13;
+
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    f2.pNext = &f13;
+    f2.pNext = &v11;
 
     // Enabling VK_KHR_portability_subset is only half the contract. The extension is a list of
     // capabilities a Metal/D3D translation layer may or may not have, and — like every Vulkan
@@ -439,6 +453,11 @@ bool VulkanDevice::create_logical_device() {
     vkGetPhysicalDeviceFeatures(physical_, &supported);
     anisotropy_supported_ = supported.samplerAnisotropy == VK_TRUE;
     f2.features.samplerAnisotropy = supported.samplerAnisotropy;
+
+    // The virtual-geometry visibility pass submits a fixed-capacity indexed-indirect draw so a
+    // later GPU brick can decide the visible count without a same-frame readback. That needs
+    // drawCount > 1, which requires multiDrawIndirect.
+    f2.features.multiDrawIndirect = supported.multiDrawIndirect;
 
     // Storage images in NARROW/NORMALIZED formats (m10.4b's SDF clipmap: imageStore/imageLoad on
     // an image3D<r16_snorm>) need this feature. Vulkan's mandatory storage-image format list
