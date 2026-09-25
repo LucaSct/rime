@@ -121,6 +121,10 @@ struct VirtualGeometryVisibilityStats {
     std::uint32_t skipped_too_many_triangles = 0; // > 128 triangles: the ID has 7 triangle bits
     std::uint32_t skipped_duplicate_slot = 0;     // a slot already used earlier in this request
     std::uint32_t skipped_over_capacity = 0; // accepted cluster past the fixed indirect draw count
+    // The device cannot do GPU-driven draw (AdapterInfo::gpu_driven_draw). Every cluster in the
+    // request lands here: this path has no non-indirect fallback, and drawing a truncated cut
+    // would look like a selection bug a long way from its cause.
+    std::uint32_t skipped_no_gpu_driven_draw = 0;
 };
 
 class VirtualGeometryVisibilityPass {

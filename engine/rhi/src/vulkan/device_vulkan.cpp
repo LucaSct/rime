@@ -459,6 +459,18 @@ bool VulkanDevice::create_logical_device() {
     // drawCount > 1, which requires multiDrawIndirect.
     f2.features.multiDrawIndirect = supported.multiDrawIndirect;
 
+    // Both halves of AdapterInfo::gpu_driven_draw, surfaced together: a consumer that can only use
+    // an indirect draw list when it can also index it by gl_DrawID has one question, not two.
+    adapter_.gpu_driven_draw =
+        supported.multiDrawIndirect == VK_TRUE && v11_supported.shaderDrawParameters == VK_TRUE;
+    if (!adapter_.gpu_driven_draw) {
+        RIME_WARN("rhi: no GPU-driven draw support (multiDrawIndirect {}, shaderDrawParameters {})"
+                  " — the virtual-geometry visibility path will refuse rather than draw a"
+                  " truncated cut",
+                  supported.multiDrawIndirect == VK_TRUE,
+                  v11_supported.shaderDrawParameters == VK_TRUE);
+    }
+
     // Storage images in NARROW/NORMALIZED formats (m10.4b's SDF clipmap: imageStore/imageLoad on
     // an image3D<r16_snorm>) need this feature. Vulkan's mandatory storage-image format list
     // (the spec's "Required Format Support" table) covers only the wide formats (R32_*,

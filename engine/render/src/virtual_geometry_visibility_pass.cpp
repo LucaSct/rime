@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+#include <span>
 #include <vector>
 
 #include "rime/render/passes.hpp"
@@ -165,7 +166,19 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
     std::vector<VirtualGeometryGpuCluster> table;
     std::vector<ClusterDraw> draws;
 
-    for (const VirtualGeometryClusterDraw& item : request.clusters) {
+    // Refuse loudly rather than draw a truncated cut. The single indexed-indirect submission below
+    // needs multiDrawIndirect (or a driver issues only the first command) and shaderDrawParameters
+    // (or gl_DrawID does not resolve); AdapterInfo::gpu_driven_draw is both, and the RHI already
+    // warned once at device creation. Refusing the whole request — rather than each cluster for a
+    // reason that is not the cluster's — keeps every skip counter's meaning honest.
+    const std::span<const VirtualGeometryClusterDraw> gated_clusters =
+        device_.adapter().gpu_driven_draw ? request.clusters
+                                          : std::span<const VirtualGeometryClusterDraw>{};
+    if (gated_clusters.empty() && !request.clusters.empty()) {
+        stats_.skipped_no_gpu_driven_draw += static_cast<std::uint32_t>(request.clusters.size());
+    }
+
+    for (const VirtualGeometryClusterDraw& item : gated_clusters) {
         // Gate order matters only for which counter a doubly-bad cluster lands in; each rejection
         // bumps exactly one counter and the cluster is simply not drawn.
         const auto gate = [&]() -> std::uint32_t* {
@@ -271,6 +284,12 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
         // sequence 0,1,2,...,total_indices-1 and setting first_index to each cluster's index_base,
         // gl_VertexIndex becomes the global cluster index. This avoids gl_PrimitiveID, which would
         // need the geometryShader feature and is not available on MoltenVK.
+        //
+        // Known cost, deliberately unoptimized: this buffer's contents depend only on its LENGTH,
+        // so rebuilding and re-uploading it per declare() is pure redundancy (~1.5 MB at the 1024-
+        // draw capacity). It becomes a grow-only persistent buffer when the next brick moves the
+        // command build onto the GPU and the per-frame upload disappears anyway; optimizing it
+        // before that measurement would be guessing.
         std::vector<std::uint32_t> identity(all_indices.size());
         std::iota(identity.begin(), identity.end(), 0u);
 
