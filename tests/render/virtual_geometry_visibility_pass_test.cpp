@@ -472,3 +472,85 @@ TEST_CASE("vg visibility: a cluster at nonzero page offsets draws its own pixels
         CHECK(pass.stats().drawn == 0);
     }
 }
+
+TEST_CASE("vg visibility: indexed-indirect submission with multiple clusters (M18.3b)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (std::getenv("RIME_REQUIRE_VULKAN") != nullptr) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping indexed-indirect visibility proofs");
+        return;
+    }
+
+    const assets::VirtualGeometryAsset asset = shared_page_fixture();
+    REQUIRE(assets::validate_virtual_geometry(asset) == assets::VirtualGeometryError::None);
+    VirtualGeometryResidency residency;
+    REQUIRE(residency.register_asset(kAssetId, asset));
+    REQUIRE(residency.request_page(kAssetId, 1));
+    REQUIRE(residency.complete_page(kAssetId, 1));
+    const VirtualGeometrySelection selection{{1}, 0};
+
+    VirtualGeometryVisibilityRequest request{};
+    request.asset = &asset;
+    request.asset_id = kAssetId;
+    request.residency = &residency;
+    request.selection = &selection;
+    request.clip_from_object = core::identity();
+
+    SUBCASE("two clusters in one request each land their own slot/generation/triangle IDs") {
+        std::array<VirtualGeometryClusterDraw, 2> draws = {
+            VirtualGeometryClusterDraw{1, 11, 2},
+            VirtualGeometryClusterDraw{2, 12, 3},
+        };
+        request.clusters = {draws.data(), draws.size()};
+        const VirtualGeometryVisibilityWords left_id =
+            *pack_virtual_geometry_visibility_id64({11, 2});
+        const VirtualGeometryVisibilityWords right_id =
+            *pack_virtual_geometry_visibility_id64({12, 3});
+
+        VirtualGeometryVisibilityPass pass(*device);
+        const Readback r = render_cluster(*device, pass, request);
+        CHECK(r.drew);
+        CHECK(pass.stats().drawn == 2);
+        CHECK(count_in_rect(r.ids, left_id, 8, 24, 16, 48) == 16u * 32u);
+        CHECK(count_in_rect(r.ids, right_id, 40, 56, 16, 48) == 16u * 32u);
+
+        // Triangle bits are real and per-cluster: each quad emits four triangles; exactly one
+        // winding (two triangles) survives the back-face cull for each cluster.
+        for (const auto& id : {left_id, right_id}) {
+            std::array<std::size_t, 4> per_triangle{};
+            for (const VirtualGeometryVisibilityWords w : r.ids) {
+                if (cluster_bits(w) == id) {
+                    ++per_triangle[unpack_virtual_geometry_visibility_id64(w)->triangle & 3u];
+                }
+            }
+            CHECK(per_triangle[0] + per_triangle[1] + per_triangle[2] + per_triangle[3] > 0u);
+            const bool first_winding = per_triangle[0] != 0;
+            CHECK(per_triangle[first_winding ? 0 : 2] > 0u);
+            CHECK(per_triangle[first_winding ? 1 : 3] > 0u);
+            CHECK(per_triangle[first_winding ? 2 : 0] + per_triangle[first_winding ? 3 : 1] == 0u);
+        }
+    }
+
+    SUBCASE(
+        "a request larger than the fixed capacity counts the overflow and still draws what fits") {
+        std::vector<VirtualGeometryClusterDraw> many;
+        many.reserve(kVirtualGeometryMaxIndirectDraws + 1);
+        for (std::uint32_t slot = 0; slot < kVirtualGeometryMaxIndirectDraws + 1; ++slot) {
+            many.push_back({1, slot, 0});
+        }
+        request.clusters = {many.data(), many.size()};
+        const VirtualGeometryVisibilityWords first_id =
+            *pack_virtual_geometry_visibility_id64({0, 0});
+
+        VirtualGeometryVisibilityPass pass(*device);
+        const Readback r = render_cluster(*device, pass, request);
+        CHECK(r.drew);
+        CHECK(pass.stats().drawn == kVirtualGeometryMaxIndirectDraws);
+        CHECK(pass.stats().skipped_over_capacity == 1);
+        // The first accepted cluster is the one that survives the depth test (same depth,
+        // earlier draw wins the Less test), so its slot is visible in the left rectangle.
+        CHECK(count_in_rect(r.ids, first_id, 8, 24, 16, 48) == 16u * 32u);
+    }
+}

@@ -21,12 +21,14 @@
 // triangle, cluster slot, generation and format version — so a recycled slot cannot be confused
 // with an old pixel and the resolve pass (virtual_geometry_resolve_pass.hpp) can find the triangle.
 //
-// **Vertex pulling** (M18 step 2). The vertex stage has no vertex or index buffer bound: it reads
-// the cluster's u32 indices and interleaved vertices from storage buffers by gl_VertexIndex and
-// derives the triangle index as gl_VertexIndex / 3. That is how the triangle reaches the pixel
-// portably — gl_PrimitiveID in a fragment shader needs the Vulkan `geometryShader` feature, which
-// MoltenVK does not have — and it means the resolve pass reads exactly the same buffers this pass
-// drew from, so the two cannot disagree about which three vertices a triangle index names.
+// **Indexed-indirect submission** (M18.3b). The pass submits all accepted clusters as one
+// `draw_indexed_indirect` with a fixed-capacity command buffer. Per-cluster values live in a
+// std430 storage buffer indexed by `gl_DrawIDARB`; the MVP alone remains a push constant. An
+// identity index buffer is bound so `gl_VertexIndex` is the global cluster index, letting the
+// vertex shader keep pulling from the existing storage buffers and derive the triangle as
+// `(gl_VertexIndex - index_base) / 3`. This avoids `gl_PrimitiveID`, which needs the Vulkan
+// `geometryShader` feature MoltenVK does not have, and keeps the resolve pass reading the same
+// buffers this pass drew from.
 //
 // The fragment stage ALSO writes gl_FragCoord.z's bits to a second R32Uint target: the RHI's
 // depth readback copies the colour aspect only, so encoding depth into a copyable integer is how
@@ -77,10 +79,30 @@ struct VirtualGeometryGpuCluster {
 
 static_assert(sizeof(VirtualGeometryGpuCluster) == 32, "must match the shaders' std430 struct");
 
+// Per-draw data for the single indexed-indirect submission. Push constants cannot vary between
+// commands, so the per-cluster values live in this std430 storage buffer, one record per draw,
+// indexed by gl_DrawID in the vertex shader.
+struct VirtualGeometryDrawRecord {
+    std::uint32_t id_lo = 0;        // packed v3 visibility ID, low word
+    std::uint32_t id_hi = 0;        // packed v3 visibility ID, high word
+    std::uint32_t index_base = 0;   // this cluster's first index in the global index buffer
+    std::uint32_t vertex_base = 0;  // this cluster's first vertex in the global vertex buffer
+    std::uint32_t stride_words = 0; // cooked vertex stride in u32 words
+    std::uint32_t cluster_slot = 0; // cluster slot this draw owns
+    std::uint32_t pad[2] = {};      // pad to 32 bytes for std430
+};
+
+static_assert(sizeof(VirtualGeometryDrawRecord) == 32, "must match the shaders' std430 struct");
+
+inline constexpr std::uint32_t kVirtualGeometryMaxIndirectDraws = 1024u;
+
 struct VirtualGeometryClusterBuffers {
     rhi::BufferHandle vertices;
     rhi::BufferHandle indices;
     rhi::BufferHandle clusters;
+    rhi::BufferHandle records;             // per-draw VirtualGeometryDrawRecord storage buffer
+    rhi::BufferHandle indirect;            // constant-capacity VkDrawIndexedIndirectCommand array
+    rhi::BufferHandle identity_index;      // identity sequence 0,1,2,... for vertex pulling
     std::uint32_t cluster_count = 0;       // entries in `clusters` (max drawn slot + 1)
     std::uint32_t vertex_stride_words = 0; // cooked vertex stride / 4
 };
@@ -98,6 +120,11 @@ struct VirtualGeometryVisibilityStats {
     std::uint32_t skipped_bad_id = 0;          // slot/generation do not fit the visibility ABI
     std::uint32_t skipped_too_many_triangles = 0; // > 128 triangles: the ID has 7 triangle bits
     std::uint32_t skipped_duplicate_slot = 0;     // a slot already used earlier in this request
+    std::uint32_t skipped_over_capacity = 0; // accepted cluster past the fixed indirect draw count
+    // The device cannot do GPU-driven draw (AdapterInfo::gpu_driven_draw). Every cluster in the
+    // request lands here: this path has no non-indirect fallback, and drawing a truncated cut
+    // would look like a selection bug a long way from its cause.
+    std::uint32_t skipped_no_gpu_driven_draw = 0;
 };
 
 class VirtualGeometryVisibilityPass {

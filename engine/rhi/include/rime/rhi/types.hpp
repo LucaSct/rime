@@ -417,6 +417,18 @@ struct AdapterInfo {
     // block-compressed load with a named counter and a warn-once. It must never silently substitute
     // the placeholder, because a fallback path nothing exercises is a fallback that does not work.
     bool block_compression = false;
+
+    // `gpu_driven_draw` is two Vulkan features at once, because the virtual-geometry visibility
+    // path needs both or neither: `multiDrawIndirect` (a single indirect draw may issue more than
+    // one command) and `shaderDrawParameters` (a shader may read `gl_DrawID` to learn which of
+    // those commands it is drawing). Together they are what lets a draw list live in GPU memory
+    // instead of in push constants.
+    //
+    // Same rule as `block_compression`, and for the same reason: a device without this must make
+    // its consumer REFUSE with a named counter and a warn-once. The silent failure here is
+    // particularly nasty — a driver that ignores `drawCount > 1` renders the first cluster and
+    // drops the rest, which looks like a selection bug a long way from its cause.
+    bool gpu_driven_draw = false;
 };
 
 // ── Bit-flag operators ──────────────────────────────────────────────────────────────────────
