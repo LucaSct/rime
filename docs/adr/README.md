@@ -68,3 +68,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0041](0041-the-visual-bar-m17.md) — M17 "The Visual Bar" (the budget is earned before the bar is spent; the frame becomes attributable first; virtualized geometry deferred to M18)
 - [ADR-0042](0042-fluids-track-reopened.md) — Track FL reopens (water, fire, smoke: the particle + heightfield fork now, a unified particle-grid substrate gated for later; all three bricks strictly after M18)
 - [ADR-0043](0043-virtualized-geometry-m18.md) — M18 virtualized geometry (rigid opaque mesh clusters, replacement DAG, GPU selection and a visibility path; terrain is M19)
+- [ADR-0044](0044-visibility-id-and-indirect-abi.md) — the 64-bit `RG32Uint` visibility ID (version 3; version 2 retired) and how an indirect draw finds its cluster (`gl_DrawID` records, an identity index buffer, a constant draw count)
