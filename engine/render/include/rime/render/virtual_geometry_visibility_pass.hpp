@@ -9,6 +9,7 @@
 #include "rime/assets/virtual_geometry.hpp"
 #include "rime/core/math/mat.hpp"
 #include "rime/render/render_graph.hpp"
+#include "rime/render/virtual_geometry_gpu_selection.hpp"
 #include "rime/render/virtual_geometry_residency.hpp"
 #include "rime/render/virtual_geometry_selection.hpp"
 
@@ -58,6 +59,26 @@ struct VirtualGeometryVisibilityRequest {
     // Every cluster is gated independently: a rejected one is counted and simply not drawn.
     std::span<const VirtualGeometryClusterDraw> clusters = {};
     core::Mat4 clip_from_object{};
+    // GPU-BUILT SUBMISSION (M18.3c), opt-in. When this holds the flag buffer that
+    // select_virtual_geometry_on_gpu left on the device, the "is this cluster on the cut?" gate
+    // moves off the CPU: every cluster that passes the static and residency gates is uploaded as a
+    // CANDIDATE, and a compute dispatch turns the GPU's verdict into the indirect commands. That is
+    // what ADR-0043 gate 4 asks for — no readback decides this frame's draw list.
+    //
+    // `selection` is still required, and must still be the cut: it is what the CPU path gates on,
+    // and on the GPU path it is what the test compares the GPU's choice against. The two must
+    // describe the same frame or the comparison is meaningless.
+    // The buffer must outlive the frame: declare() imports it into the graph, so it is read when
+    // the graph executes, not when declare() returns.
+    const VirtualGeometryGpuSelectionBuffers* gpu_selection = nullptr;
+    // Effective draw capacity, clamped to kVirtualGeometryMaxIndirectDraws; 0 means the maximum. On
+    // the GPU path it is the builder's capacity (and the CPU keeps uploading candidates up to
+    // kVirtualGeometryMaxDrawCandidates); on the CPU path it caps what declare() accepts, counting
+    // the rest into skipped_over_capacity. It does NOT change the submitted draw count, which stays
+    // the constant kVirtualGeometryMaxIndirectDraws — commands past the capacity are zeroed no-ops.
+    // It exists so the overflow-to-coarse path is reachable with a handful of clusters instead of
+    // 1025 of them, and so a future frame budget has somewhere to land.
+    std::uint32_t max_draws = 0;
 };
 
 // The GPU-side cluster data a declare() uploaded, for the resolve pass to read. All three are
@@ -96,6 +117,41 @@ static_assert(sizeof(VirtualGeometryDrawRecord) == 32, "must match the shaders' 
 
 inline constexpr std::uint32_t kVirtualGeometryMaxIndirectDraws = 1024u;
 
+// One cluster the GPU builder MAY turn into a draw. The CPU owns the gates only it can answer —
+// static asset validity, residency, the visibility-ID bounds, slot uniqueness — and uploads
+// everything that survives them; the builder owns exactly one gate, "is this cluster's group on the
+// cut?", because that is the answer that lives in GPU memory.
+struct VirtualGeometryDrawCandidate {
+    VirtualGeometryDrawRecord record; // emitted verbatim when the candidate becomes a draw
+    std::uint32_t index_count = 0;    // indices this cluster draws
+    std::uint32_t group = 0;          // replacement group whose selected flag gates it
+    // 1 = this cluster belongs to the permanently-resident coarse group, so it is a legal fallback
+    // when the full cut does not fit the command buffer.
+    std::uint32_t coarse = 0;
+    std::uint32_t pad = 0;
+};
+
+static_assert(sizeof(VirtualGeometryDrawCandidate) == 48,
+              "must match the Candidate struct in vg_build_draws.comp");
+
+// Upload ceiling for candidates. The builder's compaction scan is O(N^2) flag reads, which is free
+// at this N against a buffer this small; a larger ceiling wants a prefix sum first.
+inline constexpr std::uint32_t kVirtualGeometryMaxDrawCandidates = 4096u;
+
+// What the GPU builder decided, as IT saw it. Read back by tests and tooling only — the frame path
+// never waits on this, which is the whole point. Mirrors the BuildCounters block in
+// vg_build_draws.comp.
+struct VirtualGeometryGpuBuildCounters {
+    std::uint32_t selected_total = 0;       // candidates on the cut, before capacity
+    std::uint32_t emitted = 0;              // draw commands written
+    std::uint32_t fell_back_to_coarse = 0;  // the cut overflowed; the coarse cut was drawn
+    std::uint32_t coarse_over_capacity = 0; // even the coarse cut was truncated
+    // The cut overflowed and no coarse candidate was offered, so NOTHING was drawn. The candidate
+    // upload has its own ceiling (kVirtualGeometryMaxDrawCandidates) and the coarse cluster can be
+    // the one it drops; this is the counter that keeps that from being an invisible hole.
+    std::uint32_t overflow_without_coarse = 0;
+};
+
 struct VirtualGeometryClusterBuffers {
     rhi::BufferHandle vertices;
     rhi::BufferHandle indices;
@@ -103,8 +159,11 @@ struct VirtualGeometryClusterBuffers {
     rhi::BufferHandle records;             // per-draw VirtualGeometryDrawRecord storage buffer
     rhi::BufferHandle indirect;            // constant-capacity VkDrawIndexedIndirectCommand array
     rhi::BufferHandle identity_index;      // identity sequence 0,1,2,... for vertex pulling
+    rhi::BufferHandle candidates;          // GPU path only: VirtualGeometryDrawCandidate array
+    rhi::BufferHandle build_counters;      // GPU path only: VirtualGeometryGpuBuildCounters
     std::uint32_t cluster_count = 0;       // entries in `clusters` (max drawn slot + 1)
     std::uint32_t vertex_stride_words = 0; // cooked vertex stride / 4
+    std::uint32_t candidate_count = 0;     // entries in `candidates` (0 on the CPU path)
 };
 
 // Every way a request can draw nothing gets its own counter (the replication rule applied to
@@ -125,6 +184,19 @@ struct VirtualGeometryVisibilityStats {
     // request lands here: this path has no non-indirect fallback, and drawing a truncated cut
     // would look like a selection bug a long way from its cause.
     std::uint32_t skipped_no_gpu_driven_draw = 0;
+    std::uint32_t skipped_over_candidate_cap =
+        0; // GPU path: past kVirtualGeometryMaxDrawCandidates
+    // request.gpu_selection was given but carries no verdict buffer. As with
+    // skipped_no_gpu_driven_draw the WHOLE request lands here: the safe reading of a missing
+    // verdict is "nothing is selected", and quietly gating on the CPU's copy instead would make a
+    // broken GPU path look like a working one.
+    std::uint32_t skipped_no_gpu_verdict = 0;
+    // GPU path: candidates uploaded and offered to the builder. `drawn` stays 0 on this path, on
+    // purpose — the CPU does not know what was drawn, and a counter that reported an intention as a
+    // fact is the exact failure the counter rule exists to prevent. What the GPU chose is in
+    // VirtualGeometryGpuBuildCounters.
+    std::uint32_t candidates_offered = 0;
+    std::uint32_t gpu_built = 0; // 1 = the last declare() built its commands on the GPU
 };
 
 class VirtualGeometryVisibilityPass {
@@ -143,6 +215,19 @@ public:
     //
     // The uploaded cluster buffers are replaced by the next declare(); the caller must have
     // waited for the submission that used the previous ones (one visibility frame in flight).
+    //
+    // With request.gpu_selection set, a "vg-build-draws" COMPUTE pass is declared first and the
+    // raster pass reads what it wrote. Two gates then behave differently, and both are deliberate:
+    // `skipped_not_selected` can no longer fire, because that verdict is the GPU's; and a cluster
+    // of the COARSE group is accepted even though the group has children, because the coarse cut is
+    // the overflow fallback and must be on the device before the overflow is known. The return
+    // value then means "commands were built", not "pixels were drawn" — what the GPU chose is in
+    // VirtualGeometryGpuBuildCounters, read from cluster_buffers().build_counters.
+    //
+    // Known cost of that seam, stated rather than hidden: the CPU uploads the geometry of every
+    // candidate, including the coarse clusters it will usually not draw, because it no longer knows
+    // which ones win. That is the price of not reading the verdict back, and it goes away with the
+    // GPU page pool (M18 step 5), not before.
     bool declare(RenderGraph& graph,
                  RGTexture visibility,
                  RGTexture depth_bits,
@@ -163,7 +248,9 @@ private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
+    rhi::ShaderHandle build_shader_;
     rhi::PipelineHandle pipeline_;
+    rhi::PipelineHandle build_pipeline_;
     VirtualGeometryClusterBuffers buffers_;
     VirtualGeometryVisibilityStats stats_;
 };

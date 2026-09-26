@@ -24,6 +24,7 @@
 #include "rime/core/math/mat.hpp"
 #include "rime/render/passes.hpp"
 #include "rime/render/render_graph.hpp"
+#include "rime/render/virtual_geometry_gpu_selection.hpp"
 #include "rime/render/virtual_geometry_residency.hpp"
 #include "rime/render/virtual_geometry_selection.hpp"
 #include "rime/render/virtual_geometry_visibility_id.hpp"
@@ -553,4 +554,210 @@ TEST_CASE("vg visibility: indexed-indirect submission with multiple clusters (M1
         // earlier draw wins the Less test), so its slot is visible in the left rectangle.
         CHECK(count_in_rect(r.ids, first_id, 8, 24, 16, 48) == 16u * 32u);
     }
+}
+
+namespace {
+
+// Read what the builder decided. This is a TEST-ONLY readback: the frame path never waits on these
+// counters, which is the property M18.3c exists to deliver (ADR-0043 gate 4).
+VirtualGeometryGpuBuildCounters build_counters(rhi::Device& device,
+                                               const VirtualGeometryVisibilityPass& pass) {
+    VirtualGeometryGpuBuildCounters c{};
+    const rhi::BufferHandle handle = pass.cluster_buffers().build_counters;
+    if (handle.is_valid()) {
+        device.read_buffer(handle, &c, sizeof(c), 0);
+    }
+    return c;
+}
+
+} // namespace
+
+TEST_CASE("vg visibility: the indirect commands are built on the GPU from the cut (M18.3c)") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (std::getenv("RIME_REQUIRE_VULKAN") != nullptr) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping GPU-built submission proofs");
+        return;
+    }
+
+    const assets::VirtualGeometryAsset asset = shared_page_fixture();
+    REQUIRE(assets::validate_virtual_geometry(asset) == assets::VirtualGeometryError::None);
+    VirtualGeometryResidency residency;
+    REQUIRE(residency.register_asset(kAssetId, asset));
+    REQUIRE(residency.request_page(kAssetId, 1));
+    REQUIRE(residency.complete_page(kAssetId, 1));
+
+    // One selection, computed on the GPU, whose per-group verdict STAYS on the GPU. The CPU copy
+    // returned here is only what the assertions and the CPU-path comparison need.
+    const VirtualGeometrySelectionInput input{.pixels_per_metre = 2.0f,
+                                              .max_projected_error_px = 1.0f,
+                                              .page_resident =
+                                                  residency.page_residency_bytes(kAssetId)};
+    VirtualGeometryGpuSelectionBuffers flags;
+    const VirtualGeometrySelection selection =
+        select_virtual_geometry_on_gpu(*device, asset, input, &flags);
+    REQUIRE(selection.groups == std::vector<std::uint32_t>{1});
+    REQUIRE(flags.selected_flags.is_valid());
+    REQUIRE(flags.group_count == 2);
+
+    // Cluster 0 is the coarse quad (pixels [16,48)²) and belongs to group 0, which the cut did NOT
+    // select; clusters 1 and 2 are the selected leaves (left [8,24), right [40,56)). Offering all
+    // three is the point: only the GPU's verdict keeps the coarse quad out of the picture.
+    std::array<VirtualGeometryClusterDraw, 3> offered = {
+        VirtualGeometryClusterDraw{0, 10, 1},
+        VirtualGeometryClusterDraw{1, 11, 2},
+        VirtualGeometryClusterDraw{2, 12, 3},
+    };
+    const VirtualGeometryVisibilityWords coarse_id =
+        *pack_virtual_geometry_visibility_id64({10, 1});
+    const VirtualGeometryVisibilityWords left_id = *pack_virtual_geometry_visibility_id64({11, 2});
+    const VirtualGeometryVisibilityWords right_id = *pack_virtual_geometry_visibility_id64({12, 3});
+
+    VirtualGeometryVisibilityRequest request{};
+    request.asset = &asset;
+    request.asset_id = kAssetId;
+    request.residency = &residency;
+    request.selection = &selection;
+    request.clusters = {offered.data(), offered.size()};
+    request.clip_from_object = core::identity();
+
+    SUBCASE("the GPU-built draw list renders the same pixels as the CPU-built one") {
+        // The strongest available proof that the builder applied the cut correctly: the same
+        // request through both paths must produce IDENTICAL images. A builder that ignored the
+        // verdict would paint the coarse quad over the middle; one that mis-ranked its slots would
+        // swap the two leaves' IDs. (It does NOT cover a stale tail: the buffers are still
+        // re-created zero-filled per declare(), so nothing stale exists to replay yet — see the
+        // shader's note.)
+        VirtualGeometryVisibilityPass cpu_pass(*device);
+        const Readback cpu = render_cluster(*device, cpu_pass, request);
+        CHECK(cpu.drew);
+        CHECK(cpu_pass.stats().drawn == 2);
+        CHECK(cpu_pass.stats().skipped_not_selected == 1); // the coarse cluster, gated on the CPU
+        CHECK(cpu_pass.stats().gpu_built == 0);
+
+        request.gpu_selection = &flags;
+        VirtualGeometryVisibilityPass gpu_pass(*device);
+        const Readback gpu = render_cluster(*device, gpu_pass, request);
+        CHECK(gpu.drew);
+        CHECK(gpu_pass.stats().gpu_built == 1);
+        // `drawn` is deliberately 0 here: the CPU does not know what was drawn on this path.
+        CHECK(gpu_pass.stats().drawn == 0);
+        CHECK(gpu_pass.stats().candidates_offered == 3);   // the coarse cluster IS offered…
+        CHECK(gpu_pass.stats().skipped_not_selected == 0); // …and the CPU no longer judges it
+        CHECK(gpu_pass.stats().skipped_not_leaf == 0);     // the coarse exception applied
+
+        const VirtualGeometryGpuBuildCounters counters = build_counters(*device, gpu_pass);
+        CHECK(counters.selected_total == 2); // the GPU found exactly the two leaves
+        CHECK(counters.emitted == 2);
+        CHECK(counters.fell_back_to_coarse == 0);
+        CHECK(counters.coarse_over_capacity == 0);
+
+        CHECK(gpu.ids == cpu.ids);
+        CHECK(gpu.depth_bits == cpu.depth_bits);
+        // Stated absolutely as well as relatively, so the pair cannot both be empty and "agree".
+        CHECK(count_in_rect(gpu.ids, left_id, 8, 24, 16, 48) == 16u * 32u);
+        CHECK(count_in_rect(gpu.ids, right_id, 40, 56, 16, 48) == 16u * 32u);
+        std::size_t coarse_pixels = 0;
+        for (const VirtualGeometryVisibilityWords w : gpu.ids) {
+            coarse_pixels += cluster_bits(w) == coarse_id ? 1 : 0;
+        }
+        CHECK(coarse_pixels == 0); // the unselected group never reached the raster stage
+        CHECK(at(gpu.ids, 32, 32) == kInvalidVirtualGeometryVisibilityWords); // between the leaves
+    }
+
+    SUBCASE("a cut that overflows the capacity degrades to the coarse cut, not to a hole") {
+        // max_draws = 1 makes the two-leaf cut overflow with three clusters instead of 1025. The
+        // submitted draw count is unchanged; only the builder's capacity moved.
+        request.gpu_selection = &flags;
+        request.max_draws = 1;
+
+        VirtualGeometryVisibilityPass pass(*device);
+        const Readback r = render_cluster(*device, pass, request);
+        CHECK(r.drew);
+        CHECK(pass.stats().gpu_built == 1);
+        CHECK(pass.stats().candidates_offered == 3);
+        CHECK(pass.stats().skipped_over_candidate_cap ==
+              0); // the cap is the builder's, not the CPU's
+
+        const VirtualGeometryGpuBuildCounters counters = build_counters(*device, pass);
+        CHECK(counters.selected_total == 2);
+        CHECK(counters.fell_back_to_coarse == 1);
+        CHECK(counters.emitted == 1);
+        CHECK(counters.coarse_over_capacity == 0);
+        CHECK(counters.overflow_without_coarse == 0);
+
+        // What landed is the COARSE quad covering [16,48)², whole — not one leaf and a hole where
+        // the other should be. The leaves' exclusive columns are the witness: pixels in [8,16) and
+        // [48,56) belong to a leaf only, so they must be clear.
+        CHECK(count_in_rect(r.ids, coarse_id, 16, 48, 16, 48) == 32u * 32u);
+        CHECK(count_in_rect(r.ids, left_id, 8, 16, 16, 48) == 0u);
+        CHECK(count_in_rect(r.ids, right_id, 48, 56, 16, 48) == 0u);
+        std::size_t drawn_pixels = 0;
+        for (const VirtualGeometryVisibilityWords w : r.ids) {
+            drawn_pixels += w == kInvalidVirtualGeometryVisibilityWords ? 0 : 1;
+        }
+        CHECK(drawn_pixels == 32u * 32u); // exactly the coarse quad, nothing else
+    }
+
+    SUBCASE("an overflow with no coarse candidate offered draws nothing and says so") {
+        // The fallback can only fire if the coarse clusters were offered. A caller that offers only
+        // leaves and then overflows gets nothing drawn — which is defensible, but must be VISIBLE,
+        // or an object vanishes with every counter reading zero.
+        request.gpu_selection = &flags;
+        request.max_draws = 1;
+        request.clusters = {offered.data() + 1, 2}; // the two leaves, no coarse cluster
+
+        VirtualGeometryVisibilityPass pass(*device);
+        const Readback r = render_cluster(*device, pass, request);
+        CHECK(pass.stats().candidates_offered == 2);
+        const VirtualGeometryGpuBuildCounters counters = build_counters(*device, pass);
+        CHECK(counters.selected_total == 2);
+        CHECK(counters.fell_back_to_coarse == 1);
+        CHECK(counters.overflow_without_coarse == 1); // the witness
+        CHECK(counters.emitted == 0);
+        check_all_clear(r); // nothing was drawn, and the targets are "nothing" rather than stale
+    }
+
+    SUBCASE("a verdict buffer that carries nothing refuses the request instead of guessing") {
+        const VirtualGeometryGpuSelectionBuffers empty{};
+        request.gpu_selection = &empty;
+
+        VirtualGeometryVisibilityPass pass(*device);
+        const Readback r = render_cluster(*device, pass, request);
+        CHECK_FALSE(r.drew);
+        check_all_clear(r);
+        CHECK(pass.stats().skipped_no_gpu_verdict == 3);
+        CHECK(pass.stats().drawn == 0);
+        CHECK(pass.stats().candidates_offered == 0);
+        CHECK(pass.stats().gpu_built == 0);
+    }
+
+    SUBCASE("the build is a compute pass in the same frame as the draw it feeds") {
+        // The structural half of "no readback decides this frame's draw list": the command build
+        // and the raster pass are two passes of ONE graph, ordered by the graph's own dependency
+        // derivation rather than by a CPU wait in between.
+        request.gpu_selection = &flags;
+        RenderGraph graph(*device);
+        const RGTexture ids =
+            graph.create_texture({{kSize, kSize}, rhi::Format::RG32Uint, "vg-ids"});
+        const RGTexture depth_bits =
+            graph.create_texture({{kSize, kSize}, rhi::Format::R32Uint, "vg-depth-bits"});
+        const RGTexture depth = graph.create_texture({{kSize, kSize}, kDepthFormat, "vg-depth"});
+        graph.export_texture(ids);
+
+        VirtualGeometryVisibilityPass pass(*device);
+        REQUIRE(pass.declare(graph, ids, depth_bits, depth, request));
+        REQUIRE(graph.pass_count() == 2);
+        CHECK(graph.pass_name(0) == "vg-build-draws");
+        CHECK(graph.pass_name(1) == "vg-visibility");
+
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        CHECK(build_counters(*device, pass).emitted == 2);
+    }
+
+    device->destroy(flags.selected_flags);
 }

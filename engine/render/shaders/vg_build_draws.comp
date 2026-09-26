@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// M18.3c: build the visibility pass's indexed-indirect command list ON THE GPU, from the
+// selection's per-group flag buffer.
+//
+// Why this shader has to exist at all (ADR-0043 gate 4): "no GPU readback decides the same frame's
+// draw list". Until now the CPU read the selection flags back, filtered its candidates, and wrote
+// the commands — a round trip that serialises the frame and, worse, makes the draw list one frame
+// stale the moment selection moves into the frame graph. Here the flags never leave GPU memory:
+// the CPU uploads every CANDIDATE it could legally draw (static asset facts + residency, which it
+// alone knows) and this dispatch decides which candidates become draws.
+//
+// The technique — deterministic stream compaction by rank. Each invocation scans the whole
+// candidate array and counts how many selected candidates precede it; that count IS its slot in
+// the compacted output. The obvious alternative, an atomicAdd append, is one line shorter and
+// produces a draw order that varies run to run — which would make the command buffer
+// irreproducible and put cross-cluster depth ties at the mercy of scheduling. The scan is O(N²)
+// flag reads over a buffer of at most kMaxCandidates * 4 bytes, which is L2-resident and free next
+// to the raster work it feeds; if N ever grows past a few thousand this becomes a workgroup prefix
+// sum, not an atomic append. A side benefit: with no atomics and no barriers, every invocation
+// knows the TOTAL as well as its own rank, so the overflow decision needs no second dispatch.
+#version 450
+
+layout(local_size_x = 64) in;
+
+// Mirrors rime::render::VirtualGeometryDrawCandidate (48 bytes, std430 array stride 48).
+struct Candidate {
+    // ── the VirtualGeometryDrawRecord this candidate would emit, verbatim ──
+    uint id_lo;
+    uint id_hi;
+    uint index_base;
+    uint vertex_base;
+    uint stride_words;
+    uint cluster_slot;
+    uint record_pad0;
+    uint record_pad1;
+    // ── what the builder needs and the record does not carry ──
+    uint index_count; // indices this cluster draws
+    uint group;       // replacement group whose selected flag gates it
+    uint coarse;      // 1 = belongs to the permanently-resident coarse cut
+    uint pad;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Candidates {
+    Candidate candidates[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer Selected {
+    uint selected[]; // one per group, as vg_select.comp wrote it — never read back to the CPU
+};
+
+layout(std430, set = 0, binding = 2) writeonly buffer Records {
+    // kMaxDraws VirtualGeometryDrawRecord entries (8 words each), indexed by gl_DrawID.
+    uint records[];
+};
+
+layout(std430, set = 0, binding = 3) writeonly buffer Indirect {
+    // kMaxDraws VkDrawIndexedIndirectCommand entries, 5 words each. Written as a flat uint array
+    // rather than a struct so the 20-byte stride cannot be rounded up by a std430 rule.
+    uint commands[];
+};
+
+layout(std430, set = 0, binding = 4) buffer BuildCounters {
+    uint selected_total;         // candidates the cut accepted, BEFORE capacity is applied
+    uint emitted;                // draw commands actually written
+    uint fell_back_to_coarse;    // 1 = the cut overflowed and the coarse cut was drawn instead
+    uint coarse_over_capacity;   // 1 = even the coarse cut did not fit (it was truncated)
+    // 1 = the cut overflowed and there was NO coarse candidate to fall back to, so nothing was
+    // drawn. Reachable when the candidate upload itself was capped and the coarse cluster was the
+    // one left out; without this counter that case is an object silently vanishing.
+    uint overflow_without_coarse;
+} counters;
+
+layout(push_constant) uniform PushConstants {
+    uint candidate_count;
+    uint group_count;
+    uint capacity;   // effective draw capacity; <= kMaxDraws (see VirtualGeometryVisibilityRequest)
+    uint max_draws;  // kVirtualGeometryMaxIndirectDraws, the buffers' real length
+} pc;
+
+const uint kRecordWords = 8u;
+const uint kCommandWords = 5u;
+
+void write_record(uint slot, Candidate c) {
+    uint base = slot * kRecordWords;
+    records[base + 0u] = c.id_lo;
+    records[base + 1u] = c.id_hi;
+    records[base + 2u] = c.index_base;
+    records[base + 3u] = c.vertex_base;
+    records[base + 4u] = c.stride_words;
+    records[base + 5u] = c.cluster_slot;
+    records[base + 6u] = 0u;
+    records[base + 7u] = 0u;
+}
+
+void write_command(uint slot, uint index_count, uint first_index) {
+    uint base = slot * kCommandWords;
+    commands[base + 0u] = index_count;
+    commands[base + 1u] = 1u; // instance_count
+    commands[base + 2u] = first_index;
+    commands[base + 3u] = 0u; // vertex_offset: the vertex shader rebases from the record
+    commands[base + 4u] = 0u; // first_instance: identity comes from gl_DrawID, not this (ADR-0044)
+}
+
+void zero_slot(uint slot) {
+    // An all-zero command is a legal no-op (index_count = 0), which is what lets the CPU submit a
+    // CONSTANT draw count without knowing what the GPU chose. The record is zeroed too so a stale
+    // visibility ID from the previous frame cannot be read by a draw that should not exist.
+    uint base = slot * kRecordWords;
+    for (uint i = 0u; i < kRecordWords; ++i) {
+        records[base + i] = 0u;
+    }
+    write_command(slot, 0u, 0u);
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    uint capacity = min(pc.capacity, pc.max_draws);
+
+    // One full deterministic scan: my rank among the selected candidates, my rank among the coarse
+    // ones, and both totals. Every invocation computes the same totals from the same immutable
+    // inputs, so there is nothing to synchronise.
+    uint total = 0u;
+    uint coarse_total = 0u;
+    uint my_rank = 0u;
+    uint my_coarse_rank = 0u;
+    bool mine_selected = false;
+    bool mine_coarse = false;
+    for (uint c = 0u; c < pc.candidate_count; ++c) {
+        Candidate cand = candidates[c];
+        bool sel = cand.group < pc.group_count && selected[cand.group] != 0u;
+        bool coarse = cand.coarse != 0u;
+        if (c == t) {
+            mine_selected = sel;
+            mine_coarse = coarse;
+        }
+        if (sel) {
+            if (c < t) {
+                ++my_rank;
+            }
+            ++total;
+        }
+        if (coarse) {
+            if (c < t) {
+                ++my_coarse_rank;
+            }
+            ++coarse_total;
+        }
+    }
+
+    // Overflow degrades to COARSE-BUT-HOLE-FREE rather than to a truncated cut. A truncated cut
+    // drops whichever clusters happened to sort last, which reads as a hole in the middle of the
+    // mesh a long way from its cause; the coarse cut is permanently resident by contract, so it
+    // covers the whole object at lower detail. Drawing nothing at all would be the third option and
+    // is worse than both.
+    bool overflow = total > capacity;
+    uint emit_count = overflow ? min(coarse_total, capacity) : total;
+
+    if (t == 0u) {
+        counters.selected_total = total;
+        counters.emitted = emit_count;
+        counters.fell_back_to_coarse = overflow ? 1u : 0u;
+        counters.coarse_over_capacity = (overflow && coarse_total > capacity) ? 1u : 0u;
+        counters.overflow_without_coarse = (overflow && coarse_total == 0u) ? 1u : 0u;
+    }
+
+    if (t < pc.candidate_count) {
+        bool emit = overflow ? mine_coarse : mine_selected;
+        uint slot = overflow ? my_coarse_rank : my_rank;
+        if (emit && slot < capacity) {
+            Candidate mine = candidates[t];
+            write_record(slot, mine);
+            write_command(slot, mine.index_count, mine.index_base);
+        }
+    }
+
+    // Zero every slot past the emitted list, which is why the dispatch is sized to cover max_draws
+    // and not just the candidates. Today the CPU also uploads these buffers zero-filled each
+    // declare(), so this is belt-and-braces rather than load-bearing — it becomes load-bearing the
+    // moment the buffers go grow-only persistent (the next step), and writing it now means that
+    // change cannot silently start replaying last frame's commands.
+    if (t < pc.max_draws && t >= emit_count) {
+        zero_slot(t);
+    }
+}

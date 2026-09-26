@@ -41,6 +41,7 @@ rime_add_shaders(rime_render
     shaders/pbr_forward_shadowed.frag
     shaders/cluster_cull.comp
     shaders/vg_select.comp
+    shaders/vg_build_draws.comp
     shaders/sdf_compose.comp
     shaders/ddgi_trace.comp
     shaders/ddgi_blend_irradiance.comp
