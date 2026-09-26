@@ -98,8 +98,12 @@ std::uint32_t longest_group_chain(const assets::VirtualGeometryAsset& asset) {
 VirtualGeometrySelection
 select_virtual_geometry_on_gpu(rhi::Device& device,
                                const assets::VirtualGeometryAsset& asset,
-                               const VirtualGeometrySelectionInput& input) {
+                               const VirtualGeometrySelectionInput& input,
+                               VirtualGeometryGpuSelectionBuffers* keep_flags) {
     VirtualGeometrySelection out;
+    if (keep_flags != nullptr) {
+        *keep_flags = {};
+    }
 
     // Identical validation to the CPU oracle: reject bad assets, non-finite / negative camera
     // scales, and residency spans that do not match the page count.
@@ -127,6 +131,30 @@ select_virtual_geometry_on_gpu(rhi::Device& device,
         out.gpu_depth_fallback = 1;
         // The CPU oracle never touches the GPU counters, so an overflow witness is zero here.
         out.gpu_depth_overflow = 0;
+        // A caller that asked for the flag buffer gets one anyway, uploaded from the oracle's
+        // verdict. The alternative — hand back a selection with no buffer — would make "the asset
+        // was too deep for the shader" indistinguishable from "nothing is selected" at the
+        // consumer, and the consumer's safe reading of an absent verdict is to draw NOTHING. That
+        // is a whole object vanishing because of an asset property, which is exactly the class of
+        // silent failure this path is built to avoid. This is not a readback: the flags were
+        // computed on the CPU and are being sent the same direction as every other upload.
+        if (keep_flags != nullptr) {
+            const auto fallback_group_count = static_cast<std::uint32_t>(asset.groups.size());
+            std::vector<std::uint32_t> flags(std::max<std::size_t>(fallback_group_count, 1u), 0u);
+            for (const std::uint32_t g : out.groups) {
+                if (g < fallback_group_count) {
+                    flags[g] = 1u;
+                }
+            }
+            rhi::BufferDesc fd{};
+            fd.size = flags.size() * sizeof(std::uint32_t);
+            fd.usage = rhi::BufferUsage::Storage;
+            fd.memory = rhi::MemoryUsage::CpuToGpu;
+            fd.initial_data = flags.data();
+            fd.debug_name = "vg-select-selected-cpu-fallback";
+            keep_flags->selected_flags = device.create_buffer(fd);
+            keep_flags->group_count = fallback_group_count;
+        }
         return out;
     }
 
@@ -336,7 +364,16 @@ select_virtual_geometry_on_gpu(rhi::Device& device,
     out.refinement_blocked_by_residency = counters[0];
     out.gpu_depth_overflow = counters[1];
 
-    device.destroy(selected_buffer);
+    // The verdict either goes home with the caller (GPU-to-GPU, see the header) or dies here. Note
+    // the flags are handed on EVEN WHEN the readback above found nothing selected: "nothing is on
+    // the cut" is a verdict, and a caller that treated an absent buffer as "draw everything" would
+    // be the silent-wrong-pixel failure this whole path exists to avoid.
+    if (keep_flags != nullptr) {
+        keep_flags->selected_flags = selected_buffer;
+        keep_flags->group_count = group_count;
+    } else {
+        device.destroy(selected_buffer);
+    }
     device.destroy(counter_buffer);
     device.destroy(child_group_buffer);
     device.destroy(parent_buffer);

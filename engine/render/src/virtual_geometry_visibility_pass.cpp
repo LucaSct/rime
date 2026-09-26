@@ -14,6 +14,7 @@
 
 #include "rime/render/passes.hpp"
 #include "rime/render/virtual_geometry_visibility_id.hpp"
+#include "vg_build_draws.comp.spv.h"
 #include "vg_visibility.frag.spv.h"
 #include "vg_visibility.vert.spv.h"
 
@@ -34,6 +35,24 @@ constexpr rhi::BindingDesc kBindings[] = {
     {0, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
     {1, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
     {2, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
+};
+
+// Mirrors the PushConstants block in vg_build_draws.comp.
+struct BuildPush {
+    std::uint32_t candidate_count = 0;
+    std::uint32_t group_count = 0;
+    std::uint32_t capacity = 0;
+    std::uint32_t max_draws = 0;
+};
+
+constexpr std::uint32_t kBuildGroupSize = 64;
+
+constexpr rhi::BindingDesc kBuildBindings[] = {
+    {0, rhi::BindingType::StorageBuffer, rhi::StageMask::Compute}, // candidates
+    {1, rhi::BindingType::StorageBuffer, rhi::StageMask::Compute}, // selection flags
+    {2, rhi::BindingType::StorageBuffer, rhi::StageMask::Compute}, // draw records out
+    {3, rhi::BindingType::StorageBuffer, rhi::StageMask::Compute}, // indirect commands out
+    {4, rhi::BindingType::StorageBuffer, rhi::StageMask::Compute}, // build counters out
 };
 
 // Residency is transitive: a page is drawable only if it and every page it depends on is resident
@@ -73,10 +92,13 @@ make_storage(rhi::Device& device, const void* data, std::size_t size, std::strin
     return device.create_buffer(bd);
 }
 
-// One accepted cluster's draw, recorded at declare time and replayed in the pass body.
+// One accepted cluster's draw, recorded at declare time and replayed in the pass body. `group` and
+// `coarse` are only consulted on the GPU-built path, where they become the candidate's gate.
 struct ClusterDraw {
     VirtualGeometryDrawRecord record;
     std::uint32_t index_count = 0;
+    std::uint32_t group = 0;
+    bool coarse = false;
 };
 
 // Vulkan VkDrawIndexedIndirectCommand layout, mirrored here so the CPU can fill the buffer.
@@ -123,10 +145,26 @@ VirtualGeometryVisibilityPass::VirtualGeometryVisibilityPass(rhi::Device& device
     pd.push_constant_size = sizeof(VisibilityPush);
     pd.debug_name = "vg-visibility";
     pipeline_ = device.create_graphics_pipeline(pd);
+
+    rhi::ShaderDesc cs{};
+    cs.stage = rhi::ShaderStage::Compute;
+    cs.spirv = vg_build_draws_comp_spv;
+    cs.spirv_size_bytes = sizeof(vg_build_draws_comp_spv);
+    cs.debug_name = "vg_build_draws.comp";
+    build_shader_ = device.create_shader(cs);
+
+    rhi::ComputePipelineDesc bd{};
+    bd.shader = build_shader_;
+    bd.bindings = kBuildBindings;
+    bd.push_constant_size = sizeof(BuildPush);
+    bd.debug_name = "vg-build-draws";
+    build_pipeline_ = device.create_compute_pipeline(bd);
 }
 
 VirtualGeometryVisibilityPass::~VirtualGeometryVisibilityPass() {
     release_cluster_buffers();
+    device_.destroy(build_pipeline_);
+    device_.destroy(build_shader_);
     device_.destroy(pipeline_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
@@ -138,7 +176,9 @@ void VirtualGeometryVisibilityPass::release_cluster_buffers() noexcept {
                                  &buffers_.clusters,
                                  &buffers_.records,
                                  &buffers_.indirect,
-                                 &buffers_.identity_index}) {
+                                 &buffers_.identity_index,
+                                 &buffers_.candidates,
+                                 &buffers_.build_counters}) {
         if (b->is_valid()) {
             device_.destroy(*b);
         }
@@ -178,7 +218,25 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
         stats_.skipped_no_gpu_driven_draw += static_cast<std::uint32_t>(request.clusters.size());
     }
 
-    for (const VirtualGeometryClusterDraw& item : gated_clusters) {
+    // GPU-built submission (M18.3c). A verdict buffer that is present but invalid is refused rather
+    // than silently downgraded to CPU gating — see skipped_no_gpu_verdict.
+    const bool verdict_missing =
+        request.gpu_selection != nullptr && !request.gpu_selection->selected_flags.is_valid();
+    if (verdict_missing && !gated_clusters.empty()) {
+        stats_.skipped_no_gpu_verdict += static_cast<std::uint32_t>(gated_clusters.size());
+    }
+    const bool gpu_build = request_ok && !verdict_missing && request.gpu_selection != nullptr;
+    const std::span<const VirtualGeometryClusterDraw> accepted_clusters =
+        verdict_missing ? std::span<const VirtualGeometryClusterDraw>{} : gated_clusters;
+    const std::uint32_t draw_capacity =
+        request.max_draws == 0 ? kVirtualGeometryMaxIndirectDraws
+                               : std::min(request.max_draws, kVirtualGeometryMaxIndirectDraws);
+    // The CPU path can only accept what it can submit; the GPU path uploads candidates and lets the
+    // builder apply draw_capacity, so its ceiling is the candidate ceiling instead.
+    const std::uint32_t cpu_accept_limit =
+        gpu_build ? kVirtualGeometryMaxDrawCandidates : draw_capacity;
+
+    for (const VirtualGeometryClusterDraw& item : accepted_clusters) {
         // Gate order matters only for which counter a doubly-bad cluster lands in; each rejection
         // bumps exactly one counter and the cluster is simply not drawn.
         const auto gate = [&]() -> std::uint32_t* {
@@ -186,12 +244,23 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
                 return &stats_.skipped_invalid_request;
             }
             const assets::VirtualGeometryCluster& cluster = asset->clusters[item.cluster];
-            const auto& groups = request.selection->groups;
-            if (std::find(groups.begin(), groups.end(), cluster.replacement_group) ==
-                groups.end()) {
-                return &stats_.skipped_not_selected;
+            const bool is_coarse = cluster.replacement_group == asset->coarse_group;
+            // On the GPU path this gate belongs to vg_build_draws.comp: the cut lives in GPU memory
+            // and asking the CPU's copy here would reintroduce the readback the brick removes.
+            if (!gpu_build) {
+                const auto& groups = request.selection->groups;
+                if (std::find(groups.begin(), groups.end(), cluster.replacement_group) ==
+                    groups.end()) {
+                    return &stats_.skipped_not_selected;
+                }
             }
-            if (asset->groups[cluster.replacement_group].child_count != 0) {
+            // This pass still draws leaf clusters only (see the header) — with one exception on the
+            // GPU path: the coarse group's clusters are the overflow fallback, and the overflow is
+            // not known until the builder has run, so they must already be uploaded. The coarse
+            // group has children whenever the asset has more than one LOD, so without this the
+            // fallback could never be drawn.
+            if (asset->groups[cluster.replacement_group].child_count != 0 &&
+                !(gpu_build && is_coarse)) {
                 return &stats_.skipped_not_leaf;
             }
             if (!page_and_dependencies_resident(
@@ -238,11 +307,15 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
             ++*rejected;
             continue;
         }
-        if (draws.size() >= kVirtualGeometryMaxIndirectDraws) {
-            ++stats_.skipped_over_capacity;
+        if (draws.size() >= cpu_accept_limit) {
+            ++(gpu_build ? stats_.skipped_over_candidate_cap : stats_.skipped_over_capacity);
             continue;
         }
-        ++stats_.drawn;
+        if (gpu_build) {
+            ++stats_.candidates_offered;
+        } else {
+            ++stats_.drawn;
+        }
 
         // Append: this cluster's vertices start at vertex_base, its indices at index_base, and
         // its indices stay cluster-local — the shaders add vertex_base, so no CPU rebasing.
@@ -275,6 +348,8 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
         draw.record.stride_words = stride_words;
         draw.record.cluster_slot = item.cluster_slot;
         draw.index_count = view.index_count;
+        draw.group = asset->clusters[item.cluster].replacement_group;
+        draw.coarse = draw.group == asset->coarse_group;
         draws.push_back(draw);
     }
 
@@ -299,13 +374,33 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
             records.push_back(d.record);
         }
 
+        // On the GPU path the records and the commands are OUTPUTS of the builder, so they are
+        // allocated at full capacity and zeroed. Zeroed matters: a record the builder does not
+        // write must read as an all-zero visibility ID rather than as whatever the last frame left
+        // there.
+        std::vector<VirtualGeometryDrawCandidate> candidates;
+        if (gpu_build) {
+            candidates.reserve(draws.size());
+            for (const ClusterDraw& d : draws) {
+                VirtualGeometryDrawCandidate c{};
+                c.record = d.record;
+                c.index_count = d.index_count;
+                c.group = d.group;
+                c.coarse = d.coarse ? 1u : 0u;
+                candidates.push_back(c);
+            }
+            records.assign(kVirtualGeometryMaxIndirectDraws, VirtualGeometryDrawRecord{});
+        }
+
         // Fixed-capacity indirect buffer. A later brick will build these commands on the GPU;
         // keeping the CPU draw_count constant lets a GPU-decided visible count reach the draw
         // without a same-frame readback. Entries past the accepted clusters are zero-initialized,
         // so their instance_count is 0 and they are legal no-ops.
         std::vector<IndexedIndirectCommand> indirect_cmds(kVirtualGeometryMaxIndirectDraws);
-        for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(draws.size()); ++i) {
-            indirect_cmds[i] = {draws[i].index_count, 1u, draws[i].record.index_base, 0, 0};
+        if (!gpu_build) {
+            for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(draws.size()); ++i) {
+                indirect_cmds[i] = {draws[i].index_count, 1u, draws[i].record.index_base, 0, 0};
+            }
         }
 
         buffers_.vertices =
@@ -318,10 +413,16 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
                                          table.data(),
                                          table.size() * sizeof(VirtualGeometryGpuCluster),
                                          "vg-cluster-table");
-        buffers_.records = make_storage(device_,
-                                        records.data(),
-                                        records.size() * sizeof(VirtualGeometryDrawRecord),
-                                        "vg-draw-records");
+        // The records are host-written on the CPU path and a compute output on the GPU path, so
+        // their memory follows: write-combined host-visible for a CPU upload, device-local for a
+        // buffer the GPU writes every frame and the CPU only seeds with zeroes.
+        rhi::BufferDesc rec_desc{};
+        rec_desc.size = records.size() * sizeof(VirtualGeometryDrawRecord);
+        rec_desc.usage = rhi::BufferUsage::Storage;
+        rec_desc.memory = gpu_build ? rhi::MemoryUsage::GpuOnly : rhi::MemoryUsage::CpuToGpu;
+        rec_desc.initial_data = records.data();
+        rec_desc.debug_name = "vg-draw-records";
+        buffers_.records = device_.create_buffer(rec_desc);
 
         rhi::BufferDesc id_desc{};
         id_desc.size = identity.size() * sizeof(std::uint32_t);
@@ -333,15 +434,38 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
 
         rhi::BufferDesc ind_desc{};
         ind_desc.size = kVirtualGeometryMaxIndirectDraws * sizeof(IndexedIndirectCommand);
-        ind_desc.usage = rhi::BufferUsage::Indirect;
-        ind_desc.memory = rhi::MemoryUsage::CpuToGpu;
+        // Storage as well as Indirect on the GPU path: the same bytes are a compute shader's output
+        // and the command processor's input, which is the whole trick of GPU-driven submission.
+        ind_desc.usage = gpu_build ? (rhi::BufferUsage::Indirect | rhi::BufferUsage::Storage)
+                                   : rhi::BufferUsage::Indirect;
+        ind_desc.memory = gpu_build ? rhi::MemoryUsage::GpuOnly : rhi::MemoryUsage::CpuToGpu;
         ind_desc.initial_data = indirect_cmds.data();
         ind_desc.debug_name = "vg-indirect-commands";
         buffers_.indirect = device_.create_buffer(ind_desc);
 
+        if (gpu_build) {
+            buffers_.candidates =
+                make_storage(device_,
+                             candidates.data(),
+                             candidates.size() * sizeof(VirtualGeometryDrawCandidate),
+                             "vg-draw-candidates");
+            const VirtualGeometryGpuBuildCounters zero_counters{};
+            // GpuToCpu so a test can read what the builder decided. The frame path never does: the
+            // point of the brick is that no readback stands between the verdict and the draw.
+            rhi::BufferDesc cd{};
+            cd.size = sizeof(VirtualGeometryGpuBuildCounters);
+            cd.usage = rhi::BufferUsage::Storage;
+            cd.memory = rhi::MemoryUsage::GpuToCpu;
+            cd.initial_data = &zero_counters;
+            cd.debug_name = "vg-build-counters";
+            buffers_.build_counters = device_.create_buffer(cd);
+            buffers_.candidate_count = static_cast<std::uint32_t>(candidates.size());
+        }
+
         buffers_.cluster_count = static_cast<std::uint32_t>(table.size());
         buffers_.vertex_stride_words = stride_words;
     }
+    stats_.gpu_built = (gpu_build && !draws.empty()) ? 1u : 0u;
 
     // Both integer targets clear to all-zero bits: the invalid visibility ID and +0.0 depth.
     const RGColorAttachment colors[] = {
@@ -355,12 +479,75 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
 
     VisibilityPush push{};
     std::memcpy(push.mvp, request.clip_from_object.m, sizeof(push.mvp));
+    // The commands enter the graph in the state they are actually in. On the CPU path the host
+    // wrote them, so they are ready for the command processor; on the GPU path they are still
+    // zeroes waiting for a dispatch, and the graph derives the ShaderWrite -> IndirectRead barrier
+    // between the two passes below. Getting this wrong is invisible on a desktop driver and wrong
+    // on a tiler, which is why it is declared rather than assumed.
     const RGBuffer indirect_rg =
+        draws.empty()
+            ? RGBuffer{}
+            : graph.import_buffer(buffers_.indirect,
+                                  stats_.gpu_built != 0u ? rhi::ResourceState::ShaderRead
+                                                         : rhi::ResourceState::IndirectRead);
+    const RGBuffer records_rg =
         draws.empty() ? RGBuffer{}
-                      : graph.import_buffer(buffers_.indirect, rhi::ResourceState::IndirectRead);
+                      : graph.import_buffer(buffers_.records, rhi::ResourceState::ShaderRead);
     const RGBuffer indirect_reads[] = {indirect_rg};
+    const RGBuffer raster_buffer_reads[] = {records_rg};
     if (!draws.empty()) {
         desc.indirect_reads = indirect_reads;
+        // The records are a compute output on the GPU path, so the vertex stage's read of them is
+        // an edge the graph must see; on the CPU path declaring it costs one redundant barrier and
+        // keeps a single code path.
+        desc.buffer_reads = raster_buffer_reads;
+    }
+
+    if (stats_.gpu_built != 0u) {
+        const RGBuffer candidates_rg =
+            graph.import_buffer(buffers_.candidates, rhi::ResourceState::ShaderRead);
+        const RGBuffer flags_rg = graph.import_buffer(request.gpu_selection->selected_flags,
+                                                      rhi::ResourceState::ShaderRead);
+        const RGBuffer counters_rg =
+            graph.import_buffer(buffers_.build_counters, rhi::ResourceState::ShaderRead);
+        const RGBuffer build_reads[] = {candidates_rg, flags_rg};
+        const RGBuffer build_writes[] = {records_rg, indirect_rg, counters_rg};
+        RenderGraph::ComputePassDesc build{};
+        build.buffer_reads = build_reads;
+        build.buffer_writes = build_writes;
+        // Keep the counters readable after execute(): they are the only witness to what the builder
+        // chose, and a proof that cannot see what was skipped still reads as passing.
+        graph.export_buffer(counters_rg);
+
+        BuildPush bp{};
+        bp.candidate_count = buffers_.candidate_count;
+        bp.group_count = request.gpu_selection->group_count;
+        bp.capacity = draw_capacity;
+        bp.max_draws = kVirtualGeometryMaxIndirectDraws;
+        // Every slot of the command buffer needs an invocation, not just every candidate: the tail
+        // past the emitted list is zeroed by the same dispatch (see the shader).
+        const std::uint32_t threads = std::max(bp.candidate_count, bp.max_draws);
+        graph.add_compute_pass("vg-build-draws",
+                               build,
+                               [pipe = build_pipeline_,
+                                bp,
+                                threads,
+                                &graph,
+                                candidates_rg,
+                                flags_rg,
+                                records_rg,
+                                indirect_rg,
+                                counters_rg](rhi::CommandBuffer& cmd) {
+                                   cmd.bind_compute_pipeline(pipe);
+                                   cmd.bind_storage_buffer(0, graph.physical_buffer(candidates_rg));
+                                   cmd.bind_storage_buffer(1, graph.physical_buffer(flags_rg));
+                                   cmd.bind_storage_buffer(2, graph.physical_buffer(records_rg));
+                                   cmd.bind_storage_buffer(3, graph.physical_buffer(indirect_rg));
+                                   cmd.bind_storage_buffer(4, graph.physical_buffer(counters_rg));
+                                   cmd.push_constants(&bp, sizeof(bp));
+                                   cmd.dispatch(
+                                       (threads + kBuildGroupSize - 1) / kBuildGroupSize, 1, 1);
+                               });
     }
 
     graph.add_raster_pass("vg-visibility",
