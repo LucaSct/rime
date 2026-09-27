@@ -48,6 +48,24 @@ enum class Codec : std::uint8_t {
     Av1 = 3,  // lossy inter-frame video — the S1 wire codec (see video_codec.hpp)
 };
 
+// The codec's name, for logs and error messages. A negotiated codec is a fact worth reading in a
+// log line, and `static_cast<int>` on an enum turns "we are streaming LZ4" into "we are streaming
+// 1". Returns `const char*` rather than string_view on purpose: both existing callers feed it to a
+// printf-style format, where a non-terminated view is undefined behaviour waiting to happen.
+[[nodiscard]] constexpr const char* codec_name(Codec codec) noexcept {
+    switch (codec) {
+        case Codec::Raw:
+            return "raw";
+        case Codec::LZ4:
+            return "lz4";
+        case Codec::Jpeg:
+            return "jpeg";
+        case Codec::Av1:
+            return "av1";
+    }
+    return "unknown"; // a wire value this build predates — reachable, so it is named
+}
+
 // Just enough to describe a raw frame to encode / a decode target to fill. S0 speaks only 8-bit,
 // 4-channel colour (RGBA8/BGRA8, un/sRGB) — what the offscreen target and both codecs handle — so
 // every supported format is 4 bytes/pixel; byte_size() bakes that in.

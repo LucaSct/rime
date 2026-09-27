@@ -144,19 +144,7 @@ double psnr(const Bytes& a, const Bytes& c) {
     return 10.0 * std::log10(255.0 * 255.0 / mse);
 }
 
-const char* codec_name(stream::Codec c) {
-    switch (c) {
-        case stream::Codec::Raw:
-            return "raw";
-        case stream::Codec::LZ4:
-            return "lz4";
-        case stream::Codec::Jpeg:
-            return "jpeg";
-        case stream::Codec::Av1:
-            return "av1";
-    }
-    return "?";
-}
+// codec_name now lives in rime/stream/frame_codec.hpp — this file had the only copy.
 
 struct Row {
     const char* content;

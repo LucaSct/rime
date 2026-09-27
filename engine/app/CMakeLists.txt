@@ -63,11 +63,14 @@ target_include_directories(rime_editorhost_app
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
+# rime::stream is PUBLIC as of m18: the public header names `stream::Codec` (kEditorHostCodecs, the
+# list the viewport offers a client), so every consumer of this library needs stream's headers. A
+# PRIVATE link would compile this target and break each of its users.
 target_link_libraries(rime_editorhost_app
-    PUBLIC rime::ecs
+    PUBLIC rime::ecs rime::stream
     PRIVATE rime::editorhost rime::scene rime::assets rime::app rime::physics rime::ground
             rime::render
-            rime::rhi rime::stream rime::platform rime::core fmt::fmt)
+            rime::rhi rime::platform rime::core fmt::fmt)
 
 rime_apply_common_target_options(rime_editorhost_app)
 rime_install_module(rime_editorhost_app)

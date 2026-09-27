@@ -2,7 +2,10 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <functional>
+
+#include "rime/stream/frame_codec.hpp"
 
 namespace rime::ecs {
 class World;
@@ -66,6 +69,17 @@ using ComponentRegistrar = std::function<void(ecs::World&)>;
 // nothing to add" — the honest v1 behaviour for `rime-engine` opening arbitrary content.
 using ScenePreparer =
     std::function<void(ecs::World&, render::MeshRegistry&, render::MaterialRegistry&)>;
+
+// What the viewport host can ENCODE, in no particular preference order — `stream::choose_codec`
+// walks the *client's* preference list against this one, because only the client knows whether it
+// is a browser on a WAN link that wants AV1's bandwidth or a local editor that wants LZ4's
+// losslessness (ADR-0030 §4). Exposed here, rather than left a local constant inside
+// `run_editor_host`, so a test can assert what a real client actually gets: the negotiation is a
+// contract with two live clients (the Rust editor and a browser), not an implementation detail.
+inline constexpr std::array<stream::Codec, 4> kEditorHostCodecs{stream::Codec::LZ4,
+                                                                stream::Codec::Av1,
+                                                                stream::Codec::Jpeg,
+                                                                stream::Codec::Raw};
 
 // Parse `--editor-host <socket> [--scene <file>] [--assets <manifest>] [--viewport]` and serve
 // until the client disconnects. `usage_name` is what the usage line calls this binary, so a game's
