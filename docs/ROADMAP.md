@@ -1660,7 +1660,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
   property of the session**, enforced in the gateway by never forwarding the `0x02xx` editor band to
   a play session, rather than by trusting the client; and HTTP/TLS/auth/WebRTC stay **out of
   `engine/`**, which gains only `LocalSocket::adopt` and a `--serve-fd` flag
-  ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §2). *Inspired by: cloud-gaming
+  ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §2). **Hosting happens on starbase's GTX 1060, behind blackStar; the workstation's RTX 3060 never serves a hosted session** — so the gateway is single-host and there is no cross-host placement, and the hosted tier gets its **own** ratified budget rather than relaxing ADR-0035's 3060 one ([ADR-0047](adr/0047-two-machines-and-the-starbase-tier.md)). *Inspired by: cloud-gaming
   split rendering; the editor-as-a-client discipline of ADR-0016.*
 - **Graphics streaming (Track S):** the engine renders → captures → encodes → transports → a thin
   client presents and sends input back. **S0** (LAN/loopback dev-stream — TCP, JPEG/LZ4, a thin
