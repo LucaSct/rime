@@ -21,6 +21,17 @@ tree by the reviewer before being written down.
 server. Multiple users, eventually spending prepaid credits to create games and to play/stream them
 interactively.
 
+> **DNS exists as of 2026-09-27: `rime.peekstar.eu` resolves to this workstation's IP** (Luca created
+> the record). **That is ahead of decision 1 below, and the gap is the dangerous part.** Decision 1
+> says production runs on a separate machine and this box is for *un-authenticated LAN testing of the
+> first slice only*; a public A record pointing here, plus a gateway listening on a public interface,
+> is exactly the configuration decision 1 exists to prevent — this machine holds the owner's SSH
+> keys, git credentials and this repository, and none of the containment below is built yet.
+>
+> So until the containment plan is in place: **the gateway binds to loopback or the LAN interface,
+> never `0.0.0.0`**, and the DNS record is useful only for LAN testing and for having the name ready.
+> A record pointing at a host is not an invitation to listen on it.
+
 ## Decisions taken (2026-09-25, Luca)
 
 1. **Production runs on a separate machine, not this workstation.** This box is for
@@ -50,8 +61,12 @@ The seam is not the RHI. It is `engine/stream` plus `engine/editorhost`, and mos
   echoing the client's own stamp — the instrumentation any latency claim here must use.
 - `engine/editorhost/include/rime/editorhost/editor_host.hpp:41` reserved `0x02xx` editor band;
   `:76` `message_affects_frame`, the idle-skip classifier that makes editor tenancy cheap.
-- Headless rendering is real: `engine/rhi/include/rime/rhi/device.hpp:150`,
-  `engine/capi/include/rime/capi/rime.h:100` `rime_app_create_headless`.
+- Headless rendering is real: `engine/rhi/include/rime/rhi/device.hpp:150`.
+  **Corrected 2026-09-27 ([ADR-0046](../adr/0046-exported-games-and-the-blender-boundary.md) §1):**
+  `rime_app_create_headless` was cited here as evidence for that and is not. The C ABI documents it
+  as "no device, 60 Hz sim" (`engine/capi/include/rime/capi/rime.h:99`) — it cannot render, and
+  exists to prove the FFI can spin the engine loop from another language. The off-screen render path
+  is the RHI's, not the C ABI's.
 - `samples/04-remote-view/main.cpp:170-186` is single-client, blocking `bind → accept()`.
 
 ## The shape

@@ -1650,6 +1650,18 @@ milestone boundary; time estimates come at brick-decomposition, not here.
   M17 nor M18. Both tracks are cross-cutting (interleave under mainline-first once M18 has closed),
   not milestones; most of both is provable GPU-free/structural on lavapipe. *Inspired by: Frostbite/Niagara
   effects; shallow-water + SPH literature.*
+- **Hosted front end (Track H):** `rime.peekstar.eu` — a browser page that is a GUI for Rime, the
+  engine running server-side, with an **edit** surface and a **play** surface over one hostname.
+  Committed scope since 2026-09-27 ([ADR-0045](adr/0045-hosted-front-end-v1.md)); the design is
+  [`docs/design/hosted-rime.md`](design/hosted-rime.md). Cross-cutting, **not** a milestone, and it
+  queues after M18 like the other tracks. Three properties are decided rather than open: the wire
+  **stays AV1** (measured — SVT-AV1 costs 2.49 ms/frame at 720p30 on one core, so Ampere's missing
+  AV1 encoder does not justify reversing ADR-0030's Apache-2.0 licensing choice); the **surface is a
+  property of the session**, enforced in the gateway by never forwarding the `0x02xx` editor band to
+  a play session, rather than by trusting the client; and HTTP/TLS/auth/WebRTC stay **out of
+  `engine/`**, which gains only `LocalSocket::adopt` and a `--serve-fd` flag
+  ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §2). *Inspired by: cloud-gaming
+  split rendering; the editor-as-a-client discipline of ADR-0016.*
 - **Graphics streaming (Track S):** the engine renders → captures → encodes → transports → a thin
   client presents and sends input back. **S0** (LAN/loopback dev-stream — TCP, JPEG/LZ4, a thin
   Rime-built client) lands right after Phase 0, before M4; **S1+** (hardware codecs, QUIC/WebRTC)
@@ -1683,6 +1695,8 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) |
 | **M17** | **"The Visual Bar"** | visual work delivered on the consolidated M18 branch; its remaining M13 frame-budget clause is inherited unchanged by M18 rather than waived ([ADR-0041](adr/0041-the-visual-bar-m17.md), [ADR-0043](adr/0043-virtualized-geometry-m18.md)) |
 | **M18** | **virtualized geometry + the consolidated visual bar** | Nanite-style rigid opaque meshes: a separately versioned clustered payload, replacement DAG, GPU-driven culling, visibility buffer and **mandatory hybrid sub-pixel rasterization** so detailed shapes survive. M18 inherits M17/M13's unchanged clean-tree block budget; it is not complete until both the detailed geometry path and that measured gate hold ([ADR-0043](adr/0043-virtualized-geometry-m18.md)). Terrain's heightfield, collision, splat blending and streaming are **M19**, rather than silently folded into cluster rendering. |
+| **M20** | **"The Shipped Game"** | a game exported from the pipeline runs as a **standalone product** with the Rime core embedded, and its *end user* picks the mode at launch: play locally · host for a browser · a CLI server that streams over the network · host a multiplayer session · a **dedicated server anyone can run** from the exported artifact. One binary, mode chosen **before a device is created**, so the dedicated server never touches Vulkan ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §1). **Done when:** the bundle is moved off this machine with the repo out of reach, `dedicated` runs on a box with **no Vulkan**, and its state digest matches the in-tree run. Prerequisite: `samples/hello-game`, which [ADR-0038](adr/0038-platform-proof-m15.md) named and M15 never built — the block's ~3000-line sample loop is the wrong first subject for an engine-owned `GameDefinition`. |
+| **M21** | **"Generated & Bridged Authoring"** | assets created from an **LLM plus user input**, and an authoring bridge to Blender, both entering through the **existing cook** as *source* assets — never as cooked payloads, never as code or shaders, so `engine/`'s "no scripting engine" boundary holds. A provenance sidecar (model, prompt, inputs, seed, output hashes) replays to the same cooked bytes with no network call. **Blender stays a SEPARATE PROCESS at arm's length and no GPL code is ever linked** — the same ruling as "never GPL x264 in the engine", applied to an authoring tool, because under M20 every exported game would otherwise inherit the GPL ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §4). An in-house modelling core replaces the *producer* behind the same seam later, and must be **clean-room**. **Done when:** a recorded prompt yields an asset that cooks, is placed in a `.rscene`, and renders in **both** the game and the editor, and a deliberately malformed generated asset is refused with the counter showing it. |
 
 ### Detail
 
