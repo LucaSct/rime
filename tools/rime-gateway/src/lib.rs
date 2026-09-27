@@ -26,6 +26,10 @@ use std::io::{Read, Write};
 
 use rime_protocol::{Connection, MessageType, Result};
 
+pub mod supervisor;
+
+pub use supervisor::{spawn_session, SessionHandle, SessionSpec, SpawnError};
+
 /// Which surface a session was created for. Assigned by the gateway when it admits the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
