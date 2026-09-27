@@ -17,9 +17,11 @@
 #include <random>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
+#include "rime/app/editor_host_app.hpp"
 #include "rime/core/byte_cursor.hpp"
 #include "rime/core/math/transform.hpp"
 #include "rime/core/reflect.hpp"
@@ -1077,4 +1079,53 @@ TEST_CASE("m14.3: the SaveScene/SaveResult payloads round-trip") {
     CHECK(got.path == sent.path);
     CHECK(got.entities == sent.entities);
     CHECK(got.bytes == sent.bytes);
+}
+
+// ── Codec negotiation: what a REAL client gets (m18, ADR-0030 §4 wired for ADR-0046 §2) ─────────
+//
+// The viewport used to hardcode LZ4. `choose_codec` was already tested in isolation; what was not
+// tested is the list the editor host actually offers, which is the half that decides what the two
+// live clients see. These cases are that contract.
+TEST_CASE("the editor host's codec list serves both a native editor and a browser") {
+    SUBCASE("a client that never sends Capabilities keeps LZ4") {
+        // Not negotiated at all — the pre-m18 editor. The host's default must stay LZ4 so this
+        // change is byte-identical for every client built before it.
+        CHECK(app::kEditorHostCodecs[0] == stream::Codec::LZ4);
+    }
+    SUBCASE("a native editor asking for losslessness first gets LZ4") {
+        const stream::Codec client[] = {stream::Codec::LZ4, stream::Codec::Av1};
+        const auto picked = stream::choose_codec(client, app::kEditorHostCodecs);
+        REQUIRE(picked.has_value());
+        CHECK(*picked == stream::Codec::LZ4);
+    }
+    SUBCASE("a browser that can only decode AV1 gets AV1") {
+        // The case the brick exists for: a browser has no LZ4 decoder of its own, so a host that
+        // ignored Capabilities would stream it something it cannot display.
+        const stream::Codec client[] = {stream::Codec::Av1};
+        const auto picked = stream::choose_codec(client, app::kEditorHostCodecs);
+        REQUIRE(picked.has_value());
+        CHECK(*picked == stream::Codec::Av1);
+    }
+    SUBCASE("a browser preferring AV1 but able to fall back still gets AV1") {
+        const stream::Codec client[] = {stream::Codec::Av1, stream::Codec::Jpeg};
+        const auto picked = stream::choose_codec(client, app::kEditorHostCodecs);
+        REQUIRE(picked.has_value());
+        CHECK(*picked == stream::Codec::Av1);
+    }
+    SUBCASE("a client we share nothing with is refused, not served something it cannot decode") {
+        // choose_codec returns nullopt and the host sends Bye. Streaming a codec the peer cannot
+        // decode would present as a black viewport behind a healthy connection.
+        const stream::Codec client[] = {static_cast<stream::Codec>(0x7F)};
+        CHECK_FALSE(stream::choose_codec(client, app::kEditorHostCodecs).has_value());
+    }
+}
+
+TEST_CASE("codec_name names every wire codec") {
+    // It is used in log lines that explain a session's behaviour, so an unnamed codec would make
+    // the one message that says what is being streamed useless.
+    CHECK(std::string_view(stream::codec_name(stream::Codec::Raw)) == "raw");
+    CHECK(std::string_view(stream::codec_name(stream::Codec::LZ4)) == "lz4");
+    CHECK(std::string_view(stream::codec_name(stream::Codec::Jpeg)) == "jpeg");
+    CHECK(std::string_view(stream::codec_name(stream::Codec::Av1)) == "av1");
+    CHECK(std::string_view(stream::codec_name(static_cast<stream::Codec>(0x7F))) == "unknown");
 }

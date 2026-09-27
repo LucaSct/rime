@@ -75,24 +75,10 @@ stream::Codec parse_codec(const std::string& s) {
     return stream::Codec::Jpeg; // default: the wire codec
 }
 
-const char* codec_name(stream::Codec c) {
-    switch (c) {
-        case stream::Codec::Raw:
-            return "raw";
-        case stream::Codec::LZ4:
-            return "lz4";
-        case stream::Codec::Jpeg:
-            return "jpeg";
-        case stream::Codec::Av1:
-            // Av1 is the s1.2 inter-frame wire codec, but it is *stateful* — it runs through the
-            // VideoEncoder/VideoDecoder pair + the StreamConfig/KeyframeRequest handshake, not this
-            // sample's stateless FrameEncoder path. Switching this sample's server/client to the
-            // video pipe by default is its own brick (tracked for the S1 close-out); until then the
-            // `--codec` parser above never yields Av1, so this case only keeps the switch total.
-            return "av1";
-    }
-    return "?";
-}
+// codec_name now lives in rime/stream/frame_codec.hpp. The note that used to sit on the Av1 case
+// belongs with the sample, not the helper: Av1 is stateful (VideoEncoder/VideoDecoder plus the
+// StreamConfig/KeyframeRequest handshake), not this sample's stateless FrameEncoder path, so its
+// `--codec` parser never yields Av1. Switching this sample to the video pipe is its own brick.
 
 // ── The scene: a colour the remote input steers ──────────────────────────────────────────────────
 // std::atomic scalars, so the input thread can update it while the render thread reads it with no

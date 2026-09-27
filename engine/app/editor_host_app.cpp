@@ -28,6 +28,7 @@
 
 #include <fmt/core.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -73,6 +74,7 @@
 #include "rime/stream/frame_codec.hpp"
 #include "rime/stream/frame_streamer.hpp"
 #include "rime/stream/protocol.hpp"
+#include "rime/stream/video_codec.hpp"
 
 namespace {
 
@@ -711,8 +713,32 @@ int serve_viewport(std::string_view socket_path,
     });
 
     // Render + stream loop, paced to ~30 fps. Each frame: apply queued edits, tick + render,
-    // capture the rendered LDR, LZ4-compress it, and send it as a Frame message.
+    // capture the rendered LDR, encode it with the NEGOTIATED codec, and send it as a Frame
+    // message.
+    //
+    // CODEC NEGOTIATION (ADR-0030 §4, wired here for ADR-0046 §2's browser editor). This loop used
+    // to hardcode Codec::LZ4, which is right for a native editor on a LAN — lossless, and UI-like
+    // content compresses 200x — and useless to a browser, which has no LZ4 decoder of its own. The
+    // protocol already had the whole mechanism (CapabilitiesMessage, StreamConfigMessage,
+    // choose_codec) and nothing used it.
+    //
+    // The client decides WHICH and the server decides WHETHER, which is ADR-0030's split and the
+    // right one: only the client knows whether it is a WAN browser that wants AV1's bandwidth or a
+    // local editor that wants LZ4's losslessness. The order below is what the server can encode,
+    // and `choose_codec` walks the CLIENT's preference list against it.
+    //
+    // LZ4 stays the default, so a client that never sends Capabilities — every editor built before
+    // this change — gets byte-identical behaviour to before.
     stream::FrameEncoder encoder;
+    stream::VideoEncoder video; // opened only if AV1 is negotiated; stateful, one per stream
+    stream::Codec codec = stream::Codec::LZ4;
+    // StreamConfig must reach the client BEFORE the first frame it describes: for AV1 it carries
+    // the sequence header without which no decoder can start. Re-armed whenever the codec changes.
+    bool codec_announced = false;
+    // Every way a frame can fail to go out gets a counter, so a silent stream is diagnosable rather
+    // than mysterious (the engine's counter rule, applied to the stream).
+    std::uint64_t frames_no_packet = 0;
+    std::uint64_t frames_encode_failed = 0;
     stream::ImageDesc frame_desc{};
     frame_desc.extent = cfg.render_extent;
     frame_desc.format = rhi::Format::RGBA8Unorm;
@@ -753,6 +779,63 @@ int serve_viewport(std::string_view socket_path,
                 // reply with a fresh snapshot. Apply all real edits first, then send one snapshot
                 // that reflects them (coalescing multiple requests in a batch). PickRequest is the
                 // same shape of message — answered by this thread, not applied to the world.
+                // Two STREAM-level messages arrive on the same queue as the editor band, and both
+                // must be handled before the cast below — an 0x01xx code reinterpreted as an
+                // EditorMessage is a silent no-op that would look like the client saying nothing.
+                if (e.type == stream::MessageType::Capabilities) {
+                    stream::CapabilitiesMessage caps;
+                    if (!caps.decode(e.payload)) {
+                        RIME_WARN("editor-host: malformed Capabilities — keeping {}",
+                                  stream::codec_name(codec));
+                        continue;
+                    }
+                    const std::optional<stream::Codec> picked =
+                        stream::choose_codec(caps.decoders, rime::app::kEditorHostCodecs);
+                    if (!picked) {
+                        // Refusing is the honest outcome: streaming a codec the peer cannot decode
+                        // would present as a black viewport with a healthy connection behind it.
+                        RIME_WARN("editor-host: no codec in common with the client — closing");
+                        (void)conn.send_bye();
+                        stop.store(true, std::memory_order_relaxed);
+                        continue;
+                    }
+                    if (*picked != codec) {
+                        codec = *picked;
+                        codec_announced = false;
+                        if (codec == stream::Codec::Av1) {
+                            stream::VideoEncoder::Config vc{};
+                            vc.desc = frame_desc;
+                            vc.fps_num = 30;
+                            vc.fps_den = 1;
+                            if (!video.open(vc)) {
+                                // Fall back rather than serve nothing: the client asked for AV1 and
+                                // gets LZ4, which it may not decode — but it is TOLD so, via the
+                                // StreamConfig below, instead of waiting for frames that never
+                                // come.
+                                RIME_WARN("editor-host: AV1 encoder failed to open — falling back "
+                                          "to LZ4; a browser client will not be able to decode it");
+                                codec = stream::Codec::LZ4;
+                            }
+                        }
+                        RIME_INFO("editor-host: streaming {} (client offered {} decoder(s))",
+                                  stream::codec_name(codec),
+                                  caps.decoders.size());
+                    }
+                    // A codec change is frame-affecting: the client needs a frame in the new format
+                    // promptly, and an idle editor would otherwise send nothing until the
+                    // keepalive.
+                    needs_render = true;
+                    continue;
+                }
+                if (e.type == stream::MessageType::KeyframeRequest) {
+                    // Only AV1 has a delta chain to restart; for the stateless codecs every frame
+                    // is already independent, so the request is satisfied by definition.
+                    if (codec == stream::Codec::Av1) {
+                        video.request_keyframe();
+                    }
+                    needs_render = true;
+                    continue;
+                }
                 const auto msg = static_cast<editorhost::EditorMessage>(e.type);
                 // m10.0-perf: does this message change the streamed frame? (Edits, gizmo, play
                 // control do; a snapshot/pick request does not.) One classifier, tested in
@@ -919,12 +1002,64 @@ int serve_viewport(std::string_view socket_path,
 
             const rhi::TextureHandle ldr = app.graph()->physical(last_ldr);
             const stream::FrameView view = streamer->capture(ldr);
+
+            // Before the frame it describes, never after: an AV1 decoder cannot start without the
+            // sequence header this carries.
+            if (!codec_announced) {
+                stream::StreamConfigMessage sc{};
+                sc.codec = codec;
+                sc.desc = frame_desc;
+                if (codec == stream::Codec::Av1) {
+                    const std::span<const std::byte> header = video.sequence_header();
+                    sc.codec_config.assign(header.begin(), header.end());
+                }
+                if (!conn.send_stream_config(sc)) {
+                    break; // client disconnected
+                }
+                codec_announced = true;
+            }
+
+            if (codec == stream::Codec::Av1) {
+                // Stateful: one call may yield zero packets (the encoder is still filling) or more
+                // than one, so the frame/packet mapping is not 1:1 and each packet is its own
+                // FrameMessage. A frame that produced nothing is COUNTED rather than treated as an
+                // error — it is normal at stream start, and indistinguishable from a stall unless
+                // someone is counting.
+                std::vector<stream::VideoPacket> packets;
+                if (!video.encode(view.pixels, packets)) {
+                    ++frames_encode_failed;
+                    RIME_ERROR("editor-host: AV1 encode failed");
+                    break;
+                }
+                if (packets.empty()) {
+                    ++frames_no_packet;
+                }
+                bool sent = true;
+                for (const stream::VideoPacket& packet : packets) {
+                    stream::FrameMessage frame;
+                    frame.sequence = sequence++;
+                    frame.codec = stream::Codec::Av1;
+                    frame.desc = frame_desc;
+                    frame.data = packet.data;
+                    if (!conn.send_frame(frame)) {
+                        sent = false;
+                        break;
+                    }
+                }
+                if (!sent) {
+                    break; // client disconnected
+                }
+                last_render = std::chrono::steady_clock::now();
+                continue;
+            }
+
             stream::FrameMessage frame;
             frame.sequence = sequence++;
-            frame.codec = stream::Codec::LZ4;
+            frame.codec = codec;
             frame.desc = frame_desc;
-            if (!encoder.encode(stream::Codec::LZ4, frame_desc, view.pixels, frame.data)) {
-                RIME_ERROR("editor-host: frame encode failed");
+            if (!encoder.encode(codec, frame_desc, view.pixels, frame.data)) {
+                ++frames_encode_failed;
+                RIME_ERROR("editor-host: frame encode failed ({})", stream::codec_name(codec));
                 break;
             }
             if (!conn.send_frame(frame)) {
@@ -962,6 +1097,17 @@ int serve_viewport(std::string_view socket_path,
         next_frame += frame_period;
         std::this_thread::sleep_until(next_frame);
     }
+
+    // The stream's own epilogue. A counter that is incremented and never read is not a proof of
+    // anything — the compiler says so too, with -Wunused-but-set-variable — so the negotiated codec
+    // and every way a frame failed to go out are reported once, here, where a session's behaviour
+    // can still be explained.
+    RIME_INFO("editor-host: stream closed — codec {}, {} frame(s) sent, {} produced no packet, "
+              "{} encode failure(s)",
+              stream::codec_name(codec),
+              sequence,
+              frames_no_packet,
+              frames_encode_failed);
 
     stop.store(true, std::memory_order_relaxed);
     receiver.join();
