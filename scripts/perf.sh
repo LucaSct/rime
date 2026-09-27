@@ -24,7 +24,8 @@ Rime perf — measure frame/sim time on this machine and write a fingerprinted r
 
 Usage: scripts/perf.sh [options]
   --preset dev|release    build to measure (default: release — Debug numbers mean nothing)
-  --sample NAME           lit-rooms | destructible-wall | the-block | all  (default: all)
+  --sample NAME           lit-rooms | destructible-wall | the-block | virtual-geometry | all
+                          (default: all)
   --frames N              measured frames per run (default: the sample's own, 600)
   --width W --height H    render resolution (default: 1920x1080)
   --commit                write the reports into docs/perf/ instead of a scratch dir
@@ -380,10 +381,17 @@ case "$sample" in
     # it (`ctest -R block_demo_cook` in the build dir), and the run will refuse to start without it
     # rather than measure a block that is not there.
     the-block)         run_one the_block 99-the-block ;;
+    # m18.3d. ADR-0043 gate 4's complexity sweep: candidates, selected triangles, CPU submission and
+    # GPU time at a fixed projected size. Unlike the samples above it needs no cooked asset — it
+    # generates its own quadtree, because the sweep's variable is the size of the CUT and a cooked
+    # mesh cannot move that without moving five other things with it. `--sweep` prints every row;
+    # the committed report is the reference depth, so `git log docs/perf/` still reads as a series.
+    virtual-geometry)  run_one virtual_geometry 14-virtual-geometry --sweep ;;
     all)
         run_one lit_rooms 11-lit-rooms
         run_one destructible_wall 10-destructible-wall
         run_one the_block 99-the-block
+        run_one virtual_geometry 14-virtual-geometry --sweep
         ;;
     *) echo "perf.sh: unknown sample '$sample' (try --help)" >&2; exit 2 ;;
 esac
