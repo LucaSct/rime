@@ -2813,6 +2813,13 @@ name = "rime-ffi"
 version = "0.0.1"
 
 [[package]]
+name = "rime-gateway"
+version = "0.0.1"
+dependencies = [
+ "rime-protocol",
+]
+
+[[package]]
 name = "rime-protocol"
 version = "0.0.1"
 dependencies = [
