@@ -69,3 +69,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0042](0042-fluids-track-reopened.md) — Track FL reopens (water, fire, smoke: the particle + heightfield fork now, a unified particle-grid substrate gated for later; all three bricks strictly after M18)
 - [ADR-0043](0043-virtualized-geometry-m18.md) — M18 virtualized geometry (rigid opaque mesh clusters, replacement DAG, GPU selection and a visibility path; terrain is M19)
 - [ADR-0044](0044-visibility-id-and-indirect-abi.md) — the 64-bit `RG32Uint` visibility ID (version 3; version 2 retired) and how an indirect draw finds its cluster (`gl_DrawID` records, an identity index buffer, a constant draw count)
+- [ADR-0045](0045-hosted-front-end-v1.md) — a hosted browser front end becomes committed scope (a separate Rust WebRTC gateway, both surfaces in the first deliverable; **the wire stays AV1** — measurement, not H.264, answers Ampere's missing AV1 encoder, so ADR-0030 is not amended)
