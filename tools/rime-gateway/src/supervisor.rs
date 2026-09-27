@@ -271,8 +271,15 @@ c.sendall(bytes.fromhex('31534d52') + (3).to_bytes(2, 'little'))\n\
 c.recv(6)\n\
 time.sleep(30)\n";
 
+    /// `kill -0` rather than `/proc/<pid>`: procfs is Linux-only, and this test must mean the same
+    /// thing on macOS, where the first version of it failed for that reason alone.
     fn pid_alive(pid: u32) -> bool {
-        Path::new(&format!("/proc/{pid}")).exists()
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     #[test]

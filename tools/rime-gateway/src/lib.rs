@@ -26,8 +26,14 @@ use std::io::{Read, Write};
 
 use rime_protocol::{Connection, MessageType, Result};
 
+// Unix-only: a session is reached over a Unix-domain socket, which is what the engine's
+// LocalListener binds on POSIX (`engine/platform/.../socket.hpp`). Windows would need named pipes and
+// a different `SessionSpec`, so the module is gated rather than stubbed — a stub that compiles and
+// cannot work is worse than an honest absence. The surface policy above is portable and stays so.
+#[cfg(unix)]
 pub mod supervisor;
 
+#[cfg(unix)]
 pub use supervisor::{spawn_session, SessionHandle, SessionSpec, SpawnError};
 
 /// Which surface a session was created for. Assigned by the gateway when it admits the session.
