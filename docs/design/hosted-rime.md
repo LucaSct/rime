@@ -1,8 +1,16 @@
 # Hosted Rime — a browser front end, and the shape of a paid service
 
-Status: **plan, not scope.** Nothing here is committed work, and no milestone depends on it.
-This file exists so the decisions below are inherited rather than re-argued. It is not an ADR:
-an ADR is due when the first slice becomes committed scope.
+Status: **committed scope since 2026-09-27**, and this file is now the design appendix to
+[ADR-0045](../adr/0045-hosted-front-end-v1.md) rather than a plan. It was written as "plan, not
+scope", with the note that "an ADR is due when the first slice becomes committed scope"; Luca asked
+for it to be built, so that ADR exists and records what changed.
+
+> **§"The AV1 problem" below is SUPERSEDED by ADR-0045 decision 1.** Its premise — that software
+> SVT-AV1 "competes for the cores the simulation needs", so the hosted path needs a `Codec` value for
+> H.264 — did not survive measurement. `samples/codec_bench`, which already existed and had not been
+> run for this question, puts SVT-AV1 at **2.49 ms/frame at 1280x720/30 pinned to one core** against
+> a 33.3 ms budget. There is no `Codec::H264`, ADR-0030 is not amended, and its Apache-2.0 licensing
+> rationale is not reversed. Everything else in this file stands.
 
 Consulted 2026-09-25 (Opus 5.5, read-only); the seam citations below were re-verified against the
 tree by the reviewer before being written down.
