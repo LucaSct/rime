@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "run": {
+    "sample": "14-virtual-geometry",
+    "commit": "8fce420",
+    "date": "2026-09-27"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce GTX 1060 6GB",
+    "driver": "NVIDIA 580.178.04",
+    "os": "linux",
+    "build": "RelWithDebInfo",
+    "sanitizer": "off",
+    "preset": "gpu-built-draws-sweep",
+    "width": 1280,
+    "height": 720
+  },
+  "distributions": {
+    "frame": {
+      "count": 120,
+      "min_ms": 0.936,
+      "p50_ms": 0.969,
+      "p95_ms": 1.082,
+      "p99_ms": 1.113,
+      "max_ms": 1.871
+    },
+    "vg.d3.build": {
+      "count": 120,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.001,
+      "max_ms": 0.001
+    },
+    "vg.d3.gpu": {
+      "count": 120,
+      "min_ms": 0.112,
+      "p50_ms": 0.119,
+      "p95_ms": 0.140,
+      "p99_ms": 0.145,
+      "max_ms": 0.146
+    },
+    "vg.d3.select": {
+      "count": 120,
+      "min_ms": 0.363,
+      "p50_ms": 0.383,
+      "p95_ms": 0.433,
+      "p99_ms": 0.511,
+      "max_ms": 1.302
+    },
+    "vg.d3.submit": {
+      "count": 120,
+      "min_ms": 0.564,
+      "p50_ms": 0.585,
+      "p95_ms": 0.648,
+      "p99_ms": 0.669,
+      "max_ms": 0.693
+    }
+  },
+  "passes": {
+    "vg-build-draws": {
+      "p50_ms": 0.032,
+      "max_ms": 0.034
+    },
+    "vg-visibility": {
+      "p50_ms": 0.086,
+      "max_ms": 0.114
+    }
+  },
+  "worst_frame": {
+    "index": 75,
+    "ms": 1.871,
+    "passes": {
+      "vg-build-draws": 0.026,
+      "vg-visibility": 0.086
+    },
+    "zones": {}
+  },
+  "ledger": {
+    "frames.measured": 120,
+    "vg.triangles_per_cluster": 64,
+    "vg.d1.candidates": 5,
+    "vg.d1.selected_triangles": 256,
+    "vg.d1.emitted_draws": 4,
+    "vg.d1.selected_total": 4,
+    "vg.d1.fell_back_to_coarse": 0,
+    "vg.d1.coarse_over_capacity": 0,
+    "vg.d1.overflow_without_coarse": 0,
+    "vg.d1.refinement_blocked": 0,
+    "vg.d1.skipped_over_candidate_cap": 0,
+    "vg.d1.covered_pixels": 921600,
+    "vg.d1.frames_without_raster": 0,
+    "vg.d2.candidates": 17,
+    "vg.d2.selected_triangles": 1024,
+    "vg.d2.emitted_draws": 16,
+    "vg.d2.selected_total": 16,
+    "vg.d2.fell_back_to_coarse": 0,
+    "vg.d2.coarse_over_capacity": 0,
+    "vg.d2.overflow_without_coarse": 0,
+    "vg.d2.refinement_blocked": 0,
+    "vg.d2.skipped_over_candidate_cap": 0,
+    "vg.d2.covered_pixels": 921600,
+    "vg.d2.frames_without_raster": 0,
+    "vg.d3.candidates": 65,
+    "vg.d3.selected_triangles": 4096,
+    "vg.d3.emitted_draws": 64,
+    "vg.d3.selected_total": 64,
+    "vg.d3.fell_back_to_coarse": 0,
+    "vg.d3.coarse_over_capacity": 0,
+    "vg.d3.overflow_without_coarse": 0,
+    "vg.d3.refinement_blocked": 0,
+    "vg.d3.skipped_over_candidate_cap": 0,
+    "vg.d3.covered_pixels": 921600,
+    "vg.d3.frames_without_raster": 0,
+    "vg.d4.candidates": 257,
+    "vg.d4.selected_triangles": 16384,
+    "vg.d4.emitted_draws": 256,
+    "vg.d4.selected_total": 256,
+    "vg.d4.fell_back_to_coarse": 0,
+    "vg.d4.coarse_over_capacity": 0,
+    "vg.d4.overflow_without_coarse": 0,
+    "vg.d4.refinement_blocked": 0,
+    "vg.d4.skipped_over_candidate_cap": 0,
+    "vg.d4.covered_pixels": 921600,
+    "vg.d4.frames_without_raster": 0,
+    "vg.d5.candidates": 1025,
+    "vg.d5.selected_triangles": 65536,
+    "vg.d5.emitted_draws": 1024,
+    "vg.d5.selected_total": 1024,
+    "vg.d5.fell_back_to_coarse": 0,
+    "vg.d5.coarse_over_capacity": 0,
+    "vg.d5.overflow_without_coarse": 0,
+    "vg.d5.refinement_blocked": 0,
+    "vg.d5.skipped_over_candidate_cap": 0,
+    "vg.d5.covered_pixels": 921600,
+    "vg.d5.frames_without_raster": 0,
+    "vg.d3cap.candidates": 65,
+    "vg.d3cap.selected_triangles": 4096,
+    "vg.d3cap.emitted_draws": 1,
+    "vg.d3cap.selected_total": 64,
+    "vg.d3cap.fell_back_to_coarse": 1,
+    "vg.d3cap.coarse_over_capacity": 0,
+    "vg.d3cap.overflow_without_coarse": 0,
+    "vg.d3cap.refinement_blocked": 0,
+    "vg.d3cap.skipped_over_candidate_cap": 0,
+    "vg.d3cap.covered_pixels": 921600,
+    "vg.d3cap.frames_without_raster": 0
+  }
+}
