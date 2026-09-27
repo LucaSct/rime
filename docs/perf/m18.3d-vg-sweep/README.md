@@ -32,19 +32,20 @@ guard: a raster pass that covers no pixels is the cheapest one there is.
 
 ## Measured, 2026-09-27, RTX 3060 (NVIDIA 610.57.04), 1920x1080, 64 triangles/cluster
 
-> **UNPINNED CLOCKS.** These were taken with `RIME_PERF_ALLOW_UNPINNED_CLOCKS=1`; the box reported
-> 337 MHz of 2100 MHz graphics and 405 MHz of 7501 MHz memory at the time. They are **not**
-> comparable against a pinned baseline, and no report from this run is committed beside them. The
-> ratios below are the finding; the absolute milliseconds are not yet a baseline.
+Clock-pinned (`nvidia-smi -pm 1; -lgc 1785,1785; -lmc 7501`), Release/RelWithDebInfo, the box quiet
+for the whole run. The committed report beside this file is
+[`2026-09-27-14-virtual-geometry-nvidia-geforce-rtx-3060.json`](../2026-09-27-14-virtual-geometry-nvidia-geforce-rtx-3060.json),
+and it **establishes** this machine's baseline rather than confirming one — the regression check has
+nothing to compare against until a second run exists.
 
 | level | groups | leaves | candidates | triangles | sel p50 | sub p50 | sub p99 | gpu p50 | gpu p99 | drawn |
 |---|---|---|---|---|---|---|---|---|---|---|
-| depth 1 | 5 | 4 | 5 | 256 | 1.180 | 0.536 | 1.265 | 0.110 | 0.121 | 4 |
-| depth 2 | 21 | 16 | 17 | 1024 | 1.136 | 0.562 | 0.938 | 0.125 | 0.131 | 16 |
-| depth 3 | 85 | 64 | 65 | 4096 | 1.141 | 0.646 | 0.873 | 0.156 | 0.163 | 64 |
-| depth 4 | 341 | 256 | 257 | 16384 | 1.142 | 0.958 | 1.482 | 0.225 | 0.244 | 256 |
-| depth 5 | 1365 | 1024 | 1025 | 65536 | 1.142 | 2.144 | 2.920 | 0.391 | 0.451 | 1024 |
-| depth 3, capacity 16 | 85 | 64 | 65 | 4096 | 1.133 | 0.595 | 1.085 | 0.104 | 0.111 | **1** |
+| depth 1 | 5 | 4 | 5 | 256 | 1.223 | 0.560 | 0.951 | 0.113 | 0.116 | 4 |
+| depth 2 | 21 | 16 | 17 | 1024 | 1.227 | 0.626 | 1.493 | 0.135 | 0.139 | 16 |
+| depth 3 | 85 | 64 | 65 | 4096 | 1.234 | 0.701 | 1.013 | 0.169 | 0.176 | 64 |
+| depth 4 | 341 | 256 | 257 | 16384 | 1.234 | 0.988 | 1.385 | 0.243 | 0.261 | 256 |
+| depth 5 | 1365 | 1024 | 1025 | 65536 | 1.243 | 2.166 | 2.999 | 0.418 | 0.478 | 1024 |
+| depth 3, capacity 16 | 85 | 64 | 65 | 4096 | 1.233 | 0.734 | 1.001 | 0.113 | 0.119 | **1** |
 
 120 measured frames per row after 12 warmup frames. Every row reported `frames_without_raster = 0`
 and `covered_pixels = 2073600`, i.e. the full framebuffer.
@@ -56,8 +57,8 @@ candidate-array build is omitted from the table because it never exceeded 0.0015
 ## What it says
 
 **The draw-list machinery scales; the per-frame geometry upload is what costs.** Across a 256x
-growth in the cut, CPU submission grows 4.0x (0.536 -> 2.144 ms) and GPU time 3.6x (0.110 -> 0.391
-ms) — both strongly sub-linear. But at the top of the sweep **CPU submission costs 5.5x the GPU time
+growth in the cut, CPU submission grows 3.9x (0.560 -> 2.166 ms) and GPU time 3.7x (0.113 -> 0.418
+ms) — both strongly sub-linear. But at the top of the sweep **CPU submission costs 5.2x the GPU time
 it is feeding**, and that is the number to carry forward.
 
 It is also a cost M18.3c predicted in prose and nobody had measured. `virtual_geometry_visibility_-
@@ -68,8 +69,8 @@ This sweep is the first measurement of that price. **Step 5 is where it goes, an
 before-picture.**
 
 **Selection's blocking submit is a fixed cost, and at small cuts it is the whole cost.** `sel` moves
-1.180 -> 1.142 ms — it does not move at all, and if anything drifts *down* — while the group count
-grows 273x (5 -> 1365). It is a submit round trip,
+1.223 -> 1.243 ms — 1.6%, which at this spread is not a trend — while the group count grows 273x
+(5 -> 1365). It is a submit round trip,
 not selection work. At depth 1 it is **2.2x** the CPU submission and **11x** the GPU time. Folding
 selection into the frame graph (named as later work in M18.3c) is therefore worth more than any
 amount of tuning inside the selector.
@@ -104,8 +105,10 @@ copies the visibility target to a host buffer — 16 MB at 1080p, recorded in th
 the submit timer covers. It originally ran on the *first measured* frame, and nearest-rank p99 of 120
 samples **is** the 119th sample, so that one frame could be the `sub p99` being reported. It was: at
 depths 2 and 3 the reported `sub p99` fell from 1.215 and 1.273 ms to 0.938 and 0.873 ms once the
-readback moved to the last warmup frame. The p50s did not move, which is what says the contamination
-was one frame rather than a bias.
+readback moved to the last warmup frame. (Both of those runs were unpinned, so they are comparable
+with each other and not with the pinned table above, whose p99s are noisier still — `sub p99` is the
+one column here where a single frame is the statistic.) The p50s did not move, which is what says the
+contamination was one frame rather than a bias.
 
 A fourth, smaller one: `VirtualGeometryVisibilityStats` is the **pass's** running total, not one
 `declare()`'s, so a level's candidate count is a difference. Reading it directly reported 220
@@ -113,10 +116,23 @@ candidates for a four-leaf quadtree — forty frames of five, which looks like a
 is not one. The sample now differences it per frame and cross-checks it against what the CPU
 uploaded, failing the row if the two disagree.
 
+## A note on pinning, since it costs about 7%
+
+The same sweep taken minutes earlier with `RIME_PERF_ALLOW_UNPINNED_CLOCKS=1` was consistently
+*faster*: `sel` 1.180 vs 1.223 ms, depth-5 `sub` 2.144 vs 2.166, depth-5 `gpu` 0.391 vs 0.418. That
+is the expected direction and not a contradiction. Pinning parks the graphics clock at **1785 MHz**
+against a 2100 MHz boost ceiling, so a pinned run is slower than an unpinned one that happened to
+boost — it trades peak throughput for a number that means the same thing tomorrow. The unpinned
+figures are recorded here only to document the size of that trade; they are not a baseline and
+nothing compares against them.
+
 ## Still open on gate 4
 
-- **A pinned-clock run.** The table above is unpinned and therefore establishes no baseline. Pin
-  both domains (`nvidia-smi -pm 1; -lgc 1785,1785; -lmc 7501`) and re-run with `--commit`.
+- Nothing. Gate 4's two halves — GPU selection plus indirect submission against the oracle
+  (M18.3b/c), and this complexity sweep — are both delivered, with overflow counted and degrading to
+  the coarse cut. **Gate 6** (the hybrid micro-triangle raster path) is next, and its own clause
+  requires "the split earns a measured micro-triangle gain" — which this harness is now what
+  measures. Vary `--triangles` against a fixed cut to move triangle *size* rather than count.
 - A pre-existing RHI warning fires once per frame on this path and is not this brick's:
   `initial_data ignored for device-local buffer 'vg-draw-records' / 'vg-indirect-commands' (needs
   staging)`. Both buffers are GPU-written before they are read, so it is noise rather than a bug —
