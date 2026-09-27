@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# rime-gateway — the hosted front end's session broker (Track H, ADR-0045 / ADR-0046 §2).
+#
+# It owns everything tenant-shaped that must stay OUT of engine/: session admission, the per-session
+# engine process, and — the property this first brick exists for — the SURFACE POLICY. A hosted
+# session is either an `edit` session or a `play` session, and that is a fact about the session the
+# gateway created, never something the browser asserts. A play session's `0x02xx` editor band is
+# dropped here, so the engine is never asked to answer "may this peer edit?" about an untrusted peer.
+#
+# HTTP, TLS and WebRTC are NOT here yet and are deliberately absent from this brick: the filter is
+# the load-bearing security property and it is provable over an in-memory pipe, with no network, no
+# browser and no engine. Deleting this crate leaves the engine unchanged (guardrail 2).
+[package]
+name = "rime-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Session broker for Rime's hosted browser front end (surface policy, per-session engine process)"
+
+[dependencies]
+rime-protocol = { path = "../rime-protocol" }
+
+[lints.clippy]
+all = "deny"

@@ -17,6 +17,7 @@ Why Rust for tools (and C++ for the runtime)? See
 | --- | --- |
 | `editor` | the visual editor: a client of a live engine (`rime-engine --editor-host`) — inspectors driven by engine reflection, live preview. v1 = a headless `--smoke`; egui shell follows |
 | `rime-protocol` | the editor's Rust implementation of the engine streaming/editor wire protocol (mirrors `engine/stream`; cross-language conformance-tested) |
+| `rime-gateway` | the hosted front end's session broker (Track H, [ADR-0045](../docs/adr/0045-hosted-front-end-v1.md) / [ADR-0046](../docs/adr/0046-exported-games-and-the-blender-boundary.md) §2): session admission, the per-session engine process, and the **surface policy** — a `play` session's `0x02xx` editor band is dropped here, so the engine is never asked whether an untrusted peer may edit. HTTP/TLS/WebRTC land in later bricks; everything tenant-shaped stays out of `engine/` |
 | `asset-pipeline` | importers, bakers, and cookers that turn source art (meshes, textures, audio) into runtime-ready engine assets |
 | `rime-cli` | command-line entry points: build/cook a project, run headless, inspect assets |
 | `ffi` | the stable boundary crate that talks to the C++ engine (C ABI / protocol) |
