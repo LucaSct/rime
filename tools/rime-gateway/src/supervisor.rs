@@ -312,12 +312,16 @@ time.sleep(30)\n";
 
     #[test]
     fn a_child_that_dies_before_binding_is_reported_as_such() {
-        // /bin/false exits at once. This must be ChildExited and not SocketTimeout: waiting the full
+        // A process that exits at once. `/bin/sh -c "exit 1"` is used rather than the obvious
+        // `false`, which lives at /usr/bin/false on macOS and /bin/false on Linux — the first version
+        // hardcoded the Linux path and failed on macOS with Spawn(NotFound), asserting the location of
+        // a binary instead of the behaviour it was written for. This must be ChildExited and not
+        // SocketTimeout: waiting the full
         // timeout for a process that is already gone turns an instant, explainable failure into a
         // slow mysterious one, and the two errors point at different culprits.
         let socket = scratch_socket();
         let started = Instant::now();
-        let err = spawn_session(&spec("/bin/false", &[], socket, 5_000))
+        let err = spawn_session(&spec("/bin/sh", &["-c", "exit 1"], socket, 5_000))
             .expect_err("a process that exits cannot serve a session");
         assert!(
             matches!(err, SpawnError::ChildExited(_)),
@@ -356,7 +360,7 @@ time.sleep(30)\n";
         let socket = scratch_socket();
         std::fs::write(&socket, b"stale").expect("plant a stale file");
         assert!(socket.exists());
-        let err = spawn_session(&spec("/bin/false", &[], socket.clone(), 300))
+        let err = spawn_session(&spec("/bin/sh", &["-c", "exit 1"], socket.clone(), 300))
             .expect_err("the child still cannot serve");
         // Not SocketTimeout: the stale file must not have been mistaken for a bound socket.
         assert!(
