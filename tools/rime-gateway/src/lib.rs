@@ -26,13 +26,22 @@ use std::io::{Read, Write};
 
 use rime_protocol::{Connection, MessageType, Result};
 
-// Unix-only: a session is reached over a Unix-domain socket, which is what the engine's
-// LocalListener binds on POSIX (`engine/platform/.../socket.hpp`). Windows would need named pipes and
-// a different `SessionSpec`, so the module is gated rather than stubbed — a stub that compiles and
-// cannot work is worse than an honest absence. The surface policy above is portable and stays so.
+// Both modules below are Unix-only, and for the same reason at bottom: this is a Linux service on
+// starbase (ADR-0047 §3). `supervisor` reaches a session over a Unix-domain socket, which is what the
+// engine's LocalListener binds on POSIX; `admission` reads `/dev/urandom` to mint session ids.
+//
+// Gated rather than stubbed or given a portable fallback. A stub that compiles and cannot work is
+// worse than an honest absence, and the fallback nobody runs is the one that is quietly weaker — a
+// weaker session id is a weaker capability. CI builds this crate on Windows and macOS, so leaving
+// either ungated would pass compilation and fail the test run, which is how `supervisor` first went
+// red. The surface policy above is portable and stays so.
+#[cfg(unix)]
+pub mod admission;
 #[cfg(unix)]
 pub mod supervisor;
 
+#[cfg(unix)]
+pub use admission::{AdmissionCounters, AdmissionPolicy, Refusal, Registry, SessionId};
 #[cfg(unix)]
 pub use supervisor::{spawn_session, SessionHandle, SessionSpec, SpawnError};
 
