@@ -8,7 +8,8 @@
 
 # Backend-agnostic sources — built on every platform and in every configuration.
 add_library(rime_rhi STATIC
-    src/device.cpp)
+    src/device.cpp
+    src/adapter_choice.cpp)
 
 # Namespaced alias so dependents link rime::rhi (matching rime::core / rime::platform).
 add_library(rime::rhi ALIAS rime_rhi)

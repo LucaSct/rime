@@ -30,6 +30,9 @@ inline constexpr bool kValidationDefault = true;
 struct DeviceDesc {
     std::string_view app_name = "Rime";
     bool enable_validation = kValidationDefault;
+    // Case-insensitive substring of the adapter name to prefer, e.g. "3060". Empty = no preference.
+    // A preference that matches nothing warns and falls back to the default choice.
+    std::string_view prefer_adapter = {};
     // No window/surface here: M3.1–M3.3 render off-screen (headless), which is what lets the proof
     // run on a software GPU in CI. Presentation (a swapchain built from platform::NativeWindow)
     // arrives in M3.4 as a separate object created from the Device.
