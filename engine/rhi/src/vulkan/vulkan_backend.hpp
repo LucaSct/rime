@@ -210,7 +210,7 @@ private:
     // create() steps, each returns false on failure (after logging the cause).
     bool create_instance(const DeviceDesc& desc);
     bool create_debug_messenger();
-    bool pick_physical_device();
+    bool pick_physical_device(const DeviceDesc& desc);
     bool create_logical_device();
     bool create_allocator();
     bool create_command_pool();

@@ -7,11 +7,13 @@
 // needs and what lets the proof run on a software GPU (lavapipe) in CI. Presentation is added in
 // M3.4 by creating a swapchain from a platform::NativeWindow.
 
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "rime/rhi/adapter_choice.hpp"
 #include "vulkan/vulkan_backend.hpp"
 
 namespace rime::rhi {
@@ -75,6 +77,24 @@ std::optional<std::uint32_t> find_graphics_family(VkPhysicalDevice pd) {
     return std::nullopt;
 }
 
+// The deviceType score that ranks adapters for the default (no-preference) choice. A discrete GPU
+// is what the engine wants for heavy rendering; a CPU device (lavapipe) is perfectly acceptable —
+// it is exactly what we want in CI, where there is no hardware GPU — so it scores low but non-zero.
+int device_type_score(VkPhysicalDeviceType type) {
+    switch (type) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+            return 1000;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+            return 500;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+            return 250;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU:
+            return 100;
+        default:
+            return 10;
+    }
+}
+
 } // namespace
 
 std::unique_ptr<VulkanDevice> VulkanDevice::create(const DeviceDesc& desc) {
@@ -93,7 +113,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(const DeviceDesc& desc) {
         return nullptr;
     if (dev->validation_)
         dev->create_debug_messenger(); // best-effort; absence is not fatal
-    if (!dev->pick_physical_device())
+    if (!dev->pick_physical_device(desc))
         return nullptr;
     if (!dev->create_logical_device())
         return nullptr;
@@ -283,7 +303,7 @@ bool VulkanDevice::create_debug_messenger() {
     return true;
 }
 
-bool VulkanDevice::pick_physical_device() {
+bool VulkanDevice::pick_physical_device(const DeviceDesc& desc) {
     std::uint32_t count = 0;
     vkEnumeratePhysicalDevices(instance_, &count, nullptr);
     if (count == 0) {
@@ -293,10 +313,11 @@ bool VulkanDevice::pick_physical_device() {
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance_, &count, devices.data());
 
-    VkPhysicalDevice best = VK_NULL_HANDLE;
-    VkPhysicalDeviceProperties best_props{};
-    int best_score = -1;
-
+    // Gather every device that passes the existing bar as name + type-score pairs, so the decision
+    // is made by the pure, testable selection function and every candidate is logged — a caller
+    // must be able to see what the choice was made among, not just who won.
+    std::vector<AdapterCandidate> candidates;
+    candidates.reserve(devices.size());
     for (VkPhysicalDevice pd : devices) {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(pd, &props);
@@ -313,37 +334,39 @@ bool VulkanDevice::pick_physical_device() {
         if (!find_graphics_family(pd).has_value())
             continue;
 
-        // Prefer a real discrete GPU, but a CPU device (lavapipe) is perfectly acceptable — it is
-        // exactly what we want in CI, where there is no hardware GPU.
-        int score = 0;
-        switch (props.deviceType) {
-            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
-                score = 1000;
-                break;
-            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
-                score = 500;
-                break;
-            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
-                score = 250;
-                break;
-            case VK_PHYSICAL_DEVICE_TYPE_CPU:
-                score = 100;
-                break;
-            default:
-                score = 10;
-                break;
-        }
-        if (score > best_score) {
-            best_score = score;
-            best = pd;
-            best_props = props;
-        }
+        candidates.push_back({props.deviceName, device_type_score(props.deviceType)});
     }
 
-    if (best == VK_NULL_HANDLE) {
+    if (candidates.empty()) {
         RIME_ERROR("rhi: no GPU meets the Vulkan 1.3 + dynamic-rendering + synchronization2 bar");
         return false;
     }
+
+    // The environment override wins over DeviceDesc, so a perf run can pin the GPU without
+    // recompiling. RIME_ADAPTER is a case-insensitive name substring, e.g. "3060".
+    std::string_view preference = desc.prefer_adapter;
+    if (const char* env = std::getenv("RIME_ADAPTER"); env != nullptr && env[0] != '\0')
+        preference = env;
+
+    // `candidates` is non-empty here, so choose_adapter cannot return nullopt.
+    const AdapterChoice choice = *choose_adapter(candidates, preference);
+
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        RIME_INFO("rhi: candidate [{}] '{}' (type score {}){}",
+                  i,
+                  candidates[i].name,
+                  candidates[i].type_score,
+                  i == choice.index ? "  <-- chosen" : "");
+    }
+    if (choice.preference_unmatched) {
+        RIME_WARN("rhi: adapter preference '{}' matched no adapter — falling back to '{}'",
+                  preference,
+                  candidates[choice.index].name);
+    }
+
+    VkPhysicalDevice best = devices[choice.index];
+    VkPhysicalDeviceProperties best_props{};
+    vkGetPhysicalDeviceProperties(best, &best_props);
 
     physical_ = best;
     graphics_family_ = *find_graphics_family(best);
