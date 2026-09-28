@@ -60,6 +60,8 @@ pub mod http;
 // Portable: a principal is a number and a cookie is a string, so every CI platform tests the
 // ownership vocabulary even where the registry it guards does not build.
 pub mod identity;
+// Portable: integer arithmetic over a caller-supplied clock, so every CI platform tests the bound.
+pub mod limits;
 // Portable: port ownership and public-address validation need no socket, so CI can test both.
 pub mod media;
 // Portable: str0m is sans-IO and UdpSocket is std, so all three CI platforms exercise the run loop.
@@ -72,6 +74,7 @@ pub use api::{
 #[cfg(all(unix, feature = "auth"))]
 pub use auth_api::{AuthApi, AuthApiCounters, CEREMONY_COOKIE};
 pub use identity::{cookie, AccessPolicy, AccountRef, Principal, SESSION_COOKIE};
+pub use limits::{Decision, Limiter, Rate};
 
 /// Which surface a session was created for. Assigned by the gateway when it admits the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
