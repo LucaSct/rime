@@ -34,6 +34,7 @@ use std::path::PathBuf;
 
 use crate::admission::{AdmissionCounters, AdmissionPolicy, Refusal, Registry, SessionId};
 use crate::http::{self, json_string, parse_flat_object, Method, ParseError, Request, Response};
+use crate::identity::{AccessPolicy, Principal};
 use crate::Surface;
 
 impl Surface {
@@ -145,6 +146,13 @@ pub struct ApiCounters {
     pub not_implemented: u64,
     /// The request could not be parsed at all. Counted separately because these never reach a route.
     pub malformed: u64,
+    /// Requests refused because this host requires an account and the request carried none.
+    pub unauthenticated: u64,
+    /// Requests that named a session belonging to somebody else. They are answered `404`, so without
+    /// this counter they would be indistinguishable in the log from a typo — and the difference
+    /// between "a client mistyped an id" and "somebody is walking the id space" is the whole point of
+    /// having counters.
+    pub not_owner: u64,
 }
 
 /// The routing table plus the state it decides over.
@@ -153,20 +161,31 @@ pub struct SessionApi<L: Launcher> {
     registry: Registry<L::Session>,
     launcher: L,
     counters: ApiCounters,
+    access: AccessPolicy,
 }
 
 impl<L: Launcher> SessionApi<L> {
     #[must_use]
+    /// Build with the default [`AccessPolicy`], which **requires an account**. A deployment that
+    /// wants ADR-0045's open LAN behaviour says so with [`Self::with_access`], where a reader can find
+    /// it, rather than inheriting it from a default nobody had to write down.
     pub fn new(catalogue: Catalogue, policy: AdmissionPolicy, launcher: L) -> Self {
         Self {
             catalogue,
             registry: Registry::new(policy),
             launcher,
             counters: ApiCounters::default(),
+            access: AccessPolicy::default(),
         }
     }
 
+    /// Replace the access policy — the one call that makes this gateway serve anonymous requests.
     #[must_use]
+    pub fn with_access(mut self, access: AccessPolicy) -> Self {
+        self.access = access;
+        self
+    }
+
     pub fn counters(&self) -> ApiCounters {
         self.counters
     }
@@ -190,8 +209,21 @@ impl<L: Launcher> SessionApi<L> {
     }
 
     /// Route one parsed request.
-    pub fn route(&mut self, request: &Request) -> Response {
+    /// Route one request on behalf of `who`.
+    ///
+    /// The principal is an argument rather than something this function derives, because deriving it
+    /// means reading a cookie and asking the store, and neither belongs in a router. The caller
+    /// resolves identity once, at the connection, and hands the answer down — so there is exactly one
+    /// place where a request becomes a person, and it is not here.
+    pub fn route(&mut self, request: &Request, who: Principal) -> Response {
         self.counters.requests += 1;
+        // Before anything else. A host that requires an account must not let an anonymous request
+        // learn the catalogue, the session list, or whether an id exists.
+        if self.access.require_account && !who.is_account() {
+            self.counters.unauthenticated += 1;
+            return Response::error(401, "this host requires an account")
+                .with_header("WWW-Authenticate", "Rime-Session".to_string());
+        }
         // Split once, so `/api/sessions/<id>/offer` and `/api/sessions` are the same match arm shape
         // and a trailing slash cannot produce a third path spelling that routes differently.
         let segments: Vec<&str> = request.path.split('/').filter(|s| !s.is_empty()).collect();
@@ -200,22 +232,29 @@ impl<L: Launcher> SessionApi<L> {
                 Response::json(200, api.catalogue.to_json())
             }),
             ["api", "sessions"] => match request.method {
-                Method::Get => self.list_sessions(),
-                Method::Post => self.create_session(request),
+                Method::Get => self.list_sessions(who),
+                Method::Post => self.create_session(request, who),
                 _ => self.method_not_allowed(&[Method::Get, Method::Post]),
             },
             ["api", "sessions", id] => {
                 let id = id.to_string();
                 match request.method {
-                    Method::Get => self.get_session(&id),
-                    Method::Delete => self.delete_session(&id),
+                    Method::Get => self.get_session(&id, who),
+                    Method::Delete => self.delete_session(&id, who),
                     _ => self.method_not_allowed(&[Method::Get, Method::Delete]),
                 }
             }
             // The signalling endpoints, honestly absent. Named here so the shape is reviewable and so
             // a client gets `501` rather than `404` — `404` would say "this is not a route", which is
             // untrue and would send someone looking for a typo.
-            ["api", "sessions", _, "offer"] | ["api", "sessions", _, "answer"] => {
+            // The signalling endpoints, honestly absent — but ownership is checked HERE, before the
+            // 501, and not left for whoever implements them. A route that learns to do something
+            // before it learns who may do it is the ordering ADR-0048 brick 3 exists to prevent, and
+            // there is a test asserting a stranger gets 404 rather than 501 from these.
+            ["api", "sessions", id, "offer"] | ["api", "sessions", id, "answer"] => {
+                if let Some(refusal) = self.owned_or_absent(id, who) {
+                    return refusal;
+                }
                 self.counters.not_implemented += 1;
                 Response::error(
                     501,
@@ -255,8 +294,15 @@ impl<L: Launcher> SessionApi<L> {
         Response::error(400, message)
     }
 
-    fn list_sessions(&mut self) -> Response {
-        let mut ids: Vec<(SessionId, Surface)> = self.registry.iter().collect();
+    /// Only the caller's own sessions. A list that showed everything would hand every id on the host
+    /// to anyone who asked, which is the same leak `owned_or_absent` refuses one id at a time.
+    fn list_sessions(&mut self, who: Principal) -> Response {
+        let mut ids: Vec<(SessionId, Surface)> = self
+            .registry
+            .iter()
+            .filter(|(_, _, owner)| *owner == who)
+            .map(|(id, surface, _)| (id, surface))
+            .collect();
         // Sorted, because `HashMap` iteration order is deliberately randomised per process: an
         // unsorted list would be a response that differs between identical requests, which is both
         // unpleasant to consume and untestable.
@@ -268,9 +314,37 @@ impl<L: Launcher> SessionApi<L> {
         Response::json(200, format!("{{\"sessions\":[{}]}}", items.join(",")))
     }
 
-    fn get_session(&mut self, raw: &str) -> Response {
+    /// `None` when `who` may act on the session, otherwise the refusal to return.
+    ///
+    /// **Somebody else's session is `404`, not `403`.** A `403` would confirm that the id exists,
+    /// which turns the session list into something a stranger can enumerate one id at a time; a
+    /// session id is a capability (ADR-0048 decision 4) and "this capability is real but not yours" is
+    /// exactly the sentence a capability must never say.
+    fn owned_or_absent(&mut self, raw: &str, who: Principal) -> Option<Response> {
         let Some(id) = parse_id(raw) else {
-            return self.bad_request("malformed session id");
+            return Some(self.bad_request("malformed session id"));
+        };
+        match self.registry.owner_of(id) {
+            Some(owner) if owner == who => None,
+            Some(_) => {
+                self.counters.not_owner += 1;
+                self.counters.not_found += 1;
+                Some(Response::error(404, "no such session"))
+            }
+            None => {
+                self.counters.not_found += 1;
+                Some(Response::error(404, "no such session"))
+            }
+        }
+    }
+
+    fn get_session(&mut self, raw: &str, who: Principal) -> Response {
+        if let Some(refusal) = self.owned_or_absent(raw, who) {
+            return refusal;
+        }
+        let id = match parse_id(raw) {
+            Some(id) => id,
+            None => return self.bad_request("malformed session id"),
         };
         match self.registry.surface_of(id) {
             Some(surface) => Response::json(200, session_json(id, surface)),
@@ -281,7 +355,10 @@ impl<L: Launcher> SessionApi<L> {
         }
     }
 
-    fn delete_session(&mut self, raw: &str) -> Response {
+    fn delete_session(&mut self, raw: &str, who: Principal) -> Response {
+        if let Some(refusal) = self.owned_or_absent(raw, who) {
+            return refusal;
+        }
         let Some(id) = parse_id(raw) else {
             return self.bad_request("malformed session id");
         };
@@ -300,7 +377,7 @@ impl<L: Launcher> SessionApi<L> {
         }
     }
 
-    fn create_session(&mut self, request: &Request) -> Response {
+    fn create_session(&mut self, request: &Request, who: Principal) -> Response {
         // The media type is checked rather than sniffed. A body we would parse regardless of what the
         // client called it is a body a confused-deputy request can deliver from a form post.
         match request.header("content-type") {
@@ -337,7 +414,8 @@ impl<L: Launcher> SessionApi<L> {
             return self.bad_request("that game does not offer that surface");
         }
 
-        let id = match self.registry.try_admit(surface) {
+        // The owner is fixed here, from the principal the connection proved — never from the body.
+        let id = match self.registry.try_admit(surface, who) {
             Ok(id) => id,
             Err(refusal) => {
                 let status = match refusal {
@@ -346,6 +424,12 @@ impl<L: Launcher> SessionApi<L> {
                     Refusal::HostFull { .. } | Refusal::PlayFull { .. } => {
                         self.counters.refused_admission += 1;
                         503
+                    }
+                    // `429`, not `503`: this one IS about who is asking, and retrying without closing
+                    // a session of its own will never succeed, however long the client waits.
+                    Refusal::AccountFull { .. } => {
+                        self.counters.refused_admission += 1;
+                        429
                     }
                     Refusal::NoEntropy(_) => 500,
                 };
@@ -455,13 +539,19 @@ impl Launcher for ProcessLauncher {
 /// Keep-alive is a thing to add with a real event loop and a read timeout, not something to leave
 /// half-true in the meantime: a server that advertises keep-alive and then closes makes every client
 /// retry, and one that holds the connection with no timeout is a slot exhausted by an idle peer.
+/// Serve one connection on behalf of an already-resolved principal.
+///
+/// Identity is resolved by the caller — it needs the store, which this crate can be compiled without
+/// (ADR-0048 decision 2) — and passed in, so a build with no authentication at all still routes, and
+/// still enforces ownership, with every request anonymous.
 pub fn serve_connection<S: Read + Write, L: Launcher>(
     api: &mut SessionApi<L>,
     stream: &mut S,
+    who: Principal,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(&mut *stream);
     let response = match http::read_request(&mut reader) {
-        Ok(request) => api.route(&request),
+        Ok(request) => api.route(&request, who),
         // A peer that connected and said nothing gets nothing back. Answering `400` to a bare TCP
         // health probe would fill the log with failures that are not failures.
         Err(ParseError::NoRequest) => return Ok(()),
@@ -473,6 +563,7 @@ pub fn serve_connection<S: Read + Write, L: Launcher>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::AccountRef;
     use std::io::Cursor;
 
     /// A launcher with no process behind it: enough to drive every route, and able to fail on demand
@@ -525,12 +616,18 @@ mod tests {
             AdmissionPolicy {
                 max_sessions: 3,
                 max_play_sessions: 1,
+                max_sessions_per_account: 2,
             },
             FakeLauncher {
                 fail,
                 launched: Vec::new(),
             },
         )
+        // These cases are about routing, not about identity, so they run as the open LAN host
+        // ADR-0045 describes. The ownership cases below build their own API and say so.
+        .with_access(AccessPolicy {
+            require_account: false,
+        })
     }
 
     fn request(raw: &str) -> Request {
@@ -544,6 +641,26 @@ mod tests {
             body.len(),
             body
         ))
+    }
+
+    /// An API that requires an account — the hosted deployment, as opposed to `api()`'s open LAN one.
+    fn hosted() -> SessionApi<FakeLauncher> {
+        SessionApi::new(
+            catalogue(),
+            AdmissionPolicy {
+                max_sessions: 3,
+                max_play_sessions: 1,
+                max_sessions_per_account: 2,
+            },
+            FakeLauncher {
+                fail: false,
+                launched: Vec::new(),
+            },
+        )
+    }
+
+    fn account(n: u128) -> Principal {
+        Principal::Account(AccountRef::from_u128(n))
     }
 
     fn body_of(response: &Response) -> String {
@@ -560,7 +677,10 @@ mod tests {
     fn the_catalogue_never_serialises_a_program_path_or_argv() {
         // The module's central decision, as a test. If a path ever appears here, a client can see
         // what to ask for — and the next step is a client that asks for it directly.
-        let response = api(false).route(&request("GET /api/catalogue HTTP/1.1\r\n\r\n"));
+        let response = api(false).route(
+            &request("GET /api/catalogue HTTP/1.1\r\n\r\n"),
+            Principal::Anonymous,
+        );
         assert_eq!(response.status, 200);
         let body = body_of(&response);
         assert!(body.contains("\"hello\""));
@@ -573,7 +693,7 @@ mod tests {
     #[test]
     fn creating_a_session_assigns_the_surface_and_returns_a_capability() {
         let mut api = api(false);
-        let response = api.route(&post("hello", "play"));
+        let response = api.route(&post("hello", "play"), Principal::Anonymous);
         assert_eq!(response.status, 201);
         let id = created_id(&response);
         assert_eq!(id.len(), 32, "a session id is 128 random bits in hex");
@@ -589,30 +709,45 @@ mod tests {
     #[test]
     fn a_session_can_be_fetched_and_deleted_and_then_is_gone() {
         let mut api = api(false);
-        let id = created_id(&api.route(&post("hello", "play")));
+        let id = created_id(&api.route(&post("hello", "play"), Principal::Anonymous));
         let path = format!("/api/sessions/{id}");
 
         assert_eq!(
-            api.route(&request(&format!("GET {path} HTTP/1.1\r\n\r\n")))
-                .status,
+            api.route(
+                &request(&format!("GET {path} HTTP/1.1\r\n\r\n")),
+                Principal::Anonymous
+            )
+            .status,
             200
         );
-        let list = api.route(&request("GET /api/sessions HTTP/1.1\r\n\r\n"));
+        let list = api.route(
+            &request("GET /api/sessions HTTP/1.1\r\n\r\n"),
+            Principal::Anonymous,
+        );
         assert!(body_of(&list).contains(&id));
 
-        let deleted = api.route(&request(&format!("DELETE {path} HTTP/1.1\r\n\r\n")));
+        let deleted = api.route(
+            &request(&format!("DELETE {path} HTTP/1.1\r\n\r\n")),
+            Principal::Anonymous,
+        );
         assert_eq!(deleted.status, 204);
         assert!(deleted.body.is_empty());
         // Gone means gone: the slot is free AND the id no longer resolves. A `DELETE` that only freed
         // the slot would leave a live id addressing a released session.
         assert_eq!(
-            api.route(&request(&format!("GET {path} HTTP/1.1\r\n\r\n")))
-                .status,
+            api.route(
+                &request(&format!("GET {path} HTTP/1.1\r\n\r\n")),
+                Principal::Anonymous
+            )
+            .status,
             404
         );
         assert_eq!(
-            api.route(&request(&format!("DELETE {path} HTTP/1.1\r\n\r\n")))
-                .status,
+            api.route(
+                &request(&format!("DELETE {path} HTTP/1.1\r\n\r\n")),
+                Principal::Anonymous
+            )
+            .status,
             404
         );
         assert_eq!(api.counters().deleted, 1);
@@ -624,35 +759,63 @@ mod tests {
         // The leak this guards is invisible from outside: without the release, the play cap is
         // consumed by a session that never existed, and the host reports itself full forever.
         let mut api = api(true);
-        assert_eq!(api.route(&post("hello", "play")).status, 500);
+        assert_eq!(
+            api.route(&post("hello", "play"), Principal::Anonymous)
+                .status,
+            500
+        );
         assert_eq!(api.counters().launch_failed, 1);
         assert!(api.registry().is_empty(), "the slot leaked");
         assert_eq!(api.admission_counters().released, 1);
         // And the cap is genuinely still available afterwards: the SAME api, whose launcher now
         // succeeds, admits a play session — which it could not if the slot were still held.
         api.launcher.fail = false;
-        assert_eq!(api.route(&post("hello", "play")).status, 201);
+        assert_eq!(
+            api.route(&post("hello", "play"), Principal::Anonymous)
+                .status,
+            201
+        );
     }
 
     #[test]
     fn the_play_cap_is_enforced_and_is_a_503_not_a_400() {
         let mut api = api(false);
-        assert_eq!(api.route(&post("hello", "play")).status, 201);
-        let second = api.route(&post("block", "play"));
+        assert_eq!(
+            api.route(&post("hello", "play"), Principal::Anonymous)
+                .status,
+            201
+        );
+        let second = api.route(&post("block", "play"), Principal::Anonymous);
         assert_eq!(second.status, 503, "{}", body_of(&second));
         assert_eq!(api.counters().refused_admission, 1);
         // An edit session is cheaper and still admitted, which is the whole reason the two caps are
         // separate rather than one number.
-        assert_eq!(api.route(&post("block", "edit")).status, 201);
+        assert_eq!(
+            api.route(&post("block", "edit"), Principal::Anonymous)
+                .status,
+            201
+        );
     }
 
     #[test]
     fn the_total_cap_is_enforced_after_the_play_cap() {
         let mut api = api(false);
-        assert_eq!(api.route(&post("block", "edit")).status, 201);
-        assert_eq!(api.route(&post("block", "edit")).status, 201);
-        assert_eq!(api.route(&post("block", "edit")).status, 201);
-        let full = api.route(&post("block", "edit"));
+        assert_eq!(
+            api.route(&post("block", "edit"), Principal::Anonymous)
+                .status,
+            201
+        );
+        assert_eq!(
+            api.route(&post("block", "edit"), Principal::Anonymous)
+                .status,
+            201
+        );
+        assert_eq!(
+            api.route(&post("block", "edit"), Principal::Anonymous)
+                .status,
+            201
+        );
+        let full = api.route(&post("block", "edit"), Principal::Anonymous);
         assert_eq!(full.status, 503);
         assert!(body_of(&full).contains("host is full"));
     }
@@ -667,7 +830,7 @@ mod tests {
             body.len(),
             body
         ));
-        assert_eq!(api.route(&req).status, 404);
+        assert_eq!(api.route(&req, Principal::Anonymous).status, 404);
         assert!(api.launcher.launched.is_empty(), "attempted a launch");
     }
 
@@ -676,7 +839,7 @@ mod tests {
         // `hello` is an exported game: play only. Editing it is not a missing feature, it is a
         // property of the catalogue entry — so the answer comes from the catalogue, not the client.
         let mut api = api(false);
-        let response = api.route(&post("hello", "edit"));
+        let response = api.route(&post("hello", "edit"), Principal::Anonymous);
         assert_eq!(response.status, 400);
         assert!(body_of(&response).contains("does not offer"));
         assert!(api.launcher.launched.is_empty());
@@ -687,7 +850,7 @@ mod tests {
     fn an_unknown_surface_name_is_refused_rather_than_defaulted() {
         let mut api = api(false);
         for name in ["Edit", "EDIT", "author", "", "play "] {
-            let response = api.route(&post("block", name));
+            let response = api.route(&post("block", name), Principal::Anonymous);
             assert_eq!(response.status, 400, "accepted surface {name:?}");
         }
         assert!(api.launcher.launched.is_empty());
@@ -702,14 +865,14 @@ mod tests {
             body.len(),
             body
         ));
-        assert_eq!(api.route(&req).status, 415);
+        assert_eq!(api.route(&req, Principal::Anonymous).status, 415);
         // A charset parameter is not a different media type, though.
         let req = request(&format!(
             "POST /api/sessions HTTP/1.1\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body
         ));
-        assert_eq!(api.route(&req).status, 201);
+        assert_eq!(api.route(&req, Principal::Anonymous).status, 201);
     }
 
     #[test]
@@ -718,14 +881,18 @@ mod tests {
         // and collapsing them would let a client probe the id space by watching the status.
         let mut api = api(false);
         assert_eq!(
-            api.route(&request("GET /api/sessions/nope HTTP/1.1\r\n\r\n"))
-                .status,
+            api.route(
+                &request("GET /api/sessions/nope HTTP/1.1\r\n\r\n"),
+                Principal::Anonymous
+            )
+            .status,
             400
         );
         assert_eq!(
-            api.route(&request(
-                "GET /api/sessions/00000000000000000000000000000000 HTTP/1.1\r\n\r\n"
-            ))
+            api.route(
+                &request("GET /api/sessions/00000000000000000000000000000000 HTTP/1.1\r\n\r\n"),
+                Principal::Anonymous
+            )
             .status,
             404
         );
@@ -734,13 +901,19 @@ mod tests {
     #[test]
     fn wrong_methods_answer_405_with_allow() {
         let mut api = api(false);
-        let response = api.route(&request("DELETE /api/sessions HTTP/1.1\r\n\r\n"));
+        let response = api.route(
+            &request("DELETE /api/sessions HTTP/1.1\r\n\r\n"),
+            Principal::Anonymous,
+        );
         assert_eq!(response.status, 405);
         assert!(response
             .extra
             .iter()
             .any(|(k, v)| *k == "Allow" && v == "GET, POST"));
-        let response = api.route(&request("POST /api/catalogue HTTP/1.1\r\n\r\n"));
+        let response = api.route(
+            &request("POST /api/catalogue HTTP/1.1\r\n\r\n"),
+            Principal::Anonymous,
+        );
         assert_eq!(response.status, 405);
         assert_eq!(api.counters().method_not_allowed, 2);
     }
@@ -748,10 +921,11 @@ mod tests {
     #[test]
     fn signalling_answers_501_rather_than_404_or_a_plausible_stub() {
         let mut api = api(false);
-        let id = created_id(&api.route(&post("hello", "play")));
-        let response = api.route(&request(&format!(
-            "POST /api/sessions/{id}/offer HTTP/1.1\r\n\r\n"
-        )));
+        let id = created_id(&api.route(&post("hello", "play"), Principal::Anonymous));
+        let response = api.route(
+            &request(&format!("POST /api/sessions/{id}/offer HTTP/1.1\r\n\r\n")),
+            Principal::Anonymous,
+        );
         assert_eq!(response.status, 501);
         assert_eq!(api.counters().not_implemented, 1);
     }
@@ -760,12 +934,18 @@ mod tests {
     fn unknown_routes_and_trailing_slashes_do_not_produce_two_spellings() {
         let mut api = api(false);
         assert_eq!(
-            api.route(&request("GET /api/nothing HTTP/1.1\r\n\r\n"))
-                .status,
+            api.route(
+                &request("GET /api/nothing HTTP/1.1\r\n\r\n"),
+                Principal::Anonymous
+            )
+            .status,
             404
         );
         // `/api/sessions/` must be the collection, not a session whose id is the empty string.
-        let response = api.route(&request("GET /api/sessions/ HTTP/1.1\r\n\r\n"));
+        let response = api.route(
+            &request("GET /api/sessions/ HTTP/1.1\r\n\r\n"),
+            Principal::Anonymous,
+        );
         assert_eq!(response.status, 200);
         assert!(body_of(&response).contains("\"sessions\""));
     }
@@ -775,11 +955,17 @@ mod tests {
         // `HashMap` iteration is randomised per process, so an unsorted listing would differ between
         // calls within one run — untestable, and unpleasant for a browser diffing it.
         let mut api = api(false);
-        api.route(&post("block", "edit"));
-        api.route(&post("block", "edit"));
-        api.route(&post("hello", "play"));
-        let first = body_of(&api.route(&request("GET /api/sessions HTTP/1.1\r\n\r\n")));
-        let second = body_of(&api.route(&request("GET /api/sessions HTTP/1.1\r\n\r\n")));
+        api.route(&post("block", "edit"), Principal::Anonymous);
+        api.route(&post("block", "edit"), Principal::Anonymous);
+        api.route(&post("hello", "play"), Principal::Anonymous);
+        let first = body_of(&api.route(
+            &request("GET /api/sessions HTTP/1.1\r\n\r\n"),
+            Principal::Anonymous,
+        ));
+        let second = body_of(&api.route(
+            &request("GET /api/sessions HTTP/1.1\r\n\r\n"),
+            Principal::Anonymous,
+        ));
         assert_eq!(first, second);
         assert_eq!(first.matches("\"session\":").count(), 3);
     }
@@ -824,7 +1010,7 @@ mod tests {
             inbound: Cursor::new(b"GET /api/catalogue HTTP/1.1\r\nHost: rime\r\n\r\n".to_vec()),
             outbound: Vec::new(),
         };
-        serve_connection(&mut api, &mut pipe).unwrap();
+        serve_connection(&mut api, &mut pipe, Principal::Anonymous).unwrap();
         let text = String::from_utf8(pipe.outbound).unwrap();
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(text.contains("Content-Type: application/json\r\n"));
@@ -835,7 +1021,129 @@ mod tests {
             inbound: Cursor::new(Vec::new()),
             outbound: Vec::new(),
         };
-        serve_connection(&mut api, &mut silent).unwrap();
+        serve_connection(&mut api, &mut silent, Principal::Anonymous).unwrap();
         assert!(silent.outbound.is_empty());
+    }
+
+    // THE SECOND-ACCOUNT TEST (ADR-0048 brick 3). One account creates a session; another account,
+    // holding its real id, must not be able to read it, delete it, signal on it, or even learn that it
+    // exists. Everything about ownership in this module is here to make this case fail closed.
+    #[test]
+    fn a_second_account_can_neither_see_nor_touch_the_first_ones_session() {
+        let mut api = hosted();
+        let alice = account(1);
+        let bob = account(2);
+
+        let created = api.route(&post("block", "edit"), alice);
+        assert_eq!(created.status, 201);
+        let id = created_id(&created);
+
+        // Reading it: 404, not 403 — a 403 would confirm the id is real.
+        let get = api.route(
+            &request(&format!("GET /api/sessions/{id} HTTP/1.1\r\n\r\n")),
+            bob,
+        );
+        assert_eq!(get.status, 404);
+        // Deleting it: refused, and the session is still there afterwards.
+        let delete = api.route(
+            &request(&format!("DELETE /api/sessions/{id} HTTP/1.1\r\n\r\n")),
+            bob,
+        );
+        assert_eq!(delete.status, 404);
+        // Listing: Bob sees nothing at all, and Alice still sees hers.
+        let bobs = api.route(&request("GET /api/sessions HTTP/1.1\r\n\r\n"), bob);
+        assert_eq!(body_of(&bobs), "{\"sessions\":[]}");
+        let alices = api.route(&request("GET /api/sessions HTTP/1.1\r\n\r\n"), alice);
+        assert!(body_of(&alices).contains(&id));
+        // And the owner can still delete it, so the refusals above were about Bob and not about the
+        // session having quietly broken.
+        let owner_delete = api.route(
+            &request(&format!("DELETE /api/sessions/{id} HTTP/1.1\r\n\r\n")),
+            alice,
+        );
+        assert_eq!(owner_delete.status, 204);
+        assert_eq!(api.counters().not_owner, 2);
+    }
+
+    // The signalling routes are 501s today. Ownership is checked BEFORE the 501, so the check cannot
+    // be forgotten by whoever implements them — and a stranger cannot use a 501-vs-404 difference to
+    // learn that an id exists.
+    #[test]
+    fn signalling_refuses_a_stranger_before_it_answers_not_implemented() {
+        let mut api = hosted();
+        let alice = account(1);
+        let created = api.route(&post("block", "edit"), alice);
+        let id = created_id(&created);
+
+        for verb in ["offer", "answer"] {
+            let owner = api.route(
+                &request(&format!("POST /api/sessions/{id}/{verb} HTTP/1.1\r\n\r\n")),
+                alice,
+            );
+            assert_eq!(
+                owner.status, 501,
+                "the owner reaches the unimplemented route"
+            );
+            let stranger = api.route(
+                &request(&format!("POST /api/sessions/{id}/{verb} HTTP/1.1\r\n\r\n")),
+                account(2),
+            );
+            assert_eq!(stranger.status, 404, "a stranger does not learn it exists");
+        }
+    }
+
+    #[test]
+    fn a_host_that_requires_an_account_refuses_every_anonymous_route() {
+        let mut api = hosted();
+        for raw in [
+            "GET /api/catalogue HTTP/1.1\r\n\r\n",
+            "GET /api/sessions HTTP/1.1\r\n\r\n",
+            "GET /api/sessions/0123456789abcdef0123456789abcdef HTTP/1.1\r\n\r\n",
+        ] {
+            let response = api.route(&request(raw), Principal::Anonymous);
+            assert_eq!(response.status, 401, "anonymous: {raw}");
+        }
+        assert_eq!(
+            api.route(&post("block", "edit"), Principal::Anonymous)
+                .status,
+            401
+        );
+        assert_eq!(api.counters().unauthenticated, 4);
+        assert!(api.registry().is_empty(), "nothing was admitted");
+    }
+
+    // The cap is per account and it is not the host cap: the host still has a free slot when the
+    // second account's first session is admitted, which is what makes this a fair-share rule rather
+    // than a queue.
+    #[test]
+    fn an_account_is_capped_before_the_host_is() {
+        let mut api = hosted();
+        let alice = account(1);
+        assert_eq!(api.route(&post("block", "edit"), alice).status, 201);
+        assert_eq!(api.route(&post("block", "edit"), alice).status, 201);
+        // 429, not 503: waiting will never help, closing one of her own will.
+        let third = api.route(&post("block", "edit"), alice);
+        assert_eq!(third.status, 429);
+        // The host itself is not full — somebody else gets the remaining slot.
+        assert_eq!(api.route(&post("block", "edit"), account(2)).status, 201);
+        assert_eq!(api.admission_counters().refused_account_full, 1);
+    }
+
+    // An open LAN host has exactly one principal, so a per-account cap applied to it would cap the
+    // whole host at two. It is deliberately not applied to anonymous requests.
+    #[test]
+    fn the_per_account_cap_does_not_shut_down_an_anonymous_host() {
+        let mut api = api(false);
+        for _ in 0..3 {
+            assert_eq!(
+                api.route(&post("block", "edit"), Principal::Anonymous)
+                    .status,
+                201
+            );
+        }
+        // Three admitted, so the refusal that follows is the HOST cap and not the account one.
+        let fourth = api.route(&post("block", "edit"), Principal::Anonymous);
+        assert_eq!(fourth.status, 503);
+        assert_eq!(api.admission_counters().refused_account_full, 0);
     }
 }

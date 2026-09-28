@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::identity::Principal;
 use crate::Surface;
 
 /// An opaque session handle. **Random, never sequential**, because a session id is a capability: it
@@ -93,6 +94,13 @@ pub struct AdmissionPolicy {
     /// total because an editor session is much cheaper — `message_affects_frame` means an idle
     /// editor renders nothing at all — so a host can carry several editors and only one game.
     pub max_play_sessions: usize,
+    /// Sessions **one account** may hold at once (ADR-0048 brick 3). The global cap alone is not a
+    /// fair-share rule: with three slots and three invited people, one account opening three sessions
+    /// is indistinguishable from a full host to the other two, and nothing in the protocol tells them
+    /// apart. An anonymous host (`AccessPolicy::require_account` off) has one principal by
+    /// construction, so this cap would shut it down entirely — it is therefore only applied to
+    /// requests that carry an account.
+    pub max_sessions_per_account: usize,
 }
 
 impl Default for AdmissionPolicy {
@@ -105,6 +113,9 @@ impl Default for AdmissionPolicy {
         Self {
             max_sessions: 3,
             max_play_sessions: 1,
+            // One editor and one play session at a time: enough to author something and then try it
+            // without closing the editor, and not enough to fill the host alone.
+            max_sessions_per_account: 2,
         }
     }
 }
@@ -117,6 +128,10 @@ pub enum Refusal {
     HostFull { limit: usize },
     /// The host will take another session, but not another *play* session.
     PlayFull { limit: usize },
+    /// This account already holds as many sessions as it may. Distinct from `HostFull` because it is
+    /// actionable by the client — closing one of its own sessions fixes it — and because telling a
+    /// user the host is full when it is not would be a lie the counters would later contradict.
+    AccountFull { limit: usize },
     /// The id could not be generated. Not the client's fault and not retryable by it.
     NoEntropy(std::io::Error),
 }
@@ -126,6 +141,9 @@ impl fmt::Display for Refusal {
         match self {
             Refusal::HostFull { limit } => write!(f, "host is full ({limit} sessions)"),
             Refusal::PlayFull { limit } => write!(f, "host is full for play ({limit})"),
+            Refusal::AccountFull { limit } => {
+                write!(f, "this account already holds {limit} sessions")
+            }
             Refusal::NoEntropy(e) => write!(f, "could not generate a session id: {e}"),
         }
     }
@@ -144,6 +162,8 @@ pub struct AdmissionCounters {
     pub refused_host_full: u64,
     pub refused_play_full: u64,
     pub refused_no_entropy: u64,
+    /// Refusals because the requesting account already held its maximum.
+    pub refused_account_full: u64,
     pub released: u64,
 }
 
@@ -152,8 +172,20 @@ pub struct AdmissionCounters {
 #[derive(Debug)]
 pub struct Registry<T> {
     policy: AdmissionPolicy,
-    sessions: HashMap<SessionId, (Surface, Option<T>)>,
+    sessions: HashMap<SessionId, Slot<T>>,
     counters: AdmissionCounters,
+}
+
+/// One admitted session: what it is for, **who it belongs to**, and whatever the caller attached.
+///
+/// The owner is recorded at admission rather than at attach, for the same reason the slot is taken at
+/// admission: a fact established later than the thing it governs is a fact something can happen
+/// before.
+#[derive(Debug)]
+struct Slot<T> {
+    surface: Surface,
+    owner: Principal,
+    value: Option<T>,
 }
 
 impl<T> Registry<T> {
@@ -180,8 +212,23 @@ impl<T> Registry<T> {
     pub fn play_count(&self) -> usize {
         self.sessions
             .values()
-            .filter(|(surface, _)| *surface == Surface::Play)
+            .filter(|slot| slot.surface == Surface::Play)
             .count()
+    }
+
+    /// How many sessions a principal holds.
+    #[must_use]
+    pub fn count_for(&self, owner: Principal) -> usize {
+        self.sessions
+            .values()
+            .filter(|slot| slot.owner == owner)
+            .count()
+    }
+
+    /// Who an admitted session belongs to, if it exists.
+    #[must_use]
+    pub fn owner_of(&self, id: SessionId) -> Option<Principal> {
+        self.sessions.get(&id).map(|slot| slot.owner)
     }
 
     #[must_use]
@@ -193,7 +240,7 @@ impl<T> Registry<T> {
     ///
     /// The slot is taken **before** the caller spawns anything, so two concurrent requests cannot
     /// both pass the check and then both spawn — the classic way a cap becomes advisory.
-    pub fn try_admit(&mut self, surface: Surface) -> Result<SessionId, Refusal> {
+    pub fn try_admit(&mut self, surface: Surface, owner: Principal) -> Result<SessionId, Refusal> {
         if self.sessions.len() >= self.policy.max_sessions {
             self.counters.refused_host_full += 1;
             return Err(Refusal::HostFull {
@@ -206,6 +253,14 @@ impl<T> Registry<T> {
                 limit: self.policy.max_play_sessions,
             });
         }
+        // Only for a named account: anonymous requests are all one principal, so a per-account cap
+        // applied to them would cap the whole host at `max_sessions_per_account`.
+        if owner.is_account() && self.count_for(owner) >= self.policy.max_sessions_per_account {
+            self.counters.refused_account_full += 1;
+            return Err(Refusal::AccountFull {
+                limit: self.policy.max_sessions_per_account,
+            });
+        }
         let id = match SessionId::generate() {
             Ok(id) => id,
             Err(e) => {
@@ -213,7 +268,14 @@ impl<T> Registry<T> {
                 return Err(Refusal::NoEntropy(e));
             }
         };
-        self.sessions.insert(id, (surface, None));
+        self.sessions.insert(
+            id,
+            Slot {
+                surface,
+                owner,
+                value: None,
+            },
+        );
         self.counters.admitted += 1;
         Ok(id)
     }
@@ -223,7 +285,7 @@ impl<T> Registry<T> {
     pub fn attach(&mut self, id: SessionId, value: T) -> bool {
         match self.sessions.get_mut(&id) {
             Some(slot) => {
-                slot.1 = Some(value);
+                slot.value = Some(value);
                 true
             }
             None => false,
@@ -232,20 +294,22 @@ impl<T> Registry<T> {
 
     #[must_use]
     pub fn surface_of(&self, id: SessionId) -> Option<Surface> {
-        self.sessions.get(&id).map(|(surface, _)| *surface)
+        self.sessions.get(&id).map(|slot| slot.surface)
     }
 
     pub fn get_mut(&mut self, id: SessionId) -> Option<&mut T> {
-        self.sessions.get_mut(&id).and_then(|slot| slot.1.as_mut())
+        self.sessions
+            .get_mut(&id)
+            .and_then(|slot| slot.value.as_mut())
     }
 
     /// Every admitted session and its surface, for a listing. Yields the surface rather than `&T` so
     /// a caller that only wants to *report* the set does not have to be able to touch the live
     /// sessions — the API's `GET /api/sessions` is exactly that caller.
-    pub fn iter(&self) -> impl Iterator<Item = (SessionId, Surface)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (SessionId, Surface, Principal)> + '_ {
         self.sessions
             .iter()
-            .map(|(id, (surface, _))| (*id, *surface))
+            .map(|(id, slot)| (*id, slot.surface, slot.owner))
     }
 
     /// Free the slot and hand back whatever was attached, so the caller can shut it down. Dropping
@@ -255,7 +319,7 @@ impl<T> Registry<T> {
         if removed.is_some() {
             self.counters.released += 1;
         }
-        removed.map(|(_, value)| value)
+        removed.map(|slot| slot.value)
     }
 }
 
@@ -267,6 +331,7 @@ mod tests {
         AdmissionPolicy {
             max_sessions: total,
             max_play_sessions: play,
+            max_sessions_per_account: usize::MAX,
         }
     }
 
@@ -294,9 +359,11 @@ mod tests {
     #[test]
     fn the_total_cap_refuses_and_counts() {
         let mut reg: Registry<()> = Registry::new(policy(2, 2));
-        assert!(reg.try_admit(Surface::Edit).is_ok());
-        assert!(reg.try_admit(Surface::Edit).is_ok());
-        let err = reg.try_admit(Surface::Edit).expect_err("host is full");
+        assert!(reg.try_admit(Surface::Edit, Principal::Anonymous).is_ok());
+        assert!(reg.try_admit(Surface::Edit, Principal::Anonymous).is_ok());
+        let err = reg
+            .try_admit(Surface::Edit, Principal::Anonymous)
+            .expect_err("host is full");
         assert!(matches!(err, Refusal::HostFull { limit: 2 }), "{err:?}");
         assert_eq!(reg.counters().admitted, 2);
         assert_eq!(reg.counters().refused_host_full, 1);
@@ -309,11 +376,13 @@ mod tests {
         // all), so a host that is full for play may still take an editor. A single cap could not
         // express that, which is the reason there are two.
         let mut reg: Registry<()> = Registry::new(policy(3, 1));
-        assert!(reg.try_admit(Surface::Play).is_ok());
-        let err = reg.try_admit(Surface::Play).expect_err("play is full");
+        assert!(reg.try_admit(Surface::Play, Principal::Anonymous).is_ok());
+        let err = reg
+            .try_admit(Surface::Play, Principal::Anonymous)
+            .expect_err("play is full");
         assert!(matches!(err, Refusal::PlayFull { limit: 1 }), "{err:?}");
         assert!(
-            reg.try_admit(Surface::Edit).is_ok(),
+            reg.try_admit(Surface::Edit, Principal::Anonymous).is_ok(),
             "an editor must still fit"
         );
         assert_eq!(reg.counters().refused_play_full, 1);
@@ -323,13 +392,13 @@ mod tests {
     #[test]
     fn releasing_a_play_session_frees_its_slot() {
         let mut reg: Registry<&str> = Registry::new(policy(3, 1));
-        let id = reg.try_admit(Surface::Play).unwrap();
+        let id = reg.try_admit(Surface::Play, Principal::Anonymous).unwrap();
         assert!(reg.attach(id, "engine"));
-        assert!(reg.try_admit(Surface::Play).is_err());
+        assert!(reg.try_admit(Surface::Play, Principal::Anonymous).is_err());
         assert_eq!(reg.release(id), Some(Some("engine")));
         assert_eq!(reg.counters().released, 1);
         assert!(
-            reg.try_admit(Surface::Play).is_ok(),
+            reg.try_admit(Surface::Play, Principal::Anonymous).is_ok(),
             "the slot must come back, or the host leaks capacity until restart"
         );
     }
@@ -340,8 +409,8 @@ mod tests {
         // the check and both spawn — the classic way a limit becomes advisory. Admitting without
         // ever attaching must still consume capacity.
         let mut reg: Registry<()> = Registry::new(policy(1, 1));
-        let _id = reg.try_admit(Surface::Edit).unwrap();
-        assert!(reg.try_admit(Surface::Edit).is_err());
+        let _id = reg.try_admit(Surface::Edit, Principal::Anonymous).unwrap();
+        assert!(reg.try_admit(Surface::Edit, Principal::Anonymous).is_err());
         assert_eq!(reg.len(), 1);
     }
 

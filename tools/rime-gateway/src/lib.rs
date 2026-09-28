@@ -53,6 +53,9 @@ pub use supervisor::{spawn_session, SessionHandle, SessionSpec, SpawnError};
 #[cfg(unix)]
 pub mod api;
 pub mod http;
+// Portable: a principal is a number and a cookie is a string, so every CI platform tests the
+// ownership vocabulary even where the registry it guards does not build.
+pub mod identity;
 // Portable: str0m is sans-IO and UdpSocket is std, so all three CI platforms exercise the run loop.
 pub mod transport;
 
@@ -60,6 +63,7 @@ pub mod transport;
 pub use api::{
     serve_connection, ApiCounters, Catalogue, CatalogueEntry, Launcher, ProcessLauncher, SessionApi,
 };
+pub use identity::{cookie, AccessPolicy, AccountRef, Principal, SESSION_COOKIE};
 
 /// Which surface a session was created for. Assigned by the gateway when it admits the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
