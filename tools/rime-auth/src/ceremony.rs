@@ -477,13 +477,24 @@ fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, CeremonyEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The software authenticator is a Unix-only dev dependency (it implies a native OpenSSL build),
+    // and every case that uses it is `#[cfg(unix)]` for the entropy reason anyway.
+    #[cfg(unix)]
     use webauthn_authenticator_rs::softpasskey::SoftPasskey;
+    #[cfg(unix)]
     use webauthn_authenticator_rs::WebauthnAuthenticator;
+    #[cfg(unix)]
     use webauthn_rs::prelude::CreationChallengeResponse;
+    #[cfg(unix)]
     use webauthn_rs::prelude::RequestChallengeResponse;
 
     const ORIGIN: &str = "https://rime.example";
     const NOW: Timestamp = 1_700_000_000;
+
+    #[cfg(unix)]
+    fn account() -> AccountId {
+        "0123456789abcdef0123456789abcdef".parse().unwrap()
+    }
 
     fn ceremonies() -> Ceremonies {
         Ceremonies::new(&CeremonyConfig {
@@ -494,12 +505,9 @@ mod tests {
         .expect("a well-formed relying party")
     }
 
-    fn account() -> AccountId {
-        "0123456789abcdef0123456789abcdef".parse().unwrap()
-    }
-
     /// Drive a whole registration through a software authenticator and hand back the stored blob —
     /// the same bytes `AuthStore::add_credential` would hold.
+    #[cfg(unix)]
     fn register(
         c: &mut Ceremonies,
         auth: &mut WebauthnAuthenticator<SoftPasskey>,

@@ -179,10 +179,20 @@ if (-not $CppOnly) {
     # is the forgiving one and only pwsh shows it. A green local `build.ps1 -RustOnly` proves nothing
     # about this line; it has to be read in CI's log.
     $cargoArgs = @(if ($Preset -eq 'release') { '--release' })
+
+    # rime-auth is EXCLUDED on Windows, and that is a recorded decision (ADR-0051), not an oversight.
+    # webauthn-rs-core depends on openssl/openssl-sys UNCONDITIONALLY - no feature avoids it - and the
+    # Windows runner has no OpenSSL for it to find, so the crate fails to build before any of its own
+    # code is type-checked. Hosting is Linux (ADR-0047 section 3) and an exported game never enables
+    # the `auth` feature (ADR-0046 section 2), so what this leg gives up is a crate it would not run.
+    # Nothing else depends on rime-auth unless that feature is on, so the rest of the workspace is
+    # unaffected. If a Windows regression in it ever matters, the recorded fallback is to vendor
+    # OpenSSL instead of narrowing the build.
+    $excluded = @('--workspace', '--exclude', 'rime-auth')
     Push-Location tools
     try {
-        Say 'Rust: cargo build'; Run cargo build @cargoArgs
-        if (-not $NoTests) { Say 'Rust: cargo test'; Run cargo test @cargoArgs }
+        Say 'Rust: cargo build (rime-auth excluded, ADR-0051)'; Run cargo build @cargoArgs @excluded
+        if (-not $NoTests) { Say 'Rust: cargo test'; Run cargo test @cargoArgs @excluded }
     }
     finally { Pop-Location }
 }

@@ -39,10 +39,15 @@ serde_json = "1"
 hmac = "0.12"
 subtle = "2"
 
-[dev-dependencies]
 # A software authenticator, so the ceremony tests run REAL ceremonies: a challenge is signed by a key
 # whose verification the test does not control, rather than asserted about by a mock. Same project as
 # `webauthn-rs`, MPL-2.0, and a dev dependency — it is in no shipped artifact.
+#
+# **Unix only**, because every ceremony it drives is `#[cfg(unix)]` anyway: `fill_random` refuses to
+# invent entropy off Linux, and ADR-0047 §3 puts production there. Building a dev dependency on a
+# platform where none of its tests can run buys nothing — and this one implies a native OpenSSL build,
+# which is the same reason the CRATE is not built on Windows at all (ADR-0051).
+[target.'cfg(unix)'.dev-dependencies]
 webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 
 [lints.clippy]
