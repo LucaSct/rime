@@ -53,6 +53,37 @@ impl fmt::Display for SessionId {
     }
 }
 
+impl std::str::FromStr for SessionId {
+    type Err = MalformedSessionId;
+
+    /// Parse the 32-hex-digit form [`fmt::Display`] writes.
+    ///
+    /// **Exactly 32 digits, nothing shorter.** `u128::from_str_radix` would happily accept `"1"`, and
+    /// then a client could address a session by its numeric value with the leading zeros stripped —
+    /// which is not an attack by itself, but it means an id has more than one spelling, and an id with
+    /// more than one spelling is one a rate limiter or an audit log cannot count.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text.len() != 32 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(MalformedSessionId);
+        }
+        u128::from_str_radix(text, 16)
+            .map(Self)
+            .map_err(|_| MalformedSessionId)
+    }
+}
+
+/// The only thing that can go wrong parsing a [`SessionId`]: it was not 32 hex digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MalformedSessionId;
+
+impl fmt::Display for MalformedSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "a session id is 32 hexadecimal digits")
+    }
+}
+
+impl std::error::Error for MalformedSessionId {}
+
 /// What this host is willing to run at once.
 #[derive(Debug, Clone, Copy)]
 pub struct AdmissionPolicy {
@@ -206,6 +237,15 @@ impl<T> Registry<T> {
 
     pub fn get_mut(&mut self, id: SessionId) -> Option<&mut T> {
         self.sessions.get_mut(&id).and_then(|slot| slot.1.as_mut())
+    }
+
+    /// Every admitted session and its surface, for a listing. Yields the surface rather than `&T` so
+    /// a caller that only wants to *report* the set does not have to be able to touch the live
+    /// sessions — the API's `GET /api/sessions` is exactly that caller.
+    pub fn iter(&self) -> impl Iterator<Item = (SessionId, Surface)> + '_ {
+        self.sessions
+            .iter()
+            .map(|(id, (surface, _))| (*id, *surface))
     }
 
     /// Free the slot and hand back whatever was attached, so the caller can shut it down. Dropping

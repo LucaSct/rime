@@ -91,6 +91,37 @@ path is NVENC H.264/HEVC. Software SVT-AV1 competes for the cores the simulation
 value for H.264 is therefore required, and being a `uint8_t` enum with room, it is additive. **This
 needs its own ADR** amending ADR-0030's codec choice for the hosted path.
 
+## The session API (v1, landed 2026-09-28)
+
+`tools/rime-gateway/src/http.rs` + `api.rs`. **Hand-rolled HTTP/1.1 with no new dependency**, for the
+reason `rime-protocol` has none: the wire is fully described by this repository. TLS and the public
+hostname live in **blackStar**, the estate's edge (ADR-0047 §3), never here.
+
+| route | method | answer |
+| --- | --- | --- |
+| `/api/catalogue` | `GET` | `{"games":[{"id","title","surfaces":["edit","play"]}]}` |
+| `/api/sessions` | `POST` | `201` + `{"session","surface","game"}` and a `Location` header |
+| `/api/sessions` | `GET` | `{"sessions":[{"session","surface"}]}`, id-ordered |
+| `/api/sessions/<id>` | `GET` / `DELETE` | the one session, or `204` and it is reaped |
+| `/api/sessions/<id>/offer`, `/answer` | — | `501`, naming the transport brick |
+
+Four properties are enforced in code with a test each, not left to convention:
+
+- **The client names a catalogue entry, never a program.** `CatalogueEntry` holds `program`/`args` and
+  serialises neither, so a `POST` can only start something the operator listed. The alternative is a
+  remote-execution service with a JSON front end.
+- **Every length is bounded** — request line 8 KiB, headers 16 KiB *in aggregate* and 64 lines, body
+  64 KiB, refused with `414`/`431`/`413` rather than truncated. Chunked encoding is `501` and wins over
+  `Content-Length`, because a request carrying both is the smuggling ambiguity.
+- **`0.0.0.0` is refused by `check_bind`.** v1 is un-authenticated, so which interfaces the gateway
+  answers on *is* the containment boundary; a wildcard bind means a new interface exposes the service
+  with no diff in this repository.
+- **A failed launch hands the admission slot back.** Otherwise the cap leaks and the host reports
+  itself full with nothing running — a symptom that arrives hours later with no other information.
+
+Signalling is deliberately a refusal rather than a stub: an endpoint that answers plausibly and does
+nothing is one a client would build against.
+
 ## What one box can actually serve
 
 `docs/perf/2026-09-22-99-the-block-nvidia-geforce-rtx-3060.json` measures the flagship sample at
