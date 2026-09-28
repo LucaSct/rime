@@ -44,6 +44,14 @@ rime-protocol = { path = "../rime-protocol" }
 # libjpeg-turbo and lz4 (engine/stream/include/rime/stream/frame_codec.hpp:28).
 str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
 
+# TURN credentials (`turn.rs`) are an HMAC-SHA1. `hmac` and `sha1` are ALREADY in `Cargo.lock` and
+# already compiled for this crate: `str0m`'s DTLS and STUN code depend on both (`cargo tree -i sha1`),
+# so these two lines add no new code to the build, only a direct name for it. There is no `base64`
+# here on purpose: it is in the lock file only through `webauthn-rs`, which this build may not
+# include, and the one 20-byte encode is written by hand in `turn.rs` beside its test vector.
+hmac = "0.12"
+sha1 = "0.10"
+
 # Authentication is OPTIONAL, and the flag is a licensing boundary as much as a build one (ADR-0048
 # decision 2). Passkey verification needs `webauthn-rs`, which is MPL-2.0; ADR-0046 §2 puts this gateway
 # inside every exported game, so without the flag every game a Rime user ships would carry that
@@ -60,6 +68,12 @@ rime-auth = { path = "../rime-auth", optional = true }
 webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 webauthn-rs = "0.5"
 serde_json = "1"
+
+# The adapter that strips blackStar's PROXY v2 header before coturn (ADR-0053 decision 2). Unix-only:
+# it runs in the Linux container next to coturn. The source is one file and uses only `std`.
+[[bin]]
+name = "rime-turn-proxy"
+path = "src/bin/rime-turn-proxy.rs"
 
 [features]
 default = []

@@ -3689,9 +3689,11 @@ version = "0.0.1"
 name = "rime-gateway"
 version = "0.0.1"
 dependencies = [
+ "hmac",
  "rime-auth",
  "rime-protocol",
  "serde_json",
+ "sha1",
  "str0m",
  "webauthn-authenticator-rs",
  "webauthn-rs",
