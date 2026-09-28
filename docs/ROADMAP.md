@@ -2162,9 +2162,11 @@ first-person game · **m15.6** dead reflected fields implemented or deleted · *
 README build instructions, a getting-started page, `samples/hello-game` · **m15.8** the proof: a
 target range authored in the editor, its diff touching only `samples/` and `docs/`. Cut order:
 m15.7's hello-game → m15.6's alpha mask → m15.3's colour swatch. **Never cut:** m15.1, m15.3's Save,
-m15.8.
+m15.8. *(m15.7 was duly cut and has now been paid back — ADR-0046 §1 made `hello-game` a prerequisite
+of M20 rather than a nicety, because lifting a play loop into an engine-owned `GameDefinition` needs a
+small subject and the block's ~3000-line sample loop is not one.)*
 
-> **Progress (2026-08-30) — m15.0 through m15.6b are on `main`; m15.7 and m15.8 are open.**
+> **Progress (2026-09-28) — m15.0 through m15.7 are on `main`; m15.8 is open.**
 >
 > | brick | state | what landed |
 > |---|---|---|
@@ -2176,7 +2178,7 @@ m15.8.
 > | m15.5 | ✅ #163 | `Window::set_cursor_mode` on all four backends; `fullscreen`/`high_dpi` deleted |
 > | m15.6a | ✅ #164 | `alpha_cutoff` reaches the forward shaders — alpha-tested glTF stops being an opaque quad |
 > | m15.6b | ✅ #165 | `Collider::sensor` becomes real: `PhysicsWorld::trigger_events()` |
-> | m15.7 | open | the on-ramp: README build instructions, `docs/getting-started.md`, `samples/hello-game`, the drifted `samples/README.md` |
+> | m15.7 | ✅ #204 | the on-ramp: `samples/hello-game` (the smallest complete game here, and M20's `GameDefinition` subject per [ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §1), `docs/getting-started.md`, README build instructions, and the drifted `samples/README.md` fixed — `99-the-block` was still under "Still to come" and `13-networked-player` was missing entirely |
 > | m15.8 | open | **the proof** — a target range authored through the editor, its diff touching only `samples/` and `docs/` |
 >
 > **m15.6 was split** into 15.6a (alpha) and 15.6b (sensors): two independent dead fields, in two

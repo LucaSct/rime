@@ -61,6 +61,19 @@ high-end engine out there. See the [engine survey](docs/research/engine-survey.m
 building it in the open, brick by brick. Watch [docs/ROADMAP.md](docs/ROADMAP.md) for
 the milestone map. Expect rapid change and clearly-labeled stubs.
 
+## Build it
+
+```bash
+scripts/setup.sh    # toolchains: Conan + Rust user-local; checks CMake/Ninja/compiler
+scripts/build.sh    # conan install, configure, build C++ + Rust, run both test suites
+build/dev/bin/hello_game --windowed   # walk around the smallest complete game here
+```
+
+No Vulkan SDK is needed to *build* — Conan supplies the headers. A Vulkan runtime (a GPU driver,
+MoltenVK, or software lavapipe) is needed only to render; `hello_game --verbose` is GPU-free.
+
+Full walkthrough: **[docs/getting-started.md](docs/getting-started.md)**.
+
 ## Repository layout
 
 ```
@@ -74,8 +87,9 @@ rime/
 └── scripts/         # Setup / build / lint helpers
 ```
 
-Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) to understand how the pieces
-fit, and [docs/glossary.md](docs/glossary.md) if any term is unfamiliar.
+Start with [docs/getting-started.md](docs/getting-started.md) to build and run it,
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) to understand how the pieces fit, and
+[docs/glossary.md](docs/glossary.md) if any term is unfamiliar.
 
 ## Getting involved
 
@@ -83,6 +97,7 @@ Rime is built to become a community. Whether you want to ship games on it, push 
 graphics frontier, or *learn how engines work by reading and contributing*, you're
 welcome here.
 
+- Build it: [docs/getting-started.md](docs/getting-started.md).
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
 - Browse the [architecture](docs/ARCHITECTURE.md) and [roadmap](docs/ROADMAP.md).
 - Foundations are the best first contributions — they're where the learning is densest.
