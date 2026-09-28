@@ -45,6 +45,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+pub mod ceremony;
+pub mod codes;
+pub mod flow;
+pub mod mail;
+
 /// How long an invitation is good for unless the caller says otherwise. Seven days: long enough to
 /// reach somebody who reads mail weekly, short enough that a leaked mailbox is not a permanent way in.
 pub const DEFAULT_INVITE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -74,6 +79,14 @@ pub fn now() -> Timestamp {
 /// it is also the WebAuthn user handle, which must not leak anything about the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AccountId(u128);
+
+impl AccountId {
+    /// The raw id. The WebAuthn user handle is this value (`ceremony.rs`), which is the reason it is
+    /// readable at all — nothing else needs it, and nothing else should use it as a key.
+    pub fn as_u128(self) -> u128 {
+        self.0
+    }
+}
 
 impl fmt::Display for AccountId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -137,6 +150,12 @@ pub struct Account {
     pub email: String,
     pub created_at: Timestamp,
     pub disabled_at: Option<Timestamp>,
+    /// `SHA-256` of the recovery secret shown once at registration, if the account has one.
+    ///
+    /// Hashed for the same reason a session token is: a readable store must not be a set of live
+    /// credentials. It needs no password KDF — the secret is 256 random bits, so there is no
+    /// dictionary to stretch against, and a slow hash would only slow the legitimate check.
+    pub recovery_secret_hash: Option<String>,
 }
 
 impl Account {
@@ -158,6 +177,9 @@ pub struct Credential {
     pub account_id: AccountId,
     pub label: String,
     pub created_at: Timestamp,
+    /// When this credential last completed an authentication, if it ever has. Needed to answer "which
+    /// of my passkeys is the one I lost?" before revoking it.
+    pub last_used_at: Option<Timestamp>,
     pub revoked_at: Option<Timestamp>,
     pub blob: Vec<u8>,
 }
@@ -223,6 +245,10 @@ pub struct AuthCounters {
     pub accounts_created: u64,
     pub credentials_added: u64,
     pub credentials_revoked: u64,
+    /// Blob write-backs after a login moved an authenticator's counter or backup state.
+    pub credentials_updated: u64,
+    /// Recovery secrets set — at registration, and again each time a recovery completes.
+    pub recovery_secrets_set: u64,
     pub sessions_created: u64,
     pub sessions_authenticated: u64,
     pub sessions_rejected_unknown: u64,
@@ -425,12 +451,31 @@ impl AuthStore {
         email: &str,
         now_ts: Timestamp,
     ) -> Result<AccountId, AuthError> {
+        self.create_account_with_id(AccountId(mint_u128()?), email, now_ts)
+    }
+
+    /// Create an account with an id decided **before** the account existed.
+    ///
+    /// Registration needs this. The account id is the WebAuthn user handle, and the authenticator
+    /// signs over the handle during the ceremony — so it has to be chosen before the passkey is made,
+    /// while the account itself may not be created until the passkey exists and the invitation is
+    /// consumed. An id minted at the end would leave every credential carrying a handle that names
+    /// nothing, which is invisible today (login supplies the credential list) and breaks the moment a
+    /// usernameless or conditional-UI login asks the handle who it belongs to.
+    pub fn create_account_with_id(
+        &mut self,
+        id: AccountId,
+        email: &str,
+        now_ts: Timestamp,
+    ) -> Result<AccountId, AuthError> {
         let email = normalise_email(email);
         check_representable(&email, "email")?;
         if self.by_email.contains_key(&email) {
             return Err(AuthError::EmailTaken);
         }
-        let id = AccountId(mint_u128()?);
+        if self.accounts.contains_key(&id) {
+            return Err(AuthError::EmailTaken);
+        }
         self.append(&["acct", &id.to_string(), &email, &now_ts.to_string()])?;
         self.accounts.insert(
             id,
@@ -439,6 +484,7 @@ impl AuthStore {
                 email: email.clone(),
                 created_at: now_ts,
                 disabled_at: None,
+                recovery_secret_hash: None,
             },
         );
         self.by_email.insert(email, id);
@@ -473,6 +519,7 @@ impl AuthStore {
             account_id: account,
             label: label.to_string(),
             created_at: now_ts,
+            last_used_at: None,
             revoked_at: None,
             blob: blob.to_vec(),
         });
@@ -502,6 +549,97 @@ impl AuthStore {
         }
         self.counters.credentials_revoked += 1;
         Ok(true)
+    }
+
+    /// Write back a credential's blob after a successful authentication.
+    ///
+    /// The blob carries the authenticator's signature counter and backup state, and a counter that is
+    /// never written back cannot detect a cloned credential — which is the only thing the counter is
+    /// for. So a login that moved it appends a record, and replay takes the last one.
+    ///
+    /// A revoked credential is not updated: a login against one should not have happened, and writing
+    /// to it would quietly resurrect a row an incident review is reading as closed.
+    pub fn update_credential_blob(
+        &mut self,
+        credential_id: &[u8],
+        blob: &[u8],
+        now_ts: Timestamp,
+    ) -> Result<bool, AuthError> {
+        let found = self
+            .credentials
+            .iter()
+            .any(|c| c.credential_id == credential_id && c.revoked_at.is_none());
+        if !found {
+            return Ok(false);
+        }
+        self.append(&[
+            "cred-used",
+            &to_hex(credential_id),
+            &now_ts.to_string(),
+            &to_hex(blob),
+        ])?;
+        for c in &mut self.credentials {
+            if c.credential_id == credential_id && c.revoked_at.is_none() {
+                c.blob = blob.to_vec();
+                c.last_used_at = Some(now_ts);
+            }
+        }
+        self.counters.credentials_updated += 1;
+        Ok(true)
+    }
+
+    /// What address an invitation is for, **without consuming it**.
+    ///
+    /// Registration validates the invitation up front (so the mailed code goes to the address the
+    /// invitation names, never one the browser supplied) and consumes it only when the account and
+    /// credential are actually created. Two registrations that both pass this check race at
+    /// [`Self::redeem_invitation`], and exactly one wins — which is why that is the call that
+    /// accounts for it, and this one touches no counter.
+    #[must_use]
+    pub fn invitation_email(&self, token: &str, now_ts: Timestamp) -> Option<&str> {
+        let invitation = self.invitations.get(&hash_token(token))?;
+        if invitation.consumed_at.is_some() || invitation.expires_at <= now_ts {
+            return None;
+        }
+        Some(&invitation.email)
+    }
+
+    /// Set (or replace) an account's recovery secret, storing only its hash.
+    ///
+    /// Replacing is how recovery "revokes" the old secret: the value that completed a recovery must
+    /// not complete a second one, and a replacement says so in one record rather than two.
+    pub fn set_recovery_secret(
+        &mut self,
+        account: AccountId,
+        secret: &str,
+        now_ts: Timestamp,
+    ) -> Result<(), AuthError> {
+        if !self.accounts.contains_key(&account) {
+            return Err(AuthError::NoSuchAccount);
+        }
+        let hash = hash_token(secret);
+        self.append(&["recov", &account.to_string(), &hash, &now_ts.to_string()])?;
+        if let Some(a) = self.accounts.get_mut(&account) {
+            a.recovery_secret_hash = Some(hash);
+        }
+        self.counters.recovery_secrets_set += 1;
+        Ok(())
+    }
+
+    /// Does `secret` match the account's recovery secret?
+    ///
+    /// An account without one answers **false**, never true-by-absence. It is one of two proofs
+    /// recovery needs (ADR-0048 decision 1); on its own it authenticates nothing.
+    #[must_use]
+    pub fn check_recovery_secret(&self, account: AccountId, secret: &str) -> bool {
+        let Some(stored) = self
+            .accounts
+            .get(&account)
+            .and_then(|a| a.recovery_secret_hash.as_deref())
+        else {
+            return false;
+        };
+        constant_time_str_eq(stored, &hash_token(secret))
     }
 
     /// Mint a user session for an account, returning the bearer token **once**.
@@ -719,6 +857,7 @@ impl AuthStore {
                         email: email.clone(),
                         created_at: created,
                         disabled_at: None,
+                        recovery_secret_hash: None,
                     },
                 );
                 self.by_email.insert(email, id);
@@ -736,6 +875,20 @@ impl AuthStore {
                     .map_err(|_| corrupt("acct-disabled: bad timestamp"))?;
                 if let Some(a) = self.accounts.get_mut(&id) {
                     a.disabled_at = Some(at);
+                }
+            }
+            "recov" => {
+                let account: AccountId = it
+                    .next()
+                    .ok_or_else(|| corrupt("recov: no account"))?
+                    .parse()
+                    .map_err(|_| corrupt("recov: bad account"))?;
+                let hash = it
+                    .next()
+                    .ok_or_else(|| corrupt("recov: no hash"))?
+                    .to_string();
+                if let Some(a) = self.accounts.get_mut(&account) {
+                    a.recovery_secret_hash = Some(hash);
                 }
             }
             "cred" => {
@@ -762,9 +915,27 @@ impl AuthStore {
                     account_id: account,
                     label,
                     created_at: created,
+                    last_used_at: None,
                     revoked_at: None,
                     blob,
                 });
+            }
+            "cred-used" => {
+                let cid = from_hex(it.next().ok_or_else(|| corrupt("cred-used: no id"))?)
+                    .ok_or_else(|| corrupt("cred-used: bad id hex"))?;
+                let at: Timestamp = it
+                    .next()
+                    .ok_or_else(|| corrupt("cred-used: no timestamp"))?
+                    .parse()
+                    .map_err(|_| corrupt("cred-used: bad timestamp"))?;
+                let blob = from_hex(it.next().ok_or_else(|| corrupt("cred-used: no blob"))?)
+                    .ok_or_else(|| corrupt("cred-used: bad blob hex"))?;
+                for c in &mut self.credentials {
+                    if c.credential_id == cid && c.revoked_at.is_none() {
+                        c.blob.clone_from(&blob);
+                        c.last_used_at = Some(at);
+                    }
+                }
             }
             "cred-revoked" => {
                 let cid = from_hex(it.next().ok_or_else(|| corrupt("cred-revoked: no id"))?)
@@ -841,6 +1012,19 @@ fn check_representable(value: &str, field: &'static str) -> Result<(), AuthError
     Ok(())
 }
 
+/// Compare two hex digests without an early return. Both are this crate's own SHA-256 output, so the
+/// lengths are equal by construction and the only thing worth hiding is WHERE they differ.
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn hash_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     to_hex(&digest)
@@ -861,7 +1045,7 @@ fn mint_u128() -> Result<u128, AuthError> {
 /// OS entropy. A short read is a hard failure rather than padded: silently degrading the entropy of a
 /// capability is worse than refusing to mint one, which is the same rule the gateway's `SessionId`
 /// follows.
-fn fill_random(out: &mut [u8]) -> std::io::Result<()> {
+pub(crate) fn fill_random(out: &mut [u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Read;
@@ -889,7 +1073,7 @@ fn fill_random(out: &mut [u8]) -> std::io::Result<()> {
     }
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         out.push_str(&format!("{b:02x}"));

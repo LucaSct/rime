@@ -144,8 +144,11 @@ not be made to.
 ## Bricks
 
 1. **the store** — `rime-auth` behind the feature: records, the append-only log, invitation issue and
-   single-use redemption, session tokens. *(this brick)*
+   single-use redemption, session tokens. *(landed)*
 2. **the ceremonies** — `webauthn-rs` registration and login, mailed codes through the Resend relay,
-   recovery.
+   recovery. *(this brick)* — `ceremony.rs` (both WebAuthn ceremonies, JSON in and out so no library
+   type reaches the gateway), `codes.rs` (HMAC'd eight-digit codes), `mail.rs` (plain SMTP to the
+   estate's local relay, which already holds the Resend key — so this crate holds none), and `flow.rs`,
+   which is where the ordering rule of decision 1 is actually enforced.
 3. **the gate** — `owner_account_id` through admission, authorization before spawn, per-account caps,
    ownership on every route including signalling, and the second-account test.
