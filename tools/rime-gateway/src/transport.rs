@@ -172,6 +172,9 @@ pub struct TransportCounters {
     pub data_sends_dropped: u64,
     /// Events dropped because the consumer was not reading. See [`EVENT_QUEUE`].
     pub events_dropped: u64,
+    /// ICMP-driven `ConnectionReset`/`ConnectionRefused` reports from `recv_from` (a Windows habit;
+    /// see the run loop). Survived, not fatal, and counted so a burst of them is visible.
+    pub socket_resets: u64,
     /// Wakeup datagrams consumed. Proof the mechanism is in use rather than the 50 ms ceiling
     /// carrying the whole load, which would look identical from outside.
     pub wakeups: u64,
@@ -624,6 +627,27 @@ fn run_loop(
                     return counters;
                 }
             }
+            // WINDOWS UDP TRAP. On Windows, a UDP socket reports `ConnectionReset` (WSAECONNRESET)
+            // on the next `recv_from` after *any* earlier send drew an ICMP port-unreachable, for
+            // example a check to a candidate the peer has already abandoned. It describes a past
+            // datagram to someone else, not this socket's health, so ending the session on it
+            // would let one stale candidate kill a live connection. Count it and carry on;
+            // `ConnectionRefused` is the same report under another name on some stacks.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                counters.socket_resets += 1;
+                if rtc.handle_input(Input::Timeout(now)).is_err() {
+                    emit(
+                        &mut counters,
+                        Event::Failed("rtc rejected a timeout".into()),
+                    );
+                    return counters;
+                }
+            }
             Err(e) => {
                 emit(&mut counters, Event::Failed(format!("socket read: {e}")));
                 return counters;
@@ -1000,8 +1024,12 @@ mod tests {
         let mut requested = false;
         while Instant::now() < deadline && !requested {
             peer.pump(Duration::from_millis(20), |_| false);
-            if let Some(event) = transport.poll_event(Duration::from_millis(10)) {
-                requested = event == Event::KeyframeRequested;
+            match transport.poll_event(Duration::from_millis(10)) {
+                Some(Event::KeyframeRequested) => requested = true,
+                // A dead transport would otherwise read as "the PLI never arrived".
+                Some(Event::Failed(why)) => panic!("transport failed: {why}"),
+                Some(Event::Disconnected) => panic!("transport disconnected"),
+                _ => {}
             }
         }
         assert!(requested, "PLI did not reach the transport event seam");
