@@ -46,7 +46,10 @@ str0m = { version = "0.24", default-features = false, features = ["rust-crypto"]
 # obligation. Hosted builds turn `auth` on; exported bundles leave it off and need no accounts anyway.
 rime-auth = { path = "../rime-auth", optional = true }
 
-[dev-dependencies]
+# Unix-only, like the `auth_api` module whose tests are their only users. `webauthn-rs` pulls
+# `openssl-sys` unconditionally, and ADR-0051 keeps that off the Windows leg; an unconditional
+# dev-dependency would drag it back in through `cargo test` even with `--exclude rime-auth`.
+[target.'cfg(unix)'.dev-dependencies]
 # The account endpoints are tested by driving real ceremonies through them: a software authenticator
 # signs a challenge it did not choose, and the response crosses the HTTP surface as the browser's own
 # JSON. Mocking that would test the mock. All three are dev-only, so nothing here ships.
