@@ -77,6 +77,19 @@ minting in the gateway, roughly two bricks before deployment.
 It has to be verified with a real browser **before** the TURN bricks are built on it. If it fails,
 this decision comes back to Luca; it does not quietly become something else.
 
+**Verified 2026-09-28, the same day, before any TURN code was written.** Each browser loaded a page
+whose only ICE server was `turns:turn.test:8443?transport=tcp` with `iceTransportPolicy: "relay"`,
+with `turn.test` mapped to loopback, and a Python TLS listener logged the ClientHello's SNI:
+
+| browser | SNI received | then |
+|---|---|---|
+| Chromium 151.0.7922.173 Arch Linux (headless) | `turn.test`, on both of its connections | rejected the self-signed cert |
+| Mozilla Firefox 154.0 (headless) | `turn.test`, on both of its connections | rejected the self-signed cert |
+
+Both send SNI for `turns:`, so blackStar can route TURN by name. Both also refuse an untrusted
+certificate, so the TURN listener needs a real certificate for `turn.rime.peekstar.eu`, obtained the
+same way as the site's.
+
 ## Consequences
 
 - blackStar gains a forwarding chain and a DNAT rule set, a change to another repository
@@ -85,6 +98,6 @@ this decision comes back to Luca; it does not quietly become something else.
 - ADR-0047 §3's "nothing in the container listens publicly" is **narrowed, not broken**: the media
   sockets still bind the private `vmbr2` address, and what reaches them is exactly three filtered
   tuples, forwarded by the edge.
-- Deployment order: SNI-on-TURN check → gateway port pool and public candidate → blackStar forwarding →
+- Deployment order: ~~SNI-on-TURN check~~ (done, above) → gateway port pool and public candidate → blackStar forwarding →
   CT 122 policy routing → router forwards → the adapter and coturn → first browser session over UDP,
   then with UDP blocked.
