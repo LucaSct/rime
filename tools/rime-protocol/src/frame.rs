@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! [seq:u64][capture_us:u64][readback_us:u64][encode_us:u64][wire_us:u64]
-//! [last_input_seq:u32][last_input_client_us:u64][codec:u8][fmt:u8][w:u32][h:u32][data...]
+//! [last_input_seq:u32][last_input_client_us:u64][codec:u8][flags:u8][fmt:u8][w:u32][h:u32][data...]
 //! ```
 
 use crate::wire::{Reader, Writer};
@@ -106,9 +106,16 @@ pub struct FrameMessage {
     pub last_input_seq: u32,
     pub last_input_client_us: u64,
     pub codec: Codec,
+    /// Decodable with no earlier frame (flags bit 0, protocol v4). Always true for the intra-only
+    /// codecs; for `Av1` it is the encoder's own keyframe bit, which a relay needs to know where a
+    /// joining decoder can start.
+    pub keyframe: bool,
     pub desc: ImageDesc,
     pub data: Vec<u8>,
 }
+
+/// `flags` bit 0 of a `Frame` (v4): the frame needs no earlier one to decode.
+pub const FRAME_FLAG_KEYFRAME: u8 = 0x01;
 
 impl FrameMessage {
     /// Serialize the full payload (header + encoded data).
@@ -122,6 +129,11 @@ impl FrameMessage {
         w.u32(self.last_input_seq);
         w.u64(self.last_input_client_us);
         w.u8(self.codec.to_code());
+        w.u8(if self.keyframe {
+            FRAME_FLAG_KEYFRAME
+        } else {
+            0
+        });
         w.u8(self.desc.format.to_code());
         w.u32(self.desc.width);
         w.u32(self.desc.height);
@@ -141,6 +153,11 @@ impl FrameMessage {
         let last_input_seq = r.u32()?;
         let last_input_client_us = r.u64()?;
         let codec = Codec::from_code(r.u8()?)?;
+        let flags = r.u8()?;
+        // Reserved bits must be zero, exactly as the C++ decoder insists.
+        if flags & !FRAME_FLAG_KEYFRAME != 0 {
+            return Err(Error::BadFrameFlags(flags));
+        }
         let format = PixelFormat::from_code(r.u8()?)?;
         let width = r.u32()?;
         let height = r.u32()?;
@@ -154,6 +171,7 @@ impl FrameMessage {
             last_input_seq,
             last_input_client_us,
             codec,
+            keyframe: flags & FRAME_FLAG_KEYFRAME != 0,
             desc: ImageDesc {
                 width,
                 height,

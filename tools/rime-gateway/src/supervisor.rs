@@ -260,16 +260,25 @@ mod tests {
     ///
     /// `python3 -c SCRIPT <args>` puts the script's arguments in `sys.argv[1:]`, and the supervisor
     /// appends `--editor-host <socket>` last, so `sys.argv[-1]` is the socket path.
-    const STUB_HOST: &str = "\
+    ///
+    /// The version is spliced in from [`rime_protocol::PROTOCOL_VERSION`], not written as a literal:
+    /// the literal `3` this stub used to carry broke the moment the wire moved to v4, which is the
+    /// stale-peer refusal working exactly as designed, pointed at a test.
+    fn stub_host() -> String {
+        format!(
+            "\
 import socket, sys, time\n\
 p = sys.argv[-1]\n\
 s = socket.socket(socket.AF_UNIX)\n\
 s.bind(p)\n\
 s.listen(1)\n\
 c, _ = s.accept()\n\
-c.sendall(bytes.fromhex('31534d52') + (3).to_bytes(2, 'little'))\n\
+c.sendall(bytes.fromhex('31534d52') + ({}).to_bytes(2, 'little'))\n\
 c.recv(6)\n\
-time.sleep(30)\n";
+time.sleep(30)\n",
+            rime_protocol::PROTOCOL_VERSION
+        )
+    }
 
     /// `kill -0` rather than `/proc/<pid>`: procfs is Linux-only, and this test must mean the same
     /// thing on macOS, where the first version of it failed for that reason alone.
@@ -288,8 +297,13 @@ time.sleep(30)\n";
         // and a gateway that only makes the first one runs out of machine slowly enough that the
         // cause is long gone by the time anyone looks.
         let socket = scratch_socket();
-        let mut handle = spawn_session(&spec("python3", &["-c", STUB_HOST], socket.clone(), 5000))
-            .expect("session should come up");
+        let mut handle = spawn_session(&spec(
+            "python3",
+            &["-c", &stub_host()],
+            socket.clone(),
+            5000,
+        ))
+        .expect("session should come up");
         let pid = handle.pid();
         assert!(pid_alive(pid), "child should be running before the drop");
         assert_eq!(handle.session().surface(), Surface::Play);

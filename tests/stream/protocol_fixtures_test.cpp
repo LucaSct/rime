@@ -60,6 +60,23 @@ std::vector<std::byte> input_bytes() {
     return out;
 }
 
+// An AV1 *delta* frame (v4 keyframe flag CLEAR). The LZ4 golden above can only ever carry the bit
+// set, and one value cannot prove both languages read the flag at the same offset with the same
+// meaning; this one is the other value. The data tail is opaque bytes, not a real AV1 frame.
+std::vector<std::byte> frame_av1_delta_bytes() {
+    stream::FrameMessage f;
+    f.sequence = 8;
+    f.capture_us = 5000;
+    f.codec = stream::Codec::Av1;
+    f.keyframe = false;
+    f.desc.extent = rhi::Extent2D{4, 2};
+    f.desc.format = rhi::Format::RGBA8Unorm;
+    f.data = {std::byte{0x32}, std::byte{0x01}, std::byte{0x00}};
+    std::vector<std::byte> out;
+    f.encode(out);
+    return out;
+}
+
 // A FrameMessage payload (header + a short opaque data tail; the tail stands in for encoded pixels
 // — LZ4 pixel decode is the viewport panel's brick, not this one).
 std::vector<std::byte> frame_bytes() {
@@ -316,6 +333,7 @@ std::vector<Fixture> all_fixtures() {
         {"play_state.bin", play_state_bytes()},
         {"frame_lz4.bin", frame_lz4_bytes()},
         {"frame_lz4_pixels.bin", lz4_pixels_raw()},
+        {"frame_av1_delta.bin", frame_av1_delta_bytes()},
     };
 }
 
