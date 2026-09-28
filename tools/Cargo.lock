@@ -3454,6 +3454,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rime-auth"
+version = "0.0.1"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "rime-cli"
 version = "0.0.1"
 dependencies = [
@@ -3469,6 +3476,7 @@ version = "0.0.1"
 name = "rime-gateway"
 version = "0.0.1"
 dependencies = [
+ "rime-auth",
  "rime-protocol",
  "str0m",
 ]

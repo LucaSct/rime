@@ -40,5 +40,18 @@ rime-protocol = { path = "../rime-protocol" }
 # libjpeg-turbo and lz4 (engine/stream/include/rime/stream/frame_codec.hpp:28).
 str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
 
+# Authentication is OPTIONAL, and the flag is a licensing boundary as much as a build one (ADR-0048
+# decision 2). Passkey verification needs `webauthn-rs`, which is MPL-2.0; ADR-0046 §2 puts this gateway
+# inside every exported game, so without the flag every game a Rime user ships would carry that
+# obligation. Hosted builds turn `auth` on; exported bundles leave it off and need no accounts anyway.
+rime-auth = { path = "../rime-auth", optional = true }
+
+[features]
+default = []
+# Enables accounts, invitations and sessions. Required before the hosted front end may be published
+# (ADR-0048); CI must keep BOTH configurations green, because an untested configuration is the one that
+# breaks on the day it matters.
+auth = ["dep:rime-auth"]
+
 [lints.clippy]
 all = "deny"
