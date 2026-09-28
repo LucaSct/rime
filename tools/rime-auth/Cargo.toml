@@ -33,6 +33,11 @@ webauthn-rs = "0.5"
 # reaches admission or the engine (ADR-0048 decision 3).
 serde = { version = "1", default-features = false, features = ["derive"] }
 serde_json = "1"
+# The mailed verification code is stored as an HMAC, never as the code: a store that holds the code
+# holds a live credential. RustCrypto again, MIT OR Apache-2.0, and `subtle` is what makes the
+# comparison constant-time rather than a timing oracle on a six-digit search space.
+hmac = "0.12"
+subtle = "2"
 
 [dev-dependencies]
 # A software authenticator, so the ceremony tests run REAL ceremonies: a challenge is signed by a key

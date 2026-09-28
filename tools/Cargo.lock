@@ -3664,9 +3664,11 @@ dependencies = [
 name = "rime-auth"
 version = "0.0.1"
 dependencies = [
+ "hmac",
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "webauthn-authenticator-rs",
  "webauthn-rs",
 ]

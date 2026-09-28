@@ -46,6 +46,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 pub mod ceremony;
+pub mod codes;
+pub mod mail;
 
 /// How long an invitation is good for unless the caller says otherwise. Seven days: long enough to
 /// reach somebody who reads mail weekly, short enough that a leaked mailbox is not a permanent way in.
