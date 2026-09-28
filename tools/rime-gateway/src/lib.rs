@@ -41,13 +41,23 @@ pub mod admission;
 pub mod supervisor;
 
 #[cfg(unix)]
-pub use admission::{AdmissionCounters, AdmissionPolicy, Refusal, Registry, SessionId};
+pub use admission::{
+    AdmissionCounters, AdmissionPolicy, MalformedSessionId, Refusal, Registry, SessionId,
+};
 #[cfg(unix)]
 pub use supervisor::{spawn_session, SessionHandle, SessionSpec, SpawnError};
 
 // `http` is portable and stays that way: it is a parser over a `BufRead`, so every CI platform tests
-// the bounds checks that are the reason it exists.
+// the bounds checks that are the reason it exists. `api` routes over `Registry`, which is Unix-only
+// for the entropy reason above, so it inherits the gate.
+#[cfg(unix)]
+pub mod api;
 pub mod http;
+
+#[cfg(unix)]
+pub use api::{
+    serve_connection, ApiCounters, Catalogue, CatalogueEntry, Launcher, ProcessLauncher, SessionApi,
+};
 
 /// Which surface a session was created for. Assigned by the gateway when it admits the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
