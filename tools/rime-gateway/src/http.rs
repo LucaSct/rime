@@ -149,6 +149,8 @@ impl ParseError {
     #[must_use]
     pub fn status(&self) -> u16 {
         match self {
+            // A request that did not arrive in time is the client's to retry, and 408 says so.
+            ParseError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => 408,
             ParseError::NoRequest | ParseError::Io(_) => 400,
             ParseError::RequestLineTooLong => 414,
             ParseError::HeadersTooLarge | ParseError::TooManyHeaders => 431,
