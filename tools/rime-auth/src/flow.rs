@@ -438,15 +438,26 @@ impl Auth {
     }
 
     /// Finish a login, writing back the authenticator's counter if it moved, and mint the session.
+    /// The account is read off the ceremony rather than taken as an argument: a caller that named the
+    /// account here could hand the write-back a different account's credentials, and an argument that
+    /// only has to be *consistent* is one that will eventually be inconsistent.
     pub fn finish_login(
         &mut self,
         challenge_id: &str,
         browser_binding: &str,
         response_json: &str,
-        email: &str,
         now: Timestamp,
     ) -> Result<LoggedIn, FlowError> {
-        let (_, blobs) = self.active_credentials(email)?;
+        let account = self
+            .ceremonies
+            .authentication_account(challenge_id)
+            .ok_or(FlowError::Ceremony(CeremonyError::UnknownChallenge))?;
+        let blobs: Vec<Vec<u8>> = self
+            .store
+            .active_credentials(account)
+            .iter()
+            .map(|c| c.blob.clone())
+            .collect();
         let who = self.ceremonies.finish_authentication(
             challenge_id,
             browser_binding,
@@ -921,7 +932,6 @@ mod tests {
                 started.challenge_id.expose(),
                 "browser",
                 &serde_json::to_string(&assertion).unwrap(),
-                INVITED,
                 NOW + 11,
             )
             .unwrap();

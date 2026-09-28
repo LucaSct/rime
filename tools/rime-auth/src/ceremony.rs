@@ -397,6 +397,15 @@ impl Ceremonies {
         })
     }
 
+    /// Which account an open authentication ceremony is for.
+    ///
+    /// The caller needs this BEFORE finishing, so it can fetch that account's credential blobs for
+    /// the counter write-back without being told an account by whoever is finishing. It is a read:
+    /// it does not consume the challenge, and a wrong browser is still refused at the finish.
+    pub fn authentication_account(&self, challenge_id: &str) -> Option<AccountId> {
+        self.authentications.get(challenge_id).map(|p| p.account)
+    }
+
     fn mint_id(&self) -> Result<ChallengeId, CeremonyError> {
         let mut bytes = [0u8; 16];
         fill_random(&mut bytes)
