@@ -60,6 +60,8 @@ pub mod http;
 // Portable: a principal is a number and a cookie is a string, so every CI platform tests the
 // ownership vocabulary even where the registry it guards does not build.
 pub mod identity;
+// Portable: port ownership and public-address validation need no socket, so CI can test both.
+pub mod media;
 // Portable: str0m is sans-IO and UdpSocket is std, so all three CI platforms exercise the run loop.
 pub mod transport;
 
