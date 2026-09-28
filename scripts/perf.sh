@@ -59,7 +59,7 @@ done
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-# ── The GPU must not be allowed to park itself (m17.3d) ──────────────────────────────────────
+# ── The GPU clock is measured DURING the run, not checked before it (m17.3d) ─────────────────
 #
 # Found the hard way while taking M17's re-baseline. `99-the-block` is CPU-bound — the simulation is
 # ~24 ms of a ~35 ms frame — so the GPU is idle most of every frame and the driver's power governor
@@ -71,78 +71,135 @@ cd "$root"
 # the same pass: `ssr-resolve` p50 1.842 vs 0.856 ms. A committed baseline measured like that
 # encodes the governor's mood, and every future comparison against it inherits that.
 #
-# BOTH clock domains have to be checked, and the memory one is the one that bites. `nvidia-smi -lgc`
+# BOTH clock domains have to be measured, and the memory one is the one that bites. `nvidia-smi -lgc`
 # pins the graphics clock and says nothing about memory: measured on this box with -lgc 1785 held
 # rock-steady for a whole run, the memory clock sat at 810 MHz of 7501 from the first sample to the
 # last, never boosting even while the GPU reported 44% utilisation. That is ~11% of peak bandwidth,
 # and the passes this report is about (SSR, DDGI, the g-buffer resolves at 1080p) are bandwidth-bound.
 # A guard that watched only the core would have passed that machine and called the result a baseline.
 #
-# So this refuses to run rather than producing a number nobody can trust — the same ruling
-# ADR-0041 Ruling 4 makes about an incomparable baseline, applied one step earlier to an
-# unmeasurable machine. Override deliberately if you are measuring something the parking cannot
-# reach (a GPU-bound sample) or on a machine where clocks cannot be pinned.
-check_gpu_clocks() {
-    command -v nvidia-smi >/dev/null 2>&1 || return 0   # not an NVIDIA box; nothing to check
+# The OLD check tried to prove stability up front by reading the idle clocks against their maxima, and
+# it was wrong twice over, both measured 2026-09-28:
+#   * an idle NVIDIA GPU parks in power state P8 at a low clock NO MATTER WHAT is configured (a GTX
+#     1060 reads 139 MHz of a 1911 MHz max while idle, then holds 1898–1911 MHz for the whole
+#     measured workload), so an idle reading proves nothing; and
+#   * Pascal-class GPUs cannot be pinned at all — `nvidia-smi -lgc`, `-lmc` and `-ac` all print
+#     "not supported", then "Treating as warning and moving on", and still exit 0, so an exit-status
+#     check on those commands is worthless.
+# Pinning was only ever a proxy for stability. This measures the thing itself: the clocks are sampled
+# at 20 Hz WHILE the benchmark runs, and the GRAPHICS spread over its own median must stay within 2%
+# — a check that works whether or not the card can be pinned. The memory domain is measured and
+# reported but does NOT gate: a memory clock that moves while the graphics clock holds still is a real
+# and separately interesting signal, but a stable graphics clock is what the frame times ride on. This
+# is the same ruling ADR-0041 Ruling 4 makes about an incomparable baseline, applied to a machine that
+# stopped being fit to measure.
+#
+# READ A CLOCK UNDER LOAD OR NOT AT ALL (ADR-0050). A benchmark process is not busy for the whole of
+# its lifetime: `lit_rooms --perf` measures its 600 frames in ~1.1 s but spends the time before that
+# creating a device, compiling pipelines and uploading assets, with the GPU at 0-1% utilisation.
+# Sampling that window on a card that cannot be pinned reads its IDLE clock (139 MHz of a 1911 MHz max
+# on the GTX 1060) and would fail every run for a ramp that is not part of the measurement at all. So
+# only samples taken while the GPU was working count — and a run that yields too few of those gets no
+# verdict rather than a verdict drawn from three samples.
+gpu_load_pct=10        # utilisation at or above which a sample belongs to the measured window
+gpu_min_samples=10     # fewer loaded samples than this is not a distribution — say so, don't judge
+gpu_spread_limit=2.0   # % of the median, the bound ADR-0050 ratifies
 
-    # A pinned domain sits at its locked floor even while idle, so a clock far below its own maximum
-    # means the governor is still in charge of that domain. Reported per domain, because being told
-    # "the GPU is not pinned" when the core is fine and the memory is not sends you to the wrong fix.
-    local unpinned=""
-    local cur_gr max_gr cur_mem max_mem
-    read -r cur_gr max_gr cur_mem max_mem <<<"$(nvidia-smi \
-        --query-gpu=clocks.current.graphics,clocks.max.graphics,clocks.current.memory,clocks.max.memory \
-        --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' | tr ',' ' ')"
+gpu_sampler_available() { command -v nvidia-smi >/dev/null 2>&1; }
 
-    domain_unpinned() {   # $1=name $2=current $3=max -> echoes a description when the governor owns it
-        case "$2$3" in ''|*[!0-9]*) return 0 ;; esac    # unreadable: do not invent a verdict
-        [ "$3" -gt 0 ] || return 0
-        [ $(( $2 * 2 )) -ge "$3" ] && return 0
-        printf '  %s clock: %s MHz of %s MHz max\n' "$1" "$2" "$3"
-    }
-    # Joined with an explicit newline: $(...) strips the trailing one, so appending both straight
-    # into a string printed two flagged domains on a single line.
-    local gr_line mem_line
-    gr_line="$(domain_unpinned graphics "$cur_gr" "$max_gr")"
-    mem_line="$(domain_unpinned memory "$cur_mem" "$max_mem")"
-    if [ -n "$gr_line" ] && [ -n "$mem_line" ]; then
-        unpinned="${gr_line}"$'\n'"${mem_line}"
+# Start ONE long-lived nvidia-smi writing `graphics, memory, utilisation` at 20 Hz into $1, and echo
+# its pid. One process rather than one per sample deliberately: this script refuses to measure on a
+# box that is not quiet (below), so a guard that forked a process twice a second would be contending
+# with the very run it is judging (the sampler itself measures 0.0% CPU). `-i 0` keeps the old
+# check's "first GPU" scope — on a two-card box the idle one would otherwise read as a clock
+# collapse that never happened.
+start_gpu_sampler() {
+    nvidia-smi -i 0 --query-gpu=clocks.gr,clocks.mem,utilization.gpu \
+        --format=csv,noheader,nounits -lms 50 > "$1" 2>/dev/null &
+    echo $!
+}
+
+stop_gpu_sampler() {
+    kill "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
+}
+
+# Read a sorted column of numbers on stdin; print "min median max spread_pct".
+col_stats() {
+    awk '
+        { a[NR] = $1 }
+        END {
+            if (NR == 0) exit 1
+            min = a[1]; max = a[NR]
+            med = (NR % 2) ? a[int(NR / 2) + 1] : (a[int(NR / 2)] + a[int(NR / 2) + 1]) / 2
+            printf "%.0f %.1f %.0f %.1f\n", min, med, max, (max - min) / med * 100
+        }'
+}
+
+# Reduce a sample log to one line — graphics min/median/max/spread, memory min/median/max/spread,
+# total samples, loaded samples, and the verdict `true`, `false` or `null` — or print nothing at all
+# when there was no readable sample. `null` is the honest answer for a run too short to judge: an
+# absent GPU, a driver that answers [N/A] and a benchmark that finished in half a second must none of
+# them produce a verdict, and none of them may gate the run.
+gpu_clock_stats() {
+    local log="$1" loaded total
+    total="$(awk -F'[, ]+' '$1 ~ /^[0-9]+$/ { n++ } END { print n + 0 }' "$log")"
+    loaded="$(awk -F'[, ]+' -v t="$gpu_load_pct" \
+        '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 + 0 >= t { print $1, $2 }' "$log")"
+    [ -n "$loaded" ] || return 0
+    local n gmin gmed gmax gspread mmin mmed mmax mspread stable=""
+    n="$(printf '%s\n' "$loaded" | grep -c .)"
+    read -r gmin gmed gmax gspread <<<"$(printf '%s\n' "$loaded" | awk '{ print $1 }' | sort -n | col_stats)"
+    read -r mmin mmed mmax mspread <<<"$(printf '%s\n' "$loaded" | awk '{ print $2 }' | sort -n | col_stats)"
+    # An unreadable spread must never read as a pass. col_stats cannot fail on a non-empty column,
+    # but a verdict that defaults to `true` when a number is missing is the exact shape of the bug
+    # this whole section exists because of, so it is checked rather than assumed.
+    case "$gspread" in ''|*[!0-9.]*) stable="null"; gspread="null" ;; esac
+    if [ "${stable:-}" = "null" ]; then
+        :
+    elif [ "$n" -lt "$gpu_min_samples" ]; then
+        stable="null"
+    elif awk -v s="$gspread" -v l="$gpu_spread_limit" 'BEGIN { exit (s > l) ? 0 : 1 }'; then
+        stable="false"
     else
-        unpinned="${gr_line}${mem_line}"
+        stable="true"
     fi
-    [ -z "$unpinned" ] && return 0
+    printf '%s %s %s %s %s %s %s %s %s %s %s\n' \
+        "$gmin" "$gmed" "$gmax" "$gspread" "$mmin" "$mmed" "$mmax" "$mspread" "$total" "$n" "$stable"
+}
 
-    # Deliberately BELOW the maximum boost clock for the core. Pinning at max invites the thermal
-    # governor to take over instead of the idle one, which reintroduces exactly the variance being
-    # removed; a clock the card can hold indefinitely is what makes two runs comparable. Memory gets
-    # no such treatment — GDDR6 has one supported clock on this class of card, and it is the top one.
-    # Only arithmetic on a number. A domain can report [N/A] (a vGPU, a locked-down driver), and
-    # `$(( ))` on a non-numeric string yields 0 — printing a recipe that says `-lgc 0,0`.
-    local pin="<85% of the max graphics clock>"
-    case "$max_gr" in ''|*[!0-9]*) ;; *) pin=$(( max_gr * 85 / 100 )) ;; esac
-    case "$max_mem" in ''|*[!0-9]*) max_mem="<max memory clock>" ;; esac
-    cat >&2 <<EOF
-perf.sh: the GPU is not clock-pinned.
-
-${unpinned}
-
-  This sample is CPU-bound, so the driver parks the GPU mid-run and the report becomes a
-  measurement of the power governor rather than of the engine. Pin BOTH domains first — locking
-  the graphics clock alone leaves memory free to sit at its idle state all run:
-
-      sudo nvidia-smi -pm 1
-      sudo nvidia-smi -lgc ${pin},${pin}
-      sudo nvidia-smi -lmc ${max_mem}
-
-  and afterwards, to hand the GPU back to the governor:
-
-      sudo nvidia-smi -rgc
-      sudo nvidia-smi -rmc
-
-  Set RIME_PERF_ALLOW_UNPINNED_CLOCKS=1 to measure anyway — and say so in the PR, because the
-  numbers are not comparable against a pinned baseline.
-EOF
-    return 1
+# Splice a `gpu_clocks` object into the pretty-printed report just before its root closing brace.
+# The report already carries its other top-level keys, so the object is added with a leading comma.
+# `samples` is in the report on purpose: a spread is only as meaningful as the number of readings
+# behind it, and a reader comparing two reports must be able to see that without rerunning anything.
+inject_gpu_clocks() {
+    local report="$1" gmin="$2" gmed="$3" gmax="$4" gspread="$5" \
+          mmin="$6" mmed="$7" mmax="$8" mspread="$9" total="${10}" loaded="${11}" stable="${12}"
+    awk -v gm="$gmin" -v gd="$gmed" -v gx="$gmax" -v gs="$gspread" \
+        -v mm="$mmin" -v md="$mmed" -v mx="$mmax" -v ms="$mspread" \
+        -v tot="$total" -v ld="$loaded" -v st="$stable" '
+        { line[NR] = $0; if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) last = NR }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (i == last - 1) { print line[i] ","; continue }
+                if (i == last) {
+                    print "  \"gpu_clocks\": {"
+                    printf "    \"graphics_min\": %s,\n", gm
+                    printf "    \"graphics_median\": %s,\n", gd
+                    printf "    \"graphics_max\": %s,\n", gx
+                    printf "    \"graphics_spread_pct\": %s,\n", gs
+                    printf "    \"memory_min\": %s,\n", mm
+                    printf "    \"memory_median\": %s,\n", md
+                    printf "    \"memory_max\": %s,\n", mx
+                    printf "    \"memory_spread_pct\": %s,\n", ms
+                    printf "    \"samples_total\": %s,\n", tot
+                    printf "    \"samples_under_load\": %s,\n", ld
+                    printf "    \"stable\": %s\n", st
+                    print "  }"
+                }
+                print line[i]
+            }
+        }' "$report" > "$report.tmp" && mv "$report.tmp" "$report"
 }
 
 # ── …and the CPU must not be shared either (m17.5) ───────────────────────────────────────────
@@ -272,9 +329,6 @@ EOF
     return 1
 }
 
-if [ -z "${RIME_PERF_ALLOW_UNPINNED_CLOCKS:-}" ]; then
-    check_gpu_clocks || exit 3
-fi
 if [ -z "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
     check_box_quiet || exit 4
 fi
@@ -316,6 +370,7 @@ slug_of() {
 }
 
 status=0
+clock_unstable=0
 run_one() {
     local exe="$1" name="$2"; shift 2
     local extra=()
@@ -346,6 +401,15 @@ run_one() {
               | grep -vxF -- "$self" | tail -1 || true)"
 
     echo "── ${name} on ${gpu} ──"
+    # The clock sampler is the BACKGROUND job and the benchmark stays in the foreground, so the run
+    # keeps the terminal, the signal handling and the exit status it always had, and the sampler is
+    # something this function starts and stops around it. The 12-frame probe above is deliberately
+    # not sampled: its numbers are never used for anything.
+    local clock_log="" sampler_pid=""
+    if gpu_sampler_available; then
+        clock_log="$(mktemp)"
+        sampler_pid="$(start_gpu_sampler "$clock_log")"
+    fi
     if [ -n "$latest" ]; then
         echo "  baseline: ${latest}"
         "${bin}/${exe}" --perf --width "$width" --height "$height" \
@@ -354,6 +418,44 @@ run_one() {
         echo "  baseline: none yet for this machine — this run establishes one"
         "${bin}/${exe}" --perf --width "$width" --height "$height" \
             --out "$out" "${extra[@]}" "$@" || status=1
+    fi
+    [ -n "$sampler_pid" ] && stop_gpu_sampler "$sampler_pid"
+
+    if [ -n "$clock_log" ]; then
+        local clock_line
+        clock_line="$(gpu_clock_stats "$clock_log")"
+        rm -f "$clock_log"
+        if [ -n "$clock_line" ] && [ -s "$out" ]; then
+            local gmin gmed gmax gspread mmin mmed mmax mspread total loaded stable
+            read -r gmin gmed gmax gspread mmin mmed mmax mspread total loaded stable <<<"$clock_line"
+            inject_gpu_clocks "$out" "$gmin" "$gmed" "$gmax" "$gspread" \
+                "$mmin" "$mmed" "$mmax" "$mspread" "$total" "$loaded" "$stable"
+            echo "  gpu clock: ${gmed} MHz median, ${gspread}% spread over ${loaded} of ${total} samples (stable=${stable})"
+            if [ "$stable" = "false" ]; then
+                clock_unstable=1
+                status=1
+                cat >&2 <<EOF
+
+perf.sh: the GPU graphics clock was NOT stable during this run.
+
+  graphics clock: ${gmin}–${gmax} MHz — ${gspread}% spread of a ${gmed} MHz median (limit ${gpu_spread_limit}%)
+  memory clock:   ${mmin}–${mmax} MHz — ${mspread}% spread (reported, not gating)
+  measured from ${loaded} samples taken at ≥${gpu_load_pct}% utilisation, of ${total} taken in all
+
+  A graphics clock that moves more than ${gpu_spread_limit}% over the run means this report measures the
+  clock ramp as much as the engine, so the numbers are not comparable against a stable baseline.
+  Re-run once the card settles — and check cooling and power limits, because the thermal and power
+  governors move the graphics clock even on a card that cannot be pinned.
+EOF
+            elif [ "$stable" = "null" ]; then
+                # Not a failure and NOT a pass: too short a loaded window to call. The report keeps
+                # the numbers and a null verdict, so a reader can see the precondition was not
+                # established rather than assume it was.
+                echo "" >&2
+                echo "perf.sh: only ${loaded} sample(s) at ≥${gpu_load_pct}% GPU utilisation — too few to judge" >&2
+                echo "  clock stability, so this report carries \"stable\": null. It is NOT a verified-stable run." >&2
+            fi
+        fi
     fi
 }
 
@@ -436,7 +538,7 @@ rm -f "$contention_log"
 # File the staged reports — or don't. A report the box was not quiet for is left where it was
 # written and named, so it can still be looked at, but it does not become the committed history.
 if [ -n "$final_dir" ]; then
-    if [ "$contended" -eq 0 ] || [ -n "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; then
+    if [ "$clock_unstable" -eq 0 ] && { [ "$contended" -eq 0 ] || [ -n "${RIME_PERF_ALLOW_BUSY_BOX:-}" ]; }; then
         for f in "$outdir"/*.json; do
             [ -e "$f" ] || continue
             mv "$f" "$final_dir/"
@@ -444,7 +546,7 @@ if [ -n "$final_dir" ]; then
         done
     else
         echo "" >&2
-        echo "perf.sh: NOT filing into ${final_dir} — the box was not quiet for this run." >&2
+        echo "perf.sh: NOT filing into ${final_dir} — the box was not idle or a GPU clock moved." >&2
         echo "  The reports are in ${outdir} if you want to look at them." >&2
     fi
 fi
