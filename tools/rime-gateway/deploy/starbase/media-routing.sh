@@ -16,3 +16,8 @@ fi
 if ! ip rule show | grep -q "lookup $table"; then
     ip rule add ipproto udp sport 50000-50002 lookup "$table"
 fi
+
+# coturn's egress restriction (see turn-egress.nft). Loaded here because it must be in place before
+# coturn relays anything, and this unit runs before the services. Idempotent: the file deletes and
+# recreates its own table.
+nft -f /opt/rime/bin/turn-egress.nft

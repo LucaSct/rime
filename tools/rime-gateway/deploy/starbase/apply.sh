@@ -8,6 +8,13 @@ trap 'rm -rf "$work"' EXIT
 tar -C "$work" -xzf "$bundle"
 
 # Service user
+# Prerequisites, checked up front: a missing one used to surface half-way through as an unrelated
+# failure (a chown to a group coturn's package creates), leaving a half-installed host.
+for tool in caddy turnserver nft ip openssl; do
+  command -v "$tool" >/dev/null || { echo "apply: '$tool' is not installed (apt install caddy coturn nftables iproute2 openssl)" >&2; exit 1; }
+done
+getent group turnserver >/dev/null || { echo "apply: group 'turnserver' missing (is coturn installed?)" >&2; exit 1; }
+
 if ! id -u rime >/dev/null 2>&1; then
   useradd -r -s /usr/sbin/nologin -d /var/lib/rime -m rime
 fi
@@ -18,6 +25,7 @@ install -d -m 755 /opt/rime/bin /opt/rime/web /etc/rime /var/lib/rime /etc/cotur
 install -m 755 "$work/rime-gateway/rime-gateway" /opt/rime/bin/rime-gateway
 install -m 755 "$work/rime-gateway/rime-turn-proxy" /opt/rime/bin/rime-turn-proxy
 install -m 755 "$work/rime-gateway/deploy/"*.sh /opt/rime/bin/
+install -m 644 "$work/rime-gateway/deploy/turn-egress.nft" /opt/rime/bin/turn-egress.nft
 
 # Static web assets
 cp -a "$work/rime-gateway/web/"* /opt/rime/web/
@@ -26,7 +34,9 @@ cp -a "$work/rime-gateway/web/"* /opt/rime/web/
 install -m 644 "$work/rime-gateway/deploy/Caddyfile" /etc/caddy/Caddyfile
 
 # Rime configuration (operator-supplied catalogue.conf may be added here)
-install -m 640 -o rime -g rime "$work/rime-gateway/deploy/catalogue.conf" /etc/rime/catalogue.conf 2>/dev/null || true
+# The catalogue is the operator's (which games this host serves); it is not bundled. Say so now rather
+# than let the gateway refuse to start without a word from this script.
+[ -f /etc/rime/catalogue.conf ] || echo "apply: WARNING /etc/rime/catalogue.conf is missing; rime-gateway will not start until it exists" >&2
 
 # Shared TURN secret: created once, read by both the gateway and coturn.
 if [ ! -f /etc/rime/turn-secret ]; then

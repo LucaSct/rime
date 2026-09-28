@@ -35,7 +35,7 @@ rime.peekstar.eu {
         Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self';"
         Referrer-Policy "no-referrer"
         X-Content-Type-Options "nosniff"
-        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        Strict-Transport-Security "max-age=63072000; includeSubDomains"
     }
 }
 
