@@ -61,6 +61,7 @@ fn frame_message_decodes_and_re_encodes_byte_exact() {
     assert_eq!(f.last_input_seq, 42);
     assert_eq!(f.last_input_client_us, 123_456_789);
     assert_eq!(f.codec, Codec::Lz4);
+    assert!(f.keyframe, "an intra-only frame is always a keyframe");
     assert_eq!(f.desc.width, 4);
     assert_eq!(f.desc.height, 2);
     assert_eq!(f.desc.format, PixelFormat::Rgba8Unorm);
@@ -86,6 +87,29 @@ fn lz4_frame_decodes_to_the_pixels_cpp_compressed() {
         fixture("frame_lz4_pixels.bin"),
         "cross-language LZ4 pixel mismatch"
     );
+}
+
+#[test]
+fn an_av1_delta_frame_carries_a_clear_keyframe_flag_byte_exact() {
+    // The other value of the v4 flag. Together with frame_message.bin (flag set) this pins the bit's
+    // offset and meaning across both implementations, not just its presence.
+    let golden = fixture("frame_av1_delta.bin");
+    let f = FrameMessage::decode(&golden).expect("decode frame");
+    assert_eq!(f.codec, Codec::Av1);
+    assert!(!f.keyframe, "a delta frame decoded as a keyframe");
+    assert_eq!(f.sequence, 8);
+    assert_eq!(f.data, vec![0x32, 0x01, 0x00]);
+    assert_eq!(f.encode(), golden);
+}
+
+#[test]
+fn a_reserved_frame_flag_bit_is_refused() {
+    let mut bytes = fixture("frame_av1_delta.bin");
+    // The flags byte follows the 49-byte ledger header and the codec byte.
+    let flags = 8 * 5 + 4 + 8 + 1;
+    assert_eq!(bytes[flags], 0x00);
+    bytes[flags] = 0x02;
+    assert!(FrameMessage::decode(&bytes).is_err());
 }
 
 #[test]

@@ -181,6 +181,9 @@ std::optional<Codec> known_codec(std::uint8_t code) {
 
 } // namespace
 
+// Frame flags (v4). One bit today; the rest are reserved and refused if set.
+constexpr std::uint8_t kFrameFlagKeyframe = 0x01;
+
 // ── FrameMessage ────────────────────────────────────────────────────────────────────────────────
 
 void FrameMessage::encode(std::vector<std::byte>& out) const {
@@ -194,6 +197,7 @@ void FrameMessage::encode(std::vector<std::byte>& out) const {
     w.u32(last_input_seq);
     w.u64(last_input_client_us);
     w.u8(static_cast<std::uint8_t>(codec));
+    w.u8(keyframe ? kFrameFlagKeyframe : std::uint8_t{0});
     // desc.format is always a codec-supported format here (the frame came from the codec, which
     // rejects others); map it, and fail loud rather than silently mislabel if that invariant
     // breaks.
@@ -210,12 +214,14 @@ void FrameMessage::encode(std::vector<std::byte>& out) const {
 bool FrameMessage::decode(std::span<const std::byte> payload) {
     ByteReader r(payload);
     std::uint8_t codec_byte = 0;
+    std::uint8_t flags = 0;
     std::uint8_t format_byte = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     if (!r.u64(sequence) || !r.u64(capture_us) || !r.u64(readback_us) || !r.u64(encode_us) ||
         !r.u64(wire_us) || !r.u32(last_input_seq) || !r.u64(last_input_client_us) ||
-        !r.u8(codec_byte) || !r.u8(format_byte) || !r.u32(width) || !r.u32(height)) {
+        !r.u8(codec_byte) || !r.u8(flags) || !r.u8(format_byte) || !r.u32(width) ||
+        !r.u32(height)) {
         RIME_ERROR("FrameMessage::decode: truncated header ({} bytes)", payload.size());
         return false;
     }
@@ -224,6 +230,13 @@ bool FrameMessage::decode(std::span<const std::byte> payload) {
         RIME_ERROR("FrameMessage::decode: unknown codec {}", codec_byte);
         return false;
     }
+    // Reserved bits must be zero: a peer that sets one means something this build cannot know, and
+    // a silently ignored meaning is how two builds disagree about a frame without anyone noticing.
+    if ((flags & ~kFrameFlagKeyframe) != 0) {
+        RIME_ERROR("FrameMessage::decode: unknown frame flags {:#04x}", flags);
+        return false;
+    }
+    keyframe = (flags & kFrameFlagKeyframe) != 0;
     const auto fmt = rhi_format_of(format_byte);
     if (!fmt) {
         RIME_ERROR("FrameMessage::decode: unknown pixel format {}", format_byte);

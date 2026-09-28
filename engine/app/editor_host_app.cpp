@@ -1021,6 +1021,8 @@ int serve_viewport(std::string_view socket_path,
                     stream::FrameMessage frame;
                     frame.sequence = sequence++;
                     frame.codec = stream::Codec::Av1;
+                    // The encoder's own bit, not a default: this is the one sender with deltas.
+                    frame.keyframe = packet.keyframe;
                     frame.desc = frame_desc;
                     frame.data = packet.data;
                     if (!conn.send_frame(frame)) {

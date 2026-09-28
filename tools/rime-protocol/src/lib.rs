@@ -45,8 +45,9 @@ pub use input::{InputEvent, InputKind};
 pub const PROTOCOL_MAGIC: u32 = 0x524D_5331;
 
 /// The protocol version exchanged in the handshake. Bumped for any incompatible wire change; the
-/// editor channel rides version 3 (s1.3's latency ledger). Mirrors `stream::kProtocolVersion`.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// editor channel rides version 4 (v3's latency ledger, plus m18's keyframe flag on `Frame`).
+/// Mirrors `stream::kProtocolVersion`.
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Upper bound on one message's payload, so a corrupt/hostile length can't drive a huge allocation.
 /// Mirrors `stream::kMaxMessageBytes` (64 MiB).
@@ -123,6 +124,9 @@ pub enum Error {
     BadCodec(u8),
     /// A frame carried a pixel-format byte this build does not know.
     BadFormat(u8),
+    /// A frame set a reserved `flags` bit (v4). Refused, not ignored: a bit this build cannot
+    /// interpret is a meaning the sender relies on and we would silently drop.
+    BadFrameFlags(u8),
     /// A length field exceeded [`MAX_MESSAGE_BYTES`].
     TooLarge(u32),
     /// A blob's declared magic tag did not match (a wrong-shaped schema/snapshot).
@@ -139,6 +143,7 @@ impl std::fmt::Display for Error {
             Error::BadVersion(v) => write!(f, "unsupported protocol version {v}"),
             Error::BadCodec(c) => write!(f, "unknown codec byte {c}"),
             Error::BadFormat(c) => write!(f, "unknown pixel-format byte {c}"),
+            Error::BadFrameFlags(b) => write!(f, "unknown frame flags {b:#04x}"),
             Error::TooLarge(n) => write!(f, "message length {n} exceeds the cap"),
             Error::BadTag(t) => write!(f, "bad blob tag {t:#010x}"),
             Error::Io(e) => write!(f, "io error: {e}"),

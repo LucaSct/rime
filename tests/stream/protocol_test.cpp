@@ -85,6 +85,33 @@ TEST_CASE("FrameMessage round-trips through bytes") {
     CHECK(dst.data == src.data);
 }
 
+TEST_CASE("FrameMessage carries the keyframe flag, and refuses a reserved one (v4)") {
+    stream::FrameMessage src;
+    src.codec = stream::Codec::Av1;
+    src.desc = {{64, 32}, rhi::Format::RGBA8Unorm};
+    src.data = {b(0x32), b(0x01), b(0x00)};
+
+    // Both values, because a flag that always decodes to its default would pass either one alone.
+    for (const bool keyframe : {true, false}) {
+        src.keyframe = keyframe;
+        Bytes payload;
+        src.encode(payload);
+        stream::FrameMessage dst;
+        dst.keyframe = !keyframe; // prove decode WRITES the field rather than keeping a stale value
+        REQUIRE(dst.decode(payload));
+        CHECK(dst.keyframe == keyframe);
+    }
+
+    // The flags byte sits right after the codec byte: 5 ledger u64s, a u32, a u64, then codec.
+    Bytes payload;
+    src.encode(payload);
+    constexpr std::size_t kFlags = 8 * 5 + 4 + 8 + 1;
+    REQUIRE(payload.size() > kFlags);
+    payload[kFlags] = b(0x02);
+    stream::FrameMessage dst;
+    CHECK_FALSE(dst.decode(payload));
+}
+
 TEST_CASE("CapabilitiesMessage round-trips a decoder preference list (s1.2)") {
     stream::CapabilitiesMessage src;
     src.decoders = {stream::Codec::Av1, stream::Codec::Jpeg, stream::Codec::LZ4};

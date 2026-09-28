@@ -44,8 +44,12 @@ namespace rime::stream {
 //   3 — s1.3 (ADR-0030 §5): the latency ledger — Frame carries the server's per-stage stamps + the
 //       echoed input seq/time, and Input carries a client stamp + sequence number. Wider payloads,
 //       so a v2 peer would misread them; refused at connect.
+//   4 — m18 (ADR-0052): Frame carries a flags byte after the codec, bit 0 = keyframe. The gateway
+//       relays AV1 onto a WebRTC track and must know which frames a joining decoder can start from;
+//       the encoder knows exactly, so the wire says so rather than every relay guessing from the
+//       bitstream. A v3 peer would read the flags byte as the pixel format; refused at connect.
 inline constexpr std::uint32_t kProtocolMagic = 0x524D5331u; // 'R''M''S''1'
-inline constexpr std::uint16_t kProtocolVersion = 3;
+inline constexpr std::uint16_t kProtocolVersion = 4;
 
 // An upper bound on a single message's payload, so a corrupt or hostile length field can't make us
 // try to allocate/read gigabytes. A raw 4K RGBA frame is ~33 MiB; 64 MiB leaves headroom while
@@ -112,6 +116,10 @@ struct FrameMessage {
     std::uint32_t last_input_seq = 0; // most recent input applied (0 = none yet)
     std::uint64_t last_input_client_us = 0; // that input's client-clock send time (echoed back)
     Codec codec = Codec::Jpeg;
+    // Decodable on its own, with no earlier frame (wire flags bit 0, v4). Defaults to TRUE because
+    // every intra-only codec (Raw, LZ4, JPEG) produces nothing else; only an inter-frame codec's
+    // sender (Av1) has deltas, and it sets this from the encoder's own packet flag.
+    bool keyframe = true;
     ImageDesc desc{};
     std::vector<std::byte> data;
 
