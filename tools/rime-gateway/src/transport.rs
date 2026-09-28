@@ -242,6 +242,33 @@ impl Str0mTransport {
         offer_sdp: &str,
         bind: SocketAddr,
     ) -> Result<(Self, String), TransportError> {
+        Self::accept_offer_at(offer_sdp, bind, None)
+    }
+
+    /// [`Str0mTransport::accept_offer`] for a socket that the internet reaches through a port forward
+    /// (ADR-0053): `bind` is the private address the socket really has, and `public` is the address
+    /// the edge forwards to it.
+    ///
+    /// **Why a second *host* candidate, and why that is enough.** The textbook shape is a
+    /// server-reflexive candidate, "reachable at `public`, arriving at `bind`". But an ICE-lite agent
+    /// may only have host candidates, and str0m enforces that: it silently rejects anything else
+    /// (`str0m-is` `agent.rs`, measured when this was first tried). So `public` is advertised as a
+    /// second host candidate, beside the private one.
+    ///
+    /// The two do different jobs. The **public** candidate only tells the browser where to send. The
+    /// **private** one is what str0m matches arriving datagrams against, because after the edge's
+    /// forward they really do arrive at `bind`. An ICE-lite agent never nominates a pair, so which
+    /// of its own candidates answered is invisible to the browser, which only needs the reply to come
+    /// back from the address it sent to, and the forward's return path does that. (Measured: the
+    /// loopback forward test passes whether or not the receive side pretends datagrams arrived at
+    /// `public`, so it does not pretend.) The private candidate also serves the in-container TURN
+    /// relay directly (ADR-0053 decision 2). A peer on the internet that tries it just fails that one
+    /// check.
+    pub fn accept_offer_at(
+        offer_sdp: &str,
+        bind: SocketAddr,
+        public: Option<SocketAddr>,
+    ) -> Result<(Self, String), TransportError> {
         crate::http::check_bind(bind).map_err(|e| {
             TransportError::Io(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -265,6 +292,17 @@ impl Str0mTransport {
         let candidate = Candidate::host(local_addr, "udp")
             .map_err(|e| TransportError::Negotiation(e.to_string()))?;
         rtc.add_local_candidate(candidate);
+        if let Some(public) = public {
+            let mapped = Candidate::host(public, "udp")
+                .map_err(|e| TransportError::Negotiation(e.to_string()))?;
+            // `None` means str0m refused it, and a refusal here would otherwise surface only as
+            // "the browser never connects", with nothing in the answer to say why.
+            if rtc.add_local_candidate(mapped).is_none() {
+                return Err(TransportError::Negotiation(format!(
+                    "the public candidate {public} was refused"
+                )));
+            }
+        }
 
         let offer = SdpOffer::from_sdp_string(offer_sdp)
             .map_err(|e| TransportError::BadOffer(e.to_string()))?;
@@ -1271,5 +1309,125 @@ mod tests {
             done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
             "the run loop outlived its owner"
         );
+    }
+
+    /// Stands in for blackStar's port forward (ADR-0053): datagrams to the returned "public" address
+    /// are relayed to the transport's private socket, and replies go back out the public address.
+    /// Userspace, so unlike a kernel DNAT it changes the source the transport sees. ICE handles that
+    /// as a peer-reflexive address, and it does not weaken what the test proves: the peer only ever
+    /// sends to the public address. The target is filled in once the transport exists, because each
+    /// side needs the other's port first.
+    fn spawn_port_forward(
+        target: std::sync::Arc<std::sync::Mutex<Option<SocketAddr>>>,
+        relayed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SocketAddr {
+        let public = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let inner = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = public.local_addr().unwrap();
+        public
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        inner
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 2048];
+            let mut client: Option<SocketAddr> = None;
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                if let Ok((n, from)) = public.recv_from(&mut buf) {
+                    client = Some(from);
+                    if let Some(to) = *target.lock().unwrap() {
+                        if inner.send_to(&buf[..n], to).is_ok() {
+                            relayed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+                if let (Ok((n, _)), Some(to)) = (inner.recv_from(&mut buf), client) {
+                    let _ = public.send_to(&buf[..n], to);
+                }
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_peer_that_cannot_reach_the_host_candidate_connects_through_the_public_address() {
+        let target = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let relayed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let public = spawn_port_forward(target.clone(), relayed.clone());
+
+        let (mut peer, offer) = TestPeer::new();
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (transport, answer) =
+            Str0mTransport::accept_offer_at(&offer, bind, Some(public)).unwrap();
+        *target.lock().unwrap() = Some(transport.local_addr());
+
+        // A browser on the internet cannot reach `10.77.0.22`; model that by removing the private
+        // candidate from the answer it sees. The public one must be enough.
+        let internet_view = without_candidate(&answer, transport.local_addr());
+        assert!(internet_view.contains(&format!(" {} {} typ host", public.ip(), public.port())));
+        peer.accept_answer(&internet_view);
+
+        let mut server_connected = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !(server_connected && peer.connected) {
+            peer.pump(Duration::from_millis(50), |p| p.connected);
+            if let Some(event) = transport.poll_event(Duration::from_millis(10)) {
+                match event {
+                    Event::Connected => server_connected = true,
+                    Event::Failed(why) => panic!("transport failed: {why}"),
+                    Event::Disconnected => panic!("transport disconnected during the handshake"),
+                    Event::Data { .. } | Event::KeyframeRequested => {}
+                }
+            }
+        }
+        assert!(
+            server_connected && peer.connected,
+            "no connection through the public address"
+        );
+        assert!(
+            relayed.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "connected without the port forward carrying anything"
+        );
+        let mut transport = transport;
+        transport.close();
+    }
+
+    /// The answer as a peer that cannot reach `hidden` would effectively see it.
+    fn without_candidate(answer: &str, hidden: SocketAddr) -> String {
+        let needle = format!(" {} {} typ ", hidden.ip(), hidden.port());
+        let kept: String = answer
+            .lines()
+            .filter(|l| !(l.starts_with("a=candidate") && l.contains(&needle)))
+            .map(|l| format!("{l}\r\n"))
+            .collect();
+        assert!(kept.len() < answer.len(), "{hidden} was not in the answer");
+        kept
+    }
+
+    #[test]
+    fn with_a_public_address_set_the_private_path_still_connects() {
+        // The in-container TURN relay's path (ADR-0053 decision 2): it sends straight to the private
+        // socket. Advertising a public address must not cost the path that never goes through the
+        // forward.
+        let unused_public: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let (mut peer, offer) = TestPeer::new();
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (transport, answer) =
+            Str0mTransport::accept_offer_at(&offer, bind, Some(unused_public)).unwrap();
+        peer.accept_answer(&without_candidate(&answer, unused_public));
+
+        let mut server_connected = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !(server_connected && peer.connected) {
+            peer.pump(Duration::from_millis(50), |p| p.connected);
+            if let Some(Event::Connected) = transport.poll_event(Duration::from_millis(10)) {
+                server_connected = true;
+            }
+        }
+        assert!(server_connected && peer.connected, "the private path broke");
+        let mut transport = transport;
+        transport.close();
     }
 }
