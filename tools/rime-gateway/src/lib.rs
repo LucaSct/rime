@@ -52,6 +52,10 @@ pub use supervisor::{spawn_session, SessionHandle, SessionSpec, SpawnError};
 // for the entropy reason above, so it inherits the gate.
 #[cfg(unix)]
 pub mod api;
+/// The account endpoints. Only with the `auth` feature, and only on Unix, which is where the store's
+/// entropy source is — an exported bundle has no accounts and gets no account routes to attack.
+#[cfg(all(unix, feature = "auth"))]
+pub mod auth_api;
 pub mod http;
 // Portable: a principal is a number and a cookie is a string, so every CI platform tests the
 // ownership vocabulary even where the registry it guards does not build.
@@ -63,6 +67,8 @@ pub mod transport;
 pub use api::{
     serve_connection, ApiCounters, Catalogue, CatalogueEntry, Launcher, ProcessLauncher, SessionApi,
 };
+#[cfg(all(unix, feature = "auth"))]
+pub use auth_api::{AuthApi, AuthApiCounters, CEREMONY_COOKIE};
 pub use identity::{cookie, AccessPolicy, AccountRef, Principal, SESSION_COOKIE};
 
 /// Which surface a session was created for. Assigned by the gateway when it admits the session.
