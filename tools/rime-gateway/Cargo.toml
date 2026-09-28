@@ -7,9 +7,11 @@
 # gateway created, never something the browser asserts. A play session's `0x02xx` editor band is
 # dropped here, so the engine is never asked to answer "may this peer edit?" about an untrusted peer.
 #
-# HTTP, TLS and WebRTC are NOT here yet and are deliberately absent from this brick: the filter is
-# the load-bearing security property and it is provable over an in-memory pipe, with no network, no
-# browser and no engine. Deleting this crate leaves the engine unchanged (guardrail 2).
+# A bounded HTTP/1.1 surface and the session API landed on top of that filter (`http.rs`, `api.rs`),
+# hand-rolled with no new dependency for the reason `rime-protocol` has none. TLS, auth and WebRTC are
+# still absent: TLS and the hostname belong to blackStar, the estate's edge (ADR-0047 §3), and v1 is
+# un-authenticated by ADR-0045's last consequence. Deleting this crate leaves the engine unchanged
+# (guardrail 2).
 [package]
 name = "rime-gateway"
 version.workspace = true
