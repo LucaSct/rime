@@ -23,5 +23,22 @@ description = "Session broker for Rime's hosted browser front end (surface polic
 [dependencies]
 rime-protocol = { path = "../rime-protocol" }
 
+# The ONE third-party dependency this crate has, and the reason is that the alternative is worse.
+# WebRTC needs ICE, DTLS-SRTP, SCTP and RTP packetisation; the verification alone means CBOR/COSE and
+# ES256, and hand-rolling cryptographic transport is not a thing to do to save a dependency.
+#
+# `str0m` is SANS-IO: it owns no sockets, spawns no threads and forces no async runtime on us, so the
+# blocking HTTP server and process supervisor already in this crate keep working unchanged. A
+# full-stack alternative would have made tokio viral through code that is already written and merged.
+#
+# `default-features = false` is load-bearing twice over. The default set is `["aws-lc-rs", "examples"]`
+# and `examples` pulls in `rouille` — an entire HTTP server framework — which would ship inside every
+# exported game bundle (ADR-0046 §2 puts this gateway in the bundle). `rust-crypto` selects the pure
+# Rust backend instead, so there is no vendored C to build on three CI platforms.
+#
+# Licence: MIT OR Apache-2.0, so Apache-2.0-safe, the same test `third_party/` policy applies to
+# libjpeg-turbo and lz4 (engine/stream/include/rime/stream/frame_codec.hpp:28).
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+
 [lints.clippy]
 all = "deny"

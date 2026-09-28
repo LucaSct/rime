@@ -53,6 +53,8 @@ pub use supervisor::{spawn_session, SessionHandle, SessionSpec, SpawnError};
 #[cfg(unix)]
 pub mod api;
 pub mod http;
+// Portable: str0m is sans-IO and UdpSocket is std, so all three CI platforms exercise the run loop.
+pub mod transport;
 
 #[cfg(unix)]
 pub use api::{
