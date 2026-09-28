@@ -39,6 +39,19 @@ silently misses a brand-new source file, the trap that red-CI'd M6.8):
 CI's format job is the backstop, not the first line of defence — skipping the local run
 cost M6.3, M6.4 and M6.8 a red-CI round-trip each.
 
+**Rust lints: run CI's exact command, not a plain `cargo clippy`.** CI runs
+
+```bash
+cargo clippy --all-targets -- -D warnings
+```
+
+from `tools/`. Without `-D warnings` an unused import is a *warning*, so `cargo clippy` exits **0**
+and a green exit status means nothing about whether the job will pass — which is how #211's format
+job went red on an import that was only used inside `mod tests`. The exit-status rule ("judge a build
+by its exit status") is necessary and not sufficient: the status has to come from the command CI
+actually runs. For a crate with optional features, lint **each configuration** the workflow builds
+(`--features auth` here), because an import unused in one is not unused in the other.
+
 ## Landing a stack: every child conflicts the moment its parent merges
 
 We merge to `main` by **squash**, so `main` ends up holding the parent's *squashed*
