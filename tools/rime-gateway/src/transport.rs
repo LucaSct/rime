@@ -1171,14 +1171,18 @@ mod tests {
 
         let sends = PENDING_QUEUE * 3;
         let mut submitted = 0usize;
-        for _ in 0..sends {
+        // `Busy` means the loop has not yet drained the command queue into `pending`. Stopping there
+        // made this test depend on the runner's speed — a slow macOS runner filled the 64-slot command
+        // queue before `pending` ever reached its bound, and the assertion below failed. So wait and
+        // retry: the property under test is `pending`'s bound, and it can only be reached through the
+        // loop's draining. The deadline keeps a genuinely wedged loop a failure, not a hang.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while submitted < sends && Instant::now() < deadline {
             match transport.submit(Command::SendData {
                 payload: vec![7u8; 64],
             }) {
                 Ok(()) => submitted += 1,
-                // Also acceptable and also backpressure: the loop was slow enough that the command
-                // queue filled. Either path proves the caller cannot grow us without limit.
-                Err(TransportError::Busy) => break,
+                Err(TransportError::Busy) => std::thread::sleep(Duration::from_millis(1)),
                 Err(e) => panic!("unexpected: {e}"),
             }
         }
