@@ -32,10 +32,16 @@ session.
 - **Return traffic must go back through blackStar.** CT 122 policy-routes replies *from* the media
   ports via `10.77.0.1`, so conntrack can reverse the DNAT. Without that, replies leave by CT 122's own
   route with the wrong source, and media fails silently after ICE appears to work. (astra caught this.)
-- **The advertised address is not the bound address.** The socket binds `10.77.0.22:<leased>`; the ICE
-  candidate advertises the **public** address and the same port, as a server-reflexive candidate whose
-  base is the bound socket. Rewriting the host candidate in the SDP text would not work: str0m checks
-  that a datagram's destination matches the candidate's base.
+- **The advertised address is not the bound address.** The socket binds `10.77.0.22:<leased>`, and the
+  answer carries **two host candidates**: that private address, and the **public** address with the
+  same port. *(Corrected from this ADR's first draft, which followed the consult in specifying a
+  server-reflexive candidate. Measured the same day: str0m's ICE-lite agent **rejects every non-host
+  candidate** (`str0m-is` `agent.rs`), so that could not be built. The measured replacement is also
+  simpler: arriving datagrams match the private candidate, an ICE-lite agent never nominates a pair,
+  and the browser only needs the reply to come from the address it sent to, which the forward's
+  return path provides. No receive-side address rewriting is needed; a loopback test with a
+  userspace forward and the private candidate hidden from the peer proves it.)* The private
+  candidate also serves the in-container TURN relay (Decision 2).
 - **The public IPv4 is learned by resolving `rime.peekstar.eu`** when a session starts *(implementation
   choice, Claude)*. The home address may change, and whatever keeps that A record current already
   solves "what is our address". Resolving the name reuses that and adds no dependency. It is wrong only
