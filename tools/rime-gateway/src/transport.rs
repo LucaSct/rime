@@ -28,8 +28,7 @@
 //! connection — ICE, DTLS-SRTP, SCTP — between this transport and a conformant `str0m` peer, over
 //! real loopback UDP sockets, and sends a DataChannel message each way. That proves the run loop,
 //! the socket plumbing, the SDP exchange and the wakeup mechanism. It does **not** prove browser
-//! interop, which nothing without a browser can, and it does not carry video yet: the AV1 path and
-//! the browser page are the next brick.
+//! interop, which nothing without a browser can; the browser page is a separate brick.
 
 use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
@@ -40,6 +39,7 @@ use std::time::{Duration, Instant};
 
 use str0m::change::SdpOffer;
 use str0m::channel::ChannelId;
+use str0m::media::{MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event as RtcEvent, IceConnectionState, Input, Output, Rtc};
 
@@ -85,6 +85,13 @@ const MAX_POLL: Duration = Duration::from_millis(50);
 pub enum Command {
     /// Send bytes on the input DataChannel. Opaque here: see the module note on the surface policy.
     SendData { payload: Vec<u8> },
+    /// One encoded AV1 temporal unit from the engine wire. Capture time is monotonic microseconds
+    /// and becomes the 90 kHz RTP timestamp; callers must not send it backwards.
+    SendVideo {
+        frame: Vec<u8>,
+        keyframe: bool,
+        capture_micros: u64,
+    },
     /// Shut the connection down and end the thread.
     Close,
 }
@@ -97,6 +104,9 @@ pub enum Event {
     Connected,
     /// Bytes arrived on the DataChannel.
     Data { payload: Vec<u8> },
+    /// The peer sent PLI/FIR, or a newly writable track needs its first decodable frame. The
+    /// caller forwards this as an engine `KeyframeRequest`; no codec detail crosses this seam.
+    KeyframeRequested,
     /// The peer went away, or `Close` was honoured. Terminal.
     Disconnected,
     /// The connection failed. Terminal, and the string is for the operator's log rather than the peer.
@@ -142,6 +152,19 @@ pub struct TransportCounters {
     pub datagrams_rejected: u64,
     pub data_messages_in: u64,
     pub data_messages_out: u64,
+    /// Frames written to the AV1 track, so a silent video path is visible to the operator.
+    pub video_frames_out: u64,
+    /// Frames sent before ICE and the negotiated AV1 track were writable; stale frames are dropped.
+    pub video_frames_dropped_not_ready: u64,
+    /// Frames refused because the offer has no AV1 video sender, while input can still work.
+    pub video_frames_dropped_no_track: u64,
+    /// Deltas refused before a keyframe, since a fresh decoder could not decode them.
+    pub video_deltas_dropped_before_keyframe: u64,
+    /// PLI/FIR feedback received, so engine keyframe demand can be diagnosed.
+    pub keyframe_requests_in: u64,
+    /// Frames the state machine refused at write time (no writer for the mid, or `write` erred).
+    /// Should stay zero; a drop path without a counter is one that reads as "video is fine".
+    pub video_frames_write_failed: u64,
     /// Sends that found no open channel and were queued. A caller sending before [`Event::Connected`].
     pub data_sends_early: u64,
     /// Sends dropped because [`PENDING_QUEUE`] was full. Never silent: "my input did nothing" has to
@@ -223,7 +246,13 @@ impl Str0mTransport {
         let socket = UdpSocket::bind(bind).map_err(TransportError::Io)?;
         let local_addr = socket.local_addr().map_err(TransportError::Io)?;
 
-        let mut rtc = Rtc::builder().set_ice_lite(true).build(Instant::now());
+        // Restrict the answer to AV1: an offer with another video codec still keeps its data
+        // channel, but must never make us claim an encoder format we cannot send.
+        let mut rtc = Rtc::builder()
+            .set_ice_lite(true)
+            .clear_codecs()
+            .enable_av1(true)
+            .build(Instant::now());
         // ICE-lite because this side is the server: it has a stable, reachable address and does not
         // need to probe the peer's. It halves the state machine's work and removes a class of
         // connectivity-check bug we would otherwise own.
@@ -238,6 +267,9 @@ impl Str0mTransport {
             .accept_offer(offer)
             .map_err(|e| TransportError::Negotiation(e.to_string()))?;
         let answer_sdp = answer.to_sdp_string();
+        // The accepted answer is authoritative: an unoffered or rejected video m-line must not
+        // become a send target merely because a codec is configured locally.
+        let video_answer = av1_video_answer(&answer_sdp);
 
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<Command>(COMMAND_QUEUE);
         let (ev_tx, ev_rx) = mpsc::sync_channel::<Event>(EVENT_QUEUE);
@@ -252,7 +284,7 @@ impl Str0mTransport {
         let loop_magic = magic;
         let thread = std::thread::Builder::new()
             .name("rime-gateway-transport".into())
-            .spawn(move || run_loop(rtc, socket, cmd_rx, ev_tx, loop_magic))
+            .spawn(move || run_loop(rtc, socket, cmd_rx, ev_tx, loop_magic, video_answer))
             .map_err(TransportError::Io)?;
 
         Ok((
@@ -379,6 +411,53 @@ fn push_bounded(
     pending.push_back(payload);
 }
 
+/// The answer is internal signalling state; only its AV1 sending mid and payload type are needed
+/// by the loop. A rejected or recvonly video section is not a writable track.
+///
+/// This parses **our own** answer — text `str0m` just generated from a codec set restricted to AV1 —
+/// never the peer's offer, so the format it has to understand is one this module controls. The
+/// alternative, waiting for `MediaAdded` and asking the writer for its payload parameters, would make
+/// the track's existence depend on event ordering inside the loop.
+fn av1_video_answer(sdp: &str) -> Option<(String, u8)> {
+    let mut video = false;
+    let mut active = false;
+    let mut sending = true;
+    let mut mid = None;
+    let mut pt = None;
+    for line in sdp.lines().map(str::trim) {
+        if line.starts_with("m=") {
+            if video && active && sending {
+                if let (Some(mid), Some(pt)) = (mid.take(), pt) {
+                    return Some((mid, pt));
+                }
+            }
+            let fields: Vec<_> = line.split_whitespace().collect();
+            video = fields.first() == Some(&"m=video");
+            active = video && fields.get(1) != Some(&"0");
+            sending = true;
+            mid = None;
+            pt = None;
+        } else if video {
+            if let Some(value) = line.strip_prefix("a=mid:") {
+                mid = Some(value.to_string());
+            } else if line == "a=recvonly" || line == "a=inactive" {
+                sending = false;
+            } else if let Some(value) = line.strip_prefix("a=rtpmap:") {
+                if let Some((number, codec)) = value.split_once(' ') {
+                    if codec.eq_ignore_ascii_case("AV1/90000") {
+                        pt = number.parse().ok();
+                    }
+                }
+            }
+        }
+    }
+    if video && active && sending {
+        mid.zip(pt)
+    } else {
+        None
+    }
+}
+
 /// The run loop: drive the state machine, move datagrams, translate events.
 ///
 /// The shape is `str0m`'s documented contract and it is not optional. Poll outputs until the state
@@ -392,12 +471,22 @@ fn run_loop(
     commands: Receiver<Command>,
     events: SyncSender<Event>,
     magic: [u8; 16],
+    video_answer: Option<(String, u8)>,
 ) -> TransportCounters {
     let mut counters = TransportCounters::default();
     let mut buf = vec![0u8; RECV_BUFFER];
     let mut channel: Option<ChannelId> = None;
     let mut pending: VecDeque<Vec<u8>> = VecDeque::new();
     let mut announced_connected = false;
+    let mut ice_connected = false;
+    // The accepted answer already names the negotiated sending Mid. This avoids depending on
+    // when str0m emits MediaAdded, which may be later than the first writable ICE state.
+    let video_mid = video_answer
+        .as_ref()
+        .map(|(mid, _)| Mid::from(mid.as_str()));
+    let mut announced_writable = false;
+    let mut wrote_keyframe = false;
+    let mut last_capture_micros = 0;
     let local_addr = socket.local_addr().ok();
 
     let emit = |counters: &mut TransportCounters, event: Event| match events.try_send(event) {
@@ -437,6 +526,14 @@ fn run_loop(
                     }
                 }
                 Ok(Output::Event(event)) => match event {
+                    // Both count. As the ICE-lite side this transport never reports `Connected`:
+                    // measured on the loopback test, it goes `Checking` -> `Completed`, and a check
+                    // for `Connected` alone left the video track unwritable forever.
+                    RtcEvent::IceConnectionStateChange(
+                        IceConnectionState::Connected | IceConnectionState::Completed,
+                    ) => {
+                        ice_connected = true;
+                    }
                     RtcEvent::IceConnectionStateChange(IceConnectionState::Disconnected) => {
                         emit(&mut counters, Event::Disconnected);
                         return counters;
@@ -446,6 +543,14 @@ fn run_loop(
                         if !announced_connected {
                             announced_connected = true;
                             emit(&mut counters, Event::Connected);
+                        }
+                    }
+                    RtcEvent::KeyframeRequest(request) => {
+                        if video_mid == Some(request.mid) {
+                            // PLI/FIR is a decoder recovery signal; the engine owns the encoder,
+                            // so pass its demand across the byte-shaped seam without codec data.
+                            counters.keyframe_requests_in += 1;
+                            emit(&mut counters, Event::KeyframeRequested);
                         }
                     }
                     RtcEvent::ChannelData(data) => {
@@ -463,6 +568,13 @@ fn run_loop(
                 }
             }
         };
+
+        // ICE and the negotiated Mid/PT must all exist before a write: str0m drops pre-ICE
+        // media, and a decoder joining a live stream needs a new keyframe exactly once.
+        if ice_connected && video_mid.is_some() && video_answer.is_some() && !announced_writable {
+            announced_writable = true;
+            emit(&mut counters, Event::KeyframeRequested);
+        }
 
         // The ceiling: see MAX_POLL. `saturating_duration_since` rather than subtraction because a
         // timeout already in the past is normal (the poll above took time) and must become "don't
@@ -538,6 +650,52 @@ fn run_loop(
                         push_bounded(&mut pending, payload, &mut counters);
                     }
                 },
+                Command::SendVideo {
+                    frame,
+                    keyframe,
+                    capture_micros,
+                } => {
+                    if video_answer.is_none() {
+                        // DataChannel-only offers are valid for input; report missing video via
+                        // counters instead of failing the whole session.
+                        counters.video_frames_dropped_no_track += 1;
+                    } else if !ice_connected || video_mid.is_none() {
+                        // Stale video is worse than none, so unlike early input it is never queued.
+                        counters.video_frames_dropped_not_ready += 1;
+                    } else if !keyframe && !wrote_keyframe {
+                        // A delta cannot initialize a decoder even after the track is writable.
+                        counters.video_deltas_dropped_before_keyframe += 1;
+                    } else if let (Some(mid), Some((_, pt))) = (video_mid, video_answer.as_ref()) {
+                        // Saturating monotonic time protects RTP order if a caller supplies an
+                        // older timestamp; u128 avoids overflow during the 90 kHz conversion.
+                        // Instant::now() describes this write's wallclock, not capture time.
+                        let capture = capture_micros.max(last_capture_micros);
+                        let ticks =
+                            ((capture as u128 * 90_000) / 1_000_000).min(u64::MAX as u128) as u64;
+                        let written = rtc.writer(mid).is_some_and(|writer| {
+                            writer
+                                .write(
+                                    Pt::from(*pt),
+                                    Instant::now(),
+                                    MediaTime::new(
+                                        ticks,
+                                        std::num::NonZeroU32::new(90_000)
+                                            .expect("nonzero RTP rate")
+                                            .into(),
+                                    ),
+                                    frame,
+                                )
+                                .is_ok()
+                        });
+                        if written {
+                            last_capture_micros = capture;
+                            wrote_keyframe |= keyframe;
+                            counters.video_frames_out += 1;
+                        } else {
+                            counters.video_frames_write_failed += 1;
+                        }
+                    }
+                }
                 Command::Close => {
                     rtc.disconnect();
                     emit(&mut counters, Event::Disconnected);
@@ -552,6 +710,7 @@ fn run_loop(
 mod tests {
     use super::*;
     use str0m::change::SdpAnswer;
+    use str0m::media::{Direction, KeyframeRequestKind, MediaKind};
 
     #[test]
     fn the_unspecified_address_is_refused_for_the_media_socket_too() {
@@ -586,17 +745,32 @@ mod tests {
         socket: UdpSocket,
         channel: Option<ChannelId>,
         received: Vec<Vec<u8>>,
+        video_mid: Option<Mid>,
+        received_video: Vec<Vec<u8>>,
         connected: bool,
     }
 
     impl TestPeer {
         fn new() -> (Self, String) {
+            Self::new_with_video(false)
+        }
+
+        fn new_with_video(video: bool) -> (Self, String) {
             let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
             let local = socket.local_addr().unwrap();
-            let mut rtc = Rtc::new(Instant::now());
+            let mut rtc = Rtc::builder()
+                .clear_codecs()
+                .enable_av1(true)
+                .build(Instant::now());
             rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
             let mut api = rtc.sdp_api();
             api.add_channel("input".to_string());
+            let video_mid = if video {
+                // The browser receives video while the same offer opens its input DataChannel.
+                Some(api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None))
+            } else {
+                None
+            };
             let (offer, pending) = api.apply().expect("a channel is a change");
             let sdp = offer.to_sdp_string();
             // The pending offer has to outlive this function, so it is stashed on the struct via a
@@ -606,6 +780,8 @@ mod tests {
                 socket,
                 channel: None,
                 received: Vec::new(),
+                video_mid,
+                received_video: Vec::new(),
                 connected: false,
             };
             PENDING.with(|p| *p.borrow_mut() = Some(pending));
@@ -640,6 +816,8 @@ mod tests {
                                 self.connected = true;
                             }
                             RtcEvent::ChannelData(d) => self.received.push(d.data),
+                            RtcEvent::MediaAdded(added) => self.video_mid = Some(added.mid),
+                            RtcEvent::MediaData(d) => self.received_video.push(d.data.to_vec()),
                             _ => {}
                         },
                     }
@@ -671,11 +849,238 @@ mod tests {
                 None => false,
             }
         }
+
+        fn request_pli(&mut self) {
+            self.rtc
+                .writer(self.video_mid.expect("negotiated video mid"))
+                .unwrap()
+                .request_keyframe(None, KeyframeRequestKind::Pli)
+                .unwrap();
+        }
     }
 
     thread_local! {
         static PENDING: std::cell::RefCell<Option<str0m::change::SdpPendingOffer>> =
             const { std::cell::RefCell::new(None) };
+    }
+
+    /// 0x12 is a temporal delimiter with its size bit set; 0x00 is its zero length. 0x0a is a
+    /// sequence-header OBU with size bit, 0x02 is its length, and 0x01/0x02 are known contents.
+    /// 0x32 is a frame OBU with size bit, 0x03 is its length, and A1/B2/C3 are known contents.
+    /// A minimal AV1 temporal unit in the low-overhead format (`obu_has_size_field = 1`), which is
+    /// what an encoder hands over. The packetizer reads OBU *headers* only, so payloads are markers:
+    ///
+    /// - `0x12 0x00` — temporal delimiter: header `0b0_0010_0_1_0` (type 2, has_size), size 0;
+    /// - `0x0a 0x02 0x01 0x02` — sequence header: type 1, has_size, size 2, two marker bytes;
+    /// - `0x32 0x03 0xa1 0xb2 0xc3` — frame OBU: type 6, has_size, size 3, three marker bytes.
+    fn av1_test_keyframe() -> Vec<u8> {
+        vec![
+            0x12, 0x00, 0x0a, 0x02, 0x01, 0x02, 0x32, 0x03, 0xa1, 0xb2, 0xc3,
+        ]
+    }
+
+    #[test]
+    fn the_answer_selects_only_av1_for_video() {
+        // SDP negotiation can be checked without a live socket, which also catches an accidental
+        // codec fallback before a session starts sending undecodable bytes.
+        let mut peer = Rtc::builder()
+            .clear_codecs()
+            .enable_av1(true)
+            .build(Instant::now());
+        peer.add_local_candidate(
+            Candidate::host("127.0.0.1:40000".parse().unwrap(), "udp").unwrap(),
+        );
+        let mut api = peer.sdp_api();
+        api.add_channel("input".to_string());
+        api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+        let (offer, _pending) = api.apply().unwrap();
+        let mut server = Rtc::builder()
+            .clear_codecs()
+            .enable_av1(true)
+            .build(Instant::now());
+        server.add_local_candidate(
+            Candidate::host("127.0.0.1:40001".parse().unwrap(), "udp").unwrap(),
+        );
+        let answer = server
+            .sdp_api()
+            .accept_offer(offer)
+            .unwrap()
+            .to_sdp_string();
+        let (answer_mid, pt) = av1_video_answer(&answer).expect("answer must send AV1");
+        let mid = Mid::from(answer_mid.as_str());
+        // Writer::write validates the negotiated Pt even though media before ICE is dropped.
+        assert!(server
+            .writer(mid)
+            .unwrap()
+            .write(
+                Pt::from(pt),
+                Instant::now(),
+                MediaTime::new(90_000, std::num::NonZeroU32::new(90_000).unwrap().into()),
+                av1_test_keyframe(),
+            )
+            .is_ok());
+    }
+
+    fn connect_video_peer() -> (TestPeer, Str0mTransport) {
+        let (mut peer, offer) = TestPeer::new_with_video(true);
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (transport, answer) = Str0mTransport::accept_offer(&offer, bind).unwrap();
+        assert!(
+            av1_video_answer(&answer).is_some(),
+            "answer has no AV1 sender"
+        );
+        peer.accept_answer(&answer);
+        let mut connected = false;
+        let mut requested = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !(connected && peer.connected && requested == 1) {
+            peer.pump(Duration::from_millis(20), |p| p.connected);
+            while let Some(event) = transport.poll_event(Duration::ZERO) {
+                match event {
+                    Event::Connected => connected = true,
+                    Event::KeyframeRequested => requested += 1,
+                    Event::Failed(why) => panic!("transport failed: {why}"),
+                    Event::Disconnected => panic!("transport disconnected during handshake"),
+                    Event::Data { .. } => {}
+                }
+            }
+        }
+        assert!(connected && peer.connected, "video peer did not connect");
+        assert_eq!(requested, 1, "writable track did not ask for one keyframe");
+        (peer, transport)
+    }
+
+    #[test]
+    fn an_av1_keyframe_reaches_the_peer_through_a_negotiated_video_track() {
+        let (mut peer, mut transport) = connect_video_peer();
+        transport
+            .submit(Command::SendVideo {
+                frame: av1_test_keyframe(),
+                keyframe: true,
+                capture_micros: 1_000_000,
+            })
+            .unwrap();
+        assert!(peer.pump(Duration::from_secs(5), |p| !p.received_video.is_empty()));
+        // RFC AV1 RTP packetization strips the temporal delimiter; the peer reconstructs both
+        // remaining size-bearing OBUs and their exact payload bytes.
+        assert_eq!(
+            peer.received_video,
+            vec![vec![0x0a, 0x02, 0x01, 0x02, 0x32, 0x03, 0xa1, 0xb2, 0xc3]]
+        );
+        assert_eq!(transport.close().video_frames_out, 1);
+    }
+
+    #[test]
+    fn the_track_becoming_writable_asks_for_a_keyframe_once() {
+        let (mut peer, mut transport) = connect_video_peer();
+        peer.pump(Duration::from_millis(200), |_| false);
+        let mut extra = 0;
+        while let Some(event) = transport.poll_event(Duration::ZERO) {
+            if event == Event::KeyframeRequested {
+                extra += 1;
+            }
+        }
+        assert_eq!(extra, 0, "writable transition requested more than once");
+        transport.close();
+    }
+
+    #[test]
+    fn a_pli_from_the_peer_becomes_a_keyframe_request_event() {
+        let (mut peer, mut transport) = connect_video_peer();
+        transport
+            .submit(Command::SendVideo {
+                frame: av1_test_keyframe(),
+                keyframe: true,
+                capture_micros: 1_000_000,
+            })
+            .unwrap();
+        assert!(peer.pump(Duration::from_secs(5), |p| !p.received_video.is_empty()));
+        peer.request_pli();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut requested = false;
+        while Instant::now() < deadline && !requested {
+            peer.pump(Duration::from_millis(20), |_| false);
+            if let Some(event) = transport.poll_event(Duration::from_millis(10)) {
+                requested = event == Event::KeyframeRequested;
+            }
+        }
+        assert!(requested, "PLI did not reach the transport event seam");
+        assert_eq!(transport.close().keyframe_requests_in, 1);
+    }
+
+    #[test]
+    fn video_before_the_track_is_writable_is_dropped_and_counted() {
+        let (mut peer, offer) = TestPeer::new_with_video(true);
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (mut transport, answer) = Str0mTransport::accept_offer(&offer, bind).unwrap();
+        peer.accept_answer(&answer);
+        // The peer is deliberately not pumped, so ICE cannot connect before this command.
+        transport
+            .submit(Command::SendVideo {
+                frame: av1_test_keyframe(),
+                keyframe: true,
+                capture_micros: 1_000_000,
+            })
+            .unwrap();
+        let counters = transport.close();
+        assert_eq!(counters.video_frames_dropped_not_ready, 1, "{counters:?}");
+        assert_eq!(counters.video_frames_out, 0);
+    }
+
+    #[test]
+    fn delta_frames_before_the_first_keyframe_are_dropped_and_counted() {
+        let (mut peer, mut transport) = connect_video_peer();
+        transport
+            .submit(Command::SendVideo {
+                frame: vec![0x32, 0x03, 0x11, 0x22, 0x33],
+                keyframe: false,
+                capture_micros: 1_000_000,
+            })
+            .unwrap();
+        peer.pump(Duration::from_millis(200), |_| false);
+        let counters = transport.close();
+        assert!(peer.received_video.is_empty());
+        assert_eq!(
+            counters.video_deltas_dropped_before_keyframe, 1,
+            "{counters:?}"
+        );
+        assert_eq!(counters.video_frames_out, 0);
+    }
+
+    #[test]
+    fn an_offer_without_video_still_carries_the_datachannel_and_counts_video_drops() {
+        let (mut peer, offer) = TestPeer::new();
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (mut transport, answer) = Str0mTransport::accept_offer(&offer, bind).unwrap();
+        assert!(av1_video_answer(&answer).is_none());
+        peer.accept_answer(&answer);
+        assert!(peer.pump(Duration::from_secs(5), |p| p.connected));
+        transport
+            .submit(Command::SendVideo {
+                frame: av1_test_keyframe(),
+                keyframe: true,
+                capture_micros: 1_000_000,
+            })
+            .unwrap();
+        transport
+            .submit(Command::SendData {
+                payload: b"down".to_vec(),
+            })
+            .unwrap();
+        assert!(peer.pump(Duration::from_secs(5), |p| !p.received.is_empty()));
+        assert_eq!(peer.received, vec![b"down".to_vec()]);
+        assert!(peer.send(b"up"));
+        let mut inbound = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && inbound.is_none() {
+            peer.pump(Duration::from_millis(20), |_| false);
+            if let Some(Event::Data { payload }) = transport.poll_event(Duration::from_millis(10)) {
+                inbound = Some(payload);
+            }
+        }
+        assert_eq!(inbound, Some(b"up".to_vec()));
+        let counters = transport.close();
+        assert_eq!(counters.video_frames_dropped_no_track, 1, "{counters:?}");
     }
 
     #[test]
@@ -700,6 +1105,7 @@ mod tests {
                     Event::Failed(why) => panic!("transport failed: {why}"),
                     Event::Disconnected => panic!("transport disconnected during the handshake"),
                     Event::Data { .. } => {}
+                    Event::KeyframeRequested => {}
                 }
             }
         }
