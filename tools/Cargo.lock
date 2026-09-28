@@ -3691,7 +3691,10 @@ version = "0.0.1"
 dependencies = [
  "rime-auth",
  "rime-protocol",
+ "serde_json",
  "str0m",
+ "webauthn-authenticator-rs",
+ "webauthn-rs",
 ]
 
 [[package]]
