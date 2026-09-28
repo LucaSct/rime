@@ -27,20 +27,21 @@ that can only be judged by eye is not a proof.
 | `10-destructible-wall` | M8 **"done when"** | A cooked destructible wall takes a hit, sheds part of itself as tumbling debris, and drives **one** destruction event stream out to three systems that have never heard of each other — a VFX dust puff, the null audio backend, and gameplay. |
 | `11-lit-rooms` | M10 **"done when"** | The whole advanced-lighting stack on one scene — CSM, local shadows, clustered forward, SDF clipmap, DDGI, SSR — and **opening a wall visibly changes the light in the room behind it**. The first place every M10 technique runs together in one frame. |
 | `12-networked-destruction` | M11 **"done when"** | A dedicated headless server plus two clients that receive **different bytes** — each has its own relevancy set — and must still agree **bit for bit** on which parts died and what debris exists. Scripted-loss deterministic by default; `--transport=udp` runs the same code over real sockets. |
+| `13-networked-player` | M12 **"done when"** | A server and two clients running a **predicted, reconciled** player under scripted loss: own-input response within one tick against a prediction-off control in the same match, remote motion continuous, both clients converging bit-exactly. GPU-free. |
 | `14-virtual-geometry` | m18.3d / [ADR-0043](../docs/adr/0043-virtualized-geometry-m18.md) gate 4 | **Benchmark:** the virtual-geometry complexity sweep — candidates, selected triangles, CPU submission and GPU time at a *fixed* projected size, over a generated quadtree whose depth is the only variable. Includes the row where the cut overflows the command buffer and the builder degrades to the coarse cut. Needs a GPU (`--sweep`, or `scripts/perf.sh --sample virtual-geometry`). |
+| `hello-game` | m15.7 on-ramp / M20 prerequisite | **The smallest complete game here:** walk a character around an arena, touch five trigger volumes, push a crate, win. Read this one first — every other sample demonstrates a subsystem; this one shows the shape of a *game*. Its rules live in one class with three methods and know nothing about devices, windows or frames, which is the seam [ADR-0046](../docs/adr/0046-exported-games-and-the-blender-boundary.md) §1 will cut M20's `GameDefinition` along. GPU-free self-check; `--windowed` to play. |
+| `99-the-block` | M13 **"done when"** (partly) | **The vision demo:** a destructible urban block — destruction, dynamic GI, many lights and networking together. Its 27 structural claims are green; the frame-rate clause is **not** met and is carried by M18 ([ADR-0041](../docs/adr/0041-the-visual-bar-m17.md)). Listed honestly rather than as done or as absent. |
 | `codec_bench` | Track S (S0.3) | **Benchmark:** encode representative frames with each streaming codec (raw / LZ4 / JPEG) and print ratio, throughput, wire bandwidth and JPEG PSNR — the measurement behind [ADR-0017](../docs/adr/0017-streaming-codec.md). GPU-free. |
 | `jobs_core_saturation` | M1.6 | **Benchmark:** saturate every core through the work-stealing job system — a CPU-heavy function over millions of items, serial then `parallel_for`, results compared and the speedup reported. On an N-core machine it should approach N. |
 
 M9 (Editor v1) is the exception: its proof is the Rust editor in [`tools/`](../tools), not a sample.
 
-## Still to come
-
-| Sample | Demonstrates |
-| --- | --- |
-| `99-the-block` | **the vision demo** (M12): a destructible urban block — destruction + dynamic GI + many lights + networking, together, at a playable frame rate |
-
 `99-the-block` is the "vertical slice" of the dream described in [../VISION.md](../VISION.md) — when
-it runs and looks *and feels* right, the core thesis is proven.
+it runs and looks *and feels* right, the core thesis is proven. It runs; ADR-0041 tracks what it does
+not yet do at frame rate.
+
+**Where to start reading:** `hello-game` for the shape of a game, `00-hello-window` for the platform
+seam, `06-render-graph` for how a frame is declared, `09-physics-playground` for the fixed tick.
 
 ## Running them
 

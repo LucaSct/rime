@@ -166,6 +166,12 @@ jobs:
       # a Vulkan device, so LeakSanitizer runs clean and a genuine leak here still fails CI. The
       # binaries were built by the step above (ASan links LSan in); this just re-runs those suites
       # with leak detection on. The suppression file is a belt-and-suspenders guard.
+      #
+      # `hello_game_selftest` is the one SAMPLE in this list, and it earns its place: it runs ~360
+      # physics ticks during which five entities are DESPAWNED, each taking a bound physics body with
+      # it. That is the shape a leak hides in — the bridge finds an orphaned body through its own
+      # entity-body roster rather than through a query, because the despawn already took the handle
+      # component — and no engine suite exercises despawn-with-body over a long run.
       - name: Leak-check the GPU-free suites (LeakSanitizer)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -177,7 +183,7 @@ jobs:
         # one that found no problems. Same class as the bug #167 fixed for the Windows build.
         run: >-
           ctest --test-dir build/dev --output-on-failure --no-tests=error -R
-          'rime_core_tests|rime_ecs_tests|rime_physics_tests|rime_assets_tests|rime_destruction_tests|rime_capi_tests'
+          'rime_core_tests|rime_ecs_tests|rime_physics_tests|rime_assets_tests|rime_destruction_tests|rime_capi_tests|hello_game_selftest'
 
   sanitize-thread:
     name: sanitizer (TSan, Clang)
