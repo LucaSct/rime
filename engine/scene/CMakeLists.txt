@@ -8,6 +8,7 @@
 # the runtime frame path depends on it, and it needs no GPU.
 
 add_library(rime_scene STATIC
+    src/derive_transforms.cpp
     src/scene_format.cpp)
 
 # Namespaced alias so dependents link `rime::scene`, matching our C++ namespace.
