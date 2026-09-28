@@ -152,6 +152,9 @@ pub struct TransportCounters {
     pub datagrams_rejected: u64,
     pub data_messages_in: u64,
     pub data_messages_out: u64,
+    /// DataChannel writes the SCTP layer refused (buffer full, channel closing). Without this, a
+    /// refused write was indistinguishable from one that was never attempted.
+    pub data_writes_failed: u64,
     /// Frames written to the AV1 track, so a silent video path is visible to the operator.
     pub video_frames_out: u64,
     /// Frames sent before ICE and the negotiated AV1 track were writable; stale frames are dropped.
@@ -340,6 +343,12 @@ impl Str0mTransport {
     /// Shut down and collect the counters. Idempotent.
     pub fn close(&mut self) -> TransportCounters {
         let _ = self.commands.try_send(Command::Close);
+        // `try_send` fails when the command queue is full, and then `Close` is simply lost. Dropping
+        // our `Sender` is the stop signal that cannot be lost: the loop sees the channel disconnect
+        // once it has drained what is queued. Without it, a full queue plus a lost `Close` meant a
+        // `join` on a thread that would never end. (Found by the relay design consult.)
+        let (dead, _) = mpsc::sync_channel::<Command>(0);
+        drop(std::mem::replace(&mut self.commands, dead));
         self.waker.wake();
         if let Some(thread) = self.thread.take() {
             if let Ok(counters) = thread.join() {
@@ -509,6 +518,8 @@ fn run_loop(
                 if let Some(mut ch) = rtc.channel(id) {
                     if ch.write(true, &payload).is_ok() {
                         counters.data_messages_out += 1;
+                    } else {
+                        counters.data_writes_failed += 1;
                     }
                 } else {
                     pending.push_front(payload);
@@ -656,13 +667,26 @@ fn run_loop(
 
         // Commands last, so a Close is honoured after this iteration's traffic has been processed
         // rather than stranding a datagram that was already in hand.
-        while let Ok(command) = commands.try_recv() {
+        loop {
+            let command = match commands.try_recv() {
+                Ok(command) => command,
+                Err(mpsc::TryRecvError::Empty) => break,
+                // The owner dropped its `Sender`: `close()` ran, whether or not `Close` fitted in the
+                // queue. Same ending as an explicit `Close`.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    rtc.disconnect();
+                    emit(&mut counters, Event::Disconnected);
+                    return counters;
+                }
+            };
             match command {
                 Command::SendData { payload } => match channel {
                     Some(id) => match rtc.channel(id) {
                         Some(mut ch) => {
                             if ch.write(true, &payload).is_ok() {
                                 counters.data_messages_out += 1;
+                            } else {
+                                counters.data_writes_failed += 1;
                             }
                         }
                         None => push_bounded(&mut pending, payload, &mut counters),
@@ -1226,5 +1250,26 @@ mod tests {
             "pending grew without bound — the fix is not in effect: {counters:?}"
         );
         assert!(counters.data_sends_early > 0, "{counters:?}");
+    }
+
+    #[test]
+    fn the_loop_ends_when_its_owner_is_gone_even_without_close() {
+        // The case `close()` hit with a full queue: `Close` never arrives, and the only signal left
+        // is the owner's `Sender` going away. Driven on the loop directly so it is deterministic,
+        // not a race to fill a queue that the loop drains as fast as it is filled.
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rtc = Rtc::builder().set_ice_lite(true).build(Instant::now());
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<Command>(COMMAND_QUEUE);
+        let (ev_tx, _ev_rx) = mpsc::sync_channel::<Event>(EVENT_QUEUE);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = run_loop(rtc, socket, cmd_rx, ev_tx, [0u8; 16], None);
+            let _ = done_tx.send(());
+        });
+        drop(cmd_tx);
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the run loop outlived its owner"
+        );
     }
 }
