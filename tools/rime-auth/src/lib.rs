@@ -47,6 +47,7 @@ use sha2::{Digest, Sha256};
 
 pub mod ceremony;
 pub mod codes;
+pub mod flow;
 pub mod mail;
 
 /// How long an invitation is good for unless the caller says otherwise. Seven days: long enough to
@@ -149,6 +150,12 @@ pub struct Account {
     pub email: String,
     pub created_at: Timestamp,
     pub disabled_at: Option<Timestamp>,
+    /// `SHA-256` of the recovery secret shown once at registration, if the account has one.
+    ///
+    /// Hashed for the same reason a session token is: a readable store must not be a set of live
+    /// credentials. It needs no password KDF — the secret is 256 random bits, so there is no
+    /// dictionary to stretch against, and a slow hash would only slow the legitimate check.
+    pub recovery_secret_hash: Option<String>,
 }
 
 impl Account {
@@ -240,6 +247,8 @@ pub struct AuthCounters {
     pub credentials_revoked: u64,
     /// Blob write-backs after a login moved an authenticator's counter or backup state.
     pub credentials_updated: u64,
+    /// Recovery secrets set — at registration, and again each time a recovery completes.
+    pub recovery_secrets_set: u64,
     pub sessions_created: u64,
     pub sessions_authenticated: u64,
     pub sessions_rejected_unknown: u64,
@@ -442,12 +451,31 @@ impl AuthStore {
         email: &str,
         now_ts: Timestamp,
     ) -> Result<AccountId, AuthError> {
+        self.create_account_with_id(AccountId(mint_u128()?), email, now_ts)
+    }
+
+    /// Create an account with an id decided **before** the account existed.
+    ///
+    /// Registration needs this. The account id is the WebAuthn user handle, and the authenticator
+    /// signs over the handle during the ceremony — so it has to be chosen before the passkey is made,
+    /// while the account itself may not be created until the passkey exists and the invitation is
+    /// consumed. An id minted at the end would leave every credential carrying a handle that names
+    /// nothing, which is invisible today (login supplies the credential list) and breaks the moment a
+    /// usernameless or conditional-UI login asks the handle who it belongs to.
+    pub fn create_account_with_id(
+        &mut self,
+        id: AccountId,
+        email: &str,
+        now_ts: Timestamp,
+    ) -> Result<AccountId, AuthError> {
         let email = normalise_email(email);
         check_representable(&email, "email")?;
         if self.by_email.contains_key(&email) {
             return Err(AuthError::EmailTaken);
         }
-        let id = AccountId(mint_u128()?);
+        if self.accounts.contains_key(&id) {
+            return Err(AuthError::EmailTaken);
+        }
         self.append(&["acct", &id.to_string(), &email, &now_ts.to_string()])?;
         self.accounts.insert(
             id,
@@ -456,6 +484,7 @@ impl AuthStore {
                 email: email.clone(),
                 created_at: now_ts,
                 disabled_at: None,
+                recovery_secret_hash: None,
             },
         );
         self.by_email.insert(email, id);
@@ -557,6 +586,60 @@ impl AuthStore {
         }
         self.counters.credentials_updated += 1;
         Ok(true)
+    }
+
+    /// What address an invitation is for, **without consuming it**.
+    ///
+    /// Registration validates the invitation up front (so the mailed code goes to the address the
+    /// invitation names, never one the browser supplied) and consumes it only when the account and
+    /// credential are actually created. Two registrations that both pass this check race at
+    /// [`Self::redeem_invitation`], and exactly one wins — which is why that is the call that
+    /// accounts for it, and this one touches no counter.
+    #[must_use]
+    pub fn invitation_email(&self, token: &str, now_ts: Timestamp) -> Option<&str> {
+        let invitation = self.invitations.get(&hash_token(token))?;
+        if invitation.consumed_at.is_some() || invitation.expires_at <= now_ts {
+            return None;
+        }
+        Some(&invitation.email)
+    }
+
+    /// Set (or replace) an account's recovery secret, storing only its hash.
+    ///
+    /// Replacing is how recovery "revokes" the old secret: the value that completed a recovery must
+    /// not complete a second one, and a replacement says so in one record rather than two.
+    pub fn set_recovery_secret(
+        &mut self,
+        account: AccountId,
+        secret: &str,
+        now_ts: Timestamp,
+    ) -> Result<(), AuthError> {
+        if !self.accounts.contains_key(&account) {
+            return Err(AuthError::NoSuchAccount);
+        }
+        let hash = hash_token(secret);
+        self.append(&["recov", &account.to_string(), &hash, &now_ts.to_string()])?;
+        if let Some(a) = self.accounts.get_mut(&account) {
+            a.recovery_secret_hash = Some(hash);
+        }
+        self.counters.recovery_secrets_set += 1;
+        Ok(())
+    }
+
+    /// Does `secret` match the account's recovery secret?
+    ///
+    /// An account without one answers **false**, never true-by-absence. It is one of two proofs
+    /// recovery needs (ADR-0048 decision 1); on its own it authenticates nothing.
+    #[must_use]
+    pub fn check_recovery_secret(&self, account: AccountId, secret: &str) -> bool {
+        let Some(stored) = self
+            .accounts
+            .get(&account)
+            .and_then(|a| a.recovery_secret_hash.as_deref())
+        else {
+            return false;
+        };
+        constant_time_str_eq(stored, &hash_token(secret))
     }
 
     /// Mint a user session for an account, returning the bearer token **once**.
@@ -774,6 +857,7 @@ impl AuthStore {
                         email: email.clone(),
                         created_at: created,
                         disabled_at: None,
+                        recovery_secret_hash: None,
                     },
                 );
                 self.by_email.insert(email, id);
@@ -791,6 +875,20 @@ impl AuthStore {
                     .map_err(|_| corrupt("acct-disabled: bad timestamp"))?;
                 if let Some(a) = self.accounts.get_mut(&id) {
                     a.disabled_at = Some(at);
+                }
+            }
+            "recov" => {
+                let account: AccountId = it
+                    .next()
+                    .ok_or_else(|| corrupt("recov: no account"))?
+                    .parse()
+                    .map_err(|_| corrupt("recov: bad account"))?;
+                let hash = it
+                    .next()
+                    .ok_or_else(|| corrupt("recov: no hash"))?
+                    .to_string();
+                if let Some(a) = self.accounts.get_mut(&account) {
+                    a.recovery_secret_hash = Some(hash);
                 }
             }
             "cred" => {
@@ -912,6 +1010,19 @@ fn check_representable(value: &str, field: &'static str) -> Result<(), AuthError
         return Err(AuthError::UnrepresentableValue(field));
     }
     Ok(())
+}
+
+/// Compare two hex digests without an early return. Both are this crate's own SHA-256 output, so the
+/// lengths are equal by construction and the only thing worth hiding is WHERE they differ.
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn hash_token(token: &str) -> String {
