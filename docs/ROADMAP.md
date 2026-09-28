@@ -2178,7 +2178,7 @@ small subject and the block's ~3000-line sample loop is not one.)*
 > | m15.5 | ✅ #163 | `Window::set_cursor_mode` on all four backends; `fullscreen`/`high_dpi` deleted |
 > | m15.6a | ✅ #164 | `alpha_cutoff` reaches the forward shaders — alpha-tested glTF stops being an opaque quad |
 > | m15.6b | ✅ #165 | `Collider::sensor` becomes real: `PhysicsWorld::trigger_events()` |
-> | m15.7 | ✅ | the on-ramp: `samples/hello-game` (the smallest complete game here, and M20's `GameDefinition` subject per [ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §1), `docs/getting-started.md`, README build instructions, and the drifted `samples/README.md` fixed — `99-the-block` was still under "Still to come" and `13-networked-player` was missing entirely |
+> | m15.7 | ✅ #204 | the on-ramp: `samples/hello-game` (the smallest complete game here, and M20's `GameDefinition` subject per [ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §1), `docs/getting-started.md`, README build instructions, and the drifted `samples/README.md` fixed — `99-the-block` was still under "Still to come" and `13-networked-player` was missing entirely |
 > | m15.8 | open | **the proof** — a target range authored through the editor, its diff touching only `samples/` and `docs/` |
 >
 > **m15.6 was split** into 15.6a (alpha) and 15.6b (sensors): two independent dead fields, in two
