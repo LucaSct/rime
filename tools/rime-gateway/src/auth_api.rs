@@ -50,6 +50,7 @@ use rime_auth::flow::{Auth, FlowError};
 use crate::admission::SessionId;
 use crate::http::{parse_flat_object, Method, Request, Response};
 use crate::identity::{cookie, SESSION_COOKIE};
+use crate::limits::{Decision, Limiter, Rate};
 
 /// The cookie that binds a ceremony to the browser that started it.
 pub const CEREMONY_COOKIE: &str = "__Host-rime-ceremony";
@@ -60,6 +61,28 @@ const SESSION_MAX_AGE: u64 = 7 * 24 * 60 * 60;
 
 /// How long the ceremony cookie lives — the transaction's own lifetime.
 const CEREMONY_MAX_AGE: u64 = 20 * 60;
+
+/// What one caller may ask of this surface, and what everybody together may.
+///
+/// The numbers are set against what a real ceremony costs rather than against an attacker's patience:
+/// a registration is four requests and a login is two, so twenty a minute is a browser that is trying
+/// repeatedly and failing, not a browser that is working. The global bound exists because a per-client
+/// limit is only as good as the client key, and an attacker with many addresses has many keys — it is
+/// the one number that still holds when the key space is not theirs to exhaust.
+#[derive(Debug, Clone, Copy)]
+pub struct LimitPolicy {
+    pub per_client: Rate,
+    pub global: Rate,
+}
+
+impl Default for LimitPolicy {
+    fn default() -> Self {
+        Self {
+            per_client: Rate::new(20, 60),
+            global: Rate::new(120, 60),
+        }
+    }
+}
 
 /// What the endpoints have been asked to do. Counters rather than messages, because the client is
 /// deliberately told less than this.
@@ -80,21 +103,43 @@ pub struct AuthApiCounters {
     pub method_not_allowed: u64,
     /// The store, the mailer or a ceremony failed — ours, not the client's.
     pub internal: u64,
+    /// Requests refused by the rate limiter. The client is told `429` and nothing else; the shape of
+    /// what is happening lives here.
+    pub rate_limited: u64,
 }
 
 /// The account endpoints.
 pub struct AuthApi {
     auth: Auth,
     counters: AuthApiCounters,
+    per_client: Limiter,
+    global: Limiter,
 }
 
 impl AuthApi {
     #[must_use]
     pub fn new(auth: Auth) -> Self {
+        Self::with_limits(auth, LimitPolicy::default())
+    }
+
+    /// Build with a chosen [`LimitPolicy`]. Tests that are about a ceremony rather than about the
+    /// limiter raise the numbers rather than removing them, so the limiter is on every path they
+    /// exercise.
+    #[must_use]
+    pub fn with_limits(auth: Auth, limits: LimitPolicy) -> Self {
         Self {
             auth,
             counters: AuthApiCounters::default(),
+            per_client: Limiter::new(limits.per_client),
+            global: Limiter::new(limits.global),
         }
+    }
+
+    /// Refusals by the limiter, split the way an operator needs them: a global limit biting means the
+    /// host is under load from many places, and a per-client limit biting means one caller is.
+    #[must_use]
+    pub fn limit_counters(&self) -> (u64, u64) {
+        (self.global.denied(), self.per_client.denied())
     }
 
     #[must_use]
@@ -114,8 +159,19 @@ impl AuthApi {
         path == "/api/auth" || path.starts_with("/api/auth/")
     }
 
-    /// Route one account request. `now` is the caller's clock, as everywhere else in this crate.
-    pub fn route(&mut self, request: &Request, now: u64) -> Response {
+    /// Route one account request on behalf of `client` — the peer's address, as the listener saw it.
+    ///
+    /// The limiter runs **first**, before the method check and before any parsing, because everything
+    /// after it costs something: a JSON parse, a store read, an HMAC, a mail. A limiter that ran after
+    /// the work would bound the answers rather than the work.
+    ///
+    /// `client` is the key and nothing else — it is never logged with the request, never compared for
+    /// authorization, and an empty one is a key like any other (it will simply share a bucket with
+    /// every other caller the listener could not name, which is the conservative direction).
+    pub fn route(&mut self, request: &Request, client: &str, now: u64) -> Response {
+        if let Some(refusal) = self.rate_limit(client, now) {
+            return refusal;
+        }
         let segments: Vec<&str> = request.path.split('/').filter(|s| !s.is_empty()).collect();
         // Every one of these changes state or spends a proof, so every one is a POST. A GET that began
         // a ceremony would be something a link could do to somebody.
@@ -374,6 +430,25 @@ impl AuthApi {
 
     // ── Plumbing ──────────────────────────────────────────────────────────────────────────────
 
+    /// The global bound first, then the per-client one: a caller that is inside its own budget must
+    /// still not be served when the host as a whole is over, or the global bound would only apply to
+    /// whoever asked last.
+    fn rate_limit(&mut self, client: &str, now: u64) -> Option<Response> {
+        for decision in [
+            self.global.check("all", now),
+            self.per_client.check(client, now),
+        ] {
+            if let Decision::Deny { retry_after } = decision {
+                self.counters.rate_limited += 1;
+                return Some(
+                    Response::error(429, "too many requests")
+                        .with_header("Retry-After", retry_after.to_string()),
+                );
+            }
+        }
+        None
+    }
+
     fn flat(&mut self, request: &Request) -> Result<Vec<(String, String)>, Response> {
         match request.header("content-type") {
             Some(ct) if ct.split(';').next().unwrap_or("").trim() == "application/json" => {}
@@ -493,6 +568,11 @@ mod tests {
     }
 
     fn api() -> (AuthApi, Arc<CapturingMailer>) {
+        let (auth, mailer) = api_parts();
+        (AuthApi::new(auth), mailer)
+    }
+
+    fn api_parts() -> (rime_auth::flow::Auth, Arc<CapturingMailer>) {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut path = std::env::temp_dir();
         path.push(format!(
@@ -512,7 +592,7 @@ mod tests {
             Box::new(Shared(Arc::clone(&mailer))),
         )
         .expect("auth builds");
-        (AuthApi::new(auth), mailer)
+        (auth, mailer)
     }
 
     fn post(path: &str, body: &str, cookies: &str) -> Request {
@@ -587,6 +667,7 @@ mod tests {
                 &format!("{{\"invitation\":\"{invitation}\"}}"),
                 "",
             ),
+            "10.0.0.1",
             NOW,
         );
         assert_eq!(begun.status, 201);
@@ -600,12 +681,14 @@ mod tests {
                 &format!("{{\"code\":\"{}\"}}", mailed_code(&mailer)),
                 &jar,
             ),
+            "10.0.0.1",
             NOW + 1,
         );
         assert_eq!(coded.status, 204);
 
         let options = api.route(
             &post(&format!("/api/auth/register/{tx}/options"), "{}", &jar),
+            "10.0.0.1",
             NOW + 2,
         );
         assert_eq!(options.status, 200);
@@ -624,6 +707,7 @@ mod tests {
                 &serde_json::to_string(&credential).unwrap(),
                 &jar,
             ),
+            "10.0.0.1",
             NOW + 3,
         );
         assert_eq!(finished.status, 201);
@@ -657,6 +741,7 @@ mod tests {
         let (mut api, _mailer) = api();
         let response = api.route(
             &post("/api/auth/register", "{\"invitation\":\"nope\"}", ""),
+            "10.0.0.1",
             NOW,
         );
         // That invitation is refused, so use one that gets as far as setting a cookie.
@@ -675,6 +760,7 @@ mod tests {
                 &format!("{{\"invitation\":\"{invitation}\"}}"),
                 "",
             ),
+            "10.0.0.1",
             NOW,
         );
         for c in set_cookies(&begun) {
@@ -692,7 +778,11 @@ mod tests {
     #[test]
     fn a_finish_without_the_ceremony_cookie_is_refused() {
         let (mut api, _mailer) = api();
-        let no_cookie = api.route(&post("/api/auth/register/abc/options", "{}", ""), NOW);
+        let no_cookie = api.route(
+            &post("/api/auth/register/abc/options", "{}", ""),
+            "10.0.0.1",
+            NOW,
+        );
         assert_eq!(no_cookie.status, 409);
         let wrong_cookie = api.route(
             &post(
@@ -700,6 +790,7 @@ mod tests {
                 "{}",
                 &format!("{CEREMONY_COOKIE}=somebodyelses"),
             ),
+            "10.0.0.1",
             NOW,
         );
         // A real cookie and a transaction that is not theirs are the same answer.
@@ -713,6 +804,7 @@ mod tests {
         let (mut api, mailer) = api();
         let bad_invitation = api.route(
             &post("/api/auth/register", "{\"invitation\":\"nope\"}", ""),
+            "10.0.0.1",
             NOW,
         );
         assert_eq!(bad_invitation.status, 403);
@@ -727,6 +819,7 @@ mod tests {
                 "{\"email\":\"nobody@example.test\"}",
                 "",
             ),
+            "10.0.0.1",
             NOW,
         );
         assert_eq!(unknown_account.status, 403);
@@ -745,6 +838,7 @@ mod tests {
                 &format!("{{\"invitation\":\"{invitation}\"}}"),
                 "",
             ),
+            "10.0.0.1",
             NOW,
         );
         let tx = field_of(&begun, "transaction");
@@ -758,6 +852,7 @@ mod tests {
                 "{\"code\":\"00000000\"}",
                 &jar,
             ),
+            "10.0.0.1",
             NOW + 1,
         );
         assert_eq!(wrong_code.status, 403);
@@ -769,6 +864,7 @@ mod tests {
                 &format!("{{\"code\":\"{}\"}}", mailed_code(&mailer)),
                 &jar,
             ),
+            "10.0.0.1",
             NOW + 2,
         );
         assert_eq!(right.status, 204);
@@ -781,7 +877,7 @@ mod tests {
         let (mut api, _mailer) = api();
         let raw = "GET /api/auth/register HTTP/1.1\r\n\r\n";
         let request = crate::http::read_request(&mut Cursor::new(raw.as_bytes().to_vec())).unwrap();
-        let response = api.route(&request, NOW);
+        let response = api.route(&request, "10.0.0.1", NOW);
         assert_eq!(response.status, 405);
         assert!(response
             .extra
@@ -806,7 +902,7 @@ mod tests {
             .unwrap();
         let jar = format!("{SESSION_COOKIE}={}", session.expose());
 
-        let out = api.route(&post("/api/auth/logout", "{}", &jar), NOW + 1);
+        let out = api.route(&post("/api/auth/logout", "{}", &jar), "10.0.0.1", NOW + 1);
         assert_eq!(out.status, 204);
         assert!(set_cookies(&out)
             .iter()
@@ -818,7 +914,7 @@ mod tests {
         );
         // And logging out twice is still a 204: whether a token was live is not a fact to confirm.
         assert_eq!(
-            api.route(&post("/api/auth/logout", "{}", &jar), NOW + 3)
+            api.route(&post("/api/auth/logout", "{}", &jar), "10.0.0.1", NOW + 3)
                 .status,
             204
         );
@@ -841,6 +937,7 @@ mod tests {
                 &format!("{{\"invitation\":\"{invitation}\"}}"),
                 "",
             ),
+            "10.0.0.1",
             NOW,
         );
         let tx = field_of(&begun, "transaction");
@@ -854,10 +951,12 @@ mod tests {
                 &format!("{{\"code\":\"{}\"}}", mailed_code(&mailer)),
                 &jar,
             ),
+            "10.0.0.1",
             NOW + 1,
         );
         let options = api.route(
             &post(&format!("/api/auth/register/{tx}/options"), "{}", &jar),
+            "10.0.0.1",
             NOW + 2,
         );
         let body = body_of(&options);
@@ -874,6 +973,7 @@ mod tests {
                 &serde_json::to_string(&credential).unwrap(),
                 &jar,
             ),
+            "10.0.0.1",
             NOW + 3,
         );
 
@@ -884,6 +984,7 @@ mod tests {
                 &format!("{{\"email\":\"{INVITED}\"}}"),
                 "",
             ),
+            "10.0.0.1",
             NOW + 10,
         );
         assert_eq!(started.status, 200);
@@ -908,6 +1009,7 @@ mod tests {
                 &signed,
                 &format!("{CEREMONY_COOKIE}=someoneelse"),
             ),
+            "10.0.0.1",
             NOW + 11,
         );
         assert_eq!(elsewhere.status, 403);
@@ -919,6 +1021,7 @@ mod tests {
                 &format!("{{\"email\":\"{INVITED}\"}}"),
                 &login_jar,
             ),
+            "10.0.0.1",
             NOW + 12,
         );
         let challenge = field_of(&started, "challenge");
@@ -935,10 +1038,114 @@ mod tests {
                 &serde_json::to_string(&assertion).unwrap(),
                 &login_jar,
             ),
+            "10.0.0.1",
             NOW + 13,
         );
         assert_eq!(ok.status, 200);
         assert!(cookie_value(&ok, SESSION_COOKIE).is_some());
         assert_eq!(api.counters().logins_completed, 1);
+    }
+
+    /// The limiter is on the surface, not merely in the module. Twenty is the default per-client
+    /// burst; the twenty-first request from the same caller is refused with something it can act on.
+    #[test]
+    fn a_caller_that_hammers_the_surface_is_refused_with_a_retry_after() {
+        let (mut api, _mailer) = api();
+        for _ in 0..20 {
+            let response = api.route(
+                &post("/api/auth/register", "{\"invitation\":\"nope\"}", ""),
+                "10.0.0.1",
+                NOW,
+            );
+            assert_eq!(
+                response.status, 403,
+                "inside the budget, it is the proof that fails"
+            );
+        }
+        let limited = api.route(
+            &post("/api/auth/register", "{\"invitation\":\"nope\"}", ""),
+            "10.0.0.1",
+            NOW,
+        );
+        assert_eq!(limited.status, 429);
+        let retry = limited
+            .extra
+            .iter()
+            .find(|(k, _)| *k == "Retry-After")
+            .map(|(_, v)| v.parse::<u64>().unwrap())
+            .expect("a Retry-After a client can honour");
+        assert!(retry >= 1);
+        assert_eq!(api.counters().rate_limited, 1);
+        // A different caller is unaffected: the budget is per key, and the global one is six times
+        // larger than the per-client one for exactly this reason.
+        assert_eq!(
+            api.route(
+                &post("/api/auth/register", "{\"invitation\":\"nope\"}", ""),
+                "10.0.0.2",
+                NOW,
+            )
+            .status,
+            403
+        );
+    }
+
+    /// A `429` must cost the host nothing beyond the limiter itself. If the parse, the store read or
+    /// the mail happened first, the limit would bound the answers rather than the work.
+    #[test]
+    fn the_limiter_runs_before_any_of_the_work() {
+        let (auth, _mailer) = api_parts();
+        let mut api = AuthApi::with_limits(
+            auth,
+            LimitPolicy {
+                per_client: Rate::new(1, 60),
+                global: Rate::new(100, 60),
+            },
+        );
+        assert_eq!(
+            api.route(&post("/api/auth/register", "{}", ""), "10.0.0.1", NOW)
+                .status,
+            400,
+            "the first one is spent on a real answer"
+        );
+        let before = api.counters();
+        // Malformed body, wrong media type, unknown route: none of it is even looked at.
+        let limited = api.route(
+            &post("/api/auth/nonsense", "not json at all", ""),
+            "10.0.0.1",
+            NOW,
+        );
+        assert_eq!(limited.status, 429);
+        let after = api.counters();
+        assert_eq!(after.bad_request, before.bad_request, "nothing was parsed");
+        assert_eq!(after.not_found, before.not_found, "nothing was routed");
+    }
+
+    /// The global bound is what still holds when the client key is not the attacker's constraint.
+    #[test]
+    fn the_global_bound_holds_across_many_clients() {
+        let (auth, _mailer) = api_parts();
+        let mut api = AuthApi::with_limits(
+            auth,
+            LimitPolicy {
+                per_client: Rate::new(2, 60),
+                global: Rate::new(5, 60),
+            },
+        );
+        let mut allowed = 0;
+        for i in 0..20 {
+            let response = api.route(
+                &post("/api/auth/register", "{\"invitation\":\"nope\"}", ""),
+                &format!("10.0.0.{i}"),
+                NOW,
+            );
+            if response.status != 429 {
+                allowed += 1;
+            }
+        }
+        // Five got through, one per global token, however many addresses asked.
+        assert_eq!(allowed, 5);
+        let (global_denied, per_client_denied) = api.limit_counters();
+        assert_eq!(global_denied, 15);
+        assert_eq!(per_client_denied, 0, "the global bound bit first");
     }
 }
