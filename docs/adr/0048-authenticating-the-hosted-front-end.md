@@ -146,9 +146,14 @@ not be made to.
 1. **the store** — `rime-auth` behind the feature: records, the append-only log, invitation issue and
    single-use redemption, session tokens. *(landed)*
 2. **the ceremonies** — `webauthn-rs` registration and login, mailed codes through the Resend relay,
-   recovery. *(this brick)* — `ceremony.rs` (both WebAuthn ceremonies, JSON in and out so no library
+   recovery. *(landed)* — `ceremony.rs` (both WebAuthn ceremonies, JSON in and out so no library
    type reaches the gateway), `codes.rs` (HMAC'd eight-digit codes), `mail.rs` (plain SMTP to the
    estate's local relay, which already holds the Resend key — so this crate holds none), and `flow.rs`,
    which is where the ordering rule of decision 1 is actually enforced.
 3. **the gate** — `owner_account_id` through admission, authorization before spawn, per-account caps,
-   ownership on every route including signalling, and the second-account test.
+   ownership on every route including signalling, and the second-account test. *(this brick)* — the
+   gateway gained its own `identity.rs` (a `Principal` and an `AccountRef`, so no `rime-auth` type
+   crosses into admission), an owner on every admitted slot, `AccessPolicy::require_account`
+   defaulting to **refuse anonymous**, and a per-account cap of 2. Somebody else's session answers
+   **404, not 403**: a session id is a capability, and "this is real but not yours" is the one sentence
+   a capability must never say.
