@@ -52,8 +52,17 @@ the same pass: `ssr-resolve` p50 1.842 vs 0.856 ms. Pinned, the same pair agrees
 0.879 ms) and every pass above 0.05 ms lands within 1.5%. A baseline taken unpinned encodes the
 governor's mood, and every future comparison against it inherits that.
 
-`RIME_PERF_ALLOW_UNPINNED_CLOCKS=1` overrides the refusal — say so in the PR, because the numbers
-are not comparable against a pinned baseline.
+**What is checked is now stability, not pinning** ([ADR-0050](../adr/0050-clock-stability-not-clock-pinning.md)).
+Pinning was only ever a proxy for "the clock did not wander during the measurement", it cannot be done
+at all on the Pascal card that hosts, and the old pre-run check read an *idle* GPU — which parks in P8
+regardless of how it is configured — so it answered a question nobody asked. `perf.sh` now samples both
+clocks at 20 Hz **while the benchmark runs**, keeps the samples taken at ≥10% utilisation, and writes
+min/median/max/spread plus the sample counts into the report as `gpu_clocks`. A graphics spread above
+**2% of its median** refuses the run and blocks filing; the memory domain is recorded but does not gate.
+
+A run with fewer than 10 loaded samples carries `"stable": null` — not a pass. There is no override
+environment variable any more (`RIME_PERF_ALLOW_UNPINNED_CLOCKS` is gone): a machine that holds its
+clock passes without being pinned, and one that does not is not fit to measure on.
 
 The samples can also be driven directly:
 

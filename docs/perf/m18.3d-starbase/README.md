@@ -69,9 +69,13 @@ Vulkan — so the lock is accepted and then never engaged. Locked graphics clock
 Volta-and-later facility. **If that is right, a clock-pinned Vulkan measurement on this GPU is not
 achievable with `nvidia-smi`**, and ADR-0047's precondition cannot be met as written.
 
-That leaves a decision that is the owner's, not this file's: **ratify the starbase bar from unpinned
-runs** (accepting wider variance, and saying so wherever the number is quoted), or **have no starbase
-bar** and make no hosted performance claim. Nothing here assumes either. The report beside this file
+That decision was the owner's, and it was taken: **neither** option.
+[ADR-0050](../../adr/0050-clock-stability-not-clock-pinning.md) amends ADR-0047 §2 so the precondition
+is clock-*stability*-verified rather than clock-*pinned* — `perf.sh` measures the spread of the
+graphics clock under load during the run and gates at 2%, which is the property pinning was a proxy
+for and which this card can actually demonstrate (13 MHz, 0.7% of median, measured here). So the bar is
+ratified from the first CT 122 run that passes that gate; **this report predates the gate and is still
+not that run.** The report beside this file
 is committed so the numbers exist and are diffable, and it is labelled unpinned in exactly the way the
 workstation's first sweep was.
 
