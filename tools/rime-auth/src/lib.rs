@@ -45,6 +45,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+pub mod ceremony;
+
 /// How long an invitation is good for unless the caller says otherwise. Seven days: long enough to
 /// reach somebody who reads mail weekly, short enough that a leaked mailbox is not a permanent way in.
 pub const DEFAULT_INVITE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -74,6 +76,14 @@ pub fn now() -> Timestamp {
 /// it is also the WebAuthn user handle, which must not leak anything about the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AccountId(u128);
+
+impl AccountId {
+    /// The raw id. The WebAuthn user handle is this value (`ceremony.rs`), which is the reason it is
+    /// readable at all — nothing else needs it, and nothing else should use it as a key.
+    pub fn as_u128(self) -> u128 {
+        self.0
+    }
+}
 
 impl fmt::Display for AccountId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -158,6 +168,9 @@ pub struct Credential {
     pub account_id: AccountId,
     pub label: String,
     pub created_at: Timestamp,
+    /// When this credential last completed an authentication, if it ever has. Needed to answer "which
+    /// of my passkeys is the one I lost?" before revoking it.
+    pub last_used_at: Option<Timestamp>,
     pub revoked_at: Option<Timestamp>,
     pub blob: Vec<u8>,
 }
@@ -223,6 +236,8 @@ pub struct AuthCounters {
     pub accounts_created: u64,
     pub credentials_added: u64,
     pub credentials_revoked: u64,
+    /// Blob write-backs after a login moved an authenticator's counter or backup state.
+    pub credentials_updated: u64,
     pub sessions_created: u64,
     pub sessions_authenticated: u64,
     pub sessions_rejected_unknown: u64,
@@ -473,6 +488,7 @@ impl AuthStore {
             account_id: account,
             label: label.to_string(),
             created_at: now_ts,
+            last_used_at: None,
             revoked_at: None,
             blob: blob.to_vec(),
         });
@@ -501,6 +517,43 @@ impl AuthStore {
             }
         }
         self.counters.credentials_revoked += 1;
+        Ok(true)
+    }
+
+    /// Write back a credential's blob after a successful authentication.
+    ///
+    /// The blob carries the authenticator's signature counter and backup state, and a counter that is
+    /// never written back cannot detect a cloned credential — which is the only thing the counter is
+    /// for. So a login that moved it appends a record, and replay takes the last one.
+    ///
+    /// A revoked credential is not updated: a login against one should not have happened, and writing
+    /// to it would quietly resurrect a row an incident review is reading as closed.
+    pub fn update_credential_blob(
+        &mut self,
+        credential_id: &[u8],
+        blob: &[u8],
+        now_ts: Timestamp,
+    ) -> Result<bool, AuthError> {
+        let found = self
+            .credentials
+            .iter()
+            .any(|c| c.credential_id == credential_id && c.revoked_at.is_none());
+        if !found {
+            return Ok(false);
+        }
+        self.append(&[
+            "cred-used",
+            &to_hex(credential_id),
+            &now_ts.to_string(),
+            &to_hex(blob),
+        ])?;
+        for c in &mut self.credentials {
+            if c.credential_id == credential_id && c.revoked_at.is_none() {
+                c.blob = blob.to_vec();
+                c.last_used_at = Some(now_ts);
+            }
+        }
+        self.counters.credentials_updated += 1;
         Ok(true)
     }
 
@@ -762,9 +815,27 @@ impl AuthStore {
                     account_id: account,
                     label,
                     created_at: created,
+                    last_used_at: None,
                     revoked_at: None,
                     blob,
                 });
+            }
+            "cred-used" => {
+                let cid = from_hex(it.next().ok_or_else(|| corrupt("cred-used: no id"))?)
+                    .ok_or_else(|| corrupt("cred-used: bad id hex"))?;
+                let at: Timestamp = it
+                    .next()
+                    .ok_or_else(|| corrupt("cred-used: no timestamp"))?
+                    .parse()
+                    .map_err(|_| corrupt("cred-used: bad timestamp"))?;
+                let blob = from_hex(it.next().ok_or_else(|| corrupt("cred-used: no blob"))?)
+                    .ok_or_else(|| corrupt("cred-used: bad blob hex"))?;
+                for c in &mut self.credentials {
+                    if c.credential_id == cid && c.revoked_at.is_none() {
+                        c.blob.clone_from(&blob);
+                        c.last_used_at = Some(at);
+                    }
+                }
             }
             "cred-revoked" => {
                 let cid = from_hex(it.next().ok_or_else(|| corrupt("cred-revoked: no id"))?)
@@ -861,7 +932,7 @@ fn mint_u128() -> Result<u128, AuthError> {
 /// OS entropy. A short read is a hard failure rather than padded: silently degrading the entropy of a
 /// capability is worse than refusing to mint one, which is the same rule the gateway's `SessionId`
 /// follows.
-fn fill_random(out: &mut [u8]) -> std::io::Result<()> {
+pub(crate) fn fill_random(out: &mut [u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Read;
@@ -889,7 +960,7 @@ fn fill_random(out: &mut [u8]) -> std::io::Result<()> {
     }
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         out.push_str(&format!("{b:02x}"));

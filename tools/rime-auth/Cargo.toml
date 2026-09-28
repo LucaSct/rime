@@ -17,10 +17,28 @@ authors.workspace = true
 description = "Accounts, invitations and sessions for Rime's hosted front end"
 
 [dependencies]
-# The only dependency, and it is a hash. Token values are stored hashed so a stolen store is not a
-# stolen set of credentials, and hand-rolling SHA-256 for a security boundary to save a dependency
-# would be the wrong trade — ADR-0048 decision 3. RustCrypto, MIT OR Apache-2.0, pure Rust.
+# A hash, because token values are stored hashed so a stolen store is not a stolen set of credentials,
+# and hand-rolling SHA-256 for a security boundary to save a dependency would be the wrong trade —
+# ADR-0048 decision 3. RustCrypto, MIT OR Apache-2.0, pure Rust.
 sha2 = "0.10"
+
+# The passkey ceremonies (brick 2). ADR-0048 decision 2 ratified this dependency and made the whole
+# crate optional because of it: `webauthn-rs` is MPL-2.0, and ADR-0046 §2 would otherwise put that
+# obligation inside every game a Rime user ships. What it does is CBOR/COSE parsing and ES256
+# signature verification against a server-issued challenge — a security boundary nobody should
+# hand-roll.
+webauthn-rs = "0.5"
+# A credential is stored as the library's OWN serialisation, kept whole (`ceremony::decode_passkey`),
+# and the ceremony options and responses cross the gateway as JSON strings so that no library type
+# reaches admission or the engine (ADR-0048 decision 3).
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# A software authenticator, so the ceremony tests run REAL ceremonies: a challenge is signed by a key
+# whose verification the test does not control, rather than asserted about by a mock. Same project as
+# `webauthn-rs`, MPL-2.0, and a dev dependency — it is in no shipped artifact.
+webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 
 [lints.clippy]
 all = "deny"
