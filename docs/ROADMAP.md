@@ -1691,7 +1691,7 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M12** | **"The Player"** ✅ | a server and two clients run a predicted, reconciled player under scripted loss: own-input response ≤ 1 tick against a prediction-off control, remote motion continuous, both clients converging bit-exactly — GPU-free and CI-gated (`samples/13-networked-player`) |
 | **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). Carried to M17, where [ADR-0041](adr/0041-the-visual-bar-m17.md) ranks the breaches: `sim.block` 4.25× over, `frame.render` p99 12.69 of 16.6 |
 | **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
-| **M15** | **"The Platform Proof"** | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
+| **M15** | **"The Platform Proof"** ✅ | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
 | **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) |
 | **M17** | **"The Visual Bar"** | visual work delivered on the consolidated M18 branch; its remaining M13 frame-budget clause is inherited unchanged by M18 rather than waived ([ADR-0041](adr/0041-the-visual-bar-m17.md), [ADR-0043](adr/0043-virtualized-geometry-m18.md)) |
 | **M18** | **virtualized geometry + the consolidated visual bar** | Nanite-style rigid opaque meshes: a separately versioned clustered payload, replacement DAG, GPU-driven culling, visibility buffer and **mandatory hybrid sub-pixel rasterization** so detailed shapes survive. M18 inherits M17/M13's unchanged clean-tree block budget; it is not complete until both the detailed geometry path and that measured gate hold ([ADR-0043](adr/0043-virtualized-geometry-m18.md)). Terrain's heightfield, collision, splat blending and streaming are **M19**, rather than silently folded into cluster rendering. |
@@ -2166,7 +2166,7 @@ m15.8. *(m15.7 was duly cut and has now been paid back — ADR-0046 §1 made `he
 of M20 rather than a nicety, because lifting a play loop into an engine-owned `GameDefinition` needs a
 small subject and the block's ~3000-line sample loop is not one.)*
 
-> **Progress (2026-09-28) — m15.0 through m15.7 are on `main`; m15.8 is open.**
+> **Progress (2026-09-28) — m15.0 through m15.8 are on `main`. M15 is COMPLETE.**
 >
 > | brick | state | what landed |
 > |---|---|---|
@@ -2179,7 +2179,7 @@ small subject and the block's ~3000-line sample loop is not one.)*
 > | m15.6a | ✅ #164 | `alpha_cutoff` reaches the forward shaders — alpha-tested glTF stops being an opaque quad |
 > | m15.6b | ✅ #165 | `Collider::sensor` becomes real: `PhysicsWorld::trigger_events()` |
 > | m15.7 | ✅ #204 | the on-ramp: `samples/hello-game` (the smallest complete game here, and M20's `GameDefinition` subject per [ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §1), `docs/getting-started.md`, README build instructions, and the drifted `samples/README.md` fixed — `99-the-block` was still under "Still to come" and `13-networked-player` was missing entirely |
-> | m15.8 | open | **the proof** — a target range authored through the editor, its diff touching only `samples/` and `docs/` |
+> | m15.8 | ✅ | **the proof** — `samples/target-range`: five crates authored as a `.rscene`, shot with real raycasts, counted, with the game's OWN reflected component round-tripping through the engine's serializer and its OWN `target-range-host` so the editor understands it. Diff touches only `samples/` and `docs/`. **Two findings recorded rather than papered over:** `rime-engine` correctly REFUSES to save a scene whose components it does not register (which is why a game needs its own host — the m15.2 seam, now proven by a second game), and `derive_world_transforms` is file-local to `editor_host_app.cpp` so every game must rewrite it — promoting it into `rime::scene` is a follow-up. |
 >
 > **m15.6 was split** into 15.6a (alpha) and 15.6b (sensors): two independent dead fields, in two
 > modules, with nothing shared but the reason they were dead. **m15.3's colour swatch was cut**, as

@@ -1,0 +1,233 @@
+# Rime scene v1 (.rscene) — reflection-serialized world. Human-diffable; hand-edit or regenerate.
+rime_scene 1
+
+entity 0 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 1.25 z 6 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::Camera 0x42cdb0b7ddc97dbc {
+    fov_y 0.87266
+    z_near 0.1
+    z_far 1000
+    active true
+  }
+}
+
+entity 1 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x -0.45377016 y 0.11087233 z 0.05701855 w 0.8823542 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::DirectionalLight 0x0279ad2e8762ff9a {
+    color_r 1
+    color_g 0.97
+    color_b 0.92
+    intensity 3.4
+  }
+}
+
+entity 2 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y -0.5 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::physics::RigidBody 0xbc2d5cdce49c0ed5 {
+    motion 0
+    mass 1
+    friction 0.5
+    restitution 0
+    linear_damping 0
+    angular_damping 0.05
+    gravity_factor 1
+  }
+  rime::physics::Collider 0x8ed112a74edf2f66 {
+    shape_type 1
+    radius 0.5
+    half_x 24
+    half_y 0.5
+    half_z 24
+    half_height 0.5
+    sensor false
+  }
+}
+
+entity 3 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.8 y 0.4 z -9 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::physics::RigidBody 0xbc2d5cdce49c0ed5 {
+    motion 2
+    mass 4
+    friction 0.5
+    restitution 0
+    linear_damping 0
+    angular_damping 0.05
+    gravity_factor 1
+  }
+  rime::physics::Collider 0x8ed112a74edf2f66 {
+    shape_type 1
+    radius 0.5
+    half_x 0.4
+    half_y 0.4
+    half_z 0.4
+    half_height 0.5
+    sensor false
+  }
+  targetrange::Target 0x65a0bf25e44efc48 {
+    points 10
+    required true
+    down false
+    knock 6
+  }
+}
+
+entity 4 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.4 y 0.4 z -9 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::physics::RigidBody 0xbc2d5cdce49c0ed5 {
+    motion 2
+    mass 4
+    friction 0.5
+    restitution 0
+    linear_damping 0
+    angular_damping 0.05
+    gravity_factor 1
+  }
+  rime::physics::Collider 0x8ed112a74edf2f66 {
+    shape_type 1
+    radius 0.5
+    half_x 0.4
+    half_y 0.4
+    half_z 0.4
+    half_height 0.5
+    sensor false
+  }
+  targetrange::Target 0x65a0bf25e44efc48 {
+    points 10
+    required true
+    down false
+    knock 6
+  }
+}
+
+entity 5 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.4 z -9 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::physics::RigidBody 0xbc2d5cdce49c0ed5 {
+    motion 2
+    mass 4
+    friction 0.5
+    restitution 0
+    linear_damping 0
+    angular_damping 0.05
+    gravity_factor 1
+  }
+  rime::physics::Collider 0x8ed112a74edf2f66 {
+    shape_type 1
+    radius 0.5
+    half_x 0.4
+    half_y 0.4
+    half_z 0.4
+    half_height 0.5
+    sensor false
+  }
+  targetrange::Target 0x65a0bf25e44efc48 {
+    points 50
+    required true
+    down false
+    knock 6
+  }
+}
+
+entity 6 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2.4 y 0.4 z -9 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::physics::RigidBody 0xbc2d5cdce49c0ed5 {
+    motion 2
+    mass 4
+    friction 0.5
+    restitution 0
+    linear_damping 0
+    angular_damping 0.05
+    gravity_factor 1
+  }
+  rime::physics::Collider 0x8ed112a74edf2f66 {
+    shape_type 1
+    radius 0.5
+    half_x 0.4
+    half_y 0.4
+    half_z 0.4
+    half_height 0.5
+    sensor false
+  }
+  targetrange::Target 0x65a0bf25e44efc48 {
+    points 10
+    required true
+    down false
+    knock 6
+  }
+}
+
+entity 7 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 4.8 y 0.4 z -9 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::physics::RigidBody 0xbc2d5cdce49c0ed5 {
+    motion 2
+    mass 4
+    friction 0.5
+    restitution 0
+    linear_damping 0
+    angular_damping 0.05
+    gravity_factor 1
+  }
+  rime::physics::Collider 0x8ed112a74edf2f66 {
+    shape_type 1
+    radius 0.5
+    half_x 0.4
+    half_y 0.4
+    half_z 0.4
+    half_height 0.5
+    sensor false
+  }
+  targetrange::Target 0x65a0bf25e44efc48 {
+    points 10
+    required true
+    down false
+    knock 6
+  }
+}
+
