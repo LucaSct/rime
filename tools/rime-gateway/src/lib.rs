@@ -66,8 +66,12 @@ pub mod identity;
 pub mod limits;
 // Portable: port ownership and public-address validation need no socket, so CI can test both.
 pub mod media;
+// Portable: a byte parser over `Read`, so every CI platform tests the header bounds.
+pub mod proxy_v2;
 // Portable: str0m is sans-IO and UdpSocket is std, so all three CI platforms exercise the run loop.
 pub mod transport;
+// Portable: HMAC over a caller-supplied clock and a secret file.
+pub mod turn;
 
 #[cfg(unix)]
 pub use api::{
