@@ -20,6 +20,10 @@ license.workspace = true
 authors.workspace = true
 description = "Session broker for Rime's hosted browser front end (surface policy, per-session engine process)"
 
+[[bin]]
+name = "rime-gateway"
+path = "src/bin/rime-gateway.rs"
+
 [dependencies]
 rime-protocol = { path = "../rime-protocol" }
 

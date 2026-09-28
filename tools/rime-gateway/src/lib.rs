@@ -57,6 +57,8 @@ pub mod api;
 #[cfg(all(unix, feature = "auth"))]
 pub mod auth_api;
 pub mod http;
+#[cfg(unix)]
+pub mod serve;
 // Portable: a principal is a number and a cookie is a string, so every CI platform tests the
 // ownership vocabulary even where the registry it guards does not build.
 pub mod identity;
