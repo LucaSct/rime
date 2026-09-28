@@ -70,6 +70,7 @@
 #include "rime/render/render_graph.hpp"
 #include "rime/render/scene_picker.hpp"
 #include "rime/render/scene_renderer.hpp"
+#include "rime/scene/derive_transforms.hpp"
 #include "rime/scene/scene_format.hpp"
 #include "rime/stream/frame_codec.hpp"
 #include "rime/stream/frame_streamer.hpp"
@@ -155,27 +156,6 @@ void register_and_populate(ecs::World& world,
         core::JobSystem jobs;
         ecs::propagate_transforms(world, jobs);
     }
-}
-
-// A reflection-driven restore (a .rscene load, or m9.7's play-session PlaySession::stop) only ever
-// carries LocalTransform — WorldTransform is derived state and deliberately unreflected
-// (reflect.hpp), so it cannot ride a snapshot at all. After such a restore, give every
-// LocalTransform holder that lacks one a default WorldTransform, then propagate_transforms composes
-// the (possibly parented) local chain into it — the same two-step "load then derive" every
-// reflection-driven world reconstruction needs. Collect-then-add because add_component relocates an
-// entity between archetypes (the "archetype move"), which would invalidate a query mid-iteration.
-void derive_world_transforms(ecs::World& world) {
-    std::vector<ecs::Entity> posed;
-    world.query<ecs::LocalTransform>().for_each([&](ecs::Entity e, ecs::LocalTransform&) {
-        if (!world.has<ecs::WorldTransform>(e)) {
-            posed.push_back(e);
-        }
-    });
-    for (const ecs::Entity e : posed) {
-        (void)world.add_component<ecs::WorldTransform>(e, ecs::WorldTransform{});
-    }
-    core::JobSystem jobs;
-    ecs::propagate_transforms(world, jobs);
 }
 
 // Apply one editor->engine edit to `world`. Mirrors editorhost::EditorHost::poll_one's dispatch,
@@ -460,7 +440,8 @@ void load_viewport_scene(ecs::World& world,
     // Leaves the world as whatever loaded on failure: the editor still connects and shows an
     // empty/partial outliner rather than the host dying on a bad path.
     (void)load_scene_for_editor(world, scene_path, hosted);
-    derive_world_transforms(world);
+    core::JobSystem jobs;
+    scene::derive_world_transforms(world, jobs);
 
     // THE GROUND IS ENGINE CONTENT, so the engine dresses it (m17.8b). m17.8 made the block's
     // street a `ground::GroundSurface` whose mesh is derived rather than uploaded — and this path
@@ -917,7 +898,8 @@ int serve_viewport(std::string_view socket_path,
                         // The restore only reconstructed reflected components (LocalTransform among
                         // them); WorldTransform is derived and must be recomputed, exactly like a
                         // fresh .rscene load — see derive_world_transforms's comment.
-                        derive_world_transforms(app.world());
+                        core::JobSystem jobs;
+                        scene::derive_world_transforms(app.world(), jobs);
                         // Discard the play session's bodies wholesale — the next Play rebuilds them
                         // from the just-restored components (PhysicsSync::reconcile), never from
                         // whatever the old roster remembered.

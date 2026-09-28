@@ -68,6 +68,7 @@
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/rhi/device.hpp"
+#include "rime/scene/derive_transforms.hpp"
 #include "rime/scene/scene_format.hpp"
 #include "rime/worldkit/profile.hpp"
 #include "target.hpp"
@@ -319,38 +320,7 @@ private:
 
 // Register the engine's components and then the game's own, in that fixed order. The order is
 // shared with every other Rime game on purpose (`profile.hpp:50-52`): `component_schema_hash` goes
-// into the net driver's config and two peers that registered different sets refuse to connect. Give
-// every loaded entity a WorldTransform, then compose the chain into it.
-//
-// **A `.rscene` load carries LocalTransform only.** `WorldTransform` is derived state and
-// deliberately unreflected, so it cannot ride a snapshot — and `ecs::propagate_transforms` only
-// RECOMPUTES entities that already have both (`engine/ecs/include/rime/ecs/transform.hpp:41`). A
-// freshly loaded scene therefore has no world poses at all, nothing binds to physics, and the range
-// comes up with zero targets. That is exactly how this sample failed the first time it ran.
-//
-// **This is a finding of the platform proof, not an incidental helper.** The engine already
-// contains this function — `derive_world_transforms` in `engine/app/editor_host_app.cpp:167`, whose
-// own comment calls it "the same two-step 'load then derive' every reflection-driven world
-// reconstruction needs" — but it is file-local to that translation unit and not exported, so every
-// game must write it again. m15.8's diff may not touch `engine/`, so this copy is the honest
-// outcome: the proof surfaces the gap rather than hiding it. Promoting it into `rime::scene` is
-// recorded as a follow-up.
-//
-// Collect-then-add because `add_component` relocates the entity between archetypes, which would
-// invalidate the query mid-iteration.
-void derive_world_transforms(ecs::World& world, core::JobSystem& jobs) {
-    std::vector<ecs::Entity> posed;
-    world.query<ecs::LocalTransform>().for_each([&](ecs::Entity e, ecs::LocalTransform&) {
-        if (!world.has<ecs::WorldTransform>(e)) {
-            posed.push_back(e);
-        }
-    });
-    for (const ecs::Entity e : posed) {
-        (void)world.add_component<ecs::WorldTransform>(e, ecs::WorldTransform{});
-    }
-    ecs::propagate_transforms(world, jobs);
-}
-
+// into the net driver's config and two peers that registered different sets refuse to connect.
 std::size_t register_all(ecs::World& world) {
     const std::size_t engine = worldkit::register_engine_components(world);
     targetrange::register_content_components(world);
@@ -447,7 +417,7 @@ RunResult play(const std::filesystem::path& scene, int tick_budget, unsigned wor
     }
     // WorldTransform is DERIVED and is not written by a load, so nothing has a world pose until
     // this runs. Skipping it leaves every crate at the origin and the range silently unwinnable.
-    derive_world_transforms(app.world(), app.jobs());
+    scene::derive_world_transforms(app.world(), app.jobs());
     result.digest = authored_digest(app.world());
 
     physics::PhysicsWorld physics;
@@ -564,7 +534,7 @@ int run_digest(const std::filesystem::path& scene) {
         fmt::print(stderr, "target-range: FAILED to load {}: {}\n", scene.string(), report.error);
         return 1;
     }
-    derive_world_transforms(app.world(), app.jobs());
+    scene::derive_world_transforms(app.world(), app.jobs());
     fmt::print("{:#018x}\n", authored_digest(app.world()));
     return 0;
 }
@@ -573,7 +543,7 @@ int run_emit(const std::filesystem::path& out) {
     app::Application app(app::AppConfig{});
     register_all(app.world());
     author_scene(app.world());
-    derive_world_transforms(app.world(), app.jobs());
+    scene::derive_world_transforms(app.world(), app.jobs());
     if (!scene::save_scene_file(app.world(), out)) {
         fmt::print(stderr, "target-range: could not write {}\n", out.string());
         return 1;
@@ -605,7 +575,7 @@ int run_rendered(const std::filesystem::path& scene, int frames) {
         fmt::print(stderr, "target-range: FAILED to load {}: {}\n", scene.string(), report.error);
         return 1;
     }
-    derive_world_transforms(app.world(), app.jobs());
+    scene::derive_world_transforms(app.world(), app.jobs());
 
     physics::PhysicsWorld physics;
     physics::PhysicsSync sync;
