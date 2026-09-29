@@ -145,6 +145,30 @@ export function decodeInputEvent(bytes) {
   return { kind, code, x, y, scrollX, scrollY, mods, clientUs, seq };
 }
 
+// ── StreamConfig — mirrors engine/stream/src/protocol.cpp `StreamConfigMessage::encode` ────────
+//
+// [codec:u8][fmt:u8][w:u32 LE][h:u32 LE][codec_config...]
+//
+// The AV1 path does not need it to stand up a decoder (the sequence header rides the video track),
+// but m18 Track H's input path needs its GEOMETRY: `InputEvent.x/y` are stream-frame pixels, and
+// this message is the authoritative statement of what the frame's pixel space IS. The variable
+// tail is skipped — this page has no use for a sequence header it is not decoding.
+
+/** Decode a `StreamConfig` payload's fixed head. Throws on a truncated message, for the same
+ * reason `decodeEnvelope` does: a peer that cannot frame 10 bytes is not one to guess for. */
+export function decodeStreamConfig(bytes) {
+  if (bytes.length < 10) {
+    throw new Error(`StreamConfig payload must be at least 10 bytes, got ${bytes.length}`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return {
+    codec: view.getUint8(0),
+    format: view.getUint8(1),
+    width: view.getUint32(2, true),
+    height: view.getUint32(6, true),
+  };
+}
+
 // ── Capabilities — mirrors engine/stream/src/protocol.cpp `CapabilitiesMessage::encode` ─────────
 //
 // [count:u8][decoder:u8 * count] — a one-byte count (capped at 255) followed by that many codec

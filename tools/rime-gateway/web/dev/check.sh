@@ -89,6 +89,14 @@ else
   ok=1
 fi
 
+echo "== keymap_test.mjs =="
+if node "$DIR/keymap_test.mjs"; then
+  echo "ok - keymap_test.mjs"
+else
+  echo "FAIL - keymap_test.mjs"
+  ok=1
+fi
+
 echo "== dump-dom: catalogue requires an account -> the sign-in form renders =="
 PORT1=$(pick_port)
 run_dump_dom "$PORT1" 1 'aria-label="Sign in"' "401 catalogue shows the sign-in form"
