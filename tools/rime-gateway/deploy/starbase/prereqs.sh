@@ -22,7 +22,13 @@ deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.asc] https://dl.
 EOF
 
 apt-get update
-apt-get install -y caddy coturn nftables iproute2 openssl
+apt-get install -y caddy coturn nftables iproute2 openssl libssl-dev pkg-config
+
+# `rime-auth`'s webauthn-rs (a REGULAR dependency of the auth feature, not test-only) pulls in
+# openssl-sys, and CT 122 ships only the runtime libssl3/libcrypto3 .so files — no headers, no
+# openssl.pc. ADR-0051 turned the equivalent Windows gap into "don't build rime-auth there" because
+# Windows has no OpenSSL to find at all; here the fix is the ordinary one, installing the dev package
+# the target actually has room for, not vendoring a build-from-source OpenSSL into every deploy.
 
 # Ubuntu's coturn package ships DISABLED (TURNSERVER_ENABLED=0 in /etc/default/coturn) until an
 # operator opts in; without this, apply.sh's `systemctl restart coturn` succeeds and starts nothing,

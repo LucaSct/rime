@@ -22,6 +22,14 @@ cargo_target="$deploy_root/cargo-target"
 cmake_build="$deploy_root/build-release"
 stage="$deploy_root/stage-$sha"
 
+# `runuser -u dev --` (install.sh's invocation) changes the UID and $HOME but NOT the working
+# directory — it inherits whatever `pct exec` started in, which is `/root`, a directory `dev` cannot
+# even stat. Conan's workspace search reads `os.getcwd()` before it reads any argument, so it failed
+# on a bare PermissionError before printing a single word about what it was doing (measured
+# 2026-09-29). Every step below assumes a readable, writable cwd, so make that true explicitly rather
+# than rely on the caller's.
+cd "$repo_root"
+
 say() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 
 # Cargo and the Conan venv live under $HOME but `runuser -u dev --` runs a non-login shell, so PATH
