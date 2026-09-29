@@ -26,7 +26,7 @@ deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.
 EOF
 
 apt-get update
-apt-get install -y caddy coturn nftables iproute2 openssl libssl-dev pkg-config
+apt-get install -y caddy coturn nftables iproute2 openssl libssl-dev pkg-config libsasl2-modules
 
 # `rime-auth`'s webauthn-rs (a REGULAR dependency of the auth feature, not test-only) pulls in
 # openssl-sys, and CT 122 ships only the runtime libssl3/libcrypto3 .so files — no headers, no

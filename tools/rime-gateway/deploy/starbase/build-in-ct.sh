@@ -90,7 +90,7 @@ fi
 
 deploy_src="$repo_root/tools/rime-gateway/deploy/starbase"
 cp "$deploy_src/"*.service "$deploy_src/"*.path "$deploy_src/Caddyfile" "$deploy_src/turnserver.conf" \
-   "$deploy_src/turn-egress.nft" "$stage/deploy/"
+   "$deploy_src/turn-egress.nft" "$deploy_src/coturn-rime.conf" "$stage/deploy/"
 install -m 755 "$deploy_src/media-routing.sh" "$deploy_src/sync-turn-cert.sh" "$stage/bin/"
 install -m 755 "$deploy_src/apply.sh" "$stage/apply.sh"
 install -m 755 "$deploy_src/prereqs.sh" "$stage/prereqs.sh"

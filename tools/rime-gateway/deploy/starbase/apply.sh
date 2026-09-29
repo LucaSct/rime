@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
 # Runs inside CT 122 as root (install.sh runs it straight from the stage dir build-in-ct.sh just
 # produced, as `dev`). Safe to run again.
 set -euo pipefail
@@ -67,6 +67,9 @@ fi
 # coturn configuration: substitute the real secret into the placeholder.
 install -m 640 -o root -g turnserver "$stage/deploy/turnserver.conf" /etc/coturn/turnserver.conf
 sed -i "s|__TURN_SECRET__|$(cat /etc/rime/turn-secret)|" /etc/coturn/turnserver.conf
+# Point the packaged coturn unit at that file; see coturn-rime.conf for why this is not optional.
+install -d -m 755 /etc/systemd/system/coturn.service.d
+install -m 644 "$stage/deploy/coturn-rime.conf" /etc/systemd/system/coturn.service.d/rime.conf
 
 # systemd units
 install -m 644 "$stage/deploy/"*.service "$stage/deploy/"*.path /etc/systemd/system/

@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Policy routing: replies from UDP source ports 50000-50002 leave via eth1/blackStar.
 set -euo pipefail
 
