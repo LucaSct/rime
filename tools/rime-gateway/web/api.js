@@ -74,7 +74,10 @@ export function getSession(id) {
 }
 
 export async function deleteSession(id) {
-  await call(`/api/sessions/${id}`, { method: "DELETE" });
+  // `keepalive` lets the request outlive the page: `leave()` runs from `pagehide`, and without it
+  // the browser cancels the fetch as the document unloads, leaving the slot held until the
+  // gateway notices the transport is gone.
+  await call(`/api/sessions/${id}`, { method: "DELETE", keepalive: true });
 }
 
 export async function getIceServers(id) {

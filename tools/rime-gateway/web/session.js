@@ -67,16 +67,24 @@ function preferAv1(transceiver) {
   transceiver.setCodecPreferences([...av1, ...rest]);
 }
 
+// Gathering is capped: an unreachable TURN server can keep a browser gathering for tens of
+// seconds before it gives up on that candidate. After the cap the offer goes out with whatever
+// candidates exist — the gateway is ICE-lite and only needs one that works.
+const ICE_GATHERING_CAP_MS = 5000;
+
 function waitForIceGatheringComplete(pc) {
   if (pc.iceGatheringState === "complete") {
     return Promise.resolve();
   }
   return new Promise((resolve) => {
+    const timer = setTimeout(done, ICE_GATHERING_CAP_MS);
     function onChange() {
-      if (pc.iceGatheringState === "complete") {
-        pc.removeEventListener("icegatheringstatechange", onChange);
-        resolve();
-      }
+      if (pc.iceGatheringState === "complete") done();
+    }
+    function done() {
+      clearTimeout(timer);
+      pc.removeEventListener("icegatheringstatechange", onChange);
+      resolve();
     }
     pc.addEventListener("icegatheringstatechange", onChange);
   });
@@ -155,8 +163,17 @@ export class SessionHandle {
     };
     this.videoEl.requestVideoFrameCallback(onFrame);
     this.stallTimer = setInterval(() => {
+      // A hidden tab stops video frame callbacks, which is not a stall — asking for keyframes
+      // there would make the encoder send its most expensive frame for nobody to see.
+      if (document.hidden) {
+        this.lastFrameAt = performance.now();
+        return;
+      }
       if (performance.now() - this.lastFrameAt > STALL_TIMEOUT_MS) {
         this.sendKeyframeRequest();
+        // Restart the stall window: one request per STALL_TIMEOUT_MS at most. Without this, a
+        // real stall would ask four times a second, and every answer is a full keyframe.
+        this.lastFrameAt = performance.now();
       }
     }, 500);
   }
@@ -315,6 +332,10 @@ export async function startSession(game, surface, videoEl, onStatus) {
   };
 
   const channel = pc.createDataChannel("input", { ordered: true });
+  // The spec's default `binaryType` is "blob" (Firefox follows it; Chrome defaults to
+  // "arraybuffer"). A Blob cannot be read synchronously, so without this every message from the
+  // gateway would decode as an empty envelope in Firefox and be dropped as malformed.
+  channel.binaryType = "arraybuffer";
   const handle = new SessionHandle(sessionId, pc, channel, videoEl, onStatus);
   channel.addEventListener("open", () => handle.onChannelOpen());
   channel.addEventListener("message", (event) => handle.onMessage(event));
