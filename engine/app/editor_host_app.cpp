@@ -833,23 +833,21 @@ int serve_viewport(std::string_view socket_path,
                     needs_render = true;
                     continue;
                 }
-                if (e.type == stream::MessageType::Input) {
-                    // m18 Track H. Handled HERE, beside Capabilities and above the EditorMessage
-                    // cast, for the reason the comment above gives: 0x0101 is a STREAM-band code,
-                    // and reinterpreting it as an editor message is a no-op that looks like
-                    // silence. Deliberately NOT frame-affecting: input moves the world through the
-                    // tick, and a Playing session is already rendering every iteration, so forcing
-                    // a render here would only defeat m10.0-perf's idle skip for a mouse moving
-                    // over a paused editor.
-                    stream::InputEvent ie;
-                    if (!ie.decode(e.payload)) {
+                // m18 Track H. Asked HERE, beside Capabilities and above the EditorMessage cast,
+                // for the reason the comment above gives: 0x0101 is a STREAM-band code, and
+                // reinterpreting it as an editor message is a no-op that looks like silence.
+                // Deliberately NOT frame-affecting: input moves the world through the tick, and a
+                // Playing session already renders every iteration, so forcing a render here would
+                // only defeat m10.0-perf's idle skip for a mouse moving over a paused editor.
+                const app::InputDispatch input_disp = app::dispatch_input_message(
+                    e.type, e.payload, input_translator, input_events);
+                if (input_disp != app::InputDispatch::NotInput) {
+                    if (input_disp == app::InputDispatch::Malformed) {
                         ++input_malformed;
                         RIME_WARN("editor-host: malformed Input payload ({} bytes) — {} so far",
                                   e.payload.size(),
                                   input_malformed);
-                        continue; // one bad message, not a dead session
                     }
-                    input_translator.translate(ie, input_events);
                     continue;
                 }
                 if (e.type == stream::MessageType::KeyframeRequest) {

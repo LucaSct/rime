@@ -165,4 +165,21 @@ void StreamInputTranslator::release_all(std::vector<platform::Event>& out) {
     }
 }
 
+InputDispatch dispatch_input_message(stream::MessageType type,
+                                     std::span<const std::byte> payload,
+                                     StreamInputTranslator& translator,
+                                     std::vector<platform::Event>& out) {
+    if (type != stream::MessageType::Input) {
+        return InputDispatch::NotInput;
+    }
+    stream::InputEvent event;
+    if (!event.decode(payload)) {
+        // One bad message, not a dead session: the sender is a browser on the public internet and
+        // a truncated DataChannel message must cost a counter, not the stream.
+        return InputDispatch::Malformed;
+    }
+    translator.translate(event, out);
+    return InputDispatch::Applied;
+}
+
 } // namespace rime::app

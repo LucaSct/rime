@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "rime/platform/event.hpp"
@@ -98,5 +99,29 @@ private:
     std::uint64_t unknown_usages_ = 0;
     std::uint64_t unknown_buttons_ = 0;
 };
+
+// What `dispatch_input_message` did with a drained message.
+enum class InputDispatch : std::uint8_t {
+    NotInput,  // some other message type; the caller's own handling still owns it
+    Applied,   // decoded and translated; `out` grew by 0..n events
+    Malformed, // an `Input` whose payload did not decode — count it and carry on
+};
+
+// The editor host's `Input` handling, as a function.
+//
+// It lives here rather than inline in the drain loop for one reason: the drain loop needs a GPU, a
+// socket and a live client, so a branch inside it is unprovable, and "the host handles `Input`" is
+// exactly the claim m18 needs to be able to break on purpose. Pulling it out makes the claim a
+// three-line call at the call site and a testable function here.
+//
+// Returns `NotInput` for anything that is not `MessageType::Input`, so the caller's `if` reads the
+// same way the `Capabilities` and `KeyframeRequest` branches beside it do — and, crucially, this
+// must be asked BEFORE an editor host casts the type to an `EditorMessage`: `Input` is 0x0101, a
+// STREAM-band code, and reinterpreting it as an editor message is a silent no-op that looks
+// exactly like a client saying nothing.
+[[nodiscard]] InputDispatch dispatch_input_message(stream::MessageType type,
+                                                   std::span<const std::byte> payload,
+                                                   StreamInputTranslator& translator,
+                                                   std::vector<platform::Event>& out);
 
 } // namespace rime::app
