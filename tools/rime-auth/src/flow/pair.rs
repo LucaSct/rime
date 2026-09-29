@@ -73,13 +73,22 @@ const PURPOSE_PAIR: &str = "pair";
 const USER_AGENT_MAX: usize = 64;
 
 /// What the desktop is handed when it opens a pairing.
-#[derive(Debug)]
 pub struct PairingStarted {
     /// The pairing id. 128 random bits, and a capability — it goes into the QR code's URL fragment
     /// and nowhere else.
     pub id: String,
     /// Seconds until the pairing is dead, for the desktop's countdown.
     pub expires_in: u64,
+}
+
+// A derived Debug would print the id, and an id is a capability: a trace of this value is a leak.
+impl fmt::Debug for PairingStarted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PairingStarted")
+            .field("id", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// What the phone may see before it approves anything: the desktop's own description of itself,
