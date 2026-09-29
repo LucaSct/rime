@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=Sync Caddy's turn.rime.peekstar.eu certificate into coturn
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/rime/bin/sync-turn-cert.sh
+User=root

@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+{
+    servers :443 {
+        listener_wrappers {
+            proxy_protocol {
+                allow 10.77.0.1/32
+            }
+            tls
+        }
+    }
+    servers :80 {
+        listener_wrappers {
+            proxy_protocol {
+                allow 10.77.0.1/32
+            }
+        }
+    }
+}
+
+http://rime.peekstar.eu, http://turn.rime.peekstar.eu {
+    # Caddy's tls app intercepts /.well-known/acme-challenge/ automatically.
+    # This site exists only so the :80 server inherits the PROXY v2 wrapper above.
+    log
+}
+
+rime.peekstar.eu {
+    root * /opt/rime/web
+    file_server
+
+    reverse_proxy /api/* 127.0.0.1:8787 {
+        header_up X-Forwarded-For {remote_host}
+    }
+
+    header {
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self';"
+        Referrer-Policy "no-referrer"
+        X-Content-Type-Options "nosniff"
+        Strict-Transport-Security "max-age=63072000; includeSubDomains"
+    }
+}
+
+turn.rime.peekstar.eu {
+    # Certificate only: Caddy obtains/renews it; sync-turn-cert copies it to coturn.
+    tls
+}

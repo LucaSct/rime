@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=Rime TURN PROXY v2 header stripper for coturn
+After=network.target
+
+[Service]
+Type=simple
+User=rime
+Group=rime
+ExecStart=/opt/rime/bin/rime-turn-proxy --listen 10.77.0.22:5349 --trust 10.77.0.1 --upstream 127.0.0.1:5350
+Restart=on-failure
+
+# Hardening
+# service never needs setuid/setgid helpers
+NoNewPrivileges=true
+# /usr, /boot, /etc are read-only
+ProtectSystem=strict
+# no access to /home directories
+ProtectHome=true
+# isolated /tmp so secrets do not leak
+PrivateTmp=true
+# only TCP/UDP/Unix sockets
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# runtime files, if any
+ReadWritePaths=/run/rime
+
+[Install]
+WantedBy=multi-user.target

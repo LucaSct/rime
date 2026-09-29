@@ -1,0 +1,18 @@
+#!/usr/sbin/nft -f
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Rime Engine Authors.
+#
+# coturn may relay only to the gateway's media ports. coturn's allowed-peer-ip can name an address but
+# not a port, so without this a TURN client could reach ANY UDP service on 10.77.0.22 through the relay
+# — and that traffic is local to this container, so the PVE firewall in front of it never sees it.
+# Matched on coturn's user rather than on its relay ports, so it holds whatever ports coturn picks.
+table inet rime_turn_egress
+delete table inet rime_turn_egress
+table inet rime_turn_egress {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		meta skuid "turnserver" ip daddr 10.77.0.22 udp dport 50000-50002 accept
+		meta skuid "turnserver" ip daddr 10.77.0.22 counter drop
+		meta skuid "turnserver" ip6 daddr ::/0 meta l4proto { tcp, udp } counter drop
+	}
+}

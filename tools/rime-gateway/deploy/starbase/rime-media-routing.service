@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=Rime media ingress policy routing
+Before=rime-gateway.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/rime/bin/media-routing.sh
+
+[Install]
+WantedBy=multi-user.target
