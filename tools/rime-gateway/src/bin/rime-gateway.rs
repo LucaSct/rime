@@ -23,7 +23,7 @@ use rime_gateway::AuthApi;
 use rime_gateway::{AccessPolicy, AdmissionPolicy, Catalogue, ProcessLauncher};
 
 #[cfg(unix)]
-const HELP: &str = "Usage: rime-gateway --catalogue <path> [--bind <addr:port>] [--socket-dir <path>] [--open] [--max-sessions <n>] [--max-play <n>]\n\
+const HELP: &str = "Usage: rime-gateway --catalogue <path> [--bind <addr:port>] [--socket-dir <path>] [--open] [--max-sessions <n>] [--max-play <n>] [--trust-forwarded-from-loopback]\n\
 With auth: --store <path> --rp-id <id> --rp-origin <url> --rp-name <name> --mail-relay <host:port> --mail-from <address>";
 
 #[cfg(unix)]
@@ -43,6 +43,7 @@ fn run() -> Result<(), (i32, String)> {
     let mut catalogue = None;
     let mut socket_dir = std::env::temp_dir();
     let mut access = AccessPolicy::default();
+    let mut trust_forwarded_from_loopback = false;
     // The measured starbase tier; `AdmissionPolicy::default` carries the evidence for its numbers.
     let mut admission = AdmissionPolicy::default();
     #[cfg(feature = "auth")]
@@ -55,7 +56,7 @@ fn run() -> Result<(), (i32, String)> {
             return Ok(());
         }
         let needs_value = match flag.as_str() {
-            "--open" => false,
+            "--open" | "--trust-forwarded-from-loopback" => false,
             "--bind" | "--catalogue" | "--socket-dir" | "--max-sessions" | "--max-play" => true,
             #[cfg(feature = "auth")]
             "--store" | "--rp-id" | "--rp-origin" | "--rp-name" | "--mail-relay"
@@ -77,6 +78,7 @@ fn run() -> Result<(), (i32, String)> {
             "--catalogue" => catalogue = arg.map(PathBuf::from),
             "--socket-dir" => socket_dir = PathBuf::from(arg.unwrap()),
             "--open" => access.require_account = false,
+            "--trust-forwarded-from-loopback" => trust_forwarded_from_loopback = true,
             "--max-sessions" => {
                 admission.max_sessions = arg
                     .unwrap()
@@ -134,6 +136,7 @@ fn run() -> Result<(), (i32, String)> {
         catalogue,
         admission,
         access,
+        trust_forwarded_from_loopback,
     };
     let server = Server::new(config, launcher);
     #[cfg(feature = "auth")]

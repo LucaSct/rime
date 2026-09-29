@@ -20,7 +20,7 @@
 //! before every read, so the total is bounded no matter how the bytes are paced.
 
 use std::io::{self, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,6 +38,19 @@ pub struct ServerConfig {
     pub catalogue: Catalogue,
     pub admission: AdmissionPolicy,
     pub access: AccessPolicy,
+    /// Trust `X-Forwarded-For` for the client's address, but only on a request whose TCP peer is
+    /// loopback — see [`Server::client_address`] for why that combination, and nothing weaker, is safe.
+    pub trust_forwarded_from_loopback: bool,
+}
+
+/// Counters `respond` updates directly, for an operator to watch outside of any one request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerCounters {
+    /// `--trust-forwarded-from-loopback` was set, the peer was loopback, and `X-Forwarded-For` was
+    /// missing or unparseable, so the request was answered `400` rather than guess. A climb here means
+    /// Caddy's `header_up X-Forwarded-For` line is missing or the reverse proxy changed, not that a
+    /// visitor is doing anything — a visitor cannot reach this gateway directly to trigger it.
+    pub forwarded_rejected: u64,
 }
 
 /// How long connections may take, and how many may be open at once.
@@ -67,6 +80,8 @@ pub struct Server<L: Launcher> {
     bind: SocketAddr,
     limits: ConnectionLimits,
     sessions: SessionApi<L>,
+    trust_forwarded_from_loopback: bool,
+    counters: ServerCounters,
     #[cfg(feature = "auth")]
     accounts: Option<AuthApi>,
 }
@@ -78,14 +93,23 @@ impl<L: Launcher> Server<L> {
             catalogue,
             admission,
             access,
+            trust_forwarded_from_loopback,
         } = config;
         Self {
             bind,
             limits: ConnectionLimits::default(),
             sessions: SessionApi::new(catalogue, admission, launcher).with_access(access),
+            trust_forwarded_from_loopback,
+            counters: ServerCounters::default(),
             #[cfg(feature = "auth")]
             accounts: None,
         }
+    }
+
+    /// Counters this server has updated directly (not those of the routers it holds).
+    #[must_use]
+    pub fn counters(&self) -> ServerCounters {
+        self.counters
     }
 
     #[cfg(feature = "auth")]
@@ -101,16 +125,16 @@ impl<L: Launcher> Server<L> {
         self
     }
 
-    /// Read and answer one request on an already accepted connection. `client` is the peer's IP
-    /// address, which the account router uses as its rate-limit key.
+    /// Read and answer one request on an already accepted connection. `peer` is the TCP peer's own
+    /// address — see [`Server::client_address`] for how (and when) that differs from the visitor's.
     pub fn serve_one<S: Read + Write>(
         &mut self,
         stream: &mut S,
-        client: &str,
+        peer: &str,
         now: u64,
     ) -> io::Result<()> {
         let request = http::read_request(&mut BufReader::new(&mut *stream));
-        match self.respond(request, client, now) {
+        match self.respond(request, peer, now) {
             Some(response) => response.write_to(stream),
             None => Ok(()),
         }
@@ -121,13 +145,18 @@ impl<L: Launcher> Server<L> {
     fn respond(
         &mut self,
         request: Result<Request, ParseError>,
-        client: &str,
+        peer: &str,
         now: u64,
     ) -> Option<Response> {
         let request = match request {
             Ok(request) => request,
             Err(ParseError::NoRequest) => return None,
             Err(error) => return Some(self.sessions.reject(&error)),
+        };
+
+        let client = match self.client_address(peer, &request) {
+            Ok(client) => client,
+            Err(rejection) => return Some(rejection),
         };
 
         #[cfg(feature = "auth")]
@@ -145,12 +174,57 @@ impl<L: Launcher> Server<L> {
         }
         #[cfg(feature = "auth")]
         if let Some(accounts) = self.accounts.as_mut() {
-            return Some(accounts.route(&request, client, now));
+            return Some(accounts.route(&request, &client, now));
         }
         #[cfg(not(feature = "auth"))]
         let _ = (client, now);
         // The route exists; this deployment has no account service. 404 would claim otherwise.
         Some(Response::error(503, "accounts are not configured"))
+    }
+
+    /// Derive the request's client address: the TCP `peer`, unless the operator has enabled
+    /// `--trust-forwarded-from-loopback` *and* `peer` is loopback — the combination that means "this
+    /// connection is Caddy" (`deploy/starbase/Caddyfile`'s `header_up X-Forwarded-For {remote_host}`,
+    /// reached only via the PROXY v2 wrapper it trusts from blackStar alone). Only then is
+    /// `X-Forwarded-For` Caddy's own write rather than something a visitor could forge: a visitor
+    /// cannot reach this gateway directly (it binds loopback), so a non-loopback peer sending the
+    /// header is presumed hostile and simply ignored — trusting it would let anyone pick their own
+    /// rate-limit bucket (`limits.rs`) and defeat the whole point of keying on the client at all.
+    ///
+    /// The **last** comma-separated entry is used, never the first: every entry before Caddy's own is
+    /// something the visitor supplied and cannot be trusted. The result is re-rendered through
+    /// `IpAddr`'s own `Display`, with an IPv4-mapped `::ffff:a.b.c.d` folded to plain `a.b.c.d` first,
+    /// so the two spellings of the same address cannot mint two rate-limit buckets.
+    ///
+    /// Missing or unparseable when trust applies is answered `400` rather than falling back to `peer`:
+    /// every visitor is `peer` (Caddy) in that case, which is the exact collapse this exists to end.
+    fn client_address(&mut self, peer: &str, request: &Request) -> Result<String, Response> {
+        let peer_is_loopback = peer.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        if !self.trust_forwarded_from_loopback || !peer_is_loopback {
+            return Ok(peer.to_string());
+        }
+        let forwarded = request
+            .header("x-forwarded-for")
+            .and_then(|value| value.rsplit(',').next())
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .and_then(|entry| entry.parse::<IpAddr>().ok());
+        match forwarded {
+            Some(ip) => Ok(canonical(ip).to_string()),
+            None => {
+                self.counters.forwarded_rejected += 1;
+                Err(Response::error(400, "missing or invalid X-Forwarded-For"))
+            }
+        }
+    }
+}
+
+/// Fold an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to the plain IPv4 spelling, so both forms of
+/// the same address key the same rate-limit bucket.
+fn canonical(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        v4 => v4,
     }
 }
 
@@ -189,11 +263,13 @@ where
                     continue;
                 }
             };
-            // The key is the IP alone. The ephemeral port changes on every connection, so a key that
-            // included it would give every request a fresh bucket and make the limiter a no-op.
-            // (Behind a TLS terminator on this host the peer is the terminator; the client's own
-            // address then has to arrive from it — see the TLS brick.)
-            let client = match stream.peer_addr() {
+            // This is the RAW TCP peer, always — the port is dropped (it changes on every connection,
+            // so keying on it would give every request a fresh bucket and make the limiter a no-op),
+            // but nothing here yet asks who the *visitor* is. Behind Caddy in this container that peer
+            // is Caddy itself, on loopback; `Server::respond` (via `client_address`) is where the real
+            // visitor address is recovered from `X-Forwarded-For`, and only when this peer is loopback
+            // and the operator opted in — see that method for the reasoning.
+            let peer = match stream.peer_addr() {
                 Ok(peer) => peer.ip().to_string(),
                 // The peer reset between accept and here. Nothing to answer, nobody to answer.
                 Err(_) => continue,
@@ -209,8 +285,8 @@ where
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
                 let _guard = guard;
-                if let Err(error) = serve_connection(&shared, stream, &client, limits) {
-                    eprintln!("rime-gateway: connection from {client} failed: {error}");
+                if let Err(error) = serve_connection(&shared, stream, &peer, limits) {
+                    eprintln!("rime-gateway: connection from {peer} failed: {error}");
                 }
             });
         }
@@ -222,7 +298,7 @@ where
 fn serve_connection<L: Launcher>(
     shared: &Mutex<Server<L>>,
     stream: TcpStream,
-    client: &str,
+    peer: &str,
     limits: ConnectionLimits,
 ) -> io::Result<()> {
     let request = http::read_request(&mut BufReader::new(Deadline {
@@ -235,7 +311,7 @@ fn serve_connection<L: Launcher>(
         .map_err(io::Error::other)?
         .as_secs();
     let response = match shared.lock() {
-        Ok(mut server) => server.respond(request, client, now),
+        Ok(mut server) => server.respond(request, peer, now),
         Err(_) => Some(Response::error(500, "gateway is stopping")),
     };
     match response {
@@ -454,6 +530,10 @@ mod tests {
     }
 
     fn server(bind: &str) -> Server<FakeLauncher> {
+        server_with(bind, false)
+    }
+
+    fn server_with(bind: &str, trust_forwarded_from_loopback: bool) -> Server<FakeLauncher> {
         Server::new(
             ServerConfig {
                 bind: bind.parse().unwrap(),
@@ -466,13 +546,14 @@ mod tests {
                 access: AccessPolicy {
                     require_account: false,
                 },
+                trust_forwarded_from_loopback,
             },
             FakeLauncher,
         )
     }
 
     #[cfg(feature = "auth")]
-    fn accounts() -> AuthApi {
+    fn accounts_with_limits(limits: crate::auth_api::LimitPolicy) -> AuthApi {
         use rime_auth::ceremony::CeremonyConfig;
         use rime_auth::flow::Auth;
         use rime_auth::mail::CapturingMailer;
@@ -495,7 +576,12 @@ mod tests {
             Box::new(CapturingMailer::default()),
         )
         .unwrap();
-        AuthApi::new(auth)
+        AuthApi::with_limits(auth, limits)
+    }
+
+    #[cfg(feature = "auth")]
+    fn accounts() -> AuthApi {
+        accounts_with_limits(crate::auth_api::LimitPolicy::default())
     }
 
     #[cfg(feature = "auth")]
@@ -530,6 +616,100 @@ mod tests {
         let mut pipe = Pipe::new("");
         server.serve_one(&mut pipe, "10.0.0.1", 100).unwrap();
         assert!(pipe.outbound.is_empty());
+    }
+
+    /// Parse a raw request the way a connection would hand one to `Server::respond`, without going
+    /// through a `Pipe` — these tests are about `client_address` alone.
+    fn parsed(raw: &str) -> Request {
+        http::read_request(&mut BufReader::new(Cursor::new(raw.as_bytes()))).unwrap()
+    }
+
+    #[test]
+    fn forwarded_for_is_ignored_without_the_flag() {
+        let mut server = server("127.0.0.1:0");
+        let request = parsed("GET /api/catalogue HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n");
+        assert_eq!(
+            server.client_address("127.0.0.1", &request).unwrap(),
+            "127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn forwarded_for_is_ignored_from_a_non_loopback_peer() {
+        let mut server = server_with("127.0.0.1:0", true);
+        let request = parsed("GET /api/catalogue HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n");
+        assert_eq!(
+            server.client_address("203.0.113.5", &request).unwrap(),
+            "203.0.113.5"
+        );
+    }
+
+    #[test]
+    fn the_last_forwarded_entry_is_the_client() {
+        let mut server = server_with("127.0.0.1:0", true);
+        let request = parsed(
+            "GET /api/catalogue HTTP/1.1\r\nX-Forwarded-For: 203.0.113.5, 10.77.0.1, 9.9.9.9\r\n\r\n",
+        );
+        assert_eq!(
+            server.client_address("127.0.0.1", &request).unwrap(),
+            "9.9.9.9"
+        );
+    }
+
+    #[test]
+    fn a_loopback_request_without_forwarded_for_is_400() {
+        let mut server = server_with("127.0.0.1:0", true);
+        let request = parsed("GET /api/catalogue HTTP/1.1\r\n\r\n");
+        let response = server.client_address("127.0.0.1", &request).unwrap_err();
+        assert_eq!(response.status, 400);
+        assert_eq!(server.counters().forwarded_rejected, 1);
+    }
+
+    /// The property this brick exists for: two visitors sharing one Caddy peer must not share one
+    /// rate-limit bucket. A tight per-client budget (one request per window) makes "exhausted" mean
+    /// something observable in a handful of requests rather than twenty.
+    #[cfg(feature = "auth")]
+    #[test]
+    fn two_visitors_behind_caddy_get_separate_limits() {
+        use crate::auth_api::LimitPolicy;
+        use crate::limits::Rate;
+
+        let accounts = accounts_with_limits(LimitPolicy {
+            per_client: Rate::new(1, 60),
+            global: Rate::new(100, 60),
+        });
+        let mut server = server_with("127.0.0.1:0", true).with_accounts(accounts);
+        let request = |xff: &str| {
+            format!(
+                "POST /api/auth/register HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Forwarded-For: {xff}\r\n\r\n{{}}"
+            )
+        };
+
+        let mut first = Pipe::new(&request("1.1.1.1"));
+        server.serve_one(&mut first, "127.0.0.1", 100).unwrap();
+        assert!(
+            !first.output().starts_with("HTTP/1.1 429 "),
+            "{}",
+            first.output()
+        );
+
+        // The same visitor again, in the same window: its one token is already spent.
+        let mut spent = Pipe::new(&request("1.1.1.1"));
+        server.serve_one(&mut spent, "127.0.0.1", 100).unwrap();
+        assert!(
+            spent.output().starts_with("HTTP/1.1 429 "),
+            "{}",
+            spent.output()
+        );
+
+        // A different visitor behind the same Caddy peer must not be caught by the first one's limit.
+        let mut second = Pipe::new(&request("2.2.2.2"));
+        server.serve_one(&mut second, "127.0.0.1", 100).unwrap();
+        assert!(
+            !second.output().starts_with("HTTP/1.1 429 "),
+            "{}",
+            second.output()
+        );
     }
 
     #[test]
