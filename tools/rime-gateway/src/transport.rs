@@ -191,7 +191,15 @@ pub struct TransportCounters {
 /// for the same reason — a resource whose release is asynchronous is a resource that leaks under load.
 pub struct Str0mTransport {
     commands: SyncSender<Command>,
-    events: Receiver<Event>,
+    /// **Behind a `Mutex` so the whole transport is `Sync`**, which is what lets the relay share one
+    /// `Arc<dyn MediaTransport>` between its reader and writer threads instead of wrapping the
+    /// transport in a lock of its own. `SyncSender` is already `Sync`; `Receiver` is not, and it is
+    /// the only field that was not. Wrapping *this* field rather than the whole object is the point:
+    /// a lock around everything would put the 50 ms event poll in front of every video frame the
+    /// other thread submits, which at 60 fps is the difference between a stream and a stutter.
+    ///
+    /// Uncontended in practice — one thread polls events — so the lock costs an atomic per poll.
+    events: std::sync::Mutex<Receiver<Event>>,
     /// Where to send a wakeup datagram, and the magic that identifies one.
     waker: Arc<Waker>,
     thread: Option<JoinHandle<TransportCounters>>,
@@ -334,7 +342,7 @@ impl Str0mTransport {
         Ok((
             Self {
                 commands: cmd_tx,
-                events: ev_rx,
+                events: std::sync::Mutex::new(ev_rx),
                 waker,
                 thread: Some(thread),
                 local_addr,
@@ -369,7 +377,14 @@ impl Str0mTransport {
     /// non-blocking queue in a loop burns a core on an idle session, and "poll faster" is not a
     /// design. A caller that wants no blocking passes `Duration::ZERO`.
     pub fn poll_event(&self, timeout: Duration) -> Option<Event> {
-        match self.events.recv_timeout(timeout) {
+        // A poisoned lock means a previous poller panicked while holding it. The receiver itself is
+        // not corrupted by that — there is no invariant to break — so recovering is right and
+        // propagating the panic to whichever thread polls next is not.
+        let events = self
+            .events
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match events.recv_timeout(timeout) {
             Ok(event) => Some(event),
             Err(RecvTimeoutError::Timeout) => None,
             // The thread ended. Report it as the terminal event rather than as nothing, so a caller
@@ -795,8 +810,8 @@ fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use str0m::change::SdpAnswer;
-    use str0m::media::{Direction, KeyframeRequestKind, MediaKind};
+    use crate::test_peer::{av1_test_keyframe, TestPeer};
+    use str0m::media::{Direction, MediaKind};
 
     #[test]
     fn the_unspecified_address_is_refused_for_the_media_socket_too() {
@@ -815,154 +830,6 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let err = Str0mTransport::accept_offer("this is not sdp", addr).unwrap_err();
         assert!(matches!(err, TransportError::BadOffer(_)), "{err}");
-    }
-
-    /// A conformant peer, built from `str0m` directly.
-    ///
-    /// Deliberately NOT a second `Str0mTransport`: a test where both ends are the code under test can
-    /// pass on a shared misreading of the protocol. Driving a raw `Rtc` as the client means the loop
-    /// under test is talking to the library's own state machine, on real loopback sockets, through a
-    /// real ICE/DTLS/SCTP handshake.
-    ///
-    /// It cannot prove BROWSER interop — nothing without a browser can — and that limit is stated
-    /// rather than implied.
-    struct TestPeer {
-        rtc: Rtc,
-        socket: UdpSocket,
-        channel: Option<ChannelId>,
-        received: Vec<Vec<u8>>,
-        video_mid: Option<Mid>,
-        received_video: Vec<Vec<u8>>,
-        connected: bool,
-    }
-
-    impl TestPeer {
-        fn new() -> (Self, String) {
-            Self::new_with_video(false)
-        }
-
-        fn new_with_video(video: bool) -> (Self, String) {
-            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-            let local = socket.local_addr().unwrap();
-            let mut rtc = Rtc::builder()
-                .clear_codecs()
-                .enable_av1(true)
-                .build(Instant::now());
-            rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
-            let mut api = rtc.sdp_api();
-            api.add_channel("input".to_string());
-            let video_mid = if video {
-                // The browser receives video while the same offer opens its input DataChannel.
-                Some(api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None))
-            } else {
-                None
-            };
-            let (offer, pending) = api.apply().expect("a channel is a change");
-            let sdp = offer.to_sdp_string();
-            // The pending offer has to outlive this function, so it is stashed on the struct via a
-            // field-less trick: `accept_answer` consumes it, so we keep it in an Option.
-            let peer = Self {
-                rtc,
-                socket,
-                channel: None,
-                received: Vec::new(),
-                video_mid,
-                received_video: Vec::new(),
-                connected: false,
-            };
-            PENDING.with(|p| *p.borrow_mut() = Some(pending));
-            (peer, sdp)
-        }
-
-        fn accept_answer(&mut self, answer_sdp: &str) {
-            let answer = SdpAnswer::from_sdp_string(answer_sdp).unwrap();
-            let pending = PENDING
-                .with(|p| p.borrow_mut().take())
-                .expect("offer pending");
-            self.rtc.sdp_api().accept_answer(pending, answer).unwrap();
-        }
-
-        /// Drive the peer for up to `budget`, returning when `done` says so or the time runs out.
-        fn pump(&mut self, budget: Duration, mut done: impl FnMut(&Self) -> bool) -> bool {
-            let deadline = Instant::now() + budget;
-            let mut buf = vec![0u8; RECV_BUFFER];
-            while Instant::now() < deadline {
-                if done(self) {
-                    return true;
-                }
-                let timeout = loop {
-                    match self.rtc.poll_output().unwrap() {
-                        Output::Timeout(t) => break t,
-                        Output::Transmit(t) => {
-                            let _ = self.socket.send_to(&t.contents, t.destination);
-                        }
-                        Output::Event(e) => match e {
-                            RtcEvent::ChannelOpen(id, _) => {
-                                self.channel = Some(id);
-                                self.connected = true;
-                            }
-                            RtcEvent::ChannelData(d) => self.received.push(d.data),
-                            RtcEvent::MediaAdded(added) => self.video_mid = Some(added.mid),
-                            RtcEvent::MediaData(d) => self.received_video.push(d.data.to_vec()),
-                            _ => {}
-                        },
-                    }
-                };
-                let wait = timeout
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(10))
-                    .max(Duration::from_millis(1));
-                self.socket.set_read_timeout(Some(wait)).unwrap();
-                let now = Instant::now();
-                match self.socket.recv_from(&mut buf) {
-                    Ok((n, source)) => {
-                        let dest = self.socket.local_addr().unwrap();
-                        if let Ok(r) = Receive::new(Protocol::Udp, source, dest, &buf[..n]) {
-                            let _ = self.rtc.handle_input(Input::Receive(now, r));
-                        }
-                    }
-                    Err(_) => {
-                        let _ = self.rtc.handle_input(Input::Timeout(now));
-                    }
-                }
-            }
-            done(self)
-        }
-
-        fn send(&mut self, payload: &[u8]) -> bool {
-            match self.channel.and_then(|id| self.rtc.channel(id)) {
-                Some(mut ch) => ch.write(true, payload).is_ok(),
-                None => false,
-            }
-        }
-
-        fn request_pli(&mut self) {
-            self.rtc
-                .writer(self.video_mid.expect("negotiated video mid"))
-                .unwrap()
-                .request_keyframe(None, KeyframeRequestKind::Pli)
-                .unwrap();
-        }
-    }
-
-    thread_local! {
-        static PENDING: std::cell::RefCell<Option<str0m::change::SdpPendingOffer>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    /// 0x12 is a temporal delimiter with its size bit set; 0x00 is its zero length. 0x0a is a
-    /// sequence-header OBU with size bit, 0x02 is its length, and 0x01/0x02 are known contents.
-    /// 0x32 is a frame OBU with size bit, 0x03 is its length, and A1/B2/C3 are known contents.
-    /// A minimal AV1 temporal unit in the low-overhead format (`obu_has_size_field = 1`), which is
-    /// what an encoder hands over. The packetizer reads OBU *headers* only, so payloads are markers:
-    ///
-    /// - `0x12 0x00` — temporal delimiter: header `0b0_0010_0_1_0` (type 2, has_size), size 0;
-    /// - `0x0a 0x02 0x01 0x02` — sequence header: type 1, has_size, size 2, two marker bytes;
-    /// - `0x32 0x03 0xa1 0xb2 0xc3` — frame OBU: type 6, has_size, size 3, three marker bytes.
-    fn av1_test_keyframe() -> Vec<u8> {
-        vec![
-            0x12, 0x00, 0x0a, 0x02, 0x01, 0x02, 0x32, 0x03, 0xa1, 0xb2, 0xc3,
-        ]
     }
 
     #[test]
