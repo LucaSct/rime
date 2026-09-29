@@ -57,6 +57,10 @@ pub mod api;
 #[cfg(all(unix, feature = "auth"))]
 pub mod auth_api;
 pub mod http;
+// Unix-only for the same reason `supervisor` is: it relays a Unix-domain socket, and its whole
+// teardown discipline is `shutdown(2)` on one.
+#[cfg(unix)]
+pub mod relay;
 #[cfg(unix)]
 pub mod serve;
 // Portable: a principal is a number and a cookie is a string, so every CI platform tests the
@@ -68,6 +72,10 @@ pub mod limits;
 pub mod media;
 // Portable: a byte parser over `Read`, so every CI platform tests the header bounds.
 pub mod proxy_v2;
+/// A conformant `str0m` peer, shared by the transport and relay tests. Lives here rather than inside
+/// either test module because both need it and a test peer duplicated is a test peer that drifts.
+#[cfg(test)]
+pub(crate) mod test_peer;
 // Portable: str0m is sans-IO and UdpSocket is std, so all three CI platforms exercise the run loop.
 pub mod transport;
 // Portable: HMAC over a caller-supplied clock and a secret file.
@@ -75,12 +83,18 @@ pub mod turn;
 
 #[cfg(unix)]
 pub use api::{
-    serve_connection, ApiCounters, Catalogue, CatalogueEntry, Launcher, ProcessLauncher, SessionApi,
+    serve_connection, ApiCounters, Catalogue, CatalogueEntry, Launcher, MediaConfig,
+    ProcessLauncher, SessionApi,
 };
 #[cfg(all(unix, feature = "auth"))]
 pub use auth_api::{AuthApi, AuthApiCounters, CEREMONY_COOKIE};
 pub use identity::{cookie, AccessPolicy, AccountRef, Principal, SESSION_COOKIE};
 pub use limits::{Decision, Limiter, Rate};
+#[cfg(unix)]
+pub use relay::{
+    IceProvider, MediaSession, MediaTransport, Relay, RelayConfig, RelayCounters, RelayReport,
+    StopReason, Str0mFactory, TransportFactory, TurnIceProvider,
+};
 
 /// Which surface a session was created for. Assigned by the gateway when it admits the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +197,13 @@ impl<S: Read + Write> Session<S> {
         }
     }
 
+    /// Borrow the underlying transport — enough to set a socket timeout or shut a socket down,
+    /// which is what the relay's teardown needs and what a `&mut self` method could not give it
+    /// while another thread holds the other half.
+    pub fn get_ref(&self) -> &S {
+        self.connection.get_ref()
+    }
+
     /// Send a message, refusing one this surface does not carry.
     ///
     /// A refusal here is the gateway catching *itself*: nothing a client sent reaches this path, so
@@ -195,6 +216,32 @@ impl<S: Read + Write> Session<S> {
         }
         self.connection.send(ty, payload)?;
         Ok(true)
+    }
+}
+
+/// Two views of one engine socket, for the relay's two threads.
+///
+/// **Why a clone of the socket and not a shared, locked `Session`.** The relay reads with a blocking
+/// `recv` that has no timeout — `Connection::recv` is two `read_exact`s and cannot survive a timeout
+/// landing between them — so a lock held across that read would be held for as long as the engine
+/// stays quiet, and the write side would never get it. A socket is already safe to use from one
+/// reader and one writer at once (the C++ side and TCP itself both rely on it;
+/// `rime_protocol::Connection` says so), so the split belongs to the *transport*, not to a mutex.
+///
+/// **No second handshake.** The version header was exchanged once, by the supervisor, on this same
+/// socket; sending another would be six bytes of garbage in the middle of the stream. So the clone
+/// adopts a connection that is already up.
+///
+/// **The counters start at zero**, and the relay adds the two halves together at teardown. The
+/// alternative — copying the original's counters — would count everything it forwarded twice.
+#[cfg(unix)]
+impl Session<std::os::unix::net::UnixStream> {
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self {
+            connection: Connection::new(self.connection.get_ref().try_clone()?),
+            surface: self.surface,
+            counters: SessionCounters::default(),
+        })
     }
 }
 
