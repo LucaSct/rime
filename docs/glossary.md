@@ -648,6 +648,14 @@ See also **Determinism / replication** under *Physics & destruction*.
 - **Lag compensation.** Server-side rewinding of the world to what a shooter *saw* when they fired,
   so hits land despite latency. Named and deferred in M11.
 
+- **Passkey.** A WebAuthn credential: a key pair whose private half never leaves the authenticator
+  (a phone, a laptop's secure element, a security key). Signing in means the authenticator signs a
+  fresh server challenge, and the browser binds that signature to the site's origin, which is what
+  makes a passkey resistant to phishing. Rime's accounts authenticate with passkeys only (ADR-0048).
+- **Pairing (sign-in).** Rime's way to sign in a browser that cannot use a passkey itself: it shows a
+  QR code, a phone that holds the passkey approves it and displays a short code, and typing that code
+  into the browser gives it an ordinary session — a session, never a credential (ADR-0055).
+
 ## Performance & threading
 
 - **Job system / task scheduler.** Splits work into many small *jobs* spread across CPU

@@ -158,3 +158,39 @@ export function recoverPasskey(tx, credentialJson) {
 export async function logout() {
   await postJson("/api/auth/logout", {});
 }
+
+// ── Signing in with your phone (/api/auth/pair/..., ADR-0055; the views are pair.js) ──────────
+
+export function pairBegin() {
+  return postJson("/api/auth/pair", {});
+}
+
+export function pairDescribe(id) {
+  return postJson(`/api/auth/pair/${id}/describe`, {});
+}
+
+export function pairOptions(id, email) {
+  return postJson(`/api/auth/pair/${id}/options`, { email });
+}
+
+/** Same shape as `loginFinish`: the challenge in the path, the signed assertion as the whole body. */
+export function pairApprove(id, challenge, credentialJson) {
+  return callJson(`/api/auth/pair/${id}/approve/${challenge}`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: credentialJson,
+  });
+}
+
+export function pairStatus(id) {
+  return postJson(`/api/auth/pair/${id}/status`, {});
+}
+
+export function pairRedeem(id, code) {
+  return postJson(`/api/auth/pair/${id}/redeem`, { code });
+}
+
+/** `decision` is "accept" (mint the session) or "refuse" (kill the pairing). */
+export function pairFinish(id, decision) {
+  return postJson(`/api/auth/pair/${id}/finish`, { decision });
+}

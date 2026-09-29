@@ -317,6 +317,22 @@ impl Ceremonies {
         browser_binding: &str,
         now: Timestamp,
     ) -> Result<Started, CeremonyError> {
+        let ttl = self.ttl;
+        self.start_authentication_within(account, credential_blobs, browser_binding, now, ttl)
+    }
+
+    /// [`start_authentication`](Self::start_authentication) with a challenge that lives `ttl` rather
+    /// than [`CHALLENGE_TTL`]. A caller whose own deadline is nearer than five minutes — a phone
+    /// approving a pairing that expires sooner — must not leave behind a challenge that outlives the
+    /// thing it was started for, so the shorter clock is passed in rather than checked afterwards.
+    pub fn start_authentication_within(
+        &mut self,
+        account: AccountId,
+        credential_blobs: &[Vec<u8>],
+        browser_binding: &str,
+        now: Timestamp,
+        ttl: Duration,
+    ) -> Result<Started, CeremonyError> {
         self.expire(now);
         if self.pending() >= MAX_PENDING {
             return Err(CeremonyError::TooManyPending);
@@ -339,7 +355,7 @@ impl Ceremonies {
                 state,
                 account,
                 binding: bind(browser_binding),
-                expires_at: now + self.ttl.as_secs(),
+                expires_at: now + ttl.as_secs(),
             },
         );
         Ok(Started {

@@ -5,6 +5,7 @@
 - **Decided by:** Luca (owner decisions marked); `gpt-6-astra` consulted on the design
 - **Supersedes:** nothing. **Amends** [ADR-0045](0045-hosted-front-end-v1.md)'s last consequence
   ("v1 is LAN and un-authenticated") by naming what has to exist before that stops being true.
+- **Amended by** [ADR-0055](0055-signing-in-a-browser-with-your-phone.md) (decision 1: a phone's passkey may approve a session for another browser).
 
 ## Context
 

@@ -52,6 +52,8 @@ use crate::http::{parse_flat_object, Method, Request, Response};
 use crate::identity::{cookie, SESSION_COOKIE};
 use crate::limits::{Decision, Limiter, Rate};
 
+mod pair;
+
 /// The cookie that binds a ceremony to the browser that started it.
 pub const CEREMONY_COOKIE: &str = "__Host-rime-ceremony";
 
@@ -106,6 +108,15 @@ pub struct AuthApiCounters {
     /// Requests refused by the rate limiter. The client is told `429` and nothing else; the shape of
     /// what is happening lives here.
     pub rate_limited: u64,
+    /// Phone-approved sign-ins (ADR-0055): opened by a desktop, approved by a phone, finished with a
+    /// session.
+    pub pairings_begun: u64,
+    pub pairings_approved: u64,
+    pub pairings_completed: u64,
+    /// A pairing step answered with the one refusal: unknown, expired, wrong state or not yours.
+    pub refused_pairing: u64,
+    /// A pairing request whose `Origin` was not the configured relying-party origin.
+    pub wrong_origin: u64,
 }
 
 /// The account endpoints.
@@ -178,6 +189,10 @@ impl AuthApi {
         if request.method != Method::Post {
             self.counters.method_not_allowed += 1;
             return Response::error(405, "method not allowed").with_header("Allow", "POST");
+        }
+        // Pairing has its own fences (an exact Origin, no-store, one refusal), applied in one place.
+        if let ["api", "auth", "pair", rest @ ..] = segments.as_slice() {
+            return self.pair_route(request, rest, now);
         }
         match segments.as_slice() {
             ["api", "auth", "register"] => self.begin_registration(request, now),
@@ -491,6 +506,14 @@ impl AuthApi {
                 self.counters.refused_step += 1;
                 Response::error(409, "start again")
             }
+            FlowError::PairingRefused => {
+                self.counters.refused_pairing += 1;
+                Response::error(404, pair::REFUSAL)
+            }
+            FlowError::TooManyPairings => {
+                self.counters.refused_pairing += 1;
+                Response::error(429, "too many sign-ins in flight — try again shortly")
+            }
             FlowError::TooManyTransactions => {
                 self.counters.refused_step += 1;
                 Response::error(429, "too many registrations in flight — try again shortly")
@@ -556,9 +579,9 @@ mod tests {
     use webauthn_authenticator_rs::WebauthnAuthenticator;
     use webauthn_rs::prelude::{CreationChallengeResponse, RequestChallengeResponse, Url};
 
-    const ORIGIN: &str = "https://rime.example";
-    const NOW: u64 = 1_700_000_000;
-    const INVITED: &str = "claire@example.test";
+    pub(super) const ORIGIN: &str = "https://rime.example";
+    pub(super) const NOW: u64 = 1_700_000_000;
+    pub(super) const INVITED: &str = "claire@example.test";
 
     struct Shared(Arc<CapturingMailer>);
     impl Mailer for Shared {
@@ -572,7 +595,7 @@ mod tests {
         (AuthApi::new(auth), mailer)
     }
 
-    fn api_parts() -> (rime_auth::flow::Auth, Arc<CapturingMailer>) {
+    pub(super) fn api_parts() -> (rime_auth::flow::Auth, Arc<CapturingMailer>) {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut path = std::env::temp_dir();
         path.push(format!(
@@ -608,11 +631,11 @@ mod tests {
         crate::http::read_request(&mut Cursor::new(raw.into_bytes())).unwrap()
     }
 
-    fn body_of(response: &Response) -> String {
+    pub(super) fn body_of(response: &Response) -> String {
         String::from_utf8(response.body.clone()).unwrap()
     }
 
-    fn field_of(response: &Response, name: &str) -> String {
+    pub(super) fn field_of(response: &Response, name: &str) -> String {
         let body = body_of(response);
         let needle = format!("\"{name}\":\"");
         let start = body.find(&needle).expect("field present") + needle.len();
@@ -620,7 +643,7 @@ mod tests {
         body[start..end].to_string()
     }
 
-    fn set_cookies(response: &Response) -> Vec<String> {
+    pub(super) fn set_cookies(response: &Response) -> Vec<String> {
         response
             .extra
             .iter()
@@ -629,14 +652,14 @@ mod tests {
             .collect()
     }
 
-    fn cookie_value(response: &Response, name: &str) -> Option<String> {
+    pub(super) fn cookie_value(response: &Response, name: &str) -> Option<String> {
         set_cookies(response)
             .iter()
             .find_map(|c| c.strip_prefix(&format!("{name}=")))
             .map(|rest| rest.split(';').next().unwrap_or("").to_string())
     }
 
-    fn mailed_code(mailer: &CapturingMailer) -> String {
+    pub(super) fn mailed_code(mailer: &CapturingMailer) -> String {
         let sent = mailer.sent();
         let body = sent.last().expect("something was mailed").body.clone();
         body.chars()
