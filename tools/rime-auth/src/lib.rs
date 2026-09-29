@@ -209,6 +209,8 @@ pub enum AuthError {
     InvitationRejected,
     /// The email already has an account.
     EmailTaken,
+    /// Another open store holds this file's lock — in practice a running `rime-gateway`.
+    InUse,
     /// No such account.
     NoSuchAccount,
 }
@@ -225,6 +227,10 @@ impl fmt::Display for AuthError {
             }
             AuthError::InvitationRejected => write!(f, "that invitation is not valid"),
             AuthError::EmailTaken => write!(f, "that address already has an account"),
+            AuthError::InUse => write!(
+                f,
+                "the auth store is open in another process (stop rime-gateway first)"
+            ),
             AuthError::NoSuchAccount => write!(f, "no such account"),
         }
     }
@@ -326,6 +332,17 @@ impl AuthStore {
             options.mode(0o600);
         }
         let log = options.open(&path).map_err(AuthError::Io)?;
+        // One writer per file, enforced rather than assumed. The store replays the log ONCE, here,
+        // and afterwards trusts its in-memory maps; a second process appending to the same file would
+        // be invisible to the first (an invitation the running gateway cannot redeem), and two
+        // appenders can interleave a record. An advisory exclusive lock (flock(2) on Unix) turns that
+        // into a clean refusal at open time. It is released when `log` closes, so a crashed process
+        // never leaves it behind.
+        match log.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(AuthError::InUse),
+            Err(std::fs::TryLockError::Error(e)) => return Err(AuthError::Io(e)),
+        }
 
         let mut store = Self {
             path,
@@ -1136,6 +1153,18 @@ mod tests {
         // a round-trip one — a round trip passes against its own mistake.
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
         assert_eq!(crc32(b""), 0);
+    }
+
+    #[test]
+    fn a_store_open_elsewhere_is_refused_until_it_closes() {
+        let path = temp_path("lock");
+        let first = AuthStore::open(&path).unwrap();
+        // The lock is per open file, so a second open in the SAME process stands in for a second
+        // process (an `invite` run while the gateway is up).
+        assert!(matches!(AuthStore::open(&path), Err(AuthError::InUse)));
+        drop(first);
+        AuthStore::open(&path).expect("the lock is released when the first store closes");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
