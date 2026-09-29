@@ -34,6 +34,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
+mod pair;
+pub use pair::{
+    PairingDecision, PairingStarted, PairingStatus, PairingView, MAX_PAIRINGS,
+    PAIRING_CHALLENGE_TTL, PAIRING_TTL,
+};
+
 use crate::ceremony::{Ceremonies, CeremonyConfig, CeremonyError, Started};
 use crate::codes::{self, CodeChallenge, CodeKey, CodeOutcome, DEFAULT_CODE_TTL};
 use crate::mail::{MailError, Mailer, Message};
@@ -122,6 +128,12 @@ pub enum FlowError {
     NoSuchAccount,
     /// [`MAX_TRANSACTIONS`] are already in flight.
     TooManyTransactions,
+    /// A pairing (ADR-0055) is unknown, expired, finished, not in the state this step needs, or not
+    /// this browser's. One variant for all five on purpose: a pairing id is a capability, and "this is
+    /// real but not yours" is the one sentence a capability must never say.
+    PairingRefused,
+    /// [`MAX_PAIRINGS`] are already live.
+    TooManyPairings,
     Store(AuthError),
     Ceremony(CeremonyError),
     Mail(MailError),
@@ -138,6 +150,8 @@ impl fmt::Display for FlowError {
             Self::InvitationRejected => f.write_str("the invitation was not accepted"),
             Self::NoSuchAccount => f.write_str("no such account"),
             Self::TooManyTransactions => f.write_str("too many registrations in flight"),
+            Self::PairingRefused => f.write_str("no such pairing"),
+            Self::TooManyPairings => f.write_str("too many pairings in flight"),
             Self::Store(e) => write!(f, "store: {e}"),
             Self::Ceremony(e) => write!(f, "ceremony: {e}"),
             Self::Mail(e) => write!(f, "mail: {e}"),
@@ -199,7 +213,15 @@ pub struct Auth {
     code_key: CodeKey,
     mailer: Box<dyn Mailer>,
     transactions: HashMap<String, Transaction>,
+    /// Phone-approved sign-ins in flight (ADR-0055), by pairing id. In memory only: a restart
+    /// invalidates every pairing, which costs a user one rescan and keeps half-approved states out of
+    /// the durable log.
+    pairings: HashMap<String, pair::Pairing>,
     display_name: String,
+    /// The relying party's origin, fixed by configuration. Kept here so the gateway's `Origin` check
+    /// compares against the SAME value the ceremonies were built with, never a second copy that can
+    /// drift from it — and never anything taken from a request.
+    rp_origin: String,
 }
 
 impl fmt::Debug for Auth {
@@ -207,6 +229,7 @@ impl fmt::Debug for Auth {
         f.debug_struct("Auth")
             .field("accounts", &self.store.account_count())
             .field("transactions", &self.transactions.len())
+            .field("pairings", &self.pairings.len())
             .finish()
     }
 }
@@ -219,14 +242,22 @@ impl Auth {
         mailer: Box<dyn Mailer>,
     ) -> Result<Self, FlowError> {
         let display_name = config.rp_name.clone();
+        let rp_origin = config.rp_origin.clone();
         Ok(Self {
             store,
             ceremonies: Ceremonies::new(config)?,
             code_key: CodeKey::generate().map_err(|e| FlowError::Store(AuthError::Io(e)))?,
             mailer,
             transactions: HashMap::new(),
+            pairings: HashMap::new(),
             display_name,
+            rp_origin,
         })
+    }
+
+    /// The configured relying-party origin, e.g. `https://rime.example`.
+    pub fn rp_origin(&self) -> &str {
+        &self.rp_origin
     }
 
     /// The store, for the operator-facing things brick 3 needs (issuing invitations, counters).
@@ -632,6 +663,7 @@ impl Auth {
     /// Drop transactions whose deadline passed. Called at every entry point that can create one.
     pub fn expire(&mut self, now: Timestamp) {
         self.transactions.retain(|_, t| t.expires_at > now);
+        self.pairings.retain(|_, p| p.expires_at > now);
         self.ceremonies.expire(now);
     }
 
@@ -731,9 +763,9 @@ mod tests {
     use webauthn_authenticator_rs::WebauthnAuthenticator;
     use webauthn_rs::prelude::{CreationChallengeResponse, RequestChallengeResponse, Url};
 
-    const ORIGIN: &str = "https://rime.example";
-    const NOW: Timestamp = 1_700_000_000;
-    const INVITED: &str = "claire@example.test";
+    pub(super) const ORIGIN: &str = "https://rime.example";
+    pub(super) const NOW: Timestamp = 1_700_000_000;
+    pub(super) const INVITED: &str = "claire@example.test";
 
     /// A `Mailer` that both the test and the `Auth` can see. `Auth` takes a `Box<dyn Mailer>`, so the
     /// shared side is an `Arc` the box forwards to.
@@ -758,7 +790,7 @@ mod tests {
         AuthStore::open(&path).expect("a fresh store")
     }
 
-    fn auth() -> (Auth, Arc<CapturingMailer>) {
+    pub(super) fn auth() -> (Auth, Arc<CapturingMailer>) {
         let mailer = Arc::new(CapturingMailer::default());
         let config = CeremonyConfig {
             rp_id: "rime.example".to_string(),
@@ -807,7 +839,7 @@ mod tests {
             .to_string()
     }
 
-    fn register(
+    pub(super) fn register(
         auth: &mut Auth,
         mailer: &CapturingMailer,
     ) -> (Registered, WebauthnAuthenticator<SoftPasskey>) {
