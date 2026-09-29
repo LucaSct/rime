@@ -373,6 +373,22 @@ impl Response {
         Self::json(status, format!("{{\"error\":{}}}", json_string(message)))
     }
 
+    /// A response in a media type that is not JSON.
+    ///
+    /// The one caller is the signalling route, whose answer is `application/sdp` because that is what
+    /// the offer was and what `setRemoteDescription` expects. Wrapping it in JSON would mean the page
+    /// unwrapping a string that is already a well-defined media type with its own parser in every
+    /// browser.
+    #[must_use]
+    pub fn raw(status: u16, content_type: &'static str, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            content_type,
+            body,
+            extra: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn empty(status: u16) -> Self {
         Self {

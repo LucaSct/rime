@@ -42,7 +42,6 @@
 //! the blocking read into a clean EOF. Every stop path goes through [`Stop::request`], which does
 //! exactly that — so a stop decided by either thread unblocks the other one.
 
-use std::io::Write;
 use std::net::SocketAddr;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -990,7 +989,7 @@ fn codec_code(codec: Codec) -> u8 {
 /// than a copy in each test module that needs it.
 #[cfg(test)]
 pub(crate) fn write_framed(
-    stream: &mut impl Write,
+    stream: &mut impl std::io::Write,
     code: u16,
     payload: &[u8],
 ) -> std::io::Result<()> {

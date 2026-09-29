@@ -486,11 +486,34 @@ mod tests {
 
     struct FakeLauncher;
 
-    impl Launcher for FakeLauncher {
-        type Session = String;
+    /// A launched session with no socket behind it.
+    ///
+    /// These tests are about the listener — threads, deadlines, the connection cap, which router a path
+    /// reaches — and none of them signals, so `engine_halves` is an honest error rather than a socket
+    /// pair nothing would read. A relay that tried to start here would fail loudly, which is the
+    /// correct outcome for a fake that cannot carry media.
+    struct FakeSession;
 
-        fn launch(&mut self, entry: &CatalogueEntry, surface: Surface) -> Result<String, String> {
-            Ok(format!("{}:{}", entry.id, surface.as_str()))
+    impl crate::relay::MediaSession for FakeSession {
+        fn engine_halves(
+            &mut self,
+        ) -> io::Result<(
+            crate::Session<std::os::unix::net::UnixStream>,
+            crate::Session<std::os::unix::net::UnixStream>,
+        )> {
+            Err(io::Error::other("the serve tests never start a relay"))
+        }
+    }
+
+    impl Launcher for FakeLauncher {
+        type Session = FakeSession;
+
+        fn launch(
+            &mut self,
+            _entry: &CatalogueEntry,
+            _surface: Surface,
+        ) -> Result<FakeSession, String> {
+            Ok(FakeSession)
         }
     }
 

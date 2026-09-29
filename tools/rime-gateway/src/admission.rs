@@ -312,6 +312,17 @@ impl<T> Registry<T> {
             .map(|(id, slot)| (*id, slot.surface, slot.owner))
     }
 
+    /// Every admitted id, so a caller can walk the attached values one at a time with
+    /// [`Registry::get_mut`].
+    ///
+    /// A `Vec` rather than an iterator on purpose: the caller that needs this is the API's sweep of
+    /// relays that stopped on their own, and it has to *mutate* the registry — release the dead ones —
+    /// while walking it, which a borrow of the map would forbid.
+    #[must_use]
+    pub fn ids(&self) -> Vec<SessionId> {
+        self.sessions.keys().copied().collect()
+    }
+
     /// Free the slot and hand back whatever was attached, so the caller can shut it down. Dropping
     /// the returned value is what reaps the process, if `T` is the supervisor's handle.
     pub fn release(&mut self, id: SessionId) -> Option<Option<T>> {
