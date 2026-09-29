@@ -1454,7 +1454,9 @@ mod tests {
         let (ty, payload) = rig.engine_receives();
         assert_eq!(ty, MessageType::KeyframeRequest);
         assert!(payload.is_empty());
-        assert_eq!(rig.relay.counters().keyframe_requests_to_engine, 1);
+        // `to_engine` writes first and counts after, so the engine can hold the bytes a moment before
+        // the counter moves. Reading it once raced on a loaded CI runner; wait for it instead.
+        assert!(rig.wait(|c| c.keyframe_requests_to_engine == 1));
     }
 
     #[test]
