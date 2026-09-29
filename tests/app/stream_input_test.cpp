@@ -286,6 +286,44 @@ TEST_CASE("stream input: a disconnect releases every held key and button") {
     CHECK(events.empty());
 }
 
+TEST_CASE("stream input: the latency echo latches the most recent TIMED input") {
+    StreamInputTranslator translator;
+    std::vector<Event> events;
+
+    // Nothing yet: seq 0 is the wire's "un-timed", and a frame carrying it tells the client not
+    // to compute an input-to-photon number rather than to compute a wrong one.
+    CHECK(translator.last_seq() == 0);
+    CHECK(translator.last_client_us() == 0);
+
+    InputEvent timed = key(InputEvent::Kind::KeyDown, 0x04);
+    timed.seq = 7;
+    timed.client_us = 1'234'567;
+    CHECK(dispatch_input_message(MessageType::Input, wire(timed), translator, events) ==
+          InputDispatch::Applied);
+    CHECK(translator.last_seq() == 7);
+    CHECK(translator.last_client_us() == 1'234'567);
+
+    // An UNTIMED event (any client built before s1.3 leaves these zero) must not clear the echo —
+    // "the most recent input the server applied" is the most recent one it can date.
+    events.clear();
+    CHECK(dispatch_input_message(MessageType::Input, wire(key(InputEvent::Kind::KeyUp, 0x04)),
+                                 translator, events) == InputDispatch::Applied);
+    CHECK(translator.last_seq() == 7);
+    CHECK(translator.last_client_us() == 1'234'567);
+
+    // An event whose usage this build does not map still counts as input seen: otherwise the
+    // measured latency would depend on which key was pressed.
+    events.clear();
+    InputEvent unmapped = key(InputEvent::Kind::KeyDown, 0x66); // Power — not a platform::Key
+    unmapped.seq = 8;
+    unmapped.client_us = 2'000'000;
+    CHECK(dispatch_input_message(MessageType::Input, wire(unmapped), translator, events) ==
+          InputDispatch::Applied);
+    CHECK(events.empty());
+    CHECK(translator.last_seq() == 8);
+    CHECK(translator.last_client_us() == 2'000'000);
+}
+
 TEST_CASE("stream input: a non-Input message is left to the caller") {
     StreamInputTranslator translator;
     std::vector<Event> events;

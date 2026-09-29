@@ -1080,6 +1080,12 @@ int serve_viewport(std::string_view socket_path,
                 for (const stream::VideoPacket& packet : packets) {
                     stream::FrameMessage frame;
                     frame.sequence = sequence++;
+                    // The s1.3 latency echo (ADR-0030 §5), closing the loop the browser page has
+                    // been stamping into every InputEvent since m18 with nothing echoing it back.
+                    // The drain, the tick and this send all happen in one iteration, so the frame
+                    // carrying the echo is the first frame that reflects the input.
+                    frame.last_input_seq = input_translator.last_seq();
+                    frame.last_input_client_us = input_translator.last_client_us();
                     frame.codec = stream::Codec::Av1;
                     // The encoder's own bit, not a default: this is the one sender with deltas.
                     frame.keyframe = packet.keyframe;
@@ -1099,6 +1105,8 @@ int serve_viewport(std::string_view socket_path,
 
             stream::FrameMessage frame;
             frame.sequence = sequence++;
+            frame.last_input_seq = input_translator.last_seq();
+            frame.last_input_client_us = input_translator.last_client_us();
             frame.codec = codec;
             frame.desc = frame_desc;
             if (!encoder.encode(codec, frame_desc, view.pixels, frame.data)) {

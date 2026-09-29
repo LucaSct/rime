@@ -70,6 +70,17 @@ public:
 
     [[nodiscard]] std::size_t held_count() const noexcept;
 
+    // The latency echo (ADR-0030 §5): the identity and client-clock send time of the most recent
+    // TIMED input this translator has applied. The host copies these onto the FrameMessage it
+    // sends after the tick that consumed them, and the client subtracts `client_us` from its own
+    // present time — both client-clock stamps, so input-to-photon falls out with no clock-offset
+    // guess. `seq == 0` means "nothing timed yet": a sender that leaves the s1.3 fields zero (any
+    // client built before them) is read as un-timed and simply not echoed, which is the contract
+    // protocol.hpp states.
+    [[nodiscard]] std::uint32_t last_seq() const noexcept { return last_seq_; }
+
+    [[nodiscard]] std::uint64_t last_client_us() const noexcept { return last_client_us_; }
+
     // The wire's `mods` bitmask IS `platform::KeyMods` (Shift=1, Ctrl=2, Alt=4, Super=8) — see the
     // `InputEvent` comment in protocol.hpp. Bits above those four are reserved and ignored rather
     // than rejected, so a newer client that starts sending one is not refused.
@@ -98,6 +109,8 @@ private:
     bool have_pointer_ = false;
     std::uint64_t unknown_usages_ = 0;
     std::uint64_t unknown_buttons_ = 0;
+    std::uint32_t last_seq_ = 0;
+    std::uint64_t last_client_us_ = 0;
 };
 
 // What `dispatch_input_message` did with a drained message.

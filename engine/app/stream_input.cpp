@@ -86,6 +86,15 @@ void StreamInputTranslator::translate(const stream::InputEvent& event,
     using Kind = stream::InputEvent::Kind;
     const KeyMods mods = mods_from_wire(event.mods);
 
+    // Latch the echo BEFORE the switch, so an event whose usage this build does not map still
+    // counts as "input the server has seen". Echoing only mapped keys would make the measured
+    // latency depend on which key was pressed, which is the kind of quiet bias a latency ledger
+    // exists to not have.
+    if (event.seq != 0) {
+        last_seq_ = event.seq;
+        last_client_us_ = event.client_us;
+    }
+
     switch (event.kind) {
         case Kind::KeyDown:
         case Kind::KeyUp: {
