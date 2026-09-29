@@ -11,6 +11,10 @@
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "prereqs.sh: must run as root" >&2; exit 1; }
 
+# A half-finished earlier run can leave the caddy source pointing at a keyring that does not verify,
+# and then this very first `apt-get update` fails before the keyring could be repaired. The source
+# is rewritten below anyway, so drop it until then.
+rm -f /etc/apt/sources.list.d/caddy-stable.list
 apt-get update
 apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
 
