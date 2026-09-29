@@ -28,7 +28,11 @@ ssh starbase "pct exec 122 -- runuser -u dev -- mkdir -p '$remote_src'"
 git archive HEAD | ssh starbase "pct exec 122 -- runuser -u dev -- tar -C '$remote_src' -x"
 
 echo "== build-in-ct.sh (as dev, in CT 122) =="
-ssh starbase "pct exec 122 -- runuser -u dev -- '$remote_build_script'"
+# `bash` explicitly, not relying on the shebang: this repo's convention is the SPDX line FIRST and
+# `#!/usr/bin/env bash` second, which is correct for every other invocation here (always `bash
+# script.sh` or piped into `bash -s`) but means the file does not start with `#!` — a direct exec
+# falls back to /bin/sh (dash on this container), which rejects `set -o pipefail` outright.
+ssh starbase "pct exec 122 -- runuser -u dev -- bash '$remote_build_script'"
 
 echo "== apply.sh (as root, in CT 122) =="
 ssh starbase "pct exec 122 -- bash '$remote_stage/apply.sh'"
