@@ -25,6 +25,12 @@ PrivateTmp=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # auth store and runtime/session sockets
 ReadWritePaths=/var/lib/rime /run/rime
+# GPU access, checked rather than assumed (m18/track-H-deploy-build): a hosted game is a CHILD of
+# this unit's process, spawned inside the same cgroup/mount namespace, so hardening here applies to
+# it too. None of the above hides /dev — ProtectSystem=strict exempts /dev, /proc and /sys, and there
+# is deliberately no PrivateDevices= or DevicePolicy= here. RestrictAddressFamilies bounds socket()
+# families, not device ioctls, so it does not touch the Vulkan/NVIDIA path either. On CT 122 the
+# device nodes are 0666 root:root (measured), so `rime` needs no extra group membership to open them.
 
 [Install]
 WantedBy=multi-user.target
