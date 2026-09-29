@@ -51,8 +51,13 @@ impl InputKind {
     }
 }
 
-/// One input event. `code` is a key code (Key*) or a button index (Pointer{Down,Up}); `x`/`y` are
-/// pointer pixels; `scroll_*` are wheel deltas; `mods` is a client-defined modifier bitmask. The
+/// One input event. The numberings are ADR-0054's, and the canonical statement of them is the
+/// `InputEvent` comment in `engine/stream/include/rime/stream/protocol.hpp`, which this mirrors:
+/// `code` is a **USB HID usage ID, Keyboard/Keypad page 0x07** for Key{Down,Up} (KeyA = 0x04,
+/// Space = 0x2C) or a **DOM `MouseEvent.button` index** for Pointer{Down,Up} (0 left, 1 middle,
+/// 2 right); `x`/`y` are **stream-frame pixels**, the pixel space of the image the server is
+/// sending, and may fall outside it for a pointer-locked client; `scroll_*` are wheel deltas;
+/// `mods` is the `platform::KeyMods` bitmask (Shift 1, Ctrl 2, Alt 4, Super 8). The
 /// s1.3 latency ledger adds `client_us` (the client-clock send time) and `seq` (a per-client
 /// sequence number) — the server echoes them on the frame that first reflects this input, closing an
 /// offset-free input-to-photon measurement. Leaving them 0 reads as "un-timed".
