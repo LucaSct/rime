@@ -16,4 +16,7 @@ fi
 install -m 640 -o turnserver -g turnserver "$cert" "$dest_dir/turn.rime.peekstar.eu.crt"
 install -m 640 -o turnserver -g turnserver "$key" "$dest_dir/turn.rime.peekstar.eu.key"
 
-systemctl reload coturn
+# coturn.service (Ubuntu) defines no ExecReload, so a plain reload fails; it only reads the pair
+# at startup anyway. A restart once per renewal (~60 days) drops live TURN allocations: it
+# costs the sessions relayed through TURN at that moment (not verified to recover on their own).
+systemctl try-reload-or-restart coturn
