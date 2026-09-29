@@ -9,7 +9,7 @@ User=rime
 Group=rime
 StateDirectory=rime
 RuntimeDirectory=rime
-ExecStart=/opt/rime/bin/rime-gateway --bind 127.0.0.1:8787 --catalogue /etc/rime/catalogue.conf --store /var/lib/rime/auth.log --rp-id rime.peekstar.eu --rp-origin https://rime.peekstar.eu --rp-name Rime --mail-relay 127.0.0.1:25 --mail-from rime@peekstar.eu --media-bind 10.77.0.22 --media-ports 50000-50002 --public-name rime.peekstar.eu --turn-uri turns:turn.rime.peekstar.eu:443?transport=tcp --turn-secret-file /etc/rime/turn-secret
+ExecStart=/opt/rime/bin/rime-gateway --bind 127.0.0.1:8787 --catalogue /etc/rime/catalogue.conf --store /var/lib/rime/auth.log --rp-id rime.peekstar.eu --rp-origin https://rime.peekstar.eu --rp-name Rime --mail-relay 127.0.0.1:25 --mail-from rime@peekstar.eu --media-bind 10.77.0.22 --media-ports 50000-50002 --public-name rime.peekstar.eu --turn-uri turns:turn.rime.peekstar.eu:443?transport=tcp --turn-secret-file /etc/rime/turn-secret --trust-forwarded-from-loopback
 Restart=on-failure
 
 # Hardening
