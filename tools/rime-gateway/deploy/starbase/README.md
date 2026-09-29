@@ -66,3 +66,23 @@ Proxmox container `rime` (CT 122) on the starbase.
   toolchain for the C++ half (cmake, g++, ninja, ~dev/.conan2, ~dev/.rime-tools) and `~dev/.cargo` for
   the Rust half — both already present as of 2026-09-29 (the perf-run checkout at `/srv/dev/rime`
   uses the same toolchain; `install.sh` never touches that checkout).
+
+## Inviting someone
+
+Registration needs an invitation, minted on CT 122 with the gateway stopped (the auth store is
+locked while the service has it open, and it only reads the log at startup):
+
+    systemctl stop rime-gateway
+    runuser -u rime -- /opt/rime/bin/rime-gateway invite --store /var/lib/rime/auth.log --email <address>
+    systemctl start rime-gateway
+
+The token is printed once (only its hash is stored); send it to the invitee, who pastes it into
+"Register with an invitation". Stopping the gateway ends any live sessions.
+
+## Outbound mail
+
+The registration code is mailed via CT 122's postfix (`--mail-relay 127.0.0.1:25`), which relays
+through Resend (`[smtp.resend.com]:465`, SASL, wrapper-mode TLS) as the starbase host does. The
+credential is copied from the host by hand (`pct push 122 /etc/postfix/sasl_passwd ...`, then
+`postmap`), never committed; `libsasl2-modules` (in prereqs.sh) is required, or postfix reports
+"no mechanism available".

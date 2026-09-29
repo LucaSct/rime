@@ -32,7 +32,8 @@ use rime_gateway::{AccessPolicy, AdmissionPolicy, Catalogue, MediaConfig, Proces
 const HELP: &str = "Usage: rime-gateway --catalogue <path> [--bind <addr:port>] [--socket-dir <path>] [--open] [--max-sessions <n>] [--max-play <n>] [--trust-forwarded-from-loopback]\n\
 With auth: --store <path> --rp-id <id> --rp-origin <url> --rp-name <name> --mail-relay <host:port> --mail-from <address>\n\
 With media: --media-bind <ip> --media-ports <lo-hi> --public-name <dns> [--lan-lossless]\n\
-With TURN: --turn-uri <uri> --turn-secret-file <path>";
+With TURN: --turn-uri <uri> --turn-secret-file <path>\n\
+Invite (auth builds; the gateway must be stopped): rime-gateway invite --store <path> --email <address>";
 
 #[cfg(unix)]
 fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -58,7 +59,12 @@ fn run() -> Result<(), (i32, String)> {
     let mut auth_flags = AuthFlags::default();
     let mut media_flags = MediaFlags::default();
 
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
+    #[cfg(feature = "auth")]
+    if args.peek().map(String::as_str) == Some("invite") {
+        args.next();
+        return invite(args);
+    }
     while let Some(flag) = args.next() {
         if flag == "--help" {
             println!("{HELP}");
@@ -338,6 +344,40 @@ impl AuthFlags {
             .map(Some)
             .map_err(|e| e.to_string())
     }
+}
+
+/// `rime-gateway invite --store <path> --email <address>` — mint one registration invitation and
+/// print its token, which the operator hands to the invitee to paste into the page.
+///
+/// A subcommand of the gateway rather than an HTTP route because an admin route would have to tell
+/// the operator apart from a visitor, and behind Caddy every request arrives from loopback. Run it
+/// with the service stopped: the store's lock refuses a second opener (`AuthError::InUse`), since a
+/// running gateway replays the log only at startup and would never see an invitation appended
+/// behind its back. The token is printed once and only its hash is stored, like every token here.
+#[cfg(all(unix, feature = "auth"))]
+fn invite(mut args: impl Iterator<Item = String>) -> Result<(), (i32, String)> {
+    let mut store = None;
+    let mut email = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--store" => store = Some(value(&mut args, &flag).map_err(|e| (2, e))?),
+            "--email" => email = Some(value(&mut args, &flag).map_err(|e| (2, e))?),
+            _ => return Err((2, format!("unknown invite flag {flag}\n{HELP}"))),
+        }
+    }
+    let (Some(store), Some(email)) = (store, email) else {
+        return Err((2, format!("invite needs --store and --email\n{HELP}")));
+    };
+    let mut store = AuthStore::open(&store).map_err(|e| (1, e.to_string()))?;
+    let token = store
+        .issue_invitation(&email, rime_auth::DEFAULT_INVITE_TTL, rime_auth::now())
+        .map_err(|e| (1, e.to_string()))?;
+    eprintln!(
+        "rime-gateway: invitation for {email}, valid {} days; give the invitee this code:",
+        rime_auth::DEFAULT_INVITE_TTL.as_secs() / 86_400
+    );
+    println!("{}", token.expose());
+    Ok(())
 }
 
 #[cfg(unix)]
