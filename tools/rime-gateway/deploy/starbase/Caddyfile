@@ -40,6 +40,9 @@ rime.peekstar.eu {
 }
 
 turn.rime.peekstar.eu {
-    # Certificate only: Caddy obtains/renews it; sync-turn-cert copies it to coturn.
-    tls
+    # Certificate only: Caddy obtains/renews it; sync-turn-cert copies it to coturn. blackStar
+    # sends this name's :443 traffic to the TURN proxy on :5349, so no browser ever reaches this
+    # site over TLS; the block exists for its certificate. A bare `tls` is not valid Caddyfile (it
+    # needs arguments), and a site needs at least one directive, hence the refusal.
+    respond 404
 }

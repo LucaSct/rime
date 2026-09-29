@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Stream rime-gateway's source into CT 122 "rime" on the starbase, build it THERE, and install it.
 #   tools/rime-gateway/deploy/starbase/install.sh
 #

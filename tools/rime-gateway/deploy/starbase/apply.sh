@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
 # Runs inside CT 122 as root (install.sh runs it straight from the stage dir build-in-ct.sh just
 # produced, as `dev`). Safe to run again.
 set -euo pipefail

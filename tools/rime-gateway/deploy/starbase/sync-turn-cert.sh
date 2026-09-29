@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Copy Caddy's certificate for turn.rime.peekstar.eu into coturn's config directory.
 set -euo pipefail
 
