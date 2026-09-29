@@ -16,6 +16,7 @@
 import * as api from "./api.js";
 import * as webauthn from "./webauthn.js";
 import { startSession, av1DecodeSupported } from "./session.js";
+import { pairButton, renderPhonePairing, takePairFragment } from "./pair.js";
 
 const root = document.getElementById("app");
 
@@ -113,6 +114,7 @@ function renderSignIn() {
     ],
   );
   root.appendChild(form);
+  root.appendChild(pairButton(pairUi()));
   root.appendChild(
     h("nav", {}, [
       h("a", {
@@ -449,4 +451,15 @@ window.addEventListener("pagehide", () => {
   }
 });
 
-renderCatalogueOrSignIn();
+/** What pair.js needs from this module (see its header for why it is passed rather than imported). */
+function pairUi() {
+  return { root, h, clear, messageFor, back: renderSignIn, done: renderCatalogueOrSignIn };
+}
+
+// A phone that scanned a desktop's QR code lands on `/#pair=<id>` (ADR-0055).
+const pairing = takePairFragment();
+if (pairing) {
+  renderPhonePairing(pairUi(), pairing);
+} else {
+  renderCatalogueOrSignIn();
+}
