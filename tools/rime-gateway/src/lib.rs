@@ -83,7 +83,8 @@ pub mod turn;
 
 #[cfg(unix)]
 pub use api::{
-    serve_connection, ApiCounters, Catalogue, CatalogueEntry, Launcher, ProcessLauncher, SessionApi,
+    serve_connection, ApiCounters, Catalogue, CatalogueEntry, Launcher, MediaConfig,
+    ProcessLauncher, SessionApi,
 };
 #[cfg(all(unix, feature = "auth"))]
 pub use auth_api::{AuthApi, AuthApiCounters, CEREMONY_COOKIE};

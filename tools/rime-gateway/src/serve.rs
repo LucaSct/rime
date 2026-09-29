@@ -26,9 +26,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::api::{Catalogue, CatalogueEntry, Launcher, SessionApi};
+use crate::api::{Catalogue, CatalogueEntry, Launcher, MediaConfig, SessionApi};
 use crate::http::{self, ParseError, Request, Response};
 use crate::identity::{AccessPolicy, Principal};
+use crate::relay::IceProvider;
 #[cfg(feature = "auth")]
 use crate::{auth_api::AuthApi, identity::principal_of};
 use crate::{AdmissionPolicy, Surface};
@@ -41,6 +42,12 @@ pub struct ServerConfig {
     /// Trust `X-Forwarded-For` for the client's address, but only on a request whose TCP peer is
     /// loopback — see [`Server::client_address`] for why that combination, and nothing weaker, is safe.
     pub trust_forwarded_from_loopback: bool,
+    /// `None` on a host with no media flags, which then answers every offer `503`. One option rather
+    /// than four fields, for the reason [`MediaConfig`] documents: the parts are only useful together.
+    pub media: Option<MediaConfig>,
+    /// Where `GET /api/sessions/<id>/ice` gets its answer. The default hands out an empty list, which
+    /// is the honest answer for a deployment with no TURN relay.
+    pub ice: Option<Box<dyn IceProvider>>,
 }
 
 /// Counters `respond` updates directly, for an operator to watch outside of any one request.
@@ -94,11 +101,19 @@ impl<L: Launcher> Server<L> {
             admission,
             access,
             trust_forwarded_from_loopback,
+            media,
+            ice,
         } = config;
+        let mut sessions = SessionApi::new(catalogue, admission, launcher)
+            .with_access(access)
+            .with_media(media);
+        if let Some(ice) = ice {
+            sessions = sessions.with_ice(ice);
+        }
         Self {
             bind,
             limits: ConnectionLimits::default(),
-            sessions: SessionApi::new(catalogue, admission, launcher).with_access(access),
+            sessions,
             trust_forwarded_from_loopback,
             counters: ServerCounters::default(),
             #[cfg(feature = "auth")]
@@ -570,6 +585,8 @@ mod tests {
                     require_account: false,
                 },
                 trust_forwarded_from_loopback,
+                media: None,
+                ice: None,
             },
             FakeLauncher,
         )
