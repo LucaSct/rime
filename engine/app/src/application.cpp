@@ -39,7 +39,7 @@ Application::Application(const AppConfig& config)
     // pure-sim tool on a headless build without Vulkan still works. Rendering code must tolerate
     // it.
     if (config.gpu) {
-        device_ = rhi::create_device({});
+        device_ = config.device_factory ? config.device_factory() : rhi::create_device({});
         if (device_) {
             graph_ = std::make_unique<render::RenderGraph>(*device_);
         } else {
