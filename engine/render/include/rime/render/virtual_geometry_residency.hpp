@@ -10,8 +10,10 @@
 #include "rime/assets/asset_id.hpp"
 #include "rime/assets/virtual_geometry.hpp"
 
-// Render-owned page state for M18. This is the CPU seam that a future upload scheduler will use;
-// it deliberately does not know about Vulkan buffers, addresses, or command submission.
+// Render-owned page state for M18. This is the CPU seam the M18.5 page cache
+// (virtual_geometry_page_cache.hpp) drives: the cache owns one of these and calls request/complete
+// only when an upload's frame has RETIRED, so "resident" here means confirmed on the device. It
+// deliberately does not know about Vulkan buffers, addresses, or command submission.
 namespace rime::render {
 
 class VirtualGeometryResidency {

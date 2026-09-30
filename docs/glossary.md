@@ -146,6 +146,18 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Virtualized geometry (Nanite-style).** Rendering enormous geometric detail by
   streaming and culling at very fine granularity, so triangle count stops being the
   budget you fight.
+- **Page pool / page residency (virtual geometry).** A fixed-size GPU buffer cut into equal
+  *slots*; each slot holds one cooked *page* of clusters. A page is *resident* only once the frame
+  that copied it in has **retired** (its fence signalled), and a slot is reused only once every
+  frame that read its old page has retired. The permanently resident *coarse cut* is never
+  evicted, so a camera that outruns streaming draws the coarser ancestor instead of a hole.
+  See [ADR-0056](adr/0056-m18.5-page-streaming.md).
+- **Frame retirement / retirement watermark.** A frame has *retired* when the GPU has finished
+  all its work (known from a fence poll, not from counting frames). The watermark is the newest
+  frame for which it and every earlier frame have retired — the safe point for reusing anything
+  those frames touched.
+- **LRU (least recently used).** An eviction policy: when space is needed, drop the item that was
+  used longest ago, on the bet that it is the least likely to be needed soon.
 - **Shadow map / Virtual Shadow Map (VSM).** A shadow map is a depth render from a
   light's view used to test what's in shadow. *Virtual* shadow maps provide very high,
   consistent resolution efficiently.
