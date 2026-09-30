@@ -30,6 +30,34 @@ rime_apply_common_target_options(rime_app)
 # a demo launcher, not SDK surface, so it is deliberately NOT installed.
 rime_install_module(rime_app)
 
+# ── rime_app_game — the engine-owned `main` of a shipped game (m20.1, ADR-0046 §1) ─────────────
+# `GameDefinition` (what a game supplies), the launch-mode parser, and `run_game` (the one loop every
+# mode shares). Its own target rather than more sources in rime_app because it needs rime::scene (a
+# definition may name an entry `.rscene`), and rime_app deliberately does not: a sim-only tool that
+# links rime_app should not acquire the scene format because games can have entry scenes.
+#
+# It links rime::render because `play` owns a SceneRenderer — and that is also why `dedicated`
+# cannot be proved GPU-free AT LINK TIME in this brick: ADR-0046 §1 wants ONE binary that can do
+# both, so the render path is in the executable by design. The guarantee is instead that the device
+# factory is never ENTERED (`RunReport::device_factory_calls`, asserted by the tests) and that the
+# Vulkan loader is only ever dlopen'd inside it (volk), so a dedicated process never maps libvulkan
+# — which `hello_game --dedicated-proof` checks in a live process on Linux.
+add_library(rime_app_game STATIC
+    src/game_definition.cpp
+    src/launch.cpp)
+add_library(rime::app_game ALIAS rime_app_game)
+
+target_include_directories(rime_app_game
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+
+target_link_libraries(rime_app_game
+    PUBLIC rime::app rime::ecs rime::platform rime::render
+    PRIVATE rime::scene rime::rhi rime::core fmt::fmt)
+
+rime_apply_common_target_options(rime_app_game)
+rime_install_module(rime_app_game)
+
 # ── rime_hello — the launcher (M0 seed, now the --scene loader) ───────────────────────────────────
 # Proves the engine builds, links its modules, and runs — the seed rime_app grew from. Since M9.2 it
 # also loads a `.rscene` via rime::scene (registering the transform + render component set a scene
