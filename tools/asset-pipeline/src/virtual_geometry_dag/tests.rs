@@ -441,6 +441,10 @@ fn dag_has_many_levels_and_roughly_halves_triangles_per_level() {
         .iter()
         .filter(|p| p.dependency_count > 1)
         .count();
+    eprintln!(
+        "DAG shape: {shared} of {} swap-unit pages depend on >1 coarser page",
+        dag.asset.pages.len() - 1
+    );
     assert!(
         shared * 4 >= dag.asset.pages.len(),
         "only {shared} of {} units feed >1 group",
