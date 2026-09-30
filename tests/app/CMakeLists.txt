@@ -11,10 +11,17 @@ rime_add_test(rime_app_tests
     sim_stage_test.cpp
     editor_play_test.cpp
     windowed_test.cpp
-    windowed_input_test.cpp)
+    windowed_input_test.cpp
+    launch_test.cpp)
 
 # windowed_input_test.cpp (m13.3c) adds rime::gameplay: it drives a gameplay::FlyCamera from an
 # Application's input snapshot, which is the join the samples make and the one nothing tested.
 # gameplay is GPU-free like the rest of this suite, so the whole thing still runs headless.
 target_link_libraries(rime_app_tests
     PRIVATE rime::app rime::editorhost rime::physics rime::gameplay)
+
+# launch_test.cpp (m20.1) adds the game runner (rime::app_game) and rime::scene (it authors the
+# entry scene the runner loads). Both GPU-free: the tests hand the runner a device factory that
+# counts and returns null, so the suite still runs on every CI OS with no device.
+target_link_libraries(rime_app_tests
+    PRIVATE rime::app_game rime::scene rime::rhi)
