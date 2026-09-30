@@ -27,6 +27,7 @@ add_library(rime_render STATIC
     src/fx_pass.cpp
     src/culling.cpp
     src/virtual_geometry_residency.cpp
+    src/virtual_geometry_page_cache.cpp
     src/virtual_geometry_visibility_pass.cpp
     src/virtual_geometry_resolve_pass.cpp
     src/virtual_geometry_gpu_selection.cpp)
