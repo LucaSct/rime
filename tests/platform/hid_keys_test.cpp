@@ -75,13 +75,13 @@ TEST_CASE("hid_keys: the standard's anchor values") {
 
 TEST_CASE("hid_keys: an unmapped usage is Unknown, never a crash") {
     // The wire is attacker-controlled. Every one of these is a legal u32 a peer may send.
-    CHECK(hid_usage_to_key(0x00) == Key::Unknown);      // "Reserved (no event indicated)"
-    CHECK(hid_usage_to_key(0x01) == Key::Unknown);      // ErrorRollOver — a real usage, not a key
-    CHECK(hid_usage_to_key(0x32) == Key::Unknown);      // the non-US "# and ~"; see hid_keys.cpp
-    CHECK(hid_usage_to_key(0x64) == Key::Unknown);      // the non-US "\ and |"
-    CHECK(hid_usage_to_key(0x66) == Key::Unknown);      // Power
-    CHECK(hid_usage_to_key(0xE8) == Key::Unknown);      // one past the modifier block
-    CHECK(hid_usage_to_key(0xFFFF) == Key::Unknown);    // off the page entirely
+    CHECK(hid_usage_to_key(0x00) == Key::Unknown);        // "Reserved (no event indicated)"
+    CHECK(hid_usage_to_key(0x01) == Key::Unknown);        // ErrorRollOver — a real usage, not a key
+    CHECK(hid_usage_to_key(0x32) == Key::Unknown);        // the non-US "# and ~"; see hid_keys.cpp
+    CHECK(hid_usage_to_key(0x64) == Key::Unknown);        // the non-US "\ and |"
+    CHECK(hid_usage_to_key(0x66) == Key::Unknown);        // Power
+    CHECK(hid_usage_to_key(0xE8) == Key::Unknown);        // one past the modifier block
+    CHECK(hid_usage_to_key(0xFFFF) == Key::Unknown);      // off the page entirely
     CHECK(hid_usage_to_key(0xFFFFFFFFu) == Key::Unknown); // the largest value the field can hold
 }
 

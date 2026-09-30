@@ -316,7 +316,8 @@ int run_client_headless(const std::string& host,
             e.kind = stream::InputEvent::Kind::PointerMove;
             e.x = (i * 255) / 100; // 0 → 255 sweep drives R on the server
             e.y = 128;
-            e.client_us = now_us(); // s1.3: stamp the send time + a per-client seq (the ledger echo)
+            e.client_us =
+                now_us(); // s1.3: stamp the send time + a per-client seq (the ledger echo)
             e.seq = ++iseq;
             if (!conn.send_input(e)) {
                 break;
@@ -363,9 +364,10 @@ int run_client_headless(const std::string& host,
         last_px = std::move(pixels);
         ++received;
 
-        // Fold this frame into the ledger: the server's stamps ride in `fm`; recv/decode/present are
-        // ours; the echoed input (fm.last_input_*) closes the offset-free input-to-photon. A headless
-        // client has no display, so "present" is the moment it finishes consuming the frame.
+        // Fold this frame into the ledger: the server's stamps ride in `fm`; recv/decode/present
+        // are ours; the echoed input (fm.last_input_*) closes the offset-free input-to-photon. A
+        // headless client has no display, so "present" is the moment it finishes consuming the
+        // frame.
         stream::LatencyLedger ledger;
         ledger.capture_us = fm.capture_us;
         ledger.readback_us = fm.readback_us;
@@ -395,8 +397,8 @@ int run_client_headless(const std::string& host,
         (received > 1 && last_r != first_r) ? "— scene responded to input ✓" : "");
 
     // s1.3: the latency ledger — median/p95 per stage over the session (ADR-0030 §5). On loopback
-    // the numbers are tiny (same box, no real wire) but every stage is populated, proving the ledger
-    // flows end to end; a real WAN client is where input->photon earns its keep.
+    // the numbers are tiny (same box, no real wire) but every stage is populated, proving the
+    // ledger flows end to end; a real WAN client is where input->photon earns its keep.
     if (received > 0) {
         std::printf("%s", latency.dump().c_str());
     }

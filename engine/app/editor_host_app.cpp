@@ -839,8 +839,8 @@ int serve_viewport(std::string_view socket_path,
                 // Deliberately NOT frame-affecting: input moves the world through the tick, and a
                 // Playing session already renders every iteration, so forcing a render here would
                 // only defeat m10.0-perf's idle skip for a mouse moving over a paused editor.
-                const app::InputDispatch input_disp = app::dispatch_input_message(
-                    e.type, e.payload, input_translator, input_events);
+                const app::InputDispatch input_disp =
+                    app::dispatch_input_message(e.type, e.payload, input_translator, input_events);
                 if (input_disp != app::InputDispatch::NotInput) {
                     if (input_disp == app::InputDispatch::Malformed) {
                         ++input_malformed;

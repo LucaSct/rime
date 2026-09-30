@@ -8,10 +8,10 @@
 // what they LOOK LIKE (the preparer, m15.4). One CMake target, no plugin system, and nothing in
 // `engine/` knows this game exists.
 //
-// The editor already takes `--engine <path>`, so pointing it here instead of at `rime-engine` is the
-// whole integration. `rime-engine` still opens `block.rscene` — the loader skips `blockkit::SlabRole`
-// and reports it — which is exactly the degradation m14.1 built and exactly the difference this
-// binary removes.
+// The editor already takes `--engine <path>`, so pointing it here instead of at `rime-engine` is
+// the whole integration. `rime-engine` still opens `block.rscene` — the loader skips
+// `blockkit::SlabRole` and reports it — which is exactly the degradation m14.1 built and exactly
+// the difference this binary removes.
 
 #include <algorithm>
 #include <cmath>
@@ -71,10 +71,10 @@ void prepare_block_for_viewport(rime::ecs::World& world,
     // one wall's gizmo cannot resize another.
     std::unordered_map<std::uint64_t, rime::render::MeshId> preview;
     for (const rime::blockkit::CookSpec& spec : rime::blockkit::cook_specs()) {
-        preview[spec.asset] = meshes.add(
-            rime::render::make_box(
-                rime::core::Vec3{spec.size_x * 0.5f, spec.size_y * 0.5f, spec.size_z * 0.5f}),
-            spec.name);
+        preview[spec.asset] =
+            meshes.add(rime::render::make_box(rime::core::Vec3{
+                           spec.size_x * 0.5f, spec.size_y * 0.5f, spec.size_z * 0.5f}),
+                       spec.name);
     }
 
     std::vector<std::pair<rime::ecs::Entity, rime::render::MeshId>> to_mesh;
@@ -127,9 +127,7 @@ void prepare_block_for_viewport(rime::ecs::World& world,
 // and `Stop` restores the pre-play snapshot, which puts the camera back where it was.
 class BlockFlyCamera {
 public:
-    void tick(rime::ecs::World& world,
-              std::span<const rime::platform::Event> events,
-              double dt) {
+    void tick(rime::ecs::World& world, std::span<const rime::platform::Event> events, double dt) {
         // The camera is a world entity, and which entity that is can change between play sessions
         // (a scene load, an author spawning another camera), so it is looked up per tick rather
         // than cached across one. One query over a handful of cameras costs nothing next to the
@@ -137,9 +135,7 @@ public:
         rime::ecs::Entity camera = rime::ecs::kNullEntity;
         rime::core::Transform current{};
         world.query<rime::render::Camera, rime::ecs::LocalTransform>().for_each(
-            [&](rime::ecs::Entity e,
-                rime::render::Camera& cam,
-                rime::ecs::LocalTransform& local) {
+            [&](rime::ecs::Entity e, rime::render::Camera& cam, rime::ecs::LocalTransform& local) {
                 if (camera == rime::ecs::kNullEntity && cam.active) {
                     camera = e;
                     current = local.value;
@@ -200,7 +196,7 @@ int main(int argc, char** argv) {
         },
         "the-block-host",
         prepare_block_for_viewport,
-        [&fly](rime::ecs::World& world,
-               std::span<const rime::platform::Event> events,
-               double dt) { fly.tick(world, events, dt); });
+        [&fly](rime::ecs::World& world, std::span<const rime::platform::Event> events, double dt) {
+            fly.tick(world, events, dt);
+        });
 }

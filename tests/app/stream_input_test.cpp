@@ -248,9 +248,10 @@ TEST_CASE("stream input: a disconnect releases every held key and button") {
 
     // Hold W and D and the left button — the shape of a player mid-strafe when the relay drops.
     for (const std::uint32_t usage : {0x1Au, 0x07u}) { // W, D
-        CHECK(dispatch_input_message(
-                  MessageType::Input, wire(key(InputEvent::Kind::KeyDown, usage)), translator,
-                  events) == InputDispatch::Applied);
+        CHECK(dispatch_input_message(MessageType::Input,
+                                     wire(key(InputEvent::Kind::KeyDown, usage)),
+                                     translator,
+                                     events) == InputDispatch::Applied);
     }
     InputEvent click;
     click.kind = InputEvent::Kind::PointerDown;
@@ -306,8 +307,9 @@ TEST_CASE("stream input: the latency echo latches the most recent TIMED input") 
     // An UNTIMED event (any client built before s1.3 leaves these zero) must not clear the echo —
     // "the most recent input the server applied" is the most recent one it can date.
     events.clear();
-    CHECK(dispatch_input_message(MessageType::Input, wire(key(InputEvent::Kind::KeyUp, 0x04)),
-                                 translator, events) == InputDispatch::Applied);
+    CHECK(dispatch_input_message(
+              MessageType::Input, wire(key(InputEvent::Kind::KeyUp, 0x04)), translator, events) ==
+          InputDispatch::Applied);
     CHECK(translator.last_seq() == 7);
     CHECK(translator.last_client_us() == 1'234'567);
 
