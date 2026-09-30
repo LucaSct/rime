@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// M18.4: the SOFTWARE half of the hybrid micro-triangle rasterizer (ADR-0043 gate 6, ADR-0056).
+// M18.4: the SOFTWARE half of the hybrid micro-triangle rasterizer (ADR-0043 gate 6, ADR-0058).
 //
 // Why a GPU would rasterize in a compute shader at all. Fixed-function raster hardware is built
 // for triangles that cover many pixels: it walks them in 2x2 quads (so derivatives exist) and

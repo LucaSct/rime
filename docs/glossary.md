@@ -162,7 +162,7 @@ Entries are grouped roughly by area and kept short on purpose.
   through the GPU's fixed-function rasterizer, sub-pixel ones through a *software* rasterizer in a
   compute shader (one thread walks one triangle's few pixels), because hardware setup and its 2×2
   quad granularity waste most of their work on a triangle smaller than a pixel. Both write the same
-  visibility buffer and must agree on fill rule and depth. Rime's is M18.4 ([ADR-0056](adr/0056-m18.4-micro-raster.md)).
+  visibility buffer and must agree on fill rule and depth. Rime's is M18.4 ([ADR-0058](adr/0058-m18.4-micro-raster.md)).
 - **Fill rule / top-left rule.** Which triangle owns a pixel centre lying exactly on a shared edge.
   The top-left rule gives it to the triangle for which that edge is a *left* edge or a flat *top*
   edge (y pointing down), so a shared edge's samples are drawn exactly once — no cracks, no double
