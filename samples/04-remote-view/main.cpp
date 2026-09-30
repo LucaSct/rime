@@ -39,6 +39,7 @@
 #include <thread>
 #include <vector>
 
+#include "rime/platform/hid_keys.hpp"
 #include "rime/platform/platform.hpp" // window + event pump + input (the --window client)
 #include "rime/platform/socket.hpp"
 #include "rime/rhi/rhi.hpp"
@@ -315,7 +316,8 @@ int run_client_headless(const std::string& host,
             e.kind = stream::InputEvent::Kind::PointerMove;
             e.x = (i * 255) / 100; // 0 → 255 sweep drives R on the server
             e.y = 128;
-            e.client_us = now_us(); // s1.3: stamp the send time + a per-client seq (the ledger echo)
+            e.client_us =
+                now_us(); // s1.3: stamp the send time + a per-client seq (the ledger echo)
             e.seq = ++iseq;
             if (!conn.send_input(e)) {
                 break;
@@ -362,9 +364,10 @@ int run_client_headless(const std::string& host,
         last_px = std::move(pixels);
         ++received;
 
-        // Fold this frame into the ledger: the server's stamps ride in `fm`; recv/decode/present are
-        // ours; the echoed input (fm.last_input_*) closes the offset-free input-to-photon. A headless
-        // client has no display, so "present" is the moment it finishes consuming the frame.
+        // Fold this frame into the ledger: the server's stamps ride in `fm`; recv/decode/present
+        // are ours; the echoed input (fm.last_input_*) closes the offset-free input-to-photon. A
+        // headless client has no display, so "present" is the moment it finishes consuming the
+        // frame.
         stream::LatencyLedger ledger;
         ledger.capture_us = fm.capture_us;
         ledger.readback_us = fm.readback_us;
@@ -394,8 +397,8 @@ int run_client_headless(const std::string& host,
         (received > 1 && last_r != first_r) ? "— scene responded to input ✓" : "");
 
     // s1.3: the latency ledger — median/p95 per stage over the session (ADR-0030 §5). On loopback
-    // the numbers are tiny (same box, no real wire) but every stage is populated, proving the ledger
-    // flows end to end; a real WAN client is where input->photon earns its keep.
+    // the numbers are tiny (same box, no real wire) but every stage is populated, proving the
+    // ledger flows end to end; a real WAN client is where input->photon earns its keep.
     if (received > 0) {
         std::printf("%s", latency.dump().c_str());
     }
@@ -612,6 +615,36 @@ void synthesize_frame(std::vector<std::byte>& buf, std::uint32_t w, std::uint32_
 // from window framebuffer pixels into the *frame's* pixel space (what "client pixels" means to the
 // server: the coordinate system of the image it is sending), so a drag across the whole window
 // sweeps the server's full input range regardless of window size. Escape asks the window to close.
+//
+// KEY CODES ARE HID USAGES and BUTTON INDICES ARE DOM ORDER (m18 Track H, ADR-0054). This client
+// used to put `static_cast<uint32_t>(Key)` and `static_cast<uint32_t>(MouseButton)` on the wire —
+// the enums' own ordinals, which `keyboard.hpp` says are "arbitrary and stable; do not rely on
+// them numerically" and which the browser page had no way to reproduce. Nothing shipped ever READ
+// either field (this sample's own server treats any KeyDown as "reset", and 07/08/10 do the same),
+// so changing the meaning breaks no deployed pair and costs no protocol version bump — but leaving
+// the only native producer speaking a private numbering would mean the wire had two meanings the
+// day something did read it.
+// `MouseButton` -> the wire's DOM `MouseEvent.button` index. The two orders differ in the middle
+// (the engine's is Left, Right, Middle; DOM's is left, MIDDLE, right), which is the one place this
+// conversion can be silently wrong — so it is written out rather than cast.
+[[nodiscard]] std::uint32_t dom_button_index(platform::MouseButton b) noexcept {
+    switch (b) {
+        case platform::MouseButton::Left:
+            return 0;
+        case platform::MouseButton::Middle:
+            return 1;
+        case platform::MouseButton::Right:
+            return 2;
+        case platform::MouseButton::X1:
+            return 3;
+        case platform::MouseButton::X2:
+            return 4;
+        case platform::MouseButton::Count:
+            break;
+    }
+    return 0;
+}
+
 void forward_input(stream::ProtocolConnection& conn,
                    const platform::Event& e,
                    platform::Extent2D win,
@@ -634,7 +667,7 @@ void forward_input(stream::ProtocolConnection& conn,
         case ET::MouseButton:
             ie.kind = e.button.down ? stream::InputEvent::Kind::PointerDown
                                     : stream::InputEvent::Kind::PointerUp;
-            ie.code = static_cast<std::uint32_t>(e.button.button);
+            ie.code = dom_button_index(e.button.button);
             break;
         case ET::MouseWheel:
             ie.kind = stream::InputEvent::Kind::PointerScroll;
@@ -643,14 +676,14 @@ void forward_input(stream::ProtocolConnection& conn,
             break;
         case ET::KeyDown:
             ie.kind = stream::InputEvent::Kind::KeyDown;
-            ie.code = static_cast<std::uint32_t>(e.key.key);
+            ie.code = platform::key_to_hid_usage(e.key.key);
             if (e.key.key == platform::Key::Escape) {
                 window.request_close();
             }
             break;
         case ET::KeyUp:
             ie.kind = stream::InputEvent::Kind::KeyUp;
-            ie.code = static_cast<std::uint32_t>(e.key.key);
+            ie.code = platform::key_to_hid_usage(e.key.key);
             break;
         default:
             return; // not an event we forward

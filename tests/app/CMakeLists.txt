@@ -11,10 +11,16 @@ rime_add_test(rime_app_tests
     sim_stage_test.cpp
     editor_play_test.cpp
     windowed_test.cpp
-    windowed_input_test.cpp)
+    windowed_input_test.cpp
+    stream_input_test.cpp)
 
 # windowed_input_test.cpp (m13.3c) adds rime::gameplay: it drives a gameplay::FlyCamera from an
 # Application's input snapshot, which is the join the samples make and the one nothing tested.
 # gameplay is GPU-free like the rest of this suite, so the whole thing still runs headless.
+# stream_input_test.cpp (m18 Track H) adds rime::editorhost_app: `app::StreamInputTranslator` and
+# `dispatch_input_message` are the editor host's own input decode, and the point of testing them
+# HERE is that they are the very code the host's drain loop calls, not a re-implementation of it.
+# GPU-free like the rest of this suite (the translator touches no device and no socket).
 target_link_libraries(rime_app_tests
-    PRIVATE rime::app rime::editorhost rime::physics rime::gameplay)
+    PRIVATE rime::app rime::editorhost rime::editorhost_app rime::physics rime::gameplay
+            rime::stream)

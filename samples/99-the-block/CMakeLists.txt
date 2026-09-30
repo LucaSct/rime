@@ -35,9 +35,12 @@ rime_apply_common_target_options(the_block)
 # `editor --engine build/dev/bin/the-block-host`.
 add_executable(the_block_host block_host_main.cpp)
 set_target_properties(the_block_host PROPERTIES OUTPUT_NAME the-block-host)
+# rime::gameplay + rime::platform arrive with m18 Track H: the host's play-mode `PlayTick` hook
+# flies a `gameplay::FlyCamera` from the browser's input, which is this game deciding what a key
+# MEANS — the third thing ADR-0038 says a game's own host binary is for.
 target_link_libraries(the_block_host
     PRIVATE rime::editorhost_app rime::worldkit rime::blockkit rime::ecs rime::render
-            rime::destruction)
+            rime::destruction rime::gameplay rime::platform rime::core)
 rime_apply_common_target_options(the_block_host)
 
 # ── The cooked block ────────────────────────────────────────────────────────────────────────────

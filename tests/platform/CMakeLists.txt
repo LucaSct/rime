@@ -8,6 +8,7 @@ rime_add_test(rime_platform_tests
     event_test.cpp
     window_test.cpp
     input_test.cpp
+    hid_keys_test.cpp
     filesystem_test.cpp
     socket_test.cpp)
 

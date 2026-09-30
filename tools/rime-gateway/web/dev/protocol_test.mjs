@@ -17,6 +17,7 @@ import {
   encodeInputEvent,
   decodeInputEvent,
   encodeCapabilities,
+  decodeStreamConfig,
 } from "../protocol.js";
 
 function toHex(bytes) {
@@ -120,6 +121,29 @@ console.log("ok - decodeEnvelope recovers type and payload");
 // truncated or padded — a peer that lies about a length is not a peer to trust the rest of.
 assert.throws(() => decodeEnvelope(new Uint8Array([0x02, 0x01, 0xff, 0x00, 0x00, 0x00, 0x01]).buffer));
 console.log("ok - decodeEnvelope rejects a length that does not match the message");
+
+// ── StreamConfig — [codec:u8][fmt:u8][w:u32 LE][h:u32 LE][codec_config...]
+// (engine/stream/src/protocol.cpp, `StreamConfigMessage::encode`). The page reads only the
+// geometry, because that is the pixel space `InputEvent.x/y` are defined in — so the vector below
+// carries a two-byte tail the decoder must step over rather than choke on.
+//   codec  = Av1 = 3                    -> 03
+//   fmt    = 0 (whatever wire_format_of gave; the page does not read it)  -> 00
+//   width  = 0x000003C0 = 960           -> C0 03 00 00 (LE)
+//   height = 0x0000021C = 540           -> 1C 02 00 00 (LE)
+//   tail   = two bytes of "sequence header"                               -> AA BB
+const streamConfigBytes = new Uint8Array([
+  0x03, 0x00, 0xc0, 0x03, 0x00, 0x00, 0x1c, 0x02, 0x00, 0x00, 0xaa, 0xbb,
+]);
+const streamConfig = decodeStreamConfig(streamConfigBytes);
+assert.equal(streamConfig.codec, Codec.Av1);
+assert.equal(streamConfig.width, 960);
+assert.equal(streamConfig.height, 540);
+console.log("ok - decodeStreamConfig reads the 960x540 geometry past a variable tail");
+
+// Nine bytes is one short of the fixed head; a page that guessed a geometry here would scale every
+// pointer coordinate by a number it invented.
+assert.throws(() => decodeStreamConfig(new Uint8Array(9)));
+console.log("ok - decodeStreamConfig rejects a truncated head");
 
 if (failures > 0) {
   console.error(`${failures} vector(s) did not match`);

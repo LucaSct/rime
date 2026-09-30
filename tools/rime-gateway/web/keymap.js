@@ -1,74 +1,60 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 
-// Browser physical key (`KeyboardEvent.code`) -> `rime::platform::Key` ordinal
-// (engine/platform/include/rime/platform/keyboard.hpp).
+// Browser physical key (`KeyboardEvent.code`) -> USB HID usage ID, Keyboard/Keypad page (0x07).
 //
-// INFERRED, not measured: `input.rs`'s doc comment says an `InputEvent.code` for a key event "is
-// a key code (Key*)", but nothing in the repository defines a wire-stable numbering for that enum
-// — `keyboard.hpp` says the opposite in so many words: "Values are arbitrary and stable; do not
-// rely on them numerically." No engine-side input-injection path exists yet to decode this page's
-// `code` field back into a `Key` at all (grep for `InputEvent` under `engine/` turns up only the
-// wire structs, never a producer or consumer tied to `platform::Key`), so there is nothing to
-// conform this table against. What follows is this page's own choice: the enum's declaration
-// order, read by hand from `keyboard.hpp` (`Unknown` = 0, then each named key in file order), used
-// as the ordinal. If a future engine-side injector picks a different numbering, this table moves,
-// not the wire format — flagged in the brick's report for exactly that reason.
-const KEY_ORDER = [
-  "Unknown",
-  "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
-  "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-  "Num0", "Num1", "Num2", "Num3", "Num4", "Num5", "Num6", "Num7", "Num8", "Num9",
-  "Space", "Enter", "Tab", "Backspace", "Escape", "Insert", "Delete",
-  "Left", "Right", "Up", "Down", "Home", "End", "PageUp", "PageDown",
-  "Minus", "Equal", "LeftBracket", "RightBracket", "Backslash", "Semicolon", "Apostrophe",
-  "Grave", "Comma", "Period", "Slash",
-  "LeftShift", "RightShift", "LeftCtrl", "RightCtrl", "LeftAlt", "RightAlt",
-  "LeftSuper", "RightSuper", "CapsLock", "NumLock", "ScrollLock",
-  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-  "PrintScreen", "Pause", "Menu",
-  "KP0", "KP1", "KP2", "KP3", "KP4", "KP5", "KP6", "KP7", "KP8", "KP9",
-  "KPDecimal", "KPDivide", "KPMultiply", "KPSubtract", "KPAdd", "KPEnter", "KPEqual",
-];
-
-const KEY_TO_ORDINAL = Object.freeze(
-  Object.fromEntries(KEY_ORDER.map((name, index) => [name, index])),
-);
-
-/** `KeyboardEvent.code` (the physical-key string; `event.key` is the layout-mapped character and
- * the wrong thing to send — `keyboard.hpp` identifies keys "by position, not the character it
- * produces") to this table's key name. */
-const CODE_TO_KEY_NAME = Object.freeze({
-  KeyA: "A", KeyB: "B", KeyC: "C", KeyD: "D", KeyE: "E", KeyF: "F", KeyG: "G",
-  KeyH: "H", KeyI: "I", KeyJ: "J", KeyK: "K", KeyL: "L", KeyM: "M", KeyN: "N",
-  KeyO: "O", KeyP: "P", KeyQ: "Q", KeyR: "R", KeyS: "S", KeyT: "T", KeyU: "U",
-  KeyV: "V", KeyW: "W", KeyX: "X", KeyY: "Y", KeyZ: "Z",
-  Digit0: "Num0", Digit1: "Num1", Digit2: "Num2", Digit3: "Num3", Digit4: "Num4",
-  Digit5: "Num5", Digit6: "Num6", Digit7: "Num7", Digit8: "Num8", Digit9: "Num9",
-  Space: "Space", Enter: "Enter", Tab: "Tab", Backspace: "Backspace", Escape: "Escape",
-  Insert: "Insert", Delete: "Delete",
-  ArrowLeft: "Left", ArrowRight: "Right", ArrowUp: "Up", ArrowDown: "Down",
-  Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
-  Minus: "Minus", Equal: "Equal", BracketLeft: "LeftBracket", BracketRight: "RightBracket",
-  Backslash: "Backslash", Semicolon: "Semicolon", Quote: "Apostrophe", Backquote: "Grave",
-  Comma: "Comma", Period: "Period", Slash: "Slash",
-  ShiftLeft: "LeftShift", ShiftRight: "RightShift", ControlLeft: "LeftCtrl",
-  ControlRight: "RightCtrl", AltLeft: "LeftAlt", AltRight: "RightAlt",
-  MetaLeft: "LeftSuper", MetaRight: "RightSuper",
-  CapsLock: "CapsLock", NumLock: "NumLock", ScrollLock: "ScrollLock",
-  F1: "F1", F2: "F2", F3: "F3", F4: "F4", F5: "F5", F6: "F6",
-  F7: "F7", F8: "F8", F9: "F9", F10: "F10", F11: "F11", F12: "F12",
-  PrintScreen: "PrintScreen", Pause: "Pause", ContextMenu: "Menu",
-  Numpad0: "KP0", Numpad1: "KP1", Numpad2: "KP2", Numpad3: "KP3", Numpad4: "KP4",
-  Numpad5: "KP5", Numpad6: "KP6", Numpad7: "KP7", Numpad8: "KP8", Numpad9: "KP9",
-  NumpadDecimal: "KPDecimal", NumpadDivide: "KPDivide", NumpadMultiply: "KPMultiply",
-  NumpadSubtract: "KPSubtract", NumpadAdd: "KPAdd", NumpadEnter: "KPEnter",
-  NumpadEqual: "KPEqual",
+// MEASURED against the engine, not inferred: `InputEvent.code` for a key event is a HID usage
+// (ADR-0054, decided 2026-09-29), and `engine/platform/src/hid_keys.cpp` is the table that reads
+// it back into `rime::platform::Key`. This file's previous version sent `platform::Key` ORDINALS,
+// which it flagged itself as a guess — `keyboard.hpp` says "values are arbitrary and stable; do
+// not rely on them numerically", so there was no stable numbering to send and nothing on the
+// server decoded them anyway.
+//
+// WHY HID. A `KeyboardEvent.code` identifies a key by POSITION ("KeyA" is the key where A sits on
+// a US board, whatever the layout prints on it), and so does `platform::Key`, and so does the HID
+// page — the three agree about what a key IS, which is the only thing that has to survive the
+// wire. The page is a published standard that has not moved since USB 1.1, so neither end has to
+// ship a version of it.
+//
+// The names in the comments are the standard's own ("Keyboard a and A", etc.), abbreviated.
+const CODE_TO_HID_USAGE = Object.freeze({
+  // 0x04..0x1D — letters, in alphabetical order.
+  KeyA: 0x04, KeyB: 0x05, KeyC: 0x06, KeyD: 0x07, KeyE: 0x08, KeyF: 0x09, KeyG: 0x0a,
+  KeyH: 0x0b, KeyI: 0x0c, KeyJ: 0x0d, KeyK: 0x0e, KeyL: 0x0f, KeyM: 0x10, KeyN: 0x11,
+  KeyO: 0x12, KeyP: 0x13, KeyQ: 0x14, KeyR: 0x15, KeyS: 0x16, KeyT: 0x17, KeyU: 0x18,
+  KeyV: 0x19, KeyW: 0x1a, KeyX: 0x1b, KeyY: 0x1c, KeyZ: 0x1d,
+  // 0x1E..0x27 — the number row. The page runs 1..9 and puts 0 LAST, so this is not an offset.
+  Digit1: 0x1e, Digit2: 0x1f, Digit3: 0x20, Digit4: 0x21, Digit5: 0x22,
+  Digit6: 0x23, Digit7: 0x24, Digit8: 0x25, Digit9: 0x26, Digit0: 0x27,
+  // 0x28..0x38 — whitespace, editing, and the US punctuation positions.
+  Enter: 0x28, Escape: 0x29, Backspace: 0x2a, Tab: 0x2b, Space: 0x2c,
+  Minus: 0x2d, Equal: 0x2e, BracketLeft: 0x2f, BracketRight: 0x30, Backslash: 0x31,
+  Semicolon: 0x33, Quote: 0x34, Backquote: 0x35, Comma: 0x36, Period: 0x37, Slash: 0x38,
+  // 0x39..0x45 — CapsLock then F1..F12.
+  CapsLock: 0x39,
+  F1: 0x3a, F2: 0x3b, F3: 0x3c, F4: 0x3d, F5: 0x3e, F6: 0x3f,
+  F7: 0x40, F8: 0x41, F9: 0x42, F10: 0x43, F11: 0x44, F12: 0x45,
+  // 0x46..0x52 — the system / navigation cluster and the arrows.
+  PrintScreen: 0x46, ScrollLock: 0x47, Pause: 0x48,
+  Insert: 0x49, Home: 0x4a, PageUp: 0x4b, Delete: 0x4c, End: 0x4d, PageDown: 0x4e,
+  ArrowRight: 0x4f, ArrowLeft: 0x50, ArrowDown: 0x51, ArrowUp: 0x52,
+  // 0x53..0x63, 0x67 — the keypad, 1..9 then 0 like the number row.
+  NumLock: 0x53, NumpadDivide: 0x54, NumpadMultiply: 0x55, NumpadSubtract: 0x56,
+  NumpadAdd: 0x57, NumpadEnter: 0x58,
+  Numpad1: 0x59, Numpad2: 0x5a, Numpad3: 0x5b, Numpad4: 0x5c, Numpad5: 0x5d,
+  Numpad6: 0x5e, Numpad7: 0x5f, Numpad8: 0x60, Numpad9: 0x61, Numpad0: 0x62,
+  NumpadDecimal: 0x63, ContextMenu: 0x65, NumpadEqual: 0x67,
+  // 0xE0..0xE7 — the modifiers, the one block every OS and browser agrees on exactly.
+  ControlLeft: 0xe0, ShiftLeft: 0xe1, AltLeft: 0xe2, MetaLeft: 0xe3,
+  ControlRight: 0xe4, ShiftRight: 0xe5, AltRight: 0xe6, MetaRight: 0xe7,
 });
 
-/** The `Key` ordinal for a `KeyboardEvent`, or `Key::Unknown` (0) for anything not in the table —
- * never `undefined`, so a caller can encode it straight onto the wire. */
-export function keyOrdinalOf(event) {
-  const name = CODE_TO_KEY_NAME[event.code];
-  return name ? KEY_TO_ORDINAL[name] : KEY_TO_ORDINAL.Unknown;
+/** The HID usage for a `KeyboardEvent`, or 0 for a key this table does not cover — never
+ * `undefined`, so a caller can encode it straight onto the wire. 0 is the page's own "Reserved
+ * (no event indicated)", and the engine reads it as `Key::Unknown` and counts it.
+ *
+ * `event.code` (the physical key) and not `event.key` (the character the layout produced): the
+ * engine identifies keys by position, so WASD stays WASD on an AZERTY board. */
+export function hidUsageOf(event) {
+  return CODE_TO_HID_USAGE[event.code] ?? 0;
 }

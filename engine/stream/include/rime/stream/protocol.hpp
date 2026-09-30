@@ -170,9 +170,33 @@ struct StreamConfigMessage {
 // One input event on its way back to the engine. A single tagged struct (rather than a struct per
 // event) keeps the wire and the server's event-injection loop simple. Fields not relevant to a
 // `kind` are zero. The client fills this from platform events; the server maps it back to platform
-// input (S0.5). Payload layout (fixed 37 bytes):
+// input (`app::StreamInputTranslator`, m18 Track H). Payload layout (fixed 37 bytes):
 //   [ kind:u8 ][ code:u32 ][ x:i32 ][ y:i32 ][ scroll_x:f32 ][ scroll_y:f32 ][ mods:u32 ]
 //   [ client_us:u64 ][ seq:u32 ]
+//
+// THE NUMBERINGS, all four decided in ADR-0054 and none of them inferrable from the layout above.
+// Until m18 they were undefined in practice: nothing on the server read `code` at all, and the two
+// producers had each picked something different.
+//
+//   * `code`, KeyDown/KeyUp — a **USB HID usage ID on the Keyboard/Keypad page (0x07)**. KeyA =
+//     0x04, Enter = 0x28, Space = 0x2C, ArrowRight = 0x4F, ControlLeft = 0xE0. NOT a
+//     `platform::Key` ordinal: keyboard.hpp says those values are "arbitrary and stable; do not
+//     rely on them numerically", so the enum must stay free to grow a key in the middle, and
+//     anything that froze it onto a wire would take that freedom away. 0 is the page's "no event
+//     indicated"; an unmapped usage decodes to `Key::Unknown` and is counted, never fatal.
+//     `platform::hid_usage_to_key` / `key_to_hid_usage` are the table both directions go through.
+//   * `code`, PointerDown/PointerUp — a **DOM `MouseEvent.button` index**: 0 left, 1 MIDDLE,
+//     2 right, 3 back, 4 forward. Note that this is not `platform::MouseButton`'s order (Left,
+//     Right, Middle, …) — the two differ in the middle, deliberately, because the browser is the
+//     client that cannot change its own numbering and the engine is the side that can translate.
+//   * `mods` — the `platform::KeyMods` bitmask: Shift 1, Ctrl 2, Alt 4, Super 8. Bits above those
+//     four are reserved; a receiver ignores them rather than rejecting the event.
+//   * `x` / `y` — **stream-frame pixels**: the coordinate system of the image the server is
+//     sending (the `StreamConfig` extent), NOT the client's window or CSS pixels. A client scales
+//     from its own viewport before sending, because only the client knows how big its viewport is.
+//     Values outside [0, w) x [0, h) are legal: a pointer-locked client integrates relative motion
+//     into an unbounded virtual position so a look does not stall against an edge, and a consumer
+//     that wants a cursor clamps it.
 struct InputEvent {
     enum class Kind : std::uint8_t {
         KeyDown = 0,
@@ -184,12 +208,12 @@ struct InputEvent {
     };
 
     Kind kind = Kind::KeyDown;
-    std::uint32_t code = 0; // Key*: a key code; PointerDown/Up: a button index
-    std::int32_t x = 0;     // pointer position (PointerMove/Down/Up), in client pixels
+    std::uint32_t code = 0; // Key*: a HID usage (page 0x07); PointerDown/Up: a DOM button index
+    std::int32_t x = 0;     // pointer position (PointerMove/Down/Up), in stream-frame pixels
     std::int32_t y = 0;     //
     float scroll_x = 0.0f;  // PointerScroll deltas
     float scroll_y = 0.0f;  //
-    std::uint32_t mods = 0; // modifier-key bitmask (client-defined; carried verbatim)
+    std::uint32_t mods = 0; // platform::KeyMods bits (Shift 1, Ctrl 2, Alt 4, Super 8)
     // s1.3 (ADR-0030 §5): the input's client-clock send time + a per-client sequence number. The
     // server echoes seq + client_us on the frame that first reflects this input, closing the
     // offset-free input-to-photon measurement (latency.hpp). Old-style constructions leave them 0,
