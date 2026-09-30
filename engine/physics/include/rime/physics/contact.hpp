@@ -67,9 +67,10 @@ struct Manifold {
     // Terrain (M19.1): a body resting across a heightfield may touch it in several PATCHES whose
     // normals differ (a ball in a V-shaped gully touches both slopes) — one manifold holds one
     // normal, so each patch is its own region. `patch` names it by the index of the first
-    // (lowest-numbered) terrain triangle in it, which stays the same frame to frame while the body
-    // rests. 0 for every non-heightfield pair (where it is meaningless). Manifolds within one
-    // (pair, child) are ordered by it.
+    // (lowest-numbered) terrain triangle in it — bumped to one past the previous patch's id in the
+    // rare case two patches start in the same triangle, so ids are unique — which stays the same
+    // frame to frame while the body rests. 0 for every non-heightfield pair (where it is
+    // meaningless). Manifolds within one (pair, child) are ordered by it, strictly ascending.
     std::uint32_t patch = 0;
 };
 

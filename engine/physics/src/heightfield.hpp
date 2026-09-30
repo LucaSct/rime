@@ -855,7 +855,15 @@ inline std::uint32_t group_patches(std::span<const HeightfieldContact> cands,
             patches[best].normal_sum += c.normal;
         } else if (patches.size() < kMaxPatches) {
             HeightfieldPatch np;
-            np.seed_triangle = c.triangle;
+            // The region id is the seed triangle — made STRICTLY increasing across patches: seeds
+            // are non-decreasing (candidates arrive in triangle order), but one triangle can seed
+            // two patches (a capsule's end sphere on a face and its shaft on that face's edge have
+            // different normals). A repeated id would make two regions one warm-start key and one
+            // event, so the second takes the previous id + 1. Still ordered (the event merge needs
+            // that), still stable while the contact configuration is.
+            np.seed_triangle = patches.empty()
+                                   ? c.triangle
+                                   : std::max(c.triangle, patches.back().seed_triangle + 1u);
             np.seed_normal = c.normal;
             np.normal_sum = c.normal;
             np.members.push_back(k);
