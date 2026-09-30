@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 
-//! The M18 virtualized-geometry companion payload writer. This module owns only the stable,
-//! versioned RMA1 byte encoding; clustering, simplification, and page packing are separate cook
-//! stages. Its field order mirrors `decode_virtual_geometry` in the C++ reader exactly.
+//! The M18 virtualized-geometry companion payload writer. This module owns the stable, versioned
+//! RMA1 byte encoding and the single-page leaf cook; the replacement-DAG cook (clustering,
+//! simplification, grouping and page packing) is `virtual_geometry_dag`. The field order here
+//! mirrors `decode_virtual_geometry` in the C++ reader exactly.
 
 use crate::cooked::{
     wrap_container, ByteWriter, ASSET_KIND_VIRTUAL_GEOMETRY, VIRTUAL_GEOMETRY_SCHEMA_HASH,
@@ -14,7 +15,11 @@ use crate::mesh::{
 };
 
 /// Version of the kind-specific virtual-geometry payload (independent of the RMA1 envelope).
-pub const PAYLOAD_VERSION: u32 = 1;
+///
+/// v2 (M18.6, ADR-0056) appends a per-group LOD bounding sphere after v1's group record, so a
+/// view-dependent selector can bound projected error per group. The C++ reader still accepts v1
+/// (spheres read as zero); this writer only emits v2.
+pub const PAYLOAD_VERSION: u32 = 2;
 
 /// Conservative leaf-cluster triangle cap for the first M18 cook stage. The partitioner only
 /// cuts between complete source triangles, so an indexed submesh's material range is preserved.
@@ -48,6 +53,11 @@ pub struct Cluster {
 }
 
 /// One replacement group and its child-group adjacency slice.
+///
+/// `lod_center`/`lod_radius` (payload v2) is the group's LOD bounding sphere in local space: it
+/// encloses every source triangle this representation stands for, and — the DAG cook guarantees
+/// it — every child group's LOD sphere. Together with a monotone `lod_error_m` that is what lets a
+/// view-dependent selector compute a projected error that can only grow toward the root.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Group {
     pub first_cluster: u32,
@@ -56,6 +66,8 @@ pub struct Group {
     pub child_count: u32,
     pub lod_error_m: f32,
     pub permanently_resident: bool,
+    pub lod_center: [f32; 3],
+    pub lod_radius: f32,
 }
 
 /// CPU-side virtual-geometry payload data ready to wrap in an RMA1 container.
@@ -83,6 +95,10 @@ pub enum LeafCookError {
     InvalidSubmesh,
     NonFiniteVertex,
     OversizedPayload,
+    /// The DAG cook broke one of its own structural invariants (a simplification produced more
+    /// clusters than it consumed, so a parent would be left without a child to replace it). This
+    /// is a cooker bug, reported rather than written as an asset whose cuts would overlap.
+    DagInvariant,
 }
 
 /// The page-byte contract for the M18 leaf cook is deliberately simple and stable: the page starts
@@ -99,58 +115,8 @@ impl Asset {
     /// remain intact. The helper intentionally does not merge primitives or invent a material when
     /// the source record is malformed.
     pub fn from_mesh(source_mesh: u64, mesh: &Mesh) -> Result<Self, LeafCookError> {
-        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
-            return Err(LeafCookError::EmptyMesh);
-        }
-        if mesh.submeshes.is_empty() {
-            return Err(LeafCookError::MissingSubmeshes);
-        }
-        if mesh
-            .tangents
-            .as_ref()
-            .is_some_and(|v| v.len() != mesh.vertices.len())
-            || mesh.skin.as_ref().is_some_and(|s| {
-                s.joints.len() != mesh.vertices.len() || s.weights.len() != mesh.vertices.len()
-            })
-        {
-            return Err(LeafCookError::MalformedOptionalArray);
-        }
-        for vertex in &mesh.vertices {
-            if vertex
-                .position
-                .into_iter()
-                .chain(vertex.normal)
-                .chain(vertex.uv)
-                .any(|v| !v.is_finite())
-            {
-                return Err(LeafCookError::NonFiniteVertex);
-            }
-        }
-        for &index in &mesh.indices {
-            if index as usize >= mesh.vertices.len() {
-                return Err(LeafCookError::InvalidIndex);
-            }
-        }
-        for submesh in &mesh.submeshes {
-            if submesh.index_count == 0
-                || submesh.index_count % 3 != 0
-                || u64::from(submesh.first_index) + u64::from(submesh.index_count)
-                    > mesh.indices.len() as u64
-            {
-                return Err(LeafCookError::InvalidSubmesh);
-            }
-        }
-
-        let mut attribs = ATTR_POSITION | ATTR_NORMAL | ATTR_UV;
-        let mut vertex_stride = STRIDE_NO_TANGENT;
-        if mesh.tangents.is_some() {
-            attribs |= ATTR_TANGENT;
-            vertex_stride += TANGENT_BYTES;
-        }
-        if mesh.skin.is_some() {
-            attribs |= ATTR_JOINTS | ATTR_WEIGHTS;
-            vertex_stride += SKIN_BYTES;
-        }
+        validate_source_mesh(mesh)?;
+        let (attribs, vertex_stride) = vertex_layout(mesh);
 
         let vertex_bytes = u64::from(vertex_stride) * mesh.vertices.len() as u64;
         let index_bytes = 4u64 * mesh.indices.len() as u64;
@@ -160,32 +126,8 @@ impl Asset {
         }
 
         let mut page_bytes = ByteWriter::new();
-        for (i, vertex) in mesh.vertices.iter().enumerate() {
-            for value in vertex.position {
-                page_bytes.f32(value);
-            }
-            for value in vertex.normal {
-                page_bytes.f32(value);
-            }
-            for value in vertex.uv {
-                page_bytes.f32(value);
-            }
-            if let Some(tangents) = &mesh.tangents {
-                for value in tangents[i] {
-                    page_bytes.f32(value);
-                }
-            }
-            if let Some(skin) = &mesh.skin {
-                for joint in skin.joints[i] {
-                    page_bytes.u16(joint);
-                }
-                for weight in skin.weights[i] {
-                    if !weight.is_finite() {
-                        return Err(LeafCookError::NonFiniteVertex);
-                    }
-                    page_bytes.f32(weight);
-                }
-            }
+        for i in 0..mesh.vertices.len() {
+            write_vertex(&mut page_bytes, mesh, i)?;
         }
         for &index in &mesh.indices {
             page_bytes.u32(index);
@@ -224,6 +166,12 @@ impl Asset {
                 });
             }
         }
+        let cluster_count_u32 = clusters.len() as u32;
+        let (lod_center, lod_radius) = bounding_sphere_of_points(
+            mesh.indices
+                .iter()
+                .map(|&index| mesh.vertices[index as usize].position),
+        );
         Ok(Self {
             source_mesh,
             attribs,
@@ -240,11 +188,16 @@ impl Asset {
             clusters,
             groups: vec![Group {
                 first_cluster: 0,
-                cluster_count: mesh.submeshes.len() as u32,
+                // Every cluster, not every submesh: a submesh longer than one cluster splits, and
+                // a group that stopped short would leave clusters naming a group that does not
+                // contain them (the C++ validator's InvalidCluster).
+                cluster_count: cluster_count_u32,
                 first_child: 0,
                 child_count: 0,
                 lod_error_m: 0.0,
                 permanently_resident: true,
+                lod_center,
+                lod_radius,
             }],
             child_groups: Vec::new(),
             page_dependencies: Vec::new(),
@@ -252,6 +205,155 @@ impl Asset {
             coarse_group: 0,
         })
     }
+}
+
+/// Validate the parts of a cooked mesh both the leaf and the DAG cooks rely on: non-empty, in-range
+/// indices, well-formed submeshes, finite attributes and parallel optional arrays.
+pub(crate) fn validate_source_mesh(mesh: &Mesh) -> Result<(), LeafCookError> {
+    if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+        return Err(LeafCookError::EmptyMesh);
+    }
+    if mesh.submeshes.is_empty() {
+        return Err(LeafCookError::MissingSubmeshes);
+    }
+    if mesh
+        .tangents
+        .as_ref()
+        .is_some_and(|v| v.len() != mesh.vertices.len())
+        || mesh.skin.as_ref().is_some_and(|s| {
+            s.joints.len() != mesh.vertices.len() || s.weights.len() != mesh.vertices.len()
+        })
+    {
+        return Err(LeafCookError::MalformedOptionalArray);
+    }
+    for vertex in &mesh.vertices {
+        if vertex
+            .position
+            .into_iter()
+            .chain(vertex.normal)
+            .chain(vertex.uv)
+            .any(|v| !v.is_finite())
+        {
+            return Err(LeafCookError::NonFiniteVertex);
+        }
+    }
+    for &index in &mesh.indices {
+        if index as usize >= mesh.vertices.len() {
+            return Err(LeafCookError::InvalidIndex);
+        }
+    }
+    for submesh in &mesh.submeshes {
+        if submesh.index_count == 0
+            || submesh.index_count % 3 != 0
+            || u64::from(submesh.first_index) + u64::from(submesh.index_count)
+                > mesh.indices.len() as u64
+        {
+            return Err(LeafCookError::InvalidSubmesh);
+        }
+    }
+    Ok(())
+}
+
+/// The attribute flags and interleaved stride a page vertex uses — the same order `Mesh::cook`
+/// writes, so a page vertex decodes with the source mesh's own layout.
+pub(crate) fn vertex_layout(mesh: &Mesh) -> (u32, u32) {
+    let mut attribs = ATTR_POSITION | ATTR_NORMAL | ATTR_UV;
+    let mut vertex_stride = STRIDE_NO_TANGENT;
+    if mesh.tangents.is_some() {
+        attribs |= ATTR_TANGENT;
+        vertex_stride += TANGENT_BYTES;
+    }
+    if mesh.skin.is_some() {
+        attribs |= ATTR_JOINTS | ATTR_WEIGHTS;
+        vertex_stride += SKIN_BYTES;
+    }
+    (attribs, vertex_stride)
+}
+
+/// Append source vertex `i` in the page vertex layout.
+pub(crate) fn write_vertex(
+    out: &mut ByteWriter,
+    mesh: &Mesh,
+    i: usize,
+) -> Result<(), LeafCookError> {
+    let vertex = &mesh.vertices[i];
+    for value in vertex.position {
+        out.f32(value);
+    }
+    for value in vertex.normal {
+        out.f32(value);
+    }
+    for value in vertex.uv {
+        out.f32(value);
+    }
+    if let Some(tangents) = &mesh.tangents {
+        for value in tangents[i] {
+            out.f32(value);
+        }
+    }
+    if let Some(skin) = &mesh.skin {
+        for joint in skin.joints[i] {
+            out.u16(joint);
+        }
+        for weight in skin.weights[i] {
+            if !weight.is_finite() {
+                return Err(LeafCookError::NonFiniteVertex);
+            }
+            out.f32(weight);
+        }
+    }
+    Ok(())
+}
+
+/// A conservative bounding sphere of a point set: the centre is the AABB centre rounded to f32,
+/// and the radius is measured in f64 *from that rounded centre* and then rounded up, so the sphere
+/// written to disk really contains every point. (Measuring from the unrounded centre and rounding
+/// to nearest could leave a point a few ULPs outside — invisible on screen, but it would break the
+/// containment the DAG's monotonicity proof checks exactly.)
+pub(crate) fn bounding_sphere_of_points(
+    points: impl Iterator<Item = [f32; 3]> + Clone,
+) -> ([f32; 3], f32) {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points.clone() {
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(f64::from(p[axis]));
+            hi[axis] = hi[axis].max(f64::from(p[axis]));
+        }
+    }
+    if lo[0] > hi[0] {
+        return ([0.0; 3], 0.0);
+    }
+    let center = [
+        ((lo[0] + hi[0]) * 0.5) as f32,
+        ((lo[1] + hi[1]) * 0.5) as f32,
+        ((lo[2] + hi[2]) * 0.5) as f32,
+    ];
+    let mut radius = 0.0f64;
+    for p in points {
+        radius = radius.max(distance_f64(center, p));
+    }
+    (center, round_radius_up(radius))
+}
+
+/// Euclidean distance evaluated in f64 from f32 inputs. The C++ validator uses the same formula,
+/// so both sides agree on containment to the last bit.
+pub(crate) fn distance_f64(a: [f32; 3], b: [f32; 3]) -> f64 {
+    let dx = f64::from(a[0]) - f64::from(b[0]);
+    let dy = f64::from(a[1]) - f64::from(b[1]);
+    let dz = f64::from(a[2]) - f64::from(b[2]);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Round an f64 radius to the smallest f32 that is not below it, plus a relative guard of 2^-20 so
+/// a reader evaluating containment with a slightly different operation order still agrees.
+pub(crate) fn round_radius_up(radius: f64) -> f32 {
+    let guarded = radius * (1.0 + 1.0 / 1_048_576.0);
+    let mut r = guarded as f32;
+    if f64::from(r) < guarded {
+        r = f32::from_bits(r.to_bits() + 1);
+    }
+    r
 }
 
 fn count(value: usize, field: &str) -> u32 {
@@ -306,6 +408,11 @@ impl Asset {
             p.u32(group.child_count);
             p.f32(group.lod_error_m);
             p.bytes(&[u8::from(group.permanently_resident)]);
+            // v2 tail: appended after v1's record so a v1 reader's prefix is unchanged.
+            for value in group.lod_center {
+                p.f32(value);
+            }
+            p.f32(group.lod_radius);
         }
         for &child in &self.child_groups {
             p.u32(child);
@@ -367,6 +474,8 @@ mod tests {
                 child_count: 0,
                 lod_error_m: 0.5,
                 permanently_resident: true,
+                lod_center: [0.0, 0.5, 1.0],
+                lod_radius: 4.0,
             }],
             child_groups: Vec::new(),
             page_dependencies: Vec::new(),
@@ -496,6 +605,9 @@ mod tests {
         let second = Asset::from_mesh(0x55, &mesh).unwrap();
         assert_eq!(first, second);
         assert_eq!(first.clusters.len(), 2);
+        // The one group must own both clusters (it once owned `submeshes.len()` = 1, leaving
+        // cluster 1 naming a group that did not contain it).
+        assert_eq!(first.groups[0].cluster_count, 2);
         assert_eq!(
             first.clusters[0].index_count,
             (MAX_TRIANGLES_PER_CLUSTER * 3) as u32
@@ -588,8 +700,12 @@ mod tests {
     #[test]
     fn payload_has_the_cxx_header_and_table_sizes() {
         let payload = fixture().encode_payload();
-        // 48-byte payload header + 29-byte page + 56-byte cluster + 21-byte group + 3-byte tail.
-        assert_eq!(payload.len(), 157);
+        // 48-byte payload header + 29-byte page + 56-byte cluster + 37-byte v2 group (v1's 21
+        // bytes + a 16-byte LOD sphere) + 3-byte tail.
+        assert_eq!(payload.len(), 173);
+        let group = 48 + 29 + 56;
+        assert_eq!(&payload[group + 21..group + 25], &0.0f32.to_le_bytes());
+        assert_eq!(&payload[group + 33..group + 37], &4.0f32.to_le_bytes());
         assert_eq!(&payload[0..4], &PAYLOAD_VERSION.to_le_bytes());
         assert_eq!(
             u64::from_le_bytes(payload[4..12].try_into().unwrap()),

@@ -1271,10 +1271,14 @@ read_mesh_sdf(std::span<const std::byte> file, AssetError& out_error, AssetId* o
 
 namespace {
 
-inline constexpr std::uint32_t kVirtualGeometryPayloadVersion = 1;
+// v1 is the resident-leaf payload; v2 (M18.6, ADR-0056) appends a 16-byte LOD sphere to each
+// group record for the replacement DAG. Both stay readable: a v1 group's sphere reads as zero.
+inline constexpr std::uint32_t kVirtualGeometryPayloadVersionMin = 1;
+inline constexpr std::uint32_t kVirtualGeometryPayloadVersion = 2;
 inline constexpr std::uint32_t kVirtualGeometryPageRecordBytes = 29;
 inline constexpr std::uint32_t kVirtualGeometryClusterRecordBytes = 56;
-inline constexpr std::uint32_t kVirtualGeometryGroupRecordBytes = 21;
+inline constexpr std::uint32_t kVirtualGeometryGroupRecordBytesV1 = 21;
+inline constexpr std::uint32_t kVirtualGeometryGroupRecordBytesV2 = 37;
 
 } // namespace
 
@@ -1305,17 +1309,20 @@ std::optional<VirtualGeometryAsset> decode_virtual_geometry(std::span<const std:
         out_error = AssetError::Truncated;
         return std::nullopt;
     }
-    if (version != kVirtualGeometryPayloadVersion) {
+    if (version < kVirtualGeometryPayloadVersionMin || version > kVirtualGeometryPayloadVersion) {
         out_error = AssetError::UnsupportedVersion;
         return std::nullopt;
     }
+    const bool has_lod_sphere = version >= 2;
+    const std::uint32_t group_record_bytes =
+        has_lod_sphere ? kVirtualGeometryGroupRecordBytesV2 : kVirtualGeometryGroupRecordBytesV1;
 
     // Check each fixed table against the bytes still available before reserve/resize. The final
     // page-byte count is checked after the tables, since it is the only variable-size tail.
     const std::uint64_t table_bytes =
         std::uint64_t{page_count} * kVirtualGeometryPageRecordBytes +
         std::uint64_t{cluster_count} * kVirtualGeometryClusterRecordBytes +
-        std::uint64_t{group_count} * kVirtualGeometryGroupRecordBytes;
+        std::uint64_t{group_count} * group_record_bytes;
     if (table_bytes > reader.remaining()) {
         out_error = AssetError::SizeMismatch;
         return std::nullopt;
@@ -1382,6 +1389,11 @@ std::optional<VirtualGeometryAsset> decode_virtual_geometry(std::span<const std:
             return std::nullopt;
         }
         group.permanently_resident = resident != 0;
+        if (has_lod_sphere && (!reader.f32(group.lod_center.x) || !reader.f32(group.lod_center.y) ||
+                               !reader.f32(group.lod_center.z) || !reader.f32(group.lod_radius))) {
+            out_error = AssetError::Truncated;
+            return std::nullopt;
+        }
         asset.groups.push_back(group);
     }
 
