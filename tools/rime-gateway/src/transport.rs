@@ -940,14 +940,32 @@ mod tests {
     #[test]
     fn a_pli_from_the_peer_becomes_a_keyframe_request_event() {
         let (mut peer, mut transport) = connect_video_peer();
-        transport
-            .submit(Command::SendVideo {
-                frame: av1_test_keyframe(),
-                keyframe: true,
-                capture_micros: 1_000_000,
-            })
-            .unwrap();
-        assert!(peer.pump(Duration::from_secs(5), |p| !p.received_video.is_empty()));
+        // A PLI needs a receive stream to be about: str0m creates the peer's stream from the first
+        // RTP packet it sees, so `request_pli` has nothing to address until a frame has arrived.
+        //
+        // The keyframe is ONE RTP packet, and RTP is unreliable: NACK repair works by noticing a
+        // sequence gap, and a lone packet leaves no gap to notice, so a lost or not-yet-mappable
+        // first packet is gone for good. A Windows CI run failed exactly here (this wait, not the
+        // PLI below) after 5 s. A real sender does not give up after one frame: the transport asks
+        // for a keyframe (`Event::KeyframeRequested`) and the engine answers with another. Model
+        // that instead of hoping the one datagram lands: resend the keyframe every 500 ms until the
+        // peer has it. What the test proves is unchanged -- a keyframe reaches the peer, then a PLI
+        // from the peer reaches the event seam exactly once.
+        let mut delivered = false;
+        for _ in 0..10 {
+            transport
+                .submit(Command::SendVideo {
+                    frame: av1_test_keyframe(),
+                    keyframe: true,
+                    capture_micros: 1_000_000,
+                })
+                .unwrap();
+            if peer.pump(Duration::from_millis(500), |p| !p.received_video.is_empty()) {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "no keyframe reached the peer in 10 attempts");
         peer.request_pli();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut requested = false;
