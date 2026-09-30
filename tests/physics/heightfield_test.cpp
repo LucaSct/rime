@@ -392,6 +392,67 @@ TEST_CASE("heightfield raycast: the cell diagonal is (i,j)→(i+1,j+1), as the f
     CHECK(hit.normal.x == doctest::Approx(0.0f));
 }
 
+TEST_CASE("heightfield raycast: the surface is watertight at every edge and vertex") {
+    // A bumpy, non-planar terrain (pseudo-random samples at an awkward scale, so neighbouring
+    // triangles' planes evaluate their shared edges with genuinely different rounding). Every
+    // downward ray that starts above the tile and lands within its footprint MUST hit — the
+    // surface is closed — including rays aimed exactly at grid vertices, at edge midpoints, and
+    // along the diagonal and grid lines, which is where a walk that tests triangles independently
+    // leaks through the seams.
+    PhysicsWorld w;
+    Terrain t{17, 13, 0.37f, 0.53f, 0.0137f, -3.1f, {}};
+    std::uint32_t state = 12345u;
+    for (std::uint32_t k = 0; k < t.columns * t.rows; ++k) {
+        state = state * 1664525u + 1013904223u;
+        // 0..15 steps: a ~0.2 m bumpy range, gentler than every ray below is steep, so a ray
+        // starting metres above cannot pass UNDER a bump without first crossing down into it.
+        t.samples.push_back(static_cast<std::uint16_t>(state >> 28));
+    }
+    add_terrain(w, t);
+    int misses = 0;
+    int casts = 0;
+    // Interior vertices only: at the tile's own rim a ray can meet the footprint in a single
+    // boundary point, and whether rounding lands it a hair inside or outside is not a seam.
+    for (std::uint32_t j = 1; j + 1 < t.rows; ++j) {
+        for (std::uint32_t i = 1; i + 1 < t.columns; ++i) {
+            const float x = t.dx * float(i);
+            const float z = t.dz * float(j);
+            // Vertex, the two edge midpoints, the diagonal midpoint — straight down, and obliquely
+            // from four directions aimed at the same point.
+            const core::Vec3 aims[] = {{x, 0.0f, z},
+                                       {x + 0.5f * t.dx, 0.0f, z},
+                                       {x, 0.0f, z + 0.5f * t.dz},
+                                       {x + 0.5f * t.dx, 0.0f, z + 0.5f * t.dz}};
+            const core::Vec3 dirs[] = {{t.dx, -1.0f, t.dz},
+                                       {-t.dx, -1.0f, t.dz},
+                                       {t.dx, -2.0f, 0.0f},
+                                       {0.0f, -2.0f, -t.dz}};
+            for (const core::Vec3 aim : aims) {
+                // Straight down first: the surface height at the aim point.
+                RayHit down;
+                ++casts;
+                if (!cast(w, {aim.x, 100.0f, aim.z}, {0.0f, -1.0f, 0.0f}, down)) {
+                    ++misses;
+                    continue;
+                }
+                // Then obliquely, aimed at exactly that surface point from 5 m back: the ray is
+                // above the surface until it gets there, so it must hit at (or before) it.
+                for (const core::Vec3 d : dirs) {
+                    const core::Vec3 dn = core::normalize(d);
+                    const core::Vec3 o = down.point - dn * 5.0f;
+                    RayHit hit;
+                    ++casts;
+                    if (!cast(w, o, d, hit, 5.01f)) {
+                        ++misses;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(casts == 15 * 11 * 4 * 5);
+    CHECK(misses == 0);
+}
+
 TEST_CASE("heightfield raycast: grazing, one-sidedness, and rays that never reach the tile") {
     // A ridge along x = 2: heights 0, 0, 1, 0, 0 across columns (q = 0 or 100, scale 0.01).
     PhysicsWorld w;

@@ -285,8 +285,14 @@ triangle_id(const HeightfieldShape& hf, std::uint32_t ci, std::uint32_t cj, int 
                                                    std::uint32_t& tri_out) noexcept {
     // 1. Slab clip against the SURFACE's box (the thickness band below min_h is solid for
     //    contacts, but a ray only ever hits the top surface, which lives in [min_h, max_h]).
-    const float lo[3] = {0.0f, hf.min_h, 0.0f};
-    const float hi[3] = {hf.extent_x(), hf.max_h, hf.extent_z()};
+    //    Padded vertically: a ray whose hit is exactly ON the box's floor or ceiling (a vertical
+    //    ray onto the lowest sample) would otherwise have its walk end at a t whose rounded y
+    //    sits a hair ABOVE the surface, and the root would fall just outside the walk. The pad
+    //    cannot create a hit — hits come only from the surface test — it only lets the walk run
+    //    long enough to see one. (The watertight sweep in heightfield_test.cpp found this.)
+    const float pad = 1e-3f * (1.0f + std::max(std::fabs(hf.min_h), std::fabs(hf.max_h)));
+    const float lo[3] = {0.0f, hf.min_h - pad, 0.0f};
+    const float hi[3] = {hf.extent_x(), hf.max_h + pad, hf.extent_z()};
     const float oo[3] = {o.x, o.y, o.z};
     const float dd[3] = {d.x, d.y, d.z};
     float t0 = 0.0f;
