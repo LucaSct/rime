@@ -853,4 +853,73 @@ void VulkanCommandBuffer::copy_buffer(BufferHandle src, BufferHandle dst, std::u
     vkCmdPipelineBarrier2(cmd_, &post_dep);
 }
 
+void VulkanCommandBuffer::copy_buffer_regions(BufferHandle src,
+                                              BufferHandle dst,
+                                              std::span<const BufferCopyRegion> regions) {
+    if (regions.empty()) {
+        return;
+    }
+    VulkanBuffer* s = device_.lookup(src);
+    VulkanBuffer* d = device_.lookup(dst);
+    if (!s || !d) {
+        RIME_ERROR("rhi: copy_buffer_regions with an invalid handle");
+        return;
+    }
+    if (in_rendering_) {
+        RIME_ERROR(
+            "rhi: copy_buffer_regions inside begin/end_rendering — copies run between passes");
+        return;
+    }
+    // Validate every region before recording any: an upload that half-happened is worse than one
+    // that did not happen, because the caller's bookkeeping would believe all or none of it.
+    std::vector<VkBufferCopy> copies;
+    copies.reserve(regions.size());
+    const auto inside = [](std::uint64_t offset, std::uint64_t size, VkDeviceSize total) {
+        return size != 0 && offset <= total && size <= total - offset;
+    };
+    for (const BufferCopyRegion& r : regions) {
+        if (!inside(r.src_offset, r.size, s->size) || !inside(r.dst_offset, r.size, d->size)) {
+            RIME_ERROR(
+                "rhi: copy_buffer_regions region [{} -> {}, {} bytes] exceeds the source ({}) "
+                "or destination ({}); nothing recorded",
+                r.src_offset,
+                r.dst_offset,
+                r.size,
+                s->size,
+                d->size);
+            return;
+        }
+        copies.push_back({r.src_offset, r.dst_offset, r.size});
+    }
+
+    // Before: anything earlier in this command buffer that read or wrote the destination (a draw
+    // pulling vertices from a pool slot, say) is finished — write-after-read and write-after-write.
+    // Host writes into the staging source need no barrier: vkQueueSubmit makes them visible.
+    VkMemoryBarrier2 pre{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    pre.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    pre.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    pre.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    pre.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    VkDependencyInfo pre_dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    pre_dep.memoryBarrierCount = 1;
+    pre_dep.pMemoryBarriers = &pre;
+    vkCmdPipelineBarrier2(cmd_, &pre_dep);
+
+    vkCmdCopyBuffer(
+        cmd_, s->buffer, d->buffer, static_cast<std::uint32_t>(copies.size()), copies.data());
+
+    // After: the uploaded bytes are visible to every later GPU consumer. An upload's reader is a
+    // shader or the command processor, never the host, which is the one thing copy_buffer's post
+    // barrier gets right for a readback and wrong for this.
+    VkMemoryBarrier2 post{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    post.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    post.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    post.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    post.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo post_dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    post_dep.memoryBarrierCount = 1;
+    post_dep.pMemoryBarriers = &post;
+    vkCmdPipelineBarrier2(cmd_, &post_dep);
+}
+
 } // namespace rime::rhi
