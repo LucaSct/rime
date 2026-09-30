@@ -117,6 +117,27 @@ interpolation are cooked; CUBICSPLINE is rejected with a clear message.
 | `key_count` | u32 | keyframes in this track (≥ 1) |
 | keyframe blob | per channel, in table order | `f32 times[key_count]` (strictly increasing), then `f32 values[key_count × components]` — components = 3 (T/S) or 4 (rotation quaternion) |
 
+## Heightfield payload (kind 9, M19.1)
+
+A terrain height grid ([ADR-0056-m19.1](../../docs/adr/0056-m19.1-heightfield.md)): a fixed 52-byte
+header, then the samples. `height(i, j) = height_offset + height_scale * sample(i, j)`; sample `(i, j)`
+sits at local `(i * cell_size_x, height, j * cell_size_z)`. Samples are quantised **u16** copied verbatim
+from the 16-bit source — the cook never re-quantises. Cooked by `rime heightfield <src.png|src.r16>`
+from the source plus a `<src>.toml` sidecar (`size_x`, `size_z`, `height_min`, `height_max`,
+optional `origin_*`, and `columns`/`rows` for raw sources).
+
+| field | type | notes |
+| --- | --- | --- |
+| `payload_version` | u32 | `1`; anything else is `UnsupportedVersion` |
+| `columns`, `rows` | 2 × u32 | samples along local X, local Z; each in `[2, 16385]` |
+| `cell_size_x`, `cell_size_z` | 2 × f32 | metres between samples, finite, > 0 |
+| `origin` | 3 × f32 | world position of local (0, 0, 0) |
+| `height_scale` | f32 | metres per step, finite, > 0 (`(height_max - height_min) / 65535`) |
+| `height_offset` | f32 | metres at sample 0 (`height_min`) |
+| `triangulation` | u32 | `0` = every cell split along the (i,j)→(i+1,j+1) diagonal |
+| `min_sample`, `max_sample` | 2 × u32 | the samples' exact range (≤ 65535); the reader rejects any sample outside it |
+| samples | `columns × rows` × u16 | row-major, x fastest (`i + columns * j`); exactly this many, no trailing bytes |
+
 ## The schema hash
 
 `type_schema_hash` is the engine's reflection `type_hash` of a v1 layout record, computed and pinned in
@@ -126,6 +147,7 @@ record (`texture_schema_hash()` ↔ `cooked::TEXTURE_SCHEMA_HASH`); for a **mate
 whole fixed material record (`material_schema_hash()` ↔ `cooked::MATERIAL_SCHEMA_HASH`); for a
 **skeleton** it fingerprints the per-joint record (`skeleton_schema_hash()` ↔
 `cooked::SKELETON_SCHEMA_HASH`); for a **clip** it fingerprints the channel-table record
-(`clip_schema_hash()` ↔ `cooked::CLIP_SCHEMA_HASH`). The reader rejects a mismatch with a "re-cook"
+(`clip_schema_hash()` ↔ `cooked::CLIP_SCHEMA_HASH`); for a **heightfield** it fingerprints the fixed
+header record (`heightfield_schema_hash()` ↔ `cooked::HEIGHTFIELD_SCHEMA_HASH`). The reader rejects a mismatch with a "re-cook"
 error, so a layout change forces both sides to update together. If you change a layout, update the
 constant in both languages and regenerate the fixtures.

@@ -33,6 +33,7 @@ enum class AssetKind : std::uint16_t {
     MeshSdf = 7,         // cooked signed-distance volume: whole mesh or one destructible part
                          // (M10.4a, ADR-0032 §2)
     VirtualGeometry = 8, // clustered rigid-mesh companion payload (M18, ADR-0043)
+    Heightfield = 9,     // terrain height grid: quantised u16 samples + scale (M19.1)
 };
 
 // A content-hashed asset identity. A struct (not a bare u64) so it cannot be confused with an

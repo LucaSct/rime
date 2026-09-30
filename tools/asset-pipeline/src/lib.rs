@@ -19,6 +19,7 @@ pub mod fracture;
 pub mod gltf_import;
 pub mod gltf_material;
 pub mod ground;
+pub mod heightfield;
 pub mod manifest;
 pub mod material;
 pub mod math;

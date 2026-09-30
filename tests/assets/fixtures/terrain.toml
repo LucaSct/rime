@@ -1,0 +1,9 @@
+# Sidecar for terrain.png (M19.1 cross-language fixture): a 5x4-sample, 16-bit height map.
+# Sample (i, j) = 1000*i + 3000*j, plus 7 at (2, 1) so an x/z transposition cannot pass.
+size_x = 8.0        # 4 cells along X -> 2 m spacing
+size_z = 6.0        # 3 cells along Z -> 2 m spacing
+height_min = -5.0   # metres at sample 0
+height_max = 60.535 # metres at sample 65535 -> 0.001 m per step
+origin_x = 100.0
+origin_y = 0.0
+origin_z = -50.0

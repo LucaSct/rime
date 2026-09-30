@@ -147,6 +147,25 @@ struct MeshSdfHeaderV1 {
 
 static_assert(sizeof(MeshSdfHeaderV1) == 60, "v1 SDF header must stay 11 floats + 4 packed u32s");
 
+// The v1 cooked-heightfield header record (M19.1), reflected for the MeshSdfHeaderV1 reason: it is
+// the entire structured part of the payload — the trailing sample blob is bare u16 scalars. The
+// payload's OWN version leads it (the container version guards the envelope, this one the
+// heightfield layout), so a v2 payload is refused as UnsupportedVersion by name, not misparsed.
+// The sample range is stored widened to u32 purely so the record stays a run of 4-byte fields; the
+// reader rejects a value above 65535. Reorder, retype, add or remove a field and the type_hash —
+// and so every previously cooked file's SchemaMismatch — changes with it.
+struct HeightfieldHeaderV1 {
+    std::uint32_t payload_version;
+    std::uint32_t columns, rows;        // samples along local X, local Z
+    float cell_size_x, cell_size_z;     // metres between samples
+    float origin_x, origin_y, origin_z; // world placement of local (0,0,0)
+    float height_scale, height_offset;  // height = offset + scale * sample
+    std::uint32_t triangulation;        // HeightfieldTriangulation (0 = DiagonalMinToMax)
+    std::uint32_t min_sample, max_sample;
+};
+
+static_assert(sizeof(HeightfieldHeaderV1) == 52, "v1 heightfield header must stay 13 x 4 bytes");
+
 } // namespace rime::assets::detail
 
 // Registration is at global scope (the macro opens namespace rime::core to specialize its traits).
@@ -263,6 +282,22 @@ RIME_REFLECT_FIELD(encoding)
 RIME_REFLECT_FIELD(max_abs_distance)
 RIME_REFLECT_END()
 
+RIME_REFLECT_BEGIN(rime::assets::detail::HeightfieldHeaderV1)
+RIME_REFLECT_FIELD(payload_version)
+RIME_REFLECT_FIELD(columns)
+RIME_REFLECT_FIELD(rows)
+RIME_REFLECT_FIELD(cell_size_x)
+RIME_REFLECT_FIELD(cell_size_z)
+RIME_REFLECT_FIELD(origin_x)
+RIME_REFLECT_FIELD(origin_y)
+RIME_REFLECT_FIELD(origin_z)
+RIME_REFLECT_FIELD(height_scale)
+RIME_REFLECT_FIELD(height_offset)
+RIME_REFLECT_FIELD(triangulation)
+RIME_REFLECT_FIELD(min_sample)
+RIME_REFLECT_FIELD(max_sample)
+RIME_REFLECT_END()
+
 namespace rime::assets {
 
 std::string_view to_string(AssetError error) noexcept {
@@ -302,6 +337,10 @@ std::string_view to_string(AssetError error) noexcept {
                    "resolution outside the sanity ceiling, or a sample exceeding max_abs_distance)";
         case AssetError::InvalidVirtualGeometry:
             return "invalid virtual geometry payload";
+        case AssetError::InvalidHeightfield:
+            return "invalid heightfield (grid outside [2, ceiling], a non-finite/non-positive "
+                   "spacing or scale, unknown triangulation, or a sample outside the recorded "
+                   "range)";
         case AssetError::Io:
             return "I/O error";
     }
@@ -1446,6 +1485,136 @@ std::optional<VirtualGeometryAsset> read_virtual_geometry(std::span<const std::b
         *out_id = content_hash(payload);
     }
     return decode_virtual_geometry(payload, out_error);
+}
+
+// ── Heightfield (M19.1) ─────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// Per-axis ceiling on a cooked heightfield's sample count. 16385 = 2^14 + 1 samples, i.e. a
+// 16384-cell edge — already far larger than one streamed terrain tile should be (M19's streaming
+// brick tiles well below this), so a real cook never approaches it, while a corrupt dimension is
+// refused before it can be multiplied into an allocation. The physics store accepts up to 32768
+// per axis (its own limit: triangle indices must fit u32); this is the stricter, file-facing gate.
+inline constexpr std::uint32_t kMaxHeightfieldSamplesPerAxis = 16385;
+
+} // namespace
+
+std::uint64_t heightfield_schema_hash() noexcept {
+    return core::reflect<detail::HeightfieldHeaderV1>().type_hash;
+}
+
+std::optional<HeightfieldAsset> decode_heightfield(std::span<const std::byte> payload,
+                                                   AssetError& out_error) noexcept {
+    core::ByteReader reader(payload);
+    HeightfieldAsset hf;
+    std::uint32_t version = 0;
+    std::uint32_t triangulation_raw = 0;
+    std::uint32_t min_raw = 0;
+    std::uint32_t max_raw = 0;
+
+    // The version is read (and judged) ALONE first: a v2 payload may lay out everything after it
+    // differently, so nothing past this field may be interpreted until we know it is ours.
+    if (!reader.u32(version)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+    if (version != kHeightfieldPayloadVersion) {
+        out_error = AssetError::UnsupportedVersion;
+        return std::nullopt;
+    }
+    if (!reader.u32(hf.columns) || !reader.u32(hf.rows) || !reader.f32(hf.cell_size_x) ||
+        !reader.f32(hf.cell_size_z) || !reader.f32(hf.origin.x) || !reader.f32(hf.origin.y) ||
+        !reader.f32(hf.origin.z) || !reader.f32(hf.height_scale) || !reader.f32(hf.height_offset) ||
+        !reader.u32(triangulation_raw) || !reader.u32(min_raw) || !reader.u32(max_raw)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+
+    // Validate the header before trusting any of it to size the grid. `x > 0.0f` is false for a
+    // NaN as well as for zero and negatives, and the isfinite guards catch +inf.
+    const bool spacing_ok = std::isfinite(hf.cell_size_x) && hf.cell_size_x > 0.0f &&
+                            std::isfinite(hf.cell_size_z) && hf.cell_size_z > 0.0f;
+    const bool placement_ok = std::isfinite(hf.origin.x) && std::isfinite(hf.origin.y) &&
+                              std::isfinite(hf.origin.z) && std::isfinite(hf.height_offset);
+    const bool scale_ok = std::isfinite(hf.height_scale) && hf.height_scale > 0.0f;
+    const bool dims_ok = hf.columns >= 2 && hf.rows >= 2 &&
+                         hf.columns <= kMaxHeightfieldSamplesPerAxis &&
+                         hf.rows <= kMaxHeightfieldSamplesPerAxis;
+    const bool range_ok = min_raw <= max_raw && max_raw <= 0xFFFFu;
+    const bool triangulation_ok =
+        triangulation_raw == static_cast<std::uint32_t>(HeightfieldTriangulation::DiagonalMinToMax);
+    if (!spacing_ok || !placement_ok || !scale_ok || !dims_ok || !range_ok || !triangulation_ok) {
+        out_error = AssetError::InvalidHeightfield;
+        return std::nullopt;
+    }
+    // The highest representable height must be finite too: offset + scale * 65535 can overflow
+    // f32 even when both factors are individually finite, and an infinite peak would poison every
+    // AABB built from this asset.
+    if (!std::isfinite(hf.height_offset + hf.height_scale * static_cast<float>(max_raw))) {
+        out_error = AssetError::InvalidHeightfield;
+        return std::nullopt;
+    }
+    hf.triangulation = static_cast<HeightfieldTriangulation>(triangulation_raw);
+    hf.min_sample = static_cast<std::uint16_t>(min_raw);
+    hf.max_sample = static_cast<std::uint16_t>(max_raw);
+
+    // The blob is EXACTLY columns * rows u16s — no shorter, no trailing bytes — checked in 64 bits
+    // before the allocation is sized from it.
+    const std::uint64_t count = std::uint64_t{hf.columns} * std::uint64_t{hf.rows};
+    if (reader.remaining() != count * sizeof(std::uint16_t)) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+    hf.samples.resize(static_cast<std::size_t>(count));
+    for (std::uint16_t& q : hf.samples) {
+        if (!reader.u16(q)) {
+            out_error = AssetError::Truncated; // unreachable after the size check; kept for safety
+            return std::nullopt;
+        }
+        // Exact integrity check, the SDF's max_abs_distance idea: the cooker's min/max is a
+        // comparison-only reduction over these same integers, so a sample outside the recorded
+        // range can only mean a corrupt file (or a cooker bug) — never rounding.
+        if (q < hf.min_sample || q > hf.max_sample) {
+            out_error = AssetError::InvalidHeightfield;
+            return std::nullopt;
+        }
+    }
+    return hf;
+}
+
+std::optional<HeightfieldAsset> read_heightfield(std::span<const std::byte> file,
+                                                 AssetError& out_error,
+                                                 AssetId* out_id,
+                                                 AssetRejectCounters* rejects) noexcept {
+    // One exit for every refusal, so no path can return an error without also tallying it.
+    const auto reject = [&](AssetError e) -> std::optional<HeightfieldAsset> {
+        out_error = e;
+        if (rejects != nullptr) {
+            rejects->record(e);
+        }
+        return std::nullopt;
+    };
+    std::span<const std::byte> payload;
+    AssetError error = AssetError::Truncated;
+    const std::optional<CookedHeader> header = read_header(file, payload, error);
+    if (!header) {
+        return reject(error);
+    }
+    if (header->kind != AssetKind::Heightfield) {
+        return reject(AssetError::WrongKind);
+    }
+    if (header->type_schema_hash != heightfield_schema_hash()) {
+        return reject(AssetError::SchemaMismatch);
+    }
+    std::optional<HeightfieldAsset> hf = decode_heightfield(payload, error);
+    if (!hf) {
+        return reject(error);
+    }
+    if (out_id != nullptr) {
+        *out_id = content_hash(payload);
+    }
+    return hf;
 }
 
 } // namespace rime::assets

@@ -271,3 +271,41 @@ TEST_CASE("a Rust-cooked mesh SDF (cube.rsdf) loads and samples like a unit-cube
     // (still comfortably inside 1 voxel) rather than the tight one the face-interior points get.
     CHECK(sample_mesh_sdf(*sdf, {0.0f, 0.0f, 0.0f}) == doctest::Approx(-1.0f).epsilon(0.06));
 }
+
+TEST_CASE(
+    "a Rust-cooked heightfield (terrain.rhf) loads with every sample and header field intact") {
+    // The M19.1 cross-language proof: terrain.rhf is cooked by `rime heightfield` from the 16-bit
+    // terrain.png + terrain.toml sidecar (tools/asset-pipeline/tests/cook_fixture.rs pins the
+    // bytes). Sample (i, j) = 1000*i + 3000*j, plus 7 at (2, 1) — the asymmetric bump is what makes
+    // a transposed (column-major) read fail here instead of passing by symmetry.
+    const std::optional<std::vector<std::byte>> bytes = load_fixture("terrain.rhf");
+    REQUIRE_MESSAGE(bytes.has_value(), "missing fixture: terrain.rhf");
+
+    AssetRejectCounters rejects;
+    AssetError error = AssetError::Io;
+    AssetId id;
+    const std::optional<HeightfieldAsset> hf = read_heightfield(*bytes, error, &id, &rejects);
+    REQUIRE_MESSAGE(hf.has_value(), to_string(error));
+    CHECK(rejects.total == 0);
+    CHECK(id.is_valid());
+    CHECK(hf->columns == 5);
+    CHECK(hf->rows == 4);
+    CHECK(hf->cell_size_x == 2.0f); // size_x 8 m over 4 cells
+    CHECK(hf->cell_size_z == 2.0f); // size_z 6 m over 3 cells
+    CHECK(hf->origin.x == 100.0f);
+    CHECK(hf->origin.y == 0.0f);
+    CHECK(hf->origin.z == -50.0f);
+    CHECK(hf->height_offset == -5.0f);
+    CHECK(hf->height_scale == doctest::Approx(0.001f).epsilon(1e-6));
+    CHECK(hf->triangulation == HeightfieldTriangulation::DiagonalMinToMax);
+    CHECK(hf->min_sample == 0);
+    CHECK(hf->max_sample == 13000);
+    for (std::uint32_t j = 0; j < hf->rows; ++j) {
+        for (std::uint32_t i = 0; i < hf->columns; ++i) {
+            const std::uint32_t expected = 1000 * i + 3000 * j + ((i == 2 && j == 1) ? 7 : 0);
+            CHECK(hf->samples[hf->index(i, j)] == expected);
+        }
+    }
+    // The dequantised height at the far corner: -5 + 0.001 * 13000 = 8 m (to f32 rounding).
+    CHECK(hf->height(4, 3) == doctest::Approx(8.0f).epsilon(1e-5));
+}
