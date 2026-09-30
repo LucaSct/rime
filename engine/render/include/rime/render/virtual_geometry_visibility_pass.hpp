@@ -10,6 +10,7 @@
 #include "rime/core/math/mat.hpp"
 #include "rime/render/render_graph.hpp"
 #include "rime/render/virtual_geometry_gpu_selection.hpp"
+#include "rime/render/virtual_geometry_page_pool.hpp"
 #include "rime/render/virtual_geometry_residency.hpp"
 #include "rime/render/virtual_geometry_selection.hpp"
 
@@ -35,9 +36,10 @@
 // depth readback copies the colour aspect only, so encoding depth into a copyable integer is how
 // a test (and a future debug view) can inspect it without widening the RHI.
 //
-// Stub/limits: every declare() uploads the requested clusters from their page bytes through
-// view_virtual_geometry_page() into host-visible storage buffers owned by this pass. There is no
-// GPU page pool, no instancing, and no cluster culling yet — those are later M18 steps.
+// Stub/limits: by default every declare() uploads the requested clusters from their page bytes
+// through view_virtual_geometry_page() into host-visible storage buffers owned by this pass. With
+// request.page_pool (M18.5) it uploads nothing: the clusters are pulled from the streamed page pool
+// where the cache placed them. There is no instancing and no cluster culling yet.
 namespace rime::render {
 
 // One cluster to draw. The residency slot and allocation generation are what the upload
@@ -79,6 +81,17 @@ struct VirtualGeometryVisibilityRequest {
     // It exists so the overflow-to-coarse path is reachable with a handful of clusters instead of
     // 1025 of them, and so a future frame budget has somewhere to land.
     std::uint32_t max_draws = 0;
+    // STREAMED GEOMETRY (M18.5), opt-in. When set, the pass draws out of this pool instead of
+    // copying page bytes per declare(): a cluster is accepted only if its page has a confirmed-
+    // resident SLOT in the pool's cache, and its draw record points into that slot. `residency`
+    // may then be null or must be `&page_pool->cache().residency()` — the pool's confirmed set is
+    // the only residency that can describe what is actually in the pool. The asset must be
+    // registered with the pool under `asset_id`.
+    //
+    // The leaf-only gate is lifted in this mode: the streaming fallback IS an interior group (the
+    // resident ancestor of pages that have not arrived), so the pass draws the selected cut
+    // verbatim. Drawing an interior group costs nothing extra here — no bytes are copied.
+    const VirtualGeometryPagePool* page_pool = nullptr;
 };
 
 // The GPU-side cluster data a declare() uploaded, for the resolve pass to read. All three are
@@ -164,6 +177,9 @@ struct VirtualGeometryClusterBuffers {
     std::uint32_t cluster_count = 0;       // entries in `clusters` (max drawn slot + 1)
     std::uint32_t vertex_stride_words = 0; // cooked vertex stride / 4
     std::uint32_t candidate_count = 0;     // entries in `candidates` (0 on the CPU path)
+    // Pool mode: `vertices` and `indices` are the page pool and `identity_index` is the pass's
+    // persistent pool-sized identity buffer; none of the three is destroyed with the rest.
+    bool borrowed_geometry = false;
 };
 
 // Every way a request can draw nothing gets its own counter (the replication rule applied to
@@ -174,9 +190,10 @@ struct VirtualGeometryVisibilityStats {
     std::uint32_t skipped_not_selected = 0;    // cluster's group is not in the selected cut
     std::uint32_t skipped_not_leaf = 0;        // selected group still has children
     std::uint32_t skipped_not_resident = 0;    // cluster page (or a dependency) not resident
-    std::uint32_t skipped_page_view = 0;       // view_virtual_geometry_page() rejected the page
-    std::uint32_t skipped_bad_index = 0;       // an index points outside the cluster's vertices
-    std::uint32_t skipped_bad_id = 0;          // slot/generation do not fit the visibility ABI
+    // (in pool mode: also a page the pool's cache has no confirmed slot for)
+    std::uint32_t skipped_page_view = 0;          // view_virtual_geometry_page() rejected the page
+    std::uint32_t skipped_bad_index = 0;          // an index points outside the cluster's vertices
+    std::uint32_t skipped_bad_id = 0;             // slot/generation do not fit the visibility ABI
     std::uint32_t skipped_too_many_triangles = 0; // > 128 triangles: the ID has 7 triangle bits
     std::uint32_t skipped_duplicate_slot = 0;     // a slot already used earlier in this request
     std::uint32_t skipped_over_capacity = 0; // accepted cluster past the fixed indirect draw count
@@ -251,6 +268,11 @@ private:
     rhi::ShaderHandle build_shader_;
     rhi::PipelineHandle pipeline_;
     rhi::PipelineHandle build_pipeline_;
+    // Pool mode's identity index buffer covers every u32 word of the pool, because a cluster's
+    // first_index is its word offset in the pool. Its contents depend only on its length, so it is
+    // built once per pool size and kept, rather than rebuilt at pool size every declare().
+    rhi::BufferHandle pool_identity_;
+    std::uint64_t pool_identity_words_ = 0;
     VirtualGeometryClusterBuffers buffers_;
     VirtualGeometryVisibilityStats stats_;
 };

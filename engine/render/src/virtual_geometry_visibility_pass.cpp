@@ -163,6 +163,7 @@ VirtualGeometryVisibilityPass::VirtualGeometryVisibilityPass(rhi::Device& device
 
 VirtualGeometryVisibilityPass::~VirtualGeometryVisibilityPass() {
     release_cluster_buffers();
+    device_.destroy(pool_identity_);
     device_.destroy(build_pipeline_);
     device_.destroy(build_shader_);
     device_.destroy(pipeline_);
@@ -171,6 +172,12 @@ VirtualGeometryVisibilityPass::~VirtualGeometryVisibilityPass() {
 }
 
 void VirtualGeometryVisibilityPass::release_cluster_buffers() noexcept {
+    if (buffers_.borrowed_geometry) {
+        // The pool owns these two; the identity buffer is kept across declares (pool_identity_).
+        buffers_.vertices = {};
+        buffers_.indices = {};
+        buffers_.identity_index = {};
+    }
     for (rhi::BufferHandle* b : {&buffers_.vertices,
                                  &buffers_.indices,
                                  &buffers_.clusters,
@@ -194,8 +201,18 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
     release_cluster_buffers();
 
     const assets::VirtualGeometryAsset* asset = request.asset;
+    // Pool mode (M18.5) reads residency from the pool's cache: the confirmed set is the only one
+    // that can describe what is in the pool, so a caller-supplied different one is an invalid
+    // request rather than something to silently prefer or ignore.
+    const VirtualGeometryPagePool* pool = request.page_pool;
+    const VirtualGeometryResidency* residency =
+        pool != nullptr ? &pool->cache().residency() : request.residency;
+    const bool pool_ok =
+        pool == nullptr ||
+        (pool->is_valid() && pool->cache().asset(request.asset_id) == asset &&
+         (request.residency == nullptr || request.residency == &pool->cache().residency()));
     const bool request_ok =
-        asset != nullptr && request.residency != nullptr && request.selection != nullptr &&
+        asset != nullptr && residency != nullptr && pool_ok && request.selection != nullptr &&
         assets::validate_virtual_geometry(*asset) == assets::VirtualGeometryError::None &&
         asset->vertex_stride == assets::expected_vertex_stride(assets::kMeshV1Attribs);
     const std::uint32_t stride_words = request_ok ? asset->vertex_stride / 4u : 0u;
@@ -259,12 +276,15 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
             // not known until the builder has run, so they must already be uploaded. The coarse
             // group has children whenever the asset has more than one LOD, so without this the
             // fallback could never be drawn.
-            if (asset->groups[cluster.replacement_group].child_count != 0 &&
+            // Pool mode draws the cut verbatim — the streaming fallback is an interior group.
+            if (pool == nullptr && asset->groups[cluster.replacement_group].child_count != 0 &&
                 !(gpu_build && is_coarse)) {
                 return &stats_.skipped_not_leaf;
             }
             if (!page_and_dependencies_resident(
-                    *asset, request.asset_id, *request.residency, cluster.page)) {
+                    *asset, request.asset_id, *residency, cluster.page) ||
+                (pool != nullptr &&
+                 !pool->cache().resident_slot(request.asset_id, cluster.page).has_value())) {
                 return &stats_.skipped_not_resident;
             }
             if (!pack_virtual_geometry_visibility_id64({item.cluster_slot, item.generation})) {
@@ -319,13 +339,29 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
 
         // Append: this cluster's vertices start at vertex_base, its indices at index_base, and
         // its indices stay cluster-local — the shaders add vertex_base, so no CPU rebasing.
-        const auto vertex_base =
-            static_cast<std::uint32_t>(vertex_bytes.size() / view.vertex_stride);
-        const auto index_base = static_cast<std::uint32_t>(all_indices.size());
-        const std::span<const std::byte> slice = view.vertices.subspan(
-            view.vertex_offset, std::size_t{view.vertex_count} * view.vertex_stride);
-        vertex_bytes.insert(vertex_bytes.end(), slice.begin(), slice.end());
-        all_indices.insert(all_indices.end(), indices.begin(), indices.end());
+        std::uint32_t vertex_base = 0;
+        std::uint32_t index_base = 0;
+        if (pool != nullptr) {
+            // Pool mode: nothing is copied. The page sits verbatim at its slot's byte offset, so
+            // the cluster's vertices and indices are addressed where they already are. The cache
+            // guaranteed slot_bytes is a multiple of the stride and of 4, and the page view that
+            // its vertex section ends on a u32 boundary, so both divisions are exact.
+            const std::uint64_t slot_base =
+                std::uint64_t{*pool->cache().resident_slot(request.asset_id,
+                                                           asset->clusters[item.cluster].page)} *
+                pool->cache().config().slot_bytes;
+            vertex_base =
+                static_cast<std::uint32_t>((slot_base + view.vertex_offset) / view.vertex_stride);
+            index_base =
+                static_cast<std::uint32_t>((slot_base + view.index_offset) / 4u + view.first_index);
+        } else {
+            vertex_base = static_cast<std::uint32_t>(vertex_bytes.size() / view.vertex_stride);
+            index_base = static_cast<std::uint32_t>(all_indices.size());
+            const std::span<const std::byte> slice = view.vertices.subspan(
+                view.vertex_offset, std::size_t{view.vertex_count} * view.vertex_stride);
+            vertex_bytes.insert(vertex_bytes.end(), slice.begin(), slice.end());
+            all_indices.insert(all_indices.end(), indices.begin(), indices.end());
+        }
 
         if (table.size() <= item.cluster_slot) {
             table.resize(std::size_t{item.cluster_slot} + 1);
@@ -365,7 +401,7 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
         // draw capacity). It becomes a grow-only persistent buffer when the next brick moves the
         // command build onto the GPU and the per-frame upload disappears anyway; optimizing it
         // before that measurement would be guessing.
-        std::vector<std::uint32_t> identity(all_indices.size());
+        std::vector<std::uint32_t> identity(pool != nullptr ? 0 : all_indices.size());
         std::iota(identity.begin(), identity.end(), 0u);
 
         std::vector<VirtualGeometryDrawRecord> records;
@@ -403,12 +439,33 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
             }
         }
 
-        buffers_.vertices =
-            make_storage(device_, vertex_bytes.data(), vertex_bytes.size(), "vg-cluster-vertices");
-        buffers_.indices = make_storage(device_,
-                                        all_indices.data(),
-                                        all_indices.size() * sizeof(std::uint32_t),
-                                        "vg-cluster-indices");
+        if (pool != nullptr) {
+            buffers_.borrowed_geometry = true;
+            buffers_.vertices = pool->buffer();
+            buffers_.indices = pool->buffer();
+            const std::uint64_t words = pool->pool_bytes() / 4u;
+            if (words != pool_identity_words_) {
+                device_.destroy(pool_identity_);
+                std::vector<std::uint32_t> pool_identity(static_cast<std::size_t>(words));
+                std::iota(pool_identity.begin(), pool_identity.end(), 0u);
+                rhi::BufferDesc pid{};
+                pid.size = words * sizeof(std::uint32_t);
+                pid.usage = rhi::BufferUsage::Index | rhi::BufferUsage::TransferDst;
+                pid.memory = rhi::MemoryUsage::CpuToGpu;
+                pid.initial_data = pool_identity.data();
+                pid.debug_name = "vg-pool-identity-index";
+                pool_identity_ = device_.create_buffer(pid);
+                pool_identity_words_ = words;
+            }
+            buffers_.identity_index = pool_identity_;
+        } else {
+            buffers_.vertices = make_storage(
+                device_, vertex_bytes.data(), vertex_bytes.size(), "vg-cluster-vertices");
+            buffers_.indices = make_storage(device_,
+                                            all_indices.data(),
+                                            all_indices.size() * sizeof(std::uint32_t),
+                                            "vg-cluster-indices");
+        }
         buffers_.clusters = make_storage(device_,
                                          table.data(),
                                          table.size() * sizeof(VirtualGeometryGpuCluster),
@@ -424,13 +481,15 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
         rec_desc.debug_name = "vg-draw-records";
         buffers_.records = device_.create_buffer(rec_desc);
 
-        rhi::BufferDesc id_desc{};
-        id_desc.size = identity.size() * sizeof(std::uint32_t);
-        id_desc.usage = rhi::BufferUsage::Index | rhi::BufferUsage::TransferDst;
-        id_desc.memory = rhi::MemoryUsage::CpuToGpu;
-        id_desc.initial_data = identity.data();
-        id_desc.debug_name = "vg-identity-index";
-        buffers_.identity_index = device_.create_buffer(id_desc);
+        if (pool == nullptr) {
+            rhi::BufferDesc id_desc{};
+            id_desc.size = identity.size() * sizeof(std::uint32_t);
+            id_desc.usage = rhi::BufferUsage::Index | rhi::BufferUsage::TransferDst;
+            id_desc.memory = rhi::MemoryUsage::CpuToGpu;
+            id_desc.initial_data = identity.data();
+            id_desc.debug_name = "vg-identity-index";
+            buffers_.identity_index = device_.create_buffer(id_desc);
+        }
 
         rhi::BufferDesc ind_desc{};
         ind_desc.size = kVirtualGeometryMaxIndirectDraws * sizeof(IndexedIndirectCommand);
