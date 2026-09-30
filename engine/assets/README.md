@@ -22,6 +22,7 @@ one-way dependency is what keeps the whole reader unit-testable with in-memory b
 | M6.5 | **async loading** — `AssetServer` runs IO/parse on the `JobSystem`, placeholder assets, frame-point drain (`GpuAssetBridge`, ADR-0025) | landed |
 | M6.7 | **skeletons + animation clips** (`read_skeleton`/`read_clip`) + a CPU clip sampler (GPU skinning follows at M7) | landed |
 | M6.10 | the proof: `samples/08-gltf-zoo` cooks + loads + renders three glTF models end-to-end — **M6 complete** | landed |
+| M19.1 | **terrain heightfields** (`AssetKind::Heightfield`, `read_heightfield`) — quantised u16 samples + scale/offset + the cell triangulation; every refusal tallied in a caller-owned `AssetRejectCounters`; the `terrain.rhf` cross-language fixture ([ADR-0056-m19.1](../../docs/adr/0056-m19.1-heightfield.md)) | landed |
 
 ## The cooked container (RMA1)
 
