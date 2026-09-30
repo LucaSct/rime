@@ -530,8 +530,11 @@ bool VirtualGeometryVisibilityPass::declare(RenderGraph& graph,
     const RGColorAttachment colors[] = {
         {visibility, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}},
         {depth_bits, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+    // Depth is STORED (M18.4): the software micro rasterizer's merge pass loads it and lets the
+    // depth test arbitrate hardware versus software samples, so the hardware depth must survive
+    // this pass. DontCare here would make that arbitration read garbage on a tiler.
     const RGDepthAttachment depth_att{
-        depth, rhi::LoadOp::Clear, rhi::StoreOp::DontCare, 1.0f, 0, false};
+        depth, rhi::LoadOp::Clear, rhi::StoreOp::Store, 1.0f, 0, false};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.depth = &depth_att;
