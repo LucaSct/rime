@@ -238,7 +238,7 @@ TEST_CASE("vg streaming: a teleport renders hole-free on the coarse cut, then co
         ctx.frame = pool.frame();
         ctx.asset = id;
         ctx.selection = stream_virtual_geometry(pool.cache(), id, asset, fx::kNear, 1.0f);
-        REQUIRE_FALSE(ctx.selection.groups.empty());
+        CHECK_FALSE(ctx.selection.groups.empty()); // CHECK: let the pixel proof see it too
         const std::vector<VirtualGeometryClusterDraw> draws = draws_for(asset, ctx.selection);
 
         VirtualGeometryVisibilityRequest request{};
