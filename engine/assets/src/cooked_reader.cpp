@@ -1271,7 +1271,7 @@ read_mesh_sdf(std::span<const std::byte> file, AssetError& out_error, AssetId* o
 
 namespace {
 
-// v1 is the resident-leaf payload; v2 (M18.6, ADR-0056) appends a 16-byte LOD sphere to each
+// v1 is the resident-leaf payload; v2 (M18.6, ADR-0059) appends a 16-byte LOD sphere to each
 // group record for the replacement DAG. Both stay readable: a v1 group's sphere reads as zero.
 inline constexpr std::uint32_t kVirtualGeometryPayloadVersionMin = 1;
 inline constexpr std::uint32_t kVirtualGeometryPayloadVersion = 2;
