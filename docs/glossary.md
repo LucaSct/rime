@@ -169,6 +169,22 @@ Entries are grouped roughly by area and kept short on purpose.
   writes. Two rasterizers sharing edges must use the same rule.
 - **Visibility buffer.** A render target storing *which triangle* covers each pixel (an ID, not a
   colour); a later pass fetches attributes and shades once per pixel. Rime's is 64-bit (ADR-0044).
+- **Replacement DAG (cluster hierarchy).** The data structure behind virtualized geometry: small
+  triangle *clusters*, grouped and simplified level by level, so a coarse set of clusters can
+  replace a finer set covering the same surface. Groups are re-formed every level, so one group's
+  output feeds several next-level groups — a DAG, not a tree. A *cut* through it is what gets drawn.
+  See [ADR-0056](adr/0056-m18.6-replacement-dag-cook.md).
+- **Locked boundary.** Vertices a simplification may not move — here, every vertex a group shares
+  with another group. Because a group's boundary is bit-identical before and after simplifying,
+  swapping a group's LOD can never open a crack against a neighbour at a different LOD.
+- **QEM (quadric error metric).** Garland & Heckbert's edge-collapse simplification: each vertex
+  sums the plane equations (as 4x4 *quadrics*) of its triangles, and collapsing an edge costs the
+  summed squared distance of the kept point to those planes. Cheapest collapse first.
+- **Half-edge collapse.** An edge collapse that moves one endpoint onto the other (no new vertex),
+  as opposed to placing the merged vertex at an optimal new position.
+- **Monotone LOD error.** A parent's error is never below its children's (and its bounding sphere
+  contains theirs), so "refine" is true for an ancestor whenever it is for a descendant — the
+  property that makes a projected-error cut consistent and crack-free.
 - **Shadow map / Virtual Shadow Map (VSM).** A shadow map is a depth render from a
   light's view used to test what's in shadow. *Virtual* shadow maps provide very high,
   consistent resolution efficiently.
