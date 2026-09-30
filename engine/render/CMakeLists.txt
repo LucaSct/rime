@@ -29,7 +29,8 @@ add_library(rime_render STATIC
     src/virtual_geometry_residency.cpp
     src/virtual_geometry_visibility_pass.cpp
     src/virtual_geometry_resolve_pass.cpp
-    src/virtual_geometry_gpu_selection.cpp)
+    src/virtual_geometry_gpu_selection.cpp
+    src/virtual_geometry_micro_raster_pass.cpp)
 
 # The engine's own shaders (M5.6): compiled to SPIR-V at build time and embedded into the
 # library, the same offline model the tests/samples use (ADR-0008). The generated headers are
@@ -62,6 +63,9 @@ rime_add_shaders(rime_render
     shaders/vg_visibility.vert
     shaders/vg_visibility.frag
     shaders/vg_resolve.frag
+    shaders/vg_micro_clear.comp
+    shaders/vg_micro_raster.comp
+    shaders/vg_micro_merge.frag
     shaders/gizmo.vert
     shaders/gizmo.frag
     shaders/particle.vert
@@ -73,6 +77,15 @@ rime_add_shaders(rime_render
 # the baseline shadowed shader stays free of the unused second output.
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag WRITE_GBUFFER pbr_forward_shadowed_gbuffer.frag)
+
+# The micro-triangle rasterizer's portable fallback (M18.4, ADR-0058): the SAME source as the 64-bit
+# single pass, compiled twice more as the two 32-bit passes that compute the identical minimum on a
+# device without shaderBufferInt64Atomics. One source keeps the fill rule, the tie rule and the
+# depth arithmetic identical by construction across all three — they cannot drift apart.
+rime_add_shader_variant(rime_render
+    shaders/vg_micro_raster.comp MICRO_RASTER_DEPTH32 vg_micro_raster_depth32.comp)
+rime_add_shader_variant(rime_render
+    shaders/vg_micro_raster.comp MICRO_RASTER_ID32 vg_micro_raster_id32.comp)
 
 # The masked depth-prepass vertex variant (m16.4): the SAME source with -DMASKED so it also passes
 # UV through. Compiled rather than hand-copied so `invariant gl_Position` still means something —

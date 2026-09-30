@@ -653,8 +653,16 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
             Resource& r = resources_[a.resource];
             if (r.kind == ResourceKind::Buffer) {
                 // Buffers have no layout and no implicit-transition path to delegate to, so the
-                // rule is simply "state changed ⇒ dependency" (m10.3).
-                if (r.state != a.state) {
+                // rule is "state changed ⇒ dependency" (m10.3) — plus one case a state compare
+                // cannot see (M18.4). A buffer is only ever declared StorageReadWrite by a WRITER,
+                // so StorageReadWrite -> StorageReadWrite is two consecutive writers: a
+                // write-after- write (and, for a pass that also reads what it writes,
+                // read-after-write) hazard whose state never changes. The micro rasterizer's clear
+                // -> raster -> raster chain is exactly that; without this, nothing orders the
+                // second atomic pass after the first on a GPU that overlaps dispatches.
+                const bool write_after_write = a.state == rhi::ResourceState::StorageReadWrite &&
+                                               r.state == rhi::ResourceState::StorageReadWrite;
+                if (r.state != a.state || write_after_write) {
                     cmd.buffer_barrier(r.buffer, r.state, a.state);
                     r.state = a.state;
                 }

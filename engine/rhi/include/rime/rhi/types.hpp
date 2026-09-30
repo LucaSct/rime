@@ -429,6 +429,15 @@ struct AdapterInfo {
     // particularly nasty — a driver that ignores `drawCount > 1` renders the first cluster and
     // drops the rest, which looks like a selection bug a long way from its cause.
     bool gpu_driven_draw = false;
+
+    // `buffer_int64_atomics` is Vulkan's `shaderInt64` AND `shaderBufferInt64Atomics` (M18.4): a
+    // shader may declare 64-bit integers and atomicMin them in a storage buffer. The software
+    // micro-triangle rasterizer resolves (depth, triangle) per pixel with ONE such atomic. Unlike
+    // the two flags above this one has a real fallback rather than a refusal — two 32-bit atomic
+    // passes compute the same minimum bit for bit (ADR-0058) — so a consumer without it runs the
+    // slower path and says so in its stats. Measured: lavapipe (Mesa 26.2, LLVM 22) and the RTX
+    // 3060 report it; MoltenVK only on newer Apple GPU families.
+    bool buffer_int64_atomics = false;
 };
 
 // ── Bit-flag operators ──────────────────────────────────────────────────────────────────────

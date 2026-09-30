@@ -146,6 +146,17 @@ Entries are grouped roughly by area and kept short on purpose.
 - **Virtualized geometry (Nanite-style).** Rendering enormous geometric detail by
   streaming and culling at very fine granularity, so triangle count stops being the
   budget you fight.
+- **Hybrid (micro-triangle) rasterization.** Splitting triangles by projected size: big ones go
+  through the GPU's fixed-function rasterizer, sub-pixel ones through a *software* rasterizer in a
+  compute shader (one thread walks one triangle's few pixels), because hardware setup and its 2×2
+  quad granularity waste most of their work on a triangle smaller than a pixel. Both write the same
+  visibility buffer and must agree on fill rule and depth. Rime's is M18.4 ([ADR-0058](adr/0058-m18.4-micro-raster.md)).
+- **Fill rule / top-left rule.** Which triangle owns a pixel centre lying exactly on a shared edge.
+  The top-left rule gives it to the triangle for which that edge is a *left* edge or a flat *top*
+  edge (y pointing down), so a shared edge's samples are drawn exactly once — no cracks, no double
+  writes. Two rasterizers sharing edges must use the same rule.
+- **Visibility buffer.** A render target storing *which triangle* covers each pixel (an ID, not a
+  colour); a later pass fetches attributes and shades once per pixel. Rime's is 64-bit (ADR-0044).
 - **Shadow map / Virtual Shadow Map (VSM).** A shadow map is a depth render from a
   light's view used to test what's in shadow. *Virtual* shadow maps provide very high,
   consistent resolution efficiently.
