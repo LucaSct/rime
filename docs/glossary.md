@@ -151,7 +151,7 @@ Entries are grouped roughly by area and kept short on purpose.
   that copied it in has **retired** (its fence signalled), and a slot is reused only once every
   frame that read its old page has retired. The permanently resident *coarse cut* is never
   evicted, so a camera that outruns streaming draws the coarser ancestor instead of a hole.
-  See [ADR-0056](adr/0056-m18.5-page-streaming.md).
+  See [ADR-0057](adr/0057-m18.5-page-streaming.md).
 - **Frame retirement / retirement watermark.** A frame has *retired* when the GPU has finished
   all its work (known from a fence poll, not from counting frames). The watermark is the newest
   frame for which it and every earlier frame have retired — the safe point for reusing anything
