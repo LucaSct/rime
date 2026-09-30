@@ -60,6 +60,27 @@ function messageFor(err) {
   return "Something went wrong.";
 }
 
+/** Switch the page's layout to `view` ("auth", "catalogue", "session") and put `actions` in the top
+ * bar's right-hand slot. The layout is CSS keyed off `body[data-view]` — a view never sets widths
+ * itself — so the column is narrow for a form, wide for the grid and edge to edge for a stream. */
+function setView(view, actions = []) {
+  document.body.dataset.view = view;
+  const slot = document.getElementById("topbar-actions");
+  if (slot) {
+    clear(slot);
+    for (const action of actions) slot.appendChild(action);
+  }
+}
+
+/** Clear `#app` and hand back a fresh card to build an auth-style view in. */
+function authCard() {
+  clear(root);
+  setView("auth");
+  const card = h("section", { class: "card" });
+  root.appendChild(card);
+  return card;
+}
+
 function backToSignIn() {
   return h("nav", {}, [
     h("a", {
@@ -76,7 +97,7 @@ function backToSignIn() {
 // ── Sign in ───────────────────────────────────────────────────────────────────────────────────
 
 function renderSignIn() {
-  clear(root);
+  const card = authCard();
   const status = h("p", { class: "status", role: "status" });
   const email = h("input", {
     type: "email",
@@ -106,14 +127,15 @@ function renderSignIn() {
     },
     [
       h("h1", { text: "Sign in" }),
+      h("p", { class: "lede", text: "Play and edit Rime games in your browser." }),
       h("label", { for: "signin-email", text: "Email" }),
       email,
       h("button", { type: "submit", text: "Sign in with a passkey" }),
       status,
     ],
   );
-  root.appendChild(form);
-  root.appendChild(
+  card.appendChild(form);
+  card.appendChild(
     h("nav", {}, [
       h("a", {
         href: "#register",
@@ -138,7 +160,7 @@ function renderSignIn() {
 // ── Register: invitation -> mailed code -> passkey (ADR-0048 decision 1's ordering) ─────────────
 
 function renderRegister() {
-  clear(root);
+  const card = authCard();
   const status = h("p", { class: "status", role: "status" });
   const step = h("div", { id: "register-step" });
   const invitation = h("input", { type: "text", id: "register-invitation", name: "invitation", required: "" });
@@ -164,7 +186,7 @@ function renderRegister() {
       h("button", { type: "submit", text: "Continue" }),
     ],
   );
-  root.append(form, step, status, backToSignIn());
+  card.append(form, step, status, backToSignIn());
 }
 
 function renderRegisterCodeStep(tx, container, status) {
@@ -230,7 +252,7 @@ function renderRegisterPasskeyStep(tx, container, status) {
 // ── Recover: both proofs, then a replacement passkey (ADR-0048: mail can never replace a passkey) ─
 
 function renderRecover() {
-  clear(root);
+  const card = authCard();
   const status = h("p", { class: "status", role: "status" });
   const step = h("div", { id: "recover-step" });
   const email = h("input", { type: "email", id: "recover-email", name: "email", required: "" });
@@ -256,7 +278,7 @@ function renderRecover() {
       h("button", { type: "submit", text: "Continue" }),
     ],
   );
-  root.append(form, step, status, backToSignIn());
+  card.append(form, step, status, backToSignIn());
 }
 
 function renderRecoverProofsStep(tx, container, status) {
@@ -319,17 +341,17 @@ function renderRecoverPasskeyStep(tx, container, status) {
 }
 
 function renderRecoverySecret(secret, onContinue) {
-  clear(root);
-  root.appendChild(h("h1", { text: "Save your recovery secret" }));
-  root.appendChild(
+  const card = authCard();
+  card.appendChild(h("h1", { text: "Save your recovery secret" }));
+  card.appendChild(
     h("p", {
       text:
         "This is shown once and never again. Store it somewhere safe: it is needed, together " +
         "with a mailed code, if every passkey is ever lost.",
     }),
   );
-  root.appendChild(h("code", { id: "recovery-secret", text: secret }));
-  root.appendChild(
+  card.appendChild(h("code", { id: "recovery-secret", text: secret }));
+  card.appendChild(
     h("button", {
       type: "button",
       text: "I have saved it — continue",
@@ -361,10 +383,10 @@ async function renderCatalogueOrSignIn() {
 
 function renderCatalogue(games) {
   clear(root);
-  root.appendChild(h("h1", { text: "Rime" }));
-  root.appendChild(
+  setView("catalogue", [
     h("button", {
       type: "button",
+      class: "secondary small",
       text: "Sign out",
       onclick: async () => {
         try {
@@ -375,30 +397,75 @@ function renderCatalogue(games) {
         renderCatalogueOrSignIn();
       },
     }),
+  ]);
+  root.appendChild(
+    h("div", { class: "catalogue-head" }, [
+      h("h1", { text: "Games" }),
+      h("p", {
+        class: "lede",
+        text: "Each one runs on this server and streams to your browser — pick one to start.",
+      }),
+    ]),
   );
   const list = h("ul", { class: "catalogue" });
   for (const game of games) {
-    const item = h("li", {}, [h("h2", { text: game.title })]);
-    for (const surface of game.surfaces) {
-      item.appendChild(
+    const actions = h("div", { class: "game-actions" });
+    // Play first and loud, the editor second and quiet: a card should have one obvious thing to
+    // press, and for a visitor that is playing — whatever order the gateway happens to list them.
+    const surfaces = [...game.surfaces].sort((a, b) => (a === "play" ? -1 : b === "play" ? 1 : 0));
+    surfaces.forEach((surface, i) => {
+      actions.appendChild(
         h("button", {
           type: "button",
+          class: i === 0 ? "" : "secondary",
           text: surfaceLabel(surface),
-          onclick: () => beginSession(game.id, surface),
+          onclick: () => beginSession(game, surface),
         }),
       );
-    }
-    list.appendChild(item);
+    });
+    list.appendChild(
+      h("li", {}, [
+        h("div", { class: "game-cover", "aria-hidden": "true" }),
+        h("div", { class: "game-body" }, [h("h2", { text: game.title }), actions]),
+      ]),
+    );
   }
   root.appendChild(list);
   if (games.length === 0) {
-    root.appendChild(h("p", { text: "No games are available on this host yet." }));
+    root.appendChild(h("p", { class: "lede", text: "No games are available on this host yet." }));
   }
 }
 
 // ── Session ───────────────────────────────────────────────────────────────────────────────────
 
-async function beginSession(gameId, surface) {
+/** Listeners the session view attaches to `document` — kept so leaving can take them off again
+ * (the view is rebuilt on every visit, and a stale listener would toggle a detached stage). */
+let stageListeners = [];
+
+function removeStageListeners() {
+  for (const [type, fn] of stageListeners) document.removeEventListener(type, fn);
+  stageListeners = [];
+}
+
+/** Fullscreen the stage, then take the pointer and — where the browser has it — the keyboard.
+ *
+ * Keyboard Lock (`navigator.keyboard.lock()`, Chromium only, and only while fullscreen) is what lets
+ * a game receive keys the browser would otherwise keep for itself: Esc, Ctrl+W, Alt+Tab-adjacent
+ * shortcuts. With it, a quick Esc goes to the game and **holding** Esc leaves fullscreen — the
+ * browser shows that hint itself. Without it (Firefox), Esc releases the pointer as usual. */
+async function enterFullscreen(stage, video) {
+  try {
+    if (!document.fullscreenElement) await stage.requestFullscreen({ navigationUI: "hide" });
+    if (navigator.keyboard && typeof navigator.keyboard.lock === "function") {
+      await navigator.keyboard.lock();
+    }
+  } catch (err) {
+    console.warn("rime: fullscreen was refused", err);
+  }
+  if (document.pointerLockElement !== video) video.requestPointerLock();
+}
+
+async function beginSession(game, surface) {
   if (!av1DecodeSupported()) {
     // ADR-0052: AV1 on a WebRTC track is the only decode path this page offers today. A browser
     // that cannot decode it gets this sentence instead of a black video.
@@ -409,21 +476,61 @@ async function beginSession(gameId, surface) {
     return;
   }
   clear(root);
+  removeStageListeners();
   const video = h("video", { autoplay: "", playsinline: "", id: "session-video" });
+  // Input only flows while the pointer is locked to the video (session.js explains why), so the
+  // person has to be told to click — without this line the stream looks live but ignores them.
+  const hint = h("div", { class: "stage-hint" }, [
+    h("span", { text: "Click the picture to play · Esc gives the mouse back" }),
+  ]);
   const status = h("p", { class: "status", role: "status", text: "Starting…" });
+  const stage = h("section", { class: "stage", "aria-label": game.title });
+  // Wired through the `onclick` PROPERTY (below, and in onFullscreen) rather than `h`'s listener,
+  // so the label and the action it performs are swapped together in one place.
+  const fullscreen = h("button", { type: "button", class: "secondary small", text: "Fullscreen" });
+  fullscreen.onclick = () => enterFullscreen(stage, video);
   const leave = h("button", {
     type: "button",
+    class: "secondary small",
     text: "Leave",
     onclick: async () => {
       const session = activeSession;
       activeSession = null;
+      removeStageListeners();
+      if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
       if (session) await session.leave();
       renderCatalogueOrSignIn();
     },
   });
-  root.append(video, status, leave);
+  const controls = h("div", { class: "controls" }, [fullscreen, leave]);
+  stage.append(video, hint, h("div", { class: "stage-bar" }, [status, controls]));
+  root.appendChild(stage);
+  setView("session", [
+    h("span", {
+      class: "topbar-title",
+      text: `${game.title} · ${surface === "edit" ? "editor" : "play"}`,
+    }),
+  ]);
+
+  const onLock = () => stage.classList.toggle("locked", document.pointerLockElement === video);
+  const onFullscreen = () => {
+    fullscreen.textContent = document.fullscreenElement === stage ? "Exit fullscreen" : "Fullscreen";
+    fullscreen.onclick =
+      document.fullscreenElement === stage
+        ? () => document.exitFullscreen().catch(() => {})
+        : () => enterFullscreen(stage, video);
+    if (!document.fullscreenElement && navigator.keyboard && navigator.keyboard.unlock) {
+      navigator.keyboard.unlock();
+    }
+  };
+  stageListeners = [
+    ["pointerlockchange", onLock],
+    ["fullscreenchange", onFullscreen],
+  ];
+  for (const [type, fn] of stageListeners) document.addEventListener(type, fn);
+
   try {
-    activeSession = await startSession(gameId, surface, video, (text) => {
+    activeSession = await startSession(game.id, surface, video, (text) => {
       status.textContent = text;
     });
   } catch (err) {
@@ -432,9 +539,9 @@ async function beginSession(gameId, surface) {
 }
 
 function renderFatalError(text) {
-  clear(root);
-  root.appendChild(h("p", { class: "error", role: "alert", text }));
-  root.appendChild(
+  const card = authCard();
+  card.appendChild(h("p", { class: "error", role: "alert", text }));
+  card.appendChild(
     h("button", { type: "button", text: "Try again", onclick: () => renderCatalogueOrSignIn() }),
   );
 }
