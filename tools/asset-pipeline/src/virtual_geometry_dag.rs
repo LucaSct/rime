@@ -645,8 +645,66 @@ fn eval_quadric(q: &Quadric, p: [f64; 3]) -> f64 {
 
 struct Simplified {
     tris: Vec<Tri>,
-    /// sqrt of the largest quadric cost accepted, metres.
+    /// Largest distance from a collapsed-away vertex to the triangles that absorbed it, metres.
     error_m: f64,
+}
+
+/// Distance from `p` to the triangle `t` (closest-point construction from Ericson, *Real-Time
+/// Collision Detection*, §5.1.5: classify `p` against the triangle's Voronoi regions — three
+/// vertices, three edges, the face — and project onto the one it falls in).
+fn point_triangle_distance(p: [f64; 3], t: [[f64; 3]; 3]) -> f64 {
+    let [a, b, c] = t;
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let ap = sub(p, a);
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    let closest = if d1 <= 0.0 && d2 <= 0.0 {
+        a
+    } else {
+        let bp = sub(p, b);
+        let d3 = dot(ab, bp);
+        let d4 = dot(ac, bp);
+        let cp = sub(p, c);
+        let d5 = dot(ab, cp);
+        let d6 = dot(ac, cp);
+        let vc = d1 * d4 - d3 * d2;
+        let vb = d5 * d2 - d1 * d6;
+        let va = d3 * d6 - d5 * d4;
+        let along = |from: [f64; 3], dir: [f64; 3], s: f64| {
+            [
+                from[0] + s * dir[0],
+                from[1] + s * dir[1],
+                from[2] + s * dir[2],
+            ]
+        };
+        if d3 >= 0.0 && d4 <= d3 {
+            b
+        } else if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            along(a, ab, d1 / (d1 - d3))
+        } else if d6 >= 0.0 && d5 <= d6 {
+            c
+        } else if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            along(a, ac, d2 / (d2 - d6))
+        } else if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+            along(b, sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6)))
+        } else {
+            let denom = va + vb + vc;
+            if denom == 0.0 {
+                a // degenerate triangle: fall back to a vertex (still an upper bound)
+            } else {
+                let v = vb / denom;
+                let w = vc / denom;
+                [
+                    a[0] + ab[0] * v + ac[0] * w,
+                    a[1] + ab[1] * v + ac[1] * w,
+                    a[2] + ab[2] * v + ac[2] * w,
+                ]
+            }
+        }
+    };
+    let d = sub(p, closest);
+    dot(d, d).sqrt()
 }
 
 struct LocalTri {
@@ -664,9 +722,16 @@ struct LocalTri {
 /// distances from `v` to all the planes that vertex started on. Collapsing edge `u→v` moves `u`
 /// onto `v`, and its cost is `vᵀ (Q_u + Q_v) v` — how far `v` sits from every plane either vertex
 /// was responsible for. Always collapsing the cheapest edge first, and summing quadrics as vertices
-/// merge, keeps the surface near all the planes it was built from. Planes are unit-length and
-/// unweighted, so `sqrt(cost)` is a length in metres (an upper bound on the distance to any one
-/// accumulated plane), which is what the group's LOD error reports.
+/// merge, keeps the surface near all the planes it was built from.
+///
+/// QEM only *orders* the collapses. The error the group reports is measured geometrically once
+/// simplification is done: every vertex that was collapsed away is followed along its chain of
+/// collapses to the vertex that finally absorbed it, and its distance to that vertex's surviving
+/// triangles is taken; the group's error is the largest such distance. Distance to *some* output
+/// triangles bounds the distance to the output surface from above, so this is a conservative
+/// one-sided measure in metres. (An earlier draft reported `sqrt` of the accumulated quadric: a sum
+/// of squared distances to every plane a vertex ever touched, which grows with the NUMBER of
+/// merged planes and read 10–100x too large — a unit sphere's root claimed metres of error.)
 ///
 /// We use **half-edge** collapse (`u` moves onto the existing `v`) rather than the optimal
 /// placement: no new position is ever created, so a vertex we refuse to move is bit-exact at every
@@ -718,7 +783,12 @@ fn simplify_group(
         }
     }
 
-    // --- Locking.
+    // --- Locking. Three layers overlap on purpose. On a manifold mesh an edge a group shares with
+    // a neighbour has one triangle inside the group, so the edge-count test below locks it, and a
+    // boundary vertex's fan is not a closed disc, so the disc test locks it too; the `shared` mask
+    // (positions referenced by more than one group) additionally catches groups that touch at a
+    // single vertex with no shared edge. Removing any one layer leaves the others holding the line
+    // — the M18.6 falsification had to unlock shared vertices outright to open a crack.
     let mut locked: Vec<bool> = ids.iter().map(|&p| shared[p as usize]).collect();
     let mut edges: Vec<(u32, u32)> = Vec::with_capacity(tris.len() * 3);
     for tri in &tris {
@@ -849,9 +919,9 @@ fn simplify_group(
         }
     }
 
-    let mut max_cost = 0.0f64;
+    let mut merged_into = vec![u32::MAX; n];
     while live > target {
-        let Some(Reverse((cost_bits, u, v, su, sv))) = heap.pop() else {
+        let Some(Reverse((_cost, u, v, su, sv))) = heap.pop() else {
             break;
         };
         if removed[u as usize] || removed[v as usize] {
@@ -976,7 +1046,7 @@ fn simplify_group(
         let qu = quadrics[u as usize];
         add_quadric(&mut quadrics[v as usize], &qu);
         stamp[v as usize] += 1;
-        max_cost = max_cost.max(f64::from_bits(cost_bits));
+        merged_into[u as usize] = v;
         stats.collapses += 1;
 
         // Re-offer every edge whose cost (around v) or validity (the 2-ring) may have changed,
@@ -989,6 +1059,29 @@ fn simplify_group(
         }
     }
 
+    let mut error_m = 0.0f64;
+    for u in 0..n {
+        if !removed[u] {
+            continue;
+        }
+        let mut rep = u;
+        while removed[rep] {
+            rep = merged_into[rep] as usize;
+        }
+        let nearest = fan[rep]
+            .iter()
+            .filter(|&&t| tris[t as usize].alive)
+            .map(|&t| point_triangle_distance(pos[u], tris[t as usize].p.map(|p| pos[p as usize])))
+            .fold(f64::INFINITY, f64::min);
+        let distance = if nearest.is_finite() {
+            nearest
+        } else {
+            let d = sub(pos[u], pos[rep]);
+            dot(d, d).sqrt()
+        };
+        error_m = error_m.max(distance);
+    }
+
     Simplified {
         tris: tris
             .iter()
@@ -998,7 +1091,7 @@ fn simplify_group(
                 material: t.material,
             })
             .collect(),
-        error_m: max_cost.sqrt(),
+        error_m,
     }
 }
 
