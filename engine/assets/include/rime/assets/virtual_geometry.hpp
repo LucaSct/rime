@@ -54,7 +54,7 @@ struct VirtualGeometryCluster {
 // VirtualGeometryAsset::child_groups; it is a DAG rather than an implicit binary tree, because one
 // complete parent cut can be replaced by several independent groups. The reader rejects cycles.
 //
-// `lod_center`/`lod_radius` (payload v2, ADR-0056) is the LOD bounding sphere: it encloses the
+// `lod_center`/`lod_radius` (payload v2, ADR-0059) is the LOD bounding sphere: it encloses the
 // source surface this group stands for and every child's LOD sphere. v1 payloads read it as zero.
 // The reader enforces MONOTONICITY across every edge — a parent's error is never below a child's
 // and its sphere contains the child's — because a projected-error cut is only consistent when

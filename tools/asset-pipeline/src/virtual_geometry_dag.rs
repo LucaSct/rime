@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 
-//! The M18.6 replacement-DAG cook: a Nanite-style cluster hierarchy (ADR-0043, ADR-0056).
+//! The M18.6 replacement-DAG cook: a Nanite-style cluster hierarchy (ADR-0043, ADR-0059).
 //!
 //! # The idea
 //!
@@ -66,7 +66,7 @@ pub const GROUP_TARGET_CLUSTERS: usize = 8;
 /// Groups smaller than this are merged into a neighbour: a tiny group is mostly boundary, and its
 /// locked boundary leaves almost nothing to simplify.
 pub const GROUP_MIN_CLUSTERS: usize = 4;
-/// Upper bound on a merged group (ADR-0056: 4–32 clusters per group).
+/// Upper bound on a merged group (ADR-0059: 4–32 clusters per group).
 pub const GROUP_MAX_CLUSTERS: usize = 32;
 /// Safety cap on DAG depth. Halving per level reaches one cluster from 2^32 in 32 levels; the GPU
 /// selector's ancestor walk (`kVirtualGeometryGpuSelectionMaxDepth` = 256) is far above this.

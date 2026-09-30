@@ -173,7 +173,7 @@ Entries are grouped roughly by area and kept short on purpose.
   triangle *clusters*, grouped and simplified level by level, so a coarse set of clusters can
   replace a finer set covering the same surface. Groups are re-formed every level, so one group's
   output feeds several next-level groups — a DAG, not a tree. A *cut* through it is what gets drawn.
-  See [ADR-0056](adr/0056-m18.6-replacement-dag-cook.md).
+  See [ADR-0059](adr/0059-m18.6-replacement-dag-cook.md).
 - **Locked boundary.** Vertices a simplification may not move — here, every vertex a group shares
   with another group. Because a group's boundary is bit-identical before and after simplifying,
   swapping a group's LOD can never open a crack against a neighbour at a different LOD.

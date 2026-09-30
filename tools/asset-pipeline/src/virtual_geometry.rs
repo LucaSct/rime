@@ -16,7 +16,7 @@ use crate::mesh::{
 
 /// Version of the kind-specific virtual-geometry payload (independent of the RMA1 envelope).
 ///
-/// v2 (M18.6, ADR-0056) appends a per-group LOD bounding sphere after v1's group record, so a
+/// v2 (M18.6, ADR-0059) appends a per-group LOD bounding sphere after v1's group record, so a
 /// view-dependent selector can bound projected error per group. The C++ reader still accepts v1
 /// (spheres read as zero); this writer only emits v2.
 pub const PAYLOAD_VERSION: u32 = 2;
