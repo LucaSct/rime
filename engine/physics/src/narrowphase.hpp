@@ -1308,6 +1308,12 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
             // only the hull is collidable here (see the Compound note below).
             return sb.type == ShapeType::ConvexHull && hull_a != nullptr && hull_b != nullptr &&
                    collide_hull_hull(*hull_a, pa, qa, *hull_b, pb, qb, m);
+        case ShapeType::Heightfield:
+            // Terrain never collides HERE either: it is not convex, and the world routes every
+            // pair involving it to build_heightfield_contacts (heightfield.hpp, M19.1). Canonical
+            // order puts it second, so reaching the Sphere/Box/... arms above with it falls
+            // through their `default:` — collide as nothing, the unresolved-hull posture.
+            break;
         case ShapeType::Compound:
             // A compound never collides HERE: it is not convex, so the world's contact build
             // enumerates its convex CHILDREN and dispatches each child pair through this same
@@ -1402,6 +1408,7 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
 struct ContactCacheKey {
     std::uint64_t bodies = 0;   // (slot_a << 32) | slot_b, canonical a < b
     std::uint32_t children = 0; // (child_a << 16) | child_b; 0 for a non-compound pair
+    std::uint32_t patch = 0;    // Manifold::patch — the terrain patch (M19.1); 0 otherwise
 
     friend bool operator==(const ContactCacheKey&, const ContactCacheKey&) noexcept = default;
 };
@@ -1412,8 +1419,9 @@ struct ContactCacheKey {
 // map). A splitmix64-style finalizer mixes the two fields' bits thoroughly and cheaply.
 struct ContactCacheKeyHash {
     [[nodiscard]] std::size_t operator()(const ContactCacheKey& k) const noexcept {
-        std::uint64_t h =
-            k.bodies ^ (static_cast<std::uint64_t>(k.children) * 0x9E3779B97F4A7C15ull);
+        std::uint64_t h = k.bodies ^
+                          (static_cast<std::uint64_t>(k.children) * 0x9E3779B97F4A7C15ull) ^
+                          (static_cast<std::uint64_t>(k.patch) * 0xC2B2AE3D27D4EB4Full);
         h ^= h >> 33;
         h *= 0xFF51AFD7ED558CCDull;
         h ^= h >> 33;

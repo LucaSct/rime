@@ -141,7 +141,8 @@ namespace compound_detail {
         case ShapeType::ConvexHull:
             return hull != nullptr ? hull->volume : 0.0f;
         case ShapeType::Compound:
-            return 0.0f; // nesting is rejected before volumes are ever asked for
+        case ShapeType::Heightfield:
+            return 0.0f; // nesting / terrain children are rejected before volumes are asked for
     }
     return 0.0f;
 }
@@ -197,6 +198,9 @@ namespace compound_detail {
         const CompoundChildDesc& child = children[i];
         if (child.shape.type == ShapeType::Compound) {
             return false; // no nesting in v1 (ADR-0028 defers flatten-at-register)
+        }
+        if (child.shape.type == ShapeType::Heightfield) {
+            return false; // terrain is a static body of its own, never a part (M19.1)
         }
         const ConvexHull* h = compound_child_hull(child.shape, hulls);
         if (child.shape.type == ShapeType::ConvexHull && h == nullptr) {

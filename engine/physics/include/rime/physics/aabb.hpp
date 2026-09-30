@@ -95,6 +95,9 @@ compute_aabb(const ShapeDesc& s, core::Vec3 pos, const core::Quat& q) noexcept {
             // PhysicsWorld bounds compounds internally as the union of the posed children's
             // bounds; without a world, the honest degenerate point bound below.
             break;
+        case ShapeType::Heightfield:
+            // Same again: the sample grid lives in the world's heightfield store (M19.1).
+            break;
     }
     return Aabb{pos, pos};
 }

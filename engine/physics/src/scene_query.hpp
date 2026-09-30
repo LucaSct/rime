@@ -286,6 +286,10 @@ namespace rime::physics {
             return ray_vs_capsule(s.radius, s.half_height, pos, q, o, dir, tmax, t_out, n_out);
         case ShapeType::ConvexHull:
             return hull != nullptr && ray_vs_hull(*hull, pos, q, o, dir, tmax, t_out, n_out);
+        case ShapeType::Heightfield:
+            // Terrain needs its store entry, which this shape-only dispatch cannot see; the world
+            // calls ray_vs_heightfield (heightfield.hpp) itself before reaching here (M19.1).
+            return false;
         case ShapeType::Compound: {
             if (compound == nullptr) {
                 return false;
@@ -373,6 +377,8 @@ namespace rime::physics {
             const GjkResult g = gjk(sup_c, sup_h, c - pos);
             return g.overlapping || g.distance <= sr;
         }
+        case ShapeType::Heightfield:
+            return false; // the world tests terrain itself (heightfield.hpp), as for raycasts
         case ShapeType::Compound: {
             if (compound == nullptr) {
                 return false;

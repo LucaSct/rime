@@ -33,6 +33,15 @@ struct CompoundTag {};
 // flat POD). Default constructed ⇒ null. Ids are only meaningful to the world that issued them.
 using CompoundId = core::Handle<CompoundTag>;
 
+// Phantom tag for HeightfieldId — same discipline as HullTag.
+struct HeightfieldTag {};
+
+// Handle to a terrain heightfield registered with a PhysicsWorld (M19.1,
+// ADR-0056-m19.1-heightfield): the sample grid is WORLD-OWNED, registered once via
+// PhysicsWorld::register_heightfield — the hull/compound storage answer again, for the same
+// reason (a terrain tile is megabytes of variable-length data; ShapeDesc stays a flat POD).
+using HeightfieldId = core::Handle<HeightfieldTag>;
+
 // The shape set: the v1 primitives, the convex hull (M7.11), and the compound (M7.12). The static
 // triangle mesh (world geometry) is still to land; the enum leaves room to grow without
 // renumbering.
@@ -40,8 +49,9 @@ enum class ShapeType : std::uint8_t {
     Sphere = 0,
     Box = 1,
     Capsule = 2,
-    ConvexHull = 3, // geometry lives in the world's hull store; `hull` is the reference
-    Compound = 4,   // child list lives in the world's compound store; `compound` is the reference
+    ConvexHull = 3,  // geometry lives in the world's hull store; `hull` is the reference
+    Compound = 4,    // child list lives in the world's compound store; `compound` is the reference
+    Heightfield = 5, // terrain grid in the world's heightfield store (M19.1) — STATIC bodies only
     // Mesh — deferred (ADR-0027 names its home)
 };
 
@@ -54,6 +64,7 @@ struct ShapeDesc {
     float half_height = 0.5f;                  // Capsule (cylinder half-height, local Y)
     HullId hull{};                             // ConvexHull (PhysicsWorld::register_hull)
     CompoundId compound{};                     // Compound (PhysicsWorld::register_compound)
+    HeightfieldId heightfield{};               // Heightfield (PhysicsWorld::register_heightfield)
 };
 
 // One child of a compound shape (M7.12, ADR-0028): a convex shape — any primitive or a registered
@@ -121,6 +132,11 @@ struct MassProperties {
             // (ADR-0028), which composed the combined COM/inertia at register_compound() by the
             // parallel-axis theorem (docs/math/compound-mass-properties.md). create_body resolves
             // the id there; a caller with no world gets the unit-inertia fallback.
+            break;
+        case ShapeType::Heightfield:
+            // Terrain is static-only (create_body refuses anything else), and a static body's
+            // mass never enters the solver — so there is nothing to compute. The unit fallback
+            // stands.
             break;
     }
     return mp;

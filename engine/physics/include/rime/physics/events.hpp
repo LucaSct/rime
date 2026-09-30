@@ -55,6 +55,10 @@ struct ContactEvent {
     ContactPhase phase = ContactPhase::Began;
     std::uint16_t child_a = 0; // compound child index on each side (M7.12) — the part that was
     std::uint16_t child_b = 0; // hit, the M8 damage-to-part mapping; 0 for a plain body
+    // Heightfield pairs (M19.1): which terrain patch this region is — Manifold::patch, the index
+    // of the lowest terrain triangle in it. Two simultaneous contacts between one body and the
+    // terrain are two regions with two lifecycles, told apart by this. 0 for non-terrain pairs.
+    std::uint32_t patch = 0;
 };
 
 // A body deactivated or reactivated *as a result of a step()*. `Slept` is the basis for M8's

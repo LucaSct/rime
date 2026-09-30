@@ -78,6 +78,10 @@ support_local(const ShapeDesc& s, core::Vec3 dir, const ConvexHull* hull = nullp
             // whole — the world always dispatches its CHILDREN (each convex) instead (M7.12,
             // ADR-0028). Reaching here is a caller bug; return the origin rather than crash.
             return core::Vec3{};
+        case ShapeType::Heightfield:
+            // Terrain is not convex either (M19.1): the world routes it to per-triangle routines
+            // and never asks it for a support point. Same caller-bug posture.
+            return core::Vec3{};
     }
     return core::Vec3{};
 }

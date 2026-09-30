@@ -64,6 +64,13 @@ struct Manifold {
     std::uint8_t count = 0;    // 0 never leaves the narrowphase (no-contact = no manifold)
     std::uint16_t child_a = 0; // compound child index on each side (M7.12) — which part of a
     std::uint16_t child_b = 0; // compound this contact region belongs to; 0 for a plain body
+    // Terrain (M19.1): a body resting across a heightfield may touch it in several PATCHES whose
+    // normals differ (a ball in a V-shaped gully touches both slopes) — one manifold holds one
+    // normal, so each patch is its own region. `patch` names it by the index of the first
+    // (lowest-numbered) terrain triangle in it, which stays the same frame to frame while the body
+    // rests. 0 for every non-heightfield pair (where it is meaningless). Manifolds within one
+    // (pair, child) are ordered by it.
+    std::uint32_t patch = 0;
 };
 
 } // namespace rime::physics
