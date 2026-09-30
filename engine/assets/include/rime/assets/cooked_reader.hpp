@@ -257,8 +257,9 @@ read_destructible(std::span<const std::byte> file,
                                                         AssetError& out_error,
                                                         AssetId* out_id = nullptr) noexcept;
 
-// The schema fingerprint for the v1 virtual-geometry payload. Unlike MeshAsset this is a
-// companion payload, so its own versioned table layout is kept separate from the stable mesh ABI.
+// The schema fingerprint for the virtual-geometry payload (v1 and v2 share it; the payload carries
+// its own version, see ADR-0059). Unlike MeshAsset this is a companion payload, so its own
+// versioned table layout is kept separate from the stable mesh ABI.
 [[nodiscard]] std::uint64_t virtual_geometry_schema_hash() noexcept;
 
 // Decode a versioned virtual-geometry payload. The payload begins with its own u32 payload version

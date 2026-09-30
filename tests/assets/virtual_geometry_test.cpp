@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <span>
 #include <system_error>
 #include <vector>
@@ -92,6 +93,12 @@ namespace {
         writer.u32(group.child_count);
         writer.f32(group.lod_error_m);
         writer.u8(group.permanently_resident ? 1 : 0);
+        if (version >= 2) {
+            writer.f32(group.lod_center.x);
+            writer.f32(group.lod_center.y);
+            writer.f32(group.lod_center.z);
+            writer.f32(group.lod_radius);
+        }
     }
     for (const std::uint32_t child : asset.child_groups)
         writer.u32(child);
@@ -209,7 +216,10 @@ TEST_CASE("virtual geometry: corrupt version, schema, truncation, and graph are 
     SUBCASE("unsupported payload version") {
         AssetError error{};
         CHECK_FALSE(
-            read_virtual_geometry(write_file(source, virtual_geometry_schema_hash(), 2), error));
+            read_virtual_geometry(write_file(source, virtual_geometry_schema_hash(), 3), error));
+        CHECK(error == AssetError::UnsupportedVersion);
+        CHECK_FALSE(
+            read_virtual_geometry(write_file(source, virtual_geometry_schema_hash(), 0), error));
         CHECK(error == AssetError::UnsupportedVersion);
     }
     SUBCASE("schema drift") {
@@ -354,5 +364,78 @@ TEST_CASE("virtual geometry: page view rejects malformed layout ranges") {
         view.index_count = 1;
         std::uint32_t decoded = 0;
         CHECK_FALSE(read_virtual_geometry_index(view, 0, decoded));
+    }
+}
+
+// M18.6: payload v2 carries a per-group LOD sphere, and the reader enforces the monotonicity the
+// replacement-DAG cook guarantees. A v1 payload stays readable (its spheres read as zero).
+namespace {
+
+[[nodiscard]] VirtualGeometryAsset two_level_asset() {
+    VirtualGeometryAsset asset = valid_asset();
+    asset.page_bytes.resize(216);
+    asset.pages.push_back({108, 108, 1, 1, 0, 0, false});
+    VirtualGeometryCluster child = asset.clusters[0];
+    child.page = 1;
+    child.replacement_group = 1;
+    asset.clusters.push_back(child);
+    asset.groups[0] = {0, 1, 0, 1, 0.5f, true, {0.0f, 0.0f, 0.0f}, 2.0f};
+    asset.groups.push_back({1, 1, 0, 0, 0.25f, false, {0.5f, 0.0f, 0.0f}, 1.5f});
+    asset.child_groups = {1};
+    return asset;
+}
+
+} // namespace
+
+TEST_CASE("virtual geometry: v2 payload round-trips the LOD sphere; v1 stays readable (M18.6)") {
+    const VirtualGeometryAsset source = two_level_asset();
+    REQUIRE(validate_virtual_geometry(source) == VirtualGeometryError::None);
+    AssetError error{};
+    const auto v2 =
+        read_virtual_geometry(write_file(source, virtual_geometry_schema_hash(), 2), error);
+    REQUIRE_MESSAGE(v2.has_value(), to_string(error));
+    CHECK(v2->groups[1].lod_center.x == 0.5f);
+    CHECK(v2->groups[1].lod_radius == 1.5f);
+    CHECK(v2->groups[0].lod_radius == 2.0f);
+
+    // The same asset written as v1 has no sphere bytes; the reader must not over-read into the
+    // child table, and zero spheres trivially satisfy containment.
+    VirtualGeometryAsset v1_source = source;
+    for (VirtualGeometryGroup& group : v1_source.groups) {
+        group.lod_center = {};
+        group.lod_radius = 0.0f;
+    }
+    const auto v1 = read_virtual_geometry(write_file(v1_source), error);
+    REQUIRE_MESSAGE(v1.has_value(), to_string(error));
+    CHECK(v1->groups[1].lod_radius == 0.0f);
+    CHECK(v1->child_groups == std::vector<std::uint32_t>{1});
+}
+
+TEST_CASE("virtual geometry: a non-monotone replacement edge is rejected (M18.6)") {
+    SUBCASE("child error above its parent's") {
+        VirtualGeometryAsset asset = two_level_asset();
+        asset.groups[1].lod_error_m = 0.75f;
+        CHECK(validate_virtual_geometry(asset) == VirtualGeometryError::NonMonotoneGroups);
+        AssetError error{};
+        CHECK_FALSE(
+            read_virtual_geometry(write_file(asset, virtual_geometry_schema_hash(), 2), error));
+        CHECK(error == AssetError::InvalidVirtualGeometry);
+    }
+    SUBCASE("equal error is monotone (the selector's comparison is strict)") {
+        VirtualGeometryAsset asset = two_level_asset();
+        asset.groups[1].lod_error_m = 0.5f;
+        CHECK(validate_virtual_geometry(asset) == VirtualGeometryError::None);
+    }
+    SUBCASE("child sphere reaching outside its parent's") {
+        VirtualGeometryAsset asset = two_level_asset();
+        asset.groups[1].lod_center.x = 0.6f; // 0.6 + 1.5 = 2.1 > 2.0
+        CHECK(validate_virtual_geometry(asset) == VirtualGeometryError::NonMonotoneGroups);
+    }
+    SUBCASE("a negative or non-finite radius is malformed, not merely non-monotone") {
+        VirtualGeometryAsset asset = two_level_asset();
+        asset.groups[1].lod_radius = -1.0f;
+        CHECK(validate_virtual_geometry(asset) == VirtualGeometryError::InvalidGroup);
+        asset.groups[1].lod_radius = std::numeric_limits<float>::quiet_NaN();
+        CHECK(validate_virtual_geometry(asset) == VirtualGeometryError::InvalidGroup);
     }
 }
