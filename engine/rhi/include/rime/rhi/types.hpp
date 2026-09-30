@@ -47,6 +47,14 @@ struct SubmitTicket {
     [[nodiscard]] bool is_valid() const noexcept { return id != 0; }
 };
 
+// One byte range of a buffer-to-buffer copy (CommandBuffer::copy_buffer_regions, m18.5): `size`
+// bytes from `src_offset` in the source to `dst_offset` in the destination. Mirrors VkBufferCopy.
+struct BufferCopyRegion {
+    std::uint64_t src_offset = 0;
+    std::uint64_t dst_offset = 0;
+    std::uint64_t size = 0;
+};
+
 // ── Small geometric PODs ────────────────────────────────────────────────────────────────────
 // rhi has its own Extent2D (rather than reusing platform::Extent2D) so the graphics seam owns its
 // vocabulary and does not drag a platform dependency into every consumer of a size.

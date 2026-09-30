@@ -319,6 +319,9 @@ public:
     void
     copy_texture_to_buffer(TextureHandle src, BufferHandle dst, std::uint32_t base_layer) override;
     void copy_buffer(BufferHandle src, BufferHandle dst, std::uint64_t size) override;
+    void copy_buffer_regions(BufferHandle src,
+                             BufferHandle dst,
+                             std::span<const BufferCopyRegion> regions) override;
 
     [[nodiscard]] VkCommandBuffer handle() const noexcept { return cmd_; }
 
