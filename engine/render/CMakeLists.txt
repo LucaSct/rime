@@ -78,7 +78,7 @@ rime_add_shaders(rime_render
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag WRITE_GBUFFER pbr_forward_shadowed_gbuffer.frag)
 
-# The micro-triangle rasterizer's portable fallback (M18.4, ADR-0056): the SAME source as the 64-bit
+# The micro-triangle rasterizer's portable fallback (M18.4, ADR-0058): the SAME source as the 64-bit
 # single pass, compiled twice more as the two 32-bit passes that compute the identical minimum on a
 # device without shaderBufferInt64Atomics. One source keeps the fill rule, the tie rule and the
 # depth arithmetic identical by construction across all three — they cannot drift apart.

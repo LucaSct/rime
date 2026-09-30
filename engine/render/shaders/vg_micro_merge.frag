@@ -2,7 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // M18.4: resolve the software micro-triangle buffer into the SAME visibility target the hardware
-// pass wrote (ADR-0056). One fullscreen triangle; each fragment reads its pixel's 64-bit
+// pass wrote (ADR-0058). One fullscreen triangle; each fragment reads its pixel's 64-bit
 // (depth key, list index) word from vg_micro_raster.comp.
 //
 // The hardware/software depth arbitration is not written here — it is the DEPTH TEST. This pass

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 //
 // Proofs for M18.4, the software half of the hybrid micro-triangle rasterizer (ADR-0043 gate 6,
-// ADR-0056), on a real Vulkan device. Structural, never golden: every expectation is computed by
+// ADR-0058), on a real Vulkan device. Structural, never golden: every expectation is computed by
 // the CPU oracle (rasterize_micro_triangle_reference) from the same inputs.
 //
 //   (a) PARITY. The GPU software rasterizer equals the CPU oracle BIT FOR BIT — identity and depth

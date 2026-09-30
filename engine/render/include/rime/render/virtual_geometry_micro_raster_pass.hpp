@@ -9,7 +9,7 @@
 #include "rime/render/render_graph.hpp"
 #include "rime/render/virtual_geometry_visibility_id.hpp"
 
-// M18.4: the software half of the HYBRID micro-triangle rasterizer (ADR-0043 gate 6, ADR-0056).
+// M18.4: the software half of the HYBRID micro-triangle rasterizer (ADR-0043 gate 6, ADR-0058).
 //
 // ADR-0043 makes the split mandatory: triangles that cover enough pixels go through the hardware
 // visibility pass (virtual_geometry_visibility_pass.hpp), sub-pixel ones through a compute
@@ -30,7 +30,7 @@
 // What goes in is already projected and already routed: route_micro_triangle() (micro_triangle.hpp)
 // is the classifier wiring, and a caller hands this pass the Software-routed list. Moving the
 // projection and the per-triangle routing onto the GPU — so a cluster's triangles split without a
-// CPU round trip — is the next brick; see ADR-0056's "not yet" list.
+// CPU round trip — is the next brick; see ADR-0058's "not yet" list.
 //
 // Stub/limits, stated: the triangle list is uploaded per declare() into a host-visible buffer (as
 // the hardware pass does with its clusters, until the GPU page pool exists); one declare() per
