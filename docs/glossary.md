@@ -381,6 +381,17 @@ Entries are grouped roughly by area and kept short on purpose.
   structured than a triangle mesh — "which triangles are under this point" is a division, not a
   search — at the price of no overhangs or caves. Rime's is cooked as quantised u16 samples with a
   scale and offset (M19.1, ADR-0060-m19.1).
+- **Vertex pulling.** A draw with no vertex buffer: the vertex shader *reads* the data it needs
+  (from a texture, a storage buffer, or arithmetic on `gl_VertexIndex`) instead of having it *fed*
+  by the fixed-function vertex-fetch stage. Useful when the vertices are derivable rather than
+  authored — Rime's terrain pass turns `gl_VertexIndex` into a grid coordinate and fetches the
+  height from the heightfield texture (m19.3, ADR-0062), so the drawn surface and the collided
+  surface are built from one set of integers with no float copy in between.
+- **UNORM / SNORM.** How a GPU reads a small integer as a real number. An *n*-bit UNORM texel is
+  decoded as `value / (2ⁿ − 1)` into `[0, 1]`; SNORM as `value / (2ⁿ⁻¹ − 1)` into `[−1, 1]`. The
+  stored bits are still the integer, which is why `R16_UNORM` can carry a quantised heightfield
+  losslessly: multiply the decoded value back by 65535 and the original `u16` is recovered exactly.
+  Distinct from a float format, where the *step size* grows with magnitude.
 - **DDA (digital differential analyzer) grid walk.** Stepping a ray through a grid cell by cell:
   track, per axis, the distance at which the ray next crosses a grid line and always cross the
   nearest one (Amanatides & Woo's "fast voxel traversal"). No cell is skipped or visited twice, and

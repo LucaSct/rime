@@ -202,6 +202,14 @@ TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset) {
     td.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
     td.debug_name = "terrain-heights";
     tile.heights = device_.create_texture(td);
+    if (!tile.heights.is_valid()) {
+        // The device logged why. Counting it here too is what keeps `tiles_refused()` the one
+        // number that answers "why is there no terrain?" — an out-of-memory tile and a malformed
+        // one both end with nothing drawn, and a caller should not have to read the log to tell
+        // them apart from a tile nobody ever handed over.
+        ++refused_;
+        return kInvalidTerrainTile;
+    }
     // THE MEMCPY THAT IS THE POINT OF THE BRICK. `samples` is row-major with x fastest, which is
     // exactly a 2-D texture upload's walk, and R16_UNORM's storage is the u16 itself — so the
     // bytes physics holds and the bytes the GPU holds are the same bytes. No conversion exists to
@@ -222,6 +230,11 @@ TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset) {
     bd.memory = rhi::MemoryUsage::CpuToGpu;
     bd.debug_name = "terrain-indices";
     tile.indices = device_.create_buffer(bd);
+    if (!tile.indices.is_valid()) {
+        device_.destroy(tile.heights); // no half-resident tile enters the store
+        ++refused_;
+        return kInvalidTerrainTile;
+    }
     device_.write_buffer(tile.indices, indices.data(), bd.size, 0);
 
     tiles_.push_back(tile);
