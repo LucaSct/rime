@@ -33,3 +33,8 @@ target_link_libraries(rime_physics_tests
 # regression test for it provably cannot exist. Everything else in this suite drives PhysicsWorld
 # only, and should keep doing so.
 target_include_directories(rime_physics_tests PRIVATE ${CMAKE_SOURCE_DIR}/engine/physics/src)
+
+# The heightfield seam rule is unreachable by ordinary rays, so the test that pins it must SEE it
+# fire (a counter in heightfield.hpp, compiled in only under this macro and only for this target --
+# the library and every other build keep the plain hot path). See the hook's comment there.
+target_compile_definitions(rime_physics_tests PRIVATE RIME_PHYSICS_SEAM_COUNTER)

@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "heightfield.hpp" // private: the seam-firing counter is test-only (see CMakeLists)
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
@@ -1101,4 +1102,26 @@ TEST_CASE("heightfield raycast: the seam rule closes a surface the per-piece roo
         }
     }
     CHECK(misses == 0);
+
+    // THE PROOF MUST SEE THE GUARD ACT. A hit alone cannot distinguish "the seam rule closed the
+    // gap" from "this toolchain rounds differently and the ordinary root caught it", so the same
+    // rays are walked directly through ray_vs_heightfield_local (this TU's instrumented copy, see
+    // RIME_PHYSICS_SEAM_COUNTER in heightfield.hpp) and the firing counter must rise by at least
+    // one per ray. A lapsed proof turns this red instead of passing quietly. (The world is at the
+    // origin with identity rotation, so world and local frames coincide.)
+    HeightfieldShape shape;
+    REQUIRE(build_heightfield(desc_of(t), shape));
+    const std::uint64_t before = seam_firings();
+    int direct_hits = 0;
+    for (const SeamRay& r : rays) {
+        float tt = 0.0f;
+        core::Vec3 n{};
+        std::uint32_t tri = 0;
+        direct_hits += ray_vs_heightfield_local(
+            shape, {r.ox, r.oy, r.oz}, {r.dx, r.dy, r.dz}, r.tmax, tt, n, tri);
+    }
+    const std::uint64_t fired = seam_firings() - before;
+    MESSAGE("seam guard firings across the five rays: ", fired);
+    CHECK(direct_hits == 5);
+    CHECK(fired >= 5);
 }

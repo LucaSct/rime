@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -309,6 +310,22 @@ inline void cell_range(float lo,
 // segment over that cell (the plane can only be hit between its min and max height).
 //
 // `o`/`d` are in the heightfield's LOCAL frame and `d` is unit, so t is a distance in metres.
+#ifdef RIME_PHYSICS_SEAM_COUNTER
+// TEST-ONLY HOOK (defined solely for rime_physics_tests, see tests/physics/CMakeLists.txt). The
+// seam rule below never fires on ordinary rays, so a test that merely checks "the ray hits" cannot
+// tell a rule that closed the seam from a toolchain whose rounding no longer reaches it -- the
+// proof would lapse into passing silently. This counts firings so the test can SEE the rule act.
+// The definitions live in an INLINE NAMESPACE so this instrumented copy of the walk has different
+// symbols from the library's uninstrumented one (same header, same inline names, two bodies in one
+// binary would be an ODR violation the linker resolves arbitrarily). Without the macro there is no
+// counter, no atomic and no extra branch: the hot path is byte-for-byte the plain one.
+inline namespace seam_counted {
+inline std::atomic<std::uint64_t> g_seam_firings{0};
+
+[[nodiscard]] inline std::uint64_t seam_firings() noexcept {
+    return g_seam_firings.load(std::memory_order_relaxed);
+}
+#endif
 [[nodiscard]] inline bool ray_vs_heightfield_local(const HeightfieldShape& hf,
                                                    core::Vec3 o,
                                                    core::Vec3 d,
@@ -394,6 +411,9 @@ inline void cell_range(float lo,
         const float fb = f(b);
         float hit_t = -1.0f;
         if (have_prev && prev_f > 0.0f && fa < 0.0f) {
+#ifdef RIME_PHYSICS_SEAM_COUNTER
+            g_seam_firings.fetch_add(1, std::memory_order_relaxed);
+#endif
             hit_t = a; // crossed down exactly on the seam between the last piece and this one
         } else if (fa >= 0.0f && fb <= 0.0f) {
             // f is linear on [a, b]: its root is at the fraction fa / (fa - fb). fa == fb == 0 is
@@ -495,6 +515,9 @@ inline void cell_range(float lo,
     n_out = core::rotate(q, n);
     return true;
 }
+#ifdef RIME_PHYSICS_SEAM_COUNTER
+} // namespace seam_counted
+#endif
 
 // ─── Contacts ────────────────────────────────────────────────────────────────────────────────
 //
