@@ -56,7 +56,8 @@ target_link_libraries(rime_hello
 # callback, which is what lets a game build its own binary without the engine knowing the game
 # exists. See include/rime/app/editor_host_app.hpp.
 add_library(rime_editorhost_app STATIC
-    editor_host_app.cpp)
+    editor_host_app.cpp
+    stream_input.cpp)
 add_library(rime::editorhost_app ALIAS rime_editorhost_app)
 
 target_include_directories(rime_editorhost_app
@@ -66,11 +67,15 @@ target_include_directories(rime_editorhost_app
 # rime::stream is PUBLIC as of m18: the public header names `stream::Codec` (kEditorHostCodecs, the
 # list the viewport offers a client), so every consumer of this library needs stream's headers. A
 # PRIVATE link would compile this target and break each of its users.
+# rime::platform joins the PUBLIC set with m18's input path: `rime/app/stream_input.hpp` names
+# platform::Event / Key / MouseButton in its public interface. It already arrived transitively
+# (rime::stream links it PUBLIC), but a public header naming a module's types and a PRIVATE link
+# is exactly the pairing that breaks the day the transitive edge is tightened.
 target_link_libraries(rime_editorhost_app
-    PUBLIC rime::ecs rime::stream
+    PUBLIC rime::ecs rime::stream rime::platform
     PRIVATE rime::editorhost rime::scene rime::assets rime::app rime::physics rime::ground
             rime::render
-            rime::rhi rime::platform rime::core fmt::fmt)
+            rime::rhi rime::core fmt::fmt)
 
 rime_apply_common_target_options(rime_editorhost_app)
 rime_install_module(rime_editorhost_app)

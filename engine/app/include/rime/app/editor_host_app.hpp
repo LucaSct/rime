@@ -4,7 +4,9 @@
 
 #include <array>
 #include <functional>
+#include <span>
 
+#include "rime/platform/event.hpp"
 #include "rime/stream/frame_codec.hpp"
 
 namespace rime::ecs {
@@ -70,6 +72,25 @@ using ComponentRegistrar = std::function<void(ecs::World&)>;
 using ScenePreparer =
     std::function<void(ecs::World&, render::MeshRegistry&, render::MaterialRegistry&)>;
 
+// One fixed tick of a LIVE PLAY SESSION, with the client's input for that frame (m18 Track H,
+// ADR-0054).
+//
+// WHY THE HOST NEEDS A THIRD CALLBACK. The two above answer "what are this game's components" and
+// "what do they look like"; this one answers "what does this game DO when someone presses a key",
+// and until m18 nobody could ask it, because no input ever reached the host at all. The drain loop
+// now decodes `stream::InputEvent` into `platform::Event`s and posts them through
+// `Application::post_input`, so `events` here is exactly `Application::frame_input()` — the same
+// span a windowed game reads from its own OS pump (ADR-0023 §5), which is what makes a game's
+// implementation of this hook identical to the one it already has in its windowed main().
+//
+// Called from the fixed-tick hook, so it runs ONLY while the session is Playing or stepping (an
+// Edit-mode editor must not have WASD moving the scene under the author's cursor), after physics
+// has stepped and with the world's WorldTransforms current. `dt` is the fixed tick's dt.
+//
+// Default `{}` means "this host has no play behaviour" — `rime-engine` opening arbitrary content
+// has none to have, and every host that existed before m18 keeps its exact behaviour.
+using PlayTick = std::function<void(ecs::World&, std::span<const platform::Event>, double)>;
+
 // What the viewport host can ENCODE, in no particular preference order — `stream::choose_codec`
 // walks the *client's* preference list against this one, because only the client knows whether it
 // is a browser on a WAN link that wants AV1's bandwidth or a local editor that wants LZ4's
@@ -88,6 +109,7 @@ inline constexpr std::array<stream::Codec, 4> kEditorHostCodecs{stream::Codec::L
                                   char** argv,
                                   const ComponentRegistrar& registrar,
                                   const char* usage_name = "rime-engine",
-                                  const ScenePreparer& prepare = {});
+                                  const ScenePreparer& prepare = {},
+                                  const PlayTick& play_tick = {});
 
 } // namespace rime::app

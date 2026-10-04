@@ -13,6 +13,7 @@ add_library(rime_platform STATIC
     src/event_queue.cpp
     src/window.cpp
     src/input.cpp
+    src/hid_keys.cpp
     src/filesystem.cpp
     src/socket.cpp
     src/null/window_null.cpp)

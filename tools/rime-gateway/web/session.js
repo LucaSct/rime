@@ -17,8 +17,9 @@ import {
   decodeEnvelope,
   encodeInputEvent,
   encodeCapabilities,
+  decodeStreamConfig,
 } from "./protocol.js";
-import { keyOrdinalOf } from "./keymap.js";
+import { hidUsageOf } from "./keymap.js";
 
 /** `KeyMods` bitmask — mirrors `engine/platform/include/rime/platform/keyboard.hpp`'s explicit
  * (and therefore, unlike `Key`, stable-by-declaration) values. */
@@ -104,12 +105,22 @@ export class SessionHandle {
     this.stallTimer = null;
     this.lastFrameAt = 0;
     this.left = false;
+    // The stream's own pixel space, as `StreamConfig` declared it. Null until one arrives; the
+    // AV1 path learns the same numbers from the decoded track instead (see frameSize()).
+    this.frameWidth = 0;
+    this.frameHeight = 0;
+    // The pointer, in STREAM-FRAME pixels — the coordinate space `InputEvent.x/y` is defined in
+    // (protocol.hpp). Under pointer lock there is no browser-supplied position to send, so the
+    // page integrates `movementX/Y` into this one instead; see forwardPointerMove.
+    this.pointerX = 0;
+    this.pointerY = 0;
     this._boundKeyDown = (e) => this.forwardKey(e, InputKind.KeyDown);
     this._boundKeyUp = (e) => this.forwardKey(e, InputKind.KeyUp);
     this._boundMouseDown = (e) => this.forwardPointerButton(e, InputKind.PointerDown);
     this._boundMouseUp = (e) => this.forwardPointerButton(e, InputKind.PointerUp);
     this._boundMouseMove = (e) => this.forwardPointerMove(e);
     this._boundWheel = (e) => this.forwardScroll(e);
+    this._boundLockChange = () => this.onPointerLockChange();
   }
 
   // ── Setup ────────────────────────────────────────────────────────────────────────────────
@@ -131,10 +142,17 @@ export class SessionHandle {
     }
     switch (decoded.type) {
       case MessageType.StreamConfig:
-        // Geometry/codec parameters for the DataChannel `Frame` path (contract.md: sent "ONLY for
-        // a non-AV1 codec"). AV1 arrives on the video track and needs none of this, and the
-        // LAN-only LZ4 path this would configure is not implemented yet (ADR-0052) — nothing to
-        // do with it today.
+        // The DataChannel `Frame` path this configures is not implemented (AV1 arrives on the
+        // video track, and the LAN-only LZ4 path waits on its own brick, ADR-0052) — but the
+        // GEOMETRY is used: it is the authoritative statement of the pixel space `InputEvent.x/y`
+        // are expressed in, and the engine re-sends it whenever the stream's size changes.
+        try {
+          const cfg = decodeStreamConfig(decoded.payload);
+          this.frameWidth = cfg.width;
+          this.frameHeight = cfg.height;
+        } catch (err) {
+          console.error("rime: malformed StreamConfig", err);
+        }
         break;
       case MessageType.Bye:
         this.onStatus("the session ended");
@@ -195,6 +213,7 @@ export class SessionHandle {
     el.addEventListener("mouseup", this._boundMouseUp);
     el.addEventListener("mousemove", this._boundMouseMove);
     el.addEventListener("wheel", this._boundWheel, { passive: true });
+    document.addEventListener("pointerlockchange", this._boundLockChange);
   }
 
   detachInputListeners() {
@@ -205,6 +224,72 @@ export class SessionHandle {
     el.removeEventListener("mouseup", this._boundMouseUp);
     el.removeEventListener("mousemove", this._boundMouseMove);
     el.removeEventListener("wheel", this._boundWheel);
+    document.removeEventListener("pointerlockchange", this._boundLockChange);
+  }
+
+  /** Put the virtual cursor in the MIDDLE of the frame each time the pointer locks. Starting it at
+   * (0, 0) would begin every session in the frame's top-left corner, which is a real position the
+   * engine would believe — a pick or a UI hit-test on the first click would land in the corner
+   * rather than where the person is looking. */
+  onPointerLockChange() {
+    if (document.pointerLockElement !== this.videoEl) return;
+    const frame = this.frameSize();
+    this.pointerX = frame.width / 2;
+    this.pointerY = frame.height / 2;
+  }
+
+  // ── Pointer coordinates ─────────────────────────────────────────────────────────────────
+  //
+  // `InputEvent.x/y` are STREAM-FRAME pixels: the coordinate system of the image the server is
+  // sending, not of this page's layout. That is the contract protocol.hpp states and the one the
+  // native client (samples/04-remote-view) has always followed — it scales window pixels into
+  // frame pixels before sending. This page previously sent raw `movementX/Y` deltas, which is a
+  // different quantity in a different space; it is the side that was wrong.
+  //
+  // Doing the scaling HERE rather than on the server is deliberate: only the client knows how big
+  // its video box is, and a server that had to be told would need a second message and a window
+  // where the two disagree.
+
+  /** The stream's pixel size. `StreamConfig` is authoritative when one has arrived; otherwise the
+   * decoded track's own dimensions, which for the AV1 path are the same numbers by construction.
+   * Zero (no frame decoded yet, no config) means "unknown" and the caller passes coordinates
+   * through unscaled rather than dividing by zero. */
+  frameSize() {
+    if (this.frameWidth > 0 && this.frameHeight > 0) {
+      return { width: this.frameWidth, height: this.frameHeight };
+    }
+    return { width: this.videoEl.videoWidth || 0, height: this.videoEl.videoHeight || 0 };
+  }
+
+  /** Where the video's PICTURE actually is inside the element's box, and how big it is there.
+   * A `<video>` letterboxes (`object-fit: contain` is the default), so the element's box is not
+   * the picture: on a 16:9 element showing a 4:3 stream there are bars down both sides, and
+   * measuring against the box would put the cursor several degrees off near the edges. */
+  displayedVideoRect() {
+    const box = this.videoEl.getBoundingClientRect();
+    const frame = this.frameSize();
+    if (frame.width === 0 || frame.height === 0 || box.width === 0 || box.height === 0) {
+      return { left: box.left, top: box.top, width: box.width, height: box.height };
+    }
+    const scale = Math.min(box.width / frame.width, box.height / frame.height);
+    const width = frame.width * scale;
+    const height = frame.height * scale;
+    return {
+      left: box.left + (box.width - width) / 2,
+      top: box.top + (box.height - height) / 2,
+      width,
+      height,
+    };
+  }
+
+  /** CSS pixels of motion -> stream-frame pixels of motion. */
+  motionScale() {
+    const rect = this.displayedVideoRect();
+    const frame = this.frameSize();
+    if (rect.width === 0 || rect.height === 0 || frame.width === 0 || frame.height === 0) {
+      return { x: 1, y: 1 };
+    }
+    return { x: frame.width / rect.width, y: frame.height / rect.height };
   }
 
   // ── Input forwarding ────────────────────────────────────────────────────────────────────
@@ -214,7 +299,7 @@ export class SessionHandle {
     event.preventDefault();
     this.sendInput({
       kind,
-      code: keyOrdinalOf(event),
+      code: hidUsageOf(event),
       x: 0,
       y: 0,
       scrollX: 0,
@@ -225,11 +310,15 @@ export class SessionHandle {
 
   forwardPointerButton(event, kind) {
     if (document.pointerLockElement !== this.videoEl) return;
+    // `event.button` goes on the wire in DOM order (0 left, 1 middle, 2 right) — see the
+    // `InputEvent` comment in protocol.hpp; the engine swaps middle/right into its own
+    // `MouseButton` order. A button carries the CURRENT pointer position rather than zeros, so a
+    // click is a click somewhere.
     this.sendInput({
       kind,
       code: event.button,
-      x: 0,
-      y: 0,
+      x: Math.round(this.pointerX),
+      y: Math.round(this.pointerY),
       scrollX: 0,
       scrollY: 0,
       mods: modsOf(event),
@@ -238,16 +327,25 @@ export class SessionHandle {
 
   forwardPointerMove(event) {
     if (document.pointerLockElement !== this.videoEl) return;
-    // Pointer-locked motion is reported as a delta (`movementX`/`movementY`), not an absolute
-    // position — `clientX`/`clientY` stay frozen once the pointer is locked, so there is no
-    // absolute position to send. INFERRED: nothing in the contract says whether `x`/`y` on a
-    // locked `PointerMove` means a delta or a position; a delta is what a locked pointer's own
-    // browser event carries, so it is what this page forwards.
+    // Pointer-locked motion arrives as a delta (`movementX/Y`); `clientX/Y` freeze the moment the
+    // pointer locks, so there is no browser-supplied position to scale. The page therefore keeps
+    // the position itself: integrate the delta, converted from CSS pixels to frame pixels, and
+    // send the running total — which is what the wire's absolute `x`/`y` mean.
+    //
+    // NOT CLAMPED TO THE FRAME, and that is the interesting choice. A clamped virtual cursor is
+    // what a desktop with a real pointer has, and it is exactly why desktop first-person games
+    // use raw deltas instead: the engine reconstructs its `MouseMove` delta as (this − previous),
+    // so clamping at an edge would zero the delta and the camera would refuse to keep turning
+    // mid-look. The units stay stream-frame pixels either way; only the range is unbounded, and a
+    // consumer that wants a cursor rather than a look-delta clamps it itself.
+    const scale = this.motionScale();
+    this.pointerX += event.movementX * scale.x;
+    this.pointerY += event.movementY * scale.y;
     this.sendInput({
       kind: InputKind.PointerMove,
       code: 0,
-      x: event.movementX,
-      y: event.movementY,
+      x: Math.round(this.pointerX),
+      y: Math.round(this.pointerY),
       scrollX: 0,
       scrollY: 0,
       mods: modsOf(event),

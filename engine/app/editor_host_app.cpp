@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "rime/app/application.hpp"
+#include "rime/app/stream_input.hpp"
 #include "rime/assets/asset_id.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/manifest.hpp"
@@ -61,6 +62,7 @@
 #include "rime/editorhost/editor_host.hpp"
 #include "rime/ground/bind.hpp"
 #include "rime/physics/physics.hpp" // umbrella: body/shape/world/components/sync (m9.7 Play)
+#include "rime/platform/event.hpp"
 #include "rime/platform/socket.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/gizmo_renderer.hpp"
@@ -458,7 +460,8 @@ int serve_viewport(std::string_view socket_path,
                    std::string_view scene_path,
                    std::string_view assets_path,
                    const app::ComponentRegistrar& registrar,
-                   const app::ScenePreparer& prepare) {
+                   const app::ScenePreparer& prepare,
+                   const app::PlayTick& play_tick) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kViewportWidth, kViewportHeight};
@@ -589,6 +592,21 @@ int serve_viewport(std::string_view socket_path,
     std::unique_ptr<physics::PhysicsWorld> physics_world;
     physics::PhysicsSync physics_sync;
 
+    // ── Client input (m18 Track H, ADR-0054) ─────────────────────────────────────────────────
+    // The browser page sends `stream::InputEvent`s over the same connection the editor band uses,
+    // and until this brick the drain below reinterpreted them as `EditorMessage`s and did nothing
+    // — a silent no-op that made rime.peekstar.eu watch-only. The translator turns each one back
+    // into `platform::Event`s and the drain posts them to `Application::post_input`, which is the
+    // engine's ALREADY-EXISTING headless input route (ADR-0023 §5: "a test — or a scripted harness
+    // — injects events the same way", which is precisely what a remote client is). Anything that
+    // reads `Application::frame_input()` therefore sees browser input with no further plumbing:
+    // a sim stage, or a `gameplay::FlyCamera`, which is the join tests/app/windowed_input_test.cpp
+    // already proves end to end.
+    app::StreamInputTranslator input_translator;
+    std::vector<platform::Event> input_events; // reused per drain; cleared, never reallocated
+    std::uint64_t input_malformed = 0;         // an Input payload that did not decode
+    bool input_released = false;               // release_all has run for this (single) connection
+
     // The one place a fixed tick advances physics: Application's per-tick hook (ADR-0023), which
     // runs on the main thread between the Schedule and the render — exactly where PhysicsSync's
     // reconcile is allowed to add/remove RigidBodyHandle components (a structural change). This
@@ -603,6 +621,13 @@ int serve_viewport(std::string_view socket_path,
             physics_sync.step(w, *physics_world, static_cast<float>(dt));
         }
         play_session.record_tick();
+        // The game's own per-tick behaviour, with THIS frame's client input. `frame_input()` is
+        // already swapped in by `Application::step` before it runs any tick, so the span is the
+        // events this frame's drain posted — and the render that follows the tick sees whatever
+        // the game did with them.
+        if (play_tick) {
+            play_tick(w, app.frame_input(), dt);
+        }
     });
 
     render::RGTexture last_ldr{};
@@ -808,6 +833,23 @@ int serve_viewport(std::string_view socket_path,
                     needs_render = true;
                     continue;
                 }
+                // m18 Track H. Asked HERE, beside Capabilities and above the EditorMessage cast,
+                // for the reason the comment above gives: 0x0101 is a STREAM-band code, and
+                // reinterpreting it as an editor message is a no-op that looks like silence.
+                // Deliberately NOT frame-affecting: input moves the world through the tick, and a
+                // Playing session already renders every iteration, so forcing a render here would
+                // only defeat m10.0-perf's idle skip for a mouse moving over a paused editor.
+                const app::InputDispatch input_disp =
+                    app::dispatch_input_message(e.type, e.payload, input_translator, input_events);
+                if (input_disp != app::InputDispatch::NotInput) {
+                    if (input_disp == app::InputDispatch::Malformed) {
+                        ++input_malformed;
+                        RIME_WARN("editor-host: malformed Input payload ({} bytes) — {} so far",
+                                  e.payload.size(),
+                                  input_malformed);
+                    }
+                    continue;
+                }
                 if (e.type == stream::MessageType::KeyframeRequest) {
                     // Only AV1 has a delta chain to restart; for the stateless codecs every frame
                     // is already independent, so the request is satisfied by definition.
@@ -913,6 +955,24 @@ int serve_viewport(std::string_view socket_path,
             }
             pending.clear();
         }
+
+        // A key held when the relay stops must not stay stuck (the brick's own rule). The receiver
+        // thread sets `stop` on a `Bye` or a dead socket, and this is the first place the main
+        // thread can see it — still inside the iteration, so the releases below reach the SAME
+        // frame's tick rather than a frame that never runs. `input_released` makes it once-only:
+        // this host serves exactly one connection, so a second release would be a second set of
+        // spurious KeyUps, not a safety net.
+        if (!input_released && stop.load(std::memory_order_relaxed)) {
+            input_released = true;
+            input_translator.release_all(input_events);
+        }
+        // One place feeds the engine, so a queued event cannot be applied twice or skipped: the
+        // drain above only APPENDS to input_events, and this drains it into the frame snapshot.
+        for (const platform::Event& ev : input_events) {
+            app.post_input(ev);
+        }
+        input_events.clear();
+
         if (snapshot_requested && !conn.send_message(static_cast<stream::MessageType>(
                                                          editorhost::EditorMessage::Snapshot),
                                                      editorhost::serialize_world(app.world()))) {
@@ -1020,6 +1080,12 @@ int serve_viewport(std::string_view socket_path,
                 for (const stream::VideoPacket& packet : packets) {
                     stream::FrameMessage frame;
                     frame.sequence = sequence++;
+                    // The s1.3 latency echo (ADR-0030 §5), closing the loop the browser page has
+                    // been stamping into every InputEvent since m18 with nothing echoing it back.
+                    // The drain, the tick and this send all happen in one iteration, so the frame
+                    // carrying the echo is the first frame that reflects the input.
+                    frame.last_input_seq = input_translator.last_seq();
+                    frame.last_input_client_us = input_translator.last_client_us();
                     frame.codec = stream::Codec::Av1;
                     // The encoder's own bit, not a default: this is the one sender with deltas.
                     frame.keyframe = packet.keyframe;
@@ -1039,6 +1105,8 @@ int serve_viewport(std::string_view socket_path,
 
             stream::FrameMessage frame;
             frame.sequence = sequence++;
+            frame.last_input_seq = input_translator.last_seq();
+            frame.last_input_client_us = input_translator.last_client_us();
             frame.codec = codec;
             frame.desc = frame_desc;
             if (!encoder.encode(codec, frame_desc, view.pixels, frame.data)) {
@@ -1093,6 +1161,17 @@ int serve_viewport(std::string_view socket_path,
               frames_no_packet,
               frames_encode_failed);
 
+    // The input path's own epilogue, same rule: a drop that nobody counts reads as "the client
+    // sent nothing". `held` is what release_all did NOT get to unwind — non-zero means the loop
+    // exited between the drain and the release check, which is harmless here (the process is
+    // ending) and would not be in a host that served a second client.
+    RIME_INFO("editor-host: input closed — {} malformed, {} unknown key usage(s), {} unknown "
+              "button(s), {} still held",
+              input_malformed,
+              input_translator.unknown_usages(),
+              input_translator.unknown_buttons(),
+              input_translator.held_count());
+
     stop.store(true, std::memory_order_relaxed);
     receiver.join();
     // Synchronous capture() completes each frame before returning, so nothing is in flight to
@@ -1111,10 +1190,15 @@ int serve(std::string_view socket_path,
           std::string_view assets_path,
           bool viewport,
           const app::ComponentRegistrar& registrar,
-          const app::ScenePreparer& prepare) {
+          const app::ScenePreparer& prepare,
+          const app::PlayTick& play_tick) {
     if (viewport) {
-        return serve_viewport(socket_path, scene_path, assets_path, registrar, prepare);
+        return serve_viewport(socket_path, scene_path, assets_path, registrar, prepare, play_tick);
     }
+    // The GPU-free channel host below has no play session and no frame loop, so it has no tick to
+    // hand a game and no client input to hand it with — `play_tick` is deliberately unused there
+    // rather than silently half-wired.
+    (void)play_tick;
     ecs::World world;
     editorhost::HostedScene hosted;
     register_and_populate(world, scene_path, hosted, registrar);
@@ -1148,7 +1232,8 @@ int run_editor_host(int argc,
                     char** argv,
                     const ComponentRegistrar& registrar,
                     const char* usage_name,
-                    const ScenePreparer& prepare) {
+                    const ScenePreparer& prepare,
+                    const PlayTick& play_tick) {
     std::string_view socket_path;
     std::string_view scene_path;
     std::string_view assets_path;
@@ -1173,7 +1258,7 @@ int run_editor_host(int argc,
                    usage_name);
         return 2;
     }
-    return serve(socket_path, scene_path, assets_path, viewport, registrar, prepare);
+    return serve(socket_path, scene_path, assets_path, viewport, registrar, prepare, play_tick);
 }
 
 } // namespace rime::app
