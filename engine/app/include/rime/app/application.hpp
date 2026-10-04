@@ -77,6 +77,16 @@ struct AppConfig {
     bool windowed = false;
     std::string window_title = "Rime";
     rhi::Extent2D window_size{1280, 720};
+
+    // ── Who makes the device (m20.1) ─────────────────────────────────────────────────────────
+    // Empty (the default) means `rhi::create_device({})`, exactly as before. A non-empty factory
+    // REPLACES that call, and is consulted only when `gpu` is set — which is the property the M20
+    // launch modes lean on: a `dedicated` server builds its Application with `gpu = false`, so no
+    // factory, real or injected, is ever entered. A test hands in a counting factory to prove that
+    // structurally (a count of zero) rather than inferring it from "no window appeared"; a test of
+    // the no-GPU machine hands in one that returns null, which is what `create_device` returns on a
+    // box with no Vulkan loader.
+    std::function<std::unique_ptr<rhi::Device>()> device_factory;
 };
 
 // Everything a render callback is handed for one frame. `world` is post-tick (already simulated

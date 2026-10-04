@@ -1698,6 +1698,14 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M20** | **"The Shipped Game"** | a game exported from the pipeline runs as a **standalone product** with the Rime core embedded, and its *end user* picks the mode at launch: play locally · host for a browser · a CLI server that streams over the network · host a multiplayer session · a **dedicated server anyone can run** from the exported artifact. One binary, mode chosen **before a device is created**, so the dedicated server never touches Vulkan ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §1). **Done when:** the bundle is moved off this machine with the repo out of reach, `dedicated` runs on a box with **no Vulkan**, and its state digest matches the in-tree run. Prerequisite: `samples/hello-game`, which [ADR-0038](adr/0038-platform-proof-m15.md) named and M15 never built — the block's ~3000-line sample loop is the wrong first subject for an engine-owned `GameDefinition`. |
 | **M21** | **"Generated & Bridged Authoring"** | assets created from an **LLM plus user input**, and an authoring bridge to Blender, both entering through the **existing cook** as *source* assets — never as cooked payloads, never as code or shaders, so `engine/`'s "no scripting engine" boundary holds. A provenance sidecar (model, prompt, inputs, seed, output hashes) replays to the same cooked bytes with no network call. **Blender stays a SEPARATE PROCESS at arm's length and no GPL code is ever linked** — the same ruling as "never GPL x264 in the engine", applied to an authoring tool, because under M20 every exported game would otherwise inherit the GPL ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §4). An in-house modelling core replaces the *producer* behind the same seam later, and must be **clean-room**. **Done when:** a recorded prompt yields an asset that cooks, is placed in a `.rscene`, and renders in **both** the game and the editor, and a deliberately malformed generated asset is refused with the counter showing it. |
 
+> **M20 progress (2026-09-30).** **m20.1** — an engine-owned `rime::app::GameDefinition` and
+> `run_game` ([ADR-0056](adr/0056-m20.1-game-definition.md)): `play` and `dedicated` are real, `browser`
+> / `stream` / `host` parse and refuse as not-yet (exit 3). `samples/hello-game` is ported with its
+> self-check numbers unchanged, and `hello_game --dedicated-proof` shows `dedicated` never entering the
+> device factory, mapping no `libvulkan`, and matching the pre-port loop's state digest (as do `play`
+> with no GPU and `play` rendering). **Not yet:** network input for `dedicated`, the listening modes,
+> the no-argument launcher, content resolved relative to the executable, and the bundle.
+
 ### Detail
 
 **M0 — Build bootstrap & skeleton.** One command builds the C++ engine and the Rust
