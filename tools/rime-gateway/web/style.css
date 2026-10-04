@@ -3,32 +3,54 @@ SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 The Rime Engine Authors.
 */
 
-/* Light by default, dark on request — `prefers-color-scheme` rather than a toggle, because this
-   page has no account-level settings store to remember a manual choice in (a per-viewer localStorage
+/* ── Tokens ──────────────────────────────────────────────────────────────────────────────────
+
+   Every colour is a custom property so the two schemes are one block each, never scattered
+   overrides. The palette is "frost": a near-black blue ground and an ice-blue accent in the dark
+   scheme, a cold paper white in the light one — the engine is named after hoarfrost.
+
+   The scheme follows `prefers-color-scheme` rather than a toggle, because this page has no
+   account-level settings store to remember a manual choice in (a per-viewer localStorage
    preference would be invisible to the deployment that has to look reasonable in either mode by
    default). */
 :root {
-  --bg: #f7f7f8;
-  --fg: #1a1a1e;
-  --muted: #5b5b63;
-  --accent: #2b5fd9;
-  --border: #d4d4d9;
+  --bg: #f3f6fa;
+  --bg-glow: #dbe8f7;
+  --surface: #ffffff;
+  --surface-2: #eef2f7;
+  --fg: #111722;
+  --muted: #5a6677;
+  --accent: #1f6fd1;
+  --accent-fg: #ffffff;
+  --accent-soft: #e2edfb;
+  --border: #d5dde8;
   --error-bg: #fdecec;
   --error-fg: #8a1f1f;
+  --shadow: 0 1px 2px rgb(16 24 40 / 0.06), 0 8px 24px rgb(16 24 40 / 0.06);
+  --radius: 0.75rem;
+  --topbar-h: 3.5rem;
   color-scheme: light dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16161a;
-    --fg: #eaeaee;
-    --muted: #9a9aa4;
-    --accent: #7aa2ff;
-    --border: #34343c;
+    --bg: #0a0d12;
+    --bg-glow: #12233a;
+    --surface: #121822;
+    --surface-2: #19212e;
+    --fg: #e7edf5;
+    --muted: #8d99ab;
+    --accent: #7cc4ff;
+    --accent-fg: #06121f;
+    --accent-soft: #15293f;
+    --border: #243043;
     --error-bg: #3a1414;
     --error-fg: #ff9a9a;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px rgb(0 0 0 / 0.35);
   }
 }
+
+/* ── Base ──────────────────────────────────────────────────────────────────────────────────── */
 
 * {
   box-sizing: border-box;
@@ -37,47 +59,152 @@ Copyright (c) 2026 The Rime Engine Authors.
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bg);
+  min-height: 100dvh;
+  background:
+    radial-gradient(60rem 30rem at 50% -10rem, var(--bg-glow), transparent 70%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--fg);
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   line-height: 1.5;
-}
-
-#app {
-  max-width: 32rem;
-  margin: 0 auto;
-  padding: 1.5rem 1rem 3rem;
+  -webkit-font-smoothing: antialiased;
 }
 
 h1 {
-  font-size: 1.5rem;
-  margin: 0 0 1rem;
+  font-size: 1.6rem;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.25rem;
 }
 
 h2 {
   font-size: 1.1rem;
-  margin: 0 0 0.5rem;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+p {
+  margin: 0 0 0.75rem;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ── Top bar ───────────────────────────────────────────────────────────────────────────────── */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--fg);
+  font-weight: 700;
+  font-size: 1.15rem;
+  letter-spacing: 0.08em;
+}
+
+.brand:hover {
+  text-decoration: none;
+}
+
+.brand-mark {
+  width: 1.4rem;
+  height: 1.4rem;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.topbar-title {
+  color: var(--muted);
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Main column — its width is the view's, set through body[data-view] ─────────────────────── */
+
+#app {
+  margin: 0 auto;
+  padding: 2.5rem 1rem 3rem;
+  max-width: 28rem;
+}
+
+body[data-view="catalogue"] #app {
+  max-width: 64rem;
+}
+
+/* A session is the whole viewport under the top bar: the picture is the point of the page, so it
+   gets every pixel rather than a column's worth. */
+body[data-view="session"] #app {
+  max-width: none;
+  padding: 0;
+}
+
+/* ── Cards, forms, buttons ─────────────────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.75rem;
+}
+
+.lede {
+  color: var(--muted);
+  margin-bottom: 1.25rem;
 }
 
 form {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.45rem;
   margin-bottom: 1rem;
 }
 
 label {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 500;
   color: var(--muted);
 }
 
 input,
 button {
   font: inherit;
-  padding: 0.6rem 0.7rem;
-  border-radius: 0.4rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 0.5rem;
   border: 1px solid var(--border);
-  background: transparent;
+  background: var(--surface-2);
   color: var(--fg);
 }
 
@@ -87,91 +214,242 @@ input {
 
 input:focus,
 button:focus-visible,
-a:focus-visible {
+a:focus-visible,
+video:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
 
 button {
   cursor: pointer;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   border-color: transparent;
+  font-weight: 600;
   align-self: flex-start;
+  transition: filter 120ms ease, transform 120ms ease;
 }
 
 button:hover {
   filter: brightness(1.08);
 }
 
-nav {
-  display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-top: 1rem;
+button:active {
+  transform: translateY(1px);
 }
 
-nav a,
-a {
-  color: var(--accent);
+form button {
+  margin-top: 0.5rem;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+button.secondary:hover {
+  background: var(--surface-2);
+  filter: none;
+}
+
+button.small {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+nav {
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.95rem;
 }
 
 .status {
   min-height: 1.2em;
   color: var(--muted);
+  font-size: 0.95rem;
 }
 
 .error {
   background: var(--error-bg);
   color: var(--error-fg);
-  padding: 0.75rem;
-  border-radius: 0.4rem;
+  padding: 0.85rem 1rem;
+  border-radius: 0.5rem;
 }
 
 code {
   display: block;
   word-break: break-all;
-  padding: 0.75rem;
+  padding: 0.9rem 1rem;
   margin: 1rem 0;
-  border: 1px solid var(--border);
-  border-radius: 0.4rem;
-  font-size: 1rem;
+  border: 1px dashed var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0.5rem;
+  font-size: 1.05rem;
+}
+
+/* ── Catalogue ─────────────────────────────────────────────────────────────────────────────── */
+
+.catalogue-head {
+  margin-bottom: 1.5rem;
 }
 
 ul.catalogue {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
   gap: 1rem;
 }
 
 ul.catalogue li {
-  border: 1px solid var(--border);
-  border-radius: 0.5rem;
-  padding: 1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  align-items: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  transition: border-color 120ms ease, transform 120ms ease;
 }
 
-ul.catalogue button {
-  margin-right: 0.5rem;
+ul.catalogue li:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+/* A generated cover rather than a screenshot: the catalogue has no image field yet, and a stripe
+   of the accent keeps the grid from reading as a list of forms. */
+.game-cover {
+  aspect-ratio: 16 / 7;
+  background:
+    linear-gradient(135deg, var(--accent-soft), transparent 60%),
+    repeating-linear-gradient(120deg, transparent 0 14px, color-mix(in srgb, var(--accent) 10%, transparent) 14px 15px),
+    var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.game-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 1rem 1.1rem 1.2rem;
+}
+
+.game-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ── Session ───────────────────────────────────────────────────────────────────────────────── */
+
+/* The stage is what goes fullscreen, not the <video>: fullscreening the element alone would drop
+   the hint overlay and the status line, which are siblings of it. */
+.stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--topbar-h));
+  height: calc(100dvh - var(--topbar-h));
+  background: #000;
+}
+
+.stage:fullscreen {
+  height: 100vh;
 }
 
 #session-video {
+  flex: 1;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  min-height: 0;
   background: #000;
-  border-radius: 0.4rem;
+  /* `contain` is the default, spelled out because session.js's pointer maths depends on it: the
+     picture is letterboxed inside this box, never cropped or stretched. */
+  object-fit: contain;
+  cursor: pointer;
 }
 
-/* Phone width: the 32rem max-width above already reads as a single column there; this only trims
-   the outer padding so nothing touches the screen edge. */
+.stage.locked #session-video {
+  cursor: none;
+}
+
+/* Clicks must reach the <video> underneath — its click handler is what asks for pointer lock — so
+   the hint never intercepts the pointer. */
+.stage-hint {
+  position: absolute;
+  inset: 0 0 3rem;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+
+.stage-hint span {
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.6);
+  color: #fff;
+  font-size: 0.95rem;
+  backdrop-filter: blur(6px);
+}
+
+.stage.locked .stage-hint {
+  opacity: 0;
+}
+
+.stage-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  height: 3rem;
+  padding: 0 1rem;
+  background: #07090d;
+  color: #c9d3e0;
+  border-top: 1px solid #1a2230;
+}
+
+.stage-bar .status {
+  margin: 0;
+  color: #8d99ab;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-bar .controls {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.stage-bar button.secondary {
+  color: #e7edf5;
+  border-color: #2a3446;
+}
+
+.stage-bar button.secondary:hover {
+  background: #141b27;
+}
+
+/* ── Phone width ───────────────────────────────────────────────────────────────────────────── */
+
 @media (max-width: 480px) {
+  .topbar {
+    padding: 0 1rem;
+  }
+
   #app {
-    padding: 1rem 0.75rem 2rem;
+    padding: 1.5rem 1rem 2rem;
+  }
+
+  .card {
+    padding: 1.25rem;
   }
 }
