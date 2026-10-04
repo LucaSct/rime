@@ -9,6 +9,16 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Where things stand (2026-10-04, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
+> frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
+> been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the
+> street, the owned ground) with m17.7e and m17.9 cut, but its frame-rate clause is **unpaid** and
+> has transferred unchanged to **M18**, which is in progress: gates 1–4 delivered, M18.4/18.5/18.6
+> open as #235/#234/#237. **M19** (terrain) and **M20** (the shipped game) have each started and sit
+> in open PRs (#238/#240 and #233). **Track H** (the hosted front end) has largely landed on `main`.
+> The per-milestone tables carry the proof for each claim; the dated notes below them are history
+> and keep the state they were written in.
+
 > **Update (2026-08-30) — m13.p: the block is measured, and it MISSES the budget.** The first
 > hardware numbers for the vision demo, Release, 1920×1080, RTX 3060, 600 frames with the full M10
 > stack on (m13.L):
