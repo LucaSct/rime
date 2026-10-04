@@ -2372,9 +2372,9 @@ m17.8, m17.10.
 > | brick | state | proof |
 > |---|---|---|
 > | m17.0–m17.3c | ✅ #181 | the squash commit `e28a78a` lists them; the detailed table below is unchanged |
-> | m17.3d | ✅ #181 | re-baseline: `docs/perf/2026-09-05-99-the-block-nvidia-geforce-rtx-3060.json` and ADR-0041 Ruling 4 |
+> | m17.3d | ✅ #181 | the serialized re-baseline is named in #181's body ("perf(docs): m17.3d"); that the 2026-09-05 report in `docs/perf/` is that run is *inferred* from its date; ADR-0041 Ruling 4 |
 > | **m17.4** | ✅ #181 — **no longer open** | `engine/render/src/lighting/clustered.cpp:137` ("Everything the CPU rewrites per frame moved to the graph's ring"); the same move is commented at `ssr.cpp:110`, `shadows.cpp:147`, `local_shadows.cpp:175`, `sky.cpp:348` and `ddgi.cpp:231`, and the only `write_buffer` left in `lighting/` outside `clustered.cpp:131` (a write-once buffer) is `sky.cpp:308` (a one-shot dummy). The "14 buffers" count is *inferred* from that, not re-counted. [ADR-0041 §m17.4/m17.5a](adr/0041-the-visual-bar-m17.md) |
-> | m17.5 / m17.5a | ✅ #181 | clause met on one machine (`frame.player` 12.6); ADR-0041 Ruling 5 amendment of 2026-09-06 |
+> | m17.5 / m17.5a | ✅ #181 | clause met on one machine (`frame.player` 12.6); ADR-0041 "Amendment (2026-09-06, m17.5)" |
 > | m17.6 | ⚠️ re-scoped, **no brick landed** | ADR-0041 Ruling 6: its budget premise vanished once the clocks were pinned. Nothing in `git log` is labelled m17.6 — state of the correctness work it was re-pointed to is **unverified** |
 > | m17.7a | ✅ #183 | `CMakeLists.txt:259-273` (`-I` plus `--depfile` for shader `#include`); `engine/render/shaders/sky.frag:25` includes `sky_common.glsl` |
 > | m17.7b | ✅ #183 | `engine/render/shaders/sky_sh.comp`, `sky_skyview.comp`; the A/B cost is `docs/perf/m17.7b-sky/README.md` |
