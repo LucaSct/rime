@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proofs for the terrain heightfield shape (M19.1, ADR-0056-m19.1-heightfield), all through the
+// Proofs for the terrain heightfield shape (M19.1, ADR-0060-m19.1-heightfield), all through the
 // PhysicsWorld seam:
 //
 //   * REGISTRATION validates and the store keeps the hull/compound lifecycle (static-only bodies,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// Proof for the RMA1 cooked-heightfield reader (M19.1, ADR-0056-m19.1-heightfield). The shape of
+// Proof for the RMA1 cooked-heightfield reader (M19.1, ADR-0060-m19.1-heightfield). The shape of
 // cooked_mesh_sdf_test.cpp, plus the one thing this brick adds to the reader contract — the
 // REJECTION COUNTER:
 //

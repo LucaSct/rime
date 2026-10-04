@@ -17,7 +17,7 @@
 #include "rime/physics/shape.hpp"
 #include "rime/physics/world.hpp"
 
-// Terrain heightfields (M19.1, ADR-0056-m19.1-heightfield) — the runtime store entry and all the
+// Terrain heightfields (M19.1, ADR-0060-m19.1-heightfield) — the runtime store entry and all the
 // geometry that runs against it: the ray walk, the per-triangle contact routines, and the patch
 // grouping that turns a pile of triangle contacts into solver manifolds. PRIVATE, like every src/
 // header.
@@ -268,7 +268,18 @@ triangle_id(const HeightfieldShape& hf, std::uint32_t ci, std::uint32_t cj, int 
 // edge or a vertex would slip through the seam. The walk therefore carries the previous piece's
 // end value forward: "was above at the end of the last piece, is below at the start of this one"
 // is itself a hit, at the seam. That makes the surface closed by construction — no epsilon, no
-// "fatten the triangles" — and it is what the edge/vertex ray tests exercise.
+// "fatten the triangles".
+//
+// It is a GUARD, NOT A PATH THE TESTS REACH, and saying so is the honest version. Instrumenting
+// the branch with a counter and running the whole physics suite (167 cases, including
+// "the surface is watertight at every edge and vertex" and its 3,300 casts at vertices, edge
+// midpoints and diagonal midpoints of a bumpy non-planar tile) fires it **zero** times: every one
+// of those rays is steep enough that f moves by far more than an ulp across each piece, so the
+// ordinary `fa >= 0 && fb <= 0` root is what closes the surface there. Provoking the seam needs a
+// ray within one ulp of tangency at a shared edge AND the two plane equations rounding in opposite
+// directions at that exact t — not something a test can construct on demand. So the watertightness
+// the suite proves is empirical, this rule is the belt to its braces, and a refactor that broke it
+// would go unnoticed by CI. Measured 2026-10-04; do not upgrade this to "tested".
 //
 // ONE-SIDED: a ray that starts BELOW the surface never reports the surface as it rises out (f goes
 // negative → positive, which is not a hit). The same rule ray_vs_box uses for an origin inside the

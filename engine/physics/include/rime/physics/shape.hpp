@@ -37,7 +37,7 @@ using CompoundId = core::Handle<CompoundTag>;
 struct HeightfieldTag {};
 
 // Handle to a terrain heightfield registered with a PhysicsWorld (M19.1,
-// ADR-0056-m19.1-heightfield): the sample grid is WORLD-OWNED, registered once via
+// ADR-0060-m19.1-heightfield): the sample grid is WORLD-OWNED, registered once via
 // PhysicsWorld::register_heightfield — the hull/compound storage answer again, for the same
 // reason (a terrain tile is megabytes of variable-length data; ShapeDesc stays a flat POD).
 using HeightfieldId = core::Handle<HeightfieldTag>;

@@ -380,7 +380,7 @@ Entries are grouped roughly by area and kept short on purpose.
   per grid point, each cell split into two triangles along a fixed diagonal). Cheaper and more
   structured than a triangle mesh — "which triangles are under this point" is a division, not a
   search — at the price of no overhangs or caves. Rime's is cooked as quantised u16 samples with a
-  scale and offset (M19.1, ADR-0056-m19.1).
+  scale and offset (M19.1, ADR-0060-m19.1).
 - **DDA (digital differential analyzer) grid walk.** Stepping a ray through a grid cell by cell:
   track, per axis, the distance at which the ray next crosses a grid line and always cross the
   nearest one (Amanatides & Woo's "fast voxel traversal"). No cell is skipped or visited twice, and

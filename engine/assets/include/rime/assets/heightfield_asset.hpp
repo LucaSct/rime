@@ -8,7 +8,7 @@
 
 #include "rime/core/math/vec.hpp"
 
-// A cooked terrain HEIGHTFIELD (M19.1, ADR-0056-m19.1-heightfield): a regular grid of height
+// A cooked terrain HEIGHTFIELD (M19.1, ADR-0060-m19.1-heightfield): a regular grid of height
 // samples over the local XZ plane — the one piece of data terrain collision (engine/physics), and
 // later terrain rendering, splat blending and streaming, all read. This header is the cooked,
 // CPU-resident form the RMA1 reader hands back (cooked_reader.hpp: decode_heightfield /

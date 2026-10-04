@@ -743,6 +743,14 @@ void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
     const std::uint64_t pair_key =
         (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
 
+    // KNOWN LIMITATION, named rather than fixed (M19.1): these two vectors — and each patch's
+    // own `members` — are heap-allocated per terrain pair per step. The narrowphase loop that
+    // calls this is SERIAL (`for (const Pair& pr : pairs)` in step()), so they could be hoisted to
+    // persistent `mutable` scratch on Impl with no data race; that is deliberately not done here
+    // because nothing has measured it. No shipped scene has terrain in it yet, so the cost today
+    // is zero, and ADR-0035 §2c's rule is that an optimisation arrives with its measurement. When
+    // M19's streaming brick puts terrain under a body count that matters, measure here first:
+    // the roadmap already names the every-tick narrowphase cache as the next physics hot spot.
     std::vector<HeightfieldContact> cands;
     std::vector<HeightfieldPatch> patches;
     bool any = false;

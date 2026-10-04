@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 
-//! The terrain **heightfield** cook (M19.1, ADR-0056-m19.1-heightfield): a 16-bit grayscale height
+//! The terrain **heightfield** cook (M19.1, ADR-0060-m19.1-heightfield): a 16-bit grayscale height
 //! map plus a small sidecar of world dimensions in, one RMA1 `Heightfield` payload out. The C++
 //! reader is `engine/assets` (`read_heightfield`); the byte layout is in `FORMAT.md`.
 //!

@@ -119,7 +119,7 @@ interpolation are cooked; CUBICSPLINE is rejected with a clear message.
 
 ## Heightfield payload (kind 9, M19.1)
 
-A terrain height grid ([ADR-0056-m19.1](../../docs/adr/0056-m19.1-heightfield.md)): a fixed 52-byte
+A terrain height grid ([ADR-0060-m19.1](../../docs/adr/0060-m19.1-heightfield.md)): a fixed 52-byte
 header, then the samples. `height(i, j) = height_offset + height_scale * sample(i, j)`; sample `(i, j)`
 sits at local `(i * cell_size_x, height, j * cell_size_z)`. Samples are quantised **u16** copied verbatim
 from the 16-bit source — the cook never re-quantises. Cooked by `rime heightfield <src.png|src.r16>`

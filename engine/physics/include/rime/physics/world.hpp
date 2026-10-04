@@ -53,7 +53,7 @@ struct CompoundDesc {
     std::span<const CompoundChildDesc> children;
 };
 
-// A terrain heightfield for PhysicsWorld::register_heightfield (M19.1, ADR-0056-m19.1-heightfield).
+// A terrain heightfield for PhysicsWorld::register_heightfield (M19.1, ADR-0060-m19.1-heightfield).
 // The same quantised form the cooked asset carries (engine/assets HeightfieldAsset) — u16 samples
 // plus a scale and offset — so a loaded tile registers without a conversion pass, and the surface
 // bodies collide with is built from the very integers the renderer draws:
@@ -531,7 +531,7 @@ public:
     // Not safe to call concurrently with step().
     [[nodiscard]] bool unregister_compound(CompoundId id);
 
-    // --- Heightfields (M19.1, ADR-0056-m19.1-heightfield) -----------------------------------
+    // --- Heightfields (M19.1, ADR-0060-m19.1-heightfield) -----------------------------------
     // Register a terrain heightfield and get the id ShapeDesc::heightfield refers to. The body that
     // instantiates it must be STATIC — create_body returns the null id for a dynamic or kinematic
     // heightfield body (terrain does not move, and nothing in the solver could give a non-convex
