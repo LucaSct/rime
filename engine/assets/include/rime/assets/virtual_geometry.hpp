@@ -53,6 +53,12 @@ struct VirtualGeometryCluster {
 // A complete representation at one LOD. `children` is an adjacency slice into
 // VirtualGeometryAsset::child_groups; it is a DAG rather than an implicit binary tree, because one
 // complete parent cut can be replaced by several independent groups. The reader rejects cycles.
+//
+// `lod_center`/`lod_radius` (payload v2, ADR-0059) is the LOD bounding sphere: it encloses the
+// source surface this group stands for and every child's LOD sphere. v1 payloads read it as zero.
+// The reader enforces MONOTONICITY across every edge — a parent's error is never below a child's
+// and its sphere contains the child's — because a projected-error cut is only consistent when
+// "refine this group" can never be true for a descendant while false for its ancestor.
 struct VirtualGeometryGroup {
     std::uint32_t first_cluster = 0;
     std::uint32_t cluster_count = 0;
@@ -60,6 +66,8 @@ struct VirtualGeometryGroup {
     std::uint32_t child_count = 0;
     float lod_error_m = 0.0f;
     bool permanently_resident = false;
+    core::Vec3 lod_center{};
+    float lod_radius = 0.0f;
 };
 
 struct VirtualGeometryAsset {
@@ -87,6 +95,7 @@ enum class VirtualGeometryError : std::uint8_t {
     CyclicPages,
     CyclicGroups,
     MissingCoarseCut,
+    NonMonotoneGroups, // a parent's error or LOD sphere does not bound one of its children's
 };
 
 enum class VirtualGeometryPageViewError : std::uint8_t {
@@ -264,12 +273,37 @@ validate_virtual_geometry(const VirtualGeometryAsset& asset) noexcept {
         if (group.cluster_count == 0 ||
             !inside(group.first_cluster, group.cluster_count, asset.clusters.size()) ||
             !inside(group.first_child, group.child_count, asset.child_groups.size()) ||
-            !std::isfinite(group.lod_error_m) || group.lod_error_m < 0.0f) {
+            !std::isfinite(group.lod_error_m) || group.lod_error_m < 0.0f ||
+            !std::isfinite(group.lod_center.x) || !std::isfinite(group.lod_center.y) ||
+            !std::isfinite(group.lod_center.z) || !std::isfinite(group.lod_radius) ||
+            group.lod_radius < 0.0f) {
             return VirtualGeometryError::InvalidGroup;
         }
         for (std::uint32_t i = 0; i < group.child_count; ++i) {
             if (asset.child_groups[group.first_child + i] >= asset.groups.size()) {
                 return VirtualGeometryError::InvalidGroup;
+            }
+        }
+    }
+    // Monotonicity across every replacement edge. The selector refines a group when
+    // `error * pixels_per_metre > threshold`; if a child could carry MORE error than its parent,
+    // the parent could be kept while the child "needed" refinement, and two sibling parents sharing
+    // a source region could disagree — the cut would stop being a function of the camera alone.
+    // Containment is checked in double from the stored floats, the same arithmetic the cooker
+    // used to round each radius up, with a 2^-20 relative guard for operation-order differences.
+    for (const VirtualGeometryGroup& group : asset.groups) {
+        for (std::uint32_t i = 0; i < group.child_count; ++i) {
+            const VirtualGeometryGroup& child =
+                asset.groups[asset.child_groups[group.first_child + i]];
+            if (child.lod_error_m > group.lod_error_m) {
+                return VirtualGeometryError::NonMonotoneGroups;
+            }
+            const double dx = double{group.lod_center.x} - double{child.lod_center.x};
+            const double dy = double{group.lod_center.y} - double{child.lod_center.y};
+            const double dz = double{group.lod_center.z} - double{child.lod_center.z};
+            const double reach = std::sqrt(dx * dx + dy * dy + dz * dz) + double{child.lod_radius};
+            if (reach > double{group.lod_radius} * (1.0 + 1.0 / 1048576.0)) {
+                return VirtualGeometryError::NonMonotoneGroups;
             }
         }
     }

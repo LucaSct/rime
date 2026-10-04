@@ -29,6 +29,7 @@ pub mod stl;
 pub mod tangent;
 pub mod texture;
 pub mod virtual_geometry;
+pub mod virtual_geometry_dag;
 
 use std::collections::BTreeMap;
 use std::fmt;
