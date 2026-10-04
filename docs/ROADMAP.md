@@ -1662,6 +1662,20 @@ milestone boundary; time estimates come at brick-decomposition, not here.
   `engine/`**, which gains only `LocalSocket::adopt` and a `--serve-fd` flag
   ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §2). **Hosting happens on starbase's GTX 1060, behind blackStar; the workstation's RTX 3060 never serves a hosted session** — so the gateway is single-host and there is no cross-host placement, and the hosted tier gets its **own** ratified budget rather than relaxing ADR-0035's 3060 one ([ADR-0047](adr/0047-two-machines-and-the-starbase-tier.md)). *Inspired by: cloud-gaming
   split rendering; the editor-as-a-client discipline of ADR-0016.*
+
+  **State (2026-10-04): well past "queues after M18" — the first slices are on `main` and running.**
+  The roadmap said Track H queues after M18; M18 is not finished and Track H has landed anyway, in
+  parallel, so that sentence describes the plan and not the history. Landed (all `m18/track-H` on
+  `main`): the session broker (#196), bring-up and teardown (#198), admission control (#202), the
+  bounded HTTP surface (#203), the WebRTC transport seam (#206, ADR-0049), the auth store (#207), the
+  passkey ceremonies (#210), the owner gate (#211), account endpoints (#212), the media port-lease
+  pool (#216, ADR-0053), rate limiting (#217), the AV1 video track (#214, ADR-0052), the
+  `rime-gateway` binary (#219), TURN and PROXY-v2 (#221), the starbase deployment files (#222), the
+  browser page (#223), the relay and signalling routes (#225), the first real install in CT 122
+  (#226, #227), `rime-gateway invite` (#228) and browser keys and mouse (#231, ADR-0054); ADR-0045
+  to ADR-0054 are all accepted (`docs/adr/README.md`), the perf-gate amendment being ADR-0050 (#208).
+  In flight: #230 (phone sign-in fallback, ADR-0055) and #232 (full-window stream and page redesign),
+  both open. Not verified here: whether the hosted session has been exercised end to end since #227.
 - **Graphics streaming (Track S):** the engine renders → captures → encodes → transports → a thin
   client presents and sends input back. **S0** (LAN/loopback dev-stream — TCP, JPEG/LZ4, a thin
   Rime-built client) lands right after Phase 0, before M4; **S1+** (hardware codecs, QUIC/WebRTC)
@@ -2760,6 +2774,33 @@ m17.8, m17.10.
 > smoke's background pixel is now found by a 9×9 emptiness test, because the old near-black scan
 > could land on a deeply shadowed rock — with a sky in the frame it reports "no background pixel to
 > miss-test" instead of inventing a test it cannot run.
+
+**M18 — virtualized geometry + the consolidated visual bar.** *[ADR-0043](adr/0043-virtualized-geometry-m18.md)
+(2026-09-22) is the architecture, with [ADR-0044](adr/0044-visibility-id-and-indirect-abi.md) for the
+visibility ID and indirect-draw ABI.* This section was added by the 2026-10-04 roadmap refresh: M18
+had a table row and an ADR but no detail section, so its progress was written nowhere a newcomer
+would look. The seven delivery gates are ADR-0043's "Delivery order and gates"; the state of each
+was read from `git log`, the ADR index and the open-PR list on 2026-10-04.
+
+> **Progress (2026-10-04) — gates 1–4 are delivered; 5 and 6 are in open PRs; 7 is unmet.**
+>
+> | ADR-0043 gate | state | proof |
+> |---|---|---|
+> | 1 versioned payload + reader/cooker validation | ✅ #183 | `engine/assets/include/rime/assets/virtual_geometry.hpp`, `tests/assets/virtual_geometry_test.cpp` (both in `6ac770e`'s stat) |
+> | 2 resident leaf cluster through visibility + material resolve | ✅ #184 (M18.1), #186 (M18.2) | the 64-bit `RG32Uint` ID is [ADR-0044](adr/0044-visibility-id-and-indirect-abi.md) (#189) |
+> | 3 cooked replacement groups + CPU reference selector | ⚠️ **half** | the selector and the DAG *reader* landed in #183; the cooker still writes only the leaf level — the multi-level DAG cook is **#237 (M18.6, ADR-0059), open**. The "leaf level only" claim is from #237's description (*inferred*, not re-run) |
+> | 4 GPU selection + indirect submission, and a complexity sweep | ✅ #187 (M18.3a), #190 (M18.3b), #192 (M18.3c), #193 (M18.3d sweep) | `docs/perf/m18.3d-vg-sweep/README.md`; the same path on starbase's GTX 1060 is #201, `docs/perf/m18.3d-starbase/README.md` |
+> | 5 bounded page streaming | 🔧 **in flight** | **#234 (M18.5, ADR-0057)**, open |
+> | 6 hybrid software rasterization (**mandatory**) | 🔧 **in flight** | **#235 (M18.4, ADR-0058)**, open; the CPU classifier and software-raster oracle landed earlier in #183 |
+> | 7 the block's budget on a clean, clock-pinned tree | ❌ **unmet** | the only clean-tree measurement is M17's, 28.376 ms `frame` p99 against 16.600 (`docs/perf/2026-09-22-99-the-block-nvidia-geforce-rtx-3060.json:19`); `docs/perf/2026-09-27-14-virtual-geometry-nvidia-geforce-rtx-3060.json` measures the *sample*, not the block. State of any block re-measurement since is **unverified** |
+>
+> **Landed outside the ladder, for the hosted tier.** `DeviceDesc`/`RIME_ADAPTER` adapter selection (#197)
+> and the client's choice of editor-viewport codec (#200) went in under the M18 prefix because Track H
+> needed them; they are not gate work.
+>
+> **M18 is not complete, and the order that remains is not decided by this file.** Open: M18.4 (#235),
+> M18.5 (#234), M18.6 (#237) and gate 7. #234 and #235 may conflict textually in
+> `virtual_geometry_visibility_pass` (#234's own description says so); whichever lands second rebases.
 
 ### The adversarial review that M11–M15 never got (2026-08-31)
 
