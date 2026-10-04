@@ -187,6 +187,23 @@ public:
     // host reads, so the caller needs no barriers of its own.
     virtual void copy_buffer(BufferHandle src, BufferHandle dst, std::uint64_t size = 0) = 0;
 
+    // Copy several byte ranges from `src` (TransferSrc) into `dst` (TransferDst) in ONE command
+    // (m18.5) — the UPLOAD twin of copy_buffer. copy_buffer always starts both buffers at offset 0,
+    // which is right for a readback and useless for streaming: a staging ring hands out a slice of
+    // one buffer per frame, and a page pool is one buffer carved into fixed slots, so an upload is
+    // "these bytes at this staging offset go to that slot's offset". Batching every region of a
+    // frame into one call means one barrier pair per frame rather than one per page.
+    //
+    // The barriers are the other difference, and they are deliberately conservative in the other
+    // direction: before the copy, every earlier command's reads and writes (a draw still reading
+    // the destination, in this command buffer) complete; after it, the written bytes are visible to
+    // every later stage — vertex pulling, compute, indirect — rather than to the host. A region
+    // that falls outside either buffer is rejected (logged) and the whole call records nothing, so
+    // a bad offset cannot become a partial upload. Ranges within `dst` must not overlap each other.
+    virtual void copy_buffer_regions(BufferHandle src,
+                                     BufferHandle dst,
+                                     std::span<const BufferCopyRegion> regions) = 0;
+
     // ── Compute (M5.2, ADR-0021) ───────────────────────────────────────────────────────────
     // Bind a compute pipeline (created with create_compute_pipeline). Compute has its own bind
     // call because Vulkan keeps graphics and compute bind points separate on one command buffer;
