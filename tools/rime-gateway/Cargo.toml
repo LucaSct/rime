@@ -58,6 +58,15 @@ sha1 = "0.10"
 # obligation. Hosted builds turn `auth` on; exported bundles leave it off and need no accounts anyway.
 rime-auth = { path = "../rime-auth", optional = true }
 
+# The QR code a desktop shows so a phone can approve its sign-in (ADR-0055). Rendered server-side as
+# SVG, because the alternative is a QR encoder in the page — the same Reed-Solomon arithmetic written
+# a second time in a language this repository does not otherwise test. OPTIONAL and pulled in only by
+# the `auth` feature: a pairing is an account ceremony, and an exported game has no accounts, so the
+# bundle ADR-0046 §2 ships never compiles it. `default-features = false` drops `image` (an entire
+# raster-codec stack) and `pic`; `svg` is the one renderer used, and it is plain string building with
+# no dependencies of its own. Licence: MIT OR Apache-2.0 (crates.io, qrcode 0.14.1), Apache-2.0-safe.
+qrcode = { version = "0.14", default-features = false, features = ["svg"], optional = true }
+
 # Unix-only, like the `auth_api` module whose tests are their only users. `webauthn-rs` pulls
 # `openssl-sys` unconditionally, and ADR-0051 keeps that off the Windows leg; an unconditional
 # dev-dependency would drag it back in through `cargo test` even with `--exclude rime-auth`.
@@ -80,7 +89,7 @@ default = []
 # Enables accounts, invitations and sessions. Required before the hosted front end may be published
 # (ADR-0048); CI must keep BOTH configurations green, because an untested configuration is the one that
 # breaks on the day it matters.
-auth = ["dep:rime-auth"]
+auth = ["dep:rime-auth", "dep:qrcode"]
 
 [lints.clippy]
 all = "deny"
