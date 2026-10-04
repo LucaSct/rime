@@ -117,6 +117,18 @@ enum class Format : std::uint32_t {
     // a second attachment and let a reader pair halves from different frames. Colour-attachment,
     // sampled and transfer support for R32G32_UINT are all spec-mandatory, so no device query.
     RG32Uint,
+    // One 16-bit UNSIGNED-NORMALIZED channel: the GPU decodes the stored uint16 as
+    // `uint16 / 65535` into [0, 1] on sample, and the inverse on store. This is the TERRAIN
+    // HEIGHTFIELD's upload format (m19.3, ADR-0062): the cooked heightfield stores heights as u16
+    // samples with a scale and an offset (ADR-0060 §1), so uploading them through this format
+    // hands the vertex stage *the very integers physics collides against* — multiply the decoded
+    // value back by 65535 and the sample is recovered, then one multiply-add dequantises it. The
+    // alternative (an R32Float texture of pre-dequantised metres) would be a SECOND height
+    // representation that can drift from the collision one, which is exactly what ADR-0060 §1
+    // chose u16 to prevent. Sampled + transfer support for R16_UNORM is spec-mandatory, so no
+    // device query; `shaderStorageImageExtendedFormats` would be needed to imageStore into it, and
+    // nothing does.
+    R16Unorm,
     // One 16-bit SIGNED-NORMALIZED channel: the GPU decodes the stored int16 as
     // clamp(int16 / 32767, -1, 1) on sample/imageLoad and encodes the inverse on imageStore. This
     // is the SDF clipmap's narrow-band storage (m10.4b, ADR-0032 §10) — a signed distance there is
@@ -168,6 +180,7 @@ struct FormatBlockInfo {
         case Format::R8Snorm:
             return {1, 1, 1};
         case Format::R16Snorm:
+        case Format::R16Unorm:
             return {1, 1, 2};
         case Format::RGBA8Unorm:
         case Format::RGBA8Srgb:

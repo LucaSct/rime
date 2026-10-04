@@ -66,4 +66,6 @@ endif()
 if(RIME_RHI_VULKAN)
     add_subdirectory(rhi)
     add_subdirectory(render) # the render graph (M5.4): pixel proofs on lavapipe
+    # m19.3: the drawn terrain IS the collided terrain — needs render + physics + a device
+    add_subdirectory(terrain_render)
 endif()
