@@ -383,11 +383,31 @@ struct Slot(Arc<AtomicUsize>);
 
 impl Slot {
     fn take(open: &Arc<AtomicUsize>, max: usize) -> Option<Self> {
-        open.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-            (n < max).then_some(n + 1)
-        })
-        .ok()
-        .map(|_| Slot(Arc::clone(open)))
+        // A hand-rolled compare-exchange loop rather than `fetch_update`, which a 2026-10 Rust
+        // stable deprecated in favour of `try_update`. CI pins `dtolnay/rust-toolchain@stable`,
+        // which FLOATS, and the lint job runs `clippy -- -D warnings`, so the deprecation became a
+        // hard error on `main` and on every open PR at once — none of which had touched this file.
+        //
+        // Switching to `try_update` would fix today and break the floor: it is newer than the
+        // oldest stable this crate still builds on, so the repo would start requiring a toolchain
+        // no manifest asks for. This loop is what `fetch_update` does internally and has been
+        // stable since 1.0, so it is correct under both the old and the new compiler and cannot be
+        // deprecated out from under us again.
+        //
+        // `compare_exchange_weak` is the right one in a loop: it is allowed to fail spuriously on
+        // LL/SC architectures, which is free here because a spurious failure just retries, and it
+        // avoids the strong version's extra retry loop on those targets. Acquire on failure, so a
+        // retry observes the winner's increment.
+        let mut n = open.load(Ordering::Acquire);
+        loop {
+            if n >= max {
+                return None; // full — the caller answers 503 rather than queueing
+            }
+            match open.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(Slot(Arc::clone(open))),
+                Err(observed) => n = observed,
+            }
+        }
     }
 }
 
