@@ -435,7 +435,20 @@ bool VulkanDevice::create_logical_device() {
         vkGetPhysicalDeviceFeatures2(physical_, &probe);
     }
     v11.shaderDrawParameters = v11_supported.shaderDrawParameters;
-    v11.pNext = &f13;
+
+    // shaderBufferInt64Atomics (Vulkan 1.2, optional) is half of AdapterInfo::buffer_int64_atomics;
+    // the other half, shaderInt64, is a core feature bit set below. Enabled exactly as reported.
+    VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceVulkan12Features v12_supported{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    {
+        VkPhysicalDeviceFeatures2 probe{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        probe.pNext = &v12_supported;
+        vkGetPhysicalDeviceFeatures2(physical_, &probe);
+    }
+    v12.shaderBufferInt64Atomics = v12_supported.shaderBufferInt64Atomics;
+    v12.pNext = &f13;
+    v11.pNext = &v12;
 
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     f2.pNext = &v11;
@@ -481,6 +494,18 @@ bool VulkanDevice::create_logical_device() {
     // later GPU brick can decide the visible count without a same-frame readback. That needs
     // drawCount > 1, which requires multiDrawIndirect.
     f2.features.multiDrawIndirect = supported.multiDrawIndirect;
+
+    // The software micro-triangle rasterizer's single-pass path (M18.4). Without it that pass runs
+    // its portable two-pass 32-bit path instead, so this is an INFO, not a warning.
+    f2.features.shaderInt64 = supported.shaderInt64;
+    adapter_.buffer_int64_atomics =
+        supported.shaderInt64 == VK_TRUE && v12_supported.shaderBufferInt64Atomics == VK_TRUE;
+    if (!adapter_.buffer_int64_atomics) {
+        RIME_INFO("rhi: no 64-bit buffer atomics (shaderInt64 {}, shaderBufferInt64Atomics {})"
+                  " — the micro-triangle rasterizer will use its two-pass 32-bit path",
+                  supported.shaderInt64 == VK_TRUE,
+                  v12_supported.shaderBufferInt64Atomics == VK_TRUE);
+    }
 
     // Both halves of AdapterInfo::gpu_driven_draw, surfaced together: a consumer that can only use
     // an indirect draw list when it can also index it by gl_DrawID has one question, not two.

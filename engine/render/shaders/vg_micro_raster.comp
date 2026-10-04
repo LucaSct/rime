@@ -1,0 +1,346 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// M18.4: the SOFTWARE half of the hybrid micro-triangle rasterizer (ADR-0043 gate 6, ADR-0058).
+//
+// Why a GPU would rasterize in a compute shader at all. Fixed-function raster hardware is built
+// for triangles that cover many pixels: it walks them in 2x2 quads (so derivatives exist) and
+// sets each one up once. A triangle smaller than a pixel pays the whole setup and a whole quad for
+// at most one covered sample — three quarters of the lanes do nothing. Nanite's answer, and ours,
+// is to hand those triangles to a compute shader that walks each one's tiny bounding box on ONE
+// thread and resolves visibility with atomics instead of the depth test.
+//
+// The technique — **visibility by 64-bit atomic min**. Every pixel owns one 64-bit word whose HIGH
+// half is an order-preserving key of the depth and whose LOW half is the triangle's index in this
+// frame's software list. atomicMin on the whole word is then a depth test AND a tie-break in one
+// indivisible step: the nearest depth wins, and between equal depths the lowest list index wins.
+// That second clause is what makes the result deterministic (no dependence on which thread got
+// there first) and, not by accident, exactly what the CPU oracle does: it processes the list in
+// order and "a depth tie retains the existing pixel", i.e. the earliest triangle.
+//
+// Why the low half is a LIST INDEX and not the visibility ID: the ID is already 64 bits (ADR-0044),
+// so (depth, ID) is 96 bits and no single atomic can carry it. The index is a 32-bit indirection
+// that vg_micro_merge.frag turns back into the ID when it resolves this buffer into the SAME
+// RG32Uint visibility target the hardware pass writes.
+//
+// Three compilations of this one source (see engine/render/CMakeLists.txt):
+//   (no define)          — the single pass above; needs shaderInt64 + shaderBufferInt64Atomics.
+//   MICRO_RASTER_DEPTH32 — portable fallback, pass 1: atomicMin the depth key alone.
+//   MICRO_RASTER_ID32    — portable fallback, pass 2: re-rasterize, and where this triangle's key
+//                          EQUALS the surviving key, atomicMin the index. Two 32-bit atomics compute
+//                          the same lexicographic minimum as one 64-bit atomic, at twice the
+//                          raster work and with no precision cost — so the two paths are
+//                          bit-identical by construction (the tests hold them to it).
+//
+// THE CONTRACT IS THE CPU ORACLE (rasterize_micro_triangle_reference, micro_triangle.hpp). Every
+// float operation below is written in the oracle's order, one rounding per operation, and marked
+// `precise` so the compiler may neither fuse a multiply-add nor reassociate. Vulkan guarantees
+// correctly-rounded add/sub/mul, so that is enough for bit-exactness — except for division, which
+// Vulkan only promises to 2.5 ulp. The oracle's 1.0f / area is IEEE-exact, so this shader rebuilds
+// it with integer long division (reciprocal_rn below) rather than trusting OpFDiv.
+#version 450
+
+// The base compilation (no define) is the 64-bit single pass.
+#if !defined(MICRO_RASTER_DEPTH32) && !defined(MICRO_RASTER_ID32)
+#define MICRO_RASTER_INT64
+#endif
+
+#if defined(MICRO_RASTER_INT64)
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+#endif
+
+layout(local_size_x = 64) in;
+
+// Mirrors rime::render::VirtualGeometryMicroTriangle (48 bytes, std430 array stride 48).
+struct MicroTriangle {
+    float x0, y0, x1, y1, x2, y2; // framebuffer pixels, y down, pixel centres at +0.5
+    float z0, z1, z2;             // window depth, [0, 1]
+    uint id_lo;                   // packed v3 visibility ID (triangle field already filled)
+    uint id_hi;
+    uint pad;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Triangles {
+    MicroTriangle triangles[];
+};
+
+#if defined(MICRO_RASTER_INT64)
+layout(std430, set = 0, binding = 1) buffer Samples {
+    uint64_t samples[]; // one per pixel: (depth key << 32) | list index
+};
+#else
+layout(std430, set = 0, binding = 1) buffer Samples {
+    uint samples[]; // two per pixel: [2p] = list index, [2p + 1] = depth key (little-endian u64)
+};
+#endif
+
+// Mirrors rime::render::VirtualGeometryMicroRasterCounters. Every way a triangle can produce no
+// samples has its own counter: a proof that cannot see what it skipped still reads as passing.
+layout(std430, set = 0, binding = 2) buffer Counters {
+    uint processed;           // invocations that owned a list entry
+    uint rejected_invalid_id; // visibility ID is the empty sentinel
+    uint rejected_invalid;    // non-finite coordinate, or a depth outside [0, 1]
+    uint rejected_degenerate; // zero or non-finite area — the oracle draws nothing
+    uint rejected_inverse;    // 1/area overflows float — the oracle's depth would be non-finite
+    uint dropped_oversized;   // bounding box wider/taller than the software cap
+    uint culled_backface;     // back-facing while the pass mirrors the hardware cull
+    uint no_sample;           // valid, but its box holds no pixel centre inside the target
+    uint rasterized;          // reached the sample loop
+    uint samples_covered;     // covered pixel centres (atomics issued)
+    uint non_finite_depth;    // unreachable by the argument in the header; counted anyway
+} counters;
+
+layout(push_constant) uniform Pc {
+    uint triangle_count;
+    uint width;
+    uint height;
+    uint flags; // bit 0: cull back faces (the hardware pass's CullMode::Back, CCW front)
+    float max_extent_px;
+} pc;
+
+// 1.0e-6f, the oracle's `epsilon`, spelled as its bit pattern so no decimal-to-float conversion in
+// the shader compiler can land one ulp away from the C++ literal. micro_raster_test pins the pair.
+const uint kEpsilonBits = 0x358637BDu;
+
+// The oracle's inside test. `inclusive` is the tie rule for a sample exactly on (within epsilon of)
+// this edge: only the edges the fill rule owns keep it, so a sample on an edge SHARED by two
+// triangles is covered exactly once — the watertightness the hybrid split depends on.
+bool inside(float value, bool inclusive) {
+    const float eps = uintBitsToFloat(kEpsilonBits);
+    return value > eps || (inclusive && abs(value) <= eps);
+}
+
+// The oracle's edge function, one rounding per operation: (b.x - a.x) * (y - a.y) - (b.y - a.y) *
+// (x - a.x). Split into named precise temporaries so no multiply can fuse with the subtraction.
+float edge_fn(vec2 a, vec2 b, float x, float y) {
+    precise float dx = b.x - a.x;
+    precise float py = y - a.y;
+    precise float dy = b.y - a.y;
+    precise float px = x - a.x;
+    precise float lhs = dx * py;
+    precise float rhs = dy * px;
+    precise float e = lhs - rhs;
+    return e;
+}
+
+// The fill rule, translated from the oracle's `top_left` lambda verbatim (as corrected in M18.4 —
+// see the lambda's comment). After the winding is
+// normalised (positive area), an edge a->b owns its samples when it runs toward -y, or runs along
+// +x — in the framebuffer's y-down space those are exactly the LEFT edges and the flat TOP edge,
+// which is Direct3D's and every desktop Vulkan rasterizer's top-left convention. (The hybrid proof
+// in virtual_geometry_micro_raster_test.cpp is what holds the hardware to the same rule.)
+bool owns_edge(vec2 a, vec2 b) {
+    return b.y < a.y || (b.y == a.y && b.x > a.x);
+}
+
+// **A correctly rounded reciprocal from integer arithmetic.** Vulkan lets OpFDiv be off by 2.5
+// ulp; the oracle's 1.0f / area is IEEE round-to-nearest-even, and a one-ulp difference in 1/area
+// is a one-ulp difference in every depth this triangle writes. So instead of dividing in float,
+// divide the significand: write a = m * 2^e with m a 24-bit integer, then 1/a = (2^47 / m) *
+// 2^(-e-47), and 2^47 / m is ordinary restoring long division — 24 shift-and-subtract steps whose
+// remainder never exceeds 25 bits, so plain uint suffices on every device. The remainder decides
+// the rounding; an exact half is impossible for a reciprocal (it would need m to divide 2^48, i.e.
+// be a power of two, whose reciprocal is exact). Returns +inf when the result overflows — the
+// caller rejects those, as the oracle does when its depth goes non-finite.
+float reciprocal_rn(float a) {
+    const uint bits = floatBitsToUint(a); // a > 0, finite: the caller checked
+    uint m;
+    int e;
+    const uint biased = bits >> 23;
+    if (biased == 0u) {
+        // Denormal: renormalise so m carries its leading one at bit 23 like a normal number.
+        m = bits & 0x007FFFFFu;
+        const int shift = 23 - findMSB(m);
+        m <<= uint(shift);
+        e = -149 - shift;
+    } else {
+        m = (bits & 0x007FFFFFu) | 0x00800000u;
+        e = int(biased) - 150;
+    }
+    // q = floor(2^47 / m): the numerator's top 24 bits are 2^23 and the rest are zeros.
+    uint rem = 1u << 23;
+    uint q = 0u;
+    if (rem >= m) { // only when m == 2^23, i.e. a is a power of two
+        rem -= m;
+        q = 1u;
+    }
+    for (int i = 0; i < 24; ++i) {
+        rem <<= 1;
+        q <<= 1;
+        if (rem >= m) {
+            rem -= m;
+            q |= 1u;
+        }
+    }
+    if (2u * rem > m) {
+        q += 1u; // round to nearest (no ties exist, see above)
+    }
+    int r = -e - 47; // the value is q * 2^r
+    if (q >= (1u << 24)) {
+        q >>= 1; // a power-of-two input, or a round-up that carried out: still exact
+        r += 1;
+    }
+    const int out_biased = r + 23 + 127;
+    if (out_biased >= 255) {
+        return uintBitsToFloat(0x7F800000u); // overflow: +inf
+    }
+    if (out_biased <= 0) {
+        // A denormal reciprocal needs an area above 2^126, which the extent cap makes impossible;
+        // returning +inf routes it to the rejected_inverse counter rather than to a wrong value.
+        return uintBitsToFloat(0x7F800000u);
+    }
+    return uintBitsToFloat((uint(out_biased) << 23) | (q & 0x007FFFFFu));
+}
+
+bool finite(float v) {
+    return !isnan(v) && !isinf(v);
+}
+
+// Depth as an unsigned key whose integer order is the float order (the standard radix-sort
+// flip: set the sign bit of a positive float, invert every bit of a negative one). The oracle's
+// interpolated depth can dip a hair below zero at an inclusive edge, so the negative half matters.
+// -0.0 is folded to +0.0 first because the oracle compares floats, and there -0.0 == +0.0.
+uint depth_key(float depth) {
+    const float canonical = depth == 0.0 ? 0.0 : depth;
+    const uint b = floatBitsToUint(canonical);
+    return (b & 0x80000000u) != 0u ? ~b : (b | 0x80000000u);
+}
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= pc.triangle_count) {
+        return;
+    }
+#if !defined(MICRO_RASTER_ID32)
+    // Counters belong to exactly one pass: the fallback's second pass re-walks the same triangles
+    // and would count every one of them twice.
+#define COUNT(name) atomicAdd(counters.name, 1u)
+#else
+#define COUNT(name)
+#endif
+    COUNT(processed);
+
+    const MicroTriangle t = triangles[index];
+    if (t.id_lo == 0u && t.id_hi == 0u) {
+        COUNT(rejected_invalid_id);
+        return;
+    }
+    const bool all_finite = finite(t.x0) && finite(t.y0) && finite(t.x1) && finite(t.y1) &&
+                            finite(t.x2) && finite(t.y2) && finite(t.z0) && finite(t.z1) &&
+                            finite(t.z2);
+    if (!all_finite || t.z0 < 0.0 || t.z0 > 1.0 || t.z1 < 0.0 || t.z1 > 1.0 || t.z2 < 0.0 ||
+        t.z2 > 1.0) {
+        COUNT(rejected_invalid);
+        return;
+    }
+
+    vec3 v0 = vec3(t.x0, t.y0, t.z0);
+    vec3 v1 = vec3(t.x1, t.y1, t.z1);
+    vec3 v2 = vec3(t.x2, t.y2, t.z2);
+
+    // Twice the signed area, in the oracle's order.
+    precise float ax = v1.x - v0.x;
+    precise float by = v2.y - v0.y;
+    precise float ay = v1.y - v0.y;
+    precise float bx = v2.x - v0.x;
+    precise float area_l = ax * by;
+    precise float area_r = ay * bx;
+    precise float area = area_l - area_r;
+
+    // The hardware pass culls back faces with a counter-clockwise front face. In the y-down
+    // framebuffer that is a NEGATIVE area here (Vulkan's own area formula carries the opposite
+    // sign), so a positive area is a back face.
+    if ((pc.flags & 1u) != 0u && area > 0.0) {
+        COUNT(culled_backface);
+        return;
+    }
+    if (area < 0.0) {
+        const vec3 tmp = v1;
+        v1 = v2;
+        v2 = tmp;
+        area = -area;
+    }
+    if (!(area > 0.0) || !finite(area)) {
+        COUNT(rejected_degenerate);
+        return;
+    }
+
+    const float min_x = min(v0.x, min(v1.x, v2.x));
+    const float max_x = max(v0.x, max(v1.x, v2.x));
+    const float min_y = min(v0.y, min(v1.y, v2.y));
+    const float max_y = max(v0.y, max(v1.y, v2.y));
+    // The software cap. A sub-pixel-AREA triangle can still be a long sliver; walking its whole
+    // box on one thread would stall the wave. The CPU router already sends such triangles to the
+    // hardware path (route_micro_triangle), so anything that still arrives here is counted, not
+    // silently truncated. It also bounds the area, which keeps 1/area a normal float.
+    precise float extent_x = max_x - min_x;
+    precise float extent_y = max_y - min_y;
+    if (extent_x > pc.max_extent_px || extent_y > pc.max_extent_px) {
+        COUNT(dropped_oversized);
+        return;
+    }
+
+    const float inv_area = reciprocal_rn(area);
+    if (!finite(inv_area)) {
+        COUNT(rejected_inverse);
+        return;
+    }
+
+    // The sample range. Compared as floats BEFORE any int conversion: the clamps make both ends
+    // lie in [0, size - 1] whenever the range is non-empty, so the casts below are always in range.
+    precise float first_xf = ceil(max(min_x - 0.5, 0.0));
+    precise float last_xf = floor(min(max_x - 0.5, float(pc.width - 1u)));
+    precise float first_yf = ceil(max(min_y - 0.5, 0.0));
+    precise float last_yf = floor(min(max_y - 0.5, float(pc.height - 1u)));
+    if (first_xf > last_xf || first_yf > last_yf) {
+        COUNT(no_sample);
+        return;
+    }
+    COUNT(rasterized);
+
+    const bool own0 = owns_edge(v1.xy, v2.xy);
+    const bool own1 = owns_edge(v2.xy, v0.xy);
+    const bool own2 = owns_edge(v0.xy, v1.xy);
+    const int x_begin = int(first_xf);
+    const int x_end = int(last_xf);
+    const int y_begin = int(first_yf);
+    const int y_end = int(last_yf);
+    for (int y = y_begin; y <= y_end; ++y) {
+        for (int x = x_begin; x <= x_end; ++x) {
+            precise float px = float(x) + 0.5;
+            precise float py = float(y) + 0.5;
+            const float e0 = edge_fn(v1.xy, v2.xy, px, py);
+            const float e1 = edge_fn(v2.xy, v0.xy, px, py);
+            const float e2 = edge_fn(v0.xy, v1.xy, px, py);
+            if (!inside(e0, own0) || !inside(e1, own1) || !inside(e2, own2)) {
+                continue;
+            }
+            // (e0 * z0 + e1 * z1 + e2 * z2) * inv_area, left to right, one rounding each.
+            precise float w0 = e0 * v0.z;
+            precise float w1 = e1 * v1.z;
+            precise float w2 = e2 * v2.z;
+            precise float s01 = w0 + w1;
+            precise float s = s01 + w2;
+            precise float depth = s * inv_area;
+            if (!finite(depth)) {
+                COUNT(non_finite_depth);
+                continue;
+            }
+            const uint pixel = uint(y) * pc.width + uint(x);
+            const uint key = depth_key(depth);
+#if defined(MICRO_RASTER_INT64)
+            atomicMin(samples[pixel], (uint64_t(key) << 32) | uint64_t(index));
+#elif defined(MICRO_RASTER_DEPTH32)
+            atomicMin(samples[2u * pixel + 1u], key);
+#else
+            // Pass 2: pass 1 has settled every pixel's depth key, and a barrier sits between the
+            // passes (the graph's write->write buffer rule), so this read sees the final key.
+            if (samples[2u * pixel + 1u] == key) {
+                atomicMin(samples[2u * pixel], index);
+            }
+#endif
+            COUNT(samples_covered);
+        }
+    }
+}

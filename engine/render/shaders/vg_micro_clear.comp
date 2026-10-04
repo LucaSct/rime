@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// M18.4: reset the software micro-raster buffer to "nothing here" before vg_micro_raster.comp runs.
+// All-ones is the clear because the buffer is resolved by atomicMin: the largest possible word
+// loses to any real sample, so no sample needs a special first-write case. (The depth key of any
+// finite depth is below 0xFFFFFFFF; vg_micro_merge.frag reads that exact value as "empty".)
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) writeonly buffer Samples {
+    uint words[];
+};
+
+layout(push_constant) uniform Pc {
+    uint word_count;
+} pc;
+
+// Grid-stride loop: a 4K target is ~16.6M words, far past the 65,535-workgroup dispatch limit at 64
+// lanes per group, so the host caps the group count and each lane strides over the rest.
+void main() {
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < pc.word_count; i += stride) {
+        words[i] = 0xFFFFFFFFu;
+    }
+}
