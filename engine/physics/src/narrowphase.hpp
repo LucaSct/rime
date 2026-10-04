@@ -1340,22 +1340,23 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
 // is a deferred, conservative-advancement case — ADR-0026). Returns false (m left empty) when the
 // pair overlaps (the exact path owns that), is not approaching, or is still too far to touch this
 // step. `dt` must be > 0.
-[[nodiscard]] inline bool collide_speculative(const ShapeDesc& sa,
-                                              core::Vec3 pa,
-                                              const core::Quat& qa,
-                                              core::Vec3 va,
-                                              const ShapeDesc& sb,
-                                              core::Vec3 pb,
-                                              const core::Quat& qb,
-                                              core::Vec3 vb,
-                                              float dt,
-                                              Manifold& m,
-                                              const ConvexHull* hull_a = nullptr,
-                                              const ConvexHull* hull_b = nullptr) {
+// The support-function form, so terrain can reuse it (m19.2). The comment above promises this path
+// is "shape-agnostic by construction"; a heightfield triangle has a support function
+// (narrowphase_detail::PolySupport over a 3-vertex PolyView) but no ShapeDesc, so the promise only
+// actually holds once the rule lives here, on two supports, rather than on two ShapeDescs. The
+// ShapeDesc overload below is this function with ShapeSupports built for it, so the convex path's
+// behaviour is unchanged by construction rather than by re-derivation.
+template <typename SupportA, typename SupportB>
+[[nodiscard]] inline bool collide_speculative_supports(const SupportA& support_a,
+                                                       core::Vec3 centre_a,
+                                                       core::Vec3 va,
+                                                       const SupportB& support_b,
+                                                       core::Vec3 centre_b,
+                                                       core::Vec3 vb,
+                                                       float dt,
+                                                       Manifold& m) {
     m.count = 0;
-    const ShapeSupport support_a{&sa, pa, qa, hull_a};
-    const ShapeSupport support_b{&sb, pb, qb, hull_b};
-    const GjkResult g = gjk(support_a, support_b, pa - pb);
+    const GjkResult g = gjk(support_a, support_b, centre_a - centre_b);
     if (g.overlapping || g.distance <= narrowphase_detail::kNormalEps) {
         return false; // overlapping (the exact narrowphase owns it) or coincident — no gap to speak
                       // of
@@ -1395,6 +1396,23 @@ collide_sphere_sphere(core::Vec3 pa, float ra, core::Vec3 pb, float rb, Manifold
     p.tangent_impulse = 0.0f;
     m.count = 1;
     return true;
+}
+
+[[nodiscard]] inline bool collide_speculative(const ShapeDesc& sa,
+                                              core::Vec3 pa,
+                                              const core::Quat& qa,
+                                              core::Vec3 va,
+                                              const ShapeDesc& sb,
+                                              core::Vec3 pb,
+                                              const core::Quat& qb,
+                                              core::Vec3 vb,
+                                              float dt,
+                                              Manifold& m,
+                                              const ConvexHull* hull_a = nullptr,
+                                              const ConvexHull* hull_b = nullptr) {
+    const ShapeSupport support_a{&sa, pa, qa, hull_a};
+    const ShapeSupport support_b{&sb, pb, qb, hull_b};
+    return collide_speculative_supports(support_a, pa, va, support_b, pb, vb, dt, m);
 }
 
 // ------------------------------------------------------------------------ manifold cache -------

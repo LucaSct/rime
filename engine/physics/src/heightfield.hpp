@@ -9,6 +9,7 @@
 #include <span>
 #include <vector>
 
+#include "epa.hpp"
 #include "hull.hpp"
 #include "narrowphase.hpp"
 #include "rime/core/math/quat.hpp"
@@ -16,6 +17,7 @@
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/shape.hpp"
 #include "rime/physics/world.hpp"
+#include "scene_query.hpp"
 
 // Terrain heightfields (M19.1, ADR-0060-m19.1-heightfield) — the runtime store entry and all the
 // geometry that runs against it: the ray walk, the per-triangle contact routines, and the patch
@@ -240,6 +242,24 @@ inline void triangle_vertices(const HeightfieldShape& hf,
 [[nodiscard]] inline std::uint32_t
 triangle_id(const HeightfieldShape& hf, std::uint32_t ci, std::uint32_t cj, int half) noexcept {
     return 2u * (ci + hf.cells_x() * cj) + static_cast<std::uint32_t>(half);
+}
+
+// The inclusive cell index range an interval [lo, hi] covers along one axis, clamped to the grid.
+// floor() of each end over the cell size — the grid IS its own midphase, so there is no tree to
+// descend. Shared by the contact build and the convex queries (m19.2) so there is exactly one
+// definition of "which cells does this bound touch": two copies would be two chances to disagree
+// about a bound that lands exactly on a grid line, and a query that enumerated a different cell
+// set from the narrowphase would report hits the solver never sees.
+inline void cell_range(float lo,
+                       float hi,
+                       float size,
+                       std::uint32_t cells,
+                       std::uint32_t& c0,
+                       std::uint32_t& c1) noexcept {
+    const float f0 = std::floor(lo / size);
+    const float f1 = std::floor(hi / size);
+    c0 = f0 <= 0.0f ? 0u : static_cast<std::uint32_t>(std::min(f0, float(cells - 1)));
+    c1 = f1 <= 0.0f ? 0u : static_cast<std::uint32_t>(std::min(f1, float(cells - 1)));
 }
 
 // ─── The ray walk ────────────────────────────────────────────────────────────────────────────
@@ -771,17 +791,6 @@ inline std::size_t heightfield_contacts_local(const HeightfieldShape& hf,
         b.min.y > hf.max_h || b.max.y < hf.min_h - hf.thickness) {
         return 0;
     }
-    const auto cell_range = [](float lo,
-                               float hi,
-                               float size,
-                               std::uint32_t cells,
-                               std::uint32_t& c0,
-                               std::uint32_t& c1) {
-        const float f0 = std::floor(lo / size);
-        const float f1 = std::floor(hi / size);
-        c0 = f0 <= 0.0f ? 0u : static_cast<std::uint32_t>(std::min(f0, float(cells - 1)));
-        c1 = f1 <= 0.0f ? 0u : static_cast<std::uint32_t>(std::min(f1, float(cells - 1)));
-    };
     std::uint32_t i0 = 0, i1 = 0, j0 = 0, j1 = 0;
     cell_range(b.min.x, b.max.x, hf.dx, hf.cells_x(), i0, i1);
     cell_range(b.min.z, b.max.z, hf.dz, hf.cells_z(), j0, j1);
@@ -933,6 +942,384 @@ sphere_overlaps_heightfield_local(const HeightfieldShape& hf, core::Vec3 c, floa
     s.radius = r;
     std::vector<HeightfieldContact> scratch;
     return heightfield_contacts_local(hf, s, c, core::quat_identity(), nullptr, 0u, scratch) > 0;
+}
+
+// ─── Convex queries against terrain (m19.2) ──────────────────────────────────────────────────
+//
+// M19.1 shipped the ray walk and the contact build, and deferred the three places a CONVEX shape
+// meets terrain: `shape_cast`, `penetration`, and speculative CCD. All three skipped terrain and
+// counted the skip. This closes them, and the shape of the solution is the same in all three
+// because a heightfield cell's two triangles are each CONVEX: the engine's existing GJK, EPA and
+// conservative-advancement cast already handle any convex pair through a support function, and
+// `narrowphase_detail::PolySupport` over a three-vertex `PolyView` IS a triangle's support
+// function. So terrain needs no new geometric kernel — only an enumeration of which triangles to
+// hand the kernels, and a rule for combining the per-triangle answers.
+//
+// WHY PER-TRIANGLE RATHER THAN A SUPPORT FUNCTION FOR THE WHOLE FIELD. A heightfield is not
+// convex, so it has no support function (support.hpp returns the origin for it and says so). The
+// alternative — the one physics engines that "support heightfields in GJK" actually implement — is
+// to pick a local convex piece and pretend; that silently gives wrong answers near a ridge, where
+// the nearest triangle is not the one the shape is about to hit. Enumerating the candidates and
+// taking the best answer per kernel is slower and right.
+//
+// THE CANDIDATE SET IS THE SHAPE'S BOUND OVER THE GRID, exactly as the contact build's is, via the
+// shared `cell_range` — one definition of "which cells does this bound touch", so a query can
+// never enumerate a different set from the narrowphase that will have to resolve what it found.
+// For a cast the bound is the SWEPT one (the caster's AABB at t = 0 unioned with its AABB at
+// t = tmax), which is conservative: a convex shape swept along a straight line stays inside the
+// union of its end poses' boxes, because each coordinate is a linear function of t.
+//
+// THE BUDGET IS EXPLICIT AND COUNTED. A long cast across a large tile can sweep a bound covering
+// more cells than it is worth testing one at a time — a 500 m cast over a 0.37 m grid is ~1.8 M
+// triangles. Rather than stall a frame, the enumeration stops at `kMaxQueryTriangles` and reports
+// that it was truncated, so the caller bumps the same `heightfield_query_skips()` counter M19.1
+// used: "the query saw nothing" and "the query could not look at all of it" stay distinguishable,
+// which is the whole reason that counter exists. A character controller — the motivating caller,
+// and the one ADR-0060 named — sweeps a metre or two and touches tens of triangles, nowhere near
+// the cap. Deferred, and named in the ADR: walking the sweep with the grid DDA and testing only a
+// band of cells around each step, which is O(cells crossed) instead of O(cells in the bound) and
+// would retire the cap rather than raise it.
+
+namespace heightfield_detail {
+
+// Candidate ceiling for one convex query (see above). 8192 triangles = 4096 cells, i.e. a 64x64
+// cell patch — far more than any character-scale sweep touches, and small enough that hitting it
+// costs microseconds rather than a frame.
+inline constexpr std::size_t kMaxQueryTriangles = 8192;
+
+// One terrain triangle posed as a support function, with storage for its three vertices. The
+// vertices are in the HEIGHTFIELD'S LOCAL frame and the view is posed with identity, because every
+// routine below has already transformed the query into that frame — so GJK/EPA/the cast all run in
+// local space and only the final answer is rotated back out. Keeping the pose out of the inner loop
+// is also what makes the support function a pure vertex argmax.
+struct TriangleSupportStorage {
+    core::Vec3 verts[3];
+    core::Vec3 normal;
+    std::uint32_t vid[3];
+    std::uint32_t tri;
+    narrowphase_detail::PolyView view;
+
+    void set(const HeightfieldShape& hf, const HeightfieldCell& c, int half) noexcept {
+        triangle_vertices(hf, c, half, verts, vid);
+        normal = c.normal(half);
+        tri = triangle_id(hf, c.ci, c.cj, half);
+        view.verts = std::span<const core::Vec3>(verts, 3);
+        view.face_normals = {};
+        view.face_offsets = {};
+        view.face_indices = {};
+        view.pos = core::Vec3{};
+        view.orient = core::quat_identity();
+    }
+
+    [[nodiscard]] narrowphase_detail::PolySupport support() const noexcept {
+        return narrowphase_detail::PolySupport{&view};
+    }
+
+    // The triangle's centroid — the "centre" the kernels want for their initial search direction
+    // and for the speculative rule's relative-velocity frame. A triangle has no stored centre, and
+    // using a vertex instead would bias the first GJK direction toward one corner.
+    [[nodiscard]] core::Vec3 centroid() const noexcept {
+        return (verts[0] + verts[1] + verts[2]) * (1.0f / 3.0f);
+    }
+};
+
+// Visit every candidate triangle for an AABB over the grid, in ascending (row, column, half)
+// order — the contact build's order, so two routines looking at the same bound agree on which
+// triangle they saw first and every tie-break below is a pure function of the inputs. Returns
+// false when the bound was truncated by the budget (the caller counts that).
+template <typename Fn>
+[[nodiscard]] inline bool
+for_each_candidate_triangle(const HeightfieldShape& hf, const Aabb& bound, Fn&& fn) {
+    // Entirely outside the tile (including below its solid band) ⇒ no candidates, not truncated.
+    if (bound.max.x < 0.0f || bound.max.z < 0.0f || bound.min.x > hf.extent_x() ||
+        bound.min.z > hf.extent_z() || bound.min.y > hf.max_h ||
+        bound.max.y < hf.min_h - hf.thickness) {
+        return true;
+    }
+    std::uint32_t i0 = 0, i1 = 0, j0 = 0, j1 = 0;
+    cell_range(bound.min.x, bound.max.x, hf.dx, hf.cells_x(), i0, i1);
+    cell_range(bound.min.z, bound.max.z, hf.dz, hf.cells_z(), j0, j1);
+
+    std::size_t tested = 0;
+    TriangleSupportStorage tri;
+    for (std::uint32_t cj = j0; cj <= j1; ++cj) {
+        for (std::uint32_t ci = i0; ci <= i1; ++ci) {
+            const HeightfieldCell c = cell_of(hf, ci, cj);
+            for (int half = 0; half < 2; ++half) {
+                if (tested >= kMaxQueryTriangles) {
+                    return false; // truncated — the caller counts it
+                }
+                ++tested;
+                tri.set(hf, c, half);
+                fn(tri);
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace heightfield_detail
+
+// ── shape_cast against terrain ──
+//
+// Sweep one posed convex shape along `dir` (unit) for at most `tmax` and report the first terrain
+// triangle it reaches. Everything is in the heightfield's LOCAL frame. `truncated` is set when the
+// budget cut the candidate set short, so the caller can count a partial look as a skip rather than
+// as a clean miss. Returns false with `overlap_out` true when the shape ALREADY overlaps terrain at
+// t = 0 — the same contract `shape_cast` has for convex targets, where the caller is told to run
+// `penetration` instead, because a cast has no time of impact to report for a shape that starts
+// inside something.
+[[nodiscard]] inline bool cast_shape_vs_heightfield_local(const HeightfieldShape& hf,
+                                                          const ShapeDesc& s,
+                                                          core::Vec3 origin,
+                                                          const core::Quat& q,
+                                                          const ConvexHull* hull,
+                                                          core::Vec3 dir,
+                                                          float tmax,
+                                                          float& t_out,
+                                                          core::Vec3& n_out,
+                                                          core::Vec3& p_out,
+                                                          bool& overlap_out,
+                                                          bool& truncated) {
+    using namespace heightfield_detail;
+    overlap_out = false;
+    truncated = false;
+
+    // The swept bound: the caster's box at both ends of the sweep, unioned. Conservative because
+    // each coordinate of a linearly swept convex shape is linear in t, so the shape never leaves
+    // the union of its endpoint boxes.
+    const Aabb a0 =
+        hull != nullptr ? hull_world_aabb(*hull, origin, q) : compute_aabb(s, origin, q);
+    const core::Vec3 end = origin + dir * tmax;
+    const Aabb a1 = hull != nullptr ? hull_world_aabb(*hull, end, q) : compute_aabb(s, end, q);
+    const Aabb swept{core::Vec3{std::min(a0.min.x, a1.min.x),
+                                std::min(a0.min.y, a1.min.y),
+                                std::min(a0.min.z, a1.min.z)},
+                     core::Vec3{std::max(a0.max.x, a1.max.x),
+                                std::max(a0.max.y, a1.max.y),
+                                std::max(a0.max.z, a1.max.z)}};
+
+    bool hit = false;
+    float best_t = tmax;
+    std::uint32_t best_tri = 0;
+    core::Vec3 best_n{0.0f, 1.0f, 0.0f};
+    core::Vec3 best_p{};
+    bool overlapped = false;
+
+    const bool complete =
+        for_each_candidate_triangle(hf, swept, [&](const TriangleSupportStorage& tri) {
+            if (overlapped) {
+                return; // an initial overlap outranks any time of impact; stop refining
+            }
+            const narrowphase_detail::PolySupport target = tri.support();
+            float t = 0.0f;
+            core::Vec3 n{};
+            core::Vec3 p{};
+            bool overlap = false;
+            if (!cast_convex_vs_convex(
+                    s, origin, q, hull, target, tri.centroid(), dir, tmax, t, n, p, overlap)) {
+                return;
+            }
+            if (overlap) {
+                // An initial overlap outranks any time of impact (the convex path's rule), and it
+                // still reports a normal and a point: the caller is about to run `penetration`,
+                // and handing it an uninitialised axis would be worse than handing it this
+                // triangle's. Recorded from the FIRST overlapping triangle in grid order, so it is
+                // a pure function of the inputs like every other answer here.
+                overlapped = true;
+                best_n = n;
+                best_p = p;
+                return;
+            }
+            // Earliest wins, with an exact-tie break toward the LOWER TRIANGLE ID so the answer
+            // does not depend on enumeration order being stable for a reason other than the grid.
+            // A sweep that reaches a shared edge touches two triangles at the identical t, which is
+            // the common case on terrain rather than a corner one.
+            if (!hit || t < best_t || (t == best_t && tri.tri < best_tri)) {
+                hit = true;
+                best_t = t;
+                best_tri = tri.tri;
+                best_n = n;
+                best_p = p;
+            }
+        });
+    if (!complete) {
+        truncated = true;
+    }
+    if (overlapped) {
+        overlap_out = true;
+        n_out = best_n;
+        p_out = best_p;
+        return false;
+    }
+    if (!hit) {
+        return false;
+    }
+    t_out = best_t;
+    n_out = best_n;
+    p_out = best_p;
+    return true;
+}
+
+// ── penetration against terrain ──
+//
+// Deepest overlap between one posed convex shape and the terrain, in the heightfield's LOCAL
+// frame. `normal` points the way the QUERY SHAPE must move to separate, and `depth` is how far.
+//
+// THIS DELIBERATELY DOES NOT RUN EPA PER TRIANGLE, and the reason is the whole subtlety of the
+// brick. EPA answers "what is the shortest translation that separates these two convex shapes",
+// and a cell triangle is a ZERO-THICKNESS surface — so for a shape that has sunk into the ground,
+// the shortest separation is very often DEEPER INTO IT. Measured while building this: a sphere of
+// radius 0.5 whose centre sits 0.1 below a flat tile spans [-0.4, +0.6] about the surface, and EPA
+// correctly reported that pushing it 0.4 DOWN separates it from the triangle sooner than pushing
+// it 0.6 up. That is the right answer about a triangle and a catastrophic answer about ground: a
+// character controller handed it would depenetrate itself into the rock. The sideways case is the
+// same bug — a shape over a shared edge can leave a triangle's extent more cheaply than it can
+// leave the surface.
+//
+// The contact build already owns the correct rule, because the narrowphase had to solve exactly
+// this: `sphere_vs_triangle` and friends only accept a below-plane overlap when the shape lies
+// over the triangle's INTERIOR, and then resolve it along the triangle's own normal — "straight
+// back up, never sideways". So this query reuses `heightfield_contacts_local` and takes its
+// deepest contact. One rule for what "inside the ground" means, shared by the solver and by the
+// query that tells a caller how to get out of it; a second derivation here would be a second
+// chance to disagree with the thing that actually moves bodies.
+//
+// Deepest, not nearest, matching the convex query: repeatedly resolving the worst violation
+// strictly reduces the maximum, so a shape wedged in a crevice converges out of it.
+[[nodiscard]] inline bool penetration_vs_heightfield_local(const HeightfieldShape& hf,
+                                                           const ShapeDesc& s,
+                                                           core::Vec3 pos,
+                                                           const core::Quat& q,
+                                                           const ConvexHull* hull,
+                                                           float& depth_out,
+                                                           core::Vec3& normal_out,
+                                                           core::Vec3& point_out,
+                                                           bool& truncated) {
+    // The contact build enumerates from the shape's own bound and has no budget to exceed: its
+    // candidate set is the bound's cells, which is what this query would have used anyway. So
+    // there is no truncation to report here — the flag stays in the signature because the caller
+    // treats all three terrain queries uniformly, and a later banded enumeration may reintroduce
+    // one.
+    truncated = false;
+    std::vector<HeightfieldContact> cands;
+    if (heightfield_contacts_local(hf, s, pos, q, hull, 0u, cands) == 0) {
+        return false;
+    }
+    bool found = false;
+    float best_depth = 0.0f;
+    std::uint32_t best_tri = 0;
+    core::Vec3 best_normal{0.0f, 1.0f, 0.0f};
+    core::Vec3 best_point{};
+    for (const HeightfieldContact& c : cands) {
+        // Zero depth is a TOUCH, not a penetration — the same filter the convex query applies to
+        // EPA's depth, and for the same reason: there is nothing to push out of.
+        if (!(c.depth > 0.0f)) {
+            continue;
+        }
+        if (!found || c.depth > best_depth || (c.depth == best_depth && c.triangle < best_tri)) {
+            found = true;
+            best_depth = c.depth;
+            best_tri = c.triangle;
+            best_normal = c.normal;
+            best_point = c.point;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    depth_out = best_depth;
+    // HeightfieldContact::normal is terrain → shape (the convention the manifolds carry), which is
+    // already the direction the SHAPE must move to separate. No negation: the sign is inherited
+    // from the contact build rather than re-reasoned.
+    normal_out = best_normal;
+    point_out = best_point;
+    return true;
+}
+
+// ── speculative CCD against terrain ──
+//
+// The nearest imminent contact between one posed convex shape moving at `v` and the terrain, in
+// the heightfield's LOCAL frame, as a one-point manifold carrying a NEGATIVE penetration (the gap
+// still to close). Terrain is static, so its velocity is zero. The rule is not re-derived here:
+// `collide_speculative_supports` owns it, and this routine only enumerates triangles and keeps the
+// nearest gap — so a body approaching terrain is arrested by exactly the same condition that
+// arrests it against a wall, including the closing-speed test and the slop.
+//
+// NEAREST, NOT DEEPEST: for a speculative contact the smallest gap is the one that will be touched
+// first, and letting a farther triangle win would let the solver permit motion through the nearer
+// one.
+//
+// THE NORMAL IS TERRAIN → SHAPE, which is `patch_to_manifold`'s convention and NOT what
+// `collide_speculative_supports` hands back. That function returns a → b for the order it was
+// called in, and it is called here as (shape, triangle) — so its answer is shape → terrain and is
+// negated once, below, before it leaves. Matching the exact path's convention is the point: the
+// caller then applies the identical "flip it if the terrain is body b" rule to both, instead of
+// two routines with two conventions and one chance to get a sign backwards. (It WAS backwards:
+// the first version of this brick negated on the wrong branch, and the fast-projectile test
+// measured the body sailing through the ground exactly as it had before CCD was wired at all.)
+[[nodiscard]] inline bool speculative_vs_heightfield_local(const HeightfieldShape& hf,
+                                                           const ShapeDesc& s,
+                                                           core::Vec3 pos,
+                                                           const core::Quat& q,
+                                                           const ConvexHull* hull,
+                                                           core::Vec3 v,
+                                                           float dt,
+                                                           Manifold& m,
+                                                           bool& truncated) {
+    using namespace heightfield_detail;
+    truncated = false;
+    m.count = 0;
+    if (!(dt > 0.0f)) {
+        return false;
+    }
+    // The bound is the SWEPT one for the same reason the cast's is: a contact that is imminent is
+    // by definition one the shape's current box may not yet reach.
+    const Aabb a0 = hull != nullptr ? hull_world_aabb(*hull, pos, q) : compute_aabb(s, pos, q);
+    const core::Vec3 end = pos + v * dt;
+    const Aabb a1 = hull != nullptr ? hull_world_aabb(*hull, end, q) : compute_aabb(s, end, q);
+    const Aabb swept{core::Vec3{std::min(a0.min.x, a1.min.x),
+                                std::min(a0.min.y, a1.min.y),
+                                std::min(a0.min.z, a1.min.z)},
+                     core::Vec3{std::max(a0.max.x, a1.max.x),
+                                std::max(a0.max.y, a1.max.y),
+                                std::max(a0.max.z, a1.max.z)}};
+    const ShapeSupport query{&s, pos, q, hull};
+
+    bool found = false;
+    float best_gap = 0.0f;
+    std::uint32_t best_tri = 0;
+    Manifold best{};
+
+    const bool complete =
+        for_each_candidate_triangle(hf, swept, [&](const TriangleSupportStorage& tri) {
+            Manifold cand;
+            cand.count = 0;
+            if (!collide_speculative_supports(
+                    query, pos, v, tri.support(), tri.centroid(), core::Vec3{}, dt, cand)) {
+                return;
+            }
+            // Into the terrain → shape convention (see the header comment) before any comparison,
+            // so what is stored is what is returned.
+            cand.normal = cand.normal * -1.0f;
+            // `penetration` is the NEGATIVE gap here, so the nearest triangle is the one whose
+            // penetration is LARGEST (closest to zero).
+            const float gap = cand.points[0].penetration;
+            if (!found || gap > best_gap || (gap == best_gap && tri.tri < best_tri)) {
+                found = true;
+                best_gap = gap;
+                best_tri = tri.tri;
+                best = cand;
+            }
+        });
+    if (!complete) {
+        truncated = true;
+    }
+    if (!found) {
+        return false;
+    }
+    m = best;
+    return true;
 }
 
 } // namespace rime::physics

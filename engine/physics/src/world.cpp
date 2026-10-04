@@ -800,10 +800,57 @@ void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
             out.push_back(m);
         }
     }
-    // No exact contact, and the body asked for CCD: terrain has no speculative path yet (it is
-    // not convex, and M7.10's speculative contacts are GJK), so say so rather than pretend.
+    // No exact contact, and the body asked for CCD: speculate against terrain (m19.2). M7.10's
+    // rule is GJK-based and therefore shape-agnostic once it is expressed over support functions,
+    // which is what `collide_speculative_supports` now is — so a body approaching terrain fast is
+    // arrested by exactly the same closing-speed condition that arrests it against a wall, rather
+    // than by a second rule invented for terrain. A compound is opened one level here too, because
+    // each child is convex and rides the body rigidly.
+    // Nothing imminent is simply no contact; only a TRUNCATED look bumps hf_ccd_skipped, so the
+    // counter keeps meaning "could not look" rather than "found nothing".
     if (!any && dt > 0.0f && ccd[dbody] != 0) {
-        ++hf_ccd_skipped_last;
+        for (std::size_t ci = 0; ci < n_children; ++ci) {
+            const ShapeDesc* cs = &shape[dbody];
+            core::Vec3 cpos = body_pos;
+            core::Quat cq = body_q;
+            if (comp != nullptr) {
+                cs = &comp->child_shape[ci];
+                cpos = compound_child_world_pos(*comp, ci, body_pos, body_q);
+                cq = compound_child_world_orient(*comp, ci, body_q);
+            }
+            Manifold m;
+            bool truncated = false;
+            if (!speculative_vs_heightfield_local(*hf,
+                                                  *cs,
+                                                  core::rotate(tqc, cpos - tp),
+                                                  tqc * cq,
+                                                  hull_of(*cs),
+                                                  core::rotate(tqc, linear_velocity[dbody]),
+                                                  dt,
+                                                  m,
+                                                  truncated)) {
+                if (truncated) {
+                    ++hf_ccd_skipped_last;
+                }
+                continue;
+            }
+            // Back into world space, then into SLOT order — the identical two steps the exact
+            // path above takes, because the local routine was made to use the same terrain → body
+            // convention `patch_to_manifold` does. The manifold normal is a → b for every other
+            // pair and must be here too, or the solver pushes the body the wrong way.
+            m.normal = core::rotate(orientation[dt_], m.normal);
+            m.points[0].position = tp + core::rotate(orientation[dt_], m.points[0].position);
+            if (!terrain_is_a) {
+                m.normal = m.normal * -1.0f;
+            }
+            m.a = pr.a;
+            m.b = pr.b;
+            const auto child16 = static_cast<std::uint16_t>(ci);
+            m.child_a = terrain_is_a ? std::uint16_t{0} : child16;
+            m.child_b = terrain_is_a ? child16 : std::uint16_t{0};
+            m.patch = 0; // a speculative contact is one point, not a surface region
+            out.push_back(m);
+        }
     }
 }
 
@@ -1847,10 +1894,60 @@ bool PhysicsWorld::shape_cast(const ShapeCast& cast,
         const std::uint32_t d = p.slots[slot].dense;
         const ShapeDesc& shape = p.shape[d];
         if (shape.type == ShapeType::Heightfield) {
-            // No convex cast against terrain yet (GJK needs a support function; M19.1 defers the
-            // per-triangle cast). Skipped — and COUNTED, so "the cast saw nothing" and "the cast
-            // could not look" stay distinguishable (heightfield_query_skips()).
-            p.hf_query_skips.fetch_add(1, std::memory_order_relaxed);
+            // Terrain takes the per-triangle cast (m19.2): the heightfield has no support function
+            // of its own, so the sweep is run against each candidate CELL TRIANGLE, which is
+            // convex, through the very same `cast_convex_vs_convex` every other target uses. The
+            // query is transformed into the tile's frame and the answer rotated back out — an
+            // isometry, so the reported distance is unchanged by the trip.
+            const HeightfieldShape* hf = p.heightfield_of(shape);
+            if (hf == nullptr) {
+                p.hf_query_skips.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            const core::Vec3 tp = p.position[d];
+            const core::Quat tqc = core::conjugate(p.orientation[d]);
+            float t = 0.0f;
+            core::Vec3 n{};
+            core::Vec3 pt{};
+            bool overlap = false;
+            bool truncated = false;
+            const bool got = cast_shape_vs_heightfield_local(*hf,
+                                                             cast.shape,
+                                                             core::rotate(tqc, cast.origin - tp),
+                                                             tqc * cast.orientation,
+                                                             caster_hull,
+                                                             core::rotate(tqc, dir),
+                                                             tmax,
+                                                             t,
+                                                             n,
+                                                             pt,
+                                                             overlap,
+                                                             truncated);
+            if (truncated) {
+                // The candidate bound exceeded the per-query triangle budget, so this answer is
+                // about PART of the tile. Counted on the same counter M19.1 used, because the
+                // meaning is the same one: the cast could not look at everything. Whatever it DID
+                // find is still reported — a real hit is not made less true by an incomplete
+                // search, and suppressing it would turn a conservative answer into a wrong one.
+                p.hf_query_skips.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (overlap && !best_overlap) {
+                best_t = 0.0f;
+                best_slot = slot;
+                best_n = core::rotate(p.orientation[d], n);
+                best_p = tp + core::rotate(p.orientation[d], pt);
+                best_child = 0;
+                best_overlap = true;
+                return;
+            }
+            if (!got || best_overlap || t >= best_t) {
+                return;
+            }
+            best_t = t;
+            best_slot = slot;
+            best_n = core::rotate(p.orientation[d], n);
+            best_p = tp + core::rotate(p.orientation[d], pt);
+            best_child = 0;
             return;
         }
         const core::Vec3 pos = p.position[d];
@@ -1970,8 +2067,49 @@ bool PhysicsWorld::penetration(const ShapeDesc& shape,
         const std::uint32_t d = p.slots[slot].dense;
         const ShapeDesc& body_shape = p.shape[d];
         if (body_shape.type == ShapeType::Heightfield) {
-            // EPA against terrain is the same deferral as shape_cast's (M19.1) — skipped, counted.
-            p.hf_query_skips.fetch_add(1, std::memory_order_relaxed);
+            // Terrain takes the per-triangle GJK+EPA (m19.2), the same two kernels every convex
+            // target uses, run against each candidate cell triangle and reduced by the same
+            // "deepest wins" rule. The query is measured in the tile's frame and the axis rotated
+            // back out.
+            const HeightfieldShape* hf = p.heightfield_of(body_shape);
+            if (hf == nullptr) {
+                p.hf_query_skips.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            const core::Vec3 tp = p.position[d];
+            const core::Quat& tq = p.orientation[d];
+            const core::Quat tqc = core::conjugate(tq);
+            float depth = 0.0f;
+            core::Vec3 axis{};
+            core::Vec3 point{};
+            bool truncated = false;
+            const bool got = penetration_vs_heightfield_local(*hf,
+                                                              shape,
+                                                              core::rotate(tqc, position - tp),
+                                                              tqc * orientation,
+                                                              query_hull,
+                                                              depth,
+                                                              axis,
+                                                              point,
+                                                              truncated);
+            if (truncated) {
+                // Partial look, counted — the same meaning as the cast's truncation. What was
+                // found is still reported: a measured overlap does not become less real because
+                // a deeper one might exist in the part of the tile that was not reached.
+                p.hf_query_skips.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (!got) {
+                return;
+            }
+            const bool better = best_slot == core::kInvalidSlotIndex || depth > best_depth ||
+                                (depth == best_depth && slot < best_slot);
+            if (!better) {
+                return;
+            }
+            best_depth = depth;
+            best_normal = core::rotate(tq, axis);
+            best_slot = slot;
+            best_child = 0;
             return;
         }
         const core::Vec3 body_pos = p.position[d];
