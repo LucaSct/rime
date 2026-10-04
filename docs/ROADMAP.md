@@ -2364,6 +2364,42 @@ exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: **m17.9
 a ground nothing lights well is the worse half-milestone). **Never cut:** m17.3, m17.5, m17.7,
 m17.8, m17.10.
 
+> **Progress (2026-10-04) — M17's visual work has landed; its frame-rate clause has not.** Added by
+> the roadmap refresh; the 2026-09-03 tables and the dated notes below it are history and are kept
+> as written. Every row's proof was read in the repo on this date (**measured**) unless marked
+> *inferred*.
+>
+> | brick | state | proof |
+> |---|---|---|
+> | m17.0–m17.3c | ✅ #181 | the squash commit `e28a78a` lists them; the detailed table below is unchanged |
+> | m17.3d | ✅ #181 | re-baseline: `docs/perf/2026-09-05-99-the-block-nvidia-geforce-rtx-3060.json` and ADR-0041 Ruling 4 |
+> | **m17.4** | ✅ #181 — **no longer open** | `engine/render/src/lighting/clustered.cpp:137` ("Everything the CPU rewrites per frame moved to the graph's ring"); the same move is commented at `ssr.cpp:110`, `shadows.cpp:147`, `local_shadows.cpp:175`, `sky.cpp:348` and `ddgi.cpp:231`, and the only `write_buffer` left in `lighting/` outside `clustered.cpp:131` (a write-once buffer) is `sky.cpp:308` (a one-shot dummy). The "14 buffers" count is *inferred* from that, not re-counted. [ADR-0041 §m17.4/m17.5a](adr/0041-the-visual-bar-m17.md) |
+> | m17.5 / m17.5a | ✅ #181 | clause met on one machine (`frame.player` 12.6); ADR-0041 Ruling 5 amendment of 2026-09-06 |
+> | m17.6 | ⚠️ re-scoped, **no brick landed** | ADR-0041 Ruling 6: its budget premise vanished once the clocks were pinned. Nothing in `git log` is labelled m17.6 — state of the correctness work it was re-pointed to is **unverified** |
+> | m17.7a | ✅ #183 | `CMakeLists.txt:259-273` (`-I` plus `--depfile` for shader `#include`); `engine/render/shaders/sky.frag:25` includes `sky_common.glsl` |
+> | m17.7b | ✅ #183 | `engine/render/shaders/sky_sh.comp`, `sky_skyview.comp`; the A/B cost is `docs/perf/m17.7b-sky/README.md` |
+> | m17.7c | ✅ #183 | `sky_transmittance.comp`, `sky_multiple_scattering.comp`; `tests/render/sky_atmosphere_test.cpp` |
+> | m17.7d | ✅ #183 | ADR-0041 amendment of 2026-09-22 ("after the m17.7a–d physical-sky work") and `samples/99-the-block/main.cpp:1484`, which calls `set_ambient` "the sky-less fallback" |
+> | **m17.7e** | ✂️ **cut** | ADR-0041 amendment 2026-09-22 (m17.10): aerial perspective would spend budget the frame does not have. Costs only the "landscape reads as kilometres deep" claim |
+> | m17.8 / m17.8b | ✅ #181 | the owned ground and the generated BC7 material; `docs/perf/m17.8b-hold/` holds the unpinned re-measurement |
+> | m17.9 | ✂️ **cut** | ADR-0041 amendment 2026-09-22: the CSM numbers show no shadow-scaling breach; virtual shadow maps would need sparse binding |
+> | m17.10 | ✅ measured, ⚠️ clause **not met** | `docs/perf/2026-09-22-99-the-block-nvidia-geforce-rtx-3060.json:19` (`frame` p99 28.376, max 31.296; `sim.block` p99 15.692; `sim.collapse` max 15.121) against 16.600 / 33.000 / 6.000 / 12.000. Unpinned (the pinning access is gone) |
+>
+> **Where M17 landed.** #181 (`e28a78a`, 2026-09-20) squashed m17.0–m17.8b. m17.7a–d and m17.10 did
+> not get a PR of their own: they went to `main` inside **#183** (`6ac770e`, "M18: virtual geometry
+> foundation … Consolidates M17 visual work (ADR-0043)"), which is why the milestone table says the
+> visual work was delivered on the consolidated M18 branch. The ADR-0040 and ADR-0041 headers still
+> read `Status: Proposed` although their code has landed (`docs/adr/0040-sky-and-atmosphere.md:3`,
+> `docs/adr/0041-the-visual-bar-m17.md:3`); ADRs are append-only, so that is recorded here rather
+> than edited there.
+>
+> **The corrections this refresh makes.** (1) The 2026-09-06 note below that calls the ring "**m17.4**"
+> as an open finding is now a *closed* one — see the m17.4 row. (2) The note that "the sky does not
+> light the scene" and that "m17.7 schedules it" is superseded: the block's street is lit by the
+> sky's solar source, with `set_ambient` demoted to the fallback (`main.cpp:1476-1486`). (3) M17's
+> frame-rate clause is **unpaid, not waived**: it transfers to M18 gate 7 unchanged, and the best
+> clean-tree number is still 28.376 ms p99 against 16.600.
+
 > **This milestone started without its planning brick, and that is recorded rather than tidied
 > away.** Every milestone since M12 opened with an ADR and a brick ladder; M17 opened with two
 > bricks and got its ladder third. [ADR-0040](adr/0040-sky-and-atmosphere.md) was written afterwards
@@ -2702,7 +2738,7 @@ m17.8, m17.10.
 > **The sky does not light the scene, and no test can currently see that it doesn't.** All three
 > consumers of a sky's radiance — forward ambient, the DDGI miss, the SSR miss — still read one
 > constant (`SceneRenderer::ambient_`, whose own comment still calls it "the crude GI stand-in until
-> M10"). ADR-0040 §6 names the replacement; **m17.7 schedules it.**
+> M10"). ADR-0040 §6 names the replacement; **m17.7 schedules it.** *(Since landed through m17.7d — see the 2026-10-04 progress table above; this paragraph is the state as of 2026-09-06.)*
 >
 > **Every lighting pass writes pass-owned buffers per frame with no frame-in-flight ring** — the
 > finding opened at three passes and closed at seven. `write_buffer` calls sit inside the per-frame
@@ -2714,7 +2750,7 @@ m17.8, m17.10.
 > express". The fix one level up was a ring of `frames_in_flight + 1`; the pass-owned buffers never
 > got it. It cannot show up under `submit_blocking`, which is every test — only under `present()`,
 > which is the editor viewport and every `--windowed` sample, i.e. exactly where a *visual* bar gets
-> judged. **Reasoned, not reproduced**, and it is **m17.4**: the ring depth is owned by
+> judged. **Reasoned, not reproduced**, and it is **m17.4** *(since landed in #181 — see the 2026-10-04 progress table above)*: the ring depth is owned by
 > `SceneRenderer`, so fixing it means threading a slot index into seven passes.
 >
 > Smaller things named so they are not rediscovered: the cloud layer's per-pixel cost is
