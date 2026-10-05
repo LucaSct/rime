@@ -38,11 +38,13 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include "rime/assets/heightfield_asset.hpp"
@@ -725,4 +727,370 @@ TEST_CASE("m19.3: upload refuses what it will not draw, and counts every refusal
     CHECK(pass.tile_count() == 0);
     CHECK(pass.upload(good) != render::kInvalidTerrainTile);
     CHECK(pass.tiles_refused() == expected_refusals); // the good one did not disturb the tally
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// m19.4 — SPLAT BLENDING (ADR-0063). Structural proofs, no golden images, no colour tolerances.
+//
+// Radiance under a fixed camera and light is LINEAR in albedo (terrain.frag: base * irradiance,
+// where irradiance depends only on the geometry), so "the splat render of X" can be compared
+// against "the plain v1 render with albedo X" PIXEL FOR PIXEL. Every claim below is one of:
+// bit-identical to a v1 render, strictly between two v1 renders, or nearer one v1 render than
+// another by a geometric region chosen with margin (never a colour margin).
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+namespace {
+
+using Palette4 = render::TerrainPalette;
+
+render::TerrainLight splat_light(core::Vec3 albedo) {
+    render::TerrainLight l{};
+    l.sun_direction = {0.8f, -0.6f, 0.0f};
+    l.sun_irradiance = 4.0f;
+    l.albedo = albedo;
+    l.ambient = 0.1f; // > 0, so no pixel's radiance is zero and a channel can never hide at black
+    return l;
+}
+
+// A v2 asset over the fixture's heights. `weights` is 4 bytes per texel, row-major, x fastest.
+assets::HeightfieldAsset make_splat_asset(const std::vector<std::uint16_t>& samples,
+                                          std::uint32_t wc,
+                                          std::uint32_t wr,
+                                          std::vector<std::uint8_t> weights) {
+    assets::HeightfieldAsset a = make_asset(samples);
+    a.weight_columns = wc;
+    a.weight_rows = wr;
+    a.weights = std::move(weights);
+    for (std::uint32_t k = 0; k < 4; ++k) {
+        a.layers[k] = assets::AssetId{0x1000u + k};
+    }
+    return a;
+}
+
+std::vector<std::uint8_t>
+uniform_weights(std::uint32_t wc, std::uint32_t wr, std::array<std::uint8_t, 4> texel) {
+    std::vector<std::uint8_t> w;
+    for (std::uint32_t t = 0; t < wc * wr; ++t) {
+        w.insert(w.end(), texel.begin(), texel.end());
+    }
+    return w;
+}
+
+// Draw one tile through the real TerrainPass::add into a cleared HDR target; return the readback.
+std::vector<std::uint8_t> render_tile(rhi::Device& device,
+                                      render::TerrainPass& pass,
+                                      render::TerrainTileId id,
+                                      const render::TerrainLight& light) {
+    render::RenderGraph graph(device);
+    graph.reset();
+    const render::RGTexture hdr =
+        graph.create_texture({{kSize, kSize}, render::kHdrFormat, "splat-hdr"});
+    const render::RGTexture depth =
+        graph.create_texture({{kSize, kSize}, render::kDepthFormat, "splat-depth"});
+    graph.export_texture(hdr);
+    {
+        const render::RGColorAttachment clears[] = {
+            {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
+        const render::RGDepthAttachment dclear{
+            depth, rhi::LoadOp::Clear, rhi::StoreOp::Store, 1.0f, 0, false, 0};
+        render::RenderGraph::RasterPassDesc cd{};
+        cd.colors = clears;
+        cd.depth = &dclear;
+        graph.add_raster_pass("frame-clear", cd, [](rhi::CommandBuffer&) {});
+    }
+    pass.add(graph, hdr, depth, id, top_down_view_proj(), light);
+    auto cmd = device.begin_commands();
+    graph.execute(*cmd);
+    device.submit_blocking(*cmd);
+    return read_texture(device, graph.physical(hdr), 8);
+}
+
+float chan(const std::vector<std::uint8_t>& img, std::uint32_t px, std::uint32_t py, int c) {
+    std::uint16_t h = 0;
+    std::memcpy(&h, &img[(std::size_t{py} * kSize + px) * 8 + std::size_t(c) * 2], sizeof(h));
+    return half_to_float(h);
+}
+
+// Pixels whose RGB differs from the black clear: the vacuity witness ("something was drawn").
+int covered_pixels(const std::vector<std::uint8_t>& img) {
+    int n = 0;
+    for (std::uint32_t py = 0; py < kSize; ++py) {
+        for (std::uint32_t px = 0; px < kSize; ++px) {
+            if (chan(img, px, py, 0) > 0.0f || chan(img, px, py, 1) > 0.0f ||
+                chan(img, px, py, 2) > 0.0f) {
+                ++n;
+            }
+        }
+    }
+    return n;
+}
+
+// The v1 reference render: the same heights, flat albedo `c`.
+std::vector<std::uint8_t>
+render_v1(rhi::Device& device, const std::vector<std::uint16_t>& samples, core::Vec3 c) {
+    render::TerrainPass pass(device);
+    const render::TerrainTileId id = pass.upload(make_asset(samples));
+    REQUIRE(id != render::kInvalidTerrainTile);
+    return render_tile(device, pass, id, splat_light(c));
+}
+
+std::vector<std::uint8_t> render_v2(rhi::Device& device,
+                                    const std::vector<std::uint16_t>& samples,
+                                    std::uint32_t wc,
+                                    std::uint32_t wr,
+                                    std::vector<std::uint8_t> weights,
+                                    const Palette4& palette) {
+    render::TerrainPass pass(device);
+    const render::TerrainTileId id =
+        pass.upload(make_splat_asset(samples, wc, wr, std::move(weights)), palette);
+    REQUIRE(id != render::kInvalidTerrainTile);
+    const auto img = render_tile(device, pass, id, splat_light({0.0f, 0.0f, 0.0f}));
+    CHECK(pass.tiles_drawn() == 1);
+    CHECK(pass.splat_refused() == 0);
+    return img;
+}
+
+constexpr core::Vec3 kLayerColors[4] = {{0.8f, 0.2f, 0.1f},
+                                        {0.1f, 0.7f, 0.9f},
+                                        {0.9f, 0.9f, 0.05f},
+                                        {0.05f, 0.1f, 0.3f}};
+
+Palette4 distinct_palette() {
+    Palette4 p{};
+    for (std::size_t k = 0; k < 4; ++k) {
+        p[k].base_color = kLayerColors[k];
+    }
+    return p;
+}
+
+std::unique_ptr<rhi::Device> splat_device() {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the splat proof");
+    }
+    return device;
+}
+
+} // namespace
+
+TEST_CASE("m19.4: a splat tile whose four layers are equal is BIT-IDENTICAL to the flat tile") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    const core::Vec3 x{0.37f, 0.61f, 0.23f};
+    const auto a = render_v1(*device, samples, x);
+
+    // 5x3 — deliberately not the 33x33 height grid. Every texel sums to 255; the combinations are
+    // chosen so that each weight channel, and sums that are not exactly representable (n/255),
+    // occur.
+    const std::uint8_t texels[15][4] = {{255, 0, 0, 0},
+                                        {0, 255, 0, 0},
+                                        {0, 0, 0, 255},
+                                        {128, 127, 0, 0},
+                                        {85, 85, 85, 0},
+                                        {64, 64, 64, 63},
+                                        {1, 1, 1, 252},
+                                        {0, 0, 128, 127},
+                                        {0, 0, 255, 0},
+                                        {0, 128, 0, 127},
+                                        {200, 50, 5, 0},
+                                        {10, 20, 30, 195},
+                                        {0, 0, 0, 255},
+                                        {100, 100, 50, 5},
+                                        {3, 252, 0, 0}};
+    std::vector<std::uint8_t> w;
+    for (const auto& t : texels) {
+        w.insert(w.end(), t, t + 4);
+    }
+    Palette4 pal{};
+    for (auto& l : pal) {
+        l.base_color = x;
+    }
+    const auto b = render_v2(*device, samples, 5, 3, w, pal);
+
+    const int covered = covered_pixels(a);
+    CHECK(covered > 8000); // the tile fills the frame; a blank render would "match" itself
+    CHECK(covered_pixels(b) == covered);
+    REQUIRE(a.size() == b.size());
+    CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+}
+
+TEST_CASE("m19.4: a pure layer-0 map is bit-identical to the flat tile of that colour") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    const auto a = render_v1(*device, samples, kLayerColors[0]);
+    const auto b = render_v2(
+        *device, samples, 3, 3, uniform_weights(3, 3, {255, 0, 0, 0}), distinct_palette());
+    CHECK(covered_pixels(a) > 8000);
+    CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+}
+
+TEST_CASE("m19.4: a 50/50 blend lies strictly between the two layers' renders, per channel") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    const auto r0 = render_v1(*device, samples, kLayerColors[0]);
+    const auto r1 = render_v1(*device, samples, kLayerColors[1]);
+    const auto b = render_v2(
+        *device, samples, 2, 2, uniform_weights(2, 2, {128, 127, 0, 0}), distinct_palette());
+    int checked = 0;
+    for (std::uint32_t py = 0; py < kSize; ++py) {
+        for (std::uint32_t px = 0; px < kSize; ++px) {
+            if (chan(r0, px, py, 0) <= 0.0f) {
+                continue; // not covered
+            }
+            for (int c = 0; c < 3; ++c) {
+                const float lo = std::min(chan(r0, px, py, c), chan(r1, px, py, c));
+                const float hi = std::max(chan(r0, px, py, c), chan(r1, px, py, c));
+                const float v = chan(b, px, py, c);
+                REQUIRE(lo < hi);
+                CHECK(v > lo);
+                CHECK(v < hi);
+            }
+            ++checked;
+        }
+    }
+    CHECK(checked > 8000);
+}
+
+TEST_CASE("m19.4: every layer is reachable — a pure layer-k map is nearest layer k's render") {
+    // Catches a dropped w1/w2/w3 term, which the equal-layers anchor cannot see (every difference
+    // is zero there). Four distinct colours, one uniform pure map per layer.
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    std::vector<std::uint8_t> refs[4];
+    for (int k = 0; k < 4; ++k) {
+        refs[k] = render_v1(*device, samples, kLayerColors[k]);
+    }
+    for (int k = 0; k < 4; ++k) {
+        std::array<std::uint8_t, 4> t{0, 0, 0, 0};
+        t[std::size_t(k)] = 255;
+        const auto img =
+            render_v2(*device, samples, 2, 2, uniform_weights(2, 2, t), distinct_palette());
+        int wrong = 0;
+        int checked = 0;
+        for (std::uint32_t py = 0; py < kSize; ++py) {
+            for (std::uint32_t px = 0; px < kSize; ++px) {
+                if (chan(refs[0], px, py, 0) <= 0.0f) {
+                    continue;
+                }
+                float best = std::numeric_limits<float>::max();
+                int best_k = -1;
+                for (int m = 0; m < 4; ++m) {
+                    float d = 0.0f;
+                    for (int c = 0; c < 3; ++c) {
+                        d += std::fabs(chan(img, px, py, c) - chan(refs[m], px, py, c));
+                    }
+                    if (d < best) {
+                        best = d;
+                        best_k = m;
+                    }
+                }
+                wrong += (best_k != k);
+                ++checked;
+            }
+        }
+        CHECK(checked > 8000);
+        CHECK(wrong == 0);
+    }
+}
+
+TEST_CASE("m19.4: the weight map is walked x-fastest, corner-aligned, left to right") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    // 4 wide x 2 tall: columns 0,1 pure layer 0; columns 2,3 pure layer 1 (both rows alike). A
+    // transposed walk reads this as a top/bottom split, a flipped axis as a mirrored one; either
+    // moves the left or right region's colour.
+    std::vector<std::uint8_t> w;
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 4; ++i) {
+            const std::uint8_t t[4] = {
+                std::uint8_t(i < 2 ? 255 : 0), std::uint8_t(i < 2 ? 0 : 255), 0, 0};
+            w.insert(w.end(), t, t + 4);
+        }
+    }
+    const auto r0 = render_v1(*device, samples, kLayerColors[0]);
+    const auto r1 = render_v1(*device, samples, kLayerColors[1]);
+    const auto b = render_v2(*device, samples, 4, 2, w, distinct_palette());
+
+    // Pixel column px has world-local x = (px + 0.5) * 0.25 m of a 32 m tile (orthographic,
+    // fitted). Weight texel centres sit at x/extent = 0, 1/3, 2/3, 1, so x/extent < 1/3 is pure
+    // layer 0 and > 2/3 pure layer 1. The regions below are the outer 23% / 23%, inside those spans
+    // with margin.
+    int left = 0;
+    int right = 0;
+    for (std::uint32_t py = 2; py < kSize - 2; ++py) {
+        for (std::uint32_t px = 0; px < 30; ++px) {
+            for (int c = 0; c < 3; ++c) {
+                CHECK(chan(b, px, py, c) == chan(r0, px, py, c)); // exact: w1..w3 are 0 here
+            }
+            ++left;
+        }
+        for (std::uint32_t px = 98; px < kSize; ++px) {
+            for (int c = 0; c < 3; ++c) {
+                CHECK(std::fabs(chan(b, px, py, c) - chan(r1, px, py, c)) <
+                      std::fabs(chan(b, px, py, c) - chan(r0, px, py, c)));
+            }
+            ++right;
+        }
+    }
+    CHECK(left > 3000);
+    CHECK(right > 3000);
+}
+
+TEST_CASE("m19.4: splat refusals are counted, and v1 assets are untouched by them") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    render::TerrainPass pass(*device);
+    const auto good = make_splat_asset(samples, 2, 2, uniform_weights(2, 2, {255, 0, 0, 0}));
+
+    // v2 through the palette-less overload: no materials, so refused rather than guessed.
+    CHECK(pass.upload(good) == render::kInvalidTerrainTile);
+    CHECK(pass.tiles_refused() == 1);
+    CHECK(pass.splat_refused() == 1);
+
+    // A weight map past the cap (4097 wide).
+    auto wide = make_splat_asset(samples, 4097, 1, uniform_weights(4097, 1, {255, 0, 0, 0}));
+    CHECK(pass.upload(wide, distinct_palette()) == render::kInvalidTerrainTile);
+    CHECK(pass.tiles_refused() == 2);
+    CHECK(pass.splat_refused() == 2);
+
+    // A weight span that does not match its size.
+    auto torn = good;
+    torn.weights.pop_back();
+    CHECK(pass.upload(torn, distinct_palette()) == render::kInvalidTerrainTile);
+    CHECK(pass.tiles_refused() == 3);
+    CHECK(pass.splat_refused() == 3);
+
+    // A heights failure moves tiles_refused() only.
+    auto bad = good;
+    bad.cell_size_x = 0.0f;
+    CHECK(pass.upload(bad, distinct_palette()) == render::kInvalidTerrainTile);
+    CHECK(pass.tiles_refused() == 4);
+    CHECK(pass.splat_refused() == 3);
+
+    // A v1 asset uploads through either overload and never touches the splat counter.
+    CHECK(pass.upload(make_asset(samples)) != render::kInvalidTerrainTile);
+    CHECK(pass.upload(make_asset(samples), distinct_palette()) != render::kInvalidTerrainTile);
+    CHECK(pass.upload(good, distinct_palette()) != render::kInvalidTerrainTile);
+    CHECK(pass.tiles_refused() == 4);
+    CHECK(pass.splat_refused() == 3);
 }
