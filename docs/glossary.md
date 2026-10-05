@@ -625,6 +625,26 @@ Entries are grouped roughly by area and kept short on purpose.
   textures in the engine, colour and roughness are the whole surface vocabulary, and this is the
   cheapest rule that gives a facade vertical structure — it reads as shopfronts under a low sun.
 
+- **Tick barrier.** The point between two simulation ticks at which the world may be changed
+  structurally — bodies created or destroyed, shapes registered — because nothing is stepping it.
+  Rime's regional terrain collision (m19.8c, ADR-0068) does *all* of its work there: which tiles
+  are installed is read and changed at the barrier only, in a fixed order, so the result cannot
+  depend on which disk read happened to finish first.
+- **Deferred admission.** Holding an entity *out of the simulation* until the ground it is about
+  to stand on is installed, while everything else keeps ticking. The answer to "a player
+  teleported onto terrain that has not loaded": the entity waits, the server does not (ADR-0068).
+- **Stall (terrain).** The safety net beside deferred admission: if a body that is *already*
+  simulated needs a tile that is not installed, the whole tick waits rather than stepping that body
+  over empty ground. Counted separately, and expected to read zero when the prefetch envelope is
+  sized correctly.
+- **Prefetch envelope / hysteresis (streaming).** The *prefetch envelope* is how far ahead of a
+  body tiles are requested (one tile width, by default), so they are installed before they are
+  needed. *Hysteresis* is keeping them for longer than that (two widths) before letting go, so a
+  body pacing across a boundary does not load and unload the same tile every step.
+- **Pin (streaming).** A request that a resource stay resident for a stated reason other than "a
+  body is on it" — a pending query, rollback history, an entity waiting to be admitted. Counted
+  per reason, so "why is this still loaded?" has an answer.
+
 ## Assets & the pipeline
 
 - **Content root.** The directory a running game reads its content from (m20.2,
