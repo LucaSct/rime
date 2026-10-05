@@ -3,7 +3,9 @@
 
 #include "rime/assets/asset_server.hpp"
 
+#include <algorithm>
 #include <span>
+#include <type_traits>
 
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/core/byte_cursor.hpp"
@@ -85,6 +87,26 @@ TextureAsset make_placeholder_texture() {
     tex.mips.push_back({1, 1, 16, 4});
     return tex;
 }
+
+// What differs between the streamed kinds: a name for the log line and the one-call reader. The
+// rest of the streamed path (slots, ownership, eviction) is written once, as templates over T.
+template <class T> struct StreamKind;
+
+template <> struct StreamKind<HeightfieldAsset> {
+    static constexpr const char* kName = "heightfield";
+
+    static std::optional<HeightfieldAsset> read(std::span<const std::byte> file, AssetError& err) {
+        return read_heightfield(file, err);
+    }
+};
+
+template <> struct StreamKind<TerrainLayerAsset> {
+    static constexpr const char* kName = "terrain layer";
+
+    static std::optional<TerrainLayerAsset> read(std::span<const std::byte> file, AssetError& err) {
+        return read_terrain_layer(file, err);
+    }
+};
 
 } // namespace
 
@@ -215,10 +237,285 @@ void AssetServer::load_material_job(std::uint32_t index, std::filesystem::path p
     }
 }
 
+// ─── The streamed kinds (m19.8b, ADR-0067) ──────────────────────────────────────────────────────
+//
+// The technique is a GENERATIONAL SLOT MAP with an ownership count per slot. A slot is in exactly
+// one of three conditions, and mu_ makes every transition between them atomic:
+//
+//   FREE      occupied == false. On the free list. Its generation is already one past every
+//             handle ever issued for it, so no handle resolves to it.
+//   OWNED     occupied, owners > 0. Resident (or loading, or Failed) and reachable by handle.
+//   OWED      occupied, owners == 0, in_flight. The last owner left while the load job was still
+//             running. The slot stays occupied — pinned by the job, which will write into it by
+//             index — and the job evicts it on its way out. No handle resolves to it.
+//
+// There is deliberately no fourth "occupied, unowned, idle" condition: the two places an owner
+// count can reach zero with no job in flight (release, and a job finishing an OWED slot) both
+// evict before they drop the lock.
+
+template <class T> AssetServer::StreamPool<T>& AssetServer::stream_pool() noexcept {
+    if constexpr (std::is_same_v<T, HeightfieldAsset>) {
+        return hf_pool_;
+    } else {
+        static_assert(std::is_same_v<T, TerrainLayerAsset>);
+        return layer_pool_;
+    }
+}
+
+template <class T> const AssetServer::StreamPool<T>& AssetServer::stream_pool() const noexcept {
+    if constexpr (std::is_same_v<T, HeightfieldAsset>) {
+        return hf_pool_;
+    } else {
+        static_assert(std::is_same_v<T, TerrainLayerAsset>);
+        return layer_pool_;
+    }
+}
+
+template <class T>
+StreamedAssetHandle<T> AssetServer::request_streamed(const std::filesystem::path& path) {
+    const std::string key = path.string();
+    StreamPool<T>& pool = stream_pool<T>();
+    StreamedAssetHandle<T> handle;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        ++stream_counters_.requests;
+        if (const auto it = pool.by_path.find(key); it != pool.by_path.end()) {
+            // Coalesce — and take an ownership, which is the difference from the retained path.
+            StreamSlot<T>& slot = pool.slots[it->second];
+            ++stream_counters_.coalesced_requests;
+            if (slot.owners == 0) {
+                // An OWED slot: its eviction was deferred behind the in-flight job, and now
+                // somebody wants the same file again. Adopt the load instead of letting it be
+                // thrown away and read a second time. The owed eviction is cancelled, visibly.
+                ++stream_counters_.cancelled_evictions;
+            }
+            ++slot.owners;
+            return StreamedAssetHandle<T>{it->second, slot.generation};
+        }
+        std::uint32_t index;
+        if (!pool.free.empty()) {
+            // Reuse the most recently evicted index. LIFO keeps the slot deque dense; it is also
+            // the order that makes a stale handle most likely to collide with a new tenant, so
+            // the generation check below is load-bearing rather than theoretical.
+            index = pool.free.back();
+            pool.free.pop_back();
+        } else {
+            index = static_cast<std::uint32_t>(pool.slots.size());
+            pool.slots.emplace_back();
+        }
+        StreamSlot<T>& slot = pool.slots[index];
+        slot.state = AssetState::Loading;
+        slot.owners = 1;
+        slot.occupied = true;
+        slot.in_flight = true; // set under the same lock that publishes the slot: pinned from birth
+        slot.key = key;
+        pool.by_path.emplace(key, index);
+        ++pool.live;
+        ++stream_counters_.loads_started;
+        handle = StreamedAssetHandle<T>{index, slot.generation};
+    }
+    jobs_.run([this, index = handle.index, path] { load_streamed_job<T>(index, path); },
+              &inflight_);
+    return handle;
+}
+
+template <class T>
+void AssetServer::load_streamed_job(std::uint32_t index, std::filesystem::path path) {
+    physical_loads_.fetch_add(1, std::memory_order_relaxed);
+    // IO + decode OUTSIDE the lock, as for the retained kinds. `asset` is declared before the lock
+    // below, so if the result turns out to be unwanted it is destroyed after the lock is dropped.
+    std::optional<T> asset;
+    if (const std::optional<std::vector<std::byte>> bytes = platform::read_file(path)) {
+        AssetError error = AssetError::Io;
+        asset = StreamKind<T>::read(*bytes, error);
+        if (!asset) {
+            RIME_ERROR("assets: async {} load '{}' failed: {}",
+                       StreamKind<T>::kName,
+                       path.string(),
+                       to_string(error));
+        }
+    } else {
+        RIME_ERROR("assets: async {} load cannot open '{}'", StreamKind<T>::kName, path.string());
+    }
+
+    StreamPool<T>& pool = stream_pool<T>();
+    std::lock_guard<std::mutex> lock(mu_);
+    // The index is still ours: in_flight pinned the slot, so it was neither evicted nor reused
+    // while we were decoding, however many owners came and went. That is why the job needs no
+    // generation of its own.
+    StreamSlot<T>& slot = pool.slots[index];
+    slot.in_flight = false;
+    if (!asset) {
+        ++stream_counters_.failed_loads;
+    }
+    if (slot.owners == 0) {
+        // OWED: every owner released while we were loading. This is the deferred eviction being
+        // paid — here, by the job, at the first moment it is safe. The decoded bytes never enter
+        // the slot. (evict_locked returns the slot's payload; an OWED slot never had one.)
+        (void)evict_locked(pool, index);
+    } else if (asset) {
+        // Park the payload in the slot but leave the state Loading: only pump(), on the main
+        // thread, makes it Ready, so a getter never sees a payload appear mid-frame.
+        slot.asset = std::move(*asset);
+        asset.reset();
+        ++pool.resident;
+        pool.done.push_back(index);
+    } else {
+        slot.state = AssetState::Failed; // owned and failed: stays Failed until released
+    }
+}
+
+template <class T>
+const AssetServer::StreamSlot<T>* AssetServer::resolve_locked(StreamedAssetHandle<T> handle) const {
+    const StreamPool<T>& pool = stream_pool<T>();
+    if (handle.index >= pool.slots.size()) {
+        return nullptr; // invalid / never issued: "no handle", not a stale one
+    }
+    const StreamSlot<T>& slot = pool.slots[handle.index];
+    // THE GENERATION CHECK. The index says where to look; the generation says whether what is
+    // there is still what this handle was issued for. `owners == 0` additionally refuses a handle
+    // whose every ownership was released while the load was in flight (an OWED slot): same
+    // generation, but nothing the caller is entitled to.
+    if (!slot.occupied || slot.generation != handle.generation || slot.owners == 0) {
+        ++stream_counters_.stale_handle_resolutions;
+        return nullptr;
+    }
+    return &slot;
+}
+
+template <class T>
+std::optional<T> AssetServer::evict_locked(StreamPool<T>& pool, std::uint32_t index) {
+    StreamSlot<T>& slot = pool.slots[index];
+    std::optional<T> payload = std::move(slot.asset);
+    slot.asset.reset();
+    if (payload) {
+        --pool.resident;
+        // A payload that was loaded but never pumped is still queued for promotion; take it out,
+        // so pump() can never promote an index that now belongs to someone else. (The queue holds
+        // at most one frame's completions, so the linear erase is cheap.)
+        std::erase(pool.done, index);
+    }
+    pool.by_path.erase(slot.key);
+    slot.key.clear();
+    slot.state = AssetState::Loading;
+    slot.owners = 0;
+    slot.occupied = false;
+    slot.in_flight = false;
+    // Bump the generation: every handle issued so far for this index is now stale. A u32 wraps
+    // after 2^32 evictions of ONE index — at an eviction a second, 136 years — at which point a
+    // handle held across the entire wrap could alias. Accepted, and stated.
+    ++slot.generation;
+    pool.free.push_back(index);
+    --pool.live;
+    ++stream_counters_.evictions;
+    return payload;
+}
+
+template <class T> bool AssetServer::release_streamed(StreamedAssetHandle<T> handle) {
+    StreamPool<T>& pool = stream_pool<T>();
+    // Declared before the lock so an evicted payload is destroyed after the lock is dropped.
+    std::optional<T> doomed;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (resolve_locked(handle) == nullptr) {
+        return false; // stale (counted) or invalid: never touches whoever lives there now
+    }
+    StreamSlot<T>& slot = pool.slots[handle.index];
+    if (--slot.owners > 0) {
+        return true; // another owner still holds it: stays resident
+    }
+    if (slot.in_flight) {
+        // The load job is running (or queued) and will write into this slot by index. Freeing the
+        // slot now would let a new request reuse the index under that job. So the eviction is
+        // only RECORDED as owed; load_streamed_job pays it when it publishes.
+        ++stream_counters_.deferred_evictions;
+        return true;
+    }
+    doomed = evict_locked(pool, handle.index);
+    return true;
+}
+
+template <class T> AssetState AssetServer::state_streamed(StreamedAssetHandle<T> handle) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (handle.index >= stream_pool<T>().slots.size()) {
+        return AssetState::Failed; // invalid handle — same answer as the retained kinds
+    }
+    const StreamSlot<T>* slot = resolve_locked(handle);
+    return slot ? slot->state : AssetState::Stale;
+}
+
+template <class T> const T* AssetServer::get_streamed(StreamedAssetHandle<T> handle) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    const StreamSlot<T>* slot = resolve_locked(handle);
+    if (slot == nullptr || slot->state != AssetState::Ready) {
+        return nullptr;
+    }
+    // Stable address (deque) and not mutated while Ready; valid until the caller's ownership is
+    // released — see the header.
+    return &*slot->asset;
+}
+
+HeightfieldAssetHandle AssetServer::request_heightfield(const std::filesystem::path& path) {
+    return request_streamed<HeightfieldAsset>(path);
+}
+
+TerrainLayerAssetHandle AssetServer::request_terrain_layer(const std::filesystem::path& path) {
+    return request_streamed<TerrainLayerAsset>(path);
+}
+
+bool AssetServer::release(HeightfieldAssetHandle handle) {
+    return release_streamed(handle);
+}
+
+bool AssetServer::release(TerrainLayerAssetHandle handle) {
+    return release_streamed(handle);
+}
+
+AssetState AssetServer::state(HeightfieldAssetHandle handle) const {
+    return state_streamed(handle);
+}
+
+AssetState AssetServer::state(TerrainLayerAssetHandle handle) const {
+    return state_streamed(handle);
+}
+
+const HeightfieldAsset* AssetServer::get(HeightfieldAssetHandle handle) const {
+    return get_streamed(handle);
+}
+
+const TerrainLayerAsset* AssetServer::get(TerrainLayerAssetHandle handle) const {
+    return get_streamed(handle);
+}
+
+StreamCounters AssetServer::stream_counters() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return stream_counters_;
+}
+
+std::size_t AssetServer::live_heightfield_slots() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return hf_pool_.live;
+}
+
+std::size_t AssetServer::resident_heightfields() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return hf_pool_.resident;
+}
+
+std::size_t AssetServer::live_terrain_layer_slots() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return layer_pool_.live;
+}
+
+std::size_t AssetServer::resident_terrain_layers() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return layer_pool_.resident;
+}
+
 std::size_t AssetServer::pump() {
     std::vector<std::pair<std::uint32_t, MeshAsset>> meshes;
     std::vector<std::pair<std::uint32_t, TextureAsset>> textures;
     std::vector<std::pair<std::uint32_t, MaterialAsset>> materials;
+    std::size_t streamed = 0;
     {
         std::lock_guard<std::mutex> lock(mu_);
         meshes.swap(mesh_done_);
@@ -238,8 +535,20 @@ std::size_t AssetServer::pump() {
             mat_slots_[index].asset = std::move(mat);
             mat_slots_[index].state = AssetState::Ready;
         }
+        // Streamed kinds: the payload is already in its slot (the job parked it there); promoting
+        // is just the state flip. Every queued index is live and loaded — eviction removes its
+        // own entry from the queue — so there is no stale completion to skip here.
+        const auto promote = [&streamed](auto& pool) {
+            for (const std::uint32_t index : pool.done) {
+                pool.slots[index].state = AssetState::Ready;
+            }
+            streamed += pool.done.size();
+            pool.done.clear();
+        };
+        promote(hf_pool_);
+        promote(layer_pool_);
     }
-    return meshes.size() + textures.size() + materials.size();
+    return meshes.size() + textures.size() + materials.size() + streamed;
 }
 
 AssetState AssetServer::state(MeshAssetHandle handle) const {
