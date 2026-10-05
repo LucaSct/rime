@@ -376,6 +376,20 @@ Entries are grouped roughly by area and kept short on purpose.
 
 ## Physics & destruction
 
+- **Heightfield.** Terrain stored as a regular grid of heights over the ground plane (one height
+  per grid point, each cell split into two triangles along a fixed diagonal). Cheaper and more
+  structured than a triangle mesh — "which triangles are under this point" is a division, not a
+  search — at the price of no overhangs or caves. Rime's is cooked as quantised u16 samples with a
+  scale and offset (M19.1, ADR-0060-m19.1).
+- **DDA (digital differential analyzer) grid walk.** Stepping a ray through a grid cell by cell:
+  track, per axis, the distance at which the ray next crosses a grid line and always cross the
+  nearest one (Amanatides & Woo's "fast voxel traversal"). No cell is skipped or visited twice, and
+  cells come out in order along the ray — so the first hit found is the nearest. The heightfield
+  raycast is a 2-D DDA over its cells.
+- **Contact patch (terrain).** One group of body-vs-terrain contacts sharing (nearly) one normal,
+  solved as one manifold. A body touching terrain in places whose normals differ — a ball in a
+  gully — gets one patch per surface direction (`Manifold::patch`).
+
 - **Rigid body.** A solid object that doesn't deform, simulated with position, velocity,
   mass, and collisions. Debris chunks are rigid bodies.
 - **ECS↔physics sync.** The bridge (`PhysicsSync`) that keeps game data (entities with
@@ -506,6 +520,13 @@ Entries are grouped roughly by area and kept short on purpose.
   cheapest rule that gives a facade vertical structure — it reads as shopfronts under a low sun.
 
 ## Assets & the pipeline
+
+- **Quantised heights.** Storing terrain heights as integers (u16: 65,536 levels) plus a
+  scale and offset in the header, `height = offset + scale × sample`, instead of floats: exactly
+  what 16-bit height maps already are, half the bytes, and uniform precision — at the cost of a
+  bounded error of half a step (`scale / 2`).
+- **Reject counter (`AssetRejectCounters`).** A caller-owned tally of refused loads, by reason.
+  A loader that falls back or moves on after a refusal would otherwise leave no trace of it.
 
 - **Asset.** A piece of content the engine consumes — a mesh, texture, material, sound,
   animation clip, destructible. Source assets (glTF, PNG, STL…) are what tools edit;

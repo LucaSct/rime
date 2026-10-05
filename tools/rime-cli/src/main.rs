@@ -119,6 +119,19 @@ enum Command {
         #[arg(long)]
         coarse: bool,
     },
+    /// Cook a terrain heightfield (M19.1): a 16-bit grayscale `.png` (or raw little-endian `.r16`)
+    /// height map plus its `<source>.toml` sidecar (world size, height range, origin) into
+    /// `<name>.rhf`. The samples are copied verbatim — the cook never re-quantises.
+    Heightfield {
+        /// The `.png` / `.r16` source; its sidecar is the same path with a `.toml` extension.
+        input: PathBuf,
+        /// Output directory for the `<name>.rhf` file.
+        #[arg(long)]
+        out: PathBuf,
+        /// Output file stem (writes `<name>.rhf`). Defaults to the input file's stem.
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Print the header of a cooked RMA1 asset file.
     Inspect {
         /// A cooked `.rmesh`/`.rtex` (or other RMA1) file.
@@ -174,6 +187,9 @@ fn main() -> ExitCode {
             coarse,
         }) => run_sdf(&input, &out, name.as_deref(), coarse),
         Some(Command::Ground { out, name, bc }) => run_ground(&out, &name, bc),
+        Some(Command::Heightfield { input, out, name }) => {
+            run_heightfield(&input, &out, name.as_deref())
+        }
         Some(Command::Inspect { file }) => run_inspect(&file),
     }
 }
@@ -272,6 +288,38 @@ fn mesh_geometry_for_sdf(input: &Path) -> Result<SoupGeometry, asset_pipeline::P
     // rebuild — the constant lives in the type instead of in three index expressions.
     let triangles: Vec<[u32; 3]> = mesh.indices.as_chunks::<3>().0.to_vec();
     Ok((vertices, triangles))
+}
+
+/// Cook one heightfield source into `<out>/<name>.rhf`.
+fn run_heightfield(input: &Path, out: &Path, name: Option<&str>) -> ExitCode {
+    let hf = match asset_pipeline::heightfield::Heightfield::from_file(input) {
+        Ok(hf) => hf,
+        Err(e) => {
+            eprintln!("rime heightfield: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stem = name.map(str::to_string).unwrap_or_else(|| {
+        input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "terrain".to_string())
+    });
+    let (bytes, id) = hf.cook();
+    let file = out.join(format!("{stem}.rhf"));
+    if let Err(e) = std::fs::create_dir_all(out).and_then(|()| std::fs::write(&file, &bytes)) {
+        eprintln!("rime heightfield: writing {}: {e}", file.display());
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "cooked {} -> {} ({}x{} samples, {:.4} m/step, id {id:016x})",
+        input.display(),
+        file.display(),
+        hf.columns,
+        hf.rows,
+        hf.height_scale()
+    );
+    ExitCode::SUCCESS
 }
 
 fn run_sdf(input: &Path, out: &Path, name: Option<&str>, coarse: bool) -> ExitCode {

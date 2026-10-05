@@ -41,6 +41,7 @@ and replay validation build on. Scope: same-binary reproducibility, *not* cross-
 | M7.11 | **shapes II: convex hulls** — world-owned hull store ([ADR-0027](../../docs/adr/0027-convex-hull-shapes.md)); authored+validated geometry, polyhedral mass properties → principal axes ([math note](../../docs/math/polyhedral-mass-properties.md)); hull support fn through GJK/EPA; reference-face clipping generalized to hull faces; hull raycast/overlap/CCD | landed |
 | M7.12 | **compound shapes** — world-owned compound store ([ADR-0028](../../docs/adr/0028-compound-shapes.md)); one body, many convex children at local poses; parallel-axis mass composition ([math note](../../docs/math/compound-mass-properties.md)); narrowphase-expansion multi-region contacts (per-child manifolds, per-region events) | landed |
 | M7.13 | **instrumentation + stress harness** — `WorldStats` (deterministic per-tick body/collision/island counts via `stats()`); `samples/09-physics-playground --stress` debris-scale load + throughput report; the measure-first capstone | landed |
+| M19.1 | **terrain heightfield** ([ADR-0060-m19.1](../../docs/adr/0060-m19.1-heightfield.md)) — world-owned quantised-u16 store, static-only bodies, one broadphase leaf per tile; a 2-D DDA ray walk with exact per-triangle roots; one-sided per-triangle contacts (sphere, capsule, box/hull, compound children) grouped into ≤4 normal patches (`Manifold::patch`); fallbacks counted (`WorldStats::heightfield_*`, `heightfield_query_skips()`). `shape_cast`/`penetration`/CCD against terrain deferred | landed |
 
 **M7's "done when" (ROADMAP): objects fall/collide/stack; raycasts hit; runs parallel to the frame —
 met**, proven by `samples/09-physics-playground` self-checking in CI. M7.9–M7.13 are the
@@ -82,6 +83,7 @@ engine/physics/
     ├── support.hpp/gjk.hpp/epa.hpp/narrowphase.hpp   # the collision algorithm suite
     ├── hull.hpp            #   the convex-hull store entry: validation, mass properties (M7.11)
     ├── compound.hpp        #   the compound store entry: child list, composed mass props (M7.12)
+    ├── heightfield.hpp     #   the terrain store entry, the DDA ray walk, per-triangle contacts (M19.1)
     ├── solver.hpp          #   sequential-impulse + NGS
     ├── islands.hpp         #   union-find island partition
     └── scene_query.hpp     #   exact ray-vs-shape / sphere-vs-shape geometry

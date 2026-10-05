@@ -475,3 +475,35 @@ fn bc7_cooks_to_a_file_whose_levels_round_up_to_whole_blocks() {
         "BC7 should be ~4x smaller, got {ratio}x"
     );
 }
+
+#[test]
+fn terrain_png_cooks_to_the_committed_heightfield_fixture_bytes() {
+    // The M19.1 heightfield cross-language alarm: terrain.rhf is what the C++ fixture test loads.
+    // Cooking terrain.png + terrain.toml must reproduce it byte for byte — twice, which is also the
+    // file-level determinism proof (PNG decode + sidecar parse + encode, end to end). Regenerate
+    // deliberately with `rime heightfield tests/assets/fixtures/terrain.png --out
+    // tests/assets/fixtures` if the format changes.
+    use asset_pipeline::heightfield::Heightfield;
+    let committed = std::fs::read(fixtures().join("terrain.rhf")).unwrap();
+    let first = Heightfield::from_file(&fixtures().join("terrain.png"))
+        .unwrap()
+        .cook()
+        .0;
+    let second = Heightfield::from_file(&fixtures().join("terrain.png"))
+        .unwrap()
+        .cook()
+        .0;
+    assert_eq!(
+        first, second,
+        "two cooks of one source differ — the cook is not deterministic"
+    );
+    assert_eq!(
+        first, committed,
+        "heightfield cooker output diverged from the committed fixture — regenerate it deliberately"
+    );
+    let (header, _) = read_header(&committed).unwrap();
+    assert_eq!(
+        header.asset_kind,
+        asset_pipeline::cooked::ASSET_KIND_HEIGHTFIELD
+    );
+}

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -14,6 +15,7 @@
 
 #include "aabb_tree.hpp"
 #include "compound.hpp"
+#include "heightfield.hpp"
 #include "hull.hpp"
 #include "islands.hpp"
 #include "narrowphase.hpp"
@@ -164,6 +166,22 @@ struct PhysicsWorld::Impl {
     std::vector<std::uint32_t> compound_refs;
     std::vector<std::uint32_t> compound_free_list;
 
+    // The heightfield store (M19.1): the same generational-slot contract again. `heightfield_refs`
+    // counts live bodies using each tile; unregister refuses while it is non-zero.
+    std::vector<HeightfieldShape> heightfields;
+    std::vector<std::uint32_t> heightfield_generation;
+    std::vector<std::uint8_t> heightfield_live;
+    std::vector<std::uint32_t> heightfield_refs;
+    std::vector<std::uint32_t> heightfield_free_list;
+
+    // Terrain fallback counters (WorldStats docs). The per-tick pair are written by the contact
+    // build (sequential — it never runs on a worker) and copied into last_stats; the query-skip
+    // total is cumulative and ATOMIC because queries are const and may be issued from several
+    // jobs at once between steps.
+    mutable std::uint32_t hf_patch_merges_last = 0;
+    mutable std::uint32_t hf_ccd_skipped_last = 0;
+    mutable std::atomic<std::uint64_t> hf_query_skips{0};
+
     AabbTree static_tree;
     AabbTree dynamic_tree;
 
@@ -253,6 +271,7 @@ struct PhysicsWorld::Impl {
     struct ContactRecord {
         std::uint64_t key = 0;      // (a.index << 32) | b.index
         std::uint32_t children = 0; // (child_a << 16) | child_b — the region within the pair
+        std::uint32_t patch = 0;    // Manifold::patch — the terrain patch within that (M19.1)
         BodyId a;
         BodyId b;
         core::Vec3 point{0.0f, 0.0f, 0.0f};
@@ -296,6 +315,14 @@ struct PhysicsWorld::Impl {
                                  float dt,
                                  std::vector<Manifold>& out,
                                  std::uint32_t& warm) const;
+    // The terrain arm of build_contacts (M19.1): one body (or each compound child of it) against
+    // one heightfield, fanned out into per-patch manifolds. Defined beside build_contacts.
+    void build_heightfield_contacts(const Pair& pr,
+                                    std::uint32_t da,
+                                    std::uint32_t db,
+                                    float dt,
+                                    std::vector<Manifold>& out,
+                                    std::uint32_t& warm) const;
     void commit_contact_cache(const std::vector<Manifold>& manifolds) const;
 
     [[nodiscard]] AabbTree& tree_for(std::uint8_t m) noexcept {
@@ -371,6 +398,19 @@ struct PhysicsWorld::Impl {
         return &compounds[s.compound.index];
     }
 
+    // Resolve a shape's heightfield reference — hull_of's twin for the terrain store (M19.1).
+    [[nodiscard]] const HeightfieldShape* heightfield_of(const ShapeDesc& s) const noexcept {
+        if (s.type != ShapeType::Heightfield) {
+            return nullptr;
+        }
+        if (s.heightfield.index >= heightfields.size() ||
+            heightfield_generation[s.heightfield.index] != s.heightfield.generation ||
+            heightfield_live[s.heightfield.index] == 0) {
+            return nullptr;
+        }
+        return &heightfields[s.heightfield.index];
+    }
+
     // The hull store as a span — the form the compound helpers take (compound.hpp stays free of
     // world internals; a compound's hull children resolve against exactly this store).
     [[nodiscard]] std::span<const ConvexHull> hull_span() const noexcept {
@@ -385,6 +425,9 @@ struct PhysicsWorld::Impl {
     aabb_of(const ShapeDesc& s, core::Vec3 pos, const core::Quat& q) const noexcept {
         if (const CompoundShape* c = compound_of(s); c != nullptr) {
             return compound_world_aabb(*c, hull_span(), pos, q);
+        }
+        if (const HeightfieldShape* hf = heightfield_of(s); hf != nullptr) {
+            return heightfield_world_aabb(*hf, pos, q);
         }
         const ConvexHull* h = hull_of(s);
         return h != nullptr ? hull_world_aabb(*h, pos, q) : compute_aabb(s, pos, q);
@@ -441,11 +484,20 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
     broadphase_pairs_last = static_cast<std::uint32_t>(pairs.size());
 
     std::uint32_t warm = 0;
+    hf_patch_merges_last = 0;
+    hf_ccd_skipped_last = 0;
     for (const Pair& pr : pairs) {
         const std::uint32_t da = dense_of(pr.a);
         const std::uint32_t db = dense_of(pr.b);
         if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex) {
             continue; // impossible for a pair compute_pairs just returned, but stay defensive
+        }
+
+        // Terrain first (M19.1): a heightfield is not convex, so neither the plain dispatch nor
+        // the compound expansion below can take it. Two heightfields never pair (both static).
+        if (shape[da].type == ShapeType::Heightfield || shape[db].type == ShapeType::Heightfield) {
+            build_heightfield_contacts(pr, da, db, dt, out, warm);
+            continue;
         }
 
         // A pair with a compound on either side expands into child-vs-child sub-pairs and may
@@ -658,6 +710,103 @@ void PhysicsWorld::Impl::build_compound_contacts(const Pair& pr,
     }
 }
 
+void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
+                                                    std::uint32_t da,
+                                                    std::uint32_t db,
+                                                    float dt,
+                                                    std::vector<Manifold>& out,
+                                                    std::uint32_t& warm) const {
+    // Which side is the terrain? Canonical pair order is by SLOT, not by shape, so it may be
+    // either — and the manifold normal must point a → b whichever it is.
+    const bool terrain_is_a = shape[da].type == ShapeType::Heightfield;
+    const std::uint32_t dt_ = terrain_is_a ? da : db; // the terrain's dense index
+    const std::uint32_t dbody = terrain_is_a ? db : da;
+    const HeightfieldShape* hf = heightfield_of(shape[dt_]);
+    if (hf == nullptr) {
+        return; // unreachable: create_body refuses an unresolved heightfield id
+    }
+
+    // Work in the terrain's LOCAL frame: pose the body there once (the inverse of the tile's
+    // pose), generate, and pose results back. A yawed tile then costs one extra rotation per
+    // body, and every per-triangle routine can assume "up is +Y, the grid is axis-aligned".
+    const core::Quat tq = orientation[dt_];
+    const core::Vec3 tp = position[dt_];
+    const core::Quat tqc = core::conjugate(tq);
+    const core::Vec3 body_pos = position[dbody];
+    const core::Quat& body_q = orientation[dbody];
+
+    // A compound body is opened one level, exactly as build_compound_contacts does: each convex
+    // child collides with the terrain on its own, and its index rides the child slot of the
+    // manifold on the body's side.
+    const CompoundShape* comp = compound_of(shape[dbody]);
+    const std::size_t n_children = comp != nullptr ? comp->child_count() : 1;
+    const std::uint64_t pair_key =
+        (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
+
+    // KNOWN LIMITATION, named rather than fixed (M19.1): these two vectors — and each patch's
+    // own `members` — are heap-allocated per terrain pair per step. The narrowphase loop that
+    // calls this is SERIAL (`for (const Pair& pr : pairs)` in step()), so they could be hoisted to
+    // persistent `mutable` scratch on Impl with no data race; that is deliberately not done here
+    // because nothing has measured it. No shipped scene has terrain in it yet, so the cost today
+    // is zero, and ADR-0035 §2c's rule is that an optimisation arrives with its measurement. When
+    // M19's streaming brick puts terrain under a body count that matters, measure here first:
+    // the roadmap already names the every-tick narrowphase cache as the next physics hot spot.
+    std::vector<HeightfieldContact> cands;
+    std::vector<HeightfieldPatch> patches;
+    bool any = false;
+    for (std::size_t ci = 0; ci < n_children; ++ci) {
+        const ShapeDesc* cs = &shape[dbody];
+        core::Vec3 cpos = body_pos;
+        core::Quat cq = body_q;
+        if (comp != nullptr) {
+            cs = &comp->child_shape[ci];
+            cpos = compound_child_world_pos(*comp, ci, body_pos, body_q);
+            cq = compound_child_world_orient(*comp, ci, body_q);
+        }
+        const std::uint32_t seed =
+            feature_combine(heightfield_detail::kFeatHeightfield, static_cast<std::uint32_t>(ci));
+        cands.clear();
+        heightfield_contacts_local(
+            *hf, *cs, core::rotate(tqc, cpos - tp), tqc * cq, hull_of(*cs), seed, cands);
+        if (cands.empty()) {
+            continue;
+        }
+        any = true;
+        hf_patch_merges_last += group_patches(cands, patches);
+
+        const auto child16 = static_cast<std::uint16_t>(ci);
+        for (const HeightfieldPatch& patch : patches) {
+            Manifold m;
+            m.a = pr.a;
+            m.b = pr.b;
+            m.child_a = terrain_is_a ? std::uint16_t{0} : child16;
+            m.child_b = terrain_is_a ? child16 : std::uint16_t{0};
+            patch_to_manifold(patch, cands, tp, tq, m);
+            if (m.count == 0) {
+                continue;
+            }
+            if (!terrain_is_a) {
+                m.normal = -m.normal; // patch normals point terrain → body; a is the body here
+            }
+            const ContactCacheKey key{pair_key,
+                                      (static_cast<std::uint32_t>(m.child_a) << 16) |
+                                          static_cast<std::uint32_t>(m.child_b),
+                                      m.patch};
+            const auto it = contact_cache.find(key);
+            if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
+                it->second.gen_b == pr.b.generation) {
+                warm += warm_start_from(it->second, m);
+            }
+            out.push_back(m);
+        }
+    }
+    // No exact contact, and the body asked for CCD: terrain has no speculative path yet (it is
+    // not convex, and M7.10's speculative contacts are GJK), so say so rather than pretend.
+    if (!any && dt > 0.0f && ccd[dbody] != 0) {
+        ++hf_ccd_skipped_last;
+    }
+}
+
 void PhysicsWorld::Impl::commit_contact_cache(const std::vector<Manifold>& manifolds) const {
     // Rebuild the persistent cache from this tick's manifolds — in step() they are the SOLVED
     // manifolds, so the impulses that carry to next tick are the converged ones (the whole point
@@ -674,7 +823,8 @@ void PhysicsWorld::Impl::commit_contact_cache(const std::vector<Manifold>& manif
             (static_cast<std::uint64_t>(m.a.index) << 32) | static_cast<std::uint64_t>(m.b.index);
         const ContactCacheKey key{pair_key,
                                   (static_cast<std::uint32_t>(m.child_a) << 16) |
-                                      static_cast<std::uint32_t>(m.child_b)};
+                                      static_cast<std::uint32_t>(m.child_b),
+                                  m.patch};
         next.emplace(key, make_cache_entry(pair_key, m.a.generation, m.b.generation, m));
     }
     contact_cache.swap(next);
@@ -698,6 +848,12 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     if (d.shape.type == ShapeType::Compound && p.compound_of(d.shape) == nullptr) {
         return BodyId{};
     }
+    // Terrain must resolve AND be static (M19.1): a heightfield has no meaningful mass
+    // distribution and the contact path assumes it never moves under a resting body.
+    if (d.shape.type == ShapeType::Heightfield &&
+        (p.heightfield_of(d.shape) == nullptr || d.motion != MotionType::Static)) {
+        return BodyId{};
+    }
 
     // The shape id is now known-valid (checked just above), and the rest of create_body cannot
     // fail — so take the store reference here (M8.5): this body now holds hull/compound i, and
@@ -706,6 +862,8 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
         ++p.hull_refs[d.shape.hull.index];
     } else if (d.shape.type == ShapeType::Compound) {
         ++p.compound_refs[d.shape.compound.index];
+    } else if (d.shape.type == ShapeType::Heightfield) {
+        ++p.heightfield_refs[d.shape.heightfield.index];
     }
 
     // Claim a slot (reuse a freed one to keep the table compact; its generation was already
@@ -854,6 +1012,10 @@ void PhysicsWorld::destroy_body(BodyId id) {
                released_shape.compound.index < p.compound_refs.size() &&
                p.compound_refs[released_shape.compound.index] > 0) {
         --p.compound_refs[released_shape.compound.index];
+    } else if (released_shape.type == ShapeType::Heightfield &&
+               released_shape.heightfield.index < p.heightfield_refs.size() &&
+               p.heightfield_refs[released_shape.heightfield.index] > 0) {
+        --p.heightfield_refs[released_shape.heightfield.index];
     }
 }
 
@@ -1253,6 +1415,7 @@ void PhysicsWorld::step(float dt) {
                     static_cast<std::uint64_t>(m.b.index),
                 (static_cast<std::uint32_t>(m.child_a) << 16) |
                     static_cast<std::uint32_t>(m.child_b),
+                m.patch,
                 m.a,
                 m.b,
                 m.points[best].position,
@@ -1305,10 +1468,19 @@ void PhysicsWorld::step(float dt) {
             e.phase = phase;
             e.child_a = static_cast<std::uint16_t>(r.children >> 16);
             e.child_b = static_cast<std::uint16_t>(r.children & 0xFFFFu);
+            e.patch = r.patch;
             p.contact_events_back.push_back(e);
         };
         const auto record_less = [](const Impl::ContactRecord& x, const Impl::ContactRecord& y) {
-            return x.key < y.key || (x.key == y.key && x.children < y.children);
+            // (pair, child sub-pair, terrain patch) lexicographically — the patch is 0 for every
+            // non-terrain region, so their merge is unchanged (M19.1).
+            if (x.key != y.key) {
+                return x.key < y.key;
+            }
+            if (x.children != y.children) {
+                return x.children < y.children;
+            }
+            return x.patch < y.patch;
         };
         {
             const std::vector<Impl::ContactRecord>& cur = p.contact_cur;
@@ -1415,6 +1587,17 @@ void PhysicsWorld::step(float dt) {
     for (const Manifold& m : manifolds) {
         st.contact_points += m.count;
     }
+    // Terrain regions are the manifolds whose pair has a heightfield on either side (M19.1).
+    for (const Manifold& m : manifolds) {
+        const std::uint32_t ma = p.dense_of(m.a);
+        const std::uint32_t mb = p.dense_of(m.b);
+        if ((ma != core::kInvalidSlotIndex && p.shape[ma].type == ShapeType::Heightfield) ||
+            (mb != core::kInvalidSlotIndex && p.shape[mb].type == ShapeType::Heightfield)) {
+            ++st.heightfield_manifolds;
+        }
+    }
+    st.heightfield_patch_merges = p.hf_patch_merges_last;
+    st.heightfield_ccd_skipped = p.hf_ccd_skipped_last;
     st.contacts_warm_started = p.warm_started_last;
     st.islands = static_cast<std::uint32_t>(isl.island_count);
     st.islands_solved_parallel = p.parallel_islands_last;
@@ -1558,6 +1741,19 @@ bool PhysicsWorld::raycast(const Ray& ray, RayHit& out, const QueryFilter& filte
         float t = 0.0f;
         core::Vec3 n{0.0f, 0.0f, 0.0f};
         std::uint16_t child = 0;
+        // Terrain takes its own grid walk (heightfield.hpp) — it needs the store entry the
+        // shape-only ray_vs_shape dispatch cannot see (M19.1).
+        if (const HeightfieldShape* hf = p.heightfield_of(p.shape[d]); hf != nullptr) {
+            if (ray_vs_heightfield(
+                    *hf, p.position[d], p.orientation[d], ray.origin, dir, best_t, t, n) &&
+                t < best_t) {
+                best_t = t;
+                best_slot = slot;
+                best_n = n;
+                best_child = 0;
+            }
+            return;
+        }
         if (ray_vs_shape(p.shape[d],
                          p.position[d],
                          p.orientation[d],
@@ -1650,6 +1846,13 @@ bool PhysicsWorld::shape_cast(const ShapeCast& cast,
         }
         const std::uint32_t d = p.slots[slot].dense;
         const ShapeDesc& shape = p.shape[d];
+        if (shape.type == ShapeType::Heightfield) {
+            // No convex cast against terrain yet (GJK needs a support function; M19.1 defers the
+            // per-triangle cast). Skipped — and COUNTED, so "the cast saw nothing" and "the cast
+            // could not look" stay distinguishable (heightfield_query_skips()).
+            p.hf_query_skips.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         const core::Vec3 pos = p.position[d];
         const core::Quat& orient = p.orientation[d];
 
@@ -1766,6 +1969,11 @@ bool PhysicsWorld::penetration(const ShapeDesc& shape,
         }
         const std::uint32_t d = p.slots[slot].dense;
         const ShapeDesc& body_shape = p.shape[d];
+        if (body_shape.type == ShapeType::Heightfield) {
+            // EPA against terrain is the same deferral as shape_cast's (M19.1) — skipped, counted.
+            p.hf_query_skips.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         const core::Vec3 body_pos = p.position[d];
         const core::Quat& body_orient = p.orientation[d];
 
@@ -1879,6 +2087,15 @@ void PhysicsWorld::overlap_sphere(core::Vec3 center,
             return;
         }
         const std::uint32_t d = p.slots[slot].dense;
+        if (const HeightfieldShape* hf = p.heightfield_of(p.shape[d]); hf != nullptr) {
+            // Terrain: the same per-triangle sphere test the contact path runs, in its frame.
+            const core::Quat qc = core::conjugate(p.orientation[d]);
+            if (sphere_overlaps_heightfield_local(
+                    *hf, core::rotate(qc, center - p.position[d]), radius)) {
+                hits.push_back(slot);
+            }
+            return;
+        }
         if (sphere_vs_shape(center,
                             radius,
                             p.shape[d],
@@ -2085,6 +2302,62 @@ bool PhysicsWorld::compound_info(CompoundId id, CompoundInfo& out) const {
     out.principal_rotation = c.principal;
     out.child_count = static_cast<std::uint32_t>(c.child_count());
     return true;
+}
+
+HeightfieldId PhysicsWorld::register_heightfield(const HeightfieldDesc& desc) {
+    Impl& p = *impl_;
+    HeightfieldShape hf;
+    if (!build_heightfield(desc, hf)) {
+        return HeightfieldId{}; // null id — nothing stored on failure
+    }
+    std::uint32_t index;
+    if (!p.heightfield_free_list.empty()) {
+        index = p.heightfield_free_list.back();
+        p.heightfield_free_list.pop_back();
+        p.heightfields[index] = std::move(hf);
+        p.heightfield_live[index] = 1;
+        p.heightfield_refs[index] = 0;
+    } else {
+        index = static_cast<std::uint32_t>(p.heightfields.size());
+        p.heightfields.push_back(std::move(hf));
+        p.heightfield_generation.push_back(0);
+        p.heightfield_live.push_back(1);
+        p.heightfield_refs.push_back(0);
+    }
+    return HeightfieldId{index, p.heightfield_generation[index]};
+}
+
+bool PhysicsWorld::heightfield_info(HeightfieldId id, HeightfieldInfo& out) const {
+    const Impl& p = *impl_;
+    ShapeDesc s;
+    s.type = ShapeType::Heightfield;
+    s.heightfield = id;
+    const HeightfieldShape* hf = p.heightfield_of(s);
+    if (hf == nullptr) {
+        return false;
+    }
+    out.columns = hf->columns;
+    out.rows = hf->rows;
+    out.triangle_count = hf->triangle_count();
+    out.local_bounds = hf->local_bounds();
+    return true;
+}
+
+bool PhysicsWorld::unregister_heightfield(HeightfieldId id) {
+    Impl& p = *impl_;
+    if (id.index >= p.heightfields.size() || p.heightfield_generation[id.index] != id.generation ||
+        p.heightfield_live[id.index] == 0 || p.heightfield_refs[id.index] != 0) {
+        return false; // unknown / stale / freed, or a live body still stands on it
+    }
+    p.heightfield_live[id.index] = 0;
+    ++p.heightfield_generation[id.index];
+    p.heightfields[id.index] = HeightfieldShape{}; // release the samples now, not at reuse
+    p.heightfield_free_list.push_back(id.index);
+    return true;
+}
+
+std::uint64_t PhysicsWorld::heightfield_query_skips() const noexcept {
+    return impl_->hf_query_skips.load(std::memory_order_relaxed);
 }
 
 std::span<const ContactEvent> PhysicsWorld::contact_events() const noexcept {

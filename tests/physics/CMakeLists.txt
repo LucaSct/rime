@@ -18,6 +18,7 @@ rime_add_test(rime_physics_tests
     events_test.cpp
     ccd_test.cpp
     hull_test.cpp
+    heightfield_test.cpp
     compound_test.cpp
     unregister_test.cpp
     stats_test.cpp)

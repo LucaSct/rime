@@ -12,6 +12,7 @@
 #include "rime/assets/asset_id.hpp"
 #include "rime/assets/clip_asset.hpp"
 #include "rime/assets/destructible_asset.hpp"
+#include "rime/assets/heightfield_asset.hpp"
 #include "rime/assets/material_asset.hpp"
 #include "rime/assets/mesh_asset.hpp"
 #include "rime/assets/sdf_asset.hpp"
@@ -69,7 +70,36 @@ enum class AssetError {
     InvalidMeshSdf, // sdf: unknown encoding, a non-finite/non-positive header value, a resolution
                     // outside the sanity ceiling, or a distance sample exceeding max_abs_distance
     InvalidVirtualGeometry, // virtual geometry: malformed versioned page/cluster/group payload
-    Io,                     // the file could not be opened/read (load-from-path only)
+    InvalidHeightfield,     // heightfield: grid dimensions outside [2, ceiling], a non-finite or
+                            // non-positive spacing/scale, an unknown triangulation, or a sample
+                            // outside the header's own recorded [min_sample, max_sample]
+    Io,                     // the file could not be opened/read (load-from-path only) — keep LAST:
+                            // kAssetErrorCount below is derived from it
+};
+
+// How many AssetError values exist — the size of a per-error counter table.
+inline constexpr std::size_t kAssetErrorCount = static_cast<std::size_t>(AssetError::Io) + 1;
+
+// A tally of REJECTED loads, by reason. A reader that refuses a file returns a typed error to its
+// caller — but a caller that retries, falls back to a placeholder, or streams the next tile moves
+// on, and the refusal then exists nowhere. "Every skip/drop path gets a counter" is the house rule
+// for exactly that reason (a streaming system that silently drops corrupt tiles reads as a world
+// with holes in it, not as a bug). CALLER-OWNED rather than a process-wide static on purpose: the
+// engine runs loaders on the job system, and a global mutable tally is the hidden shared state the
+// threading guardrail forbids. One owner per loader (an AssetServer, a streaming tile cache, a
+// test); aggregate if you need a total.
+struct AssetRejectCounters {
+    std::uint64_t total = 0;
+    std::array<std::uint64_t, kAssetErrorCount> by_error{};
+
+    void record(AssetError error) noexcept {
+        ++total;
+        ++by_error[static_cast<std::size_t>(error)];
+    }
+
+    [[nodiscard]] std::uint64_t count(AssetError error) const noexcept {
+        return by_error[static_cast<std::size_t>(error)];
+    }
 };
 
 // A short human-readable tag for an error (logging, test messages).
@@ -275,5 +305,38 @@ decode_virtual_geometry(std::span<const std::byte> payload, AssetError& out_erro
 read_virtual_geometry(std::span<const std::byte> file,
                       AssetError& out_error,
                       AssetId* out_id = nullptr) noexcept;
+
+// The schema fingerprint the current build expects a cooked *heightfield* payload to match (M19.1):
+// the reflection type_hash of the v1 fixed header record (payload version, grid dimensions,
+// spacing, origin, height scale/offset, triangulation, sample range — see cooked_reader.cpp). Like
+// the SDF, the header is the whole structured part of the payload; the trailing sample blob is bare
+// u16 scalars. The Rust cooker embeds this same value; the cross-language fixture test
+// (fixture_test.cpp, terrain.rhf) is the drift alarm.
+[[nodiscard]] std::uint64_t heightfield_schema_hash() noexcept;
+
+// The payload version decode_heightfield understands — the FIRST field of the payload. The RMA1
+// container version guards the envelope; this guards the heightfield payload's own layout, so a
+// future v2 (say, per-cell diagonal flags) is refused cleanly by an old build as
+// UnsupportedVersion instead of being misread.
+inline constexpr std::uint32_t kHeightfieldPayloadVersion = 1;
+
+// Decode a heightfield payload (the bytes after the header) into a fully validated
+// HeightfieldAsset. Assumes the caller has confirmed the header's kind and schema hash. The payload
+// version must be kHeightfieldPayloadVersion; every header float must be finite, the spacings and
+// height scale positive; the grid must be at least 2x2 samples and within a per-axis sanity ceiling
+// (so a corrupt file cannot size a huge allocation); the triangulation a known value; and the
+// sample blob EXACTLY columns*rows u16s with every sample inside [min_sample, max_sample].
+[[nodiscard]] std::optional<HeightfieldAsset> decode_heightfield(std::span<const std::byte> payload,
+                                                                 AssetError& out_error) noexcept;
+
+// The one-call heightfield path: read a whole RMA1 file, confirm it is a Heightfield of the
+// expected schema, and decode it. `out_id`, if non-null, receives the payload's content hash. If
+// `rejects` is non-null, every refusal — envelope, kind, schema, or payload — is also tallied
+// there by reason (see AssetRejectCounters for why a returned error alone is not enough).
+[[nodiscard]] std::optional<HeightfieldAsset>
+read_heightfield(std::span<const std::byte> file,
+                 AssetError& out_error,
+                 AssetId* out_id = nullptr,
+                 AssetRejectCounters* rejects = nullptr) noexcept;
 
 } // namespace rime::assets

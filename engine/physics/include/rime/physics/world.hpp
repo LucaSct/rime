@@ -53,6 +53,50 @@ struct CompoundDesc {
     std::span<const CompoundChildDesc> children;
 };
 
+// A terrain heightfield for PhysicsWorld::register_heightfield (M19.1, ADR-0060-m19.1-heightfield).
+// The same quantised form the cooked asset carries (engine/assets HeightfieldAsset) — u16 samples
+// plus a scale and offset — so a loaded tile registers without a conversion pass, and the surface
+// bodies collide with is built from the very integers the renderer draws:
+//
+//   sample (i, j) sits at LOCAL (i * cell_size_x, height_offset + height_scale * q, j *
+//   cell_size_z)
+//
+// `samples` is row-major, x fastest (q = samples[i + columns * j]). The body's position places
+// local (0, 0, 0) in the world and its orientation rotates the whole grid (a yawed tile is fine;
+// "up" is local +Y). Each cell is split into two triangles along the (i,j)→(i+1,j+1) diagonal —
+// the HeightfieldTriangulation::DiagonalMinToMax the asset format records.
+//
+// The terrain is a SURFACE for rays (one-sided: a ray starting below it never hits it on the way
+// out, the ray_vs_box "origin inside" rule) and a SOLID for contacts, down to `thickness` metres
+// below its lowest sample: a body that sinks through is pushed back UP, never sideways or down.
+// Registration validates (grid in [2, 32768] per axis, span size = columns*rows, spacings and
+// scale finite and > 0, offset and thickness finite, thickness >= 0) and returns the null id on
+// any violation. The span is only read during the call (the world copies what it keeps).
+struct HeightfieldDesc {
+    std::span<const std::uint16_t> samples;
+    std::uint32_t columns = 0; // samples along local X
+    std::uint32_t rows = 0;    // samples along local Z
+    float cell_size_x = 1.0f;
+    float cell_size_z = 1.0f;
+    float height_scale = 1.0f;
+    float height_offset = 0.0f;
+    // How far below the LOWEST sample the terrain still counts as solid (it extends the
+    // broadphase bound downward). It must be deep enough that a body sinking a little in one tick
+    // is still seen and lifted out. The cost of more: anything that legitimately lives beneath the
+    // terrain (a tunnel built from other geometry) and strays into that band is pushed up through
+    // the ground — a heightfield cannot express "open space under here".
+    float thickness = 1.0f;
+};
+
+// Read-back for a registered heightfield: its grid and LOCAL bounds (what the cooked asset's
+// header also knows, but derived here from the registered samples).
+struct HeightfieldInfo {
+    std::uint32_t columns = 0;
+    std::uint32_t rows = 0;
+    std::uint32_t triangle_count = 0; // 2 per cell; triangle ids in contacts index into this
+    Aabb local_bounds{};              // [0, min_h - thickness, 0] .. [extent_x, max_h, extent_z]
+};
+
 // Derived physical properties of a registered compound — the same read-back contract as HullInfo.
 // Child shapes and poses are deliberately NOT exposed: they live behind the seam (ADR-0028), and
 // the authoring side already has the authored data.
@@ -151,6 +195,21 @@ struct WorldStats {
     // counter that reported fifty-one would say the solve went wide on a tick that could not.
     std::uint32_t largest_active_island = 0;
     std::uint32_t islands_solved_parallel = 0;
+
+    // Terrain (M19.1). heightfield_manifolds is how many of `manifolds` were body-vs-terrain
+    // patches. The other two count the FALLBACKS the terrain contact path takes, because a
+    // fallback that is not counted reads as the thing working:
+    //  - heightfield_patch_merges: a contact whose normal fit none of a pair's existing patches
+    //    but the pair already had the maximum four, so it was folded into the best-aligned one
+    //    (its own normal is lost — the body is pushed along a neighbour's). Non-zero means a body
+    //    is resting on terrain rougher than a four-patch manifold can describe.
+    //  - heightfield_ccd_skipped: a CCD body near terrain with no exact contact this tick. Terrain
+    //    has no speculative-contact path yet (M7.10 CCD speaks convex GJK, and a heightfield is not
+    //    convex), so a fast body can still tunnel through it; this is how many times that could
+    //    have happened.
+    std::uint32_t heightfield_manifolds = 0;
+    std::uint32_t heightfield_patch_merges = 0;
+    std::uint32_t heightfield_ccd_skipped = 0;
 };
 
 class PhysicsWorld {
@@ -471,6 +530,32 @@ public:
     // compound). Slot generation bumped on success; ids stay a pure function of the call sequence.
     // Not safe to call concurrently with step().
     [[nodiscard]] bool unregister_compound(CompoundId id);
+
+    // --- Heightfields (M19.1, ADR-0060-m19.1-heightfield) -----------------------------------
+    // Register a terrain heightfield and get the id ShapeDesc::heightfield refers to. The body that
+    // instantiates it must be STATIC — create_body returns the null id for a dynamic or kinematic
+    // heightfield body (terrain does not move, and nothing in the solver could give a non-convex
+    // mass distribution a meaning). Contacts are generated against spheres, boxes, capsules,
+    // convex hulls, and compounds of those; raycast() and overlap_sphere() see terrain. Returns
+    // the null id if the input fails validation (see HeightfieldDesc). Not safe to call
+    // concurrently with step().
+    [[nodiscard]] HeightfieldId register_heightfield(const HeightfieldDesc& desc);
+
+    // Read back a registered heightfield's grid and local bounds. False (out untouched) for a
+    // null/unknown/unregistered id.
+    [[nodiscard]] bool heightfield_info(HeightfieldId id, HeightfieldInfo& out) const;
+
+    // Unregister a heightfield (a streamed-out terrain tile). REJECT-IF-REFERENCED like the hull
+    // and compound stores: false and no change while a live body uses it. Slot generation bumped
+    // on success. Not safe to call concurrently with step().
+    [[nodiscard]] bool unregister_heightfield(HeightfieldId id);
+
+    // How many times shape_cast() or penetration() met a heightfield body and SKIPPED it, since
+    // the world was created. Both queries run GJK/EPA, which need a convex support function, and
+    // terrain has none; a per-triangle version is the follow-up (a character controller walking
+    // on terrain needs it). Until then a cast silently passing through terrain would read as
+    // "nothing there" — this counter is what says otherwise. Safe to read between steps.
+    [[nodiscard]] std::uint64_t heightfield_query_skips() const noexcept;
 
 private:
     struct Impl;
