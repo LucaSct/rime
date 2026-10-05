@@ -156,7 +156,7 @@ impl HeightfieldSidecar {
                 // some other asset. 0 is the "unused" sentinel, so naming it is a mistake.
                 let id = value
                     .strip_prefix("0x")
-                    .filter(|h| !h.is_empty())
+                    .filter(|h| !h.is_empty() && h.bytes().all(|c| c.is_ascii_hexdigit()))
                     .and_then(|h| u64::from_str_radix(h, 16).ok())
                     .filter(|&id| id != 0)
                     .ok_or_else(|| {
@@ -693,6 +693,7 @@ mod tests {
         assert!(parse("layer4 = 0x1\n").is_err()); // unknown key
         assert!(parse("layer00 = 0x1\n").is_err());
         assert!(parse("layer0 = 0x1ffffffffffffffff\n").is_err()); // overflows u64
+        assert!(parse("layer0 = 0x+11\n").is_err()); // from_str_radix alone would take the sign
     }
 
     #[test]
