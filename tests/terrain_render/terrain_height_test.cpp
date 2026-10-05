@@ -48,6 +48,7 @@
 #include <memory>
 #include <vector>
 
+#include "fullscreen.vert.spv.h"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/heightfield_asset.hpp"
 #include "rime/core/jobs/job_system.hpp"
@@ -60,7 +61,6 @@
 #include "rime/render/render_graph.hpp"
 #include "rime/render/terrain_pass.hpp"
 #include "rime/rhi/device.hpp"
-#include "fullscreen.vert.spv.h"
 #include "terrain.vert.spv.h"
 #include "terrain_height_probe.frag.spv.h"
 #include "terrain_layer_probe.frag.spv.h"
@@ -1932,12 +1932,14 @@ render::TerrainLight ambient_only_light() {
 
 // A flat v2 tile at `origin` whose every weight texel is `texel`.
 assets::HeightfieldAsset flat_splat_at(core::Vec3 origin, std::array<std::uint8_t, 4> texel) {
-    assets::HeightfieldAsset a = make_splat_asset(flat_samples(), 2, 2, uniform_weights(2, 2, texel));
+    assets::HeightfieldAsset a =
+        make_splat_asset(flat_samples(), 2, 2, uniform_weights(2, 2, texel));
     a.origin = origin;
     return a;
 }
 
-std::uint16_t half_bits(const std::vector<std::uint8_t>& img, std::uint32_t px, std::uint32_t py, int c) {
+std::uint16_t
+half_bits(const std::vector<std::uint8_t>& img, std::uint32_t px, std::uint32_t py, int c) {
     std::uint16_t h = 0;
     std::memcpy(&h, &img[(std::size_t{py} * kSize + px) * 8 + std::size_t(c) * 2], sizeof(h));
     return h;
@@ -1986,7 +1988,7 @@ TEST_CASE("m19.7b: a palette with no textures is BIT-IDENTICAL to the same draw 
     Palette4 textured = plain;
     for (std::size_t k = 0; k < 4; ++k) {
         textured[k].albedo_height = (k % 2 == 0) ? tex_a : tex_b;
-        textured[k].uv_scale[0] = 1.5f + static_cast<float>(k); // irrelevant to a white texture —
+        textured[k].uv_scale[0] = 1.5f + static_cast<float>(k);  // irrelevant to a white texture —
         textured[k].uv_scale[1] = 0.75f + static_cast<float>(k); // and so must not matter either
     }
 
@@ -2019,7 +2021,10 @@ TEST_CASE("m19.7b: the layer texture reaches the pixel with its orientation and 
     constexpr std::uint32_t kW = 4;
     constexpr std::uint32_t kH = 2;
     const auto texel = [](std::uint32_t i, std::uint32_t j) -> std::array<std::uint8_t, 4> {
-        return {static_cast<std::uint8_t>(40 + 60 * i), static_cast<std::uint8_t>(60 + 120 * j), 128, 0};
+        return {static_cast<std::uint8_t>(40 + 60 * i),
+                static_cast<std::uint8_t>(60 + 120 * j),
+                128,
+                0};
     };
     std::vector<std::uint8_t> real;
     for (std::uint32_t j = 0; j < kH; ++j) {
@@ -2028,8 +2033,8 @@ TEST_CASE("m19.7b: the layer texture reaches the pixel with its orientation and 
             real.insert(real.end(), t.begin(), t.end());
         }
     }
-    // THE FALSIFICATION, in data: the same texels stored transposed (2 x 4, texel (j, i) at (i, j)),
-    // which is exactly what a shader that swapped u and v would read out of the real texture.
+    // THE FALSIFICATION, in data: the same texels stored transposed (2 x 4, texel (j, i) at (i,
+    // j)), which is exactly what a shader that swapped u and v would read out of the real texture.
     std::vector<std::uint8_t> swapped;
     for (std::uint32_t i = 0; i < kW; ++i) {
         for (std::uint32_t j = 0; j < kH; ++j) {
@@ -2040,8 +2045,9 @@ TEST_CASE("m19.7b: the layer texture reaches the pixel with its orientation and 
 
     // One texel per metre on both axes: a 4 m period along X over 4 texels, 2 m along Z over 2.
     // The tile origin is chosen so pixel centres (every 0.25 m, offset 0.125 m) land EXACTLY on
-    // texel centres (world k + 0.5): -20.125 + 0.125 = -20, an integer, and likewise 12.375 + 0.125.
-    // It straddles world x = 0, so negative coordinates (REPEAT of a negative uv) are probed too.
+    // texel centres (world k + 0.5): -20.125 + 0.125 = -20, an integer, and likewise 12.375 +
+    // 0.125. It straddles world x = 0, so negative coordinates (REPEAT of a negative uv) are probed
+    // too.
     const core::Vec3 origin{-20.125f, 3.25f, 12.375f};
     const TopDown view = top_down_centred(origin.x + kHalf, origin.z + kHalf);
 
@@ -2128,8 +2134,8 @@ TEST_CASE("m19.7b: the texture coordinate is WORLD xz — the pattern runs on ac
     // B's origin, shifting it by 32 mod 3 = 2 m (two of three texels) right at the seam; a world
     // coordinate does not see the seam at all.
     //
-    // The claim: colour(x, z) == colour(x + 3 m, z) for EVERY probed pair, including the pairs whose
-    // members lie on different tiles.
+    // The claim: colour(x, z) == colour(x + 3 m, z) for EVERY probed pair, including the pairs
+    // whose members lie on different tiles.
     //
     // THE BOUND, AND WHY IT IS NOT "BITS" OR "ONE f16 ULP". The two members of a pair read u and
     // u + 1 in exact arithmetic, but the GPU forms each from its own interpolated world position
@@ -2242,10 +2248,10 @@ TEST_CASE("m19.7b: the texture coordinate is WORLD xz — the pattern runs on ac
     int varied = 0;
     for (std::uint32_t py = 0; py < kSize; py += 3) {
         for (std::uint32_t px = 0; px + 4 < kSize; ++px) {
-            varied += std::abs(int(half_bits(img, px, py, 0)) - int(half_bits(img, px + 4, py, 0))) >
-                              16
-                          ? 1
-                          : 0;
+            varied +=
+                std::abs(int(half_bits(img, px, py, 0)) - int(half_bits(img, px + 4, py, 0))) > 16
+                    ? 1
+                    : 0;
         }
     }
     CHECK(varied > pairs / 2);
@@ -2407,7 +2413,8 @@ TEST_CASE("m19.7b: a layer texture's height (A) reaches the shader LINEAR throug
             if (r_byte >= 32) {
                 CHECK(std::abs(double(r) - r_byte / 255.0) > 0.01);
             }
-            // Where the two curves are far apart, A sits on the linear one and FAR from the sRGB one.
+            // Where the two curves are far apart, A sits on the linear one and FAR from the sRGB
+            // one.
             if (a_byte >= 64 && a_byte <= 200) {
                 ++mid_alpha;
                 CHECK(std::abs(double(a) - srgb_decode(a_byte)) > 0.05);

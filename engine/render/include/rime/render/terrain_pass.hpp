@@ -147,8 +147,8 @@ struct TerrainLayer {
     core::Vec3 base_color{0.5f, 0.5f, 0.5f};
     float metallic = 0.0f;
     float roughness = 1.0f;
-    rhi::TextureHandle albedo_height{};  // invalid = no texture (the white fallback)
-    float uv_scale[2] = {1.0f, 1.0f};    // metres per repeat along world X, world Z
+    rhi::TextureHandle albedo_height{}; // invalid = no texture (the white fallback)
+    float uv_scale[2] = {1.0f, 1.0f};   // metres per repeat along world X, world Z
 };
 
 // Slot k is `HeightfieldAsset::layers[k]`. Entries for unused slots (zero AssetId) are ignored:
