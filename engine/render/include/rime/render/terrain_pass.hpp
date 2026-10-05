@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -54,7 +55,7 @@
 // ── WHAT THIS PASS IS NOT, YET (all deferred in ADR-0062, none of it silent) ──────────────────
 //
 //   * no LOD, no clipmap, no tessellation: a tile is drawn at full sample density, every frame;
-//   * no splat blending — one flat albedo, see terrain.frag;
+//   * splat blending (m19.4, ADR-0063) blends BASE COLOUR only — see TerrainLayer;
 //   * no streaming: `upload()` is a one-shot, and a tile stays resident until the pass dies;
 //   * no holes, no decals, no per-cell best-fit diagonals (the format cannot express them either);
 //   * a tile is placed by TRANSLATION only, because `HeightfieldAsset` carries an `origin` and no
@@ -92,7 +93,29 @@ struct TerrainTile {
     float height_scale = 0.0f;
     float height_offset = 0.0f;
     core::Vec3 origin{0.0f, 0.0f, 0.0f};
+    // m19.4. EVERY tile owns these, so the descriptor layout (and the pipeline) is the same for a
+    // v1 tile and a splat tile: a v1 tile holds a 1x1 dummy weight texture and a uniform block
+    // whose flag is 0.
+    rhi::TextureHandle weights{};  // RGBA8_UNORM, weight_columns x weight_rows, bytes verbatim
+    rhi::BufferHandle splat_ubo{}; // flag, extent, weight dims, the four base colours
+    bool has_splat = false;
 };
+
+// One palette entry, resolved BY THE CALLER. The pass must not reach into the asset system, so the
+// caller looks each `HeightfieldAsset::layers[k]` up and hands over the colour.
+//
+// Only `base_color` exists, on purpose. terrain.frag is Lambert (ADR-0062), so a blended metallic
+// or roughness would be data nothing reads and nothing could prove; it joins when the shading does.
+struct TerrainLayer {
+    core::Vec3 base_color{0.5f, 0.5f, 0.5f};
+};
+
+// Slot k is `HeightfieldAsset::layers[k]`. Entries for unused slots (zero AssetId) are ignored:
+// their weights are 0 everywhere, and the pass writes a zero colour difference for them.
+using TerrainPalette = std::array<TerrainLayer, 4>;
+
+// The largest weight map, per axis. Past this a splat map is a cook mistake, refused and counted.
+inline constexpr std::uint32_t kMaxSplatTexelsPerAxis = 4096;
 
 // How the tile is lit. A struct rather than four arguments so a caller cannot transpose them, and
 // deliberately NOT read out of the ECS: this pass is composed by its caller, which already knows
@@ -138,7 +161,18 @@ public:
     // grid, a non-finite or non-positive spacing/scale, an axis past `kMaxTileSamplesPerAxis`, or
     // a `triangulation` value this build does not know. It REFUSES rather than repairing, the
     // registration posture ADR-0060 §2 set for the physics side.
+    //
+    // An asset that carries a splat map is REFUSED here (counted in `tiles_refused()` and
+    // `splat_refused()`): without materials it cannot be shaded correctly, and guessing a colour
+    // would be a silent wrong picture.
     [[nodiscard]] TerrainTileId upload(const assets::HeightfieldAsset& asset);
+
+    // As above, plus the caller-resolved palette for a splat asset (m19.4). On an asset without a
+    // splat map the palette is ignored. Additional refusals, all also counted in `splat_refused()`:
+    // a weight map past `kMaxSplatTexelsPerAxis`, a weight span that does not match its size, a
+    // non-finite palette colour, or a failed weight-texture / uniform-buffer allocation.
+    [[nodiscard]] TerrainTileId upload(const assets::HeightfieldAsset& asset,
+                                       const TerrainPalette& palette);
 
     // UNCHECKED, the MeshRegistry::get contract: `id` must have come from a successful upload().
     [[nodiscard]] const TerrainTile& tile(TerrainTileId id) const { return tiles_[id]; }
@@ -166,6 +200,10 @@ public:
     // handed over produce the same empty frame, so the difference has to be countable.
     [[nodiscard]] std::uint64_t tiles_refused() const noexcept { return refused_; }
 
+    // The subset of `tiles_refused()` that is splat-specific (m19.4): every such refusal moves both
+    // counters, so "why is there no terrain?" separates heights from materials.
+    [[nodiscard]] std::uint64_t splat_refused() const noexcept { return splat_refused_; }
+
     // Tiles actually submitted, cumulative — the vacuity witness. "The pass drew nothing" and
     // "the pass drew a tile you cannot see" look identical on screen.
     [[nodiscard]] std::uint64_t tiles_drawn() const noexcept { return drawn_; }
@@ -176,8 +214,12 @@ private:
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
     rhi::SamplerHandle sampler_;
+    rhi::SamplerHandle weight_sampler_; // LINEAR, clamp-to-edge: the weight map is meant to filter
     std::vector<TerrainTile> tiles_;
+    TerrainTileId upload_impl(const assets::HeightfieldAsset& asset, const TerrainPalette* palette);
+
     std::uint64_t refused_ = 0;
+    std::uint64_t splat_refused_ = 0;
     std::uint64_t drawn_ = 0;
 };
 

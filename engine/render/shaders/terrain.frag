@@ -3,9 +3,9 @@
 //
 // The terrain heightfield pass, fragment stage (m19.3, ADR-0062). Deliberately the smallest honest
 // shading of a terrain: one directional light, Lambert, plus an ambient term, into the HDR target.
-// Splat blending (several materials weighted by a cooked weight map) is a later M19 brick and this
-// shader is not where that decision gets pre-empted — it carries a single flat albedo so that the
-// brick's claim is "the heightfield draws", not "terrain looks right".
+// m19.3 drew the heightfield with one flat albedo; m19.4 (ADR-0063) lets a tile blend up to four
+// base colours by a cooked weight map. A tile without a splat map still takes the flat-albedo path
+// (`pc.surface.rgb`), so the m19.3 picture is untouched.
 //
 // ── THE NORMAL COMES FROM THE GEOMETRY, NOT FROM A SECOND HEIGHT READ ────────────────────────
 //
@@ -29,6 +29,18 @@
 #version 450
 
 layout(location = 0) in vec3 v_world;
+layout(location = 1) in vec2 v_local; // tile-local xz, metres
+
+// m19.4: the splat weights (RGBA8_UNORM, one texel = the four layer weights) and the per-tile
+// constants. The 128-byte push block is full, so these live in a small uniform buffer made at
+// upload. A v1 tile binds a 1x1 dummy texture and flag = 0, so the descriptor layout is identical
+// for every tile and there is ONE pipeline.
+layout(set = 0, binding = 1) uniform sampler2D splat_weights;
+layout(set = 0, binding = 2) uniform Splat {
+    vec4 info;     // x = 1 when this tile has a splat map, yz = tile extent in metres (x, z)
+    vec4 dims;     // xy = weight map size in texels
+    vec4 color[4]; // base colour per layer; an unused slot repeats layer 0 (a zero difference)
+} splat;
 
 layout(location = 0) out vec4 out_color;
 
@@ -42,6 +54,37 @@ layout(push_constant) uniform Pc {
 } pc;
 
 void main() {
+    // ── THE SPLAT BLEND, AND WHY IT IS WRITTEN AS DIFFERENCES FROM LAYER 0 ────────────────────
+    //
+    // The obvious formula is  sum_k w_k * c_k.  The reader guarantees the four u8 weights sum to
+    // exactly 255, so in exact arithmetic that is a convex combination. In FLOATS it is not: the
+    // four n/255 values do not sum to exactly 1.0, linear filtering adds its own rounding, and a
+    // GPU may contract the sum into fused multiply-adds. So with all four colours EQUAL the naive
+    // sum is still not bit-equal to that colour — a "blend of identical layers" would shift the
+    // picture by a few ULP, and the proof could only say "close".
+    //
+    //     base = c0 + w1*(c1 - c0) + w2*(c2 - c0) + w3*(c3 - c0)
+    //
+    // is the same quantity when sum(w) = 1 (substitute w0 = 1 - w1 - w2 - w3), but every term
+    // (c_k - c0) is EXACTLY 0 when the layers are equal, so the result is c0 bit for bit on every
+    // GPU with any filter. Likewise a texel whose weights 1..3 are 0 yields c0 exactly. That is
+    // what lets ADR-0063 section 4 anchor the blend with "bit-identical, no margin". w0 is never
+    // read: it is implied. Only base colour is blended — this shader is Lambert (ADR-0062), so a
+    // blended roughness or metallic would be data nothing here reads.
+    vec3 base = pc.surface.rgb;
+    if (splat.info.x > 0.5) {
+        // CORNER-aligned, like the height samples: weight texel (0,0) is centred on the tile
+        // origin and texel (wc-1, wr-1) on the far corner. Normalised uv puts texel k's centre at
+        // (k + 0.5)/dims, so map local/extent in [0,1] onto [0.5/dims, (dims-0.5)/dims]. A
+        // one-texel axis gives (dims-1) = 0, i.e. uv 0.5, the only texel there is.
+        const vec2 uv = (v_local / splat.info.yz) * ((splat.dims.xy - 1.0) / splat.dims.xy) +
+                        0.5 / splat.dims.xy;
+        const vec4 w = texture(splat_weights, uv);
+        const vec3 c0 = splat.color[0].rgb;
+        base = c0 + w.g * (splat.color[1].rgb - c0) + w.b * (splat.color[2].rgb - c0) +
+               w.a * (splat.color[3].rgb - c0);
+    }
+
     vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));
     if (n.y < 0.0) {
         n = -n; // see the header: a heightfield's surface normal is never downward
@@ -54,7 +97,7 @@ void main() {
     // Lambert: outgoing radiance = albedo/π × irradiance. The 1/π is the normalisation that makes
     // a white Lambertian surface reflect exactly the energy it receives and no more; dropping it
     // is the single most common way a renderer ends up π times too bright.
-    const vec3 radiance = pc.surface.rgb *
+    const vec3 radiance = base *
                           (pc.sun.w * n_dot_l * 0.31830988618 + pc.surface.w);
     out_color = vec4(radiance, 1.0);
 }

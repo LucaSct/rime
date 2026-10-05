@@ -120,6 +120,9 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     // and the whole reason this pass needs no vertex buffer.
     const rhi::BindingDesc bindings[] = {
         {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Vertex},
+        // m19.4: the splat weights and the per-tile constants, fragment-only.
+        {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {2, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},
     };
 
     rhi::GraphicsPipelineDesc pd{};
@@ -156,20 +159,54 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     sd.address_mode = rhi::AddressMode::ClampToEdge;
     sd.debug_name = "terrain-heights";
     sampler_ = device.create_sampler(sd);
+
+    // The weight map is the one place filtering is wanted: a painted splat map is meant to fade
+    // between texels. CLAMP so the edge texels hold to the tile's border instead of wrapping.
+    rhi::SamplerDesc wd{};
+    wd.mag_filter = rhi::Filter::Linear;
+    wd.min_filter = rhi::Filter::Linear;
+    wd.mip_filter = rhi::Filter::Nearest;
+    wd.address_mode = rhi::AddressMode::ClampToEdge;
+    wd.debug_name = "terrain-weights";
+    weight_sampler_ = device.create_sampler(wd);
 }
 
 TerrainPass::~TerrainPass() {
     for (const TerrainTile& t : tiles_) {
+        device_.destroy(t.splat_ubo);
+        device_.destroy(t.weights);
         device_.destroy(t.indices);
         device_.destroy(t.heights);
     }
+    device_.destroy(weight_sampler_);
     device_.destroy(sampler_);
     device_.destroy(pipeline_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
 }
 
+namespace {
+// std140 mirror of terrain.frag's `Splat` block: 6 x vec4 = 96 bytes.
+struct SplatUniform {
+    float info[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // x = splat flag, yz = tile extent (m)
+    float dims[4] = {1.0f, 1.0f, 0.0f, 0.0f}; // xy = weight map size in texels
+    float color[4][4] = {};
+};
+
+static_assert(sizeof(SplatUniform) == 96, "SplatUniform must match terrain.frag's Splat block");
+} // namespace
+
 TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset) {
+    return upload_impl(asset, nullptr);
+}
+
+TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset,
+                                  const TerrainPalette& palette) {
+    return upload_impl(asset, &palette);
+}
+
+TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
+                                       const TerrainPalette* palette) {
     // Validate, never repair (ADR-0060 §2's registration posture). Every rejection is one of the
     // asset reader's own invariants restated at the GPU boundary, because an asset can also be
     // built in memory by a caller that never went through the reader.
@@ -184,6 +221,27 @@ TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset) {
     if (!grid_ok || !scale_ok || !triangulation_ok) {
         ++refused_;
         return kInvalidTerrainTile;
+    }
+
+    // Splat-specific validation (m19.4). Every refusal here moves BOTH counters, so a material
+    // failure is distinguishable from a heights failure.
+    const bool splat = asset.has_splat();
+    if (splat) {
+        bool splat_ok = palette != nullptr && // no materials: refuse, never guess a colour
+                        asset.weight_columns <= kMaxSplatTexelsPerAxis &&
+                        asset.weight_rows <= kMaxSplatTexelsPerAxis &&
+                        asset.weights.size() == asset.weight_texel_count() * 4;
+        if (splat_ok) {
+            for (const TerrainLayer& l : *palette) {
+                splat_ok = splat_ok && std::isfinite(l.base_color.x) &&
+                           std::isfinite(l.base_color.y) && std::isfinite(l.base_color.z);
+            }
+        }
+        if (!splat_ok) {
+            ++refused_;
+            ++splat_refused_;
+            return kInvalidTerrainTile;
+        }
     }
 
     TerrainTile tile{};
@@ -237,6 +295,61 @@ TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset) {
     }
     device_.write_buffer(tile.indices, indices.data(), bd.size, 0);
 
+    // ── m19.4: the weight texture and the per-tile constants ─────────────────────────────────
+    // A v1 tile gets a 1x1 dummy so every tile binds the same layout. The weights are uploaded
+    // VERBATIM (4 bytes per texel, row-major, x fastest — exactly an RGBA8 2-D upload's walk).
+    const std::uint8_t dummy_texel[4] = {255, 0, 0, 0};
+    tile.has_splat = splat;
+    rhi::TextureDesc wtd{};
+    wtd.extent =
+        splat ? rhi::Extent2D{asset.weight_columns, asset.weight_rows} : rhi::Extent2D{1, 1};
+    wtd.format = rhi::Format::RGBA8Unorm;
+    wtd.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    wtd.debug_name = "terrain-weights";
+    tile.weights = device_.create_texture(wtd);
+
+    SplatUniform u{};
+    if (splat) {
+        u.info[0] = 1.0f;
+        u.info[1] = asset.cell_size_x * static_cast<float>(asset.columns - 1);
+        u.info[2] = asset.cell_size_z * static_cast<float>(asset.rows - 1);
+        u.dims[0] = static_cast<float>(asset.weight_columns);
+        u.dims[1] = static_cast<float>(asset.weight_rows);
+        // Unused slots (zero AssetId) repeat layer 0, so a stray filter tail pulls in a ZERO
+        // difference rather than garbage; see terrain.frag.
+        const core::Vec3 c0 = (*palette)[0].base_color;
+        for (std::size_t k = 0; k < 4; ++k) {
+            const core::Vec3 c =
+                (k == 0 || asset.layers[k].is_valid()) ? (*palette)[k].base_color : c0;
+            u.color[k][0] = c.x;
+            u.color[k][1] = c.y;
+            u.color[k][2] = c.z;
+        }
+    }
+    rhi::BufferDesc ubd{};
+    ubd.size = sizeof(SplatUniform);
+    ubd.usage = rhi::BufferUsage::Uniform;
+    ubd.memory = rhi::MemoryUsage::CpuToGpu;
+    ubd.debug_name = "terrain-splat-ubo";
+    tile.splat_ubo = device_.create_buffer(ubd);
+    if (!tile.weights.is_valid() || !tile.splat_ubo.is_valid()) {
+        device_.destroy(tile.splat_ubo);
+        device_.destroy(tile.weights);
+        device_.destroy(tile.indices);
+        device_.destroy(tile.heights);
+        ++refused_;
+        if (splat) {
+            ++splat_refused_;
+        }
+        return kInvalidTerrainTile;
+    }
+    if (splat) {
+        device_.write_texture(tile.weights, asset.weights.data(), asset.weights.size());
+    } else {
+        device_.write_texture(tile.weights, dummy_texel, sizeof(dummy_texel));
+    }
+    device_.write_buffer(tile.splat_ubo, &u, sizeof(u), 0);
+
     tiles_.push_back(tile);
     return static_cast<TerrainTileId>(tiles_.size() - 1);
 }
@@ -274,7 +387,8 @@ void TerrainPass::add(RenderGraph& graph,
     // texture into a shader-read state before the draw; a pass that read it without saying so
     // would work by accident today and break the first time a compute pass wrote one.
     const RGTexture sampled[] = {
-        graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead)};
+        graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
+        graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead)};
     desc.sampled = sampled;
 
     ++drawn_;
@@ -282,12 +396,17 @@ void TerrainPass::add(RenderGraph& graph,
                           desc,
                           [pipeline = pipeline_,
                            sampler = sampler_,
+                           weight_sampler = weight_sampler_,
                            heights = tile.heights,
+                           weights = tile.weights,
+                           splat_ubo = tile.splat_ubo,
                            indices = tile.indices,
                            index_count = tile.index_count,
                            push](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipeline);
                               cmd.bind_texture(0, heights, sampler);
+                              cmd.bind_texture(1, weights, weight_sampler);
+                              cmd.bind_uniform_buffer(2, splat_ubo);
                               cmd.bind_index_buffer(indices, rhi::IndexType::Uint32);
                               cmd.push_constants(&push, sizeof(push));
                               // No vertex buffer is bound because there is nothing to bind: the
