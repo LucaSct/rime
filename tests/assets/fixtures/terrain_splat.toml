@@ -1,0 +1,21 @@
+# Sidecar for terrain_splat.png (M19.4 cross-language fixture): terrain.png's heights plus a
+# 3x2 splat map in terrain_splat.splat.png (RGBA8; R,G,B,A = layer 0..3; layer 3 is unused).
+# Texels (i, j), raw RGBA -> weights the cook writes (largest-remainder, sum 255):
+#   (0,0) 200,55,0,0   -> 200,55,0,0   already normalized: must come out unchanged
+#   (1,0)   1, 1,0,0   -> 128,127,0,0   tie: the extra unit goes to the lowest index
+#   (2,0)   0, 9,0,0   ->   0,255,0,0
+#   (0,1)   3, 0,0,0   -> 255,0,0,0
+#   (1,1) 100,100,100,0 -> 85,85,85,0
+#   (2,1)  10,20,30,0  ->  43,85,127,0   floors 42,85,127 leave 1 spare; remainders 30,0,30 tie, lowest index wins
+# The 3x2 weight grid is deliberately not the 5x4 height grid, and every row differs, so a
+# transposed walk fails.
+size_x = 8.0        # 4 cells along X -> 2 m spacing
+size_z = 6.0        # 3 cells along Z -> 2 m spacing
+height_min = -5.0   # metres at sample 0
+height_max = 60.535 # metres at sample 65535 -> 0.001 m per step
+origin_x = 100.0
+origin_y = 0.0
+origin_z = -50.0
+layer0 = 0x1111111111111111
+layer1 = 0x2222222222222222
+layer2 = 0xfedcba9876543210

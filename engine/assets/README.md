@@ -23,6 +23,7 @@ one-way dependency is what keeps the whole reader unit-testable with in-memory b
 | M6.7 | **skeletons + animation clips** (`read_skeleton`/`read_clip`) + a CPU clip sampler (GPU skinning follows at M7) | landed |
 | M6.10 | the proof: `samples/08-gltf-zoo` cooks + loads + renders three glTF models end-to-end — **M6 complete** | landed |
 | M19.1 | **terrain heightfields** (`AssetKind::Heightfield`, `read_heightfield`) — quantised u16 samples + scale/offset + the cell triangulation; every refusal tallied in a caller-owned `AssetRejectCounters`; the `terrain.rhf` cross-language fixture ([ADR-0060-m19.1](../../docs/adr/0060-m19.1-heightfield.md)) | landed |
+| M19.4 | **terrain splat materials** — heightfield payload v2: the sidecar's `layer0..layer3` (material AssetIds, `0x` hex; `layer0` required) plus a sibling `<stem>.splat.png` (8-bit RGBA, R/G/B/A = layer 0..3, own resolution) are cooked in as a palette and per-texel weights, each texel normalized to sum 255 by largest-remainder apportionment; no `layerN` keys keeps the v1 bytes; the `terrain_splat.rhf` fixture ([ADR-0063](../../docs/adr/0063-m19.4-terrain-splat-blending.md)) | cook landed |
 
 ## The cooked container (RMA1)
 
