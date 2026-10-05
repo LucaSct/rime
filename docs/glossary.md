@@ -381,6 +381,15 @@ Entries are grouped roughly by area and kept short on purpose.
   structured than a triangle mesh — "which triangles are under this point" is a division, not a
   search — at the price of no overhangs or caves. Rime's is cooked as quantised u16 samples with a
   scale and offset (M19.1, ADR-0060-m19.1).
+- **Terrain layer.** One surface a terrain's splat palette can name (M19.7a, ADR-0066): a material
+  plus a texture packing the layer's albedo (RGB) and height (A), tiled at world-XZ coordinates with
+  a `uv_scale`, and a `height_contrast`. A palette slot names either a terrain layer or a plain
+  material; the cooked file's kind says which.
+- **Height blending.** Splat blending where each layer's *height* map, not just its painted weight,
+  decides who wins a transition texel: the locally higher layer takes more of it, so gravel shows
+  through grass along the low cracks instead of the two cross-fading into one smudge. Rime's form
+  (planned, ADR-0066 §5) reweights `b_k ∝ w_k · exp2(c · (h_k − h_max))`, so painting stays in
+  control and contrast only sharpens the edge.
 - **Vertex pulling.** A draw with no vertex buffer: the vertex shader *reads* the data it needs
   (from a texture, a storage buffer, or arithmetic on `gl_VertexIndex`) instead of having it *fed*
   by the fixed-function vertex-fetch stage. Useful when the vertices are derivable rather than
