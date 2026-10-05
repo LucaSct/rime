@@ -381,6 +381,13 @@ Entries are grouped roughly by area and kept short on purpose.
   structured than a triangle mesh — "which triangles are under this point" is a division, not a
   search — at the price of no overhangs or caves. Rime's is cooked as quantised u16 samples with a
   scale and offset (M19.1, ADR-0060-m19.1).
+- **Streamed asset / deferred eviction.** An asset the `AssetServer` can give back (M19.8b,
+  ADR-0067): each request is an *ownership*, and when the last owner releases, the slot is
+  *evicted* — its CPU payload freed and its index recycled under a bumped generation, so old
+  handles go stale instead of pointing at the new tenant. If the release arrives while the load job
+  is still running, the eviction is *deferred*: the slot stays pinned and the job frees it as it
+  finishes, so nothing is freed under a running job. Contrast *retained* assets (meshes, textures,
+  materials), which stay for the server's lifetime.
 - **Terrain layer.** One surface a terrain's splat palette can name (M19.7a, ADR-0066): a material
   plus a texture packing the layer's albedo (RGB) and height (A), tiled at world-XZ coordinates with
   a `uv_scale`, and a `height_contrast`. A palette slot names either a terrain layer or a plain
