@@ -26,6 +26,7 @@ add_library(rime_render STATIC
     src/lighting/sky.cpp
     src/fx_pass.cpp
     src/culling.cpp
+    src/terrain_pass.cpp
     src/virtual_geometry_residency.cpp
     src/virtual_geometry_page_cache.cpp
     src/virtual_geometry_page_pool.cpp
@@ -72,7 +73,9 @@ rime_add_shaders(rime_render
     shaders/gizmo.frag
     shaders/particle.vert
     shaders/particle.frag
-    shaders/depth_masked.frag)
+    shaders/depth_masked.frag
+    shaders/terrain.vert
+    shaders/terrain.frag)
 
 # The SSR G-buffer variant (m10.7a): the shadowed shader compiled a second time with -DWRITE_GBUFFER
 # so it emits the thin normal+roughness G-buffer into a second attachment. One source, two modules —
