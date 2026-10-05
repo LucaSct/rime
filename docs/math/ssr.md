@@ -209,7 +209,10 @@ original sketch imagined (that sharpens the mid-roughness band using on-screen d
 follow-up; it needs an RHI mip-generation/LOD surface that does not exist yet).
 
 **Fresnel.** Reflectivity rises at grazing angles — the effect that sells a wet floor or a lake at
-sunset. Schlick's approximation at a dielectric base reflectance $F_0 = 0.04$:
+sunset. Schlick's approximation at the surface's base reflectance $F_0$ — $0.04$ for a dielectric,
+the base colour for a metal, mixed by `metallic` exactly as `brdf.glsl` does. (Until m19.6b it was
+the constant $0.04$ for every surface; the G-buffer now carries base colour and metallic in a
+second target so a metal reflects as one — ADR-0065, Fix 1.)
 
 $$F = F_0 + (1-F_0)\,(1 - \mathbf n\cdot(-\hat{\mathbf v}))^5.$$
 

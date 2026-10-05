@@ -137,6 +137,9 @@ public:
         // to read it back, or feed it to the SSR march (m10.7b). Invalid otherwise (no allocation,
         // no write): the pre-SSR frame is untouched.
         RGTexture gbuffer;
+        // Its material half (m19.6b fix 1): base colour + metallic, kGbufferMaterialFormat. Valid
+        // exactly when `gbuffer` is.
+        RGTexture gbuffer_material;
     };
 
     // Extract → upload → declare into `graph` (which the caller later executes). Returns invalid

@@ -154,6 +154,9 @@ layout(location = 0) out vec4 out_hdr;
 // source, two SPIR-V modules — no duplicated GLSL. docs/math/ssr.md (m10.7b) is what marches it.
 #ifdef WRITE_GBUFFER
 layout(location = 1) out vec4 out_gbuffer;
+// The material half (m19.6b fix 1): base colour + metallic, so the SSR resolve can reflect this
+// surface at its own Fresnel F0 rather than a dielectric's (passes.hpp, kGbufferMaterialFormat).
+layout(location = 2) out vec4 out_gbuffer_material;
 #endif
 
 #include "brdf.glsl"
@@ -579,5 +582,8 @@ void main() {
     // and A = 1.0 as a "geometry is here" mask so the SSR march (m10.7b) can distinguish a shaded
     // fragment from cleared background (which stays A = 0).
     out_gbuffer = vec4(ddgi_oct_encode(n), roughness, 1.0);
+    // The SAME albedo and metallic the lights above were shaded with — maps already multiplied in
+    // — so the reflection SSR adds is tinted by the F0 this surface's direct highlights have.
+    out_gbuffer_material = vec4(albedo, metallic);
 #endif
 }

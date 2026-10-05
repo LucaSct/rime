@@ -429,6 +429,13 @@ namespace {
 
 constexpr std::uint32_t kFloorTop = kSize * 5 / 8;
 
+// The NEAR floor, for the SSR cases. At the far, grazing end of the floor (measured: rows 55-61
+// of 96) the screen march's thickness test lets a nearly floor-parallel ray "hit" the floor it
+// left, so those pixels reflect the FLOOR — m10.7b's behaviour, and correct for what it is, but
+// not the environment the claims below are about. From 3/4 height down every reflection ray
+// climbs off the top of the screen without meeting anything: a pure miss, the probe alone.
+constexpr std::uint32_t kNearFloorTop = kSize * 3 / 4;
+
 // One f16 unit in the last place at `v`: binary16 keeps 11 significant bits, so a normal value
 // m * 2^e with m in [0.5, 1) is spaced 2^(e-11) from its neighbours. Read from the exponent, not
 // tuned — the same construction terrain's m19.6 anchor uses.
@@ -445,9 +452,9 @@ struct FloorStats {
     Rgb mean;
 };
 
-[[nodiscard]] FloorStats floor_stats(const HdrImage& img) {
+[[nodiscard]] FloorStats floor_stats(const HdrImage& img, std::uint32_t top = kFloorTop) {
     FloorStats s;
-    for (std::uint32_t y = kFloorTop; y < kSize; ++y) {
+    for (std::uint32_t y = top; y < kSize; ++y) {
         for (std::uint32_t x = 0; x < kSize; ++x) {
             const std::size_t i = (static_cast<std::size_t>(y) * img.width + x) * 3;
             const float r = img.rgb[i], g = img.rgb[i + 1], b = img.rgb[i + 2];
@@ -476,19 +483,6 @@ struct FloorStats {
         }
     }
     return worst;
-}
-
-// Whole-frame pixels (floor AND background) at which two decoded images differ. decode_hdr is
-// exact, so equal floats here are equal half-floats in the target.
-[[nodiscard]] std::uint32_t differing_pixels(const HdrImage& a, const HdrImage& b) {
-    std::uint32_t n = 0;
-    for (std::size_t p = 0; p < a.rgb.size() / 3; ++p) {
-        n += (a.rgb[p * 3] != b.rgb[p * 3] || a.rgb[p * 3 + 1] != b.rgb[p * 3 + 1] ||
-              a.rgb[p * 3 + 2] != b.rgb[p * 3 + 2])
-                 ? 1u
-                 : 0u;
-    }
-    return n;
 }
 
 // FNV-1a over the decoded floats: a fingerprint to LOG, so a before/after run of this file on two
@@ -612,20 +606,23 @@ TEST_CASE(
     CHECK(metal_floor.max_abs == 0.0f);
 }
 
-TEST_CASE("m19.6b: with SSR on, two metals of different colour are the same image under the sky") {
+TEST_CASE("m19.6b: SSR reflects each surface at its own F0 — a metal tinted, a dielectric not") {
     auto device = rhi::create_device({});
     if (!device) {
         if (vulkan_required()) {
             FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
         }
-        MESSAGE("no Vulkan device available — skipping the m19.6b SSR gating proof");
+        MESSAGE("no Vulkan device available — skipping the m19.6b SSR Fresnel proof");
         return;
     }
     MeshRegistry meshes(*device);
     const MeshId floor = meshes.add(make_plane(12.0f), "m196b-floor");
     MaterialRegistry materials;
-    const MaterialId warm_metal = add_material(materials, kWarm, 1.0f, 0.3f);
-    const MaterialId cool_metal = add_material(materials, kCool, 1.0f, 0.3f);
+    // Red is 1.0 on purpose: 255/255 survives the 8-bit G-buffer exactly, and F0 = 1 makes
+    // Schlick's Fresnel exactly 1 at every angle — the channel every exact claim below reads.
+    constexpr float kSmooth = 0.05f;
+    const Rgb red{1.0f, 0.2f, 0.2f};
+    const MaterialId red_metal = add_material(materials, red, 1.0f, kSmooth);
     const MaterialId warm_diel = add_material(materials, kWarm, 0.0f, 0.3f);
     const MaterialId cool_diel = add_material(materials, kCool, 0.0f, 0.3f);
 
@@ -634,46 +631,136 @@ TEST_CASE("m19.6b: with SSR on, two metals of different colour are the same imag
     ls.ssr_max_distance = 8.0f;
     ls.ssr_thickness = 0.5f;
     ls.ssr_max_steps = 64;
-    SceneRenderer renderer(*device, meshes, materials);
-    renderer.set_lighting(ls);
-    renderer.set_sky(physical_sky(1.0f));
-    const auto render = [&](MaterialId mat) {
+    SceneRenderer ssr_on(*device, meshes, materials);
+    ssr_on.set_lighting(ls);
+    SceneRenderer ssr_off(*device, meshes, materials);
+    const auto render = [&](SceneRenderer& renderer, MaterialId mat) {
         return render_hdr(*device, renderer, [&](ecs::World& w) { build_floor(w, floor, mat); });
     };
-    (void)render(warm_metal); // warm the sky bake; every measured frame below reuses it
 
-    // (a) + the SSR GATING, in one exact property. With SSR on, the pixel is
-    //     forward + reflection * fresnel(0.04)          (ssr_resolve.frag)
-    // and the reflection reads only the G-buffer (normal, roughness), the depth and the sky —
-    // never the base colour. So the base colour can reach the pixel ONLY through the forward
-    // pass, and there a metal's diffuse is albedo * (1 - 1) = 0. If the forward pass also added
-    // its own specular sky term here, f0 = albedo would tint it and the two frames would differ;
-    // if the diffuse were still applied, albedo * sky would. Neither happens: the two frames are
-    // the SAME IMAGE, pixel for pixel, float for float — one program, identical inputs.
-    const HdrImage warm = render(warm_metal);
-    const HdrImage cool = render(cool_metal);
-    const std::uint32_t metal_diff = differing_pixels(warm, cool);
-    const FloorStats warm_floor = floor_stats(warm);
-    MESSAGE("m19.6b SSR on, sky: warm vs cool metal differ at "
-            << metal_diff << " pixels; floor lit " << warm_floor.lit << "/" << warm_floor.count
-            << " mean r=" << warm_floor.mean.r << " b=" << warm_floor.mean.b);
-    CHECK(metal_diff == 0);
-    // ...and that image is not black: SSR's sky reflection is there, once.
-    CHECK(warm_floor.lit == warm_floor.count);
+    // ── A NEUTRAL GREY ENVIRONMENT (no sky): the exact half ─────────────────────────────────────
+    // On the near floor (kNearFloorTop) every reflection ray leaves the screen, so SSR reflects
+    // the flat ambient E. The pixel is then  forward + E * F(f0, n.v)  and every term is known.
+    constexpr float kAmbient = 0.11f;
+    ssr_on.set_ambient(kAmbient, kAmbient, kAmbient);
 
-    // The control that makes "0 pixels differ" evidence: the SAME two colours at metallic 0 do
-    // differ, everywhere on the floor, so the colour is reaching the shader and it is the metal
-    // weighting — not a dead uniform — that removed it.
-    const HdrImage warm_d = render(warm_diel);
-    const HdrImage cool_d = render(cool_diel);
-    const FloorStats wd = floor_stats(warm_d);
-    const FloorStats cd = floor_stats(cool_d);
+    // A METAL: forward is albedo * (1 - 1) * E = 0, and red's F0 is 1, so F = 1 + (1 - 1) * f = 1:
+    // the red channel is E itself. The resolve blends E with E twice on the way and the target
+    // rounds once, so the bound is two f16 ULPs of E — the format's, not a margin. Were the
+    // diffuse still applied this would read 2E; were F0 still 0.04, under half of E.
+    //
+    // And the TINT, exactly: green's F0 is 0.2, so its Fresnel 0.2 + 0.8 * (1 - n.v)^5 is below 1
+    // wherever n.v > 0, i.e. at every pixel that can see the floor. Under a grey environment red
+    // is therefore strictly above green at EVERY near-floor pixel — no threshold.
+    const HdrImage metal_flat = render(ssr_on, red_metal);
+    float red_err = 0.0f;
+    std::uint32_t red_over_green = 0;
+    for (std::uint32_t y = kNearFloorTop; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 3;
+            red_err = std::max(red_err, std::fabs(metal_flat.rgb[i] - kAmbient));
+            red_over_green += metal_flat.rgb[i] > metal_flat.rgb[i + 1] ? 1u : 0u;
+        }
+    }
+    const FloorStats flat_floor = floor_stats(metal_flat, kNearFloorTop);
+    MESSAGE("m19.6b fix 1, grey ambient, SSR on, red metal: worst |red - E| = "
+            << red_err << " (two f16 ULP = " << 2.0f * f16_ulp(kAmbient) << "), red > green at "
+            << red_over_green << "/" << flat_floor.count << ", mean g=" << flat_floor.mean.g);
+    CHECK(red_err <= 2.0f * f16_ulp(kAmbient));
+    CHECK(red_over_green == flat_floor.count);
+
+    // A DIELECTRIC IS NOT TINTED. Its pixel is albedo * E + E * F(0.04, n.v): subtract the
+    // diffuse (known on the CPU) and what is left is the reflection, which must not know the
+    // base colour. Two very different colours, each channel: the residuals agree to the four f16
+    // roundings between them — each frame stores its forward target and its resolved target in
+    // half floats. A reflection tinted by even 1% of the albedo would miss this by orders.
+    const HdrImage warm_flat = render(ssr_on, warm_diel);
+    const HdrImage cool_flat = render(ssr_on, cool_diel);
+    const float warm_c[3] = {kWarm.r, kWarm.g, kWarm.b};
+    const float cool_c[3] = {kCool.r, kCool.g, kCool.b};
+    float worst_excess = -1.0f; // |residual difference| - its bound, worst over the floor
+    float worst_resid_diff = 0.0f;
+    float min_reflection = 1.0e9f;
+    for (std::uint32_t y = kNearFloorTop; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 3;
+            for (std::size_t c = 0; c < 3; ++c) {
+                const float dw = warm_c[c] * kAmbient;
+                const float dc = cool_c[c] * kAmbient;
+                const float rw = warm_flat.rgb[i + c] - dw;
+                const float rc = cool_flat.rgb[i + c] - dc;
+                const float bound = f16_ulp(dw) + f16_ulp(dc) + f16_ulp(warm_flat.rgb[i + c]) +
+                                    f16_ulp(cool_flat.rgb[i + c]);
+                worst_resid_diff = std::max(worst_resid_diff, std::fabs(rw - rc));
+                worst_excess = std::max(worst_excess, std::fabs(rw - rc) - bound);
+                min_reflection = std::min({min_reflection, rw, rc});
+            }
+        }
+    }
+    MESSAGE("m19.6b fix 1, grey ambient, SSR on, dielectrics: worst reflection difference "
+            << worst_resid_diff << ", worst excess over the four-ULP bound " << worst_excess
+            << ", smallest reflection " << min_reflection);
+    CHECK(worst_excess <= 0.0f);
+    CHECK(min_reflection > 0.0f); // there IS a reflection to be untinted
+
+    // ── UNDER THE SKY ───────────────────────────────────────────────────────────────────────────
+    ssr_on.set_sky(physical_sky(1.0f));
+    ssr_off.set_sky(physical_sky(1.0f));
+    (void)render(ssr_on, red_metal); // warm both bakes; every measured frame below reuses them
+    (void)render(ssr_off, red_metal);
+
+    // The metallic-0 frames, fingerprinted so two builds can be compared (never asserted): these
+    // are the same two materials the pre-fix build logged.
+    const HdrImage warm_sky = render(ssr_on, warm_diel);
+    const HdrImage cool_sky = render(ssr_on, cool_diel);
+    const FloorStats wd = floor_stats(warm_sky);
+    const FloorStats cd = floor_stats(cool_sky);
     MESSAGE("m19.6b SSR on, sky: dielectric warm r/b="
             << wd.mean.r << "/" << wd.mean.b << " cool r/b=" << cd.mean.r << "/" << cd.mean.b
-            << " fingerprints " << fingerprint(warm_d) << " " << fingerprint(cool_d));
-    CHECK(differing_pixels(warm_d, cool_d) >= wd.count);
-    CHECK(wd.mean.r > cd.mean.r);
+            << " fingerprints " << fingerprint(warm_sky) << " " << fingerprint(cool_sky));
+    CHECK(wd.mean.r > cd.mean.r); // the base colour reaches the frame (through the diffuse)
     CHECK(cd.mean.b > wd.mean.b);
+
+    // THE METAL, SSR ON AGAINST SSR OFF. Same floor, same sky; only who mirrors it differs.
+    //   SSR on :  lut(r) * F(f0)                                 (ssr_resolve.frag)
+    //   SSR off:  mix(lut(r), sh, alpha) * EnvBRDFApprox(f0, roughness, n.v)   (the forward pass)
+    // In the red channel f0 = 1, where both weights are closed-form: Schlick is exactly 1, and the
+    // fit is A + B = 1 - 0.55 * roughness (the n.v terms cancel). So
+    //   on / off = 1 / ((1 - 0.55 * roughness) * (1 + alpha * (sh / lut - 1))).
+    // The sky is not negative, so sh / lut >= 0 and the ratio cannot exceed
+    //   1 / ((1 - 0.55 * roughness) * (1 - alpha))                — the UPPER bound, derived.
+    // Downward it is limited only by how much brighter the hemisphere's average is than the
+    // mirrored direction; kSkyContrast = 8 is the stated assumption (measured here: the floor
+    // mean sits near the top of the interval, so the average is not far above the mirror).
+    // If SSR's reflection and the forward term were BOTH applied the ratio would be about 2; with
+    // the old dielectric Fresnel it was 0.29 — either falls far outside.
+    const HdrImage on = render(ssr_on, red_metal);
+    const HdrImage off = render(ssr_off, red_metal);
+    const float alpha = kSmooth * kSmooth;
+    const float fit = 1.0f - 0.55f * kSmooth;
+    constexpr float kSkyContrast = 8.0f;
+    const double upper = 1.0 / (double(fit) * (1.0 - double(alpha)));
+    const double lower = 1.0 / (double(fit) * (1.0 + double(alpha) * (kSkyContrast - 1.0)));
+    const FloorStats on_floor = floor_stats(on, kNearFloorTop);
+    const FloorStats off_floor = floor_stats(off, kNearFloorTop);
+    const double ratio = double(on_floor.mean.r) / double(off_floor.mean.r);
+    std::uint32_t sky_red_over_green = 0;
+    for (std::uint32_t y = kNearFloorTop; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 3;
+            sky_red_over_green += on.rgb[i] > on.rgb[i + 1] ? 1u : 0u;
+        }
+    }
+    MESSAGE("m19.6b fix 1, sky, red metal: SSR on r/g/b="
+            << on_floor.mean.r << "/" << on_floor.mean.g << "/" << on_floor.mean.b
+            << " SSR off r/g/b=" << off_floor.mean.r << "/" << off_floor.mean.g << "/"
+            << off_floor.mean.b << "; red on/off = " << ratio << " in [" << lower << ", " << upper
+            << "]; red > green at " << sky_red_over_green << "/" << on_floor.count);
+    CHECK(ratio <= upper);
+    CHECK(ratio >= lower);
+    // The reflected sky is RED-tinted: red above green at every near-floor pixel. (Blue stays
+    // above red here — the sky is blue, and a tint scales a colour, it does not replace it.)
+    CHECK(sky_red_over_green == on_floor.count);
 }
 
 TEST_CASE("m19.6b: with SSR off, the forward pass mirrors the sky — a smooth metal follows it") {

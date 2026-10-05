@@ -118,7 +118,11 @@ public:
              // so a frame with no sky is unchanged.
              RGTexture skyview_lut,
              rhi::SamplerHandle skyview_sampler,
-             bool sky_enabled);
+             bool sky_enabled,
+             // The G-buffer's material half (m19.6b fix 1): base colour + metallic, written by
+             // the same forward draw as `gbuffer`. The resolve reflects each surface at its own
+             // Fresnel F0 = mix(0.04, base colour, metallic) instead of a dielectric's for all.
+             RGTexture gbuffer_material);
 
 private:
     rhi::Device& device_;

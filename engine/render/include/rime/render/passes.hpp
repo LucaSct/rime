@@ -42,7 +42,17 @@ inline constexpr rhi::Format kLdrFormat = rhi::Format::RGBA8Unorm;
 // The thin SSR G-buffer (m10.7a): RG = octahedral world normal, B = perceptual roughness, A = a
 // geometry mask (1 where shaded, 0 where cleared). RGBA16Float so the signed [-1,1] octahedral
 // pair and the [0,1] roughness all keep full precision — thin means two attachments, not narrow.
+// ("Two" was HDR + this; m19.6b fix 1 added the material target below, so SSR-on is three.)
 inline constexpr rhi::Format kGbufferFormat = rhi::Format::RGBA16Float;
+// The G-buffer's MATERIAL half (m19.6b fix 1): RGB = base colour, A = metallic. SSR needs it to
+// reflect a surface at its own Fresnel F0 = mix(0.04, base colour, metallic) — without it every
+// surface reflected like a dielectric, so a metal (which has no other ambient light) went dark
+// whenever SSR was on. Base colour + metallic rather than F0 itself, because metallic 0 survives
+// 8 bits EXACTLY (0/255) and then F0 is the literal 0.04 the resolve always used: a dielectric's
+// reflection does not move. RGBA8Srgb: the hardware sRGB-encodes RGB (perceptual spacing, what an
+// 8-bit albedo wants) and stores A linearly. 4 bytes per pixel on top of the 8 above, written
+// only when SSR is on.
+inline constexpr rhi::Format kGbufferMaterialFormat = rhi::Format::RGBA8Srgb;
 
 // Fixed light budgets for the per-frame uniform block. Uniform blocks are statically sized, so
 // the caps are compile-time; 4 suns and 16 point lights are generous for M5 scenes. Past these,
@@ -345,7 +355,12 @@ public:
                       // leaving the specular sky term out (m19.6b): passing a G-buffer is a
                       // promise that an SSR resolve will add the specular environment instead,
                       // so the sky is not mirrored twice (ADR-0065 addendum A2).
-                      RGTexture gbuffer = {}) const;
+                      RGTexture gbuffer = {},
+                      // The G-buffer's material half (kGbufferMaterialFormat, m19.6b fix 1):
+                      // base colour + metallic, for SSR's Fresnel. It travels WITH `gbuffer` —
+                      // both valid or both invalid. One without the other is a caller bug: it is
+                      // logged, and the pass draws the single-attachment path.
+                      RGTexture gbuffer_material = {}) const;
 
 private:
     rhi::Device& device_;

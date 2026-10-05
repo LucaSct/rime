@@ -725,8 +725,12 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // SSR G-buffer (m10.7a): allocated ONLY when SSR is on, so the shadowed pass below stays
     // single-attachment and the pre-SSR frame is untouched otherwise. m10.7b's march reads it.
     RGTexture gbuffer;
-    if (lighting_.ssr_enabled)
+    RGTexture gbuffer_material; // base colour + metallic, for SSR's Fresnel (m19.6b fix 1)
+    if (lighting_.ssr_enabled) {
         gbuffer = graph.create_texture({extent, kGbufferFormat, "scene-gbuffer"});
+        gbuffer_material =
+            graph.create_texture({extent, kGbufferMaterialFormat, "scene-gbuffer-material"});
+    }
     if (use_depth_prepass)
         depth_prepass_.add(graph, depth, data);
     // The M10 forward path (ADR-0032 §11 regression bridge) runs only when a feature actually has
@@ -800,7 +804,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                               clusters,
                               ddgi_binding,
                               sky_binding,
-                              gbuffer);
+                              gbuffer,
+                              gbuffer_material);
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }
@@ -860,7 +865,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                  ddgi_binding.sampler,
                  sky_binding.skyview,
                  sky_binding.sampler,
-                 sky_on);
+                 sky_on,
+                 gbuffer_material);
         tonemap_src = hdr_ssr;
     }
 
@@ -878,7 +884,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // reflection-added target (tonemap_src); with SSR off it is the raw forward HDR, unchanged.
     // This is what a caller wanting the scene's HDR colour should read (and what the GPU proofs
     // assert on, like the DDGI thesis test — never the tonemapped LDR through the pass chain).
-    return {tonemap_src, ldr, gbuffer};
+    return {tonemap_src, ldr, gbuffer, gbuffer_material};
 }
 
 } // namespace rime::render

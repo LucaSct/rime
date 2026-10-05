@@ -17,6 +17,7 @@
 #include "pbr_forward_shadowed.frag.spv.h"
 #include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
 #include "present.frag.spv.h"
+#include "rime/core/diagnostics/log.hpp"
 #include "tonemap.frag.spv.h"
 
 namespace rime::render {
@@ -341,7 +342,7 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     // somewhere to land (the baseline pair above declares one attachment, so the hardware discards
     // it there). color_formats wins over the single color_format when non-empty
     // (rhi::GraphicsPipelineDesc), which is what makes these two MRT.
-    const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat};
+    const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat, kGbufferMaterialFormat};
     pd.color_formats = gbuffer_formats;
     pd.fragment_shader = shadowed_gbuffer_fragment_shader_; // the -DWRITE_GBUFFER twin
     pd.depth_write = false;
@@ -422,14 +423,26 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   const ClusterBinding& clusters,
                                   const DdgiBinding& ddgi,
                                   const SkyLightBinding& sky,
-                                  RGTexture gbuffer) const {
+                                  RGTexture gbuffer,
+                                  RGTexture gbuffer_material) const {
     // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
     // is the "no geometry" the shader overwrites with 1 where it shades), rendered by the matching
     // MRT pipeline variant. Invalid = the one-attachment baseline, byte-for-byte the pre-SSR path.
-    const bool write_gbuffer = gbuffer.is_valid();
+    // The material half (m19.6b fix 1) is a THIRD output of the same variant and travels with the
+    // first: the G-buffer pipelines declare three attachments, so half a G-buffer cannot be drawn.
+    // A caller that passes only one gets the single-attachment path and an error, not a pipeline
+    // whose attachment count disagrees with its render pass.
+    if (gbuffer.is_valid() != gbuffer_material.is_valid()) {
+        RIME_ERROR("render: add_shadowed was given half a G-buffer (gbuffer {}, material {}) — "
+                   "drawing without one",
+                   gbuffer.is_valid(),
+                   gbuffer_material.is_valid());
+    }
+    const bool write_gbuffer = gbuffer.is_valid() && gbuffer_material.is_valid();
     const RGColorAttachment colors[] = {
         {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}},
-        {gbuffer, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+        {gbuffer, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {gbuffer_material, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
     RGDepthAttachment depth_att{};
     depth_att.texture = depth;
     if (depth_prepassed) {
@@ -457,7 +470,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // barrier. An undeclared read would work right up until the frame that actually re-baked.
     const RGBuffer buffers[] = {clusters.lights, clusters.lists, sky.sh};
     RenderGraph::RasterPassDesc desc{};
-    desc.colors = write_gbuffer ? std::span<const RGColorAttachment>{colors, 2}
+    desc.colors = write_gbuffer ? std::span<const RGColorAttachment>{colors, 3}
                                 : std::span<const RGColorAttachment>{colors, 1};
     desc.depth = &depth_att;
     desc.sampled = sampled;

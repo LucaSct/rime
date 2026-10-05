@@ -45,6 +45,8 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
         // rather than as one flat colour. Always bound (SkyPass::empty_binding's 1x1 dummy when
         // there is no sky) for the same fixed-layout reason as the DDGI pair above.
         {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
+        // The G-buffer's material half (m19.6b fix 1): base colour + metallic, for the Fresnel F0.
+        {8, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
     };
     rhi::GraphicsPipelineDesc pd{};
     pd.vertex_shader = vertex_shader_;
@@ -84,7 +86,8 @@ void SsrPass::add(RenderGraph& graph,
                   rhi::SamplerHandle ddgi_sampler,
                   RGTexture skyview_lut,
                   rhi::SamplerHandle skyview_sampler,
-                  bool sky_enabled) {
+                  bool sky_enabled,
+                  RGTexture gbuffer_material) {
     // The inverse projection is what turns a uv + depth back into a view-space position — computed
     // once here, on the CPU, rather than every one of the march's steps re-inverting it on the GPU.
     // inv_view (m10.7c) does the same job for the probe fallback: view space back to the WORLD the
@@ -118,8 +121,13 @@ void SsrPass::add(RenderGraph& graph,
     // that makes the octahedral border ring do its job, ddgi.md §3), distinct from SSR's own
     // point+clamp; depth/colour must not interpolate, the atlases must.
     const RGColorAttachment colors[] = {{out_hdr, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
-    const RGTexture sampled[] = {
-        scene_color, gbuffer, depth, ddgi_irradiance, ddgi_visibility, skyview_lut};
+    const RGTexture sampled[] = {scene_color,
+                                 gbuffer,
+                                 depth,
+                                 ddgi_irradiance,
+                                 ddgi_visibility,
+                                 skyview_lut,
+                                 gbuffer_material};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.sampled = sampled;
@@ -138,6 +146,7 @@ void SsrPass::add(RenderGraph& graph,
                            ddgi_sampler,
                            skyview_lut,
                            skyview_sampler,
+                           gbuffer_material,
                            &graph](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipe);
                               cmd.bind_texture(0, graph.physical(scene_color), smp);
@@ -149,6 +158,7 @@ void SsrPass::add(RenderGraph& graph,
                               cmd.bind_uniform_buffer(
                                   6, ddgi_params.buffer, ddgi_params.offset, ddgi_params.size);
                               cmd.bind_texture(7, graph.physical(skyview_lut), skyview_sampler);
+                              cmd.bind_texture(8, graph.physical(gbuffer_material), smp);
                               cmd.draw(3);
                           });
 }
