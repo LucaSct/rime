@@ -166,6 +166,18 @@ struct HeightfieldHeaderV1 {
 
 static_assert(sizeof(HeightfieldHeaderV1) == 52, "v1 heightfield header must stay 13 x 4 bytes");
 
+// The v1 cooked-terrain-layer record (M19.7a, ADR-0066), reflected for the MaterialV1 reason: it is
+// the WHOLE payload, so these fields in this order are the entire wire format, and changing any of
+// them changes terrain_layer_schema_hash() — every previously cooked layer is then refused with
+// SchemaMismatch rather than misread. Mixed-width like MaterialV1; compute_type_hash ignores
+// padding, and the wire is written field by field, never memcpy'd.
+struct TerrainLayerV1 {
+    std::uint64_t material;
+    std::uint64_t albedo_height;
+    float uv_scale_x, uv_scale_z;
+    float height_contrast;
+};
+
 } // namespace rime::assets::detail
 
 // Registration is at global scope (the macro opens namespace rime::core to specialize its traits).
@@ -298,6 +310,14 @@ RIME_REFLECT_FIELD(min_sample)
 RIME_REFLECT_FIELD(max_sample)
 RIME_REFLECT_END()
 
+RIME_REFLECT_BEGIN(rime::assets::detail::TerrainLayerV1)
+RIME_REFLECT_FIELD(material)
+RIME_REFLECT_FIELD(albedo_height)
+RIME_REFLECT_FIELD(uv_scale_x)
+RIME_REFLECT_FIELD(uv_scale_z)
+RIME_REFLECT_FIELD(height_contrast)
+RIME_REFLECT_END()
+
 namespace rime::assets {
 
 std::string_view to_string(AssetError error) noexcept {
@@ -341,6 +361,9 @@ std::string_view to_string(AssetError error) noexcept {
             return "invalid heightfield (grid outside [2, ceiling], a non-finite/non-positive "
                    "spacing or scale, unknown triangulation, or a sample outside the recorded "
                    "range)";
+        case AssetError::InvalidTerrainLayer:
+            return "invalid terrain layer (a zero material/texture id, a non-finite or "
+                   "non-positive uv_scale, or a non-finite or negative height_contrast)";
         case AssetError::Io:
             return "I/O error";
     }
@@ -1700,6 +1723,83 @@ std::optional<HeightfieldAsset> read_heightfield(std::span<const std::byte> file
         *out_id = content_hash(payload);
     }
     return hf;
+}
+
+// ── Terrain layer (M19.7a, ADR-0066) ────────────────────────────────────────────────────────────
+
+std::uint64_t terrain_layer_schema_hash() noexcept {
+    return core::reflect<detail::TerrainLayerV1>().type_hash;
+}
+
+std::optional<TerrainLayerAsset> decode_terrain_layer(std::span<const std::byte> payload,
+                                                      AssetError& out_error) noexcept {
+    core::ByteReader reader(payload);
+    TerrainLayerAsset layer;
+    std::uint64_t material = 0;
+    std::uint64_t albedo_height = 0;
+
+    // Wire order IS the format: it must match detail::TerrainLayerV1 and the Rust cooker.
+    if (!reader.u64(material) || !reader.u64(albedo_height) || !reader.f32(layer.uv_scale[0]) ||
+        !reader.f32(layer.uv_scale[1]) || !reader.f32(layer.height_contrast)) {
+        out_error = AssetError::Truncated;
+        return std::nullopt;
+    }
+    // Fixed record => the payload ends here; trailing bytes mean a corrupt or foreign file.
+    if (reader.remaining() != 0) {
+        out_error = AssetError::SizeMismatch;
+        return std::nullopt;
+    }
+
+    // Unlike a material's texture slots, neither id may be 0: a material texture slot has a 1x1
+    // fallback that makes "no texture" a meaningful state, but a terrain layer without a material
+    // has nothing to shade with, and one without its albedo/height texture has nothing that makes
+    // it a layer. `x > 0.0f` is false for NaN as well as for zero and negatives, and isfinite
+    // catches +inf; `>= 0.0f` likewise rejects a NaN contrast.
+    const bool ids_ok = material != 0 && albedo_height != 0;
+    const bool scale_ok = std::isfinite(layer.uv_scale[0]) && layer.uv_scale[0] > 0.0f &&
+                          std::isfinite(layer.uv_scale[1]) && layer.uv_scale[1] > 0.0f;
+    const bool contrast_ok = std::isfinite(layer.height_contrast) && layer.height_contrast >= 0.0f;
+    if (!ids_ok || !scale_ok || !contrast_ok) {
+        out_error = AssetError::InvalidTerrainLayer;
+        return std::nullopt;
+    }
+    layer.material = AssetId{material};
+    layer.albedo_height = AssetId{albedo_height};
+    return layer;
+}
+
+std::optional<TerrainLayerAsset> read_terrain_layer(std::span<const std::byte> file,
+                                                    AssetError& out_error,
+                                                    AssetId* out_id,
+                                                    AssetRejectCounters* rejects) noexcept {
+    // One exit for every refusal, so no path can return an error without also tallying it.
+    const auto reject = [&](AssetError e) -> std::optional<TerrainLayerAsset> {
+        out_error = e;
+        if (rejects != nullptr) {
+            rejects->record(e);
+        }
+        return std::nullopt;
+    };
+    std::span<const std::byte> payload;
+    AssetError error = AssetError::Truncated;
+    const std::optional<CookedHeader> header = read_header(file, payload, error);
+    if (!header) {
+        return reject(error);
+    }
+    if (header->kind != AssetKind::TerrainLayer) {
+        return reject(AssetError::WrongKind);
+    }
+    if (header->type_schema_hash != terrain_layer_schema_hash()) {
+        return reject(AssetError::SchemaMismatch);
+    }
+    std::optional<TerrainLayerAsset> layer = decode_terrain_layer(payload, error);
+    if (!layer) {
+        return reject(error);
+    }
+    if (out_id != nullptr) {
+        *out_id = content_hash(payload);
+    }
+    return layer;
 }
 
 } // namespace rime::assets

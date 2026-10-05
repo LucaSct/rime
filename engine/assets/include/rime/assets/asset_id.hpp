@@ -34,6 +34,8 @@ enum class AssetKind : std::uint16_t {
                          // (M10.4a, ADR-0032 §2)
     VirtualGeometry = 8, // clustered rigid-mesh companion payload (M18, ADR-0043)
     Heightfield = 9,     // terrain height grid: quantised u16 samples + scale (M19.1)
+    TerrainLayer = 10,   // one terrain splat layer: material + packed albedo/height texture +
+                         // world UV scale + height contrast (M19.7a, ADR-0066)
 };
 
 // A content-hashed asset identity. A struct (not a bare u64) so it cannot be confused with an
