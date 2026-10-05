@@ -220,11 +220,14 @@ TEST_CASE("m19.8c (e): resident terrain plateaus under a long traversal") {
     CHECK(c.peak_bytes_resident <= 18 * kTileBytes);
     CHECK(peak_second_half == peak_first_half); // flat, not creeping
     CHECK(c.installs - c.evictions == c.tiles_installed);
-    // The asset side plateaus with it: every eviction gave its handle back, exactly once.
-    CHECK(sim.source.live_slots() == c.tiles_installed);
-    CHECK(sim.source.peak_live <= 18);
+    // The asset side: an INSTALLED tile holds no ownership at all — the handle goes back the moment
+    // physics has its copy — so what is live in the source is only what is still loading, and
+    // every request was released exactly once: at install, or at cancellation.
+    CHECK(sim.source.releases == c.installs + c.requests_cancelled);
     CHECK(sim.source.requests == sim.source.releases + sim.source.live_slots());
+    CHECK(sim.source.peak_live <= 9); // in flight: the leading edge, a few columns deep at most
     CHECK(sim.source.stale_releases == 0);
+    CHECK(c.refused_stale_handle == 0);
     CHECK(c.stalls_admitted_body == 0);
 }
 
@@ -236,15 +239,28 @@ TEST_CASE("m19.8c: destroying the module returns every body, shape and handle") 
         const tc::PinToken token =
             terrain.pin(box_around({40.0f, 0.0f, 8.0f}, {20.0f, 1.0f, 1.0f}), 1);
         REQUIRE(token.is_valid());
-        for (std::uint64_t tick = 0; tick < 4; ++tick) {
+        std::uint64_t tick = 0;
+        const auto barrier = [&] {
             source.pump();
-            const tc::Plan plan = terrain.plan(tick, {});
+            const tc::Plan plan = terrain.plan(tick++, {});
             REQUIRE(terrain.try_commit(plan) == tc::CommitStatus::Ready);
+        };
+        barrier();
+        CHECK(source.live_slots() == 3); // requested: three ownerships held while loading
+        for (int i = 0; i < 9; ++i) {
+            barrier();
         }
         CHECK(terrain.counters().tiles_installed == 3);
         CHECK(world.body_count() == 3);
-        CHECK(source.live_slots() == 3);
+        CHECK(source.live_slots() == 0); // installed: every handle already given back
+        CHECK(source.releases == 3);
+
+        // One more tile, left mid-load: the destructor has a handle to return as well as bodies.
+        REQUIRE(terrain.pin(box_around({200.0f, 0.0f, 8.0f}, {1.0f, 1.0f, 1.0f}), 1).is_valid());
+        barrier();
+        CHECK(source.live_slots() == 1);
     }
+    CHECK(source.releases == 4);
     CHECK(world.body_count() == 0);
     CHECK(source.live_slots() == 0);
     CHECK(source.stale_releases == 0);

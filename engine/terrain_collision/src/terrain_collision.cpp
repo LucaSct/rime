@@ -6,6 +6,7 @@
 #include <cmath>
 #include <utility>
 
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/physics/world.hpp"
 
 namespace rime::terrain_collision {
@@ -108,6 +109,7 @@ TerrainCollision::~TerrainCollision() {
             world_.destroy_body(record.body);
             (void)world_.unregister_heightfield(record.shape);
         }
+        // Only a load still in flight holds a handle (an installed tile released at install).
         if (record.handle.is_valid()) {
             (void)source_.release(record.handle);
         }
@@ -453,6 +455,16 @@ void TerrainCollision::try_install(Record& record, std::uint64_t tick, bool requ
     // THE ONLY PLACE READINESS IS READ. Everything a load completion did before this line was to
     // change what `state` answers; nothing was installed, selected or scheduled by it.
     const assets::AssetState state = source_.state(record.handle);
+    const std::uint64_t scheduled = record.requested_tick + config_.activation_lead_ticks;
+    if (state != assets::AssetState::Ready && tick >= scheduled && !record.late) {
+        // The tick this tile was scheduled to appear on has come and the load has not. From here
+        // its install tick is set by the disk, not by the request — so it is said, once per
+        // request, rather than left to look like an on-time install. Whether anything WAITS for
+        // it is not decided here: a body that requires the tile stalls the tick (step 5), an
+        // arriving entity stays deferred (step 6), and a tile nobody is on simply appears late.
+        record.late = true;
+        ++counters_.install_late;
+    }
     if (state == assets::AssetState::Loading) {
         return;
     }
@@ -476,10 +488,16 @@ void TerrainCollision::try_install(Record& record, std::uint64_t tick, bool requ
 
     // Ready. A prefetched tile waits out its lead so that the tick it appears in the physics world
     // is set by when it was asked for, not by how fast the disk was. A REQUIRED tile never waits:
-    // the lead is a determinism aid for the envelope, not a reason to stall a body.
-    if (!required && tick < record.requested_tick + config_.activation_lead_ticks) {
-        ++counters_.installs_held_for_lead;
-        return;
+    // the lead is a determinism aid for the envelope, not a reason to stall a body. That early
+    // install is still a function of the tick history alone — a required tile is installed on the
+    // tick it first became required whether the load was fast (here) or slow (the stall holds the
+    // tick until it is) — and it is counted so that it is not a silent exception to the schedule.
+    if (tick < scheduled) {
+        if (!required) {
+            ++counters_.installs_held_for_lead;
+            return;
+        }
+        ++counters_.installs_required_early;
     }
 
     const TilePayload payload = source_.resolve(record.handle);
@@ -536,6 +554,15 @@ void TerrainCollision::try_install(Record& record, std::uint64_t tick, bool requ
     record.body = id;
     record.bytes = asset.samples.size() * sizeof(std::uint16_t);
     record.state = TileState::Installed;
+    // The physics world copied the samples at registration, so this module has no further use for
+    // the asset: give the ownership back NOW rather than at deactivation. On a server that halves
+    // what an installed tile costs; on a client the render residency holds its own ownership of the
+    // same slot (ADR-0067: one request, one release), so nothing is reloaded there. `asset` dangles
+    // after this line — nothing below may touch it.
+    if (!source_.release(record.handle)) {
+        ++counters_.refused_stale_handle;
+    }
+    record.handle = {};
     ++counters_.installs;
     ++counters_.tiles_installed;
     counters_.bytes_resident += record.bytes;
@@ -557,8 +584,8 @@ void TerrainCollision::deactivate(Record& record, std::uint64_t tick) {
     } else if (record.state == TileState::Requested) {
         ++counters_.requests_cancelled;
     }
-    // Exactly once: `fail` clears the handle when it releases, so a Failed record arrives here
-    // with nothing to give back.
+    // Exactly once. Only a record still LOADING holds a handle by now: an installed tile gave its
+    // ownership back at install, and `fail` clears the handle when it releases.
     if (record.handle.is_valid()) {
         if (!source_.release(record.handle)) {
             ++counters_.refused_stale_handle;
@@ -653,6 +680,29 @@ CommitStatus TerrainCollision::try_commit(const Plan& plan) {
             it = deferred_.erase(it);
         } else {
             ++counters_.admission_retries;
+            if (!it->failure_reported && it->pin.is_valid()) {
+                // Is it waiting for something that can still arrive? A tile that failed to load or
+                // was refused will not: this entity is stuck until the caller cancels or re-aims
+                // it. There is no timeout policy here (ADR-0068), so the least this can do is make
+                // the stuck admission visible — one count and one warning per deferral, not one
+                // per barrier.
+                std::vector<TileKey> keys;
+                (void)collect_keys(it->bounds, 0.0f, keys);
+                for (const TileKey& key : keys) {
+                    if (tile_state(key) == TileState::Failed) {
+                        it->failure_reported = true;
+                        ++counters_.admissions_blocked_by_failure;
+                        RIME_WARN("terrain_collision: admission of entity {} is blocked — tile "
+                                  "({}, {}) rev {} failed to load or was refused; it stays "
+                                  "deferred until cancelled",
+                                  it->entity,
+                                  key.x,
+                                  key.z,
+                                  key.revision);
+                        break;
+                    }
+                }
+            }
             ++it;
         }
     }

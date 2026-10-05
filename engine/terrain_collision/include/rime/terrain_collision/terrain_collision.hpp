@@ -50,15 +50,16 @@ class PhysicsWorld;
 //   2. COMPUTE the immutable demand and eviction lists — `plan(tick, demands)`. A pure function of
 //      the demands, the pins and the manifest. It does not look at what has finished loading.
 //   3. REQUEST the assets the plan wants and this module does not yet hold.
-//   4. INSTALL every wanted tile that is READY: validate it, register the shape, create the static
-//      body.
+//   4. INSTALL every wanted tile that is READY and DUE (its scheduled tick has come, or a body
+//      requires it now): validate it, register the shape, create the static body — and release
+//      the asset handle, exactly once. Physics keeps its own copy of the samples.
 //   5. STALL CHECK (the safety net): if an already-admitted body's bounds need a tile that is still
 //      not installed, stop here and return `Waiting`. Nothing below runs and the tick is not
 //      simulated; the caller pumps its loader and calls `try_commit` again WITH THE SAME PLAN.
 //   6. EVALUATE deferred admissions: an entity is admitted only if every tile under its bounds is
 //      installed.
-//   7. DEACTIVATE outgoing tiles: destroy the body, unregister the shape, release the asset handle
-//      exactly once.
+//   7. DEACTIVATE outgoing tiles: destroy the body, unregister the shape. (A tile still loading
+//      gives back the handle it holds here instead; an installed one already did, at step 4.)
 //   8. JOURNAL — each install and each deactivation appends `(tick, key, activate|deactivate)`.
 //   9. RUN gameplay and physics (the application).
 //
@@ -237,13 +238,30 @@ struct Config {
     float activate_margin_tiles = 1.0f;
     float retain_margin_tiles = 2.0f;
 
-    // A prefetched tile that is ready is installed at the first barrier at or after
-    // `requested tick + activation_lead_ticks`. With 0 it is installed at the first barrier that
-    // finds it ready — so WHICH tick that is depends on how long the load took. A lead longer than
-    // the load makes the install tick a function of the request tick alone, i.e. independent of
-    // load timing and not only of completion order. A tile a body REQUIRES is never held for the
-    // lead. The cost of a lead is envelope: the tile is usable that many ticks later.
-    std::uint32_t activation_lead_ticks = 0;
+    // THE ACTIVATION SCHEDULE. A tile requested at tick T is installed at tick T + lead — not when
+    // its load happens to finish. That is what makes the set of static bodies at a given tick (and
+    // so the ids physics hands out, and the broadphase order) a function of the tick history ALONE:
+    // two runs with the same inputs and different disk timing produce the same journal and the
+    // same world hash, which replay and a dedicated-server digest check both depend on.
+    //
+    // The schedule has exactly two counted exceptions, neither silent:
+    //   - EARLY: a body requires the tile before T + lead. It is installed on the tick it became
+    //     required (the stall holds that tick if the load is slow), which is still independent of
+    //     load timing. `installs_required_early`.
+    //   - LATE: the load is not finished at T + lead. Determinism for that tile is lost — it
+    //     appears when the disk delivers it — and `install_late` says so. Nothing simulates over
+    //     the gap: a body that needs the tile stalls, an arriving entity stays deferred.
+    // So `install_late == 0` is the witness that a session was timing-independent.
+    //
+    // WHY 8. Reasoned, not measured (nothing here has timed a real tile load): a load cannot be
+    // seen sooner than the next barrier, since the asset server only readies assets at its
+    // once-per-frame pump, so 1–2 ticks is the floor even for an instant read; 8 ticks is 133 ms
+    // at 60 Hz, several times that floor and comfortably above a warm read-and-decode of a few
+    // megabytes of samples. The price is that an admission takes at least `lead` ticks even with
+    // an instant disk, and that the prefetch envelope must cover `lead` ticks of travel — at one
+    // 64 m tile width that is 480 m/s, beyond anything the envelope is otherwise sized for.
+    // 0 restores "install as soon as ready", where every install tick depends on load timing.
+    std::uint32_t activation_lead_ticks = 8;
 
     // The most tiles the simulation may REQUIRE at once (under a demand, or pinned). Exceeding it
     // fails the commit explicitly — it is never trimmed, because every way of trimming a required
@@ -265,6 +283,11 @@ struct Counters {
     std::uint64_t load_failures = 0;
     // A ready prefetch tile left uninstalled this barrier because its lead has not elapsed.
     std::uint64_t installs_held_for_lead = 0;
+    // Ready and required before its scheduled tick: installed early, deterministically.
+    std::uint64_t installs_required_early = 0;
+    // The scheduled tick came and the load had not finished (once per request). Non-zero means
+    // some install tick in this session was set by load timing.
+    std::uint64_t install_late = 0;
     // A planned deactivation skipped because the tile was pinned after the plan was made.
     std::uint64_t evictions_skipped_pinned = 0;
 
@@ -273,6 +296,9 @@ struct Counters {
     std::uint64_t admitted_after_deferral = 0; // a deferred entity admitted at a barrier
     std::uint64_t admission_retries = 0;       // barriers a deferred entity was re-asked and held
     std::uint64_t admissions_cancelled = 0;
+    // Deferred entities found waiting on a tile that is Failed — stuck until cancelled. Counted
+    // (and warned about) once per deferral.
+    std::uint64_t admissions_blocked_by_failure = 0;
 
     // TICKS stalled, by the kind of demand whose tile was missing, and how many `Waiting` answers
     // those ticks cost in total. `stalls_admitted_body` is the safety net's counter: ~0 in a
@@ -297,7 +323,7 @@ struct Counters {
     std::uint64_t coverage_refusals = 0;       // require_coverage answered false
 
     std::uint64_t tiles_installed = 0;     // gauge
-    std::uint64_t bytes_resident = 0;      // gauge: sample bytes of installed tiles
+    std::uint64_t bytes_resident = 0;      // gauge: sample bytes of installed tiles (physics' copy)
     std::uint64_t peak_bytes_resident = 0; // high-water mark of the above
 };
 
@@ -376,6 +402,7 @@ private:
         std::uint64_t requested_tick = 0;
         std::uint64_t bytes = 0;
         TileState state = TileState::Pending;
+        bool late = false; // install_late already counted for this request
 
         [[nodiscard]] std::uint32_t pin_total() const noexcept {
             return pins[0] + pins[1] + pins[2];
@@ -392,6 +419,7 @@ private:
         std::uint64_t entity = 0;
         physics::Aabb bounds{};
         PinToken pin{};
+        bool failure_reported = false; // admissions_blocked_by_failure already counted
     };
 
     // Every manifest tile whose column `bounds`, grown by `margin_tiles` tile widths, touches.

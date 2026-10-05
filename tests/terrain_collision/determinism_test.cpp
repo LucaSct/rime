@@ -37,8 +37,16 @@ struct Outcome {
     return 3.0 + 1.5 * std::sin(x * 0.21) * std::cos(z * 0.17);
 }
 
-[[nodiscard]] Outcome
-run_session(Order order, std::uint64_t seed, std::uint32_t jitter, std::uint32_t lead_ticks) {
+// The shipped schedule: tc::Config's own default lead, not a number restated here.
+const std::uint32_t kDefaultLead = tc::Config{}.activation_lead_ticks;
+
+// `slow_tile_latency` > 0 makes one tile — (1, 1), which the session prefetches but no body ever
+// stands on — take that many pumps to load, whatever the jitter says.
+[[nodiscard]] Outcome run_session(Order order,
+                                  std::uint64_t seed,
+                                  std::uint32_t jitter,
+                                  std::uint32_t lead_ticks,
+                                  std::uint32_t slow_tile_latency = 0) {
     FakeTileSource::Options so;
     so.min_x = -6;
     so.max_x = 14;
@@ -54,6 +62,9 @@ run_session(Order order, std::uint64_t seed, std::uint32_t jitter, std::uint32_t
     config.activation_lead_ticks = lead_ticks;
 
     Sim sim(so, config);
+    if (slow_tile_latency > 0) {
+        sim.source.set_latency(1, 1, slow_tile_latency);
+    }
     const auto ground = [](float x, float z) { return static_cast<float>(hills(x, z)); };
 
     // Three bodies heading in different directions, so several tiles are requested at once and
@@ -113,10 +124,10 @@ void check_same(const Outcome& a, const Outcome& b) {
 
 TEST_CASE("m19.8c (a): permuted load completions give one journal, one set of admission ticks, "
           "one world hash per tick") {
-    const Outcome fifo = run_session(Order::Fifo, 1, 0, 0);
-    const Outcome lifo = run_session(Order::Lifo, 1, 0, 0);
-    const Outcome shuffled_a = run_session(Order::Shuffled, 0xA11CEull, 0, 0);
-    const Outcome shuffled_b = run_session(Order::Shuffled, 0xB0Bull, 0, 0);
+    const Outcome fifo = run_session(Order::Fifo, 1, 0, kDefaultLead);
+    const Outcome lifo = run_session(Order::Lifo, 1, 0, kDefaultLead);
+    const Outcome shuffled_a = run_session(Order::Shuffled, 0xA11CEull, 0, kDefaultLead);
+    const Outcome shuffled_b = run_session(Order::Shuffled, 0xB0Bull, 0, kDefaultLead);
 
     // Vacuity: the session did real work…
     REQUIRE(fifo.completed);
@@ -139,21 +150,26 @@ TEST_CASE("m19.8c (a): permuted load completions give one journal, one set of ad
     check_same(fifo, shuffled_b);
 }
 
-TEST_CASE("m19.8c (a): with an activation lead, load TIMING does not leak either") {
+TEST_CASE("m19.8c (a): under the DEFAULT schedule, load TIMING does not leak either") {
     // Stronger than a permutation: here each load takes a different, seeded number of pumps, so
-    // tiles become ready on different TICKS from run to run. With `activation_lead_ticks` longer
-    // than the slowest load, a prefetched tile is installed at `requested + lead` regardless — the
-    // install tick is a function of the request tick alone.
-    constexpr std::uint32_t kJitter = 5; // loads take 3..8 pumps
-    constexpr std::uint32_t kLead = 10;  // > 8
-    const Outcome a = run_session(Order::Shuffled, 0x1111ull, kJitter, kLead);
-    const Outcome b = run_session(Order::Shuffled, 0x2222ull, kJitter, kLead);
-    const Outcome c = run_session(Order::Lifo, 0x3333ull, kJitter, kLead);
+    // tiles become ready on different TICKS from run to run. Every load still finishes within the
+    // default lead, so each tile is installed at `requested + lead` regardless — the install tick
+    // is a function of the request tick alone, and so is everything downstream of it.
+    REQUIRE(kDefaultLead == 8); // the shipped default is a schedule, not "as soon as ready"
+    constexpr std::uint32_t kJitter = 4; // loads take 3..7 pumps: all inside the lead of 8
+    const Outcome a = run_session(Order::Shuffled, 0x1111ull, kJitter, kDefaultLead);
+    const Outcome b = run_session(Order::Shuffled, 0x2222ull, kJitter, kDefaultLead);
+    const Outcome c = run_session(Order::Lifo, 0x3333ull, kJitter, kDefaultLead);
 
     REQUIRE(a.completed);
     CHECK(a.counters.installs > 20);
     CHECK(a.counters.installs_held_for_lead > 0); // the lead actually held something back
     CHECK(a.counters.stalls_admitted_body == 0);
+    // The witness: no install in any of the three runs was late, so none was set by the disk.
+    CHECK(a.counters.install_late == 0);
+    CHECK(b.counters.install_late == 0);
+    CHECK(c.counters.install_late == 0);
+    CHECK(a.counters.installs_required_early == 0);
     // The runs differ in WHEN loads completed, not merely in what order within a pump.
     std::vector<std::uint64_t> pumps_a, pumps_b;
     for (const auto& completion : a.completions) {
@@ -182,4 +198,64 @@ TEST_CASE("m19.8c (a): the control — without a lead, different load timing DOE
     CHECK(a.journal != b.journal);
     CHECK(a.counters.stalls_admitted_body == 0);
     CHECK(b.counters.stalls_admitted_body == 0);
+    // With no lead the scheduled tick IS the request tick, which no load can meet: the counter
+    // says, truthfully, that every install in such a session was timed by its load.
+    CHECK(a.counters.install_late == a.counters.requests);
+}
+
+TEST_CASE("m19.8c (a): a load that EXCEEDS the lead is counted late — and is the only thing that "
+          "moves") {
+    // One prefetched tile takes 30 pumps in one run and 45 in the other; the default lead is 8.
+    // It misses its scheduled tick in both, and `install_late` says so in both. Nothing simulates
+    // over the gap — no body is on that tile, so nothing stalls and nothing falls — but the tile
+    // does appear on a different tick in each run, and from that tick the world hash differs
+    // (terrain bodies are part of it). That is the honest limit of the schedule, and the counter
+    // is how a session knows it crossed it.
+    const Outcome on_time = run_session(Order::Fifo, 1, 0, kDefaultLead);
+    const Outcome late_a = run_session(Order::Fifo, 1, 0, kDefaultLead, 30);
+    const Outcome late_b = run_session(Order::Fifo, 1, 0, kDefaultLead, 45);
+    REQUIRE(on_time.completed);
+    REQUIRE(late_a.completed);
+    REQUIRE(late_b.completed);
+    CHECK(on_time.counters.install_late == 0);
+    CHECK(late_a.counters.install_late == 1); // once for the tile, not once per barrier it was late
+    CHECK(late_b.counters.install_late == 1);
+    CHECK(late_a.counters.stalls_admitted_body == 0);
+    CHECK(late_b.counters.stalls_admitted_body == 0);
+    CHECK(late_a.counters.installs == on_time.counters.installs); // late, not lost
+
+    const tc::TileKey slow{1, 1, 1};
+    const auto activated_on = [&](const Outcome& o) {
+        for (const tc::JournalEntry& e : o.journal) {
+            if (e.key == slow && e.op == tc::JournalOp::Activate) {
+                return static_cast<std::int64_t>(e.tick);
+            }
+        }
+        return std::int64_t{-1};
+    };
+    const std::int64_t scheduled = activated_on(on_time);
+    REQUIRE(scheduled >= 0);
+    CHECK(activated_on(late_a) > scheduled);
+    CHECK(activated_on(late_b) > activated_on(late_a));
+    // Every OTHER tile kept its schedule: strip the slow tile's lines and the journals agree.
+    const auto without_slow = [&](const Outcome& o) {
+        std::vector<tc::JournalEntry> rest;
+        for (const tc::JournalEntry& e : o.journal) {
+            if (!(e.key == slow)) {
+                rest.push_back(e);
+            }
+        }
+        return rest;
+    };
+    CHECK(without_slow(late_a) == without_slow(on_time));
+    CHECK(without_slow(late_b) == without_slow(on_time));
+    // And the bodies were never affected — only the terrain body's presence differs, so the hashes
+    // agree up to the scheduled tick and the admissions happened on the same ticks throughout.
+    CHECK(late_a.admission_ticks == on_time.admission_ticks);
+    for (std::int64_t t = 0; t < scheduled; ++t) {
+        REQUIRE(late_a.hashes[static_cast<std::size_t>(t)] ==
+                on_time.hashes[static_cast<std::size_t>(t)]);
+    }
+    CHECK(late_a.hashes[static_cast<std::size_t>(scheduled)] !=
+          on_time.hashes[static_cast<std::size_t>(scheduled)]);
 }

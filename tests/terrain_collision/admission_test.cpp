@@ -52,8 +52,10 @@ TEST_CASE("m19.8c (b): a teleport into uninstalled terrain is held while the wor
     const tc::TileKey fast{10, 0, 1};
     const tc::TileKey slow{10, -1, 1};
     Sim sim(so, Sim::default_config());
+    // `fast` loads inside the default lead of 8 and is installed on schedule, at +8; `slow` takes
+    // 20 pumps, misses its scheduled tick, and is installed late — at +20.
     sim.source.set_latency(fast.x, fast.z, 4);
-    sim.source.set_latency(slow.x, slow.z, 13);
+    sim.source.set_latency(slow.x, slow.z, 20);
 
     // Two bodies near the origin: the witness that keeps moving, and the one that will teleport.
     REQUIRE(sim.spawn_sphere(1, {4.0f, 0.6f, 4.0f}, {3.0f, 0.0f, 0.0f}, /*driven=*/true) ==
@@ -117,6 +119,11 @@ TEST_CASE("m19.8c (b): a teleport into uninstalled terrain is held while the wor
     CHECK(sim.terrain.counters().admission_retries > 0);
     CHECK(sim.terrain.deferred_admissions() == 0);
 
+    // On schedule and late, respectively — and the late one is counted, once.
+    CHECK(fast_tick == static_cast<std::int64_t>(teleport_tick) + 8);
+    CHECK(slow_tick == static_cast<std::int64_t>(teleport_tick) + 20);
+    CHECK(sim.terrain.counters().install_late == 1);
+
     // The whole episode was deferral, not the stall.
     CHECK(sim.terrain.counters().stalls_admitted_body == 0);
     CHECK(sim.waiting_pumps == 0);
@@ -167,6 +174,8 @@ struct Walk {
     std::uint64_t stalled_ticks = 0;
     std::uint64_t stall_retries = 0;
     std::uint64_t waiting_pumps = 0;
+    std::uint64_t install_late = 0;
+    std::uint64_t installs_required_early = 0;
     float lowest_y = 1.0e9f;
     float final_x = 0.0f;
     std::uint64_t ticks = 0;
@@ -197,6 +206,8 @@ struct Walk {
     out.stalled_ticks = sim.terrain.counters().stalls_admitted_body;
     out.stall_retries = sim.terrain.counters().stall_retries;
     out.waiting_pumps = sim.waiting_pumps;
+    out.install_late = sim.terrain.counters().install_late;
+    out.installs_required_early = sim.terrain.counters().installs_required_early;
     out.final_x = sim.state_of(1).position.x;
     out.ticks = sim.tick;
     out.hashes = sim.hashes.size();
@@ -225,6 +236,9 @@ TEST_CASE("m19.8c (c): outrunning a too-small prefetch envelope stalls the tick 
     // A stall holds the tick: every tick was simulated exactly once.
     CHECK(starved.ticks == 420);
     CHECK(starved.hashes == 420);
+    // Each of those tiles was required the tick it was requested — before its scheduled tick — so
+    // it was installed early, on the tick the stall held, and counted as such.
+    CHECK(starved.installs_required_early >= 2);
 
     // The same walk with the default one-tile envelope: the tile is requested 16 m — over three
     // seconds — ahead of a body covering 0.083 m per tick. It is installed long before it is
@@ -236,6 +250,11 @@ TEST_CASE("m19.8c (c): outrunning a too-small prefetch envelope stalls the tick 
     CHECK(fed.waiting_pumps == 0);
     CHECK(fed.final_x > 24.0f);
     CHECK(fed.lowest_y > 0.4f);
+    // Forty pumps is five times the default lead: every one of these loads missed its scheduled
+    // tick, and the counter says so. Late is not the same as missing — the envelope is 16 m deep,
+    // the tiles were in long before the body arrived, and the ground was never empty.
+    CHECK(fed.install_late > 0);
+    CHECK(fed.installs_required_early == 0);
 }
 
 TEST_CASE("m19.8c (c): a sweep over unloaded terrain stalls too, under its own counter") {

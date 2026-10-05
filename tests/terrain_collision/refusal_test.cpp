@@ -44,6 +44,14 @@ namespace {
            c.refused_required_failed;
 }
 
+// The activation schedule is determinism_test's subject. Here it is switched off, so that each
+// barrier counted below is about the refusal being injected and not about a lead elapsing.
+[[nodiscard]] tc::Config immediate() {
+    tc::Config c = Sim::default_config();
+    c.activation_lead_ticks = 0;
+    return c;
+}
+
 const physics::Aabb kSpot = box_around({40.0f, 0.5f, 8.0f}, {0.5f, 0.5f, 0.5f}); // tile (2, 0)
 const tc::TileKey kSpotTile{2, 0, 1};
 
@@ -53,7 +61,7 @@ TEST_CASE("m19.8c (f): a stale handle is refused and counted, never read, and th
           "for again") {
     FakeTileSource source(small_world());
     physics::PhysicsWorld world;
-    tc::TerrainCollision terrain(Sim::default_config(), source, world);
+    tc::TerrainCollision terrain(immediate(), source, world);
 
     REQUIRE(terrain.request_admission(1, kSpot) == tc::AdmissionResult::Deferred);
     REQUIRE(barrier(source, terrain, 0) == tc::CommitStatus::Ready);
@@ -78,9 +86,11 @@ TEST_CASE("m19.8c (f): a stale handle is refused and counted, never read, and th
     CHECK(terrain.tile_state(kSpotTile) == tc::TileState::Installed);
     REQUIRE(terrain.admitted().size() == 1);
     CHECK(terrain.admitted()[0] == 1);
-    // The stale handle was never released (it was not ours to release any more).
+    // The stale handle was never released (it was not ours to release any more); the fresh one
+    // was, once, when its tile installed.
     CHECK(source.stale_releases == 0);
-    CHECK(source.live_slots() == 1);
+    CHECK(source.releases == 1);
+    CHECK(source.live_slots() == 0);
 }
 
 TEST_CASE("m19.8c (f): a payload at the wrong revision is refused and counted; a body that needs "
@@ -88,7 +98,7 @@ TEST_CASE("m19.8c (f): a payload at the wrong revision is refused and counted; a
     FakeTileSource source(small_world());
     source.set_payload_revision(kSpotTile.x, kSpotTile.z, 7); // the manifest says 1
     physics::PhysicsWorld world;
-    tc::TerrainCollision terrain(Sim::default_config(), source, world);
+    tc::TerrainCollision terrain(immediate(), source, world);
 
     REQUIRE(terrain.request_admission(1, kSpot) == tc::AdmissionResult::Deferred);
     for (std::uint64_t tick = 0; tick < 6; ++tick) {
@@ -103,6 +113,9 @@ TEST_CASE("m19.8c (f): a payload at the wrong revision is refused and counted; a
     CHECK(source.live_slots() == 0);           // the refused payload's handle was given back
     CHECK(terrain.deferred_admissions() == 1); // the entity is still held out…
     CHECK(terrain.counters().admission_retries >= 5); // …and that, too, is visible
+    // It is not merely waiting, it is STUCK — its tile can never arrive — and that is counted
+    // apart from an ordinary wait: once for the deferral, not once per barrier.
+    CHECK(terrain.counters().admissions_blocked_by_failure == 1);
 
     // A simulated body over that tile cannot be waited into existence: explicit failure.
     const std::vector<tc::Demand> demands{{kSpot, tc::DemandKind::Body}};
@@ -114,7 +127,7 @@ TEST_CASE("m19.8c (f): a payload at the wrong revision is refused and counted; a
 TEST_CASE("m19.8c (f): a pin at the wrong revision is refused; an unknown unpin is refused") {
     FakeTileSource source(small_world());
     physics::PhysicsWorld world;
-    tc::TerrainCollision terrain(Sim::default_config(), source, world);
+    tc::TerrainCollision terrain(immediate(), source, world);
 
     // History recorded against revision 2 may not be replayed over revision-1 ground.
     const tc::PinToken wrong = terrain.pin(kSpot, 2, tc::PinReason::History);
@@ -141,7 +154,7 @@ TEST_CASE("m19.8c (f): a required set over the cap fails explicitly, before anyt
           "requested") {
     FakeTileSource source(small_world());
     physics::PhysicsWorld world;
-    tc::Config config = Sim::default_config();
+    tc::Config config = immediate();
     config.max_required_tiles = 3;
     tc::TerrainCollision terrain(config, source, world);
 
@@ -186,7 +199,7 @@ TEST_CASE("m19.8c (f): a failed load and misplaced content are each refused unde
     source.set_fails(2, 0);
     source.set_misplaced(3, 0); // a tile whose cooked origin is 3 m off its grid cell
     physics::PhysicsWorld world;
-    tc::TerrainCollision terrain(Sim::default_config(), source, world);
+    tc::TerrainCollision terrain(immediate(), source, world);
 
     REQUIRE(terrain.pin(box_around({56.0f, 0.5f, 8.0f}, {20.0f, 0.5f, 0.5f}), 1).is_valid());
     for (std::uint64_t tick = 0; tick < 5; ++tick) {
@@ -199,7 +212,8 @@ TEST_CASE("m19.8c (f): a failed load and misplaced content are each refused unde
     CHECK(terrain.counters().refused_invalid_content == 1);
     CHECK(all_refusals(terrain.counters()) == 1);
     CHECK(terrain.counters().installs == 1);
-    CHECK(source.live_slots() == 1); // only the good tile still holds a handle
+    CHECK(source.live_slots() == 0); // failed, refused and installed alike: all given back
+    CHECK(source.releases == 3);
     CHECK_FALSE(terrain.require_coverage(box_around({56.0f, 0.5f, 8.0f}, {1.0f, 0.5f, 0.5f})));
     CHECK(terrain.counters().coverage_refusals == 1);
 }
@@ -208,7 +222,7 @@ TEST_CASE("m19.8c (f): a superseded or already-committed plan is refused; a tile
           "plan is not evicted") {
     FakeTileSource source(small_world());
     physics::PhysicsWorld world;
-    tc::TerrainCollision terrain(Sim::default_config(), source, world);
+    tc::TerrainCollision terrain(immediate(), source, world);
 
     // Install tile (2,0) under a pin, then drop the pin so the next plan lists it for eviction.
     const tc::PinToken first = terrain.pin(kSpot, 1);
