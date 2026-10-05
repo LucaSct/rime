@@ -1106,9 +1106,9 @@ TEST_CASE("heightfield raycast: the seam rule closes a surface the per-piece roo
     // THE PROOF MUST SEE THE GUARD ACT. A hit alone cannot distinguish "the seam rule closed the
     // gap" from "this toolchain rounds differently and the ordinary root caught it", so the same
     // rays are walked directly through ray_vs_heightfield_local (this TU's instrumented copy, see
-    // RIME_PHYSICS_SEAM_COUNTER in heightfield.hpp) and the firing counter must rise by at least
-    // one per ray. A lapsed proof turns this red instead of passing quietly. (The world is at the
-    // origin with identity rotation, so world and local frames coincide.)
+    // RIME_PHYSICS_SEAM_COUNTER in heightfield.hpp) and the firing counter must move. A lapsed
+    // proof turns this red instead of passing quietly. (The world is at the origin with identity
+    // rotation, so world and local frames coincide.)
     HeightfieldShape shape;
     REQUIRE(build_heightfield(desc_of(t), shape));
     const std::uint64_t before = seam_firings();
@@ -1123,5 +1123,39 @@ TEST_CASE("heightfield raycast: the seam rule closes a surface the per-piece roo
     const std::uint64_t fired = seam_firings() - before;
     MESSAGE("seam guard firings across the five rays: ", fired);
     CHECK(direct_hits == 5);
-    CHECK(fired >= 5);
+    CHECK(fired >= 1);
+
+    // AND THE FIRING MUST BE LOAD-BEARING, which the counter alone does not show. Disable the rule
+    // and cast the identical rays: without it the per-piece root has to miss at least one, because
+    // the whole claim is that a ray can read as above the surface at the end of one triangle and
+    // below at the start of the next, so neither piece sees a sign change. This runs the
+    // falsification that ADR-0060 could only assert, and it is the portable form of the claim --
+    // HOW MANY of the five land in the seam depends on the target's rounding and contraction
+    // (measured: five on x86-64/GCC, three on macOS/arm64, where the ordinary root happens to
+    // catch the other two), so a count is a statement about one compiler while "it leaks without
+    // the rule" is a statement about the rule.
+    set_seam_disabled(true);
+    int hits_without_rule = 0;
+    for (const SeamRay& r : rays) {
+        float tt = 0.0f;
+        core::Vec3 n{};
+        std::uint32_t tri = 0;
+        hits_without_rule += ray_vs_heightfield_local(
+            shape, {r.ox, r.oy, r.oz}, {r.dx, r.dy, r.dz}, r.tmax, tt, n, tri);
+    }
+    set_seam_disabled(false);
+    MESSAGE("rays that still hit with the seam rule disabled: ", hits_without_rule);
+    CHECK(hits_without_rule < 5);
+
+    // The switch is global state in this TU, so prove it was put back rather than leaving a
+    // disabled seam rule to quietly weaken every heightfield case that runs after this one.
+    int direct_hits_again = 0;
+    for (const SeamRay& r : rays) {
+        float tt = 0.0f;
+        core::Vec3 n{};
+        std::uint32_t tri = 0;
+        direct_hits_again += ray_vs_heightfield_local(
+            shape, {r.ox, r.oy, r.oz}, {r.dx, r.dy, r.dz}, r.tmax, tt, n, tri);
+    }
+    CHECK(direct_hits_again == 5);
 }

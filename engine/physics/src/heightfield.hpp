@@ -274,11 +274,25 @@ inline void cell_range(float lo,
 // symbols from the library's uninstrumented one (same header, same inline names, two bodies in one
 // binary would be an ODR violation the linker resolves arbitrarily). Without the macro there is no
 // counter, no atomic and no extra branch: the hot path is byte-for-byte the plain one.
+//
+// `g_seam_disabled` is the other half, and the stronger one: a switch that turns the seam rule OFF
+// so the test can run the COUNTERFACTUAL in-suite — cast the same rays with the rule gone and watch
+// the surface leak. Counting firings proves the rule fired; running it off is what proves the
+// firing is load-bearing. It also makes the proof portable in a way a per-ray count is not: WHICH
+// grazing rays land in the seam depends on the target's rounding and FMA contraction (macOS/arm64
+// reaches two of five by the ordinary per-piece root that x86-64 does not), so "at least one ray
+// misses without the rule, none with it" is the property that holds on every target, while
+// "exactly five fire" is a statement about one compiler.
 inline namespace seam_counted {
 inline std::atomic<std::uint64_t> g_seam_firings{0};
+inline std::atomic<bool> g_seam_disabled{false};
 
 [[nodiscard]] inline std::uint64_t seam_firings() noexcept {
     return g_seam_firings.load(std::memory_order_relaxed);
+}
+
+inline void set_seam_disabled(bool off) noexcept {
+    g_seam_disabled.store(off, std::memory_order_relaxed);
 }
 #endif
 //
@@ -411,7 +425,13 @@ inline std::atomic<std::uint64_t> g_seam_firings{0};
         const float fa = f(a);
         const float fb = f(b);
         float hit_t = -1.0f;
-        if (have_prev && prev_f > 0.0f && fa < 0.0f) {
+        bool seam = have_prev && prev_f > 0.0f && fa < 0.0f;
+#ifdef RIME_PHYSICS_SEAM_COUNTER
+        if (seam && g_seam_disabled.load(std::memory_order_relaxed)) {
+            seam = false; // TEST-ONLY: hand this ray back to the per-piece root alone, and leak
+        }
+#endif
+        if (seam) {
 #ifdef RIME_PHYSICS_SEAM_COUNTER
             g_seam_firings.fetch_add(1, std::memory_order_relaxed);
 #endif
