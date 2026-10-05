@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <string>
@@ -722,8 +723,7 @@ TEST_CASE("heightfield contact: a capsule lies flat and a compound stands on its
 
 // ── Queries, counters, determinism ───────────────────────────────────────────────────────────
 
-TEST_CASE(
-    "heightfield: overlap_sphere sees terrain; shape_cast and penetration skips are counted") {
+TEST_CASE("heightfield: overlap_sphere sees terrain, and no query skips the tile any more") {
     PhysicsWorld w;
     const Terrain t =
         sample_terrain(9, 9, 1.0f, 1.0f, 0.5f, 0.0f, [](double, double) { return 1.0; });
@@ -735,18 +735,225 @@ TEST_CASE(
     w.overlap_sphere({4.0f, 1.6f, 4.0f}, 0.5f, hits);
     CHECK(hits.empty());
 
+    // M19.1 asserted here that shape_cast and penetration SKIPPED terrain and counted it. m19.2
+    // closes both, so the assertion inverts: the queries answer, and the skip counter stays at
+    // zero. That counter is now reserved for one thing only — a candidate set truncated by the
+    // per-query triangle budget — which is why the flat terrain below never trips it.
     CHECK(w.heightfield_query_skips() == 0);
+
     ShapeCast sc;
     sc.shape.type = ShapeType::Sphere;
+    sc.shape.radius = 0.5f;
     sc.origin = {4.0f, 5.0f, 4.0f};
+    sc.direction = {0.0f, -1.0f, 0.0f};
+    sc.max_distance = 10.0f;
     ShapeHit sh;
-    CHECK_FALSE(w.shape_cast(sc, sh));       // terrain cannot be cast against yet...
-    CHECK(w.heightfield_query_skips() == 1); // ...and the skip is visible
+    REQUIRE(w.shape_cast(sc, sh));
+    CHECK(sh.body == terrain);
+    CHECK_FALSE(sh.initial_overlap);
+    // The sphere's surface reaches the plane at y = 1 when its centre is at y = 1.5, so it has
+    // travelled 5 - 1.5 = 3.5 m. This is the whole point of a shape cast over a ray cast: the
+    // reported distance is where the SHAPE touches, not where its centre line crosses.
+    CHECK(sh.distance == doctest::Approx(3.5f).epsilon(1e-4));
+    CHECK(sh.normal.y == doctest::Approx(1.0f).epsilon(1e-3));
+    CHECK(sh.point.y == doctest::Approx(1.0f).epsilon(1e-3));
+
+    // A sphere already buried in the ground: the cast has no time of impact to report, so it
+    // reports the body at distance 0 with `initial_overlap` set — the flag that tells a caller to
+    // run `penetration` instead. (Returning false would lose WHICH body it is inside, which is
+    // the one thing the caller needs next; the convex path has always answered this way.)
+    sc.origin = {4.25f, 0.9f, 4.75f};
+    ShapeHit sh2;
+    REQUIRE(w.shape_cast(sc, sh2));
+    CHECK(sh2.initial_overlap);
+    CHECK(sh2.distance == 0.0f);
+    CHECK(sh2.body == terrain);
     ShapeDesc probe;
     probe.type = ShapeType::Sphere;
+    probe.radius = 0.5f;
     PenetrationHit ph;
-    CHECK_FALSE(w.penetration(probe, {4.0f, 1.2f, 4.0f}, core::quat_identity(), ph));
-    CHECK(w.heightfield_query_skips() == 2);
+    REQUIRE(w.penetration(probe, {4.25f, 0.9f, 4.75f}, core::quat_identity(), ph));
+    CHECK(ph.body == terrain);
+    // Centre 0.1 below a surface at y = 1 with radius 0.5 ⇒ the sphere's lowest point is 0.6 under
+    // the surface, and the way out is STRAIGHT UP.
+    //
+    // The depth is 0.6, not the 0.4 a per-triangle EPA would report. That difference is the point
+    // of the rule this query inherits from the contact build: 0.4 is the shortest way out of the
+    // zero-thickness TRIANGLE (downward, since only 0.4 of the sphere sticks up through it), and
+    // acting on it would drive a character controller into the rock. 0.6 is the way out of the
+    // GROUND. See the header comment on penetration_vs_heightfield_local.
+    CHECK(ph.depth == doctest::Approx(0.6f).epsilon(1e-3));
+    CHECK(ph.normal.y == doctest::Approx(1.0f).epsilon(1e-3));
+    // Clear of the ground is not a penetration, and must not be reported as a shallow one.
+    CHECK_FALSE(w.penetration(probe, {4.25f, 1.6f, 4.75f}, core::quat_identity(), ph));
+    CHECK(w.heightfield_query_skips() == 0);
+}
+
+TEST_CASE("heightfield: a shape sunk exactly on a vertex or diagonal gets NO depenetration") {
+    // A LIMITATION, pinned down so it is a known gap with a gate on it rather than a surprise.
+    // It is inherited, not introduced: the below-plane branch of the contact build
+    // (`sphere_vs_triangle`) only accepts a shape whose centre projects into a triangle's
+    // INTERIOR, because a centre outside the triangle "belongs to a neighbour whose face region
+    // does contain it" — and on a grid VERTEX, or on a cell's DIAGONAL, no triangle's interior
+    // contains it, so every candidate declines and the deepest-contact reduction has nothing to
+    // reduce. Writing the test above walked into it twice in a row (x = 4, z = 4 is a vertex of a
+    // unit grid; x = 4.5, z = 4.5 is on the min→max diagonal), which is how it was found.
+    //
+    // It affects DEPENETRATION ONLY. A body resting ON terrain is handled by the above-plane
+    // path, which does accept edge and vertex features — the watertightness and resting proofs
+    // cover exactly those points and pass. So the reachable symptom is narrow: a body already
+    // sunk below the surface, with its centre on a grid line, is told it is not penetrating and
+    // stays there. The fix belongs to the contact rule, not to this query (accepting a boundary
+    // feature means not double-counting it across the triangles that share it, which is what
+    // `push_unique`'s dedup exists for), so it is named in ADR-0061 and left for the brick that
+    // owns the controller.
+    PhysicsWorld w;
+    const Terrain t =
+        sample_terrain(9, 9, 1.0f, 1.0f, 0.5f, 0.0f, [](double, double) { return 1.0; });
+    add_terrain(w, t);
+    ShapeDesc probe;
+    probe.type = ShapeType::Sphere;
+    probe.radius = 0.5f;
+    PenetrationHit ph;
+
+    // Interior of a cell half: answered, and the depth is the way out of the GROUND.
+    REQUIRE(w.penetration(probe, {4.25f, 0.9f, 4.75f}, core::quat_identity(), ph));
+    CHECK(ph.depth == doctest::Approx(0.6f).epsilon(1e-3));
+
+    // Exactly on a grid vertex, and exactly on a cell diagonal: not answered. These two CHECKs
+    // are the gate — if a later brick fixes the contact rule they go red, which is the signal to
+    // come back here and promote them.
+    CHECK_FALSE(w.penetration(probe, {4.0f, 0.9f, 4.0f}, core::quat_identity(), ph));
+    CHECK_FALSE(w.penetration(probe, {4.5f, 0.9f, 4.5f}, core::quat_identity(), ph));
+
+    // And the gap is specifically the BELOW-plane branch: the same two positions, resting just
+    // above the surface, are seen perfectly well.
+    std::vector<BodyId> hits;
+    w.overlap_sphere({4.0f, 1.4f, 4.0f}, 0.5f, hits);
+    CHECK(hits.size() == 1);
+    w.overlap_sphere({4.5f, 1.4f, 4.5f}, 0.5f, hits);
+    CHECK(hits.size() == 1);
+}
+
+TEST_CASE("heightfield: a shape cast up a slope stops on the slope, not on the flat") {
+    // A ramp rising along +X at 45 degrees. A cast travelling along -Y from above the middle must
+    // report the RAMP's normal, which is the measurement a plane could not distinguish: a cast
+    // that quietly used a vertical ray plus the cell's height would get the point right and the
+    // normal wrong.
+    PhysicsWorld w;
+    const Terrain t =
+        sample_terrain(17, 9, 0.5f, 0.5f, 0.001f, 0.0f, [](double x, double) { return x; });
+    const BodyId terrain = add_terrain(w, t);
+    ShapeCast sc;
+    sc.shape.type = ShapeType::Sphere;
+    sc.shape.radius = 0.25f;
+    sc.origin = {4.0f, 9.0f, 2.0f};
+    sc.direction = {0.0f, -1.0f, 0.0f};
+    sc.max_distance = 20.0f;
+    ShapeHit sh;
+    REQUIRE(w.shape_cast(sc, sh));
+    CHECK(sh.body == terrain);
+    // 45 degrees: the normal is (-1, 1, 0)/sqrt(2) — pointing up and back down the slope.
+    CHECK(sh.normal.y == doctest::Approx(0.70710678f).epsilon(2e-3));
+    CHECK(sh.normal.x == doctest::Approx(-0.70710678f).epsilon(2e-3));
+    CHECK(std::fabs(sh.normal.z) < 1e-3f);
+    // The sphere rests tangent to the slope. Its centre stops where the distance to the plane
+    // y = x equals r, i.e. at y = 4 + r*sqrt(2); the contact point is r along -n from there, so
+    // y = 4 + r*sqrt(2) - r/sqrt(2) = 4 + r/sqrt(2).
+    CHECK(sh.point.y == doctest::Approx(4.0f + 0.25f * 0.70710678f).epsilon(5e-3));
+    CHECK(w.heightfield_query_skips() == 0);
+}
+
+TEST_CASE("heightfield: a fast body does not tunnel through terrain (speculative CCD)") {
+    // THE PROOF THIS BRICK EXISTS FOR. A 1 cm sphere falling at 300 m/s moves 5 m in a 1/60 s
+    // step — hundreds of times its own thickness — so the exact narrowphase never samples it
+    // overlapping the ground and it passes straight through. M19.1 counted that as
+    // heightfield_ccd_skipped and let it happen. With the speculative path wired, the solver is
+    // handed a negative-penetration contact and arrests the body AT the surface.
+    //
+    // Falsifiable by construction: the SAME scene with ccd off must tunnel. Asserting only that
+    // the CCD body stops would pass against a bug that made terrain thick enough to catch
+    // anything, which is why the control run is part of the test rather than a separate one.
+    const auto drop = [](bool ccd_on, float& final_y, std::uint32_t& skips) {
+        PhysicsWorld w;
+        const Terrain t =
+            sample_terrain(33, 33, 1.0f, 1.0f, 0.001f, 0.0f, [](double, double) { return 0.0; });
+        add_terrain(w, t);
+        BodyDesc b;
+        b.shape.type = ShapeType::Sphere;
+        b.shape.radius = 0.01f;
+        b.position = {16.0f, 6.0f, 16.0f};
+        b.mass = 1.0f;
+        b.ccd = ccd_on;
+        b.linear_velocity = {0.0f, -300.0f, 0.0f};
+        w.set_gravity({0.0f, 0.0f, 0.0f}); // velocity alone, so the step count is the whole story
+        const BodyId body = w.create_body(b);
+        for (int i = 0; i < 6; ++i) {
+            w.step(1.0f / 60.0f);
+        }
+        BodyState st;
+        REQUIRE(w.get_body_state(body, st));
+        final_y = st.position.y;
+        skips = w.stats().heightfield_ccd_skipped;
+    };
+
+    float y_ccd = 0.0f;
+    float y_plain = 0.0f;
+    std::uint32_t skips_ccd = 0;
+    std::uint32_t skips_plain = 0;
+    drop(true, y_ccd, skips_ccd);
+    drop(false, y_plain, skips_plain);
+
+    // The control tunnels: with no speculative contact it ends far below the ground.
+    CHECK(y_plain < -10.0f);
+    // The CCD body is arrested at the surface — above it, and nowhere near where it would have
+    // been without the brick.
+    CHECK(y_ccd > -0.5f);
+    CHECK(y_ccd > y_plain + 10.0f);
+    // And the "could not look" counter stayed silent: the body was caught, not skipped.
+    CHECK(skips_ccd == 0);
+}
+
+TEST_CASE(
+    "heightfield: the convex queries are rotation-covariant and tie-break deterministically") {
+    // The same bumpy tile placed at two different orientations must give the same ANSWER in each
+    // tile's own frame — the queries transform into the tile's frame and rotate the result back,
+    // which is an isometry, so a distance measured through it must not move. This is what catches
+    // a transform applied in the wrong order or a normal rotated by the conjugate.
+    // Two placements of one tile: identity at the origin, and yawed 90 degrees. A cast fired along
+    // each tile's own local -Y from the same local point must report the same distance.
+    const auto cast_local = [](const core::Quat& q) {
+        PhysicsWorld w;
+        const Terrain t = sample_terrain(
+            13, 13, 0.5f, 0.5f, 0.001f, 0.0f, [](double x, double z) { return 0.2 * (x + z); });
+        const core::Vec3 tile_pos{10.0f, 3.0f, -4.0f};
+        add_terrain(w, t, tile_pos, q);
+
+        // Local (3, +4 above the surface, 3) cast straight down in LOCAL space.
+        const core::Vec3 local_origin{3.0f, 0.2f * 6.0f + 4.0f, 3.0f};
+        ShapeCast sc;
+        sc.shape.type = ShapeType::Sphere;
+        sc.shape.radius = 0.2f;
+        sc.origin = tile_pos + core::rotate(q, local_origin);
+        sc.direction = core::rotate(q, core::Vec3{0.0f, -1.0f, 0.0f});
+        sc.max_distance = 20.0f;
+        ShapeHit sh;
+        REQUIRE(w.shape_cast(sc, sh));
+        // The normal, brought back into the tile's local frame, must be the same vector whatever
+        // the tile's orientation.
+        const core::Vec3 n_local = core::rotate(core::conjugate(q), sh.normal);
+        return std::pair<float, core::Vec3>{sh.distance, n_local};
+    };
+
+    const auto a = cast_local(core::quat_identity());
+    const auto b = cast_local(core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, 1.5707963f));
+    const auto c = cast_local(core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, 0.7f));
+    CHECK(b.first == doctest::Approx(a.first).epsilon(1e-4));
+    CHECK(c.first == doctest::Approx(a.first).epsilon(1e-4));
+    CHECK(b.second.y == doctest::Approx(a.second.y).epsilon(1e-3));
+    CHECK(c.second.y == doctest::Approx(a.second.y).epsilon(1e-3));
+    CHECK(b.second.x == doctest::Approx(a.second.x).epsilon(1e-3));
+    CHECK(c.second.x == doctest::Approx(a.second.x).epsilon(1e-3));
 }
 
 TEST_CASE("heightfield: a terrain scene steps bit-identically across worker counts") {
@@ -783,4 +990,35 @@ TEST_CASE("heightfield: a terrain scene steps bit-identically across worker coun
     CHECK(run(0) == h0);
     CHECK(run(2) == h0);
     CHECK(run(8) == h0);
+}
+
+TEST_CASE("heightfield: depenetration reports the DEEPEST overlapping triangle, not just one") {
+    // An ASYMMETRIC V-valley: a steep left wall (slope 0.9) meeting a gentle right floor
+    // (slope 0.15) at x = 4. A sphere resting in the crease overlaps triangles belonging to both,
+    // at genuinely different depths — which a flat tile cannot show, because there every candidate
+    // is equally deep and "deepest wins" and "first one found wins" are indistinguishable. That is
+    // exactly the hole this test fills: the rule was written, and until this configuration existed
+    // nothing in the suite could tell it from its opposite (MEASURED — inverting the comparison to
+    // "shallowest" left every other heightfield test green).
+    PhysicsWorld w;
+    const Terrain t = sample_terrain(17, 9, 0.5f, 0.5f, 0.001f, 0.0f, [](double x, double) {
+        return x < 4.0 ? 0.9 * (4.0 - x) : 0.15 * (x - 4.0);
+    });
+    add_terrain(w, t);
+    ShapeDesc probe;
+    probe.type = ShapeType::Sphere;
+    probe.radius = 0.4f;
+    PenetrationHit ph;
+    REQUIRE(w.penetration(probe, {4.0f, 0.1f, 2.3f}, core::quat_identity(), ph));
+    // The STEEP wall is the deepest violation, so that is the axis to resolve along, and resolving
+    // it is what moves the sphere out of the worst overlap rather than merely out of some overlap.
+    CHECK(ph.depth == doctest::Approx(0.32567f).epsilon(1e-3));
+    CHECK(ph.normal.x == doctest::Approx(0.669f).epsilon(5e-3));
+    CHECK(ph.normal.y == doctest::Approx(0.743f).epsilon(5e-3));
+    CHECK(std::fabs(ph.normal.z) < 1e-3f);
+    // For contrast, the numbers a "shallowest wins" reduction reports at this very position
+    // (measured by inverting the comparison): depth 0.0838 along (0, 0.316, 0.949) — a Z-facing
+    // triangle on the valley's flank, a third of the depth and a different axis entirely. Pushing
+    // the sphere that way leaves it inside the steep wall.
+    CHECK(ph.depth > 0.2f);
 }

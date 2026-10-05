@@ -456,7 +456,24 @@ Entries are grouped roughly by area and kept short on purpose.
   O(log n), not a scan of every body.
 - **CCD — continuous collision detection.** Catching collisions a fast, thin body would *tunnel*
   through in one step (a bullet through a wall) by sweeping its motion rather than testing only its
-  end pose. Planned for the physics core (speculative contacts); not yet built.
+  end pose. Built in M7.10 as **speculative contacts** (below) rather than as a time-of-impact
+  rewind ([ADR-0026](adr/0026-physics-core.md)), and extended to terrain in m19.2
+  ([ADR-0061](adr/0061-m19.2-terrain-convex-queries.md)).
+- **Speculative contact.** The form CCD takes in Rime: when two *separated* shapes are approaching
+  fast enough to touch within this step, emit a one-point contact carrying the **negative**
+  penetration — the gap still to be closed. The solver then permits the pair to approach only far
+  enough to touch and no further, so the body stops **at** the surface instead of through it. No
+  rewind, so the fixed-step determinism contract is untouched.
+- **Shape cast.** Sweeping a whole convex *shape* along a direction and reporting where it first
+  touches something — a raycast that has thickness. What a character controller uses to ask "can I
+  step there"; the reported distance is where the shape touches, not where its centre line crosses.
+  An `initial_overlap` flag says the shape started inside something, which has no time of impact and
+  means the caller should ask for **depenetration** instead.
+- **Depenetration.** Measuring how far, and in which direction, an already-overlapping shape must
+  move to separate — the recovery query a controller runs when it finds itself inside geometry.
+  Against **terrain** this is deliberately not the shortest separation from the individual cell
+  triangle: a triangle has no thickness, so the shortest escape is often *deeper into the ground*
+  ([ADR-0061](adr/0061-m19.2-terrain-convex-queries.md)).
 - **Fracture.** Splitting a mesh into pieces, often precomputed, used for destruction.
 - **Part-based destruction.** Modeling a destructible as an assembly of breakable parts
   with connectivity, rather than one monolithic object (Frostbite's approach).
