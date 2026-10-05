@@ -88,7 +88,9 @@ struct SkyInputs {
 // and it is what lets ADR-0032 §11's "off is byte-identical" claim rest on a shader branch rather
 // than on what happens to be bound.
 struct SkyLightBinding {
-    RGTexture skyview;          // the baked sky-view LUT (RGBA16Float), sampled by SSR and DDGI
+    // The baked sky-view LUT (RGBA16Float): sampled by SSR, DDGI, terrain, and — when no SSR pass
+    // will mirror it instead — the forward PBR pass (m19.6b).
+    RGTexture skyview;
     RGBuffer sh;                // ten vec4: nine SH coefficients, then the live flag
     rhi::SamplerHandle sampler; // linear; wraps in azimuth, clamps in elevation
 };

@@ -335,12 +335,16 @@ public:
                       // The sky's lighting half (m17.7b): nine SH coefficients for the ambient
                       // term, plus the baked sky-view LUT. Always valid — SkyPass::empty_binding
                       // stands in when there is no sky, and its zero flag is what makes the
-                      // shader keep taking FrameUniforms::ambient.
+                      // shader keep taking FrameUniforms::ambient. The LUT is the SPECULAR half
+                      // (m19.6b), mirrored only by the single-attachment variants.
                       const SkyLightBinding& sky,
                       // The thin SSR G-buffer (m10.7a). Invalid (the default) = the baseline
                       // single-attachment path. Valid = a second colour attachment the shadowed
                       // shader writes world-normal + roughness into, using a pipeline variant that
-                      // differs from the baseline shadowed pipeline ONLY in attachment count.
+                      // differs from the baseline shadowed pipeline in attachment count AND in
+                      // leaving the specular sky term out (m19.6b): passing a G-buffer is a
+                      // promise that an SSR resolve will add the specular environment instead,
+                      // so the sky is not mirrored twice (ADR-0065 addendum A2).
                       RGTexture gbuffer = {}) const;
 
 private:

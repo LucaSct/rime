@@ -305,6 +305,7 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
         {15, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
         {16, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
         {17, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},        // sky SH (m17.7b)
+        {18, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
     };
     // 18 of the RHI's 24 descriptor slots (rhi::kMaxBindings, vulkan_backend.hpp:355) are now
     // spoken for. The previous note here named 18 as the trigger for a second descriptor set or a
@@ -317,6 +318,12 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     //
     // The trigger stands, just moved: the next technique that wants its own bindings on the
     // forward pipeline should split the set rather than take a 19th.
+    //
+    // m19.6b took the 19th anyway (binding 18, the sky-view LUT the specular sky term mirrors),
+    // and that is a recorded exception rather than the note being ignored: it is the OTHER HALF of
+    // the sky binding already here, not a new technique — SkyLightBinding has carried the LUT
+    // since m17.7b and terrain/SSR bind the same pair. 19 of 24. The trigger is unchanged for
+    // anything that is genuinely new.
     pd.fragment_shader = shadowed_fragment_shader_;
     pd.bindings = shadowed_bindings;
     pd.depth_write = false;
@@ -437,7 +444,11 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // Both shadow arrays AND both DDGI atlases are SAMPLED here — declaring them makes the graph
     // order this pass after whatever last wrote each (m10.1 cascades, m10.2 spots, m10.5b's own
     // blend-irradiance/blend-visibility compute passes) and transition all four to ShaderRead.
-    const RGTexture sampled[] = {shadow.map, local.map, ddgi.irradiance, ddgi.visibility};
+    // The sky-view LUT joins them (m19.6b): the forward shader mirrors it when no SSR pass will,
+    // and declaring the read is what orders this pass after the bake that writes it. It leaves the
+    // LUT in ShaderRead — the state SceneRenderer already reports to SkyPass on every sky-on frame.
+    const RGTexture sampled[] = {
+        shadow.map, local.map, ddgi.irradiance, ddgi.visibility, sky.skyview};
     // Declaring the two cluster buffers is what orders this pass after the cull dispatch that
     // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
     // The sky's SH buffer joins the cluster buffers here for the same reason they are declared:
@@ -461,7 +472,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
         desc,
         [pipe, data, shadow, local, clusters, ddgi, sky, &graph](rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipe);
-            // Bindings 7–16 are attached once (they persist across draws — ADR-0020);
+            // Bindings 7–18 are attached once (they persist across draws — ADR-0020);
             // record_draws re-binds only per-draw state on top. The resources' physical handles
             // resolve now (assign_physicals has run), the same late-resolve the tonemap pass uses.
             cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
@@ -476,6 +487,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
             cmd.bind_uniform_buffer(16, ddgi.ubo.buffer, ddgi.ubo.offset, ddgi.ubo.size);
             cmd.bind_storage_buffer(17, graph.physical_buffer(sky.sh));
+            cmd.bind_texture(18, graph.physical(sky.skyview), sky.sampler);
             // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
             // overwhelming majority and the byte-identical old path — then the double-sided draws
             // with culling off. Dynamic state rather than a second pipeline: the forward pass
