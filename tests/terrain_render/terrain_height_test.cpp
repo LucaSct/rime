@@ -1699,7 +1699,49 @@ TEST_CASE("m19.6: with no sky bound, terrain matches the m19.5 shader to one f16
         check_within_one_half_ulp(empty, reference);
         CHECK(pass.sky_bound_draws() == 1);
         CHECK(pass.tiles_drawn() == 2);
+        // The default binding of (1) is legitimate "no sky" and was not counted as partial.
+        CHECK(pass.sky_partial_bindings() == 0);
     }
+}
+
+TEST_CASE("m19.6: a partial sky binding draws on the placeholders, counted") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    const render::TerrainLight light = pbr_light({0.8f, 0.55f, 0.3f}, 1.0f, 0.3f);
+    render::TerrainPass pass(*device);
+    const render::TerrainTileId id = pass.upload(make_asset(samples));
+    REQUIRE(id != render::kInvalidTerrainTile);
+    const auto reference = render_m195_reference(*device, pass.tile(id), light);
+
+    // Only the LUT is set: the SH buffer and the sampler are missing.
+    render::SkyPass sky(*device);
+    render::RenderGraph graph(*device);
+    graph.reset();
+    const render::RGTexture hdr =
+        graph.create_texture({{kSize, kSize}, render::kHdrFormat, "partial-sky-hdr"});
+    const render::RGTexture depth =
+        graph.create_texture({{kSize, kSize}, render::kDepthFormat, "partial-sky-depth"});
+    graph.export_texture(hdr);
+    declare_clear(graph, hdr, depth);
+    render::SkyLightBinding partial{};
+    partial.skyview = sky.empty_binding(graph).skyview;
+    pass.add(graph, hdr, depth, id, top_down_view_proj(), top_down_eye(), light, partial);
+    auto cmd = device->begin_commands();
+    graph.execute(*cmd);
+    device->submit_blocking(*cmd);
+    const auto img = read_texture(*device, graph.physical(hdr), 8);
+    CHECK(pass.sky_partial_bindings() == 1);
+    CHECK(pass.sky_bound_draws() == 0);
+    CHECK(pass.tiles_drawn() == 1);
+    check_within_one_half_ulp(img, reference); // the draw still happened, on the flat path
+
+    // A default binding afterwards does not move the counter.
+    (void)render_tile(*device, pass, id, light);
+    CHECK(pass.sky_partial_bindings() == 1);
+    CHECK(pass.tiles_drawn() == 2);
 }
 
 TEST_CASE("m19.6: a smooth metal follows the sky more than a rough dielectric does") {

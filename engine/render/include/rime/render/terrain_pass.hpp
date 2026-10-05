@@ -260,6 +260,12 @@ public:
     // (A caller's `empty_binding()` counts: whether a sky is LIVE is the SH flag's business.)
     [[nodiscard]] std::uint64_t sky_bound_draws() const noexcept { return sky_bound_; }
 
+    // Draws whose caller handed over a PARTIAL sky binding — at least one of skyview/sh/sampler
+    // valid, but not all three — and so fell back to the placeholders (warned once, naming the
+    // invalid members). Guardrail 5: that fallback is a silent skip of the sky unless it is
+    // counted. A fully default binding is the legitimate "no sky" and is NOT counted here.
+    [[nodiscard]] std::uint64_t sky_partial_bindings() const noexcept { return sky_partial_; }
+
 private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
@@ -280,6 +286,8 @@ private:
     std::uint64_t splat_refused_ = 0;
     std::uint64_t drawn_ = 0;
     std::uint64_t sky_bound_ = 0;
+    std::uint64_t sky_partial_ = 0;
+    bool sky_partial_warned_ = false;
 };
 
 } // namespace rime::render

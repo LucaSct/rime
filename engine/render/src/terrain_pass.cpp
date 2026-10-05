@@ -462,7 +462,24 @@ void TerrainPass::add(RenderGraph& graph,
     // with compute earlier in the frame, and declaring the read is what orders this pass after
     // that dispatch and emits the write -> shader-read barrier. An undeclared read would work
     // right up until the first frame that actually re-baked.
-    const bool caller_sky = sky.skyview.is_valid() && sky.sh.is_valid() && sky.sampler.is_valid();
+    const bool lut_ok = sky.skyview.is_valid();
+    const bool sh_ok = sky.sh.is_valid();
+    const bool sampler_ok = sky.sampler.is_valid();
+    const bool caller_sky = lut_ok && sh_ok && sampler_ok;
+    // A binding with SOME members set is a caller's mistake, not "no sky": it still draws on the
+    // placeholders, but counted and warned once (guardrail 5), so a sky that never arrives cannot
+    // pass for a frame that simply had none. All three invalid is the default, legitimate no-sky.
+    if (!caller_sky && (lut_ok || sh_ok || sampler_ok)) {
+        ++sky_partial_;
+        if (!sky_partial_warned_) {
+            sky_partial_warned_ = true;
+            RIME_WARN("terrain: partial sky binding ignored, drawing with flat ambient — invalid:"
+                      "{}{}{}",
+                      lut_ok ? "" : " skyview",
+                      sh_ok ? "" : " sh",
+                      sampler_ok ? "" : " sampler");
+        }
+    }
     const RGTexture sky_lut =
         caller_sky ? sky.skyview
                    : graph.import_texture(dummy_skyview_, rhi::ResourceState::ShaderRead);
