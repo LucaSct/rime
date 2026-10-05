@@ -9,6 +9,7 @@
 
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
+#include "rime/render/lighting/sky.hpp" // SkyLightBinding — the interface only, never SkyPass state
 #include "rime/render/render_graph.hpp"
 
 // The terrain heightfield DRAW pass (m19.3, ADR-0062-m19.3-terrain-render).
@@ -56,8 +57,12 @@
 //
 //   * no LOD, no clipmap, no tessellation: a tile is drawn at full sample density, every frame;
 //   * splat blending (m19.4/m19.5, ADR-0063/0064) blends base colour, metallic and roughness per
-//     texel — see TerrainLayer; shading is the shared GGX BRDF (brdf.glsl) with a flat-ambient
-//     stand-in, so there are no environment reflections yet (ADR-0064);
+//     texel — see TerrainLayer; shading is the shared GGX BRDF (brdf.glsl);
+//   * the environment is the SKY only (m19.6, ADR-0065), and only when the caller binds one: SH
+//     diffuse plus the sky-view LUT along the mirror direction, through Karis' analytic env-BRDF.
+//     No prefiltered radiance (roughness fades from the LUT toward the SH instead) and NO SKY
+//     OCCLUSION — a valley reflects sky its own walls hide. With no sky the flat-ambient stand-in
+//     of ADR-0064 renders bit-identically;
 //   * no streaming: `upload()` is a one-shot, and a tile stays resident until the pass dies;
 //   * no holes, no decals, no per-cell best-fit diagonals (the format cannot express them either);
 //   * a tile is placed by TRANSLATION only, because `HeightfieldAsset` carries an `origin` and no
@@ -212,13 +217,29 @@ public:
     // A NO-OP when `id` is not a tile this pass holds: no pipeline bind, no barrier, no attachment
     // load, so a frame without terrain is byte-identical to a build without this file in it — the
     // structural gate discipline ADR-0032 §11 set and `FxParticlePass` follows.
+    //
+    // `sky` (m19.6, ADR-0065) is the sky's lighting half, as `SkyPass::add_lighting` (or
+    // `empty_binding`) returns it — taken as a parameter, the convention
+    // `ForwardPbrPass::add_shadowed` set. It is OPTIONAL: the default-constructed binding (all
+    // handles invalid) means "no sky", and the pass binds its OWN 1x1 dummy LUT and all-zero SH
+    // buffer, whose zero flag keeps terrain.frag on the m19.5 flat-ambient path — bit-identical to
+    // m19.5 (proven against a frozen copy of that shader). A binding with ANY member invalid is
+    // treated as no sky as a whole, never mixed. When it is lit by the sky, `light.ambient` is
+    // ignored (the SH replaces it) and the sun is still `light`'s, not the sky's.
+    //
+    // THE LUT STATE CONTRACT. `SkyPass` owns the sky-view LUT and imports it every frame in the
+    // state the last consumer left it in, which it cannot see. Sampling it here leaves it in
+    // ShaderRead, so the caller that owns the SkyPass must report
+    // `sky.note_skyview_state(rhi::ResourceState::ShaderRead)` after declaring this pass — exactly
+    // what SceneRenderer already does for the background composite and SSR.
     void add(RenderGraph& graph,
              RGTexture hdr,
              RGTexture depth,
              TerrainTileId id,
              const core::Mat4& view_proj,
              const core::Vec3& eye,
-             const TerrainLight& light);
+             const TerrainLight& light,
+             const SkyLightBinding& sky = {});
 
     // Assets `upload()` would not draw. Guardrail 5: a refused tile and a tile that was never
     // handed over produce the same empty frame, so the difference has to be countable.
@@ -232,6 +253,12 @@ public:
     // "the pass drew a tile you cannot see" look identical on screen.
     [[nodiscard]] std::uint64_t tiles_drawn() const noexcept { return drawn_; }
 
+    // The subset of `tiles_drawn()` that bound a CALLER's sky binding (m19.6) rather than the
+    // pass's own placeholders — the witness that tells "lit by the sky" from "the caller's binding
+    // was incomplete, so the pass fell back to flat ambient", which look alike on a dim frame.
+    // (A caller's `empty_binding()` counts: whether a sky is LIVE is the SH flag's business.)
+    [[nodiscard]] std::uint64_t sky_bound_draws() const noexcept { return sky_bound_; }
+
 private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
@@ -239,6 +266,10 @@ private:
     rhi::PipelineHandle pipeline_;
     rhi::SamplerHandle sampler_;
     rhi::SamplerHandle weight_sampler_; // LINEAR, clamp-to-edge: the weight map is meant to filter
+    // m19.6: the no-sky placeholders, SkyPass::empty_binding's pair owned here so a caller without
+    // a SkyPass can still draw. Written once at construction, permanently in ShaderRead.
+    rhi::TextureHandle dummy_skyview_;
+    rhi::BufferHandle dummy_sh_;
     std::vector<TerrainTile> tiles_;
     TerrainTileId upload_impl(const assets::HeightfieldAsset& asset, const TerrainPalette* palette);
 
@@ -247,6 +278,7 @@ private:
     std::uint64_t refused_ = 0;
     std::uint64_t splat_refused_ = 0;
     std::uint64_t drawn_ = 0;
+    std::uint64_t sky_bound_ = 0;
 };
 
 } // namespace rime::render

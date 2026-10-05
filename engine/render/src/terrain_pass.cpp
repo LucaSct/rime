@@ -142,6 +142,10 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
         // m19.4: the splat weights and the per-tile constants, fragment-only.
         {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
         {2, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},
+        // m19.6: the sky — the sky-view LUT and the SH buffer (terrain.frag's SKY_SH_BINDING).
+        // Always bound (a placeholder pair when there is no sky): the layout is fixed.
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {4, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},
     };
 
     rhi::GraphicsPipelineDesc pd{};
@@ -191,6 +195,28 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     wd.address_mode = rhi::AddressMode::ClampToEdge;
     wd.debug_name = "terrain-weights";
     weight_sampler_ = device.create_sampler(wd);
+
+    // m19.6: the no-sky placeholders — SkyPass::empty_binding's pair, owned here so a caller with
+    // no SkyPass at all can still draw. The all-zero SH buffer's flag (its tenth vec4) is what
+    // keeps terrain.frag on the flat-ambient branch; the 1x1 LUT is never actually sampled, it
+    // exists because the descriptor layout is fixed. 10 x vec4 matches sky_sh_eval.glsl's block.
+    rhi::TextureDesc dd{};
+    dd.extent = {1, 1};
+    dd.format = rhi::Format::RGBA16Float;
+    dd.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    dd.debug_name = "terrain-dummy-skyview";
+    dummy_skyview_ = device.create_texture(dd);
+    const std::uint16_t zero_half4[4] = {0, 0, 0, 0};
+    device.write_texture(dummy_skyview_, zero_half4, sizeof(zero_half4));
+
+    const float zero_sh[10 * 4] = {};
+    rhi::BufferDesc sbd{};
+    sbd.size = sizeof(zero_sh);
+    sbd.usage = rhi::BufferUsage::Storage;
+    sbd.memory = rhi::MemoryUsage::CpuToGpu;
+    sbd.debug_name = "terrain-dummy-sky-sh";
+    dummy_sh_ = device.create_buffer(sbd);
+    device.write_buffer(dummy_sh_, zero_sh, sizeof(zero_sh), 0);
 }
 
 TerrainPass::~TerrainPass() {
@@ -200,6 +226,8 @@ TerrainPass::~TerrainPass() {
         device_.destroy(t.indices);
         device_.destroy(t.heights);
     }
+    device_.destroy(dummy_sh_);
+    device_.destroy(dummy_skyview_);
     device_.destroy(weight_sampler_);
     device_.destroy(sampler_);
     device_.destroy(pipeline_);
@@ -399,7 +427,8 @@ void TerrainPass::add(RenderGraph& graph,
                       TerrainTileId id,
                       const core::Mat4& view_proj,
                       const core::Vec3& eye,
-                      const TerrainLight& light) {
+                      const TerrainLight& light,
+                      const SkyLightBinding& sky) {
     // The structural gate: an unknown tile declares NO pass, so the frame is byte-identical to one
     // from a build without this file. A pass that ran and drew zero indices would be *almost*
     // that, and almost is not a regression bridge (ADR-0032 §11).
@@ -426,12 +455,32 @@ void TerrainPass::add(RenderGraph& graph,
     // The heightfield is a SAMPLED input of this pass. Declaring it is what lets the graph put the
     // texture into a shader-read state before the draw; a pass that read it without saying so
     // would work by accident today and break the first time a compute pass wrote one.
+    //
+    // m19.6: the sky. A caller's binding is used only when it is COMPLETE; anything less is "no
+    // sky" as a whole, so a half-bound sky can never pair a live LUT with a placeholder SH (or the
+    // reverse). Both the LUT and the SH buffer are declared reads either way: the sky bakes them
+    // with compute earlier in the frame, and declaring the read is what orders this pass after
+    // that dispatch and emits the write -> shader-read barrier. An undeclared read would work
+    // right up until the first frame that actually re-baked.
+    const bool caller_sky = sky.skyview.is_valid() && sky.sh.is_valid() && sky.sampler.is_valid();
+    const RGTexture sky_lut =
+        caller_sky ? sky.skyview
+                   : graph.import_texture(dummy_skyview_, rhi::ResourceState::ShaderRead);
+    const RGBuffer sky_sh =
+        caller_sky ? sky.sh : graph.import_buffer(dummy_sh_, rhi::ResourceState::ShaderRead);
+    const rhi::SamplerHandle sky_sampler = caller_sky ? sky.sampler : weight_sampler_;
     const RGTexture sampled[] = {
         graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
-        graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead)};
+        graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead),
+        sky_lut};
     desc.sampled = sampled;
+    const RGBuffer buffers[] = {sky_sh};
+    desc.buffer_reads = buffers;
 
     ++drawn_;
+    if (caller_sky) {
+        ++sky_bound_;
+    }
     graph.add_raster_pass("terrain",
                           desc,
                           [pipeline = pipeline_,
@@ -442,11 +491,19 @@ void TerrainPass::add(RenderGraph& graph,
                            splat_ubo = tile.splat_ubo,
                            indices = tile.indices,
                            index_count = tile.index_count,
+                           sky_lut,
+                           sky_sh,
+                           sky_sampler,
+                           &graph,
                            push](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipeline);
                               cmd.bind_texture(0, heights, sampler);
                               cmd.bind_texture(1, weights, weight_sampler);
                               cmd.bind_uniform_buffer(2, splat_ubo);
+                              // The sky's handles resolve now, after assign_physicals — the
+                              // late-resolve add_shadowed uses for the same graph resources.
+                              cmd.bind_texture(3, graph.physical(sky_lut), sky_sampler);
+                              cmd.bind_storage_buffer(4, graph.physical_buffer(sky_sh));
                               cmd.bind_index_buffer(indices, rhi::IndexType::Uint32);
                               cmd.push_constants(&push, sizeof(push));
                               // No vertex buffer is bound because there is nothing to bind: the
