@@ -56,6 +56,7 @@ add_subdirectory(gameplay_net) # the networked player: consume loop, latency bas
 add_subdirectory(destruction_render) # per-part render leaves: creation, posing, C6 retirement — GPU-free (m13.2d)
 add_subdirectory(blockkit) # the block as content: assembly, .rscene round trip, ADR-0035 §1's scale floors — GPU-free (m13.2c)
 add_subdirectory(ground) # the ground's seam: drawn extent == collider extent, proven by raycast — GPU-free (m17.8)
+add_subdirectory(terrain_collision) # regional collision: permuted-completion determinism, deferred admission, the stall — GPU-free (m19.8c)
 add_subdirectory(worldkit) # the component profile: the block's scene loads with zero unknown types — GPU-free (m14.1)
 if(RIME_BUILD_CAPI)
     add_subdirectory(capi) # the C ABI (M6.9), driven through librime_capi — GPU-free
