@@ -48,6 +48,9 @@ layout(set = 0, binding = 2) uniform Splat {
     vec4 dims;     // xy = weight map size in texels
     vec4 color[4]; // rgb = base colour, w = metallic per layer; an unused slot repeats layer 0
     vec4 roughness; // x..w = roughness of layer 0..3 (same repeat rule)
+    // m19.7b: metres per texture repeat along world X, Z — [0] = layer 0 (xy), layer 1 (zw);
+    // [1] = layers 2, 3. Appended after m19.5's block, so its first 112 bytes are unchanged.
+    vec4 uv_scale[2];
 } splat;
 
 // m19.6: the sky's lighting half (SkyLightBinding). ALWAYS bound — the pass binds its own 1x1 dummy
@@ -57,6 +60,15 @@ layout(set = 0, binding = 2) uniform Splat {
 layout(set = 0, binding = 3) uniform sampler2D skyview_lut;
 #define SKY_SH_BINDING 4
 #include "sky_sh_eval.glsl"
+
+// m19.7b (ADR-0066 addendum): each layer's packed albedo+height texture — RGB = albedo, decoded
+// from sRGB by the format; A = height, LINEAR (an sRGB format leaves alpha alone). A layer without
+// a texture binds the pass's 1x1 white texel, which samples as exactly (1, 1, 1, 0). Four separate
+// bindings rather than one array: layers are independently authored assets of different sizes.
+layout(set = 0, binding = 5) uniform sampler2D layer_tex0;
+layout(set = 0, binding = 6) uniform sampler2D layer_tex1;
+layout(set = 0, binding = 7) uniform sampler2D layer_tex2;
+layout(set = 0, binding = 8) uniform sampler2D layer_tex3;
 
 layout(location = 0) out vec4 out_color;
 
@@ -123,9 +135,37 @@ void main() {
         const vec2 uv = (v_local / splat.info.yz) * ((splat.dims.xy - 1.0) / splat.dims.xy) +
                         0.5 / splat.dims.xy;
         const vec4 w = texture(splat_weights, uv);
-        const vec3 c0 = splat.color[0].rgb;
-        base = c0 + w.g * (splat.color[1].rgb - c0) + w.b * (splat.color[2].rgb - c0) +
-               w.a * (splat.color[3].rgb - c0);
+
+        // ── THE LAYER TEXTURES (m19.7b), AT WORLD-SPACE UVs ───────────────────────────────────
+        //
+        // The coordinate is WORLD xz over the layer's period, not tile-local xz. A tile-local
+        // coordinate restarts at every tile's origin, so unless every tile's size happened to be a
+        // whole number of periods, the pattern would JUMP at each seam — a visible grid laid over
+        // the landscape exactly where the streaming system cut it. World xz is one continuous
+        // function across all tiles, so the seam is invisible by construction (shown in the
+        // m19.7b continuity proof). The cost: a world coordinate loses precision far from the
+        // origin (at 10 km an f32 resolves ~1 mm, still far below a texel), which world-origin
+        // rebasing will answer when worlds get that large.
+        //
+        // The colour each layer contributes is its base colour TINTED by its texture. Every
+        // layer's colour is formed BEFORE the blend, and the blend below is m19.4's difference
+        // form, unchanged — so with the white fallback (exactly 1.0) every c_k is the scalar
+        // colour to the bit, and every earlier anchor still holds exactly.
+        const vec2 xz = v_world.xz;
+        const vec4 t0 = texture(layer_tex0, xz / splat.uv_scale[0].xy);
+        const vec4 t1 = texture(layer_tex1, xz / splat.uv_scale[0].zw);
+        const vec4 t2 = texture(layer_tex2, xz / splat.uv_scale[1].xy);
+        const vec4 t3 = texture(layer_tex3, xz / splat.uv_scale[1].zw);
+        // The four layer heights, for brick 3's height blend. Sampled now so the binding, the
+        // format's linear alpha and the coordinate are proven before anything depends on them;
+        // NOT read yet, so today's picture cannot depend on them either.
+        const vec4 h = vec4(t0.a, t1.a, t2.a, t3.a);
+
+        const vec3 c0 = splat.color[0].rgb * t0.rgb;
+        const vec3 c1 = splat.color[1].rgb * t1.rgb;
+        const vec3 c2 = splat.color[2].rgb * t2.rgb;
+        const vec3 c3 = splat.color[3].rgb * t3.rgb;
+        base = c0 + w.g * (c1 - c0) + w.b * (c2 - c0) + w.a * (c3 - c0);
         const float m0 = splat.color[0].w;
         metallic = m0 + w.g * (splat.color[1].w - m0) + w.b * (splat.color[2].w - m0) +
                    w.a * (splat.color[3].w - m0);

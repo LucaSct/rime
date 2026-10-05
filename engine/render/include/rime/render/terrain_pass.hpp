@@ -57,7 +57,10 @@
 //
 //   * no LOD, no clipmap, no tessellation: a tile is drawn at full sample density, every frame;
 //   * splat blending (m19.4/m19.5, ADR-0063/0064) blends base colour, metallic and roughness per
-//     texel — see TerrainLayer; shading is the shared GGX BRDF (brdf.glsl);
+//     texel — see TerrainLayer; shading is the shared GGX BRDF (brdf.glsl). m19.7b (ADR-0066
+//     addendum) multiplies each layer's colour by its own albedo texture at world-XZ UVs; the
+//     height channel those textures carry is sampled but not yet used (height blending is the
+//     next brick), and a layer has no normal map;
 //   * the environment is the SKY only (m19.6, ADR-0065), and only when the caller binds one: SH
 //     diffuse plus the sky-view LUT along the mirror direction, through Karis' analytic env-BRDF.
 //     No prefiltered radiance (roughness fades from the LUT toward the SH instead) and NO SKY
@@ -104,8 +107,13 @@ struct TerrainTile {
     // v1 tile and a splat tile: a v1 tile holds a 1x1 dummy weight texture and a uniform block
     // whose flag is 0.
     rhi::TextureHandle weights{};  // RGBA8_UNORM, weight_columns x weight_rows, bytes verbatim
-    rhi::BufferHandle splat_ubo{}; // flag, extent, weight dims, the four base colours
+    rhi::BufferHandle splat_ubo{}; // flag, extent, weight dims, colours, roughness, uv scales
     bool has_splat = false;
+    // m19.7b: the four per-layer albedo+height textures, bound at bindings 5..8. NOT owned by the
+    // tile — they are the builder's (see TerrainLayer::albedo_height) — except that a slot with no
+    // texture holds the PASS's 1x1 white fallback, so every tile binds four valid handles. A v1
+    // tile holds the fallback in all four (it never samples them: its flag is 0).
+    std::array<rhi::TextureHandle, 4> layer_textures{};
 };
 
 // One palette entry, resolved BY THE CALLER. The pass must not reach into the asset system, so the
@@ -116,10 +124,31 @@ struct TerrainTile {
 // BRDF, so metallic and roughness join the blend. Both must be finite and in [0,1]; upload()
 // refuses (and counts) anything else rather than clamping it into a plausible-looking lie. The
 // defaults — dielectric, fully rough — are the closest GGX gets to the old Lambert look.
+//
+// m19.7b (ADR-0066 addendum): a layer may carry a TEXTURE — the cooked `TerrainLayer` asset's
+// packed albedo+height (RGB = albedo, sRGB; A = height, linear). The colour the blend sees becomes
+// `base_color * texture.rgb`; metallic and roughness stay scalar. The pass never uploads it: the
+// BUILDER (this upload()'s caller) resolves the layer's `albedo_height` AssetId to a GPU texture
+// the way every material texture is resolved — `GpuAssetBridge::texture_or_placeholder`, which
+// creates a cooked `Rgba8Srgb` texture as `rhi::Format::RGBA8Srgb` with its whole cooked mip chain.
+// Vulkan's sRGB formats decode R, G and B only, so the height in A arrives linear (proven in the
+// m19.7b tests, not assumed). The handle is BORROWED: the builder keeps it alive for as long as
+// any tile uploaded with it is resident.
+//
+// An invalid handle (the default) means "no texture": the pass binds its own 1x1 WHITE texel
+// instead, which decodes to exactly 1.0, so `base_color * 1.0` is `base_color` bit for bit — every
+// pre-texture render is reproduced exactly, not approximately.
+//
+// `uv_scale` is metres per texture repeat along WORLD X and Z — the texture coordinate is
+// world.xz / uv_scale, so a pattern runs continuously across tile seams. Finite and > 0, or the
+// tile is refused and counted. (`height_contrast`, the asset's third field, arrives with its use
+// in brick 3; the heights are sampled but not yet read.)
 struct TerrainLayer {
     core::Vec3 base_color{0.5f, 0.5f, 0.5f};
     float metallic = 0.0f;
     float roughness = 1.0f;
+    rhi::TextureHandle albedo_height{};  // invalid = no texture (the white fallback)
+    float uv_scale[2] = {1.0f, 1.0f};    // metres per repeat along world X, world Z
 };
 
 // Slot k is `HeightfieldAsset::layers[k]`. Entries for unused slots (zero AssetId) are ignored:
@@ -197,8 +226,9 @@ public:
     // As above, plus the caller-resolved palette for a splat asset (m19.4). On an asset without a
     // splat map the palette is ignored. Additional refusals, all also counted in `splat_refused()`:
     // a weight map past `kMaxSplatTexelsPerAxis`, a weight span that does not match its size, a
-    // non-finite palette colour, a layer metallic/roughness that is non-finite or outside [0,1], or
-    // a failed weight-texture / uniform-buffer allocation.
+    // non-finite palette colour, a layer metallic/roughness that is non-finite or outside [0,1], a
+    // layer `uv_scale` component that is non-finite or <= 0 (m19.7b), or a failed weight-texture /
+    // uniform-buffer allocation. A layer texture is only borrowed (see TerrainLayer).
     [[nodiscard]] TerrainTileId upload(const assets::HeightfieldAsset& asset,
                                        const TerrainPalette& palette);
 
@@ -273,6 +303,10 @@ private:
     rhi::PipelineHandle pipeline_;
     rhi::SamplerHandle sampler_;
     rhi::SamplerHandle weight_sampler_; // LINEAR, clamp-to-edge: the weight map is meant to filter
+    // m19.7b: the layer textures' sampler (trilinear, REPEAT — a layer tiles the ground) and the
+    // 1x1 white texel a layer without a texture binds. Written once, permanently in ShaderRead.
+    rhi::SamplerHandle layer_sampler_;
+    rhi::TextureHandle white_layer_;
     // m19.6: the no-sky placeholders, SkyPass::empty_binding's pair owned here so a caller without
     // a SkyPass can still draw. Written once at construction, permanently in ShaderRead.
     rhi::TextureHandle dummy_skyview_;
