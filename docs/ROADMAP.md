@@ -9,6 +9,20 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+> **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
+> frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
+> been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the
+> street, the owned ground) with m17.7e and m17.9 cut, but its frame-rate clause is **unpaid** and
+> has transferred unchanged to **M18**, which is in progress: **ADR-0043's gates 1–6 are now all
+> delivered on `main`** — M18.4, M18.5 and M18.6 landed as #235/#234/#237 on 2026-10-05 — and only
+> **gate 7**, the block's budget on a clean clock-pinned tree, remains. **M19** (terrain) has its
+> first three bricks on `main`: m19.1 (#238), m19.2 (#240) and m19.3 (#243) — cooked, collidable
+> and drawn, with splat blending and streaming still to come. **M20** (the shipped
+> game) has started — m20.1's engine-owned `GameDefinition` landed as #233. **Track H** (the hosted
+> front end) has largely landed on `main`.
+> The per-milestone tables carry the proof for each claim; the dated notes below them are history
+> and keep the state they were written in.
+
 > **Update (2026-08-30) — m13.p: the block is measured, and it MISSES the budget.** The first
 > hardware numbers for the vision demo, Release, 1920×1080, RTX 3060, 600 frames with the full M10
 > stack on (m13.L):
@@ -1662,6 +1676,20 @@ milestone boundary; time estimates come at brick-decomposition, not here.
   `engine/`**, which gains only `LocalSocket::adopt` and a `--serve-fd` flag
   ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §2). **Hosting happens on starbase's GTX 1060, behind blackStar; the workstation's RTX 3060 never serves a hosted session** — so the gateway is single-host and there is no cross-host placement, and the hosted tier gets its **own** ratified budget rather than relaxing ADR-0035's 3060 one ([ADR-0047](adr/0047-two-machines-and-the-starbase-tier.md)). *Inspired by: cloud-gaming
   split rendering; the editor-as-a-client discipline of ADR-0016.*
+
+  **State (2026-10-04): well past "queues after M18" — the first slices are on `main` and running.**
+  The roadmap said Track H queues after M18; M18 is not finished and Track H has landed anyway, in
+  parallel, so that sentence describes the plan and not the history. Landed (all `m18/track-H` on
+  `main`): the session broker (#196), bring-up and teardown (#198), admission control (#202), the
+  bounded HTTP surface (#203), the WebRTC transport seam (#206, ADR-0049), the auth store (#207), the
+  passkey ceremonies (#210), the owner gate (#211), account endpoints (#212), the media port-lease
+  pool (#216, ADR-0053), rate limiting (#217), the AV1 video track (#214, ADR-0052), the
+  `rime-gateway` binary (#219), TURN and PROXY-v2 (#221), the starbase deployment files (#222), the
+  browser page (#223), the relay and signalling routes (#225), the first real install in CT 122
+  (#226, #227), `rime-gateway invite` (#228) and browser keys and mouse (#231, ADR-0054); ADR-0045
+  to ADR-0054 are all accepted (`docs/adr/README.md`), the perf-gate amendment being ADR-0050 (#208).
+  In flight: #230 (phone sign-in fallback, ADR-0055) and #232 (full-window stream and page redesign),
+  both open. Not verified here: whether the hosted session has been exercised end to end since #227.
 - **Graphics streaming (Track S):** the engine renders → captures → encodes → transports → a thin
   client presents and sends input back. **S0** (LAN/loopback dev-stream — TCP, JPEG/LZ4, a thin
   Rime-built client) lands right after Phase 0, before M4; **S1+** (hardware codecs, QUIC/WebRTC)
@@ -1692,10 +1720,11 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 | **M13** | **"The Block" (vision demo)** ⚠️ | a destructible urban block (M8+M10+M11+M12) runs at a playable frame rate and *feels* right — **27 structural claims green** in `samples/99-the-block`, but the **frame-rate clause is NOT met**: p99 35.6 ms against a ratified 16.6 ms (m13.p). Carried to M17, where [ADR-0041](adr/0041-the-visual-bar-m17.md) ranks the breaches: `sim.block` 4.25× over, `frame.render` p99 12.69 of 16.6 |
 | **M14** | **"The Authoring Loop"** ✅ | open the shipped block in the editor, change it, save it, and run the changed scene in the game — `scripts/authoring-round-trip.sh`, gated on the two runs' placement digests differing ([ADR-0037](adr/0037-authoring-loop-m14.md)) |
 | **M15** | **"The Platform Proof"** ✅ | a small game that is **not the block** is authored through the editor and runs on the engine, with **no engine or editor source changed to support it** — the proof's own diff touches only `samples/` and `docs/` ([ADR-0038](adr/0038-platform-proof-m15.md)) |
-| **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) |
-| **M17** | **"The Visual Bar"** | visual work delivered on the consolidated M18 branch; its remaining M13 frame-budget clause is inherited unchanged by M18 rather than waived ([ADR-0041](adr/0041-the-visual-bar-m17.md), [ADR-0043](adr/0043-virtualized-geometry-m18.md)) |
-| **M18** | **virtualized geometry + the consolidated visual bar** | Nanite-style rigid opaque meshes: a separately versioned clustered payload, replacement DAG, GPU-driven culling, visibility buffer and **mandatory hybrid sub-pixel rasterization** so detailed shapes survive. M18 inherits M17/M13's unchanged clean-tree block budget; it is not complete until both the detailed geometry path and that measured gate hold ([ADR-0043](adr/0043-virtualized-geometry-m18.md)). Terrain's heightfield, collision, splat blending and streaming are **M19**, rather than silently folded into cluster rendering. |
-| **M20** | **"The Shipped Game"** | a game exported from the pipeline runs as a **standalone product** with the Rime core embedded, and its *end user* picks the mode at launch: play locally · host for a browser · a CLI server that streams over the network · host a multiplayer session · a **dedicated server anyone can run** from the exported artifact. One binary, mode chosen **before a device is created**, so the dedicated server never touches Vulkan ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §1). **Done when:** the bundle is moved off this machine with the repo out of reach, `dedicated` runs on a box with **no Vulkan**, and its state digest matches the in-tree run. Prerequisite: `samples/hello-game`, which [ADR-0038](adr/0038-platform-proof-m15.md) named and M15 never built — the block's ~3000-line sample loop is the wrong first subject for an engine-owned `GameDefinition`. |
+| **M16** | **"Authored Surfaces"** | a texture authored in Blender is cooked, placed in a `.rscene`, and renders on that mesh in **both the game and the editor** — the proof's own diff touching only `assets/`, `samples/` and `docs/` ([ADR-0039](adr/0039-authored-surfaces-m16.md)) **State (2026-10-04): ⚠️ still partial** — m16.0–m16.8 landed (#171–#179); the Blender-authored proof asset has still not been made (the repo has no `assets/` directory; `docs/authoring-blender.md` is the only m16.9 artifact), so the proof has not run. See the M16 progress table. |
+| **M17** | **"The Visual Bar"** | visual work delivered on the consolidated M18 branch; its remaining M13 frame-budget clause is inherited unchanged by M18 rather than waived ([ADR-0041](adr/0041-the-visual-bar-m17.md), [ADR-0043](adr/0043-virtualized-geometry-m18.md)) **State (2026-10-04): visual work LANDED, frame-rate clause UNPAID.** m17.0–m17.8b landed in #181; m17.7a–d (the physical sky lights the street) and m17.10's measurement landed inside the consolidated M18 foundation commit #183. m17.9 and m17.7e are **cut**, m17.6 was **re-scoped** (no brick of its own landed), and the clean-tree run still misses: `frame` p99 28.376 ms against 16.600 (`docs/perf/2026-09-22-99-the-block-nvidia-geforce-rtx-3060.json:19`). Detail in the M17 progress table. |
+| **M18** | **virtualized geometry + the consolidated visual bar** | Nanite-style rigid opaque meshes: a separately versioned clustered payload, replacement DAG, GPU-driven culling, visibility buffer and **mandatory hybrid sub-pixel rasterization** so detailed shapes survive. M18 inherits M17/M13's unchanged clean-tree block budget; it is not complete until both the detailed geometry path and that measured gate hold ([ADR-0043](adr/0043-virtualized-geometry-m18.md)). Terrain's heightfield, collision, splat blending and streaming are **M19**, rather than silently folded into cluster rendering. **State (2026-10-05): in progress — gates 1–6 closed, gate 7 open.** M18.0–M18.3d landed (#183–#193, ADR-0044); M18.4 (#235, ADR-0058), M18.5 (#234, ADR-0057) and M18.6 (#237, ADR-0059) all landed on 2026-10-05, closing gates 5 and 6 and the cooker half of gate 3. Gate 7 — the block's budget on a clean, clock-pinned tree — is **not met**, and it needs the RTX 3060. Detail in the M18 progress section. |
+| **M19** | **Terrain** | a heightfield terrain that is cooked, collides, blends splat materials and streams, rather than being folded into cluster rendering — scope as set by [ADR-0043](adr/0043-virtualized-geometry-m18.md) ("Terrain's heightfield, collision, splat blending and streaming are **M19**"). **State (2026-10-05): started — cooked, collidable and drawn.** m19.1 (the cooked heightfield and grid-walk collision, ADR-0060) landed as #238, m19.2 (convex queries and speculative CCD against terrain, ADR-0061) as #240, and m19.3 (ADR-0062 — the drawn surface reconstructed from the same u16 samples physics collides against, with no vertex buffer, so a second height representation cannot exist to drift) as #243. **Splat-material blending and streaming have not started**, and they are the rest of M19's scope. *This row was added on 2026-10-04: M19 had been named by the M18 row but never given a row of its own.* |
+| **M20** | **"The Shipped Game"** | a game exported from the pipeline runs as a **standalone product** with the Rime core embedded, and its *end user* picks the mode at launch: play locally · host for a browser · a CLI server that streams over the network · host a multiplayer session · a **dedicated server anyone can run** from the exported artifact. One binary, mode chosen **before a device is created**, so the dedicated server never touches Vulkan ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §1). **Done when:** the bundle is moved off this machine with the repo out of reach, `dedicated` runs on a box with **no Vulkan**, and its state digest matches the in-tree run. Prerequisite: `samples/hello-game`, which [ADR-0038](adr/0038-platform-proof-m15.md) named and M15 never built — the block's ~3000-line sample loop is the wrong first subject for an engine-owned `GameDefinition`. **State (2026-10-05): started.** m15.7's `samples/hello-game` (the prerequisite) landed in #204; m20.1 (`GameDefinition`, ADR-0056) landed as #233. |
 | **M21** | **"Generated & Bridged Authoring"** | assets created from an **LLM plus user input**, and an authoring bridge to Blender, both entering through the **existing cook** as *source* assets — never as cooked payloads, never as code or shaders, so `engine/`'s "no scripting engine" boundary holds. A provenance sidecar (model, prompt, inputs, seed, output hashes) replays to the same cooked bytes with no network call. **Blender stays a SEPARATE PROCESS at arm's length and no GPL code is ever linked** — the same ruling as "never GPL x264 in the engine", applied to an authoring tool, because under M20 every exported game would otherwise inherit the GPL ([ADR-0046](adr/0046-exported-games-and-the-blender-boundary.md) §4). An in-house modelling core replaces the *producer* behind the same seam later, and must be **clean-room**. **Done when:** a recorded prompt yields an asset that cooks, is placed in a `.rscene`, and renders in **both** the game and the editor, and a deliberately malformed generated asset is refused with the counter showing it. |
 
 > **M20 progress (2026-09-30).** **m20.1** — an engine-owned `rime::app::GameDefinition` and
@@ -2363,6 +2392,42 @@ exist yet · **m17.10** the re-measured demo on a clean tree. Cut order: **m17.9
 a ground nothing lights well is the worse half-milestone). **Never cut:** m17.3, m17.5, m17.7,
 m17.8, m17.10.
 
+> **Progress (2026-10-04) — M17's visual work has landed; its frame-rate clause has not.** Added by
+> the roadmap refresh; the 2026-09-03 tables and the dated notes below it are history and are kept
+> as written. Every row's proof was read in the repo on this date (**measured**) unless marked
+> *inferred*.
+>
+> | brick | state | proof |
+> |---|---|---|
+> | m17.0–m17.3c | ✅ #181 | the squash commit `e28a78a` lists them; the detailed table below is unchanged |
+> | m17.3d | ✅ #181 | the serialized re-baseline is named in #181's body ("perf(docs): m17.3d"); that the 2026-09-05 report in `docs/perf/` is that run is *inferred* from its date; ADR-0041 Ruling 4 |
+> | **m17.4** | ✅ #181 — **no longer open** | `engine/render/src/lighting/clustered.cpp:137` ("Everything the CPU rewrites per frame moved to the graph's ring"); the same move is commented at `ssr.cpp:110`, `shadows.cpp:147`, `local_shadows.cpp:175`, `sky.cpp:348` and `ddgi.cpp:231`, and the only `write_buffer` left in `lighting/` outside `clustered.cpp:131` (a write-once buffer) is `sky.cpp:308` (a one-shot dummy). The "14 buffers" count is *inferred* from that, not re-counted. [ADR-0041 §m17.4/m17.5a](adr/0041-the-visual-bar-m17.md) |
+> | m17.5 / m17.5a | ✅ #181 | clause met on one machine (`frame.player` 12.6); ADR-0041 "Amendment (2026-09-06, m17.5)" |
+> | m17.6 | ⚠️ re-scoped, **no brick landed** | ADR-0041 Ruling 6: its budget premise vanished once the clocks were pinned. Nothing in `git log` is labelled m17.6 — state of the correctness work it was re-pointed to is **unverified** |
+> | m17.7a | ✅ #183 | `CMakeLists.txt:259-273` (`-I` plus `--depfile` for shader `#include`); `engine/render/shaders/sky.frag:25` includes `sky_common.glsl` |
+> | m17.7b | ✅ #183 | `engine/render/shaders/sky_sh.comp`, `sky_skyview.comp`; the A/B cost is `docs/perf/m17.7b-sky/README.md` |
+> | m17.7c | ✅ #183 | `sky_transmittance.comp`, `sky_multiple_scattering.comp`; `tests/render/sky_atmosphere_test.cpp` |
+> | m17.7d | ✅ #183 | ADR-0041 amendment of 2026-09-22 ("after the m17.7a–d physical-sky work") and `samples/99-the-block/main.cpp:1484`, which calls `set_ambient` "the sky-less fallback" |
+> | **m17.7e** | ✂️ **cut** | ADR-0041 amendment 2026-09-22 (m17.10): aerial perspective would spend budget the frame does not have. Costs only the "landscape reads as kilometres deep" claim |
+> | m17.8 / m17.8b | ✅ #181 | the owned ground and the generated BC7 material; `docs/perf/m17.8b-hold/` holds the unpinned re-measurement |
+> | m17.9 | ✂️ **cut** | ADR-0041 amendment 2026-09-22: the CSM numbers show no shadow-scaling breach; virtual shadow maps would need sparse binding |
+> | m17.10 | ✅ measured, ⚠️ clause **not met** | `docs/perf/2026-09-22-99-the-block-nvidia-geforce-rtx-3060.json:19` (`frame` p99 28.376, max 31.296; `sim.block` p99 15.692; `sim.collapse` max 15.121) against 16.600 / 33.000 / 6.000 / 12.000. Unpinned (the pinning access is gone) |
+>
+> **Where M17 landed.** #181 (`e28a78a`, 2026-09-20) squashed m17.0–m17.8b. m17.7a–d and m17.10 did
+> not get a PR of their own: they went to `main` inside **#183** (`6ac770e`, "M18: virtual geometry
+> foundation … Consolidates M17 visual work (ADR-0043)"), which is why the milestone table says the
+> visual work was delivered on the consolidated M18 branch. The ADR-0040 and ADR-0041 headers still
+> read `Status: Proposed` although their code has landed (`docs/adr/0040-sky-and-atmosphere.md:3`,
+> `docs/adr/0041-the-visual-bar-m17.md:3`); ADRs are append-only, so that is recorded here rather
+> than edited there.
+>
+> **The corrections this refresh makes.** (1) The 2026-09-06 note below that calls the ring "**m17.4**"
+> as an open finding is now a *closed* one — see the m17.4 row. (2) The note that "the sky does not
+> light the scene" and that "m17.7 schedules it" is superseded: the block's street is lit by the
+> sky's solar source, with `set_ambient` demoted to the fallback (`main.cpp:1476-1486`). (3) M17's
+> frame-rate clause is **unpaid, not waived**: it transfers to M18 gate 7 unchanged, and the best
+> clean-tree number is still 28.376 ms p99 against 16.600.
+
 > **This milestone started without its planning brick, and that is recorded rather than tidied
 > away.** Every milestone since M12 opened with an ADR and a brick ladder; M17 opened with two
 > bricks and got its ladder third. [ADR-0040](adr/0040-sky-and-atmosphere.md) was written afterwards
@@ -2701,7 +2766,7 @@ m17.8, m17.10.
 > **The sky does not light the scene, and no test can currently see that it doesn't.** All three
 > consumers of a sky's radiance — forward ambient, the DDGI miss, the SSR miss — still read one
 > constant (`SceneRenderer::ambient_`, whose own comment still calls it "the crude GI stand-in until
-> M10"). ADR-0040 §6 names the replacement; **m17.7 schedules it.**
+> M10"). ADR-0040 §6 names the replacement; **m17.7 schedules it.** *(Since landed through m17.7d — see the 2026-10-04 progress table above; this paragraph is the state as of 2026-09-06.)*
 >
 > **Every lighting pass writes pass-owned buffers per frame with no frame-in-flight ring** — the
 > finding opened at three passes and closed at seven. `write_buffer` calls sit inside the per-frame
@@ -2713,7 +2778,7 @@ m17.8, m17.10.
 > express". The fix one level up was a ring of `frames_in_flight + 1`; the pass-owned buffers never
 > got it. It cannot show up under `submit_blocking`, which is every test — only under `present()`,
 > which is the editor viewport and every `--windowed` sample, i.e. exactly where a *visual* bar gets
-> judged. **Reasoned, not reproduced**, and it is **m17.4**: the ring depth is owned by
+> judged. **Reasoned, not reproduced**, and it is **m17.4** *(since landed in #181 — see the 2026-10-04 progress table above)*: the ring depth is owned by
 > `SceneRenderer`, so fixing it means threading a slot index into seven passes.
 >
 > Smaller things named so they are not rediscovered: the cloud layer's per-pixel cost is
@@ -2723,6 +2788,36 @@ m17.8, m17.10.
 > smoke's background pixel is now found by a 9×9 emptiness test, because the old near-black scan
 > could land on a deeply shadowed rock — with a sky in the frame it reports "no background pixel to
 > miss-test" instead of inventing a test it cannot run.
+
+**M18 — virtualized geometry + the consolidated visual bar.** *[ADR-0043](adr/0043-virtualized-geometry-m18.md)
+(2026-09-22) is the architecture, with [ADR-0044](adr/0044-visibility-id-and-indirect-abi.md) for the
+visibility ID and indirect-draw ABI.* This section was added by the 2026-10-04 roadmap refresh: M18
+had a table row and an ADR but no detail section, so its progress was written nowhere a newcomer
+would look. The seven delivery gates are ADR-0043's "Delivery order and gates"; the state of each
+was read from `git log`, the ADR index and the open-PR list on 2026-10-04, and re-read on 2026-10-05
+once the eight-PR stack had landed.
+
+> **Progress (2026-10-05) — gates 1–6 are delivered; only gate 7 is unmet.**
+>
+> | ADR-0043 gate | state | proof |
+> |---|---|---|
+> | 1 versioned payload + reader/cooker validation | ✅ #183 | `engine/assets/include/rime/assets/virtual_geometry.hpp`, `tests/assets/virtual_geometry_test.cpp` (both in `6ac770e`'s stat) |
+> | 2 resident leaf cluster through visibility + material resolve | ✅ #184 (M18.1), #186 (M18.2) | the 64-bit `RG32Uint` ID is [ADR-0044](adr/0044-visibility-id-and-indirect-abi.md) (#189) |
+> | 3 cooked replacement groups + CPU reference selector | ✅ #183, #237 | the selector and the DAG *reader* landed in #183, which cooked the leaf level only; the multi-level replacement-DAG cook landed as **#237 (M18.6, ADR-0059)** on 2026-10-05 — payload v2 adds a monotone per-group LOD sphere and the reader rejects a non-monotone edge |
+> | 4 GPU selection + indirect submission, and a complexity sweep | ✅ #187 (M18.3a), #190 (M18.3b), #192 (M18.3c), #193 (M18.3d sweep) | `docs/perf/m18.3d-vg-sweep/README.md`; the same path on starbase's GTX 1060 is #201, `docs/perf/m18.3d-starbase/README.md` |
+> | 5 bounded page streaming | ✅ #234 | **#234 (M18.5, ADR-0057)**, landed 2026-10-05: a fixed-slot page pool behind a CPU policy with an explicit frame clock — a page is resident only once its upload's frame has **retired**, and the permanent coarse cut is never evicted, so a teleport falls back to a resident ancestor rather than a hole |
+> | 6 hybrid software rasterization (**mandatory**) | ✅ #235 | **#235 (M18.4, ADR-0058)**, landed 2026-10-05: per-pixel 64-bit atomic min of (depth key, list index), merged into the hardware visibility target by the depth test, with a bit-identical two-pass 32-bit fallback; the CPU classifier and software-raster oracle landed earlier in #183 |
+> | 7 the block's budget on a clean, clock-pinned tree | ❌ **unmet** | the only clean-tree measurement is M17's, 28.376 ms `frame` p99 against 16.600 (`docs/perf/2026-09-22-99-the-block-nvidia-geforce-rtx-3060.json:19`); `docs/perf/2026-09-27-14-virtual-geometry-nvidia-geforce-rtx-3060.json` measures the *sample*, not the block. State of any block re-measurement since is **unverified** |
+>
+> **Landed outside the ladder, for the hosted tier.** `DeviceDesc`/`RIME_ADAPTER` adapter selection (#197)
+> and the client's choice of editor-viewport codec (#200) went in under the M18 prefix because Track H
+> needed them; they are not gate work.
+>
+> **M18 is not complete: exactly one gate remains.** As of 2026-10-05 the only thing between M18 and
+> done is **gate 7** — a fresh, clean-tree, clock-pinned **Release** `99-the-block` report meeting the
+> unchanged ratified `frame` p99 ≤ 16.6 ms / max ≤ 33 ms, via
+> `scripts/perf.sh --sample the-block --commit`. That runs on the RTX 3060, so it cannot be produced
+> unattended; until it exists, M18's completion claim stays unproven rather than assumed.
 
 ### The adversarial review that M11–M15 never got (2026-08-31)
 
