@@ -111,8 +111,11 @@ TerrainPush terrain_push(const TerrainTile& tile,
     p.eye[0] = eye.x;
     p.eye[1] = eye.y;
     p.eye[2] = eye.z;
-    p.material[0] = light.metallic;
-    p.material[1] = light.roughness;
+    // Sanitised here because add() has no per-light refusal path, and a NaN reaching the shader
+    // would blank the tile silently (every BRDF term goes NaN). Non-finite falls back to the
+    // defaults (dielectric, fully rough), like the zero sun direction above; finite values clamp.
+    p.material[0] = std::isfinite(light.metallic) ? std::clamp(light.metallic, 0.0f, 1.0f) : 0.0f;
+    p.material[1] = std::isfinite(light.roughness) ? std::clamp(light.roughness, 0.0f, 1.0f) : 1.0f;
     return p;
 }
 

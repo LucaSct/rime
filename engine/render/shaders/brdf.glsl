@@ -58,6 +58,9 @@ vec3 shade_light(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo, float metal
     // Energy split: what Fresnel reflected specularly cannot ALSO scatter diffusely, and metals
     // have no diffuse at all (their "color" is the F0 of the specular lobe).
     vec3 kd = (vec3(1.0) - fresnel) * (1.0 - metallic);
+    // Lambert's albedo/pi: the 1/pi is the normalisation that makes a white Lambertian surface
+    // reflect exactly the energy it receives and no more; dropping it is the single most common
+    // way a renderer ends up pi times too bright.
     vec3 diffuse = kd * albedo / kPi;
 
     return (diffuse + specular) * radiance * n_dot_l;

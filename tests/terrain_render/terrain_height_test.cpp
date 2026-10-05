@@ -546,6 +546,51 @@ TEST_CASE("m19.3: the height the GPU reconstructs is the height physics collides
     device->destroy(vs);
 }
 
+// CPU port of terrain.frag's shading for one pixel: brdf.glsl's shade_light (GGX D, height-
+// correlated Smith V, Schlick F, kd = (1-F)(1-metallic), kd*albedo/pi + specular, times radiance
+// times n.l) plus the flat-ambient term ambient*((1-metallic)*base + f0). Written from the GLSL,
+// in double precision, so it is an independent evaluation rather than a copy of the shader's
+// floats.
+std::array<double, 3> cpu_terrain_shade(const core::Vec3& n,
+                                        const core::Vec3& v,
+                                        const core::Vec3& l,
+                                        const render::TerrainLight& light) {
+    constexpr double kPi = 3.14159265358979;
+    const double base[3] = {light.albedo.x, light.albedo.y, light.albedo.z};
+    const double metallic = light.metallic;
+    const double rough = std::clamp(static_cast<double>(light.roughness), 0.045, 1.0);
+    const double alpha = rough * rough;
+    const double irradiance = light.sun_irradiance;
+    std::array<double, 3> out{};
+    const double n_dot_l = core::dot(n, l);
+    double h[3] = {double(v.x) + l.x, double(v.y) + l.y, double(v.z) + l.z};
+    const double hl = std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
+    for (double& c : h) {
+        c /= hl;
+    }
+    const double n_dot_v = std::max(double(core::dot(n, v)), 1e-4);
+    const double n_dot_h = std::max(n.x * h[0] + n.y * h[1] + n.z * h[2], 0.0);
+    const double v_dot_h = std::max(v.x * h[0] + v.y * h[1] + v.z * h[2], 0.0);
+    const double a2 = alpha * alpha;
+    const double t = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    const double d = a2 / (kPi * t * t);
+    const double gv = n_dot_l * std::sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
+    const double gl = n_dot_v * std::sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
+    const double vis = 0.5 / std::max(gv + gl, 1e-5);
+    const double fw = std::pow(1.0 - v_dot_h, 5.0);
+    for (int c = 0; c < 3; ++c) {
+        const double f0 = 0.04 + (base[c] - 0.04) * metallic;
+        double radiance = 0.0;
+        if (n_dot_l > 0.0) {
+            const double fresnel = f0 + (1.0 - f0) * fw;
+            const double kd = (1.0 - fresnel) * (1.0 - metallic);
+            radiance = (kd * base[c] / kPi + d * vis * fresnel) * irradiance * n_dot_l;
+        }
+        out[c] = radiance + light.ambient * ((1.0 - metallic) * base[c] + f0);
+    }
+    return out;
+}
+
 TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle normals") {
     auto device = rhi::create_device({});
     if (!device) {
@@ -629,10 +674,10 @@ TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle no
     //
     // terrain.frag's normal is the DRAWN triangle's plane normal (recovered from dFdx/dFdy of the
     // interpolated world position), which is the same faceted normal physics reports. So the
-    // expected radiance at a probe is computable exactly: albedo * (E * max(n·l, 0) / π +
-    // ambient). Checking against that — rather than against a stored image — is what makes this a
-    // structural proof: it would fail for a smooth (central-difference) normal, for a dropped 1/π,
-    // and for a light pointing the wrong way.
+    // expected radiance at a probe is computable: cpu_terrain_shade's GGX model (the m19.5 shader).
+    // Checking against that — rather than against a stored image — is what makes this a structural
+    // proof: it would fail for a smooth (central-difference) normal, for a dropped 1/π, and for a
+    // light pointing the wrong way.
     const core::Vec3 to_light = core::normalize(
         core::Vec3{-light.sun_direction.x, -light.sun_direction.y, -light.sun_direction.z});
     int shaded = 0;
@@ -649,18 +694,24 @@ TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle no
 
             const core::Vec3 local = pixel_to_local(px, py);
             const core::Vec3 n = cpu_surface_normal(samples, local.x, local.z);
-            const float n_dot_l = std::max(core::dot(n, to_light), 0.0f);
-            const float irradiance =
-                light.sun_irradiance * n_dot_l * 0.31830988618f + light.ambient;
-            const float expect_r = light.albedo.x * irradiance;
-            const float expect_g = light.albedo.y * irradiance;
+            const float h = cpu_surface_height(samples, local.x, local.z, true);
+            const core::Vec3 world{kOrigin.x + local.x, kOrigin.y + h, kOrigin.z + local.z};
+            const core::Vec3 eye = top_down_eye();
+            const core::Vec3 v =
+                core::normalize(core::Vec3{eye.x - world.x, eye.y - world.y, eye.z - world.z});
+            const auto expect = cpu_terrain_shade(n, v, to_light, light);
+            const float expect_r = static_cast<float>(expect[0]);
+            const float expect_g = static_cast<float>(expect[1]);
 
             // Tolerance: RGBA16Float carries a 10-bit mantissa, so one stored step is ~1e-3
-            // relative; 1% leaves room for that plus the f32 normalise on each side. Relative,
-            // because the quantity spans an order of magnitude across the tile.
+            // relative; 1% leaves room for that plus the f32 normalise on each side. GENUINELY
+            // relative — `.scale(0)` removes doctest's default +1 absolute slack, which at these
+            // radiances (~0.1..1) once let a wrong model pass. This now fails for a dropped
+            // specular lobe, a dropped (1-F) energy split, a wrong ambient, and the old
+            // Lambert-only model, as well as for a smooth normal or a light pointing the wrong way.
             worst_rel = std::max(worst_rel, std::fabs(r - expect_r) / expect_r);
-            CHECK(r == doctest::Approx(expect_r).epsilon(0.01));
-            CHECK(g == doctest::Approx(expect_g).epsilon(0.01));
+            CHECK(r == doctest::Approx(expect_r).epsilon(0.01).scale(0));
+            CHECK(g == doctest::Approx(expect_g).epsilon(0.01).scale(0));
             brightest = std::max(brightest, r);
             dimmest = std::min(dimmest, r);
             ++shaded;
@@ -1269,6 +1320,21 @@ TEST_CASE("m19.5: roughness spreads the highlight") {
     const float r = rough[0] + rough[1] + rough[2];
     MESSAGE("m19.5 peak (channel sum): roughness 0.15 -> ", s, ", roughness 0.9 -> ", r);
     CHECK(s > r);
+}
+
+TEST_CASE("m19.5: terrain_push sanitises the flat material") {
+    render::TerrainTile tile{};
+    render::TerrainLight l{};
+    l.metallic = std::numeric_limits<float>::quiet_NaN();
+    l.roughness = std::numeric_limits<float>::infinity();
+    render::TerrainPush p = render::terrain_push(tile, core::Mat4{}, {}, l);
+    CHECK(p.material[0] == 0.0f);
+    CHECK(p.material[1] == 1.0f);
+    l.metallic = 1.5f;
+    l.roughness = -0.2f;
+    p = render::terrain_push(tile, core::Mat4{}, {}, l);
+    CHECK(p.material[0] == 1.0f);
+    CHECK(p.material[1] == 0.0f);
 }
 
 TEST_CASE("m19.5: out-of-range or non-finite layer materials are refused and counted") {
