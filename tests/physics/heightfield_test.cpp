@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "heightfield.hpp" // private: the seam-firing counter is test-only (see CMakeLists)
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
@@ -1021,4 +1022,140 @@ TEST_CASE("heightfield: depenetration reports the DEEPEST overlapping triangle, 
     // triangle on the valley's flank, a third of the depth and a different axis entirely. Pushing
     // the sphere that way leaves it inside the steep wall.
     CHECK(ph.depth > 0.2f);
+}
+
+TEST_CASE("heightfield raycast: the seam rule closes a surface the per-piece root alone leaks") {
+    // The watertightness guard in ray_vs_heightfield_local (the "was above at the end of the last
+    // piece, is below at the start of this one" rule) is NOT reached by the 3,300-cast sweep above
+    // -- measured: zero firings -- because every ray there is steep. It fires only for a ray within
+    // an ulp of grazing the surface, whose height above the surface reads +e from one triangle's
+    // plane at a shared edge and -e from its neighbour's, so neither piece sees a sign change.
+    //
+    // These five rays were FOUND, not derived: a seeded search over ~4M grazing rays (random
+    // vertex / edge-midpoint / diagonal-midpoint aim points on the sweep's bumpy tile, a slope of
+    // 0..3e-3, the origin height jittered by +-0.5 microns) turned up 12 that fire the guard, and
+    // these are five of them, pinned bit-exactly as hex floats. Each is a ray aimed to descend
+    // onto the surface; with the guard removed every one of them MISSES on the build that found
+    // them (verified by deleting the guard; eight were pinned first and the three that the
+    // ordinary root still caught were dropped), so this case goes red exactly when the rule is
+    // lost.
+    //
+    // Honest limit: the rays are tied to float rounding, so on a toolchain that contracts
+    // differently (FMA) some may no longer reach the guard and reduce to ordinary hits. The case
+    // then passes without proving anything for those rays; it can never fail spuriously, because
+    // the rule only ever ADDS a hit to a ray that is genuinely descending through the surface.
+    PhysicsWorld w;
+    Terrain t{17, 13, 0.37f, 0.53f, 0.0137f, -3.1f, {}};
+    std::uint32_t state = 12345u;
+    for (std::uint32_t k = 0; k < t.columns * t.rows; ++k) {
+        state = state * 1664525u + 1013904223u;
+        t.samples.push_back(static_cast<std::uint16_t>(state >> 28));
+    }
+    add_terrain(w, t);
+
+    struct SeamRay {
+        float ox, oy, oz, dx, dy, dz, tmax;
+    };
+
+    const SeamRay rays[] = {
+        {0x1.622902p+2,
+         -0x1.824272p+1,
+         0x1.8ca63ep+1,
+         0x1.01530cp-1,
+         -0x1.7fe3c6p-12,
+         0x1.baa342p-1,
+         0x1.66822p+0},
+        {0x1.c4412p+2,
+         -0x1.7c53dap+1,
+         0x1.3aa3aep+2,
+         -0x1.f5b8d2p-1,
+         -0x1.6f089p-9,
+         0x1.98414ap-3,
+         0x1.766a54p+1},
+        {0x1.24c6a4p+2,
+         -0x1.77abap+1,
+         0x1.1c1982p+1,
+         -0x1.518caap-1,
+         -0x1.6ce37ep-10,
+         -0x1.80f8f8p-1,
+         0x1.7c1c88p+0},
+        {0x1.026b88p+2,
+         -0x1.77a138p+1,
+         0x1.a8672p-1,
+         0x1.a81818p-3,
+         -0x1.f00cc2p-11,
+         0x1.f4e6eap-1,
+         0x1.063fcep+1},
+        {0x1.0ef0fap+2,
+         -0x1.77c092p+1,
+         0x1.84801p+0,
+         0x1.04f94cp-4,
+         -0x1.b9e8b4p-14,
+         0x1.fef5bp-1,
+         0x1.568e3cp+0},
+    };
+    int misses = 0;
+    for (const SeamRay& r : rays) {
+        RayHit hit;
+        if (!cast(w, {r.ox, r.oy, r.oz}, {r.dx, r.dy, r.dz}, hit, r.tmax)) {
+            ++misses;
+        }
+    }
+    CHECK(misses == 0);
+
+    // THE PROOF MUST SEE THE GUARD ACT. A hit alone cannot distinguish "the seam rule closed the
+    // gap" from "this toolchain rounds differently and the ordinary root caught it", so the same
+    // rays are walked directly through ray_vs_heightfield_local (this TU's instrumented copy, see
+    // RIME_PHYSICS_SEAM_COUNTER in heightfield.hpp) and the firing counter must move. A lapsed
+    // proof turns this red instead of passing quietly. (The world is at the origin with identity
+    // rotation, so world and local frames coincide.)
+    HeightfieldShape shape;
+    REQUIRE(build_heightfield(desc_of(t), shape));
+    const std::uint64_t before = seam_firings();
+    int direct_hits = 0;
+    for (const SeamRay& r : rays) {
+        float tt = 0.0f;
+        core::Vec3 n{};
+        std::uint32_t tri = 0;
+        direct_hits += ray_vs_heightfield_local(
+            shape, {r.ox, r.oy, r.oz}, {r.dx, r.dy, r.dz}, r.tmax, tt, n, tri);
+    }
+    const std::uint64_t fired = seam_firings() - before;
+    MESSAGE("seam guard firings across the five rays: ", fired);
+    CHECK(direct_hits == 5);
+    CHECK(fired >= 1);
+
+    // AND THE FIRING MUST BE LOAD-BEARING, which the counter alone does not show. Disable the rule
+    // and cast the identical rays: without it the per-piece root has to miss at least one, because
+    // the whole claim is that a ray can read as above the surface at the end of one triangle and
+    // below at the start of the next, so neither piece sees a sign change. This runs the
+    // falsification that ADR-0060 could only assert, and it is the portable form of the claim --
+    // HOW MANY of the five land in the seam depends on the target's rounding and contraction
+    // (measured: five on x86-64/GCC, three on macOS/arm64, where the ordinary root happens to
+    // catch the other two), so a count is a statement about one compiler while "it leaks without
+    // the rule" is a statement about the rule.
+    set_seam_disabled(true);
+    int hits_without_rule = 0;
+    for (const SeamRay& r : rays) {
+        float tt = 0.0f;
+        core::Vec3 n{};
+        std::uint32_t tri = 0;
+        hits_without_rule += ray_vs_heightfield_local(
+            shape, {r.ox, r.oy, r.oz}, {r.dx, r.dy, r.dz}, r.tmax, tt, n, tri);
+    }
+    set_seam_disabled(false);
+    MESSAGE("rays that still hit with the seam rule disabled: ", hits_without_rule);
+    CHECK(hits_without_rule < 5);
+
+    // The switch is global state in this TU, so prove it was put back rather than leaving a
+    // disabled seam rule to quietly weaken every heightfield case that runs after this one.
+    int direct_hits_again = 0;
+    for (const SeamRay& r : rays) {
+        float tt = 0.0f;
+        core::Vec3 n{};
+        std::uint32_t tri = 0;
+        direct_hits_again += ray_vs_heightfield_local(
+            shape, {r.ox, r.oy, r.oz}, {r.dx, r.dy, r.dz}, r.tmax, tt, n, tri);
+    }
+    CHECK(direct_hits_again == 5);
 }

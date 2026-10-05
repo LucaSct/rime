@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -264,6 +265,37 @@ inline void cell_range(float lo,
 
 // ─── The ray walk ────────────────────────────────────────────────────────────────────────────
 //
+#ifdef RIME_PHYSICS_SEAM_COUNTER
+// TEST-ONLY HOOK (defined solely for rime_physics_tests, see tests/physics/CMakeLists.txt). The
+// seam rule below never fires on ordinary rays, so a test that merely checks "the ray hits" cannot
+// tell a rule that closed the seam from a toolchain whose rounding no longer reaches it -- the
+// proof would lapse into passing silently. This counts firings so the test can SEE the rule act.
+// The definitions live in an INLINE NAMESPACE so this instrumented copy of the walk has different
+// symbols from the library's uninstrumented one (same header, same inline names, two bodies in one
+// binary would be an ODR violation the linker resolves arbitrarily). Without the macro there is no
+// counter, no atomic and no extra branch: the hot path is byte-for-byte the plain one.
+//
+// `g_seam_disabled` is the other half, and the stronger one: a switch that turns the seam rule OFF
+// so the test can run the COUNTERFACTUAL in-suite — cast the same rays with the rule gone and watch
+// the surface leak. Counting firings proves the rule fired; running it off is what proves the
+// firing is load-bearing. It also makes the proof portable in a way a per-ray count is not: WHICH
+// grazing rays land in the seam depends on the target's rounding and FMA contraction (macOS/arm64
+// reaches two of five by the ordinary per-piece root that x86-64 does not), so "at least one ray
+// misses without the rule, none with it" is the property that holds on every target, while
+// "exactly five fire" is a statement about one compiler.
+inline namespace seam_counted {
+inline std::atomic<std::uint64_t> g_seam_firings{0};
+inline std::atomic<bool> g_seam_disabled{false};
+
+[[nodiscard]] inline std::uint64_t seam_firings() noexcept {
+    return g_seam_firings.load(std::memory_order_relaxed);
+}
+
+inline void set_seam_disabled(bool off) noexcept {
+    g_seam_disabled.store(off, std::memory_order_relaxed);
+}
+#endif
+//
 // A ray against a heightfield is a 2-D problem wearing a 3-D coat. Project the ray onto the XZ
 // plane and it crosses a sequence of grid cells; the surface can only be hit inside one of them,
 // and the FIRST hit along that sequence is the nearest (cells are visited in increasing t). So:
@@ -290,16 +322,18 @@ inline void cell_range(float lo,
 // is itself a hit, at the seam. That makes the surface closed by construction — no epsilon, no
 // "fatten the triangles".
 //
-// It is a GUARD, NOT A PATH THE TESTS REACH, and saying so is the honest version. Instrumenting
-// the branch with a counter and running the whole physics suite (167 cases, including
-// "the surface is watertight at every edge and vertex" and its 3,300 casts at vertices, edge
-// midpoints and diagonal midpoints of a bumpy non-planar tile) fires it **zero** times: every one
-// of those rays is steep enough that f moves by far more than an ulp across each piece, so the
-// ordinary `fa >= 0 && fb <= 0` root is what closes the surface there. Provoking the seam needs a
-// ray within one ulp of tangency at a shared edge AND the two plane equations rounding in opposite
-// directions at that exact t — not something a test can construct on demand. So the watertightness
-// the suite proves is empirical, this rule is the belt to its braces, and a refactor that broke it
-// would go unnoticed by CI. Measured 2026-10-04; do not upgrade this to "tested".
+// The sweep test does not reach it, and saying so is the honest version. Instrumenting the branch
+// with a counter and running the whole physics suite (167 cases, including "the surface is
+// watertight at every edge and vertex" and its 3,300 casts at vertices, edge midpoints and
+// diagonal midpoints of a bumpy non-planar tile) fires it **zero** times: every one of those rays
+// is steep enough that f moves by far more than an ulp across each piece, so the ordinary
+// `fa >= 0 && fb <= 0` root is what closes the surface there. Provoking the seam needs a ray
+// within an ulp of grazing at a shared edge AND the two plane equations rounding in opposite
+// directions at that exact t -- not constructible by hand, but FINDABLE: a seeded search over ~4M
+// grazing rays fires it 12 times, and "the seam rule closes a surface the per-piece root alone
+// leaks" pins five of them bit-exactly (each misses with the rule deleted). That pin is tied to
+// float rounding, so it is evidence for this toolchain, not a proof for every one. Measured
+// 2026-10-04.
 //
 // ONE-SIDED: a ray that starts BELOW the surface never reports the surface as it rises out (f goes
 // negative → positive, which is not a hit). The same rule ray_vs_box uses for an origin inside the
@@ -391,7 +425,16 @@ inline void cell_range(float lo,
         const float fa = f(a);
         const float fb = f(b);
         float hit_t = -1.0f;
-        if (have_prev && prev_f > 0.0f && fa < 0.0f) {
+        bool seam = have_prev && prev_f > 0.0f && fa < 0.0f;
+#ifdef RIME_PHYSICS_SEAM_COUNTER
+        if (seam && g_seam_disabled.load(std::memory_order_relaxed)) {
+            seam = false; // TEST-ONLY: hand this ray back to the per-piece root alone, and leak
+        }
+#endif
+        if (seam) {
+#ifdef RIME_PHYSICS_SEAM_COUNTER
+            g_seam_firings.fetch_add(1, std::memory_order_relaxed);
+#endif
             hit_t = a; // crossed down exactly on the seam between the last piece and this one
         } else if (fa >= 0.0f && fb <= 0.0f) {
             // f is linear on [a, b]: its root is at the fraction fa / (fa - fb). fa == fb == 0 is
@@ -493,6 +536,9 @@ inline void cell_range(float lo,
     n_out = core::rotate(q, n);
     return true;
 }
+#ifdef RIME_PHYSICS_SEAM_COUNTER
+} // namespace seam_counted
+#endif
 
 // ─── Contacts ────────────────────────────────────────────────────────────────────────────────
 //
