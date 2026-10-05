@@ -19,6 +19,7 @@ rime_add_test(rime_assets_tests
     registry_test.cpp
     fixture_test.cpp
     asset_server_test.cpp
+    asset_server_streaming_test.cpp
     clip_sampler_test.cpp)
 
 # rime::assets is the module under test. rime::platform is linked because registry_test writes a
