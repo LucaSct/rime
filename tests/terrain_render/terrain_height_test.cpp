@@ -2478,8 +2478,8 @@ std::vector<std::uint8_t> draw_blend(rhi::Device& device,
     render::TerrainPass pass(device);
     const render::TerrainTileId id = pass.upload(asset, palette);
     REQUIRE(id != render::kInvalidTerrainTile);
-    auto img = render_tiles(
-        device, pass, {id}, ambient_only_light(), top_down_centred(kHalf, kHalf));
+    auto img =
+        render_tiles(device, pass, {id}, ambient_only_light(), top_down_centred(kHalf, kHalf));
     CHECK(pass.tiles_drawn() == 1);
     CHECK(pass.splat_refused() == 0);
     return img;
@@ -2514,9 +2514,8 @@ TEST_CASE("m19.7c: equal heights with contrast are BIT-IDENTICAL to contrast 0, 
     for (std::size_t n = 0; n < 4; ++n) {
         pal[n].base_color = {-f * k.x, -f * k.y, -f * k.z}; // layers 0, 2 and 3 are ONE material
     }
-    pal[1].base_color = {pal[0].base_color.x + k.x,
-                         pal[0].base_color.y + k.y,
-                         pal[0].base_color.z + k.z};
+    pal[1].base_color = {
+        pal[0].base_color.x + k.x, pal[0].base_color.y + k.y, pal[0].base_color.z + k.z};
 
     // Every layer's height is the SAME constant (128), from textures of two different sizes at
     // four different periods — "equal heights" as a painter would meet it, not one shared texel.
@@ -2614,10 +2613,10 @@ TEST_CASE("m19.7c: where a layer's height is high it takes more of a 50/50 texel
         return p;
     };
     const auto half_half = uniform_weights(2, 2, {128, 127, 0, 0});
-    const auto pure0 = draw_blend(*device, 2, 2, uniform_weights(2, 2, {255, 0, 0, 0}),
-                                  palette(high_low, 4.0f));
-    const auto pure1 = draw_blend(*device, 2, 2, uniform_weights(2, 2, {0, 255, 0, 0}),
-                                  palette(high_low, 4.0f));
+    const auto pure0 =
+        draw_blend(*device, 2, 2, uniform_weights(2, 2, {255, 0, 0, 0}), palette(high_low, 4.0f));
+    const auto pure1 =
+        draw_blend(*device, 2, 2, uniform_weights(2, 2, {0, 255, 0, 0}), palette(high_low, 4.0f));
     const auto unblended = draw_blend(*device, 2, 2, half_half, palette(high_low, 0.0f));
     const auto blended = draw_blend(*device, 2, 2, half_half, palette(high_low, 4.0f));
     const auto blended_swapped = draw_blend(*device, 2, 2, half_half, palette(low_high, 4.0f));
@@ -2629,7 +2628,7 @@ TEST_CASE("m19.7c: where a layer's height is high it takes more of a 50/50 texel
         int checked = 0;
         for (std::uint32_t py = 4; py < kSize - 4; ++py) {
             for (std::uint32_t px = 12; px <= 115; ++px) {
-                const bool high_half = px <= 51;       // x in [3.125, 12.875]
+                const bool high_half = px <= 51; // x in [3.125, 12.875]
                 if (!high_half && px < 76) {
                     continue; // the filtered step between the halves, and its margins
                 }
@@ -2649,6 +2648,14 @@ TEST_CASE("m19.7c: where a layer's height is high it takes more of a 50/50 texel
     MESSAGE("redistribution orderings held: " << held << " / " << checked);
     CHECK(checked > 20000);
     CHECK(held == checked);
+    // Reported, not asserted: layer 1's share of the pixel, read back off the red channel
+    // (colour is affine in the share). The formula predicts 0.798 / 0.198 from a painted 0.498.
+    const auto share = [&](std::uint32_t px) {
+        return (chan(blended, px, 64, 0) - chan(pure0, px, 64, 0)) /
+               (chan(pure1, px, 64, 0) - chan(pure0, px, 64, 0));
+    };
+    MESSAGE("layer 1's share of a 127/255 texel: high half " << share(32) << ", low half "
+                                                             << share(96));
     // The same heights mirrored move every probe the OTHER way: none may hold.
     const auto [held_swapped, checked_swapped] = toward(blended_swapped);
     MESSAGE("with the height map's halves swapped: " << held_swapped << " / " << checked_swapped);
@@ -2776,11 +2783,12 @@ TEST_CASE("m19.7c: at fixed heights, more painted weight is monotonically more o
         std::vector<std::uint8_t> img[kSteps];
         for (int s = 0; s < kSteps; ++s) {
             const std::uint8_t n = paint[s];
-            img[s] = draw_blend(*device,
-                                2,
-                                2,
-                                uniform_weights(2, 2, {static_cast<std::uint8_t>(255 - n), n, 0, 0}),
-                                p);
+            img[s] =
+                draw_blend(*device,
+                           2,
+                           2,
+                           uniform_weights(2, 2, {static_cast<std::uint8_t>(255 - n), n, 0, 0}),
+                           p);
         }
         mid[arrangement] = img[4];
         // img[0] is pure layer 0 and img[8] pure layer 1. Every step in between must move every
