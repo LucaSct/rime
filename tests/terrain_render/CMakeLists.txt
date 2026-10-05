@@ -23,4 +23,7 @@ target_link_libraries(rime_terrain_render_tests
 # prove something about the copy.
 rime_add_shaders(rime_terrain_render_tests
     ${CMAKE_SOURCE_DIR}/engine/render/shaders/terrain.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_height_probe.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_height_probe.frag
+    # m19.6: a FROZEN copy of m19.5's terrain.frag — the anchor the no-sky bit-identity proof
+    # compares the live pass against (see the shader's header for why a copy, not a variant).
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_m195_reference.frag)

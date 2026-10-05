@@ -469,10 +469,9 @@ void TerrainPass::add(RenderGraph& graph,
     const RGBuffer sky_sh =
         caller_sky ? sky.sh : graph.import_buffer(dummy_sh_, rhi::ResourceState::ShaderRead);
     const rhi::SamplerHandle sky_sampler = caller_sky ? sky.sampler : weight_sampler_;
-    const RGTexture sampled[] = {
-        graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
-        graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead),
-        sky_lut};
+    const RGTexture sampled[] = {graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
+                                 graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead),
+                                 sky_lut};
     desc.sampled = sampled;
     const RGBuffer buffers[] = {sky_sh};
     desc.buffer_reads = buffers;
