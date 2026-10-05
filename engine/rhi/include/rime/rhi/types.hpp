@@ -459,6 +459,15 @@ struct AdapterInfo {
     // slower path and says so in its stats. Measured: lavapipe (Mesa 26.2, LLVM 22) and the RTX
     // 3060 report it; MoltenVK only on newer Apple GPU families.
     bool buffer_int64_atomics = false;
+
+    // `max_push_constant_bytes` is Vulkan's `maxPushConstantsSize` (m19.5): how much per-draw data
+    // can ride in the command stream without a buffer. The spec guarantees only 128 bytes, which is
+    // the default here so a backend that cannot report it is assumed to be at the floor. Desktop
+    // drivers report 256 or more and MoltenVK 4096, but "usually more" is not a guarantee, so a
+    // consumer whose push block exceeds 128 (the terrain pass's is 160) must compare against this
+    // and REFUSE with a named counter and a warn-once when it does not fit (ADR-0039's rule),
+    // never draw with a truncated block.
+    std::uint32_t max_push_constant_bytes = 128;
 };
 
 // ── Bit-flag operators ──────────────────────────────────────────────────────────────────────

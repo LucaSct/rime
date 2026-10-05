@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "rime/assets/heightfield_asset.hpp"
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/render/passes.hpp" // kHdrFormat / kDepthFormat — one place decides the formats
 #include "terrain.frag.spv.h"
 #include "terrain.vert.spv.h"
@@ -26,6 +27,10 @@ namespace {
     sd.spirv_size_bytes = bytes;
     sd.debug_name = name;
     return device.create_shader(sd);
+}
+
+[[nodiscard]] bool unit_interval(float v) noexcept {
+    return std::isfinite(v) && v >= 0.0f && v <= 1.0f;
 }
 
 [[nodiscard]] bool finite_positive(float v) noexcept {
@@ -67,8 +72,10 @@ void fill_grid_indices(std::uint32_t columns, std::uint32_t rows, std::vector<st
 
 } // namespace
 
-TerrainPush
-terrain_push(const TerrainTile& tile, const core::Mat4& view_proj, const TerrainLight& light) {
+TerrainPush terrain_push(const TerrainTile& tile,
+                         const core::Mat4& view_proj,
+                         const core::Vec3& eye,
+                         const TerrainLight& light) {
     TerrainPush p{};
     p.view_proj = view_proj;
     p.placement[0] = tile.origin.x;
@@ -79,7 +86,7 @@ terrain_push(const TerrainTile& tile, const core::Mat4& view_proj, const Terrain
     p.grid[1] = tile.cell_size_z;
     p.grid[2] = tile.height_scale;
     // `columns` as a float: exact below 2^24 and ADR-0060 caps an axis at 32768, so nothing is
-    // lost, and the 16 bytes it saves are what let the light share the 128-byte push floor.
+    // lost, and it saves a vec4 of the push block.
     p.grid[3] = static_cast<float>(tile.columns);
 
     // Normalise here rather than in the shader: the fragment stage would otherwise renormalise
@@ -101,10 +108,19 @@ terrain_push(const TerrainTile& tile, const core::Mat4& view_proj, const Terrain
     p.surface[1] = light.albedo.y;
     p.surface[2] = light.albedo.z;
     p.surface[3] = std::max(light.ambient, 0.0f);
+    p.eye[0] = eye.x;
+    p.eye[1] = eye.y;
+    p.eye[2] = eye.z;
+    p.material[0] = light.metallic;
+    p.material[1] = light.roughness;
     return p;
 }
 
 TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
+    // The push block is 160 bytes, above Vulkan's guaranteed 128 (see TerrainPush). The limit is
+    // read once; a device below it makes every upload() refuse (counted, warned once) instead of
+    // drawing with a block the pipeline layout cannot hold.
+    push_fits_ = device.adapter().max_push_constant_bytes >= sizeof(TerrainPush);
     vertex_shader_ = make_shader(device,
                                  rhi::ShaderStage::Vertex,
                                  terrain_vert_spv,
@@ -142,6 +158,9 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     pd.depth_compare = rhi::CompareOp::Less;
     pd.depth_format = kDepthFormat;
     pd.bindings = bindings;
+    // On a device that cannot hold the block no tile is ever resident, so no draw is submitted;
+    // the pipeline is still created with the real size so the failure stays in upload()'s counter
+    // rather than becoming a backend validation error at construction.
     pd.push_constant_size = sizeof(TerrainPush);
     pd.debug_name = "terrain";
     pipeline_ = device.create_graphics_pipeline(pd);
@@ -186,14 +205,15 @@ TerrainPass::~TerrainPass() {
 }
 
 namespace {
-// std140 mirror of terrain.frag's `Splat` block: 6 x vec4 = 96 bytes.
+// std140 mirror of terrain.frag's `Splat` block: 7 x vec4 = 112 bytes.
 struct SplatUniform {
-    float info[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // x = splat flag, yz = tile extent (m)
-    float dims[4] = {1.0f, 1.0f, 0.0f, 0.0f}; // xy = weight map size in texels
-    float color[4][4] = {};
+    float info[4] = {0.0f, 0.0f, 0.0f, 0.0f};      // x = splat flag, yz = tile extent (m)
+    float dims[4] = {1.0f, 1.0f, 0.0f, 0.0f};      // xy = weight map size in texels
+    float color[4][4] = {};                        // rgb = base colour, w = metallic, per layer
+    float roughness[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // x..w = layer 0..3
 };
 
-static_assert(sizeof(SplatUniform) == 96, "SplatUniform must match terrain.frag's Splat block");
+static_assert(sizeof(SplatUniform) == 112, "SplatUniform must match terrain.frag's Splat block");
 } // namespace
 
 TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset) {
@@ -207,6 +227,18 @@ TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset,
 
 TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
                                        const TerrainPalette* palette) {
+    if (!push_fits_) {
+        ++refused_;
+        if (!push_warned_) {
+            push_warned_ = true;
+            RIME_WARN("terrain: refusing every tile — the push block is {} bytes but the device's"
+                      " maxPushConstantsSize is {}",
+                      sizeof(TerrainPush),
+                      device_.adapter().max_push_constant_bytes);
+        }
+        return kInvalidTerrainTile;
+    }
+
     // Validate, never repair (ADR-0060 §2's registration posture). Every rejection is one of the
     // asset reader's own invariants restated at the GPU boundary, because an asset can also be
     // built in memory by a caller that never went through the reader.
@@ -234,7 +266,8 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
         if (splat_ok) {
             for (const TerrainLayer& l : *palette) {
                 splat_ok = splat_ok && std::isfinite(l.base_color.x) &&
-                           std::isfinite(l.base_color.y) && std::isfinite(l.base_color.z);
+                           std::isfinite(l.base_color.y) && std::isfinite(l.base_color.z) &&
+                           unit_interval(l.metallic) && unit_interval(l.roughness);
             }
         }
         if (!splat_ok) {
@@ -317,13 +350,16 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
         u.dims[1] = static_cast<float>(asset.weight_rows);
         // Unused slots (zero AssetId) repeat layer 0, so a stray filter tail pulls in a ZERO
         // difference rather than garbage; see terrain.frag.
-        const core::Vec3 c0 = (*palette)[0].base_color;
+        // The same repeat applies to metallic and roughness: a zero difference in every blended
+        // quantity, so an unused slot can never leak a material into the picture.
         for (std::size_t k = 0; k < 4; ++k) {
-            const core::Vec3 c =
-                (k == 0 || asset.layers[k].is_valid()) ? (*palette)[k].base_color : c0;
-            u.color[k][0] = c.x;
-            u.color[k][1] = c.y;
-            u.color[k][2] = c.z;
+            const TerrainLayer& l =
+                (k == 0 || asset.layers[k].is_valid()) ? (*palette)[k] : (*palette)[0];
+            u.color[k][0] = l.base_color.x;
+            u.color[k][1] = l.base_color.y;
+            u.color[k][2] = l.base_color.z;
+            u.color[k][3] = l.metallic;
+            u.roughness[k] = l.roughness;
         }
     }
     rhi::BufferDesc ubd{};
@@ -359,6 +395,7 @@ void TerrainPass::add(RenderGraph& graph,
                       RGTexture depth,
                       TerrainTileId id,
                       const core::Mat4& view_proj,
+                      const core::Vec3& eye,
                       const TerrainLight& light) {
     // The structural gate: an unknown tile declares NO pass, so the frame is byte-identical to one
     // from a build without this file. A pass that ran and drew zero indices would be *almost*
@@ -368,7 +405,7 @@ void TerrainPass::add(RenderGraph& graph,
     }
     const TerrainTile& tile = tiles_[id];
 
-    const TerrainPush push = terrain_push(tile, view_proj, light);
+    const TerrainPush push = terrain_push(tile, view_proj, eye, light);
 
     // LOAD the HDR target: terrain is one contributor to a frame, not its owner. Depth is written,
     // because terrain is opaque — a tile must occlude what is behind it, and be occluded by what

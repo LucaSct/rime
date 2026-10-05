@@ -215,8 +215,13 @@ constexpr std::uint32_t kSize = 128;
 constexpr float kExtent = kCell * static_cast<float>(kColumns - 1); // 32 m
 constexpr float kHalf = 0.5f * kExtent;
 
+// The camera's world position, shared by the projection and by the BRDF's view vector (m19.5).
+core::Vec3 top_down_eye() {
+    return {kOrigin.x + kHalf, kOrigin.y + 200.0f, kOrigin.z + kHalf};
+}
+
 core::Mat4 top_down_view_proj() {
-    const core::Vec3 eye{kOrigin.x + kHalf, kOrigin.y + 200.0f, kOrigin.z + kHalf};
+    const core::Vec3 eye = top_down_eye();
     const core::Vec3 target{eye.x, kOrigin.y, eye.z};
     // `up` must not be parallel to the view direction; (0, 0, -1) makes view-space +x = world +x
     // and view-space -y = world +z, which is the mapping asserted below rather than assumed.
@@ -422,7 +427,7 @@ TEST_CASE("m19.3: the height the GPU reconstructs is the height physics collides
     rpd.depth = &depth_att;
     rpd.sampled = sampled;
 
-    const render::TerrainPush push = render::terrain_push(tile, view_proj, {});
+    const render::TerrainPush push = render::terrain_push(tile, view_proj, top_down_eye(), {});
     graph.add_raster_pass("terrain-height-probe", rpd, [&](rhi::CommandBuffer& cmd) {
         cmd.bind_pipeline(pipeline);
         cmd.bind_texture(0, tile.heights, sampler);
@@ -565,7 +570,7 @@ TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle no
             gate.create_texture({{kSize, kSize}, render::kHdrFormat, "gate-hdr"});
         const render::RGTexture depth =
             gate.create_texture({{kSize, kSize}, render::kDepthFormat, "gate-depth"});
-        pass.add(gate, hdr, depth, render::kInvalidTerrainTile, core::Mat4{}, {});
+        pass.add(gate, hdr, depth, render::kInvalidTerrainTile, core::Mat4{}, {}, {});
         CHECK(gate.pass_count() == 0);
         CHECK(pass.tiles_drawn() == 0);
     }
@@ -603,7 +608,7 @@ TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle no
         graph.add_raster_pass("frame-clear", cd, [](rhi::CommandBuffer&) {});
     }
 
-    pass.add(graph, hdr, depth, tile_id, view_proj, light);
+    pass.add(graph, hdr, depth, tile_id, view_proj, top_down_eye(), light);
     CHECK(pass.tiles_drawn() == 1);
 
     auto cmd = device->begin_commands();
@@ -779,7 +784,8 @@ uniform_weights(std::uint32_t wc, std::uint32_t wr, std::array<std::uint8_t, 4> 
 std::vector<std::uint8_t> render_tile(rhi::Device& device,
                                       render::TerrainPass& pass,
                                       render::TerrainTileId id,
-                                      const render::TerrainLight& light) {
+                                      const render::TerrainLight& light,
+                                      core::Vec3 eye = top_down_eye()) {
     render::RenderGraph graph(device);
     graph.reset();
     const render::RGTexture hdr =
@@ -797,7 +803,7 @@ std::vector<std::uint8_t> render_tile(rhi::Device& device,
         cd.depth = &dclear;
         graph.add_raster_pass("frame-clear", cd, [](rhi::CommandBuffer&) {});
     }
-    pass.add(graph, hdr, depth, id, top_down_view_proj(), light);
+    pass.add(graph, hdr, depth, id, top_down_view_proj(), eye, light);
     auto cmd = device.begin_commands();
     graph.execute(*cmd);
     device.submit_blocking(*cmd);
@@ -1093,4 +1099,206 @@ TEST_CASE("m19.4: splat refusals are counted, and v1 assets are untouched by the
     CHECK(pass.upload(good, distinct_palette()) != render::kInvalidTerrainTile);
     CHECK(pass.tiles_refused() == 4);
     CHECK(pass.splat_refused() == 3);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// m19.5 — THE BRDF AND THE METALLIC/ROUGHNESS BLEND (ADR-0064). Still structural: bit-identity
+// and strict inequalities, no golden images and no tuned colour margins.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+namespace {
+
+render::TerrainLight pbr_light(core::Vec3 albedo, float metallic, float roughness) {
+    render::TerrainLight l = splat_light(albedo);
+    l.metallic = metallic;
+    l.roughness = roughness;
+    return l;
+}
+
+// Palette whose four layers share one colour; `layer1` overrides slot 1's material only.
+Palette4 material_palette(core::Vec3 c, float m0, float r0, float m1, float r1) {
+    Palette4 p{};
+    for (std::size_t k = 0; k < 4; ++k) {
+        p[k].base_color = c;
+        p[k].metallic = k == 1 ? m1 : m0;
+        p[k].roughness = k == 1 ? r1 : r0;
+    }
+    return p;
+}
+
+std::vector<std::uint8_t> render_v2_pbr(rhi::Device& device,
+                                        const std::vector<std::uint16_t>& samples,
+                                        std::uint32_t wc,
+                                        std::uint32_t wr,
+                                        std::vector<std::uint8_t> weights,
+                                        const Palette4& palette) {
+    return render_v2(device, samples, wc, wr, std::move(weights), palette);
+}
+
+int differing_covered_pixels(const std::vector<std::uint8_t>& a,
+                             const std::vector<std::uint8_t>& b) {
+    int n = 0;
+    for (std::uint32_t py = 0; py < kSize; ++py) {
+        for (std::uint32_t px = 0; px < kSize; ++px) {
+            for (int c = 0; c < 3; ++c) {
+                if (chan(a, px, py, c) != chan(b, px, py, c)) {
+                    ++n;
+                    break;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+// A planar tile: every sample equal, so the normal is exactly up everywhere and "mirror geometry"
+// is a statement about two direction vectors rather than about the fixture's relief.
+std::vector<std::uint16_t> flat_samples() {
+    return std::vector<std::uint16_t>(cook_samples().size(), 20000);
+}
+
+// The brightest pixel (by channel sum) of a render of the flat tile, viewed from straight above
+// with the sun straight down: the sun's mirror direction IS the view direction at the tile's
+// centre, so the specular lobe's peak is in frame. Returns its RGB.
+std::array<float, 3> flat_highlight(rhi::Device& device, float metallic, float roughness) {
+    render::TerrainPass pass(device);
+    const render::TerrainTileId id = pass.upload(make_asset(flat_samples()));
+    REQUIRE(id != render::kInvalidTerrainTile);
+    render::TerrainLight l = pbr_light({0.8f, 0.1f, 0.1f}, metallic, roughness);
+    l.sun_direction = {0.0f, -1.0f, 0.0f};
+    const auto img = render_tile(device, pass, id, l);
+    CHECK(covered_pixels(img) > 8000);
+    float best = -1.0f;
+    std::array<float, 3> rgb{};
+    for (std::uint32_t py = 0; py < kSize; ++py) {
+        for (std::uint32_t px = 0; px < kSize; ++px) {
+            const float sum = chan(img, px, py, 0) + chan(img, px, py, 1) + chan(img, px, py, 2);
+            if (sum > best) {
+                best = sum;
+                rgb = {chan(img, px, py, 0), chan(img, px, py, 1), chan(img, px, py, 2)};
+            }
+        }
+    }
+    return rgb;
+}
+
+} // namespace
+
+TEST_CASE("m19.5: four equal metallic layers are BIT-IDENTICAL to the flat tile of that material") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    const core::Vec3 x{0.37f, 0.61f, 0.23f};
+    render::TerrainPass flat_pass(*device);
+    const render::TerrainTileId flat_id = flat_pass.upload(make_asset(samples));
+    REQUIRE(flat_id != render::kInvalidTerrainTile);
+    const auto a = render_tile(*device, flat_pass, flat_id, pbr_light(x, 1.0f, 0.3f));
+
+    const std::uint8_t texels[10][4] = {{255, 0, 0, 0},
+                                        {0, 255, 0, 0},
+                                        {0, 0, 0, 255},
+                                        {128, 127, 0, 0},
+                                        {85, 85, 85, 0},
+                                        {64, 64, 64, 63},
+                                        {1, 1, 1, 252},
+                                        {0, 0, 128, 127},
+                                        {200, 50, 5, 0},
+                                        {10, 20, 30, 195}};
+    std::vector<std::uint8_t> w;
+    for (const auto& t : texels) {
+        w.insert(w.end(), t, t + 4);
+    }
+    const auto b =
+        render_v2_pbr(*device, samples, 5, 2, w, material_palette(x, 1.0f, 0.3f, 1.0f, 0.3f));
+    CHECK(covered_pixels(a) > 8000);
+    CHECK(covered_pixels(b) == covered_pixels(a));
+    REQUIRE(a.size() == b.size());
+    CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+}
+
+TEST_CASE("m19.5: metallic and roughness are reachable through the splat blend") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    const core::Vec3 x{0.7f, 0.5f, 0.3f};
+    const auto pure0 = uniform_weights(2, 2, {255, 0, 0, 0});
+    const auto pure1 = uniform_weights(2, 2, {0, 255, 0, 0});
+
+    // Layer 1 differs from layer 0 ONLY in metallic.
+    const Palette4 pm = material_palette(x, 0.0f, 0.5f, 1.0f, 0.5f);
+    const auto m0 = render_v2_pbr(*device, samples, 2, 2, pure0, pm);
+    const auto m1 = render_v2_pbr(*device, samples, 2, 2, pure1, pm);
+    CHECK(covered_pixels(m0) > 8000);
+    CHECK(differing_covered_pixels(m0, m1) > 8000);
+
+    // ... and ONLY in roughness (both metal, so the specular lobe carries the difference).
+    const Palette4 pr = material_palette(x, 1.0f, 0.2f, 1.0f, 0.9f);
+    const auto r0 = render_v2_pbr(*device, samples, 2, 2, pure0, pr);
+    const auto r1 = render_v2_pbr(*device, samples, 2, 2, pure1, pr);
+    CHECK(covered_pixels(r0) > 8000);
+    CHECK(differing_covered_pixels(r0, r1) > 8000);
+}
+
+TEST_CASE("m19.5: a metal's highlight takes its base colour, a dielectric's is white") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto metal = flat_highlight(*device, 1.0f, 0.2f);
+    const auto diel = flat_highlight(*device, 0.0f, 0.2f);
+    REQUIRE(metal[0] > 0.0f);
+    REQUIRE(diel[0] > 0.0f);
+    const float metal_gr = metal[1] / metal[0];
+    const float diel_gr = diel[1] / diel[0];
+    MESSAGE("m19.5 highlight G/R: metal ", metal_gr, ", dielectric ", diel_gr);
+    // Base colour is (0.8, 0.1, 0.1): the metal's G/R heads for 0.125, the dielectric's for 1.
+    CHECK(metal_gr < diel_gr);
+}
+
+TEST_CASE("m19.5: roughness spreads the highlight") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto smooth = flat_highlight(*device, 1.0f, 0.15f);
+    const auto rough = flat_highlight(*device, 1.0f, 0.9f);
+    const float s = smooth[0] + smooth[1] + smooth[2];
+    const float r = rough[0] + rough[1] + rough[2];
+    MESSAGE("m19.5 peak (channel sum): roughness 0.15 -> ", s, ", roughness 0.9 -> ", r);
+    CHECK(s > r);
+}
+
+TEST_CASE("m19.5: out-of-range or non-finite layer materials are refused and counted") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    render::TerrainPass pass(*device);
+    const auto good = make_splat_asset(samples, 2, 2, uniform_weights(2, 2, {255, 0, 0, 0}));
+    std::uint64_t expected = 0;
+    const auto refuse = [&](const Palette4& pal) {
+        CHECK(pass.upload(good, pal) == render::kInvalidTerrainTile);
+        ++expected;
+        CHECK(pass.splat_refused() == expected);
+        CHECK(pass.tiles_refused() == expected);
+    };
+    Palette4 p = distinct_palette();
+    p[2].metallic = 1.5f;
+    refuse(p);
+    p = distinct_palette();
+    p[3].roughness = -0.1f;
+    refuse(p);
+    p = distinct_palette();
+    p[1].roughness = std::numeric_limits<float>::quiet_NaN();
+    refuse(p);
+    // The boundary values themselves are legal.
+    p = distinct_palette();
+    p[1].metallic = 1.0f;
+    p[1].roughness = 0.0f;
+    CHECK(pass.upload(good, p) != render::kInvalidTerrainTile);
+    CHECK(pass.splat_refused() == expected);
 }
