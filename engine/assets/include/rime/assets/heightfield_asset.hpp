@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "rime/assets/asset_id.hpp"
 #include "rime/core/math/vec.hpp"
 
 // A cooked terrain HEIGHTFIELD (M19.1, ADR-0060-m19.1-heightfield): a regular grid of height
@@ -68,6 +69,53 @@ struct HeightfieldAsset {
     std::uint16_t min_sample = 0;
     std::uint16_t max_sample = 0;
     std::vector<std::uint16_t> samples;
+
+    // ─── Splat materials (payload v2, ADR-0063) ──────────────────────────────────────────────
+    //
+    // A terrain tile blends up to four materials per surface texel. `layers` is the tile's palette
+    // — slot by slot, with a zero AssetId meaning "this slot is unused" — and `weights` holds four
+    // u8 weights per texel, row-major, x fastest, interleaved per texel exactly as an RGBA8
+    // texture upload walks them.
+    //
+    // WHY THE WEIGHT GRID HAS ITS OWN DIMENSIONS: material detail and height detail are
+    // independent. A painter wants a finer splat map than collision needs, and a 4x finer weight
+    // map costs physics nothing, so tying the two would pin one to the other's resolution forever.
+    //
+    // WHY THE WEIGHTS SUM TO EXACTLY 255: the cook normalizes them (largest-remainder
+    // apportionment, so the sum is exact rather than drifting with rounding) and the reader
+    // REFUSES a texel that does not sum to 255. An unnormalized splat map does not fail loudly —
+    // it dims or blows out the ground by a few percent, which reads as a lighting bug and gets
+    // chased in the renderer. Making the sum an invariant moves that failure to the cook, and lets
+    // the shader blend with no renormalization in its inner loop.
+    //
+    // A v1 payload leaves all of this empty, which means "one material, shaded as m19.3 shades
+    // it". `has_splat()` is the question to ask, never `weights.empty()` alone.
+    static constexpr std::uint32_t kLayerCount = 4;
+    std::uint32_t weight_columns = 0; // weight texels along local X (0 when there is no splat map)
+    std::uint32_t weight_rows = 0;    // weight texels along local Z
+    AssetId layers[kLayerCount]{};    // the palette; slot 0 is always a valid material in a v2 file
+    std::vector<std::uint8_t> weights; // kLayerCount per texel, interleaved, row-major
+
+    [[nodiscard]] bool has_splat() const noexcept {
+        return weight_columns > 0 && weight_rows > 0 && !weights.empty();
+    }
+
+    [[nodiscard]] std::size_t weight_texel_count() const noexcept {
+        return std::size_t{weight_columns} * std::size_t{weight_rows};
+    }
+
+    // Offset of texel (i, j)'s FIRST weight; the four layers follow consecutively.
+    [[nodiscard]] std::size_t weight_index(std::uint32_t i, std::uint32_t j) const noexcept {
+        return (std::size_t{i} + std::size_t{weight_columns} * std::size_t{j}) * kLayerCount;
+    }
+
+    // Texel (i, j)'s weight for `layer`, as a fraction in [0, 1]. Callers index in range. The
+    // denominator is 255 because that is what the four weights sum to, so the four fractions a
+    // texel yields are a partition of unity by construction — the property m19.4's proof rests on.
+    [[nodiscard]] float
+    weight(std::uint32_t i, std::uint32_t j, std::uint32_t layer) const noexcept {
+        return static_cast<float>(weights[weight_index(i, j) + layer]) / 255.0f;
+    }
 
     [[nodiscard]] std::size_t sample_count() const noexcept {
         return std::size_t{columns} * std::size_t{rows};

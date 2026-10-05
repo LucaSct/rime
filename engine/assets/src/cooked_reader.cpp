@@ -1504,6 +1504,85 @@ std::uint64_t heightfield_schema_hash() noexcept {
     return core::reflect<detail::HeightfieldHeaderV1>().type_hash;
 }
 
+// The v2 splat-material block (ADR-0063), read from `reader` positioned just past the sample blob.
+// Returns false with `out_error` set; the caller then abandons the whole asset, because a terrain
+// that draws with the wrong materials is not a degraded terrain, it is a wrong one.
+[[nodiscard]] bool decode_heightfield_splat(core::ByteReader& reader,
+                                            HeightfieldAsset& hf,
+                                            AssetError& out_error) noexcept {
+    std::uint32_t layer_count = 0;
+    if (!reader.u32(hf.weight_columns) || !reader.u32(hf.weight_rows) || !reader.u32(layer_count)) {
+        out_error = AssetError::Truncated;
+        return false;
+    }
+    // Exactly four layers, not "at least" and not "up to": four is what fits one RGBA8 fetch, and
+    // a reader that quietly accepted three would shade a file nothing in this engine can produce.
+    // When a later ADR raises the count, THIS is the check that makes the old build refuse the new
+    // file instead of misreading it.
+    if (layer_count != HeightfieldAsset::kLayerCount) {
+        out_error = AssetError::InvalidHeightfield;
+        return false;
+    }
+    for (AssetId& id : hf.layers) {
+        std::uint64_t raw = 0;
+        if (!reader.u64(raw)) {
+            out_error = AssetError::Truncated;
+            return false;
+        }
+        id = AssetId{raw};
+    }
+    // Slot 0 carries the tile's base material, so a v2 file with an empty palette has nothing to
+    // blend and is a cook bug, not a tile without materials.
+    if (!hf.layers[0].is_valid()) {
+        out_error = AssetError::InvalidHeightfield;
+        return false;
+    }
+    // Same sanity ceiling as the height grid — a bound on the allocation, not a statement about
+    // resolution — and at least one texel, since a weight grid with a zero axis cannot be sampled.
+    const bool weight_dims_ok = hf.weight_columns >= 1 && hf.weight_rows >= 1 &&
+                                hf.weight_columns <= kMaxHeightfieldSamplesPerAxis &&
+                                hf.weight_rows <= kMaxHeightfieldSamplesPerAxis;
+    if (!weight_dims_ok) {
+        out_error = AssetError::InvalidHeightfield;
+        return false;
+    }
+    const std::uint64_t texels = std::uint64_t{hf.weight_columns} * std::uint64_t{hf.weight_rows};
+    const std::uint64_t weight_bytes = texels * HeightfieldAsset::kLayerCount;
+    if (reader.remaining() != weight_bytes) {
+        out_error = AssetError::SizeMismatch;
+        return false;
+    }
+    hf.weights.resize(static_cast<std::size_t>(weight_bytes));
+    for (std::uint8_t& w : hf.weights) {
+        if (!reader.u8(w)) {
+            out_error = AssetError::Truncated; // unreachable after the size check; kept for safety
+            return false;
+        }
+    }
+    // THE INVARIANT THE SHADER IS ALLOWED TO ASSUME: every texel's four weights sum to exactly
+    // 255, so the four fractions are a partition of unity and the blend needs no renormalization.
+    // Checked here, once, at load, rather than per pixel per frame forever. A weight on an UNUSED
+    // palette slot is refused too: it means the painter referenced a material the tile does not
+    // carry, and silently dropping that weight would darken the ground by the missing fraction.
+    for (std::size_t t = 0; t < static_cast<std::size_t>(texels); ++t) {
+        const std::size_t base = t * HeightfieldAsset::kLayerCount;
+        unsigned sum = 0;
+        for (std::uint32_t layer = 0; layer < HeightfieldAsset::kLayerCount; ++layer) {
+            const std::uint8_t w = hf.weights[base + layer];
+            if (w != 0 && !hf.layers[layer].is_valid()) {
+                out_error = AssetError::InvalidHeightfield;
+                return false;
+            }
+            sum += w;
+        }
+        if (sum != 255u) {
+            out_error = AssetError::InvalidHeightfield;
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<HeightfieldAsset> decode_heightfield(std::span<const std::byte> payload,
                                                    AssetError& out_error) noexcept {
     core::ByteReader reader(payload);
@@ -1519,7 +1598,7 @@ std::optional<HeightfieldAsset> decode_heightfield(std::span<const std::byte> pa
         out_error = AssetError::Truncated;
         return std::nullopt;
     }
-    if (version != kHeightfieldPayloadVersion) {
+    if (version < kHeightfieldMinPayloadVersion || version > kHeightfieldPayloadVersion) {
         out_error = AssetError::UnsupportedVersion;
         return std::nullopt;
     }
@@ -1559,10 +1638,13 @@ std::optional<HeightfieldAsset> decode_heightfield(std::span<const std::byte> pa
     hf.min_sample = static_cast<std::uint16_t>(min_raw);
     hf.max_sample = static_cast<std::uint16_t>(max_raw);
 
-    // The blob is EXACTLY columns * rows u16s — no shorter, no trailing bytes — checked in 64 bits
-    // before the allocation is sized from it.
+    // The blob is EXACTLY columns * rows u16s, checked in 64 bits before the allocation is sized
+    // from it. In v1 it is also the END of the payload, so "no trailing bytes" is part of the
+    // check; in v2 the splat block follows, so the exactness moves to the block's own check below
+    // and here we only require that the samples are all present.
     const std::uint64_t count = std::uint64_t{hf.columns} * std::uint64_t{hf.rows};
-    if (reader.remaining() != count * sizeof(std::uint16_t)) {
+    const std::uint64_t sample_bytes = count * sizeof(std::uint16_t);
+    if (version == 1 ? reader.remaining() != sample_bytes : reader.remaining() < sample_bytes) {
         out_error = AssetError::SizeMismatch;
         return std::nullopt;
     }
@@ -1579,6 +1661,9 @@ std::optional<HeightfieldAsset> decode_heightfield(std::span<const std::byte> pa
             out_error = AssetError::InvalidHeightfield;
             return std::nullopt;
         }
+    }
+    if (version >= 2 && !decode_heightfield_splat(reader, hf, out_error)) {
+        return std::nullopt;
     }
     return hf;
 }
