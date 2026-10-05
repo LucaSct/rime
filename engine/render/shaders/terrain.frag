@@ -3,7 +3,8 @@
 //
 // The terrain heightfield pass, fragment stage (m19.3, ADR-0062). One directional light plus an
 // ambient term, into the HDR target. m19.3 shaded Lambert with one flat albedo; m19.4 (ADR-0063)
-// let a tile blend up to four base colours by a cooked weight map; m19.5 (ADR-0064) shades with the
+// let a tile blend up to four base colours by a cooked weight map (m19.7c, ADR-0066: the weights
+// are redistributed by each layer's height first — see height_blend()); m19.5 (ADR-0064) shades with the
 // SAME Cook-Torrance GGX BRDF as pbr_forward.frag (brdf.glsl) and blends metallic and roughness
 // alongside the colour, so terrain can look like metal. A tile without a splat map takes the
 // flat-material path (`pc.surface.rgb`, `pc.material`). m19.6 (ADR-0065) replaces the flat ambient
@@ -51,6 +52,8 @@ layout(set = 0, binding = 2) uniform Splat {
     // m19.7b: metres per texture repeat along world X, Z — [0] = layer 0 (xy), layer 1 (zw);
     // [1] = layers 2, 3. Appended after m19.5's block, so its first 112 bytes are unchanged.
     vec4 uv_scale[2];
+    // m19.7c: height-blend contrast of layer 0..3 (x..w), >= 0; 0 = no redistribution. Appended.
+    vec4 height_contrast;
 } splat;
 
 // m19.6: the sky's lighting half (SkyLightBinding). ALWAYS bound — the pass binds its own 1x1 dummy
@@ -91,6 +94,62 @@ vec3 env_brdf_approx(vec3 f0, float roughness, float n_dot_v) {
     return f0 * ab.x + ab.y;
 }
 
+// ── HEIGHT-BASED SPLAT REDISTRIBUTION (m19.7c, ADR-0066 §5) ───────────────────────────────────
+//
+// A painted weight map alone cross-fades two layers into one even smudge. Real ground does not do
+// that: where grass meets gravel, the gravel shows first in the LOW cracks of the grass and the
+// grass holds on to its HIGH tufts. Height blending gets that from data the layers already carry:
+// each layer has a height map, and wherever two layers overlap, the one whose surface is locally
+// higher takes a larger share of the pixel than the painter gave it.
+//
+//     g_k = exp2(c_k * (h_k - h_max))        b_k = w_k * g_k / sum_j (w_j * g_j)
+//
+// w = the painted weights, h = the layer heights in [0,1], c = each layer's contrast (>= 0). The
+// highest layer keeps g = 1; a layer d below it is scaled by 2^(-c*d), so the contrast is "how
+// many halvings per unit of height". The result is renormalised, so b is again a set of weights.
+//
+// WHY h_max IS TAKEN OVER PAINTED (w > 0) LAYERS ONLY. A layer the painter did not put here must
+// have no say in this pixel — not even through the reference height. If an unpainted layer's tall
+// height set h_max, every painted layer's g would shrink by its OWN contrast, so their ratio — and
+// the picture — would change with a texture that is not even visible here.
+//
+// WHY exp2 AND NOT A MAX-HEIGHT GATE. The gate ("keep whatever is within some depth of the highest
+// layer, drop the rest") was proposed and rejected in ADR-0066: it can cut a layer to exactly
+// zero, so a layer painted at 1% that happens to be highest can end up owning the pixel. Here
+// g_k > 0 always and b_k carries the factor w_k: a layer's share is 0 where its painted weight is
+// 0, and grows continuously and monotonically with that weight. Contrast only STEEPENS the
+// transition the painter drew; it cannot move it to wherever a stray texel is tallest.
+//
+// WHY THE BYPASS. When every painted layer has the same height (always true of untextured layers,
+// whose fallback height is 0), or none of them has any contrast, every g is 1 and the formula
+// reduces to w / sum(w) — mathematically w, but NOT bit for bit: the four float weights do not
+// sum to exactly 1.0, so the division moves them by an ULP. Returning w itself keeps every
+// earlier bit-identity anchor (ADR-0063 §4 onwards) exact, and makes "no height data" cost
+// nothing.
+//
+// Returns b; the caller's difference-form blend reads b.yzw (b.x is implied, like w0 before it).
+vec4 height_blend(vec4 w, vec4 h, vec4 c) {
+    float h_max = 0.0; // heights are UNORM, so [0,1] brackets them
+    float h_min = 1.0;
+    float c_max = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        if (w[k] > 0.0) {
+            h_max = max(h_max, h[k]);
+            h_min = min(h_min, h[k]);
+            c_max = max(c_max, c[k]);
+        }
+    }
+    if (h_max == h_min || c_max == 0.0) {
+        return w; // the bypass (also the no-painted-layer case: c_max stays 0)
+    }
+    // min(.., 0) changes nothing for a painted layer (h_k <= h_max by construction). For an
+    // UNPAINTED one that is taller than h_max it keeps g <= 1: a large contrast would otherwise
+    // overflow exp2 to +inf, and w * g = 0 * inf is NaN, which would poison the whole sum.
+    const vec4 q = w * exp2(c * min(h - vec4(h_max), vec4(0.0)));
+    // Never zero: the painted layer AT h_max has g = 1 and w > 0.
+    return q / (q.x + q.y + q.z + q.w);
+}
+
 // Must match terrain.vert's block byte for byte (one block, both stages — see TerrainPush).
 layout(push_constant) uniform Pc {
     mat4 view_proj;
@@ -124,6 +183,9 @@ void main() {
     // The anchor ("four equal layers == the flat tile") would otherwise stop being bit-exact the
     // moment a scalar went through the naive weighted sum, and the anchor is what proves the
     // weight map is not quietly adding or removing light.
+    //
+    // m19.7c: the weights that enter this form are height_blend()'s b, not the sampled w. The
+    // argument is unchanged — it never needed sum = 1 to the bit, only zero differences.
     vec3 base = pc.surface.rgb;
     float metallic = pc.material.x;
     float roughness = pc.material.y;
@@ -156,22 +218,22 @@ void main() {
         const vec4 t1 = texture(layer_tex1, xz / splat.uv_scale[0].zw);
         const vec4 t2 = texture(layer_tex2, xz / splat.uv_scale[1].xy);
         const vec4 t3 = texture(layer_tex3, xz / splat.uv_scale[1].zw);
-        // The four layer heights, for brick 3's height blend. Sampled now so the binding, the
-        // format's linear alpha and the coordinate are proven before anything depends on them;
-        // NOT read yet, so today's picture cannot depend on them either.
+        // m19.7c: the painted weights, redistributed by the four layer heights (texture A,
+        // linear) — height_blend() above. Everything below blends with b where m19.7b used w.
         const vec4 h = vec4(t0.a, t1.a, t2.a, t3.a);
+        const vec4 b = height_blend(w, h, splat.height_contrast);
 
         const vec3 c0 = splat.color[0].rgb * t0.rgb;
         const vec3 c1 = splat.color[1].rgb * t1.rgb;
         const vec3 c2 = splat.color[2].rgb * t2.rgb;
         const vec3 c3 = splat.color[3].rgb * t3.rgb;
-        base = c0 + w.g * (c1 - c0) + w.b * (c2 - c0) + w.a * (c3 - c0);
+        base = c0 + b.g * (c1 - c0) + b.b * (c2 - c0) + b.a * (c3 - c0);
         const float m0 = splat.color[0].w;
-        metallic = m0 + w.g * (splat.color[1].w - m0) + w.b * (splat.color[2].w - m0) +
-                   w.a * (splat.color[3].w - m0);
+        metallic = m0 + b.g * (splat.color[1].w - m0) + b.b * (splat.color[2].w - m0) +
+                   b.a * (splat.color[3].w - m0);
         const float r0 = splat.roughness.x;
-        roughness = r0 + w.g * (splat.roughness.y - r0) + w.b * (splat.roughness.z - r0) +
-                    w.a * (splat.roughness.w - r0);
+        roughness = r0 + b.g * (splat.roughness.y - r0) + b.b * (splat.roughness.z - r0) +
+                    b.a * (splat.roughness.w - r0);
     }
     // Same floor and remap as pbr_forward: alpha = roughness^2 (perceptual), and a roughness of 0
     // would make GGX's D a delta function that no finite sun can light, so clamp it.

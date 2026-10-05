@@ -58,9 +58,10 @@
 //   * no LOD, no clipmap, no tessellation: a tile is drawn at full sample density, every frame;
 //   * splat blending (m19.4/m19.5, ADR-0063/0064) blends base colour, metallic and roughness per
 //     texel — see TerrainLayer; shading is the shared GGX BRDF (brdf.glsl). m19.7b (ADR-0066
-//     addendum) multiplies each layer's colour by its own albedo texture at world-XZ UVs; the
-//     height channel those textures carry is sampled but not yet used (height blending is the
-//     next brick), and a layer has no normal map;
+//     addendum) multiplies each layer's colour by its own albedo texture at world-XZ UVs, and
+//     m19.7c redistributes the painted weights by the height those textures carry (see
+//     TerrainLayer::height_contrast). A layer has no normal map, and the textures are projected
+//     along world Y only — no triplanar mapping, so they stretch on steep slopes;
 //   * the environment is the SKY only (m19.6, ADR-0065), and only when the caller binds one: SH
 //     diffuse plus the sky-view LUT along the mirror direction, through Karis' analytic env-BRDF.
 //     No prefiltered radiance (roughness fades from the LUT toward the SH instead) and NO SKY
@@ -107,7 +108,7 @@ struct TerrainTile {
     // v1 tile and a splat tile: a v1 tile holds a 1x1 dummy weight texture and a uniform block
     // whose flag is 0.
     rhi::TextureHandle weights{};  // RGBA8_UNORM, weight_columns x weight_rows, bytes verbatim
-    rhi::BufferHandle splat_ubo{}; // flag, extent, weight dims, colours, roughness, uv scales
+    rhi::BufferHandle splat_ubo{}; // flag, extent, dims, colours, roughness, uv scales, contrasts
     bool has_splat = false;
     // m19.7b: the four per-layer albedo+height textures, bound at bindings 5..8. NOT owned by the
     // tile — they are the builder's (see TerrainLayer::albedo_height) — except that a slot with no
@@ -141,14 +142,25 @@ struct TerrainTile {
 //
 // `uv_scale` is metres per texture repeat along WORLD X and Z — the texture coordinate is
 // world.xz / uv_scale, so a pattern runs continuously across tile seams. Finite and > 0, or the
-// tile is refused and counted. (`height_contrast`, the asset's third field, arrives with its use
-// in brick 3; the heights are sampled but not yet read.)
+// tile is refused and counted.
+//
+// m19.7c (ADR-0066 §5 and its m19.7c addendum): `height_contrast` is the asset's third field — how
+// strongly this layer's HEIGHT (the texture's A) bends the painted weights. Where layers overlap,
+// each painted layer k is scaled by 2^(contrast_k * (h_k - h_max)), h_max being the highest
+// PAINTED layer at that pixel, and the weights are renormalised: the locally higher layer shows
+// through first, the way gravel shows in the low cracks of grass. 0 (the default) is the plain
+// m19.4 cross-fade, exactly: with every painted layer at contrast 0, or at one common height (all
+// untextured layers are — the fallback's height is 0), the shader returns the sampled weights
+// untouched, so the result is bit-identical to m19.7b. A layer painted at weight 0 never gains a
+// share, whatever its height. Finite and >= 0, or the tile is refused and counted. The pass still
+// takes RESOLVED layers: filling this from the cooked `TerrainLayerAsset` is the builder's job.
 struct TerrainLayer {
     core::Vec3 base_color{0.5f, 0.5f, 0.5f};
     float metallic = 0.0f;
     float roughness = 1.0f;
     rhi::TextureHandle albedo_height{}; // invalid = no texture (the white fallback)
     float uv_scale[2] = {1.0f, 1.0f};   // metres per repeat along world X, world Z
+    float height_contrast = 0.0f;       // halvings per unit height below the highest painted layer
 };
 
 // Slot k is `HeightfieldAsset::layers[k]`. Entries for unused slots (zero AssetId) are ignored:
@@ -227,8 +239,9 @@ public:
     // splat map the palette is ignored. Additional refusals, all also counted in `splat_refused()`:
     // a weight map past `kMaxSplatTexelsPerAxis`, a weight span that does not match its size, a
     // non-finite palette colour, a layer metallic/roughness that is non-finite or outside [0,1], a
-    // layer `uv_scale` component that is non-finite or <= 0 (m19.7b), or a failed weight-texture /
-    // uniform-buffer allocation. A layer texture is only borrowed (see TerrainLayer).
+    // layer `uv_scale` component that is non-finite or <= 0 (m19.7b), a layer `height_contrast`
+    // that is non-finite or negative (m19.7c), or a failed weight-texture / uniform-buffer
+    // allocation. A layer texture is only borrowed (see TerrainLayer).
     [[nodiscard]] TerrainTileId upload(const assets::HeightfieldAsset& asset,
                                        const TerrainPalette& palette);
 
