@@ -6,11 +6,12 @@
 // what it exists not to do.
 //
 // m19.6 (ADR-0065) taught terrain.frag to read the sky. Its promise is that with no sky bound the
-// tile renders BIT-IDENTICALLY to m19.5. "Identical to what?" needs an answer that cannot move: an
+// tile renders as m19.5 did — to one half-float ULP, since two separately compiled programs need
+// not round identically (ADR-0065 §4). "Identical to what?" needs an answer that cannot move: an
 // #ifdef variant of the live shader would change along with any edit to it, and a stored image
 // would be a golden image. So the test builds a second pipeline around the engine's terrain.vert
 // and THIS fragment stage, feeds it the very tile resources and push block the engine pass uses,
-// and memcmps the two HDR targets.
+// and compares the two HDR targets channel by channel.
 //
 // The only edits from the original are this header and the brdf.glsl include path (the test's
 // shader directory is not the engine's). brdf.glsl itself is NOT frozen: it is shared by both

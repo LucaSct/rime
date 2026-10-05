@@ -1372,8 +1372,8 @@ TEST_CASE("m19.5: out-of-range or non-finite layer materials are refused and cou
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// m19.6 — TERRAIN REFLECTS THE SKY (ADR-0065). Structural: bit-identity against a frozen m19.5
-// shader, and strict inequalities between renders. The sky is the engine's real SkyPass bake
+// m19.6 — TERRAIN REFLECTS THE SKY (ADR-0065). Structural: one-f16-ULP agreement with a frozen
+// m19.5 shader, and strict inequalities between renders. The sky is the engine's real SkyPass bake
 // (sky-view LUT + SH projection), run in this binary on the same device — no synthetic fixture.
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 namespace {
@@ -1565,37 +1565,86 @@ int strictly_brighter_pixels(const std::vector<std::uint8_t>& bright,
     return n;
 }
 
-// The largest per-channel difference between two renders — reported when a bit-identity claim
-// fails, so "a few ULP of code generation" and "a different branch ran" read differently.
-float max_abs_diff(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) {
-    float worst = 0.0f;
-    for (std::uint32_t py = 0; py < kSize; ++py) {
-        for (std::uint32_t px = 0; px < kSize; ++px) {
-            for (int c = 0; c < 3; ++c) {
-                worst = std::max(worst, std::fabs(chan(a, px, py, c) - chan(b, px, py, c)));
-            }
-        }
-    }
-    return worst;
+// ── WHY THE NO-SKY ANCHOR IS "ONE f16 ULP", NOT memcmp ──────────────────────────────────────
+//
+// The m19.4/m19.5 anchors are bit-exact because they compare ONE program against itself: the
+// blend's differences from layer 0 are exactly zero, so no compiler choice can move them. This
+// anchor compares TWO SEPARATELY COMPILED programs — the live terrain.frag (sky branch present,
+// not taken) and the frozen m19.5 copy — and no driver promises those compile to the same
+// arithmetic: each may contract a multiply-add into an FMA, or reorder a sum, differently
+// depending on what ELSE the shader contains. Measured, not assumed: on an RTX 3060 the shipped
+// shader matches to the bit (0 pixels differ), but deleting one line from the sky branch moved
+// 1-2 no-sky pixels by one f16 step; on RADV (AMD Raphael) the shipped shader itself differs at
+// 2 pixels by 2^-10, which is exactly one f16 ULP of a value in [1, 2). lavapipe, macOS and
+// Windows are unmeasured.
+//
+// So the claim is the honest one: every channel within ONE half-float ULP of the reference, where
+// the ULP is read exactly from the f16 exponent of the larger magnitude — not a tuned epsilon. A
+// rounding-mode difference in the last FMA can move an f16 result by at most that; a different
+// branch (the falsification: force the sky path on) moves it by orders of magnitude more.
+float half_ulp(std::uint16_t h) {
+    const std::uint32_t exp = (h >> 10) & 0x1Fu;
+    // Subnormals (and zero) share the smallest exponent's spacing, 2^-24; a normal half with
+    // biased exponent e has 10 mantissa bits, so its spacing is 2^(e - 15 - 10).
+    return exp == 0 ? std::ldexp(1.0f, -24) : std::ldexp(1.0f, static_cast<int>(exp) - 25);
 }
 
-// memcmp, plus the size of any mismatch.
-void check_bit_identical(const std::vector<std::uint8_t>& got,
-                         const std::vector<std::uint8_t>& reference) {
-    REQUIRE(got.size() == reference.size());
-    const bool same = std::memcmp(got.data(), reference.data(), reference.size()) == 0;
-    if (!same) {
-        MESSAGE("mismatch: ",
-                differing_covered_pixels(got, reference),
-                " pixels differ, worst channel difference ",
-                max_abs_diff(got, reference));
+struct UlpComparison {
+    int differing_pixels = 0; // any channel not bit-equal
+    int beyond_ulp = 0;       // channels more than one f16 ULP apart (NaN/inf count here too)
+    float worst = 0.0f;       // largest per-channel absolute difference
+};
+
+UlpComparison compare_within_ulp(const std::vector<std::uint8_t>& a,
+                                 const std::vector<std::uint8_t>& b) {
+    UlpComparison r{};
+    for (std::size_t px = 0; px < std::size_t{kSize} * kSize; ++px) {
+        bool differs = false;
+        for (std::size_t c = 0; c < 4; ++c) {
+            std::uint16_t ha = 0;
+            std::uint16_t hb = 0;
+            std::memcpy(&ha, &a[px * 8 + c * 2], sizeof(ha));
+            std::memcpy(&hb, &b[px * 8 + c * 2], sizeof(hb));
+            if (ha == hb) {
+                continue;
+            }
+            differs = true;
+            const float fa = half_to_float(ha);
+            const float fb = half_to_float(hb);
+            const float diff = std::fabs(fa - fb);
+            const std::uint16_t larger = std::fabs(fa) >= std::fabs(fb) ? ha : hb;
+            if (!std::isfinite(fa) || !std::isfinite(fb) || !(diff <= half_ulp(larger))) {
+                ++r.beyond_ulp;
+            }
+            if (std::isfinite(diff)) {
+                r.worst = std::max(r.worst, diff);
+            }
+        }
+        if (differs) {
+            ++r.differing_pixels;
+        }
     }
-    CHECK(same);
+    return r;
+}
+
+// The anchor, plus the size of any difference — reported always, so a driver that matches to the
+// bit and one that sits a ULP off are told apart in the log, not only on failure.
+void check_within_one_half_ulp(const std::vector<std::uint8_t>& got,
+                               const std::vector<std::uint8_t>& reference) {
+    REQUIRE(got.size() == reference.size());
+    const UlpComparison r = compare_within_ulp(got, reference);
+    MESSAGE("vs m19.5: ",
+            r.differing_pixels,
+            " pixels differ, worst channel difference ",
+            r.worst,
+            ", channels beyond one f16 ULP: ",
+            r.beyond_ulp);
+    CHECK(r.beyond_ulp == 0);
 }
 
 } // namespace
 
-TEST_CASE("m19.6: with no sky bound, terrain is BIT-IDENTICAL to the m19.5 shader") {
+TEST_CASE("m19.6: with no sky bound, terrain matches the m19.5 shader to one f16 ULP") {
     auto device = splat_device();
     if (!device) {
         return;
@@ -1622,7 +1671,7 @@ TEST_CASE("m19.6: with no sky bound, terrain is BIT-IDENTICAL to the m19.5 shade
 
         // (1) No sky argument at all: the pass binds its own placeholders.
         const auto no_sky = render_tile(*device, pass, id, light);
-        check_bit_identical(no_sky, reference);
+        check_within_one_half_ulp(no_sky, reference);
         CHECK(pass.sky_bound_draws() == 0);
 
         // (2) A caller's SkyPass::empty_binding: bound, but its SH flag is zero — same picture.
@@ -1647,7 +1696,7 @@ TEST_CASE("m19.6: with no sky bound, terrain is BIT-IDENTICAL to the m19.5 shade
         graph.execute(*cmd);
         device->submit_blocking(*cmd);
         const auto empty = read_texture(*device, graph.physical(hdr), 8);
-        check_bit_identical(empty, reference);
+        check_within_one_half_ulp(empty, reference);
         CHECK(pass.sky_bound_draws() == 1);
         CHECK(pass.tiles_drawn() == 2);
     }

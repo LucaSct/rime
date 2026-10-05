@@ -194,12 +194,13 @@ void main() {
         radiance += sky_specular * env_brdf_approx(f0, roughness, max(dot(n, v), 1e-4));
     } else {
         // AMBIENT is a uniform-environment STAND-IN when no sky is bound (m19.5, ADR-0064) —
-        // kept instruction for instruction, so a tile without a sky renders bit-identically to
-        // m19.5. A uniform white environment of irradiance E reflects diffuse (1-metallic)*base*E
-        // and a specular term of about f0*E, with f0 = 0.04 for dielectrics and the base colour
-        // for metals. A flat-ambient metal reads DARKER than a real one: a metal has no diffuse,
-        // so its only ambient light is this f0 term, where a real metal mirrors the sky — the
-        // branch above.
+        // kept instruction for instruction, so a tile without a sky renders as m19.5 did (to one
+        // f16 ULP: a driver may contract this branch differently now the shader holds another;
+        // ADR-0065 §4). A uniform white environment of irradiance E reflects diffuse
+        // (1-metallic)*base*E and a specular term of about f0*E, with f0 = 0.04 for dielectrics
+        // and the base colour for metals. A flat-ambient metal reads DARKER than a real one: a
+        // metal has no diffuse, so its only ambient light is this f0 term, where a real metal
+        // mirrors the sky — the branch above.
         radiance += pc.surface.w * ((1.0 - metallic) * base + f0);
     }
     out_color = vec4(radiance, 1.0);

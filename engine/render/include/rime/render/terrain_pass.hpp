@@ -62,7 +62,7 @@
 //     diffuse plus the sky-view LUT along the mirror direction, through Karis' analytic env-BRDF.
 //     No prefiltered radiance (roughness fades from the LUT toward the SH instead) and NO SKY
 //     OCCLUSION — a valley reflects sky its own walls hide. With no sky the flat-ambient stand-in
-//     of ADR-0064 renders bit-identically;
+//     of ADR-0064 renders as m19.5 did, to one f16 ULP (ADR-0065 §4);
 //   * no streaming: `upload()` is a one-shot, and a tile stays resident until the pass dies;
 //   * no holes, no decals, no per-cell best-fit diagonals (the format cannot express them either);
 //   * a tile is placed by TRANSLATION only, because `HeightfieldAsset` carries an `origin` and no
@@ -222,10 +222,11 @@ public:
     // `empty_binding`) returns it — taken as a parameter, the convention
     // `ForwardPbrPass::add_shadowed` set. It is OPTIONAL: the default-constructed binding (all
     // handles invalid) means "no sky", and the pass binds its OWN 1x1 dummy LUT and all-zero SH
-    // buffer, whose zero flag keeps terrain.frag on the m19.5 flat-ambient path — bit-identical to
-    // m19.5 (proven against a frozen copy of that shader). A binding with ANY member invalid is
-    // treated as no sky as a whole, never mixed. When it is lit by the sky, `light.ambient` is
-    // ignored (the SH replaces it) and the sun is still `light`'s, not the sky's.
+    // buffer, whose zero flag keeps terrain.frag on the m19.5 flat-ambient path — within one f16
+    // ULP of m19.5 (proven against a frozen copy of that shader; ADR-0065 §4 says why not bits). A
+    // binding with ANY member invalid is treated as no sky as a whole, never mixed. When it is lit
+    // by the sky, `light.ambient` is ignored (the SH replaces it) and the sun is still `light`'s,
+    // not the sky's.
     //
     // THE LUT STATE CONTRACT. `SkyPass` owns the sky-view LUT and imports it every frame in the
     // state the last consumer left it in, which it cannot see. Sampling it here leaves it in
