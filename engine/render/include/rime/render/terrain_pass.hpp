@@ -152,7 +152,9 @@ struct TerrainTile {
 // m19.4 cross-fade, exactly: with every painted layer at contrast 0, or at one common height (all
 // untextured layers are — the fallback's height is 0), the shader returns the sampled weights
 // untouched, so the result is bit-identical to m19.7b. A layer painted at weight 0 never gains a
-// share, whatever its height. Finite and >= 0, or the tile is refused and counted. The pass still
+// share, whatever its height. Finite and >= 0, or the tile is refused and counted. KNOWN LIMIT:
+// give layers that overlap the SAME contrast — with unequal contrasts, a tall layer painted in at
+// even 1/255 re-divides the layers beneath it, a visible step (ADR-0066, m19.7c addendum). The pass still
 // takes RESOLVED layers: filling this from the cooked `TerrainLayerAsset` is the builder's job.
 struct TerrainLayer {
     core::Vec3 base_color{0.5f, 0.5f, 0.5f};

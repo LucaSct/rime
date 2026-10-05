@@ -120,6 +120,13 @@ vec3 env_brdf_approx(vec3 f0, float roughness, float n_dot_v) {
 // 0, and grows continuously and monotonically with that weight. Contrast only STEEPENS the
 // transition the painter drew; it cannot move it to wherever a stray texel is tallest.
 //
+// KNOWN LIMIT — UNEQUAL CONTRASTS. That holds for a layer's OWN share. The split among the OTHER
+// layers is only independent of h_max when they share one contrast (a common factor cancels in
+// the renormalisation). With different c_k, a tall layer entering at the faintest painted weight
+// raises h_max and re-divides the layers beneath it by their own contrasts — a step at the edge
+// of its painted region (measured in ADR-0066's m19.7c addendum). Give overlapping layers the
+// same contrast until that is redesigned.
+//
 // WHY THE BYPASS. When every painted layer has the same height (always true of untextured layers,
 // whose fallback height is 0), or none of them has any contrast, every g is 1 and the formula
 // reduces to w / sum(w) — mathematically w, but NOT bit for bit: the four float weights do not
