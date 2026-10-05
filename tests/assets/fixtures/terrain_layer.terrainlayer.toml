@@ -1,0 +1,17 @@
+# Sidecar for the M19.7a terrain-layer cross-language fixture (ADR-0066). Cooked by
+#   rime terrain-layer tests/assets/fixtures/terrain_layer.terrainlayer.toml --out tests/assets/fixtures
+# into terrain_layer.rtl + terrain_layer_albedo_height.rtex, which fixture_test.cpp loads.
+#
+# terrain_layer_albedo.png: 4x4 8-bit RGB, texel (x, y) = (64x + 4y + 3, 64y + 4x + 5, 255 - 16(x + y)),
+# every byte distinct per channel position so a swapped channel or transposed walk shows.
+# terrain_layer_height.png: 4x4 16-bit grey, row-major; values bracket round-to-nearest boundaries
+# (v / 257 just below / above k + 0.5) and the cooked alpha is round(v / 257):
+#   row 0:     0   128   129   256  ->   0   0   1   1
+#   row 1:   257   385   386 32767  ->   1   1   2 127
+#   row 2: 32768 65535 65407 65406  -> 128 255 255 254
+#   row 3:  1000 20000 40000 50000  ->   4  78 156 195
+material = 0x1f2e3d4c5b6a7988   # an arbitrary nonzero id; the reader does not resolve it
+albedo = "terrain_layer_albedo.png"
+height = "terrain_layer_height.png"
+uv_scale = [2.5, 4.0]
+height_contrast = 8.0

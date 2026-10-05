@@ -351,3 +351,74 @@ TEST_CASE("a Rust-cooked splat heightfield (terrain_splat.rhf) loads its palette
         }
     }
 }
+
+TEST_CASE("a Rust-cooked terrain layer (terrain_layer.rtl) loads, and names its packed "
+          "albedo+height texture by content id") {
+    // The M19.7a cross-language proof (ADR-0066): cooked by `rime terrain-layer` from
+    // terrain_layer.terrainlayer.toml — a 4x4 RGB albedo and a 4x4 16-bit height. cook_fixture.rs
+    // pins the bytes; here the C++ reader must see the same integers and floats, and the record's
+    // texture id must be the content hash this reader computes from the texture file itself.
+    const std::optional<std::vector<std::byte>> layer_bytes = load_fixture("terrain_layer.rtl");
+    const std::optional<std::vector<std::byte>> tex_bytes =
+        load_fixture("terrain_layer_albedo_height.rtex");
+    REQUIRE_MESSAGE(layer_bytes.has_value(), "missing fixture: terrain_layer.rtl");
+    REQUIRE_MESSAGE(tex_bytes.has_value(), "missing fixture: terrain_layer_albedo_height.rtex");
+
+    AssetRejectCounters rejects;
+    AssetError error = AssetError::Io;
+    AssetId layer_id;
+    const std::optional<TerrainLayerAsset> layer =
+        read_terrain_layer(*layer_bytes, error, &layer_id, &rejects);
+    REQUIRE_MESSAGE(layer.has_value(), to_string(error));
+    CHECK(rejects.total == 0);
+    CHECK(layer_id.is_valid());
+    CHECK(layer->material.value == 0x1f2e3d4c5b6a7988ull);
+    CHECK(layer->uv_scale[0] == 2.5f);
+    CHECK(layer->uv_scale[1] == 4.0f);
+    CHECK(layer->height_contrast == 8.0f);
+
+    AssetId tex_id;
+    const std::optional<TextureAsset> tex = read_texture(*tex_bytes, error, &tex_id);
+    REQUIRE_MESSAGE(tex.has_value(), to_string(error));
+    CHECK(layer->albedo_height == tex_id);
+
+    // An ordinary sRGB RGBA8 texture to the engine: the sampler decodes RGB, leaves A linear.
+    CHECK(tex->width == 4);
+    CHECK(tex->height == 4);
+    CHECK(tex->format == TextureFormat::Rgba8Srgb);
+    REQUIRE(tex->mips.size() == 3); // 4x4 -> 2x2 -> 1x1
+
+    // Level 0: RGB = the albedo formula, A = round(v / 257) of the 16-bit height (the table in
+    // the sidecar's comment). Row-major, top row first.
+    const std::uint8_t expected_height[16] = {
+        0, 0, 1, 1, 1, 1, 2, 127, 128, 255, 255, 254, 4, 78, 156, 195};
+    for (std::uint32_t y = 0; y < 4; ++y) {
+        for (std::uint32_t x = 0; x < 4; ++x) {
+            const std::size_t t = (std::size_t{y} * 4 + x) * 4;
+            CHECK(std::to_integer<unsigned>(tex->pixels[t + 0]) == 64 * x + 4 * y + 3);
+            CHECK(std::to_integer<unsigned>(tex->pixels[t + 1]) == 64 * y + 4 * x + 5);
+            CHECK(std::to_integer<unsigned>(tex->pixels[t + 2]) == 255 - 16 * (x + y));
+            CHECK(std::to_integer<unsigned>(tex->pixels[t + 3]) == expected_height[y * 4 + x]);
+        }
+    }
+    // The height mips are the PLAIN box average of the heights below (measured from the cook and
+    // equal to the rounded arithmetic mean): (0+0+1+1)/4 = 0.5 -> 1, (1+1+2+127)/4 = 32.75 -> 33,
+    // (128+255+4+78)/4 = 116.25 -> 116, (255+254+156+195)/4 = 215; then (1+33+116+215)/4 = 91.25
+    // -> 91. A coverage-rescaled chain (the m16.6 treatment a cutout texture gets) would not
+    // produce these, so this pins that the terrain cook did not apply it.
+    const std::size_t m1 = tex->mips[1].offset;
+    CHECK(std::to_integer<unsigned>(tex->pixels[m1 + 3]) == 1);
+    CHECK(std::to_integer<unsigned>(tex->pixels[m1 + 7]) == 33);
+    CHECK(std::to_integer<unsigned>(tex->pixels[m1 + 11]) == 116);
+    CHECK(std::to_integer<unsigned>(tex->pixels[m1 + 15]) == 215);
+    CHECK(std::to_integer<unsigned>(tex->pixels[tex->mips[2].offset + 3]) == 91);
+
+    // The kind dispatch a terrain builder relies on (ADR-0066): the header alone tells a layer from
+    // a material, and the material reader refuses the layer rather than misreading it.
+    std::span<const std::byte> payload;
+    const std::optional<CookedHeader> header = read_header(*layer_bytes, payload, error);
+    REQUIRE(header.has_value());
+    CHECK(header->kind == AssetKind::TerrainLayer);
+    CHECK_FALSE(read_material(*layer_bytes, error).has_value());
+    CHECK(error == AssetError::WrongKind);
+}

@@ -55,6 +55,9 @@ pub const ASSET_KIND_MESH_SDF: u16 = 7;
 pub const ASSET_KIND_VIRTUAL_GEOMETRY: u16 = 8;
 /// `asset_kind` wire value for a terrain heightfield (matches `engine/assets/asset_id.hpp`; M19.1).
 pub const ASSET_KIND_HEIGHTFIELD: u16 = 9;
+/// `asset_kind` wire value for a terrain layer (matches `engine/assets/asset_id.hpp`; M19.7a,
+/// ADR-0066).
+pub const ASSET_KIND_TERRAIN_LAYER: u16 = 10;
 
 /// The mesh schema fingerprint: the reflection `type_hash` of the v1 position/normal/uv vertex
 /// layout, computed and pinned by the C++ engine (`engine/assets`). The cooker embeds the same
@@ -115,6 +118,12 @@ pub const VIRTUAL_GEOMETRY_SCHEMA_HASH: u64 = 0xD3F3_C3A1_A18E_0042;
 /// as the SDF hash — the header is the whole structured part of the payload; the trailing samples
 /// are bare u16s. Update in lockstep with the engine and re-cook `terrain.rhf` if the record changes.
 pub const HEIGHTFIELD_SCHEMA_HASH: u64 = 0x94CB_7AE5_FCC4_E8DF;
+
+/// The terrain-layer schema fingerprint: the reflection `type_hash` of the v1 record (material id,
+/// packed albedo/height texture id, world UV scale, height contrast), computed and pinned by the C++
+/// engine (`terrain_layer_schema_hash()`, M19.7a). Same contract as the material hash — the record is
+/// the whole payload. Update in lockstep with the engine and re-cook `terrain_layer.rtl` if it changes.
+pub const TERRAIN_LAYER_SCHEMA_HASH: u64 = 0xFE78_32A2_7003_413C;
 
 /// A little-endian byte sink. Every multi-byte value is decomposed to its LE bytes explicitly, so
 /// the output never depends on the host's endianness — the same discipline as the reader's cursor.
