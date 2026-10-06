@@ -13,7 +13,8 @@ rime_add_test(rime_app_tests
     windowed_test.cpp
     windowed_input_test.cpp
     stream_input_test.cpp
-    launch_test.cpp)
+    launch_test.cpp
+    content_root_test.cpp)
 
 # windowed_input_test.cpp (m13.3c) adds rime::gameplay: it drives a gameplay::FlyCamera from an
 # Application's input snapshot, which is the join the samples make and the one nothing tested.

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <span>
@@ -160,6 +161,9 @@ struct SetupContext {
     // The constant every tick advances by — the fixed-tick contract, available before the first
     // tick so a game can size anything tick-rate-dependent up front.
     double fixed_dt = 0.0;
+    // Where this run's content lives (m20.2) — the root the entry scene was loaded from, for a game
+    // that reads more files than its entry scene. Empty when the game declares no content.
+    std::filesystem::path content_root{};
 };
 
 struct TickContext {
@@ -267,9 +271,22 @@ struct GameDefinition {
 
     // A `.rscene` loaded into the world before `setup`, STRICTLY (an unknown component type is a
     // refusal, not a skip — a game loading its own content is the case LoadOptions' comment says
-    // must fail at the door). Empty: the game builds its world in code. Resolved as given (relative
-    // to the working directory); resolving it against the executable is the bundling brick's job.
+    // must fail at the door). Empty: the game builds its world in code.
+    //
+    // RELATIVE to the content root (m20.2, `rime/app/content_root.hpp`): `--content`, else
+    // `<exe dir>/content`, else — only for a binary still in its build directory —
+    // `dev_content_dir`. Never relative to the working directory, which is wherever the user
+    // happened to double-click from. An ABSOLUTE path is loaded as given and resolves no root; that
+    // is for tests and tools, and a game that ships one is pinned to the machine that built it.
     std::string entry_scene;
+
+    // The dev fallback for the content root: the game's content directory in the SOURCE tree, and
+    // the directory the build writes the game's executable into. Set both from the build
+    // (`rime_game_content()` in CMake defines `RIME_GAME_CONTENT_DIR` / `RIME_GAME_BINARY_DIR`).
+    // Declaring `dev_content_dir` also declares that the game HAS content: the runner then resolves
+    // a root even with no entry scene, and a missing one is a refusal naming every path it tried.
+    std::string dev_content_dir;
+    std::string dev_binary_dir;
 
     // Keyboard bindings for `play`. Ignored by modes with no local keyboard.
     InputMap input;

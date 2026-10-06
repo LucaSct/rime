@@ -43,6 +43,7 @@ rime_install_module(rime_app)
 # Vulkan loader is only ever dlopen'd inside it (volk), so a dedicated process never maps libvulkan
 # — which `hello_game --dedicated-proof` checks in a live process on Linux.
 add_library(rime_app_game STATIC
+    src/content_root.cpp
     src/game_definition.cpp
     src/launch.cpp)
 add_library(rime::app_game ALIAS rime_app_game)
@@ -57,6 +58,27 @@ target_link_libraries(rime_app_game
 
 rime_apply_common_target_options(rime_app_game)
 rime_install_module(rime_app_game)
+
+# rime_game_content(<target> <content-dir>) — m20.2 (ADR-0076-m20.2): declare a game's content.
+#
+# Two things, both build-tree facts the game cannot know any other way:
+#   1. compile definitions RIME_GAME_CONTENT_DIR (the content in the SOURCE tree) and
+#      RIME_GAME_BINARY_DIR (where the build writes the executable). The game copies them into
+#      `GameDefinition::dev_content_dir` / `dev_binary_dir`, which is the content root's DEV fallback
+#      — and it is only ever taken by a binary still sitting in RIME_GAME_BINARY_DIR, so these
+#      absolute paths are inert in a bundle (`rime/app/content_root.hpp`);
+#   2. an export record, build/<preset>/export/<config>/<target>.export, naming the executable and
+#      the content directory, which `scripts/export-game.sh` reads instead of guessing where a
+#      target's binary and content live.
+function(rime_game_content target content_dir)
+    get_filename_component(_rime_content "${content_dir}" ABSOLUTE)
+    target_compile_definitions(${target} PRIVATE
+        RIME_GAME_CONTENT_DIR="${_rime_content}"
+        RIME_GAME_BINARY_DIR="$<TARGET_FILE_DIR:${target}>")
+    file(GENERATE
+        OUTPUT "${CMAKE_BINARY_DIR}/export/$<CONFIG>/${target}.export"
+        CONTENT "target=${target}\nexecutable=$<TARGET_FILE:${target}>\ncontent=${_rime_content}\n")
+endfunction()
 
 # ── rime_hello — the launcher (M0 seed, now the --scene loader) ───────────────────────────────────
 # Proves the engine builds, links its modules, and runs — the seed rime_app grew from. Since M9.2 it

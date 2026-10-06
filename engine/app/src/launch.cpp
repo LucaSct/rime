@@ -23,6 +23,7 @@
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/rhi/device.hpp"
+#include "rime/scene/derive_transforms.hpp"
 #include "rime/scene/scene_format.hpp"
 
 namespace rime::app {
@@ -99,7 +100,8 @@ std::string launch_usage(std::string_view program) {
         "  --autopilot   drive the game from its built-in autopilot\n"
         "  --headless    play: render off-screen instead of opening a window\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
-        "  --port N      the port a listening mode binds\n",
+        "  --port N      the port a listening mode binds\n"
+        "  --content DIR the game's content root (default: content/ beside this executable)\n",
         program);
 }
 
@@ -149,6 +151,11 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             if (!has_value || !parse_uint(args[++i], result.options.workers)) {
                 return fail("--workers needs a non-negative integer");
             }
+        } else if (arg == "--content") {
+            if (!has_value || args[i + 1].empty()) {
+                return fail("--content needs a directory");
+            }
+            result.options.content_dir = std::string{args[++i]};
         } else if (arg == "--port") {
             if (!has_value || !parse_uint(args[++i], result.options.port) ||
                 result.options.port == 0) {
@@ -202,6 +209,40 @@ RunReport run_game_mode(const LaunchOptions& options,
         return refuse(report, RunStatus::Failed, "the GameDefinition has no create() factory");
     }
 
+    // ── 1b. The content root, before anything is constructed (m20.2) ─────────────────────────────
+    //
+    // Resolved here, ahead of the Application, for the same reason the stub modes refuse here: a
+    // run that cannot find its content must say so before it has opened a window or a device, and
+    // say WHERE it looked — a missing root is never a silently empty world. A game declares content
+    // by naming a relative entry scene or a dev content directory; one that does neither (it builds
+    // its world in code from nothing) searches nothing.
+    std::filesystem::path entry_scene_path;
+    const std::filesystem::path entry{definition.entry_scene};
+    const bool declares_content =
+        (!entry.empty() && entry.is_relative()) || !definition.dev_content_dir.empty();
+    if (declares_content) {
+        ContentSearch search{};
+        search.explicit_dir = options.content_dir;
+        search.dev_content_dir = definition.dev_content_dir;
+        search.dev_binary_dir = definition.dev_binary_dir;
+        search.required = entry.is_relative() ? entry : std::filesystem::path{};
+        report.content = resolve_content_root(search);
+        if (!report.content.ok) {
+            return refuse(report, RunStatus::Failed, describe_content_failure(report.content));
+        }
+        if (hooks.log_content_root) {
+            fmt::print("{}: content root {} ({})\n",
+                       definition.name,
+                       report.content.dir.string(),
+                       report.content.why);
+        }
+        if (!entry.empty()) {
+            entry_scene_path = entry.is_relative() ? report.content.dir / entry : entry;
+        }
+    } else if (!entry.empty()) {
+        entry_scene_path = entry; // absolute: a test's or a tool's file, loaded as given
+    }
+
     // ── 2. THE DECISION: may this run have a device? Made here, before an Application exists ────
     //
     // The counting wrapper is installed in EVERY mode, dedicated included, and that is deliberate:
@@ -232,19 +273,22 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (definition.register_components) {
         definition.register_components(app.world());
     }
-    if (!definition.entry_scene.empty()) {
-        const scene::LoadReport loaded =
-            scene::load_scene_file(app.world(), definition.entry_scene);
+    if (!entry_scene_path.empty()) {
+        const scene::LoadReport loaded = scene::load_scene_file(app.world(), entry_scene_path);
         if (!loaded.ok) {
             return refuse(report,
                           RunStatus::Failed,
                           fmt::format("entry scene '{}' did not load: {}",
-                                      definition.entry_scene,
+                                      entry_scene_path.string(),
                                       loaded.error));
         }
-        // A load writes LocalTransforms only; compose them so `setup` sees the world where the
-        // scene put it rather than every entity at the origin until the first tick.
-        ecs::propagate_transforms(app.world(), app.jobs());
+        // A load writes LocalTransforms only — WorldTransform is derived state and deliberately not
+        // in the file. So give every loaded entity a WorldTransform and compose it, so `setup` (and
+        // PhysicsSync, which binds bodies from WorldTransform) sees the world where the scene put
+        // it. m20.1 called `propagate_transforms` alone, which only UPDATES entities that already
+        // have one: a scene-loaded body had none and would never have been simulated. No game used
+        // an entry scene until m20.2's hello-game content, which is what found it.
+        scene::derive_world_transforms(app.world(), app.jobs());
     }
 
     // Created AFTER the Application so it is destroyed BEFORE it: a game owns things (a physics
@@ -258,7 +302,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                       RunStatus::Failed,
                       fmt::format("--autopilot: '{}' ships no autopilot", definition.name));
     }
-    SetupContext setup{app.world(), app.jobs(), app.fixed_dt()};
+    SetupContext setup{app.world(), app.jobs(), app.fixed_dt(), report.content.dir};
     if (!game->setup(setup)) {
         return refuse(report, RunStatus::Failed, "the game's setup() refused to start");
     }
