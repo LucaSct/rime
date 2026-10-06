@@ -1543,13 +1543,12 @@ fn place_spawns_an_entity_referencing_the_mesh() {
 }
 
 #[test]
-fn place_is_clipped_off_the_panel_for_a_real_source_path() {
-    // DOCUMENTS A DEFECT, and the first thing a new user hits: an asset row is `glyph  path
-    // [place]` on one line that neither wraps nor scrolls sideways, and the Assets panel opens
-    // 22% of the window wide. A real cooked path ("samples/08-gltf-zoo/assets/cube.gltf") pushes
-    // "place" past the panel's right edge, where it is clipped away. The feature is unreachable
-    // until the user thinks to drag the splitter. (The accessibility node still exists, which is
-    // why the label-driven tests above can click it; a pointer cannot.)
+fn place_is_on_screen_in_the_default_panel_for_a_real_source_path() {
+    // A real cooked path ("samples/08-gltf-zoo/assets/cube.gltf") is far wider than the Assets
+    // panel, which opens 22% of the window wide. The button used to sit AFTER the path, so the
+    // path pushed "place" past the panel's right edge where a pointer could not reach it. It now
+    // comes first, so the button's whole box is inside the panel at the default layout, with no
+    // splitter dragging.
     let mut rig = Rig::new();
     rig.host.shared.lock().unwrap().assets = vec![AssetEntry {
         kind: AssetKind::Mesh,
@@ -1558,29 +1557,26 @@ fn place_is_clipped_off_the_panel_for_a_real_source_path() {
         cooked_file: "cube.rmesh".to_string(),
     }];
     rig.settle();
-    let panel = rig
-        .app()
-        .dock
-        .main_surface()
-        .iter()
-        .find_map(|node| match node {
-            egui_dock::Node::Leaf { tabs, viewport, .. } if tabs.contains(&Tab::Assets) => {
-                Some(*viewport)
-            }
-            _ => None,
-        })
-        .expect("the layout has an Assets panel");
+    let panel = panel_rect(&rig, Tab::Assets);
     let place = rig
         .harness
         .get_by_label("place")
         .raw_bounds()
         .expect("bounds");
     assert!(
-        place.x0 as f32 > panel.right(),
-        "place starts at x = {}, the panel ends at x = {}",
+        place.x0 as f32 >= panel.left() && place.x1 as f32 <= panel.right(),
+        "place spans x = {}..{}, the panel is {}..{}",
         place.x0,
+        place.x1,
+        panel.left(),
         panel.right()
     );
+    // And it is the button a person would press: a click at its centre places the mesh.
+    rig.harness
+        .get_by_role_and_label(Role::Button, "place")
+        .click();
+    rig.settle();
+    assert!(rig.has("3  MeshAsset"));
 }
 
 #[test]

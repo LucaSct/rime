@@ -1017,9 +1017,11 @@ fn assets_ui(
             shown += 1;
             ui.horizontal(|ui| {
                 ui.label(kind_glyph(a.kind));
-                ui.monospace(&a.source_path);
                 // Only meshes place (as a MeshAsset authoring reference); and only if the host's
-                // schema has that component.
+                // schema has that component. The button comes BEFORE the path, not after it: a real
+                // cooked path is long enough to push a trailing button past the panel's right edge,
+                // where it is clipped away, and the panel is only 22% of the window wide. A
+                // leading button is always on screen; the path is the part that gives way.
                 if a.kind == AssetKind::Mesh {
                     if let Some(hash) = mesh_asset_hash {
                         if ui.small_button("place").clicked() {
@@ -1038,6 +1040,7 @@ fn assets_ui(
                         }
                     }
                 }
+                ui.monospace(&a.source_path);
             });
         }
     });
