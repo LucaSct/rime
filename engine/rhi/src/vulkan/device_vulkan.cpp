@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "rime/core/diagnostics/profile.hpp"
 #include "rime/rhi/adapter_choice.hpp"
 #include "vulkan/vulkan_backend.hpp"
 
@@ -674,21 +675,36 @@ void VulkanDevice::submit_blocking(CommandBuffer& commands) {
     // Only one CommandBuffer implementation exists; the RHI hands these out itself, so the cast is
     // safe. submit + wait is the simplest correct model (perfect for the M3 one-shot render);
     // overlapping frames with the swapchain arrives in M3.4.
+    //
+    // WHERE A BLOCKING SUBMIT'S TIME GOES (p2-perf). A caller timing this whole function — the
+    // Application's `frame.submit` — sees one number that could be any of three different things:
+    // the driver finishing and validating the command buffer (`rhi.submit.queue`), the CPU sitting
+    // on the fence while the GPU executes (`rhi.submit.wait`), or our own teardown
+    // (`rhi.submit.reclaim`). They call for opposite fixes — the first is CPU recording cost, the
+    // second is GPU work, the third is bookkeeping — so the split is measured rather than guessed.
+    // A zone with no sink installed costs a Stopwatch, which is why these can stay.
     auto& vcb = static_cast<VulkanCommandBuffer&>(commands);
     VkCommandBuffer cmd = vcb.handle();
-    VK_CHECK(vkEndCommandBuffer(cmd));
-
-    VkCommandBufferSubmitInfo csi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-    csi.commandBuffer = cmd;
-    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-    si.commandBufferInfoCount = 1;
-    si.pCommandBufferInfos = &csi;
-
-    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkFence fence = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateFence(device_, &fci, nullptr, &fence));
-    VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &si, fence));
-    VK_CHECK(vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX));
+    {
+        RIME_PROFILE_ZONE("rhi.submit.queue");
+        VK_CHECK(vkEndCommandBuffer(cmd));
+
+        VkCommandBufferSubmitInfo csi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        csi.commandBuffer = cmd;
+        VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        si.commandBufferInfoCount = 1;
+        si.pCommandBufferInfos = &csi;
+
+        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VK_CHECK(vkCreateFence(device_, &fci, nullptr, &fence));
+        VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &si, fence));
+    }
+    {
+        RIME_PROFILE_ZONE("rhi.submit.wait");
+        VK_CHECK(vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX));
+    }
+    RIME_PROFILE_ZONE("rhi.submit.reclaim");
     vkDestroyFence(device_, fence, nullptr);
     vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
     // The wait above proves the GPU is done with every transient descriptor set this encoder

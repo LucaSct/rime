@@ -798,6 +798,7 @@ struct Session {
     // the engine. A player's machine runs the client half.
     double last_server_ms = 0.0;
     double last_client_ms = 0.0;
+    double last_join_ms = 0.0; // the client's thread waiting for the server's half (p2-perf)
 
     // How many destruction batches the client drained in its worst single tick, and how many
     // physics steps that cost it in total. The client's catch-up loop runs a FULL physics step per
@@ -983,6 +984,79 @@ struct Session {
                 inbox, client.replicator->map(), client.world);
         }
 
+        // ── THE TWO HALVES RUN AT ONCE (p2-perf, ADR-0077) ──
+        //
+        // On one machine this demo is two machines: a server and a client, each with its own
+        // world, physics, destruction and replication state. The tick ran them in series, so
+        // `sim.block` was the SUM of two physics steps (~7.6 ms p99 apiece on the RTX 3060 box)
+        // when a real deployment pays only one of them per machine. From here to the join the two
+        // halves touch disjoint state — the network is read above and written below, never in
+        // between — so the server's half runs as ONE job while this thread runs the client's.
+        //
+        // Why a job rather than a thread: `JobSystem` may be submitted to from inside a running
+        // job (its threading contract), so the server's physics keeps its parallel solve through
+        // the same pool, and no second pool puts ~62 workers on 32 cores (the m17.5 lesson).
+        // Each world's step is deterministic regardless of which or how many workers run it —
+        // ADR-0026's witnesses — so overlapping them changes when the work happens, not its
+        // result.
+        //
+        // What must NOT cross the join: the server's per-step bookkeeping (`note_step` writes the
+        // shared `tick_solve`) is captured here and noted after it, in the order it always was
+        // — client first, then server. The server's profile zones close on a worker, so the perf
+        // loop collects them after this returns (`ZoneTimelines::collect_parked`).
+        double server_step_ms = 0.0;
+        physics::WorldStats server_step_stats{};
+        core::JobSystem::Counter server_done{0};
+        jobs.run(
+            [&] {
+                // ── The server's simulation ──
+                const core::Stopwatch server_watch;
+                server.world.advance_version();
+                server.gameplay.consume(server.world, server.physics, server.input, kDt);
+                ecs::propagate_transforms(server.world, jobs);
+                server.sync.reconcile(server.world, server.physics);
+                server.sync.push_in(server.world, server.physics, kDt);
+                const core::Stopwatch server_step_watch;
+                server.physics.step(kDt);
+                {
+                    const physics::WorldStats ss = server.physics.stats();
+                    server_step_ms = server_step_watch.elapsed_ms();
+                    server_step_stats = ss;
+                    server_max_bodies = std::max(server_max_bodies, ss.body_count);
+                    server_max_pairs = std::max(server_max_pairs, ss.broadphase_pairs);
+                }
+                server.sync.write_back(server.world, server.physics);
+
+                // The weapon → destruction glue: the consumer's job, kept out of the engine so that
+                // `gameplay_net` never links `destruction` (ADR-0035 §3).
+                for (const gameplay_net::ShotEvent& shot : server.gameplay.shots()) {
+                    ++shots_fired;
+                    if (!shot.did_hit) {
+                        continue; // a miss is still an event — a tracer and a report, no damage
+                    }
+                    ++shots_hit;
+                    destruction::InstanceId instance{};
+                    for (std::size_t i = 0; i < server.destruction.instance_count(); ++i) {
+                        const destruction::InstanceId candidate{static_cast<std::uint32_t>(i), 0};
+                        if (server.destruction.body_of(candidate) == shot.body) {
+                            instance = candidate;
+                            break;
+                        }
+                    }
+                    if (!instance.is_valid() ||
+                        server.destruction.part_from_child(instance, shot.child) ==
+                            destruction::kInvalidPartIndex) {
+                        continue; // the street, or rubble — not a standing destructible
+                    }
+                    server.destruction.apply_damage(
+                        instance, shot.point, shot.damage_radius, shot.damage, shot.impulse);
+                    ++damage_ops;
+                }
+                server.destruction.update(server.physics);
+                last_server_ms = server_watch.elapsed_ms();
+            },
+            &server_done);
+
         const core::Stopwatch client_watch;
         ecs::propagate_transforms(client.world, jobs);
         // Stand up whatever replication just delivered, BEFORE anything can damage it. Idempotent,
@@ -1071,50 +1145,16 @@ struct Session {
         total_client_batches += batches_this_tick;
         client.sync.write_back(client.world, client.physics);
         last_client_ms = client_watch.elapsed_ms();
-
-        // ── The server's simulation ──
-        const core::Stopwatch server_watch;
-        server.world.advance_version();
-        server.gameplay.consume(server.world, server.physics, server.input, kDt);
-        ecs::propagate_transforms(server.world, jobs);
-        server.sync.reconcile(server.world, server.physics);
-        server.sync.push_in(server.world, server.physics, kDt);
-        const core::Stopwatch server_step_watch;
-        server.physics.step(kDt);
         {
-            const physics::WorldStats ss = server.physics.stats();
-            note_step(server_step_watch.elapsed_ms(), ss);
-            server_max_bodies = std::max(server_max_bodies, ss.body_count);
-            server_max_pairs = std::max(server_max_pairs, ss.broadphase_pairs);
+            // What the client's thread still waits for once its own half is done: the part of
+            // the server's half that did not fit under the client's. `sim.join` is what keeps the
+            // `sim.block` accounting a real nesting — client half, then this, in series.
+            const core::Stopwatch join_watch;
+            jobs.wait(server_done);
+            last_join_ms = join_watch.elapsed_ms();
         }
-        server.sync.write_back(server.world, server.physics);
+        note_step(server_step_ms, server_step_stats);
 
-        // The weapon → destruction glue: the consumer's job, kept out of the engine so that
-        // `gameplay_net` never links `destruction` (ADR-0035 §3).
-        for (const gameplay_net::ShotEvent& shot : server.gameplay.shots()) {
-            ++shots_fired;
-            if (!shot.did_hit) {
-                continue; // a miss is still an event — a tracer and a report, no damage
-            }
-            ++shots_hit;
-            destruction::InstanceId instance{};
-            for (std::size_t i = 0; i < server.destruction.instance_count(); ++i) {
-                const destruction::InstanceId candidate{static_cast<std::uint32_t>(i), 0};
-                if (server.destruction.body_of(candidate) == shot.body) {
-                    instance = candidate;
-                    break;
-                }
-            }
-            if (!instance.is_valid() || server.destruction.part_from_child(instance, shot.child) ==
-                                            destruction::kInvalidPartIndex) {
-                continue; // the street, or rubble — not a standing destructible
-            }
-            server.destruction.apply_damage(
-                instance, shot.point, shot.damage_radius, shot.damage, shot.impulse);
-            ++damage_ops;
-        }
-        server.destruction.update(server.physics);
-        last_server_ms = server_watch.elapsed_ms();
         // The damage-op shape, and it is not a curiosity — it is the number that made m13.5's
         // runaway collapse legible. Parts stand at 1.0 health, so an op at or above 1.0 kills
         // outright; a population that is almost entirely instant kills means the damage tuning is
@@ -2446,8 +2486,31 @@ int run_perf(const std::filesystem::path& cooked,
     // Both worlds, because the tick runs both and the accounting must add up to the tick. Naming
     // only one leaves the other as unaccounted residual, which is the failure m17.3c's gate exists
     // to catch — it would read as "the simulation spends 8 ms somewhere nobody named".
-    report.declare_accounting("sim.block",
-                              {"physics.server.step.per_frame", "physics.client.step.per_frame"});
+    //
+    // THE TREE CHANGED SHAPE WHEN THE HALVES STARTED OVERLAPPING (p2-perf, ADR-0077). It was
+    // `sim.block = server step + client step + rest`, true only while the two ran in series; with
+    // the server's half running alongside, those two steps sum to MORE than the wall clock, the
+    // residual goes negative, and a `≤ 6.0` rule on it passes whatever happens — a ratchet that
+    // can no longer fire. The containments that ARE real now:
+    //
+    //   sim.block  = sim.client + sim.join + rest   (this thread, in series: its half, then the
+    //   wait) sim.client = physics.client.step + rest     (the client's half) sim.server =
+    //   physics.server.step + rest     (the server's half, on a worker)
+    //
+    // The old single residual — everything in the sim that is not a physics step — is now three,
+    // and the gate below splits its 6.0 between them rather than granting each the whole of it.
+    report.declare_accounting("sim.block", {"sim.client", "sim.join"});
+    report.declare_accounting("sim.client", {"physics.client.step.per_frame"});
+    report.declare_accounting("sim.server", {"physics.server.step.per_frame"});
+    // `frame.submit` is a blocking submit, and a blocking submit is three different costs
+    // (p2-perf): the driver taking the command buffer, the fence wait while the GPU runs it, and
+    // our teardown. The RHI times each; declaring them here makes the split add up or say it does
+    // not. A negative residual would mean a blocking submit ran OUTSIDE `frame.submit` (an upload
+    // mid-declare, say), which is exactly the misattribution worth seeing.
+    report.declare_accounting("frame.submit.per_frame",
+                              {"rhi.submit.queue.per_frame",
+                               "rhi.submit.wait.per_frame",
+                               "rhi.submit.reclaim.per_frame"});
 
     // Deliveries QUEUE rather than overwrite, and are drained after the loop rather than inside it.
     // A single slot consumed in the loop body loses the tail: pipelined, the frames still in flight
@@ -2533,10 +2596,14 @@ int run_perf(const std::filesystem::path& cooked,
         const core::Stopwatch sim_watch;
         demo.step_sim(scripted_tape(tick));
         const double sim_ms = sim_watch.elapsed_ms();
+        // The server's half ran as a job, so its zones closed on a worker and are parked; the
+        // tick has joined it, so they belong to THIS frame. Folded in before anything reads them.
+        zones.collect_parked();
         report.observe("sim.block", sim_ms);
         // The split that decides whether the ENGINE misses the budget or this DEMO's topology does.
         report.observe("sim.client", demo.session.last_client_ms);
         report.observe("sim.server", demo.session.last_server_ms);
+        report.observe("sim.join", demo.session.last_join_ms);
         const core::Stopwatch render_watch;
         demo.app.step(demo.app.fixed_dt());
         const double render_ms = render_watch.elapsed_ms();
@@ -2591,8 +2658,17 @@ int run_perf(const std::filesystem::path& cooked,
     // which is what frame_base subtracts. A frame below frame_base is a warmup frame and is
     // dropped.
     for (const auto& [index, timings] : passes_queue) {
-        if (index >= frame_base)
+        if (index >= frame_base) {
             report.observe_passes(index - frame_base, timings);
+            // The GPU's own account of the frame, summed over its timed passes (p2-perf). Read
+            // against `rhi.submit.wait` it answers the one question the CPU zones cannot: is a
+            // long fence wait the GPU working, or the GPU idle while something else stalls? A sum
+            // of pass brackets, not first-begin to last-end, so gaps between passes are NOT in it.
+            double gpu_ms = 0.0;
+            for (const core::PassTiming& t : timings)
+                gpu_ms += t.ms;
+            report.observe("gpu.passes", gpu_ms);
+        }
     }
 
     // The ledger travels WITH the timings, so a report can never be read as "fast" without also
@@ -2702,19 +2778,25 @@ int run_perf(const std::filesystem::path& cooked,
         // it. `frame.unaccounted` is the loop's own bookkeeping between two stopwatches and
         // `frame.render.unaccounted` is `app.step`'s outside its four zones — both should be a
         // fraction of a millisecond, so 1.0 is generous by design: it must not fail on noise, only
-        // on something real arriving unnamed. `sim.block.unaccounted` gets the ratified sim budget
-        // itself, which says the weakest useful thing — no single unnamed remainder may be as
-        // large as the entire simulation is allowed to be — and m17.3d tightens it against a
-        // measured value, which is the first number this ladder produces that nobody has yet seen.
+        // on something real arriving unnamed. The sim's residual got the ratified sim budget
+        // itself, which says the weakest useful thing — no unnamed remainder may be as large as
+        // the entire simulation is allowed to be. Since p2-perf that budget is divided between the
+        // three sim residuals (below), so together they still cannot exceed it.
         .at_most("frame.unaccounted", core::PerfStat::P99, 1.0)
         .at_most("frame.render.unaccounted", core::PerfStat::P99, 1.0)
-        .at_most("sim.block.unaccounted", core::PerfStat::P99, 6.0)
+        // Split three ways at p2-perf (ADR-0077) when the one residual became three; 2.0 apiece
+        // is the old 6.0 divided, not each granted the whole of it.
+        .at_most("sim.block.unaccounted", core::PerfStat::P99, 2.0)
+        .at_most("sim.client.unaccounted", core::PerfStat::P99, 2.0)
+        .at_most("sim.server.unaccounted", core::PerfStat::P99, 2.0)
         .require_samples("frame", 200)
         .require_samples("frame.collapse", 45)
         .require_samples("sim.collapse", 45)
         .require_samples("frame.unaccounted", 200)
         .require_samples("frame.render.unaccounted", 200)
         .require_samples("sim.block.unaccounted", 200)
+        .require_samples("sim.client.unaccounted", 200)
+        .require_samples("sim.server.unaccounted", 200)
         .max_regression(0.10);
     // The vacuity guard, and every floor here is a thing that was actually found switched off at
     // some point in M13.
@@ -2770,6 +2852,21 @@ int run_perf(const std::filesystem::path& cooked,
         std::printf(
             "  render    p50 %.2f  p99 %.2f  max %.2f ms\n", r->p50_ms, r->p99_ms, r->max_ms);
     }
+    // The blocking submit split three ways, against the GPU's own pass total (p2-perf).
+    if (const auto sub = report.distribution("frame.submit.per_frame")) {
+        const auto wait = report.distribution("rhi.submit.wait.per_frame");
+        const auto queue = report.distribution("rhi.submit.queue.per_frame");
+        const auto gpu = report.distribution("gpu.passes");
+        std::printf("  submit    p99 %.2f  max %.2f ms  = queue p99 %.2f + fence wait p99 %.2f "
+                    "(max %.2f); gpu passes p99 %.2f  max %.2f ms\n",
+                    sub->p99_ms,
+                    sub->max_ms,
+                    queue ? queue->p99_ms : 0.0,
+                    wait ? wait->p99_ms : 0.0,
+                    wait ? wait->max_ms : 0.0,
+                    gpu ? gpu->p99_ms : 0.0,
+                    gpu ? gpu->max_ms : 0.0);
+    }
     if (const auto pl = report.distribution("frame.player")) {
         std::printf("  frame.player p50 %.2f  p99 %.2f  max %.2f ms  "
                     "<- client + render, i.e. one machine\n",
@@ -2819,8 +2916,11 @@ int run_perf(const std::filesystem::path& cooked,
     // WHAT THE FRAME COULD NOT NAME (m17.3c). Printed next to the breakdown it is the complement
     // of, because a decomposition read without its residual is the one that looks complete.
     {
-        static constexpr std::string_view kResiduals[] = {
-            "frame.unaccounted", "frame.render.unaccounted", "sim.block.unaccounted"};
+        static constexpr std::string_view kResiduals[] = {"frame.unaccounted",
+                                                          "frame.render.unaccounted",
+                                                          "sim.block.unaccounted",
+                                                          "sim.client.unaccounted",
+                                                          "sim.server.unaccounted"};
         std::printf("  what the frame could NOT name (residual = parent - its named parts):\n");
         for (const std::string_view name : kResiduals) {
             const auto d = report.distribution(name);

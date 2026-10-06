@@ -332,6 +332,91 @@ TEST_CASE("the thread pin holds under REAL concurrency, which is the only versio
     CHECK_FALSE(r.distribution("worker.stage").has_value());
 }
 
+TEST_CASE("a foreign zone is PARKED and lands in the owner's frame once collected (p2-perf)") {
+    // The block's server half runs as a job, so its physics zones close on a worker. Without
+    // collection they would be dropped and `physics.server.*` would vanish from the report; with
+    // it, the owner folds them in after the join — into the frame it is about to close.
+    PerfReport r;
+    std::uint64_t pending = 0;
+    std::uint64_t after = 0;
+    std::size_t folded = 0;
+    {
+        rime::core::ZoneTimelines zones(r);
+        std::thread worker([] {
+            rime::core::report_zone("worker.stage", 3.0);
+            rime::core::report_zone("worker.stage", 4.0);
+        });
+        worker.join();
+        // Parked is not yet IN the report, so it still counts as missing from it.
+        pending = zones.foreign_zones();
+        folded = zones.collect_parked();
+        after = zones.foreign_zones();
+        r.observe_frame(0, 10.0);
+    }
+    CHECK(pending == 2);
+    CHECK(folded == 2);
+    CHECK(after == 0);
+    REQUIRE(r.distribution("worker.stage").has_value());
+    CHECK(r.distribution("worker.stage")->count == 2);
+    // Both closes belong to the one frame they were collected into.
+    REQUIRE(r.distribution("worker.stage.per_frame").has_value());
+    CHECK(r.distribution("worker.stage.per_frame")->count == 1);
+    CHECK(r.distribution("worker.stage.per_frame")->max_ms == doctest::Approx(7.0));
+}
+
+TEST_CASE("collecting parked zones under REAL concurrency loses none and races nothing (p2-perf)") {
+    // Workers report while the owner both reports and collects — the version TSan can judge. Every
+    // foreign close must end up exactly once: folded into the report, or counted as missing.
+    constexpr int kWorkers = 4;
+    constexpr int kPerWorker = 200;
+    PerfReport r;
+    std::uint64_t missing = 0;
+    std::size_t folded = 0;
+    {
+        rime::core::ZoneTimelines zones(r);
+        std::vector<std::thread> workers;
+        workers.reserve(kWorkers);
+        for (int w = 0; w < kWorkers; ++w) {
+            workers.emplace_back([] {
+                for (int i = 0; i < kPerWorker; ++i)
+                    rime::core::report_zone("worker.stage", 1.0);
+            });
+        }
+        for (int i = 0; i < 50; ++i) {
+            rime::core::report_zone("owner.stage", 1.0);
+            folded += zones.collect_parked();
+        }
+        for (std::thread& t : workers)
+            t.join();
+        folded += zones.collect_parked();
+        missing = zones.foreign_zones();
+    }
+    CHECK(missing == 0);
+    CHECK(folded == static_cast<std::size_t>(kWorkers * kPerWorker));
+    REQUIRE(r.distribution("worker.stage").has_value());
+    CHECK(r.distribution("worker.stage")->count == static_cast<std::size_t>(kWorkers * kPerWorker));
+}
+
+TEST_CASE("parking is BOUNDED: past the cap a foreign close is dropped and counted (p2-perf)") {
+    PerfReport r;
+    std::uint64_t missing = 0;
+    std::size_t folded = 0;
+    {
+        rime::core::ZoneTimelines zones(r);
+        std::thread worker([] {
+            for (std::size_t i = 0; i < rime::core::ZoneTimelines::kMaxParked + 3; ++i)
+                rime::core::report_zone("worker.stage", 1.0);
+        });
+        worker.join();
+        missing = zones.foreign_zones();
+        folded = zones.collect_parked();
+    }
+    CHECK(missing == rime::core::ZoneTimelines::kMaxParked + 3);
+    CHECK(folded == rime::core::ZoneTimelines::kMaxParked);
+    REQUIRE(r.distribution("worker.stage").has_value());
+    CHECK(r.distribution("worker.stage")->count == rime::core::ZoneTimelines::kMaxParked);
+}
+
 TEST_CASE("accounting: the remainder gets a NAME, computed per frame (m17.3c)") {
     // "The frame is attributable" was an unchecked belief until this: every pass had a name and
     // every physics stage had one, and nothing said the named parts add up to the whole. A
