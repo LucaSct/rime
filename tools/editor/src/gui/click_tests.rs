@@ -32,7 +32,7 @@
 //! # Tests that document a defect
 //!
 //! Several tests here pin behaviour that is wrong or missing, and say so in their name and first
-//! comment (`..._is_not_undoable`, `view_is_a_dead_label`, …). They pass today. They are a ledger,
+//! comment (`view_is_a_dead_label`, …). They pass today. They are a ledger,
 //! not an endorsement: when the defect is fixed the test fails, which is the prompt to rewrite it
 //! as the positive claim.
 
