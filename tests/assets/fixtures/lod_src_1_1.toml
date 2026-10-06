@@ -1,0 +1,10 @@
+# m19.8d1 LOD world fixture: level-0 tile (1, 1) of lod_world.terrainworld.toml
+size_x = 4.0
+size_z = 4.0
+height_min = -5.0
+height_max = 60.535
+origin_x = 4.0
+origin_y = 1.0
+origin_z = 4.0
+columns = 5
+rows = 5

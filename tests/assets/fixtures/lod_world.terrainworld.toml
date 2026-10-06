@@ -1,0 +1,8 @@
+# m19.8d1 (ADR-0070) cross-language fixture: a 2x2 world of 5x5-sample tiles with one parent.
+# Regenerate deliberately: rime terrain-world tests/assets/fixtures/lod_world.terrainworld.toml
+#   --out tests/assets/fixtures
+levels = 2
+tile_0_0 = "lod_src_0_0.r16"
+tile_1_0 = "lod_src_1_0.r16"
+tile_0_1 = "lod_src_0_1.r16"
+tile_1_1 = "lod_src_1_1.r16"
