@@ -240,7 +240,10 @@ struct TerrainLodDraw {
     std::int32_t base_x = 0;                  // global level-L sample index of local (0, 0):
     std::int32_t base_z = 0;                  // coord · (samples − 1)
     std::uint32_t level = 0;
-    std::uint32_t coarser_edges = 0;     // TerrainLodEdge bits (terrain_lod.hpp)
+    std::uint32_t coarser_edges = 0; // TerrainLodEdge bits (terrain_lod.hpp)
+    // m19.8d3: TerrainLodLeaf::coarser_corners — that corner vertex takes morph 1 as well, so the
+    // appearance fade agrees with the neighbours that share it. No effect on the geometry.
+    std::uint32_t coarser_corners = 0;
     core::Vec3 camera{0.0f, 0.0f, 0.0f}; // the camera the SELECTION used
     float morph_start = 0.0f;            // +inf (the top level) = never morphs
     float morph_end = 0.0f;
@@ -286,6 +289,8 @@ inline constexpr std::int32_t kTerrainPushOwnBake = 1 << 5;
 inline constexpr std::int32_t kTerrainPushParentBake = 1 << 6;
 inline constexpr std::int32_t kTerrainPushQuadrantX = 1 << 7;
 inline constexpr std::int32_t kTerrainPushQuadrantZ = 1 << 8;
+// Bits 9..12 (terrain.vert): TerrainLodLeaf::coarser_corners.
+inline constexpr std::int32_t kTerrainPushCornerShift = 9;
 
 static_assert(sizeof(TerrainPush) == 208,
               "TerrainPush must match terrain.vert / terrain.frag's push_constant block");

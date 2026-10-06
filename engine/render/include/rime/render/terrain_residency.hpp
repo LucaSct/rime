@@ -109,8 +109,22 @@
 //     one. The fence rule is m19.8a's, unchanged.
 //   * DRAWN = the selection with `usable` = resident and trusted. A node whose children are not
 //     all resident draws itself: a FALLBACK, counted per tile-frame (`fallback_draws`) where
-//     m19.8a counted a hole. Parents draw with the flat (no-splat) material — their appearance is
-//     brick 8d3's — counted as `fallback_appearance_draws`.
+//     m19.8a counted a hole.
+//   * APPEARANCE (m19.8d3, ADR-0072). A parent whose manifest line names a bake loads its two
+//     bake textures WITH its heightfield and is not resident until they have arrived (or failed):
+//     a parent is never shown first in the placeholder and then in its real colours. It then
+//     shades from the bake. Every tile below the top level is drawn with its PARENT's bake bound,
+//     and fades toward it by the geomorph factor — which reads the parent's slot, so the draw is
+//     recorded as a reader of BOTH slots (the fence rule covers the borrowed texture too).
+//     REFUSAL POLICY — nothing about appearance ever costs coverage:
+//       - a parent with no bake in the manifest (a world cooked without `palette_dir`, or a
+//         parent over a palette-less tile) draws with the flat placeholder material, counted per
+//         draw in `fallback_appearance_draws`;
+//       - a bake that fails to load, or that the pass refuses (wrong format or size), is counted
+//         (`bake_load_failures` / `bake_refusals`) and the tile draws with the placeholder too;
+//       - a tile whose parent has no bake, or is not resident (a refused parent), does not fade:
+//         counted per draw in `parent_bake_missing_draws`.
+//     For a fully cooked world all three stay 0.
 //   * THE 8d1 HANDOFF: before a child is uploaded, `samples_coincide` compares it with its
 //     resident parent (a parent keeps its CPU heightfield while resident, for exactly this). A
 //     child waits for its parent (`parent_waits`); the parent is always wanted first. A mismatch
@@ -127,7 +141,9 @@
 //
 // ── WHAT IS NOT HERE ────────────────────────────────────────────────────────────────────────────
 //
-//   * no coarse APPEARANCE: a parent is drawn with the flat material (brick 8d3);
+//   * a bake's CPU copy is never released: textures are AssetServer's retained kind (ADR-0067
+//     §5), so every parent ever loaded keeps 8·N² bytes of RAM until the server dies (brick 8e's
+//     byte budget should move bakes to the streamed path);
 //   * no byte budget: the budget is a slot COUNT; bytes are measured, not enforced (brick 8e);
 //   * collision is not driven from here and never will be — camera residency must not decide what
 //     the simulation stands on (ADR-0067's plan, brick 8c);
@@ -269,13 +285,22 @@ struct TerrainResidencyStats {
     std::uint64_t lod_draws = 0;                 // leaves drawn
     std::uint64_t fallback_draws = 0;            // tile-frames drawn coarser than selected
     std::uint64_t fallback_appearance_draws = 0; // parents drawn with the placeholder material
-    std::uint64_t uncovered_draws = 0;           // root-frames nobody could draw (a refused root)
-    std::uint64_t balance_collapses = 0;         // selection nodes collapsed to restore 2:1
-    std::uint64_t coincidence_checks = 0;        // parent/child pairs compared (samples_coincide)
-    std::uint64_t refused_parents = 0;           // parents refused by a coincidence mismatch
-    std::uint64_t refusals_retracted = 0;        // provisional refusals cleared: the accuser fell
-    std::uint64_t parent_waits = 0;              // tile-frames a loaded child waited for its parent
-    std::uint64_t prefetch_requests = 0;         // loads requested for the prefetch set
+    // m19.8d3 — appearance bakes (ADR-0072).
+    std::uint64_t bake_requests = 0;          // parents whose two bake textures were requested
+    std::uint64_t bake_waits = 0;             // tile-frames a loaded parent waited for its bake
+    std::uint64_t bake_load_failures = 0;     // a bake texture failed to load
+    std::uint64_t bake_refusals = 0;          // loaded, but not a bake of this tile (format/size)
+    std::uint64_t baked_appearance_draws = 0; // parents drawn from their bake
+    std::uint64_t appearance_morph_draws = 0; // draws that bound a parent's bake to fade toward
+    std::uint64_t parent_bake_missing_draws =
+        0;                                // draws below the top level with no bake to fade to
+    std::uint64_t uncovered_draws = 0;    // root-frames nobody could draw (a refused root)
+    std::uint64_t balance_collapses = 0;  // selection nodes collapsed to restore 2:1
+    std::uint64_t coincidence_checks = 0; // parent/child pairs compared (samples_coincide)
+    std::uint64_t refused_parents = 0;    // parents refused by a coincidence mismatch
+    std::uint64_t refusals_retracted = 0; // provisional refusals cleared: the accuser fell
+    std::uint64_t parent_waits = 0;       // tile-frames a loaded child waited for its parent
+    std::uint64_t prefetch_requests = 0;  // loads requested for the prefetch set
 };
 
 class TerrainResidency {
@@ -373,6 +398,10 @@ private:
         TerrainResidentId id{};
         assets::TerrainTileEdges edges{};
         bool pinned = false; // m19.8d2: a root of a LOD world
+        // m19.8d3: the parent's appearance bake, requested with the heightfield.
+        bool bake_requested = false;
+        assets::TextureAssetHandle bake_color{};
+        assets::TextureAssetHandle bake_material{};
     };
 
     // What a slot holds, kept until RECLAIM — after its record is gone.
@@ -381,6 +410,7 @@ private:
         TerrainTileId pass_tile = kInvalidTerrainTile;
         TerrainPaletteHandle palette = kInvalidTerrainPalette;
         std::uint64_t bytes = 0;
+        bool has_bake = false; // m19.8d3: the pass tile holds an appearance bake
     };
 
     struct Submitted {
@@ -400,6 +430,9 @@ private:
     [[nodiscard]] bool check_parent(assets::TerrainTileKey k,
                                     const assets::HeightfieldAsset& asset);
     void refuse_parent(assets::TerrainTileKey parent, assets::TerrainTileKey accuser);
+    // m19.8d3: 0 = still loading, 1 = both bake textures ready, 2 = none (not requested / failed).
+    [[nodiscard]] int bake_state(Record& r);
+    [[nodiscard]] bool give_bake(TerrainTileId tile, const Record& r);
 
     // m19.8d2: a load/slot priority; lower sorts first.
     struct Priority {

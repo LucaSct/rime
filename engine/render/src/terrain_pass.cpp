@@ -137,11 +137,13 @@ TerrainPush terrain_push(const TerrainTile& tile,
                                         : std::numeric_limits<float>::max();
         p.lod_tile[0] = lod.base_x;
         p.lod_tile[1] = lod.base_z;
-        p.lod_tile[2] = static_cast<std::int32_t>(lod.coarser_edges & 0xFu) |
-                        kTerrainPushLodEnabled | (lod.own_bake ? kTerrainPushOwnBake : 0) |
-                        (lod.parent_bake ? kTerrainPushParentBake : 0) |
-                        ((lod.parent_quadrant & 1u) != 0 ? kTerrainPushQuadrantX : 0) |
-                        ((lod.parent_quadrant & 2u) != 0 ? kTerrainPushQuadrantZ : 0);
+        p.lod_tile[2] =
+            static_cast<std::int32_t>(lod.coarser_edges & 0xFu) | kTerrainPushLodEnabled |
+            (lod.own_bake ? kTerrainPushOwnBake : 0) |
+            (lod.parent_bake ? kTerrainPushParentBake : 0) |
+            ((lod.parent_quadrant & 1u) != 0 ? kTerrainPushQuadrantX : 0) |
+            ((lod.parent_quadrant & 2u) != 0 ? kTerrainPushQuadrantZ : 0) |
+            (static_cast<std::int32_t>(lod.coarser_corners & 0xFu) << kTerrainPushCornerShift);
         p.lod_tile[3] = static_cast<std::int32_t>(lod.level);
     }
     return p;

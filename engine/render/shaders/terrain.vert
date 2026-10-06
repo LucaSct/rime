@@ -175,6 +175,18 @@ void main() {
         ((edges & 4) != 0 && jj == 0) || ((edges & 8) != 0 && jj == last)) {
         m = 1.0; // the neighbour across this edge is coarser: sit exactly on its edge
     }
+    // m19.8d3: a CORNER whose diagonal neighbour is coarser (bits 9..12). The corner is an even
+    // vertex, so this moves nothing; it is here for v_lod.z. The two same-level tiles that share
+    // this corner each have the coarse tile across an EDGE, so the rule above gives them m = 1
+    // here; this tile only touches the coarse one at the point, and would otherwise fade by
+    // distance alone and shade the corner differently from its neighbours.
+    const int corners = pc.lod_tile.z >> 9;
+    if (((corners & 1) != 0 && ii == 0 && jj == 0) ||
+        ((corners & 2) != 0 && ii == last && jj == 0) ||
+        ((corners & 4) != 0 && ii == 0 && jj == last) ||
+        ((corners & 8) != 0 && ii == last && jj == last)) {
+        m = 1.0;
+    }
 
     const bool odd_i = (ii & 1) != 0;
     const bool odd_j = (jj & 1) != 0;

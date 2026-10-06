@@ -272,6 +272,15 @@ TerrainLodSelection select_terrain_lod(const TerrainWorld& world,
                 leaf.coarser_edges |= e;
             }
         }
+        // m19.8d3: and across each corner (see TerrainLodLeaf::coarser_corners).
+        for (std::uint8_t c = 0; c < 4; ++c) {
+            const TerrainTileKey r{
+                n.level,
+                {n.coord.x + ((c & 1) != 0 ? 1 : -1), n.coord.z + ((c & 2) != 0 ? 1 : -1)}};
+            if (world.find(r) != nullptr && !is_node(r)) {
+                leaf.coarser_corners |= static_cast<std::uint8_t>(1u << c);
+            }
+        }
         leaf.fallback = wants.contains(n);
         out.fallback_leaves += leaf.fallback ? 1u : 0u;
         out.leaves.push_back(leaf);

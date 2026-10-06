@@ -124,7 +124,13 @@ enum TerrainLodEdge : std::uint8_t {
 struct TerrainLodLeaf {
     assets::TerrainTileKey key{};
     std::uint8_t coarser_edges = 0; // TerrainLodEdge bits
-    bool fallback = false;          // the range asked for finer tiles here than are drawn
+    // m19.8d3: the tile touching this leaf only at a CORNER is drawn coarser. Bit 0 = the corner
+    // at local (0, 0), 1 = (last, 0), 2 = (0, last), 3 = (last, last). The geometry never needed
+    // this — a corner is a parent vertex and does not move — but the APPEARANCE fade does: the
+    // two same-level neighbours that share the corner along an edge with the coarse tile force it
+    // to morph 1, and this leaf must agree with them or its shading differs from theirs there.
+    std::uint8_t coarser_corners = 0;
+    bool fallback = false; // the range asked for finer tiles here than are drawn
 };
 
 struct TerrainLodSelection {
