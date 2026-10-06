@@ -244,17 +244,41 @@ bool TerrainResidency::check_parent(assets::TerrainTileKey k,
         verified_pairs_.insert({p, k});
         return true;
     }
-    // The 8d1 handoff's rule: the PARENT is the one refused. The child's samples are the cooked
-    // truth (they are what physics collides with); a parent that disagrees with them would morph
-    // the child onto a surface it is not a subsample of.
+    // The 8d1 handoff's rule: the PARENT is the one refused. A level-0 child is the cooked truth
+    // (it is what physics collides with), so a parent that disagrees with it is wrong, for good. A
+    // child ABOVE level 0 is only as trustworthy as its own subsamples, so its accusation is
+    // PROVISIONAL: if that child is refused in turn (by one of its own children), the parent it
+    // accused is cleared and asked for again (`refusals_retracted`). Without that, one corrupted
+    // mid-level tile would take every innocent ancestor up to the pinned root down with it.
     ++refusals_.coincidence_mismatches;
-    refuse_parent(p);
+    refuse_parent(p, k);
     return true;
 }
 
-void TerrainResidency::refuse_parent(assets::TerrainTileKey parent) {
+void TerrainResidency::refuse_parent(assets::TerrainTileKey parent,
+                                     assets::TerrainTileKey accuser) {
     refused_parents_.insert(parent);
     ++stats_.refused_parents;
+    if (accuser.level > 0) {
+        accused_by_[parent] = accuser;
+    } else {
+        accused_by_.erase(parent); // a level-0 witness makes the refusal final
+    }
+    // The parent was itself a witness against ITS parent: that accusation no longer stands.
+    for (auto it = accused_by_.begin(); it != accused_by_.end();) {
+        if (it->second == parent) {
+            const assets::TerrainTileKey cleared = it->first;
+            it = accused_by_.erase(it);
+            refused_parents_.erase(cleared);
+            const auto rec = records_.find(cleared);
+            if (rec != records_.end() && rec->second.phase == Phase::Refused) {
+                records_.erase(rec); // requested again at the next begin_frame
+            }
+            ++stats_.refusals_retracted;
+        } else {
+            ++it;
+        }
+    }
     const auto it = records_.find(parent);
     if (it == records_.end()) {
         return;
@@ -270,6 +294,26 @@ void TerrainResidency::refuse_parent(assets::TerrainTileKey parent) {
     }
     forget(r);
     r.phase = Phase::Refused;
+}
+
+TerrainResidency::Priority TerrainResidency::priority(assets::TerrainTileKey k,
+                                                      const core::Vec3& eye) const {
+    // Ranked by the distance of the tile's PARENT box: four siblings tie, so a split's whole group
+    // loads together (three children of four are worth nothing — a node draws its children only
+    // if all four are resident), and a parent is never farther than its child, so with the
+    // coarser-first tie break a chain loads top-down. Roots, then wanted, then prefetch.
+    const std::uint32_t top = world_.level_count() - 1;
+    const auto rec = records_.find(k);
+    const bool pinned = rec != records_.end() && rec->second.pinned;
+    Priority p{};
+    p.cls = pinned ? 0 : wanted_.contains(k) ? 1 : prefetch_.contains(k) ? 2 : 3;
+    const assets::TerrainTileKey group =
+        k.level >= top ? k
+                       : assets::TerrainTileKey{k.level + 1, assets::terrain_parent_coord(k.coord)};
+    p.d = static_cast<float>(terrain_lod_distance(world_, group, eye));
+    p.depth = top - std::min(k.level, top);
+    p.key = k;
+    return p;
 }
 
 float TerrainResidency::distance(assets::TerrainTileKey k, const core::Vec3& eye) const {
@@ -304,36 +348,35 @@ std::optional<TerrainResidentId> TerrainResidency::take_slot(assets::TerrainTile
     //  * m19.8a: the FARTHEST resident tile beyond retention. A kept tile is never evicted for a
     //    wanted one — that is what the hysteresis promises — so with every slot kept the wanted
     //    tile waits, counted.
-    //  * m19.8d2: the farthest resident tile that is neither pinned nor wanted nor prefetched;
-    //    failing that, for a WANTED tile, the farthest that is only prefetched. Nothing evicts a
-    //    wanted tile or a root.
-    const bool requester_wanted = wanted_.contains(k);
+    //  * m19.8d2: the resident tile of the LOWEST priority, if it is lower than the requester's —
+    //    never a root. A tile no longer wanted goes first, then prefetch, then wanted tiles behind
+    //    the requester: under pressure the far, fine end of the queue gives way, never a parent
+    //    to its own child (a parent always ranks ahead of its children).
     auto victim = records_.end();
-    float victim_d = 0.0f;
-    int victim_class = 0; // 2 = unkept, 1 = prefetch-only; higher wins, then distance
-    for (auto it = records_.begin(); it != records_.end(); ++it) {
-        const Record& r = it->second;
-        if (r.phase != Phase::Resident) {
-            continue;
-        }
-        const float d = distance(it->first, eye);
-        int cls = 0;
-        if (!lod_) {
-            cls = d > config_.retention_radius ? 2 : 0;
-        } else if (!r.pinned && !wanted_.contains(it->first)) {
-            if (!prefetch_.contains(it->first)) {
-                cls = 2;
-            } else if (requester_wanted) {
-                cls = 1;
+    if (!lod_) {
+        float victim_d = config_.retention_radius;
+        for (auto it = records_.begin(); it != records_.end(); ++it) {
+            if (it->second.phase != Phase::Resident) {
+                continue;
+            }
+            const float d = distance(it->first, eye);
+            if (d > victim_d) {
+                victim = it;
+                victim_d = d;
             }
         }
-        if (cls == 0) {
-            continue;
-        }
-        if (cls > victim_class || (cls == victim_class && d > victim_d)) {
-            victim = it;
-            victim_d = d;
-            victim_class = cls;
+    } else {
+        const Priority mine = priority(k, eye);
+        Priority worst = mine;
+        for (auto it = records_.begin(); it != records_.end(); ++it) {
+            if (it->second.phase != Phase::Resident || it->second.pinned) {
+                continue;
+            }
+            const Priority p = priority(it->first, eye);
+            if (worst < p) {
+                victim = it;
+                worst = p;
+            }
         }
     }
     if (victim == records_.end()) {
@@ -633,38 +676,18 @@ void TerrainResidency::begin_frame_lod(const core::Vec3& eye) {
         request(k);
     }
 
-    // 4. Advance in priority order: roots first, then wanted, then prefetch; within each, nearest
-    //    first, ties coarser first (an ancestor is never farther than its descendant, so a chain
-    //    loads top-down), then by key.
-    struct Pending {
-        int cls;
-        float d;
-        assets::TerrainTileKey k;
-    };
-
-    std::vector<Pending> order;
+    // 4. Advance in priority order (see `priority`): roots, then wanted, then prefetch.
+    std::vector<Priority> order;
     for (const auto& [k, r] : records_) {
         if (r.phase == Phase::Loading || r.phase == Phase::Building) {
-            const int cls = r.pinned ? 0 : wanted_.contains(k) ? 1 : 2;
-            order.push_back({cls, distance(k, eye), k});
+            order.push_back(priority(k, eye));
         }
     }
-    std::sort(order.begin(), order.end(), [](const Pending& a, const Pending& b) {
-        if (a.cls != b.cls) {
-            return a.cls < b.cls;
-        }
-        if (a.d != b.d) {
-            return a.d < b.d;
-        }
-        if (a.k.level != b.k.level) {
-            return a.k.level > b.k.level;
-        }
-        return a.k < b.k;
-    });
-    for (const Pending& p : order) {
-        const auto it = records_.find(p.k);
+    std::sort(order.begin(), order.end());
+    for (const Priority& p : order) {
+        const auto it = records_.find(p.key);
         if (it != records_.end()) {
-            advance(p.k, it->second, eye);
+            advance(p.key, it->second, eye);
         }
     }
 

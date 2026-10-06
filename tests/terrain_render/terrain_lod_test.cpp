@@ -1239,3 +1239,267 @@ TEST_CASE("m19.8d2: (e) the frame a node switches level, the drawn surface does 
                             << " m (bound " << kPopBound << " m); without the morph "
                             << worst_unmorphed << " m");
 }
+
+// ── Through the residency: (g) pinned roots, (f) determinism, the 8d1 handoff, (h) m19.8a ───────
+
+namespace {
+
+// Write every tile of `w` into `dir` as a cooked file.
+void write_lod_world(const fs::path& dir, const LodWorld& w) {
+    for (const auto& [k, a] : w.tiles) {
+        write_file(dir / tile_path(k), encode_heightfield(a));
+    }
+}
+
+// Every load requested so far finished and promoted, so a frame sees the same state whatever
+// order the workers completed in.
+void settle(assets::AssetServer& server) {
+    server.wait_for_pending_loads();
+    server.pump();
+}
+
+render::TerrainLight flat_light() {
+    render::TerrainLight l{};
+    l.sun_irradiance = 0.0f;
+    l.ambient = 1.0f;
+    return l;
+}
+
+// One residency frame, drawn for real into a small target and ended blocking.
+void lod_frame(rhi::Device& device,
+               assets::AssetServer& server,
+               render::TerrainResidency& residency,
+               core::Vec3 eye) {
+    settle(server);
+    residency.begin_frame(eye);
+    render::RenderGraph graph(device);
+    graph.reset();
+    const render::RGTexture hdr = graph.create_texture({{16, 16}, render::kHdrFormat, "lod-hdr"});
+    const render::RGTexture depth =
+        graph.create_texture({{16, 16}, render::kDepthFormat, "lod-depth"});
+    const render::RGColorAttachment clears[] = {
+        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
+    const render::RGDepthAttachment dclear{
+        depth, rhi::LoadOp::Clear, rhi::StoreOp::Store, 1.0f, 0, false, 0};
+    render::RenderGraph::RasterPassDesc cd{};
+    cd.colors = clears;
+    cd.depth = &dclear;
+    graph.add_raster_pass("lod-clear", cd, [](rhi::CommandBuffer&) {});
+    const core::Mat4 vp = top_down(kOrigin.x, kOrigin.z, 8.0f, 16, 16).view_proj;
+    residency.add(graph, hdr, depth, vp, eye, flat_light());
+    auto cmd = device.begin_commands();
+    graph.execute(*cmd);
+    device.submit_blocking(*cmd);
+    residency.end_frame_blocking();
+}
+
+} // namespace
+
+TEST_CASE("m19.8d2: (g) under maximum pressure the pinned roots stay resident and the world stays "
+          "covered; a root cover over budget is refused") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-pinned");
+    const LodWorld w = make_lod_world(16, 8, 4); // two roots, side by side
+    REQUIRE(w.world.tiles(3).size() == 2);
+    write_lod_world(dir.path, w);
+    const std::vector<PathFrame> path = camera_path(w);
+
+    for (const std::uint32_t slots : {2u, 10u}) {
+        core::JobSystem jobs(2);
+        assets::AssetServer server(jobs);
+        render::TerrainPass pass(*device);
+        render::TerrainResidencyConfig cfg{};
+        cfg.slots = slots;
+        cfg.lod = test_view();
+        render::TerrainResidency residency(*device, pass, server, w.world, dir.path, nullptr, cfg);
+        REQUIRE(residency.lod());
+        std::uint32_t warm = 0; // frames before the roots were all resident
+        std::uint32_t worst_step = 0;
+        std::uint32_t max_levels = 0;
+        for (std::size_t f = 0; f < path.size(); ++f) {
+            lod_frame(*device, server, residency, path[f].eye);
+            const render::TerrainResidencyStats& s = residency.stats();
+            REQUIRE(s.resident_slots + s.retiring_slots <= slots);
+            if (s.pinned_roots < 2) {
+                REQUIRE(f < 2); // requested on frame 1, resident by frame 2 — and never lost
+                ++warm;
+                continue;
+            }
+            const Cover c = measure_cover(w, residency.selection().leaves);
+            REQUIRE(c.exact);
+            REQUIRE(c.max_step <= 1);
+            worst_step = std::max(worst_step, c.max_step);
+            std::set<std::uint32_t> lv;
+            for (const TerrainLodLeaf& leaf : residency.selection().leaves) {
+                lv.insert(leaf.key.level);
+            }
+            max_levels = std::max(max_levels, static_cast<std::uint32_t>(lv.size()));
+        }
+        const render::TerrainResidencyStats& s = residency.stats();
+        CHECK(s.pinned_evictions == 0);
+        CHECK(s.pinned_roots == 2);
+        CHECK(s.uncovered_draws == 2u * warm); // only before the roots arrived
+        CHECK(s.fallback_draws > 0);           // pressure lowered detail...
+        CHECK(s.fallback_appearance_draws > 0);
+        CHECK(s.lod_draws == s.draws);
+        CHECK(s.stale_draws == 0);
+        CHECK(s.refused_parents == 0);
+        CHECK(s.coincidence_checks > 0);
+        CHECK(residency.refusals().coincidence_mismatches == 0);
+        if (slots == 10) {
+            CHECK(max_levels >= 2); // ...but where it could, detail came through
+        }
+        MESSAGE("m19.8d2 (g) " << slots << " slots: " << path.size()
+                               << " frames, roots resident from frame " << warm + 1 << ", "
+                               << s.fallback_draws << " fallback tile-frames, " << s.uploads
+                               << " uploads, " << s.evictions << " evictions ("
+                               << s.pinned_evictions << " of a root), up to " << max_levels
+                               << " levels drawn, " << s.coincidence_checks
+                               << " parent/child checks");
+    }
+
+    // A budget smaller than the root cover cannot promise coverage: refused at construction.
+    core::JobSystem jobs(1);
+    assets::AssetServer server(jobs);
+    render::TerrainPass pass(*device);
+    render::TerrainResidencyConfig cfg{};
+    cfg.slots = 1;
+    cfg.lod = test_view();
+    render::TerrainResidency refused(*device, pass, server, w.world, dir.path, nullptr, cfg);
+    CHECK(refused.stats().root_cover_refusals == 1);
+    for (int f = 0; f < 3; ++f) {
+        lod_frame(*device, server, refused, path[0].eye);
+    }
+    CHECK(refused.selection().leaves.empty());
+    CHECK(refused.stats().draws == 0);
+    CHECK(refused.stats().heightfield_requests == 0);
+}
+
+TEST_CASE("m19.8d2: (f) the same camera path draws the same selections whatever order the loads "
+          "complete in") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-determinism");
+    const LodWorld w = make_lod_world(16, 16, 4);
+    write_lod_world(dir.path, w);
+    const std::vector<PathFrame> path = camera_path(w);
+
+    std::vector<std::vector<TerrainLodLeaf>> runs[2];
+    std::uint64_t fallback[2] = {0, 0};
+    for (int run = 0; run < 2; ++run) {
+        // One worker completes loads in request order; eight complete them in whatever order.
+        core::JobSystem jobs(run == 0 ? 1u : 8u);
+        assets::AssetServer server(jobs);
+        render::TerrainPass pass(*device);
+        render::TerrainResidencyConfig cfg{};
+        cfg.slots = 24; // pressure: the ideal selection wants more than this on most frames
+        cfg.lod = test_view();
+        render::TerrainResidency residency(*device, pass, server, w.world, dir.path, nullptr, cfg);
+        for (const PathFrame& f : path) {
+            lod_frame(*device, server, residency, f.eye);
+            runs[run].push_back(residency.selection().leaves);
+        }
+        fallback[run] = residency.stats().fallback_draws;
+    }
+    REQUIRE(runs[0].size() == runs[1].size());
+    std::size_t identical = 0;
+    for (std::size_t f = 0; f < runs[0].size(); ++f) {
+        identical += same_leaves(runs[0][f], runs[1][f]) ? 1 : 0;
+    }
+    CHECK(identical == runs[0].size());
+    CHECK(fallback[0] == fallback[1]);
+    CHECK(fallback[0] > 0); // not vacuous: pressure made residency decide what was drawn
+    MESSAGE("m19.8d2 (f): " << identical << "/" << runs[0].size()
+                            << " frames identical across 1 and 8 load workers; " << fallback[0]
+                            << " fallback tile-frames in each");
+}
+
+TEST_CASE("m19.8d2: a parent whose samples disagree with its child is refused, counted, never "
+          "drawn — and its area stays covered") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-coincide");
+    LodWorld w = make_lod_world(4, 4, 3);
+    // Corrupt a MID-LEVEL tile: level-1 (0, 0)'s sample (2, 2). It lies over level-0 child (0, 0)'s
+    // sample (4, 4) — and it is also a sample the ROOT holds (root sample (1, 1)). So the first
+    // pair to disagree is (root, bad), and it blames the innocent root; the level-0 child then
+    // convicts `bad`, and the root's refusal must be retracted.
+    const TerrainTileKey bad{1, {0, 0}};
+    const TerrainTileKey root{2, {0, 0}};
+    w.tiles.at(bad).samples[2 + 2 * kN] += 7;
+    write_lod_world(dir.path, w);
+
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    render::TerrainPass pass(*device);
+    render::TerrainResidencyConfig cfg{};
+    cfg.slots = 21; // everything fits: the refusal, not pressure, decides
+    cfg.lod = test_view();
+    render::TerrainResidency residency(*device, pass, server, w.world, dir.path, nullptr, cfg);
+    const core::Vec3 eye{kOrigin.x + 3.0f, 27.0f, kOrigin.z + 3.0f}; // over the doctored corner
+    constexpr int kFrames = 10;
+    int covered_frames = 0;
+    for (int f = 0; f < kFrames; ++f) {
+        lod_frame(*device, server, residency, eye);
+        for (const TerrainLodLeaf& leaf : residency.selection().leaves) {
+            CHECK_FALSE(leaf.key == bad); // never drawn — not even before it was convicted
+        }
+        covered_frames += measure_cover(w, residency.selection().leaves).exact ? 1 : 0;
+    }
+    const render::TerrainResidencyStats& s = residency.stats();
+    CHECK(residency.refusals().coincidence_mismatches == 2); // (root, bad), then (bad, level 0)
+    CHECK(s.refused_parents == 2);
+    CHECK(s.refusals_retracted == 1); // the root's
+    CHECK_FALSE(residency.resident(bad).is_valid());
+    CHECK(residency.resident(root).is_valid());
+    // The last frames are covered by the root: its children cannot all be drawn, so it falls back.
+    CHECK(measure_cover(w, residency.selection().leaves).exact);
+    CHECK(s.fallback_draws > 0);
+    MESSAGE("m19.8d2 handoff: " << s.coincidence_checks << " pairs checked, "
+                                << residency.refusals().coincidence_mismatches << " mismatches, "
+                                << s.refusals_retracted << " retracted; covered " << covered_frames
+                                << "/" << kFrames << " frames, " << s.uncovered_draws
+                                << " uncovered root-frames while the root was reloaded");
+}
+
+TEST_CASE("m19.8d2: (h) a world without a chain is driven exactly as m19.8a drives it") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-level0");
+    const LodWorld chain = make_lod_world(4, 4, 1);
+    write_lod_world(dir.path, chain);
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    render::TerrainPass pass(*device);
+    render::TerrainResidencyConfig cfg{};
+    cfg.slots = 4;
+    cfg.activation_radius = 4.0f;
+    cfg.retention_radius = 8.0f;
+    cfg.lod = test_view();
+    render::TerrainResidency residency(*device, pass, server, chain.world, dir.path, nullptr, cfg);
+    CHECK_FALSE(residency.lod());
+    CHECK(residency.ranges().levels.empty());
+    for (const PathFrame& f : camera_path(chain)) {
+        lod_frame(*device, server, residency, f.eye);
+        CHECK(residency.stats().resident_slots <= 4);
+    }
+    const render::TerrainResidencyStats& s = residency.stats();
+    CHECK(s.draws > 0);
+    CHECK(s.lod_draws == 0);
+    CHECK(s.fallback_draws == 0);
+    CHECK(s.fallback_appearance_draws == 0);
+    CHECK(s.pinned_roots == 0);
+    CHECK(s.coincidence_checks == 0);
+    CHECK(s.root_cover_refusals == 0);
+    CHECK(s.missing.total() > 0); // m19.8a's holes, counted as before
+    CHECK(residency.selection().leaves.empty());
+}

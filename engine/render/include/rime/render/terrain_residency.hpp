@@ -101,11 +101,12 @@
 //     nothing — no budget can honour the guarantee.
 //   * WANTED = the selection with every tile assumed usable (the IDEAL selection), plus every
 //     ancestor of its leaves up to the roots; PREFETCH = the four children of an ideal leaf whose
-//     box is within one level diagonal of the range that would split it. Wanted tiles load and
-//     take slots first, nearest first (ties: coarser first, so an ancestor never queues behind its
-//     own descendant), then prefetch. A wanted tile may evict a resident tile that is neither
-//     wanted nor pinned, and failing that one that is only prefetched; nothing evicts a wanted
-//     tile. The fence rule is m19.8a's, unchanged.
+//     box is within one level diagonal of the range that would split it. Loads and slots go in
+//     PRIORITY order: roots, wanted, prefetch; within each, by the distance of the tile's PARENT
+//     box (so the four siblings a split needs rank together — three of four are worth nothing),
+//     coarser first. A tile may evict any resident non-root of lower priority, the least
+//     important first; a parent always ranks ahead of its children, so it is never evicted for
+//     one. The fence rule is m19.8a's, unchanged.
 //   * DRAWN = the selection with `usable` = resident and trusted. A node whose children are not
 //     all resident draws itself: a FALLBACK, counted per tile-frame (`fallback_draws`) where
 //     m19.8a counted a hole. Parents draw with the flat (no-splat) material — their appearance is
@@ -115,8 +116,11 @@
 //     child waits for its parent (`parent_waits`); the parent is always wanted first. A mismatch
 //     REFUSES THE PARENT — evicted, sticky, counted in `refusals().coincidence_mismatches` — and
 //     the child is uploaded: the area is drawn by children where they are all resident and by the
-//     grandparent where not. A verified pair is remembered, so a parent that is evicted and
-//     reloaded is not re-checked against children already proven against the same file.
+//     grandparent where not. A level-0 child's verdict is final; a coarser child's is provisional
+//     and is retracted if that child is refused by ITS children (a corrupted mid-level tile must
+//     not take its innocent ancestors down with it). A verified pair is remembered, so a parent
+//     that is evicted and reloaded is not re-checked against children already proven against the
+//     same file.
 //
 // A world with no chain (level 0 only) is driven exactly as m19.8a drove it: the radii, holes
 // counted, no pinning.
@@ -269,6 +273,7 @@ struct TerrainResidencyStats {
     std::uint64_t balance_collapses = 0;         // selection nodes collapsed to restore 2:1
     std::uint64_t coincidence_checks = 0;        // parent/child pairs compared (samples_coincide)
     std::uint64_t refused_parents = 0;           // parents refused by a coincidence mismatch
+    std::uint64_t refusals_retracted = 0;        // provisional refusals cleared: the accuser fell
     std::uint64_t parent_waits = 0;              // tile-frames a loaded child waited for its parent
     std::uint64_t prefetch_requests = 0;         // loads requested for the prefetch set
 };
@@ -394,7 +399,30 @@ private:
     // m19.8d2: the 8d1 handoff. False = wait (the parent is not resident yet).
     [[nodiscard]] bool check_parent(assets::TerrainTileKey k,
                                     const assets::HeightfieldAsset& asset);
-    void refuse_parent(assets::TerrainTileKey parent);
+    void refuse_parent(assets::TerrainTileKey parent, assets::TerrainTileKey accuser);
+
+    // m19.8d2: a load/slot priority; lower sorts first.
+    struct Priority {
+        int cls = 0;             // 0 pinned root, 1 wanted, 2 prefetch, 3 neither
+        float d = 0.0f;          // distance to the PARENT's box (the root's own, for a root)
+        std::uint32_t depth = 0; // levels below the top: coarser first
+        assets::TerrainTileKey key{};
+
+        friend bool operator<(const Priority& a, const Priority& b) noexcept {
+            if (a.cls != b.cls) {
+                return a.cls < b.cls;
+            }
+            if (a.d != b.d) {
+                return a.d < b.d;
+            }
+            if (a.depth != b.depth) {
+                return a.depth < b.depth;
+            }
+            return a.key < b.key;
+        }
+    };
+
+    [[nodiscard]] Priority priority(assets::TerrainTileKey k, const core::Vec3& eye) const;
     [[nodiscard]] std::optional<TerrainResidentId> take_slot(assets::TerrainTileKey k,
                                                              const core::Vec3& eye);
     void request(assets::TerrainTileKey k);
@@ -437,6 +465,7 @@ private:
     std::set<assets::TerrainTileKey> wanted_;          // ideal leaves + ancestors + roots
     std::set<assets::TerrainTileKey> prefetch_;        // next-finer level inside the ranges
     std::set<assets::TerrainTileKey> refused_parents_; // sticky: a coincidence mismatch
+    std::map<assets::TerrainTileKey, assets::TerrainTileKey> accused_by_; // provisional refusals
     std::set<std::pair<assets::TerrainTileKey, assets::TerrainTileKey>> verified_pairs_;
 };
 
