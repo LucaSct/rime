@@ -1302,7 +1302,9 @@ fn two_u64_fields_in_one_component_round_trip_independently() {
     // Two 64-bit fields rendered in the same component share a parent Ui. If their text boxes shared
     // an id they would share text and focus, and typing into one would show in both. Each must keep
     // its own value, above 2^53, and write only its own field.
-    const H_PAIR: u64 = 0x15;
+    // Must not collide with a hash in `fake_schema` (0x15 is H_ENTITY): `type_by_hash` returns the
+    // first match, so a clash silently renders the wrong type and this component never appears.
+    const H_PAIR: u64 = 0x17;
     const A: u64 = 0xDEAD_BEEF_CAFE_F00D;
     const B: u64 = 0x0123_4567_89AB_CDEF;
     let mut world = starting_world();
