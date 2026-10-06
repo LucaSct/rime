@@ -13,7 +13,28 @@ build/<preset>/bin/hello_game --dedicated-proof --verbose   # dedicated == play,
 build/<preset>/bin/hello_game play                               # a window, keyboard input
 build/<preset>/bin/hello_game dedicated --ticks 600 --autopilot  # headless, no GPU, prints a digest
 build/<preset>/bin/hello_game browser --port 8443                # "not implemented yet", exit 3
+build/<preset>/bin/hello_game dedicated --content <dir>          # content from <dir> (m20.2)
+
+# The bundle (m20.2): export it, then run it from anywhere
+scripts/export-game.sh hello_game /tmp/out    # -> /tmp/out/hello_game/{hello_game,content/,README.txt}
+/tmp/out/hello_game/hello_game dedicated --ticks 120 --autopilot
+scripts/export-proof.sh                       # the proof: no repo, no Vulkan, same digest
 ```
+
+## Its content, and where it is found
+
+Since **m20.2** the arena floor is **content**, not code: `content/hello-game.rscene`, the game's
+entry scene, loaded by the engine before `setup` runs. `setup` refuses to start if the floor is
+missing. The file is the output of `hello_game --emit-content samples/hello-game/content`
+(`build_arena` in `game.cpp`), the same "a generator writes the first draft" shape as target-range.
+Moving the floor out of `setup` left both digests unchanged: `f764d141966c92ef` at 120 ticks and
+`8ba766bef103c8af` at the win.
+
+The engine finds the file through the **content root** ([ADR-0076](../../docs/adr/0076-m20.2-content-root-and-bundle.md)):
+`--content <dir>`, else `content/` beside the executable, else this source directory. The last
+applies only while the binary is still in the directory the build wrote it to. Every run prints
+which root it chose and why. A copied binary with no `content/` refuses to start and lists the paths
+it tried. It does not fall back to the repository, even on the machine that built it.
 
 ## Why it exists
 
@@ -98,3 +119,12 @@ the win. `dedicated` must enter the device factory **zero** times and call no pr
 on Linux `/proc/self/maps` must show no `libvulkan` after every GPU-free leg. Falsified both ways:
 forcing the runner to create a device in `dedicated` fails the count and the `libvulkan` check, and
 nudging the crate by 1 cm in `present_setup` fails the rendering leg's digest.
+
+`scripts/export-proof.sh` (m20.2) is the bundle's proof. It exports the game to `/tmp`, then runs the
+bundle's `dedicated` under bubblewrap with `$HOME` hidden (the repository, the build tree and the
+Conan cache) and with Vulkan hidden (the ICD manifests, plus `/dev/null` bound over the loader).
+The digest must equal the in-tree run's. `play --headless` runs in the same sandbox, finds no
+device, and degrades to the simulation with the same digest. The proof is falsified three ways:
+deleting `content/` fails the run; a one-bit-off digest is rejected; and letting a moved binary use
+the source tree makes the host leg pass silently on the repository's content, which the proof
+reports as a failure.

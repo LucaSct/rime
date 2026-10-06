@@ -549,6 +549,15 @@ Entries are grouped roughly by area and kept short on purpose.
 
 ## Assets & the pipeline
 
+- **Content root.** The directory a running game reads its content from (m20.2,
+  [ADR-0076](adr/0076-m20.2-content-root-and-bundle.md)). Searched in order: `--content <dir>`, then
+  `content/` beside the executable, then the game's source-tree content. The last is used only by a
+  binary still in its build directory, so a copied binary never reads the repository. A failed
+  search names every path it tried. `rime::app::resolve_content_root`.
+- **Bundle.** What an exported game ships as (ADR-0046 §1): one directory holding the game
+  executable, its `content/` and a `README.txt`, runnable from anywhere with no repository, build
+  tree or Vulkan present (`dedicated`). Written by `scripts/export-game.sh`, which also checks it
+  links system libraries only; proved by `scripts/export-proof.sh`.
 - **Quantised heights.** Storing terrain heights as integers (u16: 65,536 levels) plus a
   scale and offset in the header, `height = offset + scale × sample`, instead of floats: exactly
   what 16-bit height maps already are, half the bytes, and uniform precision — at the cost of a
