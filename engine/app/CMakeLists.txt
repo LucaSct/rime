@@ -69,9 +69,17 @@ rime_install_module(rime_app_game)
 #      absolute paths are inert in a bundle (`rime/app/content_root.hpp`);
 #   2. an export record, build/<preset>/export/<config>/<target>.export, naming the executable and
 #      the content directory, which `scripts/export-game.sh` reads instead of guessing where a
-#      target's binary and content live.
+#      target's binary and content live;
+#   3. NO build RPATH. CMake gives an executable a RUNPATH of every library directory it linked
+#      from; with the Conan toolchain that was `~/.conan2/p/b/fmt…/p/lib:~/.conan2/p/b/volk…/p/lib`
+#      — directories holding only static archives, so dead weight, but a path into one machine's
+#      package cache baked into a binary we ship, and a place a same-named .so would be loaded from.
+#      The export's dependency check found it. Skipped for the IN-TREE binary too, so the binary the
+#      proof runs in-tree is byte-for-byte the one it bundles: a game that needs a non-system
+#      shared library then fails here, on the developer's machine, rather than on a player's.
 function(rime_game_content target content_dir)
     get_filename_component(_rime_content "${content_dir}" ABSOLUTE)
+    set_target_properties(${target} PROPERTIES SKIP_BUILD_RPATH TRUE)
     target_compile_definitions(${target} PRIVATE
         RIME_GAME_CONTENT_DIR="${_rime_content}"
         RIME_GAME_BINARY_DIR="$<TARGET_FILE_DIR:${target}>")
