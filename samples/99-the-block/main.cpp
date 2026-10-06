@@ -2448,6 +2448,15 @@ int run_perf(const std::filesystem::path& cooked,
     // to catch — it would read as "the simulation spends 8 ms somewhere nobody named".
     report.declare_accounting("sim.block",
                               {"physics.server.step.per_frame", "physics.client.step.per_frame"});
+    // `frame.submit` is a blocking submit, and a blocking submit is three different costs
+    // (p2-perf): the driver taking the command buffer, the fence wait while the GPU runs it, and
+    // our teardown. The RHI times each; declaring them here makes the split add up or say it does
+    // not. A negative residual would mean a blocking submit ran OUTSIDE `frame.submit` (an upload
+    // mid-declare, say), which is exactly the misattribution worth seeing.
+    report.declare_accounting("frame.submit.per_frame",
+                              {"rhi.submit.queue.per_frame",
+                               "rhi.submit.wait.per_frame",
+                               "rhi.submit.reclaim.per_frame"});
 
     // Deliveries QUEUE rather than overwrite, and are drained after the loop rather than inside it.
     // A single slot consumed in the loop body loses the tail: pipelined, the frames still in flight
@@ -2591,8 +2600,17 @@ int run_perf(const std::filesystem::path& cooked,
     // which is what frame_base subtracts. A frame below frame_base is a warmup frame and is
     // dropped.
     for (const auto& [index, timings] : passes_queue) {
-        if (index >= frame_base)
+        if (index >= frame_base) {
             report.observe_passes(index - frame_base, timings);
+            // The GPU's own account of the frame, summed over its timed passes (p2-perf). Read
+            // against `rhi.submit.wait` it answers the one question the CPU zones cannot: is a
+            // long fence wait the GPU working, or the GPU idle while something else stalls? A sum
+            // of pass brackets, not first-begin to last-end, so gaps between passes are NOT in it.
+            double gpu_ms = 0.0;
+            for (const core::PassTiming& t : timings)
+                gpu_ms += t.ms;
+            report.observe("gpu.passes", gpu_ms);
+        }
     }
 
     // The ledger travels WITH the timings, so a report can never be read as "fast" without also
@@ -2769,6 +2787,21 @@ int run_perf(const std::filesystem::path& cooked,
     if (const auto r = report.distribution("frame.render")) {
         std::printf(
             "  render    p50 %.2f  p99 %.2f  max %.2f ms\n", r->p50_ms, r->p99_ms, r->max_ms);
+    }
+    // The blocking submit split three ways, against the GPU's own pass total (p2-perf).
+    if (const auto sub = report.distribution("frame.submit.per_frame")) {
+        const auto wait = report.distribution("rhi.submit.wait.per_frame");
+        const auto queue = report.distribution("rhi.submit.queue.per_frame");
+        const auto gpu = report.distribution("gpu.passes");
+        std::printf("  submit    p99 %.2f  max %.2f ms  = queue p99 %.2f + fence wait p99 %.2f "
+                    "(max %.2f); gpu passes p99 %.2f  max %.2f ms\n",
+                    sub->p99_ms,
+                    sub->max_ms,
+                    queue ? queue->p99_ms : 0.0,
+                    wait ? wait->p99_ms : 0.0,
+                    wait ? wait->max_ms : 0.0,
+                    gpu ? gpu->p99_ms : 0.0,
+                    gpu ? gpu->max_ms : 0.0);
     }
     if (const auto pl = report.distribution("frame.player")) {
         std::printf("  frame.player p50 %.2f  p99 %.2f  max %.2f ms  "
