@@ -969,16 +969,18 @@ impl eframe::App for EditorApp {
             // An empty scene with no path, so Save stays disabled until Save As. There is no
             // "clear" message on the wire, so this despawns every entity through the same Commands
             // an edit uses. Despawns are not undoable, and the undo history names entities that are
-            // now gone, so it is dropped with them.
-            actions.extend(
-                entities
-                    .iter()
-                    .map(|e| Command::Despawn { id: e.editor_id }),
-            );
+            // now gone, so it is dropped with them. The despawns go through `replay`, not `actions`:
+            // `actions` is dispatched after this reset and `dispatch` would record each one as a
+            // fresh undo step, whereas `replay` keeps the wire's expect invariant and records none.
+            let despawns: Vec<Command> = entities
+                .iter()
+                .map(|e| Command::Despawn { id: e.editor_id })
+                .collect();
             self.pending_open = None;
             self.scene_path = None;
             self.save_as_path.clear();
             self.stack = CommandStack::default();
+            self.replay(despawns);
             self.selected = None;
             self.active_edit = None;
             self.gizmo_drag = None;
