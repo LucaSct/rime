@@ -11,13 +11,21 @@
 //! Schema   : [magic 'RSM2':u32][type_count:u32] then per type
 //!            [hash:u64][name_len:u16][name...][is_component:u8][field_count:u16] then per field
 //!            [name_len:u16][name...][kind:u8][nested_hash:u64]   (nested_hash 0 unless kind=Struct)
-//! Snapshot : [magic 'RSN1':u32][entities:u32] then per entity
-//!            [index:u32][generation:u32][comp_count:u16] then per component
+//! Snapshot : [magic 'RSN2':u32][entities:u32] then per entity
+//!            [index:u32][generation:u32][editor_id:u64][comp_count:u16] then per component
 //!            [hash:u64][blob_len:u32][blob...]
-//! SetComp  : [index:u32][generation:u32][hash:u64][blob_len:u32][blob...]
-//! Add/Remove: [index:u32][generation:u32][hash:u64]     Despawn: [index:u32][generation:u32]
-//! Spawn / RequestSnapshot : (empty payload)
+//! SetComp  : [editor_id:u64][hash:u64][blob_len:u32][blob...]
+//! Add/Remove: [editor_id:u64][hash:u64]      Spawn / Despawn: [editor_id:u64]
+//! SpawnEnt : [editor_id:u64][exact:u8][comp_count:u16] then per component [hash:u64][len:u32][blob]
+//! EditResult (engine → editor): [ok:u8][editor_id:u64]
+//! RequestSnapshot : (empty payload)
 //! ```
+//!
+//! **Entities are named by `EditorId`** (ADR-0075), a u64 the engine host stamps on every entity
+//! and never reuses — not by the engine's `(index, generation)` handle, which a despawn kills and a
+//! Play→Stop may replace. That includes entity references *inside* component blobs: on this wire an
+//! `rime::ecs::Entity` field is the referenced entity's EditorId (the schema describes it as one
+//! `editor_id: u64` field; 0 is null). The handle still rides the snapshot, for pick results only.
 //!
 //! The schema (m9.4) is the whole point: it carries each type's **field layout**, so a snapshot's
 //! opaque component blob is decoded into typed, editable fields ([`decode_value`]) and an edit is
@@ -30,7 +38,7 @@ use crate::wire::{Reader, Writer};
 use crate::{Error, Result};
 
 const SCHEMA_MAGIC: u32 = 0x5253_4D32; // 'R''S''M''2' (m9.4: now carries field layout)
-const SNAPSHOT_MAGIC: u32 = 0x5253_4E31; // 'R''S''N''1'
+const SNAPSHOT_MAGIC: u32 = 0x5253_4E32; // 'R''S''N''2' (ADR-0075: + editor_id per entity)
 const ASSET_LIST_MAGIC: u32 = 0x5241_4C31; // 'R''A''L''1' (m9.5: the browser's cook manifest)
 
 /// An editor-channel message type (the `0x02xx` band). Mirrors `editorhost::EditorMessage`.
@@ -58,9 +66,15 @@ pub enum EditorMessage {
     SaveResult,
     /// engine → editor: the play/edit phase plus how many fixed ticks have run (m9.7).
     PlayState,
+    /// engine → editor: the answer to a structural edit — every `Spawn`, `SpawnEntity`, `Despawn`,
+    /// `AddComponent` and `RemoveComponent`, in the order they were sent (ADR-0075). Payload
+    /// `[ok:u8][editor_id:u64]`. The editor commits an undo step only on `ok`, and learns a fresh
+    /// spawn's id from it.
+    EditResult,
     /// editor → engine: set a component's bytes on an entity.
     SetComponent,
-    /// editor → engine: spawn an empty entity.
+    /// editor → engine: spawn an entity with a default placement — under a fresh id (`0`), or
+    /// under a previously issued one (a redo).
     Spawn,
     /// editor → engine: despawn an entity.
     Despawn,
@@ -107,6 +121,7 @@ impl EditorMessage {
             EditorMessage::ViewportCamera => 0x0205,
             EditorMessage::PlayState => 0x0206,
             EditorMessage::SaveResult => 0x0207,
+            EditorMessage::EditResult => 0x0208,
             EditorMessage::SetComponent => 0x0210,
             EditorMessage::Spawn => 0x0211,
             EditorMessage::Despawn => 0x0212,
@@ -134,6 +149,7 @@ impl EditorMessage {
             0x0205 => Some(EditorMessage::ViewportCamera),
             0x0206 => Some(EditorMessage::PlayState),
             0x0207 => Some(EditorMessage::SaveResult),
+            0x0208 => Some(EditorMessage::EditResult),
             0x0210 => Some(EditorMessage::SetComponent),
             0x0211 => Some(EditorMessage::Spawn),
             0x0212 => Some(EditorMessage::Despawn),
@@ -385,11 +401,14 @@ pub struct SnapshotComponent {
     pub data: Vec<u8>,
 }
 
-/// One entity in a snapshot: its live handle (index, generation) and its reflected components.
+/// One entity in a snapshot: its stable [`EditorId`](crate::editor) — the name every command uses
+/// — its live handle (index, generation), which only a [`PickResult`] speaks, and its reflected
+/// components.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotEntity {
     pub index: u32,
     pub generation: u32,
+    pub editor_id: u64,
     pub components: Vec<SnapshotComponent>,
 }
 
@@ -408,6 +427,7 @@ impl Snapshot {
         for e in &self.entities {
             w.u32(e.index);
             w.u32(e.generation);
+            w.u64(e.editor_id);
             w.u16(e.components.len() as u16);
             for c in &e.components {
                 w.u64(c.type_hash);
@@ -430,6 +450,7 @@ impl Snapshot {
         for _ in 0..entity_count {
             let index = r.u32()?;
             let generation = r.u32()?;
+            let editor_id = r.u64()?;
             let comp_count = r.u16()?;
             let mut components = Vec::with_capacity(comp_count as usize);
             for _ in 0..comp_count {
@@ -441,6 +462,7 @@ impl Snapshot {
             entities.push(SnapshotEntity {
                 index,
                 generation,
+                editor_id,
                 components,
             });
         }
@@ -449,10 +471,10 @@ impl Snapshot {
 }
 
 /// An editor → engine "set this component's bytes on this entity" edit — the `SetComponent` payload.
+/// Entity fields inside `blob` are EditorIds, like the target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetComponent {
-    pub index: u32,
-    pub generation: u32,
+    pub editor_id: u64,
     pub type_hash: u64,
     pub blob: Vec<u8>,
 }
@@ -461,8 +483,7 @@ impl SetComponent {
     /// Serialize the `SetComponent` payload.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u32(self.index);
-        w.u32(self.generation);
+        w.u64(self.editor_id);
         w.u64(self.type_hash);
         w.u32(self.blob.len() as u32);
         w.bytes(&self.blob);
@@ -472,14 +493,12 @@ impl SetComponent {
     /// Parse a `SetComponent` payload.
     pub fn decode(payload: &[u8]) -> Result<Self> {
         let mut r = Reader::new(payload);
-        let index = r.u32()?;
-        let generation = r.u32()?;
+        let editor_id = r.u64()?;
         let type_hash = r.u64()?;
         let blob_len = r.u32()? as usize;
         let blob = r.take_bytes(blob_len)?.to_vec();
         Ok(SetComponent {
-            index,
-            generation,
+            editor_id,
             type_hash,
             blob,
         })
@@ -600,18 +619,28 @@ impl AssetList {
     }
 }
 
-/// An editor → engine "spawn an entity with these components" — the `SpawnEntity` payload (the
-/// browser's atomic "place asset"). Each component is a `(type_hash, reflection-serialized bytes)`
-/// pair, the same blob shape [`SetComponent`] carries.
+/// An editor → engine "spawn an entity with these components" — the `SpawnEntity` payload. Each
+/// component is a `(type_hash, reflection-serialized bytes)` pair, the same blob shape
+/// [`SetComponent`] carries.
+///
+/// Two uses (ADR-0075). The browser's "place" sends `editor_id: 0, exact: false`: the engine
+/// assigns a fresh id and gives the entity a default `LocalTransform` unless the list carries one.
+/// An undone despawn sends the entity's old id with `exact: true`: the engine refuses an id it
+/// never issued or one still live, and otherwise recreates exactly the listed components.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpawnEntity {
+    pub editor_id: u64,
+    pub exact: bool,
     pub components: Vec<(u64, Vec<u8>)>,
 }
 
 impl SpawnEntity {
-    /// Serialize the payload: `[comp_count:u16]` then per component `[hash:u64][blob_len:u32][blob]`.
+    /// Serialize the payload: `[editor_id:u64][exact:u8][comp_count:u16]` then per component
+    /// `[hash:u64][blob_len:u32][blob]`.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
+        w.u64(self.editor_id);
+        w.u8(u8::from(self.exact));
         w.u16(self.components.len() as u16);
         for (hash, blob) in &self.components {
             w.u64(*hash);
@@ -624,6 +653,8 @@ impl SpawnEntity {
     /// Parse a `SpawnEntity` payload.
     pub fn decode(payload: &[u8]) -> Result<Self> {
         let mut r = Reader::new(payload);
+        let editor_id = r.u64()?;
+        let exact = r.u8()? != 0;
         let count = r.u16()?;
         let mut components = Vec::with_capacity(count as usize);
         for _ in 0..count {
@@ -632,7 +663,11 @@ impl SpawnEntity {
             let blob = r.take_bytes(blob_len)?.to_vec();
             components.push((hash, blob));
         }
-        Ok(SpawnEntity { components })
+        Ok(SpawnEntity {
+            editor_id,
+            exact,
+            components,
+        })
     }
 }
 
@@ -833,12 +868,11 @@ impl GizmoAxis {
 
 /// An editor → engine gizmo-state message: the selection plus which gizmo (and highlighted axis)
 /// the engine should render over the viewport (m9.6 gizmos). Engine STATE, not a world edit — the
-/// viewport host consumes it in its frame loop like a `PickRequest`. `index == u32::MAX` (the
-/// [`PickResult::none`] sentinel) means "no selection — hide the gizmo".
+/// viewport host consumes it in its frame loop like a `PickRequest`. The selection is an EditorId
+/// the engine re-resolves every frame (ADR-0075); `0` means "no selection — hide the gizmo".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GizmoState {
-    pub index: u32,
-    pub generation: u32,
+    pub editor_id: u64,
     pub mode: GizmoMode,
     pub axis: GizmoAxis,
 }
@@ -847,18 +881,16 @@ impl GizmoState {
     /// The "nothing selected / gizmo hidden" state.
     pub const fn none() -> Self {
         GizmoState {
-            index: u32::MAX,
-            generation: 0,
+            editor_id: 0,
             mode: GizmoMode::None,
             axis: GizmoAxis::None,
         }
     }
 
-    /// Serialize the payload: `[index:u32][generation:u32][mode:u8][axis:u8]`.
+    /// Serialize the payload: `[editor_id:u64][mode:u8][axis:u8]`.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u32(self.index);
-        w.u32(self.generation);
+        w.u64(self.editor_id);
         w.u8(self.mode.to_u8());
         w.u8(self.axis.to_u8());
         w.into_vec()
@@ -867,13 +899,11 @@ impl GizmoState {
     /// Parse the payload.
     pub fn decode(payload: &[u8]) -> Result<Self> {
         let mut r = Reader::new(payload);
-        let index = r.u32()?;
-        let generation = r.u32()?;
+        let editor_id = r.u64()?;
         let mode = GizmoMode::from_u8(r.u8()?);
         let axis = GizmoAxis::from_u8(r.u8()?);
         Ok(GizmoState {
-            index,
-            generation,
+            editor_id,
             mode,
             axis,
         })
@@ -941,20 +971,24 @@ impl PlayState {
     }
 }
 
-/// Serialize a `Despawn` payload (an entity handle).
-pub fn encode_despawn(index: u32, generation: u32) -> Vec<u8> {
+/// Serialize a `Spawn` or `Despawn` payload: `[editor_id:u64]`. For `Despawn`, the entity to
+/// remove; for `Spawn`, `0` asks for a fresh id and a previously issued id respawns under it.
+pub fn encode_entity_ref(editor_id: u64) -> Vec<u8> {
     let mut w = Writer::new();
-    w.u32(index);
-    w.u32(generation);
+    w.u64(editor_id);
     w.into_vec()
 }
 
+/// Parse a `Spawn` / `Despawn` payload.
+pub fn decode_entity_ref(payload: &[u8]) -> Result<u64> {
+    Reader::new(payload).u64()
+}
+
 /// An editor → engine reference to one component on one entity — the payload shared by
-/// `AddComponent` and `RemoveComponent`: `[index:u32][generation:u32][hash:u64]`.
+/// `AddComponent` and `RemoveComponent`: `[editor_id:u64][hash:u64]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentRef {
-    pub index: u32,
-    pub generation: u32,
+    pub editor_id: u64,
     pub type_hash: u64,
 }
 
@@ -962,8 +996,7 @@ impl ComponentRef {
     /// Serialize the payload.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u32(self.index);
-        w.u32(self.generation);
+        w.u64(self.editor_id);
         w.u64(self.type_hash);
         w.into_vec()
     }
@@ -971,15 +1004,82 @@ impl ComponentRef {
     /// Parse the payload.
     pub fn decode(payload: &[u8]) -> Result<Self> {
         let mut r = Reader::new(payload);
-        let index = r.u32()?;
-        let generation = r.u32()?;
+        let editor_id = r.u64()?;
         let type_hash = r.u64()?;
         Ok(ComponentRef {
-            index,
-            generation,
+            editor_id,
             type_hash,
         })
     }
+}
+
+/// `EditResult` (engine → editor, ADR-0075): the answer to one structural edit, in send order.
+/// `editor_id` is the entity the edit was about — for a fresh `Spawn`/`SpawnEntity`, the id the
+/// engine just assigned. `ok == false` means the engine refused it (an id or reference it could not
+/// resolve) and nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EditResult {
+    pub ok: bool,
+    pub editor_id: u64,
+}
+
+impl EditResult {
+    /// Serialize the payload: `[ok:u8][editor_id:u64]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(u8::from(self.ok));
+        w.u64(self.editor_id);
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let ok = r.u8()? != 0;
+        let editor_id = r.u64()?;
+        Ok(EditResult { ok, editor_id })
+    }
+}
+
+/// The schema name of the engine's entity handle type. A Struct field whose nested type has this
+/// name is an entity reference; on the editor wire its one field is the referent's EditorId.
+pub const ENTITY_TYPE_NAME: &str = "rime::ecs::Entity";
+
+/// Every entity reference inside one component blob, as EditorIds (`0` = null), in field order —
+/// found through the schema, never by scanning bytes. Used by the editor's despawn to capture the
+/// references other entities hold to the entity it is about to remove, so the undo can put them
+/// back exactly. Empty if the type is unknown or the blob does not decode.
+pub fn entity_refs(schema: &Schema, type_hash: u64, blob: &[u8]) -> Vec<u64> {
+    fn walk(schema: &Schema, entry: &SchemaEntry, value: &Value, out: &mut Vec<u64>) {
+        let Value::Struct(fields) = value else {
+            return;
+        };
+        for (desc, (_, v)) in entry.fields.iter().zip(fields) {
+            if desc.kind != FieldKind::Struct {
+                continue;
+            }
+            let Some(nested) = schema.type_by_hash(desc.nested_hash) else {
+                continue;
+            };
+            if nested.name == ENTITY_TYPE_NAME {
+                if let Value::Struct(inner) = v {
+                    if let Some((_, Value::U64(id))) = inner.first() {
+                        out.push(*id);
+                    }
+                }
+            } else {
+                walk(schema, nested, v, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let (Some(entry), Ok(value)) = (
+        schema.type_by_hash(type_hash),
+        decode_value(schema, type_hash, blob),
+    ) {
+        walk(schema, entry, &value, &mut out);
+    }
+    out
 }
 
 /// `SaveScene` (editor → engine, m14.3): ask the engine to write the world to a `.rscene`.

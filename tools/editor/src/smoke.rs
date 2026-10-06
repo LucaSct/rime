@@ -464,11 +464,18 @@ mod imp {
                 .find(|t| t.name == "rime::ecs::LocalTransform")
                 .map(|t| t.type_hash)
                 .ok_or("schema has no LocalTransform to gizmo-edit")?;
+            // A pick answers with the engine's handle; every command names the entity by its
+            // EditorId (ADR-0075), so map the one to the other through the snapshot.
+            let picked = snapshot
+                .entities
+                .iter()
+                .find(|e| (e.index, e.generation) == (hit.index, hit.generation))
+                .ok_or("the picked handle is not in the snapshot")?;
+            let picked_id = picked.editor_id;
             conn.send_editor(
                 EditorMessage::GizmoState,
                 &GizmoState {
-                    index: hit.index,
-                    generation: hit.generation,
+                    editor_id: picked_id,
                     mode: GizmoMode::Translate,
                     axis: GizmoAxis::X,
                 }
@@ -476,11 +483,10 @@ mod imp {
             )
             .map_err(|e| format!("send gizmo state: {e}"))?;
 
-            let local = snapshot
-                .entities
+            let local = picked
+                .components
                 .iter()
-                .find(|e| (e.index, e.generation) == (hit.index, hit.generation))
-                .and_then(|e| e.components.iter().find(|c| c.type_hash == local_hash))
+                .find(|c| c.type_hash == local_hash)
                 .ok_or("picked entity has no LocalTransform (gizmo needs one to move)")?;
             let mut tf = decode_value(&schema, local_hash, &local.data)
                 .map_err(|e| format!("decode local transform: {e}"))?;
@@ -490,8 +496,7 @@ mod imp {
             conn.send_editor(
                 EditorMessage::SetComponent,
                 &SetComponent {
-                    index: hit.index,
-                    generation: hit.generation,
+                    editor_id: picked_id,
                     type_hash: local_hash,
                     blob: encode_value(&tf),
                 }
@@ -504,7 +509,7 @@ mod imp {
             let moved = snap2
                 .entities
                 .iter()
-                .find(|e| (e.index, e.generation) == (hit.index, hit.generation))
+                .find(|e| e.editor_id == picked_id)
                 .and_then(|e| e.components.iter().find(|c| c.type_hash == local_hash))
                 .ok_or("gizmo-edited entity vanished from the refreshed snapshot")?;
             let tx_got = read_first_scalar(
@@ -569,7 +574,7 @@ mod imp {
             // actually changed on the live engine — the whole reflection-driven edit loop, proven.
             let (entity, component) = find_editable(&schema, &snapshot)
                 .ok_or("snapshot has no schema-describable component with an editable field")?;
-            let key = (entity.index, entity.generation);
+            let key = entity.editor_id;
             let hash = component.type_hash;
 
             let mut value =
@@ -577,8 +582,7 @@ mod imp {
             let before = read_first_scalar(&value).ok_or("component has no scalar field")?;
             let after = bump_first_scalar(&mut value).ok_or("component has no scalar to edit")?;
             let edit = SetComponent {
-                index: key.0,
-                generation: key.1,
+                editor_id: key,
                 type_hash: hash,
                 blob: encode_value(&value),
             };
@@ -592,7 +596,7 @@ mod imp {
             let comp2 = snap2
                 .entities
                 .iter()
-                .find(|e| (e.index, e.generation) == key)
+                .find(|e| e.editor_id == key)
                 .and_then(|e| e.components.iter().find(|c| c.type_hash == hash))
                 .ok_or("edited component vanished from the refreshed snapshot")?;
             let got = read_first_scalar(
@@ -671,7 +675,12 @@ mod imp {
                 }
                 conn.send_editor(
                     EditorMessage::SpawnEntity,
-                    &SpawnEntity { components }.encode(),
+                    &SpawnEntity {
+                        editor_id: 0, // a fresh id: the engine assigns it (ADR-0075)
+                        exact: false,
+                        components,
+                    }
+                    .encode(),
                 )
                 .map_err(|e| format!("send place: {e}"))?;
             }

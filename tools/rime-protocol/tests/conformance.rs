@@ -12,11 +12,11 @@ use std::path::PathBuf;
 use std::thread;
 
 use rime_protocol::{
-    decode_value, encode_value, AssetKind, AssetList, Codec, ComponentRef, Connection,
-    EditorMessage, FieldKind, FrameMessage, GizmoAxis, GizmoMode, GizmoState, InputEvent,
-    InputKind, MessageType, PickRequest, PickResult, PixelFormat, PlayPhase, PlayState, SaveResult,
-    SaveScene, Schema, SetComponent, Snapshot, SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC,
-    PROTOCOL_VERSION,
+    decode_entity_ref, decode_value, encode_entity_ref, encode_value, AssetKind, AssetList, Codec,
+    ComponentRef, Connection, EditResult, EditorMessage, FieldKind, FrameMessage, GizmoAxis,
+    GizmoMode, GizmoState, InputEvent, InputKind, MessageType, PickRequest, PickResult,
+    PixelFormat, PlayPhase, PlayState, SaveResult, SaveScene, Schema, SetComponent, Snapshot,
+    SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -211,10 +211,30 @@ fn snapshot_components_decode_to_typed_values_and_re_encode_exact() {
 fn component_ref_decodes_and_re_encodes_byte_exact() {
     let golden = fixture("component_ref.bin");
     let cr = ComponentRef::decode(&golden).expect("decode component ref");
-    assert_eq!(cr.index, 3);
-    assert_eq!(cr.generation, 1);
+    assert_eq!(cr.editor_id, 3);
     assert!(cr.type_hash != 0); // the Camera hash
     assert_eq!(cr.encode(), golden);
+}
+
+#[test]
+fn entity_ref_carries_the_whole_u64_id() {
+    // Spawn and Despawn share `[editor_id:u64]`. The C++ fixture uses an id above 2^32, so a
+    // decoder that read only the low word would fail here rather than in a long session.
+    let golden = fixture("entity_ref.bin");
+    assert_eq!(
+        decode_entity_ref(&golden).expect("decode"),
+        0x0000_0005_0000_0009
+    );
+    assert_eq!(encode_entity_ref(0x0000_0005_0000_0009), golden);
+}
+
+#[test]
+fn edit_result_decodes_and_re_encodes_byte_exact() {
+    let golden = fixture("edit_result.bin");
+    let r = EditResult::decode(&golden).expect("decode edit result");
+    assert!(r.ok);
+    assert_eq!(r.editor_id, 42);
+    assert_eq!(r.encode(), golden);
 }
 
 #[test]
@@ -237,6 +257,9 @@ fn asset_list_decodes_and_re_encodes_byte_exact() {
 fn spawn_entity_decodes_and_re_encodes_byte_exact() {
     let golden = fixture("spawn_entity.bin");
     let se = SpawnEntity::decode(&golden).expect("decode spawn-entity");
+    // The shape an undone despawn sends: an exact restore under the entity's old id (ADR-0075).
+    assert_eq!(se.editor_id, 6);
+    assert!(se.exact);
     assert_eq!(se.components.len(), 1);
     assert!(se.components[0].0 != 0); // the Camera type_hash
     assert!(!se.components[0].1.is_empty()); // the reflected Camera bytes the browser placed
@@ -305,13 +328,12 @@ fn viewport_camera_decodes_and_re_encodes_byte_exact() {
 fn gizmo_state_decodes_and_re_encodes_byte_exact() {
     let golden = fixture("gizmo_state.bin");
     let gs = GizmoState::decode(&golden).expect("decode gizmo state");
-    assert_eq!(gs.index, 7);
-    assert_eq!(gs.generation, 2);
+    assert_eq!(gs.editor_id, 7);
     assert_eq!(gs.mode, GizmoMode::Translate);
     assert_eq!(gs.axis, GizmoAxis::Z);
     assert_eq!(gs.encode(), golden);
-    // The hidden sentinel mirrors PickResult::none() — index u32::MAX.
-    assert_eq!(GizmoState::none().index, u32::MAX);
+    // The hidden sentinel is "no EditorId" (ADR-0075: ids start at 1).
+    assert_eq!(GizmoState::none().editor_id, 0);
     assert_eq!(GizmoState::none().mode, GizmoMode::None);
 }
 
@@ -334,6 +356,10 @@ fn snapshot_decodes_structure_and_re_encodes_byte_exact() {
     let golden = fixture("snapshot.bin");
     let snap = Snapshot::decode(&golden).expect("decode snapshot");
     assert_eq!(snap.entities.len(), 2);
+    // Each entity carries the EditorId the host stamped on it (ADR-0075), in spawn order — and the
+    // EditorId component itself is NOT repeated in the component list.
+    let ids: Vec<u64> = snap.entities.iter().map(|e| e.editor_id).collect();
+    assert_eq!(ids, [1, 2]);
     // The mesh entity carries two components (MeshRef + Parent) — nested per-component blobs decode.
     assert!(snap.entities.iter().any(|e| e.components.len() == 2));
     assert!(snap
@@ -347,8 +373,7 @@ fn snapshot_decodes_structure_and_re_encodes_byte_exact() {
 fn set_component_decodes_and_re_encodes_byte_exact() {
     let golden = fixture("set_component.bin");
     let sc = SetComponent::decode(&golden).expect("decode set-component");
-    assert_eq!(sc.index, 3);
-    assert_eq!(sc.generation, 1);
+    assert_eq!(sc.editor_id, 3);
     assert!(sc.type_hash != 0);
     assert!(!sc.blob.is_empty()); // the reflected Camera bytes
     assert_eq!(sc.encode(), golden);
@@ -371,6 +396,11 @@ fn message_type_and_editor_codes_are_stable() {
     assert_eq!(EditorMessage::Pause.to_code(), 0x021A);
     assert_eq!(EditorMessage::Step.to_code(), 0x021B);
     assert_eq!(EditorMessage::Stop.to_code(), 0x021C);
+    assert_eq!(EditorMessage::EditResult.to_code(), 0x0208);
+    assert_eq!(
+        EditorMessage::from_code(0x0208),
+        Some(EditorMessage::EditResult)
+    );
     assert_eq!(
         EditorMessage::from_code(0x0200),
         Some(EditorMessage::Schema)
@@ -405,7 +435,7 @@ fn connection_handshakes_and_exchanges_a_message() {
             MessageType::Other(EditorMessage::SetComponent.to_code())
         );
         let sc = SetComponent::decode(&payload).expect("decode edit");
-        assert_eq!(sc.index, 9);
+        assert_eq!(sc.editor_id, 9);
         conn.send_bye().expect("send bye");
     });
 
@@ -416,8 +446,7 @@ fn connection_handshakes_and_exchanges_a_message() {
     assert_eq!(ty, MessageType::Other(EditorMessage::Schema.to_code()));
     assert!(Schema::decode(&payload).is_ok());
     let edit = SetComponent {
-        index: 9,
-        generation: 1,
+        editor_id: 9,
         type_hash: 0xABCD,
         blob: vec![1, 2, 3],
     };
