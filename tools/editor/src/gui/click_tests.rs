@@ -988,36 +988,32 @@ fn file_menu_has_no_new_or_open() {
 // ── View ────────────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn view_is_a_dead_label() {
-    // DOCUMENTS A STUB: `View` sits in the menu bar between two real menus and is a plain text
-    // label — not a button, no popup. A closed panel cannot be reopened from here (or anywhere).
-    let rig = Rig::new();
-    assert_eq!(rig.harness.get_by_label("View").role(), Role::Label);
-    assert!(!rig.button_labels().iter().any(|b| b == "View"));
-    // Its neighbours, for contrast, are real menus.
-    assert_eq!(rig.harness.get_by_label("File").role(), Role::Button);
-    assert!(rig.button_labels().iter().any(|b| b == "Edit"));
+fn view_menu_lists_every_panel_with_its_state() {
+    // The View menu is a real menu with one checkmark per dock panel, all ticked at the default
+    // layout.
+    let mut rig = Rig::new();
+    assert_eq!(rig.harness.get_by_label("View").role(), Role::Button);
+    rig.click("View");
+    for tab in Tab::ALL {
+        assert!(
+            rig.toggled(tab.label()),
+            "{} starts open, so it is ticked",
+            tab.label()
+        );
+    }
+    rig.key(egui::Key::Escape);
 }
 
-// ── Docking ─────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn a_closed_panel_cannot_be_reopened() {
-    // DOCUMENTS A DEFECT: egui_dock's defaults are all on — every tab is closeable (a ✕ on the
-    // tab, or a middle-click on its title, which is what this test sends) — and nothing in the
-    // editor can bring a closed panel back: `View` is the dead label above and the layout is
-    // neither persisted nor resettable. The only recovery is restarting the editor, which loses
-    // unsaved work because nothing prompts. One stray middle-click on "Viewport" ends the session.
-    //
-    // Tab titles are not in the accessibility tree either, so this finds the title the blunt way:
-    // middle-click along the Assets panel's tab bar until the tab is gone.
-    let mut rig = Rig::new();
-    let has_assets_tab =
-        |rig: &Rig| {
-            rig.app().dock.main_surface().iter().any(
-                |n| matches!(n, egui_dock::Node::Leaf { tabs, .. } if tabs.contains(&Tab::Assets)),
-            )
-        };
+/// Middle-click a panel's tab until the panel is gone — the way a person closes one. Tab titles are
+/// not in the accessibility tree, so this finds the title the blunt way: along the tab bar.
+fn close_panel(rig: &mut Rig, tab: Tab) {
+    let has_tab = |rig: &Rig| {
+        rig.app()
+            .dock
+            .main_surface()
+            .iter()
+            .any(|n| matches!(n, egui_dock::Node::Leaf { tabs, .. } if tabs.contains(&tab)))
+    };
     let bar = rig
         .app()
         .dock
@@ -1029,16 +1025,16 @@ fn a_closed_panel_cannot_be_reopened() {
                 rect,
                 viewport,
                 ..
-            } if tabs.contains(&Tab::Assets) => Some(egui::Rect::from_min_max(
+            } if tabs.contains(&tab) => Some(egui::Rect::from_min_max(
                 rect.min,
                 egui::pos2(rect.right(), viewport.top()),
             )),
             _ => None,
         })
-        .expect("the layout has an Assets panel");
-    assert!(has_assets_tab(&rig));
+        .expect("the layout has the panel");
+    assert!(has_tab(rig));
     let mut x = bar.left() + 2.0;
-    while has_assets_tab(&rig) && x < bar.right() {
+    while has_tab(rig) && x < bar.right() {
         let pos = egui::pos2(x, bar.center().y);
         for event in [
             egui::Event::PointerMoved(pos),
@@ -1060,11 +1056,57 @@ fn a_closed_panel_cannot_be_reopened() {
         }
         x += 3.0;
     }
-    assert!(!has_assets_tab(&rig), "a middle-click on the tab closed it");
+    assert!(!has_tab(rig), "a middle-click on the tab closed it");
     rig.settle();
-    // The browser is gone from the screen, and no control anywhere offers it back.
-    assert!(!rig.has("meshes/crate.gltf"));
-    assert!(!rig.button_labels().iter().any(|b| b.contains("Assets")));
+}
+
+/// The screen rect of the leaf holding an open panel, from the dock's own layout.
+fn panel_rect(rig: &Rig, tab: Tab) -> egui::Rect {
+    rig.app()
+        .dock
+        .main_surface()
+        .iter()
+        .find_map(|node| match node {
+            egui_dock::Node::Leaf { tabs, viewport, .. } if tabs.contains(&tab) => Some(*viewport),
+            _ => None,
+        })
+        .expect("the panel is open")
+}
+
+// ── Docking ─────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_closed_panel_reopens_from_the_view_menu() {
+    // A closed panel comes back from View, in the place the default layout gives it: the assets
+    // browser sits below the outliner, on the left. Its checkmark follows the panel.
+    let mut rig = Rig::new();
+    close_panel(&mut rig, Tab::Assets);
+    rig.click("View");
+    assert!(!rig.toggled("Assets"), "closed, so unticked");
+    rig.harness
+        .get_by_role_and_label(Role::CheckBox, "Assets")
+        .click();
+    rig.settle();
+
+    let assets = panel_rect(&rig, Tab::Assets);
+    let outliner = panel_rect(&rig, Tab::Outliner);
+    assert_eq!(assets.left(), outliner.left(), "down the outliner's column");
+    assert!(assets.top() > outliner.top(), "below the outliner");
+    rig.click("View");
+    assert!(rig.toggled("Assets"), "open again, so ticked");
+    rig.key(egui::Key::Escape);
+}
+
+#[test]
+fn an_open_panel_is_not_closed_by_its_menu_item() {
+    // Clicking the checkmark of an open panel changes nothing: closing is a tab gesture.
+    let mut rig = Rig::new();
+    rig.click("View");
+    rig.harness
+        .get_by_role_and_label(Role::CheckBox, "Inspector")
+        .click();
+    rig.settle();
+    assert!(rig.app().dock.find_tab(&Tab::Inspector).is_some());
 }
 
 // ── Outliner ────────────────────────────────────────────────────────────────────────────────
