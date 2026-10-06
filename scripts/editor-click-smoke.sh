@@ -5,7 +5,8 @@
 # Rime — the editor CLICK smoke: the real `editor` binary and the real `rime-engine`, driven with a
 # mouse and a keyboard, on a display nobody is looking at.
 #
-#   launch → place a mesh → select it → edit a field → undo → redo → Play → Stop → Save As → quit
+#   launch → place a mesh → select it → edit a field → undo → redo → Play → Stop → undo → redo
+#   → Save As → quit
 #
 # and then the only assertion that matters: THE FILE ON DISK says what the clicks did.
 #
@@ -338,19 +339,17 @@ click "$stop_x" "$menu_y"
 wait_for 10 "the viewport border to clear (back to Edit)" not_playing
 note "ok  stopped (border cleared)"
 
-# A SECOND PINNED KNOWN DEFECT, same cause as the Parent one asserted at the end: Stop re-creates
-# every entity under a new handle, and the undo history still names the old ones. Undo stays
-# enabled, is consumed, and changes nothing — one Play/Stop silently kills the whole history.
-# Pinned the same way: exactly this behaviour passes; if undo starts working again, remove the pin.
+# The history survives Play→Stop (ADR-0075). It used to name entities by handle, and Stop used to
+# re-create every entity under a new one, so one Play silently killed the whole history: undo stayed
+# enabled, was consumed, and changed nothing. Entities are named by EditorId now and Stop keeps
+# them, so the edit made BEFORE Play undoes after it — and redoes, which puts the world back
+# exactly as it was saved before Play, for the byte comparison at the end.
 key ctrl+z
 checkpoint
-case "$(translation_of "$opened" "$placed")" in
-    "translation { x 5 y 0 z 0 }")
-        note "KNOWN DEFECT (pinned): undo after Play→Stop did nothing (history names dead handles)" ;;
-    "translation { x 0 y 0 z 0 }")
-        fail "undo works again after Play/Stop — the known-defect pin is stale: remove it" ;;
-    *)  fail "undo after Play/Stop did something unexpected: $(translation_of "$opened" "$placed")" ;;
-esac
+expect "undo after Play/Stop" "$(translation_of "$opened" "$placed")" "translation { x 0 y 0 z 0 }"
+key ctrl+y
+checkpoint
+expect "redo after Play/Stop" "$(translation_of "$opened" "$placed")" "translation { x 5 y 0 z 0 }"
 
 # ── Save As ─────────────────────────────────────────────────────────────────────────────────────
 say "File ▸ Save As"
@@ -387,25 +386,20 @@ note "ok  the placed mesh is in the file, by content id"
 expect "the redone edit is in the file" \
     "$(translation_of "$saved_as" "$placed")" "translation { x 5 y 0 z 0 }"
 
-# Play → Stop must hand back the world that was there before Play (README: "Stop restores it
-# bit-exactly"), so this save must equal the checkpoint taken before Play.
-#
-# IT DOES NOT, and this is a pinned KNOWN DEFECT rather than a tolerance: the restore re-creates
-# every entity under a new handle and does not remap handles stored INSIDE components, so
-# `ecs::Parent` comes back dangling and is written as `null`. Playing once and saving silently
-# deletes the scene's hierarchy. The pin accepts exactly that difference and nothing else — any
-# other change fails here, and so does the day the defect is fixed (then delete the pin and keep
-# the `cmp`).
-restore_diff="$(diff "$work/before-play.rscene" "$saved_as" || true)"
-known_defect="$(printf '%s\n' '61c61' '<     value @2' '---' '>     value null')"
-if [ -z "$restore_diff" ]; then
-    fail "Play/Stop now restores the scene exactly — the known-defect pin is stale: remove it"
-elif [ "$restore_diff" = "$known_defect" ]; then
-    note "KNOWN DEFECT (pinned): Play→Stop lost a Parent reference (value @2 → null)"
-else
-    printf '%s\n' "$restore_diff" >&2
-    fail "Play/Stop changed the scene in a way the known-defect pin does not cover"
+# Play → Stop must hand back the world that was there before Play (tools/editor/README.md), and
+# after the undo/redo round trip above the world is back to that checkpoint — so this save must be
+# BYTE-IDENTICAL to the one taken before Play. Until ADR-0075 it was not: Stop re-created every
+# entity under a new handle without remapping the handles stored inside components, so
+# `ecs::Parent` came back dangling and was written as `null` — playing once and saving silently
+# deleted the scene's hierarchy. The diff is printed on failure, because "differs" alone sends a
+# reader hunting.
+grep -q 'value @' "$work/before-play.rscene" \
+    || fail "the scene has no entity reference, so this check would prove nothing about the remap"
+if ! cmp -s "$work/before-play.rscene" "$saved_as"; then
+    diff "$work/before-play.rscene" "$saved_as" >&2 || true
+    fail "Play/Stop did not restore the scene byte for byte"
 fi
+note "ok  Play→Stop restored the scene byte for byte, Parent references included"
 
 # And the file is a scene the engine can open again: reload it through the headless client.
 reload="$("$editor_bin" --smoke --engine "$engine_bin" --scene "$saved_as" 2>&1)" \

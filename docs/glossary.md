@@ -914,6 +914,13 @@ See also **Determinism / replication** under *Physics & destruction*.
 - **Scene-local id.** The ordinal (`0..N-1`) a `.rscene` gives each saved entity so a
   reference between entities (a `Parent`) is stored position-independently and remapped to a
   fresh runtime handle on load — never a volatile raw entity handle.
+- **EditorId.** The editor's stable name for an entity (ADR-0075): a u64 the engine's editor host
+  stamps on every entity the editor can see — on scene load in file order, on spawn, on place —
+  from a counter that never goes backwards, so an id is never reused, not even after a despawn. An
+  `ecs::Entity` handle dies with its entity (the generation bump that makes stale handles
+  detectable); an EditorId does not, which is what lets the undo history, the selection and every
+  entity reference on the editor wire survive a despawn being undone or a Play→Stop that recreated
+  the entity under a new handle. A session identity: never written to a `.rscene`.
 - **Editor-as-client / editor host.** Rime's editor is not the engine — it is a separate (Rust)
   process that launches the engine as a child (`rime-engine --editor-host`) and drives it over a
   versioned socket, so an editor crash can't take the engine's world with it and the editor never
