@@ -35,6 +35,7 @@ std::vector<ecs::Entity> entities_in_editor_order(const ecs::World& world) {
         std::size_t position;
         ecs::Entity e;
     };
+
     std::vector<Row> rows;
     rows.reserve(world.entity_count());
     for (std::size_t ai = 0; ai < world.archetype_count(); ++ai) {
@@ -102,7 +103,8 @@ std::uint64_t EditorIds::assign(ecs::World& world, ecs::Entity e) {
 bool EditorIds::can_adopt(ecs::World& world, std::uint64_t id) {
     if (id == kNoEditorId || id == kDanglingEditorId || id >= next_) {
         ++counters_.refused_adoptions;
-        RIME_ERROR("editorhost: refusing to respawn under id {} — this session never issued it", id);
+        RIME_ERROR("editorhost: refusing to respawn under id {} — this session never issued it",
+                   id);
         return false;
     }
     if (resolve(world, id) != ecs::kNullEntity) {

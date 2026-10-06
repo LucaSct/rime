@@ -160,14 +160,17 @@ const ParsedType* find_type(const std::vector<ParsedType>& types, std::uint64_t 
     }
     return nullptr;
 }
+
 // The browser's "place": a SpawnEntity under no id, through the dispatcher both hosts share.
 editorhost::EditOutcome
 place(ecs::World& world, std::vector<std::pair<std::uint64_t, std::vector<std::byte>>> components) {
     editorhost::EditorIds ids;
     editorhost::SpawnEntityMsg msg;
     msg.components = std::move(components);
-    return editorhost::apply_editor_edit(
-        world, ids, editorhost::EditorMessage::SpawnEntity, editorhost::serialize_spawn_entity(msg));
+    return editorhost::apply_editor_edit(world,
+                                         ids,
+                                         editorhost::EditorMessage::SpawnEntity,
+                                         editorhost::serialize_spawn_entity(msg));
 }
 } // namespace
 
@@ -509,7 +512,7 @@ TEST_CASE("editorhost: add/remove component and request-snapshot over the local 
     }
     client.join();
 
-    CHECK(out.add_acked);                  // each structural edit was answered, ok, by id
+    CHECK(out.add_acked); // each structural edit was answered, ok, by id
     CHECK(out.remove_acked);
     CHECK(out.velocity_after_add);         // AddComponent added it; RequestSnapshot showed it
     CHECK(out.velocity_gone_after_remove); // RemoveComponent took it away
@@ -652,9 +655,10 @@ TEST_CASE("editorhost: a placed entity gets a transform even when the payload ha
     (void)world.register_component<ecs::LocalTransform>();
     (void)world.register_component<et::AssetRef>();
 
-    REQUIRE(place(world,
-                  {{core::reflect<et::AssetRef>().type_hash, core::serialize(et::AssetRef{0x1234ULL})}})
-                .ok);
+    REQUIRE(
+        place(world,
+              {{core::reflect<et::AssetRef>().type_hash, core::serialize(et::AssetRef{0x1234ULL})}})
+            .ok);
     REQUIRE(world.entity_count() == 1);
 
     int placed = 0;
@@ -697,9 +701,10 @@ TEST_CASE("editorhost: a host that never registered a transform still places, it
     ecs::World world;
     (void)world.register_component<et::AssetRef>();
 
-    REQUIRE(place(world,
-                  {{core::reflect<et::AssetRef>().type_hash, core::serialize(et::AssetRef{0x99ULL})}})
-                .ok);
+    REQUIRE(
+        place(world,
+              {{core::reflect<et::AssetRef>().type_hash, core::serialize(et::AssetRef{0x99ULL})}})
+            .ok);
     CHECK(world.entity_count() == 1);
     CHECK_FALSE(world.is_registered<ecs::LocalTransform>());
 }

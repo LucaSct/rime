@@ -503,8 +503,8 @@ std::string save_scene_to_string(const ecs::World& world,
 
     // Pass 1: fix the order the entities are written in, numbering each 0..N-1 and mapping its
     // handle to that local id — so an entity-reference field can be written as a local id in pass
-    // 2. The caller's `order` comes first (the editor host passes its identity order, ADR-0075, so a
-    // file's entity numbering does not depend on which archetype an entity happens to live in);
+    // 2. The caller's `order` comes first (the editor host passes its identity order, ADR-0075, so
+    // a file's entity numbering does not depend on which archetype an entity happens to live in);
     // every live entity it did not name follows in archetype/chunk/row order, which is also the
     // whole order when none is given. A dead or repeated entry is skipped, never written twice.
     std::vector<ecs::Entity> rows;

@@ -136,6 +136,7 @@ struct SetComponentMsg {
     std::uint64_t type_hash = 0;
     std::vector<std::byte> blob;
 };
+
 [[nodiscard]] std::vector<std::byte> serialize_set_component(const SetComponentMsg& msg);
 [[nodiscard]] bool parse_set_component(std::span<const std::byte> payload, SetComponentMsg& out);
 
@@ -144,6 +145,7 @@ struct ComponentRefMsg {
     std::uint64_t editor_id = kNoEditorId;
     std::uint64_t type_hash = 0;
 };
+
 [[nodiscard]] std::vector<std::byte> serialize_component_ref(const ComponentRefMsg& msg);
 [[nodiscard]] bool parse_component_ref(std::span<const std::byte> payload, ComponentRefMsg& out);
 
@@ -161,6 +163,7 @@ struct SpawnEntityMsg {
     bool exact = false;
     std::vector<std::pair<std::uint64_t, std::vector<std::byte>>> components;
 };
+
 [[nodiscard]] std::vector<std::byte> serialize_spawn_entity(const SpawnEntityMsg& msg);
 [[nodiscard]] bool parse_spawn_entity(std::span<const std::byte> payload, SpawnEntityMsg& out);
 
@@ -172,6 +175,7 @@ struct EditResultMsg {
     bool ok = false;
     std::uint64_t editor_id = kNoEditorId;
 };
+
 [[nodiscard]] std::vector<std::byte> serialize_edit_result(const EditResultMsg& msg);
 [[nodiscard]] bool parse_edit_result(std::span<const std::byte> payload, EditResultMsg& out);
 
@@ -190,7 +194,9 @@ RIME_REFLECT_END()
 namespace rime::editorhost {
 
 template <class F>
-bool rewrite_blob_entity_refs(const ecs::ComponentInfo& info, std::vector<std::byte>& blob, F&& fn) {
+bool rewrite_blob_entity_refs(const ecs::ComponentInfo& info,
+                              std::vector<std::byte>& blob,
+                              F&& fn) {
     if (info.type_info == nullptr || !ecs::has_entity_refs(*info.type_info)) {
         return true;
     }
@@ -199,9 +205,8 @@ bool rewrite_blob_entity_refs(const ecs::ComponentInfo& info, std::vector<std::b
     if (info.alignment > alignof(std::max_align_t)) {
         return false;
     }
-    std::vector<std::max_align_t> storage((info.size + sizeof(std::max_align_t) - 1) /
-                                              sizeof(std::max_align_t) +
-                                          1);
+    std::vector<std::max_align_t> storage(
+        (info.size + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t) + 1);
     void* object = storage.data();
     info.ops.default_construct(object);
     bool ok = core::deserialize(*info.type_info, object, blob) &&

@@ -239,12 +239,12 @@ struct GizmoStateMsg {
 // Edit -> Playing/Paused -> Edit, driven by the Play/Pause/Step/Stop editor messages. `PlaySession`
 // (below) owns only a phase, an in-memory BASELINE of the pre-play world (each entity's handle,
 // component set and reflected component bytes — m9.2's reflection machinery, to MEMORY not disk),
-// and a tick counter, so it is provable in isolation (tests/editorhost). It is deliberately silent on HOW a tick is
-// produced: the caller (editor_host_main.cpp's serve_viewport) decides, each loop iteration,
-// whether to advance the sim — phase() == Playing, or a one-shot armed Step — and reports back
-// afterward via record_tick(), which keeps this class free of an rime::app or rime::physics
-// dependency (module boundaries) while remaining the single source of truth the PlayState status
-// message reports from.
+// and a tick counter, so it is provable in isolation (tests/editorhost). It is deliberately silent
+// on HOW a tick is produced: the caller (editor_host_main.cpp's serve_viewport) decides, each loop
+// iteration, whether to advance the sim — phase() == Playing, or a one-shot armed Step — and
+// reports back afterward via record_tick(), which keeps this class free of an rime::app or
+// rime::physics dependency (module boundaries) while remaining the single source of truth the
+// PlayState status message reports from.
 //
 // THE ENGINEERING RISK this brick exists to resolve (ADR-0031 §4): engine SIDE-TABLES — physics
 // bodies, the M8 destruction SoA — must be "reconstructible from components" on restore.
@@ -339,11 +339,11 @@ struct SceneSaveOutcome {
 // What one Stop did — counted, so a test can tell "restored exactly" from "restored, and also
 // quietly did something else".
 struct StopReport {
-    std::size_t survivors = 0;        // baseline entities still alive: same handle, values restored
+    std::size_t survivors = 0; // baseline entities still alive: same handle, values restored
     std::size_t removed_newcomers = 0; // entities that did not exist before play: despawned
-    std::size_t respawned = 0;        // baseline entities play destroyed: new handle, old EditorId
-    std::size_t refs_remapped = 0;    // Entity fields rewritten to a respawned entity's new handle
-    std::size_t refs_unresolved = 0;  // non-null references to nothing in the baseline: kept, logged
+    std::size_t respawned = 0;         // baseline entities play destroyed: new handle, old EditorId
+    std::size_t refs_remapped = 0;     // Entity fields rewritten to a respawned entity's new handle
+    std::size_t refs_unresolved = 0; // non-null references to nothing in the baseline: kept, logged
 };
 
 class PlaySession {
@@ -367,12 +367,13 @@ public:
     //   * a baseline entity play despawned is respawned under a FRESH handle and gets its old
     //     components back — EditorId included, so the editor's name for it is unchanged.
     // Generations are never rewound and no old handle is forced back into existence: a handle that
-    // died during play stays dead. Every missing entity is allocated BEFORE any component is filled,
-    // and every Entity field is then rewritten through old handle → EditorId → new handle, so a
-    // reference to a respawned entity (forward, backward, or to itself) lands on its new handle.
-    // Unreflected components play cannot have authored come back value-initialized (WorldTransform
-    // is then re-derived by the caller, with physics, as before). Returns to Edit and clears the
-    // baseline and tick counter. No-op returning false if already Edit — nothing to restore.
+    // died during play stays dead. Every missing entity is allocated BEFORE any component is
+    // filled, and every Entity field is then rewritten through old handle → EditorId → new handle,
+    // so a reference to a respawned entity (forward, backward, or to itself) lands on its new
+    // handle. Unreflected components play cannot have authored come back value-initialized
+    // (WorldTransform is then re-derived by the caller, with physics, as before). Returns to Edit
+    // and clears the baseline and tick counter. No-op returning false if already Edit — nothing to
+    // restore.
     bool stop(ecs::World& world);
 
     // The caller's single source-of-truth call: exactly once per fixed tick it actually ran (a
@@ -389,7 +390,7 @@ public:
 private:
     struct BaselineEntity {
         ecs::Entity handle;
-        std::uint64_t editor_id = kNoEditorId; // its identity, if the editor host gave it one
+        std::uint64_t editor_id = kNoEditorId;   // its identity, if the editor host gave it one
         std::vector<ecs::ComponentId> signature; // EVERY component, reflected or not
         std::vector<std::pair<ecs::ComponentId, std::vector<std::byte>>> values; // reflected ones
     };

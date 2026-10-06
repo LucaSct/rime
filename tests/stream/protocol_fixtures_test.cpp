@@ -129,7 +129,8 @@ std::vector<std::byte> schema_bytes() {
 }
 
 // The snapshot the EDITOR receives (RSN2, ADR-0075): each entity carries its EditorId after its
-// handle — here 1 and 2, assigned in spawn order — and EditorId itself is not listed as a component.
+// handle — here 1 and 2, assigned in spawn order — and EditorId itself is not listed as a
+// component.
 std::vector<std::byte> snapshot_bytes() {
     ecs::World w;
     build_world(w);
@@ -176,7 +177,8 @@ std::vector<std::byte> asset_list_bytes() {
 
 // A SpawnEntity payload (editor -> engine): [editor_id:u64][exact:u8][comp_count:u16] then per
 // component [hash:u64][blob_len:u32][blob]. An exact restore under id 6 with one Camera component —
-// the shape an undone despawn sends (ADR-0075); the browser's "place" is the same with id 0, exact 0.
+// the shape an undone despawn sends (ADR-0075); the browser's "place" is the same with id 0, exact
+// 0.
 std::vector<std::byte> spawn_entity_bytes() {
     editorhost::SpawnEntityMsg m;
     m.editor_id = 6;

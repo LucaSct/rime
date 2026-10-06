@@ -237,7 +237,7 @@ TEST_CASE("E1 (2): a Parent survives Stop — through a respawned parent, forwar
         REQUIRE(child2 != ecs::kNullEntity);
         REQUIRE(parent2 != ecs::kNullEntity);
         REQUIRE(turret2 != ecs::kNullEntity);
-        CHECK(parent_of(w, child2) == parent2); // the forward reference
+        CHECK(parent_of(w, child2) == parent2);                 // the forward reference
         CHECK(w.get<eid::Aim>(turret2)->target.who == turret2); // the self-reference, nested
         CHECK(w.get<eid::Aim>(turret2)->target.weight == 0.5f);
         CHECK(session.last_stop().refs_remapped == 2);
@@ -256,8 +256,7 @@ TEST_CASE("E1 (2): a Parent survives Stop — through a respawned parent, forwar
     {
         // What the editor would receive for the child's Parent: the parent's EditorId.
         std::vector<std::byte> blob = core::serialize(*w.get<ecs::Parent>(child_now));
-        const ecs::ComponentInfo& info =
-            w.components().info(w.components().id_of<ecs::Parent>());
+        const ecs::ComponentInfo& info = w.components().info(w.components().id_of<ecs::Parent>());
         REQUIRE(editorhost::rewrite_blob_entity_refs(info, blob, [&](ecs::Entity& ref) {
             ref = wire_ref(editorhost::editor_id_of(w, ref));
             return true;
@@ -393,8 +392,8 @@ TEST_CASE("E1 (4): a handle that died before or during play is still dead after 
 }
 
 TEST_CASE("E1: despawn nulls inbound references, and the editor's undo restores them exactly") {
-    // The despawn inverse the editor records (ADR-0075): an exact SpawnEntity under the old id, then
-    // a SetComponent per captured inbound reference — all by EditorId, all through the one
+    // The despawn inverse the editor records (ADR-0075): an exact SpawnEntity under the old id,
+    // then a SetComponent per captured inbound reference — all by EditorId, all through the one
     // dispatcher. Here the "editor" is the test.
     ecs::World w;
     register_all(w);
