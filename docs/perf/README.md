@@ -23,7 +23,9 @@ scripts/perf.sh --sample lit-rooms --frames 1200           # one sample, into a 
 ```
 
 `scripts/perf.sh` stamps `RIME_PERF_COMMIT` from git, defaults to the Release build, and names each
-report `<date>-<sample>-<gpu-slug>-<sha>.json` so two machines' histories coexist here without colliding, and so a before/after pair measured on the same day can both be filed (reports committed under the old SHA-less name remain valid baselines).
+report `<date>-<sample>-<gpu-slug>-<sha>.json`. The slug keeps two machines' histories from
+colliding; the SHA keeps two runs on one day from colliding, so a before/after pair measured in one
+sitting can both be filed. Reports committed under the older SHA-less name remain valid baselines.
 A dirty tree is recorded as `<sha>-dirty` rather than attributed to a commit it does not match.
 
 ### Pin the GPU clocks first — `perf.sh` will refuse otherwise

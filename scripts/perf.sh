@@ -105,9 +105,10 @@ Usage: scripts/perf.sh [options]
                           or build, exits non-zero on the first failed case
   -h, --help              show this help
 
-Reports are named <date>-<sample>-<gpu-slug>-<sha>.json, so a second machine's numbers never
-overwrite the first's and a same-day before/after pair can both be filed (SHA-less names from before
-that still count as baselines), and `git log docs/perf/` reads as the performance history of the engine.
+Reports are named <date>-<sample>-<gpu-slug>-<sha>.json. The slug stops a second machine's numbers
+overwriting the first's; the SHA stops a second run on the same day overwriting the first, so a
+before/after pair can both be filed. Older SHA-less names still count as baselines, and
+`git log docs/perf/` reads as the performance history of the engine.
 EOF
 }
 
