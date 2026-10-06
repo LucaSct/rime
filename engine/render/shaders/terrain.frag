@@ -6,7 +6,9 @@
 // let a tile blend up to four base colours by a cooked weight map; m19.5 (ADR-0064) shades with the
 // SAME Cook-Torrance GGX BRDF as pbr_forward.frag (brdf.glsl) and blends metallic and roughness
 // alongside the colour, so terrain can look like metal. A tile without a splat map takes the
-// flat-material path (`pc.surface.rgb`, `pc.material`).
+// flat-material path (`pc.surface.rgb`, `pc.material`). m19.6 (ADR-0065) replaces the flat ambient
+// with the SKY when the caller binds one: SH irradiance for the diffuse, and the sky-view LUT along
+// the mirror direction for the specular — the part that makes a metal look like a metal.
 //
 // ── THE NORMAL COMES FROM THE GEOMETRY, NOT FROM A SECOND HEIGHT READ ────────────────────────
 //
@@ -31,6 +33,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "brdf.glsl"
+#include "sky_mapping.glsl" // skyview_uv_from_direction — the same mapping the LUT was baked with
 
 layout(location = 0) in vec3 v_world;
 layout(location = 1) in vec2 v_local; // tile-local xz, metres
@@ -47,7 +50,34 @@ layout(set = 0, binding = 2) uniform Splat {
     vec4 roughness; // x..w = roughness of layer 0..3 (same repeat rule)
 } splat;
 
+// m19.6: the sky's lighting half (SkyLightBinding). ALWAYS bound — the pass binds its own 1x1 dummy
+// LUT and all-zero SH buffer when the caller has no sky — and gated by the SH buffer's own flag
+// (sky_sh_enabled()), the contract every sky consumer keeps: "off" is a shader branch, never the
+// absence of a resource, so the no-sky draw takes exactly m19.5's instructions.
+layout(set = 0, binding = 3) uniform sampler2D skyview_lut;
+#define SKY_SH_BINDING 4
+#include "sky_sh_eval.glsl"
+
 layout(location = 0) out vec4 out_color;
+
+// ── THE ENVIRONMENT BRDF, ANALYTICALLY ────────────────────────────────────────────────────────
+//
+// Lighting a surface by a whole environment means integrating the GGX lobe against it. The
+// "split-sum" approximation (Karis, "Real Shading in Unreal Engine 4", SIGGRAPH 2013) factors that
+// integral into (the environment averaged over the lobe) x (the BRDF integrated against a WHITE
+// environment). The second factor depends only on f0, roughness and n.v, and is linear in f0:
+// f0 * A + B. Unreal stores A and B in a 2-D lookup texture; Karis' mobile follow-up ("Physically
+// Based Shading on Mobile", 2014) fits them with the handful of terms below — "EnvBRDFApprox". It is
+// within a few percent of the LUT, and it costs no texture, no bake and no binding, which is why
+// terrain uses it rather than growing a second lookup table. `roughness` is PERCEPTUAL roughness.
+vec3 env_brdf_approx(vec3 f0, float roughness, float n_dot_v) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    const vec4 r = roughness * c0 + c1;
+    const float a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    const vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
 
 // Must match terrain.vert's block byte for byte (one block, both stages — see TerrainPush).
 layout(push_constant) uniform Pc {
@@ -122,13 +152,56 @@ void main() {
     vec3 radiance =
         shade_light(n, v, -pc.sun.xyz, vec3(pc.sun.w), base, metallic, alpha);
 
-    // AMBIENT is a uniform-environment STAND-IN until terrain reads the sky SH (deferred, ADR-0064).
-    // A uniform white environment of irradiance E reflects diffuse (1-metallic)*base*E and a
-    // specular term of about f0*E, with f0 = 0.04 for dielectrics and the base colour for metals.
-    // Why a flat-ambient metal still reads DARKER than a real one: a metal has no diffuse, so its
-    // only ambient light is this f0 term, and a real metal would also mirror the sky and horizon
-    // (bright, directional, coloured) — which needs the environment reflection this stand-in lacks.
     const vec3 f0 = mix(vec3(0.04), base, metallic);
-    radiance += pc.surface.w * ((1.0 - metallic) * base + f0);
+    if (sky_sh_enabled()) {
+        // ── THE SKY (m19.6, ADR-0065) ─────────────────────────────────────────────────────────
+        //
+        // DIFFUSE. sky_sh_irradiance() returns the radiance leaving a WHITE Lambertian surface
+        // facing n — irradiance already divided by pi (sky_sh_eval.glsl), the very units the flat
+        // `ambient` stood in for. So it replaces `ambient` one for one, weighted by the same
+        // (1 - metallic) * base, and gains no further 1/pi — pbr_forward_shadowed's
+        // `albedo * sky_ambient` makes the same call.
+        const vec3 sky_diffuse = sky_sh_irradiance(n);
+        radiance += (1.0 - metallic) * base * sky_diffuse;
+
+        // SPECULAR. What a mirror shows is the sky along r = reflect(-v, n), read from the LUT.
+        //
+        // BELOW THE HORIZON the LUT holds the PLANET's ground as seen from altitude, which is not
+        // what a terrain reflects: a downward ray from a slope meets more terrain (or whatever
+        // stands on it), and nothing here can trace that. Terrain mostly reflects the sky LOW, so
+        // the reflection is clamped to the horizon row (uv.y = 0.5 is elevation 0 in the square-
+        // root warp): azimuth kept, elevation floored. A grazing view of a slope therefore mirrors
+        // the horizon glow rather than a dark planet disc — brighter than the truth in a valley,
+        // which is the same known limit as the missing sky occlusion (ADR-0065).
+        const vec3 r = reflect(-v, n);
+        vec2 uv = skyview_uv_from_direction(r);
+        uv.y = max(uv.y, 0.5);
+        const vec3 sky_mirror = texture(skyview_lut, uv).rgb;
+
+        // ROUGHNESS. A rough lobe averages the sky over a wide cone; a real engine samples a
+        // prefiltered (pre-blurred) mip chain for that. The sky-view LUT has no mips, so it can
+        // only answer "the sky in exactly this direction". At the rough end, the lobe is about as
+        // wide as the cosine lobe the SH already integrates — and the SH, divided by pi (which
+        // sky_sh_irradiance already is), is the cosine-weighted AVERAGE radiance of the sky around
+        // n. So the environment fades from the LUT's point sample to the SH's average as
+        //     t = alpha = roughness^2,
+        // because the GGX lobe's angular width grows like alpha, not like perceptual roughness:
+        // roughness 0.1 is still 99% mirror, roughness 0.5 is a 25% blend, 1.0 is all SH. The SH
+        // is evaluated at n rather than r, since a fully rough lobe is centred near the normal.
+        // This is a stand-in for prefiltered radiance, not a prefilter: mid roughness shows a
+        // sharp-ish sky dimmed by a blurred one, rather than one properly blurred sky.
+        const vec3 sky_specular = mix(sky_mirror, sky_diffuse, alpha);
+        radiance += sky_specular * env_brdf_approx(f0, roughness, max(dot(n, v), 1e-4));
+    } else {
+        // AMBIENT is a uniform-environment STAND-IN when no sky is bound (m19.5, ADR-0064) —
+        // kept instruction for instruction, so a tile without a sky renders as m19.5 did (to one
+        // f16 ULP: a driver may contract this branch differently now the shader holds another;
+        // ADR-0065 §4). A uniform white environment of irradiance E reflects diffuse
+        // (1-metallic)*base*E and a specular term of about f0*E, with f0 = 0.04 for dielectrics
+        // and the base colour for metals. A flat-ambient metal reads DARKER than a real one: a
+        // metal has no diffuse, so its only ambient light is this f0 term, where a real metal
+        // mirrors the sky — the branch above.
+        radiance += pc.surface.w * ((1.0 - metallic) * base + f0);
+    }
     out_color = vec4(radiance, 1.0);
 }

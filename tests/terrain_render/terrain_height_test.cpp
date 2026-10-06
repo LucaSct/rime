@@ -51,12 +51,14 @@
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/physics.hpp"
+#include "rime/render/lighting/sky.hpp"
 #include "rime/render/passes.hpp"
 #include "rime/render/render_graph.hpp"
 #include "rime/render/terrain_pass.hpp"
 #include "rime/rhi/device.hpp"
 #include "terrain.vert.spv.h"
 #include "terrain_height_probe.frag.spv.h"
+#include "terrain_m195_reference.frag.spv.h"
 
 namespace {
 
@@ -1367,4 +1369,460 @@ TEST_CASE("m19.5: out-of-range or non-finite layer materials are refused and cou
     p[1].roughness = 0.0f;
     CHECK(pass.upload(good, p) != render::kInvalidTerrainTile);
     CHECK(pass.splat_refused() == expected);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// m19.6 — TERRAIN REFLECTS THE SKY (ADR-0065). Structural: one-f16-ULP agreement with a frozen
+// m19.5 shader, and strict inequalities between renders. The sky is the engine's real SkyPass bake
+// (sky-view LUT + SH projection), run in this binary on the same device — no synthetic fixture.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+namespace {
+
+// Clear the frame exactly as render_tile does, so every m19.6 render starts from the same bytes.
+void declare_clear(render::RenderGraph& graph, render::RGTexture hdr, render::RGTexture depth) {
+    const render::RGColorAttachment clears[] = {
+        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
+    const render::RGDepthAttachment dclear{
+        depth, rhi::LoadOp::Clear, rhi::StoreOp::Store, 1.0f, 0, false, 0};
+    render::RenderGraph::RasterPassDesc cd{};
+    cd.colors = clears;
+    cd.depth = &dclear;
+    graph.add_raster_pass("frame-clear", cd, [](rhi::CommandBuffer&) {});
+}
+
+// THE m19.5 PATH, rebuilt around the frozen reference shader: the engine's terrain.vert, the
+// frozen m19.5 terrain.frag, m19.5's three bindings, and the SAME tile resources and push block
+// the engine pass draws with (`pass.tile(id)`, `render::terrain_push`). The samplers mirror
+// TerrainPass's two. Anything this render shares with the live pass is shared on purpose; the one
+// thing that differs is the fragment stage, which is the thing under test.
+std::vector<std::uint8_t> render_m195_reference(rhi::Device& device,
+                                                const render::TerrainTile& tile,
+                                                const render::TerrainLight& light) {
+    rhi::ShaderDesc vsd{};
+    vsd.stage = rhi::ShaderStage::Vertex;
+    vsd.spirv = terrain_vert_spv;
+    vsd.spirv_size_bytes = sizeof(terrain_vert_spv);
+    vsd.debug_name = "terrain.vert";
+    const rhi::ShaderHandle vs = device.create_shader(vsd);
+    rhi::ShaderDesc fsd{};
+    fsd.stage = rhi::ShaderStage::Fragment;
+    fsd.spirv = terrain_m195_reference_frag_spv;
+    fsd.spirv_size_bytes = sizeof(terrain_m195_reference_frag_spv);
+    fsd.debug_name = "terrain_m195_reference.frag";
+    const rhi::ShaderHandle fs = device.create_shader(fsd);
+
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Vertex},
+        {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {2, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},
+    };
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vs;
+    pd.fragment_shader = fs;
+    pd.color_format = render::kHdrFormat;
+    pd.cull = rhi::CullMode::None;
+    pd.blend = rhi::BlendMode::None;
+    pd.depth_test = true;
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.depth_format = render::kDepthFormat;
+    pd.bindings = bindings;
+    pd.push_constant_size = sizeof(render::TerrainPush);
+    pd.debug_name = "terrain-m19.5-reference";
+    const rhi::PipelineHandle pipeline = device.create_graphics_pipeline(pd);
+
+    rhi::SamplerDesc hs{};
+    hs.mag_filter = rhi::Filter::Nearest;
+    hs.min_filter = rhi::Filter::Nearest;
+    hs.mip_filter = rhi::Filter::Nearest;
+    hs.address_mode = rhi::AddressMode::ClampToEdge;
+    hs.debug_name = "ref-heights";
+    const rhi::SamplerHandle height_sampler = device.create_sampler(hs);
+    rhi::SamplerDesc ws{};
+    ws.mag_filter = rhi::Filter::Linear;
+    ws.min_filter = rhi::Filter::Linear;
+    ws.mip_filter = rhi::Filter::Nearest;
+    ws.address_mode = rhi::AddressMode::ClampToEdge;
+    ws.debug_name = "ref-weights";
+    const rhi::SamplerHandle weight_sampler = device.create_sampler(ws);
+
+    const render::TerrainPush push =
+        render::terrain_push(tile, top_down_view_proj(), top_down_eye(), light);
+
+    render::RenderGraph graph(device);
+    graph.reset();
+    const render::RGTexture hdr =
+        graph.create_texture({{kSize, kSize}, render::kHdrFormat, "ref-hdr"});
+    const render::RGTexture depth =
+        graph.create_texture({{kSize, kSize}, render::kDepthFormat, "ref-depth"});
+    graph.export_texture(hdr);
+    declare_clear(graph, hdr, depth);
+    const render::RGColorAttachment colors[] = {{hdr, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
+    const render::RGDepthAttachment depth_att{
+        depth, rhi::LoadOp::Load, rhi::StoreOp::Store, 1.0f, 0, false, 0};
+    const render::RGTexture sampled[] = {
+        graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
+        graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead)};
+    render::RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.depth = &depth_att;
+    desc.sampled = sampled;
+    graph.add_raster_pass("terrain-m19.5-reference", desc, [&](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipeline);
+        cmd.bind_texture(0, tile.heights, height_sampler);
+        cmd.bind_texture(1, tile.weights, weight_sampler);
+        cmd.bind_uniform_buffer(2, tile.splat_ubo);
+        cmd.bind_index_buffer(tile.indices, rhi::IndexType::Uint32);
+        cmd.push_constants(&push, sizeof(push));
+        cmd.draw_indexed(tile.index_count);
+    });
+    auto cmd = device.begin_commands();
+    graph.execute(*cmd);
+    device.submit_blocking(*cmd);
+    auto out = read_texture(device, graph.physical(hdr), 8);
+
+    device.destroy(weight_sampler);
+    device.destroy(height_sampler);
+    device.destroy(pipeline);
+    device.destroy(fs);
+    device.destroy(vs);
+    return out;
+}
+
+// A clear physical sky (no clouds, so the bake is a function of the sun alone) whose sun sits at
+// `elevation` radians, independent of TerrainLight's sun — the sky's appearance is what changes.
+render::SkyParams sky_at(float elevation) {
+    render::SkyParams sp{};
+    sp.enabled = true;
+    sp.clouds_enabled = false;
+    sp.use_scene_sun = false;
+    sp.sun_direction[0] = 0.0f;
+    sp.sun_direction[1] = std::sin(elevation);
+    sp.sun_direction[2] = -std::cos(elevation);
+    return sp;
+}
+
+// Draw one tile through the real TerrainPass::add, lit by a REAL sky bake declared in the same
+// graph — the order SceneRenderer uses (add_lighting first, so the graph orders the bake before
+// the read). Afterwards the LUT's consumer state is reported back to its owner, the contract
+// TerrainPass::add documents.
+std::vector<std::uint8_t> render_tile_sky(rhi::Device& device,
+                                          render::TerrainPass& pass,
+                                          render::TerrainTileId id,
+                                          const render::TerrainLight& light,
+                                          render::SkyPass& sky,
+                                          const render::SkyParams& params) {
+    render::RenderGraph graph(device);
+    graph.reset();
+    const render::RGTexture hdr =
+        graph.create_texture({{kSize, kSize}, render::kHdrFormat, "sky-hdr"});
+    const render::RGTexture depth =
+        graph.create_texture({{kSize, kSize}, render::kDepthFormat, "sky-depth"});
+    graph.export_texture(hdr);
+    render::SkyInputs inputs{};
+    inputs.camera_pos = top_down_eye();
+    inputs.extent = {kSize, kSize};
+    const render::SkyLightBinding binding = sky.add_lighting(graph, params, inputs);
+    declare_clear(graph, hdr, depth);
+    pass.add(graph, hdr, depth, id, top_down_view_proj(), top_down_eye(), light, binding);
+    auto cmd = device.begin_commands();
+    graph.execute(*cmd);
+    device.submit_blocking(*cmd);
+    sky.note_skyview_state(rhi::ResourceState::ShaderRead);
+    return read_texture(device, graph.physical(hdr), 8);
+}
+
+// Σ|a − b| / Σ a over every pixel and RGB channel: how much of a render moved, as a fraction of
+// the render. Relative, so a bright and a dim surface are compared on the same footing.
+double relative_change(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) {
+    double diff = 0.0;
+    double total = 0.0;
+    for (std::uint32_t py = 0; py < kSize; ++py) {
+        for (std::uint32_t px = 0; px < kSize; ++px) {
+            for (int c = 0; c < 3; ++c) {
+                diff += std::fabs(double(chan(a, px, py, c)) - double(chan(b, px, py, c)));
+                total += chan(a, px, py, c);
+            }
+        }
+    }
+    return total > 0.0 ? diff / total : 0.0;
+}
+
+// Pixels where `bright` is strictly brighter (channel sum) than `dim`.
+int strictly_brighter_pixels(const std::vector<std::uint8_t>& bright,
+                             const std::vector<std::uint8_t>& dim) {
+    int n = 0;
+    for (std::uint32_t py = 0; py < kSize; ++py) {
+        for (std::uint32_t px = 0; px < kSize; ++px) {
+            const float b =
+                chan(bright, px, py, 0) + chan(bright, px, py, 1) + chan(bright, px, py, 2);
+            const float d = chan(dim, px, py, 0) + chan(dim, px, py, 1) + chan(dim, px, py, 2);
+            if (b > d) {
+                ++n;
+            }
+        }
+    }
+    return n;
+}
+
+// ── WHY THE NO-SKY ANCHOR IS "ONE f16 ULP", NOT memcmp ──────────────────────────────────────
+//
+// The m19.4/m19.5 anchors are bit-exact because they compare ONE program against itself: the
+// blend's differences from layer 0 are exactly zero, so no compiler choice can move them. This
+// anchor compares TWO SEPARATELY COMPILED programs — the live terrain.frag (sky branch present,
+// not taken) and the frozen m19.5 copy — and no driver promises those compile to the same
+// arithmetic: each may contract a multiply-add into an FMA, or reorder a sum, differently
+// depending on what ELSE the shader contains. Measured, not assumed: on an RTX 3060 the shipped
+// shader matches to the bit (0 pixels differ), but deleting one line from the sky branch moved
+// 1-2 no-sky pixels by one f16 step; on RADV (AMD Raphael) the shipped shader itself differs at
+// 2 pixels by 2^-10, which is exactly one f16 ULP of a value in [1, 2). lavapipe, macOS and
+// Windows are unmeasured.
+//
+// So the claim is the honest one: every channel within ONE half-float ULP of the reference, where
+// the ULP is read exactly from the f16 exponent of the larger magnitude — not a tuned epsilon. A
+// rounding-mode difference in the last FMA can move an f16 result by at most that; a different
+// branch (the falsification: force the sky path on) moves it by orders of magnitude more.
+float half_ulp(std::uint16_t h) {
+    const std::uint32_t exp = (h >> 10) & 0x1Fu;
+    // Subnormals (and zero) share the smallest exponent's spacing, 2^-24; a normal half with
+    // biased exponent e has 10 mantissa bits, so its spacing is 2^(e - 15 - 10).
+    return exp == 0 ? std::ldexp(1.0f, -24) : std::ldexp(1.0f, static_cast<int>(exp) - 25);
+}
+
+struct UlpComparison {
+    int differing_pixels = 0; // any channel not bit-equal
+    int beyond_ulp = 0;       // channels more than one f16 ULP apart (NaN/inf count here too)
+    float worst = 0.0f;       // largest per-channel absolute difference
+};
+
+UlpComparison compare_within_ulp(const std::vector<std::uint8_t>& a,
+                                 const std::vector<std::uint8_t>& b) {
+    UlpComparison r{};
+    for (std::size_t px = 0; px < std::size_t{kSize} * kSize; ++px) {
+        bool differs = false;
+        for (std::size_t c = 0; c < 4; ++c) {
+            std::uint16_t ha = 0;
+            std::uint16_t hb = 0;
+            std::memcpy(&ha, &a[px * 8 + c * 2], sizeof(ha));
+            std::memcpy(&hb, &b[px * 8 + c * 2], sizeof(hb));
+            if (ha == hb) {
+                continue;
+            }
+            differs = true;
+            const float fa = half_to_float(ha);
+            const float fb = half_to_float(hb);
+            const float diff = std::fabs(fa - fb);
+            const std::uint16_t larger = std::fabs(fa) >= std::fabs(fb) ? ha : hb;
+            if (!std::isfinite(fa) || !std::isfinite(fb) || !(diff <= half_ulp(larger))) {
+                ++r.beyond_ulp;
+            }
+            if (std::isfinite(diff)) {
+                r.worst = std::max(r.worst, diff);
+            }
+        }
+        if (differs) {
+            ++r.differing_pixels;
+        }
+    }
+    return r;
+}
+
+// The anchor, plus the size of any difference — reported always, so a driver that matches to the
+// bit and one that sits a ULP off are told apart in the log, not only on failure.
+void check_within_one_half_ulp(const std::vector<std::uint8_t>& got,
+                               const std::vector<std::uint8_t>& reference) {
+    REQUIRE(got.size() == reference.size());
+    const UlpComparison r = compare_within_ulp(got, reference);
+    MESSAGE("vs m19.5: ",
+            r.differing_pixels,
+            " pixels differ, worst channel difference ",
+            r.worst,
+            ", channels beyond one f16 ULP: ",
+            r.beyond_ulp);
+    CHECK(r.beyond_ulp == 0);
+}
+
+} // namespace
+
+TEST_CASE("m19.6: with no sky bound, terrain matches the m19.5 shader to one f16 ULP") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    // The non-planar fixture, so the normals (and so every BRDF term) vary across the frame.
+    const auto samples = cook_samples();
+
+    struct Material {
+        const char* name;
+        float metallic;
+        float roughness;
+    };
+
+    const Material materials[] = {{"metal", 1.0f, 0.3f}, {"dielectric", 0.0f, 0.6f}};
+    for (const Material& m : materials) {
+        INFO("material: ", m.name);
+        const render::TerrainLight light = pbr_light({0.8f, 0.55f, 0.3f}, m.metallic, m.roughness);
+        render::TerrainPass pass(*device);
+        const render::TerrainTileId id = pass.upload(make_asset(samples));
+        REQUIRE(id != render::kInvalidTerrainTile);
+
+        const auto reference = render_m195_reference(*device, pass.tile(id), light);
+        CHECK(covered_pixels(reference) > 8000);
+
+        // (1) No sky argument at all: the pass binds its own placeholders.
+        const auto no_sky = render_tile(*device, pass, id, light);
+        check_within_one_half_ulp(no_sky, reference);
+        CHECK(pass.sky_bound_draws() == 0);
+
+        // (2) A caller's SkyPass::empty_binding: bound, but its SH flag is zero — same picture.
+        render::SkyPass sky(*device);
+        render::RenderGraph graph(*device);
+        graph.reset();
+        const render::RGTexture hdr =
+            graph.create_texture({{kSize, kSize}, render::kHdrFormat, "empty-sky-hdr"});
+        const render::RGTexture depth =
+            graph.create_texture({{kSize, kSize}, render::kDepthFormat, "empty-sky-depth"});
+        graph.export_texture(hdr);
+        declare_clear(graph, hdr, depth);
+        pass.add(graph,
+                 hdr,
+                 depth,
+                 id,
+                 top_down_view_proj(),
+                 top_down_eye(),
+                 light,
+                 sky.empty_binding(graph));
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        const auto empty = read_texture(*device, graph.physical(hdr), 8);
+        check_within_one_half_ulp(empty, reference);
+        CHECK(pass.sky_bound_draws() == 1);
+        CHECK(pass.tiles_drawn() == 2);
+        // The default binding of (1) is legitimate "no sky" and was not counted as partial.
+        CHECK(pass.sky_partial_bindings() == 0);
+    }
+}
+
+TEST_CASE("m19.6: a partial sky binding draws on the placeholders, counted") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    const render::TerrainLight light = pbr_light({0.8f, 0.55f, 0.3f}, 1.0f, 0.3f);
+    render::TerrainPass pass(*device);
+    const render::TerrainTileId id = pass.upload(make_asset(samples));
+    REQUIRE(id != render::kInvalidTerrainTile);
+    const auto reference = render_m195_reference(*device, pass.tile(id), light);
+
+    // Only the LUT is set: the SH buffer and the sampler are missing.
+    render::SkyPass sky(*device);
+    render::RenderGraph graph(*device);
+    graph.reset();
+    const render::RGTexture hdr =
+        graph.create_texture({{kSize, kSize}, render::kHdrFormat, "partial-sky-hdr"});
+    const render::RGTexture depth =
+        graph.create_texture({{kSize, kSize}, render::kDepthFormat, "partial-sky-depth"});
+    graph.export_texture(hdr);
+    declare_clear(graph, hdr, depth);
+    render::SkyLightBinding partial{};
+    partial.skyview = sky.empty_binding(graph).skyview;
+    pass.add(graph, hdr, depth, id, top_down_view_proj(), top_down_eye(), light, partial);
+    auto cmd = device->begin_commands();
+    graph.execute(*cmd);
+    device->submit_blocking(*cmd);
+    const auto img = read_texture(*device, graph.physical(hdr), 8);
+    CHECK(pass.sky_partial_bindings() == 1);
+    CHECK(pass.sky_bound_draws() == 0);
+    CHECK(pass.tiles_drawn() == 1);
+    check_within_one_half_ulp(img, reference); // the draw still happened, on the flat path
+
+    // A default binding afterwards does not move the counter.
+    (void)render_tile(*device, pass, id, light);
+    CHECK(pass.sky_partial_bindings() == 1);
+    CHECK(pass.tiles_drawn() == 2);
+}
+
+TEST_CASE("m19.6: a smooth metal follows the sky more than a rough dielectric does") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    render::SkyPass sky(*device);
+    const render::SkyParams high = sky_at(1.2f); // ~69 degrees
+    const render::SkyParams low = sky_at(0.08f); // ~5 degrees: a sunset sky
+    // Same base colour, same TerrainLight sun (which does NOT move): only the sky changes.
+    const auto render_pair = [&](float metallic, float roughness) {
+        render::TerrainPass pass(*device);
+        const render::TerrainTileId id = pass.upload(make_asset(samples));
+        REQUIRE(id != render::kInvalidTerrainTile);
+        const render::TerrainLight l = pbr_light({0.8f, 0.8f, 0.8f}, metallic, roughness);
+        auto a = render_tile_sky(*device, pass, id, l, sky, high);
+        auto b = render_tile_sky(*device, pass, id, l, sky, low);
+        CHECK(covered_pixels(a) > 8000);
+        CHECK(pass.sky_bound_draws() == 2);
+        return std::make_pair(std::move(a), std::move(b));
+    };
+    const auto metal = render_pair(1.0f, 0.1f);
+    const auto diel = render_pair(0.0f, 1.0f);
+    CHECK(sky.stats().filled >= 2); // the swap really re-baked (high, low, high, low)
+    const double metal_change = relative_change(metal.first, metal.second);
+    const double diel_change = relative_change(diel.first, diel.second);
+    MESSAGE("m19.6 relative change under the sky swap: smooth metal ",
+            metal_change,
+            ", rough dielectric ",
+            diel_change);
+    CHECK(metal_change > 0.0);
+    CHECK(metal_change > diel_change);
+}
+
+TEST_CASE("m19.6: with the sun off, a sky-lit metal is no longer black") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    const auto samples = cook_samples();
+    render::TerrainLight l = pbr_light({0.9f, 0.6f, 0.2f}, 1.0f, 0.3f);
+    l.sun_irradiance = 0.0f;
+    l.ambient = 0.0f; // and no flat ambient: without a sky nothing lights this tile
+    render::TerrainPass pass(*device);
+    const render::TerrainTileId id = pass.upload(make_asset(samples));
+    REQUIRE(id != render::kInvalidTerrainTile);
+    render::SkyPass sky(*device);
+    const auto dark = render_tile(*device, pass, id, l);
+    const auto lit = render_tile_sky(*device, pass, id, l, sky, sky_at(0.6f));
+    CHECK(covered_pixels(dark) == 0); // the claim's premise: a metal under no light is black
+    const int covered = covered_pixels(lit);
+    MESSAGE("m19.6 sun-off metal: ", covered, " sky-lit pixels");
+    CHECK(covered > 8000);
+    CHECK(strictly_brighter_pixels(lit, dark) == covered);
+}
+
+TEST_CASE("m19.6: the sky's diffuse carries the albedo of a rough dielectric") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    // With the sun off, a dielectric's sky light is diffuse (1-metallic)*base*SH plus a specular
+    // term whose f0 is 0.04 whatever the base colour. So two base colours differ ONLY through the
+    // SH diffuse: drop it and the renders are identical.
+    const auto samples = cook_samples();
+    render::SkyPass sky(*device);
+    const render::SkyParams sp = sky_at(0.6f);
+    const auto render_base = [&](float g) {
+        render::TerrainLight l = pbr_light({g, g, g}, 0.0f, 1.0f);
+        l.sun_irradiance = 0.0f;
+        l.ambient = 0.0f;
+        render::TerrainPass pass(*device);
+        const render::TerrainTileId id = pass.upload(make_asset(samples));
+        REQUIRE(id != render::kInvalidTerrainTile);
+        return render_tile_sky(*device, pass, id, l, sky, sp);
+    };
+    const auto bright = render_base(0.9f);
+    const auto dark = render_base(0.1f);
+    const int covered = covered_pixels(bright);
+    CHECK(covered > 8000);
+    CHECK(strictly_brighter_pixels(bright, dark) == covered);
 }
