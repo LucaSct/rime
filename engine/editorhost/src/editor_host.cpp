@@ -158,7 +158,8 @@ void write_entity_record(core::ByteWriter& w,
         if (info.type_info == nullptr || info.session) {
             continue;
         }
-        std::vector<std::byte> blob = core::serialize(*info.type_info, world.get_component_raw(e, id));
+        std::vector<std::byte> blob =
+            core::serialize(*info.type_info, world.get_component_raw(e, id));
         if (ids != nullptr) {
             (void)rewrite_blob_entity_refs(info, blob, [&](ecs::Entity& ref) {
                 ref = handle_to_wire(world, ids, ref);
@@ -186,10 +187,11 @@ bool blob_from_wire(ecs::World& world,
         const ecs::Entity e = ids.resolve(world, id);
         if (e == ecs::kNullEntity) {
             ++ids.counters().unresolved_refs;
-            RIME_ERROR("editorhost: refusing a {} that references EditorId {}, which no live entity "
-                       "holds",
-                       info.name,
-                       id);
+            RIME_ERROR(
+                "editorhost: refusing a {} that references EditorId {}, which no live entity "
+                "holds",
+                info.name,
+                id);
             return false;
         }
         ref = e;
@@ -279,11 +281,13 @@ bool deserialize_world(ecs::World& dst, std::span<const std::byte> data) {
         RIME_ERROR("editorhost: bad snapshot header");
         return false;
     }
+
     struct Record {
         ecs::Entity old_handle;
         std::uint64_t editor_id;
         std::vector<std::pair<std::uint64_t, std::span<const std::byte>>> comps;
     };
+
     // Phase 1: parse every record, so phase 2 can spawn them all before any component is filled —
     // the scene loader's discipline, and what makes a forward reference resolvable.
     std::vector<Record> records;
@@ -308,7 +312,8 @@ bool deserialize_world(ecs::World& dst, std::span<const std::byte> data) {
         }
         records.push_back(std::move(rec));
     }
-    // Phase 2: a fresh entity per record, and the old-handle → new-handle map references go through.
+    // Phase 2: a fresh entity per record, and the old-handle → new-handle map references go
+    // through.
     std::unordered_map<std::uint64_t, ecs::Entity> remap;
     std::vector<ecs::Entity> spawned;
     spawned.reserve(records.size());
@@ -768,7 +773,8 @@ bool PlaySession::stop(ecs::World& world) {
         }
     }
 
-    // 2. Allocate before filling. A survivor keeps its handle; a casualty gets a FRESH one — its old
+    // 2. Allocate before filling. A survivor keeps its handle; a casualty gets a FRESH one — its
+    // old
     //    handle stays dead, because rewinding a generation would revive every stale copy of it.
     //    References then go old handle → identity → new handle, where identity is the EditorId
     //    (the editor's name for the entity). An entity no editor host stamped has no EditorId; its
