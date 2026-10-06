@@ -392,6 +392,13 @@ Entries are grouped roughly by area and kept short on purpose.
   plus a texture packing the layer's albedo (RGB) and height (A), tiled at world-XZ coordinates with
   a `uv_scale`, and a `height_contrast`. A palette slot names either a terrain layer or a plain
   material; the cooked file's kind says which.
+- **Terrain world / terrain residency.** The *terrain world* (M19.8a, ADR-0069) is the map of a
+  streamed terrain: integer grid coordinates → cooked heightfield tiles, all on one declared spacing
+  and quantisation so neighbours share their border samples exactly. *Terrain residency* keeps a
+  fixed number of those tiles on the GPU (*tile slots*), chosen around the camera with two radii —
+  *activation* (request) and *retention* (keep), the gap between them being the *hysteresis* that
+  stops a camera on a boundary from loading and evicting one tile every other frame. An evicted
+  slot is reused only once its last reader has retired (see *retirement watermark*).
 - **Height blending.** Splat blending where each layer's *height* map, not just its painted weight,
   decides who wins a transition texel: the locally higher layer takes more of it, so gravel shows
   through grass along the low cracks instead of the two cross-fading into one smudge. Rime's form
