@@ -2223,11 +2223,13 @@ TEST_CASE("m19.7b: the texture coordinate is WORLD xz — the pattern runs on ac
             for (int c = 0; c < 3; ++c) {
                 const std::uint16_t ha = half_bits(img, px, py, c);
                 const std::uint16_t hb = half_bits(img, px + kPeriodPx, py, c);
-                const double a = half_to_float(ha);
-                const double b = half_to_float(hb);
+                // va/vb, not a/b: the tile ids `a` and `b` are still in scope out here, and MSVC
+                // at /W4 /WX rejects the shadowing (C4456) that GCC accepts without a word.
+                const double va = half_to_float(ha);
+                const double vb = half_to_float(hb);
                 const double limit = bound[std::size_t(c)] + half_ulp(std::max(ha, hb));
-                ok = ok && std::abs(a - b) <= limit;
-                worst_fraction = std::max(worst_fraction, std::abs(a - b) / limit);
+                ok = ok && std::abs(va - vb) <= limit;
+                worst_fraction = std::max(worst_fraction, std::abs(va - vb) / limit);
                 // Positive halves order like their bit patterns: the integer distance is ULPs.
                 ulps = std::max(ulps, std::abs(int(ha) - int(hb)));
             }
