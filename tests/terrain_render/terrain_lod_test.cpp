@@ -46,6 +46,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -63,6 +64,7 @@
 #include "rime/rhi/device.hpp"
 #include "terrain.vert.spv.h"
 #include "terrain_height_probe.frag.spv.h"
+#include "terrain_lod_probe.frag.spv.h"
 #include "terrain_test_files.hpp"
 #include "terrain_vertex_probe.frag.spv.h"
 
@@ -617,6 +619,7 @@ lod_draw(const render::TerrainLodRanges& ranges, const TerrainLodLeaf& leaf, cor
     d.base_z = leaf.key.coord.z * kCells;
     d.level = leaf.key.level;
     d.coarser_edges = leaf.coarser_edges;
+    d.coarser_corners = leaf.coarser_corners;
     d.camera = camera;
     d.morph_start = ranges.levels[leaf.key.level].morph_start;
     d.morph_end = ranges.levels[leaf.key.level].morph_end;
@@ -1502,4 +1505,1152 @@ TEST_CASE("m19.8d2: (h) a world without a chain is driven exactly as m19.8a driv
     CHECK(s.root_cover_refusals == 0);
     CHECK(s.missing.total() > 0); // m19.8a's holes, counted as before
     CHECK(residency.selection().leaves.empty());
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// m19.8d3 (ADR-0072): BAKED APPEARANCE for coarse tiles, faded by the geometry's morph factor.
+//
+// The bake's CONTENT is proven where it is made (tools/asset-pipeline/src/terrain_bake.rs: byte-
+// equal to a brute force; shared edges byte-identical). These proofs are about what the renderer
+// does with a bake, so they use a SYNTHETIC one — hashed bytes that are a function of (level,
+// global sample), which is exactly the property the cook guarantees: a texel two tiles share is
+// the same bytes in both. Hashed bytes are the hardest case for every claim here: neighbouring
+// texels differ by up to the full range, so any sampling slip shows at full contrast.
+//
+// Everything is drawn through TerrainPass::add into the HDR target with the sun off and ambient
+// 1. With no sky that leaves  radiance = (1 − metallic)·base + mix(0.04, base, metallic)
+//                                      = base + 0.04·(1 − metallic),
+// so a pixel's "shaded base colour" is read straight off the frame.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+std::uint8_t bake_byte(std::uint32_t level, std::int64_t gx, std::int64_t gz, std::uint32_t c) {
+    std::uint64_t h = (static_cast<std::uint64_t>(level) + 1) * 0xD6E8FEB86659FD93ull ^
+                      static_cast<std::uint64_t>(gx) * 0x9E3779B97F4A7C15ull ^
+                      static_cast<std::uint64_t>(gz) * 0xC2B2AE3D27D4EB4Full ^
+                      (static_cast<std::uint64_t>(c) + 1) * 0x165667B19E3779F9ull;
+    h ^= h >> 32;
+    h *= 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 29;
+    return static_cast<std::uint8_t>(h & 0xFF);
+}
+
+struct Bake {
+    std::vector<std::byte> color;    // sRGB bytes, A = 255
+    std::vector<std::byte> material; // R = metallic, G = roughness
+};
+
+// The bake of tile `k`: texel (i, j) from the tile's GLOBAL level-L sample index, so same-level
+// neighbours agree on a shared edge by construction (the cook's guarantee).
+Bake make_bake(TerrainTileKey k) {
+    Bake b;
+    for (std::int32_t j = 0; j <= kCells; ++j) {
+        for (std::int32_t i = 0; i <= kCells; ++i) {
+            const std::int64_t gx = std::int64_t{k.coord.x} * kCells + i;
+            const std::int64_t gz = std::int64_t{k.coord.z} * kCells + j;
+            for (std::uint32_t c = 0; c < 3; ++c) {
+                b.color.push_back(static_cast<std::byte>(bake_byte(k.level, gx, gz, c)));
+            }
+            b.color.push_back(std::byte{255});
+            b.material.push_back(static_cast<std::byte>(bake_byte(k.level, gx, gz, 3)));
+            b.material.push_back(static_cast<std::byte>(bake_byte(k.level, gx, gz, 4)));
+            b.material.push_back(std::byte{0});
+            b.material.push_back(std::byte{255});
+        }
+    }
+    return b;
+}
+
+render::TerrainBakeTexels texels_of(const Bake& b) {
+    return {kN, kN, b.color, b.material};
+}
+
+// sRGB → linear, IEC 61966-2-1: what an *_SRGB format applies on a fetch.
+double bake_srgb(std::uint8_t byte) {
+    const double c = byte / 255.0;
+    return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+}
+
+// How far a GPU's sRGB decode of `byte` may sit from the IEC curve: HALF AN 8-BIT CODE, measured
+// in the ENCODED space — the tolerance the format conversion rules give (D3D's is stated exactly
+// so; Vulkan defers to the Khronos Data Format spec, which hardware built for both satisfies the
+// same way). In linear light that is the curve's slope times half a code, so it is NOT one
+// number: 1.5e-4 near black, 4.3e-3 near white. A flat bound would be either too loose for the
+// dark texels to mean anything or too tight for the bright ones to pass.
+double bake_srgb_tolerance(std::uint8_t byte) {
+    const auto at = [](double code) {
+        const double c = std::clamp(code, 0.0, 255.0) / 255.0;
+        return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+    };
+    return std::max(at(byte + 0.5) - at(byte), at(byte) - at(byte - 0.5));
+}
+
+// The frame value terrain.frag should produce from a bake at sample position (si, sj) of tile `k`
+// — the shader's hand-written bilinear, in double — channel c of RGB. `decode_tolerance`, when
+// given, receives the same blend of the texels' sRGB decode tolerances.
+double bake_radiance(TerrainTileKey k,
+                     double si,
+                     double sj,
+                     std::uint32_t c,
+                     double* decode_tolerance = nullptr) {
+    const auto i0 = static_cast<std::int32_t>(std::floor(si));
+    const auto j0 = static_cast<std::int32_t>(std::floor(sj));
+    const std::int32_t i1 = std::min(i0 + 1, kCells);
+    const std::int32_t j1 = std::min(j0 + 1, kCells);
+    const double fx = si - i0;
+    const double fz = sj - j0;
+    const auto at = [&](std::int32_t i, std::int32_t j, std::uint32_t ch) {
+        const std::uint8_t byte = bake_byte(k.level,
+                                            std::int64_t{k.coord.x} * kCells + i,
+                                            std::int64_t{k.coord.z} * kCells + j,
+                                            ch);
+        return ch < 3 ? bake_srgb(byte) : byte / 255.0;
+    };
+    const auto lerp = [&](std::uint32_t ch) {
+        return (1.0 - fz) * ((1.0 - fx) * at(i0, j0, ch) + fx * at(i1, j0, ch)) +
+               fz * ((1.0 - fx) * at(i0, j1, ch) + fx * at(i1, j1, ch));
+    };
+    if (decode_tolerance != nullptr) {
+        const auto tol = [&](std::int32_t i, std::int32_t j) {
+            return bake_srgb_tolerance(bake_byte(k.level,
+                                                 std::int64_t{k.coord.x} * kCells + i,
+                                                 std::int64_t{k.coord.z} * kCells + j,
+                                                 c));
+        };
+        *decode_tolerance = (1.0 - fz) * ((1.0 - fx) * tol(i0, j0) + fx * tol(i1, j0)) +
+                            fz * ((1.0 - fx) * tol(i0, j1) + fx * tol(i1, j1));
+    }
+    return lerp(c) + 0.04 * (1.0 - lerp(3));
+}
+
+// The chain uploaded, every parent with its bake.
+struct BakedUpload {
+    render::TerrainPass pass;
+    std::map<TerrainTileKey, render::TerrainTileId> ids;
+
+    BakedUpload(rhi::Device& device, const LodWorld& w) : pass(device) {
+        for (const auto& [k, a] : w.tiles) {
+            const render::TerrainTileId id = pass.upload(a);
+            REQUIRE(id != render::kInvalidTerrainTile);
+            ids.emplace(k, id);
+            if (k.level > 0) {
+                const Bake b = make_bake(k);
+                REQUIRE(pass.set_bake(id, texels_of(b)));
+            }
+        }
+    }
+
+    // `lod` with the tile's parent filled in, as TerrainResidency::draw_leaf does.
+    render::TerrainLodDraw with_parent(TerrainTileKey k, render::TerrainLodDraw lod) const {
+        const TerrainTileKey p{k.level + 1, assets::terrain_parent_coord(k.coord)};
+        const auto it = ids.find(p);
+        if (it != ids.end()) {
+            lod.parent = it->second;
+            lod.parent_quadrant = static_cast<std::uint32_t>(k.coord.x & 1) |
+                                  (static_cast<std::uint32_t>(k.coord.z & 1) << 1);
+        }
+        return lod;
+    }
+};
+
+float half_float(std::uint16_t h) {
+    const int exp = (h >> 10) & 0x1F;
+    const int mant = h & 0x3FF;
+    const float sign = (h & 0x8000) != 0 ? -1.0f : 1.0f;
+    if (exp == 0) {
+        return sign * std::ldexp(static_cast<float>(mant), -24);
+    }
+    if (exp == 31) {
+        return mant == 0 ? sign * std::numeric_limits<float>::infinity()
+                         : std::numeric_limits<float>::quiet_NaN();
+    }
+    return sign * std::ldexp(static_cast<float>(mant | 0x400), exp - 25);
+}
+
+// One f16 ULP at magnitude m: what the RGBA16F target rounds a value of that size to.
+double ulp16(double m) {
+    int e = 0;
+    std::frexp(std::max(std::fabs(m), 6.2e-5), &e); // below 2^-14 halves are subnormal
+    return std::ldexp(1.0, e - 11);
+}
+
+// A top-down view like `top_down`, optionally turned 180° about the vertical. Vulkan's top-left
+// rule gives a pixel centre lying EXACTLY on a tile's border to only one side of it, so a tile
+// drawn alone covers its border pixels along two of its four edges; turned half a turn it covers
+// the other two. Pixel centres map to pixel centres, so nothing else changes.
+TopDown top_down_turn(float x0, float z0, float cell, std::uint32_t w, std::uint32_t h, bool turn) {
+    const float hx = 0.5f * cell * static_cast<float>(w);
+    const float hz = 0.5f * cell * static_cast<float>(h);
+    const core::Vec3 eye{x0 + hx, 400.0f, z0 + hz};
+    return {core::ortho(-hx, hx, -hz, hz, 0.0f, 800.0f) *
+                core::look_at(eye, {eye.x, 0.0f, eye.z}, {0.0f, 0.0f, turn ? 1.0f : -1.0f}),
+            w,
+            h};
+}
+
+struct Shade {
+    render::TerrainTileId id = render::kInvalidTerrainTile;
+    core::Mat4 view_proj;
+    render::TerrainLodDraw lod{};
+};
+
+// Draw through the ENGINE's pass into a w × h HDR target cleared to alpha 0; returns RGBA floats
+// (alpha 1 = a terrain pixel).
+std::vector<float> shade(rhi::Device& device,
+                         render::TerrainPass& pass,
+                         const std::vector<Shade>& draws,
+                         std::uint32_t w,
+                         std::uint32_t h,
+                         const render::TerrainLight& light) {
+    render::RenderGraph graph(device);
+    graph.reset();
+    const render::RGTexture hdr = graph.create_texture({{w, h}, render::kHdrFormat, "bake-hdr"});
+    const render::RGTexture depth =
+        graph.create_texture({{w, h}, render::kDepthFormat, "bake-depth"});
+    graph.export_texture(hdr);
+    const render::RGColorAttachment clears[] = {
+        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+    const render::RGDepthAttachment dclear{
+        depth, rhi::LoadOp::Clear, rhi::StoreOp::Store, 1.0f, 0, false, 0};
+    render::RenderGraph::RasterPassDesc cd{};
+    cd.colors = clears;
+    cd.depth = &dclear;
+    graph.add_raster_pass("bake-clear", cd, [](rhi::CommandBuffer&) {});
+    for (const Shade& d : draws) {
+        pass.add(graph, hdr, depth, d.id, d.view_proj, {0.0f, 500.0f, 0.0f}, light, {}, d.lod);
+    }
+    auto cmd = device.begin_commands();
+    graph.execute(*cmd);
+    device.submit_blocking(*cmd);
+    const std::vector<std::uint8_t> raw = read_back(device, graph.physical(hdr), w, h, 8);
+    std::vector<float> out(std::size_t{w} * h * 4);
+    for (std::size_t n = 0; n < out.size(); ++n) {
+        std::uint16_t half = 0;
+        std::memcpy(&half, &raw[n * 2], sizeof(half));
+        out[n] = half_float(half);
+    }
+    return out;
+}
+
+// A view with ONE PIXEL PER VERTEX of tile `k`, pixel centres on the vertices, `margin` pixels
+// around it.
+TopDown vertex_view(TerrainTileKey k, std::uint32_t margin, bool turn) {
+    const float cell = static_cast<float>(1u << k.level);
+    const float x0 = world_x(std::int64_t{k.coord.x} * kCells, k.level) -
+                     (static_cast<float>(margin) + 0.5f) * cell;
+    const float z0 = world_z(std::int64_t{k.coord.z} * kCells, k.level) -
+                     (static_cast<float>(margin) + 0.5f) * cell;
+    return top_down_turn(x0, z0, cell, kN + 2 * margin, kN + 2 * margin, turn);
+}
+
+// The pixel of tile `k`'s vertex (i, j) in `v`.
+std::size_t vertex_pixel(const TopDown& v, TerrainTileKey k, std::int32_t i, std::int32_t j) {
+    const auto px = pixel_of(v,
+                             world_x(std::int64_t{k.coord.x} * kCells + i, k.level),
+                             10.0f,
+                             world_z(std::int64_t{k.coord.z} * kCells + j, k.level));
+    REQUIRE(px.has_value());
+    return *px;
+}
+
+// A pixel centre sits ON its vertex in exact arithmetic; the rasteriser's f32 interpolation puts
+// the sample coordinate within ~2^-20 of it, times at most the full texel range. 1e-4 covers that
+// with two orders to spare and is below one f16 ULP of any value above 0.1.
+constexpr double kInterpolationSlack = 1.0e-4;
+
+} // namespace
+
+TEST_CASE("m19.8d3: set_bake takes one texel per sample, owns it, and refuses anything else") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    const LodWorld w = make_lod_world(2, 2, 2);
+    render::TerrainPass pass(*device);
+    const TerrainTileKey root{1, {0, 0}};
+    const render::TerrainTileId id = pass.upload(w.tiles.at(root));
+    REQUIRE(id != render::kInvalidTerrainTile);
+    const std::uint64_t before = pass.tile_bytes(id);
+    const Bake b = make_bake(root);
+
+    render::TerrainBakeTexels wrong = texels_of(b);
+    wrong.columns = kN - 1; // not this tile's grid
+    CHECK_FALSE(pass.set_bake(id, wrong));
+    wrong = texels_of(b);
+    wrong.material = wrong.material.first(wrong.material.size() - 4); // a short span
+    CHECK_FALSE(pass.set_bake(id, wrong));
+    CHECK_FALSE(pass.set_bake(render::kInvalidTerrainTile, texels_of(b)));
+    CHECK(pass.bakes_refused() == 3);
+    CHECK(pass.tile_bytes(id) == before);
+    CHECK_FALSE(pass.tile(id).bake_color.is_valid());
+
+    REQUIRE(pass.set_bake(id, texels_of(b)));
+    CHECK(pass.tile_bytes(id) == before + 2u * kN * kN * 4u);
+    CHECK_FALSE(pass.set_bake(id, texels_of(b))); // already has one
+    CHECK(pass.bakes_refused() == 4);
+    CHECK(
+        pass.release(id)); // destroys the bake with the tile (ASan and the validation layer watch)
+    CHECK(pass.tile_bytes(id) == 0);
+}
+
+TEST_CASE("m19.8d3: (a) a parent shades each vertex with exactly its bake texel, and a fully "
+          "morphed child with the parent's") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    const LodWorld w = make_lod_world(4, 4, 3);
+    BakedUpload up(*device, w);
+    const render::TerrainLight light = flat_light();
+
+    double worst = 0.0;       // |frame − prediction|
+    double worst_share = 0.0; // the largest fraction of its own bound any value used
+    double worst_dark = 0.0;  // |frame − prediction| over predictions below 0.1, in f16 ULPs
+    std::uint32_t checked = 0;
+    std::uint32_t wrong_texel_matches = 0;
+    const auto compare = [&](const std::vector<float>& img,
+                             std::size_t px,
+                             TerrainTileKey bake_of,
+                             double si,
+                             double sj) {
+        REQUIRE(img[px * 4 + 3] == 1.0f); // a terrain pixel
+        for (std::uint32_t c = 0; c < 3; ++c) {
+            double decode = 0.0;
+            const double want = bake_radiance(bake_of, si, sj, c, &decode);
+            const double got = img[px * 4 + c];
+            // One f16 ULP (the target's rounding) + the sRGB decode bound + the interpolation.
+            const double bound = ulp16(want) + decode + kInterpolationSlack;
+            CHECK(std::fabs(got - want) <= bound);
+            worst = std::max(worst, std::fabs(got - want));
+            worst_share = std::max(worst_share, std::fabs(got - want) / bound);
+            if (want < 0.1) {
+                worst_dark = std::max(worst_dark, std::fabs(got - want) / ulp16(want));
+            }
+            ++checked;
+            // The bound DISCRIMINATES: the texel one sample over would almost never pass it.
+            const double other = bake_radiance(bake_of, si < kCells ? si + 1.0 : si - 1.0, sj, c);
+            wrong_texel_matches += std::fabs(got - other) <= bound ? 1u : 0u;
+        }
+    };
+
+    // Parents at two levels, unmorphed: their own bake, vertex by vertex. Both turns of the view,
+    // so every border vertex is covered in one of them (the top-left rule).
+    for (const TerrainTileKey k :
+         {TerrainTileKey{1, {1, 0}}, TerrainTileKey{1, {0, 1}}, TerrainTileKey{2, {0, 0}}}) {
+        std::set<std::pair<std::int32_t, std::int32_t>> seen;
+        for (const bool turn : {false, true}) {
+            const TopDown v = vertex_view(k, 1, turn);
+            const auto img = shade(*device,
+                                   up.pass,
+                                   {{up.ids.at(k), v.view_proj, fixed_morph(k, 0.0f)}},
+                                   v.w,
+                                   v.h,
+                                   light);
+            for (std::int32_t j = 0; j <= kCells; ++j) {
+                for (std::int32_t i = 0; i <= kCells; ++i) {
+                    const std::size_t px = vertex_pixel(v, k, i, j);
+                    if (img[px * 4 + 3] == 1.0f && seen.insert({i, j}).second) {
+                        compare(img, px, k, i, j);
+                    }
+                }
+            }
+        }
+        // Each turn covers the interior and two borders; the two corners where a covered border
+        // meets an uncovered one belong to neither.
+        CHECK(seen.size() >= kN * kN - 2);
+    }
+    const std::uint32_t parent_checks = checked;
+
+    // A level-0 child at morph 1 (each quadrant): every vertex shades as the PARENT's bake at
+    // ((offset + i) / 2, (offset + j) / 2) — a parent texel at even vertices, the midpoint of two
+    // (or four) at odd ones.
+    const TerrainTileKey parent{1, {1, 0}};
+    for (const TerrainTileKey k : {TerrainTileKey{0, {2, 0}},
+                                   TerrainTileKey{0, {3, 0}},
+                                   TerrainTileKey{0, {2, 1}},
+                                   TerrainTileKey{0, {3, 1}}}) {
+        const TopDown v = vertex_view(k, 1, false);
+        const auto img =
+            shade(*device,
+                  up.pass,
+                  {{up.ids.at(k), v.view_proj, up.with_parent(k, fixed_morph(k, 1.0f))}},
+                  v.w,
+                  v.h,
+                  light);
+        for (std::int32_t j = 0; j <= kCells; ++j) {
+            for (std::int32_t i = 0; i <= kCells; ++i) {
+                const std::size_t px = vertex_pixel(v, k, i, j);
+                if (img[px * 4 + 3] == 1.0f) {
+                    compare(img,
+                            px,
+                            parent,
+                            0.5 * ((k.coord.x & 1) * kCells + i),
+                            0.5 * ((k.coord.z & 1) * kCells + j));
+                }
+            }
+        }
+    }
+    CHECK(checked >= parent_checks + 4u * 3u * (kN - 1) * (kN - 1));
+    CHECK(wrong_texel_matches * 20 < checked); // < 5 %: hashed neighbours rarely look alike
+
+    // At morph 0 the parent's bake is bound and NOT read: bit-identical to a draw without it.
+    {
+        const TerrainTileKey k{0, {2, 1}};
+        const TopDown v = vertex_view(k, 1, false);
+        const auto bound =
+            shade(*device,
+                  up.pass,
+                  {{up.ids.at(k), v.view_proj, up.with_parent(k, fixed_morph(k, 0.0f))}},
+                  v.w,
+                  v.h,
+                  light);
+        const auto plain = shade(
+            *device, up.pass, {{up.ids.at(k), v.view_proj, fixed_morph(k, 0.0f)}}, v.w, v.h, light);
+        CHECK(std::memcmp(bound.data(), plain.data(), bound.size() * sizeof(float)) == 0);
+        // …and it is the flat material, not the bake: the witness that level 0 has its own look.
+        const std::size_t px = vertex_pixel(v, k, 4, 4);
+        CHECK(std::fabs(plain[px * 4] - (light.albedo.x + 0.04f)) < 1.0e-3f);
+    }
+
+    // ROUGHNESS reaches the BRDF too (the ambient-only frames above cannot see it): the same
+    // parent under a sun, with only the bake's roughness channel changed, shades differently.
+    {
+        const TerrainTileKey k{1, {0, 0}};
+        render::TerrainPass other(*device);
+        const render::TerrainTileId id = other.upload(w.tiles.at(k));
+        Bake b = make_bake(k);
+        for (std::size_t t = 0; t < b.material.size(); t += 4) {
+            b.material[t + 1] = static_cast<std::byte>(255 - static_cast<int>(b.material[t + 1]));
+        }
+        REQUIRE(other.set_bake(id, texels_of(b)));
+        render::TerrainLight sun{};
+        sun.sun_direction = {0.3f, -1.0f, 0.2f};
+        const TopDown v = vertex_view(k, 1, false);
+        const auto a = shade(
+            *device, up.pass, {{up.ids.at(k), v.view_proj, fixed_morph(k, 0.0f)}}, v.w, v.h, sun);
+        const auto c =
+            shade(*device, other, {{id, v.view_proj, fixed_morph(k, 0.0f)}}, v.w, v.h, sun);
+        std::uint32_t differ = 0;
+        for (std::size_t n = 0; n < a.size(); ++n) {
+            differ += a[n] != c[n] ? 1u : 0u;
+        }
+        CHECK(differ > kN * kN);
+    }
+    CHECK(up.pass.bake_draws() >= 6);
+    CHECK(up.pass.parent_bake_draws() >= 5);
+    MESSAGE("m19.8d3 (a): " << checked << " channel values; worst |frame - bake| " << worst
+                            << ", at most " << worst_share
+                            << " of its bound (1 f16 ULP + half an sRGB code + "
+                            << kInterpolationSlack << "); dark values (< 0.1) within " << worst_dark
+                            << " f16 ULP; " << wrong_texel_matches
+                            << " would also match the neighbouring texel");
+}
+
+TEST_CASE("m19.8d3: (c) along a shared edge both tiles shade the same colour — same-level "
+          "parents, a fine tile against a coarser one, and two fading children") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    const LodWorld w = make_lod_world(4, 4, 3);
+    BakedUpload up(*device, w);
+    const render::TerrainLight light = flat_light();
+
+    // Draw `k` alone with `lod` and return the frame's RGB at world sample positions along the
+    // line x = `gx` (level-0 global samples), z from gz0 to gz1 — whichever turn covers each.
+    struct EdgeDraw {
+        TerrainTileKey key;
+        render::TerrainLodDraw lod;
+    };
+
+    const auto along = [&](const EdgeDraw& d, std::int64_t gx, std::int64_t gz0, std::int64_t gz1) {
+        std::map<std::int64_t, std::array<float, 3>> out;
+        // One pixel per LEVEL-0 sample, so a coarse tile is also read between its vertices.
+        const float x0 = world_x(gx, 0) - 8.5f;
+        const float z0 = world_z(gz0, 0) - 1.5f;
+        const auto h = static_cast<std::uint32_t>(gz1 - gz0 + 4);
+        for (const bool turn : {false, true}) {
+            const TopDown v = top_down_turn(x0, z0, 1.0f, 17, h, turn);
+            const auto img =
+                shade(*device, up.pass, {{up.ids.at(d.key), v.view_proj, d.lod}}, v.w, v.h, light);
+            for (std::int64_t gz = gz0; gz <= gz1; ++gz) {
+                const auto px = pixel_of(v, world_x(gx, 0), 10.0f, world_z(gz, 0));
+                REQUIRE(px.has_value());
+                if (img[*px * 4 + 3] == 1.0f) {
+                    out[gz] = {img[*px * 4], img[*px * 4 + 1], img[*px * 4 + 2]};
+                }
+            }
+        }
+        return out;
+    };
+    std::uint32_t compared = 0;
+    std::uint32_t bit_equal = 0;
+    double worst_ulps = 0.0;
+    const auto same = [&](const EdgeDraw& a,
+                          const EdgeDraw& b,
+                          std::int64_t gx,
+                          std::int64_t gz0,
+                          std::int64_t gz1) {
+        const auto ea = along(a, gx, gz0, gz1);
+        const auto eb = along(b, gx, gz0, gz1);
+        std::uint32_t n = 0;
+        for (const auto& [gz, ca] : ea) {
+            const auto it = eb.find(gz);
+            if (it == eb.end()) {
+                continue;
+            }
+            ++n;
+            for (std::size_t c = 0; c < 3; ++c) {
+                const double ulps = std::fabs(ca[c] - it->second[c]) / ulp16(ca[c]);
+                CHECK(ulps <= 1.0);
+                worst_ulps = std::max(worst_ulps, ulps);
+                ++compared;
+                bit_equal += ca[c] == it->second[c] ? 1u : 0u;
+            }
+        }
+        // Every sample on the edge except, at most, its two end corners.
+        CHECK(n >= static_cast<std::uint32_t>(gz1 - gz0 - 1));
+        // Not vacuous: the colour varies along the edge.
+        CHECK(ea.begin()->second != std::prev(ea.end())->second);
+    };
+
+    // 1. Two level-1 parents, unmorphed: each reads its OWN bake's edge column.
+    const TerrainTileKey a1{1, {0, 0}};
+    const TerrainTileKey b1{1, {1, 0}};
+    same({a1, fixed_morph(a1, 0.0f)}, {b1, fixed_morph(b1, 0.0f)}, 2 * kCells, 0, 2 * kCells);
+
+    // 2. A FINE tile against a COARSER neighbour: level-0 (1, 0), whose +x neighbour is drawn at
+    //    level 1. The edge bit forces its border to morph 1, so there it shades its PARENT's edge
+    //    column — the same bytes as the coarse neighbour's own. The distance morph is off (m = 0
+    //    inside the tile), so only the edge bit can be doing this.
+    const TerrainTileKey fine{0, {1, 0}};
+    render::TerrainLodDraw fine_lod = up.with_parent(fine, fixed_morph(fine, 0.0f));
+    fine_lod.coarser_edges = render::kTerrainEdgePosX;
+    same({fine, fine_lod}, {b1, fixed_morph(b1, 0.0f)}, 2 * kCells, 0, kCells);
+
+    // 3. Two level-0 tiles with DIFFERENT parents, both fully morphed: each shades its own
+    //    parent's edge column.
+    const TerrainTileKey c0{0, {1, 1}};
+    const TerrainTileKey d0{0, {2, 1}};
+    same({c0, up.with_parent(c0, fixed_morph(c0, 1.0f))},
+         {d0, up.with_parent(d0, fixed_morph(d0, 1.0f))},
+         2 * kCells,
+         kCells,
+         2 * kCells);
+
+    // The control: one sample INSIDE each parent the two do differ (their bakes are different
+    // textures; only the shared column agrees).
+    {
+        const auto ia = along({a1, fixed_morph(a1, 0.0f)}, 2 * kCells - 2, 2, 2 * kCells - 2);
+        const auto ib = along({b1, fixed_morph(b1, 0.0f)}, 2 * kCells + 2, 2, 2 * kCells - 2);
+        std::uint32_t differ = 0;
+        for (const auto& [gz, ca] : ia) {
+            differ += ib.contains(gz) && ib.at(gz) != ca ? 1u : 0u;
+        }
+        CHECK(differ > kCells);
+    }
+    CHECK(compared >= 3u * (2u * kCells + 2u * kCells - 4u));
+    MESSAGE("m19.8d3 (c): " << compared << " channel values on shared edges, " << bit_equal
+                            << " bit-identical; worst " << worst_ulps << " f16 ULP");
+}
+
+namespace {
+
+// Every leaf's per-vertex morph factor, read back from the GPU (points, one pixel per vertex).
+struct MorphProbe {
+    rhi::Device& device;
+    rhi::ShaderHandle vs{};
+    rhi::ShaderHandle fs{};
+    rhi::PipelineHandle points{};
+    rhi::SamplerHandle sampler{};
+
+    explicit MorphProbe(rhi::Device& d) : device(d) {
+        rhi::ShaderDesc sd{};
+        sd.stage = rhi::ShaderStage::Vertex;
+        sd.spirv = terrain_vert_spv;
+        sd.spirv_size_bytes = sizeof(terrain_vert_spv);
+        sd.debug_name = "terrain.vert";
+        vs = device.create_shader(sd);
+        sd.stage = rhi::ShaderStage::Fragment;
+        sd.spirv = terrain_lod_probe_frag_spv;
+        sd.spirv_size_bytes = sizeof(terrain_lod_probe_frag_spv);
+        sd.debug_name = "terrain_lod_probe.frag";
+        fs = device.create_shader(sd);
+        static const rhi::BindingDesc bindings[] = {
+            {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Vertex},
+        };
+        rhi::GraphicsPipelineDesc pd{};
+        pd.vertex_shader = vs;
+        pd.fragment_shader = fs;
+        pd.color_format = rhi::Format::R32Uint;
+        pd.topology = rhi::PrimitiveTopology::PointList;
+        pd.cull = rhi::CullMode::None;
+        pd.bindings = bindings;
+        pd.push_constant_size = sizeof(render::TerrainPush);
+        pd.debug_name = "m19.8d3-morph-probe";
+        points = device.create_graphics_pipeline(pd);
+        rhi::SamplerDesc smp{};
+        smp.mag_filter = rhi::Filter::Nearest;
+        smp.min_filter = rhi::Filter::Nearest;
+        smp.address_mode = rhi::AddressMode::ClampToEdge;
+        sampler = device.create_sampler(smp);
+    }
+
+    ~MorphProbe() {
+        device.wait_idle();
+        device.destroy(points);
+        device.destroy(sampler);
+        device.destroy(fs);
+        device.destroy(vs);
+    }
+
+    MorphProbe(const MorphProbe&) = delete;
+    MorphProbe& operator=(const MorphProbe&) = delete;
+
+    // morphs[n][i + kN·j] for leaf n.
+    std::vector<std::vector<float>> run(const Uploaded& up,
+                                        const std::vector<TerrainLodLeaf>& leaves,
+                                        const render::TerrainLodRanges& ranges,
+                                        core::Vec3 eye,
+                                        bool corner_bits = true) {
+        constexpr std::uint32_t kStride = kN + 1;
+        const auto cols =
+            static_cast<std::uint32_t>(std::ceil(std::sqrt(static_cast<double>(leaves.size()))));
+        const std::uint32_t rows = (static_cast<std::uint32_t>(leaves.size()) + cols - 1) / cols;
+        const std::uint32_t w = cols * kStride;
+        const std::uint32_t h = rows * kStride;
+        std::vector<TopDown> views;
+        for (std::size_t n = 0; n < leaves.size(); ++n) {
+            const TerrainTileKey k = leaves[n].key;
+            const float cell = static_cast<float>(1u << k.level);
+            const float x0 = world_x(std::int64_t{k.coord.x} * kCells, k.level) -
+                             (static_cast<float>(n % cols * kStride) + 0.5f) * cell;
+            const float z0 = world_z(std::int64_t{k.coord.z} * kCells, k.level) -
+                             (static_cast<float>(n / cols * kStride) + 0.5f) * cell;
+            views.push_back(top_down(x0, z0, cell, w, h));
+        }
+        render::RenderGraph graph(device);
+        graph.reset();
+        const render::RGTexture target =
+            graph.create_texture({{w, h}, rhi::Format::R32Uint, "morph-probe"});
+        graph.export_texture(target);
+        const render::RGColorAttachment colors[] = {
+            {target, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+        std::vector<render::RGTexture> sampled;
+        for (const TerrainLodLeaf& leaf : leaves) {
+            sampled.push_back(
+                graph.import_texture(up.tile(leaf.key).heights, rhi::ResourceState::ShaderRead));
+        }
+        render::RenderGraph::RasterPassDesc rpd{};
+        rpd.colors = colors;
+        rpd.sampled = sampled;
+        graph.add_raster_pass("m19.8d3-morph-probe", rpd, [&](rhi::CommandBuffer& cmd) {
+            cmd.bind_pipeline(points);
+            for (std::size_t n = 0; n < leaves.size(); ++n) {
+                const render::TerrainTile& tile = up.tile(leaves[n].key);
+                render::TerrainLodDraw lod = lod_draw(ranges, leaves[n], eye);
+                if (!corner_bits) {
+                    lod.coarser_corners = 0; // the counterfactual: the vertex stage without them
+                }
+                const render::TerrainPush push =
+                    render::terrain_push(tile, views[n].view_proj, eye, {}, lod);
+                cmd.bind_texture(0, tile.heights, sampler);
+                cmd.push_constants(&push, sizeof(push));
+                cmd.draw(tile.vertex_count);
+            }
+        });
+        auto cmd = device.begin_commands();
+        graph.execute(*cmd);
+        device.submit_blocking(*cmd);
+        const auto words = read_back(device, graph.physical(target), w, h, 4);
+        std::vector<std::vector<float>> out(leaves.size());
+        for (std::size_t n = 0; n < leaves.size(); ++n) {
+            const TerrainTileKey k = leaves[n].key;
+            for (std::int32_t j = 0; j <= kCells; ++j) {
+                for (std::int32_t i = 0; i <= kCells; ++i) {
+                    const auto px =
+                        pixel_of(views[n],
+                                 world_x(std::int64_t{k.coord.x} * kCells + i, k.level),
+                                 10.0f,
+                                 world_z(std::int64_t{k.coord.z} * kCells + j, k.level));
+                    REQUIRE(px.has_value());
+                    const std::uint32_t word = word_at(words, *px);
+                    REQUIRE(word != 0); // a point landed here (the probe sets the sign bit)
+                    out[n].push_back(bits_float(word ^ 0x80000000u));
+                }
+            }
+        }
+        return out;
+    }
+};
+
+} // namespace
+
+TEST_CASE("m19.8d3: a vertex gets ONE morph factor whichever tile draws it, and 1 wherever it "
+          "touches a coarser tile — edges and corners") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    const LodWorld w = make_lod_world(16, 16, 4);
+    const render::TerrainLodRanges ranges = render::terrain_lod_ranges(w.world, test_view());
+    const Uploaded up(*device, w);
+    MorphProbe probe(*device);
+    const std::vector<PathFrame> path = camera_path(w);
+    const std::uint32_t top = w.world.level_count() - 1;
+
+    struct Seen {
+        std::uint32_t level;
+        float m;
+    };
+
+    std::uint64_t shared = 0;          // vertex positions drawn by more than one leaf
+    std::uint64_t same_level = 0;      // …by two leaves of one level
+    std::uint64_t mid_morph = 0;       // …of which strictly between 0 and 1
+    std::uint64_t cross_level = 0;     // …by leaves of different levels
+    std::uint64_t coarse_morphing = 0; // the COARSER tile is itself morphing at such a vertex
+    std::uint64_t coarse_morphing_ideal = 0;
+    std::uint32_t frames = 0;
+    for (std::size_t f = 0; f < path.size(); f += 7) {
+        for (const bool forced : {false, true}) {
+            const render::TerrainLodSelection sel =
+                render::select_terrain_lod(w.world, ranges, path[f].eye, [&](TerrainTileKey k) {
+                    return w.world.find(k) != nullptr &&
+                           (!forced || forced_fallback_usable(k, top, f));
+                });
+            const auto morphs = probe.run(up, sel.leaves, ranges, path[f].eye);
+            ++frames;
+            std::map<std::pair<std::int64_t, std::int64_t>, std::vector<Seen>> at;
+            for (std::size_t n = 0; n < sel.leaves.size(); ++n) {
+                const TerrainTileKey k = sel.leaves[n].key;
+                for (std::int32_t j = 0; j <= kCells; ++j) {
+                    for (std::int32_t i = 0; i <= kCells; ++i) {
+                        const std::int64_t gx = (std::int64_t{k.coord.x} * kCells + i) << k.level;
+                        const std::int64_t gz = (std::int64_t{k.coord.z} * kCells + j) << k.level;
+                        at[{gx, gz}].push_back(
+                            {k.level, morphs[n][static_cast<std::size_t>(i + kN * j)]});
+                    }
+                }
+            }
+            for (const auto& [pos, seen] : at) {
+                if (seen.size() < 2) {
+                    continue;
+                }
+                ++shared;
+                std::uint32_t finest = seen[0].level;
+                std::uint32_t coarsest = seen[0].level;
+                for (const Seen& s : seen) {
+                    finest = std::min(finest, s.level);
+                    coarsest = std::max(coarsest, s.level);
+                }
+                for (const Seen& s : seen) {
+                    for (const Seen& o : seen) {
+                        if (s.level == o.level) {
+                            // THE CLAIM: bit for bit the same factor.
+                            CHECK(float_bits(s.m) == float_bits(o.m));
+                        }
+                    }
+                }
+                if (finest == coarsest) {
+                    ++same_level;
+                    mid_morph += seen[0].m > 0.0f && seen[0].m < 1.0f ? 1u : 0u;
+                    continue;
+                }
+                ++cross_level;
+                for (const Seen& s : seen) {
+                    if (s.level < coarsest) {
+                        // Finer than something it touches: fully on the parent's appearance.
+                        CHECK(s.m == 1.0f);
+                    } else if (s.m != 0.0f) {
+                        ++coarse_morphing;
+                        coarse_morphing_ideal += forced ? 0u : 1u;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(frames >= 40);
+    CHECK(same_level > 10000);
+    CHECK(mid_morph > 500);
+    CHECK(cross_level > 1000);
+    // With every tile available (the ideal selection) the ranges NEST: a coarser tile is not
+    // morphing where a finer one touches it, so the fine side's "parent bake" and the coarse
+    // side's own bake are the same texels and the appearance is continuous across the level
+    // boundary. Under forced fallback that nesting is not guaranteed; it is counted, not asserted.
+    CHECK(coarse_morphing_ideal == 0);
+    MESSAGE("m19.8d3 morph agreement: " << frames << " selections, " << shared
+                                        << " shared vertices — " << same_level << " same-level ("
+                                        << mid_morph << " mid-morph), " << cross_level
+                                        << " across levels; coarser side morphing at "
+                                        << coarse_morphing << " of them under forced fallback, "
+                                        << coarse_morphing_ideal << " in ideal selections");
+
+    // ── THE CORNER, BUILT ON PURPOSE ────────────────────────────────────────────────────────
+    //
+    // The sweep above passes with the corner bits removed (measured): wherever a tile is coarser
+    // because it is FAR, every vertex touching it is beyond the finer level's morph range anyway.
+    // The bits matter when a tile is coarser because its children are NOT RESIDENT while the
+    // camera is close — so that case is constructed: three level-1 nodes around a point split to
+    // level 0, the fourth (diagonal) one cannot, and the camera hovers over the point. The
+    // level-0 tile diagonal to the coarse node touches it at ONE vertex; its two neighbours have
+    // the coarse node across an edge. Without the corner bit that tile fades the vertex by
+    // distance (m = 0 here) while its neighbours hold it at 1.
+    {
+        const core::Vec3 eye{world_x(2 * kCells, 0), 27.0f, world_z(2 * kCells, 0)};
+        const TerrainTileKey coarse{1, {1, 1}};
+        const render::TerrainLodSelection sel =
+            render::select_terrain_lod(w.world, ranges, eye, [&](TerrainTileKey k) {
+                return w.world.find(k) != nullptr &&
+                       !(k.level == 0 && assets::terrain_parent_coord(k.coord) == coarse.coord);
+            });
+        const TerrainLodLeaf* diagonal = nullptr;
+        bool coarse_is_leaf = false;
+        for (const TerrainLodLeaf& leaf : sel.leaves) {
+            if (leaf.key == TerrainTileKey{0, {1, 1}}) {
+                diagonal = &leaf;
+            }
+            coarse_is_leaf = coarse_is_leaf || leaf.key == coarse;
+        }
+        REQUIRE(diagonal != nullptr); // the three neighbours did split to level 0
+        REQUIRE(coarse_is_leaf);
+        CHECK(diagonal->coarser_edges == 0);   // it has no coarser EDGE neighbour…
+        CHECK(diagonal->coarser_corners == 8); // …only the (last, last) corner
+        const auto disagreements = [&](bool corner_bits) {
+            const auto morphs = probe.run(up, sel.leaves, ranges, eye, corner_bits);
+            std::map<std::tuple<std::uint32_t, std::int64_t, std::int64_t>, std::uint32_t> first;
+            std::uint32_t n_bad = 0;
+            for (std::size_t n = 0; n < sel.leaves.size(); ++n) {
+                const TerrainTileKey k = sel.leaves[n].key;
+                for (std::int32_t j = 0; j <= kCells; ++j) {
+                    for (std::int32_t i = 0; i <= kCells; ++i) {
+                        const std::uint32_t bits =
+                            float_bits(morphs[n][static_cast<std::size_t>(i + kN * j)]);
+                        const auto [it, fresh] =
+                            first.try_emplace({k.level,
+                                               std::int64_t{k.coord.x} * kCells + i,
+                                               std::int64_t{k.coord.z} * kCells + j},
+                                              bits);
+                        n_bad += !fresh && it->second != bits ? 1u : 0u;
+                    }
+                }
+            }
+            return n_bad;
+        };
+        CHECK(disagreements(true) == 0);
+        const std::uint32_t without = disagreements(false);
+        CHECK(without > 0); // the bit is what holds it: its absence is visible
+        MESSAGE("m19.8d3 corner: a tile touching a coarser one at a corner only — 0 shared "
+                "vertices disagree with the corner bit, "
+                << without << " without it");
+    }
+}
+
+TEST_CASE("m19.8d3: (b) the frame a node switches level, no pixel's colour changes") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    const LodWorld w = make_lod_world(16, 16, 4);
+    const render::TerrainLodRanges ranges = render::terrain_lod_ranges(w.world, test_view());
+    BakedUpload up(*device, w);
+    const std::vector<PathFrame> path = camera_path(w);
+    const render::TerrainLight light = flat_light();
+
+    constexpr std::uint32_t kPx = 256; // the whole world, 0.5 m per pixel
+    const TopDown view = top_down(kOrigin.x, kOrigin.z, 0.5f, kPx, kPx);
+    const auto frame = [&](const render::TerrainLodSelection& sel, core::Vec3 eye, bool morph) {
+        std::vector<Shade> d;
+        for (const TerrainLodLeaf& leaf : sel.leaves) {
+            render::TerrainLodDraw lod = up.with_parent(leaf.key, lod_draw(ranges, leaf, eye));
+            if (!morph) {
+                // The control: geometry and appearance both unmorphed (m = 0 everywhere).
+                lod.morph_start = std::numeric_limits<float>::infinity();
+                lod.morph_end = std::numeric_limits<float>::infinity();
+                lod.coarser_edges = 0;
+                lod.coarser_corners = 0;
+            }
+            d.push_back({up.ids.at(leaf.key), view.view_proj, lod});
+        }
+        return shade(*device, up.pass, d, kPx, kPx, light);
+    };
+    const auto all = [&](TerrainTileKey k) { return w.world.find(k) != nullptr; };
+    // DERIVED. At a switch a node is replaced by its four children, which arrive at morph 1 while
+    // the node itself is not morphing (the nesting, ADR-0071 §1). So before, a pixel shows the
+    // node's bake at sample s; after, a child shows its PARENT's bake — the same texture — at
+    // (offset + s_child) / 2, which is s in exact arithmetic. What differs is the f32
+    // interpolation of the sample coordinate in two different triangulations (kInterpolationSlack,
+    // times a texel range of at most 1) and the two frames' independent f16 rounding: one ULP
+    // each, of a value that is at most 1.04.
+    const double kPopBound = 2.0 * ulp16(1.04) + kInterpolationSlack;
+    render::TerrainLodSelection prev =
+        render::select_terrain_lod(w.world, ranges, path[0].eye, all);
+    int switches = 0;
+    double worst = 0.0;
+    double worst_unmorphed = 0.0;
+    std::uint64_t unmorphed_pixels = 0;
+    for (std::size_t f = 1; f < path.size() && switches < 24; ++f) {
+        const render::TerrainLodSelection cur =
+            render::select_terrain_lod(w.world, ranges, path[f].eye, all);
+        if (!same_leaves(prev.leaves, cur.leaves) && path[f].slow) {
+            ++switches;
+            const core::Vec3 eye = path[f].eye;
+            const auto before = frame(prev, eye, true);
+            const auto after = frame(cur, eye, true);
+            const auto before_flat = frame(prev, eye, false);
+            const auto after_flat = frame(cur, eye, false);
+            std::uint32_t covered = 0;
+            for (std::size_t p = 0; p < std::size_t{kPx} * kPx; ++p) {
+                if (before[p * 4 + 3] != 1.0f || after[p * 4 + 3] != 1.0f) {
+                    continue;
+                }
+                ++covered;
+                bool jumped = false;
+                for (std::size_t c = 0; c < 3; ++c) {
+                    worst = std::max(
+                        worst, std::fabs(double{before[p * 4 + c]} - double{after[p * 4 + c]}));
+                    const double flat =
+                        std::fabs(double{before_flat[p * 4 + c]} - double{after_flat[p * 4 + c]});
+                    worst_unmorphed = std::max(worst_unmorphed, flat);
+                    jumped = jumped || flat > kPopBound;
+                }
+                unmorphed_pixels += jumped ? 1u : 0u;
+            }
+            CHECK(covered == kPx * kPx);
+        }
+        prev = cur;
+    }
+    CHECK(switches >= 10);
+    CHECK(worst <= kPopBound);
+    // The bound DISCRIMINATES: without the morph the same switches jump two orders past it.
+    CHECK(worst_unmorphed > 100.0 * kPopBound);
+    CHECK(unmorphed_pixels > 1000);
+    CHECK(up.pass.parent_bake_missing_draws() == 0);
+    MESSAGE("m19.8d3 (b): " << switches << " level switches; worst per-pixel colour change "
+                            << worst << " (bound " << kPopBound << "); without the morph "
+                            << worst_unmorphed << ", over " << unmorphed_pixels << " pixels");
+}
+
+// ── Through the residency: bakes loaded from files, bound, counted ──────────────────────────────
+
+namespace {
+
+std::string bake_path(TerrainTileKey k, const char* what) {
+    return "lod_L" + std::to_string(k.level) + "_" + std::to_string(k.coord.x) + "_" +
+           std::to_string(k.coord.z) + "_bake_" + what + ".rtex";
+}
+
+// A single-level RGBA8 texture file, as `rime terrain-world` cooks a bake (texture.rs,
+// cook_single_level).
+std::vector<std::byte> encode_single_level(std::uint32_t w,
+                                           std::uint32_t h,
+                                           assets::TextureFormat format,
+                                           const std::vector<std::byte>& pixels) {
+    Writer p;
+    p.u32(w);
+    p.u32(h);
+    p.u32(static_cast<std::uint32_t>(format));
+    p.u32(1);
+    p.u32(w);
+    p.u32(h);
+    p.u32(0);
+    p.u32(static_cast<std::uint32_t>(pixels.size()));
+    p.b.insert(p.b.end(), pixels.begin(), pixels.end());
+    return rma1(assets::AssetKind::Texture, assets::texture_schema_hash(), p.b);
+}
+
+// `w`'s manifest with every parent naming its bake, and the bake files written into `dir`.
+assets::TerrainWorld write_baked_world(const fs::path& dir, const LodWorld& w) {
+    write_lod_world(dir, w);
+    auto out = assets::TerrainWorld::make(lod_grid());
+    REQUIRE(out.has_value());
+    for (std::uint32_t l = 0; l < w.world.level_count(); ++l) {
+        for (assets::TerrainWorldTile t : w.world.tiles(l)) {
+            if (l > 0) {
+                const Bake b = make_bake(t.key());
+                t.bake_color_path = bake_path(t.key(), "color");
+                t.bake_material_path = bake_path(t.key(), "material");
+                write_file(dir / t.bake_color_path,
+                           encode_single_level(kN, kN, assets::TextureFormat::Rgba8Srgb, b.color));
+                write_file(
+                    dir / t.bake_material_path,
+                    encode_single_level(kN, kN, assets::TextureFormat::Rgba8Unorm, b.material));
+            }
+            REQUIRE(out->add_tile(std::move(t)));
+        }
+    }
+    REQUIRE(out->validate_levels());
+    return *out;
+}
+
+struct BakeRun {
+    render::TerrainResidencyStats stats;
+    std::uint64_t top_level_draws = 0;
+    std::uint64_t parent_draws = 0;
+    std::uint64_t pass_bake_draws = 0;
+    std::uint64_t pass_parent_draws = 0;
+    std::uint64_t pass_refused = 0;
+    bool always_covered = true; // from the frame the roots were resident
+};
+
+BakeRun run_sweep(rhi::Device& device,
+                  const LodWorld& w,
+                  const assets::TerrainWorld& world,
+                  const fs::path& dir,
+                  std::uint32_t slots) {
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    render::TerrainPass pass(device);
+    render::TerrainResidencyConfig cfg{};
+    cfg.slots = slots;
+    cfg.lod = test_view();
+    render::TerrainResidency residency(device, pass, server, world, dir, nullptr, cfg);
+    REQUIRE(residency.lod());
+    const std::uint32_t top = world.level_count() - 1;
+    const std::size_t roots = world.tiles(top).size();
+    BakeRun out;
+    for (const PathFrame& f : camera_path(w)) {
+        lod_frame(device, server, residency, f.eye);
+        for (const TerrainLodLeaf& leaf : residency.selection().leaves) {
+            out.top_level_draws += leaf.key.level == top ? 1u : 0u;
+            out.parent_draws += leaf.key.level > 0 ? 1u : 0u;
+        }
+        if (residency.stats().pinned_roots == roots) {
+            out.always_covered =
+                out.always_covered && measure_cover(w, residency.selection().leaves).exact;
+        }
+    }
+    out.stats = residency.stats();
+    out.pass_bake_draws = pass.bake_draws();
+    out.pass_parent_draws = pass.parent_bake_draws();
+    out.pass_refused = pass.bakes_refused();
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("m19.8d3: (d) a fully cooked world draws every parent from its bake and fades every "
+          "tile toward its parent's — no placeholder, at any slot budget") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-bake");
+    const LodWorld w = make_lod_world(16, 16, 4);
+    const assets::TerrainWorld baked = write_baked_world(dir.path, w);
+
+    // The manifest round trip: a 14-field line for a parent, the 10-field line for level 0.
+    {
+        const std::string text =
+            "grid\t9\t1\t1\t0.01\t0\t0\t0\t0\n"
+            "tile\t0\t0\t0\t0\t1\t2\t0\tabc\ta.rhf\n"
+            "tile\t0\t1\t0\t0\t1\t2\t0\tabd\tb.rhf\n"
+            "tile\t0\t0\t1\t0\t1\t2\t0\tabe\tc.rhf\n"
+            "tile\t0\t1\t1\t0\t1\t2\t0\tabf\td.rhf\n"
+            "tile\t1\t0\t0\t0\t1\t2\t0.5\tac0\tp.rhf\t111\tp_color.rtex\t222\tp_material.rtex\n";
+        const auto parsed = assets::TerrainWorld::parse(text);
+        REQUIRE(parsed.has_value());
+        const assets::TerrainWorldTile* p = parsed->find(TerrainTileKey{1, {0, 0}});
+        REQUIRE(p != nullptr);
+        CHECK(p->has_bake());
+        CHECK(p->bake_color_path == "p_color.rtex");
+        CHECK(p->bake_material_path == "p_material.rtex");
+        CHECK(p->bake_color_id == assets::AssetId{0x111});
+        CHECK(p->bake_material_id == assets::AssetId{0x222});
+        CHECK_FALSE(parsed->find(TerrainTileKey{0, {1, 1}})->has_bake());
+        // A level-0 line may not carry a bake, and a half-named bake is malformed.
+        CHECK_FALSE(assets::TerrainWorld::parse(
+                        "grid\t9\t1\t1\t0.01\t0\t0\t0\t0\n"
+                        "tile\t0\t0\t0\t0\t1\t2\t0\tabc\ta.rhf\t1\tc.rtex\t2\tm.rtex\n")
+                        .has_value());
+        CHECK_FALSE(
+            assets::TerrainWorld::parse("grid\t9\t1\t1\t0.01\t0\t0\t0\t0\n"
+                                        "tile\t1\t0\t0\t0\t1\t2\t0\tabc\ta.rhf\t1\t\t2\tm.rtex\n")
+                .has_value());
+    }
+
+    for (const std::uint32_t slots : {160u, 12u}) {
+        const BakeRun r = run_sweep(*device, w, baked, dir.path, slots);
+        const render::TerrainResidencyStats& s = r.stats;
+        CHECK(s.fallback_appearance_draws == 0); // THE CLAIM
+        CHECK(s.parent_bake_missing_draws == 0);
+        CHECK(s.bake_load_failures == 0);
+        CHECK(s.bake_refusals == 0);
+        CHECK(r.pass_refused == 0);
+        CHECK(r.always_covered);
+        // Not vacuous, and every draw accounted for: each parent drawn was drawn from its bake,
+        // each tile below the top level had its parent's bound — in the residency's counters and
+        // in the pass's own.
+        CHECK(s.bake_requests > 4);
+        CHECK(r.parent_draws > 500);
+        CHECK(s.baked_appearance_draws == r.parent_draws);
+        CHECK(s.appearance_morph_draws == s.lod_draws - r.top_level_draws);
+        CHECK(s.appearance_morph_draws > 1000);
+        CHECK(r.pass_bake_draws == s.baked_appearance_draws);
+        CHECK(r.pass_parent_draws == s.appearance_morph_draws);
+        if (slots == 12u) {
+            CHECK(s.fallback_draws > 0); // pressure really did lower detail
+            CHECK(s.evictions > 0);
+        }
+        MESSAGE("m19.8d3 (d), " << slots << " slots: " << s.lod_draws << " leaf draws, "
+                                << s.baked_appearance_draws << " parents from their bake, "
+                                << s.appearance_morph_draws << " fading toward a parent's, "
+                                << s.fallback_appearance_draws << " placeholder, "
+                                << s.parent_bake_missing_draws << " without a parent bake; "
+                                << s.bake_waits << " tile-frames waited for a bake, "
+                                << s.fallback_draws << " fallback tile-frames");
+    }
+}
+
+TEST_CASE("m19.8d3: a world without bakes, a bake of the wrong size and a missing bake file all "
+          "still draw — placeholder, counted, coverage intact") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    const LodWorld w = make_lod_world(8, 8, 3);
+
+    // Cooked WITHOUT bakes: m19.8d2's picture, and its counter.
+    {
+        TempDir dir("lod-nobake");
+        write_lod_world(dir.path, w);
+        const BakeRun r = run_sweep(*device, w, w.world, dir.path, 96);
+        CHECK(r.always_covered);
+        CHECK(r.stats.bake_requests == 0);
+        CHECK(r.stats.baked_appearance_draws == 0);
+        CHECK(r.stats.appearance_morph_draws == 0);
+        CHECK(r.stats.fallback_appearance_draws == r.parent_draws);
+        CHECK(r.stats.fallback_appearance_draws > 0);
+        CHECK(r.stats.parent_bake_missing_draws == r.stats.lod_draws - r.top_level_draws);
+        CHECK(r.pass_bake_draws == 0);
+    }
+    // One root's bake is 5×5 (a valid texture, not this tile's), another root's colour file is
+    // missing. Both roots still become resident and are drawn — with the placeholder.
+    {
+        TempDir dir("lod-badbake");
+        const assets::TerrainWorld baked = write_baked_world(dir.path, w);
+        REQUIRE(baked.tiles(2).size() == 4);
+        const TerrainTileKey small{2, {0, 0}};
+        const TerrainTileKey gone{2, {1, 0}};
+        const std::vector<std::byte> tiny(5 * 5 * 4, std::byte{128});
+        write_file(dir.path / bake_path(small, "color"),
+                   encode_single_level(5, 5, assets::TextureFormat::Rgba8Srgb, tiny));
+        write_file(dir.path / bake_path(small, "material"),
+                   encode_single_level(5, 5, assets::TextureFormat::Rgba8Unorm, tiny));
+        fs::remove(dir.path / bake_path(gone, "color"));
+        const BakeRun r = run_sweep(*device, w, baked, dir.path, 96);
+        CHECK(r.always_covered);
+        CHECK(r.stats.pinned_roots == 4);
+        CHECK(r.stats.bake_refusals == 1);
+        CHECK(r.pass_refused == 1);
+        CHECK(r.stats.bake_load_failures == 1);
+        CHECK(r.stats.refused_loads == 0); // the HEIGHTS loaded: appearance never costs coverage
+        // Every placeholder draw is one of those two roots, or a child fading toward one.
+        CHECK(r.stats.fallback_appearance_draws + r.stats.baked_appearance_draws == r.parent_draws);
+        CHECK(r.stats.baked_appearance_draws > 0);
+        CHECK(r.stats.appearance_morph_draws + r.stats.parent_bake_missing_draws ==
+              r.stats.lod_draws - r.top_level_draws);
+        CHECK(r.stats.parent_bake_missing_draws > 0);
+        CHECK(r.stats.appearance_morph_draws > 0);
+    }
 }
