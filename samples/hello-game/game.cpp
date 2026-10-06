@@ -16,9 +16,12 @@
 #include <bit>
 #include <cmath>
 #include <memory>
+#include <string>
 
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
+#include "rime/ecs/query.hpp"
+#include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/material.hpp"
@@ -43,10 +46,10 @@ constexpr std::uint32_t kCapsuleShape = static_cast<std::uint32_t>(physics::Shap
 constexpr float kArenaHalf = 9.0f;
 constexpr float kFloorHalfY = 0.5f;
 constexpr float kCrateHalf = 0.5f;
-// The CENTRE of the ring, not a point on it. Starting on the ring would put the player inside marker
-// 0 at tick zero and collect it for free — which passed the self-check and made the first reported
-// collection tick 1, a number that looks like a working trigger and is really a spawn overlap. A
-// game's starting position is a rule, and this is the rule: you have to walk.
+// The CENTRE of the ring, not a point on it. Starting on the ring would put the player inside
+// marker 0 at tick zero and collect it for free — which passed the self-check and made the first
+// reported collection tick 1, a number that looks like a working trigger and is really a spawn
+// overlap. A game's starting position is a rule, and this is the rule: you have to walk.
 constexpr core::Vec3 kPlayerStart{0.0f,
                                   HelloGame::kPlayerRadius + HelloGame::kPlayerHalfHeight,
                                   0.0f};
@@ -123,14 +126,20 @@ bool HelloGame::setup(app::SetupContext& ctx) {
     physics_.set_job_system(&ctx.jobs);
     physics_.set_sleeping_enabled(true);
 
-    // The floor: a static slab whose top surface is exactly y = 0, so every other height in this
-    // file is a height above the ground and not an offset from a slab's centre.
+    // The floor is CONTENT since m20.2: it arrives from `content/hello-game.rscene`, the entry
+    // scene the engine loads from the content root before this runs. So the arena is already here —
+    // and if it is not, this refuses rather than dropping the player into an empty world, where the
+    // autopilot would still "win" by walking through the markers in mid-air. A game's own check of
+    // its own content, on top of the engine's "the root and the scene exist".
     {
-        core::Transform tf{};
-        tf.translation = {0.0f, -kFloorHalfY, 0.0f};
-        (void)world.spawn_with(WorldTransform{tf},
-                               physics::RigidBody{.motion = kStatic},
-                               box_collider(kArenaHalf, kFloorHalfY, kArenaHalf));
+        int floors = 0;
+        world.query<physics::RigidBody, physics::Collider>().for_each(
+            [&](ecs::Entity, const physics::RigidBody& rb, const physics::Collider& c) {
+                floors += (rb.motion == kStatic && c.shape_type == kBoxShape && !c.sensor) ? 1 : 0;
+            });
+        if (floors != 1) {
+            return false;
+        }
     }
 
     // The player: KINEMATIC, so the game owns its pose and `PhysicsSync::push_in` drives the body
@@ -157,20 +166,19 @@ bool HelloGame::setup(app::SetupContext& ctx) {
                                   box_collider(kCrateHalf, kCrateHalf, kCrateHalf));
     }
 
-    // The five markers: SENSOR spheres. A sensor joins the broadphase and the exact narrowphase like
-    // any other body but is skipped by the solver, so it reports overlaps and exchanges no impulse
-    // — the player walks through it and the trigger fires.
+    // The five markers: SENSOR spheres. A sensor joins the broadphase and the exact narrowphase
+    // like any other body but is skipped by the solver, so it reports overlaps and exchanges no
+    // impulse — the player walks through it and the trigger fires.
     //
     // Placed on a ring rather than at random, because a sample's scene is documentation: a reader
     // can see at a glance that five of something is five of something.
     for (int i = 0; i < kPickupCount; ++i) {
         core::Transform tf{};
         tf.translation = marker_position(i);
-        const ecs::Entity e = world.spawn_with(WorldTransform{tf},
-                                               physics::RigidBody{.motion = kStatic},
-                                               physics::Collider{.shape_type = kSphereShape,
-                                                                 .radius = kPickupRadius,
-                                                                 .sensor = true});
+        const ecs::Entity e = world.spawn_with(
+            WorldTransform{tf},
+            physics::RigidBody{.motion = kStatic},
+            physics::Collider{.shape_type = kSphereShape, .radius = kPickupRadius, .sensor = true});
         pickups_.push_back(Pickup{e, physics::BodyId{}, false});
     }
     return true;
@@ -336,7 +344,8 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     render::register_render_components(world);
     ctx.renderer.set_ambient(0.04f, 0.045f, 0.06f);
 
-    const render::MeshId floor_mesh = ctx.meshes.add(render::make_plane(kArenaHalf, 12.0f), "floor");
+    const render::MeshId floor_mesh =
+        ctx.meshes.add(render::make_plane(kArenaHalf, 12.0f), "floor");
     const render::MeshId crate_mesh = ctx.meshes.add(render::make_cube(kCrateHalf), "crate");
     const render::MeshId marker_mesh =
         ctx.meshes.add(render::make_uv_sphere(kPickupRadius, 16, 24), "marker");
@@ -413,6 +422,27 @@ void HelloGame::present_frame(app::PresentFrameContext& ctx) {
     }
 }
 
+// ── The content ───────────────────────────────────────────────────────────────────────────────
+//
+// The floor: a static slab whose top surface is exactly y = 0, so every other height in this file
+// is a height above the ground and not an offset from a slab's centre. Written with a
+// LocalTransform, the reflected (savable) half of a pose — WorldTransform is derived and never in a
+// file.
+void build_arena(ecs::World& world) {
+    ecs::register_transform_components(world);
+    physics::register_physics_components(world);
+    core::Transform tf{};
+    tf.translation = {0.0f, -kFloorHalfY, 0.0f};
+    (void)world.spawn_with(ecs::LocalTransform{tf},
+                           physics::RigidBody{.motion = kStatic},
+                           box_collider(kArenaHalf, kFloorHalfY, kArenaHalf));
+}
+
+void register_components(ecs::World& world) {
+    ecs::register_transform_components(world);
+    physics::register_physics_components(world);
+}
+
 // ── The definition ────────────────────────────────────────────────────────────────────────────
 //
 // Everything the engine needs, as values: a name, a tick rate, the key bindings, and a factory.
@@ -430,6 +460,16 @@ app::GameDefinition definition() {
     };
     def.input.buttons = {{platform::Key::Escape, kButtonQuit}};
     def.create = [] { return std::make_unique<HelloGame>(); };
+    // Content (m20.2): the arena is a file, found through the content root — `--content`, else
+    // `content/` beside the executable, else (a binary still in its build directory) the source
+    // tree's `samples/hello-game/content`. The two RIME_GAME_* paths come from
+    // `rime_game_content()` in CMakeLists.txt and are inert once the binary is moved.
+    def.register_components = register_components;
+    def.entry_scene = std::string{kEntryScene};
+#if defined(RIME_GAME_CONTENT_DIR) && defined(RIME_GAME_BINARY_DIR)
+    def.dev_content_dir = RIME_GAME_CONTENT_DIR;
+    def.dev_binary_dir = RIME_GAME_BINARY_DIR;
+#endif
     return def;
 }
 

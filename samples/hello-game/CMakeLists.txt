@@ -11,9 +11,15 @@
 add_executable(hello_game main.cpp game.cpp)
 
 target_link_libraries(hello_game
-    PRIVATE rime::app_game rime::app rime::physics)
+    PRIVATE rime::app_game rime::app rime::physics rime::scene)
 
 rime_apply_common_target_options(hello_game)
+
+# m20.2 — the arena is CONTENT: `content/hello-game.rscene`, found at run time through the content
+# root (`--content`, else `content/` beside the executable, else — for a binary still in its build
+# directory only — this source directory). rime_game_content() hands the game those two build-tree
+# paths and writes the export record `scripts/export-game.sh hello_game <out>` reads.
+rime_game_content(hello_game ${CMAKE_CURRENT_SOURCE_DIR}/content)
 
 # The default run is the GPU-FREE self-check, so it gates on every CI OS and under both sanitizers —
 # the rules, the character controller and the trigger volumes are all CPU work, and none of them
@@ -42,3 +48,11 @@ add_test(NAME hello_game_cli_browser_not_yet COMMAND hello_game browser --port 8
 # included. The exact exit code (3) is asserted by tests/app/launch_test.cpp.
 set_tests_properties(hello_game_cli_browser_not_yet PROPERTIES
     PASS_REGULAR_EXPRESSION "'browser' mode is not implemented yet")
+
+# m20.2 — a content root that is named and wrong is a refusal that says where it looked, never a run
+# on an empty world. (The bundle-side half — a moved binary with its content deleted — is
+# scripts/export-proof.sh, because it needs a binary outside the build tree.)
+add_test(NAME hello_game_cli_content_missing
+    COMMAND hello_game dedicated --ticks 1 --content ${CMAKE_CURRENT_BINARY_DIR}/no-such-content)
+set_tests_properties(hello_game_cli_content_missing PROPERTIES
+    PASS_REGULAR_EXPRESSION "no content root found; tried, in order:.*no-such-content: missing")
