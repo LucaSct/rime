@@ -2725,6 +2725,7 @@ TEST_CASE("m19.8e: (a) under a byte budget a long sweep plateaus — GPU bytes n
     std::uint64_t peak = 0;
     std::uint64_t peak_cpu_bakes = 0;
     std::uint32_t covered_frames = 0;
+    std::uint32_t worst_holds = 0;
     render::TerrainResidencyStats s{};
     {
         render::TerrainPass pass(*device);
@@ -2743,7 +2744,7 @@ TEST_CASE("m19.8e: (a) under a byte budget a long sweep plateaus — GPU bytes n
             peak = std::max(peak, now.budget_bytes);
             // Every CPU bake copy the server holds is one a not-yet-resident parent is waiting
             // on (measured once the loads in flight have landed); no resident tile holds one.
-            REQUIRE(now.resident_bake_holds == 0);
+            worst_holds = std::max(worst_holds, now.resident_bake_holds);
             settle(server);
             const std::uint64_t cpu = server.resident_streamed_texture_bytes();
             REQUIRE(cpu <= std::uint64_t{now.bake_handles_held} * kN * kN * 4);
@@ -2755,6 +2756,7 @@ TEST_CASE("m19.8e: (a) under a byte budget a long sweep plateaus — GPU bytes n
         }
         s = residency.stats();
         CHECK(s.peak_budget_bytes <= budget);
+        CHECK(worst_holds == 0);
     }
     // Every ownership returned: the server's streamed bytes are back where they started.
     CHECK(server.resident_streamed_bytes() == cpu_baseline);
