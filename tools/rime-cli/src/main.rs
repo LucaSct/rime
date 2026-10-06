@@ -149,6 +149,19 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Cook a terrain WORLD with its LOD chain (M19.8d1, ADR-0070): a `<name>.terrainworld.toml`
+    /// naming `levels` and one `tile_<x>_<z> = "source"` per level-0 tile (each a `rime
+    /// heightfield` source with its own sidecar). Writes every tile as `<name>_L<level>_<x>_<z>.rhf`
+    /// — level 0 cooked as `rime heightfield` cooks it, each coarser level every second sample of
+    /// its four children — and the world manifest `<name>.terrainworld` (levels, bounds, geometric
+    /// errors). A world the root level cannot cover exactly is refused with every reason listed.
+    TerrainWorld {
+        /// The `<name>.terrainworld.toml` description; tile paths in it are relative to it.
+        input: PathBuf,
+        /// Output directory for the tiles and the manifest.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Print the header of a cooked RMA1 asset file.
     Inspect {
         /// A cooked `.rmesh`/`.rtex` (or other RMA1) file.
@@ -208,6 +221,7 @@ fn main() -> ExitCode {
             run_heightfield(&input, &out, name.as_deref())
         }
         Some(Command::TerrainLayer { input, out }) => run_terrain_layer(&input, &out),
+        Some(Command::TerrainWorld { input, out }) => run_terrain_world(&input, &out),
         Some(Command::Inspect { file }) => run_inspect(&file),
     }
 }
@@ -336,6 +350,52 @@ fn run_heightfield(input: &Path, out: &Path, name: Option<&str>) -> ExitCode {
         hf.columns,
         hf.rows,
         hf.height_scale()
+    );
+    ExitCode::SUCCESS
+}
+
+/// Cook a terrain world description into its tiles (every level) plus `<out>/<name>.terrainworld`.
+fn run_terrain_world(input: &Path, out: &Path) -> ExitCode {
+    let cooked = match asset_pipeline::terrain_world::cook_terrain_world(input) {
+        Ok(cooked) => cooked,
+        Err(e) => {
+            eprintln!("rime terrain-world: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(out) {
+        eprintln!("rime terrain-world: creating {}: {e}", out.display());
+        return ExitCode::FAILURE;
+    }
+    let manifest = (
+        cooked.manifest_file_name(),
+        cooked.manifest.as_bytes().to_vec(),
+    );
+    for (file_name, bytes) in cooked
+        .files
+        .iter()
+        .map(|(f, b, _)| (f.clone(), b.clone()))
+        .chain(std::iter::once(manifest))
+    {
+        let file = out.join(&file_name);
+        if let Err(e) = std::fs::write(&file, bytes) {
+            eprintln!("rime terrain-world: writing {}: {e}", file.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    println!(
+        "cooked {} -> {} ({} tiles over {} levels, root error {:.4} m)",
+        input.display(),
+        out.join(cooked.manifest_file_name()).display(),
+        cooked.world.tiles.len(),
+        cooked.world.levels,
+        cooked
+            .world
+            .tiles
+            .iter()
+            .filter(|t| t.level + 1 == cooked.world.levels)
+            .map(|t| t.geometric_error)
+            .fold(0.0f32, f32::max)
     );
     ExitCode::SUCCESS
 }

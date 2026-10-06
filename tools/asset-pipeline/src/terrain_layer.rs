@@ -53,7 +53,7 @@ pub struct TerrainLayerSidecar {
 }
 
 /// Strip a `#` comment, but not one inside a `"..."` string: a path may legally contain `#`.
-fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     let mut in_string = false;
     for (i, c) in line.char_indices() {
         match c {

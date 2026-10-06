@@ -29,6 +29,7 @@ pub mod skin;
 pub mod stl;
 pub mod tangent;
 pub mod terrain_layer;
+pub mod terrain_world;
 pub mod texture;
 pub mod virtual_geometry;
 pub mod virtual_geometry_dag;
