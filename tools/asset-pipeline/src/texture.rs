@@ -317,6 +317,29 @@ impl Texture {
     }
 }
 
+/// Cook ONE level of raw RGBA8 texels as a texture with no mip chain, returning
+/// `(bytes, asset_id)`. For data that is addressed texel by texel rather than minified — the
+/// terrain appearance bake (m19.8d3) has one texel per vertex at every distance it is drawn, so a
+/// mip chain would be bytes nothing reads. `format` is one of the RGBA8 `TEXFMT_*` values.
+pub fn cook_single_level(width: u32, height: u32, format: u32, pixels: &[u8]) -> (Vec<u8>, u64) {
+    assert_eq!(
+        pixels.len(),
+        width as usize * height as usize * BYTES_PER_PIXEL,
+        "pixel count must be width*height*4"
+    );
+    let mut p = ByteWriter::new();
+    p.u32(width);
+    p.u32(height);
+    p.u32(format);
+    p.u32(1);
+    p.u32(width);
+    p.u32(height);
+    p.u32(0);
+    p.u32(pixels.len() as u32);
+    p.bytes(pixels);
+    wrap_container(ASSET_KIND_TEXTURE, TEXTURE_SCHEMA_HASH, &p.into_vec())
+}
+
 /// Box-filter one mip level to the next (half width/height, floored, min 1). Each destination texel
 /// averages the 2×2 source block above it, in *light* — for sRGB that means decode → average →
 /// re-encode; for linear, a plain average. Alpha is always linear (it is coverage, never gamma-

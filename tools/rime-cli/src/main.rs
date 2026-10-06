@@ -155,6 +155,8 @@ enum Command {
     /// — level 0 cooked as `rime heightfield` cooks it, each coarser level every second sample of
     /// its four children — and the world manifest `<name>.terrainworld` (levels, bounds, geometric
     /// errors). A world the root level cannot cover exactly is refused with every reason listed.
+    /// With `palette_dir = "<dir of cooked palette assets>"` it also bakes every parent's
+    /// appearance (M19.8d3, ADR-0072): `<tile>_bake_color.rtex` and `<tile>_bake_material.rtex`.
     TerrainWorld {
         /// The `<name>.terrainworld.toml` description; tile paths in it are relative to it.
         input: PathBuf,
@@ -397,6 +399,19 @@ fn run_terrain_world(input: &Path, out: &Path) -> ExitCode {
             .map(|t| t.geometric_error)
             .fold(0.0f32, f32::max)
     );
+    // m19.8d3: say whether parents have an appearance — a world cooked without one still draws,
+    // with the engine's placeholder material, and that should not be a surprise at run time.
+    match &cooked.bake {
+        Some(bake) => println!(
+            "  appearance: {} parent(s) baked, {} left without (a tile beneath has no palette)",
+            bake.tiles.iter().flatten().count(),
+            bake.parents_unbaked
+        ),
+        None => println!(
+            "  appearance: not baked (no `palette_dir` in the description) — parents draw with \
+             the placeholder material"
+        ),
+    }
     ExitCode::SUCCESS
 }
 
