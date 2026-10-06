@@ -156,6 +156,23 @@ coverage-rescaled; 16-bit source heights are rounded to nearest, `(2v + 257) / 5
 A heightfield palette slot (`layer0..layer3`) may name a terrain layer instead of a material; the
 heightfield format does not change — the consumer dispatches on the referenced file's `asset_kind`.
 
+## Terrain world manifest (text, M19.8a / M19.8d1)
+
+Not an RMA1 file: the tab-separated map `rime terrain-world` writes as `<name>.terrainworld`
+([ADR-0069](../../docs/adr/0069-m19.8a-terrain-render-residency.md),
+[ADR-0070](../../docs/adr/0070-m19.8d1-terrain-lod-cook.md); the reader is `rime::assets::TerrainWorld`).
+`#` lines are comments.
+
+    grid  <samples> <cell_x> <cell_z> <height_scale> <height_offset> <origin_x> <origin_y> <origin_z>
+    tile  <level> <x> <z> <revision> <min_y> <max_y> <geometric_error> <asset-id-hex> <path>
+
+One `grid` line first; floats are printed shortest-round-trip, so spacing and quantisation parse back
+bit for bit. A level-L tile covers 2^L × 2^L level-0 tiles, has the grid's `samples` and spacing
+`cell × 2^L`, and is an ordinary heightfield payload (v1, no palette) whose samples are every second
+sample of its four children. `min_y` / `max_y` are world-space bounds over every level-0 sample beneath
+the tile; `geometric_error` is metres (0 at level 0). The m19.8a 8-field line
+`tile <x> <z> <revision> <min_y> <max_y> <asset-id-hex> <path>` still reads, as level 0.
+
 ## The schema hash
 
 `type_schema_hash` is the engine's reflection `type_hash` of a v1 layout record, computed and pinned in

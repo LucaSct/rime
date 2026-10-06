@@ -1,0 +1,29 @@
+# Rime — git attributes.
+#
+# WHY THIS FILE EXISTS: committed fixtures are compared BYTE FOR BYTE.
+#
+# Several cook tests assert that cooking a description reproduces a committed fixture exactly
+# (tools/asset-pipeline/tests/cook_fixture.rs). That assertion is only meaningful if the fixture on
+# disk is the fixture that was committed — and by default it is not, on Windows. Git decides
+# "text or binary" by looking for a NUL byte in the first 8000, so a fixture that happens to hold
+# none is treated as text and gets its LF line endings rewritten to CRLF on checkout. The bytes the
+# test reads are then not the bytes anyone committed.
+#
+# That is exactly how m19.8d1 failed on windows-latest and nowhere else: lod_world.terrainworld is a
+# tab-separated text manifest, so it checked out with CRLF, while `rime terrain-world` builds the
+# same manifest in memory with LF (Rust's writeln! is always \n). The cook was right; the checkout
+# was wrong. 14 of the 44 committed fixtures hold no NUL byte and so sit in that same blast radius
+# — including raw heightfields and glTF — and only this one happened to be compared as a string.
+#
+# `-text` means: never translate, in either direction. Store and check out these paths verbatim.
+tests/assets/fixtures/** -text
+
+# The cooked asset formats, wherever they live — a cooked artifact must be identical on every
+# platform or its content hash is not a content hash.
+*.terrainworld -text
+*.rhf          -text
+*.r16          -text
+*.rmesh        -text
+*.rsdf         -text
+*.rtex         -text
+*.rscene       -text

@@ -1,0 +1,7 @@
+# rime terrain world (m19.8d1, ADR-0070) — written by `rime terrain-world`
+grid	5	1	1	0.001	-5	0	1	0
+tile	0	0	0	0	-3	46.979004	0	5d23f859fe0d2c25	lod_world_L0_0_0.rhf
+tile	0	1	0	0	-0.33099985	43.366	0	c720952522209cf4	lod_world_L0_1_0.rhf
+tile	0	0	1	0	-0.33099985	46.979004	0	dba1d1aa5c6dc12c	lod_world_L0_0_1.rhf
+tile	0	1	1	0	-0.33099985	46.635002	0	824f2853d77c4328	lod_world_L0_1_1.rhf
+tile	1	0	0	0	-3	46.979004	39.119003	af3470b5b4062647	lod_world_L1_0_0.rhf

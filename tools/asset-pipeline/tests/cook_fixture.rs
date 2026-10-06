@@ -595,3 +595,24 @@ fn terrain_layer_sidecar_cooks_to_the_committed_fixture_bytes() {
         [0, 0, 1, 1, 1, 1, 2, 127, 128, 255, 255, 254, 4, 78, 156, 195]
     );
 }
+
+#[test]
+fn lod_world_cooks_to_the_committed_fixture_bytes() {
+    // The M19.8d1 cross-language alarm: lod_world.terrainworld and its five tiles are what the C++
+    // terrain_lod_test loads and runs verify_lod_chain over. Cooking the description (four raw
+    // 5x5 sources, levels = 2) must reproduce every file byte for byte. Regenerate deliberately
+    // with `rime terrain-world tests/assets/fixtures/lod_world.terrainworld.toml --out
+    // tests/assets/fixtures`.
+    use asset_pipeline::terrain_world::cook_terrain_world;
+    let cooked = cook_terrain_world(&fixtures().join("lod_world.terrainworld.toml")).unwrap();
+    assert_eq!(cooked.files.len(), 5);
+    for (file, bytes, _) in &cooked.files {
+        let committed = std::fs::read(fixtures().join(file)).unwrap();
+        assert_eq!(
+            bytes, &committed,
+            "{file} diverged — regenerate it deliberately"
+        );
+    }
+    let manifest = std::fs::read_to_string(fixtures().join(cooked.manifest_file_name())).unwrap();
+    assert_eq!(cooked.manifest, manifest);
+}
