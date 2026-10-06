@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -260,6 +261,22 @@ public:
     };
 
     [[nodiscard]] std::vector<PassTiming> resolve_timings(rhi::CommandBuffer& cmd) const;
+
+    // Submit `cmd` (this graph's executed frame), wait for it, read its pass timings and RELEASE
+    // the submission — the whole borrow window of `Device::wait_and_borrow` in one call (p1).
+    //
+    // A blocking frame loop that wants its timings has exactly one correct sequence: submit,
+    // borrow, resolve, release. The terrain fly-through wrote the first three and forgot the
+    // fourth, so every frame left a fence and a command buffer (and, on NVIDIA, a device file
+    // descriptor) alive until the device died; a few thousand frames later vkCreateFence answered
+    // VK_ERROR_OUT_OF_HOST_MEMORY inside an unrelated texture upload. Owning the sequence here
+    // makes the release impossible to drop. A pipelined loop that resolves frames later still
+    // borrows by hand, with a TimingPlan (Application::retire_oldest_frame).
+    //
+    // A submission the device refuses answers no timings — the same answer as a device that
+    // cannot timestamp.
+    [[nodiscard]] std::vector<PassTiming>
+    submit_and_time(rhi::Device& device, std::unique_ptr<rhi::CommandBuffer> cmd) const;
 
     // A frame's timing SHAPE, taken at submit and resolved after the GPU catches up (m17.5).
     //
