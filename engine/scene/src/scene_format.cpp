@@ -23,6 +23,7 @@
 #include "rime/ecs/chunk.hpp"
 #include "rime/ecs/component.hpp"
 #include "rime/ecs/entity.hpp"
+#include "rime/ecs/entity_refs.hpp"
 #include "rime/ecs/reflect.hpp" // reflects Entity — the entity-reference field detector below keys on it
 #include "rime/ecs/world.hpp"
 
@@ -34,17 +35,10 @@
 namespace rime::scene {
 namespace {
 
-// The reflected description of ecs::Entity. A component field whose nested struct IS this type is
-// an entity reference (the only thing the format treats specially). Pointer identity is exact:
-// reflect<T> returns the one function-local-static TypeInfo per type, so make_field<Entity> stamped
-// this very address into the field's struct_type.
-const core::TypeInfo* entity_type() {
-    return &core::reflect<ecs::Entity>();
-}
-
-bool is_entity_field(const core::Field& f) {
-    return f.type == core::FieldType::Struct && f.struct_type == entity_type();
-}
+// The entity-reference detector lives in ecs/entity_refs.hpp now (ADR-0075): the editor host's
+// identity layer is its second user, and two copies of "which fields are entity references" is how
+// one of them would eventually drift.
+using ecs::is_entity_field;
 
 // A stable 64-bit key for an Entity handle, so we can map handles → scene-local ids in a hash map.
 std::uint64_t entity_key(ecs::Entity e) {
@@ -492,6 +486,12 @@ struct Reader {
 } // namespace
 
 std::string save_scene_to_string(const ecs::World& world, std::size_t* excluded_derived) {
+    return save_scene_to_string(world, std::span<const ecs::Entity>{}, excluded_derived);
+}
+
+std::string save_scene_to_string(const ecs::World& world,
+                                 std::span<const ecs::Entity> order,
+                                 std::size_t* excluded_derived) {
     std::size_t excluded = 0;
     // The tag that says "the engine computed some of this entity's state" (m16.8). Absent from a
     // world nothing derived into, in which case no exclusion happens at all and a hand-authored
@@ -501,23 +501,30 @@ std::string save_scene_to_string(const ecs::World& world, std::size_t* excluded_
                                              : ecs::kInvalidComponentId;
     const ecs::ComponentRegistry& registry = world.components();
 
-    // Pass 1: walk the world in a stable order, numbering each entity 0..N-1 and mapping its handle
-    // to that local id — so an entity-reference field can be written as a local id in pass 2.
-    struct Row {
-        const ecs::Archetype* arch;
-        std::uint32_t chunk;
-        std::uint32_t row;
-    };
-
-    std::vector<Row> rows;
+    // Pass 1: fix the order the entities are written in, numbering each 0..N-1 and mapping its
+    // handle to that local id — so an entity-reference field can be written as a local id in pass
+    // 2. The caller's `order` comes first (the editor host passes its identity order, ADR-0075, so a
+    // file's entity numbering does not depend on which archetype an entity happens to live in);
+    // every live entity it did not name follows in archetype/chunk/row order, which is also the
+    // whole order when none is given. A dead or repeated entry is skipped, never written twice.
+    std::vector<ecs::Entity> rows;
+    rows.reserve(world.entity_count());
     LocalIdMap to_local;
+    const auto take = [&](ecs::Entity e) {
+        if (world.is_alive(e) &&
+            to_local.emplace(entity_key(e), static_cast<std::uint32_t>(rows.size())).second) {
+            rows.push_back(e);
+        }
+    };
+    for (const ecs::Entity e : order) {
+        take(e);
+    }
     for (std::size_t ai = 0; ai < world.archetype_count(); ++ai) {
         const ecs::Archetype& arch = world.archetype(ai);
         for (std::uint32_t ci = 0; ci < arch.chunk_count(); ++ci) {
             const ecs::Chunk& chunk = arch.chunk(ci);
             for (std::uint32_t r = 0; r < chunk.size(); ++r) {
-                to_local[entity_key(chunk.entity_at(r))] = static_cast<std::uint32_t>(rows.size());
-                rows.push_back({&arch, ci, r});
+                take(chunk.entity_at(r));
             }
         }
     }
@@ -527,17 +534,23 @@ std::string save_scene_to_string(const ecs::World& world, std::size_t* excluded_
            "regenerate.\n";
     fmt::format_to(std::back_inserter(out), "rime_scene {}\n\n", kSceneFormatVersion);
     for (std::size_t li = 0; li < rows.size(); ++li) {
-        const Row& rw = rows[li];
+        const ecs::Entity e = rows[li];
         fmt::format_to(std::back_inserter(out), "entity {} {{\n", li);
-        const ecs::Chunk& chunk = rw.arch->chunk(rw.chunk);
-        // Was any of this entity's state computed rather than authored? Checked per ARCHETYPE, so
+        const ecs::ComponentSignature& signature = world.signature_of(e);
+        // Was any of this entity's state computed rather than authored? Checked per entity, so
         // it costs one signature test per row rather than a component lookup per component.
         const bool entity_has_derived =
-            derived_tag != ecs::kInvalidComponentId && rw.arch->signature().contains(derived_tag);
-        for (const ecs::ComponentId id : rw.arch->signature().ids()) {
+            derived_tag != ecs::kInvalidComponentId && signature.contains(derived_tag);
+        for (const ecs::ComponentId id : signature.ids()) {
             const ecs::ComponentInfo& info = registry.info(id);
             if (info.type_info == nullptr) {
                 continue; // unreflected component: no inspectable state to author
+            }
+            if (info.session) {
+                // Session identity (ADR-0075's EditorId): assigned per process, never authored.
+                // Not counted with the derived exclusions — nothing about the FILE is lost, since
+                // the host reassigns these on load from the very order this writer emits.
+                continue;
             }
             if (info.derived && entity_has_derived) {
                 // Runtime-derived state (m16.8): a dense registry index, meaningful only in the
@@ -548,7 +561,7 @@ std::string save_scene_to_string(const ecs::World& world, std::size_t* excluded_
                 ++excluded;
                 continue;
             }
-            const auto* comp = static_cast<const std::byte*>(chunk.component(id, rw.row));
+            const auto* comp = static_cast<const std::byte*>(world.get_component_raw(e, id));
             emit_component(out, *info.type_info, comp, 1, to_local);
         }
         out += "}\n\n";
@@ -743,7 +756,13 @@ load_scene_from_string(ecs::World& world, std::string_view text, const LoadOptio
 }
 
 bool save_scene_file(const ecs::World& world, const std::filesystem::path& path) {
-    const std::string text = save_scene_to_string(world);
+    return save_scene_file(world, path, std::span<const ecs::Entity>{});
+}
+
+bool save_scene_file(const ecs::World& world,
+                     const std::filesystem::path& path,
+                     std::span<const ecs::Entity> order) {
+    const std::string text = save_scene_to_string(world, order);
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) {
         return false;
