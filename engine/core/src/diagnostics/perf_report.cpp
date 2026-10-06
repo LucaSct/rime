@@ -1169,18 +1169,51 @@ ZoneTimelines::ZoneTimelines(PerfReport& report)
 
 void ZoneTimelines::on_zone(std::string_view name, double ms) {
     if (std::this_thread::get_id() != owner_) {
-        // See the class comment: dropping is the only safe answer here, and counting it is what
-        // stops the drop from reading like an absence of work.
-        foreign_.fetch_add(1, std::memory_order_relaxed);
+        // See the class comment: the report is never touched from here. The close is parked for
+        // the owner to collect, or — past the bound — dropped, and counted either way, because
+        // that is what stops a short report from reading like an absence of work.
+        const std::lock_guard<std::mutex> lock(parked_mutex_);
+        if (parked_.size() < kMaxParked) {
+            parked_.emplace_back(std::string(name), ms);
+            parked_count_.store(parked_.size(), std::memory_order_relaxed);
+        } else {
+            foreign_.fetch_add(1, std::memory_order_relaxed);
+        }
         return;
     }
     report_->observe_zone(name, ms);
+}
+
+std::size_t ZoneTimelines::collect_parked() {
+    // Swap out under the lock, fold in with it released: `observe_zone` is the report's ordinary
+    // owner-thread entry, and holding the lock across it would make a worker closing a zone wait on
+    // the report — the coupling the class comment exists to rule out.
+    std::vector<std::pair<std::string, double>> taken;
+    {
+        const std::lock_guard<std::mutex> lock(parked_mutex_);
+        taken.swap(parked_);
+        parked_count_.store(0, std::memory_order_relaxed);
+    }
+    if (report_ != nullptr) {
+        for (const auto& [name, ms] : taken)
+            report_->observe_zone(name, ms);
+    } else {
+        foreign_.fetch_add(taken.size(), std::memory_order_relaxed);
+    }
+    return taken.size();
 }
 
 void ZoneTimelines::stop() {
     if (report_) {
         set_zone_sink({});
         report_ = nullptr;
+        {
+            // Parked and never collected: these never reached the report, so they are drops.
+            const std::lock_guard<std::mutex> lock(parked_mutex_);
+            foreign_.fetch_add(parked_.size(), std::memory_order_relaxed);
+            parked_.clear();
+            parked_count_.store(0, std::memory_order_relaxed);
+        }
         const std::uint64_t dropped = foreign_.load(std::memory_order_relaxed);
         if (dropped != 0) {
             RIME_WARN("perf: {} zone closes were dropped — they fired on a thread other than the "

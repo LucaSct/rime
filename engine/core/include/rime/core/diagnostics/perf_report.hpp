@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -413,6 +414,16 @@ private:
 // The pin itself is race-free by construction: `owner_` is written before `set_zone_sink`, which
 // takes the sink mutex, and a foreign thread can only reach `on_zone` by taking that same mutex to
 // fetch the sink — so the write happens-before every read of it.
+//
+// PARKED, NOT DROPPED, WHEN SOMEONE WILL COLLECT (p2-perf). The block runs its server's half of a
+// tick as one job alongside the client's, and that half's physics zones then close on a worker.
+// Dropping them would leave `physics.server.*` empty — the report short by a whole world. So a
+// foreign close is copied into a small mutex-guarded side buffer instead of touching the report,
+// and the OWNER folds it in with `collect_parked()` after it has joined the work that produced it.
+// The report is still only ever written by one thread; the lock guards the side buffer alone and
+// is never taken on the owner's own zones, so the measured path the comment on the constructor
+// protects pays nothing. Whatever is still parked when the collector stops was never collected,
+// and is counted as dropped exactly as before.
 class ZoneTimelines {
 public:
     explicit ZoneTimelines(PerfReport& report);
@@ -427,12 +438,22 @@ public:
     // summarize while the app it measured is still alive.
     void stop();
 
-    // Zones dropped because they closed on a thread other than this collector's. Non-zero means
-    // the report is INCOMPLETE by exactly that many zone closes — read it, print it, and if it is
-    // large the answer is a per-thread sink, not a lock around this one.
+    // Zones that closed on a thread other than this collector's and are NOT in the report: those
+    // dropped, plus those parked and not yet collected. Non-zero means the report is INCOMPLETE by
+    // exactly that many zone closes — read it, print it.
     [[nodiscard]] std::uint64_t foreign_zones() const noexcept {
-        return foreign_.load(std::memory_order_relaxed);
+        return foreign_.load(std::memory_order_relaxed) +
+               parked_count_.load(std::memory_order_relaxed);
     }
+
+    // Fold every parked foreign zone into the report, as though it had closed on this thread now —
+    // so into the frame currently open. Owner thread only, and only after joining whatever produced
+    // them: the join is what makes "now" the right frame. Returns how many were folded.
+    std::size_t collect_parked();
+
+    // How many foreign closes may wait between two collections before further ones are dropped
+    // (and counted). A bound, because a collector nobody drains must not grow without limit.
+    static constexpr std::size_t kMaxParked = 4096;
 
 private:
     void on_zone(std::string_view name, double ms);
@@ -440,6 +461,9 @@ private:
     PerfReport* report_;
     std::thread::id owner_;
     std::atomic<std::uint64_t> foreign_{0};
+    std::mutex parked_mutex_;
+    std::vector<std::pair<std::string, double>> parked_; // guarded by parked_mutex_
+    std::atomic<std::uint64_t> parked_count_{0};         // parked_.size(), readable unlocked
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
