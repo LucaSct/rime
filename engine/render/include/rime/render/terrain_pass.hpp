@@ -55,7 +55,9 @@
 //
 // ── WHAT THIS PASS IS NOT, YET (all deferred in ADR-0062, none of it silent) ──────────────────
 //
-//   * no LOD, no clipmap, no tessellation: a tile is drawn at full sample density, every frame;
+//   * no clipmap, no tessellation: a tile is drawn at full sample density. LOD (m19.8d2) is a
+//     chain of coarser TILES, each drawn at its own full density and geomorphed onto its parent
+//     (TerrainLodDraw); choosing which to draw is TerrainResidency's (terrain_lod.hpp);
 //   * splat blending (m19.4/m19.5, ADR-0063/0064) blends base colour, metallic and roughness per
 //     texel — see TerrainLayer; shading is the shared GGX BRDF (brdf.glsl). m19.7b (ADR-0066
 //     addendum) multiplies each layer's colour by its own albedo texture at world-XZ UVs, and
@@ -196,11 +198,40 @@ struct TerrainLight {
     float roughness = 1.0f;
 };
 
-// The push block both terrain shaders read, byte for byte. 160 bytes: m19.5 appended the camera
-// position and the flat material to m19.3's 128. Vulkan only GUARANTEES 128 (maxPushConstantsSize),
-// so 160 is above the floor and the pass checks `adapter().max_push_constant_bytes` (desktop
-// drivers report 256 or more, MoltenVK 4096) — a device below it refuses every upload, counted
-// and warned once, rather than drawing with a truncated block. Build it with `terrain_push()`.
+// m19.8d2 (ADR-0071): how ONE tile of a LOD chain is drawn. Default-constructed = disabled, and a
+// disabled draw is m19.8a's draw exactly (terrain.vert takes the pre-LOD path, unchanged).
+//
+// Enabled, terrain.vert places the tile from WORLD-GLOBAL sample indices rather than from the
+// tile's own origin, and geomorphs it onto its parent:
+//
+//   * position  x = grid_origin.x + float(base_x + i) · cell_x  (likewise z). A vertex two tiles
+//     share has the same global index in both, so both compute it from the same f32 inputs: bit
+//     for bit the same position, across levels too (cell_{L+1} = 2 · cell_L exactly, and
+//     float(2k) · c and float(k) · 2c are the same product). Placing by origin + i · cell, as
+//     m19.3 does, rounds differently in the two tiles.
+//   * morph     m = clamp((|vertex − camera| − morph_start) / (morph_end − morph_start), 0, 1),
+//   from
+//     the vertex's world position before morphing — never the tile's — so a shared vertex gets
+//     one morph whichever tile draws it. Vertices on an edge whose bit is set in `coarser_edges`
+//     take m = 1: they lie on the coarse neighbour's edge.
+struct TerrainLodDraw {
+    bool enabled = false;
+    core::Vec3 grid_origin{0.0f, 0.0f, 0.0f}; // the world grid's origin (TerrainWorldGrid::origin)
+    std::int32_t base_x = 0;                  // global level-L sample index of local (0, 0):
+    std::int32_t base_z = 0;                  // coord · (samples − 1)
+    std::uint32_t level = 0;
+    std::uint32_t coarser_edges = 0;     // TerrainLodEdge bits (terrain_lod.hpp)
+    core::Vec3 camera{0.0f, 0.0f, 0.0f}; // the camera the SELECTION used
+    float morph_start = 0.0f;            // +inf (the top level) = never morphs
+    float morph_end = 0.0f;
+};
+
+// The push block both terrain shaders read, byte for byte. 208 bytes: m19.5 appended the camera
+// position and the flat material to m19.3's 128, and m19.8d2 appended the three LOD vectors.
+// Vulkan only GUARANTEES 128 (maxPushConstantsSize), so 208 is above the floor and the pass checks
+// `adapter().max_push_constant_bytes` (desktop drivers report 256 or more — measured 256 on the
+// RTX 3060 and RADV — MoltenVK 4096) — a device below it refuses every upload, counted and warned
+// once, rather than drawing with a truncated block. Build it with `terrain_push()`.
 struct TerrainPush {
     core::Mat4 view_proj;
     float placement[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // xyz = tile origin, w = height_offset
@@ -209,20 +240,29 @@ struct TerrainPush {
     float surface[4] = {0.0f, 0.0f, 0.0f, 0.0f};   // rgb = albedo, w = ambient
     float eye[4] = {0.0f, 0.0f, 0.0f, 0.0f};       // xyz = camera world position, w = 0
     float material[4] = {0.0f, 1.0f, 0.0f, 0.0f};  // x = metallic, y = roughness, z = w = 0
+    // m19.8d2 — read only when lod_tile.z has kTerrainPushLodEnabled.
+    float lod_origin[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // xyz = world grid origin, w = morph_start
+    float lod_camera[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // xyz = selection camera, w = 1/(end − start)
+    std::int32_t lod_tile[4] = {0, 0, 0, 0};        // base_x, base_z, flags, level
 };
 
-static_assert(sizeof(TerrainPush) == 160,
+// lod_tile.z: bits 0..3 are TerrainLodEdge ("that neighbour is coarser"); this bit enables LOD.
+inline constexpr std::int32_t kTerrainPushLodEnabled = 1 << 4;
+
+static_assert(sizeof(TerrainPush) == 208,
               "TerrainPush must match terrain.vert / terrain.frag's push_constant block");
 
 // Fold a tile + a view + a light into the shader's constant block. Free and public on purpose:
 // the pass uses it, and so does the proof's own pipeline, so the two cannot drift. A zero-length
 // `sun_direction` falls back to straight down rather than producing a NaN normal. `eye` is the
 // camera's world position — the BRDF's view vector needs it, and an orthographic projection
-// cannot supply one, so it is passed explicitly rather than inverted out of `view_proj`.
+// cannot supply one, so it is passed explicitly rather than inverted out of `view_proj`. `lod`
+// (m19.8d2) is disabled by default: the m19.8a block, with zeroed LOD vectors.
 [[nodiscard]] TerrainPush terrain_push(const TerrainTile& tile,
                                        const core::Mat4& view_proj,
                                        const core::Vec3& eye,
-                                       const TerrainLight& light);
+                                       const TerrainLight& light,
+                                       const TerrainLodDraw& lod = {});
 
 class TerrainPass {
 public:
@@ -303,6 +343,9 @@ public:
     // ShaderRead, so the caller that owns the SkyPass must report
     // `sky.note_skyview_state(rhi::ResourceState::ShaderRead)` after declaring this pass — exactly
     // what SceneRenderer already does for the background composite and SSR.
+    //
+    // `lod` (m19.8d2) draws the tile as one node of a LOD chain — see TerrainLodDraw. The default
+    // (disabled) is the m19.8a draw.
     void add(RenderGraph& graph,
              RGTexture hdr,
              RGTexture depth,
@@ -310,7 +353,8 @@ public:
              const core::Mat4& view_proj,
              const core::Vec3& eye,
              const TerrainLight& light,
-             const SkyLightBinding& sky = {});
+             const SkyLightBinding& sky = {},
+             const TerrainLodDraw& lod = {});
 
     // Assets `upload()` would not draw. Guardrail 5: a refused tile and a tile that was never
     // handed over produce the same empty frame, so the difference has to be countable.

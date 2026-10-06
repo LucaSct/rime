@@ -179,6 +179,12 @@ layout(push_constant) uniform Pc {
     vec4 surface; // rgb = albedo in [0,1], w = ambient irradiance
     vec4 eye;     // xyz = camera world position
     vec4 material; // x = metallic, y = roughness (the flat tile's material)
+    // m19.8d2: the LOD vectors. The vertex stage reads them; the fragment stage only needs its
+    // block to match (the derivative normal below is taken from the MORPHED position, so it is
+    // the drawn triangle's plane at every morph — see terrain.vert).
+    vec4 lod_origin;
+    vec4 lod_camera;
+    ivec4 lod_tile;
 } pc;
 
 void main() {

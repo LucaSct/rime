@@ -29,6 +29,7 @@ add_library(rime_render STATIC
     src/terrain_pass.cpp
     src/terrain_builder.cpp
     src/terrain_residency.cpp
+    src/terrain_lod.cpp
     src/virtual_geometry_residency.cpp
     src/virtual_geometry_page_cache.cpp
     src/virtual_geometry_page_pool.cpp
