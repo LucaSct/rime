@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 #include "rime/app/game_definition.hpp"
@@ -133,6 +134,17 @@ private:
     std::uint64_t ticks_ = 0;
     std::uint64_t presentation_calls_ = 0;
 };
+
+// The entry scene, relative to the content root (m20.2): the arena floor.
+inline constexpr std::string_view kEntryScene = "hello-game.rscene";
+
+// The arena — the content `content/hello-game.rscene` holds. `hello_game --emit-content <dir>`
+// writes it from this function; the committed file is that output, and the editor is how it would
+// change from here (the target-range shape: a generator writes the first draft).
+void build_arena(rime::ecs::World& world);
+
+// The component types the entry scene names, registered before it loads (strict load).
+void register_components(rime::ecs::World& world);
 
 // The GameDefinition: the only thing `main` hands the engine.
 [[nodiscard]] rime::app::GameDefinition definition();

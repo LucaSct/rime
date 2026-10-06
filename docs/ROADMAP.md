@@ -1732,8 +1732,20 @@ milestone boundary; time estimates come at brick-decomposition, not here.
 > / `stream` / `host` parse and refuse as not-yet (exit 3). `samples/hello-game` is ported with its
 > self-check numbers unchanged, and `hello_game --dedicated-proof` shows `dedicated` never entering the
 > device factory, mapping no `libvulkan`, and matching the pre-port loop's state digest (as do `play`
-> with no GPU and `play` rendering). **Not yet:** network input for `dedicated`, the listening modes,
-> the no-argument launcher, content resolved relative to the executable, and the bundle.
+> with no GPU and `play` rendering). **m20.2** — content resolves relative to the executable and the
+> game exports as a bundle ([ADR-0076](adr/0076-m20.2-content-root-and-bundle.md)):
+> `rime::app::resolve_content_root` searches `--content`, `<exe dir>/content`, then — only for a binary
+> still in its build directory — the source tree, and names every path it tried when it fails.
+> hello-game's floor is now content (`content/hello-game.rscene`), digests unchanged.
+> `scripts/export-game.sh` writes the bundle (executable, content, README; shaders are embedded) and
+> checks it links system libraries only, with no RUNPATH and no link-time libvulkan. It also
+> removed a RUNPATH into the Conan cache that every game binary carried. `scripts/export-proof.sh` runs
+> the bundle's `dedicated` under bubblewrap with `$HOME` (repo, build tree, Conan cache) and Vulkan
+> (ICD manifests and loader) hidden, and matches the in-tree digest at 120 ticks and at the win. The
+> proof refuses a bundle with its content deleted, and refuses a wrong digest. This is the done criterion,
+> run on this machine with the repo hidden rather than moved to a second box. **Not yet:** network
+> input for `dedicated`, the listening modes, the no-argument launcher, and the bundle manifest
+> (`rime-game.toml`, content hash, `LICENSES/`) with `rime package`.
 
 ### Detail
 

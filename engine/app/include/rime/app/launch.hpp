@@ -3,12 +3,14 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 
+#include "rime/app/content_root.hpp"
 #include "rime/app/game_definition.hpp"
 #include "rime/render/render_graph.hpp" // RGTexture (the last frame, for a caller's readback)
 #include "rime/rhi/types.hpp"           // Extent2D only — no Vulkan, no backend
@@ -18,7 +20,7 @@
 // ADR-0046 §1 fixes the shape — ONE binary, and its end user picks the mode on the command line:
 //
 //     mygame [play | dedicated | browser | stream | host] [--port N] [--ticks N] [--frames N]
-//            [--autopilot] [--headless] [--workers N]
+//            [--autopilot] [--headless] [--workers N] [--content DIR]
 //
 // and it fixes the ORDER: the mode is decided before any device exists, because the only way to
 // guarantee a dedicated server never touches Vulkan is for the code that would create a device to
@@ -88,6 +90,9 @@ struct LaunchOptions {
     bool headless = false;
     // JobSystem workers; 0 = hardware_concurrency()-1 (AppConfig's rule).
     unsigned workers = 0;
+    // --content: the content root, overriding the search (`rime/app/content_root.hpp`). Empty =
+    // search.
+    std::string content_dir;
 };
 
 enum class ParseStatus : std::uint8_t { Ok, Help, Error };
@@ -141,6 +146,11 @@ struct RunReport {
 
     // `Game::state_digest` of the final world, taken before teardown. 0 if the game supplies none.
     std::uint64_t state_digest = 0;
+
+    // The content root this run used (m20.2) — or, on a Failed run that could not find one, every
+    // candidate tried (`content.tried`). `content.source == None` and `content.ok == false` with an
+    // empty `tried` means the game declares no content and nothing was searched.
+    ContentRoot content;
 };
 
 // Hooks for a caller that embeds the runner — a test, a self-check, a later launcher. None of them
@@ -153,6 +163,11 @@ struct RunHooks {
     // Called once after the loop ends, GPU idle, before anything is torn down — the only moment a
     // caller can read back the last frame (`last_frame` is invalid when nothing was rendered).
     std::function<void(Application& app, Game& game, render::RGTexture last_frame)> on_finished;
+
+    // Print the one line saying which content root was chosen and why. On by default — an operator
+    // must be able to see it — and off for a caller that runs the game many times and reports
+    // `RunReport::content` itself (a self-check that is meant to be silent).
+    bool log_content_root = true;
 };
 
 // Run `definition` in the mode `options` names. Never throws on the frame path; a refusal is a

@@ -28,12 +28,14 @@
 //   build/<preset>/bin/hello_game --windowed         # play it: WASD to move, Esc to quit
 //   build/<preset>/bin/hello_game --dedicated-proof  # dedicated == play, and no Vulkan in sight
 //   build/<preset>/bin/hello_game play|dedicated …   # the shipped-game CLI (`--help` for it)
+//   build/<preset>/bin/hello_game --emit-content samples/hello-game/content   # rewrite the arena
 
 #include <fmt/core.h>
 
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -42,8 +44,11 @@
 
 #include "game.hpp"
 #include "rime/app/application.hpp"
+#include "rime/app/content_root.hpp"
 #include "rime/app/launch.hpp"
 #include "rime/rhi/device.hpp"
+#include "rime/scene/derive_transforms.hpp"
+#include "rime/scene/scene_format.hpp"
 
 namespace {
 
@@ -97,6 +102,7 @@ EngineRun run_through_engine(app::LaunchMode mode,
     EngineRun run{};
     app::RunHooks hooks{};
     hooks.device_factory = std::move(factory);
+    hooks.log_content_root = false; // this runs the game many times; the self-checks stay quiet
     hooks.on_finished = [&run](app::Application& application, app::Game& game, render::RGTexture) {
         run.result = result_of(static_cast<const HelloGame&>(game), application.world());
     };
@@ -181,12 +187,32 @@ int run_selftest(bool verbose) {
 // no GPU, the game driven by hand from an `on_fixed_tick`, one tick per `step(fixed_dt)`. It uses
 // none of `run_game_mode`, which is what makes it a reference for the runner rather than a second
 // copy of it.
+//
+// Since m20.2 the arena is content, so the reference loads it too — by hand, through the same
+// content-root search the runner uses (so it reads the SAME file), but with the scene load written
+// out here rather than borrowed from `run_game_mode`.
 RunResult reference_run(std::uint64_t ticks, unsigned workers) {
     app::AppConfig config{};
     config.worker_threads = workers;
     app::Application application(config);
+    const app::GameDefinition def = hello_game::definition();
+    app::ContentSearch search{};
+    search.dev_content_dir = def.dev_content_dir;
+    search.dev_binary_dir = def.dev_binary_dir;
+    search.required = hello_game::kEntryScene;
+    const app::ContentRoot root = app::resolve_content_root(search);
+    if (!root.ok) {
+        fmt::print(stderr, "hello-game: {}\n", app::describe_content_failure(root));
+        return {};
+    }
+    hello_game::register_components(application.world());
+    if (!scene::load_scene_file(application.world(), root.dir / hello_game::kEntryScene).ok) {
+        return {};
+    }
+    scene::derive_world_transforms(application.world(), application.jobs());
     HelloGame game;
-    app::SetupContext setup{application.world(), application.jobs(), application.fixed_dt()};
+    app::SetupContext setup{
+        application.world(), application.jobs(), application.fixed_dt(), root.dir};
     if (!game.setup(setup)) {
         return {};
     }
@@ -259,7 +285,8 @@ int run_dedicated_proof(bool verbose) {
     for (std::size_t b = 0; b < kBounds.size(); ++b) {
         const std::uint64_t n = kBounds[b];
         reference[b] = reference_run(n, 0);
-        check(reference[b].digest != 0, fmt::format("[{} ticks] the reference run has a digest", n));
+        check(reference[b].digest != 0,
+              fmt::format("[{} ticks] the reference run has a digest", n));
 
         // DEDICATED, with a counting factory handed in: the proof is the count, not the absence of
         // a window.
@@ -468,6 +495,23 @@ int run_rendered(bool windowed, int frames) {
     return ok ? 0 : 1;
 }
 
+// ── The content generator ─────────────────────────────────────────────────────────────────────
+
+// Write the arena to `<dir>/hello-game.rscene` — how `samples/hello-game/content` was made.
+int emit_content(const std::filesystem::path& dir) {
+    ecs::World world;
+    hello_game::build_arena(world);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::filesystem::path out = dir / hello_game::kEntryScene;
+    if (!scene::save_scene_file(world, out)) {
+        fmt::print(stderr, "hello-game: could not write {}\n", out.string());
+        return 1;
+    }
+    fmt::print("hello-game: wrote {}\n", out.string());
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -492,12 +536,14 @@ int main(int argc, char** argv) {
             windowed = true;
         } else if (arg == "--dedicated-proof") {
             dedicated_proof = true;
+        } else if (arg == "--emit-content" && i + 1 < argc) {
+            return emit_content(argv[++i]);
         } else if (arg == "--frames" && i + 1 < argc) {
             frames = std::atoi(argv[++i]);
         } else {
             fmt::print(stderr,
                        "usage: hello_game [--verbose] [--headless [--frames N]] [--windowed] "
-                       "[--dedicated-proof]\n"
+                       "[--dedicated-proof] [--emit-content DIR]\n"
                        "       hello_game play|dedicated|browser|stream|host [options]  "
                        "(see: hello_game play --help)\n");
             return 2;

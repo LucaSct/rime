@@ -23,6 +23,7 @@
 
 #include "rime/app/game_definition.hpp"
 #include "rime/app/launch.hpp"
+#include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/rhi/device.hpp"
@@ -41,6 +42,8 @@ struct Observed {
     int present_setups = 0;
     int present_frames = 0;
     std::size_t entities_at_setup = 0;
+    std::size_t world_transforms_at_setup = 0;
+    std::filesystem::path content_root_at_setup;
     std::vector<float> axis0_per_tick;
     double dt_seen = 0.0;
 };
@@ -54,6 +57,9 @@ public:
     bool setup(SetupContext& ctx) override {
         ++seen_.setups;
         seen_.entities_at_setup = ctx.world.entity_count();
+        ctx.world.query<ecs::WorldTransform>().for_each(
+            [this](ecs::Entity, ecs::WorldTransform&) { ++seen_.world_transforms_at_setup; });
+        seen_.content_root_at_setup = ctx.content_root;
         return !refuse_setup_;
     }
 
@@ -361,6 +367,59 @@ TEST_CASE("launch: an entry scene is loaded strictly before setup") {
     CHECK(run_game_mode(bounded(LaunchMode::Dedicated, 1), nowhere).status == RunStatus::Failed);
 
     std::filesystem::remove(path);
+}
+
+TEST_CASE("launch: a relative entry scene resolves against the content root, never the cwd") {
+    // m20.2. A directory holding the scene, named with --content: the run finds it, hands the root
+    // to `setup`, and composes WorldTransforms for what it loaded — m20.1 only re-propagated
+    // existing ones, so a loaded entity reached `setup` (and PhysicsSync) with no WorldTransform.
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "rime_launch_test_content";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    {
+        ecs::World authored;
+        ecs::register_transform_components(authored);
+        (void)authored.spawn_with(ecs::LocalTransform{core::Transform{}});
+        REQUIRE(scene::save_scene_file(authored, root / "level.rscene"));
+    }
+
+    Observed seen;
+    GameDefinition def = probe_definition(seen);
+    def.entry_scene = "level.rscene";
+    def.register_components = [](ecs::World& w) { ecs::register_transform_components(w); };
+    LaunchOptions options = bounded(LaunchMode::Dedicated, 1);
+    options.content_dir = root.string();
+    RunHooks quiet{};
+    quiet.log_content_root = false;
+    const RunReport r = run_game_mode(options, def, quiet);
+    CHECK(r.status == RunStatus::Ok);
+    CHECK(r.content.ok);
+    CHECK(r.content.source == ContentSource::Explicit);
+    CHECK(std::filesystem::equivalent(seen.content_root_at_setup, root));
+    CHECK(seen.entities_at_setup == 1);
+    CHECK(seen.world_transforms_at_setup == 1);
+
+    // The same game with its content gone: refused BEFORE a game is created, and the report names
+    // where it looked rather than running on an empty world.
+    std::filesystem::remove_all(root);
+    Observed gone;
+    GameDefinition missing = probe_definition(gone);
+    missing.entry_scene = "level.rscene";
+    missing.register_components = def.register_components;
+    const RunReport refused = run_game_mode(options, missing, quiet);
+    CHECK(refused.status == RunStatus::Failed);
+    CHECK(gone.created == 0);
+    CHECK_FALSE(refused.content.ok);
+    CHECK(refused.message.find("no content root found") != std::string::npos);
+    CHECK(refused.message.find("rime_launch_test_content: missing") != std::string::npos);
+}
+
+TEST_CASE("launch: --content parses, and needs a value") {
+    const ParseResult ok = parse({"dedicated", "--content", "some/dir"});
+    REQUIRE(ok.status == ParseStatus::Ok);
+    CHECK(ok.options.content_dir == "some/dir");
+    CHECK(parse({"dedicated", "--content"}).status == ParseStatus::Error);
 }
 
 // ── Input: actions, never keys ────────────────────────────────────────────────────────────────
