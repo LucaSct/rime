@@ -99,7 +99,8 @@ public:
     TerrainPaletteState update(TerrainPaletteHandle handle);
 
     // The resolved palette: non-null only when Ready. Its texture handles stay valid until this
-    // palette's `release`.
+    // palette's `release`; the POINTER only until the next `request` (which may grow the store) —
+    // copy the palette, or use it at once as TerrainResidency does.
     [[nodiscard]] const TerrainPalette* palette(TerrainPaletteHandle handle) const;
 
     // Give the palette back: drop its texture references (destroying a texture whose count reaches
