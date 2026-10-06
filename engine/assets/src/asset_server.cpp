@@ -98,6 +98,11 @@ template <> struct StreamKind<HeightfieldAsset> {
     static std::optional<HeightfieldAsset> read(std::span<const std::byte> file, AssetError& err) {
         return read_heightfield(file, err);
     }
+
+    // The decoded payload's bulk: the samples and the splat weights (m19.8e's CPU accounting).
+    static std::uint64_t bytes(const HeightfieldAsset& h) {
+        return h.samples.size() * sizeof(std::uint16_t) + h.weights.size();
+    }
 };
 
 template <> struct StreamKind<TerrainLayerAsset> {
@@ -106,6 +111,19 @@ template <> struct StreamKind<TerrainLayerAsset> {
     static std::optional<TerrainLayerAsset> read(std::span<const std::byte> file, AssetError& err) {
         return read_terrain_layer(file, err);
     }
+
+    static std::uint64_t bytes(const TerrainLayerAsset&) { return sizeof(TerrainLayerAsset); }
+};
+
+// m19.8e: the streamed texture kind — the same reader as the retained path.
+template <> struct StreamKind<TextureAsset> {
+    static constexpr const char* kName = "streamed texture";
+
+    static std::optional<TextureAsset> read(std::span<const std::byte> file, AssetError& err) {
+        return read_texture(file, err);
+    }
+
+    static std::uint64_t bytes(const TextureAsset& t) { return t.pixels.size(); }
 };
 
 } // namespace
@@ -256,6 +274,8 @@ void AssetServer::load_material_job(std::uint32_t index, std::filesystem::path p
 template <class T> AssetServer::StreamPool<T>& AssetServer::stream_pool() noexcept {
     if constexpr (std::is_same_v<T, HeightfieldAsset>) {
         return hf_pool_;
+    } else if constexpr (std::is_same_v<T, TextureAsset>) {
+        return stex_pool_;
     } else {
         static_assert(std::is_same_v<T, TerrainLayerAsset>);
         return layer_pool_;
@@ -265,6 +285,8 @@ template <class T> AssetServer::StreamPool<T>& AssetServer::stream_pool() noexce
 template <class T> const AssetServer::StreamPool<T>& AssetServer::stream_pool() const noexcept {
     if constexpr (std::is_same_v<T, HeightfieldAsset>) {
         return hf_pool_;
+    } else if constexpr (std::is_same_v<T, TextureAsset>) {
+        return stex_pool_;
     } else {
         static_assert(std::is_same_v<T, TerrainLayerAsset>);
         return layer_pool_;
@@ -359,6 +381,7 @@ void AssetServer::load_streamed_job(std::uint32_t index, std::filesystem::path p
         slot.asset = std::move(*asset);
         asset.reset();
         ++pool.resident;
+        pool.bytes += StreamKind<T>::bytes(*slot.asset);
         pool.done.push_back(index);
     } else {
         slot.state = AssetState::Failed; // owned and failed: stays Failed until released
@@ -390,6 +413,7 @@ std::optional<T> AssetServer::evict_locked(StreamPool<T>& pool, std::uint32_t in
     slot.asset.reset();
     if (payload) {
         --pool.resident;
+        pool.bytes -= StreamKind<T>::bytes(*payload);
         // A payload that was loaded but never pumped is still queued for promotion; take it out,
         // so pump() can never promote an index that now belongs to someone else. (The queue holds
         // at most one frame's completions, so the linear erase is cheap.)
@@ -462,11 +486,20 @@ TerrainLayerAssetHandle AssetServer::request_terrain_layer(const std::filesystem
     return request_streamed<TerrainLayerAsset>(path);
 }
 
+StreamedTextureAssetHandle
+AssetServer::request_streamed_texture(const std::filesystem::path& path) {
+    return request_streamed<TextureAsset>(path);
+}
+
 bool AssetServer::release(HeightfieldAssetHandle handle) {
     return release_streamed(handle);
 }
 
 bool AssetServer::release(TerrainLayerAssetHandle handle) {
+    return release_streamed(handle);
+}
+
+bool AssetServer::release(StreamedTextureAssetHandle handle) {
     return release_streamed(handle);
 }
 
@@ -478,11 +511,19 @@ AssetState AssetServer::state(TerrainLayerAssetHandle handle) const {
     return state_streamed(handle);
 }
 
+AssetState AssetServer::state(StreamedTextureAssetHandle handle) const {
+    return state_streamed(handle);
+}
+
 const HeightfieldAsset* AssetServer::get(HeightfieldAssetHandle handle) const {
     return get_streamed(handle);
 }
 
 const TerrainLayerAsset* AssetServer::get(TerrainLayerAssetHandle handle) const {
+    return get_streamed(handle);
+}
+
+const TextureAsset* AssetServer::get(StreamedTextureAssetHandle handle) const {
     return get_streamed(handle);
 }
 
@@ -509,6 +550,26 @@ std::size_t AssetServer::live_terrain_layer_slots() const {
 std::size_t AssetServer::resident_terrain_layers() const {
     std::lock_guard<std::mutex> lock(mu_);
     return layer_pool_.resident;
+}
+
+std::size_t AssetServer::live_streamed_texture_slots() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return stex_pool_.live;
+}
+
+std::size_t AssetServer::resident_streamed_textures() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return stex_pool_.resident;
+}
+
+std::uint64_t AssetServer::resident_streamed_bytes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return hf_pool_.bytes + layer_pool_.bytes + stex_pool_.bytes;
+}
+
+std::uint64_t AssetServer::resident_streamed_texture_bytes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return stex_pool_.bytes;
 }
 
 std::size_t AssetServer::pump() {
@@ -547,6 +608,7 @@ std::size_t AssetServer::pump() {
         };
         promote(hf_pool_);
         promote(layer_pool_);
+        promote(stex_pool_);
     }
     return meshes.size() + textures.size() + materials.size() + streamed;
 }

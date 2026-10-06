@@ -52,6 +52,10 @@
 //     running job.
 // Every one of those paths has a counter (StreamCounters) — CLAUDE.md guardrail 5.
 //
+// m19.8e (ADR-0073) adds a third streamed kind: TEXTURES requested through
+// `request_streamed_texture`. Terrain appearance bakes go this way so their CPU copy is freed the
+// moment the GPU has its own — the retained texture path would keep every bake ever loaded.
+//
 // Out of scope (documented seams): priorities, memory budgets, hot reload, decompression. Eviction
 // POLICY (what to release, and when) is the caller's — the server only honours releases.
 namespace rime::assets {
@@ -112,6 +116,11 @@ template <class T> struct StreamedAssetHandle {
 
 using HeightfieldAssetHandle = StreamedAssetHandle<HeightfieldAsset>;
 using TerrainLayerAssetHandle = StreamedAssetHandle<TerrainLayerAsset>;
+// m19.8e (ADR-0073): a texture on the RELEASABLE path — a terrain parent's appearance bake, whose
+// CPU copy is useless once it is on the GPU. A different type from the retained
+// `TextureAssetHandle`, so the two can never be confused: the same file requested both ways is two
+// slots in two pools, one retained and one released.
+using StreamedTextureAssetHandle = StreamedAssetHandle<TextureAsset>;
 
 // What the streamed path did, by outcome (guardrail 5: every skip / drop / defer path is counted,
 // because a proof that cannot see what was skipped still reads as passing). These cover the
@@ -121,7 +130,7 @@ using TerrainLayerAssetHandle = StreamedAssetHandle<TerrainLayerAsset>;
 //     loads_started       == evictions + (slots still owned)
 //     deferred_evictions  == cancelled_evictions + (evictions performed by a finishing load job)
 struct StreamCounters {
-    std::uint64_t requests = 0;           // every request_heightfield / request_terrain_layer call
+    std::uint64_t requests = 0; // every request_heightfield / _terrain_layer / _streamed_texture
     std::uint64_t coalesced_requests = 0; // …that joined an existing slot instead of loading
     std::uint64_t loads_started = 0;      // …that claimed a slot and submitted a load job
     std::uint64_t failed_loads = 0;       // load jobs that could not read or validate their file
@@ -172,6 +181,9 @@ public:
     // the caller defers, rather than simulating against ground that is not there.
     [[nodiscard]] HeightfieldAssetHandle request_heightfield(const std::filesystem::path& path);
     [[nodiscard]] TerrainLayerAssetHandle request_terrain_layer(const std::filesystem::path& path);
+    // m19.8e: a texture on the streamed path (see StreamedTextureAssetHandle). Same contract.
+    [[nodiscard]] StreamedTextureAssetHandle
+    request_streamed_texture(const std::filesystem::path& path);
 
     // Give up one ownership. Returns true if the handle named a live ownership. When the last one
     // goes: if the load is not in flight the slot is evicted NOW (the payload is freed before this
@@ -185,6 +197,7 @@ public:
     // spends. One request, one release.
     bool release(HeightfieldAssetHandle handle);
     bool release(TerrainLayerAssetHandle handle);
+    bool release(StreamedTextureAssetHandle handle);
 
     [[nodiscard]] AssetState state(MeshAssetHandle handle) const;
     [[nodiscard]] AssetState state(TextureAssetHandle handle) const;
@@ -193,6 +206,7 @@ public:
     // handle is Failed, as for the retained kinds.
     [[nodiscard]] AssetState state(HeightfieldAssetHandle handle) const;
     [[nodiscard]] AssetState state(TerrainLayerAssetHandle handle) const;
+    [[nodiscard]] AssetState state(StreamedTextureAssetHandle handle) const;
 
     // The loaded asset, or nullptr if the handle is invalid / not yet Ready. The `_or_placeholder`
     // form never returns null — it is what the render extraction calls, so recording never
@@ -205,6 +219,7 @@ public:
     // through the handle each frame rather than caching the pointer across a release point.
     [[nodiscard]] const HeightfieldAsset* get(HeightfieldAssetHandle handle) const;
     [[nodiscard]] const TerrainLayerAsset* get(TerrainLayerAssetHandle handle) const;
+    [[nodiscard]] const TextureAsset* get(StreamedTextureAssetHandle handle) const;
     [[nodiscard]] const MeshAsset& get_or_placeholder(MeshAssetHandle handle) const;
     [[nodiscard]] const TextureAsset& get_or_placeholder(TextureAssetHandle handle) const;
 
@@ -237,6 +252,15 @@ public:
     [[nodiscard]] std::size_t resident_heightfields() const;
     [[nodiscard]] std::size_t live_terrain_layer_slots() const;
     [[nodiscard]] std::size_t resident_terrain_layers() const;
+    [[nodiscard]] std::size_t live_streamed_texture_slots() const;
+    [[nodiscard]] std::size_t resident_streamed_textures() const;
+
+    // m19.8e: the decoded bytes the streamed kinds hold right now (payloads parked in a slot, Ready
+    // or awaiting pump()). What "the CPU copy was released" is measured in: an eviction lowers it
+    // by exactly what the load raised it by. Heightfields count their samples and weights; textures
+    // their pixels; a terrain layer is a fixed record and counts its size.
+    [[nodiscard]] std::uint64_t resident_streamed_bytes() const;
+    [[nodiscard]] std::uint64_t resident_streamed_texture_bytes() const;
 
     [[nodiscard]] const MeshAsset& placeholder_mesh() const noexcept { return placeholder_mesh_; }
 
@@ -277,6 +301,7 @@ private:
         std::vector<std::uint32_t> done;                        // loaded, awaiting pump()
         std::size_t live = 0;                                   // occupied slots
         std::size_t resident = 0;                               // occupied slots with a payload
+        std::uint64_t bytes = 0; // m19.8e: Σ payload_bytes over the payloads held
     };
 
     template <class T> StreamPool<T>& stream_pool() noexcept;
@@ -325,6 +350,7 @@ private:
     // the whole correctness argument for deferred eviction (see load_streamed_job).
     StreamPool<HeightfieldAsset> hf_pool_;
     StreamPool<TerrainLayerAsset> layer_pool_;
+    StreamPool<TextureAsset> stex_pool_; // m19.8e: streamed textures (terrain bakes)
     // mutable: a const getter that meets a stale handle counts it (the read is what found it).
     mutable StreamCounters stream_counters_;
 
