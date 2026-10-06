@@ -139,15 +139,55 @@
 // A world with no chain (level 0 only) is driven exactly as m19.8a drove it: the radii, holes
 // counted, no pinning.
 //
+// ── BUDGETS (m19.8e, ADR-0073): BYTES, AN UPLOAD CAP, AND CULLING ────────────────────────────────
+//
+// The slot count above bounds how many tiles are held, not how much memory they hold — a splat
+// tile with four layer textures and a parent with a bake differ by an order of magnitude. So:
+//
+//   * A BYTE BUDGET (`byte_budget`, 0 = none) over everything terrain residency puts on the GPU:
+//     every occupied AND retiring slot's tile bytes (heights, indices, weights, uniform block,
+//     bake — `TerrainPass::tile_bytes`) plus the builder's live layer textures. Retiring slots
+//     count because their memory is not free until the fence says so. A tile is uploaded only if
+//     its PREDICTED bytes (`TerrainPass::predicted_tile_bytes`, computed before allocating) fit;
+//     a palette creates a layer texture only if it fits the same headroom
+//     (`TerrainLayerBuilder::update`'s allowance). So the gauge `budget_bytes` never exceeds the
+//     budget — not "comes back under it", never exceeds it.
+//   * THE ROOT COVER IS RESERVED INSIDE IT, exactly as its slots are: a non-root's headroom is the
+//     budget minus the predicted bytes of every root still waiting. A world whose roots alone
+//     exceed the budget is refused at construction (`byte_budget_refusals`) and draws nothing.
+//   * UNDER PRESSURE DETAIL IS LOWERED, NEVER COVERAGE: a tile that does not fit evicts resident
+//     tiles of lower priority (the slot victim rule; never a root, never a parent for its child)
+//     until it would, and otherwise waits (`byte_budget_waits`). An evicted tile's bytes are free
+//     only when its slot is reclaimed, so a wait can last until the fence retires it.
+//   * A PER-FRAME UPLOAD CAP (`upload_cap`, bytes, 0 = none) on tile and layer-texture uploads.
+//     Uploads happen in the advance order (priority: roots, wanted, prefetch; nearest first, ties
+//     broken by key), and the FIRST tile that would cross the cap closes it for the frame: it and
+//     every later one wait (`upload_cap_waits`), so nothing overtakes a nearer tile by being
+//     smaller. One tile larger than the whole cap may go as a frame's first upload, counted
+//     (`oversize_uploads`) — otherwise it could never stream at all. A waiting tile is simply not
+//     resident, so the selection draws its parent: the 8d2 fallback, unchanged.
+//   * FRUSTUM CULLING (`frustum_cull`, off by default) of the selection's leaves against
+//     `view_proj`, using the COOKED boxes (footprint × the manifest's min_y..max_y, which bound
+//     every level-0 sample beneath the tile — ADR-0070). It changes draws only: the selection,
+//     what is requested, uploaded and evicted are computed before culling, and a culled leaf's
+//     slot is still marked read, so even the fence bookkeeping is identical with culling on or
+//     off. Off by default because every m19.8d proof counts draws against the selection.
+//   * APPEARANCE BAKES ARE STREAMED: requested through `request_streamed_texture` and released
+//     the moment the pass has its own copy (or the bake is refused, or the tile is forgotten).
+//     Before m19.8e every parent ever loaded kept 8·N² bytes of RAM until the server died.
+//   * An optional JOURNAL (`journal`) records every upload and every wait, in order, with its
+//     bytes — the record the determinism proof compares across load-completion orders.
+//
 // ── WHAT IS NOT HERE ────────────────────────────────────────────────────────────────────────────
 //
-//   * a bake's CPU copy is never released: textures are AssetServer's retained kind (ADR-0067
-//     §5), so every parent ever loaded keeps 8·N² bytes of RAM until the server dies (brick 8e's
-//     byte budget should move bakes to the streamed path);
-//   * no byte budget: the budget is a slot COUNT; bytes are measured, not enforced (brick 8e);
 //   * collision is not driven from here and never will be — camera residency must not decide what
 //     the simulation stands on (ADR-0067's plan, brick 8c);
-//   * uploads are synchronous (TerrainPass::upload); the asynchrony is the AssetServer's;
+//   * uploads are synchronous (TerrainPass::upload); the asynchrony is the AssetServer's — the cap
+//     bounds how much a frame does, not how long one upload stalls it;
+//   * a LOD parent keeps its CPU heightfield while resident (the 8d1 pair checks), so CPU memory
+//     for parents is ~2·N² bytes each — counted by the server (`resident_streamed_bytes`), not
+//     budgeted here;
+//   * layer textures are counted whole: a builder shared by two residencies is charged to both;
 //   * a border mismatch refuses whichever of the two tiles arrives SECOND, which depends on travel
 //     order. A world whose borders do not match is a cook bug; the counter is how it is found.
 //
@@ -230,6 +270,24 @@ private:
     std::vector<Slot> slots_;
 };
 
+// m19.8e: one line of the upload journal.
+struct TerrainUploadEvent {
+    enum class Kind : std::uint8_t {
+        Upload,       // a tile uploaded (bytes = its tile_bytes)
+        LayerUpload,  // layer textures created for this tile's palette (bytes = their size)
+        CapWait,      // ready, but the frame's upload cap was closed
+        BudgetWait,   // ready, but its bytes did not fit the budget
+        LayerCapWait, // a layer texture put off by the cap
+        LayerBudgetWait,
+    };
+    TerrainFrame frame = 0;
+    assets::TerrainTileKey key{};
+    Kind kind = Kind::Upload;
+    std::uint64_t bytes = 0;
+
+    friend bool operator==(const TerrainUploadEvent&, const TerrainUploadEvent&) = default;
+};
+
 struct TerrainResidencyConfig {
     std::uint32_t slots = 4;        // the GPU tile budget (>= 1)
     float activation_radius = 0.0f; // request tiles within this (XZ, from the tile footprint)
@@ -237,6 +295,11 @@ struct TerrainResidencyConfig {
     // m19.8d2: how a world with a LOD chain derives its ranges. The radii above are not used for
     // such a world; the selection decides what is wanted.
     TerrainLodView lod{};
+    // m19.8e (ADR-0073) — see BUDGETS above.
+    std::uint64_t byte_budget = 0; // GPU bytes: tiles + layer textures, retiring included; 0 = none
+    std::uint64_t upload_cap = 0;  // bytes uploaded per frame (tiles + layer textures); 0 = none
+    bool frustum_cull = false;     // cull the selection's leaves by their cooked boxes (LOD worlds)
+    std::vector<TerrainUploadEvent>* journal = nullptr; // appended to, never cleared
 };
 
 // Per-reason counts of wanted-but-not-resident tiles (tile-frames).
@@ -245,9 +308,11 @@ struct TerrainMissCounts {
     std::uint64_t no_free_slot = 0;
     std::uint64_t upload_failed = 0;
     std::uint64_t refused = 0;
+    std::uint64_t over_budget = 0;   // m19.8e: ready, but its bytes do not fit the budget
+    std::uint64_t upload_capped = 0; // m19.8e: ready, but this frame's upload cap is closed
 
     [[nodiscard]] std::uint64_t total() const noexcept {
-        return not_loaded + no_free_slot + upload_failed + refused;
+        return not_loaded + no_free_slot + upload_failed + refused + over_budget + upload_capped;
     }
 };
 
@@ -301,6 +366,25 @@ struct TerrainResidencyStats {
     std::uint64_t refusals_retracted = 0; // provisional refusals cleared: the accuser fell
     std::uint64_t parent_waits = 0;       // tile-frames a loaded child waited for its parent
     std::uint64_t prefetch_requests = 0;  // loads requested for the prefetch set
+    // m19.8e — budgets (ADR-0073).
+    std::uint64_t layer_texture_bytes = 0; // gauge: the builder's live layer textures
+    std::uint64_t budget_bytes = 0;        // gauge: resident_bytes + layer_texture_bytes
+    std::uint64_t peak_budget_bytes = 0;
+    std::uint64_t byte_budget_refusals = 0;  // the roots' predicted bytes alone exceed the budget
+    std::uint64_t byte_budget_waits = 0;     // tile-frames a ready tile waited for bytes
+    std::uint64_t byte_budget_evictions = 0; // evictions made to free bytes (not a slot)
+    std::uint64_t upload_bytes = 0;          // cumulative: tile + layer-texture bytes uploaded
+    std::uint64_t upload_bytes_this_frame = 0;
+    std::uint64_t peak_upload_bytes_frame = 0;
+    std::uint64_t upload_cap_waits = 0; // tile-frames a ready tile waited for the next frame's cap
+    std::uint64_t oversize_uploads = 0; // a tile larger than the whole cap, sent alone
+    std::uint64_t layer_allowance_waits = 0;  // palette updates that put a layer texture off
+    std::uint64_t culled_draws = 0;           // leaves selected but outside the frustum
+    std::uint64_t visible_fallback_draws = 0; // fallback leaves actually drawn (after culling)
+    std::uint64_t cpu_bake_bytes = 0;         // gauge: bake CPU copies held (loading parents only)
+    std::uint32_t resident_bake_holds = 0; // gauge: resident tiles still holding a bake: must be 0
+    double select_ms = 0.0;      // the last begin_frame's two selections, CPU milliseconds
+    double begin_frame_ms = 0.0; // the last begin_frame, whole (selection + residency)
 };
 
 class TerrainResidency {
@@ -363,6 +447,18 @@ public:
     // m19.8d2: the ranges the selection uses (empty for a level-0 world).
     [[nodiscard]] const TerrainLodRanges& ranges() const noexcept { return ranges_; }
 
+    // m19.8e: the leaves the last add() drew, and the ones it culled, in selection order.
+    [[nodiscard]] const std::vector<assets::TerrainTileKey>& drawn() const noexcept {
+        return drawn_;
+    }
+
+    [[nodiscard]] const std::vector<assets::TerrainTileKey>& culled() const noexcept {
+        return culled_;
+    }
+
+    // m19.8e: the byte budget's reservation for the pinned root cover (0 without a budget).
+    [[nodiscard]] std::uint64_t root_reserve_bytes() const noexcept { return root_bytes_; }
+
     // m19.8d2: the last begin_frame's drawn selection, and the ideal one it was fed from.
     [[nodiscard]] const TerrainLodSelection& selection() const noexcept { return selection_; }
 
@@ -395,13 +491,15 @@ private:
         TerrainPaletteHandle palette = kInvalidTerrainPalette;
         bool splat = false;
         bool waiting_for_slot = false;
+        std::uint8_t wait = 0; // m19.8e: 0 none, 1 slot, 2 bytes, 3 upload cap
         TerrainResidentId id{};
         assets::TerrainTileEdges edges{};
         bool pinned = false; // m19.8d2: a root of a LOD world
         // m19.8d3: the parent's appearance bake, requested with the heightfield.
         bool bake_requested = false;
-        assets::TextureAssetHandle bake_color{};
-        assets::TextureAssetHandle bake_material{};
+        // m19.8e: on the STREAMED path, released once the pass has its copy (see release_bake).
+        assets::StreamedTextureAssetHandle bake_color{};
+        assets::StreamedTextureAssetHandle bake_material{};
     };
 
     // What a slot holds, kept until RECLAIM — after its record is gone.
@@ -433,6 +531,15 @@ private:
     // m19.8d3: 0 = still loading, 1 = both bake textures ready, 2 = none (not requested / failed).
     [[nodiscard]] int bake_state(Record& r);
     [[nodiscard]] bool give_bake(TerrainTileId tile, const Record& r);
+    void release_bake(Record& r);
+    // m19.8e: bytes. `committed_bytes` is what the budget gauge reads now; `reserve_for` the
+    // predicted bytes of the roots still waiting, other than `k`; `limit_for` what `k` may grow
+    // the committed bytes to.
+    [[nodiscard]] std::uint64_t committed_bytes() const;
+    [[nodiscard]] std::uint64_t root_bytes(assets::TerrainTileKey k) const;
+    [[nodiscard]] std::uint64_t reserve_for(assets::TerrainTileKey k) const;
+    [[nodiscard]] std::uint64_t limit_for(assets::TerrainTileKey k) const;
+    void journal(assets::TerrainTileKey k, TerrainUploadEvent::Kind kind, std::uint64_t bytes);
 
     // m19.8d2: a load/slot priority; lower sorts first.
     struct Priority {
@@ -456,8 +563,10 @@ private:
     };
 
     [[nodiscard]] Priority priority(assets::TerrainTileKey k, const core::Vec3& eye) const;
-    [[nodiscard]] std::optional<TerrainResidentId> take_slot(assets::TerrainTileKey k,
-                                                             const core::Vec3& eye);
+    [[nodiscard]] std::optional<TerrainResidentId>
+    take_slot(assets::TerrainTileKey k, const core::Vec3& eye, std::uint64_t need, bool& bytes);
+    [[nodiscard]] std::map<assets::TerrainTileKey, Record>::iterator
+    pick_victim(assets::TerrainTileKey k, const core::Vec3& eye);
     void request(assets::TerrainTileKey k);
     void begin_frame_lod(const core::Vec3& eye);
     [[nodiscard]] bool usable(assets::TerrainTileKey k) const;
@@ -471,6 +580,7 @@ private:
                    const TerrainLight& light,
                    const SkyLightBinding& sky);
     void update_gauges();
+    [[nodiscard]] bool outside_frustum(const core::Mat4& view_proj, assets::TerrainTileKey k) const;
 
     rhi::Device& device_;
     TerrainPass& pass_;
@@ -500,6 +610,11 @@ private:
     std::set<assets::TerrainTileKey> refused_parents_; // sticky: a coincidence mismatch
     std::map<assets::TerrainTileKey, assets::TerrainTileKey> accused_by_; // provisional refusals
     std::set<std::pair<assets::TerrainTileKey, assets::TerrainTileKey>> verified_pairs_;
+    // m19.8e
+    std::uint64_t root_bytes_ = 0; // Σ predicted root bytes (the reservation), with a budget
+    bool cap_closed_ = false;      // this frame's upload cap was reached: later uploads wait
+    std::vector<assets::TerrainTileKey> drawn_;
+    std::vector<assets::TerrainTileKey> culled_;
 };
 
 } // namespace rime::render

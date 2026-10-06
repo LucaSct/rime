@@ -568,6 +568,27 @@ std::uint64_t TerrainPass::tile_bytes(TerrainTileId id) const noexcept {
            sizeof(SplatUniform) + t.bake_bytes;
 }
 
+std::uint64_t TerrainPass::predicted_tile_bytes(std::uint32_t columns,
+                                                std::uint32_t rows,
+                                                std::uint64_t weight_bytes,
+                                                bool with_bake) noexcept {
+    // tile_bytes()'s terms, before the fact: fill_grid_indices writes six indices per cell, and a
+    // bake is two RGBA8 textures of one texel per sample.
+    const std::uint64_t samples = std::uint64_t{columns} * rows;
+    const std::uint64_t cells =
+        columns > 1 && rows > 1 ? std::uint64_t{columns - 1} * (rows - 1) : 0;
+    return samples * sizeof(std::uint16_t) + cells * 6 * sizeof(std::uint32_t) + weight_bytes +
+           sizeof(SplatUniform) + (with_bake ? 2 * samples * 4 : 0);
+}
+
+std::uint64_t TerrainPass::predicted_tile_bytes(const assets::HeightfieldAsset& asset,
+                                                bool with_bake) noexcept {
+    return predicted_tile_bytes(asset.columns,
+                                asset.rows,
+                                asset.has_splat() ? asset.weights.size() : std::uint64_t{4},
+                                with_bake);
+}
+
 bool TerrainPass::set_bake(TerrainTileId id, const TerrainBakeTexels& bake) {
     if (!contains(id)) {
         ++bakes_refused_;
