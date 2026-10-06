@@ -906,6 +906,111 @@ mod tests {
         assert!(err.to_string().contains("0x000000000000dead"));
     }
 
+    #[test]
+    fn the_description_cook_reads_the_palette_directory_and_bakes() {
+        // The on-disk path end to end: sources + `palette_dir` of COOKED assets -> the same bake
+        // the in-memory cook produces from the same world and the table those assets resolve to.
+        use crate::terrain_world::cook_terrain_world;
+        let dir = std::env::temp_dir().join(format!("rime-bake-cook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cooked")).unwrap();
+        let grass = Material {
+            base_color: [0.2, 0.6, 0.1, 1.0],
+            roughness: 0.9,
+            ..Material::default()
+        }
+        .cook();
+        let rock = Material {
+            base_color: [0.4, 0.4, 0.45, 1.0],
+            metallic: 0.2,
+            roughness: 0.6,
+            ..Material::default()
+        }
+        .cook();
+        let texels: Vec<u8> = (0..16u8)
+            .flat_map(|k| [40 + 10 * k, 200 - 5 * k, 90, 16 * k])
+            .collect();
+        let texture = Texture::from_rgba8(4, 4, ColorSpace::Srgb, texels).cook();
+        let gravel = TerrainLayer {
+            material: rock.1,
+            albedo_height: texture.1,
+            uv_scale: [2.0, 2.0],
+            height_contrast: 5.0,
+        }
+        .cook();
+        for (name, asset) in [
+            ("grass.rmat", &grass),
+            ("rock.rmat", &rock),
+            ("gravel.rtex", &texture),
+            ("gravel.rtl", &gravel),
+        ] {
+            std::fs::write(dir.join("cooked").join(name), &asset.0).unwrap();
+        }
+        std::fs::write(dir.join("cooked/notes.txt"), b"not an RMA1 file").unwrap();
+
+        let mut rng = Rng(21);
+        let mut desc = String::from("levels = 2\npalette_dir = \"cooked\"\n");
+        let mut tiles = Vec::new();
+        for (x, z) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let stem = format!("t_{x}_{z}");
+            let samples = vec![1000u16; (N * N) as usize];
+            let raw: Vec<u8> = samples.iter().flat_map(|q| q.to_le_bytes()).collect();
+            std::fs::write(dir.join(format!("{stem}.r16")), raw).unwrap();
+            std::fs::write(
+                dir.join(format!("{stem}.toml")),
+                format!(
+                    "size_x = {SIZE}\nsize_z = {SIZE}\nheight_min = 0\nheight_max = 65.535\n\
+                     origin_x = {}\norigin_z = {}\ncolumns = {N}\nrows = {N}\n\
+                     layer0 = 0x{:x}\nlayer1 = 0x{:x}\n",
+                    x as f32 * SIZE,
+                    z as f32 * SIZE,
+                    grass.1,
+                    gravel.1
+                ),
+            )
+            .unwrap();
+            let rgba: Vec<u8> = (0..3 * 2)
+                .flat_map(|_| [1 + (rng.next() % 255) as u8, (rng.next() % 256) as u8, 0, 0])
+                .collect();
+            image::RgbaImage::from_raw(3, 2, rgba.clone())
+                .unwrap()
+                .save(dir.join(format!("{stem}.splat.png")))
+                .unwrap();
+            desc.push_str(&format!("tile_{x}_{z} = \"{stem}.r16\"\n"));
+            tiles.push(tile(
+                x,
+                z,
+                [Some(grass.1), Some(gravel.1), None, None],
+                (3, 2),
+                {
+                    let mut it = rgba
+                        .chunks(4)
+                        .map(|c| [c[0], c[1], c[2], c[3]])
+                        .collect::<Vec<_>>()
+                        .into_iter();
+                    move || it.next().unwrap()
+                },
+            ));
+        }
+        let desc_path = dir.join("w.terrainworld.toml");
+        std::fs::write(&desc_path, desc).unwrap();
+
+        let table = load_layer_table(&dir.join("cooked")).unwrap();
+        assert_eq!(table.len(), 3); // grass, rock, gravel — not the texture, not the notes
+        assert!(table[&gravel.1].effective_height > 0.0);
+        let cooked = cook_terrain_world(&desc_path).unwrap();
+        let bake = cooked.bake.as_ref().expect("palette_dir asks for a bake");
+        let world = build_lod_world(tiles, 2).unwrap();
+        assert_eq!(bake, &bake_world(&world, &table).unwrap());
+        assert_eq!(bake.tiles.iter().flatten().count(), 1);
+        assert_eq!(cooked.files.len(), 5 + 2);
+        assert_eq!(
+            cooked.manifest.lines().last().unwrap().split('\t').count(),
+            14
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn plain_names(files: &[(String, Vec<u8>, u64)]) -> Vec<(String, u64)> {
         files.iter().map(|(f, _, id)| (f.clone(), *id)).collect()
     }

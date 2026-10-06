@@ -616,3 +616,97 @@ fn lod_world_cooks_to_the_committed_fixture_bytes() {
     let manifest = std::fs::read_to_string(fixtures().join(cooked.manifest_file_name())).unwrap();
     assert_eq!(cooked.manifest, manifest);
 }
+
+/// The M19.8d3 fixture world: 2×2 flat tiles of 5×5 samples with one parent, palettes chosen so
+/// two of the parent's bake texels can be written down by hand (the C++ test asserts them):
+/// tile (0, 0) is pure layer A and tile (1, 0) pure layer B, so the parent's corner texels (0, 0)
+/// and (4, 0) average nothing but A and nothing but B.
+fn bake_fixture_world() -> asset_pipeline::terrain_world::CookedWorld {
+    use asset_pipeline::heightfield::{Heightfield, HeightfieldSidecar};
+    use asset_pipeline::terrain_bake::{LayerAppearance, LayerTable};
+    use asset_pipeline::terrain_world::{build_lod_world, cook_lod_world_baked};
+    let layer = |color, metallic, roughness, effective_height| LayerAppearance {
+        color,
+        metallic,
+        roughness,
+        effective_height,
+    };
+    let layers: LayerTable = [
+        (0xa1, layer([0.5, 0.25, 1.0], 0.75, 0.125, 0.0)),
+        (0xb2, layer([0.1, 0.8, 0.2], 0.0, 1.0, 0.0)),
+        (0xc3, layer([1.0, 1.0, 1.0], 0.5, 0.5, 3.0)),
+    ]
+    .into_iter()
+    .collect();
+    let tile = |x: i32, z: i32, ids: [Option<u64>; 4], dims: (u32, u32), rgba: &[u8]| {
+        let sidecar = HeightfieldSidecar {
+            size_x: 4.0,
+            size_z: 4.0,
+            height_min: 0.0,
+            height_max: 65.535,
+            origin: [x as f32 * 4.0, 0.0, z as f32 * 4.0],
+            columns: None,
+            rows: None,
+            layers: ids,
+        };
+        let hf = Heightfield::new(5, 5, vec![2000; 25], sidecar)
+            .unwrap()
+            .with_splat(dims.0, dims.1, rgba)
+            .unwrap();
+        (x, z, hf)
+    };
+    let ab = [Some(0xa1), Some(0xb2), None, None];
+    let abc = [Some(0xa1), Some(0xb2), Some(0xc3), None];
+    let tiles = vec![
+        tile(0, 0, ab, (1, 1), &[255, 0, 0, 0]),
+        tile(1, 0, ab, (1, 1), &[0, 255, 0, 0]),
+        tile(0, 1, ab, (1, 1), &[128, 127, 0, 0]),
+        tile(
+            1,
+            1,
+            abc,
+            (2, 2),
+            &[200, 55, 0, 0, 0, 100, 155, 0, 85, 85, 85, 0, 10, 0, 245, 0],
+        ),
+    ];
+    cook_lod_world_baked(
+        "bake_world",
+        build_lod_world(tiles, 2).unwrap(),
+        Some(&layers),
+    )
+    .unwrap()
+}
+
+#[test]
+fn bake_world_cooks_to_the_committed_fixture_bytes() {
+    // The M19.8d3 cross-language alarm: the manifest with its 14-field parent line and the
+    // parent's two single-level bake textures are what the C++ terrain_lod_test parses and reads.
+    // Regenerate deliberately: RIME_REGENERATE_BAKE_FIXTURE=1 cargo test bake_world
+    let cooked = bake_fixture_world();
+    assert_eq!(cooked.files.len(), 5 + 2);
+    let mut files: Vec<(String, Vec<u8>)> = cooked.files[5..]
+        .iter()
+        .map(|(f, b, _)| (f.clone(), b.clone()))
+        .collect();
+    files.push((
+        cooked.manifest_file_name(),
+        cooked.manifest.as_bytes().to_vec(),
+    ));
+    // The two texels the C++ side asserts, checked here against the layer table by hand.
+    let bake = cooked.bake.as_ref().unwrap().tiles[4].as_ref().unwrap();
+    assert_eq!(bake.color[..4], [188, 137, 255, 255]); // layer A: 0.5, 0.25, 1.0 in sRGB
+    assert_eq!(bake.material[..4], [191, 32, 0, 255]); // metallic 0.75, roughness 0.125
+    assert_eq!(bake.color[16..20], [89, 231, 124, 255]); // layer B: 0.1, 0.8, 0.2
+    assert_eq!(bake.material[16..20], [0, 255, 0, 255]);
+    for (name, bytes) in &files {
+        let path = fixtures().join(name);
+        if std::env::var_os("RIME_REGENERATE_BAKE_FIXTURE").is_some() {
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let committed = std::fs::read(&path).unwrap();
+        assert_eq!(
+            bytes, &committed,
+            "{name} diverged — regenerate it deliberately"
+        );
+    }
+}
