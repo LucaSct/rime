@@ -138,6 +138,24 @@ optional `origin_*`, and `columns`/`rows` for raw sources).
 | `min_sample`, `max_sample` | 2 × u32 | the samples' exact range (≤ 65535); the reader rejects any sample outside it |
 | samples | `columns × rows` × u16 | row-major, x fastest (`i + columns * j`); exactly this many, no trailing bytes |
 
+## Terrain layer payload (kind 10, M19.7a)
+
+One surface a terrain splat palette can name ([ADR-0066](../../docs/adr/0066-m19.7a-terrain-layer-asset.md)):
+a fixed 28-byte record, no tail. Cooked by `rime terrain-layer <name>.terrainlayer.toml` together with
+`<name>_albedo_height.rtex`, an ordinary RGBA8 **sRGB** texture whose RGB is the albedo and whose A is the
+height (linear — the sRGB format encodes RGB only; the height mips are a plain average, not
+coverage-rescaled; 16-bit source heights are rounded to nearest, `(2v + 257) / 514`).
+
+| field | type | notes |
+| --- | --- | --- |
+| `material` | u64 | AssetId of the cooked material (base-colour factor, metallic, roughness); nonzero |
+| `albedo_height` | u64 | AssetId of the packed texture above; nonzero |
+| `uv_scale_x`, `uv_scale_z` | 2 × f32 | metres per texture repeat along world X, Z; finite, > 0 |
+| `height_contrast` | f32 | height-blend strength; finite, ≥ 0 (0 = plain weighted blend) |
+
+A heightfield palette slot (`layer0..layer3`) may name a terrain layer instead of a material; the
+heightfield format does not change — the consumer dispatches on the referenced file's `asset_kind`.
+
 ## The schema hash
 
 `type_schema_hash` is the engine's reflection `type_hash` of a v1 layout record, computed and pinned in
@@ -148,6 +166,8 @@ whole fixed material record (`material_schema_hash()` ↔ `cooked::MATERIAL_SCHE
 **skeleton** it fingerprints the per-joint record (`skeleton_schema_hash()` ↔
 `cooked::SKELETON_SCHEMA_HASH`); for a **clip** it fingerprints the channel-table record
 (`clip_schema_hash()` ↔ `cooked::CLIP_SCHEMA_HASH`); for a **heightfield** it fingerprints the fixed
-header record (`heightfield_schema_hash()` ↔ `cooked::HEIGHTFIELD_SCHEMA_HASH`). The reader rejects a mismatch with a "re-cook"
+header record (`heightfield_schema_hash()` ↔ `cooked::HEIGHTFIELD_SCHEMA_HASH`); for a **terrain
+layer** it fingerprints the whole fixed record (`terrain_layer_schema_hash()` ↔
+`cooked::TERRAIN_LAYER_SCHEMA_HASH`). The reader rejects a mismatch with a "re-cook"
 error, so a layout change forces both sides to update together. If you change a layout, update the
 constant in both languages and regenerate the fixtures.

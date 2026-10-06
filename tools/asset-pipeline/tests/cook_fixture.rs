@@ -538,3 +538,60 @@ fn terrain_splat_png_cooks_to_the_committed_v2_heightfield_fixture_bytes() {
     );
     assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 2);
 }
+
+#[test]
+fn terrain_layer_sidecar_cooks_to_the_committed_fixture_bytes() {
+    // The M19.7a cross-language alarm: terrain_layer.rtl and terrain_layer_albedo_height.rtex are
+    // what fixture_test.cpp loads. Cooking terrain_layer.terrainlayer.toml (4x4 RGB albedo + 4x4
+    // 16-bit height) must reproduce both byte for byte, twice — sidecar parse, PNG decode, 16->8
+    // quantisation, packing, mips and both encoders, end to end. Regenerate deliberately with
+    // `rime terrain-layer tests/assets/fixtures/terrain_layer.terrainlayer.toml --out
+    // tests/assets/fixtures`.
+    use asset_pipeline::terrain_layer::cook_terrain_layer;
+    let sidecar = fixtures().join("terrain_layer.terrainlayer.toml");
+    let (first, second) = (
+        cook_terrain_layer(&sidecar).unwrap(),
+        cook_terrain_layer(&sidecar).unwrap(),
+    );
+    assert_eq!(
+        first.texture, second.texture,
+        "texture cook not deterministic"
+    );
+    assert_eq!(first.layer, second.layer, "layer cook not deterministic");
+    assert_eq!(
+        first.texture_file_name(),
+        "terrain_layer_albedo_height.rtex"
+    );
+    assert_eq!(first.layer_file_name(), "terrain_layer.rtl");
+    let committed_tex = std::fs::read(fixtures().join(first.texture_file_name())).unwrap();
+    let committed_layer = std::fs::read(fixtures().join(first.layer_file_name())).unwrap();
+    assert_eq!(
+        first.texture.0, committed_tex,
+        "terrain layer texture diverged from the committed fixture — regenerate it deliberately"
+    );
+    assert_eq!(
+        first.layer.0, committed_layer,
+        "terrain layer record diverged from the committed fixture — regenerate it deliberately"
+    );
+
+    // The record references the texture by the texture's content id — the link the C++ side
+    // re-derives independently from the texture bytes.
+    let (header, payload) = read_header(&committed_layer).unwrap();
+    assert_eq!(
+        header.asset_kind,
+        asset_pipeline::cooked::ASSET_KIND_TERRAIN_LAYER
+    );
+    assert_eq!(
+        u64::from_le_bytes(payload[8..16].try_into().unwrap()),
+        first.texture.1
+    );
+
+    // Level 0's alpha is the height table in the sidecar's comment: round(v / 257).
+    let (_, tex_payload) = read_header(&committed_tex).unwrap();
+    let level0 = &tex_payload[16 + 16 * 3..][..64];
+    let alpha: Vec<u8> = level0.iter().skip(3).step_by(4).copied().collect();
+    assert_eq!(
+        alpha,
+        [0, 0, 1, 1, 1, 1, 2, 127, 128, 255, 255, 254, 4, 78, 156, 195]
+    );
+}

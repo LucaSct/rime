@@ -13,6 +13,7 @@ rime_add_test(rime_assets_tests
     cooked_destructible_test.cpp
     cooked_mesh_sdf_test.cpp
     cooked_heightfield_test.cpp
+    cooked_terrain_layer_test.cpp
     virtual_geometry_test.cpp
     manifest_test.cpp
     registry_test.cpp

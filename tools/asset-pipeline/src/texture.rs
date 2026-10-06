@@ -17,6 +17,7 @@
 use std::path::Path;
 
 use crate::cooked::{wrap_container, ByteWriter, ASSET_KIND_TEXTURE, TEXTURE_SCHEMA_HASH};
+use crate::PipelineError;
 
 /// Wire format values (match `engine/assets/texture_asset.hpp`'s `TextureFormat`; append, never
 /// renumber). RGBA8, tagged by *semantic*: colour data (baseColor/emissive) is sRGB; everything else
@@ -58,6 +59,23 @@ impl ColorSpace {
     }
 }
 
+/// What a texture's ALPHA channel means, which decides how the cook may treat it (m19.7a). Cook-side
+/// only — it never reaches the wire: an albedo+height texture is an ordinary `RGBA8_SRGB` texture to
+/// the engine. Explicit discriminants anyway, appended and never renumbered, so that the day the cook
+/// cache keys on usage the values are already stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextureUsage {
+    /// Alpha is COVERAGE (or unused). Its mips get the m16.6 coverage rescale, so a cutout card does
+    /// not dissolve at distance. Every texture cooked before m19.7a is this.
+    #[default]
+    Color = 0,
+    /// Terrain layer albedo + height (M19.7a, ADR-0066): RGB = albedo (sRGB colour), A = height
+    /// (LINEAR). The colour mips are gamma-correct exactly as for `Color`; the height mips are a
+    /// plain average, and the coverage rescale is NOT applied — it would multiply a layer's relief
+    /// up at distance, and a height map has no cutoff to preserve.
+    TerrainAlbedoHeight = 1,
+}
+
 /// One generated mip level: its extent and its RGBA8 pixels (row-major, top row first).
 #[derive(Debug, Clone)]
 pub struct MipLevel {
@@ -73,6 +91,8 @@ pub struct Texture {
     pub width: u32,
     pub height: u32,
     pub color_space: ColorSpace,
+    /// What alpha means (coverage, or a terrain layer's height) — see [`TextureUsage`].
+    pub usage: TextureUsage,
     /// Level-0 pixels, RGBA8, row-major, `width * height * 4` bytes.
     pub level0: Vec<u8>,
 }
@@ -90,8 +110,121 @@ impl Texture {
             width,
             height,
             color_space,
+            usage: TextureUsage::Color,
             level0,
         }
+    }
+
+    /// Pack a terrain layer's albedo and height into ONE RGBA8 texture (M19.7a, ADR-0066): RGB from
+    /// `albedo_rgba` (RGBA8; its alpha must be fully opaque and is replaced), A from `height` (one
+    /// byte per texel, already 8-bit — see [`quantize_height_16_to_8`]). Both images must be the
+    /// same size: resampling one to fit the other would invent detail or blur it away, and which one
+    /// the author meant to be authoritative is not the cook's guess to make.
+    ///
+    /// Cooked as sRGB, which is right for both halves: Vulkan's `_SRGB` formats encode R, G and B
+    /// only, so the sampler linearises the albedo and returns the height untouched.
+    ///
+    /// Uncompressed RGBA8 for now. BC7 (`cook_with(true)`) would work mechanically, but its mode-6
+    /// encoder shares endpoint error between colour and alpha, and nobody has yet measured what that
+    /// does to a height channel the blend sharpens — so it waits for a brick that measures it.
+    pub fn terrain_albedo_height(
+        (albedo_w, albedo_h): (u32, u32),
+        albedo_rgba: &[u8],
+        (height_w, height_h): (u32, u32),
+        height: &[u8],
+    ) -> Result<Self, PipelineError> {
+        let bad = |msg: String| PipelineError::Unsupported(format!("terrain layer texture: {msg}"));
+        if (albedo_w, albedo_h) != (height_w, height_h) {
+            return Err(bad(format!(
+                "albedo is {albedo_w}x{albedo_h} but height is {height_w}x{height_h}; they must match"
+            )));
+        }
+        if albedo_w == 0 || albedo_h == 0 {
+            return Err(bad("an empty image is not a layer".to_string()));
+        }
+        let texels = albedo_w as usize * albedo_h as usize;
+        if albedo_rgba.len() != texels * BYTES_PER_PIXEL || height.len() != texels {
+            return Err(bad(format!(
+                "{} albedo bytes / {} height bytes for {albedo_w}x{albedo_h} texels",
+                albedo_rgba.len(),
+                height.len()
+            )));
+        }
+        let mut level0 = Vec::with_capacity(texels * BYTES_PER_PIXEL);
+        for (t, (rgba, &h)) in albedo_rgba
+            .as_chunks::<BYTES_PER_PIXEL>()
+            .0
+            .iter()
+            .zip(height)
+            .enumerate()
+        {
+            // An albedo with real alpha is almost certainly a texture authored for something else
+            // (or one where the author already put height in alpha, which this cook would silently
+            // overwrite with the height image) — refuse rather than drop it.
+            if rgba[3] != 255 {
+                return Err(bad(format!(
+                    "albedo texel ({}, {}) has alpha {} — the albedo must be opaque; its alpha \
+                     channel is where the height goes",
+                    t % albedo_w as usize,
+                    t / albedo_w as usize,
+                    rgba[3]
+                )));
+            }
+            level0.extend_from_slice(&[rgba[0], rgba[1], rgba[2], h]);
+        }
+        Ok(Texture {
+            width: albedo_w,
+            height: albedo_h,
+            color_space: ColorSpace::Srgb,
+            usage: TextureUsage::TerrainAlbedoHeight,
+            level0,
+        })
+    }
+
+    /// Load a terrain layer's albedo (8-bit RGB or RGBA PNG/JPEG) and height (8- or 16-bit
+    /// grayscale) images and pack them with [`Texture::terrain_albedo_height`]. A 16-bit height is
+    /// quantised to 8 bits by [`quantize_height_16_to_8`]. Any other pixel format is refused: an
+    /// implicit conversion (colour to grey, 16-bit colour to 8) is a decision the author should see.
+    pub fn terrain_albedo_height_from_files(
+        albedo: &Path,
+        height: &Path,
+    ) -> Result<Self, PipelineError> {
+        let albedo_img = image::open(albedo).map_err(PipelineError::Image)?;
+        let albedo_rgba = match albedo_img {
+            image::DynamicImage::ImageRgb8(_) | image::DynamicImage::ImageRgba8(_) => {
+                albedo_img.to_rgba8()
+            }
+            other => {
+                return Err(PipelineError::Unsupported(format!(
+                    "terrain layer albedo {}: expected 8-bit RGB or RGBA, found {:?}",
+                    albedo.display(),
+                    other.color()
+                )))
+            }
+        };
+        let (height_dims, height_bytes) = match image::open(height).map_err(PipelineError::Image)? {
+            image::DynamicImage::ImageLuma8(buf) => (buf.dimensions(), buf.into_raw()),
+            image::DynamicImage::ImageLuma16(buf) => (
+                buf.dimensions(),
+                buf.into_raw()
+                    .into_iter()
+                    .map(quantize_height_16_to_8)
+                    .collect(),
+            ),
+            other => {
+                return Err(PipelineError::Unsupported(format!(
+                    "terrain layer height {}: expected 8- or 16-bit grayscale, found {:?}",
+                    height.display(),
+                    other.color()
+                )))
+            }
+        };
+        Texture::terrain_albedo_height(
+            albedo_rgba.dimensions(),
+            albedo_rgba.as_raw(),
+            height_dims,
+            &height_bytes,
+        )
     }
 
     /// Decode a PNG/JPEG file into an RGBA8 level-0 texture. No vertical flip is applied: the `image`
@@ -124,7 +257,11 @@ impl Texture {
             let prev = chain.last().unwrap();
             chain.push(downsample(prev, self.color_space));
         }
-        preserve_alpha_coverage(&mut chain);
+        // Coverage is the only alpha this rescale is right for; a height channel keeps its plain
+        // average (see TextureUsage::TerrainAlbedoHeight).
+        if self.usage == TextureUsage::Color {
+            preserve_alpha_coverage(&mut chain);
+        }
         chain
     }
 
@@ -234,6 +371,16 @@ fn downsample(src: &MipLevel, color_space: ColorSpace) -> MipLevel {
         height: dst_h,
         pixels,
     }
+}
+
+/// Quantise a 16-bit height sample to 8 bits, ROUND-TO-NEAREST (m19.7a): `round(v * 255 / 65535)`,
+/// which is `round(v / 257)`, in integers as `(2v + 257) / 514`. There are no ties to break: a tie
+/// would need `2v = 257 * (2k + 1)`, an odd number, and `2v` is even. Truncating (`v >> 8`) instead
+/// would bias every height down by half a step on average (256, 99.6 % of the way to 1, becomes 0)
+/// — a skew the height blend, which compares heights ACROSS layers, would turn into a systematic
+/// preference for whichever layer was authored at 8 bits.
+pub fn quantize_height_16_to_8(v: u16) -> u8 {
+    ((2 * u32::from(v) + 257) / 514) as u8
 }
 
 /// The reference cutoff coverage is preserved against (m16.6).
@@ -564,5 +711,122 @@ mod tests {
         let (header, _payload) = read_header(&a).unwrap();
         assert_eq!(header.asset_kind, ASSET_KIND_TEXTURE);
         assert_eq!(header.type_schema_hash, TEXTURE_SCHEMA_HASH);
+    }
+
+    // ── m19.7a: terrain albedo + height packing ─────────────────────────────────────────────────
+
+    #[test]
+    fn terrain_pack_takes_rgb_from_albedo_and_a_from_height_exactly() {
+        // A 2x2 where every byte is distinct, so a swapped channel, a transposed walk or a dropped
+        // texel each produce different bytes.
+        let albedo = [
+            10, 20, 30, 255, /**/ 11, 21, 31, 255, //
+            12, 22, 32, 255, /**/ 13, 23, 33, 255,
+        ];
+        let height = [200, 201, 202, 203];
+        let tex = Texture::terrain_albedo_height((2, 2), &albedo, (2, 2), &height).unwrap();
+        assert_eq!(
+            tex.level0,
+            vec![
+                10, 20, 30, 200, /**/ 11, 21, 31, 201, //
+                12, 22, 32, 202, /**/ 13, 23, 33, 203,
+            ]
+        );
+        assert_eq!((tex.width, tex.height), (2, 2));
+        assert_eq!(tex.color_space, ColorSpace::Srgb);
+        assert_eq!(tex.usage, TextureUsage::TerrainAlbedoHeight);
+        // And it lands on the wire as an ordinary sRGB RGBA8 texture (format field is the 3rd u32).
+        let (bytes, _) = tex.cook();
+        let (_, payload) = crate::cooked::read_header(&bytes).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(payload[8..12].try_into().unwrap()),
+            TEXFMT_RGBA8_SRGB
+        );
+    }
+
+    #[test]
+    fn terrain_pack_refuses_mismatched_sizes_and_non_opaque_albedo() {
+        let albedo_2x2 = [255u8; 16];
+        let err = Texture::terrain_albedo_height((2, 2), &albedo_2x2, (2, 1), &[0, 0]).unwrap_err();
+        assert!(err.to_string().contains("must match"), "{err}");
+        let err = Texture::terrain_albedo_height((2, 2), &albedo_2x2, (1, 2), &[0, 0]).unwrap_err();
+        assert!(err.to_string().contains("must match"), "{err}");
+        let mut translucent = albedo_2x2;
+        translucent[7] = 254; // texel (1, 0)'s alpha
+        let err =
+            Texture::terrain_albedo_height((2, 2), &translucent, (2, 2), &[0; 4]).unwrap_err();
+        assert!(err.to_string().contains("(1, 0)"), "{err}");
+    }
+
+    #[test]
+    fn sixteen_bit_height_rounds_to_nearest() {
+        // Each pair brackets a rounding boundary: v/257 just below and just above k + 0.5.
+        let cases: [(u16, u8); 14] = [
+            (0, 0),
+            (128, 0), // 0.498
+            (129, 1), // 0.502 — floor would say 0
+            (256, 1), // 0.996 — `v >> 8` would say 0
+            (257, 1),
+            (385, 1), // 1.498
+            (386, 2), // 1.502
+            (32767, 127),
+            (32768, 128),
+            (65406, 254), // 254.498
+            (65407, 255), // 254.502
+            (65535, 255),
+            (1000, 4),
+            (50000, 195),
+        ];
+        for (v, q) in cases {
+            assert_eq!(quantize_height_16_to_8(v), q, "v = {v}");
+            // Against the real-number definition too.
+            assert_eq!(f64::from(v) * 255.0 / 65535.0, f64::from(v) / 257.0);
+            assert_eq!((f64::from(v) / 257.0).round() as u8, q, "v = {v}");
+        }
+        // Monotone and onto: every 8-bit level is reachable.
+        let mut seen = [false; 256];
+        let mut prev = 0u8;
+        for v in 0..=u16::MAX {
+            let q = quantize_height_16_to_8(v);
+            assert!(q >= prev);
+            prev = q;
+            seen[q as usize] = true;
+        }
+        assert!(seen.iter().all(|&b| b));
+    }
+
+    #[test]
+    fn terrain_height_mips_are_a_plain_average_not_coverage_rescaled() {
+        // A height field with partial alpha everywhere — exactly what makes the m16.6 coverage
+        // rescale fire for a Color texture. For a terrain layer the mip's alpha must be the plain
+        // box average of the four heights below it.
+        let albedo = [128u8, 128, 128, 255].repeat(4);
+        let height = [10u8, 30, 200, 250];
+        let terrain = Texture::terrain_albedo_height((2, 2), &albedo, (2, 2), &height).unwrap();
+        let mips = terrain.generate_mips();
+        assert_eq!(mips.len(), 2);
+        let mean = (10.0f32 + 30.0 + 200.0 + 250.0) / 4.0; // 122.5
+        assert_eq!(mips[1].pixels[3], mean.round() as u8);
+        // The negative control: the same bytes cooked as a Color texture ARE rescaled, so the
+        // assertion above would have caught the rescale leaking into the terrain path.
+        let mut color = terrain.clone();
+        color.usage = TextureUsage::Color;
+        assert_ne!(color.generate_mips()[1].pixels[3], mean.round() as u8);
+        // Colour stays gamma-correct either way (flat grey in, flat grey out).
+        assert_eq!(&mips[1].pixels[0..3], &[128, 128, 128]);
+    }
+
+    #[test]
+    fn terrain_texture_cook_is_byte_stable() {
+        let albedo: Vec<u8> = (0..64u8)
+            .map(|i| if i % 4 == 3 { 255 } else { i * 3 })
+            .collect();
+        let height: Vec<u8> = (0..16u8).map(|i| i * 17).collect();
+        let cook = || {
+            Texture::terrain_albedo_height((4, 4), &albedo, (4, 4), &height)
+                .unwrap()
+                .cook()
+        };
+        assert_eq!(cook(), cook());
     }
 }

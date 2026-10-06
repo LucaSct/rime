@@ -17,6 +17,7 @@
 #include "rime/assets/mesh_asset.hpp"
 #include "rime/assets/sdf_asset.hpp"
 #include "rime/assets/skeleton_asset.hpp"
+#include "rime/assets/terrain_layer_asset.hpp"
 #include "rime/assets/texture_asset.hpp"
 #include "rime/assets/virtual_geometry.hpp"
 
@@ -73,6 +74,8 @@ enum class AssetError {
     InvalidHeightfield,     // heightfield: grid dimensions outside [2, ceiling], a non-finite or
                             // non-positive spacing/scale, an unknown triangulation, or a sample
                             // outside the header's own recorded [min_sample, max_sample]
+    InvalidTerrainLayer,    // terrain layer: a zero material or texture id, a non-finite or
+                            // non-positive uv_scale, or a non-finite or negative height_contrast
     Io,                     // the file could not be opened/read (load-from-path only) — keep LAST:
                             // kAssetErrorCount below is derived from it
 };
@@ -347,5 +350,32 @@ read_heightfield(std::span<const std::byte> file,
                  AssetError& out_error,
                  AssetId* out_id = nullptr,
                  AssetRejectCounters* rejects = nullptr) noexcept;
+
+// The schema fingerprint the current build expects a cooked *terrain layer* payload to match
+// (M19.7a, ADR-0066): the reflection type_hash of the v1 record (material id, packed albedo/height
+// texture id, world UV scale, height contrast — see cooked_reader.cpp). Like the material this
+// record IS the whole payload. The Rust cooker embeds this same value; the cross-language fixture
+// test (fixture_test.cpp, terrain_layer.rtl) is the drift alarm.
+[[nodiscard]] std::uint64_t terrain_layer_schema_hash() noexcept;
+
+// Decode a terrain-layer payload (the bytes after the header) into a fully validated
+// TerrainLayerAsset. Assumes the caller has confirmed the header's kind and schema hash. A FIXED
+// 28-byte record: the payload must be exactly that long (short = Truncated, trailing bytes =
+// SizeMismatch); both AssetIds must be nonzero; uv_scale must be finite and > 0 on both axes; and
+// height_contrast finite and >= 0. Whether the referenced material and texture exist — and are of
+// the right kind — is the loader's concern, not the decoder's (exactly as for a material's
+// texture ids).
+[[nodiscard]] std::optional<TerrainLayerAsset>
+decode_terrain_layer(std::span<const std::byte> payload, AssetError& out_error) noexcept;
+
+// The one-call terrain-layer path: read a whole RMA1 file, confirm it is a TerrainLayer of the
+// expected schema, and decode it. `out_id`, if non-null, receives the payload's content hash. If
+// `rejects` is non-null, every refusal — envelope, kind, schema, or payload — is also tallied there
+// by reason, as read_heightfield does.
+[[nodiscard]] std::optional<TerrainLayerAsset>
+read_terrain_layer(std::span<const std::byte> file,
+                   AssetError& out_error,
+                   AssetId* out_id = nullptr,
+                   AssetRejectCounters* rejects = nullptr) noexcept;
 
 } // namespace rime::assets

@@ -88,6 +88,11 @@ struct HeightfieldAsset {
     // chased in the renderer. Making the sum an invariant moves that failure to the cook, and lets
     // the shader blend with no renormalization in its inner loop.
     //
+    // WHAT A SLOT NAMES (m19.7a, ADR-0066): a cooked Material, as every v2 file did when ADR-0063
+    // landed, OR a cooked TerrainLayer (material + packed albedo/height texture + UV scale + height
+    // contrast). The payload does not say which and does not need to — the referenced file's RMA1
+    // header carries its AssetKind, and the code that builds the GPU terrain dispatches on that.
+    //
     // A v1 payload leaves all of this empty, which means "one material, shaded as m19.3 shades
     // it". `has_splat()` is the question to ask, never `weights.empty()` alone.
     static constexpr std::uint32_t kLayerCount = 4;

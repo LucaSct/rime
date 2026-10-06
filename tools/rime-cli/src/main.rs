@@ -136,6 +136,19 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Cook a terrain LAYER (M19.7a, ADR-0066): a `<name>.terrainlayer.toml` sidecar naming a
+    /// material AssetId (0x hex), an albedo image (8-bit RGB/RGBA, opaque) and a height image (8- or
+    /// 16-bit grayscale, same size; 16-bit is rounded to the nearest 8-bit level), plus
+    /// `uv_scale = [x, z]` (metres per repeat in world X/Z) and `height_contrast` (>= 0). Writes
+    /// `<name>_albedo_height.rtex` (RGB = albedo, A = height; uncompressed RGBA8 — BC7 later) and
+    /// `<name>.rtl`, the layer record a heightfield's `layerN` may name instead of a material.
+    TerrainLayer {
+        /// The `<name>.terrainlayer.toml` sidecar; image paths in it are relative to it.
+        input: PathBuf,
+        /// Output directory for the two cooked files.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Print the header of a cooked RMA1 asset file.
     Inspect {
         /// A cooked `.rmesh`/`.rtex` (or other RMA1) file.
@@ -194,6 +207,7 @@ fn main() -> ExitCode {
         Some(Command::Heightfield { input, out, name }) => {
             run_heightfield(&input, &out, name.as_deref())
         }
+        Some(Command::TerrainLayer { input, out }) => run_terrain_layer(&input, &out),
         Some(Command::Inspect { file }) => run_inspect(&file),
     }
 }
@@ -323,6 +337,37 @@ fn run_heightfield(input: &Path, out: &Path, name: Option<&str>) -> ExitCode {
         hf.rows,
         hf.height_scale()
     );
+    ExitCode::SUCCESS
+}
+
+/// Cook one terrain layer sidecar into `<out>/<name>_albedo_height.rtex` + `<out>/<name>.rtl`.
+fn run_terrain_layer(input: &Path, out: &Path) -> ExitCode {
+    let cooked = match asset_pipeline::terrain_layer::cook_terrain_layer(input) {
+        Ok(cooked) => cooked,
+        Err(e) => {
+            eprintln!("rime terrain-layer: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(out) {
+        eprintln!("rime terrain-layer: creating {}: {e}", out.display());
+        return ExitCode::FAILURE;
+    }
+    for (file_name, (bytes, id)) in [
+        (cooked.texture_file_name(), &cooked.texture),
+        (cooked.layer_file_name(), &cooked.layer),
+    ] {
+        let file = out.join(file_name);
+        if let Err(e) = std::fs::write(&file, bytes) {
+            eprintln!("rime terrain-layer: writing {}: {e}", file.display());
+            return ExitCode::FAILURE;
+        }
+        println!(
+            "cooked {} -> {} (id {id:016x})",
+            input.display(),
+            file.display()
+        );
+    }
     ExitCode::SUCCESS
 }
 
