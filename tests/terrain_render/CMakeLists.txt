@@ -11,7 +11,8 @@
 # Rendered on lavapipe, GPU-free like every proof since M3.3, and structural: heights compared
 # against a physics raycast within a derived margin, radiance against the analytic Lambert value.
 # No golden images.
-rime_add_test(rime_terrain_render_tests terrain_height_test.cpp terrain_residency_test.cpp)
+rime_add_test(rime_terrain_render_tests terrain_height_test.cpp terrain_residency_test.cpp
+    terrain_lod_test.cpp)
 
 target_link_libraries(rime_terrain_render_tests
     PRIVATE rime::render rime::physics rime::assets rime::core)
@@ -30,7 +31,9 @@ rime_add_shaders(rime_terrain_render_tests
     # m19.7b: the engine's full-screen triangle plus a probe that reports the f32 bits a layer
     # texture's R and A decode to — the alpha-is-linear proof reads what the SHADER sees.
     ${CMAKE_SOURCE_DIR}/engine/render/shaders/fullscreen.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_layer_probe.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_layer_probe.frag
+    # m19.8d2: reports the exact position terrain.vert placed each vertex at (drawn as points).
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_vertex_probe.frag)
 
 # m19.7b: the alpha proof loads m19.7a's cooked terrain-layer texture through the engine's own
 # GpuAssetBridge, so it needs the shared fixtures directory (as tests/assets and tests/render do).
