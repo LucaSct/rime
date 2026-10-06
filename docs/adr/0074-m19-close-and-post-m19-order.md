@@ -90,8 +90,10 @@ in `docs/perf/m19.8e-terrain/README.md` are the shape of the costs, not a baseli
   on its branch).
 - **Full LOD for seamless travel.** The level chain is cooked and drawn with exact geomorphs and
   crack-free edges (ADR-0070, ADR-0071).
-- **Deferred admission from the start.** A collision region is admitted when it is needed, not
-  preloaded (ADR-0068, on its branch).
+- **Deferred admission from the start.** A body that spawns or teleports is admitted to the
+  simulation only once the collision region under it is installed. It is never simulated against ground
+  that is not there. A counted whole-tick stall remains only as the safety net for bodies already
+  admitted (ADR-0068, on its branch).
 
 ## Consequences
 
