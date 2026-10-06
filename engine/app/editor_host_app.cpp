@@ -104,6 +104,10 @@ void build_default_world(ecs::World& world) {
         place(1.0f, 0.0f, 0.0f), render::MeshRef{1}, render::MaterialRef{1}, ecs::Parent{ground});
 }
 
+} // namespace
+
+namespace rime::app {
+
 // Load a scene the way a TOOL must: an unknown component type is skipped and counted, not fatal.
 //
 // An editor is expected to open scenes authored by builds that had modules it does not, and
@@ -118,10 +122,16 @@ bool load_scene_for_editor(ecs::World& world,
                            editorhost::HostedScene& hosted) {
     scene::LoadOptions options;
     options.allow_unknown_components = true;
+    // Recorded before the load, so a failed one still reports the path it was asked for (E3).
+    hosted.requested_path = std::string(scene_path);
     const scene::LoadReport report =
         scene::load_scene_file(world, std::filesystem::path(scene_path), options);
     if (!report.ok) {
         RIME_ERROR("editor-host: scene load failed ({}): {}", scene_path, report.error);
+        // Said in-band too (SceneLoadReport), so the editor can refuse or warn rather than show an
+        // empty world as if it were the file. The host keeps serving what loaded.
+        hosted.load_ok = false;
+        hosted.load_error = report.error;
         return false;
     }
     if (report.skipped_components != 0) {
@@ -153,6 +163,10 @@ bool load_scene_for_editor(ecs::World& world,
     return true;
 }
 
+} // namespace rime::app
+
+namespace {
+
 void register_and_populate(ecs::World& world,
                            std::string_view scene_path,
                            editorhost::HostedScene& hosted,
@@ -160,7 +174,7 @@ void register_and_populate(ecs::World& world,
     registrar(world);
     if (scene_path.empty()) {
         build_default_world(world);
-    } else if (load_scene_for_editor(world, scene_path, hosted)) {
+    } else if (rime::app::load_scene_for_editor(world, scene_path, hosted)) {
         core::JobSystem jobs;
         ecs::propagate_transforms(world, jobs);
     }
@@ -383,8 +397,9 @@ void load_viewport_scene(ecs::World& world,
     const render::MaterialId floor_material = materials.add(floor_mat); // MaterialRef 1
 
     // Leaves the world as whatever loaded on failure: the editor still connects and shows an
-    // empty/partial outliner rather than the host dying on a bad path.
-    (void)load_scene_for_editor(world, scene_path, hosted);
+    // empty/partial outliner rather than the host dying on a bad path. The failure travels in the
+    // SceneLoadReport the host sends after the schema, so the editor can say so (E3).
+    (void)rime::app::load_scene_for_editor(world, scene_path, hosted);
     core::JobSystem jobs;
     scene::derive_world_transforms(world, jobs);
 
@@ -639,6 +654,9 @@ int serve_viewport(std::string_view socket_path,
     (void)editor_ids.assign_missing(app.world());
     if (!conn.send_message(static_cast<stream::MessageType>(editorhost::EditorMessage::Schema),
                            editorhost::serialize_schema(app.world())) ||
+        !conn.send_message(
+            static_cast<stream::MessageType>(editorhost::EditorMessage::SceneLoadReport),
+            editorhost::serialize_scene_load_report(hosted)) ||
         !conn.send_message(static_cast<stream::MessageType>(editorhost::EditorMessage::Snapshot),
                            editorhost::serialize_editor_snapshot(app.world(), editor_ids))) {
         RIME_ERROR("editor-host: failed to send schema + snapshot");
