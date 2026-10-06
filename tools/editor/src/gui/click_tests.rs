@@ -873,13 +873,10 @@ fn ctrl_s_saves_the_opened_scene() {
 }
 
 #[test]
-fn ctrl_s_over_the_viewport_also_flies_the_camera_backwards() {
-    // DOCUMENTS A DEFECT: the fly camera reads S as "back" whenever the pointer is over the
-    // viewport and never looks at the modifiers. So the save chord, pressed where the pointer
-    // usually is, also nudges the camera. The save itself goes out first and records the scene as
-    // it was — which means the world is already different from the file the instant "saved"
-    // appears, and the NEXT save writes a camera the user never moved. (The Xvfb smoke parks the
-    // pointer on the status bar before every key for exactly this reason.)
+fn ctrl_s_over_the_viewport_saves_the_scene_as_it_is() {
+    // Ctrl+S saves wherever the pointer is. With the pointer over the viewport and the right button
+    // up, it saves the world as it stood and leaves the camera where it was (E2). Before the fix the
+    // S in the chord also flew the camera backwards, after the save had already gone out.
     let mut rig = Rig::with_scene("/proj/level.rscene");
     rig.present_frame();
     rig.pointer_move((480.5, 270.5));
@@ -887,7 +884,26 @@ fn ctrl_s_over_the_viewport_also_flies_the_camera_backwards() {
     assert_eq!(rig.host.count(EditorMessage::SaveScene), 1);
     let saved_camera = &rig.host.files["/proj/level.rscene"][0].components[0].data;
     assert_eq!(*saved_camera, trs_at(0.0, 0.0, EYE_Z), "saved as it was");
-    assert!(rig.host.translation(CAMERA)[2] > EYE_Z, "then it moved");
+    assert_eq!(
+        rig.host.translation(CAMERA)[2],
+        EYE_Z,
+        "and the camera did not move"
+    );
+}
+
+#[test]
+fn ctrl_s_with_the_right_button_held_saves_without_flying() {
+    // The hard case: the fly keys are live (right button held), and the chord still must not fly.
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.present_frame();
+    rig.pointer_move((480.5, 270.5));
+    right_button_down(&mut rig, (480.5, 270.5));
+    rig.chord(CTRL, egui::Key::S);
+    right_button_up(&mut rig, (480.5, 270.5));
+    assert_eq!(rig.host.count(EditorMessage::SaveScene), 1);
+    let saved_camera = &rig.host.files["/proj/level.rscene"][0].components[0].data;
+    assert_eq!(*saved_camera, trs_at(0.0, 0.0, EYE_Z), "saved as it was");
+    assert_eq!(rig.host.translation(CAMERA)[2], EYE_Z, "and it did not fly");
 }
 
 #[test]
@@ -1527,16 +1543,33 @@ fn a_u64_field_refuses_text_that_is_not_a_number() {
 }
 
 #[test]
-fn ctrl_z_while_typing_in_a_text_box_undoes_a_world_edit() {
-    // DOCUMENTS A DEFECT: the undo chord is read from global input before any widget sees it, with
-    // no `wants_keyboard_input` gate (the gizmo hotkeys have one). So Ctrl+Z pressed to fix a typo
-    // in the asset search box reverts the last change to the WORLD instead.
+fn ctrl_z_while_typing_in_a_text_box_leaves_the_world_alone() {
+    // While a text box has focus, Ctrl+Z belongs to it, so a typo fixed in the asset search box
+    // does not revert the last world edit (E2). The world edit stays.
     let mut rig = Rig::new();
     rig.click(ROW_LIGHT);
     rig.type_into_number_field(0, "5");
     rig.harness.get_by_role(Role::TextInput).type_text("crat");
     rig.settle();
     assert_eq!(rig.app().asset_search, "crat");
+    rig.chord(CTRL, egui::Key::Z);
+    assert_eq!(rig.host.translation(LIGHT)[0], 5.0, "the world edit stays");
+}
+
+#[test]
+fn ctrl_z_outside_a_text_box_still_undoes_a_world_edit() {
+    // The other half of the routing: once focus has left the text box, Ctrl+Z is the world's undo.
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.type_into_number_field(0, "5");
+    rig.harness.get_by_role(Role::TextInput).type_text("crat");
+    rig.settle();
+    // A press on the viewport, which takes no keyboard focus, moves focus off the text box.
+    rig.viewport_click((480.0, 270.0));
+    assert!(
+        !rig.harness.ctx.wants_keyboard_input(),
+        "no text box has focus"
+    );
     rig.chord(CTRL, egui::Key::Z);
     assert_eq!(
         rig.host.translation(LIGHT)[0],
@@ -2142,30 +2175,65 @@ fn a_right_drag_leaks_an_unpaired_pointer_up_to_the_engine() {
     assert_eq!(rig.host.inputs, ["up 500,270 b0"]);
 }
 
+/// Press the right button over the viewport, the way a person does to fly: it is the fly button.
+fn right_button_down(rig: &mut Rig, px: (f32, f32)) {
+    rig.pointer_move(px);
+    rig.pointer_button(px, egui::PointerButton::Secondary, true);
+}
+
+fn right_button_up(rig: &mut Rig, px: (f32, f32)) {
+    rig.pointer_button(px, egui::PointerButton::Secondary, false);
+}
+
 #[test]
-fn wasd_over_the_viewport_flies_the_camera() {
+fn wasd_flies_the_camera_while_the_right_button_is_held() {
     let mut rig = Rig::new();
     rig.present_frame();
-    rig.pointer_move((480.0, 270.0));
+    right_button_down(&mut rig, (480.0, 270.0));
     rig.hold_key(egui::Key::S);
+    right_button_up(&mut rig, (480.0, 270.0));
     let [x, y, z] = rig.host.translation(CAMERA);
     assert!(z > EYE_Z, "S backs away along +z, got z = {z}");
     assert_eq!((x, y), (0.0, 0.0));
 }
 
 #[test]
-fn w_e_and_q_both_fly_the_camera_and_switch_the_gizmo() {
-    // DOCUMENTS A DEFECT: W/E/Q are bound twice. With the pointer over the viewport — the only
-    // place either binding is useful — pressing W to fly forward also flips the gizmo to Move, E
-    // (fly up) flips it to Rotate, and Q (fly down) hides it. Navigating therefore keeps changing
-    // the tool in hand; the README documents both bindings and not the collision.
+fn wasd_over_the_viewport_does_not_fly_with_the_right_button_up() {
+    // Without the fly button, S is nothing to the viewport.
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.pointer_move((480.0, 270.0));
+    rig.hold_key(egui::Key::S);
+    assert_eq!(rig.host.translation(CAMERA), [0.0, 0.0, EYE_Z]);
+}
+
+#[test]
+fn w_e_and_q_switch_the_gizmo_while_the_right_button_is_up() {
+    // With the button up, the three letters are the gizmo's: they switch the tool and nothing else.
     let mut rig = Rig::new();
     rig.present_frame();
     rig.pointer_move((480.0, 270.0));
     rig.click("Scale (R)");
     rig.hold_key(egui::Key::W);
+    assert!(rig.toggled("Move (W)"), "W switched the gizmo");
+    assert_eq!(
+        rig.host.translation(CAMERA),
+        [0.0, 0.0, EYE_Z],
+        "and did not fly"
+    );
+}
+
+#[test]
+fn w_e_and_q_fly_while_the_right_button_is_held() {
+    // With the button held, the same letters fly, and the gizmo keeps its tool.
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.click("Scale (R)");
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    right_button_up(&mut rig, (480.0, 270.0));
     assert!(rig.host.translation(CAMERA)[2] < EYE_Z, "flew forward");
-    assert!(rig.toggled("Move (W)"), "and the gizmo changed under it");
+    assert!(rig.toggled("Scale (R)"), "and the gizmo did not change");
 }
 
 #[test]
