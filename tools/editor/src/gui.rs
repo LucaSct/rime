@@ -1653,14 +1653,64 @@ fn render_scalar(ui: &mut egui::Ui, value: &mut Value, it: &mut Interaction) {
         Value::F64(x) => ui.add(egui::DragValue::new(x).speed(0.01)),
         Value::I32(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
         Value::U32(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
-        Value::I64(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
-        Value::U64(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
+        // 64-bit integers take the exact text path (see `exact_int_field`): a DragValue holds an
+        // f64, which has 53 bits of integer, so an asset id above 2^53 was shown and stored rounded.
+        Value::I64(x) => return exact_int_field(ui, x, it),
+        Value::U64(x) => return exact_int_field(ui, x, it),
         Value::Struct(_) => return, // handled by render_field
     };
     it.changed |= resp.changed();
     if resp.drag_stopped() || resp.lost_focus() {
         it.committed = true;
     }
+}
+
+/// A 64-bit integer edited as text, parsed exactly (`u64::from_str` / `i64::from_str`).
+///
+/// A `DragValue` stores its value as an f64, which keeps 53 integer bits. Asset ids are 64-bit
+/// content hashes, so a drag-number both DISPLAYED a different id than the scene held and WROTE the
+/// rounded one back on any edit. A text field has no such limit: the digits typed are the value
+/// stored, bit for bit. Text that does not parse is refused when focus leaves: nothing is written,
+/// the field shows red while it is wrong, and it goes back to the stored value.
+///
+/// The text lives in egui's per-id temporary memory, keyed by this widget's id. While the field is
+/// focused the typed text is kept as typed; otherwise it is re-derived from the value every frame,
+/// so an undo or a streamed snapshot shows through without the field having to be re-entered.
+fn exact_int_field<T>(ui: &mut egui::Ui, value: &mut T, it: &mut Interaction)
+where
+    T: Copy + PartialEq + std::fmt::Display + std::str::FromStr,
+{
+    let id = ui.id().with("exact-int");
+    let focused = ui.memory(|m| m.has_focus(id));
+    let stored: Option<String> = ui.data(|d| d.get_temp(id));
+    let mut text = match (focused, stored) {
+        (true, Some(typed)) => typed,
+        _ => value.to_string(),
+    };
+    let refused = text.trim().parse::<T>().is_err();
+    let color = if refused {
+        egui::Color32::from_rgb(220, 80, 80)
+    } else {
+        ui.visuals().text_color()
+    };
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .desired_width(180.0)
+            .text_color(color),
+    );
+    // Parsed once, when focus leaves (Enter or a click away), not per keystroke: a half-typed
+    // number is not a value, and a world edit per keystroke would pile up undo steps for one change.
+    if resp.lost_focus() {
+        if let Ok(parsed) = text.trim().parse::<T>() {
+            if parsed != *value {
+                *value = parsed;
+                it.changed = true;
+            }
+        }
+        it.committed = true;
+    }
+    ui.data_mut(|d| d.insert_temp(id, text));
 }
 
 // A small, UI-side input vocabulary the session thread turns into rime_protocol::InputEvent. Kept
