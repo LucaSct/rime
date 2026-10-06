@@ -2,7 +2,7 @@
   "schema": 1,
   "run": {
     "sample": "99-the-block",
-    "commit": "453866b",
+    "commit": "3adeee9",
     "date": "2026-10-06"
   },
   "machine": {
@@ -18,99 +18,115 @@
   "distributions": {
     "frame": {
       "count": 600,
-      "min_ms": 4.331,
-      "p50_ms": 14.527,
-      "p95_ms": 20.311,
-      "p99_ms": 20.958,
-      "max_ms": 21.377
+      "min_ms": 4.397,
+      "p50_ms": 10.198,
+      "p95_ms": 13.220,
+      "p99_ms": 13.705,
+      "max_ms": 15.971
     },
     "frame.collapse": {
       "count": 90,
-      "min_ms": 14.086,
-      "p50_ms": 18.847,
-      "p95_ms": 20.072,
-      "p99_ms": 20.503,
-      "max_ms": 20.503
+      "min_ms": 9.673,
+      "p50_ms": 12.200,
+      "p95_ms": 12.919,
+      "p99_ms": 15.971,
+      "max_ms": 15.971
     },
     "frame.declare": {
       "count": 600,
-      "min_ms": 0.257,
-      "p50_ms": 0.295,
-      "p95_ms": 0.333,
-      "p99_ms": 0.346,
-      "max_ms": 0.417
+      "min_ms": 0.265,
+      "p50_ms": 0.294,
+      "p95_ms": 0.326,
+      "p99_ms": 0.359,
+      "max_ms": 0.500
     },
     "frame.declare.per_frame": {
       "count": 600,
-      "min_ms": 0.257,
-      "p50_ms": 0.295,
-      "p95_ms": 0.333,
-      "p99_ms": 0.346,
-      "max_ms": 0.417
+      "min_ms": 0.265,
+      "p50_ms": 0.294,
+      "p95_ms": 0.326,
+      "p99_ms": 0.359,
+      "max_ms": 0.500
     },
     "frame.execute": {
       "count": 600,
-      "min_ms": 1.324,
-      "p50_ms": 1.601,
+      "min_ms": 1.352,
+      "p50_ms": 1.638,
       "p95_ms": 1.746,
-      "p99_ms": 1.933,
-      "max_ms": 2.114
+      "p99_ms": 1.992,
+      "max_ms": 2.246
     },
     "frame.execute.per_frame": {
       "count": 600,
-      "min_ms": 1.324,
-      "p50_ms": 1.601,
+      "min_ms": 1.352,
+      "p50_ms": 1.638,
       "p95_ms": 1.746,
-      "p99_ms": 1.933,
-      "max_ms": 2.114
+      "p99_ms": 1.992,
+      "max_ms": 2.246
     },
     "frame.player": {
       "count": 600,
-      "min_ms": 4.262,
-      "p50_ms": 9.475,
-      "p95_ms": 12.512,
-      "p99_ms": 13.468,
-      "max_ms": 13.721
+      "min_ms": 4.321,
+      "p50_ms": 9.493,
+      "p95_ms": 12.857,
+      "p99_ms": 13.329,
+      "max_ms": 15.648
     },
     "frame.render": {
       "count": 600,
-      "min_ms": 4.252,
-      "p50_ms": 4.738,
-      "p95_ms": 5.423,
-      "p99_ms": 6.141,
-      "max_ms": 6.405
+      "min_ms": 4.306,
+      "p50_ms": 4.769,
+      "p95_ms": 5.438,
+      "p99_ms": 5.799,
+      "max_ms": 8.703
     },
     "frame.render.unaccounted": {
       "count": 600,
-      "min_ms": 0.004,
-      "p50_ms": 0.009,
-      "p95_ms": 0.016,
+      "min_ms": 0.005,
+      "p50_ms": 0.010,
+      "p95_ms": 0.015,
       "p99_ms": 0.022,
-      "max_ms": 0.044
+      "max_ms": 0.036
     },
     "frame.submit": {
       "count": 600,
-      "min_ms": 2.481,
-      "p50_ms": 2.837,
-      "p95_ms": 3.433,
-      "p99_ms": 4.112,
-      "max_ms": 4.409
+      "min_ms": 2.658,
+      "p50_ms": 2.794,
+      "p95_ms": 3.446,
+      "p99_ms": 3.677,
+      "max_ms": 6.699
     },
     "frame.submit.per_frame": {
       "count": 600,
-      "min_ms": 2.481,
-      "p50_ms": 2.837,
-      "p95_ms": 3.433,
-      "p99_ms": 4.112,
-      "max_ms": 4.409
+      "min_ms": 2.658,
+      "p50_ms": 2.794,
+      "p95_ms": 3.446,
+      "p99_ms": 3.677,
+      "max_ms": 6.699
+    },
+    "frame.submit.per_frame.unaccounted": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.001,
+      "p99_ms": 0.002,
+      "max_ms": 0.005
     },
     "frame.unaccounted": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.000,
-      "p95_ms": 0.000,
-      "p99_ms": 0.001,
-      "max_ms": 0.005
+      "p50_ms": 0.002,
+      "p95_ms": 0.002,
+      "p99_ms": 0.004,
+      "max_ms": 0.006
+    },
+    "gpu.passes": {
+      "count": 600,
+      "min_ms": 1.998,
+      "p50_ms": 2.088,
+      "p95_ms": 2.750,
+      "p99_ms": 2.963,
+      "max_ms": 3.366
     },
     "physics.client.ccd_sweep": {
       "count": 600,
@@ -118,7 +134,7 @@
       "p50_ms": 0.000,
       "p95_ms": 0.000,
       "p99_ms": 0.000,
-      "max_ms": 0.000
+      "max_ms": 0.002
     },
     "physics.client.ccd_sweep.per_frame": {
       "count": 600,
@@ -126,71 +142,71 @@
       "p50_ms": 0.000,
       "p95_ms": 0.000,
       "p99_ms": 0.000,
-      "max_ms": 0.000
+      "max_ms": 0.002
     },
     "physics.client.commit": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.080,
-      "p95_ms": 0.118,
-      "p99_ms": 0.141,
-      "max_ms": 0.215
+      "p50_ms": 0.078,
+      "p95_ms": 0.125,
+      "p99_ms": 0.170,
+      "max_ms": 0.280
     },
     "physics.client.commit.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.080,
-      "p95_ms": 0.118,
-      "p99_ms": 0.141,
-      "max_ms": 0.215
+      "p50_ms": 0.078,
+      "p95_ms": 0.125,
+      "p99_ms": 0.170,
+      "max_ms": 0.280
     },
     "physics.client.constraints": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.301,
-      "p95_ms": 0.446,
-      "p99_ms": 0.460,
-      "max_ms": 0.726
+      "p50_ms": 0.303,
+      "p95_ms": 0.455,
+      "p99_ms": 0.516,
+      "max_ms": 0.793
     },
     "physics.client.constraints.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.301,
-      "p95_ms": 0.446,
-      "p99_ms": 0.460,
-      "max_ms": 0.726
+      "p50_ms": 0.303,
+      "p95_ms": 0.455,
+      "p99_ms": 0.516,
+      "max_ms": 0.793
     },
     "physics.client.contacts": {
       "count": 600,
       "min_ms": 0.001,
-      "p50_ms": 2.263,
-      "p95_ms": 3.774,
-      "p99_ms": 3.902,
-      "max_ms": 4.140
+      "p50_ms": 2.195,
+      "p95_ms": 3.839,
+      "p99_ms": 3.961,
+      "max_ms": 4.393
     },
     "physics.client.contacts.per_frame": {
       "count": 600,
       "min_ms": 0.001,
-      "p50_ms": 2.263,
-      "p95_ms": 3.774,
-      "p99_ms": 3.902,
-      "max_ms": 4.140
+      "p50_ms": 2.195,
+      "p95_ms": 3.839,
+      "p99_ms": 3.961,
+      "max_ms": 4.393
     },
     "physics.client.events": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.013,
+      "p50_ms": 0.014,
       "p95_ms": 0.021,
-      "p99_ms": 0.025,
-      "max_ms": 0.032
+      "p99_ms": 0.024,
+      "max_ms": 0.038
     },
     "physics.client.events.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.013,
+      "p50_ms": 0.014,
       "p95_ms": 0.021,
-      "p99_ms": 0.025,
-      "max_ms": 0.032
+      "p99_ms": 0.024,
+      "max_ms": 0.038
     },
     "physics.client.integrate_velocity": {
       "count": 600,
@@ -198,7 +214,7 @@
       "p50_ms": 0.001,
       "p95_ms": 0.002,
       "p99_ms": 0.003,
-      "max_ms": 0.006
+      "max_ms": 0.005
     },
     "physics.client.integrate_velocity.per_frame": {
       "count": 600,
@@ -206,23 +222,23 @@
       "p50_ms": 0.001,
       "p95_ms": 0.002,
       "p99_ms": 0.003,
-      "max_ms": 0.006
+      "max_ms": 0.005
     },
     "physics.client.islands": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.023,
-      "p95_ms": 0.050,
-      "p99_ms": 0.057,
-      "max_ms": 0.080
+      "p50_ms": 0.017,
+      "p95_ms": 0.039,
+      "p99_ms": 0.052,
+      "max_ms": 0.082
     },
     "physics.client.islands.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.023,
-      "p95_ms": 0.050,
-      "p99_ms": 0.057,
-      "max_ms": 0.080
+      "p50_ms": 0.017,
+      "p95_ms": 0.039,
+      "p99_ms": 0.052,
+      "max_ms": 0.082
     },
     "physics.client.sleep": {
       "count": 600,
@@ -230,7 +246,7 @@
       "p50_ms": 0.002,
       "p95_ms": 0.004,
       "p99_ms": 0.004,
-      "max_ms": 0.004
+      "max_ms": 0.006
     },
     "physics.client.sleep.per_frame": {
       "count": 600,
@@ -238,55 +254,55 @@
       "p50_ms": 0.002,
       "p95_ms": 0.004,
       "p99_ms": 0.004,
-      "max_ms": 0.004
+      "max_ms": 0.006
     },
     "physics.client.solve": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 2.120,
-      "p95_ms": 3.119,
-      "p99_ms": 3.226,
-      "max_ms": 5.031
+      "p50_ms": 2.207,
+      "p95_ms": 3.298,
+      "p99_ms": 3.614,
+      "max_ms": 5.075
     },
     "physics.client.solve.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 2.120,
-      "p95_ms": 3.119,
-      "p99_ms": 3.226,
-      "max_ms": 5.031
+      "p50_ms": 2.207,
+      "p95_ms": 3.298,
+      "p99_ms": 3.614,
+      "max_ms": 5.075
     },
     "physics.client.stats": {
       "count": 600,
       "min_ms": 0.000,
       "p50_ms": 0.002,
       "p95_ms": 0.003,
-      "p99_ms": 0.005,
-      "max_ms": 0.006
+      "p99_ms": 0.004,
+      "max_ms": 0.014
     },
     "physics.client.stats.per_frame": {
       "count": 600,
       "min_ms": 0.000,
       "p50_ms": 0.002,
       "p95_ms": 0.003,
-      "p99_ms": 0.005,
-      "max_ms": 0.006
+      "p99_ms": 0.004,
+      "max_ms": 0.014
     },
     "physics.client.step": {
       "count": 600,
-      "min_ms": 0.002,
-      "p50_ms": 4.604,
-      "p95_ms": 7.441,
-      "p99_ms": 7.548,
-      "max_ms": 7.921
+      "min_ms": 0.003,
+      "p50_ms": 4.794,
+      "p95_ms": 7.637,
+      "p99_ms": 7.947,
+      "max_ms": 8.477
     },
     "physics.client.step.per_frame": {
       "count": 600,
-      "min_ms": 0.002,
-      "p50_ms": 4.604,
-      "p95_ms": 7.441,
-      "p99_ms": 7.548,
-      "max_ms": 7.921
+      "min_ms": 0.003,
+      "p50_ms": 4.794,
+      "p95_ms": 7.637,
+      "p99_ms": 7.947,
+      "max_ms": 8.477
     },
     "physics.client.wake": {
       "count": 600,
@@ -294,7 +310,7 @@
       "p50_ms": 0.000,
       "p95_ms": 0.001,
       "p99_ms": 0.001,
-      "max_ms": 0.002
+      "max_ms": 0.001
     },
     "physics.client.wake.per_frame": {
       "count": 600,
@@ -302,7 +318,7 @@
       "p50_ms": 0.000,
       "p95_ms": 0.001,
       "p99_ms": 0.001,
-      "max_ms": 0.002
+      "max_ms": 0.001
     },
     "physics.server.ccd_sweep": {
       "count": 600,
@@ -323,50 +339,50 @@
     "physics.server.commit": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.084,
-      "p95_ms": 0.115,
-      "p99_ms": 0.130,
-      "max_ms": 0.230
+      "p50_ms": 0.087,
+      "p95_ms": 0.124,
+      "p99_ms": 0.168,
+      "max_ms": 0.291
     },
     "physics.server.commit.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.084,
-      "p95_ms": 0.115,
-      "p99_ms": 0.130,
-      "max_ms": 0.230
+      "p50_ms": 0.087,
+      "p95_ms": 0.124,
+      "p99_ms": 0.168,
+      "max_ms": 0.291
     },
     "physics.server.constraints": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.323,
-      "p95_ms": 0.450,
-      "p99_ms": 0.461,
+      "p50_ms": 0.340,
+      "p95_ms": 0.457,
+      "p99_ms": 0.490,
       "max_ms": 0.783
     },
     "physics.server.constraints.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.323,
-      "p95_ms": 0.450,
-      "p99_ms": 0.461,
+      "p50_ms": 0.340,
+      "p95_ms": 0.457,
+      "p99_ms": 0.490,
       "max_ms": 0.783
     },
     "physics.server.contacts": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 2.417,
-      "p95_ms": 3.730,
-      "p99_ms": 3.768,
-      "max_ms": 4.155
+      "p50_ms": 2.449,
+      "p95_ms": 3.929,
+      "p99_ms": 4.101,
+      "max_ms": 4.781
     },
     "physics.server.contacts.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 2.417,
-      "p95_ms": 3.730,
-      "p99_ms": 3.768,
-      "max_ms": 4.155
+      "p50_ms": 2.449,
+      "p95_ms": 3.929,
+      "p99_ms": 4.101,
+      "max_ms": 4.781
     },
     "physics.server.events": {
       "count": 600,
@@ -374,7 +390,7 @@
       "p50_ms": 0.014,
       "p95_ms": 0.022,
       "p99_ms": 0.026,
-      "max_ms": 0.040
+      "max_ms": 0.037
     },
     "physics.server.events.per_frame": {
       "count": 600,
@@ -382,103 +398,103 @@
       "p50_ms": 0.014,
       "p95_ms": 0.022,
       "p99_ms": 0.026,
-      "max_ms": 0.040
+      "max_ms": 0.037
     },
     "physics.server.integrate_velocity": {
       "count": 600,
       "min_ms": 0.000,
       "p50_ms": 0.001,
-      "p95_ms": 0.002,
-      "p99_ms": 0.003,
-      "max_ms": 0.005
+      "p95_ms": 0.005,
+      "p99_ms": 0.005,
+      "max_ms": 0.009
     },
     "physics.server.integrate_velocity.per_frame": {
       "count": 600,
       "min_ms": 0.000,
       "p50_ms": 0.001,
-      "p95_ms": 0.002,
-      "p99_ms": 0.003,
-      "max_ms": 0.005
+      "p95_ms": 0.005,
+      "p99_ms": 0.005,
+      "max_ms": 0.009
     },
     "physics.server.islands": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.023,
-      "p95_ms": 0.050,
-      "p99_ms": 0.059,
-      "max_ms": 0.084
+      "p50_ms": 0.028,
+      "p95_ms": 0.069,
+      "p99_ms": 0.096,
+      "max_ms": 0.138
     },
     "physics.server.islands.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 0.023,
-      "p95_ms": 0.050,
-      "p99_ms": 0.059,
-      "max_ms": 0.084
+      "p50_ms": 0.028,
+      "p95_ms": 0.069,
+      "p99_ms": 0.096,
+      "max_ms": 0.138
     },
     "physics.server.sleep": {
       "count": 600,
       "min_ms": 0.000,
       "p50_ms": 0.002,
-      "p95_ms": 0.004,
+      "p95_ms": 0.003,
       "p99_ms": 0.004,
-      "max_ms": 0.009
+      "max_ms": 0.005
     },
     "physics.server.sleep.per_frame": {
       "count": 600,
       "min_ms": 0.000,
       "p50_ms": 0.002,
-      "p95_ms": 0.004,
+      "p95_ms": 0.003,
       "p99_ms": 0.004,
-      "max_ms": 0.009
+      "max_ms": 0.005
     },
     "physics.server.solve": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 2.263,
-      "p95_ms": 3.160,
-      "p99_ms": 3.291,
-      "max_ms": 5.035
+      "p50_ms": 2.202,
+      "p95_ms": 3.116,
+      "p99_ms": 3.222,
+      "max_ms": 5.106
     },
     "physics.server.solve.per_frame": {
       "count": 600,
       "min_ms": 0.000,
-      "p50_ms": 2.263,
-      "p95_ms": 3.160,
-      "p99_ms": 3.291,
-      "max_ms": 5.035
+      "p50_ms": 2.202,
+      "p95_ms": 3.116,
+      "p99_ms": 3.222,
+      "max_ms": 5.106
     },
     "physics.server.stats": {
       "count": 600,
       "min_ms": 0.000,
       "p50_ms": 0.002,
-      "p95_ms": 0.004,
+      "p95_ms": 0.003,
       "p99_ms": 0.004,
-      "max_ms": 0.005
+      "max_ms": 0.007
     },
     "physics.server.stats.per_frame": {
       "count": 600,
       "min_ms": 0.000,
       "p50_ms": 0.002,
-      "p95_ms": 0.004,
+      "p95_ms": 0.003,
       "p99_ms": 0.004,
-      "max_ms": 0.005
+      "max_ms": 0.007
     },
     "physics.server.step": {
       "count": 600,
       "min_ms": 0.002,
-      "p50_ms": 4.961,
-      "p95_ms": 7.483,
-      "p99_ms": 7.668,
-      "max_ms": 8.088
+      "p50_ms": 5.067,
+      "p95_ms": 7.669,
+      "p99_ms": 7.891,
+      "max_ms": 8.510
     },
     "physics.server.step.per_frame": {
       "count": 600,
       "min_ms": 0.002,
-      "p50_ms": 4.961,
-      "p95_ms": 7.483,
-      "p99_ms": 7.668,
-      "max_ms": 8.088
+      "p50_ms": 5.067,
+      "p95_ms": 7.669,
+      "p99_ms": 7.891,
+      "max_ms": 8.510
     },
     "physics.server.wake": {
       "count": 600,
@@ -486,7 +502,7 @@
       "p50_ms": 0.000,
       "p95_ms": 0.001,
       "p99_ms": 0.001,
-      "max_ms": 0.001
+      "max_ms": 0.005
     },
     "physics.server.wake.per_frame": {
       "count": 600,
@@ -494,39 +510,103 @@
       "p50_ms": 0.000,
       "p95_ms": 0.001,
       "p99_ms": 0.001,
-      "max_ms": 0.001
+      "max_ms": 0.005
+    },
+    "rhi.submit.queue": {
+      "count": 600,
+      "min_ms": 0.304,
+      "p50_ms": 0.324,
+      "p95_ms": 0.355,
+      "p99_ms": 0.423,
+      "max_ms": 4.121
+    },
+    "rhi.submit.queue.per_frame": {
+      "count": 600,
+      "min_ms": 0.304,
+      "p50_ms": 0.324,
+      "p95_ms": 0.355,
+      "p99_ms": 0.423,
+      "max_ms": 4.121
+    },
+    "rhi.submit.reclaim": {
+      "count": 600,
+      "min_ms": 0.287,
+      "p50_ms": 0.316,
+      "p95_ms": 0.336,
+      "p99_ms": 0.377,
+      "max_ms": 0.757
+    },
+    "rhi.submit.reclaim.per_frame": {
+      "count": 600,
+      "min_ms": 0.287,
+      "p50_ms": 0.316,
+      "p95_ms": 0.336,
+      "p99_ms": 0.377,
+      "max_ms": 0.757
+    },
+    "rhi.submit.wait": {
+      "count": 600,
+      "min_ms": 1.900,
+      "p50_ms": 2.140,
+      "p95_ms": 2.781,
+      "p99_ms": 3.009,
+      "max_ms": 3.390
+    },
+    "rhi.submit.wait.per_frame": {
+      "count": 600,
+      "min_ms": 1.900,
+      "p50_ms": 2.140,
+      "p95_ms": 2.781,
+      "p99_ms": 3.009,
+      "max_ms": 3.390
     },
     "sim.block": {
       "count": 600,
-      "min_ms": 0.077,
-      "p50_ms": 9.705,
-      "p95_ms": 15.171,
-      "p99_ms": 15.441,
-      "max_ms": 15.827
+      "min_ms": 0.079,
+      "p50_ms": 5.442,
+      "p95_ms": 8.093,
+      "p99_ms": 8.328,
+      "max_ms": 8.826
     },
     "sim.block.unaccounted": {
       "count": 600,
-      "min_ms": 0.069,
-      "p50_ms": 0.230,
-      "p95_ms": 0.352,
-      "p99_ms": 0.441,
-      "max_ms": 0.543
+      "min_ms": 0.060,
+      "p50_ms": 0.173,
+      "p95_ms": 0.245,
+      "p99_ms": 0.314,
+      "max_ms": 0.378
     },
     "sim.client": {
       "count": 600,
-      "min_ms": 0.010,
-      "p50_ms": 4.635,
-      "p95_ms": 7.490,
-      "p99_ms": 7.596,
-      "max_ms": 7.957
+      "min_ms": 0.011,
+      "p50_ms": 4.851,
+      "p95_ms": 7.678,
+      "p99_ms": 7.983,
+      "max_ms": 8.510
+    },
+    "sim.client.unaccounted": {
+      "count": 600,
+      "min_ms": 0.008,
+      "p50_ms": 0.024,
+      "p95_ms": 0.087,
+      "p99_ms": 0.123,
+      "max_ms": 0.225
     },
     "sim.collapse": {
       "count": 90,
-      "min_ms": 9.257,
-      "p50_ms": 13.946,
-      "p95_ms": 15.139,
-      "p99_ms": 15.426,
-      "max_ms": 15.426
+      "min_ms": 4.757,
+      "p50_ms": 7.266,
+      "p95_ms": 7.716,
+      "p99_ms": 8.154,
+      "max_ms": 8.154
+    },
+    "sim.join": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.040,
+      "p95_ms": 0.625,
+      "p99_ms": 1.095,
+      "max_ms": 7.852
     },
     "sim.post": {
       "count": 600,
@@ -595,26 +675,34 @@
     "sim.server": {
       "count": 600,
       "min_ms": 0.004,
-      "p50_ms": 4.996,
-      "p95_ms": 7.518,
-      "p99_ms": 7.691,
-      "max_ms": 8.117
+      "p50_ms": 5.106,
+      "p95_ms": 7.706,
+      "p99_ms": 7.927,
+      "max_ms": 8.546
+    },
+    "sim.server.unaccounted": {
+      "count": 600,
+      "min_ms": 0.002,
+      "p50_ms": 0.027,
+      "p95_ms": 0.053,
+      "p99_ms": 0.194,
+      "max_ms": 0.327
     },
     "sim.tick": {
       "count": 600,
-      "min_ms": 0.000,
+      "min_ms": 0.001,
       "p50_ms": 0.001,
       "p95_ms": 0.001,
       "p99_ms": 0.002,
-      "max_ms": 0.003
+      "max_ms": 0.008
     },
     "sim.tick.per_frame": {
       "count": 600,
-      "min_ms": 0.000,
+      "min_ms": 0.001,
       "p50_ms": 0.001,
       "p95_ms": 0.001,
       "p99_ms": 0.002,
-      "max_ms": 0.003
+      "max_ms": 0.008
     },
     "sim.transforms": {
       "count": 600,
@@ -622,7 +710,7 @@
       "p50_ms": 0.000,
       "p95_ms": 0.000,
       "p99_ms": 0.000,
-      "max_ms": 0.001
+      "max_ms": 0.007
     },
     "sim.transforms.per_frame": {
       "count": 600,
@@ -630,13 +718,13 @@
       "p50_ms": 0.000,
       "p95_ms": 0.000,
       "p99_ms": 0.000,
-      "max_ms": 0.001
+      "max_ms": 0.007
     }
   },
   "passes": {
     "ddgi-trace": {
       "p50_ms": 0.066,
-      "max_ms": 0.082
+      "max_ms": 0.083
     },
     "ddgi-blend-irradiance": {
       "p50_ms": 0.015,
@@ -648,11 +736,11 @@
     },
     "depth-prepass": {
       "p50_ms": 0.064,
-      "max_ms": 0.101
+      "max_ms": 0.099
     },
     "csm-cascade-0": {
       "p50_ms": 0.031,
-      "max_ms": 0.039
+      "max_ms": 0.036
     },
     "csm-cascade-1": {
       "p50_ms": 0.031,
@@ -667,78 +755,81 @@
       "max_ms": 0.009
     },
     "forward-pbr shadowed": {
-      "p50_ms": 0.787,
-      "max_ms": 1.251
+      "p50_ms": 0.785,
+      "max_ms": 1.284
     },
     "sky": {
       "p50_ms": 0.076,
-      "max_ms": 0.090
+      "max_ms": 0.307
     },
     "ssr-resolve": {
       "p50_ms": 0.992,
-      "max_ms": 2.029
+      "max_ms": 1.671
     },
     "tonemap": {
       "p50_ms": 0.036,
-      "max_ms": 0.429
+      "max_ms": 0.521
     },
     "hud": {
-      "p50_ms": 0.005,
-      "max_ms": 0.343
+      "p50_ms": 0.004,
+      "max_ms": 0.005
     }
   },
   "worst_frame": {
-    "index": 399,
-    "ms": 21.377,
+    "index": 354,
+    "ms": 15.971,
     "passes": {
-      "ddgi-trace": 0.065,
+      "ddgi-trace": 0.063,
       "ddgi-blend-irradiance": 0.015,
       "ddgi-blend-visibility": 0.027,
-      "depth-prepass": 0.067,
-      "csm-cascade-0": 0.032,
+      "depth-prepass": 0.068,
+      "csm-cascade-0": 0.031,
       "csm-cascade-1": 0.031,
-      "csm-cascade-2": 0.031,
-      "cluster-cull": 0.008,
-      "forward-pbr shadowed": 1.016,
-      "sky": 0.077,
-      "ssr-resolve": 2.001,
-      "tonemap": 0.036,
+      "csm-cascade-2": 0.032,
+      "cluster-cull": 0.007,
+      "forward-pbr shadowed": 0.845,
+      "sky": 0.076,
+      "ssr-resolve": 0.982,
+      "tonemap": 0.035,
       "hud": 0.005
     },
     "zones": {
       "physics.client.integrate_velocity": 0.001,
       "physics.client.ccd_sweep": 0.000,
-      "physics.client.contacts": 3.515,
-      "physics.client.constraints": 0.441,
-      "physics.client.islands": 0.026,
+      "physics.client.contacts": 3.392,
+      "physics.client.constraints": 0.423,
+      "physics.client.islands": 0.023,
       "physics.client.wake": 0.000,
-      "physics.client.solve": 3.112,
+      "physics.client.solve": 2.891,
       "physics.client.sleep": 0.003,
-      "physics.client.events": 0.020,
-      "physics.client.commit": 0.112,
+      "physics.client.events": 0.019,
+      "physics.client.commit": 0.093,
       "physics.client.stats": 0.003,
-      "physics.client.step": 7.238,
-      "physics.server.integrate_velocity": 0.001,
+      "physics.client.step": 6.849,
+      "physics.server.integrate_velocity": 0.004,
       "physics.server.ccd_sweep": 0.000,
-      "physics.server.contacts": 3.473,
-      "physics.server.constraints": 0.436,
-      "physics.server.islands": 0.023,
-      "physics.server.wake": 0.000,
-      "physics.server.solve": 3.686,
+      "physics.server.contacts": 3.594,
+      "physics.server.constraints": 0.439,
+      "physics.server.islands": 0.028,
+      "physics.server.wake": 0.001,
+      "physics.server.solve": 2.812,
       "physics.server.sleep": 0.003,
       "physics.server.events": 0.020,
-      "physics.server.commit": 0.109,
+      "physics.server.commit": 0.108,
       "physics.server.stats": 0.003,
-      "physics.server.step": 7.757,
+      "physics.server.step": 7.016,
       "sim.pre": 0.000,
       "sim.schedule": 0.000,
       "sim.transforms": 0.000,
       "sim.post": 0.000,
       "sim.publish": 0.000,
       "sim.tick": 0.001,
-      "frame.declare": 0.328,
-      "frame.execute": 1.674,
-      "frame.submit": 4.125
+      "frame.declare": 0.295,
+      "frame.execute": 1.699,
+      "rhi.submit.queue": 4.121,
+      "rhi.submit.wait": 2.240,
+      "rhi.submit.reclaim": 0.338,
+      "frame.submit": 6.699
     }
   },
   "ledger": {
@@ -764,13 +855,13 @@
     "physics.client.max_bodies": 747,
     "physics.server.max_broadphase_pairs": 4971,
     "physics.client.max_broadphase_pairs": 4911,
-    "physics.worst_tick_index": 598,
-    "physics.worst_tick_us": 15541,
+    "physics.worst_tick_index": 536,
+    "physics.worst_tick_us": 16547,
     "physics.worst_tick_steps": 2,
-    "physics.worst_tick_min_islands": 15,
-    "physics.worst_tick_max_islands": 19,
-    "physics.worst_tick_largest": 601,
-    "physics.worst_tick_awake_bodies": 623,
+    "physics.worst_tick_min_islands": 23,
+    "physics.worst_tick_max_islands": 35,
+    "physics.worst_tick_largest": 593,
+    "physics.worst_tick_awake_bodies": 634,
     "physics.worst_tick_parallel_steps": 2
   },
   "gpu_clocks": {
@@ -782,8 +873,8 @@
     "memory_median": 7501.0,
     "memory_max": 7501,
     "memory_spread_pct": 0.0,
-    "samples_total": 182,
-    "samples_under_load": 150,
+    "samples_total": 129,
+    "samples_under_load": 116,
     "stable": true
   }
 }
