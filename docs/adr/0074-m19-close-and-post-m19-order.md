@@ -20,16 +20,16 @@ The bricks, compressed from the ADRs and the orchestrator's table:
 | m19.4 | #244 | 0063 | splat blending: four layers, a partition of unity |
 | m19.5 | #245 | 0064 | shared GGX BRDF; metallic and roughness join the splat blend |
 | m19.6 | #246 | 0065 | terrain reads the sky: SH diffuse, sky-view mirror, env-BRDF |
-| m19.7a | #247 (per the orchestrator) | 0066 | `TerrainLayer` asset: material, packed albedo+height texture, world UVs |
-| m19.7b | #249 (per the orchestrator) | 0066, addendum | terrain samples the layer textures; per-layer UV scales |
+| m19.7a | #247 | 0066 | `TerrainLayer` asset: material, packed albedo+height texture, world UVs |
+| m19.7b | #249 | 0066, addendum | terrain samples the layer textures; per-layer UV scales |
 | m19.7c + fix 1 | #252 | 0066, addenda | height-based blend, using the effective height c·h |
-| m19.8b | #248 (per the orchestrator) | 0067 | releasable, generation-checked asset ownership; streamed heightfields |
+| m19.8b | #248 | 0067 | releasable, generation-checked asset ownership; streamed heightfields |
 | m19.8c | #251 | 0068 | regional terrain collision, deferred admission |
 | m19.8a | #254 | 0069 | render residency, the terrain world manifest |
 | m19.8d1 | #255 | 0070 | LOD cook: nested subsampling, geometric error |
 | m19.8d2 | #256 | 0071 | CDLOD render, exact geomorphs, parent fallback |
 | m19.8d3 | #257 | 0072 | baked far appearance |
-| m19.8e | #TBD | 0073 | byte budget, upload cap, frustum culling, travel envelope (unpinned) |
+| m19.8e | #258 | 0073 | byte budget, upload cap, frustum culling, travel envelope (unpinned) |
 
 The stack also carries #250 (the G-buffer change, +4 B/px; per the orchestrator, not in any ADR).
 
@@ -118,9 +118,8 @@ owner exists, the entry says so rather than inventing one.
 - **Regional collision (8c) is not yet reconciled** with the residency. ADR-0073 lists it first under
   "What M19 still has to close". Owner: M19, on its own branch.
 - **Editor defects (#253)** are listed under §1.2. Owner: Editor.
-- **Unmerged PR numbers.** #TBD for m19.8e, and the #247/#248/#249 assignments marked "per the
-  orchestrator" above, must be confirmed when the PRs are opened. #248 appears in the orchestrator's
-  table for both m19.7 and m19.8b, so one of those is wrong until checked.
+- **PR numbers** were checked against GitHub on 2026-10-06: #247 is m19.7a, #248 is m19.8b (based on
+  m19.7a), #249 is m19.7b (based on m19.7a), and #258 is m19.8e.
 - **Index.** `docs/adr/README.md` does not yet index ADR-0063 or ADR-0068. This ADR adds 0074 and
   leaves those two for the bricks that own them.
 
