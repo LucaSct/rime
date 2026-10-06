@@ -47,6 +47,19 @@ struct SubmitTicket {
     [[nodiscard]] bool is_valid() const noexcept { return id != 0; }
 };
 
+// Device::submission_counters() (p1): the device's transient submission objects alive right now,
+// and the submissions it has refused since it was created. "Live" counts what begin_commands /
+// submit / submit_blocking created and nobody has freed yet — the swapchain's own per-frame fence
+// ring is fixed-size and not counted. `failed_submissions` counts every submission the device
+// could not make (a vkAllocateCommandBuffers / vkCreateFence / vkQueueSubmit2 / wait failure): the
+// work was refused and reported, never sent on with a null handle.
+struct SubmissionCounters {
+    std::uint64_t live_fences = 0;
+    std::uint64_t live_command_buffers = 0;
+    std::uint64_t in_flight_submissions = 0; // submit() tickets not yet reclaimed (incl. borrowed)
+    std::uint64_t failed_submissions = 0;
+};
+
 // One byte range of a buffer-to-buffer copy (CommandBuffer::copy_buffer_regions, m18.5): `size`
 // bytes from `src_offset` in the source to `dst_offset` in the destination. Mirrors VkBufferCopy.
 struct BufferCopyRegion {

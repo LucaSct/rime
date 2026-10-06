@@ -377,6 +377,13 @@ void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::si
     // so the image is immediately samplable. (We overwrite the whole image, so the old layout is
     // moot.)
     auto cmd = begin_commands();
+    if (!cmd) {
+        // Refused upload (p1): begin_commands logged and counted it. The texture keeps its old
+        // contents and layout; nothing was recorded, so nothing is left to clean up but staging.
+        RIME_ERROR("rhi: write_texture refused — no command buffer");
+        vmaDestroyBuffer(allocator_, staging, staging_alloc);
+        return;
+    }
     VkCommandBuffer vk = static_cast<VulkanCommandBuffer&>(*cmd).handle();
 
     transition_image(vk,
@@ -466,10 +473,13 @@ void VulkanDevice::write_texture(TextureHandle handle, const void* data, std::si
                          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     }
-    t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    submit_blocking(
-        *cmd); // blocks until the upload completes, then the staging buffer is safe to free
+    // Blocks until the upload completes, then the staging buffer is safe to free. A refused
+    // submit (p1) leaves the image's tracked layout alone: the barriers above never ran.
+    if (!submit_blocking(*cmd))
+        RIME_ERROR("rhi: write_texture refused — the upload was not submitted");
+    else
+        t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vmaDestroyBuffer(allocator_, staging, staging_alloc);
 }
 
@@ -542,6 +552,11 @@ void VulkanDevice::write_texture_mips(TextureHandle handle, std::span<const MipD
     vmaFlushAllocation(allocator_, staging_alloc, 0, total);
 
     auto cmd = begin_commands();
+    if (!cmd) {
+        RIME_ERROR("rhi: write_texture_mips refused — no command buffer"); // counted (p1)
+        vmaDestroyBuffer(allocator_, staging, staging_alloc);
+        return;
+    }
     VkCommandBuffer vk = static_cast<VulkanCommandBuffer&>(*cmd).handle();
 
     // Whole chain UNDEFINED -> TRANSFER_DST, copy every level, whole chain -> SHADER_READ (the
@@ -568,9 +583,11 @@ void VulkanDevice::write_texture_mips(TextureHandle handle, std::span<const MipD
                      VK_ACCESS_2_TRANSFER_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    submit_blocking(*cmd);
+    if (!submit_blocking(*cmd))
+        RIME_ERROR("rhi: write_texture_mips refused — the upload was not submitted");
+    else
+        t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     vmaDestroyBuffer(allocator_, staging, staging_alloc);
 }
 

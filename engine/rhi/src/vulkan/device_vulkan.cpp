@@ -663,15 +663,70 @@ std::unique_ptr<CommandBuffer> VulkanDevice::begin_commands() {
     ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    VK_CHECK(vkAllocateCommandBuffers(device_, &ai, &cmd));
+    // Checked, not VK_CHECKed (p1). VK_CHECK only asserts, and an assertion is compiled out of
+    // Release — so a failed allocation used to hand a NULL VkCommandBuffer to the next driver call,
+    // a segfault inside the driver with nothing in the log to say why.
+    const VkResult r = vkAllocateCommandBuffers(device_, &ai, &cmd);
+    if (r != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkAllocateCommandBuffers failed: {} — submission refused",
+                   result_string(r));
+        ++failed_submissions_;
+        return nullptr;
+    }
+    ++live_command_buffers_;
 
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
+    const VkResult b = vkBeginCommandBuffer(cmd, &bi);
+    if (b != VK_SUCCESS) {
+        RIME_ERROR("rhi: vkBeginCommandBuffer failed: {} — submission refused", result_string(b));
+        free_command_buffer(cmd);
+        ++failed_submissions_;
+        return nullptr;
+    }
     return std::make_unique<VulkanCommandBuffer>(*this, cmd);
 }
 
-void VulkanDevice::submit_blocking(CommandBuffer& commands) {
+void VulkanDevice::free_command_buffer(VkCommandBuffer cmd) noexcept {
+    if (cmd == VK_NULL_HANDLE)
+        return;
+    vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
+    --live_command_buffers_;
+}
+
+VkFence VulkanDevice::create_fence() noexcept {
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence = VK_NULL_HANDLE;
+    const VkResult r = vkCreateFence(device_, &fci, nullptr, &fence);
+    if (r != VK_SUCCESS) {
+        // The p1 crash's own message, now with a consequence: refuse the submission instead of
+        // submitting with (and then waiting on) a fence that does not exist.
+        RIME_ERROR("rhi: vkCreateFence failed: {} — submission refused ({} fences live)",
+                   result_string(r),
+                   live_fences_);
+        return VK_NULL_HANDLE; // the caller counts the refused submission
+    }
+    ++live_fences_;
+    return fence;
+}
+
+void VulkanDevice::destroy_fence(VkFence fence) noexcept {
+    if (fence == VK_NULL_HANDLE)
+        return;
+    vkDestroyFence(device_, fence, nullptr);
+    --live_fences_;
+}
+
+SubmissionCounters VulkanDevice::submission_counters() const {
+    SubmissionCounters c{};
+    c.live_fences = live_fences_;
+    c.live_command_buffers = live_command_buffers_;
+    c.in_flight_submissions = in_flight_submits_.size();
+    c.failed_submissions = failed_submissions_;
+    return c;
+}
+
+bool VulkanDevice::submit_blocking(CommandBuffer& commands) {
     // Only one CommandBuffer implementation exists; the RHI hands these out itself, so the cast is
     // safe. submit + wait is the simplest correct model (perfect for the M3 one-shot render);
     // overlapping frames with the swapchain arrives in M3.4.
@@ -685,32 +740,68 @@ void VulkanDevice::submit_blocking(CommandBuffer& commands) {
     // A zone with no sink installed costs a Stopwatch, which is why these can stay.
     auto& vcb = static_cast<VulkanCommandBuffer&>(commands);
     VkCommandBuffer cmd = vcb.handle();
+    // Every step is checked and every failure takes the same exit (p1): the command buffer goes
+    // back to its pool, the encoder's descriptor pools are recycled, the failure is counted, and
+    // the caller hears `false`. Two cases differ only in what the GPU might still be doing:
+    //   * nothing was submitted (end / fence / submit failed) — nothing references the buffer;
+    //   * the submit went in but the WAIT failed (device lost, typically) — then we cannot prove
+    //     the GPU is done, so idle the device before freeing anything it might still be reading.
+    const auto finish = [&](VkFence fence, bool ok) {
+        RIME_PROFILE_ZONE("rhi.submit.reclaim");
+        destroy_fence(fence);
+        free_command_buffer(cmd);
+        // The wait proves the GPU is done with every transient descriptor set this encoder baked,
+        // so its pools can be reset and reused immediately (ADR-0020).
+        for (VkDescriptorPool pool : vcb.release_descriptor_pools())
+            recycle_descriptor_pool(pool);
+        if (!ok)
+            ++failed_submissions_;
+        return ok;
+    };
+
+    // The three zones above must stay NON-OVERLAPPING and open exactly once per submit, or the
+    // split they exist to measure stops adding up. That is why the queue stage reports failure
+    // through `queued` instead of returning from inside the zone: a `return finish(...)` there
+    // would open `rhi.submit.reclaim` while `rhi.submit.queue` is still open, nesting the two and
+    // billing teardown to the queue as well.
     VkFence fence = VK_NULL_HANDLE;
+    bool queued = false;
     {
         RIME_PROFILE_ZONE("rhi.submit.queue");
-        VK_CHECK(vkEndCommandBuffer(cmd));
+        const VkResult e = vkEndCommandBuffer(cmd);
+        if (e != VK_SUCCESS) {
+            RIME_ERROR("rhi: submit_blocking: vkEndCommandBuffer failed: {}", result_string(e));
+        } else {
+            VkCommandBufferSubmitInfo csi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+            csi.commandBuffer = cmd;
+            VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+            si.commandBufferInfoCount = 1;
+            si.pCommandBufferInfos = &csi;
 
-        VkCommandBufferSubmitInfo csi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-        csi.commandBuffer = cmd;
-        VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-        si.commandBufferInfoCount = 1;
-        si.pCommandBufferInfos = &csi;
-
-        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        VK_CHECK(vkCreateFence(device_, &fci, nullptr, &fence));
-        VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &si, fence));
+            fence = create_fence(); // logs and returns VK_NULL_HANDLE on failure
+            if (fence != VK_NULL_HANDLE) {
+                const VkResult q = vkQueueSubmit2(graphics_queue_, 1, &si, fence);
+                if (q != VK_SUCCESS)
+                    RIME_ERROR("rhi: submit_blocking: vkQueueSubmit2 failed: {}", result_string(q));
+                else
+                    queued = true;
+            }
+        }
     }
+    if (!queued)
+        return finish(fence, false);
+
+    VkResult w = VK_SUCCESS;
     {
         RIME_PROFILE_ZONE("rhi.submit.wait");
-        VK_CHECK(vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX));
+        w = vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX);
     }
-    RIME_PROFILE_ZONE("rhi.submit.reclaim");
-    vkDestroyFence(device_, fence, nullptr);
-    vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
-    // The wait above proves the GPU is done with every transient descriptor set this encoder
-    // baked, so its pools can be reset and reused immediately (ADR-0020).
-    for (VkDescriptorPool pool : vcb.release_descriptor_pools())
-        recycle_descriptor_pool(pool);
+    if (w != VK_SUCCESS) {
+        RIME_ERROR("rhi: submit_blocking: vkWaitForFences failed: {}", result_string(w));
+        vkDeviceWaitIdle(device_);
+        return finish(fence, false);
+    }
+    return finish(fence, true);
 }
 
 SubmitTicket VulkanDevice::submit(std::unique_ptr<CommandBuffer> commands) {
@@ -719,9 +810,26 @@ SubmitTicket VulkanDevice::submit(std::unique_ptr<CommandBuffer> commands) {
     // transient descriptor pools it baked must outlive the submission — the fence, not the caller's
     // scope, decides when they may be freed. is_complete()/wait() reclaim them once the fence
     // signals.
+    if (!commands)
+        return SubmitTicket{}; // begin_commands refused (already counted) — nothing to submit
     auto& vcb = static_cast<VulkanCommandBuffer&>(*commands);
     VkCommandBuffer cmd = vcb.handle();
-    VK_CHECK(vkEndCommandBuffer(cmd));
+
+    // A refused submission frees what it holds at once — nothing reached the GPU — and answers
+    // an invalid ticket, which every ticket consumer already treats as "nothing in flight" (p1).
+    const auto refuse = [&](VkFence fence) {
+        destroy_fence(fence);
+        InFlightSubmit dead{VK_NULL_HANDLE, std::move(commands)};
+        reclaim_submit(dead);
+        ++failed_submissions_;
+        return SubmitTicket{};
+    };
+
+    const VkResult e = vkEndCommandBuffer(cmd);
+    if (e != VK_SUCCESS) {
+        RIME_ERROR("rhi: submit: vkEndCommandBuffer failed: {}", result_string(e));
+        return refuse(VK_NULL_HANDLE);
+    }
 
     VkCommandBufferSubmitInfo csi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
     csi.commandBuffer = cmd;
@@ -729,10 +837,14 @@ SubmitTicket VulkanDevice::submit(std::unique_ptr<CommandBuffer> commands) {
     si.commandBufferInfoCount = 1;
     si.pCommandBufferInfos = &csi;
 
-    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VkFence fence = VK_NULL_HANDLE;
-    VK_CHECK(vkCreateFence(device_, &fci, nullptr, &fence));
-    VK_CHECK(vkQueueSubmit2(graphics_queue_, 1, &si, fence));
+    const VkFence fence = create_fence();
+    if (fence == VK_NULL_HANDLE)
+        return refuse(VK_NULL_HANDLE);
+    const VkResult q = vkQueueSubmit2(graphics_queue_, 1, &si, fence);
+    if (q != VK_SUCCESS) {
+        RIME_ERROR("rhi: submit: vkQueueSubmit2 failed: {}", result_string(q));
+        return refuse(fence);
+    }
 
     const std::uint64_t id = next_ticket_id_++;
     in_flight_submits_.emplace(id, InFlightSubmit{fence, std::move(commands)});
@@ -796,14 +908,11 @@ void VulkanDevice::reclaim_submit(InFlightSubmit& s) noexcept {
         auto& vcb = static_cast<VulkanCommandBuffer&>(*s.commands);
         for (VkDescriptorPool pool : vcb.release_descriptor_pools())
             recycle_descriptor_pool(pool);
-        VkCommandBuffer cmd = vcb.handle();
-        vkFreeCommandBuffers(device_, command_pool_, 1, &cmd);
+        free_command_buffer(vcb.handle());
         s.commands.reset();
     }
-    if (s.fence) {
-        vkDestroyFence(device_, s.fence, nullptr);
-        s.fence = VK_NULL_HANDLE;
-    }
+    destroy_fence(s.fence);
+    s.fence = VK_NULL_HANDLE;
 }
 
 void VulkanDevice::wait_idle() {

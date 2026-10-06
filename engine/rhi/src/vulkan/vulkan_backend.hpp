@@ -126,12 +126,13 @@ public:
     void write_texture_mips(TextureHandle handle, std::span<const MipData> levels) override;
 
     [[nodiscard]] std::unique_ptr<CommandBuffer> begin_commands() override;
-    void submit_blocking(CommandBuffer& commands) override;
+    bool submit_blocking(CommandBuffer& commands) override;
     [[nodiscard]] SubmitTicket submit(std::unique_ptr<CommandBuffer> commands) override;
     [[nodiscard]] bool is_complete(SubmitTicket ticket) override;
     void wait(SubmitTicket ticket) override;
     [[nodiscard]] CommandBuffer* wait_and_borrow(SubmitTicket ticket) override;
     void release(SubmitTicket ticket) override;
+    [[nodiscard]] SubmissionCounters submission_counters() const override;
     void wait_idle() override;
 
     [[nodiscard]] std::unique_ptr<Swapchain> create_swapchain(const SwapchainDesc& desc) override;
@@ -188,6 +189,10 @@ public:
 
     [[nodiscard]] VkCommandPool vk_command_pool() const noexcept { return command_pool_; }
 
+    // Return a command buffer from begin_commands() to the pool. Every free goes through here —
+    // the swapchain's included — so submission_counters().live_command_buffers stays honest.
+    void free_command_buffer(VkCommandBuffer cmd) noexcept;
+
     // End + submit `cmd` with this frame's synchronization (wait the image-acquired semaphore at
     // the color-output stage, signal render-finished, trip the in-flight fence) — the present-paced
     // counterpart to submit_blocking(). Does not wait or free the command buffer: the swapchain
@@ -240,6 +245,18 @@ private:
 
     std::unordered_map<std::uint64_t, InFlightSubmit> in_flight_submits_;
     std::uint64_t next_ticket_id_ = 1;
+
+    // submission_counters() (p1). Every vkCreateFence / vkAllocateCommandBuffers on the submission
+    // paths increments, every matching destroy/free decrements; refused submissions are counted.
+    std::uint64_t live_fences_ = 0;
+    std::uint64_t live_command_buffers_ = 0;
+    std::uint64_t failed_submissions_ = 0;
+
+    // Create / destroy one submission fence, keeping live_fences_ in step. create_fence answers
+    // VK_NULL_HANDLE (logged) when the driver refuses; the caller refuses and counts the
+    // submission, and must never pass that null on to vkQueueSubmit2 or vkWaitForFences.
+    [[nodiscard]] VkFence create_fence() noexcept;
+    void destroy_fence(VkFence fence) noexcept;
 
     // Free a signalled submission: recycle its descriptor pools, free its VkCommandBuffer, destroy
     // its fence, drop the owned command buffer. Shared by is_complete()/wait() and the dtor drain.
