@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "rime/assets/heightfield_asset.hpp"
+#include "rime/assets/texture_asset.hpp"
 #include "rime/core/diagnostics/log.hpp"
 #include "rime/render/terrain_builder.hpp"
 #include "rime/rhi/device.hpp"
@@ -296,6 +297,58 @@ void TerrainResidency::refuse_parent(assets::TerrainTileKey parent,
     r.phase = Phase::Refused;
 }
 
+int TerrainResidency::bake_state(Record& r) {
+    if (!r.bake_requested) {
+        return 2;
+    }
+    const assets::AssetState c = server_.state(r.bake_color);
+    const assets::AssetState m = server_.state(r.bake_material);
+    if (c == assets::AssetState::Ready && m == assets::AssetState::Ready) {
+        return 1;
+    }
+    const auto pending = [](assets::AssetState s) {
+        return s == assets::AssetState::Loading || s == assets::AssetState::Ready;
+    };
+    if (pending(c) && pending(m)) {
+        return 0; // at least one still loading, neither failed
+    }
+    // A failed bake costs the tile its appearance, never its coverage: it is drawn with the
+    // placeholder material, counted here once and per draw in fallback_appearance_draws.
+    ++stats_.bake_load_failures;
+    r.bake_requested = false;
+    return 2;
+}
+
+bool TerrainResidency::give_bake(TerrainTileId tile, const Record& r) {
+    const assets::TextureAsset* color = server_.get(r.bake_color);
+    const assets::TextureAsset* material = server_.get(r.bake_material);
+    // The cook writes exactly this shape (terrain_bake.rs): two single-level RGBA8 textures, one
+    // texel per sample — colour sRGB, material linear. Anything else is not this tile's bake; the
+    // pass checks the size against the tile's own grid.
+    const auto level0 = [](const assets::TextureAsset* t, assets::TextureFormat format) {
+        return t != nullptr && t->format == format && !t->mips.empty() &&
+                       t->mips[0].offset + std::uint64_t{t->mips[0].size} <= t->pixels.size()
+                   ? std::span<const std::byte>(t->pixels.data() + t->mips[0].offset,
+                                                t->mips[0].size)
+                   : std::span<const std::byte>{};
+    };
+    TerrainBakeTexels texels{};
+    texels.color = level0(color, assets::TextureFormat::Rgba8Srgb);
+    texels.material = level0(material, assets::TextureFormat::Rgba8Unorm);
+    if (texels.color.empty() || texels.material.empty() || color->width != material->width ||
+        color->height != material->height) {
+        ++stats_.bake_refusals;
+        return false;
+    }
+    texels.columns = color->width;
+    texels.rows = color->height;
+    if (!pass_.set_bake(tile, texels)) {
+        ++stats_.bake_refusals; // counted in the pass too (bakes_refused)
+        return false;
+    }
+    return true;
+}
+
 TerrainResidency::Priority TerrainResidency::priority(assets::TerrainTileKey k,
                                                       const core::Vec3& eye) const {
     // Ranked by the distance of the tile's PARENT box: four siblings tie, so a split's whole group
@@ -456,6 +509,13 @@ void TerrainResidency::advance(assets::TerrainTileKey k, Record& r, const core::
     if (!check_parent(k, *asset)) {
         return;
     }
+    // m19.8d3: a parent with a bake waits for it. Uploading now and adding the bake a frame later
+    // would show the tile in the placeholder material first — a pop the bake exists to remove.
+    const int bake = bake_state(r);
+    if (bake == 0) {
+        ++stats_.bake_waits;
+        return;
+    }
     const std::optional<TerrainResidentId> id = take_slot(k, eye);
     if (!id) {
         r.waiting_for_slot = true;
@@ -475,6 +535,7 @@ void TerrainResidency::advance(assets::TerrainTileKey k, Record& r, const core::
     p.key = k;
     p.pass_tile = tile;
     p.palette = r.palette; // the slot owns the palette now: released at reclaim, after retirement
+    p.has_bake = bake == 1 && give_bake(tile, r);
     p.bytes = pass_.tile_bytes(tile);
     r.palette = kInvalidTerrainPalette;
     // The GPU has its own copy of the samples, and the borders are kept for the neighbour check,
@@ -502,8 +563,18 @@ void TerrainResidency::request(assets::TerrainTileKey k) {
     }
     const assets::TerrainWorldTile* t = world_.find(k);
     const std::filesystem::path rel(t->path);
-    r.heightfield = server_.request_heightfield(rel.is_absolute() ? rel : world_dir_ / rel);
+    const auto resolve = [&](const std::filesystem::path& p) {
+        return p.is_absolute() ? p : world_dir_ / p;
+    };
+    r.heightfield = server_.request_heightfield(resolve(rel));
     ++stats_.heightfield_requests;
+    // m19.8d3: the appearance bake loads alongside, so it is usually there when the heights are.
+    if (lod_ && t->has_bake()) {
+        r.bake_requested = true;
+        r.bake_color = server_.request_texture(resolve(t->bake_color_path));
+        r.bake_material = server_.request_texture(resolve(t->bake_material_path));
+        ++stats_.bake_requests;
+    }
     records_.emplace(k, std::move(r));
 }
 
@@ -797,14 +868,34 @@ void TerrainResidency::draw_leaf(RenderGraph& graph,
     lod.base_z = leaf.key.coord.z * n;
     lod.level = leaf.key.level;
     lod.coarser_edges = leaf.coarser_edges;
+    lod.coarser_corners = leaf.coarser_corners;
     lod.camera = selection_eye_; // the camera the selection — and so the edge guarantees — used
     lod.morph_start = lv.morph_start;
     lod.morph_end = lv.morph_end;
+    // m19.8d3: the parent's bake, for the appearance fade. This draw SAMPLES the parent's
+    // texture, so it is a reader of the parent's slot too — without that mark the parent could be
+    // evicted and reclaimed while this frame is still in flight, and the fence rule would have a
+    // hole exactly the size of one borrowed texture.
+    if (leaf.key.level + 1 < world_.level_count()) {
+        const assets::TerrainTileKey pk{leaf.key.level + 1,
+                                        assets::terrain_parent_coord(leaf.key.coord)};
+        const TerrainResidentId pid = resident(pk);
+        if (pid.is_valid() && payloads_[pid.slot].has_bake && slots_.mark_read(pid, frame_)) {
+            lod.parent = payloads_[pid.slot].pass_tile;
+            lod.parent_quadrant = static_cast<std::uint32_t>(leaf.key.coord.x & 1) |
+                                  (static_cast<std::uint32_t>(leaf.key.coord.z & 1) << 1);
+            ++stats_.appearance_morph_draws;
+        } else {
+            ++stats_.parent_bake_missing_draws; // no fade: counted, never a refusal to draw
+        }
+    }
     pass_.add(graph, hdr, depth, payloads_[id.slot].pass_tile, view_proj, eye, light, sky, lod);
     ++stats_.draws;
     ++stats_.lod_draws;
     if (leaf.key.level > 0) {
-        ++stats_.fallback_appearance_draws; // a parent: the flat placeholder material (8d3)
+        // A parent shades from its bake; without one it draws with the flat placeholder material.
+        ++(payloads_[id.slot].has_bake ? stats_.baked_appearance_draws
+                                       : stats_.fallback_appearance_draws);
     }
 }
 

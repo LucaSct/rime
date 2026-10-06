@@ -10,6 +10,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,7 @@
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/assets/heightfield_asset.hpp"
 #include "rime/assets/terrain_world.hpp"
+#include "rime/assets/texture_asset.hpp"
 #include "rime/platform/filesystem.hpp"
 
 namespace {
@@ -465,4 +467,67 @@ TEST_CASE("m19.8d1: the Rust-cooked lod_world fixture verifies, and its geometri
     for (const TerrainWorldTile& t : world->tiles()) {
         CHECK(t.geometric_error == 0.0f);
     }
+}
+
+TEST_CASE("m19.8d3: the Rust-cooked bake_world fixture — the 14-field parent line parses, and its "
+          "two single-level bake textures read back with the ids the manifest records") {
+    const std::filesystem::path dir(RIME_ASSETS_FIXTURE_DIR);
+    const auto text = rime::platform::read_file(dir / "bake_world.terrainworld");
+    REQUIRE(text.has_value());
+    const auto world = TerrainWorld::parse(
+        std::string_view(reinterpret_cast<const char*>(text->data()), text->size()));
+    REQUIRE(world.has_value());
+    REQUIRE(world->level_count() == 2);
+    for (const TerrainWorldTile& t : world->tiles()) {
+        CHECK_FALSE(t.has_bake()); // level 0 shades from its palette
+    }
+    REQUIRE(world->tiles(1).size() == 1);
+    const TerrainWorldTile& parent = world->tiles(1)[0];
+    REQUIRE(parent.has_bake());
+
+    const auto load = [&dir](const std::string& path, rime::assets::AssetId* id) {
+        const auto bytes = rime::platform::read_file(dir / path);
+        REQUIRE(bytes.has_value());
+        rime::assets::AssetError err{};
+        auto tex = rime::assets::read_texture(*bytes, err, id);
+        REQUIRE(tex.has_value());
+        return *tex;
+    };
+    rime::assets::AssetId color_id{};
+    rime::assets::AssetId material_id{};
+    const rime::assets::TextureAsset color = load(parent.bake_color_path, &color_id);
+    const rime::assets::TextureAsset material = load(parent.bake_material_path, &material_id);
+    // The manifest's ids are the content hashes this reader computes: one cook, two languages.
+    CHECK(color_id == parent.bake_color_id);
+    CHECK(material_id == parent.bake_material_id);
+    // ONE texel per sample, ONE level (a full chain for 5×5 would be 3), the two formats.
+    const std::uint32_t n = world->grid().samples;
+    for (const rime::assets::TextureAsset* t : {&color, &material}) {
+        CHECK(t->width == n);
+        CHECK(t->height == n);
+        REQUIRE(t->mips.size() == 1);
+        CHECK(t->mips[0].offset == 0);
+        CHECK(t->pixels.size() == std::size_t{n} * n * 4);
+    }
+    CHECK(color.format == rime::assets::TextureFormat::Rgba8Srgb);
+    CHECK(material.format == rime::assets::TextureFormat::Rgba8Unorm);
+
+    // Two texels written down by hand (cook_fixture.rs builds the world for exactly this): the
+    // parent's corner (0, 0) lies over a tile painted purely with layer A — linear (0.5, 0.25,
+    // 1.0), metallic 0.75, roughness 0.125 — and corner (4, 0) over one painted purely with
+    // layer B — (0.1, 0.8, 0.2), metallic 0, roughness 1. Colour is sRGB-encoded.
+    const auto texel = [n](const rime::assets::TextureAsset& t, std::uint32_t i, std::uint32_t j) {
+        std::array<int, 4> out{};
+        for (std::size_t c = 0; c < 4; ++c) {
+            out[c] = static_cast<int>(t.pixels[4 * (i + std::size_t{n} * j) + c]);
+        }
+        return out;
+    };
+    CHECK(texel(color, 0, 0) == std::array<int, 4>{188, 137, 255, 255});
+    CHECK(texel(material, 0, 0) == std::array<int, 4>{191, 32, 0, 255});
+    CHECK(texel(color, 4, 0) == std::array<int, 4>{89, 231, 124, 255});
+    CHECK(texel(material, 4, 0) == std::array<int, 4>{0, 255, 0, 255});
+    // Between them the edge fades from A to B, so the bake is not two flat halves.
+    CHECK(texel(color, 2, 0) != texel(color, 0, 0));
+    CHECK(texel(color, 2, 0) != texel(color, 4, 0));
 }

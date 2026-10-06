@@ -64,14 +64,20 @@
 //! to invent the absent samples, and there is no flat fill. Each problem is collected (all of them,
 //! not the first), counted by kind, and explained.
 //!
-//! Parent tiles carry no splat palette: their appearance is m19.8d3's coarse bake.
+//! Parent tiles carry no splat palette. Their appearance is a coarse BAKE (m19.8d3, ADR-0072,
+//! `terrain_bake.rs`): with `palette_dir = "cooked"` in the description — the directory holding
+//! the palettes' cooked materials, terrain layers and textures — every parent whose level-0 tiles
+//! all carry a palette gets two N×N textures (base colour; metallic + roughness), named on its
+//! manifest line. Without the key the world cooks exactly as m19.8d1 cooked it.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::heightfield::{Heightfield, HeightfieldSidecar, SPLAT_LAYER_COUNT};
+use crate::terrain_bake::{bake_world, load_layer_table, LayerTable, WorldBake};
 use crate::terrain_layer::strip_comment;
+use crate::texture::{cook_single_level, TEXFMT_RGBA8_SRGB, TEXFMT_RGBA8_UNORM};
 use crate::PipelineError;
 
 /// The description's file-name suffix: `hills.terrainworld.toml` cooks the world named `hills`.
@@ -89,12 +95,16 @@ const PLACEMENT_TOLERANCE: f32 = 1.0e-3;
 pub struct TerrainWorldDesc {
     pub levels: u32,
     pub tiles: Vec<(i32, i32, PathBuf)>,
+    /// m19.8d3: where the palettes' COOKED assets live (materials, terrain layers and their
+    /// textures), relative to the description. Given = bake every parent's appearance.
+    pub palette_dir: Option<PathBuf>,
 }
 
 impl TerrainWorldDesc {
     pub fn parse(text: &str) -> Result<Self, PipelineError> {
         let bad = |msg: String| PipelineError::Unsupported(format!("terrain world: {msg}"));
         let mut levels = None;
+        let mut palette_dir = None;
         let mut tiles: BTreeMap<(i32, i32), PathBuf> = BTreeMap::new();
         for (n, raw) in text.lines().enumerate() {
             let line = strip_comment(raw).trim();
@@ -122,20 +132,31 @@ impl TerrainWorldDesc {
                 }
                 continue;
             }
+            let quoted = |value: &str| {
+                value
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .filter(|v| !v.is_empty() && !v.contains('"'))
+                    .map(PathBuf::from)
+            };
+            if key == "palette_dir" {
+                let dir = quoted(value)
+                    .ok_or_else(|| at("`palette_dir` needs a non-empty \"quoted\" path"))?;
+                if palette_dir.replace(dir).is_some() {
+                    return Err(at("`palette_dir` given twice"));
+                }
+                continue;
+            }
             let coord = key.strip_prefix("tile_").and_then(|c| {
                 let (x, z) = c.split_once('_')?;
                 Some((z.parse::<i32>().ok()?, x.parse::<i32>().ok()?))
             });
             let Some((z, x)) = coord else {
                 return Err(at(&format!(
-                    "unknown key `{key}` (expected `levels` or `tile_<x>_<z>`)"
+                    "unknown key `{key}` (expected `levels`, `palette_dir` or `tile_<x>_<z>`)"
                 )));
             };
-            let path = value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .filter(|v| !v.is_empty() && !v.contains('"'))
-                .map(PathBuf::from)
+            let path = quoted(value)
                 .ok_or_else(|| at(&format!("`{key}` needs a non-empty \"quoted\" path")))?;
             if tiles.insert((z, x), path).is_some() {
                 return Err(at(&format!("tile ({x}, {z}) given twice")));
@@ -148,6 +169,7 @@ impl TerrainWorldDesc {
         Ok(TerrainWorldDesc {
             levels,
             tiles: tiles.into_iter().map(|((z, x), p)| (x, z, p)).collect(),
+            palette_dir,
         })
     }
 }
@@ -176,6 +198,8 @@ pub enum RefusalKind {
     IncompleteRootCover,
     /// A 2×2 block at some level has one to three of its four children.
     MissingChild,
+    /// m19.8d3: a tile's palette names an id the bake's layer table cannot resolve.
+    UnresolvedLayer,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -271,6 +295,18 @@ impl LodWorld {
     /// The manifest text: one `grid` line, then one 10-field `tile` line per tile. `names[k]` is
     /// tile k's `(path, asset id)`.
     pub fn manifest_text(&self, names: &[(String, u64)]) -> String {
+        self.manifest_text_with_bakes(names, &[])
+    }
+
+    /// As `manifest_text`, with each tile's appearance bake (m19.8d3, ADR-0072): `bakes[k]`, when
+    /// present and `Some`, is tile k's `[(path, id); 2]` — base colour, then material — APPENDED to
+    /// its line as four more fields. A tile without a bake keeps the 10-field line, so a world
+    /// cooked without bakes is byte-identical to m19.8d1's.
+    pub fn manifest_text_with_bakes(
+        &self,
+        names: &[(String, u64)],
+        bakes: &[Option<[(String, u64); 2]>],
+    ) -> String {
         // f32 `Display` prints the shortest decimal that round-trips, and the engine parses with
         // strtof (round to nearest), so spacing and quantisation come back bit for bit — which
         // check_tile compares.
@@ -288,9 +324,9 @@ impl LodWorld {
             self.origin[1],
             self.origin[2]
         ));
-        for (t, (path, id)) in self.tiles.iter().zip(names) {
+        for (k, (t, (path, id))) in self.tiles.iter().zip(names).enumerate() {
             s.push_str(&format!(
-                "tile\t{}\t{}\t{}\t0\t{}\t{}\t{}\t{id:016x}\t{path}\n",
+                "tile\t{}\t{}\t{}\t0\t{}\t{}\t{}\t{id:016x}\t{path}",
                 t.level,
                 t.x,
                 t.z,
@@ -298,6 +334,13 @@ impl LodWorld {
                 self.world_height(t.max_sample),
                 t.geometric_error
             ));
+            if let Some(Some([color, material])) = bakes.get(k) {
+                s.push_str(&format!(
+                    "\t{:016x}\t{}\t{:016x}\t{}",
+                    color.1, color.0, material.1, material.0
+                ));
+            }
+            s.push('\n');
         }
         s
     }
@@ -675,9 +718,12 @@ fn surface_deviation(parent: &LodTile, n: u32, height_scale: f32, level0: &[LodT
 pub struct CookedWorld {
     pub name: String,
     pub world: LodWorld,
-    /// `(file name, file bytes, asset id)` per tile, in the world's tile order.
+    /// `(file name, file bytes, asset id)`: one per tile in the world's tile order, then (m19.8d3)
+    /// two `.rtex` per baked parent — base colour, material.
     pub files: Vec<(String, Vec<u8>, u64)>,
     pub manifest: String,
+    /// m19.8d3: the appearance bake, when the cook was given a layer table.
+    pub bake: Option<WorldBake>,
 }
 
 impl CookedWorld {
@@ -689,7 +735,18 @@ impl CookedWorld {
 
 /// Cook an in-memory world: every tile's RMA1 bytes plus the manifest naming them.
 pub fn cook_lod_world(name: &str, world: LodWorld) -> CookedWorld {
-    let files: Vec<(String, Vec<u8>, u64)> = world
+    cook_lod_world_baked(name, world, None).expect("a cook without a bake cannot be refused")
+}
+
+/// As `cook_lod_world`, plus (m19.8d3) every parent's appearance bake when `layers` is given:
+/// two single-level `.rtex` files per baked parent, named in the manifest's tile line.
+pub fn cook_lod_world_baked(
+    name: &str,
+    world: LodWorld,
+    layers: Option<&LayerTable>,
+) -> Result<CookedWorld, WorldCookError> {
+    let bake = layers.map(|l| bake_world(&world, l)).transpose()?;
+    let mut files: Vec<(String, Vec<u8>, u64)> = world
         .tiles
         .iter()
         .map(|t| {
@@ -698,13 +755,32 @@ pub fn cook_lod_world(name: &str, world: LodWorld) -> CookedWorld {
         })
         .collect();
     let names: Vec<(String, u64)> = files.iter().map(|(f, _, id)| (f.clone(), *id)).collect();
-    let manifest = world.manifest_text(&names);
-    CookedWorld {
+    let mut bake_names = Vec::new();
+    if let Some(bake) = &bake {
+        let n = world.samples;
+        for (t, b) in world.tiles.iter().zip(&bake.tiles) {
+            bake_names.push(b.as_ref().map(|b| {
+                let stem = format!("{name}_L{}_{}_{}", t.level, t.x, t.z);
+                let color = cook_single_level(n, n, TEXFMT_RGBA8_SRGB, &b.color);
+                let material = cook_single_level(n, n, TEXFMT_RGBA8_UNORM, &b.material);
+                let names = [
+                    (format!("{stem}_bake_color.rtex"), color.1),
+                    (format!("{stem}_bake_material.rtex"), material.1),
+                ];
+                files.push((names[0].0.clone(), color.0, color.1));
+                files.push((names[1].0.clone(), material.0, material.1));
+                names
+            }));
+        }
+    }
+    let manifest = world.manifest_text_with_bakes(&names, &bake_names);
+    Ok(CookedWorld {
         name: name.to_string(),
         world,
         files,
         manifest,
-    }
+        bake,
+    })
 }
 
 /// Cook a `<name>.terrainworld.toml`: load every level-0 source (each a `rime heightfield` source
@@ -729,7 +805,16 @@ pub fn cook_terrain_world(desc_path: &Path) -> Result<CookedWorld, PipelineError
     for (x, z, path) in &desc.tiles {
         level0.push((*x, *z, Heightfield::from_file(&dir.join(path))?));
     }
-    Ok(cook_lod_world(name, build_lod_world(level0, desc.levels)?))
+    let layers = desc
+        .palette_dir
+        .as_ref()
+        .map(|d| load_layer_table(&dir.join(d)))
+        .transpose()?;
+    Ok(cook_lod_world_baked(
+        name,
+        build_lod_world(level0, desc.levels)?,
+        layers.as_ref(),
+    )?)
 }
 
 #[cfg(test)]
@@ -1142,6 +1227,26 @@ mod tests {
             .iter()
             .zip(&cooked.files)
             .all(|(a, b)| a.1 == b.1));
+    }
+
+    #[test]
+    fn palette_dir_is_optional_quoted_and_given_once() {
+        // m19.8d3: the key that asks for the appearance bake.
+        let d = TerrainWorldDesc::parse("levels = 1\ntile_0_0 = \"a.r16\"").unwrap();
+        assert_eq!(d.palette_dir, None);
+        let d = TerrainWorldDesc::parse(
+            "levels = 1\npalette_dir = \"../cooked\" # where the .rtl live\ntile_0_0 = \"a.r16\"",
+        )
+        .unwrap();
+        assert_eq!(d.palette_dir, Some(PathBuf::from("../cooked")));
+        for bad in [
+            "palette_dir = cooked",
+            "palette_dir = \"\"",
+            "palette_dir = \"a\"\npalette_dir = \"b\"",
+        ] {
+            let text = format!("levels = 1\ntile_0_0 = \"a.r16\"\n{bad}");
+            assert!(TerrainWorldDesc::parse(&text).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -47,7 +47,7 @@ a static mesh whose node transform is flattened into the vertices.
 | `width` | u32 | base level extent |
 | `height` | u32 | |
 | `format` | u32 | `0` = RGBA8 linear (UNORM), `1` = RGBA8 sRGB (BCn reserved) |
-| `mip_count` | u32 | a full chain: `floor(log2(max(width,height))) + 1` |
+| `mip_count` | u32 | a full chain: `floor(log2(max(width,height))) + 1` — or exactly `1` (M19.8d3: data addressed texel by texel and never minified, e.g. a terrain appearance bake) |
 | mip table | `mip_count` × (u32 width, u32 height, u32 offset, u32 size) | offsets tile the blob, no gap/overlap; `size = width·height·4` |
 | pixels | `Σ size` bytes | every level's RGBA8 texels, level 0 first |
 
@@ -156,7 +156,7 @@ coverage-rescaled; 16-bit source heights are rounded to nearest, `(2v + 257) / 5
 A heightfield palette slot (`layer0..layer3`) may name a terrain layer instead of a material; the
 heightfield format does not change — the consumer dispatches on the referenced file's `asset_kind`.
 
-## Terrain world manifest (text, M19.8a / M19.8d1)
+## Terrain world manifest (text, M19.8a / M19.8d1 / M19.8d3)
 
 Not an RMA1 file: the tab-separated map `rime terrain-world` writes as `<name>.terrainworld`
 ([ADR-0069](../../docs/adr/0069-m19.8a-terrain-render-residency.md),
@@ -172,6 +172,20 @@ bit for bit. A level-L tile covers 2^L × 2^L level-0 tiles, has the grid's `sam
 sample of its four children. `min_y` / `max_y` are world-space bounds over every level-0 sample beneath
 the tile; `geometric_error` is metres (0 at level 0). The m19.8a 8-field line
 `tile <x> <z> <revision> <min_y> <max_y> <asset-id-hex> <path>` still reads, as level 0.
+
+**Appearance bake (M19.8d3, [ADR-0072](../../docs/adr/0072-m19.8d3-terrain-lod-appearance.md)).** A
+parent (level ≥ 1) line may carry four more fields — 14 in all:
+
+    tile  <level> … <asset-id-hex> <path> <color-id-hex> <color-path> <material-id-hex> <material-path>
+
+naming two **single-level** RGBA8 textures of `samples × samples` texels, texel (i, j) *at* the tile's
+sample (i, j) (vertex-aligned, row-major, x fastest): `<tile>_bake_color.rtex` is format `1` (sRGB),
+base colour with A = 255; `<tile>_bake_material.rtex` is format `0` (UNORM), R = metallic, G =
+roughness, B = 0, A = 255. Each texel is the level-0 appearance box-filtered in linear light over the
+2^L × 2^L level-0 sample neighbourhood centred on it, the footprint taken in world sample space so
+texels on an edge two parents share are byte-identical. Written when the description has
+`palette_dir = "<directory of the palettes' cooked assets>"`; a level-0 line never carries a bake, and
+a parent over a palette-less tile keeps the 10-field line.
 
 ## The schema hash
 

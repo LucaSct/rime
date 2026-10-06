@@ -1,0 +1,7 @@
+# rime terrain world (m19.8d1, ADR-0070) — written by `rime terrain-world`
+grid	5	1	1	0.001	0	0	0	0
+tile	0	0	0	0	2	2	0	d7c915d83526517e	bake_world_L0_0_0.rhf
+tile	0	1	0	0	2	2	0	0d7baa67ab463624	bake_world_L0_1_0.rhf
+tile	0	0	1	0	2	2	0	39bd1ed31f7852a4	bake_world_L0_0_1.rhf
+tile	0	1	1	0	2	2	0	e17e174f6d9961b0	bake_world_L0_1_1.rhf
+tile	1	0	0	0	2	2	0	2dde50053b1c6bb9	bake_world_L1_0_0.rhf	fbcf202fdc53a2ca	bake_world_L1_0_0_bake_color.rtex	fd2a48c178d1a2ac	bake_world_L1_0_0_bake_material.rtex

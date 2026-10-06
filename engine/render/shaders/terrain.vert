@@ -97,6 +97,18 @@ layout(location = 0) out vec3 v_world;
 // would reintroduce a rounding the vertex stage does not have to pay.
 layout(location = 1) out vec2 v_local;
 
+// m19.8d3 (ADR-0072): xy = this vertex's SAMPLE coordinate in its tile, (i, j) as floats — exact
+// integers at the vertices, so the fragment stage's bake lookup lands on a texel at every vertex
+// (a bake has one texel per sample). z = the MORPH FACTOR this vertex was moved by.
+//
+// Why hand the geometry's own factor to the fragment stage rather than recompute a distance
+// there? Because the two must agree at the endpoints, not approximately: at m = 1 the vertex
+// stage has put this tile's surface exactly on its parent's, and the picture only stops popping
+// if the shading is exactly the parent's at that same moment. One factor, computed once, used for
+// both, cannot disagree with itself — including on an edge the vertex stage FORCED to 1 because
+// the neighbour is coarser, which no distance formula in the fragment stage would know about.
+layout(location = 2) out vec3 v_lod;
+
 const int kLodEnabled = 16; // kTerrainPushLodEnabled
 
 // m19.8d2: the dequantised height of sample (i, j) in WORLD metres, for the LOD path.
@@ -138,6 +150,7 @@ void main() {
                            vec3(float(i) * pc.grid.x, height, float(j) * pc.grid.y);
 
         v_world = world;
+        v_lod = vec3(float(i), float(j), 0.0); // not a chain: nothing to morph toward
         gl_Position = pc.view_proj * vec4(world, 1.0);
         return;
     }
@@ -161,6 +174,18 @@ void main() {
     if (((edges & 1) != 0 && ii == 0) || ((edges & 2) != 0 && ii == last) ||
         ((edges & 4) != 0 && jj == 0) || ((edges & 8) != 0 && jj == last)) {
         m = 1.0; // the neighbour across this edge is coarser: sit exactly on its edge
+    }
+    // m19.8d3: a CORNER whose diagonal neighbour is coarser (bits 9..12). The corner is an even
+    // vertex, so this moves nothing; it is here for v_lod.z. The two same-level tiles that share
+    // this corner each have the coarse tile across an EDGE, so the rule above gives them m = 1
+    // here; this tile only touches the coarse one at the point, and would otherwise fade by
+    // distance alone and shade the corner differently from its neighbours.
+    const int corners = pc.lod_tile.z >> 9;
+    if (((corners & 1) != 0 && ii == 0 && jj == 0) ||
+        ((corners & 2) != 0 && ii == last && jj == 0) ||
+        ((corners & 4) != 0 && ii == 0 && jj == last) ||
+        ((corners & 8) != 0 && ii == last && jj == last)) {
+        m = 1.0;
     }
 
     const bool odd_i = (ii & 1) != 0;
@@ -187,5 +212,8 @@ void main() {
     }
 
     v_world = world;
+    // EVERY vertex carries its m, the even ones too: they never move (they are parent vertices),
+    // but their appearance still fades to the parent's bake with their neighbours'.
+    v_lod = vec3(float(ii), float(jj), m);
     gl_Position = pc.view_proj * vec4(world, 1.0);
 }

@@ -33,7 +33,9 @@ rime_add_shaders(rime_terrain_render_tests
     ${CMAKE_SOURCE_DIR}/engine/render/shaders/fullscreen.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_layer_probe.frag
     # m19.8d2: reports the exact position terrain.vert placed each vertex at (drawn as points).
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_vertex_probe.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_vertex_probe.frag
+    # m19.8d3: reports the morph factor terrain.vert handed the fragment stage (drawn as points).
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_lod_probe.frag)
 
 # m19.7b: the alpha proof loads m19.7a's cooked terrain-layer texture through the engine's own
 # GpuAssetBridge, so it needs the shared fixtures directory (as tests/assets and tests/render do).

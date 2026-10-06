@@ -580,7 +580,10 @@ std::optional<TextureAsset> decode_texture(std::span<const std::byte> payload,
         width == 0 || height == 0 || width > kMaxTextureExtentPerAxis ||
         height > kMaxTextureExtentPerAxis ||
         std::uint64_t{width} * std::uint64_t{height} > kMaxTextureTexels ||
-        mip_count != full_mip_count(width, height)) {
+        // m19.8d3: exactly ONE level is the other legal shape — data addressed texel by texel
+        // and never minified (a terrain appearance bake: one texel per vertex). Anything between
+        // one level and the full chain is still a corrupt or foreign file.
+        (mip_count != full_mip_count(width, height) && mip_count != 1)) {
         out_error = AssetError::InvalidTexture;
         return std::nullopt;
     }

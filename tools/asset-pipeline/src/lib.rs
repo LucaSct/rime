@@ -28,6 +28,7 @@ pub mod sdf;
 pub mod skin;
 pub mod stl;
 pub mod tangent;
+pub mod terrain_bake;
 pub mod terrain_layer;
 pub mod terrain_world;
 pub mod texture;

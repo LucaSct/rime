@@ -3,6 +3,7 @@
 #include "rime/render/terrain_pass.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -137,7 +138,12 @@ TerrainPush terrain_push(const TerrainTile& tile,
         p.lod_tile[0] = lod.base_x;
         p.lod_tile[1] = lod.base_z;
         p.lod_tile[2] =
-            static_cast<std::int32_t>(lod.coarser_edges & 0xFu) | kTerrainPushLodEnabled;
+            static_cast<std::int32_t>(lod.coarser_edges & 0xFu) | kTerrainPushLodEnabled |
+            (lod.own_bake ? kTerrainPushOwnBake : 0) |
+            (lod.parent_bake ? kTerrainPushParentBake : 0) |
+            ((lod.parent_quadrant & 1u) != 0 ? kTerrainPushQuadrantX : 0) |
+            ((lod.parent_quadrant & 2u) != 0 ? kTerrainPushQuadrantZ : 0) |
+            (static_cast<std::int32_t>(lod.coarser_corners & 0xFu) << kTerrainPushCornerShift);
         p.lod_tile[3] = static_cast<std::int32_t>(lod.level);
     }
     return p;
@@ -178,6 +184,12 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
         {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
         {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
         {8, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        // m19.8d3: the tile's own appearance bake (colour, material) and its parent's. Always
+        // bound — the 1x1 white texel when a tile has none — and gated by push-constant flags.
+        {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {10, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {11, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {12, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
     };
 
     rhi::GraphicsPipelineDesc pd{};
@@ -288,6 +300,8 @@ TerrainPass::~TerrainPass() {
             continue; // released: its handles were destroyed then
         }
         const TerrainTile& t = tiles_[i];
+        device_.destroy(t.bake_material);
+        device_.destroy(t.bake_color);
         device_.destroy(t.splat_ubo);
         device_.destroy(t.weights);
         device_.destroy(t.indices);
@@ -530,6 +544,8 @@ bool TerrainPass::release(TerrainTileId id) {
         return false;
     }
     TerrainTile& t = tiles_[id];
+    device_.destroy(t.bake_material); // m19.8d3: the tile owns its bake
+    device_.destroy(t.bake_color);
     device_.destroy(t.splat_ubo);
     device_.destroy(t.weights);
     device_.destroy(t.indices);
@@ -549,7 +565,47 @@ std::uint64_t TerrainPass::tile_bytes(TerrainTileId id) const noexcept {
     // dummy on a v1 tile) and the 160-byte splat block. Allocator padding is not counted.
     return std::uint64_t{t.vertex_count} * sizeof(std::uint16_t) +
            std::uint64_t{t.index_count} * sizeof(std::uint32_t) + t.weight_bytes +
-           sizeof(SplatUniform);
+           sizeof(SplatUniform) + t.bake_bytes;
+}
+
+bool TerrainPass::set_bake(TerrainTileId id, const TerrainBakeTexels& bake) {
+    if (!contains(id)) {
+        ++bakes_refused_;
+        return false;
+    }
+    TerrainTile& t = tiles_[id];
+    // ONE TEXEL PER SAMPLE is the whole contract (terrain.frag addresses the bake by the vertex
+    // grid's own indices), so a bake of any other size cannot belong to this tile.
+    const std::size_t bytes = std::size_t{t.columns} * t.rows * 4;
+    if (t.bake_color.is_valid() || bake.columns != t.columns || bake.rows != t.rows ||
+        bake.color.size() != bytes || bake.material.size() != bytes) {
+        ++bakes_refused_;
+        return false;
+    }
+    rhi::TextureDesc cd{};
+    cd.extent = {t.columns, t.rows};
+    // sRGB for the colour: the format decodes to linear on every fetch, so the shader blends
+    // light, and the 8 bits are spent where the eye sees banding.
+    cd.format = rhi::Format::RGBA8Srgb;
+    cd.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    cd.debug_name = "terrain-bake-color";
+    rhi::TextureDesc md = cd;
+    md.format = rhi::Format::RGBA8Unorm; // metallic and roughness are plain numbers
+    md.debug_name = "terrain-bake-material";
+    const rhi::TextureHandle color = device_.create_texture(cd);
+    const rhi::TextureHandle material = device_.create_texture(md);
+    if (!color.is_valid() || !material.is_valid()) {
+        device_.destroy(material);
+        device_.destroy(color);
+        ++bakes_refused_;
+        return false;
+    }
+    device_.write_texture(color, bake.color.data(), bake.color.size());
+    device_.write_texture(material, bake.material.data(), bake.material.size());
+    t.bake_color = color;
+    t.bake_material = material;
+    t.bake_bytes = 2 * std::uint64_t{bytes};
+    return true;
 }
 
 void TerrainPass::add(RenderGraph& graph,
@@ -569,7 +625,25 @@ void TerrainPass::add(RenderGraph& graph,
     }
     const TerrainTile& tile = tiles_[id];
 
-    const TerrainPush push = terrain_push(tile, view_proj, eye, light, lod);
+    // m19.8d3: which bakes this draw reads. Decided HERE, from the tiles, not by the caller — the
+    // flags in the push block and the textures at bindings 9..12 then cannot disagree. A tile
+    // without a bake binds the 1x1 white texel and never samples it (its flag is clear).
+    TerrainLodDraw resolved = lod;
+    resolved.own_bake = lod.enabled && tile.bake_color.is_valid();
+    const bool parent_named = lod.enabled && lod.parent != kInvalidTerrainTile;
+    resolved.parent_bake = parent_named && contains(lod.parent) && lod.parent != id &&
+                           tiles_[lod.parent].bake_color.is_valid();
+    const std::array<rhi::TextureHandle, 4> bakes = {
+        resolved.own_bake ? tile.bake_color : white_layer_,
+        resolved.own_bake ? tile.bake_material : white_layer_,
+        resolved.parent_bake ? tiles_[lod.parent].bake_color : white_layer_,
+        resolved.parent_bake ? tiles_[lod.parent].bake_material : white_layer_,
+    };
+    bake_draws_ += resolved.own_bake ? 1u : 0u;
+    parent_bake_draws_ += resolved.parent_bake ? 1u : 0u;
+    parent_bake_missing_ += parent_named && !resolved.parent_bake ? 1u : 0u;
+
+    const TerrainPush push = terrain_push(tile, view_proj, eye, light, resolved);
 
     // LOAD the HDR target: terrain is one contributor to a frame, not its owner. Depth is written,
     // because terrain is opaque — a tile must occlude what is behind it, and be occluded by what
@@ -622,15 +696,21 @@ void TerrainPass::add(RenderGraph& graph,
     // heightfield. Each DISTINCT handle is imported once — four untextured layers share the white
     // fallback, and two layers may share one cooked texture — so the graph never tracks one image
     // as two resources with two independent states.
-    RGTexture sampled[3 + 4] = {graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
-                                graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead),
-                                sky_lut};
+    // m19.8d3: the four bake bindings join the same list, under the same rule (an absent bake is
+    // the white fallback again, and a parent's bake is another tile's texture).
+    RGTexture sampled[3 + 4 + 4] = {
+        graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
+        graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead),
+        sky_lut};
     std::size_t sampled_count = 3;
-    for (std::size_t k = 0; k < tile.layer_textures.size(); ++k) {
-        const rhi::TextureHandle h = tile.layer_textures[k];
+    std::array<rhi::TextureHandle, 8> extra{};
+    std::copy(tile.layer_textures.begin(), tile.layer_textures.end(), extra.begin());
+    std::copy(bakes.begin(), bakes.end(), extra.begin() + 4);
+    for (std::size_t k = 0; k < extra.size(); ++k) {
+        const rhi::TextureHandle h = extra[k];
         bool seen = false;
         for (std::size_t j = 0; j < k; ++j) {
-            seen = seen || tile.layer_textures[j] == h;
+            seen = seen || extra[j] == h;
         }
         if (!seen) {
             sampled[sampled_count++] = graph.import_texture(h, rhi::ResourceState::ShaderRead);
@@ -651,6 +731,7 @@ void TerrainPass::add(RenderGraph& graph,
                            weight_sampler = weight_sampler_,
                            layer_sampler = layer_sampler_,
                            layers = tile.layer_textures,
+                           bakes,
                            heights = tile.heights,
                            weights = tile.weights,
                            splat_ubo = tile.splat_ubo,
@@ -671,6 +752,11 @@ void TerrainPass::add(RenderGraph& graph,
                               cmd.bind_storage_buffer(4, graph.physical_buffer(sky_sh));
                               for (std::uint32_t k = 0; k < 4; ++k) {
                                   cmd.bind_texture(5 + k, layers[k], layer_sampler);
+                              }
+                              // m19.8d3: read with texelFetch (terrain.frag blends the four
+                              // texels itself), so the inert NEAREST sampler is the right one.
+                              for (std::uint32_t k = 0; k < 4; ++k) {
+                                  cmd.bind_texture(9 + k, bakes[k], sampler);
                               }
                               cmd.bind_index_buffer(indices, rhi::IndexType::Uint32);
                               cmd.push_constants(&push, sizeof(push));
