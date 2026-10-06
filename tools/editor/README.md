@@ -11,13 +11,21 @@ the whole workflow is provable headless (see the smoke below).
 
 The interactive shell (feature `gui`) is an **egui docking layout**:
 
+- **Menu bar** — **File**: New, Open (a path typed into the box), Save, Save As. **Edit**: undo and
+  redo. **View**: one checkmark per panel; clicking a closed panel reopens it in its default place.
+  New and Open are unavailable while the simulation is playing.
 - **Viewport** — draws the engine's streamed frames as a live texture and forwards pointer input.
   Click to **pick** the entity under the cursor (an engine-side ID-buffer pass, m9.6); the selected
   object shows **transform gizmos** you drag to move/rotate/scale it (`W`/`E`/`R`, m9.6b).
+  Hold the **right button** over the viewport to **fly**: drag to look, and hold it with `W`/`A`/`S`/`D`
+  to move, `Q`/`E` to go down/up, Shift to sprint. While the right button is up, `W`/`E`/`Q` set the
+  gizmo instead, so one key does one job at a time.
 - **Outliner** — the world's entities; spawn/despawn; selection is shared with the viewport.
 - **Inspector** — a selected entity's components as **editable, reflection-typed fields** (m9.4):
   edit any scalar/struct field, add/remove components, all with **undo/redo**. No per-component UI
-  code — the widgets are generated from the schema the engine sends.
+  code — the widgets are generated from the schema the engine sends. Integers are exact: a 64-bit
+  field such as an asset id is a text box parsed as an integer, applied when focus leaves; text that
+  is not a number is refused and the field goes back to the stored value.
 - **Assets** — a browser over the engine's cook manifest (`--assets`, m9.5): search/filter cooked
   content and **place** a mesh into the world.
 - **Play toolbar** — **Play ▶ / Pause / Step / Stop ■** run the simulation live *in the editor*
@@ -34,8 +42,8 @@ on a headless box". Two harnesses have since narrowed that to *how it looks*:
 - **Click tests** (`src/gui/click_tests.rs`, `cargo test -p editor --features gui`) run the shipped
   `EditorApp::update` headlessly through `egui_kittest` and drive it by widget role and label — the
   accessibility tree — against an in-process fake engine. One test per user-facing function. The
-  tests named `..._is_not_undoable`, `view_is_a_dead_label` and the like pin **known defects**;
-  read them as the editor's to-do list.
+  tests named `..._is_not_undoable` and the like pin **known defects**; read them as the editor's
+  to-do list. A fixed defect's pin is rewritten into a positive test of the fixed behaviour.
 - **[`scripts/editor-click-smoke.sh`](../../scripts/editor-click-smoke.sh)** runs the real binary
   and the real engine on a private Xvfb display and drives them with `xdotool`: place → select →
   edit → undo → redo → Play → Stop → Save As → quit, asserting the saved scene on disk. Linux-only
@@ -73,9 +81,14 @@ Then, in the window:
 2. **Move it** — with the gizmo mode buttons (`W` move · `E` rotate · `R` scale), drag a handle.
    The object moves live in the viewport as you drag.
 3. **Tweak** — in the Inspector, edit a component field (a light's colour, a material index, a
-   transform value). `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo.
+   transform value). `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo. While a text box has focus, `Ctrl+Z` is
+   that box's undo, not the world's.
 4. **Place** — in the Assets panel, search the browser and place a mesh; it appears in the Outliner.
-5. **Play** — hit **▶**. The simulation runs live (a dynamic body falls). **Step** advances one
+5. **Open another scene** — **File ▸ Open**, type a path, press **Open**. The editor starts a second
+   engine on that scene and switches to it only if the scene loads something; a missing or empty
+   file is refused with the reason, and the current scene stays. **File ▸ New** starts an empty,
+   unnamed scene; Save then waits for Save As.
+6. **Play** — hit **▶**. The simulation runs live (a dynamic body falls). **Step** advances one
    tick; **Stop ■** restores the exact pre-play scene.
 
 > Heads-up on shells: `--assets <cook-manifest>` in this README uses `<…>` as *placeholder*
