@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
@@ -262,6 +263,35 @@ fn to_proto_axis(axis: Option<gizmo::Axis>) -> GizmoAxis {
     }
 }
 
+/// How long a replacement engine may show a schema but an empty world before an Open is refused.
+/// The engine answers a bad `--scene` path by logging to its stderr and serving an empty world, so
+/// an empty snapshot is the only in-band sign of a failed load. The grace lets the first snapshot
+/// land after the schema; a real empty scene is refused too, which is the honest outcome for a
+/// file that holds no entities to show.
+const OPEN_GRACE: Duration = Duration::from_millis(1500);
+
+/// A session the shell can start on its own: the shared mirror it reads, the channel it writes, and
+/// the engine behind them. The production opener spawns `rime-engine`; the click tests substitute
+/// one whose far end they own.
+struct OpenedSession {
+    shared: Shared,
+    out_tx: Sender<Outbound>,
+    session: EngineSession,
+}
+
+/// Spawns the replacement session for an Open, given the scene path.
+type Opener = Box<dyn Fn(&str) -> OpenedSession>;
+
+/// An Open in flight. The replacement engine runs beside the current one, and the window only
+/// adopts it once it has shown a schema and a non-empty world. Until then (or if it fails) the
+/// current scene is untouched, which is what "a failed open leaves the scene intact" means here.
+struct PendingOpen {
+    path: String,
+    opened: OpenedSession,
+    /// When the replacement first showed a schema, so the empty-world grace period can be measured.
+    ready_since: Option<Instant>,
+}
+
 struct EditorApp {
     dock: DockState<Tab>,
     shared: Shared,
@@ -297,15 +327,34 @@ struct EditorApp {
     scene_path: Option<String>,
     save_as_path: String,
     save_status: Option<(String, bool)>, // (message, ok)
+    // ── New / Open (E2) ─────────────────────────────────────────────────────────────────────
+    // `opener` starts a replacement session for Open; `None` only in tests that have not supplied
+    // one, where Open is refused rather than silently doing nothing. `open_path` is the inline path
+    // box, as Save As's is. `open_grace` is `OPEN_GRACE` in the app and zero in tests that need an
+    // empty world refused at once.
+    opener: Option<Opener>,
+    pending_open: Option<PendingOpen>,
+    open_path: String,
+    open_grace: Duration,
 }
 
 impl EditorApp {
     fn new(engine: String, assets: Option<String>, scene: Option<String>) -> Self {
         let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
         let (out_tx, out_rx) = mpsc::channel();
-        let session =
-            EngineSession::spawn(engine, assets, scene.clone(), Arc::clone(&shared), out_rx);
-        Self::with_session(shared, out_tx, session, scene)
+        let session = EngineSession::spawn(
+            engine.clone(),
+            assets.clone(),
+            scene.clone(),
+            Arc::clone(&shared),
+            out_rx,
+        );
+        let mut app = Self::with_session(shared, out_tx, session, scene);
+        // File → Open starts the same engine the launch did, with the scene as `--scene` would.
+        app.opener = Some(Box::new(move |path| {
+            spawn_opened(&engine, assets.as_deref(), path)
+        }));
+        app
     }
 
     /// The app over an already-made session. This is the click tests' seam (`gui/click_tests.rs`):
@@ -339,7 +388,87 @@ impl EditorApp {
             scene_path: scene.clone(),
             save_as_path: scene.unwrap_or_default(),
             save_status: None,
+            opener: None,
+            pending_open: None,
+            open_path: String::new(),
+            open_grace: OPEN_GRACE,
         }
+    }
+
+    /// Start a replacement engine on `path`, without touching the current one. The window adopts it
+    /// later, in `settle_pending_open`, once it has proven it loaded something.
+    fn start_open(&mut self, path: String) {
+        let Some(opener) = self.opener.as_ref() else {
+            self.save_status = Some((
+                "open refused: this session has no engine to open a scene with".to_owned(),
+                false,
+            ));
+            return;
+        };
+        let opened = opener(&path);
+        self.save_status = Some((format!("opening {path}…"), true));
+        self.pending_open = Some(PendingOpen {
+            path,
+            opened,
+            ready_since: None,
+        });
+    }
+
+    /// Adopt a replacement engine once it has shown a schema and a non-empty world, or refuse it
+    /// (dropping it, which kills its engine) if it reported an error, or showed a schema but no
+    /// entities for `open_grace`. The current session is only dropped at the moment of adoption.
+    fn settle_pending_open(&mut self) {
+        let Some(pending) = self.pending_open.as_mut() else {
+            return;
+        };
+        let (error, ready, populated) = {
+            let s = pending.opened.shared.lock().unwrap();
+            (
+                s.error.clone(),
+                s.connected && !s.schema.types.is_empty(),
+                !s.snapshot.entities.is_empty(),
+            )
+        };
+        let refusal = if let Some(error) = error {
+            Some(format!("open refused: {error}"))
+        } else if ready && !populated {
+            let since = *pending.ready_since.get_or_insert_with(Instant::now);
+            (since.elapsed() >= self.open_grace).then(|| {
+                format!(
+                    "open refused: {} loaded no entities (missing, unreadable, or empty); \
+                     the current scene is unchanged",
+                    pending.path
+                )
+            })
+        } else {
+            None
+        };
+        if let Some(message) = refusal {
+            self.pending_open = None;
+            self.save_status = Some((message, false));
+            return;
+        }
+        if !(ready && populated) {
+            return;
+        }
+        let PendingOpen { path, opened, .. } = self.pending_open.take().expect("checked above");
+        self.shared = opened.shared;
+        self.out_tx = opened.out_tx;
+        // Assigning drops the old session, which kills the old engine and joins its reader.
+        self._session = opened.session;
+        // Everything that was about the old engine's world is about nothing now.
+        self.frame_tex = None;
+        self.shown_seq = 0;
+        self.selected = None;
+        self.stack = CommandStack::default();
+        self.active_edit = None;
+        self.gizmo_drag = None;
+        self.gizmo_hover = None;
+        self.last_gizmo_state = None;
+        self.fly = FlyCam::default();
+        self.scene_path = Some(path.clone());
+        self.save_as_path = path.clone();
+        self.save_status = Some((format!("opened {path}"), true));
     }
 
     /// Apply the commands the UI produced this frame: put each on the wire, patch the mirror
@@ -383,6 +512,9 @@ fn default_layout() -> DockState<Tab> {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // A replacement engine from File → Open is adopted (or refused) before this frame reads the
+        // mirror, so the frame shows the scene that is actually open.
+        self.settle_pending_open();
         // Pull the cheap state for this UI frame (hold the lock only briefly), plus the newest frame
         // as an egui image ONLY when its sequence changed — so the ~2 MB RGBA is copied once per
         // streamed frame, not once per repaint. The schema + entities are cloned so the widgets can
@@ -458,6 +590,9 @@ impl eframe::App for EditorApp {
         // Saving (m15.3): set by Ctrl+S or the File menu; `Some("")` means "write back where the
         // scene was opened", which is a decision the engine owns.
         let mut do_save: Option<String> = None;
+        // File → New and File → Open (E2): set by the menu, applied after it.
+        let mut do_new = false;
+        let mut do_open: Option<String> = None;
         let scene_is_open = self.scene_path.is_some();
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
@@ -555,6 +690,36 @@ impl eframe::App for EditorApp {
                             .clicked()
                         {
                             do_save = Some(self.save_as_path.trim().to_string());
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
+                    // New and Open replace the whole world, so they wait until it is not being
+                    // played: Stop is what brings the edit world back.
+                    let editing = play_state.phase == PlayPhase::Edit;
+                    if ui
+                        .add_enabled(editing, egui::Button::new("New"))
+                        .on_disabled_hover_text("stop the play session first")
+                        .clicked()
+                    {
+                        do_new = true;
+                        ui.close_menu();
+                    }
+                    ui.label("Open");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.open_path)
+                                .desired_width(260.0)
+                                .hint_text("path/to/scene.rscene"),
+                        );
+                        if ui
+                            .add_enabled(
+                                editing && !self.open_path.trim().is_empty(),
+                                egui::Button::new("Open"),
+                            )
+                            .clicked()
+                        {
+                            do_open = Some(self.open_path.trim().to_string());
                             ui.close_menu();
                         }
                     });
@@ -659,6 +824,26 @@ impl eframe::App for EditorApp {
             if let Some(cmd) = self.stack.redo() {
                 actions.push(cmd);
             }
+        }
+        if do_new {
+            // An empty scene with no path, so Save stays disabled until Save As. There is no
+            // "clear" message on the wire, so this despawns every entity through the same Commands
+            // an edit uses. Despawns are not undoable, and the undo history names entities that are
+            // now gone, so it is dropped with them.
+            actions.extend(entities.iter().map(|e| Command::Despawn {
+                key: (e.index, e.generation),
+            }));
+            self.pending_open = None;
+            self.scene_path = None;
+            self.save_as_path.clear();
+            self.stack = CommandStack::default();
+            self.selected = None;
+            self.active_edit = None;
+            self.gizmo_drag = None;
+            self.save_status = Some(("new scene — Save As to give it a path".to_owned(), true));
+        }
+        if let Some(path) = do_open {
+            self.start_open(path);
         }
         if let Some(path) = do_save {
             // Straight to the wire, NOT onto the undo stack: a save mutates a file, not the world,
@@ -857,6 +1042,25 @@ impl eframe::App for EditorApp {
 
         // Keep animating while a session is live so streamed frames flow smoothly.
         ctx.request_repaint();
+    }
+}
+
+/// Spawn a session for `scene` the way the launch does: the same engine, the same assets, and the
+/// scene passed as `--scene`. The mirror starts empty; `settle_pending_open` decides when it counts.
+fn spawn_opened(engine: &str, assets: Option<&str>, scene: &str) -> OpenedSession {
+    let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
+    let (out_tx, out_rx) = mpsc::channel();
+    let session = EngineSession::spawn(
+        engine.to_string(),
+        assets.map(str::to_string),
+        Some(scene.to_string()),
+        Arc::clone(&shared),
+        out_rx,
+    );
+    OpenedSession {
+        shared,
+        out_tx,
+        session,
     }
 }
 
