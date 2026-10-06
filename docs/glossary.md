@@ -427,6 +427,21 @@ Entries are grouped roughly by area and kept short on purpose.
   crack (or a row of sparkling pixels) between the two. Rime's fine terrain tiles force their
   edge vertices fully onto the coarse neighbour's edge, so the only gap is f32 rounding (bounded in
   ADR-0071).
+- **Appearance bake.** A coarse terrain tile's look, computed offline: the base colour, metallic
+  and roughness of the full-detail ground beneath it, averaged into two small textures the
+  renderer samples instead of blending layers the tile does not have. Rime's (M19.8d3,
+  [ADR-0072](adr/0072-m19.8d3-terrain-lod-appearance.md)) has one texel per vertex and is faded
+  in by the same factor that geomorphs the geometry.
+- **Vertex-aligned texels.** A texture laid out with texel (i, j) *at* grid vertex (i, j) — N
+  texels for N vertices — rather than centred on the N − 1 cells between them. Sampling at a
+  vertex then returns one texel exactly, and two tiles sharing an edge share that edge's texels.
+- **Box filter / footprint.** Averaging every source sample inside a fixed window (the
+  *footprint*) with equal weight; the simplest low-pass filter, and what a mip level is. A bake's
+  footprint is one parent cell wide and is defined in world space, so it does not stop at a tile
+  border.
+- **Linear light (averaging in).** sRGB bytes are a perceptual encoding, not proportional to
+  light, so colours must be decoded before they are averaged and re-encoded after: a black/white
+  checker averages to sRGB byte 188, not 128.
 - **Height blending.** Splat blending where each layer's *height* map, not just its painted weight,
   decides who wins a transition texel: the locally higher layer takes more of it, so gravel shows
   through grass along the low cracks instead of the two cross-fading into one smudge. Rime's form

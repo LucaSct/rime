@@ -1576,7 +1576,7 @@ double bake_srgb(std::uint8_t byte) {
 // in the ENCODED space — the tolerance the format conversion rules give (D3D's is stated exactly
 // so; Vulkan defers to the Khronos Data Format spec, which hardware built for both satisfies the
 // same way). In linear light that is the curve's slope times half a code, so it is NOT one
-// number: 1.5e-4 near black, 4.3e-3 near white. A flat bound would be either too loose for the
+// number: 1.5e-4 near black, 4.5e-3 near white. A flat bound would be either too loose for the
 // dark texels to mean anything or too tight for the bright ones to pass.
 double bake_srgb_tolerance(std::uint8_t byte) {
     const auto at = [](double code) {

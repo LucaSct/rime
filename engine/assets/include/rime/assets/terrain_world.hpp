@@ -65,6 +65,13 @@
 //   tile <TAB> level <TAB> x <TAB> z <TAB> revision <TAB> min_y <TAB> max_y <TAB> geometric_error
 //        <TAB> asset-id-hex <TAB> path
 //
+// A parent's line may carry four MORE columns (m19.8d3, ADR-0072) — its appearance bake:
+//
+//        … <TAB> path <TAB> color-id-hex <TAB> color-path <TAB> material-id-hex <TAB> material-path
+//
+// two single-level textures with one texel per sample (base colour, sRGB; metallic + roughness).
+// A level-0 line with those columns is malformed: level 0 shades from its palette.
+//
 // The 8-field line above is exactly this with level 0 and error 0, so an m19.8a manifest reads
 // unchanged. A level-L tile at (x, z) covers the 2^L x 2^L level-0 tiles from (x·2^L, z·2^L): it
 // has the SAME `samples` as a level-0 tile and 2^L times the spacing. Its samples are EVERY SECOND
