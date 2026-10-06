@@ -1775,7 +1775,10 @@ fn component_fields_ui(
     let mut it = Interaction::default();
     if let Value::Struct(fields) = &mut value {
         for (fname, fval) in fields.iter_mut() {
-            render_field(ui, fname, fval, &mut it);
+            // Every field is keyed by its component and its path, so no two fields share an id
+            // (see `exact_int_field`).
+            let salt = format!("{:016x}/{fname}", comp.type_hash);
+            render_field(ui, &salt, fname, fval, &mut it);
         }
     }
 
@@ -1835,27 +1838,35 @@ struct Interaction {
     committed: bool,
 }
 
-fn render_field(ui: &mut egui::Ui, name: &str, value: &mut Value, it: &mut Interaction) {
+/// Draw one field and its children. `salt` is the field's path from its component (type hash plus
+/// names), unique per field, and is what an id-keyed widget mixes in so siblings never share state.
+fn render_field(
+    ui: &mut egui::Ui,
+    salt: &str,
+    name: &str,
+    value: &mut Value,
+    it: &mut Interaction,
+) {
     match value {
         Value::Struct(children) => {
             egui::CollapsingHeader::new(name)
                 .default_open(true)
                 .show(ui, |ui| {
                     for (cname, cval) in children.iter_mut() {
-                        render_field(ui, cname, cval, it);
+                        render_field(ui, &format!("{salt}/{cname}"), cname, cval, it);
                     }
                 });
         }
         scalar => {
             ui.horizontal(|ui| {
                 ui.label(name);
-                render_scalar(ui, scalar, it);
+                render_scalar(ui, &format!("{salt}/{name}"), scalar, it);
             });
         }
     }
 }
 
-fn render_scalar(ui: &mut egui::Ui, value: &mut Value, it: &mut Interaction) {
+fn render_scalar(ui: &mut egui::Ui, salt: &str, value: &mut Value, it: &mut Interaction) {
     // A checkbox is a discrete edit (no drag): its change both starts and ends the gesture at once.
     // A drag-number streams changes; the gesture ends on release / focus loss.
     let resp = match value {
@@ -1872,8 +1883,8 @@ fn render_scalar(ui: &mut egui::Ui, value: &mut Value, it: &mut Interaction) {
         Value::U32(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
         // 64-bit integers take the exact text path (see `exact_int_field`): a DragValue holds an
         // f64, which has 53 bits of integer, so an asset id above 2^53 was shown and stored rounded.
-        Value::I64(x) => return exact_int_field(ui, x, it),
-        Value::U64(x) => return exact_int_field(ui, x, it),
+        Value::I64(x) => return exact_int_field(ui, salt, x, it),
+        Value::U64(x) => return exact_int_field(ui, salt, x, it),
         Value::Struct(_) => return, // handled by render_field
     };
     it.changed |= resp.changed();
@@ -1890,19 +1901,32 @@ fn render_scalar(ui: &mut egui::Ui, value: &mut Value, it: &mut Interaction) {
 /// stored, bit for bit. Text that does not parse is refused when focus leaves: nothing is written,
 /// the field shows red while it is wrong, and it goes back to the stored value.
 ///
-/// The text lives in egui's per-id temporary memory, keyed by this widget's id. While the field is
-/// focused the typed text is kept as typed; otherwise it is re-derived from the value every frame,
-/// so an undo or a streamed snapshot shows through without the field having to be re-entered.
-fn exact_int_field<T>(ui: &mut egui::Ui, value: &mut T, it: &mut Interaction)
+/// The text being typed lives in egui's temporary memory under this field's id, together with the
+/// value it was typed over. It is used only while that value is still the stored one: the moment the
+/// value changes (a commit, an undo, a streamed snapshot) the field shows the value again.
+#[derive(Clone)]
+struct TypedText {
+    text: String,
+    source: String,
+}
+
+fn exact_int_field<T>(ui: &mut egui::Ui, salt: &str, value: &mut T, it: &mut Interaction)
 where
     T: Copy + PartialEq + std::fmt::Display + std::str::FromStr,
 {
-    let id = ui.id().with("exact-int");
-    let focused = ui.memory(|m| m.has_focus(id));
-    let stored: Option<String> = ui.data(|d| d.get_temp(id));
-    let mut text = match (focused, stored) {
-        (true, Some(typed)) => typed,
-        _ => value.to_string(),
+    // The id mixes in the field's own salt. Without it, two fields in one component collided: egui's
+    // `scope_dyn` rewinds `next_auto_id_salt` after each child, so sibling `ui.horizontal` scopes get
+    // the same auto id, and the two text boxes shared text and focus (click test
+    // `two_u64_fields_in_one_component_round_trip_independently`).
+    let id = ui.id().with(("exact-int", salt));
+    let shown = value.to_string();
+    // Keyed on the value rather than on focus: when focus moves from this field to another in one
+    // frame, this field has already lost focus by the time it is drawn, and the typed text must still
+    // be the text committed.
+    let typed: Option<TypedText> = ui.data(|d| d.get_temp(id));
+    let mut text = match typed {
+        Some(t) if t.source == shown => t.text,
+        _ => shown.clone(),
     };
     let refused = text.trim().parse::<T>().is_err();
     let color = if refused {
@@ -1926,8 +1950,19 @@ where
             }
         }
         it.committed = true;
+        // Refused or committed, the typed text is done: the field shows the stored value again.
+        ui.data_mut(|d| d.remove::<TypedText>(id));
+    } else if resp.has_focus() {
+        ui.data_mut(|d| {
+            d.insert_temp(
+                id,
+                TypedText {
+                    text,
+                    source: shown,
+                },
+            )
+        });
     }
-    ui.data_mut(|d| d.insert_temp(id, text));
 }
 
 // A small, UI-side input vocabulary the session thread turns into rime_protocol::InputEvent. Kept
