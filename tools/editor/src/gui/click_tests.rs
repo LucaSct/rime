@@ -1153,6 +1153,47 @@ fn open_refuses_an_engine_that_failed_to_start() {
     assert!(rig.has("3 entities"));
 }
 
+#[test]
+fn two_u64_fields_in_one_component_round_trip_independently() {
+    // Two 64-bit fields rendered in the same component share a parent Ui. If their text boxes shared
+    // an id they would share text and focus, and typing into one would show in both. Each must keep
+    // its own value, above 2^53, and write only its own field.
+    const H_PAIR: u64 = 0x15;
+    const A: u64 = 0xDEAD_BEEF_CAFE_F00D;
+    const B: u64 = 0x0123_4567_89AB_CDEF;
+    let mut world = starting_world();
+    let blob: Vec<u8> = [1u64, 2u64].iter().flat_map(|v| v.to_le_bytes()).collect();
+    world[2].components.push(comp(H_PAIR, blob));
+    let mut rig = Rig::build(None, world);
+    let mut schema = fake_schema();
+    schema.types.push(SchemaEntry {
+        type_hash: H_PAIR,
+        name: "rime::test::IdPair".to_string(),
+        is_component: true,
+        fields: vec![field("a", FieldKind::U64, 0), field("b", FieldKind::U64, 0)],
+    });
+    rig.host.shared.lock().unwrap().schema = schema;
+    rig.settle();
+    rig.click(ROW_CRATE);
+
+    // Each value is committed with Enter, the way a person finishes a field, before the next is typed.
+    retype_field(&mut rig, "1", &A.to_string());
+    rig.key(egui::Key::Enter);
+    retype_field(&mut rig, "2", &B.to_string());
+    rig.key(egui::Key::Enter);
+
+    let stored: Vec<u8> = [A, B].iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(rig.host.component(CRATE, H_PAIR), Some(stored.as_slice()));
+    assert!(rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .any(|n| n.value().as_deref() == Some(A.to_string().as_str())));
+    assert!(rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .any(|n| n.value().as_deref() == Some(B.to_string().as_str())));
+}
+
 // ── View ────────────────────────────────────────────────────────────────────────────────────
 
 #[test]
