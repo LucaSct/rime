@@ -67,7 +67,9 @@
 //     No prefiltered radiance (roughness fades from the LUT toward the SH instead) and NO SKY
 //     OCCLUSION — a valley reflects sky its own walls hide. With no sky the flat-ambient stand-in
 //     of ADR-0064 renders as m19.5 did, to one f16 ULP (ADR-0065 §4);
-//   * no streaming: `upload()` is a one-shot, and a tile stays resident until the pass dies;
+//   * no streaming POLICY here: `upload()` is a one-shot and `release()` (m19.8a) gives a tile's
+//     GPU memory back, but deciding WHEN — and proving the GPU is done with it — is
+//     TerrainResidency's (terrain_residency.hpp, ADR-0069);
 //   * no holes, no decals, no per-cell best-fit diagonals (the format cannot express them either);
 //   * a tile is placed by TRANSLATION only, because `HeightfieldAsset` carries an `origin` and no
 //     rotation — physics can yaw a registered tile, the cooked asset cannot say so.
@@ -110,6 +112,7 @@ struct TerrainTile {
     rhi::TextureHandle weights{};  // RGBA8_UNORM, weight_columns x weight_rows, bytes verbatim
     rhi::BufferHandle splat_ubo{}; // flag, extent, dims, colours, roughness, uv scales, contrasts
     bool has_splat = false;
+    std::uint64_t weight_bytes = 0; // m19.8a: the weight texture's size, for tile_bytes()
     // m19.7b: the four per-layer albedo+height textures, bound at bindings 5..8. NOT owned by the
     // tile — they are the builder's (see TerrainLayer::albedo_height) — except that a slot with no
     // texture holds the PASS's 1x1 white fallback, so every tile binds four valid handles. A v1
@@ -252,14 +255,31 @@ public:
     [[nodiscard]] TerrainTileId upload(const assets::HeightfieldAsset& asset,
                                        const TerrainPalette& palette);
 
-    // UNCHECKED, the MeshRegistry::get contract: `id` must have come from a successful upload().
+    // UNCHECKED, the MeshRegistry::get contract: `id` must have come from a successful upload()
+    // and not been released since.
     [[nodiscard]] const TerrainTile& tile(TerrainTileId id) const { return tiles_[id]; }
 
     [[nodiscard]] bool contains(TerrainTileId id) const noexcept {
-        return id != kInvalidTerrainTile && id < tiles_.size();
+        return id != kInvalidTerrainTile && id < tiles_.size() && live_[id];
     }
 
-    [[nodiscard]] std::size_t tile_count() const noexcept { return tiles_.size(); }
+    // Tiles currently held (uploaded and not released).
+    [[nodiscard]] std::size_t tile_count() const noexcept { return tiles_.size() - free_.size(); }
+
+    // Destroy a tile's GPU resources (m19.8a) and recycle its id for a later upload(). Returns
+    // false, changing nothing, for an id this pass does not hold. The borrowed layer textures are
+    // NOT destroyed — they are the builder's.
+    //
+    // THE CALLER OWNS THE FENCE. The RHI destroys at once, so every submitted frame that drew this
+    // tile must have RETIRED before this is called; and because the id is recycled, a caller still
+    // holding it would draw the next tenant. Both are exactly what TerrainResidency exists to
+    // guarantee (a generation-checked id outside, the m18.5 retirement watermark inside) — call
+    // this directly only when nothing is in flight.
+    bool release(TerrainTileId id);
+
+    // The GPU bytes a held tile occupies — heights, indices, weights and its uniform block; not the
+    // borrowed layer textures. 0 for an id this pass does not hold.
+    [[nodiscard]] std::uint64_t tile_bytes(TerrainTileId id) const noexcept;
 
     // Declare the terrain draw into `hdr` (loaded, not cleared — terrain joins a frame other
     // passes have already contributed to) with `depth` written, like any other opaque geometry.
@@ -332,6 +352,8 @@ private:
     rhi::TextureHandle dummy_skyview_;
     rhi::BufferHandle dummy_sh_;
     std::vector<TerrainTile> tiles_;
+    std::vector<bool> live_;          // m19.8a: tiles_[i] holds resources
+    std::vector<TerrainTileId> free_; // m19.8a: released ids, reused LIFO by upload()
     TerrainTileId upload_impl(const assets::HeightfieldAsset& asset, const TerrainPalette* palette);
 
     bool push_fits_ = true; // adapter().max_push_constant_bytes >= sizeof(TerrainPush)

@@ -259,7 +259,11 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
 }
 
 TerrainPass::~TerrainPass() {
-    for (const TerrainTile& t : tiles_) {
+    for (std::size_t i = 0; i < tiles_.size(); ++i) {
+        if (!live_[i]) {
+            continue; // released: its handles were destroyed then
+        }
+        const TerrainTile& t = tiles_[i];
         device_.destroy(t.splat_ubo);
         device_.destroy(t.weights);
         device_.destroy(t.indices);
@@ -475,6 +479,7 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
         }
         return kInvalidTerrainTile;
     }
+    tile.weight_bytes = splat ? asset.weights.size() : sizeof(dummy_texel);
     if (splat) {
         device_.write_texture(tile.weights, asset.weights.data(), asset.weights.size());
     } else {
@@ -482,8 +487,45 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
     }
     device_.write_buffer(tile.splat_ubo, &u, sizeof(u), 0);
 
+    // m19.8a: a released id is recycled before the store grows, so a streaming world that keeps a
+    // bounded number of tiles resident also keeps this vector bounded.
+    if (!free_.empty()) {
+        const TerrainTileId id = free_.back();
+        free_.pop_back();
+        tiles_[id] = tile;
+        live_[id] = true;
+        return id;
+    }
     tiles_.push_back(tile);
+    live_.push_back(true);
     return static_cast<TerrainTileId>(tiles_.size() - 1);
+}
+
+bool TerrainPass::release(TerrainTileId id) {
+    if (!contains(id)) {
+        return false;
+    }
+    TerrainTile& t = tiles_[id];
+    device_.destroy(t.splat_ubo);
+    device_.destroy(t.weights);
+    device_.destroy(t.indices);
+    device_.destroy(t.heights);
+    t = TerrainTile{}; // no stale handle survives in the slot
+    live_[id] = false;
+    free_.push_back(id);
+    return true;
+}
+
+std::uint64_t TerrainPass::tile_bytes(TerrainTileId id) const noexcept {
+    if (!contains(id)) {
+        return 0;
+    }
+    const TerrainTile& t = tiles_[id];
+    // What upload() allocated, by construction: u16 heights, u32 indices, RGBA8 weights (a 1x1
+    // dummy on a v1 tile) and the 160-byte splat block. Allocator padding is not counted.
+    return std::uint64_t{t.vertex_count} * sizeof(std::uint16_t) +
+           std::uint64_t{t.index_count} * sizeof(std::uint32_t) + t.weight_bytes +
+           sizeof(SplatUniform);
 }
 
 void TerrainPass::add(RenderGraph& graph,

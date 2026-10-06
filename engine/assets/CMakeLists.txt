@@ -15,6 +15,7 @@ add_library(rime_assets STATIC
     src/cooked_reader.cpp
     src/registry.cpp
     src/manifest.cpp
+    src/terrain_world.cpp
     src/asset_server.cpp
     src/clip_sampler.cpp
     src/sdf_sampler.cpp)

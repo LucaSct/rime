@@ -33,6 +33,14 @@ namespace {
     if (name == "mesh_sdf") {
         return AssetKind::MeshSdf;
     }
+    // m19.8a: the terrain kinds, so a palette slot's id resolves to its cooked file (the terrain
+    // builder dispatches on this kind). Names match the Rust enum's snake_case, like the rest.
+    if (name == "heightfield") {
+        return AssetKind::Heightfield;
+    }
+    if (name == "terrain_layer") {
+        return AssetKind::TerrainLayer;
+    }
     return std::nullopt;
 }
 

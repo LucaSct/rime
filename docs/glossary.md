@@ -381,10 +381,24 @@ Entries are grouped roughly by area and kept short on purpose.
   structured than a triangle mesh — "which triangles are under this point" is a division, not a
   search — at the price of no overhangs or caves. Rime's is cooked as quantised u16 samples with a
   scale and offset (M19.1, ADR-0060-m19.1).
+- **Streamed asset / deferred eviction.** An asset the `AssetServer` can give back (M19.8b,
+  ADR-0067): each request is an *ownership*, and when the last owner releases, the slot is
+  *evicted* — its CPU payload freed and its index recycled under a bumped generation, so old
+  handles go stale instead of pointing at the new tenant. If the release arrives while the load job
+  is still running, the eviction is *deferred*: the slot stays pinned and the job frees it as it
+  finishes, so nothing is freed under a running job. Contrast *retained* assets (meshes, textures,
+  materials), which stay for the server's lifetime.
 - **Terrain layer.** One surface a terrain's splat palette can name (M19.7a, ADR-0066): a material
   plus a texture packing the layer's albedo (RGB) and height (A), tiled at world-XZ coordinates with
   a `uv_scale`, and a `height_contrast`. A palette slot names either a terrain layer or a plain
   material; the cooked file's kind says which.
+- **Terrain world / terrain residency.** The *terrain world* (M19.8a, ADR-0069) is the map of a
+  streamed terrain: integer grid coordinates → cooked heightfield tiles, all on one declared spacing
+  and quantisation so neighbours share their border samples exactly. *Terrain residency* keeps a
+  fixed number of those tiles on the GPU (*tile slots*), chosen around the camera with two radii —
+  *activation* (request) and *retention* (keep), the gap between them being the *hysteresis* that
+  stops a camera on a boundary from loading and evicting one tile every other frame. An evicted
+  slot is reused only once its last reader has retired (see *retirement watermark*).
 - **Height blending.** Splat blending where each layer's *height* map, not just its painted weight,
   decides who wins a transition texel: the locally higher layer takes more of it, so gravel shows
   through grass along the low cracks instead of the two cross-fading into one smudge. Rime's form
