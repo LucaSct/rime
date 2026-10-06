@@ -376,6 +376,19 @@ public:
     // not hold.
     [[nodiscard]] std::uint64_t tile_bytes(TerrainTileId id) const noexcept;
 
+    // m19.8e (ADR-0073): what `tile_bytes` WILL be once `asset` is uploaded (with a bake set, if
+    // `with_bake`) — computed before anything is allocated, so a byte budget and a per-frame upload
+    // cap can be checked before the upload rather than repaired after it. Equal by construction:
+    // the same four terms, and the test asserts it for every tile it uploads.
+    [[nodiscard]] static std::uint64_t predicted_tile_bytes(const assets::HeightfieldAsset& asset,
+                                                            bool with_bake) noexcept;
+    // The same from the grid alone, for a tile not loaded yet — a parent (no splat: the 1×1 dummy
+    // weight texel), as the pinned root cover's reservation needs.
+    [[nodiscard]] static std::uint64_t predicted_tile_bytes(std::uint32_t columns,
+                                                            std::uint32_t rows,
+                                                            std::uint64_t weight_bytes,
+                                                            bool with_bake) noexcept;
+
     // Declare the terrain draw into `hdr` (loaded, not cleared — terrain joins a frame other
     // passes have already contributed to) with `depth` written, like any other opaque geometry.
     //

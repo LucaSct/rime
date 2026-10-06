@@ -147,6 +147,12 @@ bool TerrainLayerBuilder::texture_ready(assets::AssetId id) {
         ++counters_.unsupported_textures;
         return false;
     }
+    // m19.8e: the caller's allowance (its byte budget or upload cap). Not created, not failed: the
+    // CPU copy stays loaded and a later update with more room creates it.
+    if (cpu->pixels.size() > allowance_ - created_) {
+        ++counters_.allowance_deferrals;
+        return false;
+    }
     rhi::TextureDesc desc{};
     desc.extent = {cpu->width, cpu->height};
     desc.mip_levels = static_cast<std::uint32_t>(cpu->mips.size());
@@ -168,6 +174,7 @@ bool TerrainLayerBuilder::texture_ready(assets::AssetId id) {
     }
     device_.write_texture_mips(t.gpu, levels);
     t.bytes = cpu->pixels.size();
+    created_ += t.bytes;
     ++counters_.textures_uploaded;
     return true;
 }
@@ -238,6 +245,18 @@ void TerrainLayerBuilder::advance_slot(Slot& slot) {
     slot.layer.metallic = m->metallic;
     slot.layer.roughness = m->roughness;
     slot.step = Slot::Step::Done;
+}
+
+TerrainPaletteState TerrainLayerBuilder::update(TerrainPaletteHandle handle,
+                                                std::uint64_t allowance,
+                                                std::uint64_t& created) {
+    allowance_ = allowance;
+    created_ = 0;
+    const TerrainPaletteState s = update(handle);
+    created += created_;
+    allowance_ = ~std::uint64_t{0};
+    created_ = 0;
+    return s;
 }
 
 TerrainPaletteState TerrainLayerBuilder::update(TerrainPaletteHandle handle) {

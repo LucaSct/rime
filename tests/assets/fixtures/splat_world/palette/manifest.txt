@@ -1,0 +1,9 @@
+# rime-manifest v1
+../material_quad.gltf#material0	material	bef9a2e4590227bf	material_quad.mat0.rmat
+material_quad.gltf#image0.lin	texture	496aba021f737602	material_quad.img0.lin.rtex
+material_quad.gltf#image0.srgb	texture	ac06d85f6cc446a7	material_quad.img0.srgb.rtex
+material_quad.gltf#image1.lin	texture	a9737e709787ffb1	material_quad.img1.lin.rtex
+src/grass.terrainlayer.toml	terrain_layer	ea3690517cb0d7f5	grass.rtl
+src/grass_albedo.png	texture	18274e49bd4c8ce1	grass_albedo_height.rtex
+src/rock.terrainlayer.toml	terrain_layer	1c6a735bead13ee5	rock.rtl
+src/rock_albedo.png	texture	4e239830ca0a1c74	rock_albedo_height.rtex

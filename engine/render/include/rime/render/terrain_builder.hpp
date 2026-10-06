@@ -74,6 +74,9 @@ struct TerrainBuilderCounters {
     std::uint64_t unsupported_textures = 0; // not RGBA8_SRGB, or the GPU allocation failed
     std::uint64_t textures_uploaded = 0;
     std::uint64_t textures_destroyed = 0;
+    // m19.8e: GPU texture creations put off because they did not fit the caller's allowance
+    // (`update(handle, allowance, created)`) — the residency's byte budget or upload cap.
+    std::uint64_t allowance_deferrals = 0;
 };
 
 class TerrainLayerBuilder {
@@ -97,6 +100,15 @@ public:
     // Advance a palette's resolution — main thread, after `AssetServer::pump()`. Once Ready or
     // Failed it stays so. Unknown handle → Failed.
     TerrainPaletteState update(TerrainPaletteHandle handle);
+
+    // m19.8e (ADR-0073): the same, but a layer texture is created on the GPU only if its bytes fit
+    // `allowance` (what is left of it: two textures of one palette share it). One that does not
+    // fit is not created — the palette stays Pending and the deferral is counted — so a caller
+    // holding a byte budget or a per-frame upload cap is never pushed past it by a palette. The
+    // bytes actually uploaded are ADDED to `created`. A texture already on the GPU (another
+    // palette's) costs nothing: sharing is free, which is the point of the reference count.
+    TerrainPaletteState
+    update(TerrainPaletteHandle handle, std::uint64_t allowance, std::uint64_t& created);
 
     // The resolved palette: non-null only when Ready. Its texture handles stay valid until this
     // palette's `release`; the POINTER only until the next `request` (which may grow the store) —
@@ -153,6 +165,9 @@ private:
     void begin_layer_dependencies(Slot& slot, const assets::TerrainLayerAsset& record);
     void advance_slot(Slot& slot);
     [[nodiscard]] bool texture_ready(assets::AssetId id);
+    // m19.8e: the allowance of the update() in progress (unlimited outside one), and what it spent.
+    std::uint64_t allowance_ = ~std::uint64_t{0};
+    std::uint64_t created_ = 0;
     void release_texture(assets::AssetId id);
     void fail(Slot& slot);
 

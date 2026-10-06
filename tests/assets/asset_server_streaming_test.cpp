@@ -531,3 +531,52 @@ TEST_CASE("streamed: request/release churn from worker jobs conserves slots (TSa
     CHECK(server.live_heightfield_slots() == 0);
     CHECK(server.resident_heightfields() == 0);
 }
+
+TEST_CASE("m19.8e: a streamed texture is released like a heightfield, and the streamed bytes "
+          "return to zero") {
+    // The terrain bakes' path (ADR-0073): a texture requested through the streamed pool is freed
+    // by its last release, where the retained `request_texture` would keep it until the server
+    // dies. Its bytes are what the residency's "CPU copy released" claim is measured in.
+    JobSystem jobs(2);
+    AssetServer server(jobs);
+    const fs::path tex = kFixtures / "checker.rtex";
+    const auto file = rime::platform::read_file(tex);
+    REQUIRE(file);
+    AssetError err{};
+    const auto expected = read_texture(*file, err);
+    REQUIRE(expected);
+
+    CHECK(server.resident_streamed_bytes() == 0);
+    const StreamedTextureAssetHandle t = server.request_streamed_texture(tex);
+    const HeightfieldAssetHandle h = server.request_heightfield(kTerrainSplat);
+    settle(server);
+    REQUIRE(server.get(t) != nullptr);
+    CHECK(server.get(t)->pixels == expected->pixels);
+    CHECK(server.resident_streamed_textures() == 1);
+    CHECK(server.resident_streamed_texture_bytes() == expected->pixels.size());
+    const HeightfieldAsset* hf = server.get(h);
+    REQUIRE(hf != nullptr);
+    CHECK(server.resident_streamed_bytes() ==
+          expected->pixels.size() + hf->samples.size() * 2 + hf->weights.size());
+
+    // The retained path is a different pool: requesting the same file there is a second slot, and
+    // releasing the streamed one does not touch it.
+    const TextureAssetHandle retained = server.request_texture(tex);
+    settle(server);
+    CHECK(server.get(retained) != nullptr);
+
+    CHECK(server.release(t));
+    CHECK(server.state(t) == AssetState::Stale);
+    CHECK(server.get(t) == nullptr);
+    CHECK(server.live_streamed_texture_slots() == 0);
+    CHECK(server.resident_streamed_texture_bytes() == 0);
+    CHECK(server.get(retained) != nullptr);
+    CHECK_FALSE(server.release(t)); // stale: refused, counted
+    CHECK(server.release(h));
+    CHECK(server.resident_streamed_bytes() == 0);
+
+    const StreamCounters c = server.stream_counters();
+    CHECK(c.requests == 2);
+    CHECK(c.evictions == 2);
+    CHECK(c.stale_handle_resolutions >= 3);
+}

@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <limits>
 #include <utility>
 
 #include "rime/assets/heightfield_asset.hpp"
@@ -127,6 +129,22 @@ TerrainResidency::TerrainResidency(rhi::Device& device,
                       slots_.capacity());
         }
     }
+    // m19.8e: the byte budget reserves the pinned root cover the way the slots do. Predicted from
+    // the grid alone (a root is a parent: no splat, a bake if the manifest names one), because a
+    // reservation has to exist before anything has loaded.
+    if (lod_ && config_.byte_budget > 0) {
+        for (const assets::TerrainWorldTile& t : world_.tiles(world_.level_count() - 1)) {
+            root_bytes_ += root_bytes(t.key());
+        }
+        if (root_bytes_ > config_.byte_budget) {
+            lod_refused_ = true;
+            ++stats_.byte_budget_refusals;
+            RIME_WARN("terrain residency: the world's root cover needs {} bytes, over the {}-byte "
+                      "budget — refused, nothing will be drawn",
+                      root_bytes_,
+                      config_.byte_budget);
+        }
+    }
 }
 
 TerrainResidency::~TerrainResidency() {
@@ -184,7 +202,22 @@ void TerrainResidency::reclaim_slots() {
     }
 }
 
+void TerrainResidency::release_bake(Record& r) {
+    // m19.8e: the bake's CPU copy goes back to the server — after the pass took its own copy
+    // (set_bake copies the texels), or when it was refused, failed, or the tile is forgotten. A
+    // resident tile never holds one; `resident_bake_holds` is the gauge that says so.
+    if (r.bake_color.is_valid()) {
+        server_.release(r.bake_color);
+        r.bake_color = {};
+    }
+    if (r.bake_material.is_valid()) {
+        server_.release(r.bake_material);
+        r.bake_material = {};
+    }
+}
+
 void TerrainResidency::forget(Record& r) {
+    release_bake(r);
     if (r.heightfield.is_valid()) {
         server_.release(r.heightfield);
         r.heightfield = {};
@@ -316,6 +349,7 @@ int TerrainResidency::bake_state(Record& r) {
     // placeholder material, counted here once and per draw in fallback_appearance_draws.
     ++stats_.bake_load_failures;
     r.bake_requested = false;
+    release_bake(r); // a Failed slot stays Failed until its owner lets go
     return 2;
 }
 
@@ -374,30 +408,55 @@ float TerrainResidency::distance(assets::TerrainTileKey k, const core::Vec3& eye
                 : world_.grid().distance_xz(k.coord, eye);
 }
 
-std::optional<TerrainResidentId> TerrainResidency::take_slot(assets::TerrainTileKey k,
-                                                             const core::Vec3& eye) {
-    // m19.8d2: the reserved root slots. A non-root may take a free slot only while more are free
-    // than there are roots still waiting for one, so the root cover always fits.
-    const auto may_acquire = [&]() {
-        if (!lod_) {
-            return true;
-        }
-        const auto rec = records_.find(k);
-        if (rec != records_.end() && rec->second.pinned) {
-            return true;
-        }
-        std::uint32_t waiting_roots = 0;
-        for (const auto& [rk, r] : records_) {
-            waiting_roots += r.pinned && r.phase != Phase::Resident && r.phase != Phase::Refused;
-        }
-        return slots_.count(TerrainSlotTable::State::Free) > waiting_roots;
-    };
-    if (may_acquire()) {
-        if (const auto id = slots_.acquire()) {
-            return id;
+std::uint64_t TerrainResidency::committed_bytes() const {
+    // Occupied AND retiring: a retiring slot's memory is not free until its fence says so.
+    std::uint64_t bytes = 0;
+    for (std::uint32_t i = 0; i < slots_.capacity(); ++i) {
+        if (slots_.state(i) != TerrainSlotTable::State::Free) {
+            bytes += payloads_[i].bytes;
         }
     }
-    // Pick a victim (ties broken by key, so the choice is deterministic).
+    return bytes + (builder_ != nullptr ? builder_->texture_bytes() : 0);
+}
+
+std::uint64_t TerrainResidency::root_bytes(assets::TerrainTileKey k) const {
+    const assets::TerrainWorldTile* t = world_.find(k);
+    const std::uint32_t n = world_.grid().samples;
+    return TerrainPass::predicted_tile_bytes(n, n, 4, t != nullptr && t->has_bake());
+}
+
+std::uint64_t TerrainResidency::reserve_for(assets::TerrainTileKey k) const {
+    if (root_bytes_ == 0) {
+        return 0;
+    }
+    std::uint64_t reserve = 0;
+    for (const auto& [rk, r] : records_) {
+        if (r.pinned && rk != k && r.phase != Phase::Resident && r.phase != Phase::Refused) {
+            reserve += root_bytes(rk);
+        }
+    }
+    return reserve;
+}
+
+std::uint64_t TerrainResidency::limit_for(assets::TerrainTileKey k) const {
+    if (config_.byte_budget == 0) {
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+    const std::uint64_t reserve = reserve_for(k);
+    return reserve >= config_.byte_budget ? 0 : config_.byte_budget - reserve;
+}
+
+void TerrainResidency::journal(assets::TerrainTileKey k,
+                               TerrainUploadEvent::Kind kind,
+                               std::uint64_t bytes) {
+    if (config_.journal != nullptr) {
+        config_.journal->push_back({frame_, k, kind, bytes});
+    }
+}
+
+std::map<assets::TerrainTileKey, TerrainResidency::Record>::iterator
+TerrainResidency::pick_victim(assets::TerrainTileKey k, const core::Vec3& eye) {
+    // Ties broken by key, so the choice is deterministic.
     //  * m19.8a: the FARTHEST resident tile beyond retention. A kept tile is never evicted for a
     //    wanted one — that is what the hysteresis promises — so with every slot kept the wanted
     //    tile waits, counted.
@@ -432,16 +491,76 @@ std::optional<TerrainResidentId> TerrainResidency::take_slot(assets::TerrainTile
             }
         }
     }
-    if (victim == records_.end()) {
-        return std::nullopt;
+    return victim;
+}
+
+std::optional<TerrainResidentId> TerrainResidency::take_slot(assets::TerrainTileKey k,
+                                                             const core::Vec3& eye,
+                                                             std::uint64_t need,
+                                                             bool& bytes_short) {
+    // m19.8d2: the reserved root slots. A non-root may take a free slot only while more are free
+    // than there are roots still waiting for one, so the root cover always fits.
+    const auto may_acquire = [&]() {
+        if (slots_.count(TerrainSlotTable::State::Free) == 0) {
+            return false;
+        }
+        if (!lod_) {
+            return true;
+        }
+        const auto rec = records_.find(k);
+        if (rec != records_.end() && rec->second.pinned) {
+            return true;
+        }
+        std::uint32_t waiting_roots = 0;
+        for (const auto& [rk, r] : records_) {
+            waiting_roots += r.pinned && r.phase != Phase::Resident && r.phase != Phase::Refused;
+        }
+        return slots_.count(TerrainSlotTable::State::Free) > waiting_roots;
+    };
+    // m19.8e: and the bytes. `limit_for` already holds back the waiting roots' reservation.
+    const std::uint64_t limit = limit_for(k);
+    const auto fits = [&](std::uint64_t committed) {
+        return committed <= limit && need <= limit - committed;
+    };
+    // Evict victims — the lowest priority first — while that is what stands in the way: at most
+    // ONE for a slot (m19.8a/8d2's rule, unchanged), and as many as the BYTES need. A victim's
+    // bytes are free only when its slot is reclaimed; those still retiring are counted as on
+    // their way, so pressure never evicts more than the request needs — it waits for the fence.
+    bool evicted_for_slot = false;
+    std::uint64_t on_the_way = 0;
+    for (;;) {
+        const std::uint64_t committed = committed_bytes();
+        const bool slot_ok = may_acquire();
+        const bool bytes_ok = fits(committed);
+        if (slot_ok && bytes_ok) {
+            return slots_.acquire();
+        }
+        const bool want_slot = !slot_ok && !evicted_for_slot;
+        const bool want_bytes = !bytes_ok && !fits(committed - std::min(committed, on_the_way));
+        if (!want_slot && !want_bytes) {
+            bytes_short = !bytes_ok;
+            return std::nullopt;
+        }
+        const auto victim = pick_victim(k, eye);
+        if (victim == records_.end()) {
+            bytes_short = !bytes_ok;
+            return std::nullopt;
+        }
+        const std::uint32_t vslot = victim->second.id.slot;
+        slots_.evict(victim->second.id);
+        ++stats_.evictions;
+        if (!want_slot) {
+            ++stats_.byte_budget_evictions;
+        }
+        evicted_for_slot = evicted_for_slot || want_slot;
+        forget(victim->second); // a resident parent's retained heightfield goes back to the server
+        records_.erase(victim); // the payload stays with the slot until it is reclaimed
+        // The evicted slot may already be reclaimable (no unretired frame read it).
+        reclaim_slots();
+        if (slots_.state(vslot) == TerrainSlotTable::State::Retiring) {
+            on_the_way += payloads_[vslot].bytes;
+        }
     }
-    slots_.evict(victim->second.id);
-    ++stats_.evictions;
-    forget(victim->second); // a resident parent's retained heightfield goes back to the server
-    records_.erase(victim); // the payload stays with the slot until it is reclaimed
-    // The evicted slot may already be reclaimable (no unretired frame read it).
-    reclaim_slots();
-    return may_acquire() ? slots_.acquire() : std::nullopt;
 }
 
 void TerrainResidency::advance(assets::TerrainTileKey k, Record& r, const core::Vec3& eye) {
@@ -482,8 +601,56 @@ void TerrainResidency::advance(assets::TerrainTileKey k, Record& r, const core::
     if (r.phase != Phase::Building) {
         return;
     }
+    r.wait = 0;
+    const assets::HeightfieldAsset* asset = server_.get(r.heightfield);
+    // m19.8e: what this tile will cost — its predicted GPU bytes, before anything is allocated.
+    const std::uint64_t need = TerrainPass::predicted_tile_bytes(*asset, r.bake_requested);
+    const bool budgeted = config_.byte_budget > 0 || config_.upload_cap > 0;
+    const auto cap_left = [&]() -> std::uint64_t {
+        if (config_.upload_cap == 0) {
+            return std::numeric_limits<std::uint64_t>::max();
+        }
+        if (cap_closed_ || stats_.upload_bytes_this_frame >= config_.upload_cap) {
+            return 0;
+        }
+        return config_.upload_cap - stats_.upload_bytes_this_frame;
+    };
     if (r.palette != kInvalidTerrainPalette) {
-        const TerrainPaletteState ps = builder_->update(r.palette);
+        TerrainPaletteState ps = TerrainPaletteState::Pending;
+        if (!budgeted) {
+            ps = builder_->update(r.palette);
+        } else {
+            // The palette's layer textures may take only what leaves room for the tile itself,
+            // under both the budget and this frame's cap.
+            const std::uint64_t committed = committed_bytes();
+            const std::uint64_t limit = limit_for(k);
+            const std::uint64_t budget_room =
+                committed + need <= limit ? limit - committed - need : 0;
+            const std::uint64_t cap = cap_left();
+            const std::uint64_t cap_room = cap > need ? cap - need : 0;
+            const std::uint64_t deferrals = builder_->counters().allowance_deferrals;
+            std::uint64_t created = 0;
+            ps = builder_->update(r.palette, std::min(budget_room, cap_room), created);
+            if (created > 0) {
+                stats_.upload_bytes_this_frame += created;
+                stats_.upload_bytes += created;
+                journal(k, TerrainUploadEvent::Kind::LayerUpload, created);
+            }
+            if (builder_->counters().allowance_deferrals != deferrals) {
+                ++stats_.layer_allowance_waits;
+                const bool by_cap = cap_room < budget_room;
+                if (by_cap) {
+                    cap_closed_ = true; // nothing after this tile uploads this frame
+                }
+                r.wait = by_cap ? 3 : 2;
+                ++(by_cap ? stats_.upload_cap_waits : stats_.byte_budget_waits);
+                journal(k,
+                        by_cap ? TerrainUploadEvent::Kind::LayerCapWait
+                               : TerrainUploadEvent::Kind::LayerBudgetWait,
+                        0);
+                return;
+            }
+        }
         if (ps == TerrainPaletteState::Pending) {
             return;
         }
@@ -494,7 +661,6 @@ void TerrainResidency::advance(assets::TerrainTileKey k, Record& r, const core::
             return;
         }
     }
-    const assets::HeightfieldAsset* asset = server_.get(r.heightfield);
     // The border check runs HERE, immediately before the upload, against whatever is resident at
     // this moment — a neighbour that arrived while this tile waited for its palette or a slot is
     // checked too.
@@ -516,12 +682,35 @@ void TerrainResidency::advance(assets::TerrainTileKey k, Record& r, const core::
         ++stats_.bake_waits;
         return;
     }
-    const std::optional<TerrainResidentId> id = take_slot(k, eye);
+    const std::uint64_t tile_need = TerrainPass::predicted_tile_bytes(*asset, bake == 1);
+    // m19.8e: the per-frame upload cap. The first tile that would cross it closes it, so nothing
+    // later in the (priority) order overtakes it by being smaller; a tile larger than the whole
+    // cap may go only as the frame's first upload, so it is not starved forever.
+    if (config_.upload_cap > 0) {
+        const bool first = stats_.upload_bytes_this_frame == 0 && !cap_closed_;
+        if (first && tile_need > config_.upload_cap) {
+            ++stats_.oversize_uploads;
+        } else if (tile_need > cap_left()) {
+            cap_closed_ = true;
+            r.wait = 3;
+            ++stats_.upload_cap_waits;
+            journal(k, TerrainUploadEvent::Kind::CapWait, tile_need);
+            return;
+        }
+    }
+    bool bytes_short = false;
+    const std::optional<TerrainResidentId> id = take_slot(k, eye, tile_need, bytes_short);
     if (!id) {
-        r.waiting_for_slot = true;
+        r.waiting_for_slot = !bytes_short;
+        r.wait = bytes_short ? 2 : 1;
+        if (bytes_short) {
+            ++stats_.byte_budget_waits;
+            journal(k, TerrainUploadEvent::Kind::BudgetWait, tile_need);
+        }
         return;
     }
     r.waiting_for_slot = false;
+    r.wait = 0;
     const TerrainTileId tile =
         r.splat ? pass_.upload(*asset, *builder_->palette(r.palette)) : pass_.upload(*asset);
     if (tile == kInvalidTerrainTile) {
@@ -538,6 +727,11 @@ void TerrainResidency::advance(assets::TerrainTileKey k, Record& r, const core::
     p.has_bake = bake == 1 && give_bake(tile, r);
     p.bytes = pass_.tile_bytes(tile);
     r.palette = kInvalidTerrainPalette;
+    // m19.8e: the pass holds its own copy of the bake now (or refused it): the CPU copy goes.
+    release_bake(r);
+    stats_.upload_bytes_this_frame += p.bytes;
+    stats_.upload_bytes += p.bytes;
+    journal(k, TerrainUploadEvent::Kind::Upload, p.bytes);
     // The GPU has its own copy of the samples, and the borders are kept for the neighbour check,
     // so the CPU payload is handed back to the asset server now — except a LOD PARENT's, which
     // its children are compared against as they arrive (check_parent).
@@ -571,8 +765,8 @@ void TerrainResidency::request(assets::TerrainTileKey k) {
     // m19.8d3: the appearance bake loads alongside, so it is usually there when the heights are.
     if (lod_ && t->has_bake()) {
         r.bake_requested = true;
-        r.bake_color = server_.request_texture(resolve(t->bake_color_path));
-        r.bake_material = server_.request_texture(resolve(t->bake_material_path));
+        r.bake_color = server_.request_streamed_texture(resolve(t->bake_color_path));
+        r.bake_material = server_.request_streamed_texture(resolve(t->bake_material_path));
         ++stats_.bake_requests;
     }
     records_.emplace(k, std::move(r));
@@ -590,15 +784,28 @@ void TerrainResidency::begin_frame(const core::Vec3& eye) {
         submitted_.push_back({frame_, {}, true});
         frame_open_ = false;
     }
+    const auto t0 = std::chrono::steady_clock::now();
     retire_submitted();
     reclaim_slots();
     ++frame_;
     frame_open_ = true;
     ++stats_.frames_begun;
     stats_.missing_this_frame = {};
+    stats_.upload_bytes_this_frame = 0;
+    cap_closed_ = false;
+    drawn_.clear();
+    culled_.clear();
+    const auto finish = [&]() {
+        update_gauges();
+        stats_.peak_upload_bytes_frame =
+            std::max(stats_.peak_upload_bytes_frame, stats_.upload_bytes_this_frame);
+        stats_.begin_frame_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count();
+    };
     if (lod_) {
         begin_frame_lod(eye);
-        update_gauges();
+        finish();
         return;
     }
 
@@ -650,7 +857,10 @@ void TerrainResidency::begin_frame(const core::Vec3& eye) {
                 ++m.not_loaded;
                 break;
             case Phase::Building:
-                ++(r.waiting_for_slot ? m.no_free_slot : m.not_loaded);
+                ++(r.wait == 2          ? m.over_budget
+                   : r.wait == 3        ? m.upload_capped
+                   : r.waiting_for_slot ? m.no_free_slot
+                                        : m.not_loaded);
                 break;
             case Phase::Refused:
                 ++m.refused;
@@ -664,7 +874,9 @@ void TerrainResidency::begin_frame(const core::Vec3& eye) {
     stats_.missing.no_free_slot += m.no_free_slot;
     stats_.missing.upload_failed += m.upload_failed;
     stats_.missing.refused += m.refused;
-    update_gauges();
+    stats_.missing.over_budget += m.over_budget;
+    stats_.missing.upload_capped += m.upload_capped;
+    finish();
 }
 
 bool TerrainResidency::usable(assets::TerrainTileKey k) const {
@@ -683,9 +895,12 @@ void TerrainResidency::begin_frame_lod(const core::Vec3& eye) {
 
     // 1. What the camera wants: the IDEAL selection (every tile assumed usable), every ancestor
     //    of its leaves, and the pinned roots; then the prefetch ring one level finer.
+    using Clock = std::chrono::steady_clock;
+    const auto s0 = Clock::now();
     ideal_ = select_terrain_lod(world_, ranges_, eye, [&](assets::TerrainTileKey k) {
         return world_.find(k) != nullptr && !refused_parents_.contains(k);
     });
+    stats_.select_ms = std::chrono::duration<double, std::milli>(Clock::now() - s0).count();
     wanted_.clear();
     prefetch_.clear();
     for (const assets::TerrainWorldTile& t : world_.tiles(top)) {
@@ -763,8 +978,10 @@ void TerrainResidency::begin_frame_lod(const core::Vec3& eye) {
     }
 
     // 5. What is drawn: the selection over what is resident and trusted.
+    const auto s1 = Clock::now();
     selection_ = select_terrain_lod(
         world_, ranges_, eye, [&](assets::TerrainTileKey k) { return usable(k); });
+    stats_.select_ms += std::chrono::duration<double, std::milli>(Clock::now() - s1).count();
     stats_.fallback_draws += selection_.fallback_leaves;
     stats_.balance_collapses += selection_.balance_collapses;
     stats_.uncovered_draws += selection_.uncovered;
@@ -784,7 +1001,10 @@ void TerrainResidency::begin_frame_lod(const core::Vec3& eye) {
                 ++m.not_loaded;
                 break;
             case Phase::Building:
-                ++(r.waiting_for_slot ? m.no_free_slot : m.not_loaded);
+                ++(r.wait == 2          ? m.over_budget
+                   : r.wait == 3        ? m.upload_capped
+                   : r.waiting_for_slot ? m.no_free_slot
+                                        : m.not_loaded);
                 break;
             case Phase::Refused:
                 ++m.refused;
@@ -798,6 +1018,8 @@ void TerrainResidency::begin_frame_lod(const core::Vec3& eye) {
     stats_.missing.no_free_slot += m.no_free_slot;
     stats_.missing.upload_failed += m.upload_failed;
     stats_.missing.refused += m.refused;
+    stats_.missing.over_budget += m.over_budget;
+    stats_.missing.upload_capped += m.upload_capped;
 }
 
 void TerrainResidency::update_gauges() {
@@ -813,12 +1035,76 @@ void TerrainResidency::update_gauges() {
     }
     stats_.resident_bytes = bytes;
     stats_.peak_resident_bytes = std::max(stats_.peak_resident_bytes, bytes);
+    stats_.layer_texture_bytes = builder_ != nullptr ? builder_->texture_bytes() : 0;
+    stats_.budget_bytes = bytes + stats_.layer_texture_bytes;
+    stats_.peak_budget_bytes = std::max(stats_.peak_budget_bytes, stats_.budget_bytes);
+    std::uint64_t bake_bytes = 0;
+    std::uint32_t bake_holds = 0;
+    std::uint32_t handles = 0;
+    for (const auto& [k, r] : records_) {
+        for (const assets::StreamedTextureAssetHandle h : {r.bake_color, r.bake_material}) {
+            if (h.is_valid()) {
+                ++handles;
+                const assets::TextureAsset* t = server_.get(h);
+                bake_bytes += t != nullptr ? t->pixels.size() : 0;
+            }
+        }
+        bake_holds +=
+            r.phase == Phase::Resident && (r.bake_color.is_valid() || r.bake_material.is_valid())
+                ? 1u
+                : 0u;
+    }
+    stats_.cpu_bake_bytes = bake_bytes;
+    stats_.resident_bake_holds = bake_holds;
+    stats_.bake_handles_held = handles;
     stats_.frames_in_flight = static_cast<std::uint32_t>(submitted_.size());
     std::uint32_t roots = 0;
     for (const auto& [k, r] : records_) {
         roots += r.pinned && r.phase == Phase::Resident ? 1u : 0u;
     }
     stats_.pinned_roots = roots;
+}
+
+bool TerrainResidency::outside_frustum(const core::Mat4& view_proj,
+                                       assets::TerrainTileKey k) const {
+    // FRUSTUM CULLING BY CLIP-SPACE CORNERS. A box is outside the view volume when all eight of its
+    // corners lie beyond the SAME clip plane — x < −w, x > w, y < −w, y > w, z < 0 or z > w
+    // (Vulkan's 0..1 depth). That is exactly the "every corner on the outer side of one plane"
+    // test a plane-extraction cull does, written without extracting planes. It is conservative —
+    // a box straddling two planes' corners near the frustum's edge is kept — which is the safe
+    // direction: a culling error may cost a draw, never a hole.
+    //
+    // The box is the COOKED one: the tile's footprint, and the manifest's min_y..max_y, which
+    // bound every level-0 sample beneath the tile (ADR-0070). It is what the selection measures
+    // distance to, it needs no CPU heightfield (level-0 tiles release theirs at upload), and it
+    // contains whatever this tile draws: its own samples, and the morph toward its parent's
+    // surface, which is a subsample of its own.
+    const assets::TerrainWorldTile* t = world_.find(k);
+    if (t == nullptr) {
+        return false;
+    }
+    const assets::TerrainWorldGrid& g = world_.grid();
+    const core::Vec3 o = g.tile_origin(k);
+    const float xs[2] = {o.x, o.x + g.pitch_x(k.level)};
+    const float ys[2] = {t->min_y, t->max_y};
+    const float zs[2] = {o.z, o.z + g.pitch_z(k.level)};
+    std::uint32_t all_out = 0x3F; // one bit per plane; cleared by any corner inside it
+    for (const float x : xs) {
+        for (const float y : ys) {
+            for (const float z : zs) {
+                const core::Vec4 c = view_proj * core::Vec4{x, y, z, 1.0f};
+                std::uint32_t out = 0;
+                out |= c.x < -c.w ? 1u : 0u;
+                out |= c.x > c.w ? 2u : 0u;
+                out |= c.y < -c.w ? 4u : 0u;
+                out |= c.y > c.w ? 8u : 0u;
+                out |= c.z < 0.0f ? 16u : 0u;
+                out |= c.z > c.w ? 32u : 0u;
+                all_out &= out;
+            }
+        }
+    }
+    return all_out != 0;
 }
 
 void TerrainResidency::add(RenderGraph& graph,
@@ -833,7 +1119,27 @@ void TerrainResidency::add(RenderGraph& graph,
         return;
     }
     if (lod_) {
+        drawn_.clear();
+        culled_.clear();
         for (const TerrainLodLeaf& leaf : selection_.leaves) {
+            if (config_.frustum_cull && outside_frustum(view_proj, leaf.key)) {
+                // Culled — but its slot (and the parent bake it would have borrowed) is still
+                // marked read, so the fence bookkeeping, and with it everything the residency
+                // decides, is the same with culling on or off. Culling changes draws, nothing else.
+                (void)slots_.mark_read(resident(leaf.key), frame_);
+                if (leaf.key.level + 1 < world_.level_count()) {
+                    const TerrainResidentId pid = resident(assets::TerrainTileKey{
+                        leaf.key.level + 1, assets::terrain_parent_coord(leaf.key.coord)});
+                    if (pid.is_valid() && payloads_[pid.slot].has_bake) {
+                        (void)slots_.mark_read(pid, frame_);
+                    }
+                }
+                culled_.push_back(leaf.key);
+                ++stats_.culled_draws;
+                continue;
+            }
+            drawn_.push_back(leaf.key);
+            stats_.visible_fallback_draws += leaf.fallback ? 1u : 0u;
             draw_leaf(graph, leaf, hdr, depth, view_proj, eye, light, sky);
         }
         return;

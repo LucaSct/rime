@@ -710,3 +710,27 @@ fn bake_world_cooks_to_the_committed_fixture_bytes() {
         );
     }
 }
+
+#[test]
+fn splat_world_cooks_to_the_committed_fixture_bytes() {
+    // The M19.8e end-to-end alarm: tests/assets/fixtures/splat_world/world/ is what the C++
+    // terrain_cooked_world_test draws through the whole stack — 16 splat tiles over two cooked
+    // terrain layers, five baked parents. It was written by `rime terrain-world` (regen.sh); cooking
+    // the same description here must reproduce every file and the manifest byte for byte.
+    // Regenerate deliberately: tests/assets/fixtures/splat_world/regen.sh
+    use asset_pipeline::terrain_world::cook_terrain_world;
+    let dir = fixtures().join("splat_world");
+    let cooked = cook_terrain_world(&dir.join("src/splat_world.terrainworld.toml")).unwrap();
+    assert_eq!(cooked.world.tiles.len(), 16 + 4 + 1);
+    assert_eq!(cooked.files.len(), 21 + 2 * 5); // every parent baked
+    for (file, bytes, _) in &cooked.files {
+        let committed = std::fs::read(dir.join("world").join(file)).unwrap();
+        assert_eq!(
+            bytes, &committed,
+            "{file} diverged — regenerate it deliberately"
+        );
+    }
+    let manifest =
+        std::fs::read_to_string(dir.join("world").join(cooked.manifest_file_name())).unwrap();
+    assert_eq!(cooked.manifest, manifest);
+}

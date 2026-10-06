@@ -25,7 +25,8 @@ Rime perf — measure frame/sim time on this machine and write a fingerprinted r
 Usage: scripts/perf.sh [options]
   --preset dev|release    build to measure (default: release — Debug numbers mean nothing)
   --sample NAME           lit-rooms | destructible-wall | the-block | virtual-geometry | all
-                          (default: all)
+                          (default: all), or terrain (m19.8e — not in `all`: it needs its
+                          generated world, which this script cooks first if it is missing)
   --frames N              measured frames per run (default: the sample's own, 600)
   --width W --height H    render resolution (default: 1920x1080)
   --commit                write the reports into docs/perf/ instead of a scratch dir
@@ -231,7 +232,7 @@ inject_gpu_clocks() {
 # made every `--sample destructible-wall` and every `--sample all` run report ITSELF as a
 # competitor and fail. Found in review before the path was ever exercised, because the reports
 # committed so far predate the watcher.
-foreign_mine="the_block lit_rooms destructible_wall rime_ nvidia-smi perf.sh"
+foreign_mine="the_block lit_rooms destructible_wall virtual_geometry terrain_flythrough rime_ nvidia-smi perf.sh"
 
 # Linux only today: the sampler reads /proc. Kept as its own predicate so that "no contention was
 # detected" and "contention could not be detected" are never the same answer — an absent sampler
@@ -489,6 +490,13 @@ case "$sample" in
     # mesh cannot move that without moving five other things with it. `--sweep` prints every row;
     # the committed report is the reference depth, so `git log docs/perf/` still reads as a series.
     virtual-geometry)  run_one virtual_geometry 14-virtual-geometry --sweep ;;
+    # m19.8e (ADR-0073). The terrain travel budget: walk / vehicle / aircraft fly-throughs plus the
+    # envelope speeds, over a generated 4 km world cooked by `rime terrain-world`. Kept out of
+    # `all` because the world is ~30 MB of generated files; make_world.sh cooks it on first use.
+    terrain)
+        [ -f build/terrain-perf-world/world/terrain_perf.terrainworld ] ||
+            samples/15-terrain/make_world.sh >/dev/null
+        run_one terrain_flythrough 15-terrain --envelope ;;
     all)
         run_one lit_rooms 11-lit-rooms
         run_one destructible_wall 10-destructible-wall

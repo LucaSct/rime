@@ -23,5 +23,6 @@ if(RIME_RHI_VULKAN)
     add_subdirectory(hello-game)        # m15.7 / ADR-0046 §1: the on-ramp — the smallest complete game, and M20's GameDefinition subject (its self-check is GPU-free, but it renders too)
     add_subdirectory(target-range)      # m15.8 / ADR-0038: M15's "done when" — a game that is NOT the block, authored as a .rscene, with its OWN reflected component
     add_subdirectory(14-virtual-geometry)  # m18.3d: ADR-0043 gate 4's complexity sweep over the GPU-built draw list
+    add_subdirectory(15-terrain)           # m19.8e: terrain travel budget — GPU/CPU ms, uploads, the speed envelope
     add_subdirectory(99-the-block)         # m13.5: M13's "done when" — the vision demo, everything at once
 endif()

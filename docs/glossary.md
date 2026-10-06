@@ -432,6 +432,18 @@ Entries are grouped roughly by area and kept short on purpose.
   renderer samples instead of blending layers the tile does not have. Rime's (M19.8d3,
   [ADR-0072](adr/0072-m19.8d3-terrain-lod-appearance.md)) has one texel per vertex and is faded
   in by the same factor that geomorphs the geometry.
+- **Byte budget / upload cap.** Two limits on a streaming system, enforced in bytes rather than in
+  objects: the *budget* bounds how much it holds at once (Rime's terrain counts tiles still waiting
+  on a GPU fence, because their memory is not free yet), the *cap* bounds how much it uploads in
+  one frame so a burst of arrivals cannot stall a frame. M19.8e,
+  [ADR-0073](adr/0073-m19.8e-terrain-budgets.md).
+- **Travel envelope.** The fastest a camera can move over streamed terrain while what it sees keeps
+  up: in Rime, the highest speed at which fewer than 1 % of the terrain leaves drawn are coarser
+  fallbacks for tiles that had not arrived yet, for a stated byte budget and upload cap.
+- **Frustum culling.** Not drawing what lies wholly outside the camera's view volume (the
+  *frustum*, a truncated pyramid of six planes). A box is culled when all eight of its corners are
+  beyond one plane; the test is conservative — it may keep an invisible box, never drop a visible
+  one.
 - **Vertex-aligned texels.** A texture laid out with texel (i, j) *at* grid vertex (i, j) — N
   texels for N vertices — rather than centred on the N − 1 cells between them. Sampling at a
   vertex then returns one texel exactly, and two tiles sharing an edge share that edge's texels.
