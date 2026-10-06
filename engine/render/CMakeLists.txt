@@ -27,6 +27,8 @@ add_library(rime_render STATIC
     src/fx_pass.cpp
     src/culling.cpp
     src/terrain_pass.cpp
+    src/terrain_builder.cpp
+    src/terrain_residency.cpp
     src/virtual_geometry_residency.cpp
     src/virtual_geometry_page_cache.cpp
     src/virtual_geometry_page_pool.cpp
