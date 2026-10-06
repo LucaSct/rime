@@ -873,6 +873,24 @@ fn ctrl_s_saves_the_opened_scene() {
 }
 
 #[test]
+fn ctrl_s_over_the_viewport_also_flies_the_camera_backwards() {
+    // DOCUMENTS A DEFECT: the fly camera reads S as "back" whenever the pointer is over the
+    // viewport and never looks at the modifiers. So the save chord, pressed where the pointer
+    // usually is, also nudges the camera. The save itself goes out first and records the scene as
+    // it was — which means the world is already different from the file the instant "saved"
+    // appears, and the NEXT save writes a camera the user never moved. (The Xvfb smoke parks the
+    // pointer on the status bar before every key for exactly this reason.)
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.present_frame();
+    rig.pointer_move((480.5, 270.5));
+    rig.chord(CTRL, egui::Key::S);
+    assert_eq!(rig.host.count(EditorMessage::SaveScene), 1);
+    let saved_camera = &rig.host.files["/proj/level.rscene"][0].components[0].data;
+    assert_eq!(*saved_camera, trs_at(0.0, 0.0, EYE_Z), "saved as it was");
+    assert!(rig.host.translation(CAMERA)[2] > EYE_Z, "then it moved");
+}
+
+#[test]
 fn ctrl_s_without_a_scene_does_nothing_and_says_nothing() {
     // DOCUMENTS A DEFECT (minor): the reflex key is silently swallowed when the session was started
     // without --scene. No message is sent and no hint appears; the user has to discover Save As.
@@ -1260,6 +1278,28 @@ fn a_new_edit_after_undo_drops_the_redo_branch() {
 }
 
 #[test]
+fn a_u64_field_cannot_hold_an_exact_asset_id() {
+    // DOCUMENTS A DEFECT: every numeric field is an egui `DragValue`, which holds its value as an
+    // f64 — 53 bits of integer. A `MeshAsset.asset` is a 64-bit content hash, so the inspector
+    // both DISPLAYS a different number than the scene holds and, on any edit, WRITES the rounded
+    // one: typing an id in exactly yields a neighbouring id that names no asset.
+    const ID: u64 = 0xdaba_e4d5_f45c_860b; // the cooked cube's real content id
+    let rounded = (ID as f64) as u64;
+    assert_ne!(rounded, ID);
+
+    let mut world = starting_world();
+    world[2].components[1].data = 0xAAu64.to_le_bytes().to_vec();
+    let mut rig = Rig::build(None, world);
+    rig.click(ROW_CRATE);
+    rig.type_into_number_field(10, &ID.to_string()); // after the transform's ten floats
+    assert_eq!(
+        rig.host.component(CRATE, H_MESH_ASSET),
+        Some(rounded.to_le_bytes().as_slice()),
+        "the id that was typed is not the id that was stored"
+    );
+}
+
+#[test]
 fn ctrl_z_while_typing_in_a_text_box_undoes_a_world_edit() {
     // DOCUMENTS A DEFECT: the undo chord is read from global input before any widget sees it, with
     // no `wants_keyboard_input` gate (the gizmo hotkeys have one). So Ctrl+Z pressed to fix a typo
@@ -1458,6 +1498,47 @@ fn place_spawns_an_entity_referencing_the_mesh() {
     // Placed at the engine's default transform, and NOT selected: the user has to find the new row
     // (or click the mesh in the viewport) before they can move it.
     assert_eq!(rig.app().selected, None);
+}
+
+#[test]
+fn place_is_clipped_off_the_panel_for_a_real_source_path() {
+    // DOCUMENTS A DEFECT, and the first thing a new user hits: an asset row is `glyph  path
+    // [place]` on one line that neither wraps nor scrolls sideways, and the Assets panel opens
+    // 22% of the window wide. A real cooked path ("samples/08-gltf-zoo/assets/cube.gltf") pushes
+    // "place" past the panel's right edge, where it is clipped away. The feature is unreachable
+    // until the user thinks to drag the splitter. (The accessibility node still exists, which is
+    // why the label-driven tests above can click it; a pointer cannot.)
+    let mut rig = Rig::new();
+    rig.host.shared.lock().unwrap().assets = vec![AssetEntry {
+        kind: AssetKind::Mesh,
+        id: MESH_CRATE_ID,
+        source_path: "samples/08-gltf-zoo/assets/cube.gltf".to_string(),
+        cooked_file: "cube.rmesh".to_string(),
+    }];
+    rig.settle();
+    let panel = rig
+        .app()
+        .dock
+        .main_surface()
+        .iter()
+        .find_map(|node| match node {
+            egui_dock::Node::Leaf { tabs, viewport, .. } if tabs.contains(&Tab::Assets) => {
+                Some(*viewport)
+            }
+            _ => None,
+        })
+        .expect("the layout has an Assets panel");
+    let place = rig
+        .harness
+        .get_by_label("place")
+        .raw_bounds()
+        .expect("bounds");
+    assert!(
+        place.x0 as f32 > panel.right(),
+        "place starts at x = {}, the panel ends at x = {}",
+        place.x0,
+        panel.right()
+    );
 }
 
 #[test]
