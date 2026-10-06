@@ -314,11 +314,20 @@ read_virtual_geometry(std::span<const std::byte> file,
 // (fixture_test.cpp, terrain.rhf) is the drift alarm.
 [[nodiscard]] std::uint64_t heightfield_schema_hash() noexcept;
 
-// The payload version decode_heightfield understands — the FIRST field of the payload. The RMA1
-// container version guards the envelope; this guards the heightfield payload's own layout, so a
-// future v2 (say, per-cell diagonal flags) is refused cleanly by an old build as
+// The newest heightfield payload version decode_heightfield understands — the FIRST field of the
+// payload. The RMA1 container version guards the envelope; this guards the heightfield payload's
+// own layout, so a payload from a future cook is refused cleanly by an old build as
 // UnsupportedVersion instead of being misread.
-inline constexpr std::uint32_t kHeightfieldPayloadVersion = 1;
+//
+// v2 (ADR-0063, m19.4) APPENDS the splat-material block after the sample blob: the weight grid's
+// own dimensions, a layer count, the four-slot material palette, and four u8 weights per texel.
+// **v1 remains valid and still decodes**, to an asset whose `has_splat()` is false — one material,
+// shaded as m19.3 shades it. Nothing in the fixed header record moved, which is why
+// heightfield_schema_hash() is UNCHANGED: the version field, not the schema hash, is what
+// discriminates the two layouts, and that is what the field was added for. Changing the hash would
+// have rejected every terrain already cooked, the cross-language fixture included.
+inline constexpr std::uint32_t kHeightfieldPayloadVersion = 2;
+inline constexpr std::uint32_t kHeightfieldMinPayloadVersion = 1;
 
 // Decode a heightfield payload (the bytes after the header) into a fully validated
 // HeightfieldAsset. Assumes the caller has confirmed the header's kind and schema hash. The payload

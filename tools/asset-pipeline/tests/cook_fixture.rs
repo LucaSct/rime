@@ -507,3 +507,34 @@ fn terrain_png_cooks_to_the_committed_heightfield_fixture_bytes() {
         asset_pipeline::cooked::ASSET_KIND_HEIGHTFIELD
     );
 }
+
+#[test]
+fn terrain_splat_png_cooks_to_the_committed_v2_heightfield_fixture_bytes() {
+    // The M19.4 cross-language alarm for payload v2: terrain_splat.rhf is what the C++ fixture
+    // test loads. terrain_splat.png + .toml (a palette) + .splat.png (RGBA8, 3x2, with texels that
+    // need apportioning) must reproduce it byte for byte, twice. Regenerate deliberately with
+    // `rime heightfield tests/assets/fixtures/terrain_splat.png --out tests/assets/fixtures`.
+    use asset_pipeline::heightfield::Heightfield;
+    let committed = std::fs::read(fixtures().join("terrain_splat.rhf")).unwrap();
+    let cook = || {
+        Heightfield::from_file(&fixtures().join("terrain_splat.png"))
+            .unwrap()
+            .cook()
+            .0
+    };
+    let (first, second) = (cook(), cook());
+    assert_eq!(
+        first, second,
+        "two cooks of one source differ — the cook is not deterministic"
+    );
+    assert_eq!(
+        first, committed,
+        "v2 heightfield cooker output diverged from the committed fixture — regenerate it deliberately"
+    );
+    let (header, payload) = read_header(&committed).unwrap();
+    assert_eq!(
+        header.asset_kind,
+        asset_pipeline::cooked::ASSET_KIND_HEIGHTFIELD
+    );
+    assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 2);
+}

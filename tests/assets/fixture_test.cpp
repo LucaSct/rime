@@ -309,3 +309,45 @@ TEST_CASE(
     // The dequantised height at the far corner: -5 + 0.001 * 13000 = 8 m (to f32 rounding).
     CHECK(hf->height(4, 3) == doctest::Approx(8.0f).epsilon(1e-5));
 }
+
+TEST_CASE("a Rust-cooked splat heightfield (terrain_splat.rhf) loads its palette and normalized "
+          "weights") {
+    // The M19.4 cross-language proof for payload v2: cooked by `rime heightfield` from
+    // terrain_splat.png + .toml (layers 0-2) + terrain_splat.splat.png (3x2 RGBA8, NOT the 5x4
+    // height grid). The cook's largest-remainder apportionment is pinned by cook_fixture.rs; here
+    // the C++ reader must see the same integers. The texel table is in terrain_splat.toml.
+    const std::optional<std::vector<std::byte>> bytes = load_fixture("terrain_splat.rhf");
+    REQUIRE_MESSAGE(bytes.has_value(), "missing fixture: terrain_splat.rhf");
+
+    AssetRejectCounters rejects;
+    AssetError error = AssetError::Io;
+    const std::optional<HeightfieldAsset> hf = read_heightfield(*bytes, error, nullptr, &rejects);
+    REQUIRE_MESSAGE(hf.has_value(), to_string(error));
+    CHECK(rejects.total == 0);
+    CHECK(hf->columns == 5);
+    CHECK(hf->rows == 4);
+    REQUIRE(hf->has_splat());
+    CHECK(hf->weight_columns == 3);
+    CHECK(hf->weight_rows == 2);
+    CHECK(hf->layers[0].value == 0x1111111111111111ull);
+    CHECK(hf->layers[1].value == 0x2222222222222222ull);
+    CHECK(hf->layers[2].value == 0xfedcba9876543210ull);
+    CHECK_FALSE(hf->layers[3].is_valid());
+
+    const std::uint8_t expected[2][3][4] = {
+        {{200, 55, 0, 0}, {128, 127, 0, 0}, {0, 255, 0, 0}},
+        {{255, 0, 0, 0}, {85, 85, 85, 0}, {43, 85, 127, 0}},
+    };
+    for (std::uint32_t j = 0; j < hf->weight_rows; ++j) {
+        for (std::uint32_t i = 0; i < hf->weight_columns; ++i) {
+            const std::size_t base = hf->weight_index(i, j);
+            unsigned sum = 0;
+            for (std::uint32_t k = 0; k < 4; ++k) {
+                CHECK(static_cast<unsigned>(hf->weights[base + k]) ==
+                      static_cast<unsigned>(expected[j][i][k]));
+                sum += hf->weights[base + k];
+            }
+            CHECK(sum == 255);
+        }
+    }
+}

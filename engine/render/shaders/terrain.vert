@@ -53,6 +53,11 @@ layout(push_constant) uniform Pc {
 // against `rime::physics`.
 layout(location = 0) out vec3 v_world;
 
+// Tile-LOCAL xz in metres (i * cell_x, j * cell_z), exact — the splat weight map is addressed in the
+// tile's own frame (m19.4, ADR-0063), and recovering it in the fragment stage as `v_world - origin`
+// would reintroduce a rounding the vertex stage does not have to pay.
+layout(location = 1) out vec2 v_local;
+
 void main() {
     // `columns` travels as a float. An f32 represents every integer below 2^24 exactly and
     // ADR-0060 caps a heightfield at 32768 samples per axis, so the round trip is lossless; it
@@ -72,5 +77,6 @@ void main() {
                        vec3(float(i) * pc.grid.x, height, float(j) * pc.grid.y);
 
     v_world = world;
+    v_local = vec2(float(i) * pc.grid.x, float(j) * pc.grid.y);
     gl_Position = pc.view_proj * vec4(world, 1.0);
 }

@@ -121,9 +121,13 @@ enum Command {
     },
     /// Cook a terrain heightfield (M19.1): a 16-bit grayscale `.png` (or raw little-endian `.r16`)
     /// height map plus its `<source>.toml` sidecar (world size, height range, origin) into
-    /// `<name>.rhf`. The samples are copied verbatim — the cook never re-quantises.
+    /// `<name>.rhf`. The samples are copied verbatim — the cook never re-quantises. If the sidecar
+    /// names splat layers (`layer0..layer3`, material AssetIds in 0x hex), the sibling
+    /// `<source stem>.splat.png` (8-bit RGBA) is cooked in as the terrain's material weights
+    /// (payload v2); without layers a v1 file is written.
     Heightfield {
-        /// The `.png` / `.r16` source; its sidecar is the same path with a `.toml` extension.
+        /// The `.png` / `.r16` source; its sidecar is the same path with a `.toml` extension
+        /// (and its optional splat map the same stem with `.splat.png`).
         input: PathBuf,
         /// Output directory for the `<name>.rhf` file.
         #[arg(long)]
