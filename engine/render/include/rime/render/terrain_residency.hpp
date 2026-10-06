@@ -7,12 +7,15 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <set>
+#include <utility>
 #include <vector>
 
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/terrain_world.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/render/terrain_builder.hpp" // TerrainPaletteHandle
+#include "rime/render/terrain_lod.hpp"
 #include "rime/render/terrain_pass.hpp"
 
 // TERRAIN RENDER RESIDENCY (m19.8a, ADR-0069): a world of terrain tiles drawn from a FIXED budget
@@ -81,9 +84,46 @@
 // A refused or failed tile stays so while it is kept, rather than being retried every frame;
 // leaving retention forgets it.
 //
+// ── LOD (m19.8d2, ADR-0071): PRESSURE LOWERS DETAIL, NEVER COVERAGE ─────────────────────────────
+//
+// A world whose manifest carries a LOD chain (`level_count() > 1`) is driven by CDLOD selection
+// (terrain_lod.hpp) instead of the two radii, and its records are keyed by (level, x, z):
+//
+//   * THE ROOT COVER IS PINNED. Every top-level tile has a slot reserved for it from the
+//     constructor on: a non-root tile may take a free slot only while more are free than there are
+//     roots still waiting, and a resident root is never an eviction candidate. Why pin rather than
+//     just "want" them? Because a root is the tile that can be drawn when NOTHING else is
+//     resident — the guarantee "coarser, never a hole" needs one tile per patch of world that no
+//     amount of pressure can take away. Wanting is not enough: with slots handed out nearest
+//     first, a cluster of fine tiles near the camera would fill the budget before a distant root
+//     ever arrived, and that root's whole patch would be a hole. A world whose root cover alone
+//     exceeds the budget is refused at construction, counted (`root_cover_refusals`), and draws
+//     nothing — no budget can honour the guarantee.
+//   * WANTED = the selection with every tile assumed usable (the IDEAL selection), plus every
+//     ancestor of its leaves up to the roots; PREFETCH = the four children of an ideal leaf whose
+//     box is within one level diagonal of the range that would split it. Wanted tiles load and
+//     take slots first, nearest first (ties: coarser first, so an ancestor never queues behind its
+//     own descendant), then prefetch. A wanted tile may evict a resident tile that is neither
+//     wanted nor pinned, and failing that one that is only prefetched; nothing evicts a wanted
+//     tile. The fence rule is m19.8a's, unchanged.
+//   * DRAWN = the selection with `usable` = resident and trusted. A node whose children are not
+//     all resident draws itself: a FALLBACK, counted per tile-frame (`fallback_draws`) where
+//     m19.8a counted a hole. Parents draw with the flat (no-splat) material — their appearance is
+//     brick 8d3's — counted as `fallback_appearance_draws`.
+//   * THE 8d1 HANDOFF: before a child is uploaded, `samples_coincide` compares it with its
+//     resident parent (a parent keeps its CPU heightfield while resident, for exactly this). A
+//     child waits for its parent (`parent_waits`); the parent is always wanted first. A mismatch
+//     REFUSES THE PARENT — evicted, sticky, counted in `refusals().coincidence_mismatches` — and
+//     the child is uploaded: the area is drawn by children where they are all resident and by the
+//     grandparent where not. A verified pair is remembered, so a parent that is evicted and
+//     reloaded is not re-checked against children already proven against the same file.
+//
+// A world with no chain (level 0 only) is driven exactly as m19.8a drove it: the radii, holes
+// counted, no pinning.
+//
 // ── WHAT IS NOT HERE ────────────────────────────────────────────────────────────────────────────
 //
-//   * no LOD and no coarse cover: a missing tile is a hole (brick 8d);
+//   * no coarse APPEARANCE: a parent is drawn with the flat material (brick 8d3);
 //   * no byte budget: the budget is a slot COUNT; bytes are measured, not enforced (brick 8e);
 //   * collision is not driven from here and never will be — camera residency must not decide what
 //     the simulation stands on (ADR-0067's plan, brick 8c);
@@ -174,6 +214,9 @@ struct TerrainResidencyConfig {
     std::uint32_t slots = 4;        // the GPU tile budget (>= 1)
     float activation_radius = 0.0f; // request tiles within this (XZ, from the tile footprint)
     float retention_radius = 0.0f;  // keep tiles within this; clamped up to activation
+    // m19.8d2: how a world with a LOD chain derives its ranges. The radii above are not used for
+    // such a world; the selection decides what is wanted.
+    TerrainLodView lod{};
 };
 
 // Per-reason counts of wanted-but-not-resident tiles (tile-frames).
@@ -215,6 +258,19 @@ struct TerrainResidencyStats {
     std::uint32_t frames_in_flight = 0;
     TerrainMissCounts missing{};            // cumulative
     TerrainMissCounts missing_this_frame{}; // the last begin_frame's
+    // m19.8d2 — LOD worlds only (all zero for a level-0 world).
+    std::uint64_t root_cover_refusals = 0;       // the roots alone exceed the slot budget
+    std::uint32_t pinned_roots = 0;              // gauge: roots resident right now
+    std::uint64_t pinned_evictions = 0;          // must stay 0: no pressure evicts a root
+    std::uint64_t lod_draws = 0;                 // leaves drawn
+    std::uint64_t fallback_draws = 0;            // tile-frames drawn coarser than selected
+    std::uint64_t fallback_appearance_draws = 0; // parents drawn with the placeholder material
+    std::uint64_t uncovered_draws = 0;           // root-frames nobody could draw (a refused root)
+    std::uint64_t balance_collapses = 0;         // selection nodes collapsed to restore 2:1
+    std::uint64_t coincidence_checks = 0;        // parent/child pairs compared (samples_coincide)
+    std::uint64_t refused_parents = 0;           // parents refused by a coincidence mismatch
+    std::uint64_t parent_waits = 0;              // tile-frames a loaded child waited for its parent
+    std::uint64_t prefetch_requests = 0;         // loads requested for the prefetch set
 };
 
 class TerrainResidency {
@@ -262,10 +318,25 @@ public:
     // Close the open frame after submit_blocking returned: it has retired.
     void end_frame_blocking();
 
-    // The id of the tile resident at `c`, or an invalid id.
+    // The id of the level-0 tile resident at `c`, or an invalid id.
     [[nodiscard]] TerrainResidentId resident(assets::TerrainTileCoord c) const;
-    // The coordinates resident right now, in coordinate order.
+    // The id of the tile resident at `k` (any level), or an invalid id.
+    [[nodiscard]] TerrainResidentId resident(assets::TerrainTileKey k) const;
+    // The level-0 coordinates resident right now, in coordinate order.
     [[nodiscard]] std::vector<assets::TerrainTileCoord> resident_tiles() const;
+    // m19.8d2: every resident tile, any level, in key order.
+    [[nodiscard]] std::vector<assets::TerrainTileKey> resident_keys() const;
+
+    // m19.8d2: true when the world carries a LOD chain and is driven by selection.
+    [[nodiscard]] bool lod() const noexcept { return lod_; }
+
+    // m19.8d2: the ranges the selection uses (empty for a level-0 world).
+    [[nodiscard]] const TerrainLodRanges& ranges() const noexcept { return ranges_; }
+
+    // m19.8d2: the last begin_frame's drawn selection, and the ideal one it was fed from.
+    [[nodiscard]] const TerrainLodSelection& selection() const noexcept { return selection_; }
+
+    [[nodiscard]] const TerrainLodSelection& ideal_selection() const noexcept { return ideal_; }
 
     [[nodiscard]] const TerrainResidencyStats& stats() const noexcept { return stats_; }
 
@@ -296,11 +367,12 @@ private:
         bool waiting_for_slot = false;
         TerrainResidentId id{};
         assets::TerrainTileEdges edges{};
+        bool pinned = false; // m19.8d2: a root of a LOD world
     };
 
     // What a slot holds, kept until RECLAIM — after its record is gone.
     struct Payload {
-        assets::TerrainTileCoord coord{};
+        assets::TerrainTileKey key{};
         TerrainTileId pass_tile = kInvalidTerrainTile;
         TerrainPaletteHandle palette = kInvalidTerrainPalette;
         std::uint64_t bytes = 0;
@@ -315,11 +387,28 @@ private:
     void retire_submitted();
     void reclaim_slots();
     void forget(Record& r);
-    void advance(assets::TerrainTileCoord c, Record& r, const core::Vec3& eye);
-    [[nodiscard]] bool check_world(assets::TerrainTileCoord c,
+    void advance(assets::TerrainTileKey k, Record& r, const core::Vec3& eye);
+    [[nodiscard]] bool check_world(assets::TerrainTileKey k,
                                    const assets::HeightfieldAsset& asset,
                                    const assets::TerrainTileEdges& edges);
-    [[nodiscard]] std::optional<TerrainResidentId> take_slot(const core::Vec3& eye);
+    // m19.8d2: the 8d1 handoff. False = wait (the parent is not resident yet).
+    [[nodiscard]] bool check_parent(assets::TerrainTileKey k,
+                                    const assets::HeightfieldAsset& asset);
+    void refuse_parent(assets::TerrainTileKey parent);
+    [[nodiscard]] std::optional<TerrainResidentId> take_slot(assets::TerrainTileKey k,
+                                                             const core::Vec3& eye);
+    void request(assets::TerrainTileKey k);
+    void begin_frame_lod(const core::Vec3& eye);
+    [[nodiscard]] bool usable(assets::TerrainTileKey k) const;
+    [[nodiscard]] float distance(assets::TerrainTileKey k, const core::Vec3& eye) const;
+    void draw_leaf(RenderGraph& graph,
+                   const TerrainLodLeaf& leaf,
+                   RGTexture hdr,
+                   RGTexture depth,
+                   const core::Mat4& view_proj,
+                   const core::Vec3& eye,
+                   const TerrainLight& light,
+                   const SkyLightBinding& sky);
     void update_gauges();
 
     rhi::Device& device_;
@@ -331,13 +420,24 @@ private:
     TerrainResidencyConfig config_;
     TerrainSlotTable slots_;
     std::vector<Payload> payloads_;
-    std::map<assets::TerrainTileCoord, Record> records_; // ordered: deterministic iteration
+    std::map<assets::TerrainTileKey, Record> records_; // ordered: deterministic iteration
     std::deque<Submitted> submitted_;
     TerrainFrame frame_ = 0;
     TerrainFrame retired_ = 0;
     bool frame_open_ = false;
     TerrainResidencyStats stats_{};
     assets::TerrainWorldRefusals refusals_{};
+    // m19.8d2
+    bool lod_ = false;
+    bool lod_refused_ = false; // the root cover exceeds the budget: draws nothing
+    TerrainLodRanges ranges_{};
+    TerrainLodSelection ideal_{};
+    TerrainLodSelection selection_{};
+    core::Vec3 selection_eye_{0.0f, 0.0f, 0.0f};
+    std::set<assets::TerrainTileKey> wanted_;          // ideal leaves + ancestors + roots
+    std::set<assets::TerrainTileKey> prefetch_;        // next-finer level inside the ranges
+    std::set<assets::TerrainTileKey> refused_parents_; // sticky: a coincidence mismatch
+    std::set<std::pair<assets::TerrainTileKey, assets::TerrainTileKey>> verified_pairs_;
 };
 
 } // namespace rime::render
