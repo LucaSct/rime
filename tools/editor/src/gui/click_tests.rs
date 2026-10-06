@@ -1319,26 +1319,87 @@ fn a_new_edit_after_undo_drops_the_redo_branch() {
     assert_eq!(rig.host.translation(LIGHT)[0], 7.0);
 }
 
-#[test]
-fn a_u64_field_cannot_hold_an_exact_asset_id() {
-    // DOCUMENTS A DEFECT: every numeric field is an egui `DragValue`, which holds its value as an
-    // f64 — 53 bits of integer. A `MeshAsset.asset` is a 64-bit content hash, so the inspector
-    // both DISPLAYS a different number than the scene holds and, on any edit, WRITES the rounded
-    // one: typing an id in exactly yields a neighbouring id that names no asset.
-    const ID: u64 = 0xdaba_e4d5_f45c_860b; // the cooked cube's real content id
-    let rounded = (ID as f64) as u64;
-    assert_ne!(rounded, ID);
+/// Focus the inspector's text field showing `shown`, clear it, and type `text` into it. The field
+/// is found by what it displays, since its label is not in the accessibility tree. Focus comes from
+/// the accessibility Focus action (a click action does not focus a text box in this harness), and
+/// the clearing is real key presses, so the widget sees the same edits a person's keyboard makes.
+fn retype_field(rig: &mut Rig, shown: &str, text: &str) {
+    rig.harness
+        .get_all_by_role(Role::TextInput)
+        .find(|n| n.value().as_deref() == Some(shown))
+        .expect("the field is shown")
+        .focus();
+    rig.settle();
+    rig.key(egui::Key::End);
+    for _ in 0..24 {
+        rig.key(egui::Key::Backspace);
+    }
+    rig.harness
+        .get_all_by_role(Role::TextInput)
+        .find(|n| n.is_focused())
+        .expect("the field has focus")
+        .type_text(text);
+    rig.settle();
+}
 
+#[test]
+fn a_u64_field_round_trips_an_exact_asset_id() {
+    // Asset ids are 64-bit content hashes, and this one is above 2^53, where an f64 (what the old
+    // drag-number held) silently drops the low bits. The field is now text parsed as a u64, so the
+    // digits typed are the value stored, bit for bit, and are shown back exactly.
+    const ID: u64 = 0xDEAD_BEEF_CAFE_F00D;
+    assert_ne!(
+        (ID as f64) as u64,
+        ID,
+        "the value is past what an f64 holds"
+    );
+
+    let mut world = starting_world();
+    world[2].components[1].data = 0xAAu64.to_le_bytes().to_vec(); // 170 on screen
+    let mut rig = Rig::build(None, world);
+    rig.click(ROW_CRATE);
+    retype_field(&mut rig, "170", &ID.to_string());
+    rig.key(egui::Key::Enter);
+
+    assert_eq!(
+        rig.host.component(CRATE, H_MESH_ASSET),
+        Some(ID.to_le_bytes().as_slice()),
+        "the id that was typed is the id that was stored"
+    );
+    assert!(
+        rig.harness
+            .get_all_by_role(Role::TextInput)
+            .any(|n| n.value().as_deref() == Some(ID.to_string().as_str())),
+        "and it is shown exactly, not rounded"
+    );
+}
+
+#[test]
+fn a_u64_field_refuses_text_that_is_not_a_number() {
+    // Bad input is refused, not coerced: the stored id is unchanged, and the field goes back to
+    // showing it once focus leaves.
     let mut world = starting_world();
     world[2].components[1].data = 0xAAu64.to_le_bytes().to_vec();
     let mut rig = Rig::build(None, world);
     rig.click(ROW_CRATE);
-    rig.type_into_number_field(10, &ID.to_string()); // after the transform's ten floats
+    retype_field(&mut rig, "170", "12x");
+    // The text really landed (a refusal is only meaningful if something was typed), and it is red.
+    assert!(rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .any(|n| n.value().as_deref() == Some("12x")));
+    rig.key(egui::Key::Enter);
+
     assert_eq!(
         rig.host.component(CRATE, H_MESH_ASSET),
-        Some(rounded.to_le_bytes().as_slice()),
-        "the id that was typed is not the id that was stored"
+        Some(0xAAu64.to_le_bytes().as_slice()),
+        "nothing was written"
     );
+    assert!(!rig.app().stack.can_undo(), "and no undo step was recorded");
+    assert!(rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .any(|n| n.value().as_deref() == Some("170")));
 }
 
 #[test]
