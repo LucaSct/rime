@@ -277,9 +277,10 @@ TerrainPass::~TerrainPass() {
 }
 
 namespace {
-// std140 mirror of terrain.frag's `Splat` block: 9 x vec4 = 144 bytes. m19.7b APPENDED the two
+// std140 mirror of terrain.frag's `Splat` block: 10 x vec4 = 160 bytes. m19.7b APPENDED the two
 // uv-scale vec4s after m19.5's 112 bytes rather than interleaving them, so the m19.6 proof's
 // frozen m19.5 shader, which declares only the first 112, still reads this buffer correctly.
+// m19.7c appended the contrast vec4 the same way, for the same reason.
 struct SplatUniform {
     float info[4] = {0.0f, 0.0f, 0.0f, 0.0f};      // x = splat flag, yz = tile extent (m)
     float dims[4] = {1.0f, 1.0f, 0.0f, 0.0f};      // xy = weight map size in texels
@@ -287,9 +288,10 @@ struct SplatUniform {
     float roughness[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // x..w = layer 0..3
     // Metres per repeat, world X and Z: [0] = (layer 0 x, z, layer 1 x, z), [1] = layers 2, 3.
     float uv_scale[2][4] = {{1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}};
+    float height_contrast[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // x..w = layer 0..3; 0 = plain blend
 };
 
-static_assert(sizeof(SplatUniform) == 144, "SplatUniform must match terrain.frag's Splat block");
+static_assert(sizeof(SplatUniform) == 160, "SplatUniform must match terrain.frag's Splat block");
 } // namespace
 
 TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset) {
@@ -347,7 +349,10 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
                 splat_ok = splat_ok && std::isfinite(l.base_color.x) &&
                            std::isfinite(l.base_color.y) && std::isfinite(l.base_color.z) &&
                            unit_interval(l.metallic) && unit_interval(l.roughness) &&
-                           finite_positive(l.uv_scale[0]) && finite_positive(l.uv_scale[1]);
+                           finite_positive(l.uv_scale[0]) && finite_positive(l.uv_scale[1]) &&
+                           // m19.7c: a negative contrast would INVERT the blend (the lower layer
+                           // wins) and a NaN or infinity would reach exp2 — refused like the rest.
+                           std::isfinite(l.height_contrast) && l.height_contrast >= 0.0f;
             }
         }
         if (!splat_ok) {
@@ -448,6 +453,9 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
             if (l.albedo_height.is_valid()) {
                 tile.layer_textures[k] = l.albedo_height;
             }
+            // m19.7c: and the contrast. An unused slot's weight is 0, so the shader never counts
+            // it among the painted layers; repeating layer 0 just keeps the rule uniform.
+            u.height_contrast[k] = l.height_contrast;
         }
     }
     rhi::BufferDesc ubd{};
