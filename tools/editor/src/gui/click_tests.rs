@@ -1017,6 +1017,8 @@ fn scripted_opener(world: Vec<SnapshotEntity>, error: Option<&'static str>) -> O
             s.snapshot = Snapshot {
                 entities: world.clone(),
             };
+            // The replacement has delivered its first snapshot, whatever it holds.
+            s.snapshots_received = 1;
         }
         let (out_tx, _out_rx) = mpsc::channel();
         OpenedSession {
@@ -1081,14 +1083,23 @@ fn new_and_open_are_unavailable_while_playing() {
     rig.key(egui::Key::Escape);
 }
 
+/// A real file on disk for an Open to name (Open refuses a path that is not an existing file before
+/// any engine starts). Named per process so parallel test runs do not collide.
+fn scene_file(name: &str, contents: &[u8]) -> String {
+    let path = std::env::temp_dir().join(format!("rime-e2-{}-{name}", std::process::id()));
+    std::fs::write(&path, contents).expect("write the scene fixture");
+    path.to_string_lossy().into_owned()
+}
+
 #[test]
 fn open_loads_the_typed_scene_into_the_window() {
+    let path = scene_file("other.rscene", b"scene");
     let mut rig = Rig::new();
     rig.harness.state_mut().opener = Some(scripted_opener(starting_world()[..1].to_vec(), None));
-    open_file_menu_and_type_open_path(&mut rig, "/proj/other.rscene");
+    open_file_menu_and_type_open_path(&mut rig, &path);
     rig.click("Open");
-    assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/other.rscene"));
-    assert!(rig.has("opened /proj/other.rscene"));
+    assert_eq!(rig.app().scene_path.as_deref(), Some(path.as_str()));
+    assert!(rig.has(&format!("opened {path}")));
     assert!(
         rig.has("1 entities"),
         "the window shows the new engine's world"
@@ -1096,28 +1107,46 @@ fn open_loads_the_typed_scene_into_the_window() {
 }
 
 #[test]
-fn open_of_a_file_that_loads_nothing_is_refused_and_the_scene_stays() {
-    // The engine answers a bad path with an empty world, not an error, so an empty world is refused
-    // once the grace has passed. The window keeps the scene it had.
+fn an_empty_scene_file_opens_and_is_adopted() {
+    // An empty world is a valid scene. Adoption waits for the replacement's first snapshot, not for
+    // a non-empty one, so this opens with no entities in it.
+    let path = scene_file("empty.rscene", b"");
     let mut rig = Rig::with_scene("/proj/level.rscene");
     rig.harness.state_mut().opener = Some(scripted_opener(Vec::new(), None));
-    rig.harness.state_mut().open_grace = Duration::ZERO;
-    open_file_menu_and_type_open_path(&mut rig, "/proj/missing.rscene");
+    open_file_menu_and_type_open_path(&mut rig, &path);
     rig.click("Open");
-    assert!(rig.has(
-        "open refused: /proj/missing.rscene loaded no entities (missing, unreadable, or empty); \
-         the current scene is unchanged"
-    ));
+    assert_eq!(rig.app().scene_path.as_deref(), Some(path.as_str()));
+    assert!(rig.has("0 entities"), "the empty scene is what is open");
+    assert_eq!(rig.app().save_status.as_ref().map(|s| s.1), Some(true));
+}
+
+#[test]
+fn a_missing_file_is_refused_at_once_and_no_engine_starts() {
+    // The path is checked before anything starts: the opener must never be called, and the refusal
+    // is synchronous, so it is on screen after the click with the scene untouched.
+    let missing =
+        std::env::temp_dir().join(format!("rime-e2-{}-missing.rscene", std::process::id()));
+    let missing = missing.to_string_lossy().into_owned();
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.harness.state_mut().opener = Some(Box::new(|_| {
+        panic!("an engine must not start for a file that does not exist")
+    }));
+    open_file_menu_and_type_open_path(&mut rig, &missing);
+    rig.click("Open");
+    let (message, ok) = rig.app().save_status.clone().expect("a refusal is shown");
+    assert!(!ok);
+    assert!(message.starts_with(&format!("open refused: {missing} is not a readable file")));
+    assert!(rig.app().pending_open.is_none());
     assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/level.rscene"));
     assert!(rig.has("3 entities"), "the old world is still there");
-    assert_eq!(rig.app().save_status.as_ref().map(|s| s.1), Some(false));
 }
 
 #[test]
 fn open_refuses_an_engine_that_failed_to_start() {
+    let path = scene_file("broken.rscene", b"not a scene");
     let mut rig = Rig::with_scene("/proj/level.rscene");
     rig.harness.state_mut().opener = Some(scripted_opener(Vec::new(), Some("connect: timed out")));
-    open_file_menu_and_type_open_path(&mut rig, "/proj/broken.rscene");
+    open_file_menu_and_type_open_path(&mut rig, &path);
     rig.click("Open");
     assert!(rig.has("open refused: connect: timed out"));
     assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/level.rscene"));

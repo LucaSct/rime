@@ -23,7 +23,6 @@ use std::collections::HashSet;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
@@ -263,13 +262,6 @@ fn to_proto_axis(axis: Option<gizmo::Axis>) -> GizmoAxis {
     }
 }
 
-/// How long a replacement engine may show a schema but an empty world before an Open is refused.
-/// The engine answers a bad `--scene` path by logging to its stderr and serving an empty world, so
-/// an empty snapshot is the only in-band sign of a failed load. The grace lets the first snapshot
-/// land after the schema; a real empty scene is refused too, which is the honest outcome for a
-/// file that holds no entities to show.
-const OPEN_GRACE: Duration = Duration::from_millis(1500);
-
 /// A session the shell can start on its own: the shared mirror it reads, the channel it writes, and
 /// the engine behind them. The production opener spawns `rime-engine`; the click tests substitute
 /// one whose far end they own.
@@ -283,13 +275,30 @@ struct OpenedSession {
 type Opener = Box<dyn Fn(&str) -> OpenedSession>;
 
 /// An Open in flight. The replacement engine runs beside the current one, and the window only
-/// adopts it once it has shown a schema and a non-empty world. Until then (or if it fails) the
-/// current scene is untouched, which is what "a failed open leaves the scene intact" means here.
+/// adopts it once it has connected, sent a schema, and delivered its first snapshot. Until then (or
+/// if it fails) the current scene is untouched, which is what "a failed open leaves the scene
+/// intact" means here.
 struct PendingOpen {
     path: String,
     opened: OpenedSession,
-    /// When the replacement first showed a schema, so the empty-world grace period can be measured.
-    ready_since: Option<Instant>,
+}
+
+/// Why `path` cannot be opened, checked before any engine starts: it must be an existing, readable
+/// file. A missing or unreadable path is refused at once, with the OS's own reason.
+///
+/// This check is all the editor can know about the file. A malformed but existing file is NOT
+/// refused here: it opens as whatever the engine managed to load. The engine keeps running on a bad
+/// `--scene` (`editor_host_app.cpp`, `load_viewport_scene` discards the load result), so the adopted
+/// world may be empty or partial. An in-band load report from the engine is the follow-up that
+/// would turn that into a refusal.
+fn check_openable(path: &str) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a file".to_owned());
+    }
+    std::fs::File::open(path)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 struct EditorApp {
@@ -330,12 +339,10 @@ struct EditorApp {
     // ── New / Open (E2) ─────────────────────────────────────────────────────────────────────
     // `opener` starts a replacement session for Open; `None` only in tests that have not supplied
     // one, where Open is refused rather than silently doing nothing. `open_path` is the inline path
-    // box, as Save As's is. `open_grace` is `OPEN_GRACE` in the app and zero in tests that need an
-    // empty world refused at once.
+    // box, as Save As's is.
     opener: Option<Opener>,
     pending_open: Option<PendingOpen>,
     open_path: String,
-    open_grace: Duration,
 }
 
 impl EditorApp {
@@ -391,13 +398,21 @@ impl EditorApp {
             opener: None,
             pending_open: None,
             open_path: String::new(),
-            open_grace: OPEN_GRACE,
         }
     }
 
-    /// Start a replacement engine on `path`, without touching the current one. The window adopts it
-    /// later, in `settle_pending_open`, once it has proven it loaded something.
+    /// Start a replacement engine on `path`, without touching the current one. A path that is not
+    /// an existing readable file is refused here, synchronously, before any engine starts. Otherwise
+    /// the window adopts the engine later, in `settle_pending_open`, once its first snapshot is in.
     fn start_open(&mut self, path: String) {
+        if let Err(reason) = check_openable(&path) {
+            self.pending_open = None;
+            self.save_status = Some((
+                format!("open refused: {path} is not a readable file ({reason}); the current scene is unchanged"),
+                false,
+            ));
+            return;
+        }
         let Some(opener) = self.opener.as_ref() else {
             self.save_status = Some((
                 "open refused: this session has no engine to open a scene with".to_owned(),
@@ -407,48 +422,30 @@ impl EditorApp {
         };
         let opened = opener(&path);
         self.save_status = Some((format!("opening {path}…"), true));
-        self.pending_open = Some(PendingOpen {
-            path,
-            opened,
-            ready_since: None,
-        });
+        self.pending_open = Some(PendingOpen { path, opened });
     }
 
-    /// Adopt a replacement engine once it has shown a schema and a non-empty world, or refuse it
-    /// (dropping it, which kills its engine) if it reported an error, or showed a schema but no
-    /// entities for `open_grace`. The current session is only dropped at the moment of adoption.
+    /// Adopt a replacement engine once it is connected, has sent a schema, and has delivered its
+    /// first snapshot (whatever its entity count, so an empty scene opens). It is refused, and
+    /// dropped (killing its engine), if it reports an error. The current session is only dropped at
+    /// the moment of adoption. No timer is involved: the snapshot counter says when it has spoken.
     fn settle_pending_open(&mut self) {
-        let Some(pending) = self.pending_open.as_mut() else {
+        let Some(pending) = self.pending_open.as_ref() else {
             return;
         };
-        let (error, ready, populated) = {
+        let (error, ready) = {
             let s = pending.opened.shared.lock().unwrap();
             (
                 s.error.clone(),
-                s.connected && !s.schema.types.is_empty(),
-                !s.snapshot.entities.is_empty(),
+                s.connected && !s.schema.types.is_empty() && s.snapshots_received > 0,
             )
         };
-        let refusal = if let Some(error) = error {
-            Some(format!("open refused: {error}"))
-        } else if ready && !populated {
-            let since = *pending.ready_since.get_or_insert_with(Instant::now);
-            (since.elapsed() >= self.open_grace).then(|| {
-                format!(
-                    "open refused: {} loaded no entities (missing, unreadable, or empty); \
-                     the current scene is unchanged",
-                    pending.path
-                )
-            })
-        } else {
-            None
-        };
-        if let Some(message) = refusal {
+        if let Some(error) = error {
             self.pending_open = None;
-            self.save_status = Some((message, false));
+            self.save_status = Some((format!("open refused: {error}"), false));
             return;
         }
-        if !(ready && populated) {
+        if !ready {
             return;
         }
         let PendingOpen { path, opened, .. } = self.pending_open.take().expect("checked above");

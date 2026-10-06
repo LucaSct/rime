@@ -51,6 +51,10 @@ pub struct ViewportFrame {
 pub struct SharedState {
     pub connected: bool,
     pub error: Option<String>,
+    /// How many `Snapshot` messages the engine has delivered. Opening a scene waits for the first
+    /// one rather than inferring "loaded" from an entity count, because an empty scene is a valid
+    /// world and an empty snapshot is not a failure.
+    pub snapshots_received: u64,
     pub schema: Schema,
     pub snapshot: Snapshot,
     pub assets: Vec<AssetEntry>,
@@ -304,7 +308,9 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
         }
         MessageType::Other(code) if code == EditorMessage::Snapshot.to_code() => {
             if let Ok(snapshot) = Snapshot::decode(payload) {
-                shared.lock().unwrap().snapshot = snapshot;
+                let mut s = shared.lock().unwrap();
+                s.snapshot = snapshot;
+                s.snapshots_received += 1;
             }
         }
         MessageType::Other(code) if code == EditorMessage::AssetList.to_code() => {

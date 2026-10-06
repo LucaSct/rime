@@ -84,10 +84,15 @@ Then, in the window:
    transform value). `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo. While a text box has focus, `Ctrl+Z` is
    that box's undo, not the world's.
 4. **Place** — in the Assets panel, search the browser and place a mesh; it appears in the Outliner.
-5. **Open another scene** — **File ▸ Open**, type a path, press **Open**. The editor starts a second
-   engine on that scene and switches to it only if the scene loads something; a missing or empty
-   file is refused with the reason, and the current scene stays. **File ▸ New** starts an empty,
+5. **Open another scene** — **File ▸ Open**, type a path, press **Open**. A path that is not an
+   existing readable file is refused at once, with the reason, and the current scene stays.
+   Otherwise the editor starts a second engine on that file and switches to it once that engine has
+   sent its first snapshot; an empty scene opens as an empty scene. **File ▸ New** starts an empty,
    unnamed scene; Save then waits for Save As.
+   *Limit:* a malformed but existing file opens as whatever the engine managed to load. The engine
+   keeps running on a bad `--scene` (`engine/app/editor_host_app.cpp`, `load_viewport_scene`), so the
+   result may be empty or partial. An in-band load report from the engine is the follow-up that
+   would refuse such a file.
 6. **Play** — hit **▶**. The simulation runs live (a dynamic body falls). **Step** advances one
    tick; **Stop ■** restores the exact pre-play scene.
 
