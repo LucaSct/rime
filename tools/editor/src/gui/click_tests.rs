@@ -968,21 +968,145 @@ fn a_refused_save_as_still_becomes_the_sessions_scene() {
 }
 
 #[test]
-fn file_menu_has_no_new_or_open() {
-    // DOCUMENTS A GAP: the File menu is Save + Save As and nothing else. A scene can only be
-    // chosen on the command line (`--scene`); there is no New, no Open, no Recent, no Quit, and
-    // closing the window never asks about unsaved edits (there is no dirty flag to ask with).
+fn file_menu_has_new_and_open() {
+    // The File menu offers New and Open as well as Save and Save As. There is still no Quit or
+    // Revert: closing is the window's, and Revert is not a command the editor has.
     let mut rig = Rig::new();
     rig.click("File");
     let buttons = rig.button_labels();
-    for absent in ["New", "Open", "Quit", "Exit", "Revert"] {
+    for absent in ["Quit", "Exit", "Revert"] {
         assert!(
             !buttons.iter().any(|b| b.contains(absent)),
             "found a {absent} entry: {buttons:?}"
         );
     }
-    assert!(buttons.iter().any(|b| b == SAVE));
-    assert!(buttons.iter().any(|b| b == "Write"));
+    for present in ["New", "Open", SAVE, "Write"] {
+        assert!(
+            buttons.iter().any(|b| b == present),
+            "no {present}: {buttons:?}"
+        );
+    }
+}
+
+/// A replacement engine as the Open path sees it: a session whose mirror already holds what the
+/// engine would have sent after loading `path`. `error` stands in for a session that never came up.
+fn scripted_opener(world: Vec<SnapshotEntity>, error: Option<&'static str>) -> Opener {
+    Box::new(move |_path| {
+        let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut s = shared.lock().unwrap();
+            s.connected = error.is_none();
+            s.error = error.map(str::to_string);
+            s.schema = fake_schema();
+            s.snapshot = Snapshot {
+                entities: world.clone(),
+            };
+        }
+        let (out_tx, _out_rx) = mpsc::channel();
+        OpenedSession {
+            shared,
+            out_tx,
+            session: EngineSession::detached(),
+        }
+    })
+}
+
+/// Open File and type into its Open path box. That box comes after Save As in the menu, so it is
+/// the last text box that was not there before the menu opened.
+fn open_file_menu_and_type_open_path(rig: &mut Rig, path: &str) {
+    let before: Vec<_> = rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .map(|n| n.id())
+        .collect();
+    rig.click("File");
+    rig.harness
+        .get_all_by_role(Role::TextInput)
+        .filter(|n| !before.contains(&n.id()))
+        .last()
+        .expect("the Open path box")
+        .type_text(path);
+    rig.settle();
+}
+
+#[test]
+fn new_clears_the_scene_and_leaves_save_disabled() {
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    assert!(rig.has("3 entities"));
+    rig.click("File");
+    rig.click("New");
+    assert!(rig.host.world.is_empty(), "every entity was despawned");
+    assert!(rig.has("0 entities"));
+    assert_eq!(rig.app().scene_path, None, "an unnamed scene");
+    rig.click("File");
+    assert!(!rig.enabled(SAVE), "so Save has nowhere to write");
+    rig.key(egui::Key::Escape);
+}
+
+#[test]
+fn new_forgets_the_undo_history() {
+    // The despawns are not undoable, and the edits before them name entities that no longer exist,
+    // so New drops the history with them.
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.type_into_number_field(0, "5");
+    assert!(rig.app().stack.can_undo());
+    rig.click("File");
+    rig.click("New");
+    assert!(!rig.app().stack.can_undo());
+}
+
+#[test]
+fn new_and_open_are_unavailable_while_playing() {
+    let mut rig = Rig::new();
+    rig.click("▶");
+    rig.click("File");
+    assert!(!rig.enabled("New"));
+    assert!(!rig.enabled("Open"));
+    rig.key(egui::Key::Escape);
+}
+
+#[test]
+fn open_loads_the_typed_scene_into_the_window() {
+    let mut rig = Rig::new();
+    rig.harness.state_mut().opener = Some(scripted_opener(starting_world()[..1].to_vec(), None));
+    open_file_menu_and_type_open_path(&mut rig, "/proj/other.rscene");
+    rig.click("Open");
+    assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/other.rscene"));
+    assert!(rig.has("opened /proj/other.rscene"));
+    assert!(
+        rig.has("1 entities"),
+        "the window shows the new engine's world"
+    );
+}
+
+#[test]
+fn open_of_a_file_that_loads_nothing_is_refused_and_the_scene_stays() {
+    // The engine answers a bad path with an empty world, not an error, so an empty world is refused
+    // once the grace has passed. The window keeps the scene it had.
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.harness.state_mut().opener = Some(scripted_opener(Vec::new(), None));
+    rig.harness.state_mut().open_grace = Duration::ZERO;
+    open_file_menu_and_type_open_path(&mut rig, "/proj/missing.rscene");
+    rig.click("Open");
+    assert!(rig.has(
+        "open refused: /proj/missing.rscene loaded no entities (missing, unreadable, or empty); \
+         the current scene is unchanged"
+    ));
+    assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/level.rscene"));
+    assert!(rig.has("3 entities"), "the old world is still there");
+    assert_eq!(rig.app().save_status.as_ref().map(|s| s.1), Some(false));
+}
+
+#[test]
+fn open_refuses_an_engine_that_failed_to_start() {
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.harness.state_mut().opener = Some(scripted_opener(Vec::new(), Some("connect: timed out")));
+    open_file_menu_and_type_open_path(&mut rig, "/proj/broken.rscene");
+    rig.click("Open");
+    assert!(rig.has("open refused: connect: timed out"));
+    assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/level.rscene"));
+    assert!(rig.has("3 entities"));
 }
 
 // ── View ────────────────────────────────────────────────────────────────────────────────────
