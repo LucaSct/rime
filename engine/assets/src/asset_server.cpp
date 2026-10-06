@@ -125,6 +125,20 @@ template <> struct StreamKind<TextureAsset> {
 
     static std::uint64_t bytes(const TextureAsset& t) { return t.pixels.size(); }
 };
+// The coalescing key. Requests merge on the file they name, so two spellings of one file
+// ("a/f.mesh", "./a/f.mesh", "a/b/../f.mesh", or "a\\f.mesh" on Windows) must produce ONE key;
+// otherwise the file is read and decoded twice, two slots and GPU uploads are held for one asset,
+// and physical_load_count() double-counts.
+//  * lexically_normal() folds "./", "x/../" and duplicate separators purely as text -- it never
+//    touches the filesystem, because request_* runs before the file is known to exist and must
+//    not pay a stat.
+//  * generic_string() spells every separator '/', so '\\' and '/' agree on Windows.
+//  * Deliberately NO case-folding: Linux is case-sensitive, so lowercasing would merge two
+//    genuinely different files. On Windows two spellings differing only in case still miss each
+//    other, which costs a duplicate load but is never wrong.
+std::string cache_key(const std::filesystem::path& path) {
+    return path.lexically_normal().generic_string();
+}
 
 } // namespace
 
@@ -144,7 +158,7 @@ void AssetServer::wait_for_pending_loads() {
 }
 
 MeshAssetHandle AssetServer::request_mesh(const std::filesystem::path& path) {
-    const std::string key = path.string();
+    const std::string key = cache_key(path);
     std::uint32_t index;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -160,7 +174,7 @@ MeshAssetHandle AssetServer::request_mesh(const std::filesystem::path& path) {
 }
 
 TextureAssetHandle AssetServer::request_texture(const std::filesystem::path& path) {
-    const std::string key = path.string();
+    const std::string key = cache_key(path);
     std::uint32_t index;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -176,7 +190,7 @@ TextureAssetHandle AssetServer::request_texture(const std::filesystem::path& pat
 }
 
 MaterialAssetHandle AssetServer::request_material(const std::filesystem::path& path) {
-    const std::string key = path.string();
+    const std::string key = cache_key(path);
     std::uint32_t index;
     {
         std::lock_guard<std::mutex> lock(mu_);

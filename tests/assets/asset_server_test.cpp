@@ -129,6 +129,38 @@ TEST_CASE("placeholders are the documented unit cube and 2x2 magenta checker") {
     CHECK(&server.get_or_placeholder(TextureAssetHandle{}) == &server.placeholder_texture());
 }
 
+TEST_CASE("the same file spelled two ways coalesces to one physical load") {
+    // The cache key is the lexically normalised path: "dir/f", "dir/./f" and "dir/sub/../f" are
+    // one file and must share one slot, while a genuinely different file still gets its own.
+    TempDir tmp("rime_asset_server_key_normalise");
+    const auto mesh_bytes = rime::platform::read_file(kFixtures / "quad.rmesh");
+    REQUIRE(mesh_bytes);
+    fs::create_directories(tmp.path / "sub");
+    const fs::path a = tmp.path / "a.rmesh";
+    const fs::path b = tmp.path / "b.rmesh";
+    REQUIRE(rime::platform::write_file(a, *mesh_bytes));
+    REQUIRE(rime::platform::write_file(b, *mesh_bytes));
+
+    JobSystem jobs(2);
+    AssetServer server(jobs);
+
+    const auto h1 = server.request_mesh(a);
+    const auto h2 = server.request_mesh(tmp.path / "." / "a.rmesh");
+    const auto h3 = server.request_mesh(tmp.path / "sub" / ".." / "a.rmesh");
+    server.wait_for_pending_loads();
+    server.pump();
+
+    CHECK(h1 == h2);
+    CHECK(h1 == h3);
+    CHECK(server.physical_load_count() == 1);
+
+    const auto h4 = server.request_mesh(b); // negative half: a different file is a new load
+    server.wait_for_pending_loads();
+    server.pump();
+    CHECK(h4 != h1);
+    CHECK(server.physical_load_count() == 2);
+}
+
 TEST_CASE("concurrent requests coalesce per path — one physical load each") {
     // Mint K distinct paths per kind by copying the fixtures under fresh names; the server
     // coalesces on PATH, so N requests spread over K paths must trigger exactly K physical loads
