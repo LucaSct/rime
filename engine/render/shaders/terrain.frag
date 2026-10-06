@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 The Rime Engine Authors.
 //
-// The terrain heightfield pass, fragment stage (m19.3, ADR-0062). Deliberately the smallest honest
-// shading of a terrain: one directional light, Lambert, plus an ambient term, into the HDR target.
-// m19.3 drew the heightfield with one flat albedo; m19.4 (ADR-0063) lets a tile blend up to four
-// base colours by a cooked weight map. A tile without a splat map still takes the flat-albedo path
-// (`pc.surface.rgb`), so the m19.3 picture is untouched.
+// The terrain heightfield pass, fragment stage (m19.3, ADR-0062). One directional light plus an
+// ambient term, into the HDR target. m19.3 shaded Lambert with one flat albedo; m19.4 (ADR-0063)
+// let a tile blend up to four base colours by a cooked weight map; m19.5 (ADR-0064) shades with the
+// SAME Cook-Torrance GGX BRDF as pbr_forward.frag (brdf.glsl) and blends metallic and roughness
+// alongside the colour, so terrain can look like metal. A tile without a splat map takes the
+// flat-material path (`pc.surface.rgb`, `pc.material`).
 //
 // ── THE NORMAL COMES FROM THE GEOMETRY, NOT FROM A SECOND HEIGHT READ ────────────────────────
 //
@@ -27,19 +28,23 @@
 // a heightfield always knows: its up axis is local +Y, and the surface is a function of XZ, so a
 // terrain normal can never point downward.
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "brdf.glsl"
 
 layout(location = 0) in vec3 v_world;
 layout(location = 1) in vec2 v_local; // tile-local xz, metres
 
 // m19.4: the splat weights (RGBA8_UNORM, one texel = the four layer weights) and the per-tile
-// constants. The 128-byte push block is full, so these live in a small uniform buffer made at
-// upload. A v1 tile binds a 1x1 dummy texture and flag = 0, so the descriptor layout is identical
+// constants. The push block is not the place for per-layer data, so these live in a small uniform buffer made at
+// upload. (m19.5 grew the push block to 160 bytes but the splat constants stay here.) A v1 tile binds a 1x1 dummy texture and flag = 0, so the descriptor layout is identical
 // for every tile and there is ONE pipeline.
 layout(set = 0, binding = 1) uniform sampler2D splat_weights;
 layout(set = 0, binding = 2) uniform Splat {
     vec4 info;     // x = 1 when this tile has a splat map, yz = tile extent in metres (x, z)
     vec4 dims;     // xy = weight map size in texels
-    vec4 color[4]; // base colour per layer; an unused slot repeats layer 0 (a zero difference)
+    vec4 color[4]; // rgb = base colour, w = metallic per layer; an unused slot repeats layer 0
+    vec4 roughness; // x..w = roughness of layer 0..3 (same repeat rule)
 } splat;
 
 layout(location = 0) out vec4 out_color;
@@ -51,6 +56,8 @@ layout(push_constant) uniform Pc {
     vec4 grid;
     vec4 sun;     // xyz = unit direction the light TRAVELS, w = irradiance (W/m², perpendicular)
     vec4 surface; // rgb = albedo in [0,1], w = ambient irradiance
+    vec4 eye;     // xyz = camera world position
+    vec4 material; // x = metallic, y = roughness (the flat tile's material)
 } pc;
 
 void main() {
@@ -69,9 +76,15 @@ void main() {
     // (c_k - c0) is EXACTLY 0 when the layers are equal, so the result is c0 bit for bit on every
     // GPU with any filter. Likewise a texel whose weights 1..3 are 0 yields c0 exactly. That is
     // what lets ADR-0063 section 4 anchor the blend with "bit-identical, no margin". w0 is never
-    // read: it is implied. Only base colour is blended — this shader is Lambert (ADR-0062), so a
-    // blended roughness or metallic would be data nothing here reads.
+    // read: it is implied.
+    //
+    // m19.5: metallic and roughness are blended in the SAME difference form, for the SAME reason.
+    // The anchor ("four equal layers == the flat tile") would otherwise stop being bit-exact the
+    // moment a scalar went through the naive weighted sum, and the anchor is what proves the
+    // weight map is not quietly adding or removing light.
     vec3 base = pc.surface.rgb;
+    float metallic = pc.material.x;
+    float roughness = pc.material.y;
     if (splat.info.x > 0.5) {
         // CORNER-aligned, like the height samples: weight texel (0,0) is centred on the tile
         // origin and texel (wc-1, wr-1) on the far corner. Normalised uv puts texel k's centre at
@@ -83,7 +96,18 @@ void main() {
         const vec3 c0 = splat.color[0].rgb;
         base = c0 + w.g * (splat.color[1].rgb - c0) + w.b * (splat.color[2].rgb - c0) +
                w.a * (splat.color[3].rgb - c0);
+        const float m0 = splat.color[0].w;
+        metallic = m0 + w.g * (splat.color[1].w - m0) + w.b * (splat.color[2].w - m0) +
+                   w.a * (splat.color[3].w - m0);
+        const float r0 = splat.roughness.x;
+        roughness = r0 + w.g * (splat.roughness.y - r0) + w.b * (splat.roughness.z - r0) +
+                    w.a * (splat.roughness.w - r0);
     }
+    // Same floor and remap as pbr_forward: alpha = roughness^2 (perceptual), and a roughness of 0
+    // would make GGX's D a delta function that no finite sun can light, so clamp it.
+    roughness = clamp(roughness, 0.045, 1.0);
+    const float alpha = roughness * roughness;
+    const vec3 v = normalize(pc.eye.xyz - v_world);
 
     vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));
     if (n.y < 0.0) {
@@ -91,13 +115,20 @@ void main() {
     }
 
     // `sun.xyz` is the direction the light travels, so the vector TOWARD the light is its negation
-    // — the same convention `DirectionalLight` extraction pins in components.hpp.
-    const float n_dot_l = max(dot(n, -pc.sun.xyz), 0.0);
+    // — the same convention `DirectionalLight` extraction pins in components.hpp. shade_light
+    // returns BRDF x irradiance x n.l: for a metallic-0 surface its diffuse is kd*albedo/pi with
+    // kd = 1 - Fresnel (the energy the specular lobe took), i.e. Lambert's albedo/pi scaled down by
+    // the Fresnel reflectance, plus the specular lobe Lambert never had.
+    vec3 radiance =
+        shade_light(n, v, -pc.sun.xyz, vec3(pc.sun.w), base, metallic, alpha);
 
-    // Lambert: outgoing radiance = albedo/π × irradiance. The 1/π is the normalisation that makes
-    // a white Lambertian surface reflect exactly the energy it receives and no more; dropping it
-    // is the single most common way a renderer ends up π times too bright.
-    const vec3 radiance = base *
-                          (pc.sun.w * n_dot_l * 0.31830988618 + pc.surface.w);
+    // AMBIENT is a uniform-environment STAND-IN until terrain reads the sky SH (deferred, ADR-0064).
+    // A uniform white environment of irradiance E reflects diffuse (1-metallic)*base*E and a
+    // specular term of about f0*E, with f0 = 0.04 for dielectrics and the base colour for metals.
+    // Why a flat-ambient metal still reads DARKER than a real one: a metal has no diffuse, so its
+    // only ambient light is this f0 term, and a real metal would also mirror the sky and horizon
+    // (bright, directional, coloured) — which needs the environment reflection this stand-in lacks.
+    const vec3 f0 = mix(vec3(0.04), base, metallic);
+    radiance += pc.surface.w * ((1.0 - metallic) * base + f0);
     out_color = vec4(radiance, 1.0);
 }

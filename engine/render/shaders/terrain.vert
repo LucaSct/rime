@@ -36,7 +36,7 @@
 // same walk `HeightfieldAsset::samples` already is, which is why the upload is a memcpy.
 layout(set = 0, binding = 0) uniform sampler2D heightfield;
 
-// 128 bytes exactly — the push-constant size every Vulkan implementation guarantees. Mirrored by
+// 160 bytes (m19.5) — above the 128 Vulkan guarantees, so TerrainPass checks the device's limit. Mirrored by
 // `TerrainPush` in terrain_pass.hpp, which static_asserts the size; build it with
 // `terrain_push()` rather than by hand so a second caller (the m19.3 proof builds its own pipeline
 // around this very stage) cannot assemble a differently-shaped block.
@@ -46,6 +46,8 @@ layout(push_constant) uniform Pc {
     vec4 grid;       //  80..95  x = cell_size_x, y = cell_size_z, z = height_scale, w = columns
     vec4 sun;        //  96..111 xyz = unit direction the light travels, w = irradiance (fragment)
     vec4 surface;    // 112..127 rgb = albedo, w = ambient (fragment)
+    vec4 eye;        // 128..143 xyz = camera world position (fragment)
+    vec4 material;   // 144..159 x = metallic, y = roughness (fragment, flat tiles)
 } pc;
 
 // World position, interpolated. The fragment stage needs it for shading, and the proof needs its

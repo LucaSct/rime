@@ -536,6 +536,7 @@ bool VulkanDevice::create_logical_device() {
     vkGetPhysicalDeviceProperties(physical_, &props);
     max_anisotropy_limit_ = props.limits.maxSamplerAnisotropy;
     timestamp_period_ns_ = props.limits.timestampPeriod;
+    adapter_.max_push_constant_bytes = props.limits.maxPushConstantsSize;
 
     std::uint32_t family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, nullptr);

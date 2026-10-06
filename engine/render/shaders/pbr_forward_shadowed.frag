@@ -12,9 +12,9 @@
 // It is a SEPARATE shader from pbr_forward.frag on purpose: with every M10 feature off the
 // renderer binds the unmodified pbr_forward pipeline and is byte-identical to the M5.6 baseline
 // (ADR-0032 §11). Each feature is then gated *inside* here by a count or flag in its uniform
-// block, so one pipeline covers every combination. The shared BRDF is duplicated from
-// pbr_forward.frag rather than #included because the offline shader compile has no include path
-// configured yet; factoring a common lighting_data.glsl is the C5 follow-up.
+// block, so one pipeline covers every combination. The shared BRDF lives in brdf.glsl
+// (m19.5), #included by both this file and pbr_forward.frag; the lighting-data block is still
+// duplicated (factoring a common lighting_data.glsl is the C5 follow-up).
 //
 // The techniques are derived in docs/math/shadow-mapping.md (the shadow test, cascade selection,
 // PCF and bias) and docs/math/clustered-shading.md (the froxel grid and its log-z partition).
@@ -148,44 +148,7 @@ layout(location = 0) out vec4 out_hdr;
 layout(location = 1) out vec4 out_gbuffer;
 #endif
 
-const float kPi = 3.14159265358979;
-
-float d_ggx(float n_dot_h, float alpha) {
-    float a2 = alpha * alpha;
-    float t = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / (kPi * t * t);
-}
-
-float v_smith_ggx(float n_dot_v, float n_dot_l, float alpha) {
-    float a2 = alpha * alpha;
-    float gv = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
-    float gl = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
-    return 0.5 / max(gv + gl, 1e-5);
-}
-
-vec3 f_schlick(float v_dot_h, vec3 f0) {
-    float f = pow(1.0 - v_dot_h, 5.0);
-    return f0 + (vec3(1.0) - f0) * f;
-}
-
-vec3 shade_light(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo, float metallic, float alpha) {
-    float n_dot_l = dot(n, l);
-    if (n_dot_l <= 0.0)
-        return vec3(0.0);
-    vec3 h = normalize(v + l);
-    float n_dot_v = max(dot(n, v), 1e-4);
-    float n_dot_h = max(dot(n, h), 0.0);
-    float v_dot_h = max(dot(v, h), 0.0);
-
-    vec3 f0 = mix(vec3(0.04), albedo, metallic);
-    vec3 fresnel = f_schlick(v_dot_h, f0);
-    vec3 specular = d_ggx(n_dot_h, alpha) * v_smith_ggx(n_dot_v, n_dot_l, alpha) * fresnel;
-
-    vec3 kd = (vec3(1.0) - fresnel) * (1.0 - metallic);
-    vec3 diffuse = kd * albedo / kPi;
-
-    return (diffuse + specular) * radiance * n_dot_l;
-}
+#include "brdf.glsl"
 
 // One point light's contribution. Factored out (m10.3) so the uniform-block loop and the clustered
 // loop are provably the same shading maths — only the source of the light data differs. The

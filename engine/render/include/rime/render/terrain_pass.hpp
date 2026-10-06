@@ -55,7 +55,9 @@
 // ── WHAT THIS PASS IS NOT, YET (all deferred in ADR-0062, none of it silent) ──────────────────
 //
 //   * no LOD, no clipmap, no tessellation: a tile is drawn at full sample density, every frame;
-//   * splat blending (m19.4, ADR-0063) blends BASE COLOUR only — see TerrainLayer;
+//   * splat blending (m19.4/m19.5, ADR-0063/0064) blends base colour, metallic and roughness per
+//     texel — see TerrainLayer; shading is the shared GGX BRDF (brdf.glsl) with a flat-ambient
+//     stand-in, so there are no environment reflections yet (ADR-0064);
 //   * no streaming: `upload()` is a one-shot, and a tile stays resident until the pass dies;
 //   * no holes, no decals, no per-cell best-fit diagonals (the format cannot express them either);
 //   * a tile is placed by TRANSLATION only, because `HeightfieldAsset` carries an `origin` and no
@@ -104,10 +106,15 @@ struct TerrainTile {
 // One palette entry, resolved BY THE CALLER. The pass must not reach into the asset system, so the
 // caller looks each `HeightfieldAsset::layers[k]` up and hands over the colour.
 //
-// Only `base_color` exists, on purpose. terrain.frag is Lambert (ADR-0062), so a blended metallic
-// or roughness would be data nothing reads and nothing could prove; it joins when the shading does.
+// m19.4 carried `base_color` only, because terrain.frag was Lambert and a blended metallic or
+// roughness would have been data nothing read. m19.5 (ADR-0064) moved terrain to the shared GGX
+// BRDF, so metallic and roughness join the blend. Both must be finite and in [0,1]; upload()
+// refuses (and counts) anything else rather than clamping it into a plausible-looking lie. The
+// defaults — dielectric, fully rough — are the closest GGX gets to the old Lambert look.
 struct TerrainLayer {
     core::Vec3 base_color{0.5f, 0.5f, 0.5f};
+    float metallic = 0.0f;
+    float roughness = 1.0f;
 };
 
 // Slot k is `HeightfieldAsset::layers[k]`. Entries for unused slots (zero AssetId) are ignored:
@@ -126,26 +133,40 @@ struct TerrainLight {
     float sun_irradiance = 3.0f;                 // W/m² on a surface facing the sun
     core::Vec3 albedo{0.35f, 0.33f, 0.28f};      // a plausible dirt/grass grey-green
     float ambient = 0.05f;                       // flat irradiance, stands in for sky + bounce
+    // The flat (v1, no splat map) surface's material, m19.5. A splat tile takes these per layer
+    // from its palette instead, exactly as it takes base colour from the palette rather than
+    // `albedo`.
+    float metallic = 0.0f;
+    float roughness = 1.0f;
 };
 
-// The push block both terrain shaders read, byte for byte. 128 bytes — the floor every Vulkan
-// implementation guarantees, so no capability check. Build it with `terrain_push()`.
+// The push block both terrain shaders read, byte for byte. 160 bytes: m19.5 appended the camera
+// position and the flat material to m19.3's 128. Vulkan only GUARANTEES 128 (maxPushConstantsSize),
+// so 160 is above the floor and the pass checks `adapter().max_push_constant_bytes` (desktop
+// drivers report 256 or more, MoltenVK 4096) — a device below it refuses every upload, counted
+// and warned once, rather than drawing with a truncated block. Build it with `terrain_push()`.
 struct TerrainPush {
     core::Mat4 view_proj;
     float placement[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // xyz = tile origin, w = height_offset
     float grid[4] = {0.0f, 0.0f, 0.0f, 0.0f};      // cell_x, cell_z, height_scale, columns
     float sun[4] = {0.0f, -1.0f, 0.0f, 0.0f};      // xyz = travel direction, w = irradiance
     float surface[4] = {0.0f, 0.0f, 0.0f, 0.0f};   // rgb = albedo, w = ambient
+    float eye[4] = {0.0f, 0.0f, 0.0f, 0.0f};       // xyz = camera world position, w = 0
+    float material[4] = {0.0f, 1.0f, 0.0f, 0.0f};  // x = metallic, y = roughness, z = w = 0
 };
 
-static_assert(sizeof(TerrainPush) == 128,
+static_assert(sizeof(TerrainPush) == 160,
               "TerrainPush must match terrain.vert / terrain.frag's push_constant block");
 
 // Fold a tile + a view + a light into the shader's constant block. Free and public on purpose:
 // the pass uses it, and so does the proof's own pipeline, so the two cannot drift. A zero-length
-// `sun_direction` falls back to straight down rather than producing a NaN normal.
-[[nodiscard]] TerrainPush
-terrain_push(const TerrainTile& tile, const core::Mat4& view_proj, const TerrainLight& light);
+// `sun_direction` falls back to straight down rather than producing a NaN normal. `eye` is the
+// camera's world position — the BRDF's view vector needs it, and an orthographic projection
+// cannot supply one, so it is passed explicitly rather than inverted out of `view_proj`.
+[[nodiscard]] TerrainPush terrain_push(const TerrainTile& tile,
+                                       const core::Mat4& view_proj,
+                                       const core::Vec3& eye,
+                                       const TerrainLight& light);
 
 class TerrainPass {
 public:
@@ -157,10 +178,11 @@ public:
 
     // Make a cooked heightfield resident: the samples as an R16_UNORM texture, plus the grid's
     // index buffer. Returns `kInvalidTerrainTile` (and bumps `tiles_refused()`) for an asset this
-    // pass will not draw — a grid smaller than one cell, a sample span that does not match the
-    // grid, a non-finite or non-positive spacing/scale, an axis past `kMaxTileSamplesPerAxis`, or
-    // a `triangulation` value this build does not know. It REFUSES rather than repairing, the
-    // registration posture ADR-0060 §2 set for the physics side.
+    // pass will not draw — (when the device's push-constant limit is below sizeof(TerrainPush),
+    // EVERY upload, counted and warned once) a grid smaller than one cell, a sample span that does
+    // not match the grid, a non-finite or non-positive spacing/scale, an axis past
+    // `kMaxTileSamplesPerAxis`, or a `triangulation` value this build does not know. It REFUSES
+    // rather than repairing, the registration posture ADR-0060 §2 set for the physics side.
     //
     // An asset that carries a splat map is REFUSED here (counted in `tiles_refused()` and
     // `splat_refused()`): without materials it cannot be shaded correctly, and guessing a colour
@@ -170,7 +192,8 @@ public:
     // As above, plus the caller-resolved palette for a splat asset (m19.4). On an asset without a
     // splat map the palette is ignored. Additional refusals, all also counted in `splat_refused()`:
     // a weight map past `kMaxSplatTexelsPerAxis`, a weight span that does not match its size, a
-    // non-finite palette colour, or a failed weight-texture / uniform-buffer allocation.
+    // non-finite palette colour, a layer metallic/roughness that is non-finite or outside [0,1], or
+    // a failed weight-texture / uniform-buffer allocation.
     [[nodiscard]] TerrainTileId upload(const assets::HeightfieldAsset& asset,
                                        const TerrainPalette& palette);
 
@@ -194,6 +217,7 @@ public:
              RGTexture depth,
              TerrainTileId id,
              const core::Mat4& view_proj,
+             const core::Vec3& eye,
              const TerrainLight& light);
 
     // Assets `upload()` would not draw. Guardrail 5: a refused tile and a tile that was never
@@ -218,6 +242,8 @@ private:
     std::vector<TerrainTile> tiles_;
     TerrainTileId upload_impl(const assets::HeightfieldAsset& asset, const TerrainPalette* palette);
 
+    bool push_fits_ = true; // adapter().max_push_constant_bytes >= sizeof(TerrainPush)
+    bool push_warned_ = false;
     std::uint64_t refused_ = 0;
     std::uint64_t splat_refused_ = 0;
     std::uint64_t drawn_ = 0;
