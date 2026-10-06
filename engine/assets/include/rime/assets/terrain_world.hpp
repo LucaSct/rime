@@ -211,6 +211,18 @@ struct TerrainWorldTile {
     // m19.8d1 (after `path`, so m19.8a's aggregate initialisers still mean what they meant).
     std::uint32_t level = 0;      // LOD level; 0 = a cooked source tile
     float geometric_error = 0.0f; // metres; 0 for level 0 (see the header comment)
+    // m19.8d3 (ADR-0072): a parent's appearance bake — two single-level textures with one texel
+    // per sample: base colour (RGBA8 sRGB) and material (RGBA8 UNORM, R = metallic, G =
+    // roughness). Empty paths = cooked without a bake; the renderer then draws the parent with its
+    // placeholder material and counts it.
+    AssetId bake_color_id{};
+    std::string bake_color_path{};
+    AssetId bake_material_id{};
+    std::string bake_material_path{};
+
+    [[nodiscard]] bool has_bake() const noexcept {
+        return !bake_color_path.empty() && !bake_material_path.empty();
+    }
 
     [[nodiscard]] TerrainTileKey key() const noexcept { return {level, coord}; }
 };

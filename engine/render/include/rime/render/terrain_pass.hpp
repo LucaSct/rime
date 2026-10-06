@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "rime/core/math/mat.hpp"
@@ -57,7 +58,9 @@
 //
 //   * no clipmap, no tessellation: a tile is drawn at full sample density. LOD (m19.8d2) is a
 //     chain of coarser TILES, each drawn at its own full density and geomorphed onto its parent
-//     (TerrainLodDraw); choosing which to draw is TerrainResidency's (terrain_lod.hpp);
+//     (TerrainLodDraw); choosing which to draw is TerrainResidency's (terrain_lod.hpp). A coarse
+//     tile shades from a cooked APPEARANCE BAKE (m19.8d3, ADR-0072: set_bake), and a morphing
+//     tile fades toward its parent's bake by the geometry's own morph factor;
 //   * splat blending (m19.4/m19.5, ADR-0063/0064) blends base colour, metallic and roughness per
 //     texel — see TerrainLayer; shading is the shared GGX BRDF (brdf.glsl). m19.7b (ADR-0066
 //     addendum) multiplies each layer's colour by its own albedo texture at world-XZ UVs, and
@@ -120,6 +123,23 @@ struct TerrainTile {
     // texture holds the PASS's 1x1 white fallback, so every tile binds four valid handles. A v1
     // tile holds the fallback in all four (it never samples them: its flag is 0).
     std::array<rhi::TextureHandle, 4> layer_textures{};
+    // m19.8d3: this tile's appearance bake (set_bake) — OWNED by the tile, destroyed with it.
+    // Invalid = none: the tile shades from its palette or the flat material, as before.
+    rhi::TextureHandle bake_color{};    // RGBA8_SRGB, columns x rows
+    rhi::TextureHandle bake_material{}; // RGBA8_UNORM, columns x rows; R = metallic, G = roughness
+    std::uint64_t bake_bytes = 0;
+};
+
+// m19.8d3 (ADR-0072): a coarse tile's baked appearance, as `rime terrain-world` cooks it — two
+// RGBA8 grids with ONE TEXEL PER SAMPLE of the tile (texel (i, j) at sample (i, j)), row-major,
+// x fastest. `color` is sRGB-encoded base colour; `material` is linear, R = metallic, G =
+// roughness. No mips: a tile is drawn with one texel per vertex at every distance it is selected
+// for.
+struct TerrainBakeTexels {
+    std::uint32_t columns = 0;
+    std::uint32_t rows = 0;
+    std::span<const std::byte> color;
+    std::span<const std::byte> material;
 };
 
 // One palette entry, resolved BY THE CALLER. The pass must not reach into the asset system, so the
@@ -224,6 +244,18 @@ struct TerrainLodDraw {
     core::Vec3 camera{0.0f, 0.0f, 0.0f}; // the camera the SELECTION used
     float morph_start = 0.0f;            // +inf (the top level) = never morphs
     float morph_end = 0.0f;
+    // m19.8d3 (ADR-0072): the APPEARANCE morph. `parent` is this tile's parent in the chain, as a
+    // tile of the same pass; when it holds a bake, the fragment stage fades this tile's shading
+    // toward that bake by the SAME per-vertex morph factor that moves the geometry, so at m = 1
+    // the tile shades exactly as its parent would. `parent_quadrant` says which quarter of the
+    // parent this tile is: bit 0 = the +x half, bit 1 = the +z half (coord & 1 on each axis).
+    // An invalid parent, or one without a bake, means no fade (TerrainPass counts those draws).
+    TerrainTileId parent = kInvalidTerrainTile;
+    std::uint32_t parent_quadrant = 0;
+    // Resolved by TerrainPass::add from the tiles themselves; a caller driving its own pipeline
+    // through terrain_push() sets them to match what it binds at bindings 9..12.
+    bool own_bake = false;    // shade from this tile's bake
+    bool parent_bake = false; // fade toward the parent's bake
 };
 
 // The push block both terrain shaders read, byte for byte. 208 bytes: m19.5 appended the camera
@@ -248,6 +280,12 @@ struct TerrainPush {
 
 // lod_tile.z: bits 0..3 are TerrainLodEdge ("that neighbour is coarser"); this bit enables LOD.
 inline constexpr std::int32_t kTerrainPushLodEnabled = 1 << 4;
+// m19.8d3 — read by terrain.frag: shade from the tile's own bake; fade toward the parent's; and
+// which quadrant of the parent this tile is.
+inline constexpr std::int32_t kTerrainPushOwnBake = 1 << 5;
+inline constexpr std::int32_t kTerrainPushParentBake = 1 << 6;
+inline constexpr std::int32_t kTerrainPushQuadrantX = 1 << 7;
+inline constexpr std::int32_t kTerrainPushQuadrantZ = 1 << 8;
 
 static_assert(sizeof(TerrainPush) == 208,
               "TerrainPush must match terrain.vert / terrain.frag's push_constant block");
@@ -295,6 +333,17 @@ public:
     [[nodiscard]] TerrainTileId upload(const assets::HeightfieldAsset& asset,
                                        const TerrainPalette& palette);
 
+    // m19.8d3: give a held tile its appearance bake (ADR-0072). The texels are uploaded verbatim
+    // into two textures the TILE owns (release() destroys them). Returns false, changing nothing
+    // and counted in `bakes_refused()`, for a tile this pass does not hold, a tile that already
+    // has a bake, a grid that is not the tile's own columns x rows (a bake is one texel per
+    // sample, so any other size is a different tile's), a span of the wrong size, or a failed
+    // allocation. A tile without a bake draws as it always did.
+    //
+    // A bake is only READ by a LOD draw (TerrainLodDraw::enabled): the tile's own when it has
+    // one, and its parent's when `TerrainLodDraw::parent` has one.
+    bool set_bake(TerrainTileId id, const TerrainBakeTexels& bake);
+
     // UNCHECKED, the MeshRegistry::get contract: `id` must have come from a successful upload()
     // and not been released since.
     [[nodiscard]] const TerrainTile& tile(TerrainTileId id) const { return tiles_[id]; }
@@ -317,8 +366,9 @@ public:
     // this directly only when nothing is in flight.
     bool release(TerrainTileId id);
 
-    // The GPU bytes a held tile occupies — heights, indices, weights and its uniform block; not the
-    // borrowed layer textures. 0 for an id this pass does not hold.
+    // The GPU bytes a held tile occupies — heights, indices, weights, its uniform block and
+    // (m19.8d3) its appearance bake; not the borrowed layer textures. 0 for an id this pass does
+    // not hold.
     [[nodiscard]] std::uint64_t tile_bytes(TerrainTileId id) const noexcept;
 
     // Declare the terrain draw into `hdr` (loaded, not cleared — terrain joins a frame other
@@ -380,6 +430,22 @@ public:
     // counted. A fully default binding is the legitimate "no sky" and is NOT counted here.
     [[nodiscard]] std::uint64_t sky_partial_bindings() const noexcept { return sky_partial_; }
 
+    // m19.8d3 (guardrail 5: every way a draw can fall short of its baked appearance is countable).
+    // Bakes set_bake turned away:
+    [[nodiscard]] std::uint64_t bakes_refused() const noexcept { return bakes_refused_; }
+
+    // LOD draws that shaded from the tile's own bake:
+    [[nodiscard]] std::uint64_t bake_draws() const noexcept { return bake_draws_; }
+
+    // LOD draws that bound a parent's bake to fade toward:
+    [[nodiscard]] std::uint64_t parent_bake_draws() const noexcept { return parent_bake_draws_; }
+
+    // LOD draws that NAMED a parent which holds no bake (or is not held at all), and so did not
+    // fade: the appearance will step when that tile and its parent swap.
+    [[nodiscard]] std::uint64_t parent_bake_missing_draws() const noexcept {
+        return parent_bake_missing_;
+    }
+
 private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
@@ -408,6 +474,10 @@ private:
     std::uint64_t sky_bound_ = 0;
     std::uint64_t sky_partial_ = 0;
     bool sky_partial_warned_ = false;
+    std::uint64_t bakes_refused_ = 0;
+    std::uint64_t bake_draws_ = 0;
+    std::uint64_t parent_bake_draws_ = 0;
+    std::uint64_t parent_bake_missing_ = 0;
 };
 
 } // namespace rime::render

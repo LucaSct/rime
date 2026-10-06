@@ -97,6 +97,18 @@ layout(location = 0) out vec3 v_world;
 // would reintroduce a rounding the vertex stage does not have to pay.
 layout(location = 1) out vec2 v_local;
 
+// m19.8d3 (ADR-0072): xy = this vertex's SAMPLE coordinate in its tile, (i, j) as floats — exact
+// integers at the vertices, so the fragment stage's bake lookup lands on a texel at every vertex
+// (a bake has one texel per sample). z = the MORPH FACTOR this vertex was moved by.
+//
+// Why hand the geometry's own factor to the fragment stage rather than recompute a distance
+// there? Because the two must agree at the endpoints, not approximately: at m = 1 the vertex
+// stage has put this tile's surface exactly on its parent's, and the picture only stops popping
+// if the shading is exactly the parent's at that same moment. One factor, computed once, used for
+// both, cannot disagree with itself — including on an edge the vertex stage FORCED to 1 because
+// the neighbour is coarser, which no distance formula in the fragment stage would know about.
+layout(location = 2) out vec3 v_lod;
+
 const int kLodEnabled = 16; // kTerrainPushLodEnabled
 
 // m19.8d2: the dequantised height of sample (i, j) in WORLD metres, for the LOD path.
@@ -138,6 +150,7 @@ void main() {
                            vec3(float(i) * pc.grid.x, height, float(j) * pc.grid.y);
 
         v_world = world;
+        v_lod = vec3(float(i), float(j), 0.0); // not a chain: nothing to morph toward
         gl_Position = pc.view_proj * vec4(world, 1.0);
         return;
     }
@@ -187,5 +200,8 @@ void main() {
     }
 
     v_world = world;
+    // EVERY vertex carries its m, the even ones too: they never move (they are parent vertices),
+    // but their appearance still fades to the parent's bake with their neighbours'.
+    v_lod = vec3(float(ii), float(jj), m);
     gl_Position = pc.view_proj * vec4(world, 1.0);
 }

@@ -147,8 +147,9 @@ std::optional<TerrainWorld> TerrainWorld::parse(std::string_view text) {
                     return std::nullopt;
                 }
             } else if (line.starts_with("tile\t")) {
-                // Two shapes: m19.8a's 8 fields (level 0, no error column) and m19.8d1's 10
-                // (level after the record name, geometric error before the id).
+                // Three shapes: m19.8a's 8 fields (level 0, no error column), m19.8d1's 10
+                // (level after the record name, geometric error before the id) and m19.8d3's 14
+                // (a parent with an appearance bake).
                 const auto tabs = std::count(line.begin(), line.end(), '\t');
                 TerrainWorldTile t{};
                 std::uint64_t id = 0;
@@ -170,6 +171,24 @@ std::optional<TerrainWorld> TerrainWorld::parse(std::string_view text) {
                          parse_float(f[7], t.geometric_error) && t.geometric_error >= 0.0f &&
                          parse_int(f[8], id, 16) && !f[9].empty();
                     path = f[9];
+                } else if (tabs == 13) {
+                    // m19.8d3: the 10-field line plus the tile's appearance bake — base colour id
+                    // and path, material id and path. Only a parent may carry one.
+                    std::array<std::string_view, 14> f{};
+                    std::uint64_t color = 0;
+                    std::uint64_t material = 0;
+                    ok = world && split_tabs(line, f) && parse_int(f[1], t.level) && t.level >= 1 &&
+                         t.level <= kMaxTerrainLevel && parse_int(f[2], t.coord.x) &&
+                         parse_int(f[3], t.coord.z) && parse_int(f[4], t.revision) &&
+                         parse_float(f[5], t.min_y) && parse_float(f[6], t.max_y) &&
+                         parse_float(f[7], t.geometric_error) && t.geometric_error >= 0.0f &&
+                         parse_int(f[8], id, 16) && !f[9].empty() && parse_int(f[10], color, 16) &&
+                         !f[11].empty() && parse_int(f[12], material, 16) && !f[13].empty();
+                    path = f[9];
+                    t.bake_color_id = AssetId{color};
+                    t.bake_color_path = std::string(f[11]);
+                    t.bake_material_id = AssetId{material};
+                    t.bake_material_path = std::string(f[13]);
                 }
                 if (!ok) {
                     RIME_ERROR("terrain world: line {}: malformed tile line (or no grid line "

@@ -38,6 +38,9 @@
 
 layout(location = 0) in vec3 v_world;
 layout(location = 1) in vec2 v_local; // tile-local xz, metres
+// m19.8d3: xy = position in the tile's SAMPLE grid (integers at vertices), z = the vertex stage's
+// geomorph factor, interpolated — see terrain.vert.
+layout(location = 2) in vec3 v_lod;
 
 // m19.4: the splat weights (RGBA8_UNORM, one texel = the four layer weights) and the per-tile
 // constants. The push block is not the place for per-layer data, so these live in a small uniform buffer made at
@@ -73,7 +76,58 @@ layout(set = 0, binding = 6) uniform sampler2D layer_tex1;
 layout(set = 0, binding = 7) uniform sampler2D layer_tex2;
 layout(set = 0, binding = 8) uniform sampler2D layer_tex3;
 
+// m19.8d3 (ADR-0072): the APPEARANCE BAKES — a coarse LOD tile's base colour (RGBA8 sRGB) and
+// material (R = metallic, G = roughness), one texel per SAMPLE of the tile, cooked offline as the
+// average of the level-0 ground beneath. 9/10 are this tile's own (a parent tile shades from them
+// instead of from a splat palette it does not have); 11/12 are its PARENT's, which a morphing
+// tile fades toward. Always bound (the pass's 1x1 texel when absent) and gated by push-constant
+// flags, like the sky: "no bake" is a branch, never a missing resource.
+layout(set = 0, binding = 9) uniform sampler2D bake_color;
+layout(set = 0, binding = 10) uniform sampler2D bake_material;
+layout(set = 0, binding = 11) uniform sampler2D parent_bake_color;
+layout(set = 0, binding = 12) uniform sampler2D parent_bake_material;
+
 layout(location = 0) out vec4 out_color;
+
+// lod_tile.z bits (kTerrainPush* in terrain_pass.hpp); bits 0..4 are the vertex stage's.
+const int kOwnBake = 32;     // shade from bake_color / bake_material
+const int kParentBake = 64;  // fade toward parent_bake_* by the morph factor
+const int kQuadrantX = 128;  // this tile is its parent's +x half
+const int kQuadrantZ = 256;  // ... +z half
+
+// ── SAMPLING A BAKE: BILINEAR BY HAND, IN SAMPLE SPACE ────────────────────────────────────────
+//
+// `s` is a position in the bake's texel grid, where texel (i, j) sits AT sample (i, j) — vertex-
+// aligned, not centred on cells. The four texels around `s` are fetched by integer index and
+// blended here rather than through a LINEAR sampler, for two reasons:
+//
+//   * EXACT AT A VERTEX. With f = 0 the blend below is (1 - 0) * a + 0 * b = a, bit for bit. A
+//     hardware filter computes its weights in fixed point from a normalised coordinate
+//     ((i + 0.5) / N, itself rounded), so "the texel at this vertex" comes back to within a
+//     weight step of it, on a grid that differs between GPUs (ADR-0066's m19.7b seam bound is
+//     exactly that effect). Two tiles that share an edge fetch byte-identical edge texels with a
+//     zero cross-edge weight, so they agree on the edge to the bit, not to a filter tolerance.
+//   * NO SAMPLER STATE TO GET WRONG. No half-texel offset, no mips, no wrap mode.
+//
+// texelFetch on an sRGB texture still decodes to linear, so the blend is in linear light.
+void bake_sample(sampler2D color, sampler2D material, vec2 s, out vec3 base, out vec2 mr) {
+    const ivec2 last = textureSize(color, 0) - ivec2(1);
+    const vec2 c = clamp(s, vec2(0.0), vec2(last));
+    const vec2 fl = floor(c);
+    const vec2 f = c - fl;
+    const ivec2 i0 = ivec2(fl);
+    const ivec2 i1 = min(i0 + ivec2(1), last);
+    const ivec2 i10 = ivec2(i1.x, i0.y);
+    const ivec2 i01 = ivec2(i0.x, i1.y);
+    base = (1.0 - f.y) * ((1.0 - f.x) * texelFetch(color, i0, 0).rgb +
+                          f.x * texelFetch(color, i10, 0).rgb) +
+           f.y * ((1.0 - f.x) * texelFetch(color, i01, 0).rgb +
+                  f.x * texelFetch(color, i1, 0).rgb);
+    mr = (1.0 - f.y) * ((1.0 - f.x) * texelFetch(material, i0, 0).rg +
+                        f.x * texelFetch(material, i10, 0).rg) +
+         f.y * ((1.0 - f.x) * texelFetch(material, i01, 0).rg +
+                f.x * texelFetch(material, i1, 0).rg);
+}
 
 // ── THE ENVIRONMENT BRDF, ANALYTICALLY ────────────────────────────────────────────────────────
 //
@@ -179,9 +233,9 @@ layout(push_constant) uniform Pc {
     vec4 surface; // rgb = albedo in [0,1], w = ambient irradiance
     vec4 eye;     // xyz = camera world position
     vec4 material; // x = metallic, y = roughness (the flat tile's material)
-    // m19.8d2: the LOD vectors. The vertex stage reads them; the fragment stage only needs its
-    // block to match (the derivative normal below is taken from the MORPHED position, so it is
-    // the drawn triangle's plane at every morph — see terrain.vert).
+    // m19.8d2: the LOD vectors. The vertex stage reads them (the derivative normal below is taken
+    // from the MORPHED position, so it is the drawn triangle's plane at every morph — see
+    // terrain.vert). m19.8d3: the fragment stage reads lod_tile.z's bake flags and grid.w.
     vec4 lod_origin;
     vec4 lod_camera;
     ivec4 lod_tile;
@@ -260,6 +314,42 @@ void main() {
         const float r0 = splat.roughness.x;
         roughness = r0 + b.g * (splat.roughness.y - r0) + b.b * (splat.roughness.z - r0) +
                     b.a * (splat.roughness.w - r0);
+    }
+    // ── m19.8d3: THE BAKED APPEARANCE OF A COARSE TILE, AND THE FADE TOWARD THE PARENT'S ──────
+    //
+    // A parent tile has no splat palette (its level-0 tiles may not even share one); it shades
+    // from its bake, sampled at this pixel's position in its own sample grid.
+    if ((pc.lod_tile.z & kOwnBake) != 0) {
+        vec2 mr;
+        bake_sample(bake_color, bake_material, v_lod.xy, base, mr);
+        metallic = mr.x;
+        roughness = mr.y;
+    }
+    // A MORPHING tile — a level-0 tile with its full detail above, or a parent with its own bake —
+    // fades toward its PARENT's bake by the factor the vertex stage moved its geometry by. At
+    // m = 1 the surface is the parent's and so is the shading, so swapping this tile for its
+    // parent (or the reverse) changes nothing on screen: the geometry pop and the appearance pop
+    // are removed by the same number.
+    //
+    // WHERE in the parent's bake: this tile is one quadrant of its parent, and its sample (i, j)
+    // is the parent's sample ((offset + i) / 2, (offset + j) / 2), offset = 0 or N - 1 by
+    // quadrant. Even vertices land on a parent texel, odd ones exactly halfway between two —
+    // the lattice the geometry morph uses.
+    //
+    // (1 - m) * own + m * parent, not mix(): both endpoints are then exact (terrain.vert's rule).
+    if ((pc.lod_tile.z & kParentBake) != 0) {
+        const float m = clamp(v_lod.z, 0.0, 1.0);
+        if (m > 0.0) {
+            const vec2 quadrant = vec2((pc.lod_tile.z & kQuadrantX) != 0 ? 1.0 : 0.0,
+                                       (pc.lod_tile.z & kQuadrantZ) != 0 ? 1.0 : 0.0);
+            const vec2 sp = 0.5 * (quadrant * (pc.grid.w - 1.0) + v_lod.xy);
+            vec3 parent_base;
+            vec2 parent_mr;
+            bake_sample(parent_bake_color, parent_bake_material, sp, parent_base, parent_mr);
+            base = (1.0 - m) * base + m * parent_base;
+            metallic = (1.0 - m) * metallic + m * parent_mr.x;
+            roughness = (1.0 - m) * roughness + m * parent_mr.y;
+        }
     }
     // Same floor and remap as pbr_forward: alpha = roughness^2 (perceptual), and a roughness of 0
     // would make GGX's D a delta function that no finite sun can light, so clamp it.
