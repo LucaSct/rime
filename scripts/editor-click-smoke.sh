@@ -230,13 +230,18 @@ menu_y=10
 file_menu_x=107
 save_as_field_x=230; save_as_field_y=85; save_as_write_x=389
 play_x=576; stop_x=646
-# The left column (Outliner over Assets) starts 219 px wide. AT THAT WIDTH THE BROWSER IS UNUSABLE:
-# the list does not wrap or scroll sideways, so the "place" button of any asset with a real source
-# path, and the kind filter, sit clipped off the panel's right edge. A user has to discover that
-# dragging the splitter is how you reach them; so does this script.
+# The left column (Outliner over Assets) starts 219 px wide. The "place" button used to sit AFTER
+# the source path, so at that width a real path clipped it off the panel's right edge, and this
+# script had to drag the splitter to reach it. The button now leads each row (E2), so it is on
+# screen at the default width too; the drag stays only because the rest of the pinned geometry
+# below (the viewport's left edge, the border) was measured with the panel widened.
 splitter_x=220; splitter_to_x=560; splitter_y=300
 outliner_row0_y=90; row_h=21; outliner_text_x=48
-asset_row0_y=545; asset_text_x0=27; mono_char_w=7; place_gap=26
+asset_row0_y=545
+# The "place" button's centre on a mesh row, measured from a failure screenshot at the widened
+# panel (its left edge is at x 28; the left edge does not move with the splitter). Pinned rather
+# than computed from the path length, since the button no longer follows the path.
+place_centre_x=46
 inspector_translation_x_field="1093 216"   # first numeric field of the first component
 # 3 px inside the (widened) viewport panel's left edge: the play-state border.
 border_px="566 400"
@@ -288,7 +293,7 @@ mesh_row="$(awk -F'\t' '!/^#/ {row++} $2=="mesh" {print row-1; exit}' "$manifest
 mesh_path="$(awk -F'\t' '$2=="mesh" {print $1; exit}' "$manifest")"
 mesh_id_hex="$(awk -F'\t' '$2=="mesh" {print $3; exit}' "$manifest")"
 mesh_id_dec="$(python3 -c "print(int('$mesh_id_hex', 16))")"
-place_x=$(( asset_text_x0 + mono_char_w * ${#mesh_path} + place_gap ))
+place_x=$place_centre_x
 place_y=$(( asset_row0_y + row_h * mesh_row ))
 note "placing $mesh_path (id $mesh_id_hex) — row $mesh_row, button at $place_x,$place_y"
 click "$place_x" "$place_y"
