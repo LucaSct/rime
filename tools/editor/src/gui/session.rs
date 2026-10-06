@@ -17,8 +17,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rime_protocol::{
-    AssetEntry, AssetList, Connection, EditorMessage, FrameMessage, InputEvent, InputKind,
-    MessageType, PickResult, PlayState, SaveResult, Schema, Snapshot, SnapshotComponent,
+    AssetEntry, AssetList, Connection, EditResult, EditorMessage, FrameMessage, InputEvent,
+    InputKind, MessageType, PickResult, PlayState, SaveResult, Schema, Snapshot, SnapshotComponent,
     ViewportCamera,
 };
 
@@ -79,6 +79,10 @@ pub struct SharedState {
     /// does not register, and the user has to be told why rather than left wondering whether the
     /// click registered.
     pub last_save: Option<SaveResult>,
+    /// The engine's answers to structural edits (ADR-0075), queued in arrival order until the UI
+    /// drains them into the undo history — which commits a step only on an `ok` answer. Unlike a
+    /// pick or a save, every one matters: each pairs with one command the editor sent.
+    pub edit_results: Vec<EditResult>,
     last_frame_at: Option<Instant>,
 }
 
@@ -88,12 +92,12 @@ impl SharedState {
     /// starts at Play), so the mirror stays truthful; structural changes still resync via a snapshot
     /// request. Updates the component's bytes in place, or inserts it if the entity lacked it (the
     /// undo-of-remove case).
-    pub fn apply_optimistic_set(&mut self, key: (u32, u32), type_hash: u64, blob: &[u8]) {
+    pub fn apply_optimistic_set(&mut self, editor_id: u64, type_hash: u64, blob: &[u8]) {
         let Some(entity) = self
             .snapshot
             .entities
             .iter_mut()
-            .find(|e| (e.index, e.generation) == key)
+            .find(|e| e.editor_id == editor_id)
         else {
             return;
         };
@@ -334,6 +338,11 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
         MessageType::Other(code) if code == EditorMessage::SaveResult.to_code() => {
             if let Ok(result) = SaveResult::decode(payload) {
                 shared.lock().unwrap().last_save = Some(result);
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::EditResult.to_code() => {
+            if let Ok(result) = EditResult::decode(payload) {
+                shared.lock().unwrap().edit_results.push(result);
             }
         }
         MessageType::Other(code) if code == EditorMessage::PlayState.to_code() => {

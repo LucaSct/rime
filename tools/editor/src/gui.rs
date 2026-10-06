@@ -39,7 +39,7 @@ mod click_tests;
 mod commands;
 mod session;
 
-use commands::{Command, CommandStack, Edit, EntityKey};
+use commands::{Awaiting, Command, CommandStack, Edit, EntityId, PendingStep};
 use session::{EngineSession, Outbound, Shared, SharedState};
 
 // Snap increments when snapping is engaged (Ctrl, or the toolbar toggle): a quarter unit and 15°,
@@ -165,7 +165,7 @@ fn reopen(dock: &mut DockState<Tab>, tab: Tab) {
 /// (old → new), not one per intermediate frame. `new_blob` tracks the latest value the live edits
 /// have reached.
 struct ActiveEdit {
-    key: EntityKey,
+    key: EntityId,
     type_hash: u64,
     old_blob: Vec<u8>,
     new_blob: Vec<u8>,
@@ -223,7 +223,7 @@ struct FlyCam {
 /// The camera entity's edit target: which entity, and the LocalTransform bytes to rewrite.
 #[derive(Clone)]
 struct NavTarget {
-    key: EntityKey,
+    key: EntityId,
     local_hash: u64,
 }
 
@@ -236,7 +236,7 @@ struct FlyView<'a> {
 
 #[derive(Clone)]
 struct GizmoTarget {
-    key: EntityKey,
+    key: EntityId,
     local_hash: u64,
     local_blob: Vec<u8>,
     center: gizmo::Vec3,
@@ -309,7 +309,12 @@ struct EditorApp {
     // The viewport texture, re-uploaded when a newer frame arrives.
     frame_tex: Option<egui::TextureHandle>,
     shown_seq: u64,
-    selected: Option<usize>, // index into the snapshot's entities
+    // The selection is an entity's EditorId (ADR-0075), not a row: a row index silently moved onto
+    // the next entity when one was despawned, and a handle died with every Play→Stop.
+    selected: Option<EntityId>,
+    // What was selected when Play began. The history is frozen while the simulation runs, and Stop
+    // hands back this selection with the pre-play world (`Some(None)` = "nothing was selected").
+    pre_play_selection: Option<Option<EntityId>>,
     stack: CommandStack,
     active_edit: Option<ActiveEdit>,
     // Asset browser (m9.5) filter state.
@@ -382,6 +387,7 @@ impl EditorApp {
             frame_tex: None,
             shown_seq: 0,
             selected: None,
+            pre_play_selection: None,
             stack: CommandStack::default(),
             active_edit: None,
             asset_search: String::new(),
@@ -471,28 +477,128 @@ impl EditorApp {
     /// Apply the commands the UI produced this frame: put each on the wire, patch the mirror
     /// optimistically for value edits, and request a fresh snapshot after a structural change (so the
     /// mirror re-syncs with the engine's truth — e.g. an added component's real default values).
+    ///
+    /// A structural USER edit also queues its future history step, computed now from the mirror
+    /// (the inverse of a remove or a despawn needs the values that are about to disappear); the step
+    /// is committed only when the engine accepts the edit (`CommandStack::acknowledge`).
     fn dispatch(&mut self, actions: Vec<Command>) {
         for cmd in actions {
-            let (msg, payload) = cmd.to_wire();
-            let _ = self.out_tx.send(Outbound::Editor { msg, payload });
-            match &cmd {
-                Command::SetComponent {
-                    key,
-                    type_hash,
-                    blob,
-                } => {
-                    self.shared
-                        .lock()
-                        .unwrap()
-                        .apply_optimistic_set(*key, *type_hash, blob);
-                }
-                c if c.is_structural() => {
-                    let (msg, payload) = Command::RequestSnapshot.to_wire();
-                    let _ = self.out_tx.send(Outbound::Editor { msg, payload });
-                }
-                _ => {}
+            if cmd.awaits_result() {
+                let step = self.step_for(&cmd);
+                self.stack
+                    .expect(step.map_or(Awaiting::Replay, Awaiting::Step));
             }
+            if let Command::Despawn { id } = cmd {
+                if self.selected == Some(id) {
+                    self.selected = None; // never leave the inspector on a row that is gone
+                }
+            }
+            self.send(cmd);
         }
+    }
+
+    /// Send commands whose history is already settled — an undo or redo replaying a step.
+    fn replay(&mut self, commands: Vec<Command>) {
+        for cmd in commands {
+            if cmd.awaits_result() {
+                self.stack.expect(Awaiting::Replay);
+            }
+            self.send(cmd);
+        }
+    }
+
+    fn send(&mut self, cmd: Command) {
+        let (msg, payload) = cmd.to_wire();
+        let _ = self.out_tx.send(Outbound::Editor { msg, payload });
+        match &cmd {
+            Command::SetComponent {
+                id,
+                type_hash,
+                blob,
+            } => {
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .apply_optimistic_set(*id, *type_hash, blob);
+            }
+            c if c.is_structural() => {
+                let (msg, payload) = Command::RequestSnapshot.to_wire();
+                let _ = self.out_tx.send(Outbound::Editor { msg, payload });
+            }
+            _ => {}
+        }
+    }
+
+    /// The history step a structural user edit becomes once the engine accepts it, read from the
+    /// mirror BEFORE the edit is sent. `None` when there is nothing exact to record (the entity or
+    /// component is not in the mirror) — the edit is still sent, it just cannot be undone.
+    fn step_for(&self, cmd: &Command) -> Option<PendingStep> {
+        let s = self.shared.lock().unwrap();
+        let entity = |id: EntityId| s.snapshot.entities.iter().find(|e| e.editor_id == id);
+        Some(match cmd {
+            Command::Spawn { id: 0 } => PendingStep::Spawned { components: None },
+            Command::SpawnEntity {
+                id: 0,
+                exact: false,
+                components,
+            } => PendingStep::Spawned {
+                components: Some(components.clone()),
+            },
+            Command::AddComponent { id, type_hash } => PendingStep::Ready(Edit::single(
+                cmd.clone(),
+                Command::RemoveComponent {
+                    id: *id,
+                    type_hash: *type_hash,
+                },
+            )),
+            Command::RemoveComponent { id, type_hash } => {
+                let old = entity(*id)?
+                    .components
+                    .iter()
+                    .find(|c| c.type_hash == *type_hash)?;
+                PendingStep::Ready(Edit::single(
+                    cmd.clone(),
+                    Command::SetComponent {
+                        id: *id,
+                        type_hash: *type_hash,
+                        blob: old.data.clone(),
+                    },
+                ))
+            }
+            Command::Despawn { id } => {
+                // The engine nulls every reference other entities hold to the despawned one, so the
+                // undo has to put those back too: capture each referring component now, whole, and
+                // re-set it after the exact respawn (which comes back under the same id, so the
+                // captured bytes — which name it by id — are right again).
+                let target = entity(*id)?;
+                let mut inverse = vec![Command::SpawnEntity {
+                    id: *id,
+                    exact: true,
+                    components: target
+                        .components
+                        .iter()
+                        .map(|c| (c.type_hash, c.data.clone()))
+                        .collect(),
+                }];
+                for other in s.snapshot.entities.iter().filter(|e| e.editor_id != *id) {
+                    for c in &other.components {
+                        if rime_protocol::entity_refs(&s.schema, c.type_hash, &c.data).contains(id)
+                        {
+                            inverse.push(Command::SetComponent {
+                                id: other.editor_id,
+                                type_hash: c.type_hash,
+                                blob: c.data.clone(),
+                            });
+                        }
+                    }
+                }
+                PendingStep::Ready(Edit {
+                    forward: vec![cmd.clone()],
+                    inverse,
+                })
+            }
+            _ => return None,
+        })
     }
 }
 
@@ -516,6 +622,7 @@ impl eframe::App for EditorApp {
         // as an egui image ONLY when its sequence changed — so the ~2 MB RGBA is copied once per
         // streamed frame, not once per repaint. The schema + entities are cloned so the widgets can
         // borrow them freely without holding the lock across the whole render.
+        let edit_results;
         let (
             connected,
             error,
@@ -542,6 +649,8 @@ impl eframe::App for EditorApp {
                 _ => None,
             };
             let pick = s.last_pick.take(); // consumed here: each answer moves selection once
+                                           // The engine's answers to structural edits, in send order — what commits a history step.
+            edit_results = std::mem::take(&mut s.edit_results);
             (
                 s.connected,
                 s.error.clone(),
@@ -559,17 +668,40 @@ impl eframe::App for EditorApp {
         };
 
         // Click-to-select (m9.6): the engine answered a viewport click with the entity under that
-        // pixel; map its handle back to the outliner row. A miss (empty space) — or a handle the
-        // snapshot no longer contains (despawned mid-flight) — clears the selection, exactly what
-        // clicking nothing should do.
+        // pixel, as a handle — the one message that still speaks handles — so map it to the
+        // entity's EditorId through the snapshot. A miss (empty space) — or a handle the snapshot
+        // no longer contains (despawned mid-flight) — clears the selection, exactly what clicking
+        // nothing should do.
         if let Some(pick) = pick {
             self.selected = if pick.is_hit() {
                 entities
                     .iter()
-                    .position(|e| (e.index, e.generation) == (pick.index, pick.generation))
+                    .find(|e| (e.index, e.generation) == (pick.index, pick.generation))
+                    .map(|e| e.editor_id)
             } else {
                 None
             };
+        }
+
+        // The undo history is frozen while the simulation runs (ADR-0075): Stop discards whatever
+        // play did, so a step recorded against the played world would undo something that is no
+        // longer there. Entering play remembers the selection; Stop hands it back with the world.
+        let editing = play_state.phase == PlayPhase::Edit;
+        if !editing && self.pre_play_selection.is_none() {
+            self.pre_play_selection = Some(self.selected);
+        }
+        if editing {
+            if let Some(selection) = self.pre_play_selection.take() {
+                self.selected = selection;
+            }
+        }
+        self.stack.set_frozen(!editing);
+        for result in edit_results {
+            if let Some(refusal) = self.stack.acknowledge(result) {
+                // Shown where a refused save is: the status line. A refused edit changed nothing,
+                // and the user has to be told rather than left to wonder why undo skipped it.
+                self.save_status = Some((refusal, false));
+            }
         }
 
         if let Some((seq, image)) = new_image {
@@ -580,6 +712,8 @@ impl eframe::App for EditorApp {
 
         // Every mutation the panels/menu produce this frame lands here, then is dispatched once.
         let mut actions: Vec<Command> = Vec::new();
+        // Undo/redo output: commands whose history is already settled (see `replay`).
+        let mut replayed: Vec<Command> = Vec::new();
 
         // Undo/redo — keyboard (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y) and the Edit menu.
         let mut do_undo = false;
@@ -822,13 +956,13 @@ impl eframe::App for EditorApp {
             self.gizmo_hover = None;
         }
         if do_undo {
-            if let Some(cmd) = self.stack.undo() {
-                actions.push(cmd);
+            if let Some(cmds) = self.stack.undo() {
+                replayed.extend(cmds);
             }
         }
         if do_redo {
-            if let Some(cmd) = self.stack.redo() {
-                actions.push(cmd);
+            if let Some(cmds) = self.stack.redo() {
+                replayed.extend(cmds);
             }
         }
         if do_new {
@@ -947,7 +1081,7 @@ impl eframe::App for EditorApp {
             .map(|t| t.type_hash);
         let gizmo_target = self
             .selected
-            .and_then(|idx| entities.get(idx))
+            .and_then(|id| entities.iter().find(|e| e.editor_id == id))
             .and_then(|e| {
                 let lh = local_hash?;
                 let local = e.components.iter().find(|c| c.type_hash == lh)?;
@@ -957,7 +1091,7 @@ impl eframe::App for EditorApp {
                     .or_else(|| gizmo::decode_trs_blob(&local.data))
                     .map(|t| t.translation)?;
                 Some(GizmoTarget {
-                    key: (e.index, e.generation),
+                    key: e.editor_id,
                     local_hash: lh,
                     local_blob: local.data.clone(),
                     center,
@@ -990,7 +1124,7 @@ impl eframe::App for EditorApp {
                 }
             }
             Some(NavTarget {
-                key: (e.index, e.generation),
+                key: e.editor_id,
                 local_hash: lh,
             })
         });
@@ -1024,6 +1158,7 @@ impl eframe::App for EditorApp {
             .style(Style::from_egui(ctx.style().as_ref()))
             .show(ctx, &mut viewer);
 
+        self.replay(replayed);
         self.dispatch(actions);
 
         // Tell the engine which gizmo to render (selection + mode + the now-updated hovered axis).
@@ -1031,8 +1166,7 @@ impl eframe::App for EditorApp {
         // engine only needs the transitions (a new selection, a mode switch, a hover move).
         let desired = match (self.gizmo_mode, gizmo_target.as_ref()) {
             (Some(mode), Some(target)) => GizmoState {
-                index: target.key.0,
-                generation: target.key.1,
+                editor_id: target.key,
                 mode: to_proto_mode(Some(mode)),
                 axis: to_proto_axis(self.gizmo_hover),
             },
@@ -1083,7 +1217,7 @@ struct EditorTabs<'a> {
     mesh_asset_hash: Option<u64>,
     asset_search: &'a mut String,
     asset_kind_filter: &'a mut Option<AssetKind>,
-    selected: &'a mut Option<usize>,
+    selected: &'a mut Option<EntityId>,
     out_tx: &'a Sender<Outbound>,
     actions: &'a mut Vec<Command>,
     active_edit: &'a mut Option<ActiveEdit>,
@@ -1245,6 +1379,8 @@ fn assets_ui(
                                 Value::U64(a.id),
                             )]));
                             actions.push(Command::SpawnEntity {
+                                id: 0, // a fresh id: the engine assigns it
+                                exact: false,
                                 components: vec![(hash, blob)],
                             });
                         }
@@ -1374,7 +1510,7 @@ fn viewport_fly(
         scale: gizmo::Vec3::new(1.0, 1.0, 1.0),
     };
     actions.push(Command::SetComponent {
-        key: target.key,
+        id: target.key,
         type_hash: target.local_hash,
         blob: gizmo::encode_trs_blob(&trs),
     });
@@ -1534,7 +1670,7 @@ fn viewport_input(
                     .unwrap()
                     .update(&ray_at(px, &cam), snapping);
                 gz.actions.push(Command::SetComponent {
-                    key: target.key,
+                    id: target.key,
                     type_hash: target.local_hash,
                     blob,
                 });
@@ -1555,22 +1691,22 @@ fn viewport_input(
                 // handle should not litter the undo history (mirrors the inspector's gesture rule).
                 if session.old_blob() != after.as_slice() {
                     gz.actions.push(Command::SetComponent {
-                        key: target.key,
+                        id: target.key,
                         type_hash: target.local_hash,
                         blob: after.clone(),
                     });
-                    gz.stack.push(Edit {
-                        forward: Command::SetComponent {
-                            key: target.key,
+                    gz.stack.push(Edit::single(
+                        Command::SetComponent {
+                            id: target.key,
                             type_hash: target.local_hash,
                             blob: after,
                         },
-                        inverse: Command::SetComponent {
-                            key: target.key,
+                        Command::SetComponent {
+                            id: target.key,
                             type_hash: target.local_hash,
                             blob: session.old_blob().to_vec(),
                         },
-                    });
+                    ));
                 }
             }
         } else if let Some((x, y)) = cursor.map(|(x, y)| (x as i32, y as i32)) {
@@ -1642,13 +1778,13 @@ fn outliner_ui(
     ui: &mut egui::Ui,
     schema: &Schema,
     entities: &[SnapshotEntity],
-    selected: &mut Option<usize>,
+    selected: &mut Option<EntityId>,
     actions: &mut Vec<Command>,
 ) {
     ui.horizontal(|ui| {
         if ui.button("+ spawn").clicked() {
             *selected = None;
-            actions.push(Command::Spawn);
+            actions.push(Command::Spawn { id: 0 });
         }
     });
     ui.separator();
@@ -1659,9 +1795,9 @@ fn outliner_ui(
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (i, e) in entities.iter().enumerate() {
             let label = outliner_label(schema, i, e);
-            let row = ui.selectable_label(*selected == Some(i), label);
+            let row = ui.selectable_label(*selected == Some(e.editor_id), label);
             if row.clicked() {
-                *selected = Some(i);
+                *selected = Some(e.editor_id);
             }
             // The full picture on hover, so the derived label costs no information.
             row.on_hover_text(format!(
@@ -1681,25 +1817,26 @@ fn inspector_ui(
     entities: &[SnapshotEntity],
     schema: &Schema,
     addable: &[(u64, String)],
-    selected: Option<usize>,
+    selected: Option<EntityId>,
     actions: &mut Vec<Command>,
     active_edit: &mut Option<ActiveEdit>,
     stack: &mut CommandStack,
 ) {
-    let Some(idx) = selected else {
+    let Some(id) = selected else {
         ui.weak("select an entity in the Outliner");
         return;
     };
-    let Some(entity) = entities.get(idx) else {
+    // By name, not by row: an entity that is gone is gone, never silently its neighbour.
+    let Some((idx, entity)) = entities.iter().enumerate().find(|(_, e)| e.editor_id == id) else {
         ui.weak("(stale selection)");
         return;
     };
-    let key: EntityKey = (entity.index, entity.generation);
+    let key: EntityId = entity.editor_id;
 
     ui.horizontal(|ui| {
         ui.heading(format!("entity {idx}"));
         if ui.button("✖ despawn").clicked() {
-            actions.push(Command::Despawn { key });
+            actions.push(Command::Despawn { id: key });
         }
     });
     ui.label(format!("handle {}:{}", entity.index, entity.generation));
@@ -1715,7 +1852,7 @@ fn inspector_ui(
             any = true;
             if ui.button(name).clicked() {
                 actions.push(Command::AddComponent {
-                    key,
+                    id: key,
                     type_hash: *hash,
                 });
                 ui.close_menu();
@@ -1738,7 +1875,7 @@ fn inspector_ui(
                 .show(ui, |ui| {
                     if ui.button("remove").clicked() {
                         actions.push(Command::RemoveComponent {
-                            key,
+                            id: key,
                             type_hash: comp.type_hash,
                         });
                     }
@@ -1754,7 +1891,7 @@ fn inspector_ui(
 fn component_fields_ui(
     ui: &mut egui::Ui,
     comp: &rime_protocol::SnapshotComponent,
-    key: EntityKey,
+    key: EntityId,
     schema: &Schema,
     actions: &mut Vec<Command>,
     active_edit: &mut Option<ActiveEdit>,
@@ -1798,7 +1935,7 @@ fn component_fields_ui(
             a.new_blob = new_blob.clone();
         }
         actions.push(Command::SetComponent {
-            key,
+            id: key,
             type_hash: comp.type_hash,
             blob: new_blob,
         });
@@ -1809,18 +1946,18 @@ fn component_fields_ui(
             // Only record an undo step if this gesture actually changed the bytes (a click that
             // opened and closed a drag with no delta shouldn't litter the history).
             if (a.key, a.type_hash) == (key, comp.type_hash) && a.old_blob != a.new_blob {
-                stack.push(Edit {
-                    forward: Command::SetComponent {
-                        key,
+                stack.push(Edit::single(
+                    Command::SetComponent {
+                        id: key,
                         type_hash: comp.type_hash,
                         blob: a.new_blob,
                     },
-                    inverse: Command::SetComponent {
-                        key,
+                    Command::SetComponent {
+                        id: key,
                         type_hash: comp.type_hash,
                         blob: a.old_blob,
                     },
-                });
+                ));
             } else {
                 // Not ours / no change — put it back so the real owner can still commit it.
                 if (a.key, a.type_hash) != (key, comp.type_hash) {
@@ -2007,6 +2144,7 @@ mod outliner_tests {
         SnapshotEntity {
             index: 7,
             generation: 1,
+            editor_id: 8,
             components: hashes.iter().copied().map(component).collect(),
         }
     }

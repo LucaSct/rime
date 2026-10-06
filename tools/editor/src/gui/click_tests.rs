@@ -43,8 +43,9 @@ use egui::accesskit::{Role, Toggled};
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use rime_protocol::{
-    ComponentRef, FieldDesc, FieldKind, PickResult, PlayState, SaveResult, SaveScene, SchemaEntry,
-    SetComponent, Snapshot, SnapshotComponent, SpawnEntity,
+    decode_entity_ref, encode_entity_ref, entity_refs, ComponentRef, EditResult, FieldDesc,
+    FieldKind, PickResult, PlayState, SaveResult, SaveScene, SchemaEntry, SetComponent, Snapshot,
+    SnapshotComponent, SpawnEntity,
 };
 
 use super::protocol_input::Input;
@@ -63,12 +64,18 @@ const H_WORLD: u64 = 0x11;
 const H_CAMERA: u64 = 0x12;
 const H_MESH_ASSET: u64 = 0x13;
 const H_LIGHT: u64 = 0x14;
+/// The engine's entity handle type, as the editor wire describes it (ADR-0075): ONE u64 field, the
+/// referenced entity's EditorId. And the hierarchy edge that holds one.
+const H_ENTITY: u64 = 0x15;
+const H_PARENT: u64 = 0x16;
 /// A component the schema does not describe (a game's own type opened through the engine's host).
 const H_UNKNOWN: u64 = 0xDEAD;
 
-const CAMERA: EntityKey = (0, 0);
-const LIGHT: EntityKey = (1, 0);
-const CRATE: EntityKey = (2, 0);
+// The starting world's EditorIds — what every command names an entity by. Their handles are
+// (id - 1, 0); only a pick answer ever speaks a handle.
+const CAMERA: EntityId = 1;
+const LIGHT: EntityId = 2;
+const CRATE: EntityId = 3;
 
 const MESH_CRATE_ID: u64 = 0x1001;
 const MESH_BARREL_ID: u64 = 0x1002;
@@ -135,6 +142,18 @@ fn fake_schema() -> Schema {
                     field("casts_shadow", FieldKind::Bool, 0),
                 ],
             ),
+            ty(
+                H_ENTITY,
+                rime_protocol::ENTITY_TYPE_NAME,
+                false,
+                vec![field("editor_id", FieldKind::U64, 0)],
+            ),
+            ty(
+                H_PARENT,
+                "rime::ecs::Parent",
+                true,
+                vec![field("value", FieldKind::Struct, H_ENTITY)],
+            ),
         ],
     }
 }
@@ -166,6 +185,7 @@ fn default_blob(type_hash: u64) -> Vec<u8> {
         ])),
         H_MESH_ASSET => 0u64.to_le_bytes().to_vec(),
         H_LIGHT => light_blob(1.0, false),
+        H_PARENT => parent_blob(0),
         _ => Vec::new(),
     }
 }
@@ -177,11 +197,17 @@ fn light_blob(intensity: f32, casts_shadow: bool) -> Vec<u8> {
     ]))
 }
 
+/// A `Parent` pointing at `editor_id` (0 = none) — on the editor wire, the referent's EditorId.
+fn parent_blob(editor_id: EntityId) -> Vec<u8> {
+    editor_id.to_le_bytes().to_vec()
+}
+
 /// The three-entity world every test starts from: a camera, a light at the origin, a placed mesh.
 fn starting_world() -> Vec<SnapshotEntity> {
-    let entity = |key: EntityKey, components| SnapshotEntity {
-        index: key.0,
-        generation: key.1,
+    let entity = |id: EntityId, components| SnapshotEntity {
+        index: (id - 1) as u32,
+        generation: 0,
+        editor_id: id,
         components,
     };
     vec![
@@ -226,11 +252,20 @@ fn fake_assets() -> Vec<AssetEntry> {
 
 /// The engine, as far as `EditorApp` can tell. See the module docs for what this does and does
 /// not stand for.
+///
+/// It keeps the two engine rules the editor must not depend on getting wrong (ADR-0075): a despawned
+/// entity's SLOT is recycled with a bumped generation (LIFO, like `ecs::EntityDirectory`), so a
+/// handle is never a stable name; and Stop brings back an entity play destroyed under a NEW handle
+/// with its OLD EditorId. Everything the editor sends names entities by EditorId, which this fake
+/// resolves, refuses (with `EditResult { ok: false }`) when it cannot, and never reuses.
 struct FakeHost {
     shared: Shared,
     out_rx: Receiver<Outbound>,
     world: Vec<SnapshotEntity>,
     next_index: u32,
+    /// Despawned slots, most recent last: (index, the generation the next occupant gets).
+    free_slots: Vec<(u32, u32)>,
+    next_id: EntityId,
     play: PlayState,
     pre_play: Option<Vec<SnapshotEntity>>,
     /// The scene the session "opened" (what an empty-path save writes back to).
@@ -246,27 +281,35 @@ struct FakeHost {
 }
 
 impl FakeHost {
-    fn entity_mut(&mut self, key: EntityKey) -> Option<&mut SnapshotEntity> {
-        self.world
-            .iter_mut()
-            .find(|e| (e.index, e.generation) == key)
+    fn entity_mut(&mut self, id: EntityId) -> Option<&mut SnapshotEntity> {
+        self.world.iter_mut().find(|e| e.editor_id == id)
     }
 
-    fn component(&self, key: EntityKey, type_hash: u64) -> Option<&[u8]> {
-        self.world
-            .iter()
-            .find(|e| (e.index, e.generation) == key)?
+    fn entity(&self, id: EntityId) -> Option<&SnapshotEntity> {
+        self.world.iter().find(|e| e.editor_id == id)
+    }
+
+    fn handle(&self, id: EntityId) -> Option<(u32, u32)> {
+        self.entity(id).map(|e| (e.index, e.generation))
+    }
+
+    fn component(&self, id: EntityId, type_hash: u64) -> Option<&[u8]> {
+        self.entity(id)?
             .components
             .iter()
             .find(|c| c.type_hash == type_hash)
             .map(|c| c.data.as_slice())
     }
 
-    fn translation(&self, key: EntityKey) -> [f32; 3] {
-        let t = gizmo::decode_trs_blob(self.component(key, H_LOCAL).expect("LocalTransform"))
+    fn translation(&self, id: EntityId) -> [f32; 3] {
+        let t = gizmo::decode_trs_blob(self.component(id, H_LOCAL).expect("LocalTransform"))
             .expect("trs")
             .translation;
         [t.x, t.y, t.z]
+    }
+
+    fn ids(&self) -> Vec<EntityId> {
+        self.world.iter().map(|e| e.editor_id).collect()
     }
 
     fn publish_snapshot(&self) {
@@ -275,17 +318,71 @@ impl FakeHost {
         };
     }
 
-    fn spawn(&mut self, mut components: Vec<SnapshotComponent>) {
-        // m15.3: the host gives every spawned entity a LocalTransform it does not already carry.
-        if !components.iter().any(|c| c.type_hash == H_LOCAL) {
+    fn answer(&self, ok: bool, editor_id: EntityId) {
+        self.shared
+            .lock()
+            .unwrap()
+            .edit_results
+            .push(EditResult { ok, editor_id });
+    }
+
+    /// A fresh handle: the most recently freed slot (with its bumped generation), else a new one.
+    fn allocate(&mut self) -> (u32, u32) {
+        self.free_slots.pop().unwrap_or_else(|| {
+            self.next_index += 1;
+            (self.next_index - 1, 0)
+        })
+    }
+
+    fn release(&mut self, index: u32, generation: u32) {
+        self.free_slots.push((index, generation + 1));
+    }
+
+    /// Spawn under `id` (0 = a fresh one). Refuses an id never issued or still live, like the host.
+    fn spawn(&mut self, id: EntityId, exact: bool, mut components: Vec<SnapshotComponent>) {
+        if id != 0 && (id >= self.next_id || self.entity(id).is_some()) {
+            self.answer(false, id);
+            return;
+        }
+        // m15.3: the host gives every spawned entity a LocalTransform it does not already carry —
+        // except an exact restore, which gets precisely what it lists.
+        if !exact && !components.iter().any(|c| c.type_hash == H_LOCAL) {
             components.insert(0, comp(H_LOCAL, default_blob(H_LOCAL)));
         }
+        let id = if id == 0 {
+            self.next_id += 1;
+            self.next_id - 1
+        } else {
+            id
+        };
+        let (index, generation) = self.allocate();
         self.world.push(SnapshotEntity {
-            index: self.next_index,
-            generation: 0,
+            index,
+            generation,
+            editor_id: id,
             components,
         });
-        self.next_index += 1;
+        // Keep the mirror in the engine's order: by EditorId (entities_in_editor_order).
+        self.world.sort_by_key(|e| e.editor_id);
+        self.answer(true, id);
+    }
+
+    /// Despawn `id`, nulling every reference other entities hold to it (the host's rule).
+    fn despawn(&mut self, id: EntityId) -> bool {
+        let Some(pos) = self.world.iter().position(|e| e.editor_id == id) else {
+            return false;
+        };
+        let gone = self.world.remove(pos);
+        self.release(gone.index, gone.generation);
+        let schema = fake_schema();
+        for e in &mut self.world {
+            for c in &mut e.components {
+                if c.type_hash == H_PARENT && entity_refs(&schema, H_PARENT, &c.data) == [id] {
+                    c.data = parent_blob(0);
+                }
+            }
+        }
+        true
     }
 
     /// One fixed tick of the "simulation": the crate falls a metre. Enough to make the played world
@@ -302,6 +399,38 @@ impl FakeHost {
         if self.play.phase == PlayPhase::Edit {
             self.pre_play = Some(self.world.clone());
         }
+    }
+
+    /// Stop, the way the real host does it (ADR-0075): a survivor keeps its handle, anything play
+    /// spawned goes, and anything play destroyed comes back under a FRESH handle with its old id.
+    fn stop(&mut self) {
+        let Some(baseline) = self.pre_play.take() else {
+            return;
+        };
+        let survivors: Vec<(EntityId, (u32, u32))> = self
+            .world
+            .iter()
+            .map(|e| (e.editor_id, (e.index, e.generation)))
+            .collect();
+        for (id, (index, generation)) in &survivors {
+            if !baseline
+                .iter()
+                .any(|b| b.editor_id == *id && (b.index, b.generation) == (*index, *generation))
+            {
+                self.release(*index, *generation);
+            }
+        }
+        let mut restored = Vec::with_capacity(baseline.len());
+        for mut b in baseline {
+            let alive = survivors
+                .iter()
+                .any(|(id, h)| *id == b.editor_id && *h == (b.index, b.generation));
+            if !alive {
+                (b.index, b.generation) = self.allocate();
+            }
+            restored.push(b);
+        }
+        self.world = restored;
     }
 
     /// Drain everything the UI sent since the last pump, apply it, and answer.
@@ -326,7 +455,7 @@ impl FakeHost {
         match msg {
             EditorMessage::SetComponent => {
                 let set = SetComponent::decode(payload).expect("SetComponent");
-                if let Some(e) = self.entity_mut((set.index, set.generation)) {
+                if let Some(e) = self.entity_mut(set.editor_id) {
                     match e
                         .components
                         .iter_mut()
@@ -339,21 +468,37 @@ impl FakeHost {
             }
             EditorMessage::AddComponent => {
                 let r = ComponentRef::decode(payload).expect("ComponentRef");
-                if let Some(e) = self.entity_mut((r.index, r.generation)) {
-                    e.components
-                        .push(comp(r.type_hash, default_blob(r.type_hash)));
-                }
+                let ok = match self.entity_mut(r.editor_id) {
+                    Some(e) if !e.components.iter().any(|c| c.type_hash == r.type_hash) => {
+                        e.components
+                            .push(comp(r.type_hash, default_blob(r.type_hash)));
+                        true
+                    }
+                    _ => false,
+                };
+                self.answer(ok, r.editor_id);
             }
             EditorMessage::RemoveComponent => {
                 let r = ComponentRef::decode(payload).expect("ComponentRef");
-                if let Some(e) = self.entity_mut((r.index, r.generation)) {
-                    e.components.retain(|c| c.type_hash != r.type_hash);
-                }
+                let ok = match self.entity_mut(r.editor_id) {
+                    Some(e) => {
+                        let before = e.components.len();
+                        e.components.retain(|c| c.type_hash != r.type_hash);
+                        e.components.len() != before
+                    }
+                    None => false,
+                };
+                self.answer(ok, r.editor_id);
             }
-            EditorMessage::Spawn => self.spawn(Vec::new()),
+            EditorMessage::Spawn => {
+                let id = decode_entity_ref(payload).expect("Spawn");
+                self.spawn(id, false, Vec::new());
+            }
             EditorMessage::SpawnEntity => {
                 let spawn = SpawnEntity::decode(payload).expect("SpawnEntity");
                 self.spawn(
+                    spawn.editor_id,
+                    spawn.exact,
                     spawn
                         .components
                         .into_iter()
@@ -362,11 +507,9 @@ impl FakeHost {
                 );
             }
             EditorMessage::Despawn => {
-                // `[index:u32][generation:u32]` — the same bytes `encode_despawn` writes.
-                let index = u32::from_le_bytes(payload[0..4].try_into().unwrap());
-                let generation = u32::from_le_bytes(payload[4..8].try_into().unwrap());
-                self.world
-                    .retain(|e| (e.index, e.generation) != (index, generation));
+                let id = decode_entity_ref(payload).expect("Despawn");
+                let ok = self.despawn(id);
+                self.answer(ok, id);
             }
             EditorMessage::RequestSnapshot => self.publish_snapshot(),
             EditorMessage::PickRequest => {
@@ -383,9 +526,7 @@ impl FakeHost {
                 self.tick();
             }
             EditorMessage::Stop => {
-                if let Some(world) = self.pre_play.take() {
-                    self.world = world;
-                }
+                self.stop();
                 self.play.phase = PlayPhase::Edit;
             }
             EditorMessage::SaveScene => {
@@ -524,11 +665,14 @@ impl Rig {
             s.assets = fake_assets();
         }
         let next_index = world.iter().map(|e| e.index + 1).max().unwrap_or(0);
+        let next_id = world.iter().map(|e| e.editor_id + 1).max().unwrap_or(1);
         let host = FakeHost {
             shared: Arc::clone(&shared),
             out_rx,
             world,
             next_index,
+            free_slots: Vec::new(),
+            next_id,
             play: PlayState::default(),
             pre_play: None,
             opened: scene.map(str::to_string),
@@ -1333,7 +1477,7 @@ fn outliner_click_selects_and_the_inspector_follows() {
     let mut rig = Rig::new();
     assert!(rig.has("select an entity in the Outliner"));
     rig.click(ROW_LIGHT);
-    assert_eq!(rig.app().selected, Some(1));
+    assert_eq!(rig.app().selected, Some(LIGHT));
     assert!(rig.toggled(ROW_LIGHT));
     assert!(rig.has("entity 1"));
     assert!(rig.has("handle 1:0"));
@@ -1358,14 +1502,28 @@ fn spawn_creates_an_entity_and_clears_the_selection() {
 }
 
 #[test]
-fn spawn_is_not_undoable() {
-    // DOCUMENTS A LIMITATION (commands.rs: "a considered v1 limitation"): creating an entity leaves
-    // no history, so Ctrl+Z after a mis-click does nothing and Edit ▸ Undo stays greyed out.
+fn spawn_is_undoable_and_redo_brings_back_the_same_entity() {
+    // Was `spawn_is_not_undoable`. The step is committed when the engine answers with the id it
+    // assigned (EditResult, ADR-0075); undo despawns that id, redo respawns UNDER IT — so a later
+    // step that names the entity still finds it.
     let mut rig = Rig::new();
     rig.click("+ spawn");
-    assert!(!rig.menu_item_enabled("Edit", UNDO));
+    assert_eq!(rig.host.ids(), [CAMERA, LIGHT, CRATE, 4]);
+    assert!(rig.menu_item_enabled("Edit", UNDO));
     rig.chord(CTRL, egui::Key::Z);
-    assert_eq!(rig.host.world.len(), 4, "the spawned entity is still there");
+    assert_eq!(
+        rig.host.ids(),
+        [CAMERA, LIGHT, CRATE],
+        "the spawn is undone"
+    );
+    assert!(rig.has("3 entities"));
+    rig.chord(CTRL, egui::Key::Y);
+    assert_eq!(
+        rig.host.ids(),
+        [CAMERA, LIGHT, CRATE, 4],
+        "the same id, not a fresh one"
+    );
+    assert_eq!(rig.host.translation(4), [0.0, 0.0, 0.0]);
 }
 
 // ── Inspector: entity ───────────────────────────────────────────────────────────────────────
@@ -1381,44 +1539,67 @@ fn despawn_removes_the_selected_entity() {
     );
     assert_eq!(
         rig.host.last(EditorMessage::Despawn).unwrap(),
-        rime_protocol::encode_despawn(CRATE.0, CRATE.1)
+        encode_entity_ref(CRATE)
     );
     assert!(!rig.has(ROW_CRATE));
     assert!(rig.has("2 entities"));
 }
 
 #[test]
-fn despawn_is_not_undoable() {
-    // DOCUMENTS A LIMITATION, and the one that costs work: a despawn is immediate, unconfirmed and
-    // permanent. The entity and every component value on it are gone; Undo is greyed out.
-    let mut rig = Rig::new();
-    rig.click(ROW_CRATE);
+fn despawn_with_a_child_is_undoable_and_the_child_gets_its_parent_back() {
+    // Was `despawn_is_not_undoable`. The engine nulls every reference to a despawned entity, so
+    // undo has to restore two things: the entity (exact components, under its old id) AND the
+    // child's Parent, captured before the despawn went out.
+    let mut world = starting_world();
+    world[2].components.push(comp(H_PARENT, parent_blob(LIGHT))); // the crate hangs off the light
+    let mut rig = Rig::build(None, world);
+    let light = rig.host.entity(LIGHT).unwrap().components.clone();
+    rig.click(ROW_LIGHT);
     rig.click("✖ despawn");
-    assert!(!rig.menu_item_enabled("Edit", UNDO));
-    rig.chord(CTRL, egui::Key::Z);
-    assert_eq!(rig.host.world.len(), 2, "nothing brought it back");
+    assert!(rig.host.entity(LIGHT).is_none());
+    assert_eq!(
+        rig.host.component(CRATE, H_PARENT),
+        Some(parent_blob(0).as_slice()),
+        "the engine nulled the child's reference"
+    );
+
+    rig.click("Edit");
+    rig.click(UNDO);
+    assert_eq!(
+        rig.host.entity(LIGHT).unwrap().components,
+        light,
+        "exactly what it had"
+    );
+    assert_eq!(
+        rig.host.component(CRATE, H_PARENT),
+        Some(parent_blob(LIGHT).as_slice()),
+        "and the child points at it again"
+    );
+    assert_eq!(rig.host.ids(), [CAMERA, LIGHT, CRATE]);
+
+    rig.chord(CTRL, egui::Key::Y);
+    assert!(rig.host.entity(LIGHT).is_none(), "redo despawns it again");
+    assert_eq!(
+        rig.host.component(CRATE, H_PARENT),
+        Some(parent_blob(0).as_slice())
+    );
 }
 
 #[test]
-fn despawn_slides_the_selection_onto_the_next_entity() {
-    // DOCUMENTS A DEFECT: the selection is a ROW INDEX, not an entity. Despawning row 1 leaves
-    // `selected == Some(1)`, and row 1 is now the entity that used to be row 2 — so the inspector
-    // silently shows a different object under the same "✖ despawn" button. A second click (a
-    // double-click, or "did that work?") deletes an entity the user never selected, with no undo.
+fn despawn_clears_the_selection_instead_of_sliding_it() {
+    // Was `despawn_slides_the_selection_onto_the_next_entity`: the selection was a ROW, so
+    // despawning row 1 left the inspector on whatever became row 1, under the same "✖ despawn"
+    // button. It is the entity's EditorId now, and a despawned entity is simply not selected.
     let mut rig = Rig::new();
     rig.click(ROW_LIGHT);
     rig.click("✖ despawn");
-    assert_eq!(rig.app().selected, Some(1));
-    assert!(rig.has("handle 2:0"), "the inspector now shows the crate");
-
-    rig.click("✖ despawn");
-    assert_eq!(rig.host.world.len(), 1, "the crate went too");
-    assert_eq!(
-        (rig.host.world[0].index, rig.host.world[0].generation),
-        CAMERA
+    assert_eq!(rig.app().selected, None);
+    assert!(rig.has("select an entity in the Outliner"));
+    assert!(
+        !rig.has("✖ despawn"),
+        "no button left to delete a neighbour with"
     );
-    // …and with nothing left at row 1 the inspector finally admits it.
-    assert!(rig.has("(stale selection)"));
+    assert_eq!(rig.host.ids(), [CAMERA, CRATE]);
 }
 
 // ── Inspector: field edits + undo/redo ──────────────────────────────────────────────────────
@@ -1430,10 +1611,7 @@ fn typing_into_a_number_field_edits_the_component() {
     rig.type_into_number_field(1, "2.5"); // translation.y
     assert_eq!(rig.host.translation(LIGHT), [0.0, 2.5, 0.0]);
     let last = set_of(rig.host.last(EditorMessage::SetComponent).unwrap());
-    assert_eq!(
-        (last.index, last.generation, last.type_hash),
-        (1, 0, H_LOCAL)
-    );
+    assert_eq!((last.editor_id, last.type_hash), (LIGHT, H_LOCAL));
     assert_eq!(last.blob, trs_at(0.0, 2.5, 0.0));
 }
 
@@ -1648,20 +1826,42 @@ fn ctrl_z_outside_a_text_box_still_undoes_a_world_edit() {
 }
 
 #[test]
-fn undo_after_a_despawn_edits_an_entity_that_no_longer_exists() {
-    // DOCUMENTS A DEFECT (minor): history entries name an entity by handle and are not pruned when
-    // it is despawned. Undo is offered, "succeeds", consumes the step — and changes nothing.
+fn despawn_then_undo_then_undo_the_edit_before_it_then_redo_across_slot_reuse() {
+    // Was `undo_after_a_despawn_edits_an_entity_that_no_longer_exists`: the history named the light
+    // by handle, so once it was despawned the edit's undo went nowhere. Now: edit, despawn, spawn
+    // something else (which takes the light's freed SLOT, under a bumped generation — the engine's
+    // LIFO recycling), then walk the history back and forward. Every step lands on the light.
     let mut rig = Rig::new();
     rig.click(ROW_LIGHT);
     rig.type_into_number_field(0, "5");
+    let light_handle = rig.host.handle(LIGHT).unwrap();
     rig.click("✖ despawn");
-    rig.host.log.clear();
-    assert!(rig.menu_item_enabled("Edit", UNDO));
-    rig.chord(CTRL, egui::Key::Z);
+    rig.click("+ spawn"); // reuses the light's slot
+    let squatter = rig.host.entity(4).unwrap();
+    assert_eq!(
+        squatter.index, light_handle.0,
+        "the freed slot was recycled"
+    );
+    rig.chord(CTRL, egui::Key::Z); // undo the spawn
+    assert_eq!(rig.host.ids(), [CAMERA, CRATE]);
+
+    rig.chord(CTRL, egui::Key::Z); // undo the despawn: back under its old id, a new handle
+    assert_eq!(rig.host.ids(), [CAMERA, LIGHT, CRATE]);
+    assert_ne!(rig.host.handle(LIGHT), Some(light_handle));
+    assert_eq!(rig.host.translation(LIGHT), [5.0, 0.0, 0.0]);
+
+    rig.chord(CTRL, egui::Key::Z); // undo the edit before it — it reaches the respawned light
+    assert_eq!(rig.host.translation(LIGHT), [0.0, 0.0, 0.0]);
     let sent = set_of(rig.host.last(EditorMessage::SetComponent).unwrap());
-    assert_eq!((sent.index, sent.generation), LIGHT);
-    assert!(rig.host.component(LIGHT, H_LOCAL).is_none(), "it is gone");
-    assert!(!rig.app().stack.can_undo());
+    assert_eq!(sent.editor_id, LIGHT);
+
+    rig.chord(CTRL, egui::Key::Y); // redo the edit
+    assert_eq!(rig.host.translation(LIGHT), [5.0, 0.0, 0.0]);
+    rig.chord(CTRL, egui::Key::Y); // redo the despawn
+    assert!(rig.host.entity(LIGHT).is_none());
+    rig.chord(CTRL, egui::Key::Y); // redo the spawn — under the id it had, 4
+    assert_eq!(rig.host.ids(), [CAMERA, CRATE, 4]);
+    assert!(!rig.app().stack.can_redo());
 }
 
 // ── Inspector: components ───────────────────────────────────────────────────────────────────
@@ -1685,7 +1885,8 @@ fn add_component_offers_only_what_the_entity_lacks_and_adds_it() {
         [
             "rime::ecs::WorldTransform",
             "rime::render::Camera",
-            "rime::render::MeshAsset"
+            "rime::render::MeshAsset",
+            "rime::ecs::Parent"
         ]
     );
     rig.click("rime::render::MeshAsset");
@@ -1694,22 +1895,32 @@ fn add_component_offers_only_what_the_entity_lacks_and_adds_it() {
         [EditorMessage::AddComponent, EditorMessage::RequestSnapshot]
     );
     let added = ComponentRef::decode(rig.host.last(EditorMessage::AddComponent).unwrap()).unwrap();
-    assert_eq!((added.index, added.type_hash), (1, H_MESH_ASSET));
+    assert_eq!((added.editor_id, added.type_hash), (LIGHT, H_MESH_ASSET));
     // The engine's default arrived through the resync and is now editable in the inspector.
     assert!(rig.host.component(LIGHT, H_MESH_ASSET).is_some());
     assert!(rig.has("asset"));
 }
 
 #[test]
-fn add_component_is_not_undoable() {
-    // DOCUMENTS A DEFECT: gui/commands.rs states "adding a component undoes to removing it" — an
-    // exact inverse exists and the stack can hold it — but the inspector pushes the command
-    // without recording an `Edit`. Undo stays greyed out.
+fn add_component_is_undoable_and_redoable() {
+    // Was `add_component_is_not_undoable`: the inverse existed (remove it) and was never recorded.
     let mut rig = Rig::new();
     rig.click(ROW_LIGHT);
     rig.click("+ add component");
     rig.click("rime::render::MeshAsset");
-    assert!(!rig.menu_item_enabled("Edit", UNDO));
+    assert!(rig.host.component(LIGHT, H_MESH_ASSET).is_some());
+    assert!(rig.menu_item_enabled("Edit", UNDO));
+    rig.chord(CTRL, egui::Key::Z);
+    assert!(rig.host.component(LIGHT, H_MESH_ASSET).is_none());
+    assert!(
+        !rig.has("rime::render::MeshAsset"),
+        "the inspector resynced"
+    );
+    rig.chord(CTRL, egui::Key::Y);
+    assert_eq!(
+        rig.host.component(LIGHT, H_MESH_ASSET),
+        Some(default_blob(H_MESH_ASSET).as_slice())
+    );
 }
 
 #[test]
@@ -1733,17 +1944,28 @@ fn remove_component_removes_it() {
 }
 
 #[test]
-fn remove_component_is_not_undoable_and_loses_its_values() {
-    // DOCUMENTS A DEFECT (same cause as add): commands.rs promises "removing undoes to setting its
-    // old bytes back", the inspector never records it. One click on "remove" discards an authored
-    // light's values for good.
+fn remove_component_is_undoable_with_its_exact_values() {
+    // Was `remove_component_is_not_undoable_and_loses_its_values`: one click on "remove" discarded
+    // an authored light for good. The inverse sets the captured bytes back, which re-adds it.
     let mut rig = Rig::new();
+    let authored = rig.host.component(LIGHT, H_LIGHT).unwrap().to_vec();
+    assert_eq!(
+        authored,
+        light_blob(2.0, false),
+        "not the default (1.0) — undo must not invent"
+    );
     rig.click(ROW_LIGHT);
     let removes: Vec<_> = rig.harness.get_all_by_label("remove").collect();
     removes[1].click();
     rig.settle();
-    assert!(!rig.menu_item_enabled("Edit", UNDO));
+    assert!(rig.host.component(LIGHT, H_LIGHT).is_none());
     rig.chord(CTRL, egui::Key::Z);
+    assert_eq!(
+        rig.host.component(LIGHT, H_LIGHT),
+        Some(authored.as_slice())
+    );
+    assert!(rig.has("rime::render::PointLight"));
+    rig.chord(CTRL, egui::Key::Y);
     assert!(rig.host.component(LIGHT, H_LIGHT).is_none());
 }
 
@@ -1875,13 +2097,23 @@ fn only_meshes_can_be_placed() {
 }
 
 #[test]
-fn place_is_not_undoable() {
-    // DOCUMENTS A LIMITATION: placement is a spawn, and spawns leave no history.
+fn place_is_undoable_and_redo_places_the_same_entity_again() {
+    // Was `place_is_not_undoable`. Like a spawn: committed with the id the engine assigned, undone
+    // by despawning that id, redone by placing the same components under the same id.
     let mut rig = Rig::new();
     let places: Vec<_> = rig.harness.get_all_by_label("place").collect();
     places[0].click();
     rig.settle();
-    assert!(!rig.menu_item_enabled("Edit", UNDO));
+    let placed = rig
+        .host
+        .entity(4)
+        .expect("placed under id 4")
+        .components
+        .clone();
+    rig.chord(CTRL, egui::Key::Z);
+    assert_eq!(rig.host.ids(), [CAMERA, LIGHT, CRATE]);
+    rig.chord(CTRL, egui::Key::Y);
+    assert_eq!(rig.host.entity(4).unwrap().components, placed);
 }
 
 // ── Gizmo toolbar ───────────────────────────────────────────────────────────────────────────
@@ -1901,7 +2133,7 @@ fn gizmo_mode_buttons_switch_mode_and_tell_the_engine() {
         assert!(rig.toggled(label));
         assert!(!rig.toggled("Off (Q)"));
         let state = GizmoState::decode(rig.host.last(EditorMessage::GizmoState).unwrap()).unwrap();
-        assert_eq!((state.index, state.generation, state.mode), (1, 0, mode));
+        assert_eq!((state.editor_id, state.mode), (LIGHT, mode));
     }
     rig.click("Off (Q)");
     let state = GizmoState::decode(rig.host.last(EditorMessage::GizmoState).unwrap()).unwrap();
@@ -2029,6 +2261,84 @@ fn stop_resyncs_the_mirror_to_the_restored_world() {
 }
 
 #[test]
+fn undo_works_after_play_stop_including_a_redo_branch() {
+    // The Xvfb smoke's second pin, at the widget layer: one Play→Stop used to kill the whole
+    // history, because every step named a handle and Stop replaced them all. Here play even
+    // DESTROYS the edited light, so Stop has to bring it back under a new handle — and the history,
+    // which names it by id, does not notice.
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.type_into_number_field(0, "5"); // step 1: x = 5
+    rig.type_into_number_field(1, "2"); // step 2: y = 2
+    rig.chord(CTRL, egui::Key::Z); // undo step 2 — it waits on the redo branch
+    assert_eq!(rig.host.translation(LIGHT), [5.0, 0.0, 0.0]);
+    let before_play = rig.host.handle(LIGHT).unwrap();
+
+    rig.click("▶");
+    rig.host.tick();
+    assert!(rig.host.despawn(LIGHT), "the simulation destroys the light");
+    rig.click("⏹");
+    assert_ne!(
+        rig.host.handle(LIGHT),
+        Some(before_play),
+        "back under a new handle"
+    );
+    assert_eq!(rig.host.translation(LIGHT), [5.0, 0.0, 0.0]);
+
+    rig.chord(CTRL, egui::Key::Y); // the redo branch survived Play/Stop
+    assert_eq!(rig.host.translation(LIGHT), [5.0, 2.0, 0.0]);
+    rig.chord(CTRL, egui::Key::Z);
+    rig.chord(CTRL, egui::Key::Z); // and undo reaches all the way back
+    assert_eq!(rig.host.translation(LIGHT), [0.0, 0.0, 0.0]);
+    assert!(!rig.app().stack.can_undo());
+}
+
+#[test]
+fn undo_and_redo_are_refused_while_playing_and_play_edits_leave_no_history() {
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.type_into_number_field(0, "5");
+    rig.click("▶");
+    assert!(
+        !rig.menu_item_enabled("Edit", UNDO),
+        "frozen while the simulation runs"
+    );
+    rig.host.log.clear();
+    rig.chord(CTRL, egui::Key::Z);
+    assert!(
+        rig.host.commands().is_empty(),
+        "Ctrl+Z sent nothing: {:?}",
+        rig.host.commands()
+    );
+    assert_eq!(rig.host.translation(LIGHT), [5.0, 0.0, 0.0]);
+    // An edit made during play reaches the engine (it is live) but not the history: Stop throws
+    // it away, so there would be nothing for its undo to undo.
+    rig.click("+ spawn");
+    assert_eq!(rig.host.ids(), [CAMERA, LIGHT, CRATE, 4]);
+    rig.click("⏹");
+    assert_eq!(
+        rig.host.ids(),
+        [CAMERA, LIGHT, CRATE],
+        "Stop discarded the play-time spawn"
+    );
+    rig.chord(CTRL, egui::Key::Z); // the one step is the pre-play edit
+    assert_eq!(rig.host.translation(LIGHT), [0.0, 0.0, 0.0]);
+    assert!(!rig.app().stack.can_undo());
+}
+
+#[test]
+fn stop_restores_the_pre_play_selection() {
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.click("▶");
+    rig.click(ROW_CRATE); // looking around while it runs
+    assert_eq!(rig.app().selected, Some(CRATE));
+    rig.click("⏹");
+    assert_eq!(rig.app().selected, Some(LIGHT));
+    assert!(rig.toggled(ROW_LIGHT));
+}
+
+#[test]
 fn the_inspector_is_not_live_during_play() {
     // DOCUMENTS A LIMITATION (commands.rs `is_structural`): nothing re-fetches the world while the
     // simulation runs, so the inspector keeps showing the pre-play numbers of an object that is
@@ -2075,17 +2385,17 @@ fn a_streamed_frame_reaches_the_viewport_texture() {
 fn a_viewport_click_picks_and_the_answer_selects() {
     let mut rig = Rig::new();
     rig.present_frame();
-    rig.host.pick_answer = PickResult {
-        index: CRATE.0,
-        generation: CRATE.1,
-    };
+    // A pick answers with the engine's HANDLE — the one message that still does — and the editor
+    // maps it to the entity's EditorId through the snapshot.
+    let (index, generation) = rig.host.handle(CRATE).unwrap();
+    rig.host.pick_answer = PickResult { index, generation };
     rig.viewport_click((480.5, 270.5));
 
     assert_eq!(rig.host.count(EditorMessage::PickRequest), 1);
     let pick = PickRequest::decode(rig.host.last(EditorMessage::PickRequest).unwrap()).unwrap();
     // In the ENGINE's pixel space (the lens extent), not the panel's.
     assert_eq!((pick.x, pick.y), (480, 270));
-    assert_eq!(rig.app().selected, Some(2));
+    assert_eq!(rig.app().selected, Some(CRATE));
     assert!(rig.toggled(ROW_CRATE));
 }
 
