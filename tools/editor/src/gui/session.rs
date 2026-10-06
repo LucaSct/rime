@@ -154,6 +154,18 @@ impl EngineSession {
     }
 }
 
+#[cfg(test)]
+impl EngineSession {
+    /// A session with no engine behind it — no child process, no socket thread. The click tests
+    /// (`click_tests.rs`) play the engine themselves through `Shared` and the outbound channel.
+    pub fn detached() -> Self {
+        Self {
+            child: None,
+            recv_handle: None,
+        }
+    }
+}
+
 impl Drop for EngineSession {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {

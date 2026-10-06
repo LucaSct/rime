@@ -20,12 +20,19 @@ path = "src/main.rs"
 # headless `editor --smoke` — the CI-critical path — stays a light, fast build with no windowing
 # stack. Turn it on to build/run the real editor: `cargo run -p editor --features gui`.
 default = []
-gui = ["dep:eframe", "dep:egui_dock"]
+#
+# `egui_kittest` rides on `gui` too, although only the click tests (src/gui/click_tests.rs) use it.
+# Cargo cannot feature-gate a dev-dependency, and a plain one would drag egui + winit into the plain
+# `cargo test -p editor` — the light headless build this feature split exists to protect. As an
+# optional dependency it costs the shipped binary nothing (nothing outside `#[cfg(test)]` names it,
+# and its `eframe/accesskit` is already on through eframe's defaults).
+gui = ["dep:eframe", "dep:egui_dock", "dep:egui_kittest"]
 
 [dependencies]
 rime-protocol = { path = "../rime-protocol" }
 eframe = { version = "0.31", optional = true }
 egui_dock = { version = "0.16", optional = true }
+egui_kittest = { version = "0.31", optional = true, features = ["eframe"] }
 
 [lints.clippy]
 all = "deny"
