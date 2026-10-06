@@ -146,6 +146,14 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
         // Always bound (a placeholder pair when there is no sky): the layout is fixed.
         {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
         {4, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},
+        // m19.7b: one albedo+height texture per layer. FOUR SEPARATE 2-D bindings, not one
+        // texture array (ADR-0066 addendum): an array forces every layer to one size and one mip
+        // count, and the textures are the builder's cooked assets, shared between tiles and
+        // authored independently — a gravel at 512² and a grass at 2048² is the normal case.
+        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {8, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
     };
 
     rhi::GraphicsPipelineDesc pd{};
@@ -196,6 +204,37 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     wd.debug_name = "terrain-weights";
     weight_sampler_ = device.create_sampler(wd);
 
+    // m19.7b: the layer textures. TRILINEAR (linear within and across mips — a ground texture is
+    // seen minified at every distance from the camera, so it needs its cooked mip chain), and
+    // REPEAT, because the coordinate is world position over a period: a layer is meant to tile
+    // the ground forever. No anisotropy yet, so grazing views blur toward the coarser mip; that is
+    // a quality knob for later, and leaving it off keeps every proof independent of a per-device
+    // anisotropic footprint the Vulkan spec does not pin down.
+    rhi::SamplerDesc ld{};
+    ld.mag_filter = rhi::Filter::Linear;
+    ld.min_filter = rhi::Filter::Linear;
+    ld.mip_filter = rhi::Filter::Linear;
+    ld.address_mode = rhi::AddressMode::Repeat;
+    ld.debug_name = "terrain-layers";
+    layer_sampler_ = device.create_sampler(ld);
+
+    // THE WHITE FALLBACK — what a layer with no texture samples. RGB 255 in an sRGB format decodes
+    // to EXACTLY 1.0 (the sRGB curve maps 1 to 1, and Vulkan requires the 8-bit sRGB conversion to
+    // be exact at the end points), and any filter over a texture whose every texel is 1.0 returns
+    // 1.0. So `base_color * texture(...)` is `base_color` bit for bit, which is why a palette with
+    // no textures renders exactly as m19.6 did, rather than to within a tolerance. A = 0: the
+    // height of a flat, featureless layer (brick 3's blend treats equal heights as "no
+    // redistribution", so the value matters only in that it is the same for every untextured
+    // layer). Same format as a cooked layer texture, so the fallback cannot hide a format bug.
+    rhi::TextureDesc wtd{};
+    wtd.extent = {1, 1};
+    wtd.format = rhi::Format::RGBA8Srgb;
+    wtd.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    wtd.debug_name = "terrain-white-layer";
+    white_layer_ = device.create_texture(wtd);
+    const std::uint8_t white_texel[4] = {255, 255, 255, 0};
+    device.write_texture(white_layer_, white_texel, sizeof(white_texel));
+
     // m19.6: the no-sky placeholders — SkyPass::empty_binding's pair, owned here so a caller with
     // no SkyPass at all can still draw. The all-zero SH buffer's flag (its tenth vec4) is what
     // keeps terrain.frag on the flat-ambient branch; the 1x1 LUT is never actually sampled, it
@@ -228,6 +267,8 @@ TerrainPass::~TerrainPass() {
     }
     device_.destroy(dummy_sh_);
     device_.destroy(dummy_skyview_);
+    device_.destroy(white_layer_);
+    device_.destroy(layer_sampler_);
     device_.destroy(weight_sampler_);
     device_.destroy(sampler_);
     device_.destroy(pipeline_);
@@ -236,15 +277,19 @@ TerrainPass::~TerrainPass() {
 }
 
 namespace {
-// std140 mirror of terrain.frag's `Splat` block: 7 x vec4 = 112 bytes.
+// std140 mirror of terrain.frag's `Splat` block: 9 x vec4 = 144 bytes. m19.7b APPENDED the two
+// uv-scale vec4s after m19.5's 112 bytes rather than interleaving them, so the m19.6 proof's
+// frozen m19.5 shader, which declares only the first 112, still reads this buffer correctly.
 struct SplatUniform {
     float info[4] = {0.0f, 0.0f, 0.0f, 0.0f};      // x = splat flag, yz = tile extent (m)
     float dims[4] = {1.0f, 1.0f, 0.0f, 0.0f};      // xy = weight map size in texels
     float color[4][4] = {};                        // rgb = base colour, w = metallic, per layer
     float roughness[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // x..w = layer 0..3
+    // Metres per repeat, world X and Z: [0] = (layer 0 x, z, layer 1 x, z), [1] = layers 2, 3.
+    float uv_scale[2][4] = {{1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}};
 };
 
-static_assert(sizeof(SplatUniform) == 112, "SplatUniform must match terrain.frag's Splat block");
+static_assert(sizeof(SplatUniform) == 144, "SplatUniform must match terrain.frag's Splat block");
 } // namespace
 
 TerrainTileId TerrainPass::upload(const assets::HeightfieldAsset& asset) {
@@ -296,9 +341,13 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
                         asset.weights.size() == asset.weight_texel_count() * 4;
         if (splat_ok) {
             for (const TerrainLayer& l : *palette) {
+                // m19.7b: a zero, negative or non-finite period has no meaningful texture
+                // coordinate (a divide by zero, a mirrored pattern, or NaN), so it is refused,
+                // not clamped to something that would draw.
                 splat_ok = splat_ok && std::isfinite(l.base_color.x) &&
                            std::isfinite(l.base_color.y) && std::isfinite(l.base_color.z) &&
-                           unit_interval(l.metallic) && unit_interval(l.roughness);
+                           unit_interval(l.metallic) && unit_interval(l.roughness) &&
+                           finite_positive(l.uv_scale[0]) && finite_positive(l.uv_scale[1]);
             }
         }
         if (!splat_ok) {
@@ -373,6 +422,7 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
     tile.weights = device_.create_texture(wtd);
 
     SplatUniform u{};
+    tile.layer_textures.fill(white_layer_);
     if (splat) {
         u.info[0] = 1.0f;
         u.info[1] = asset.cell_size_x * static_cast<float>(asset.columns - 1);
@@ -391,6 +441,13 @@ TerrainTileId TerrainPass::upload_impl(const assets::HeightfieldAsset& asset,
             u.color[k][2] = l.base_color.z;
             u.color[k][3] = l.metallic;
             u.roughness[k] = l.roughness;
+            // m19.7b: the texture and its period follow the SAME repeat, so an unused slot's
+            // colour `base_color * texture` is layer 0's to the bit and its difference stays 0.
+            u.uv_scale[k / 2][(k % 2) * 2 + 0] = l.uv_scale[0];
+            u.uv_scale[k / 2][(k % 2) * 2 + 1] = l.uv_scale[1];
+            if (l.albedo_height.is_valid()) {
+                tile.layer_textures[k] = l.albedo_height;
+            }
         }
     }
     rhi::BufferDesc ubd{};
@@ -486,10 +543,25 @@ void TerrainPass::add(RenderGraph& graph,
     const RGBuffer sky_sh =
         caller_sky ? sky.sh : graph.import_buffer(dummy_sh_, rhi::ResourceState::ShaderRead);
     const rhi::SamplerHandle sky_sampler = caller_sky ? sky.sampler : weight_sampler_;
-    const RGTexture sampled[] = {graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
-                                 graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead),
-                                 sky_lut};
-    desc.sampled = sampled;
+    // m19.7b: the four layer textures are sampled inputs too, declared for the same reason as the
+    // heightfield. Each DISTINCT handle is imported once — four untextured layers share the white
+    // fallback, and two layers may share one cooked texture — so the graph never tracks one image
+    // as two resources with two independent states.
+    RGTexture sampled[3 + 4] = {graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
+                                graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead),
+                                sky_lut};
+    std::size_t sampled_count = 3;
+    for (std::size_t k = 0; k < tile.layer_textures.size(); ++k) {
+        const rhi::TextureHandle h = tile.layer_textures[k];
+        bool seen = false;
+        for (std::size_t j = 0; j < k; ++j) {
+            seen = seen || tile.layer_textures[j] == h;
+        }
+        if (!seen) {
+            sampled[sampled_count++] = graph.import_texture(h, rhi::ResourceState::ShaderRead);
+        }
+    }
+    desc.sampled = std::span<const RGTexture>(sampled, sampled_count);
     const RGBuffer buffers[] = {sky_sh};
     desc.buffer_reads = buffers;
 
@@ -502,6 +574,8 @@ void TerrainPass::add(RenderGraph& graph,
                           [pipeline = pipeline_,
                            sampler = sampler_,
                            weight_sampler = weight_sampler_,
+                           layer_sampler = layer_sampler_,
+                           layers = tile.layer_textures,
                            heights = tile.heights,
                            weights = tile.weights,
                            splat_ubo = tile.splat_ubo,
@@ -520,6 +594,9 @@ void TerrainPass::add(RenderGraph& graph,
                               // late-resolve add_shadowed uses for the same graph resources.
                               cmd.bind_texture(3, graph.physical(sky_lut), sky_sampler);
                               cmd.bind_storage_buffer(4, graph.physical_buffer(sky_sh));
+                              for (std::uint32_t k = 0; k < 4; ++k) {
+                                  cmd.bind_texture(5 + k, layers[k], layer_sampler);
+                              }
                               cmd.bind_index_buffer(indices, rhi::IndexType::Uint32);
                               cmd.push_constants(&push, sizeof(push));
                               // No vertex buffer is bound because there is nothing to bind: the

@@ -26,4 +26,13 @@ rime_add_shaders(rime_terrain_render_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_height_probe.frag
     # m19.6: a FROZEN copy of m19.5's terrain.frag — the anchor the no-sky bit-identity proof
     # compares the live pass against (see the shader's header for why a copy, not a variant).
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_m195_reference.frag)
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_m195_reference.frag
+    # m19.7b: the engine's full-screen triangle plus a probe that reports the f32 bits a layer
+    # texture's R and A decode to — the alpha-is-linear proof reads what the SHADER sees.
+    ${CMAKE_SOURCE_DIR}/engine/render/shaders/fullscreen.vert
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/terrain_layer_probe.frag)
+
+# m19.7b: the alpha proof loads m19.7a's cooked terrain-layer texture through the engine's own
+# GpuAssetBridge, so it needs the shared fixtures directory (as tests/assets and tests/render do).
+target_compile_definitions(rime_terrain_render_tests
+    PRIVATE RIME_ASSETS_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/assets/fixtures")

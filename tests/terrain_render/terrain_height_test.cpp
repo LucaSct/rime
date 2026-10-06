@@ -43,14 +43,19 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <vector>
 
+#include "fullscreen.vert.spv.h"
+#include "rime/assets/asset_server.hpp"
 #include "rime/assets/heightfield_asset.hpp"
+#include "rime/core/jobs/job_system.hpp"
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/physics.hpp"
+#include "rime/render/gpu_asset_bridge.hpp"
 #include "rime/render/lighting/sky.hpp"
 #include "rime/render/passes.hpp"
 #include "rime/render/render_graph.hpp"
@@ -58,6 +63,7 @@
 #include "rime/rhi/device.hpp"
 #include "terrain.vert.spv.h"
 #include "terrain_height_probe.frag.spv.h"
+#include "terrain_layer_probe.frag.spv.h"
 #include "terrain_m195_reference.frag.spv.h"
 
 namespace {
@@ -1825,4 +1831,608 @@ TEST_CASE("m19.6: the sky's diffuse carries the albedo of a rough dielectric") {
     const int covered = covered_pixels(bright);
     CHECK(covered > 8000);
     CHECK(strictly_brighter_pixels(bright, dark) == covered);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// m19.7b — EACH LAYER SAMPLES ITS OWN ALBEDO+HEIGHT TEXTURE AT WORLD-XZ UVs (ADR-0066 addendum).
+// Structural, like everything above: bit identity for the anchor, strict inequalities for the
+// orientation and period, one f16 ULP (derived below) for the seam, exact counts for refusals, and
+// the f32 bits a shader sees for the alpha channel. No golden images.
+//
+// Most of these renders light with the AMBIENT TERM ONLY (sun irradiance 0, ambient 1, flat tile,
+// no sky): the radiance is then (1 - metallic) * base + f0 = base + 0.04 for a dielectric — a
+// strictly increasing function of the texture's colour that does not depend on the view vector or
+// the normal. So a pixel's colour is a statement about the texture lookup and nothing else.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+namespace {
+
+// A layer texture as a builder holds one: RGBA8_SRGB, row-major, x fastest — the format the
+// cooked `Rgba8Srgb` terrain-layer texture is uploaded as (GpuAssetBridge's to_rhi_format).
+rhi::TextureHandle make_layer_texture(rhi::Device& device,
+                                      std::uint32_t w,
+                                      std::uint32_t h,
+                                      const std::vector<std::uint8_t>& rgba) {
+    REQUIRE(rgba.size() == std::size_t{w} * h * 4);
+    rhi::TextureDesc td{};
+    td.extent = {w, h};
+    td.format = rhi::Format::RGBA8Srgb;
+    td.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    td.debug_name = "m19.7b-layer";
+    const rhi::TextureHandle t = device.create_texture(td);
+    REQUIRE(t.is_valid());
+    device.write_texture(t, rgba.data(), rgba.size());
+    return t;
+}
+
+// top_down_view_proj(), generalised to a 32 m square centred anywhere: pixel (px, py)'s centre is
+// world (cx - kHalf + (px + 0.5) * 0.25, cz - kHalf + (py + 0.5) * 0.25). The m19.3 proof pins that
+// mapping for the original; this is the same matrix with a different centre.
+struct TopDown {
+    core::Mat4 view_proj;
+    core::Vec3 eye;
+    float cx;
+    float cz;
+};
+
+TopDown top_down_centred(float cx, float cz) {
+    const core::Vec3 eye{cx, kOrigin.y + 200.0f, cz};
+    const core::Vec3 target{cx, kOrigin.y, cz};
+    return {core::ortho(-kHalf, kHalf, -kHalf, kHalf, 0.0f, 400.0f) *
+                core::look_at(eye, target, {0.0f, 0.0f, -1.0f}),
+            eye,
+            cx,
+            cz};
+}
+
+constexpr float kPixel = kExtent / static_cast<float>(kSize); // 0.25 m
+
+// The pixel whose centre is world (x, z) under `view` — REQUIRED to be a pixel centre exactly.
+std::array<std::uint32_t, 2> pixel_at(const TopDown& view, float x, float z) {
+    const float fx = (x - (view.cx - kHalf)) / kPixel - 0.5f;
+    const float fz = (z - (view.cz - kHalf)) / kPixel - 0.5f;
+    REQUIRE(fx == std::floor(fx));
+    REQUIRE(fz == std::floor(fz));
+    REQUIRE(fx >= 0.0f);
+    REQUIRE(fz >= 0.0f);
+    REQUIRE(fx < static_cast<float>(kSize));
+    REQUIRE(fz < static_cast<float>(kSize));
+    return {static_cast<std::uint32_t>(fx), static_cast<std::uint32_t>(fz)};
+}
+
+// Draw several tiles of ONE pass into one cleared frame (render_tile, for more than one tile).
+std::vector<std::uint8_t> render_tiles(rhi::Device& device,
+                                       render::TerrainPass& pass,
+                                       std::initializer_list<render::TerrainTileId> ids,
+                                       const render::TerrainLight& light,
+                                       const TopDown& view) {
+    render::RenderGraph graph(device);
+    graph.reset();
+    const render::RGTexture hdr =
+        graph.create_texture({{kSize, kSize}, render::kHdrFormat, "m19.7b-hdr"});
+    const render::RGTexture depth =
+        graph.create_texture({{kSize, kSize}, render::kDepthFormat, "m19.7b-depth"});
+    graph.export_texture(hdr);
+    declare_clear(graph, hdr, depth);
+    for (const render::TerrainTileId id : ids) {
+        pass.add(graph, hdr, depth, id, view.view_proj, view.eye, light);
+    }
+    auto cmd = device.begin_commands();
+    graph.execute(*cmd);
+    device.submit_blocking(*cmd);
+    return read_texture(device, graph.physical(hdr), 8);
+}
+
+render::TerrainLight ambient_only_light() {
+    render::TerrainLight l{};
+    l.sun_irradiance = 0.0f;
+    l.ambient = 1.0f;
+    l.albedo = {0.0f, 0.0f, 0.0f};
+    return l;
+}
+
+// A flat v2 tile at `origin` whose every weight texel is `texel`.
+assets::HeightfieldAsset flat_splat_at(core::Vec3 origin, std::array<std::uint8_t, 4> texel) {
+    assets::HeightfieldAsset a =
+        make_splat_asset(flat_samples(), 2, 2, uniform_weights(2, 2, texel));
+    a.origin = origin;
+    return a;
+}
+
+std::uint16_t
+half_bits(const std::vector<std::uint8_t>& img, std::uint32_t px, std::uint32_t py, int c) {
+    std::uint16_t h = 0;
+    std::memcpy(&h, &img[(std::size_t{py} * kSize + px) * 8 + std::size_t(c) * 2], sizeof(h));
+    return h;
+}
+
+// sRGB → linear, the IEC 61966-2-1 curve Vulkan's *_SRGB formats apply to R, G and B on sample.
+double srgb_decode(unsigned byte) {
+    const double c = byte / 255.0;
+    return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+}
+
+} // namespace
+
+TEST_CASE("m19.7b: a palette with no textures is BIT-IDENTICAL to the same draw with all-white "
+          "textures") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    // A varied weight map over the NON-flat fixture, the sun on: every blended quantity and every
+    // shading term is live, so "identical" is not identical-because-nothing-happened.
+    const std::array<std::uint8_t, 4> mix[5] = {
+        {255, 0, 0, 0}, {0, 255, 0, 0}, {60, 70, 80, 45}, {10, 0, 200, 45}, {0, 0, 0, 255}};
+    std::vector<std::uint8_t> weights;
+    for (std::uint32_t t = 0; t < 16; ++t) {
+        weights.insert(weights.end(), mix[t % 5].begin(), mix[t % 5].end());
+    }
+    Palette4 plain = distinct_palette();
+    for (std::size_t k = 0; k < 4; ++k) {
+        plain[k].metallic = 0.2f * static_cast<float>(k);
+        plain[k].roughness = 0.9f - 0.2f * static_cast<float>(k);
+    }
+
+    // Two DISTINCT white textures, shared pairwise (layers 0/2 and 1/3), so the draw exercises the
+    // pass's import de-duplication as well as several real bindings. RGB = 255 everywhere; A is a
+    // ramp — the HEIGHT, which this brick samples and must not let into the picture.
+    std::vector<std::uint8_t> white_a;
+    std::vector<std::uint8_t> white_b;
+    for (std::uint32_t t = 0; t < 16; ++t) {
+        const std::uint8_t ramp = static_cast<std::uint8_t>(17 * t);
+        white_a.insert(white_a.end(), {255, 255, 255, ramp});
+        white_b.insert(white_b.end(), {255, 255, 255, static_cast<std::uint8_t>(255 - ramp)});
+    }
+    const rhi::TextureHandle tex_a = make_layer_texture(*device, 4, 4, white_a);
+    const rhi::TextureHandle tex_b = make_layer_texture(*device, 4, 4, white_b);
+    Palette4 textured = plain;
+    for (std::size_t k = 0; k < 4; ++k) {
+        textured[k].albedo_height = (k % 2 == 0) ? tex_a : tex_b;
+        textured[k].uv_scale[0] = 1.5f + static_cast<float>(k);  // irrelevant to a white texture —
+        textured[k].uv_scale[1] = 0.75f + static_cast<float>(k); // and so must not matter either
+    }
+
+    const auto draw = [&](const Palette4& palette) {
+        render::TerrainPass pass(*device);
+        const render::TerrainTileId id =
+            pass.upload(make_splat_asset(cook_samples(), 4, 4, weights), palette);
+        REQUIRE(id != render::kInvalidTerrainTile);
+        auto img = render_tile(*device, pass, id, splat_light({0.0f, 0.0f, 0.0f}));
+        CHECK(pass.tiles_drawn() == 1);
+        CHECK(pass.splat_refused() == 0);
+        return img;
+    };
+    const auto fallback = draw(plain);
+    const auto explicit_white = draw(textured);
+    REQUIRE(fallback.size() == explicit_white.size());
+    CHECK(covered_pixels(fallback) > static_cast<int>(kSize * kSize / 2));
+    CHECK(std::memcmp(fallback.data(), explicit_white.data(), fallback.size()) == 0);
+    device->destroy(tex_b);
+    device->destroy(tex_a);
+}
+
+TEST_CASE("m19.7b: the layer texture reaches the pixel with its orientation and its period") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    // A 4 x 2 texture — NON-square, so a U<->V swap cannot map it onto itself. Texel (i, j): red
+    // rises with i (u, world X), green with j (v, world Z), blue constant.
+    constexpr std::uint32_t kW = 4;
+    constexpr std::uint32_t kH = 2;
+    const auto texel = [](std::uint32_t i, std::uint32_t j) -> std::array<std::uint8_t, 4> {
+        return {static_cast<std::uint8_t>(40 + 60 * i),
+                static_cast<std::uint8_t>(60 + 120 * j),
+                128,
+                0};
+    };
+    std::vector<std::uint8_t> real;
+    for (std::uint32_t j = 0; j < kH; ++j) {
+        for (std::uint32_t i = 0; i < kW; ++i) {
+            const auto t = texel(i, j);
+            real.insert(real.end(), t.begin(), t.end());
+        }
+    }
+    // THE FALSIFICATION, in data: the same texels stored transposed (2 x 4, texel (j, i) at (i,
+    // j)), which is exactly what a shader that swapped u and v would read out of the real texture.
+    std::vector<std::uint8_t> swapped;
+    for (std::uint32_t i = 0; i < kW; ++i) {
+        for (std::uint32_t j = 0; j < kH; ++j) {
+            const auto t = texel(i, j);
+            swapped.insert(swapped.end(), t.begin(), t.end());
+        }
+    }
+
+    // One texel per metre on both axes: a 4 m period along X over 4 texels, 2 m along Z over 2.
+    // The tile origin is chosen so pixel centres (every 0.25 m, offset 0.125 m) land EXACTLY on
+    // texel centres (world k + 0.5): -20.125 + 0.125 = -20, an integer, and likewise 12.375 +
+    // 0.125. It straddles world x = 0, so negative coordinates (REPEAT of a negative uv) are probed
+    // too.
+    const core::Vec3 origin{-20.125f, 3.25f, 12.375f};
+    const TopDown view = top_down_centred(origin.x + kHalf, origin.z + kHalf);
+
+    const auto render_with = [&](rhi::TextureHandle tex) {
+        Palette4 p = distinct_palette();
+        p[1].base_color = {1.0f, 1.0f, 1.0f}; // the colour IS the texture
+        p[1].albedo_height = tex;
+        p[1].uv_scale[0] = 4.0f;
+        p[1].uv_scale[1] = 2.0f;
+        render::TerrainPass pass(*device);
+        const render::TerrainTileId id = pass.upload(flat_splat_at(origin, {0, 255, 0, 0}), p);
+        REQUIRE(id != render::kInvalidTerrainTile);
+        auto img = render_tiles(*device, pass, {id}, ambient_only_light(), view);
+        CHECK(pass.tiles_drawn() == 1);
+        return img;
+    };
+
+    // Probe texel centres over SEVERAL periods on both axes: world x = 4n + i + 0.5 for
+    // n = -5..2 (x from -19.5 to 11.5), z = 2m + j + 0.5 for m = 6..21 (z from 12.5 to 43.5).
+    // Returns how many of the strict orderings hold, and how many were checked.
+    const auto orderings = [&](const std::vector<std::uint8_t>& img) {
+        int held = 0;
+        int checked = 0;
+        const auto red = [&](int n, std::uint32_t i, int m, std::uint32_t j) {
+            const auto px = pixel_at(view, 4.0f * n + i + 0.5f, 2.0f * m + j + 0.5f);
+            return chan(img, px[0], px[1], 0);
+        };
+        const auto green = [&](int n, std::uint32_t i, int m, std::uint32_t j) {
+            const auto px = pixel_at(view, 4.0f * n + i + 0.5f, 2.0f * m + j + 0.5f);
+            return chan(img, px[0], px[1], 1);
+        };
+        for (int n = -5; n <= 2; ++n) {
+            for (int m = 6; m <= 21; ++m) {
+                for (std::uint32_t j = 0; j < kH; ++j) {
+                    // Red rises texel by texel along +X within a period …
+                    for (std::uint32_t i = 0; i + 1 < kW; ++i) {
+                        ++checked;
+                        held += red(n, i, m, j) < red(n, i + 1, m, j) ? 1 : 0;
+                    }
+                    // … and falls back exactly ONE period later: the sawtooth restarts at 4 m.
+                    if (n < 2) {
+                        ++checked;
+                        held += red(n, kW - 1, m, j) > red(n + 1, 0, m, j) ? 1 : 0;
+                    }
+                }
+                for (std::uint32_t i = 0; i < kW; ++i) {
+                    ++checked;
+                    held += green(n, i, m, 0) < green(n, i, m, 1) ? 1 : 0; // rises along +Z
+                    if (m < 21) {
+                        ++checked;
+                        held += green(n, i, m, 1) > green(n, i, m + 1, 0) ? 1 : 0; // 2 m period
+                    }
+                }
+            }
+        }
+        return std::pair<int, int>{held, checked};
+    };
+
+    const rhi::TextureHandle tex = make_layer_texture(*device, kW, kH, real);
+    const rhi::TextureHandle tex_swapped = make_layer_texture(*device, kH, kW, swapped);
+    const auto img = render_with(tex);
+    const auto img_swapped = render_with(tex_swapped);
+    CHECK(covered_pixels(img) == static_cast<int>(kSize * kSize));
+
+    const auto [held, checked] = orderings(img);
+    MESSAGE("orientation/period orderings held: " << held << " / " << checked);
+    CHECK(checked > 1000);
+    CHECK(held == checked);
+    const auto [held_swapped, checked_swapped] = orderings(img_swapped);
+    MESSAGE("with U<->V swapped: " << held_swapped << " / " << checked_swapped);
+    CHECK(held_swapped < checked_swapped / 2); // broken, and broadly — not by one probe
+
+    device->destroy(tex_swapped);
+    device->destroy(tex);
+}
+
+TEST_CASE("m19.7b: the texture coordinate is WORLD xz — the pattern runs on across a tile seam") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    // Two flat tiles side by side, B's origin exactly one tile (32 m) east of A's — and 32 m is
+    // NOT a whole number of the 3 m period. A tile-local coordinate would restart the pattern at
+    // B's origin, shifting it by 32 mod 3 = 2 m (two of three texels) right at the seam; a world
+    // coordinate does not see the seam at all.
+    //
+    // The claim: colour(x, z) == colour(x + 3 m, z) for EVERY probed pair, including the pairs
+    // whose members lie on different tiles.
+    //
+    // THE BOUND, AND WHY IT IS NOT "BITS" OR "ONE f16 ULP". The two members of a pair read u and
+    // u + 1 in exact arithmetic, but the GPU forms each from its own interpolated world position
+    // in f32, and — the part that dominates — its texture unit QUANTISES the bilinear weight to
+    // `subTexelPrecisionBits` bits of a texel, at a precision that depends on |u| (the coordinate
+    // is a float, so u and u + 1 in different binades are rounded on different grids). The first
+    // version of this test asserted one f16 ULP and failed on the RTX 3060: 344 of 4988 pairs
+    // differed, by up to 20 ULP, every one of them a pair whose u straddled 2 or 4, and the worst
+    // difference was 0.0024 = (largest texel contrast 0.631) / 256 — exactly ONE 8-bit weight step
+    // (measured). So per channel the honest bound is
+    //
+    //     |a - b| <= 2 * 2^-s * (max - min of the decoded channel over the texels) + one f16 ULP
+    //
+    // — one weight step on each of the two filter axes, times the most a step can move the colour,
+    // plus the target's own rounding. `s` is 4, the MINIMUM the Vulkan specification guarantees
+    // (the RHI does not expose the device's value), so the bound holds on any conformant device;
+    // it is far looser than this hardware needs, and the measured worst is reported beside it.
+    // It still discriminates: a tile-local coordinate shifts the pattern by two whole texels at
+    // the seam, a colour change of the order of the full contrast, not of a sixteenth of it.
+    const core::Vec3 origin_a{-20.0f, 3.25f, 12.0f};
+    const core::Vec3 origin_b{origin_a.x + kExtent, origin_a.y, origin_a.z};
+    const float seam = origin_b.x; // world x = 12
+    // The camera sits 0.1 m off the tile grid on purpose: with every pixel centre on a dyadic
+    // coordinate (k/8 m) the f32 arithmetic happens to be exact and the pairs come out
+    // bit-identical (measured), which would test only the easy case. Off the grid the positions
+    // round, and the bound below is exercised.
+    const TopDown view = top_down_centred(seam + 0.1f, origin_a.z + kHalf + 0.1f);
+
+    // 3 x 2 texels, all distinct, so every 1 m step along X or Z changes the colour.
+    std::vector<std::uint8_t> rgba;
+    for (std::uint32_t j = 0; j < 2; ++j) {
+        for (std::uint32_t i = 0; i < 3; ++i) {
+            rgba.insert(rgba.end(),
+                        {static_cast<std::uint8_t>(30 + 90 * i),
+                         static_cast<std::uint8_t>(200 - 150 * j),
+                         static_cast<std::uint8_t>(70 + 40 * i + 60 * j),
+                         0});
+        }
+    }
+    const rhi::TextureHandle tex = make_layer_texture(*device, 3, 2, rgba);
+    // The bound above, per channel, from the texels themselves (base colour 1, ambient 1, so a
+    // pixel's radiance is the decoded texel mix + 0.04).
+    constexpr double kWeightStep = 1.0 / 16.0; // 2^-subTexelPrecisionBits at Vulkan's minimum, 4
+    std::array<double, 3> bound{};
+    for (int c = 0; c < 3; ++c) {
+        double lo = 1.0;
+        double hi = 0.0;
+        for (std::size_t t = 0; t < 6; ++t) {
+            lo = std::min(lo, srgb_decode(rgba[t * 4 + std::size_t(c)]));
+            hi = std::max(hi, srgb_decode(rgba[t * 4 + std::size_t(c)]));
+        }
+        bound[std::size_t(c)] = 2.0 * kWeightStep * (hi - lo);
+    }
+    Palette4 p = distinct_palette();
+    p[1].base_color = {1.0f, 1.0f, 1.0f};
+    p[1].albedo_height = tex;
+    p[1].uv_scale[0] = 3.0f;
+    p[1].uv_scale[1] = 2.0f;
+
+    render::TerrainPass pass(*device);
+    const render::TerrainTileId a = pass.upload(flat_splat_at(origin_a, {0, 255, 0, 0}), p);
+    const render::TerrainTileId b = pass.upload(flat_splat_at(origin_b, {0, 255, 0, 0}), p);
+    REQUIRE(a != render::kInvalidTerrainTile);
+    REQUIRE(b != render::kInvalidTerrainTile);
+    const auto img = render_tiles(*device, pass, {a, b}, ambient_only_light(), view);
+    CHECK(pass.tiles_drawn() == 2);
+    CHECK(covered_pixels(img) == static_cast<int>(kSize * kSize));
+
+    // The seam lies between pixel 63 (centre 2.5 cm west of it, on A) and pixel 64 (on B).
+    constexpr std::uint32_t kPeriodPx = 12; // 3 m at 0.25 m per pixel
+    const auto px_x = [&](std::uint32_t px) { return view.cx - kHalf + (px + 0.5f) * kPixel; };
+    REQUIRE(px_x(63) < seam);
+    REQUIRE(px_x(64) > seam);
+
+    int pairs = 0;
+    int straddling = 0;
+    int within = 0;
+    int one_ulp = 0;
+    double worst_fraction = 0.0; // the worst |a - b| as a fraction of its bound
+    for (std::uint32_t py = 0; py < kSize; py += 3) {
+        for (std::uint32_t px = 0; px + kPeriodPx < kSize; ++px) {
+            const bool crosses = px_x(px) < seam && px_x(px + kPeriodPx) > seam;
+            bool ok = true;
+            int ulps = 0;
+            for (int c = 0; c < 3; ++c) {
+                const std::uint16_t ha = half_bits(img, px, py, c);
+                const std::uint16_t hb = half_bits(img, px + kPeriodPx, py, c);
+                // va/vb, not a/b: the tile ids `a` and `b` are still in scope out here, and MSVC
+                // at /W4 /WX rejects the shadowing (C4456) that GCC accepts without a word.
+                const double va = half_to_float(ha);
+                const double vb = half_to_float(hb);
+                const double limit = bound[std::size_t(c)] + half_ulp(std::max(ha, hb));
+                ok = ok && std::abs(va - vb) <= limit;
+                worst_fraction = std::max(worst_fraction, std::abs(va - vb) / limit);
+                // Positive halves order like their bit patterns: the integer distance is ULPs.
+                ulps = std::max(ulps, std::abs(int(ha) - int(hb)));
+            }
+            ++pairs;
+            straddling += crosses ? 1 : 0;
+            within += ok ? 1 : 0;
+            one_ulp += ulps <= 1 ? 1 : 0;
+        }
+    }
+    MESSAGE("seam continuity: " << within << " / " << pairs << " pairs within the bound ("
+                                << straddling << " straddle the seam); worst = " << worst_fraction
+                                << " of the bound; " << one_ulp << " pairs within 1 f16 ULP");
+    CHECK(straddling > 400);
+    CHECK(within == pairs);
+
+    // Vacuity: the pattern really varies within a period — a constant colour would pass the
+    // equality above trivially. Neighbouring pixels a quarter-period apart must differ widely.
+    int varied = 0;
+    for (std::uint32_t py = 0; py < kSize; py += 3) {
+        for (std::uint32_t px = 0; px + 4 < kSize; ++px) {
+            varied +=
+                std::abs(int(half_bits(img, px, py, 0)) - int(half_bits(img, px + 4, py, 0))) > 16
+                    ? 1
+                    : 0;
+        }
+    }
+    CHECK(varied > pairs / 2);
+    device->destroy(tex);
+}
+
+TEST_CASE("m19.7b: a zero, negative or non-finite uv_scale is refused and counted") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    render::TerrainPass pass(*device);
+    const auto splat_asset = [] { return flat_splat_at(kOrigin, {0, 255, 0, 0}); };
+    const float bad[] = {0.0f,
+                         -0.0f,
+                         -2.0f,
+                         std::numeric_limits<float>::quiet_NaN(),
+                         std::numeric_limits<float>::infinity()};
+    std::uint64_t expected = 0;
+    for (const float v : bad) {
+        for (int axis = 0; axis < 2; ++axis) {
+            // Layer 2: a slot other than 0, so the check is per layer and not "layer 0 only".
+            Palette4 p = distinct_palette();
+            p[2].uv_scale[axis] = v;
+            CHECK(pass.upload(splat_asset(), p) == render::kInvalidTerrainTile);
+            ++expected;
+            CHECK(pass.splat_refused() == expected);
+            CHECK(pass.tiles_refused() == expected);
+        }
+    }
+    CHECK(expected == 10);
+
+    // Not over-refusing: tiny and huge periods are legitimate.
+    Palette4 ok = distinct_palette();
+    ok[0].uv_scale[0] = 1.0e-3f;
+    ok[3].uv_scale[1] = 1.0e4f;
+    CHECK(pass.upload(splat_asset(), ok) != render::kInvalidTerrainTile);
+
+    // A v1 asset ignores the palette (the m19.4 contract), bad periods included.
+    Palette4 nan_palette = distinct_palette();
+    nan_palette[1].uv_scale[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(pass.upload(make_asset(flat_samples()), nan_palette) != render::kInvalidTerrainTile);
+    CHECK(pass.splat_refused() == expected);
+    CHECK(pass.tiles_refused() == expected);
+    CHECK(pass.tile_count() == 2);
+}
+
+TEST_CASE("m19.7b: a layer texture's height (A) reaches the shader LINEAR through RGBA8_SRGB") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    // m19.7a's cooked fixture — a 4x4 packed albedo+height, A = round(height16 / 257) — loaded and
+    // uploaded by the ENGINE's GpuAssetBridge, the path a terrain builder takes, rather than by a
+    // texture this test made up. The CPU asset the bridge uploaded supplies the expected bytes.
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    render::GpuAssetBridge bridge(*device, server);
+    const assets::TextureAssetHandle handle = bridge.request_texture(
+        std::filesystem::path(RIME_ASSETS_FIXTURE_DIR) / "terrain_layer_albedo_height.rtex");
+    server.wait_for_pending_loads();
+    server.pump();
+    REQUIRE(bridge.drain() == 1);
+    const rhi::TextureHandle tex = bridge.texture_or_placeholder(handle);
+    REQUIRE(tex != bridge.placeholder_texture());
+    const assets::TextureAsset* cpu = server.get(handle);
+    REQUIRE(cpu != nullptr);
+    REQUIRE(cpu->format == assets::TextureFormat::Rgba8Srgb);
+    REQUIRE(cpu->width == 4);
+    REQUIRE(cpu->height == 4);
+    REQUIRE(cpu->mips.size() == 3);
+
+    // The probe: the engine's full-screen triangle over a 4x4 target, so pixel (x, y)'s centre is
+    // texel (x, y)'s centre, sampled through a sampler configured exactly like TerrainPass's layer
+    // sampler. Output: the f32 BITS of the sampled red and alpha.
+    rhi::ShaderDesc vsd{};
+    vsd.stage = rhi::ShaderStage::Vertex;
+    vsd.spirv = fullscreen_vert_spv;
+    vsd.spirv_size_bytes = sizeof(fullscreen_vert_spv);
+    vsd.debug_name = "fullscreen.vert";
+    const rhi::ShaderHandle vs = device->create_shader(vsd);
+    rhi::ShaderDesc fsd{};
+    fsd.stage = rhi::ShaderStage::Fragment;
+    fsd.spirv = terrain_layer_probe_frag_spv;
+    fsd.spirv_size_bytes = sizeof(terrain_layer_probe_frag_spv);
+    fsd.debug_name = "terrain_layer_probe.frag";
+    const rhi::ShaderHandle fs = device->create_shader(fsd);
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}};
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vs;
+    pd.fragment_shader = fs;
+    pd.color_format = rhi::Format::RG32Uint;
+    pd.cull = rhi::CullMode::None;
+    pd.blend = rhi::BlendMode::None;
+    pd.bindings = bindings;
+    pd.debug_name = "m19.7b-alpha-probe";
+    const rhi::PipelineHandle pipeline = device->create_graphics_pipeline(pd);
+    rhi::SamplerDesc sd{};
+    sd.mag_filter = rhi::Filter::Linear;
+    sd.min_filter = rhi::Filter::Linear;
+    sd.mip_filter = rhi::Filter::Linear;
+    sd.address_mode = rhi::AddressMode::Repeat;
+    sd.debug_name = "m19.7b-layer-sampler";
+    const rhi::SamplerHandle sampler = device->create_sampler(sd);
+
+    render::RenderGraph graph(*device);
+    graph.reset();
+    const render::RGTexture target =
+        graph.create_texture({{4, 4}, rhi::Format::RG32Uint, "m19.7b-alpha-probe"});
+    graph.export_texture(target);
+    const render::RGColorAttachment colors[] = {
+        {target, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+    const render::RGTexture sampled[] = {graph.import_texture(tex, rhi::ResourceState::ShaderRead)};
+    render::RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.sampled = sampled;
+    graph.add_raster_pass("m19.7b-alpha-probe", desc, [&](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipeline);
+        cmd.bind_texture(0, tex, sampler);
+        cmd.draw(3);
+    });
+    auto cmd = device->begin_commands();
+    graph.execute(*cmd);
+    device->submit_blocking(*cmd);
+
+    rhi::BufferDesc rbd{};
+    rbd.size = 4 * 4 * 8;
+    rbd.usage = rhi::BufferUsage::TransferDst;
+    rbd.memory = rhi::MemoryUsage::GpuToCpu;
+    rbd.debug_name = "m19.7b-alpha-readback";
+    const rhi::BufferHandle rb = device->create_buffer(rbd);
+    auto copy = device->begin_commands();
+    copy->copy_texture_to_buffer(graph.physical(target), rb);
+    device->submit_blocking(*copy);
+    std::vector<std::uint32_t> bits(4 * 4 * 2);
+    device->read_buffer(rb, bits.data(), bits.size() * sizeof(std::uint32_t), 0);
+
+    double worst_a = 0.0;
+    double worst_r = 0.0;
+    int mid_alpha = 0;
+    for (std::uint32_t y = 0; y < 4; ++y) {
+        for (std::uint32_t x = 0; x < 4; ++x) {
+            const std::size_t t = (std::size_t{y} * 4 + x) * 4;
+            const unsigned r_byte = std::to_integer<unsigned>(cpu->pixels[t + 0]);
+            const unsigned a_byte = std::to_integer<unsigned>(cpu->pixels[t + 3]);
+            float r = 0.0f;
+            float a = 0.0f;
+            std::memcpy(&r, &bits[(std::size_t{y} * 4 + x) * 2 + 0], sizeof(r));
+            std::memcpy(&a, &bits[(std::size_t{y} * 4 + x) * 2 + 1], sizeof(a));
+
+            // A is LINEAR: the UNORM value n/255, not the sRGB curve of it.
+            worst_a = std::max(worst_a, std::abs(double(a) - a_byte / 255.0));
+            CHECK(std::abs(double(a) - a_byte / 255.0) <= 1.0e-5);
+            // The witness that this IS an sRGB texture — R, in the same fetch, is decoded. Without
+            // it, "A is linear" could just mean "the texture was uploaded as UNORM".
+            worst_r = std::max(worst_r, std::abs(double(r) - srgb_decode(r_byte)));
+            CHECK(std::abs(double(r) - srgb_decode(r_byte)) <= 2.0e-3);
+            if (r_byte >= 32) {
+                CHECK(std::abs(double(r) - r_byte / 255.0) > 0.01);
+            }
+            // Where the two curves are far apart, A sits on the linear one and FAR from the sRGB
+            // one.
+            if (a_byte >= 64 && a_byte <= 200) {
+                ++mid_alpha;
+                CHECK(std::abs(double(a) - srgb_decode(a_byte)) > 0.05);
+            }
+            if (a_byte == 128) {
+                CHECK(a > 0.5f); // 128/255 = 0.502; sRGB-decoded it would be 0.216
+                CHECK(a < 0.505f);
+            }
+        }
+    }
+    MESSAGE("alpha: worst |A - n/255| = " << worst_a << "; red: worst |R - srgb(n)| = " << worst_r);
+    CHECK(mid_alpha == 5); // 78, 127, 128, 156, 195 — the probe is not vacuous
+
+    device->destroy(rb);
+    device->destroy(sampler);
+    device->destroy(pipeline);
+    device->destroy(fs);
+    device->destroy(vs);
 }
