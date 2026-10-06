@@ -21,6 +21,7 @@ cooked file's header.
 | M6.6 | binary **STL** import (a second mesh source) + content-hash cook cache; the viewer dogfood | landed |
 | M6.7 | glTF **skins / skeletons / animation clips** → `.rskel` + `.ranim`; skinned-mesh vertex attributes | landed |
 | M6.10 | the `samples/08-gltf-zoo` proof cooks through this crate end-to-end — **M6 complete** | landed |
+| M19.8d1 | `rime terrain-world <name>.terrainworld.toml` — a grid of `rime heightfield` sources cooked with its **LOD chain**: each parent is every second sample of its four children (nested, never filtered), with descendant min/max and a fixed-diagonal geometric error (rounded up, saturated so it is monotone) in the world manifest; every misfit, border, alignment, root-cover and missing-child problem collected and counted ([ADR-0070](../../docs/adr/0070-m19.8d1-terrain-lod-cook.md)) | landed |
 
 ## What the mesh cooker does (M6.2)
 

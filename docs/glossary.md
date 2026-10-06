@@ -399,6 +399,19 @@ Entries are grouped roughly by area and kept short on purpose.
   *activation* (request) and *retention* (keep), the gap between them being the *hysteresis* that
   stops a camera on a boundary from loading and evicting one tile every other frame. An evicted
   slot is reused only once its last reader has retired (see *retirement watermark*).
+- **Geomipmap (geometrical mip-map).** Terrain level of detail built the way a texture's mip chain
+  is: each coarser level is a grid of the same size covering twice the ground per axis. Rime's
+  (M19.8d1, [ADR-0070](adr/0070-m19.8d1-terrain-lod-cook.md)) are built by *nested subsampling* —
+  a parent's samples are every second sample of its four children, not an average — so every
+  coarse vertex is also a fine vertex and two levels can meet or morph without a crack.
+- **Geometric error (terrain).** How far a coarse terrain tile's surface strays from the real
+  ground beneath it: the largest vertical distance, in metres, between a full-resolution sample and
+  the tile's own triangles. A renderer projects it to pixels to decide whether to draw the tile or
+  its children. Rime's is rounded up and saturated by the children's (a *monotone LOD error*).
+- **Geomorph.** Sliding a finer tile's extra vertices smoothly onto the coarser tile's triangles as
+  the camera recedes, so a level-of-detail switch happens when the two surfaces already coincide
+  and nothing pops. It only works when the coarse vertices are a subset of the fine ones — the
+  reason Rime's terrain LOD is subsampled rather than filtered (m19.8d2 draws it).
 - **Height blending.** Splat blending where each layer's *height* map, not just its painted weight,
   decides who wins a transition texel: the locally higher layer takes more of it, so gravel shows
   through grass along the low cracks instead of the two cross-fading into one smudge. Rime's form
