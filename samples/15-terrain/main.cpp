@@ -103,7 +103,13 @@ struct SpeedResult {
     std::uint64_t uncovered = 0;
     std::uint64_t placeholder = 0;
     std::uint32_t warm_frames = 0;
+    int frames = 0;  // measured: --frames, or fewer if the one-way pass ends first
+    int on_pace = 0; // frames whose begin_frame + terrain GPU fit one 60 Hz frame (16.67 ms)
     double max_leaves = 0;
+
+    [[nodiscard]] double pace_pct() const {
+        return frames == 0 ? 0.0 : 100.0 * on_pace / static_cast<double>(frames);
+    }
 
     [[nodiscard]] double fallback_pct() const {
         return draws == 0
@@ -155,24 +161,24 @@ run_speed(const Setup& s, const Speed& sp, core::PerfReport* report, const std::
     render::TerrainResidency residency(
         *s.device, pass, server, *s.world, s.world_dir, &builder, cfg);
 
-    // A straight line across the world's diagonal, ping-ponging at the ends so a fast camera
-    // stays over terrain for the whole run.
+    // ONE straight pass along the world's diagonal, never back: a camera that re-flew ground it had
+    // already streamed would be measuring a warm cache, not travel (the first version ping-ponged
+    // and reported 0 % fallback at 2400 m/s for exactly that reason). So a fast speed gets fewer
+    // frames — as many as the diagonal holds — rather than a second look at the same tiles.
     const assets::TerrainWorldGrid& g = s.world->grid();
     const float extent = g.pitch_x(s.world->level_count() - 1); // the root's span
-    const float a = g.origin.x + 0.06f * extent;
-    const float b = g.origin.x + 0.94f * extent;
+    const float a = g.origin.x + 0.04f * extent;
+    const float b = g.origin.x + 0.96f * extent;
     const float span = (b - a) * std::sqrt(2.0f);
     const auto eye_at = [&](double travelled) {
-        const double period = 2.0 * span;
-        double d = std::fmod(travelled, period);
-        const bool back = d > span;
-        d = back ? period - d : d;
-        const float t = static_cast<float>(d / span);
+        const float t = static_cast<float>(std::min(travelled / span, 1.0));
         const float x = a + t * (b - a);
         const float z = g.origin.z + (x - g.origin.x); // the diagonal
         const float y = ground(*s.world, x, z) + sp.altitude;
-        return std::pair<core::Vec3, float>{{x, y, z}, back ? -1.0f : 1.0f};
+        return std::pair<core::Vec3, float>{{x, y, z}, 1.0f};
     };
+    const double step = static_cast<double>(sp.metres_per_second) / 60.0;
+    r.frames = std::min(s.frames, static_cast<int>(span / step));
 
     render::TerrainLight light{};
     light.sun_direction = {-0.4f, -0.8f, -0.3f};
@@ -233,6 +239,7 @@ run_speed(const Setup& s, const Speed& sp, core::PerfReport* report, const std::
         r.gpu.add(terrain_ms);
         r.select.add(st.select_ms);
         r.begin.add(begin_ms);
+        r.on_pace += begin_ms + terrain_ms <= 1000.0 / 60.0 ? 1 : 0;
         r.upload_bytes.push_back(static_cast<double>(st.upload_bytes_this_frame));
         r.draws += drawn;
         r.fallback_drawn += st.visible_fallback_draws - fb_before;
@@ -260,8 +267,8 @@ run_speed(const Setup& s, const Speed& sp, core::PerfReport* report, const std::
     using Clock = std::chrono::steady_clock;
     const auto period = std::chrono::nanoseconds(16'666'667);
     auto next = Clock::now();
-    for (int f = 0; f < s.frames; ++f) {
-        const auto [eye, dir] = eye_at(static_cast<double>(f + 1) * sp.metres_per_second / 60.0);
+    for (int f = 0; f < r.frames; ++f) {
+        const auto [eye, dir] = eye_at(static_cast<double>(f + 1) * step);
         frame(eye, dir, true);
         next += period;
         std::this_thread::sleep_until(next);
@@ -283,7 +290,7 @@ int main(int argc, char** argv) {
     bool perf = false, envelope = false;
     int frames = 600;
     std::uint32_t width = 1920, height = 1080;
-    double budget_mib = 96.0, cap_kib = 1024.0;
+    double budget_mib = 96.0, cap_kib = 256.0;
     std::string world_dir = "build/terrain-perf-world";
     const char* out = nullptr;
     const char* baseline = nullptr;
@@ -387,7 +394,7 @@ int main(int argc, char** argv) {
                                  {"vehicle", 30.0f, 2.5f, -0.05f},
                                  {"aircraft", 150.0f, 150.0f, -0.25f}};
     if (envelope) {
-        for (const float v : {300.0f, 600.0f, 1200.0f, 2400.0f}) {
+        for (const float v : {300.0f, 600.0f, 1200.0f, 2400.0f, 4800.0f}) {
             speeds.push_back({nullptr, v, 150.0f, -0.25f});
         }
     }
@@ -403,9 +410,10 @@ int main(int argc, char** argv) {
         return names.back();
     };
 
-    std::printf("\n%-9s %6s %8s %8s %8s %8s %9s %9s %10s %10s %7s %7s %8s %7s\n",
+    std::printf("\n%-9s %6s %6s %8s %8s %8s %8s %9s %9s %10s %10s %7s %7s %6s %8s %7s\n",
                 "speed",
                 "m/s",
+                "frames",
                 "gpu p50",
                 "gpu p99",
                 "sel p50",
@@ -416,6 +424,7 @@ int main(int argc, char** argv) {
                 "up max KB",
                 "draws",
                 "fb %",
+                "pace %",
                 "capwait",
                 "culled");
     double envelope_mps = 0.0;
@@ -429,10 +438,11 @@ int main(int argc, char** argv) {
         const core::Distribution gpu = r.gpu.summarize();
         const core::Distribution sel = r.select.summarize();
         const core::Distribution beg = r.begin.summarize();
-        std::printf("%-9s %6.0f %8.3f %8.3f %8.3f %8.3f %9.3f %9.3f %10.1f %10.1f %7llu %7.2f "
-                    "%8llu %7llu\n",
+        std::printf("%-9s %6.0f %6d %8.3f %8.3f %8.3f %8.3f %9.3f %9.3f %10.1f %10.1f %7llu %7.2f "
+                    "%6.1f %8llu %7llu\n",
                     name.c_str(),
                     static_cast<double>(r.mps),
+                    r.frames,
                     gpu.p50_ms,
                     gpu.p99_ms,
                     sel.p50_ms,
@@ -443,9 +453,13 @@ int main(int argc, char** argv) {
                     percentile(r.upload_bytes, 100) / 1024.0,
                     static_cast<unsigned long long>(r.draws),
                     r.fallback_pct(),
+                    r.pace_pct(),
                     static_cast<unsigned long long>(r.cap_waits),
                     static_cast<unsigned long long>(r.culled));
-        if (envelope_open && r.fallback_pct() < 1.0) {
+        // THE ENVELOPE needs both: detail kept up (fallback < 1 %), AND the loop kept its 60 Hz
+        // pace on ≥ 95 % of frames — a loop that fell behind gave the streamer more wall time
+        // per metre than a real 60 Hz frame does, so its fallback number flatters it.
+        if (envelope_open && r.fallback_pct() < 1.0 && r.pace_pct() >= 95.0) {
             envelope_mps = r.mps;
         } else {
             envelope_open = false;
@@ -469,6 +483,8 @@ int main(int argc, char** argv) {
         ledger.set(key(p + ".placeholder_draws"), r.placeholder);
         ledger.set(key(p + ".untimed_frames"), r.untimed_frames);
         ledger.set(key(p + ".warm_frames"), r.warm_frames);
+        ledger.set(key(p + ".frames"), static_cast<std::uint64_t>(r.frames));
+        ledger.set(key(p + ".frames_on_pace"), static_cast<std::uint64_t>(r.on_pace));
         ledger.set(key(p + ".max_leaves"), static_cast<std::uint64_t>(r.max_leaves));
         if (r.untimed_frames != 0) {
             std::fprintf(stderr,
@@ -483,12 +499,14 @@ int main(int argc, char** argv) {
             status = 1;
         }
     }
-    std::printf("\ntravel envelope (fallback < 1%% of drawn leaves, budget %.0f MiB, cap %.0f "
-                "KiB/frame): %s%.0f m/s\n",
-                budget_mib,
-                cap_kib,
-                envelope_open && envelope ? ">= " : "",
-                envelope_mps);
+    std::printf(
+        "\ntravel envelope (fallback < 1%% of drawn leaves and >= 95%% of frames on a 60 Hz "
+        "pace, budget %.0f MiB, cap %.0f "
+        "KiB/frame): %s%.0f m/s\n",
+        budget_mib,
+        cap_kib,
+        envelope_open && envelope ? ">= " : "",
+        envelope_mps);
     ledger.set("terrain.envelope_mps", static_cast<std::uint64_t>(envelope_mps));
     report.set_ledger(ledger);
 
