@@ -71,6 +71,13 @@ pub enum EditorMessage {
     /// `[ok:u8][editor_id:u64]`. The editor commits an undo step only on `ok`, and learns a fresh
     /// spawn's id from it.
     EditResult,
+    /// engine → editor: the outcome of the `--scene` load (E3), sent once right after the schema and
+    /// before the first snapshot. Payload `[ok:u8][skipped:u32][path_len:u32][path][error_len:u32][error]`.
+    ///
+    /// `ok == false` means the host is serving an empty or partial world because the file would not
+    /// load; the editor must refuse to adopt a replacement and must say why. `ok` with a non-zero
+    /// `skipped_components` is a partial load by tool policy: adopt it, and warn.
+    SceneLoadReport,
     /// editor → engine: set a component's bytes on an entity.
     SetComponent,
     /// editor → engine: spawn an entity with a default placement — under a fresh id (`0`), or
@@ -122,6 +129,7 @@ impl EditorMessage {
             EditorMessage::PlayState => 0x0206,
             EditorMessage::SaveResult => 0x0207,
             EditorMessage::EditResult => 0x0208,
+            EditorMessage::SceneLoadReport => 0x0209,
             EditorMessage::SetComponent => 0x0210,
             EditorMessage::Spawn => 0x0211,
             EditorMessage::Despawn => 0x0212,
@@ -150,6 +158,7 @@ impl EditorMessage {
             0x0206 => Some(EditorMessage::PlayState),
             0x0207 => Some(EditorMessage::SaveResult),
             0x0208 => Some(EditorMessage::EditResult),
+            0x0209 => Some(EditorMessage::SceneLoadReport),
             0x0210 => Some(EditorMessage::SetComponent),
             0x0211 => Some(EditorMessage::Spawn),
             0x0212 => Some(EditorMessage::Despawn),
@@ -1038,6 +1047,48 @@ impl EditResult {
         let ok = r.u8()? != 0;
         let editor_id = r.u64()?;
         Ok(EditResult { ok, editor_id })
+    }
+}
+
+/// `SceneLoadReport` (engine → editor, E3): what the host made of its `--scene` argument.
+///
+/// `path` is the file asked for ("" when none was given). `ok` is false when that file would not
+/// load; `error` then says why, and `skipped_components` is 0. `skipped_components` counts component
+/// types the load dropped because this build does not register them — a partial load, still `ok`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SceneLoadReport {
+    pub ok: bool,
+    pub skipped_components: u32,
+    pub path: String,
+    pub error: String,
+}
+
+impl SceneLoadReport {
+    /// Serialize the payload: `[ok:u8][skipped:u32][path_len:u32][path][error_len:u32][error]`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(u8::from(self.ok));
+        w.u32(self.skipped_components);
+        w.u32(self.path.len() as u32);
+        w.bytes(self.path.as_bytes());
+        w.u32(self.error.len() as u32);
+        w.bytes(self.error.as_bytes());
+        w.into_vec()
+    }
+
+    /// Parse the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(payload);
+        let ok = r.u8()? != 0;
+        let skipped_components = r.u32()?;
+        let path = read_string(&mut r)?;
+        let error = read_string(&mut r)?;
+        Ok(SceneLoadReport {
+            ok,
+            skipped_components,
+            path,
+            error,
+        })
     }
 }
 

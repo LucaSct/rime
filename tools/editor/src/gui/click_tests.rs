@@ -44,8 +44,8 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use rime_protocol::{
     decode_entity_ref, encode_entity_ref, entity_refs, ComponentRef, EditResult, FieldDesc,
-    FieldKind, PickResult, PlayState, SaveResult, SaveScene, SchemaEntry, SetComponent, Snapshot,
-    SnapshotComponent, SpawnEntity,
+    FieldKind, PickResult, PlayState, SaveResult, SaveScene, SceneLoadReport, SchemaEntry,
+    SetComponent, Snapshot, SnapshotComponent, SpawnEntity,
 };
 
 use super::protocol_input::Input;
@@ -278,9 +278,51 @@ struct FakeHost {
     log: Vec<(EditorMessage, Vec<u8>)>,
     /// Every forwarded viewport input event, as `"down 10,20 b0"` / `"move 10,20"` / `"up …"`.
     inputs: Vec<String>,
+    /// The SceneLoadReport this engine sends after its schema (E3). A clean load unless a test says
+    /// otherwise before `send_scene_load`.
+    scene_load: SceneLoadReport,
 }
 
 impl FakeHost {
+    /// A fake engine over `world`, launched with `opened` as its `--scene` (`None` for a new scene).
+    fn new(
+        shared: Shared,
+        out_rx: Receiver<Outbound>,
+        world: Vec<SnapshotEntity>,
+        opened: Option<String>,
+    ) -> Self {
+        let next_index = world.iter().map(|e| e.index + 1).max().unwrap_or(0);
+        let next_id = world.iter().map(|e| e.editor_id + 1).max().unwrap_or(1);
+        let scene_load = SceneLoadReport {
+            ok: true,
+            skipped_components: 0,
+            path: opened.clone().unwrap_or_default(),
+            error: String::new(),
+        };
+        FakeHost {
+            shared,
+            out_rx,
+            world,
+            next_index,
+            free_slots: Vec::new(),
+            next_id,
+            play: PlayState::default(),
+            pre_play: None,
+            opened,
+            files: HashMap::new(),
+            pick_answer: PickResult::none(),
+            log: Vec::new(),
+            inputs: Vec::new(),
+            scene_load,
+        }
+    }
+
+    /// Send the SceneLoadReport, as the engine does right after its schema and before its first
+    /// snapshot (E3). The editor reads it from `SharedState`.
+    fn send_scene_load(&self) {
+        self.shared.lock().unwrap().scene_load = Some(self.scene_load.clone());
+    }
+
     fn entity_mut(&mut self, id: EntityId) -> Option<&mut SnapshotEntity> {
         self.world.iter_mut().find(|e| e.editor_id == id)
     }
@@ -655,7 +697,20 @@ impl Rig {
         Self::build(Some(path), starting_world())
     }
 
+    /// As [`Rig::with_scene`], but the engine reports `report` for its `--scene` load (E3).
+    fn with_scene_report(path: &str, report: SceneLoadReport) -> Self {
+        Self::build_with(Some(path), starting_world(), Some(report))
+    }
+
     fn build(scene: Option<&str>, world: Vec<SnapshotEntity>) -> Self {
+        Self::build_with(scene, world, None)
+    }
+
+    fn build_with(
+        scene: Option<&str>,
+        world: Vec<SnapshotEntity>,
+        report: Option<SceneLoadReport>,
+    ) -> Self {
         let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
         let (out_tx, out_rx) = mpsc::channel();
         {
@@ -664,24 +719,17 @@ impl Rig {
             s.schema = fake_schema();
             s.assets = fake_assets();
         }
-        let next_index = world.iter().map(|e| e.index + 1).max().unwrap_or(0);
-        let next_id = world.iter().map(|e| e.editor_id + 1).max().unwrap_or(1);
-        let host = FakeHost {
-            shared: Arc::clone(&shared),
+        let mut host = FakeHost::new(
+            Arc::clone(&shared),
             out_rx,
             world,
-            next_index,
-            free_slots: Vec::new(),
-            next_id,
-            play: PlayState::default(),
-            pre_play: None,
-            opened: scene.map(str::to_string),
-            files: HashMap::new(),
-            pick_answer: PickResult::none(),
-            log: Vec::new(),
-            inputs: Vec::new(),
-        };
+            scene.map(str::to_string),
+        );
+        if let Some(report) = report {
+            host.scene_load = report;
+        }
         host.publish_snapshot();
+        host.send_scene_load();
         let scene = scene.map(str::to_string);
         let harness = Harness::builder()
             .with_size(egui::vec2(1280.0, 800.0))
@@ -1148,23 +1196,41 @@ fn file_menu_has_new_and_open() {
     }
 }
 
-/// A replacement engine as the Open path sees it: a session whose mirror already holds what the
-/// engine would have sent after loading `path`. `error` stands in for a session that never came up.
+/// A replacement engine as the Open path sees it: a session, served by a [`FakeHost`], whose mirror
+/// already holds what the engine would have sent after loading `path`. `error` stands in for a
+/// session that never came up.
 fn scripted_opener(world: Vec<SnapshotEntity>, error: Option<&'static str>) -> Opener {
-    Box::new(move |_path| {
+    scripted_opener_with(world, error, None)
+}
+
+/// As [`scripted_opener`], but the replacement reports `report` for its load instead of a clean one.
+fn scripted_opener_with(
+    world: Vec<SnapshotEntity>,
+    error: Option<&'static str>,
+    report: Option<SceneLoadReport>,
+) -> Opener {
+    Box::new(move |path| {
         let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
+        let (out_tx, out_rx) = mpsc::channel();
+        let mut host = FakeHost::new(
+            Arc::clone(&shared),
+            out_rx,
+            world.clone(),
+            Some(path.to_string()),
+        );
+        if let Some(report) = report.clone() {
+            host.scene_load = report;
+        }
         {
             let mut s = shared.lock().unwrap();
             s.connected = error.is_none();
             s.error = error.map(str::to_string);
             s.schema = fake_schema();
-            s.snapshot = Snapshot {
-                entities: world.clone(),
-            };
             // The replacement has delivered its first snapshot, whatever it holds.
             s.snapshots_received = 1;
         }
-        let (out_tx, _out_rx) = mpsc::channel();
+        host.publish_snapshot();
+        host.send_scene_load();
         OpenedSession {
             shared,
             out_tx,
@@ -1295,6 +1361,95 @@ fn open_refuses_an_engine_that_failed_to_start() {
     assert!(rig.has("open refused: connect: timed out"));
     assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/level.rscene"));
     assert!(rig.has("3 entities"));
+}
+
+/// A SceneLoadReport for a file the engine refused: `ok` false, the engine's own reason.
+fn refused_load(path: &str, error: &str) -> SceneLoadReport {
+    SceneLoadReport {
+        ok: false,
+        skipped_components: 0,
+        path: path.to_string(),
+        error: error.to_string(),
+    }
+}
+
+#[test]
+fn open_refuses_a_replacement_whose_report_says_it_did_not_load() {
+    // E3: the file exists (so the synchronous check passes) but the engine could not load it. The
+    // replacement is refused, its reason is shown, and the current scene is still what is open.
+    let path = scene_file("malformed.rscene", b"rime_scene 1\nentity 0 {");
+    let report = refused_load(&path, "line 2: unterminated entity");
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.harness.state_mut().opener = Some(scripted_opener_with(
+        starting_world()[..1].to_vec(),
+        None,
+        Some(report),
+    ));
+    open_file_menu_and_type_open_path(&mut rig, &path);
+    rig.click("Open");
+    let (message, ok) = rig.app().save_status.clone().expect("the refusal is shown");
+    assert!(!ok);
+    assert_eq!(
+        message,
+        format!("open refused: {path} did not load: line 2: unterminated entity; the current scene is unchanged")
+    );
+    assert!(rig.has_text(&message), "the refusal is on screen");
+    assert!(
+        rig.app().pending_open.is_none(),
+        "the replacement engine is dropped"
+    );
+    assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/level.rscene"));
+    assert!(rig.has("3 entities"), "the old world is still there");
+}
+
+#[test]
+fn open_adopts_a_partial_load_and_shows_the_warning() {
+    // E3: unknown component types were skipped. That is a partial load by policy, so the scene is
+    // adopted, and the status line says so instead of reading as a clean open.
+    let path = scene_file("partial.rscene", b"scene");
+    let report = SceneLoadReport {
+        ok: true,
+        skipped_components: 2,
+        path: path.clone(),
+        error: String::new(),
+    };
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.harness.state_mut().opener = Some(scripted_opener_with(
+        starting_world()[..1].to_vec(),
+        None,
+        Some(report),
+    ));
+    open_file_menu_and_type_open_path(&mut rig, &path);
+    rig.click("Open");
+    assert_eq!(rig.app().scene_path.as_deref(), Some(path.as_str()));
+    assert!(rig.has("1 entities"), "the partial scene is what is open");
+    let (message, ok) = rig.app().save_status.clone().expect("the warning is shown");
+    assert!(!ok, "a warning is not a clean open");
+    assert_eq!(
+        message,
+        format!("warning: {path} loaded with 2 component(s) this build does not register, skipped; saving it is refused")
+    );
+    assert!(rig.has_text(&message));
+}
+
+#[test]
+fn a_malformed_scene_at_startup_shows_on_the_status_line() {
+    // E3: the editor was launched on a file the engine could not load. The window opens (the engine
+    // still serves), and the status line says the world is not the file.
+    let path = "/proj/broken.rscene";
+    let mut rig = Rig::with_scene_report(path, refused_load(path, "line 1: bad header"));
+    rig.settle();
+    let (message, ok) = rig
+        .app()
+        .save_status
+        .clone()
+        .expect("the load failure is shown");
+    assert!(!ok);
+    assert_eq!(
+        message,
+        "could not load /proj/broken.rscene: line 1: bad header — the editor is showing an empty or partial world"
+    );
+    assert!(rig.has_text(&message));
 }
 
 #[test]

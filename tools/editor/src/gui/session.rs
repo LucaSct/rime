@@ -18,8 +18,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rime_protocol::{
     AssetEntry, AssetList, Connection, EditResult, EditorMessage, FrameMessage, InputEvent,
-    InputKind, MessageType, PickResult, PlayState, SaveResult, Schema, Snapshot, SnapshotComponent,
-    ViewportCamera,
+    InputKind, MessageType, PickResult, PlayState, SaveResult, SceneLoadReport, Schema, Snapshot,
+    SnapshotComponent, ViewportCamera,
 };
 
 use super::protocol_input::Input;
@@ -83,6 +83,10 @@ pub struct SharedState {
     /// drains them into the undo history — which commits a step only on an `ok` answer. Unlike a
     /// pick or a save, every one matters: each pairs with one command the editor sent.
     pub edit_results: Vec<EditResult>,
+    /// How the engine made of its `--scene` (E3), sent once right after the schema and before the
+    /// first snapshot. `None` until it arrives, and forever for an engine that never sends one. A
+    /// replacement is adopted only when this says `ok`; the window reads it for the status line.
+    pub scene_load: Option<SceneLoadReport>,
     last_frame_at: Option<Instant>,
 }
 
@@ -343,6 +347,11 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
         MessageType::Other(code) if code == EditorMessage::EditResult.to_code() => {
             if let Ok(result) = EditResult::decode(payload) {
                 shared.lock().unwrap().edit_results.push(result);
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::SceneLoadReport.to_code() => {
+            if let Ok(report) = SceneLoadReport::decode(payload) {
+                shared.lock().unwrap().scene_load = Some(report);
             }
         }
         MessageType::Other(code) if code == EditorMessage::PlayState.to_code() => {

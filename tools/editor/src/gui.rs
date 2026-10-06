@@ -286,11 +286,9 @@ struct PendingOpen {
 /// Why `path` cannot be opened, checked before any engine starts: it must be an existing, readable
 /// file. A missing or unreadable path is refused at once, with the OS's own reason.
 ///
-/// This check is all the editor can know about the file. A malformed but existing file is NOT
-/// refused here: it opens as whatever the engine managed to load. The engine keeps running on a bad
-/// `--scene` (`editor_host_app.cpp`, `load_viewport_scene` discards the load result), so the adopted
-/// world may be empty or partial. An in-band load report from the engine is the follow-up that
-/// would turn that into a refusal.
+/// This check is all the editor can know before the engine starts. A malformed but existing file
+/// passes it, and is refused later, once the engine's SceneLoadReport says it did not load (E3,
+/// `settle_pending_open`). A partial load (unknown component types) is adopted with a warning.
 fn check_openable(path: &str) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if !meta.is_file() {
@@ -348,6 +346,9 @@ struct EditorApp {
     opener: Option<Opener>,
     pending_open: Option<PendingOpen>,
     open_path: String,
+    // Whether this session's SceneLoadReport has been reported on the status line (E3). Reset when a
+    // replacement is adopted, so the new engine's report is announced like the first one was.
+    load_announced: bool,
 }
 
 impl EditorApp {
@@ -404,6 +405,7 @@ impl EditorApp {
             opener: None,
             pending_open: None,
             open_path: String::new(),
+            load_announced: false,
         }
     }
 
@@ -433,17 +435,20 @@ impl EditorApp {
 
     /// Adopt a replacement engine once it is connected, has sent a schema, and has delivered its
     /// first snapshot (whatever its entity count, so an empty scene opens). It is refused, and
-    /// dropped (killing its engine), if it reports an error. The current session is only dropped at
-    /// the moment of adoption. No timer is involved: the snapshot counter says when it has spoken.
+    /// dropped (killing its engine), if it reports an error, or if its SceneLoadReport says the file
+    /// did not load (E3: a malformed file is refused, and the current scene stays). A partial load
+    /// is adopted; `announce_scene_load` then shows its warning. The current session is only dropped
+    /// at the moment of adoption. No timer is involved: the snapshot counter says when it has spoken.
     fn settle_pending_open(&mut self) {
         let Some(pending) = self.pending_open.as_ref() else {
             return;
         };
-        let (error, ready) = {
+        let (error, ready, report) = {
             let s = pending.opened.shared.lock().unwrap();
             (
                 s.error.clone(),
                 s.connected && !s.schema.types.is_empty() && s.snapshots_received > 0,
+                s.scene_load.clone(),
             )
         };
         if let Some(error) = error {
@@ -453,6 +458,30 @@ impl EditorApp {
         }
         if !ready {
             return;
+        }
+        // The report is sent before the first snapshot, so it is in by now. Its absence means an
+        // engine that does not say how it loaded, and that is refused rather than adopted blind.
+        match report {
+            None => {
+                self.pending_open = None;
+                self.save_status = Some((
+                    "open refused: the engine did not report how it loaded the scene; the current scene is unchanged".to_owned(),
+                    false,
+                ));
+                return;
+            }
+            Some(report) if !report.ok => {
+                self.pending_open = None;
+                self.save_status = Some((
+                    format!(
+                        "open refused: {} did not load: {}; the current scene is unchanged",
+                        report.path, report.error
+                    ),
+                    false,
+                ));
+                return;
+            }
+            Some(_) => {}
         }
         let PendingOpen { path, opened, .. } = self.pending_open.take().expect("checked above");
         self.shared = opened.shared;
@@ -472,6 +501,39 @@ impl EditorApp {
         self.scene_path = Some(path.clone());
         self.save_as_path = path.clone();
         self.save_status = Some((format!("opened {path}"), true));
+        self.load_announced = false;
+    }
+
+    /// Put the engine's account of its `--scene` on the status line (E3), once per session, on the
+    /// first frame its report is in. A failed load says so, because the window is then showing an
+    /// empty or partial world that is not the file. A partial load (unknown component types skipped)
+    /// is adopted, and its warning is shown in place of the plain "opened" line, because a partial
+    /// scene is not a clean open. A clean load says nothing new.
+    fn announce_scene_load(&mut self) {
+        if self.load_announced {
+            return;
+        }
+        let Some(report) = self.shared.lock().unwrap().scene_load.clone() else {
+            return;
+        };
+        self.load_announced = true;
+        if !report.ok {
+            self.save_status = Some((
+                format!(
+                    "could not load {}: {} — the editor is showing an empty or partial world",
+                    report.path, report.error
+                ),
+                false,
+            ));
+        } else if report.skipped_components > 0 {
+            self.save_status = Some((
+                format!(
+                    "warning: {} loaded with {} component(s) this build does not register, skipped; saving it is refused",
+                    report.path, report.skipped_components
+                ),
+                false,
+            ));
+        }
     }
 
     /// Apply the commands the UI produced this frame: put each on the wire, patch the mirror
@@ -618,6 +680,7 @@ impl eframe::App for EditorApp {
         // A replacement engine from File → Open is adopted (or refused) before this frame reads the
         // mirror, so the frame shows the scene that is actually open.
         self.settle_pending_open();
+        self.announce_scene_load();
         // Pull the cheap state for this UI frame (hold the lock only briefly), plus the newest frame
         // as an egui image ONLY when its sequence changed — so the ~2 MB RGBA is copied once per
         // streamed frame, not once per repaint. The schema + entities are cloned so the widgets can

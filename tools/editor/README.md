@@ -106,12 +106,14 @@ Then, in the window:
 5. **Open another scene** — **File ▸ Open**, type a path, press **Open**. A path that is not an
    existing readable file is refused at once, with the reason, and the current scene stays.
    Otherwise the editor starts a second engine on that file and switches to it once that engine has
-   sent its first snapshot; an empty scene opens as an empty scene. **File ▸ New** starts an empty,
-   unnamed scene; Save then waits for Save As.
-   *Limit:* a malformed but existing file opens as whatever the engine managed to load. The engine
-   keeps running on a bad `--scene` (`engine/app/editor_host_app.cpp`, `load_viewport_scene`), so the
-   result may be empty or partial. An in-band load report from the engine is the follow-up that
-   would refuse such a file.
+   sent its first snapshot; an empty scene opens as an empty scene. A file the engine could not
+   load (malformed, unreadable by the engine) is **refused**, with the engine's error, and the
+   current scene stays. A file that loads with component types this build does not register opens,
+   with a warning on the status line naming how many were skipped; Save is refused for it, so the
+   skipped data is never written away. **File ▸ New** starts an empty, unnamed scene; Save then
+   waits for Save As.
+   The engine says how it loaded `--scene` in-band (the `SceneLoadReport` message, `0x0209`), so a
+   bad file at launch also shows on the status line; the engine keeps serving whatever loaded.
 6. **Play** — hit **▶**. The simulation runs live (a dynamic body falls). **Step** advances one
    tick; **Stop ■** restores the exact pre-play scene (see *What Stop guarantees* above).
 
