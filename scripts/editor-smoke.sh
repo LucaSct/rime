@@ -120,6 +120,21 @@ echo "$game_out" | grep -q ", 0 skipped" || {
 # device the engine degrades to channel-only and this would time out, so it is gated on a device
 # being discoverable (vulkaninfo). Locally, run it directly if you have any Vulkan ICD.
 if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1; then
+    # LEAK DETECTION GOES OFF FROM HERE, and only from here. Everything above is GPU-free, so it
+    # runs with LeakSanitizer on and a leak in our own editor-host code still fails the smoke. These
+    # runs stand up a real Vulkan device, and an un-instrumented driver leaks process-lifetime blocks
+    # that LeakSanitizer bills to us: on this workstation (NVIDIA 615.71.09) ~2 KiB over 16
+    # allocations whose stacks are libdbus-1 and <unknown module> frames with no engine frame in any
+    # of them. scripts/lsan-suppressions.txt cannot mask those — a `leak:` rule matches a function or
+    # module NAME, and an <unknown module> frame has neither, which is the same wall that file's own
+    # comment documents for the loader's indirect children. So this mirrors what CI does for the ASan
+    # suite: detect_leaks=0 over the GPU-touching runs, full leak checking over the GPU-free ones.
+    # Memory errors and UB are still caught here — only the leak REPORT is suppressed.
+    #
+    # Defaulted, not forced: an explicitly exported ASAN_OPTIONS wins, so a session hunting a leak in
+    # the viewport path can set its own and this does not silently override it.
+    export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}"
+
     say "run editor --smoke --frames (streamed viewport: render → LZ4 → decode)"
     "$editor_bin" --smoke --frames 8 --engine "$engine_bin" --min-coverage 10
 
