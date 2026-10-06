@@ -139,7 +139,7 @@ std::optional<TerrainWorld> TerrainWorld::parse(std::string_view text) {
                 if (ok) {
                     world = make(g);
                 }
-                if (!world) {
+                if (!ok || !world) {
                     RIME_ERROR("terrain world: line {}: bad or repeated grid line", line_number);
                     return std::nullopt;
                 }

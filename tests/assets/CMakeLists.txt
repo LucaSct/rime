@@ -16,6 +16,7 @@ rime_add_test(rime_assets_tests
     cooked_terrain_layer_test.cpp
     virtual_geometry_test.cpp
     manifest_test.cpp
+    terrain_world_test.cpp
     registry_test.cpp
     fixture_test.cpp
     asset_server_test.cpp
