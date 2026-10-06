@@ -22,6 +22,7 @@ scripts/build.sh --cpp-only --sanitizer address   # ASan+UBSan build (GCC/Clang;
 
 scripts/perf.sh --commit                          # hardware perf run -> docs/perf/ (needs a Release build)
 scripts/perf.sh --sample lit-rooms --frames 1200  # one sample, into a scratch dir
+scripts/perf.sh --self-test                       # baseline-selection checks; no GPU, no build
 ```
 
 > `--sanitizer address|thread` sets the `RIME_SANITIZER` CMake option (`address` = ASan+UBSan,
