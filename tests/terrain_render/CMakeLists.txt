@@ -12,7 +12,7 @@
 # against a physics raycast within a derived margin, radiance against the analytic Lambert value.
 # No golden images.
 rime_add_test(rime_terrain_render_tests terrain_height_test.cpp terrain_residency_test.cpp
-    terrain_lod_test.cpp)
+    terrain_lod_test.cpp terrain_cooked_world_test.cpp)
 
 target_link_libraries(rime_terrain_render_tests
     PRIVATE rime::render rime::physics rime::assets rime::core)

@@ -1,0 +1,11 @@
+size_x = 8.0
+size_z = 8.0
+height_min = 0.0
+height_max = 65.535
+origin_x = 8.0
+origin_y = 0.0
+origin_z = 16.0
+columns = 9
+rows = 9
+layer0 = 0xea3690517cb0d7f5
+layer1 = 0x1c6a735bead13ee5
