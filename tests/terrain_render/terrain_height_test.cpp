@@ -2491,8 +2491,8 @@ bool same_image(const std::vector<std::uint8_t>& a, const std::vector<std::uint8
 
 } // namespace
 
-TEST_CASE("m19.7c: equal heights with contrast are BIT-IDENTICAL to contrast 0, and to m19.7b's "
-          "blend") {
+TEST_CASE("m19.7c: equal heights with EQUAL contrasts are BIT-IDENTICAL to contrast 0, and to "
+          "m19.7b's blend") {
     auto device = splat_device();
     if (!device) {
         return;
@@ -2532,6 +2532,12 @@ TEST_CASE("m19.7c: equal heights with contrast are BIT-IDENTICAL to contrast 0, 
     for (std::size_t n = 0; n < 4; ++n) {
         contrasty[n].height_contrast = contrast[n];
     }
+    // One contrast for every layer (leg (1a)): with equal heights, every painted layer then has the
+    // same effective height c*h, so the shader's bypass fires.
+    Palette4 equal_contrast = pal;
+    for (std::size_t n = 0; n < 4; ++n) {
+        equal_contrast[n].height_contrast = 8.0f;
+    }
 
     // Two weight maps with the SAME layer-1 channel (127 in every texel). `split` shares the other
     // 128 among layers 0, 2 and 3 differently in each texel; `plain` gives it all to layer 0.
@@ -2548,10 +2554,12 @@ TEST_CASE("m19.7c: equal heights with contrast are BIT-IDENTICAL to contrast 0, 
     const auto plain = uniform_weights(4, 4, {128, 127, 0, 0});
 
     const auto zero = draw_blend(*device, 4, 4, split, pal);
-    const auto with_contrast = draw_blend(*device, 4, 4, split, contrasty);
+    const auto with_contrast = draw_blend(*device, 4, 4, split, equal_contrast);
     const auto zero_plain = draw_blend(*device, 4, 4, plain, pal);
 
-    // (1) Equal heights: contrast changes NOTHING, to the bit.
+    // (1a) Equal heights AND equal contrasts: contrast changes NOTHING, to the bit. (The UNEQUAL
+    // contrasts of the old leg (1) are no longer bit-identical, by design: the next case, m19.7c
+    // fix 1, checks them against the new formula instead.)
     CHECK(same_image(zero, with_contrast));
     // (2) …and what both equal is m19.7b's blend. m19.7b never read w0 — its picture was a
     // function of (w1, w2, w3) alone, and here layers 2 and 3 ARE layer 0, so of w1 alone. The two
@@ -2578,6 +2586,175 @@ TEST_CASE("m19.7c: equal heights with contrast are BIT-IDENTICAL to contrast 0, 
     device->destroy(tall);
     device->destroy(flat_b);
     device->destroy(flat_a);
+}
+
+// The m19.7c fix 1 blend, re-derived on the CPU (ADR-0066 addendum): e_k = c_k * h_k, e_ref = the
+// highest e over PAINTED (w > 0) layers, g_k = 2^min(e_k - e_ref, 0), b = w g / sum(w g), and the
+// same bypass as the shader (every painted e equal, or nothing painted: return w). A MODEL that
+// predicts the shader's answer; the shader's own copy stays the thing under test.
+std::array<double, 4> height_blend_cpu(const std::array<double, 4>& w,
+                                       const std::array<double, 4>& h,
+                                       const std::array<double, 4>& c) {
+    std::array<double, 4> e{};
+    double e_ref = -1.0; // every e is >= 0, so -1 marks "no painted layer"
+    double e_min = 1.0e30;
+    for (std::size_t k = 0; k < 4; ++k) {
+        e[k] = c[k] * h[k];
+        if (w[k] > 0.0) {
+            e_ref = std::max(e_ref, e[k]);
+            e_min = std::min(e_min, e[k]);
+        }
+    }
+    if (e_ref < 0.0 || e_ref == e_min) {
+        return w;
+    }
+    std::array<double, 4> q{};
+    double sum = 0.0;
+    for (std::size_t k = 0; k < 4; ++k) {
+        q[k] = w[k] * std::exp2(std::min(e[k] - e_ref, 0.0));
+        sum += q[k];
+    }
+    for (std::size_t k = 0; k < 4; ++k) {
+        q[k] /= sum;
+    }
+    return q;
+}
+
+TEST_CASE("m19.7c fix 1: equal heights with UNEQUAL contrasts follow the common-reference formula, "
+          "and differ from contrast 0") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    // The m19.7b scene: flat, ambient 1, no sun, so a pixel is its base colour + 0.04 and a
+    // statement about the blend alone. Every layer is the SAME height (128) on a white albedo
+    // texture, so each layer's colour is its kLayerColors entry. Every weight map is UNIFORM, so
+    // every pixel has one b and one CPU prediction covers the whole tile.
+    //
+    // THE PREDICTION. The lit colour is affine in the blended base colour (ambient only, metallic
+    // 0), so for blended weights b it is  sum_k b_k * P_k,  where P_k is the render with layer k
+    // alone painted (weight 255): one painted layer takes the bypass, so its b is exactly (1,0,0,0)
+    // under either shader. No term for the m19.7b seam bound: that bound is 2 * 2^-4 * (max - min
+    // of the layer texels), and every texel here is the same, so it is zero and is not added.
+    const rhi::TextureHandle flat = solid_layer(*device, 4, 4, {255, 255, 255}, 128);
+    const float contrast[4] = {8.0f, 3.0f, 0.5f, 20.0f}; // the m19.7c leg (1) contrasts, UNEQUAL
+    Palette4 contrasty = distinct_palette();
+    Palette4 no_contrast = distinct_palette();
+    for (std::size_t n = 0; n < 4; ++n) {
+        contrasty[n].albedo_height = flat;
+        no_contrast[n].albedo_height = flat;
+        contrasty[n].height_contrast = contrast[n];
+    }
+
+    // {128, 127, 0, 0}: the plain pair. {40, 60, 80, 75}: all four painted, layer 3 the tallest.
+    const std::array<std::array<std::uint8_t, 4>, 2> maps = {{{128, 127, 0, 0}, {40, 60, 80, 75}}};
+    for (const auto& texel : maps) {
+        std::array<std::vector<std::uint8_t>, 4> pure{};
+        for (std::size_t k = 0; k < 4; ++k) {
+            std::array<std::uint8_t, 4> alone{};
+            alone[k] = 255;
+            pure[k] = draw_blend(*device, 2, 2, uniform_weights(2, 2, alone), contrasty);
+        }
+        const auto blended = draw_blend(*device, 2, 2, uniform_weights(2, 2, texel), contrasty);
+        const auto zero = draw_blend(*device, 2, 2, uniform_weights(2, 2, texel), no_contrast);
+        CHECK(covered_pixels(blended) == static_cast<int>(kSize * kSize));
+
+        // The CPU model's b, from the sampled values: w = byte/255, h = 128/255 (texture A,
+        // linear).
+        std::array<double, 4> w{};
+        std::array<double, 4> h{};
+        std::array<double, 4> c{};
+        for (std::size_t k = 0; k < 4; ++k) {
+            w[k] = texel[k] / 255.0;
+            h[k] = 128.0 / 255.0;
+            c[k] = contrast[k];
+        }
+        const auto b = height_blend_cpu(w, h, c);
+
+        // (1b-i) Every covered channel is the CPU prediction to within one f16 ULP.
+        int beyond = 0;
+        float worst_ulps = 0.0f;
+        for (std::uint32_t py = 0; py < kSize; ++py) {
+            for (std::uint32_t px = 0; px < kSize; ++px) {
+                for (int ch = 0; ch < 3; ++ch) {
+                    double predicted = 0.0;
+                    for (std::size_t k = 0; k < 4; ++k) {
+                        predicted += b[k] * double(chan(pure[k], px, py, ch));
+                    }
+                    const double got = chan(blended, px, py, ch);
+                    const float ulp = half_ulp(half_bits(blended, px, py, ch));
+                    worst_ulps = std::max(worst_ulps, float(std::abs(got - predicted) / ulp));
+                    beyond += std::abs(got - predicted) <= ulp ? 0 : 1;
+                }
+            }
+        }
+        MESSAGE("texel {" << int(texel[0]) << "," << int(texel[1]) << "," << int(texel[2]) << ","
+                          << int(texel[3]) << "}: CPU b = {" << b[0] << ", " << b[1] << ", " << b[2]
+                          << ", " << b[3] << "}; worst |GPU - model| = " << worst_ulps
+                          << " f16 ULP");
+        CHECK(beyond == 0);
+
+        // (1b-ii) ...and it is NOT contrast 0: the bias, by design. Contrast 0 is the bypass, b =
+        // w.
+        CHECK_FALSE(same_image(zero, blended));
+    }
+}
+
+TEST_CASE("m19.7c fix 1: a tall layer painted at weight 1/255 moves the others by at most its own "
+          "share") {
+    auto device = splat_device();
+    if (!device) {
+        return;
+    }
+    // ADR-0066's measured case, on its own slots: layers 0 and 1 painted 128/127 at heights
+    // 128/255 and 100/255, layer 3 the tall one at height 255, slot 2 never painted. Contrasts for
+    // slots 0, 1, 3 are 2, 6, 6: UNEQUAL, which is what the old shader got wrong. The tall layer
+    // enters at 1/255, or is absent (0).
+    const rhi::TextureHandle low = solid_layer(*device, 4, 4, {255, 255, 255}, 128);
+    const rhi::TextureHandle mid = solid_layer(*device, 4, 4, {255, 255, 255}, 100);
+    const rhi::TextureHandle tall = solid_layer(*device, 4, 4, {255, 255, 255}, 255);
+    Palette4 p = distinct_palette(); // layer 0 green 0.2, layer 1 green 0.7, layer 3 green 0.1
+    p[0].albedo_height = low;
+    p[1].albedo_height = mid;
+    p[2].albedo_height = low;
+    p[3].albedo_height = tall;
+    p[0].height_contrast = 2.0f;
+    p[1].height_contrast = 6.0f;
+    p[3].height_contrast = 6.0f;
+
+    const auto without = draw_blend(*device, 2, 2, uniform_weights(2, 2, {128, 127, 0, 0}), p);
+    const auto with = draw_blend(*device, 2, 2, uniform_weights(2, 2, {128, 127, 0, 1}), p);
+
+    // Layer 3's own share at 1/255, from the formula: the reference is e_ref = 6 (its own), so
+    // g_3 = 1 and b_3 = (1/255) / sum(w g). Everything else is the CPU model above.
+    const auto b = height_blend_cpu({128.0 / 255.0, 127.0 / 255.0, 0.0, 1.0 / 255.0},
+                                    {128.0 / 255.0, 100.0 / 255.0, 1.0, 1.0},
+                                    {2.0, 6.0, 0.0, 6.0});
+
+    // The change in the green channel, worst over the tile. The move is b_3 * (layer 3's colour
+    // minus the rest's mix), and every colour here lies in [0, 1.04], so |difference| < 1 and the
+    // change is at most b_3 — plus one f16 ULP for the two rounded frames.
+    float worst_change = 0.0f;
+    float ulp_at_worst = 0.0f;
+    for (std::uint32_t py = 0; py < kSize; ++py) {
+        for (std::uint32_t px = 0; px < kSize; ++px) {
+            const float change = std::abs(chan(with, px, py, 1) - chan(without, px, py, 1));
+            if (change > worst_change) {
+                worst_change = change;
+                ulp_at_worst = half_ulp(half_bits(with, px, py, 1));
+            }
+        }
+    }
+    const double bound = b[3] + ulp_at_worst;
+    MESSAGE("green, layer 3 unpainted: " << chan(without, 64, 64, 1) << "; painted 1/255: "
+                                         << chan(with, 64, 64, 1) << "; worst change "
+                                         << worst_change << "; bound (b_3 + 1 ULP) " << bound
+                                         << ", b_3 = " << b[3]);
+    CHECK(worst_change <= bound);
+
+    device->destroy(tall);
+    device->destroy(mid);
+    device->destroy(low);
 }
 
 TEST_CASE("m19.7c: where a layer's height is high it takes more of a 50/50 texel, where low, "

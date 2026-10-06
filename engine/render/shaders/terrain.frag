@@ -94,7 +94,7 @@ vec3 env_brdf_approx(vec3 f0, float roughness, float n_dot_v) {
     return f0 * ab.x + ab.y;
 }
 
-// ── HEIGHT-BASED SPLAT REDISTRIBUTION (m19.7c, ADR-0066 §5) ───────────────────────────────────
+// ── HEIGHT-BASED SPLAT REDISTRIBUTION (m19.7c, ADR-0066 §5; m19.7c fix 1, ADR-0066 addendum) ──
 //
 // A painted weight map alone cross-fades two layers into one even smudge. Real ground does not do
 // that: where grass meets gravel, the gravel shows first in the LOW cracks of the grass and the
@@ -102,16 +102,31 @@ vec3 env_brdf_approx(vec3 f0, float roughness, float n_dot_v) {
 // each layer has a height map, and wherever two layers overlap, the one whose surface is locally
 // higher takes a larger share of the pixel than the painter gave it.
 //
-//     g_k = exp2(c_k * (h_k - h_max))        b_k = w_k * g_k / sum_j (w_j * g_j)
+//     e_k = c_k * h_k                        g_k = exp2(e_k - e_ref)
+//     b_k = w_k * g_k / sum_j (w_j * g_j)
 //
-// w = the painted weights, h = the layer heights in [0,1], c = each layer's contrast (>= 0). The
-// highest layer keeps g = 1; a layer d below it is scaled by 2^(-c*d), so the contrast is "how
-// many halvings per unit of height". The result is renormalised, so b is again a set of weights.
+// w = the painted weights, h = the layer heights in [0,1], c = each layer's contrast (>= 0).
+// e = c * h is the layer's EFFECTIVE height, in halvings: how far its surface stands above the
+// ground. e_ref is the highest e over PAINTED (w > 0) layers. The layer at e_ref keeps g = 1; a
+// layer e below it is scaled by 2^(-e). The result is renormalised, so b is again a set of weights.
 //
-// WHY h_max IS TAKEN OVER PAINTED (w > 0) LAYERS ONLY. A layer the painter did not put here must
-// have no say in this pixel — not even through the reference height. If an unpainted layer's tall
-// height set h_max, every painted layer's g would shrink by its OWN contrast, so their ratio — and
-// the picture — would change with a texture that is not even visible here.
+// WHY A COMMON e_ref CANCELS. e_ref multiplies every g_k by the same factor 2^(-e_ref), so it
+// drops out of b exactly. Its only job is to keep each exponent <= 0 for a painted layer, which
+// keeps every g in (0, 1] and the sum finite. The m19.7c form used a per-layer reference, c_k *
+// (h_k - h_max). There the reference is scaled by c_k, so it does NOT cancel across layers of
+// different contrast: a tall layer that entered at the faintest painted weight raised h_max and
+// re-divided the layers beneath it by their own contrasts, a step at the edge of its region
+// (ADR-0066, m19.7c addendum). Taking e_k = c_k * h_k first makes the reference one number for
+// every layer, so the others' split no longer depends on which layers are painted elsewhere.
+//
+// WHAT CONTRAST MEANS NOW. It scales the layer's own height map: a layer of contrast 6 at height
+// 0.5 stands as tall (e = 3) as a layer of contrast 3 at height 1.0. This is the per-layer "height
+// amplitude" convention. With every contrast EQUAL to c, e_k = c * h_k, and the result is the same
+// as the m19.7c form, term for term.
+//
+// WHY e_ref IS TAKEN OVER PAINTED LAYERS ONLY. A layer the painter did not put here (w = 0) must
+// have no say in this pixel, not even through the reference. So e_ref is taken over
+// PAINTED layers only, and an unpainted layer's exponent is clamped at 0 below.
 //
 // WHY exp2 AND NOT A MAX-HEIGHT GATE. The gate ("keep whatever is within some depth of the highest
 // layer, drop the rest") was proposed and rejected in ADR-0066: it can cut a layer to exactly
@@ -120,40 +135,38 @@ vec3 env_brdf_approx(vec3 f0, float roughness, float n_dot_v) {
 // 0, and grows continuously and monotonically with that weight. Contrast only STEEPENS the
 // transition the painter drew; it cannot move it to wherever a stray texel is tallest.
 //
-// KNOWN LIMIT — UNEQUAL CONTRASTS. That holds for a layer's OWN share. The split among the OTHER
-// layers is only independent of h_max when they share one contrast (a common factor cancels in
-// the renormalisation). With different c_k, a tall layer entering at the faintest painted weight
-// raises h_max and re-divides the layers beneath it by their own contrasts — a step at the edge
-// of its painted region (measured in ADR-0066's m19.7c addendum). Give overlapping layers the
-// same contrast until that is redesigned.
+// THE BIAS AT UNEQUAL CONTRASTS. By design, two layers at the SAME height h > 0 with DIFFERENT
+// contrasts have different e, so b != w: the higher-contrast layer is the taller one and takes
+// more of the pixel. The bypass below covers only equal e, so this is not a bug, but it means the
+// painter's weights are not what the picture shows wherever contrasts differ. Give layers that
+// meet the same contrast if the painter must get exactly the weights they painted.
 //
-// WHY THE BYPASS. When every painted layer has the same height (always true of untextured layers,
-// whose fallback height is 0), or none of them has any contrast, every g is 1 and the formula
+// WHY THE BYPASS. When every painted layer has the same e (always true of untextured layers, whose
+// fallback height is 0; and of every layer when all contrasts are 0), every g is 1 and the formula
 // reduces to w / sum(w) — mathematically w, but NOT bit for bit: the four float weights do not
 // sum to exactly 1.0, so the division moves them by an ULP. Returning w itself keeps every
 // earlier bit-identity anchor (ADR-0063 §4 onwards) exact, and makes "no height data" cost
-// nothing.
+// nothing. A pixel with no painted layer also returns w (all zero).
 //
 // Returns b; the caller's difference-form blend reads b.yzw (b.x is implied, like w0 before it).
 vec4 height_blend(vec4 w, vec4 h, vec4 c) {
-    float h_max = 0.0; // heights are UNORM, so [0,1] brackets them
-    float h_min = 1.0;
-    float c_max = 0.0;
+    const vec4 e = c * h; // effective height, in halvings; >= 0 since c >= 0 and h is in [0,1]
+    float e_ref = -1.0;   // so -1 marks "no painted layer yet"; any real e is >= 0
+    float e_min = 1e30;
     for (int k = 0; k < 4; ++k) {
         if (w[k] > 0.0) {
-            h_max = max(h_max, h[k]);
-            h_min = min(h_min, h[k]);
-            c_max = max(c_max, c[k]);
+            e_ref = max(e_ref, e[k]);
+            e_min = min(e_min, e[k]);
         }
     }
-    if (h_max == h_min || c_max == 0.0) {
-        return w; // the bypass (also the no-painted-layer case: c_max stays 0)
+    if (e_ref < 0.0 || e_ref == e_min) {
+        return w; // the bypass (also the no-painted-layer case)
     }
-    // min(.., 0) changes nothing for a painted layer (h_k <= h_max by construction). For an
-    // UNPAINTED one that is taller than h_max it keeps g <= 1: a large contrast would otherwise
+    // min(.., 0) changes nothing for a painted layer (e_k <= e_ref by construction). For an
+    // UNPAINTED one that is taller than e_ref it keeps g <= 1: a large contrast would otherwise
     // overflow exp2 to +inf, and w * g = 0 * inf is NaN, which would poison the whole sum.
-    const vec4 q = w * exp2(c * min(h - vec4(h_max), vec4(0.0)));
-    // Never zero: the painted layer AT h_max has g = 1 and w > 0.
+    const vec4 q = w * exp2(min(e - vec4(e_ref), vec4(0.0)));
+    // Never zero: the painted layer AT e_ref has g = 1 and w > 0.
     return q / (q.x + q.y + q.z + q.w);
 }
 
