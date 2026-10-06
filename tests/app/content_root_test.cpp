@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
 
 #include "rime/app/content_root.hpp"
 
@@ -56,6 +57,18 @@ struct Tree {
         return s;
     }
 };
+
+// The same normalisation content_root.cpp's own `clean()` applies before it PRINTS a candidate
+// (engine/app/src/content_root.cpp). A needle built from the raw path is not the string the
+// implementation emits: `weakly_canonical` resolves the symlinks of the part that exists, and on
+// Windows it also rewrites an 8.3 short component — `C:\Users\RUNNER~1\...` becomes
+// `C:\Users\runneradmin\...` — so the uncanonicalised needle never appeared in `tried` and
+// this file's one path-derived assertion failed on windows-latest only.
+fs::path printed_as(const fs::path& p) {
+    std::error_code ec;
+    const fs::path out = fs::weakly_canonical(fs::absolute(p, ec), ec);
+    return ec ? p.lexically_normal() : out;
+}
 
 bool tried_mentions(const ContentRoot& r, const std::string& needle) {
     for (const std::string& line : r.tried) {
@@ -105,7 +118,9 @@ TEST_CASE("content root: a moved binary with no content NEVER falls back to the 
     const ContentRoot r = resolve_content_root(t.search(t.bundle / "game"));
     CHECK_FALSE(r.ok);
     CHECK(r.source == ContentSource::None);
-    CHECK(tried_mentions(r, (t.bundle / "content").string() + ": missing"));
+    // Mirrors the implementation: clean(exe).parent_path() / "content".
+    const fs::path printed = printed_as(t.bundle / "game").parent_path() / "content";
+    CHECK(tried_mentions(r, printed.string() + ": missing"));
     CHECK(tried_mentions(r, "not considered"));
     const std::string text = describe_content_failure(r);
     CHECK(text.find("no content root found") != std::string::npos);
