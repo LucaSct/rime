@@ -471,4 +471,17 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/rime-config-version.cmake"
     DESTINATION ${RIME_INSTALL_CMAKEDIR})
 
+# SAY WHICH SANITIZER IS ON. RIME_SANITIZER is a CACHE variable, so once a build directory has
+# been configured with `--sanitizer address` every later bare `cmake --preset dev` silently reuses
+# it. That is invisible and it misleads: with an un-instrumented GPU driver loaded, LeakSanitizer
+# bills the driver's process-lifetime allocations to us, so a passing GPU test still exits non-zero
+# (measured 2026-10-06: rime_terrain_render_tests, 70/70 cases and 1.77M assertions green, exit 1 on
+# 134 KB of <unknown module> leaks). Printing the mode is what turns "why is this red?" into one
+# line of configure output. Use -DRIME_SANITIZER=off to clear a build directory.
+if(NOT RIME_SANITIZER STREQUAL "off")
+    message(STATUS "Rime: RIME_SANITIZER=${RIME_SANITIZER} — this build is instrumented (cached in "
+                   "${CMAKE_BINARY_DIR}; reconfigure with -DRIME_SANITIZER=off to clear it)")
+else()
+    message(STATUS "Rime: RIME_SANITIZER=off")
+endif()
 message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_render, rime_stream, rime_editorhost, rime_scene, rime_app, rime_net, rime_replication, rime_destruction_net, rime_gameplay, rime_gameplay_net, rime_destruction_render, rime_blockkit, rime_capi, rime_hello.")
