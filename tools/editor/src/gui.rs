@@ -970,9 +970,11 @@ impl eframe::App for EditorApp {
             // "clear" message on the wire, so this despawns every entity through the same Commands
             // an edit uses. Despawns are not undoable, and the undo history names entities that are
             // now gone, so it is dropped with them.
-            actions.extend(entities.iter().map(|e| Command::Despawn {
-                key: (e.index, e.generation),
-            }));
+            actions.extend(
+                entities
+                    .iter()
+                    .map(|e| Command::Despawn { id: e.editor_id }),
+            );
             self.pending_open = None;
             self.scene_path = None;
             self.save_as_path.clear();
