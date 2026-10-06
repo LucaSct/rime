@@ -383,6 +383,7 @@ struct TerrainResidencyStats {
     std::uint64_t visible_fallback_draws = 0; // fallback leaves actually drawn (after culling)
     std::uint64_t cpu_bake_bytes = 0;         // gauge: bake CPU copies held (loading parents only)
     std::uint32_t resident_bake_holds = 0; // gauge: resident tiles still holding a bake: must be 0
+    std::uint32_t bake_handles_held = 0;   // gauge: streamed bake handles records hold (2/parent)
     double select_ms = 0.0;      // the last begin_frame's two selections, CPU milliseconds
     double begin_frame_ms = 0.0; // the last begin_frame, whole (selection + residency)
 };

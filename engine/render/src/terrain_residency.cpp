@@ -1040,9 +1040,11 @@ void TerrainResidency::update_gauges() {
     stats_.peak_budget_bytes = std::max(stats_.peak_budget_bytes, stats_.budget_bytes);
     std::uint64_t bake_bytes = 0;
     std::uint32_t bake_holds = 0;
+    std::uint32_t handles = 0;
     for (const auto& [k, r] : records_) {
         for (const assets::StreamedTextureAssetHandle h : {r.bake_color, r.bake_material}) {
             if (h.is_valid()) {
+                ++handles;
                 const assets::TextureAsset* t = server_.get(h);
                 bake_bytes += t != nullptr ? t->pixels.size() : 0;
             }
@@ -1054,6 +1056,7 @@ void TerrainResidency::update_gauges() {
     }
     stats_.cpu_bake_bytes = bake_bytes;
     stats_.resident_bake_holds = bake_holds;
+    stats_.bake_handles_held = handles;
     stats_.frames_in_flight = static_cast<std::uint32_t>(submitted_.size());
     std::uint32_t roots = 0;
     for (const auto& [k, r] : records_) {

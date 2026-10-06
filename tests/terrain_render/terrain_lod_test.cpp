@@ -2654,3 +2654,465 @@ TEST_CASE("m19.8d3: a world without bakes, a bake of the wrong size and a missin
         CHECK(r.stats.appearance_morph_draws > 0);
     }
 }
+
+// ── m19.8e: budgets (ADR-0073) ──────────────────────────────────────────────────────────────────
+
+namespace {
+
+// The 8d2 path flown forward, back, and forward again: long enough that a budget which leaked a
+// little per tile would show it, and every region is entered more than once.
+std::vector<PathFrame> long_path(const LodWorld& w) {
+    const std::vector<PathFrame> one = camera_path(w);
+    std::vector<PathFrame> out = one;
+    out.insert(out.end(), one.rbegin(), one.rend());
+    out.insert(out.end(), one.begin(), one.end());
+    return out;
+}
+
+// lod_frame with the caller's view_proj (the culling proof needs a perspective camera).
+void view_frame(rhi::Device& device,
+                assets::AssetServer& server,
+                render::TerrainResidency& residency,
+                core::Vec3 eye,
+                const core::Mat4& vp) {
+    settle(server);
+    residency.begin_frame(eye);
+    render::RenderGraph graph(device);
+    graph.reset();
+    const render::RGTexture hdr = graph.create_texture({{16, 16}, render::kHdrFormat, "e-hdr"});
+    const render::RGTexture depth = graph.create_texture({{16, 16}, render::kDepthFormat, "e-d"});
+    const render::RGColorAttachment clears[] = {
+        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
+    const render::RGDepthAttachment dclear{
+        depth, rhi::LoadOp::Clear, rhi::StoreOp::Store, 1.0f, 0, false, 0};
+    render::RenderGraph::RasterPassDesc cd{};
+    cd.colors = clears;
+    cd.depth = &dclear;
+    graph.add_raster_pass("e-clear", cd, [](rhi::CommandBuffer&) {});
+    residency.add(graph, hdr, depth, vp, eye, flat_light());
+    auto cmd = device.begin_commands();
+    graph.execute(*cmd);
+    device.submit_blocking(*cmd);
+    residency.end_frame_blocking();
+}
+
+// Bytes of one tile of the test world, as the pass will count them.
+std::uint64_t parent_bytes() {
+    return render::TerrainPass::predicted_tile_bytes(kN, kN, 4, true);
+}
+
+} // namespace
+
+TEST_CASE("m19.8e: (a) under a byte budget a long sweep plateaus — GPU bytes never exceed it, "
+          "coverage stays exact, and the CPU bake copies go back to the server") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-budget");
+    const LodWorld w = make_lod_world(16, 16, 4);
+    const assets::TerrainWorld baked = write_baked_world(dir.path, w);
+    const std::vector<PathFrame> path = long_path(w);
+    const std::uint32_t top = baked.level_count() - 1;
+    const std::size_t roots = baked.tiles(top).size();
+    // ~24 tiles' worth: well under what the ideal selection asks for near the ground, well over
+    // the four roots' reservation.
+    const std::uint64_t budget = 24 * parent_bytes();
+
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    const std::uint64_t cpu_baseline = server.resident_streamed_bytes();
+    std::uint64_t peak = 0;
+    std::uint64_t peak_cpu_bakes = 0;
+    std::uint32_t covered_frames = 0;
+    render::TerrainResidencyStats s{};
+    {
+        render::TerrainPass pass(*device);
+        render::TerrainResidencyConfig cfg{};
+        cfg.slots = 400; // the slots never bind: bytes do
+        cfg.lod = test_view();
+        cfg.byte_budget = budget;
+        render::TerrainResidency residency(*device, pass, server, baked, dir.path, nullptr, cfg);
+        REQUIRE(residency.root_reserve_bytes() == roots * parent_bytes());
+        for (std::size_t f = 0; f < path.size(); ++f) {
+            lod_frame(*device, server, residency, path[f].eye);
+            const render::TerrainResidencyStats& now = residency.stats();
+            // THE CLAIM, every frame: what terrain holds on the GPU — tiles resident and retiring,
+            // their bakes — never exceeds the budget. Checked against the pass's own count too.
+            REQUIRE(now.budget_bytes <= budget);
+            peak = std::max(peak, now.budget_bytes);
+            // Every CPU bake copy the server holds is one a not-yet-resident parent is waiting
+            // on (measured once the loads in flight have landed); no resident tile holds one.
+            REQUIRE(now.resident_bake_holds == 0);
+            settle(server);
+            const std::uint64_t cpu = server.resident_streamed_texture_bytes();
+            REQUIRE(cpu <= std::uint64_t{now.bake_handles_held} * kN * kN * 4);
+            peak_cpu_bakes = std::max(peak_cpu_bakes, cpu);
+            if (now.pinned_roots == roots) {
+                REQUIRE(measure_cover(w, residency.selection().leaves).exact);
+                ++covered_frames;
+            }
+        }
+        s = residency.stats();
+        CHECK(s.peak_budget_bytes <= budget);
+    }
+    // Every ownership returned: the server's streamed bytes are back where they started.
+    CHECK(server.resident_streamed_bytes() == cpu_baseline);
+    CHECK(server.live_streamed_texture_slots() == 0);
+
+    CHECK(covered_frames + 2 >= path.size()); // roots by frame 2, then exact every frame
+    CHECK(s.pinned_evictions == 0);
+    CHECK(s.uncovered_draws <= 2 * roots);
+    // Not vacuous: the budget really bound, and pressure lowered detail rather than coverage.
+    CHECK(peak > budget - 2 * parent_bytes()); // the plateau sits AT the budget
+    CHECK(s.byte_budget_evictions + s.byte_budget_waits > 0);
+    CHECK(s.fallback_draws > 0);
+    CHECK(s.fallback_appearance_draws == 0);
+    CHECK(s.uploads > 3 * 24); // churn: the sweep kept replacing what it held
+
+    // CPU BYTES RETURN TO BASELINE AFTER UPLOADS — measured with the residency still alive. With
+    // no pressure, park the camera until nothing is missing: every parent it wants is on the GPU,
+    // and the server holds not one byte of any bake. (Before m19.8e it held every bake ever
+    // loaded: 8·N² bytes per parent, for as long as the server lived.)
+    std::uint64_t parked_cpu = ~std::uint64_t{0};
+    std::size_t parked_parents = 0;
+    {
+        render::TerrainPass pass(*device);
+        render::TerrainResidencyConfig cfg{};
+        cfg.slots = 400;
+        cfg.lod = test_view();
+        render::TerrainResidency residency(*device, pass, server, baked, dir.path, nullptr, cfg);
+        for (const PathFrame& f : camera_path(w)) {
+            lod_frame(*device, server, residency, f.eye);
+        }
+        for (int k = 0; k < 8 && residency.stats().missing_this_frame.total() != 0; ++k) {
+            lod_frame(*device, server, residency, camera_path(w).back().eye);
+        }
+        CHECK(residency.stats().missing_this_frame.total() == 0);
+        for (const TerrainTileKey k : residency.resident_keys()) {
+            parked_parents += k.level > 0 ? 1 : 0;
+        }
+        parked_cpu = server.resident_streamed_texture_bytes();
+        CHECK(residency.stats().bake_requests > 0);
+    }
+    CHECK(parked_parents > 4);
+    CHECK(parked_cpu == 0); // THE CLAIM: as many parents on the GPU, none of their bakes in RAM
+    CHECK(server.resident_streamed_bytes() == cpu_baseline);
+    MESSAGE("m19.8e (a): " << path.size() << " frames under a " << budget << "-byte budget: peak "
+                           << s.peak_budget_bytes << " bytes (" << s.uploads << " uploads, "
+                           << s.byte_budget_evictions << " evictions for bytes, "
+                           << s.byte_budget_waits << " tile-frames waited for bytes, "
+                           << s.fallback_draws << " fallback tile-frames); CPU bake copies peaked "
+                           << "at " << peak_cpu_bakes << " bytes, all released; parked with "
+                           << parked_parents << " parents resident: " << parked_cpu
+                           << " CPU bake bytes");
+}
+
+TEST_CASE("m19.8e: a byte budget smaller than the root cover is refused at construction, counted, "
+          "and draws nothing") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-budget-refused");
+    const LodWorld w = make_lod_world(16, 16, 4);
+    const assets::TerrainWorld baked = write_baked_world(dir.path, w);
+    const std::size_t roots = baked.tiles(baked.level_count() - 1).size();
+    for (const bool fits : {false, true}) {
+        core::JobSystem jobs(1);
+        assets::AssetServer server(jobs);
+        render::TerrainPass pass(*device);
+        render::TerrainResidencyConfig cfg{};
+        cfg.slots = 400;
+        cfg.lod = test_view();
+        // Exactly the roots' predicted bytes fits; one byte less does not.
+        cfg.byte_budget = roots * parent_bytes() - (fits ? 0 : 1);
+        render::TerrainResidency residency(*device, pass, server, baked, dir.path, nullptr, cfg);
+        for (int f = 0; f < 6; ++f) {
+            lod_frame(*device, server, residency, camera_path(w).front().eye);
+            REQUIRE(residency.stats().budget_bytes <= cfg.byte_budget);
+        }
+        const render::TerrainResidencyStats& s = residency.stats();
+        if (fits) {
+            CHECK(s.byte_budget_refusals == 0);
+            CHECK(s.pinned_roots == roots); // the reservation is exact: the roots and nothing else
+            CHECK(s.budget_bytes == cfg.byte_budget);
+            CHECK(measure_cover(w, residency.selection().leaves).exact);
+            CHECK(s.fallback_draws > 0);
+        } else {
+            CHECK(s.byte_budget_refusals == 1);
+            CHECK(residency.selection().leaves.empty());
+            CHECK(s.draws == 0);
+            CHECK(s.heightfield_requests == 0);
+        }
+    }
+}
+
+TEST_CASE("m19.8e: (b) the per-frame upload cap is never exceeded, the parent fallback covers what "
+          "waits, and the waits are the same journal whatever order the loads complete in") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-cap");
+    const LodWorld w = make_lod_world(16, 16, 4);
+    const assets::TerrainWorld baked = write_baked_world(dir.path, w);
+    const std::vector<PathFrame> path = long_path(w);
+    const std::size_t roots = baked.tiles(baked.level_count() - 1).size();
+    const std::uint64_t cap = 5 * parent_bytes() / 2; // two parents, or a parent and a child
+
+    struct Run {
+        std::vector<render::TerrainUploadEvent> journal;
+        std::vector<std::vector<TerrainLodLeaf>> selections;
+        render::TerrainResidencyStats stats;
+        std::uint64_t worst_frame = 0;
+        bool covered = true;
+        bool ordered = true; // within a frame, no upload after the cap closed
+    };
+
+    const auto run = [&](std::uint32_t workers, std::uint64_t cap_bytes) {
+        Run out;
+        core::JobSystem jobs(workers);
+        assets::AssetServer server(jobs);
+        render::TerrainPass pass(*device);
+        render::TerrainResidencyConfig cfg{};
+        cfg.slots = 400;
+        cfg.lod = test_view();
+        cfg.upload_cap = cap_bytes;
+        cfg.byte_budget = 60 * parent_bytes(); // the cap's waits under a budget's pressure too
+        cfg.journal = &out.journal;
+        render::TerrainResidency residency(*device, pass, server, baked, dir.path, nullptr, cfg);
+        for (const PathFrame& f : path) {
+            const std::size_t first = out.journal.size();
+            lod_frame(*device, server, residency, f.eye);
+            const render::TerrainResidencyStats& s = residency.stats();
+            out.worst_frame = std::max(out.worst_frame, s.upload_bytes_this_frame);
+            // The journal agrees with the counter, frame by frame.
+            std::uint64_t sum = 0;
+            bool closed = false;
+            for (std::size_t e = first; e < out.journal.size(); ++e) {
+                const render::TerrainUploadEvent& ev = out.journal[e];
+                using K = render::TerrainUploadEvent::Kind;
+                if (ev.kind == K::Upload || ev.kind == K::LayerUpload) {
+                    sum += ev.bytes;
+                    out.ordered = out.ordered && !closed;
+                }
+                closed = closed || ev.kind == K::CapWait || ev.kind == K::LayerCapWait;
+            }
+            REQUIRE(sum == s.upload_bytes_this_frame);
+            if (s.pinned_roots == roots) {
+                out.covered = out.covered && measure_cover(w, residency.selection().leaves).exact;
+            }
+            out.selections.push_back(residency.selection().leaves);
+        }
+        out.stats = residency.stats();
+        return out;
+    };
+
+    const Run one = run(1, cap);
+    const Run eight = run(8, cap);
+    const Run uncapped = run(2, 0);
+
+    // THE CLAIM: no frame uploads more than the cap — and none needed to go oversize.
+    CHECK(one.worst_frame <= cap);
+    CHECK(one.stats.peak_upload_bytes_frame <= cap);
+    CHECK(one.stats.oversize_uploads == 0);
+    CHECK(one.ordered);
+    // Not vacuous: without the cap the same sweep uploads several times as much in one frame, and
+    // with it tiles really waited.
+    CHECK(uncapped.worst_frame > 2 * cap);
+    CHECK(one.stats.upload_cap_waits > 0);
+    CHECK(one.stats.missing.upload_capped > 0);
+    // What waits is covered by its parent: coverage exact from the roots on.
+    CHECK(one.covered);
+    CHECK(one.stats.pinned_evictions == 0);
+    CHECK(one.stats.fallback_draws > uncapped.stats.fallback_draws);
+    // DETERMINISM: the same uploads and the same waits, in the same order, with the same bytes,
+    // whatever order eight workers finished the loads in.
+    CHECK(one.journal.size() == eight.journal.size());
+    CHECK(one.journal == eight.journal);
+    std::size_t identical = 0;
+    for (std::size_t f = 0; f < one.selections.size(); ++f) {
+        identical += same_leaves(one.selections[f], eight.selections[f]) ? 1 : 0;
+    }
+    CHECK(identical == one.selections.size());
+    MESSAGE("m19.8e (b): cap " << cap << " bytes/frame over " << path.size()
+                               << " frames: worst frame " << one.worst_frame << " bytes (uncapped "
+                               << uncapped.worst_frame << "), " << one.stats.upload_cap_waits
+                               << " cap waits, " << one.stats.fallback_draws
+                               << " fallback tile-frames (uncapped "
+                               << uncapped.stats.fallback_draws << "); journal of "
+                               << one.journal.size()
+                               << " events identical across 1 and 8 load workers");
+}
+
+namespace {
+
+// THE REFERENCE FRUSTUM TEST, written differently from the engine's on purpose: the six planes
+// are extracted from the matrix (Gribb & Hartmann), normalised, in double, and a box is outside
+// when its POSITIVE VERTEX — the corner farthest along the plane's normal — is behind a plane.
+// The engine transforms the eight corners to clip space in float instead. The two are the same
+// predicate in exact arithmetic.
+struct RefFrustum {
+    std::array<std::array<double, 4>, 6> planes{};
+};
+
+RefFrustum ref_frustum(const core::Mat4& m) {
+    const auto row = [&](int r) {
+        return std::array<double, 4>{m.at(r, 0), m.at(r, 1), m.at(r, 2), m.at(r, 3)};
+    };
+    const auto r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+    RefFrustum f;
+    for (int c = 0; c < 4; ++c) {
+        f.planes[0][c] = r3[c] + r0[c]; // x >= -w
+        f.planes[1][c] = r3[c] - r0[c]; // x <=  w
+        f.planes[2][c] = r3[c] + r1[c]; // y >= -w
+        f.planes[3][c] = r3[c] - r1[c]; // y <=  w
+        f.planes[4][c] = r2[c];         // z >= 0 (Vulkan)
+        f.planes[5][c] = r3[c] - r2[c]; // z <=  w
+    }
+    for (auto& p : f.planes) {
+        const double n = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        for (double& v : p) {
+            v /= n;
+        }
+    }
+    return f;
+}
+
+bool ref_outside(const RefFrustum& f, const double lo[3], const double hi[3]) {
+    for (const auto& p : f.planes) {
+        const double x = p[0] >= 0 ? hi[0] : lo[0];
+        const double y = p[1] >= 0 ? hi[1] : lo[1];
+        const double z = p[2] >= 0 ? hi[2] : lo[2];
+        if (p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("m19.8e: (c) culling draws exactly the selection minus the leaves whose cooked box is "
+          "outside the frustum, and changes neither the selection nor residency") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("lod-cull");
+    const LodWorld w = make_lod_world(16, 16, 4);
+    write_lod_world(dir.path, w);
+    const assets::TerrainWorldGrid& g = w.world.grid();
+
+    // A perspective camera that sweeps the world while turning and pitching: horizontal views
+    // whose lower plane grazes the ground at a distance (where a box's height decides), steep
+    // views, and views of the sky.
+    struct View {
+        core::Vec3 eye;
+        core::Mat4 vp;
+    };
+
+    std::vector<View> views;
+    std::uint64_t rng = 0x8E8E8E8Eull;
+    const auto unit = [&]() {
+        rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<float>(rng >> 40) / static_cast<float>(1ull << 24);
+    };
+    for (const PathFrame& f : camera_path(w)) {
+        const float yaw = 6.2831853f * unit();
+        const float pitch = -0.9f + 1.3f * unit();
+        const core::Vec3 dir_v{
+            std::cos(pitch) * std::cos(yaw), std::sin(pitch), std::cos(pitch) * std::sin(yaw)};
+        const core::Vec3 at{f.eye.x + dir_v.x, f.eye.y + dir_v.y, f.eye.z + dir_v.z};
+        const float fov = 0.5f + 0.7f * unit();
+        views.push_back({f.eye,
+                         core::perspective(fov, 1.5f, 0.1f, 400.0f) *
+                             core::look_at(f.eye, at, {0.0f, 1.0f, 0.0f})});
+    }
+
+    struct Run {
+        std::vector<std::vector<TerrainLodLeaf>> selections;
+        std::vector<std::vector<TerrainTileKey>> resident;
+        std::vector<std::vector<TerrainTileKey>> drawn;
+        render::TerrainResidencyStats stats;
+    };
+
+    const auto run = [&](bool cull) {
+        Run out;
+        core::JobSystem jobs(2);
+        assets::AssetServer server(jobs);
+        render::TerrainPass pass(*device);
+        render::TerrainResidencyConfig cfg{};
+        cfg.slots = 24; // pressure: residency decides what is drawn
+        cfg.lod = test_view();
+        cfg.frustum_cull = cull;
+        render::TerrainResidency residency(*device, pass, server, w.world, dir.path, nullptr, cfg);
+        for (const View& v : views) {
+            view_frame(*device, server, residency, v.eye, v.vp);
+            out.selections.push_back(residency.selection().leaves);
+            out.resident.push_back(residency.resident_keys());
+            out.drawn.push_back(residency.drawn());
+        }
+        out.stats = residency.stats();
+        return out;
+    };
+    const Run on = run(true);
+    const Run off = run(false);
+
+    std::uint64_t expected_culled = 0;
+    std::uint64_t mismatches = 0;
+    std::uint64_t discriminating = 0; // leaves the tile's OWN samples would have culled wrongly
+    std::size_t same_selection = 0;
+    std::size_t same_residency = 0;
+    for (std::size_t f = 0; f < views.size(); ++f) {
+        const RefFrustum fr = ref_frustum(views[f].vp);
+        std::vector<TerrainTileKey> expected;
+        for (const TerrainLodLeaf& leaf : on.selections[f]) {
+            const assets::TerrainWorldTile* t = w.world.find(leaf.key);
+            const core::Vec3 o = g.tile_origin(leaf.key);
+            const double lo[3] = {o.x, t->min_y, o.z};
+            const double hi[3] = {static_cast<double>(o.x) + g.pitch_x(leaf.key.level),
+                                  t->max_y,
+                                  static_cast<double>(o.z) + g.pitch_z(leaf.key.level)};
+            const bool out_cooked = ref_outside(fr, lo, hi);
+            if (!out_cooked) {
+                expected.push_back(leaf.key);
+            } else {
+                ++expected_culled;
+            }
+            // The same leaf, boxed by its own samples only.
+            const assets::HeightfieldAsset& a = w.tiles.at(leaf.key);
+            const double own_lo[3] = {lo[0], world_height(a.min_sample), lo[2]};
+            const double own_hi[3] = {hi[0], world_height(a.max_sample), hi[2]};
+            discriminating += ref_outside(fr, own_lo, own_hi) != out_cooked ? 1u : 0u;
+        }
+        mismatches += expected != on.drawn[f] ? 1u : 0u;
+        same_selection += same_leaves(on.selections[f], off.selections[f]) ? 1 : 0;
+        same_residency += on.resident[f] == off.resident[f] ? 1 : 0;
+    }
+    // THE CLAIM: drawn = selected − outside, against an independent frustum test, every frame.
+    CHECK(mismatches == 0);
+    CHECK(on.stats.culled_draws == expected_culled);
+    CHECK(on.stats.draws + on.stats.culled_draws == off.stats.draws);
+    // ...and culling changed nothing else.
+    CHECK(same_selection == views.size());
+    CHECK(same_residency == views.size());
+    CHECK(on.stats.uploads == off.stats.uploads);
+    CHECK(on.stats.evictions == off.stats.evictions);
+    CHECK(on.stats.reclaims == off.stats.reclaims);
+    CHECK(on.stats.fallback_draws == off.stats.fallback_draws);
+    CHECK(on.stats.missing.total() == off.stats.missing.total());
+    CHECK(off.stats.culled_draws == 0);
+    // Not vacuous: plenty was culled and plenty drawn; and the cooked box DISCRIMINATES — on some
+    // leaves the tile's own samples give the other answer, so a cull by those would be red here.
+    CHECK(expected_culled > 200);
+    CHECK(on.stats.draws > 200);
+    CHECK(discriminating > 0);
+    MESSAGE("m19.8e (c): " << views.size() << " views: " << on.stats.draws << " drawn, "
+                           << on.stats.culled_draws << " culled, " << mismatches
+                           << " frames differing from the reference; selection and residency "
+                           << "identical with culling off in " << same_selection << "/"
+                           << same_residency << " frames; " << discriminating
+                           << " leaves where the own-sample box disagrees with the cooked one");
+}
