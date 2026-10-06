@@ -412,6 +412,21 @@ Entries are grouped roughly by area and kept short on purpose.
   the camera recedes, so a level-of-detail switch happens when the two surfaces already coincide
   and nothing pops. It only works when the coarse vertices are a subset of the fine ones — the
   reason Rime's terrain LOD is subsampled rather than filtered (m19.8d2 draws it).
+- **CDLOD (Continuous Distance-Dependent Level of Detail).** Strugar's 2009 terrain LOD scheme, and
+  Rime's (M19.8d2, [ADR-0071](adr/0071-m19.8d2-terrain-lod-render.md)): a quadtree of tiles where
+  each level owns a *distance range*; a node is split into its four children when the camera comes
+  within its children's range, and every vertex *geomorphs* toward the coarser level as it nears the
+  end of its range. Choosing the ranges so each one nests inside the next (at least the previous
+  range plus a tile's diagonal) is what keeps neighbouring tiles within one level of each other.
+- **Morph range.** The band of camera distance over which a terrain vertex slides from its own
+  height onto its parent's surface: 0 before `morph_start`, 1 after `morph_end`. In CDLOD it ends
+  just inside the level's range, so a tile appears (or disappears) only when it is fully morphed —
+  that is, exactly the surface it replaces.
+- **T-junction.** A vertex of one mesh lying on the middle of another mesh's edge, where two levels
+  of detail meet. If that vertex is even slightly off the coarse edge, the rasteriser leaves a
+  crack (or a row of sparkling pixels) between the two. Rime's fine terrain tiles force their
+  edge vertices fully onto the coarse neighbour's edge, so the only gap is f32 rounding (bounded in
+  ADR-0071).
 - **Height blending.** Splat blending where each layer's *height* map, not just its painted weight,
   decides who wins a transition texel: the locally higher layer takes more of it, so gravel shows
   through grass along the low cracks instead of the two cross-fading into one smudge. Rime's form

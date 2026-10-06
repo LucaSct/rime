@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #include "rime/assets/heightfield_asset.hpp"
@@ -75,7 +76,8 @@ void fill_grid_indices(std::uint32_t columns, std::uint32_t rows, std::vector<st
 TerrainPush terrain_push(const TerrainTile& tile,
                          const core::Mat4& view_proj,
                          const core::Vec3& eye,
-                         const TerrainLight& light) {
+                         const TerrainLight& light,
+                         const TerrainLodDraw& lod) {
     TerrainPush p{};
     p.view_proj = view_proj;
     p.placement[0] = tile.origin.x;
@@ -116,13 +118,35 @@ TerrainPush terrain_push(const TerrainTile& tile,
     // defaults (dielectric, fully rough), like the zero sun direction above; finite values clamp.
     p.material[0] = std::isfinite(light.metallic) ? std::clamp(light.metallic, 0.0f, 1.0f) : 0.0f;
     p.material[1] = std::isfinite(light.roughness) ? std::clamp(light.roughness, 0.0f, 1.0f) : 1.0f;
+    if (lod.enabled) {
+        p.lod_origin[0] = lod.grid_origin.x;
+        p.lod_origin[1] = lod.grid_origin.y;
+        p.lod_origin[2] = lod.grid_origin.z;
+        p.lod_camera[0] = lod.camera.x;
+        p.lod_camera[1] = lod.camera.y;
+        p.lod_camera[2] = lod.camera.z;
+        // A level that never morphs (the top, or a start at +inf) gets the largest finite start
+        // and a zero slope, so the shader's clamp((d − start) · slope) is exactly 0 with no inf·0
+        // NaN anywhere. A degenerate region (end <= start) morphs as a step at `start`.
+        const bool morphs = std::isfinite(lod.morph_start) && std::isfinite(lod.morph_end);
+        const float span = lod.morph_end - lod.morph_start;
+        p.lod_origin[3] = morphs ? lod.morph_start : std::numeric_limits<float>::max();
+        p.lod_camera[3] = !morphs       ? 0.0f
+                          : span > 0.0f ? 1.0f / span
+                                        : std::numeric_limits<float>::max();
+        p.lod_tile[0] = lod.base_x;
+        p.lod_tile[1] = lod.base_z;
+        p.lod_tile[2] =
+            static_cast<std::int32_t>(lod.coarser_edges & 0xFu) | kTerrainPushLodEnabled;
+        p.lod_tile[3] = static_cast<std::int32_t>(lod.level);
+    }
     return p;
 }
 
 TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
-    // The push block is 160 bytes, above Vulkan's guaranteed 128 (see TerrainPush). The limit is
-    // read once; a device below it makes every upload() refuse (counted, warned once) instead of
-    // drawing with a block the pipeline layout cannot hold.
+    // The push block is 208 bytes (m19.8d2), above Vulkan's guaranteed 128 (see TerrainPush). The
+    // limit is read once; a device below it makes every upload() refuse (counted, warned once)
+    // instead of drawing with a block the pipeline layout cannot hold.
     push_fits_ = device.adapter().max_push_constant_bytes >= sizeof(TerrainPush);
     vertex_shader_ = make_shader(device,
                                  rhi::ShaderStage::Vertex,
@@ -535,7 +559,8 @@ void TerrainPass::add(RenderGraph& graph,
                       const core::Mat4& view_proj,
                       const core::Vec3& eye,
                       const TerrainLight& light,
-                      const SkyLightBinding& sky) {
+                      const SkyLightBinding& sky,
+                      const TerrainLodDraw& lod) {
     // The structural gate: an unknown tile declares NO pass, so the frame is byte-identical to one
     // from a build without this file. A pass that ran and drew zero indices would be *almost*
     // that, and almost is not a regression bridge (ADR-0032 §11).
@@ -544,7 +569,7 @@ void TerrainPass::add(RenderGraph& graph,
     }
     const TerrainTile& tile = tiles_[id];
 
-    const TerrainPush push = terrain_push(tile, view_proj, eye, light);
+    const TerrainPush push = terrain_push(tile, view_proj, eye, light, lod);
 
     // LOAD the HDR target: terrain is one contributor to a frame, not its owner. Depth is written,
     // because terrain is opaque — a tile must occlude what is behind it, and be occluded by what

@@ -112,6 +112,20 @@ TerrainResidency::TerrainResidency(rhi::Device& device,
       slots_(std::max<std::uint32_t>(config.slots, 1)), payloads_(slots_.capacity()) {
     config_.slots = slots_.capacity();
     config_.retention_radius = std::max(config_.retention_radius, config_.activation_radius);
+    lod_ = world_.level_count() > 1;
+    if (lod_) {
+        ranges_ = terrain_lod_ranges(world_, config_.lod);
+        // The pinned root cover must fit, or the residency cannot promise coverage at all.
+        const std::size_t roots = world_.tiles(world_.level_count() - 1).size();
+        if (roots > slots_.capacity()) {
+            lod_refused_ = true;
+            ++stats_.root_cover_refusals;
+            RIME_WARN("terrain residency: the world's {} root tiles exceed the {}-slot budget — "
+                      "refused, nothing will be drawn",
+                      roots,
+                      slots_.capacity());
+        }
+    }
 }
 
 TerrainResidency::~TerrainResidency() {
@@ -133,7 +147,7 @@ TerrainResidency::~TerrainResidency() {
             }
         }
     }
-    for (auto& [c, r] : records_) {
+    for (auto& [k, r] : records_) {
         forget(r);
     }
 }
@@ -185,20 +199,21 @@ void TerrainResidency::forget(Record& r) {
     }
 }
 
-bool TerrainResidency::check_world(assets::TerrainTileCoord c,
+bool TerrainResidency::check_world(assets::TerrainTileKey k,
                                    const assets::HeightfieldAsset& asset,
                                    const assets::TerrainTileEdges& edges) {
-    const assets::TerrainTileCheck fit = assets::check_tile(world_.grid(), c, asset);
+    const assets::TerrainTileCheck fit = assets::check_tile(world_.grid(), k, asset);
     if (fit != assets::TerrainTileCheck::Ok) {
         refusals_.count(fit);
         return false;
     }
-    // Against every RESIDENT edge neighbour: the samples on a shared edge must be the same
-    // integers, or the two tiles draw a crack (terrain_world.hpp).
+    // Against every RESIDENT edge neighbour of the same level: the samples on a shared edge must
+    // be the same integers, or the two tiles draw a crack (terrain_world.hpp).
+    const assets::TerrainTileCoord c = k.coord;
     const std::array<assets::TerrainTileCoord, 4> around = {
         {{c.x + 1, c.z}, {c.x - 1, c.z}, {c.x, c.z + 1}, {c.x, c.z - 1}}};
     for (const assets::TerrainTileCoord n : around) {
-        const auto it = records_.find(n);
+        const auto it = records_.find({k.level, n});
         if (it != records_.end() && it->second.phase == Phase::Resident &&
             !assets::edges_match(edges, c, it->second.edges, n)) {
             ++refusals_.border_mismatches;
@@ -208,24 +223,160 @@ bool TerrainResidency::check_world(assets::TerrainTileCoord c,
     return true;
 }
 
-std::optional<TerrainResidentId> TerrainResidency::take_slot(const core::Vec3& eye) {
-    if (const auto id = slots_.acquire()) {
-        return id;
+bool TerrainResidency::check_parent(assets::TerrainTileKey k,
+                                    const assets::HeightfieldAsset& asset) {
+    if (!lod_ || k.level + 1 >= world_.level_count()) {
+        return true; // a root, or a world without a chain: no parent to agree with
     }
-    // No free slot: evict the FARTHEST resident tile beyond retention (ties broken by coordinate,
-    // so the choice is deterministic). A kept tile is never evicted for a wanted one — that is
-    // what the hysteresis promises — so with every slot kept the wanted tile waits, counted.
-    const auto& grid = world_.grid();
-    auto victim = records_.end();
-    float victim_d = config_.retention_radius;
-    for (auto it = records_.begin(); it != records_.end(); ++it) {
-        if (it->second.phase != Phase::Resident) {
-            continue;
+    const assets::TerrainTileKey p{k.level + 1, assets::terrain_parent_coord(k.coord)};
+    if (refused_parents_.contains(p) || verified_pairs_.contains({p, k})) {
+        return true;
+    }
+    const auto it = records_.find(p);
+    if (it == records_.end() || it->second.phase != Phase::Resident ||
+        !it->second.heightfield.is_valid()) {
+        ++stats_.parent_waits; // the parent is wanted first, so this resolves within frames
+        return false;
+    }
+    const assets::HeightfieldAsset* parent = server_.get(it->second.heightfield);
+    ++stats_.coincidence_checks;
+    if (parent != nullptr && assets::samples_coincide(*parent, p, asset, k)) {
+        verified_pairs_.insert({p, k});
+        return true;
+    }
+    // The 8d1 handoff's rule: the PARENT is the one refused. A level-0 child is the cooked truth
+    // (it is what physics collides with), so a parent that disagrees with it is wrong, for good. A
+    // child ABOVE level 0 is only as trustworthy as its own subsamples, so its accusation is
+    // PROVISIONAL: if that child is refused in turn (by one of its own children), the parent it
+    // accused is cleared and asked for again (`refusals_retracted`). Without that, one corrupted
+    // mid-level tile would take every innocent ancestor up to the pinned root down with it.
+    ++refusals_.coincidence_mismatches;
+    refuse_parent(p, k);
+    return true;
+}
+
+void TerrainResidency::refuse_parent(assets::TerrainTileKey parent,
+                                     assets::TerrainTileKey accuser) {
+    refused_parents_.insert(parent);
+    ++stats_.refused_parents;
+    if (accuser.level > 0) {
+        accused_by_[parent] = accuser;
+    } else {
+        accused_by_.erase(parent); // a level-0 witness makes the refusal final
+    }
+    // The parent was itself a witness against ITS parent: that accusation no longer stands.
+    for (auto it = accused_by_.begin(); it != accused_by_.end();) {
+        if (it->second == parent) {
+            const assets::TerrainTileKey cleared = it->first;
+            it = accused_by_.erase(it);
+            refused_parents_.erase(cleared);
+            const auto rec = records_.find(cleared);
+            if (rec != records_.end() && rec->second.phase == Phase::Refused) {
+                records_.erase(rec); // requested again at the next begin_frame
+            }
+            ++stats_.refusals_retracted;
+        } else {
+            ++it;
         }
-        const float d = grid.distance_xz(it->first, eye);
-        if (d > victim_d) {
-            victim = it;
-            victim_d = d;
+    }
+    const auto it = records_.find(parent);
+    if (it == records_.end()) {
+        return;
+    }
+    Record& r = it->second;
+    if (r.phase == Phase::Resident) {
+        slots_.evict(r.id); // fence-safe as always: reclaimed once its last reader retires
+        ++stats_.evictions;
+        if (r.pinned) {
+            ++stats_.pinned_evictions; // counted: a refusal, not pressure, took a root
+        }
+        r.id = {};
+    }
+    forget(r);
+    r.phase = Phase::Refused;
+}
+
+TerrainResidency::Priority TerrainResidency::priority(assets::TerrainTileKey k,
+                                                      const core::Vec3& eye) const {
+    // Ranked by the distance of the tile's PARENT box: four siblings tie, so a split's whole group
+    // loads together (three children of four are worth nothing — a node draws its children only
+    // if all four are resident), and a parent is never farther than its child, so with the
+    // coarser-first tie break a chain loads top-down. Roots, then wanted, then prefetch.
+    const std::uint32_t top = world_.level_count() - 1;
+    const auto rec = records_.find(k);
+    const bool pinned = rec != records_.end() && rec->second.pinned;
+    Priority p{};
+    p.cls = pinned ? 0 : wanted_.contains(k) ? 1 : prefetch_.contains(k) ? 2 : 3;
+    const assets::TerrainTileKey group =
+        k.level >= top ? k
+                       : assets::TerrainTileKey{k.level + 1, assets::terrain_parent_coord(k.coord)};
+    p.d = static_cast<float>(terrain_lod_distance(world_, group, eye));
+    p.depth = top - std::min(k.level, top);
+    p.key = k;
+    return p;
+}
+
+float TerrainResidency::distance(assets::TerrainTileKey k, const core::Vec3& eye) const {
+    return lod_ ? static_cast<float>(terrain_lod_distance(world_, k, eye))
+                : world_.grid().distance_xz(k.coord, eye);
+}
+
+std::optional<TerrainResidentId> TerrainResidency::take_slot(assets::TerrainTileKey k,
+                                                             const core::Vec3& eye) {
+    // m19.8d2: the reserved root slots. A non-root may take a free slot only while more are free
+    // than there are roots still waiting for one, so the root cover always fits.
+    const auto may_acquire = [&]() {
+        if (!lod_) {
+            return true;
+        }
+        const auto rec = records_.find(k);
+        if (rec != records_.end() && rec->second.pinned) {
+            return true;
+        }
+        std::uint32_t waiting_roots = 0;
+        for (const auto& [rk, r] : records_) {
+            waiting_roots += r.pinned && r.phase != Phase::Resident && r.phase != Phase::Refused;
+        }
+        return slots_.count(TerrainSlotTable::State::Free) > waiting_roots;
+    };
+    if (may_acquire()) {
+        if (const auto id = slots_.acquire()) {
+            return id;
+        }
+    }
+    // Pick a victim (ties broken by key, so the choice is deterministic).
+    //  * m19.8a: the FARTHEST resident tile beyond retention. A kept tile is never evicted for a
+    //    wanted one — that is what the hysteresis promises — so with every slot kept the wanted
+    //    tile waits, counted.
+    //  * m19.8d2: the resident tile of the LOWEST priority, if it is lower than the requester's —
+    //    never a root. A tile no longer wanted goes first, then prefetch, then wanted tiles behind
+    //    the requester: under pressure the far, fine end of the queue gives way, never a parent
+    //    to its own child (a parent always ranks ahead of its children).
+    auto victim = records_.end();
+    if (!lod_) {
+        float victim_d = config_.retention_radius;
+        for (auto it = records_.begin(); it != records_.end(); ++it) {
+            if (it->second.phase != Phase::Resident) {
+                continue;
+            }
+            const float d = distance(it->first, eye);
+            if (d > victim_d) {
+                victim = it;
+                victim_d = d;
+            }
+        }
+    } else {
+        const Priority mine = priority(k, eye);
+        Priority worst = mine;
+        for (auto it = records_.begin(); it != records_.end(); ++it) {
+            if (it->second.phase != Phase::Resident || it->second.pinned) {
+                continue;
+            }
+            const Priority p = priority(it->first, eye);
+            if (worst < p) {
+                victim = it;
+                worst = p;
+            }
         }
     }
     if (victim == records_.end()) {
@@ -233,13 +384,14 @@ std::optional<TerrainResidentId> TerrainResidency::take_slot(const core::Vec3& e
     }
     slots_.evict(victim->second.id);
     ++stats_.evictions;
+    forget(victim->second); // a resident parent's retained heightfield goes back to the server
     records_.erase(victim); // the payload stays with the slot until it is reclaimed
     // The evicted slot may already be reclaimable (no unretired frame read it).
     reclaim_slots();
-    return slots_.acquire();
+    return may_acquire() ? slots_.acquire() : std::nullopt;
 }
 
-void TerrainResidency::advance(assets::TerrainTileCoord c, Record& r, const core::Vec3& eye) {
+void TerrainResidency::advance(assets::TerrainTileKey k, Record& r, const core::Vec3& eye) {
     if (r.phase == Phase::Loading) {
         const assets::AssetState s = server_.state(r.heightfield);
         if (s == assets::AssetState::Loading) {
@@ -252,7 +404,7 @@ void TerrainResidency::advance(assets::TerrainTileCoord c, Record& r, const core
             r.phase = Phase::Refused;
             return;
         }
-        const assets::TerrainTileCheck fit = assets::check_tile(world_.grid(), c, *asset);
+        const assets::TerrainTileCheck fit = assets::check_tile(world_.grid(), k, *asset);
         if (fit != assets::TerrainTileCheck::Ok) {
             refusals_.count(fit);
             ++stats_.refused_world;
@@ -294,13 +446,17 @@ void TerrainResidency::advance(assets::TerrainTileCoord c, Record& r, const core
     // this moment — a neighbour that arrived while this tile waited for its palette or a slot is
     // checked too.
     assets::TerrainTileEdges edges = assets::tile_edges(*asset);
-    if (!check_world(c, *asset, edges)) {
+    if (!check_world(k, *asset, edges)) {
         ++stats_.refused_world;
         forget(r);
         r.phase = Phase::Refused;
         return;
     }
-    const std::optional<TerrainResidentId> id = take_slot(eye);
+    // m19.8d2: the child agrees with its parent before it can be drawn under it.
+    if (!check_parent(k, *asset)) {
+        return;
+    }
+    const std::optional<TerrainResidentId> id = take_slot(k, eye);
     if (!id) {
         r.waiting_for_slot = true;
         return;
@@ -316,18 +472,39 @@ void TerrainResidency::advance(assets::TerrainTileCoord c, Record& r, const core
         return;
     }
     Payload& p = payloads_[id->slot];
-    p.coord = c;
+    p.key = k;
     p.pass_tile = tile;
     p.palette = r.palette; // the slot owns the palette now: released at reclaim, after retirement
     p.bytes = pass_.tile_bytes(tile);
     r.palette = kInvalidTerrainPalette;
     // The GPU has its own copy of the samples, and the borders are kept for the neighbour check,
-    // so the CPU payload is handed back to the asset server now.
-    forget(r);
+    // so the CPU payload is handed back to the asset server now — except a LOD PARENT's, which
+    // its children are compared against as they arrive (check_parent).
+    if (!(lod_ && k.level > 0)) {
+        forget(r);
+    }
     r.edges = std::move(edges);
     r.id = *id;
     r.phase = Phase::Resident;
     ++stats_.uploads;
+}
+
+void TerrainResidency::request(assets::TerrainTileKey k) {
+    if (records_.contains(k)) {
+        return;
+    }
+    Record r;
+    r.pinned = lod_ && k.level + 1 == world_.level_count();
+    if (refused_parents_.contains(k)) {
+        r.phase = Phase::Refused; // sticky: a refused parent is never asked for again
+        records_.emplace(k, std::move(r));
+        return;
+    }
+    const assets::TerrainWorldTile* t = world_.find(k);
+    const std::filesystem::path rel(t->path);
+    r.heightfield = server_.request_heightfield(rel.is_absolute() ? rel : world_dir_ / rel);
+    ++stats_.heightfield_requests;
+    records_.emplace(k, std::move(r));
 }
 
 void TerrainResidency::begin_frame(const core::Vec3& eye) {
@@ -348,13 +525,18 @@ void TerrainResidency::begin_frame(const core::Vec3& eye) {
     frame_open_ = true;
     ++stats_.frames_begun;
     stats_.missing_this_frame = {};
+    if (lod_) {
+        begin_frame_lod(eye);
+        update_gauges();
+        return;
+    }
 
     const auto& grid = world_.grid();
     // 1. Forget what is no longer kept and never became resident (a load the camera outran).
     for (auto it = records_.begin(); it != records_.end();) {
         Record& r = it->second;
         if (r.phase != Phase::Resident &&
-            grid.distance_xz(it->first, eye) > config_.retention_radius) {
+            grid.distance_xz(it->first.coord, eye) > config_.retention_radius) {
             if (r.phase == Phase::Loading || r.phase == Phase::Building) {
                 ++stats_.cancelled_loads;
             }
@@ -368,36 +550,28 @@ void TerrainResidency::begin_frame(const core::Vec3& eye) {
     const std::vector<assets::TerrainTileCoord> wanted =
         world_.tiles_within(eye, config_.activation_radius);
     for (const assets::TerrainTileCoord c : wanted) {
-        if (records_.contains(c)) {
-            continue;
-        }
-        const assets::TerrainWorldTile* t = world_.find(c);
-        const std::filesystem::path rel(t->path);
-        Record r;
-        r.heightfield = server_.request_heightfield(rel.is_absolute() ? rel : world_dir_ / rel);
-        ++stats_.heightfield_requests;
-        records_.emplace(c, std::move(r));
+        request({0, c});
     }
     // 3. Advance every non-resident record, NEAREST FIRST, so the closest tiles take the slots.
-    std::vector<std::pair<float, assets::TerrainTileCoord>> order;
-    for (const auto& [c, r] : records_) {
+    std::vector<std::pair<float, assets::TerrainTileKey>> order;
+    for (const auto& [k, r] : records_) {
         if (r.phase == Phase::Loading || r.phase == Phase::Building) {
-            order.emplace_back(grid.distance_xz(c, eye), c);
+            order.emplace_back(grid.distance_xz(k.coord, eye), k);
         }
     }
     std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
         return a.first != b.first ? a.first < b.first : a.second < b.second;
     });
-    for (const auto& [d, c] : order) {
-        const auto it = records_.find(c); // an eviction may have erased OTHER records, never this
+    for (const auto& [d, k] : order) {
+        const auto it = records_.find(k); // an eviction may have erased OTHER records, never this
         if (it != records_.end()) {
-            advance(c, it->second, eye);
+            advance(k, it->second, eye);
         }
     }
     // 4. Count every wanted tile that is not resident, under exactly one reason.
     TerrainMissCounts& m = stats_.missing_this_frame;
     for (const assets::TerrainTileCoord c : wanted) {
-        const Record& r = records_.at(c);
+        const Record& r = records_.at({0, c});
         switch (r.phase) {
             case Phase::Resident:
                 break;
@@ -422,6 +596,139 @@ void TerrainResidency::begin_frame(const core::Vec3& eye) {
     update_gauges();
 }
 
+bool TerrainResidency::usable(assets::TerrainTileKey k) const {
+    const auto it = records_.find(k);
+    return it != records_.end() && it->second.phase == Phase::Resident;
+}
+
+void TerrainResidency::begin_frame_lod(const core::Vec3& eye) {
+    selection_eye_ = eye;
+    if (lod_refused_) {
+        selection_ = {};
+        ideal_ = {};
+        return;
+    }
+    const std::uint32_t top = world_.level_count() - 1;
+
+    // 1. What the camera wants: the IDEAL selection (every tile assumed usable), every ancestor
+    //    of its leaves, and the pinned roots; then the prefetch ring one level finer.
+    ideal_ = select_terrain_lod(world_, ranges_, eye, [&](assets::TerrainTileKey k) {
+        return world_.find(k) != nullptr && !refused_parents_.contains(k);
+    });
+    wanted_.clear();
+    prefetch_.clear();
+    for (const assets::TerrainWorldTile& t : world_.tiles(top)) {
+        wanted_.insert(t.key());
+    }
+    for (const TerrainLodLeaf& leaf : ideal_.leaves) {
+        for (assets::TerrainTileKey k = leaf.key; k.level <= top;
+             k = {k.level + 1, assets::terrain_parent_coord(k.coord)}) {
+            if (!wanted_.insert(k).second && k.level > leaf.key.level) {
+                break; // the rest of this chain is already in
+            }
+        }
+    }
+    for (const TerrainLodLeaf& leaf : ideal_.leaves) {
+        const assets::TerrainTileKey n = leaf.key;
+        if (n.level == 0) {
+            continue;
+        }
+        const TerrainLodLevel& child_level = ranges_.levels[n.level - 1];
+        if (terrain_lod_distance(world_, n, eye) <=
+            static_cast<double>(child_level.range) + static_cast<double>(child_level.diagonal)) {
+            const std::uint32_t l = n.level - 1;
+            const std::int32_t x = n.coord.x * 2;
+            const std::int32_t z = n.coord.z * 2;
+            for (const assets::TerrainTileKey c : {assets::TerrainTileKey{l, {x, z}},
+                                                   assets::TerrainTileKey{l, {x + 1, z}},
+                                                   assets::TerrainTileKey{l, {x, z + 1}},
+                                                   assets::TerrainTileKey{l, {x + 1, z + 1}}}) {
+                if (!wanted_.contains(c)) {
+                    prefetch_.insert(c);
+                }
+            }
+        }
+    }
+
+    // 2. Forget what is neither wanted nor prefetched and never became resident.
+    for (auto it = records_.begin(); it != records_.end();) {
+        Record& r = it->second;
+        if (r.phase != Phase::Resident && !wanted_.contains(it->first) &&
+            !prefetch_.contains(it->first)) {
+            if (r.phase == Phase::Loading || r.phase == Phase::Building) {
+                ++stats_.cancelled_loads;
+            }
+            forget(r);
+            it = records_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // 3. Request. Pinned roots, then wanted, then prefetch.
+    for (const assets::TerrainTileKey k : wanted_) {
+        request(k);
+    }
+    for (const assets::TerrainTileKey k : prefetch_) {
+        if (!records_.contains(k)) {
+            ++stats_.prefetch_requests;
+        }
+        request(k);
+    }
+
+    // 4. Advance in priority order (see `priority`): roots, then wanted, then prefetch.
+    std::vector<Priority> order;
+    for (const auto& [k, r] : records_) {
+        if (r.phase == Phase::Loading || r.phase == Phase::Building) {
+            order.push_back(priority(k, eye));
+        }
+    }
+    std::sort(order.begin(), order.end());
+    for (const Priority& p : order) {
+        const auto it = records_.find(p.key);
+        if (it != records_.end()) {
+            advance(p.key, it->second, eye);
+        }
+    }
+
+    // 5. What is drawn: the selection over what is resident and trusted.
+    selection_ = select_terrain_lod(
+        world_, ranges_, eye, [&](assets::TerrainTileKey k) { return usable(k); });
+    stats_.fallback_draws += selection_.fallback_leaves;
+    stats_.balance_collapses += selection_.balance_collapses;
+    stats_.uncovered_draws += selection_.uncovered;
+
+    // 6. Every wanted tile that is not resident, under exactly one reason (as m19.8a counts).
+    TerrainMissCounts& m = stats_.missing_this_frame;
+    for (const assets::TerrainTileKey k : wanted_) {
+        const auto it = records_.find(k);
+        if (it == records_.end()) {
+            continue;
+        }
+        const Record& r = it->second;
+        switch (r.phase) {
+            case Phase::Resident:
+                break;
+            case Phase::Loading:
+                ++m.not_loaded;
+                break;
+            case Phase::Building:
+                ++(r.waiting_for_slot ? m.no_free_slot : m.not_loaded);
+                break;
+            case Phase::Refused:
+                ++m.refused;
+                break;
+            case Phase::UploadFailed:
+                ++m.upload_failed;
+                break;
+        }
+    }
+    stats_.missing.not_loaded += m.not_loaded;
+    stats_.missing.no_free_slot += m.no_free_slot;
+    stats_.missing.upload_failed += m.upload_failed;
+    stats_.missing.refused += m.refused;
+}
+
 void TerrainResidency::update_gauges() {
     stats_.resident_slots = slots_.count(TerrainSlotTable::State::Occupied);
     stats_.retiring_slots = slots_.count(TerrainSlotTable::State::Retiring);
@@ -436,6 +743,11 @@ void TerrainResidency::update_gauges() {
     stats_.resident_bytes = bytes;
     stats_.peak_resident_bytes = std::max(stats_.peak_resident_bytes, bytes);
     stats_.frames_in_flight = static_cast<std::uint32_t>(submitted_.size());
+    std::uint32_t roots = 0;
+    for (const auto& [k, r] : records_) {
+        roots += r.pinned && r.phase == Phase::Resident ? 1u : 0u;
+    }
+    stats_.pinned_roots = roots;
 }
 
 void TerrainResidency::add(RenderGraph& graph,
@@ -449,10 +761,50 @@ void TerrainResidency::add(RenderGraph& graph,
         ++stats_.draws_outside_frame;
         return;
     }
+    if (lod_) {
+        for (const TerrainLodLeaf& leaf : selection_.leaves) {
+            draw_leaf(graph, leaf, hdr, depth, view_proj, eye, light, sky);
+        }
+        return;
+    }
     for (std::uint32_t i = 0; i < slots_.capacity(); ++i) {
         if (slots_.state(i) == TerrainSlotTable::State::Occupied) {
             add_tile(graph, {i, slots_.generation(i)}, hdr, depth, view_proj, eye, light, sky);
         }
+    }
+}
+
+void TerrainResidency::draw_leaf(RenderGraph& graph,
+                                 const TerrainLodLeaf& leaf,
+                                 RGTexture hdr,
+                                 RGTexture depth,
+                                 const core::Mat4& view_proj,
+                                 const core::Vec3& eye,
+                                 const TerrainLight& light,
+                                 const SkyLightBinding& sky) {
+    const TerrainResidentId id = resident(leaf.key);
+    if (!slots_.mark_read(id, frame_)) {
+        ++stats_.stale_draws; // cannot happen: the selection only names resident tiles
+        return;
+    }
+    const assets::TerrainWorldGrid& g = world_.grid();
+    const auto n = static_cast<std::int32_t>(g.samples - 1);
+    const TerrainLodLevel& lv = ranges_.levels[leaf.key.level];
+    TerrainLodDraw lod{};
+    lod.enabled = true;
+    lod.grid_origin = g.origin;
+    lod.base_x = leaf.key.coord.x * n;
+    lod.base_z = leaf.key.coord.z * n;
+    lod.level = leaf.key.level;
+    lod.coarser_edges = leaf.coarser_edges;
+    lod.camera = selection_eye_; // the camera the selection — and so the edge guarantees — used
+    lod.morph_start = lv.morph_start;
+    lod.morph_end = lv.morph_end;
+    pass_.add(graph, hdr, depth, payloads_[id.slot].pass_tile, view_proj, eye, light, sky, lod);
+    ++stats_.draws;
+    ++stats_.lod_draws;
+    if (leaf.key.level > 0) {
+        ++stats_.fallback_appearance_draws; // a parent: the flat placeholder material (8d3)
     }
 }
 
@@ -498,16 +850,30 @@ void TerrainResidency::end_frame_blocking() {
 }
 
 TerrainResidentId TerrainResidency::resident(assets::TerrainTileCoord c) const {
-    const auto it = records_.find(c);
+    return resident(assets::TerrainTileKey{0, c});
+}
+
+TerrainResidentId TerrainResidency::resident(assets::TerrainTileKey k) const {
+    const auto it = records_.find(k);
     return it != records_.end() && it->second.phase == Phase::Resident ? it->second.id
                                                                        : TerrainResidentId{};
 }
 
 std::vector<assets::TerrainTileCoord> TerrainResidency::resident_tiles() const {
     std::vector<assets::TerrainTileCoord> out;
-    for (const auto& [c, r] : records_) {
+    for (const auto& [k, r] : records_) {
+        if (r.phase == Phase::Resident && k.level == 0) {
+            out.push_back(k.coord);
+        }
+    }
+    return out;
+}
+
+std::vector<assets::TerrainTileKey> TerrainResidency::resident_keys() const {
+    std::vector<assets::TerrainTileKey> out;
+    for (const auto& [k, r] : records_) {
         if (r.phase == Phase::Resident) {
-            out.push_back(c);
+            out.push_back(k);
         }
     }
     return out;
