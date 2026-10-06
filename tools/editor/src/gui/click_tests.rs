@@ -1038,8 +1038,7 @@ fn open_file_menu_and_type_open_path(rig: &mut Rig, path: &str) {
     rig.click("File");
     rig.harness
         .get_all_by_role(Role::TextInput)
-        .filter(|n| !before.contains(&n.id()))
-        .last()
+        .rfind(|n| !before.contains(&n.id()))
         .expect("the Open path box")
         .type_text(path);
     rig.settle();
