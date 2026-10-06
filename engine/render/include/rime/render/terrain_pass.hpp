@@ -144,19 +144,23 @@ struct TerrainTile {
 // world.xz / uv_scale, so a pattern runs continuously across tile seams. Finite and > 0, or the
 // tile is refused and counted.
 //
-// m19.7c (ADR-0066 §5 and its m19.7c addendum): `height_contrast` is the asset's third field — how
-// strongly this layer's HEIGHT (the texture's A) bends the painted weights. Where layers overlap,
-// each painted layer k is scaled by 2^(contrast_k * (h_k - h_max)), h_max being the highest
-// PAINTED layer at that pixel, and the weights are renormalised: the locally higher layer shows
-// through first, the way gravel shows in the low cracks of grass. 0 (the default) is the plain
-// m19.4 cross-fade, exactly: with every painted layer at contrast 0, or at one common height (all
-// untextured layers are — the fallback's height is 0), the shader returns the sampled weights
-// untouched, so the result is bit-identical to m19.7b. A layer painted at weight 0 never gains a
-// share, whatever its height. Finite and >= 0, or the tile is refused and counted. KNOWN LIMIT:
-// give layers that overlap the SAME contrast — with unequal contrasts, a tall layer painted in at
-// even 1/255 re-divides the layers beneath it, a visible step (ADR-0066, m19.7c addendum). The pass
-// still takes RESOLVED layers: filling this from the cooked `TerrainLayerAsset` is the builder's
-// job.
+// m19.7c (ADR-0066 §5 and its m19.7c addendum; fix 1 in its addendum): `height_contrast` is the
+// asset's third field — how strongly this layer's HEIGHT (the texture's A) bends the painted
+// weights. A layer's effective height is e_k = contrast_k * h_k. Where layers overlap, each painted
+// layer k is scaled by 2^(e_k - e_ref), e_ref being the highest e over PAINTED layers at that
+// pixel, and the weights are renormalised: the locally higher layer shows through first, the way
+// gravel shows in the low cracks of grass. e_ref is one number for every layer, so it cancels
+// exactly, and one layer's height no longer re-divides the others (fixed in fix 1). Contrast scales
+// the layer's own height map: a higher-contrast layer acts taller. 0 (the default) is the plain
+// m19.4 cross-fade, exactly: with every painted layer at one common effective height (every
+// painted layer at contrast 0, or at height 0 as untextured layers are), the shader returns the
+// sampled weights untouched, so the result is bit-identical to m19.7b. A layer painted at weight 0
+// never gains a share, whatever its height. Finite and >= 0, or the tile is refused and counted.
+// KNOWN LIMIT: unequal contrasts are not weight-preserving. At equal heights the higher-contrast
+// layer is the taller one and takes more of the pixel than it was painted (by design; ADR-0066,
+// m19.7c fix 1). Give layers that overlap the SAME contrast if the painted weights must be drawn
+// exactly. The pass still takes RESOLVED layers: filling this from the cooked `TerrainLayerAsset`
+// is the builder's job.
 struct TerrainLayer {
     core::Vec3 base_color{0.5f, 0.5f, 0.5f};
     float metallic = 0.0f;
