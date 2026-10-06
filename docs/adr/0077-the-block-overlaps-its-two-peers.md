@@ -1,7 +1,7 @@
 # ADR-0077: the block runs its server and client halves at once — and what `sim.block` now means
 
-- Status: **Provisional** — accepted only after Luca's pinned RTX 3060 run (see "What must be checked")
-- Date: 2026-10-06
+- Status: **Accepted** — the pinned RTX 3060 run it asked for has been made; see "What was checked"
+- Date: 2026-10-06 (provisional), 2026-10-06 (accepted on the pinned run)
 
 ## Context
 
@@ -56,7 +56,7 @@ wall clock now holds `max(client half, server half)` rather than their sum. **Th
 changed**: `frame` 16.6 / 33, `sim.block` 6.0, `sim.collapse` 12.0. No quality setting and no scene
 content changed.
 
-## Measured (UNPINNED — RADV iGPU on the same Ryzen 9 9950X3D; the RTX 3060 was mid-driver-upgrade)
+## Measured, development arm (UNPINNED — RADV iGPU on the same Ryzen 9 9950X3D; the RTX 3060 was mid-driver-upgrade)
 
 Interleaved, 600 frames, 3 runs per arm, 1-minute load 1.1–3.8, `main` (453866b) as control:
 
@@ -75,24 +75,78 @@ layer disabled): 0 reports, all 29 claims hold. With the validation layer enable
 fire, all inside `libVkLayer_khronos_validation` during renderer construction, none in this
 change's code.
 
+## Measured, the gate's machine (PINNED — RTX 3060, driver 615.71.09)
+
+Both arms are committed reports, so anyone can re-read them rather than trust this table:
+control `docs/perf/2026-10-06-99-the-block-nvidia-geforce-rtx-3060.json` on `main` (453866b),
+treatment the same path on this branch (3adeee9). 600 frames each, preset
+`block-all-lighting-gates`, 1920×1080, RelWithDebInfo, sanitizer off. Clocks pinned with
+`nvidia-smi -pm 1`, then `-lgc 1837,1837`, then `-lmc 7501,7501` as **three separate commands**:
+both runs report graphics 1837 MHz median, **0.0 % spread, `stable: true`**.
+
+| | `main` 453866b | this 3adeee9 | budget | |
+|---|---|---|---|---|
+| `frame` p99 | 20.958 | **13.705** | 16.6 | **now passes** |
+| `frame` max | 21.377 | **15.971** | 33 | passes |
+| `sim.block` p99 | 15.441 | **8.328** | 6.0 | **still over** |
+| `sim.collapse` max (n=90) | 15.426 | **8.154** | 12.0 | **now passes** |
+| `frame.submit` p99 | 4.112 | 3.677 | — | |
+| `physics.server.step` p99 | 7.668 | 7.891 | — | contention: +0.2 |
+| `physics.client.step` p99 | 7.548 | 7.947 | — | contention: +0.4 |
+| `sim.join` p99 / max | — | 1.095 / 7.852 | — | new zone |
+
+A second pinned run of the treatment read `sim.block` p99 8.64, so take 8.3–8.6 as the arm's
+spread rather than 8.328 as a point.
+
+**Why pinning was not optional.** Unpinned runs on this card read a 735–742 MHz median with a
+**~208 % spread** — they measured the clock ramp as much as the engine. That is where the earlier
+`frame` p99 of 28.01 and max of 57.10 came from.
+
+**A correction this run forces on the "Consequences" below.** The provisional ADR put the
+serialized GPU wait at "about 11 ms p99 on the 3060" and named it the largest remaining cost.
+Pinned, `frame.submit` p99 is **4.112 on `main` and 3.677 here** — the 11 ms was the card ramping,
+not the queue. So the ordering is reversed: after this change the largest remaining cost in
+`sim.block` is **one physics step** (p99 ≈ 7.9, of which contacts 4.101 and solve 3.222 on the
+server half), not the submit. Pipelining would not move `sim.block` at all.
+
 ## Consequences
 
-- **Projected, not measured:** on the 3060, `frame` p99 ≈ 28.0 − (15.5 − 8.4) ≈ **21 ms**. That is
-  still over 16.6. `sim.block` p99 ≈ 8.4 is still over 6.0. `sim.collapse` max ≈ 8.4 would pass
-  12.0. Gate 7 is **not** closed by this ADR.
-- What remains, in size order: the serialized GPU wait (`frame.submit`, about 11 ms p99 on the
-  3060), which pipelining takes off the critical path but which is a fingerprint and baseline
-  decision for Luca. Then one physics step per half (~7.6 ms each, with contacts ~3.9 and solve
-  ~3.2 the largest stages).
+- **The projection, and what it got right and wrong.** It read: "on the 3060, `frame` p99 ≈ 28.0 −
+  (15.5 − 8.4) ≈ **21 ms**, still over 16.6". The `sim.block` half held — projected 8.4, measured
+  8.328–8.64 from the iGPU arm, across a different GPU and a driver upgrade. The `frame` half did
+  not, and in our favour: measured **13.705**, under the 16.6 budget. The error was in the
+  subtrahend, not the model — it extrapolated from an unpinned 28.01 that was mostly clock ramp.
+  **Projections anchored to an unpinned number inherit its spread; re-anchor before trusting one.**
+- **Gate 7 is still not closed, but it is now one metric wide.** `frame` and `sim.collapse` both
+  pass pinned. `sim.block` p99 8.3–8.6 against a 6.0 budget is what remains.
+- What remains, in size order, measured pinned: **one physics step** (`physics.*.step` p99 ≈ 7.9,
+  contacts 4.101 and solve 3.222 the largest stages). Since the two halves now overlap, `sim.block`
+  cannot fall below one step plus the join, so **no further scheduling change reaches 6.0** — the
+  step itself has to get cheaper, or the budget has to be re-argued against a 32-participant
+  2-world sample. The serialized GPU wait is *not* next (`frame.submit` p99 3.677); pipelining
+  remains available but would move `frame`, which already passes, and not `sim.block`.
 - A comparison against the 2026-09-22 baseline is still valid by fingerprint (same preset), but
   `sim.block` before and after measure different topologies. Read `sim.client`/`sim.server` for
   like-for-like per-peer cost.
 
-## What must be checked (Luca's pinned run, after the reboot)
+## What was checked (the pinned run, 2026-10-06)
 
-1. `scripts/perf.sh --sample the-block` on the RTX 3060, clock-stable: `sim.block` p99 near 8.4
-   and `sim.collapse` max ≤ 12.
-2. `foreign_zones` is 0 (no "dropped" line), the three residuals are each ≤ 2.0, and
-   `physics.server.step.per_frame` has 600 samples.
-3. Whether the `frame` max regression (57.10 vs 31.30) reproduces on a stable clock. The RADV
-   bisect cannot see it (no spike on any arm), so it is still unattributed.
+All three items the provisional ADR asked for, read back out of the committed report:
+
+1. **`sim.block` p99 near 8.4, `sim.collapse` max ≤ 12** — ✅ 8.328 (8.64 on a second run) and
+   8.154 against 12.0.
+2. **Residuals ≤ 2.0 each, `physics.server.step.per_frame` at 600 samples, no dropped foreign
+   zones** — ✅ all six residuals in the report are 0.002–0.314 p99 (`sim.block.unaccounted` 0.314,
+   `sim.server.unaccounted` 0.194, `sim.client.unaccounted` 0.123, `frame.render.unaccounted`
+   0.022, `frame.unaccounted` 0.004, `frame.submit.per_frame.unaccounted` 0.002), each against its
+   own 2.0 limit. `physics.server.step.per_frame` n=600 and `sim.collapse` n=90. On the foreign
+   zones: the counter is not a report field — the sample prints a warning line only when it is
+   non-zero (`samples/99-the-block/main.cpp:2948`), and the run printed none. What the committed
+   artefact proves by itself is that `physics.server.*` arrives complete at n=600, which is what
+   the parking in Decision 2 buys, since those zones close on a foreign thread. **If you want this
+   checkable from the report alone, the counter needs a field** — worth doing before the next ADR
+   leans on it.
+3. **Whether the `frame` max regression (57.10 vs 31.30) reproduces on a stable clock** — ✅ **it
+   does not.** Pinned `frame` max is 15.971 here and 21.377 on `main`, both far under the 31.30
+   that the regression was measured against. The 57.10 was the unpinned card. Nothing remains
+   unattributed; the RADV bisect saw no spike because there was no spike to see.
