@@ -7,7 +7,8 @@
 # removable tooling module (guardrail 2): nothing in the runtime engine depends on it.
 
 add_library(rime_editorhost STATIC
-    src/editor_host.cpp)
+    src/editor_host.cpp
+    src/editor_identity.cpp)
 
 # Namespaced alias so dependents link `rime::editorhost`, matching our C++ namespace.
 add_library(rime::editorhost ALIAS rime_editorhost)

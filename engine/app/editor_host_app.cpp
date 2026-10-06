@@ -144,6 +144,12 @@ bool load_scene_for_editor(ecs::World& world,
     // the load dropped (so a lossy world can never be saved over the file it came from — m14.3).
     hosted.path = std::string(scene_path);
     hosted.skipped_components = report.skipped_components;
+    // Name every entity NOW, in file order (ADR-0075): the loader spawned one entity per record
+    // into an empty directory, so slot order is record order, and nothing has had a chance to
+    // spawn, despawn or reorder yet. The host's own registry, created later, moves its counter
+    // past these ids, so none is ever issued twice.
+    editorhost::register_editor_components(world);
+    (void)editorhost::EditorIds{}.assign_missing(world);
     return true;
 }
 
@@ -157,69 +163,6 @@ void register_and_populate(ecs::World& world,
     } else if (load_scene_for_editor(world, scene_path, hosted)) {
         core::JobSystem jobs;
         ecs::propagate_transforms(world, jobs);
-    }
-}
-
-// Apply one editor->engine edit to `world`. Mirrors editorhost::EditorHost::poll_one's dispatch,
-// but split out so the render thread can apply an edit the receiver thread parsed off the wire.
-// Call at a frame boundary (single-threaded world access).
-void apply_edit(ecs::World& world, stream::MessageType type, std::span<const std::byte> payload) {
-    using editorhost::EditorMessage;
-    switch (static_cast<EditorMessage>(type)) {
-        case EditorMessage::SetComponent: {
-            core::ByteReader r(payload);
-            std::uint32_t index = 0;
-            std::uint32_t generation = 0;
-            std::uint64_t hash = 0;
-            std::uint32_t blob_len = 0;
-            std::span<const std::byte> blob;
-            if (r.u32(index) && r.u32(generation) && r.u64(hash) && r.u32(blob_len) &&
-                r.bytes(blob, blob_len)) {
-                (void)editorhost::apply_set_component(
-                    world, ecs::Entity{index, generation}, hash, blob);
-            }
-            break;
-        }
-        case EditorMessage::Spawn:
-            // WITH A TRANSFORM, not empty (m15.3). A bare `world.spawn()` produced an entity the
-            // gizmo would not touch (it requires LocalTransform) and the renderer would not draw,
-            // so "+ spawn" added an invisible, unmovable row to the outliner and the user's next
-            // step was to hunt through "+ add component". A placement is the one thing every
-            // spawned entity wants; everything else is genuinely a choice.
-            (void)(world.is_registered<ecs::LocalTransform>()
-                       ? world.spawn_with(ecs::LocalTransform{})
-                       : world.spawn());
-            break;
-        case EditorMessage::Despawn: {
-            core::ByteReader r(payload);
-            std::uint32_t index = 0;
-            std::uint32_t generation = 0;
-            if (r.u32(index) && r.u32(generation)) {
-                (void)world.despawn(ecs::Entity{index, generation});
-            }
-            break;
-        }
-        case EditorMessage::AddComponent:
-        case EditorMessage::RemoveComponent: {
-            core::ByteReader r(payload);
-            std::uint32_t index = 0;
-            std::uint32_t generation = 0;
-            std::uint64_t hash = 0;
-            if (r.u32(index) && r.u32(generation) && r.u64(hash)) {
-                const ecs::Entity e{index, generation};
-                if (static_cast<EditorMessage>(type) == EditorMessage::AddComponent) {
-                    (void)editorhost::add_default_component(world, e, hash);
-                } else {
-                    (void)editorhost::remove_component(world, e, hash);
-                }
-            }
-            break;
-        }
-        case EditorMessage::SpawnEntity:
-            (void)editorhost::spawn_entity_from_payload(world, payload);
-            break;
-        default:
-            break; // an engine->editor, RequestSnapshot (handled by the sender), or unknown type
     }
 }
 
@@ -589,6 +532,11 @@ int serve_viewport(std::string_view socket_path,
     // RigidBody+Collider+WorldTransform entity that lacks a body, so handing it the just-restored
     // world IS the whole rebuild; nothing new was needed for physics to satisfy the ADR's rule.
     editorhost::PlaySession play_session;
+    // The editor's names for entities (ADR-0075). Every id-carrying message resolves through it,
+    // and the gizmo's selection is held as an id and re-resolved each frame — so a gizmo stays on
+    // its entity across a Stop that had to respawn it under a new handle.
+    editorhost::EditorIds editor_ids;
+    std::uint64_t gizmo_editor_id = editorhost::kNoEditorId;
     std::unique_ptr<physics::PhysicsWorld> physics_world;
     physics::PhysicsSync physics_sync;
 
@@ -686,10 +634,13 @@ int serve_viewport(std::string_view socket_path,
     }
 
     // Editor channel opener: schema then the world snapshot (sent on this, the render/send thread).
+    // Anything the scene load did not name (a built-in world, entities the asset bridge or the
+    // ground dressing spawned) gets an id first, after every loaded one.
+    (void)editor_ids.assign_missing(app.world());
     if (!conn.send_message(static_cast<stream::MessageType>(editorhost::EditorMessage::Schema),
                            editorhost::serialize_schema(app.world())) ||
         !conn.send_message(static_cast<stream::MessageType>(editorhost::EditorMessage::Snapshot),
-                           editorhost::serialize_world(app.world()))) {
+                           editorhost::serialize_editor_snapshot(app.world(), editor_ids))) {
         RIME_ERROR("editor-host: failed to send schema + snapshot");
         return 1;
     }
@@ -905,9 +856,9 @@ int serve_viewport(std::string_view socket_path,
                     // stale ones would only draw frames the editor has already moved past.
                     editorhost::GizmoStateMsg gs{};
                     if (editorhost::parse_gizmo_state(e.payload, gs)) {
-                        gizmo_sel.entity = ecs::Entity{gs.index, gs.generation};
+                        gizmo_editor_id = gs.editor_id;
                         gizmo_sel.mode =
-                            gs.index == 0xFFFFFFFFu
+                            gs.editor_id == editorhost::kNoEditorId
                                 ? render::GizmoMode::None
                                 : static_cast<render::GizmoMode>(gs.mode <= 3 ? gs.mode : 0);
                         gizmo_sel.axis = static_cast<render::GizmoAxis>(gs.axis <= 3 ? gs.axis : 0);
@@ -950,7 +901,18 @@ int serve_viewport(std::string_view socket_path,
                     }
                     app.timestep().reset();
                 } else {
-                    apply_edit(app.world(), e.type, e.payload);
+                    // A world edit, through the same dispatcher the GPU-free host uses — and the
+                    // structural ones answered in order, which is what the editor's undo history
+                    // waits on before it commits a step.
+                    const editorhost::EditOutcome outcome =
+                        editorhost::apply_editor_edit(app.world(), editor_ids, msg, e.payload);
+                    if (outcome.reply &&
+                        !conn.send_message(
+                            static_cast<stream::MessageType>(editorhost::EditorMessage::EditResult),
+                            editorhost::serialize_edit_result(
+                                {.ok = outcome.ok, .editor_id = outcome.editor_id}))) {
+                        stop.store(true, std::memory_order_relaxed);
+                    }
                 }
             }
             pending.clear();
@@ -973,9 +935,10 @@ int serve_viewport(std::string_view socket_path,
         }
         input_events.clear();
 
-        if (snapshot_requested && !conn.send_message(static_cast<stream::MessageType>(
-                                                         editorhost::EditorMessage::Snapshot),
-                                                     editorhost::serialize_world(app.world()))) {
+        if (snapshot_requested &&
+            !conn.send_message(
+                static_cast<stream::MessageType>(editorhost::EditorMessage::Snapshot),
+                editorhost::serialize_editor_snapshot(app.world(), editor_ids))) {
             break; // client disconnected
         }
 
@@ -987,6 +950,10 @@ int serve_viewport(std::string_view socket_path,
         if (playing || pending_step || (now - last_render) >= keepalive_period) {
             needs_render = true;
         }
+
+        // The gizmo follows the entity the editor NAMED, not a handle it once resolved: after a
+        // Stop that respawned it, or a despawn, the same id lands on the new handle or on nothing.
+        gizmo_sel.entity = editor_ids.resolve(app.world(), gizmo_editor_id);
 
         if (needs_render) {
             // Tick policy (m9.7, ADR-0031 §4): Playing ticks every iteration; a Step message arms
