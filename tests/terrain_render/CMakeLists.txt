@@ -11,7 +11,7 @@
 # Rendered on lavapipe, GPU-free like every proof since M3.3, and structural: heights compared
 # against a physics raycast within a derived margin, radiance against the analytic Lambert value.
 # No golden images.
-rime_add_test(rime_terrain_render_tests terrain_height_test.cpp)
+rime_add_test(rime_terrain_render_tests terrain_height_test.cpp terrain_residency_test.cpp)
 
 target_link_libraries(rime_terrain_render_tests
     PRIVATE rime::render rime::physics rime::assets rime::core)
