@@ -2,7 +2,8 @@
 # loopback over a real ProtocolConnection on the s1.4 local socket — all GPU-free CPU + socket work,
 # so it builds and runs on every CI OS.
 rime_add_test(rime_editorhost_tests
-    editor_host_test.cpp)
+    editor_host_test.cpp
+    editor_identity_test.cpp)
 
 # rime::scene + rime::render arrive with m14.3: saving writes a `.rscene`, and the proof loads it
 # back to show the data survived. render for a second reflected component to save alongside the
