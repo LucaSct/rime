@@ -107,6 +107,59 @@ enum Tab {
     Assets,
 }
 
+impl Tab {
+    /// Every panel, in the order the View menu lists them.
+    const ALL: [Tab; 4] = [Tab::Viewport, Tab::Outliner, Tab::Inspector, Tab::Assets];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Viewport => "Viewport",
+            Tab::Outliner => "Outliner",
+            Tab::Inspector => "Inspector",
+            Tab::Assets => "Assets",
+        }
+    }
+}
+
+/// Reopen a closed panel in the place `default_layout` gives it. egui_dock lets any tab be closed
+/// (a ✕ or a middle-click), and nothing else removes it, so the View menu is the only way back.
+///
+/// The anchors mirror `default_layout` exactly: the outliner splits off the left of the whole
+/// surface, the assets browser sits below the outliner, and the inspector splits off the right. When
+/// the anchor is itself closed, the panel falls back to the nearest equivalent edge (assets with no
+/// outliner goes to the left edge). The viewport has no edge to return to, so it rejoins the focused
+/// leaf, which is the centre only while the other panels are open.
+fn reopen(dock: &mut DockState<Tab>, tab: Tab) {
+    if dock.main_surface().is_empty() {
+        // Every panel was closed, so there is nothing to split from: the reopened panel becomes the
+        // whole layout, and the rest come back from the View menu.
+        *dock = DockState::new(vec![tab]);
+        return;
+    }
+    let root = NodeIndex::root();
+    let outliner = dock
+        .main_surface()
+        .find_tab(&Tab::Outliner)
+        .map(|(node, _)| node);
+    match tab {
+        Tab::Viewport => dock.push_to_focused_leaf(tab),
+        Tab::Outliner => {
+            dock.main_surface_mut().split_left(root, 0.22, vec![tab]);
+        }
+        Tab::Inspector => {
+            dock.main_surface_mut().split_right(root, 0.78, vec![tab]);
+        }
+        Tab::Assets => match outliner {
+            Some(node) => {
+                dock.main_surface_mut().split_below(node, 0.6, vec![tab]);
+            }
+            None => {
+                dock.main_surface_mut().split_left(root, 0.22, vec![tab]);
+            }
+        },
+    }
+}
+
 /// A component edit in progress — one drag or one focused text entry. It captures the component's
 /// bytes at the *start* of the gesture so that when the gesture ends we can push a single undo step
 /// (old → new), not one per intermediate frame. `new_blob` tracks the latest value the live edits
@@ -454,6 +507,13 @@ impl eframe::App for EditorApp {
         // these, not `self`, keeping the panel body free of a self-borrow tangle).
         let mut gizmo_mode = self.gizmo_mode;
         let mut gizmo_snap = self.gizmo_snap;
+        // The View menu's checkmarks: which panels are open right now, and a panel to reopen if the
+        // menu is clicked (applied after the bar, once the closure no longer borrows the dock).
+        let open_tabs: Vec<Tab> = Tab::ALL
+            .into_iter()
+            .filter(|t| self.dock.find_tab(t).is_some())
+            .collect();
+        let mut reopen_tab: Option<Tab> = None;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.label(egui::RichText::new("Rime Editor").strong());
@@ -515,7 +575,19 @@ impl eframe::App for EditorApp {
                         ui.close_menu();
                     }
                 });
-                ui.label("View");
+                // ── View ────────────────────────────────────────────────────────────────────
+                // One checkmark per dock panel. A closed panel is the only thing here that acts:
+                // clicking it reopens it in its default place (see `reopen`). Clicking an open one
+                // does nothing, since closing is a tab gesture, not a menu one.
+                ui.menu_button("View", |ui| {
+                    for tab in Tab::ALL {
+                        let mut shown = open_tabs.contains(&tab);
+                        if ui.checkbox(&mut shown, tab.label()).clicked() && shown {
+                            reopen_tab = Some(tab);
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.separator();
                 // Gizmo toolbar: the mode selector (mirrors the W/E/R hotkeys) + the snap toggle.
                 ui.label("Gizmo:");
@@ -572,6 +644,9 @@ impl eframe::App for EditorApp {
         });
         self.gizmo_mode = gizmo_mode;
         self.gizmo_snap = gizmo_snap;
+        if let Some(tab) = reopen_tab {
+            reopen(&mut self.dock, tab);
+        }
         if self.gizmo_mode.is_none() {
             self.gizmo_hover = None;
         }
@@ -833,13 +908,7 @@ impl TabViewer for EditorTabs<'_> {
     type Tab = Tab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        match tab {
-            Tab::Viewport => "Viewport",
-            Tab::Outliner => "Outliner",
-            Tab::Inspector => "Inspector",
-            Tab::Assets => "Assets",
-        }
-        .into()
+        tab.label().into()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
