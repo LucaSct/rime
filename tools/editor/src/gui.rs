@@ -587,6 +587,10 @@ impl eframe::App for EditorApp {
         // Undo/redo — keyboard (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y) and the Edit menu.
         let mut do_undo = false;
         let mut do_redo = false;
+        // While a text box has focus, Ctrl+Z / Ctrl+Y belong to it (E2): the world's undo is only
+        // for when no text is being typed, so fixing a typo in the asset search box cannot revert
+        // a world edit. Only the key routing is gated; the undo itself is unchanged.
+        let typing = ctx.wants_keyboard_input();
         // Saving (m15.3): set by Ctrl+S or the File menu; `Some("")` means "write back where the
         // scene was opened", which is a decision the engine owns.
         let mut do_save: Option<String> = None;
@@ -595,14 +599,14 @@ impl eframe::App for EditorApp {
         let mut do_open: Option<String> = None;
         let scene_is_open = self.scene_path.is_some();
         ctx.input(|i| {
-            if i.modifiers.command && i.key_pressed(egui::Key::Z) {
+            if !typing && i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 if i.modifiers.shift {
                     do_redo = true;
                 } else {
                     do_undo = true;
                 }
             }
-            if i.modifiers.command && i.key_pressed(egui::Key::Y) {
+            if !typing && i.modifiers.command && i.key_pressed(egui::Key::Y) {
                 do_redo = true;
             }
             // Ctrl/Cmd+S — the reflex every user already has. Only meaningful with a scene open;
@@ -615,18 +619,23 @@ impl eframe::App for EditorApp {
         // Gizmo-mode hotkeys (W translate / E rotate / R scale; Q or Esc = none) — the Maya/Blender
         // muscle memory. Gated on `wants_keyboard_input` so typing a value into an inspector field
         // never flips the gizmo out from under the drag.
-        if !ctx.wants_keyboard_input() {
+        //
+        // W, E and Q are also the fly keys (fly forward, up, down), so they only switch the gizmo
+        // while the right button is up. With it held they fly instead (E2, the Unreal convention),
+        // and the same key does one job at a time. R and Esc are not fly keys and always act.
+        let looking = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
+        if !typing {
             ctx.input(|i| {
-                if i.key_pressed(egui::Key::W) {
+                if !looking && i.key_pressed(egui::Key::W) {
                     self.gizmo_mode = Some(gizmo::Mode::Translate);
                 }
-                if i.key_pressed(egui::Key::E) {
+                if !looking && i.key_pressed(egui::Key::E) {
                     self.gizmo_mode = Some(gizmo::Mode::Rotate);
                 }
                 if i.key_pressed(egui::Key::R) {
                     self.gizmo_mode = Some(gizmo::Mode::Scale);
                 }
-                if i.key_pressed(egui::Key::Q) || i.key_pressed(egui::Key::Escape) {
+                if (!looking && i.key_pressed(egui::Key::Q)) || i.key_pressed(egui::Key::Escape) {
                     self.gizmo_mode = None;
                 }
             });
@@ -1267,7 +1276,8 @@ fn kind_glyph(kind: AssetKind) -> &'static str {
     }
 }
 
-/// Fly the viewport camera (m17.1): right-drag to look, WASD to move, Q/E down/up, Shift to sprint.
+/// Fly the viewport camera (m17.1): right-drag to look, right-hold + WASD to move, Q/E down/up, Shift
+/// to sprint. The movement keys fly only while the right button is held (E2), see `viewport_fly`.
 ///
 /// The whole feature is one `SetComponent` on the camera entity's LocalTransform per frame that the
 /// input changed -- no new protocol message, no engine-side camera state, no second source of truth
@@ -1310,9 +1320,15 @@ fn viewport_fly(
         }
     }
 
-    // Move: only while the pointer is over the viewport, so WASD typed into an inspector field
-    // never flies the camera.
-    if response.hovered() {
+    // Move: only while the right button is held over the viewport (E2). That is what keeps the fly
+    // keys from firing on their other meanings: WASD typed into an inspector field never flies (the
+    // pointer is not over the viewport), W/E/Q switch the gizmo while the button is up, and Ctrl+S
+    // over the viewport saves without moving the camera (the Command modifier is excluded here).
+    let flying = response.hovered()
+        && ui.input(|i| {
+            i.pointer.button_down(egui::PointerButton::Secondary) && !i.modifiers.command
+        });
+    if flying {
         let (mut fwd, mut right, mut up) = (0.0f32, 0.0f32, 0.0f32);
         let sprint = ui.input(|i| {
             let k = |key| i.key_down(key);
