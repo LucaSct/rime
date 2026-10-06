@@ -160,6 +160,15 @@ const ParsedType* find_type(const std::vector<ParsedType>& types, std::uint64_t 
     }
     return nullptr;
 }
+// The browser's "place": a SpawnEntity under no id, through the dispatcher both hosts share.
+editorhost::EditOutcome
+place(ecs::World& world, std::vector<std::pair<std::uint64_t, std::vector<std::byte>>> components) {
+    editorhost::EditorIds ids;
+    editorhost::SpawnEntityMsg msg;
+    msg.components = std::move(components);
+    return editorhost::apply_editor_edit(
+        world, ids, editorhost::EditorMessage::SpawnEntity, editorhost::serialize_spawn_entity(msg));
+}
 } // namespace
 
 TEST_CASE("editorhost: a world snapshots and reconstructs bit-identically through reflection") {
@@ -284,17 +293,15 @@ TEST_CASE("editorhost: serves schema + snapshot and applies an edit over the loc
                 editorhost::deserialize_world(mirror, payload) && mirror.entity_count() == 1;
         }
 
-        // Send an edit: set Position of `e` to (5, 6, 7).
-        std::vector<std::byte> edit;
-        core::ByteWriter w(edit);
-        w.u32(e.index);
-        w.u32(e.generation);
-        w.u64(core::reflect<et::Position>().type_hash);
-        const std::vector<std::byte> blob = core::serialize(et::Position{5.0f, 6.0f, 7.0f});
-        w.u32(static_cast<std::uint32_t>(blob.size()));
-        w.bytes(blob);
+        // Send an edit: set Position of `e` to (5, 6, 7) — naming it by EditorId 1, the id
+        // send_hello gave the world's only entity (ADR-0075), not by its handle.
+        editorhost::SetComponentMsg edit;
+        edit.editor_id = 1;
+        edit.type_hash = core::reflect<et::Position>().type_hash;
+        edit.blob = core::serialize(et::Position{5.0f, 6.0f, 7.0f});
         out.sent = conn.send_message(
-            static_cast<stream::MessageType>(editorhost::EditorMessage::SetComponent), edit);
+            static_cast<stream::MessageType>(editorhost::EditorMessage::SetComponent),
+            editorhost::serialize_set_component(edit));
         (void)conn.send_bye();
     });
 
@@ -348,9 +355,12 @@ TEST_CASE(
     REQUIRE(entity_count == 1u);
     std::uint32_t index = 0;
     std::uint32_t generation = 0;
+    std::uint64_t editor_id = 0;
     std::uint16_t comp_count = 0;
     REQUIRE(r.u32(index));
     REQUIRE(r.u32(generation));
+    REQUIRE(r.u64(editor_id)); // RSN2: the entity's EditorId (none here — no host assigned one)
+    CHECK(editor_id == editorhost::kNoEditorId);
     REQUIRE(r.u16(comp_count));
     // ONLY LocalTransform — WorldTransform is unreflected and never serialized (was 2 before the
     // fix).
@@ -420,6 +430,8 @@ TEST_CASE("editorhost: add/remove component and request-snapshot over the local 
     struct Outcome {
         bool velocity_after_add = false;
         bool velocity_gone_after_remove = false;
+        bool add_acked = false;
+        bool remove_acked = false;
     } out;
 
     std::thread client([&] {
@@ -436,14 +448,18 @@ TEST_CASE("editorhost: add/remove component and request-snapshot over the local 
         (void)conn.recv_message(type, payload); // the hello schema
         (void)conn.recv_message(type, payload); // the hello snapshot
 
-        // An [index][generation][hash] editor→engine message (Add/Remove share this shape).
+        // An [editor_id][hash] editor→engine message (Add/Remove share this shape). EditorId 1 is
+        // the id send_hello gave the only entity.
         const auto entity_msg = [&](std::uint64_t hash) {
-            std::vector<std::byte> m;
-            core::ByteWriter w(m);
-            w.u32(e.index);
-            w.u32(e.generation);
-            w.u64(hash);
-            return m;
+            return editorhost::serialize_component_ref({.editor_id = 1, .type_hash = hash});
+        };
+        // Every structural edit is answered with an EditResult, in order (ADR-0075).
+        const auto acked_ok = [&]() {
+            editorhost::EditResultMsg r;
+            return conn.recv_message(type, payload) &&
+                   type ==
+                       static_cast<stream::MessageType>(editorhost::EditorMessage::EditResult) &&
+                   editorhost::parse_edit_result(payload, r) && r.ok && r.editor_id == 1;
         };
         // Ask for a fresh snapshot and count how many entities carry a Velocity in it.
         const auto velocity_count_after_request = [&]() -> int {
@@ -471,11 +487,13 @@ TEST_CASE("editorhost: add/remove component and request-snapshot over the local 
         (void)conn.send_message(
             static_cast<stream::MessageType>(editorhost::EditorMessage::AddComponent),
             entity_msg(vel_h));
+        out.add_acked = acked_ok();
         out.velocity_after_add = velocity_count_after_request() == 1;
 
         (void)conn.send_message(
             static_cast<stream::MessageType>(editorhost::EditorMessage::RemoveComponent),
             entity_msg(vel_h));
+        out.remove_acked = acked_ok();
         out.velocity_gone_after_remove = velocity_count_after_request() == 0;
 
         (void)conn.send_bye();
@@ -491,6 +509,8 @@ TEST_CASE("editorhost: add/remove component and request-snapshot over the local 
     }
     client.join();
 
+    CHECK(out.add_acked);                  // each structural edit was answered, ok, by id
+    CHECK(out.remove_acked);
     CHECK(out.velocity_after_add);         // AddComponent added it; RequestSnapshot showed it
     CHECK(out.velocity_gone_after_remove); // RemoveComponent took it away
     CHECK(world.get<et::Position>(e) != nullptr); // and never touched the entity's other components
@@ -598,21 +618,17 @@ TEST_CASE("editorhost: spawn_entity_from_payload places an entity with the expec
     (void)world.register_component<et::AssetRef>();
     (void)world.register_component<et::Position>();
 
-    // Build the SpawnEntity payload the browser's "place" sends: an AssetRef carrying a content id
-    // plus a Position — [comp_count:u16] then per component [hash:u64][blob_len:u32][blob].
-    const std::vector<std::byte> asset_blob = core::serialize(et::AssetRef{0xDEADBEEFCAFEULL});
-    const std::vector<std::byte> pos_blob = core::serialize(et::Position{3.0f, 4.0f, 5.0f});
-    std::vector<std::byte> payload;
-    core::ByteWriter w(payload);
-    w.u16(2);
-    w.u64(core::reflect<et::AssetRef>().type_hash);
-    w.u32(static_cast<std::uint32_t>(asset_blob.size()));
-    w.bytes(asset_blob);
-    w.u64(core::reflect<et::Position>().type_hash);
-    w.u32(static_cast<std::uint32_t>(pos_blob.size()));
-    w.bytes(pos_blob);
-
-    REQUIRE(editorhost::spawn_entity_from_payload(world, payload));
+    // The SpawnEntity the browser's "place" sends: an AssetRef carrying a content id plus a
+    // Position, under no id (the host assigns one).
+    const editorhost::EditOutcome placed_outcome =
+        place(world,
+              {{core::reflect<et::AssetRef>().type_hash,
+                core::serialize(et::AssetRef{0xDEADBEEFCAFEULL})},
+               {core::reflect<et::Position>().type_hash,
+                core::serialize(et::Position{3.0f, 4.0f, 5.0f})}});
+    REQUIRE(placed_outcome.ok);
+    CHECK(placed_outcome.reply);
+    CHECK(placed_outcome.editor_id == 1); // the first id this host issued
     CHECK(world.entity_count() == 1);
 
     int placed = 0;
@@ -636,15 +652,9 @@ TEST_CASE("editorhost: a placed entity gets a transform even when the payload ha
     (void)world.register_component<ecs::LocalTransform>();
     (void)world.register_component<et::AssetRef>();
 
-    const std::vector<std::byte> asset_blob = core::serialize(et::AssetRef{0x1234ULL});
-    std::vector<std::byte> payload;
-    core::ByteWriter w(payload);
-    w.u16(1);
-    w.u64(core::reflect<et::AssetRef>().type_hash);
-    w.u32(static_cast<std::uint32_t>(asset_blob.size()));
-    w.bytes(asset_blob);
-
-    REQUIRE(editorhost::spawn_entity_from_payload(world, payload));
+    REQUIRE(place(world,
+                  {{core::reflect<et::AssetRef>().type_hash, core::serialize(et::AssetRef{0x1234ULL})}})
+                .ok);
     REQUIRE(world.entity_count() == 1);
 
     int placed = 0;
@@ -667,15 +677,9 @@ TEST_CASE("editorhost: an authored placement in the payload wins over the defaul
 
     ecs::LocalTransform authored{};
     authored.value.translation = {7.0f, 8.0f, 9.0f};
-    const std::vector<std::byte> blob = core::serialize(authored);
-    std::vector<std::byte> payload;
-    core::ByteWriter w(payload);
-    w.u16(1);
-    w.u64(core::reflect<ecs::LocalTransform>().type_hash);
-    w.u32(static_cast<std::uint32_t>(blob.size()));
-    w.bytes(blob);
-
-    REQUIRE(editorhost::spawn_entity_from_payload(world, payload));
+    REQUIRE(
+        place(world, {{core::reflect<ecs::LocalTransform>().type_hash, core::serialize(authored)}})
+            .ok);
     REQUIRE(world.entity_count() == 1);
 
     int placed = 0;
@@ -693,15 +697,9 @@ TEST_CASE("editorhost: a host that never registered a transform still places, it
     ecs::World world;
     (void)world.register_component<et::AssetRef>();
 
-    const std::vector<std::byte> asset_blob = core::serialize(et::AssetRef{0x99ULL});
-    std::vector<std::byte> payload;
-    core::ByteWriter w(payload);
-    w.u16(1);
-    w.u64(core::reflect<et::AssetRef>().type_hash);
-    w.u32(static_cast<std::uint32_t>(asset_blob.size()));
-    w.bytes(asset_blob);
-
-    REQUIRE(editorhost::spawn_entity_from_payload(world, payload));
+    REQUIRE(place(world,
+                  {{core::reflect<et::AssetRef>().type_hash, core::serialize(et::AssetRef{0x99ULL})}})
+                .ok);
     CHECK(world.entity_count() == 1);
     CHECK_FALSE(world.is_registered<ecs::LocalTransform>());
 }
@@ -740,20 +738,18 @@ TEST_CASE("editorhost: ViewportCamera and GizmoState round-trip their wire paylo
         std::span<const std::byte>(cam_bytes.data(), cam_bytes.size() - 1), trunc));
 
     editorhost::GizmoStateMsg gs{};
-    gs.index = 42;
-    gs.generation = 7;
-    gs.mode = 2; // rotate
-    gs.axis = 1; // X highlighted
+    gs.editor_id = 0x0000000700000042ull; // both halves of the u64 must survive
+    gs.mode = 2;                          // rotate
+    gs.axis = 1;                          // X highlighted
     const std::vector<std::byte> gs_bytes = editorhost::serialize_gizmo_state(gs);
-    CHECK(gs_bytes.size() == 4 + 4 + 1 + 1);
+    CHECK(gs_bytes.size() == 8 + 1 + 1);
     editorhost::GizmoStateMsg gs_back{};
     REQUIRE(editorhost::parse_gizmo_state(gs_bytes, gs_back));
-    CHECK(gs_back.index == 42);
-    CHECK(gs_back.generation == 7);
+    CHECK(gs_back.editor_id == 0x0000000700000042ull);
     CHECK(gs_back.mode == 2);
     CHECK(gs_back.axis == 1);
-    // The default-constructed state is the hidden sentinel (index == u32 max, mode none).
-    CHECK(editorhost::GizmoStateMsg{}.index == 0xFFFFFFFFu);
+    // The default-constructed state is the hidden sentinel (no EditorId, mode none).
+    CHECK(editorhost::GizmoStateMsg{}.editor_id == editorhost::kNoEditorId);
     CHECK(editorhost::GizmoStateMsg{}.mode == 0);
 }
 
@@ -805,16 +801,16 @@ TEST_CASE("editorhost: PlaySession — play/pause/stop is a pure ECS state machi
         CHECK(session.tick_count() == 0);
         CHECK(w.entity_count() == 1); // the extra spawn did not survive
 
-        // The original entity's data came back — a DIFFERENT handle (deserialize_world always
-        // mints fresh ids), so re-find it by its restored Position rather than by `e`.
-        bool found = false;
-        w.query<et::Position>().for_each([&](ecs::Entity, et::Position& p) {
-            found = true;
-            CHECK(p.x == 1.0f); // NOT 99 — the mid-play edit was discarded
-            CHECK(p.y == 2.0f);
-            CHECK(p.z == 3.0f);
-        });
-        CHECK(found);
+        // The original entity's data came back under the SAME handle: it survived play, and Stop
+        // reconciles in place rather than respawning the world (ADR-0075).
+        REQUIRE(w.is_alive(e));
+        const et::Position* p = w.get<et::Position>(e);
+        REQUIRE(p != nullptr);
+        CHECK(p->x == 1.0f); // NOT 99 — the mid-play edit was discarded
+        CHECK(p->y == 2.0f);
+        CHECK(p->z == 3.0f);
+        CHECK(session.last_stop().survivors == 1);
+        CHECK(session.last_stop().removed_newcomers == 1);
     }
 
     SUBCASE(
@@ -857,9 +853,9 @@ TEST_CASE("editorhost: PlaySession — play/pause/stop is a pure ECS state machi
 
 TEST_CASE("editorhost: world_content_hash ignores entity identity but not component data (m9.7)") {
     // The property world_content_hash exists for: two worlds holding the SAME component data but
-    // DIFFERENT entity handles (exactly what a despawn-everything-then-respawn restore produces,
-    // per ecs::EntityDirectory's LIFO-recycling + unconditional generation bump) still hash equal;
-    // any actual data difference still hashes different.
+    // DIFFERENT entity handles (what a Stop that respawns a casualty produces, per
+    // ecs::EntityDirectory's LIFO-recycling + unconditional generation bump) still hash equal; any
+    // actual data difference still hashes different.
     ecs::World a;
     (void)a.spawn(); // burn index 0 so `b`'s matching entity lands on a DIFFERENT index/generation
     const ecs::Entity ea = a.spawn_with(et::Position{1.0f, 2.0f, 3.0f});
