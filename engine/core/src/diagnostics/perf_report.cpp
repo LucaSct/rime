@@ -972,6 +972,23 @@ std::string PerfReport::to_json(int indent) const {
         w.close('}', !f);
     }
 
+    // Written whenever the answer is known -- always, for a measured report. A parsed report whose
+    // file predates the field stays without it: writing zeros would turn "unknown" into "clean",
+    // and would break write -> parse -> write idempotence.
+    if (const auto integrity = this->integrity()) {
+        w.item(first);
+        w.key("integrity");
+        bool f = true;
+        w.open('{');
+        w.item(f);
+        w.key("accounting_gaps");
+        w.out += std::to_string(integrity->accounting_gaps); // exact integer, never a double
+        w.item(f);
+        w.key("foreign_zones");
+        w.out += std::to_string(integrity->foreign_zones);
+        w.close('}', !f);
+    }
+
     w.close('}', !first);
     if (indent >= 0)
         w.out += '\n';
@@ -1130,6 +1147,26 @@ bool PerfReport::parse(std::string_view text, PerfReport& out, std::string& erro
         }
         // strtoull, not a double cast: the ledger's contract is exact 64-bit integers.
         r.ledger_.emplace_back(name, node.as_uint64());
+    }
+
+    // OPTIONAL, and `kSchemaVersion` deliberately did not move for it. Bumping the schema would
+    // make every already-committed baseline in `docs/perf/` unreadable, and a `parse` that fails on
+    // the baseline is how the regression gate stops comparing anything at all -- the "gate that
+    // cannot fail" this reader's strictness exists to prevent. A field an older file may
+    // legitimately not carry, read as optional, is backward-compatible; a bump is not. Absent
+    // means UNKNOWN (`integrity() == nullopt`), never zero; present is strict like every other
+    // field in this reader.
+    if (const JsonValue* integrity = root.find("integrity")) {
+        if (integrity->type != JsonValue::Type::Object) {
+            error = "non-object field 'integrity'";
+            return false;
+        }
+        if (!need_uint(*integrity, "accounting_gaps", r.accounting_gaps_, error) ||
+            !need_uint(*integrity, "foreign_zones", r.foreign_zones_, error)) {
+            return false;
+        }
+    } else {
+        r.integrity_unknown_ = true;
     }
 
     out = std::move(r);
