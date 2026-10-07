@@ -26,6 +26,7 @@ add_library(rime_render STATIC
     src/lighting/sky.cpp
     src/fx_pass.cpp
     src/culling.cpp
+    src/temporal_jitter.cpp
     src/terrain_pass.cpp
     src/terrain_builder.cpp
     src/terrain_residency.cpp
