@@ -18,8 +18,8 @@
 #include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
 #include "present.frag.spv.h"
 #include "rime/core/diagnostics/log.hpp"
-#include "tonemap.frag.spv.h"
 #include "taa_resolve.frag.spv.h"
+#include "tonemap.frag.spv.h"
 #include "velocity.frag.spv.h"
 #include "velocity.vert.spv.h"
 

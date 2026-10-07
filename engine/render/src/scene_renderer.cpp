@@ -1010,8 +1010,9 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         // an image that is now several frames stale.
         taa_history_valid_ = false;
         if (!warned_taa_no_velocity_) {
-            RIME_WARN("render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled "
-                      "and a depth pre-pass) -- no resolve this frame");
+            RIME_WARN(
+                "render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled "
+                "and a depth pre-pass) -- no resolve this frame");
             warned_taa_no_velocity_ = true;
         }
     }

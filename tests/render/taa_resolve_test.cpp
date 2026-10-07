@@ -57,7 +57,8 @@ struct View {
     MaterialRegistry materials;
     ecs::World world;
     MeshId cube = kInvalidMeshId;
-    MeshId slab = kInvalidMeshId; // a 1 x 1 x 0.01 box facing the camera: a flat, constant-depth quad
+    MeshId slab =
+        kInvalidMeshId; // a 1 x 1 x 0.01 box facing the camera: a flat, constant-depth quad
     MaterialId mat = 0;
     ecs::Entity camera;
     core::Transform camera_tf{};
@@ -100,6 +101,7 @@ struct Rig {
         ecs::Entity a;
         ecs::Entity b;
     };
+
     Pair spawn_cube(core::Vec3 at, float scale = 1.0f, float roll = 0.0f) {
         core::Transform tf{};
         tf.translation = at;
@@ -138,24 +140,30 @@ struct Rig {
         taa->set_camera(tf);
     }
 
-    static Frame render_view(rhi::Device& device, View& v, bool* resolved = nullptr) {
+    // `size` other than kSize returns only the raw bytes (the luminance helpers assume kSize).
+    static Frame render_view(rhi::Device& device,
+                             View& v,
+                             bool* resolved = nullptr,
+                             std::uint32_t size = kSize) {
         Frame f;
         RenderGraph graph(device);
         graph.reset();
-        const SceneRenderer::Output out = v.renderer.render(graph, v.world, {kSize, kSize}, true);
+        const SceneRenderer::Output out = v.renderer.render(graph, v.world, {size, size}, true);
         REQUIRE(out.ldr.is_valid());
         graph.export_texture(out.hdr);
         auto cmd = device.begin_commands();
         graph.execute(*cmd);
         device.submit_blocking(*cmd);
-        f.raw = read_texture(device, graph.physical(out.hdr), kSize, kSize, 8);
+        f.raw = read_texture(device, graph.physical(out.hdr), size, size, 8);
+        if (resolved != nullptr)
+            *resolved = v.renderer.last_frame_resolved();
+        if (size != kSize)
+            return f;
         const HdrImage img = decode_hdr(f.raw, kSize, kSize);
         f.lum.resize(kPixels);
         for (std::uint32_t y = 0; y < kSize; ++y)
             for (std::uint32_t x = 0; x < kSize; ++x)
                 f.lum[y * kSize + x] = img.luminance(x, y);
-        if (resolved != nullptr)
-            *resolved = v.renderer.last_frame_resolved();
         return f;
     }
 
@@ -164,6 +172,7 @@ struct Rig {
         Frame ref;
         Frame taa;
     };
+
     Step step() {
         Step s;
         s.ref = render_view(*device, *ref);
@@ -191,7 +200,9 @@ std::unique_ptr<Rig> make_rig() {
 struct Levels {
     float bg = 0.0f;
     float fg = 0.0f;
+
     [[nodiscard]] float contrast() const { return fg - bg; }
+
     [[nodiscard]] float coverage(float l) const { return (l - bg) / contrast(); }
 };
 
@@ -250,7 +261,8 @@ float rms_diff(const Frame& a, const Frame& b, const std::vector<std::size_t>& s
     double s = 0.0;
     for (const std::size_t i : set)
         s += static_cast<double>(a.lum[i] - b.lum[i]) * static_cast<double>(a.lum[i] - b.lum[i]);
-    return static_cast<float>(std::sqrt(s / static_cast<double>(std::max<std::size_t>(1, set.size()))));
+    return static_cast<float>(
+        std::sqrt(s / static_cast<double>(std::max<std::size_t>(1, set.size()))));
 }
 
 float max_abs_diff(const Frame& a, const Frame& b) {
@@ -318,8 +330,7 @@ TEST_CASE("taa resolve: off allocates nothing, declares nothing, and changes no 
         v->renderer.set_temporal_jitter_enabled(false);
         core::Transform tf{};
         tf.translation = {0.0f, 0.0f, -6.0f};
-        (void)v->world.spawn_with(
-            ecs::WorldTransform{tf}, MeshRef{v->cube}, MaterialRef{v->mat});
+        (void)v->world.spawn_with(ecs::WorldTransform{tf}, MeshRef{v->cube}, MaterialRef{v->mat});
     }
     REQUIRE_FALSE(never.renderer.taa_resolve_enabled()); // the default
     CHECK_FALSE(never.renderer.taa_history_allocated());
@@ -346,7 +357,8 @@ TEST_CASE("taa resolve: off allocates nothing, declares nothing, and changes no 
     CHECK(f_never.raw == f_starved.raw);
 }
 
-TEST_CASE("taa resolve: the first frame, and the first after a resize, take the current frame whole") {
+TEST_CASE(
+    "taa resolve: the first frame, and the first after a resize, take the current frame whole") {
     auto rig = make_rig();
     if (!rig)
         return;
@@ -358,6 +370,18 @@ TEST_CASE("taa resolve: the first frame, and the first after a resize, take the 
     // Frame 1 uses history, so (jitter differs) it is allowed to differ and must, on an edge.
     const Rig::Step s1 = rig->step();
     CHECK(max_abs_diff(s1.ref, s1.taa) > 1e-3f);
+    // A RESIZE invalidates the history (it is the wrong shape), so the first frame at the new size
+    // is again the current frame whole, bit for bit, and the pair has been reallocated.
+    bool resolved = false;
+    const Frame small_ref = Rig::render_view(*rig->device, *rig->ref, nullptr, 96);
+    const Frame small_taa = Rig::render_view(*rig->device, *rig->taa, &resolved, 96);
+    CHECK(resolved);
+    CHECK(small_ref.raw == small_taa.raw);
+    // ...and the frame after that resolves against real history again (jitter differs, so on an
+    // edge the two must now disagree).
+    const Frame small_ref2 = Rig::render_view(*rig->device, *rig->ref, nullptr, 96);
+    const Frame small_taa2 = Rig::render_view(*rig->device, *rig->taa, nullptr, 96);
+    CHECK(small_ref2.raw != small_taa2.raw);
 }
 
 TEST_CASE("taa resolve: static scene, no jitter -> the resolve is a fixed point") {
@@ -378,7 +402,8 @@ TEST_CASE("taa resolve: static scene, no jitter -> the resolve is a fixed point"
     CHECK(worst < 1e-3f);
 }
 
-TEST_CASE("taa resolve: converges, and converges to the supersampled mean, not merely to something") {
+TEST_CASE(
+    "taa resolve: converges, and converges to the supersampled mean, not merely to something") {
     auto rig = make_rig();
     if (!rig)
         return;
@@ -418,13 +443,21 @@ TEST_CASE("taa resolve: converges, and converges to the supersampled mean, not m
     std::printf("[taa] single raw frame vs mean, rms on edges: %.3g\n", single_raw);
     std::printf("[taa] single resolved frame vs mean, rms on edges: %.3g\n", single_res);
 
-    CHECK(period_err < 2e-3f);
-    // Margins are derived from the measurement printed above (see the comment block at the
-    // thresholds' definition below).
-    CHECK(mean_err_rms < 5e-3f);
-    CHECK(mean_err_max < 2e-2f);
-    // And the resolve is genuinely closer to the truth than the single frame it started from.
-    CHECK(single_res < 0.5f * single_raw);
+    // THRESHOLDS, derived from measurement (RTX 3060 / Vulkan, 2026-10-07, 128x128, contrast 0.5):
+    //   period error            2.44e-4  (= one half-float ulp at 0.5; the transient is gone)
+    //   period-mean vs mean     max 1.65e-3, rms on edges 8.8e-4  (the exact-identity prediction)
+    //   single raw vs mean      rms on edges 0.218
+    //   single resolved vs mean rms on edges 0.0157  (the ripple of the exponential window)
+    // Each limit is ~3-4x the measured value. They are also FAR from what a wrong pass gives: with
+    // the history weight forced to 0 the "resolved" frame IS the raw frame (0.218, ratio 1.0);
+    // forced to 1 the mean error is 0.17 rms / 0.31 max. So these margins cannot be met by a blur
+    // or by averaging with the wrong weights, which is the point of comparing against the mean.
+    CHECK(period_err < 1e-3f);
+    CHECK(mean_err_rms < 3e-3f);
+    CHECK(mean_err_max < 6e-3f);
+    // And the resolve is genuinely closer to the truth than the single frame it started from
+    // (measured ratio 0.072; limit 0.2).
+    CHECK(single_res < 0.2f * single_raw);
 }
 
 TEST_CASE("taa resolve: edge pixels are far more stable over time than raw jittered frames") {
@@ -448,7 +481,10 @@ TEST_CASE("taa resolve: edge pixels are far more stable over time than raw jitte
                 raw_var,
                 res_var,
                 res_var / raw_var);
-    CHECK(res_var < 0.1 * raw_var);
+    // Measured 2026-10-07 (RTX 3060, 284 edge pixels): raw 0.04877, resolved 0.0002545, ratio
+    // 0.0052. The limit is ~10x the measured ratio; with the resolve weakened to nothing the ratio
+    // is 1.0, so the margin has nothing to hide behind.
+    CHECK(res_var < 0.05 * raw_var);
 }
 
 TEST_CASE("taa resolve: a disoccluded pixel shows the revealed background, not the occluder") {
@@ -607,6 +643,7 @@ TEST_CASE("taa resolve: reprojection follows motion on both axes (a moving edge 
         float sx; // pixels per frame, image x
         float sy; // pixels per frame, image y (down)
     };
+
     for (const Dir d : {Dir{"x", 3.0f, 0.0f}, Dir{"y", 0.0f, 3.0f}, Dir{"diagonal", 2.0f, -3.0f}}) {
         auto rig = make_rig();
         if (!rig)
@@ -617,8 +654,8 @@ TEST_CASE("taa resolve: reprojection follows motion on both axes (a moving edge 
         const float ppu = pixels_per_unit(rig->ref->renderer, -5.995f); // the slab's front face
         const float ux = d.sx / ppu;
         const float uy = -d.sy / ppu; // image y points down, world y points up
-        // 24 px wide: its edges then fall on pixel BOUNDARIES (half a pixel from every centre), so a
-        // 1e-4 px error in the step cannot flip which side of an edge a pixel centre lies on.
+        // 24 px wide: its edges then fall on pixel BOUNDARIES (half a pixel from every centre), so
+        // a 1e-4 px error in the step cannot flip which side of an edge a pixel centre lies on.
         const Rig::Pair slab = rig->spawn_slab({0.0f, 0.0f, -6.0f}, 24.0f / ppu);
         Levels lv;
         float worst = 0.0f;
@@ -650,7 +687,11 @@ TEST_CASE("taa resolve: reprojection follows motion on both axes (a moving edge 
                     scored,
                     worst);
         REQUIRE(scored > 1000);
-        CHECK(worst < 0.02f);
+        // Measured 2026-10-07 (RTX 3060): 0.0137 / 0.0142 / 0.0044 of contrast for x / y /
+        // diagonal when correct (residual: the history of a settled edge is itself ~0.9^64 short
+        // of converged, plus half-float rounding). Wrong lookups give 0.9 -- inverted y, inverted
+        // x and a missing 0.5 all measured -- so 0.05 sits 3.5x above correct and 18x below wrong.
+        CHECK(worst < 0.05f);
     }
 }
 
@@ -703,7 +744,8 @@ TEST_CASE("taa resolve: a camera turn does not smear the background (depth repro
                             }
                     if (!near_obj)
                         continue;
-                    band_err += std::abs(lv.coverage(s.taa.at(ux, uy)) - lv.coverage(s.ref.at(ux, uy)));
+                    band_err +=
+                        std::abs(lv.coverage(s.taa.at(ux, uy)) - lv.coverage(s.ref.at(ux, uy)));
                     band_cnt += 1.0;
                 }
         }
@@ -713,6 +755,9 @@ TEST_CASE("taa resolve: a camera turn does not smear the background (depth repro
                     pitch ? "pitch" : "yaw",
                     mean_band_err,
                     band_cnt);
-        CHECK(mean_band_err < 0.05);
+        // Measured 2026-10-07 (RTX 3060): 0.0339 with depth reprojection, 0.1008 with background
+        // velocity left at zero. The 0.034 is not a defect: it is the clamp's deliberate one-pixel
+        // ghost beside a moving edge plus bilinear history blur. 0.06 splits the two.
+        CHECK(mean_band_err < 0.06);
     }
 }
