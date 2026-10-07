@@ -67,10 +67,6 @@ std::uint64_t hash_bounds(const WorldBounds& b) noexcept {
     return fnv1a_64(std::span<const std::byte>(image));
 }
 
-} // namespace rime::core
-
-namespace rime::core {
-
 Region classify_position(const WorldBounds& b,
                          float x,
                          float y,
