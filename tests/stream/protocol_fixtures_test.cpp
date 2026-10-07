@@ -128,34 +128,41 @@ std::vector<std::byte> schema_bytes() {
     return editorhost::serialize_schema(w);
 }
 
+// The snapshot the EDITOR receives (RSN2, ADR-0075): each entity carries its EditorId after its
+// handle — here 1 and 2, assigned in spawn order — and EditorId itself is not listed as a
+// component.
 std::vector<std::byte> snapshot_bytes() {
     ecs::World w;
     build_world(w);
-    return editorhost::serialize_world(w);
+    editorhost::EditorIds ids;
+    return editorhost::serialize_editor_snapshot(w, ids);
 }
 
-// A SetComponent edit payload (editor -> engine): [index][generation][hash][blob_len][blob].
+// A SetComponent edit payload (editor -> engine): [editor_id:u64][hash][blob_len][blob].
 std::vector<std::byte> set_component_bytes() {
-    std::vector<std::byte> out;
-    core::ByteWriter w(out);
-    w.u32(3);
-    w.u32(1);
-    w.u64(core::reflect<render::Camera>().type_hash);
-    const std::vector<std::byte> blob = core::serialize(render::Camera{1.2f, 0.2f, 800.0f, false});
-    w.u32(static_cast<std::uint32_t>(blob.size()));
-    w.bytes(blob);
-    return out;
+    editorhost::SetComponentMsg m;
+    m.editor_id = 3;
+    m.type_hash = core::reflect<render::Camera>().type_hash;
+    m.blob = core::serialize(render::Camera{1.2f, 0.2f, 800.0f, false});
+    return editorhost::serialize_set_component(m);
 }
 
-// An add/remove-component payload (editor -> engine): [index][generation][hash]. AddComponent and
+// An add/remove-component payload (editor -> engine): [editor_id:u64][hash]. AddComponent and
 // RemoveComponent share this shape (m9.4); one fixture guards both.
 std::vector<std::byte> component_ref_bytes() {
-    std::vector<std::byte> out;
-    core::ByteWriter w(out);
-    w.u32(3);
-    w.u32(1);
-    w.u64(core::reflect<render::Camera>().type_hash);
-    return out;
+    return editorhost::serialize_component_ref(
+        {.editor_id = 3, .type_hash = core::reflect<render::Camera>().type_hash});
+}
+
+// A Spawn / Despawn payload (editor -> engine): [editor_id:u64]. An id above 2^32 so the fixture
+// proves both halves of the u64 travel, not just the low word.
+std::vector<std::byte> entity_ref_bytes() {
+    return editorhost::serialize_entity_ref(0x0000000500000009ull);
+}
+
+// An EditResult payload (engine -> editor): [ok:u8][editor_id:u64] (ADR-0075).
+std::vector<std::byte> edit_result_bytes() {
+    return editorhost::serialize_edit_result({.ok = true, .editor_id = 42});
 }
 
 // The asset list (engine -> editor): the browser's cook manifest (m9.5). Fixed entries so the bytes
@@ -168,17 +175,17 @@ std::vector<std::byte> asset_list_bytes() {
     return editorhost::serialize_asset_list(assets);
 }
 
-// A SpawnEntity payload (editor -> engine): [comp_count:u16] then per component
-// [hash:u64][blob_len:u32][blob]. One Camera component here — the browser's "place" shape (m9.5).
+// A SpawnEntity payload (editor -> engine): [editor_id:u64][exact:u8][comp_count:u16] then per
+// component [hash:u64][blob_len:u32][blob]. An exact restore under id 6 with one Camera component —
+// the shape an undone despawn sends (ADR-0075); the browser's "place" is the same with id 0, exact
+// 0.
 std::vector<std::byte> spawn_entity_bytes() {
-    std::vector<std::byte> out;
-    core::ByteWriter w(out);
-    w.u16(1);
-    w.u64(core::reflect<render::Camera>().type_hash);
-    const std::vector<std::byte> blob = core::serialize(render::Camera{0.5f, 0.2f, 300.0f, true});
-    w.u32(static_cast<std::uint32_t>(blob.size()));
-    w.bytes(blob);
-    return out;
+    editorhost::SpawnEntityMsg m;
+    m.editor_id = 6;
+    m.exact = true;
+    m.components.emplace_back(core::reflect<render::Camera>().type_hash,
+                              core::serialize(render::Camera{0.5f, 0.2f, 300.0f, true}));
+    return editorhost::serialize_spawn_entity(m);
 }
 
 // A PickRequest payload (editor -> engine): [x:i32][y:i32] — the viewport pixel to hit-test (m9.6).
@@ -236,8 +243,7 @@ std::vector<std::byte> viewport_camera_bytes() {
 // A GizmoState payload (editor -> engine): selection + mode + highlighted axis (m9.6 gizmos).
 std::vector<std::byte> gizmo_state_bytes() {
     editorhost::GizmoStateMsg m{};
-    m.index = 7;
-    m.generation = 2;
+    m.editor_id = 7;
     m.mode = 1; // translate
     m.axis = 3; // Z highlighted
     return editorhost::serialize_gizmo_state(m);
@@ -330,6 +336,8 @@ std::vector<Fixture> all_fixtures() {
         {"pick_result.bin", pick_result_bytes()},
         {"viewport_camera.bin", viewport_camera_bytes()},
         {"gizmo_state.bin", gizmo_state_bytes()},
+        {"entity_ref.bin", entity_ref_bytes()},
+        {"edit_result.bin", edit_result_bytes()},
         {"play_state.bin", play_state_bytes()},
         {"frame_lz4.bin", frame_lz4_bytes()},
         {"frame_lz4_pixels.bin", lz4_pixels_raw()},

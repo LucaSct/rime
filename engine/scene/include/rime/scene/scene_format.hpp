@@ -4,9 +4,12 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "rime/ecs/entity.hpp"
 
 namespace rime::ecs {
 class World;
@@ -107,6 +110,16 @@ inline constexpr std::size_t kMaxReportedUnknownTypes = 16;
 [[nodiscard]] std::string save_scene_to_string(const ecs::World& world,
                                                std::size_t* excluded_derived = nullptr);
 
+// As above, writing the entities named in `order` first and in that order, then every live entity
+// it left out in iteration order. The editor host passes its identity order (ADR-0075): the
+// default order follows archetype layout, so an entity that gained and lost a component during Play
+// would come back numbered differently and a Play→Stop→Save would diff against the pre-play file
+// for no change in content. Dead or repeated entries in `order` are skipped.
+// `ecs::kSessionComponent` types are never written, on any entity.
+[[nodiscard]] std::string save_scene_to_string(const ecs::World& world,
+                                               std::span<const ecs::Entity> order,
+                                               std::size_t* excluded_derived = nullptr);
+
 // Parse `.rscene` text into `world`. By default every component type named in the file must be
 // registered in `world` with a matching `type_hash` — register your component set first, and
 // `worldkit::register_engine_components` is the one list that names the engine's own (a game adds
@@ -119,6 +132,9 @@ load_scene_from_string(ecs::World& world, std::string_view text, const LoadOptio
 // File conveniences. `save_scene_file` writes the whole buffer; `load_scene_file` reads the whole
 // file then parses it. A missing/unreadable file is a clean `false` / `LoadReport{ok=false}`.
 [[nodiscard]] bool save_scene_file(const ecs::World& world, const std::filesystem::path& path);
+[[nodiscard]] bool save_scene_file(const ecs::World& world,
+                                   const std::filesystem::path& path,
+                                   std::span<const ecs::Entity> order);
 [[nodiscard]] LoadReport load_scene_file(ecs::World& world,
                                          const std::filesystem::path& path,
                                          const LoadOptions& options = {});

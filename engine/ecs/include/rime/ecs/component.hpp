@@ -62,6 +62,9 @@ struct ComponentInfo {
     // (m16.8, ADR-0039 ruling 4). See `kDerivedComponent` below for why this is a property of the
     // TYPE rather than a decision the writer's caller makes.
     bool derived = false;
+    // SESSION state: an identity or bookkeeping value that exists only for the life of one running
+    // process, never written to a scene on ANY entity (ADR-0075). See `kSessionComponent` below.
+    bool session = false;
 };
 
 // Opt a component out of serialization: `template <> inline constexpr bool kDerivedComponent<T> =
@@ -78,6 +81,17 @@ struct ComponentInfo {
 // because an exclusion list is something a caller can forget and a new call site never learns
 // about. Reflection already carries "can this be serialized at all"; this carries "should it be".
 template <class T> inline constexpr bool kDerivedComponent = false;
+
+// Opt a component out of scene files entirely: `template <> inline constexpr bool
+// kSessionComponent<T> = true;` beside the type's declaration.
+//
+// Different from `kDerivedComponent` in one way that matters: a derived component can ALSO be
+// authored (a hand-written MeshRef), so the writer skips it only on entities tagged
+// `DerivedComponents`. A session component is never authored by anyone — the editor host's
+// `EditorId` is the case that introduced it: a per-session identity the host assigns on load, in
+// file order, so writing it back would only bake one session's numbering into a document that
+// already carries its order. Same reasoning as above for making it a trait on the TYPE.
+template <class T> inline constexpr bool kSessionComponent = false;
 
 // "Some of this entity's components were COMPUTED by the engine, not authored."
 //
@@ -169,6 +183,7 @@ public:
             info.name = "<unreflected component>";
         }
         info.derived = kDerivedComponent<T>;
+        info.session = kSessionComponent<T>;
         index_of_.emplace(key, infos_.size());
         infos_.push_back(info);
         return id;
