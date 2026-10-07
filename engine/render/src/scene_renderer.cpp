@@ -207,9 +207,9 @@ ExtractedScene extract_scene(ecs::World& world) {
 SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MeshRegistry& meshes,
                              const MaterialRegistry& materials)
-    : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device), velocity_(device),
-      forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device),
-      sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device) {
+    : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
+      velocity_(device), forward_(device), tonemap_(device), csm_(device), local_shadows_(device),
+      clustered_(device), sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device) {
     // Default ring depth: kFramesInFlight (2, private to the Vulkan swapchain) + 1. See
     // set_frames_in_flight for why the default is the safe maximum rather than the headless
     // minimum.

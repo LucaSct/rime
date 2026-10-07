@@ -349,10 +349,8 @@ public:
     // Declare the pass: clears `velocity` to zero (no motion, which is also what sky and every
     // uncovered pixel read) and writes the offset of every surface that survived the pre-pass.
     // `depth` must already hold the pre-pass result; it is read-only here.
-    void add(RenderGraph& graph,
-             RGTexture velocity,
-             RGTexture depth,
-             const SceneDrawData& data) const;
+    void
+    add(RenderGraph& graph, RGTexture velocity, RGTexture depth, const SceneDrawData& data) const;
 
 private:
     rhi::Device& device_;

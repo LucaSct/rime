@@ -59,6 +59,13 @@ layout(std140, set = 0, binding = 1) uniform DrawUniforms {
 layout(location = 0) out vec4 v_clip_current;
 layout(location = 1) out vec4 v_clip_previous;
 
+// `precise` forbids fused multiply-add contraction and re-association in everything that feeds
+// these two outputs. A static point must come out with BIT-identical current and previous clip
+// positions, and two textually identical expressions are only guaranteed to round identically if
+// the compiler may not fuse one differently from the other.
+precise v_clip_current;
+precise v_clip_previous;
+
 invariant gl_Position;
 
 void main() {

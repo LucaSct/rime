@@ -19,7 +19,9 @@ layout(location = 1) in vec4 v_clip_previous;
 layout(location = 0) out vec2 out_velocity;
 
 void main() {
-    vec2 current_ndc = v_clip_current.xy / v_clip_current.w;
-    vec2 previous_ndc = v_clip_previous.xy / v_clip_previous.w;
-    out_velocity = current_ndc - previous_ndc;
+    // `precise`: no FMA contraction, so equal inputs give an exactly zero difference (see above).
+    precise vec2 current_ndc = v_clip_current.xy / v_clip_current.w;
+    precise vec2 previous_ndc = v_clip_previous.xy / v_clip_previous.w;
+    precise vec2 velocity = current_ndc - previous_ndc;
+    out_velocity = velocity;
 }
