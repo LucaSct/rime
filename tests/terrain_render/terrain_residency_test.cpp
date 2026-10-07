@@ -651,6 +651,81 @@ TEST_CASE("m19.8a: on the real fence path, no slot is recycled before its last r
                                    << retiring_seen << " slot-frames seen Retiring");
 }
 
+// ── p1: the fly-through's timed frame loop hands back every submission it makes ────────────────
+
+// The Release terrain_flythrough crash (p1). The sample's frame was: begin_frame (which uploads
+// through submit_blocking), draw, submit, wait_and_borrow to read the pass timings, end_frame —
+// and never release. Every frame leaked one fence and one command buffer; on NVIDIA each pinned a
+// device fd, so under a 1024-fd limit vkCreateFence answered VK_ERROR_OUT_OF_HOST_MEMORY a few
+// thousand frames in, inside an upload, and the driver segfaulted on the null fence that followed.
+//
+// This is that loop, over the traversal that uploads, evicts and re-uploads tiles, timed through
+// `RenderGraph::submit_and_time` exactly as the sample now is. After EVERY frame the device's live
+// fences, command buffers and in-flight submissions must be back at the baseline: a leak of one
+// per frame is a red frame count here, three hundred frames before it could ever be a crash.
+TEST_CASE("p1: a timed terrain frame loop with uploads holds the device's live fences and command "
+          "buffers flat") {
+    auto device = make_device();
+    if (!device) {
+        return;
+    }
+    TempDir dir("p1-submissions");
+    const assets::TerrainWorld world = write_world(dir.path, grid_tiles(4, 4));
+    core::JobSystem jobs(2);
+    assets::AssetServer server(jobs);
+    render::TerrainPass pass(*device);
+    render::TerrainResidencyConfig cfg{};
+    cfg.slots = 4;
+    cfg.activation_radius = 0.25f * kPitch;
+    cfg.retention_radius = 0.5f * kPitch;
+    render::TerrainResidency residency(*device, pass, server, world, dir.path, nullptr, cfg);
+
+    const View view = top_down(16.0f, 16.0f, 16.0f);
+    const rhi::SubmissionCounters base = device->submission_counters();
+    std::uint64_t frames = 0;
+    std::uint64_t drifted = 0; // frames that ended with more live submission objects than baseline
+    rhi::SubmissionCounters worst = base;
+    for (const core::Vec3& eye : traversal_path()) {
+        settle(server);
+        residency.begin_frame(eye);
+        render::RenderGraph graph(*device);
+        graph.reset();
+        const render::RGTexture hdr =
+            graph.create_texture({{kSize, kSize}, render::kHdrFormat, "p1-hdr"});
+        const render::RGTexture depth =
+            graph.create_texture({{kSize, kSize}, render::kDepthFormat, "p1-depth"});
+        declare_clear(graph, hdr, depth);
+        residency.add(graph, hdr, depth, view.view_proj, view.eye, ambient_light());
+        auto cmd = device->begin_commands();
+        REQUIRE(cmd != nullptr);
+        graph.execute(*cmd);
+        (void)graph.submit_and_time(*device, std::move(cmd));
+        residency.end_frame_blocking();
+        ++frames;
+
+        const rhi::SubmissionCounters c = device->submission_counters();
+        const bool flat = c.live_fences == base.live_fences &&
+                          c.live_command_buffers == base.live_command_buffers &&
+                          c.in_flight_submissions == base.in_flight_submissions;
+        drifted += flat ? 0 : 1;
+        worst.live_fences = std::max(worst.live_fences, c.live_fences);
+        worst.live_command_buffers = std::max(worst.live_command_buffers, c.live_command_buffers);
+    }
+    const rhi::SubmissionCounters end = device->submission_counters();
+    CHECK(frames > 300);
+    CHECK(residency.stats().uploads > 0); // the loop really did upload (submit_blocking) tiles
+    CHECK(residency.stats().evictions > 0);
+    CHECK(drifted == 0);
+    CHECK(end.live_fences == base.live_fences);
+    CHECK(end.live_command_buffers == base.live_command_buffers);
+    CHECK(end.in_flight_submissions == base.in_flight_submissions);
+    CHECK(end.failed_submissions == 0);
+    MESSAGE("p1: " << frames << " frames, " << residency.stats().uploads << " uploads; peak live "
+                   << worst.live_fences << " fences / " << worst.live_command_buffers
+                   << " command buffers (baseline " << base.live_fences << " / "
+                   << base.live_command_buffers << ")");
+}
+
 // ── (c) a stale id draws nothing ────────────────────────────────────────────────────────────────
 
 TEST_CASE("m19.8a: drawing an evicted tile's old id is byte-identical to not drawing it, and is "

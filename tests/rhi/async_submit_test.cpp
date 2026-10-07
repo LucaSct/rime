@@ -247,3 +247,71 @@ TEST_CASE("rhi: submissions run in flight together, and each keeps its own work 
     device->destroy(pipe);
     device->destroy(csh);
 }
+
+// p1 — the Release terrain_flythrough crash. A submission borrowed with `wait_and_borrow` and never
+// released keeps its fence and its command buffer until the device dies. The fly-through did that
+// once per frame; on NVIDIA each leaked submission also pinned a device file descriptor, and under
+// a 1024-fd limit `vkCreateFence` answered VK_ERROR_OUT_OF_HOST_MEMORY a few thousand frames in —
+// inside an unrelated texture upload, which then submitted with a null fence and segfaulted in the
+// driver. `submission_counters()` is what makes the leak visible before it is fatal; this pins the
+// counters to the contract the header states.
+TEST_CASE("rhi: a borrowed submission holds its fence and command buffer until released, and "
+          "blocking uploads hold the live counts flat (p1)") {
+    using namespace rime::rhi;
+
+    auto device = create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the p1 submission-counter proof");
+        return;
+    }
+    const SubmissionCounters base = device->submission_counters();
+    CHECK(base.live_fences == 0);
+    CHECK(base.live_command_buffers == 0);
+    CHECK(base.in_flight_submissions == 0);
+    CHECK(base.failed_submissions == 0);
+
+    // The leak's own shape: N borrows, nothing released. Each one is still alive, and counted.
+    constexpr int kBorrowed = 16;
+    std::vector<SubmitTicket> tickets;
+    for (int i = 0; i < kBorrowed; ++i) {
+        const SubmitTicket t = device->submit(device->begin_commands());
+        REQUIRE(t.is_valid());
+        CHECK(device->wait_and_borrow(t) != nullptr);
+        CHECK(device->is_complete(t)); // done on the GPU — and STILL not reclaimed, by contract
+        tickets.push_back(t);
+    }
+    const SubmissionCounters held = device->submission_counters();
+    CHECK(held.live_fences == kBorrowed);
+    CHECK(held.live_command_buffers == kBorrowed);
+    CHECK(held.in_flight_submissions == kBorrowed);
+    for (const SubmitTicket t : tickets) {
+        device->release(t);
+    }
+    const SubmissionCounters released = device->submission_counters();
+    CHECK(released.live_fences == 0);
+    CHECK(released.live_command_buffers == 0);
+    CHECK(released.in_flight_submissions == 0);
+
+    // The uploads the crash landed in: many blocking texture writes, and after every one the live
+    // counts are back where they started — submit_blocking frees what it made, every time.
+    TextureDesc td{};
+    td.extent = {64, 64};
+    td.mip_levels = 4; // the GPU-downsampled path, as the terrain pass uploads
+    td.usage = TextureUsage::Sampled | TextureUsage::TransferDst | TextureUsage::TransferSrc;
+    td.debug_name = "p1-upload";
+    const TextureHandle tex = device->create_texture(td);
+    REQUIRE(tex.is_valid());
+    const std::vector<std::uint8_t> pixels(std::size_t{64} * 64 * 4, 0x7f);
+    int drifted = 0;
+    for (int i = 0; i < 256; ++i) {
+        device->write_texture(tex, pixels.data(), pixels.size());
+        const SubmissionCounters c = device->submission_counters();
+        drifted += c.live_fences != 0 || c.live_command_buffers != 0 ? 1 : 0;
+    }
+    device->destroy(tex);
+    CHECK(drifted == 0);
+    CHECK(device->submission_counters().failed_submissions == 0);
+}

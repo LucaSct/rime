@@ -98,8 +98,14 @@ public:
     // work and waits for the GPU to finish — the simplest correct model, perfect for the one-shot
     // offscreen render in the M3 proof. Frames-in-flight pipelining (overlapping CPU and GPU)
     // arrives with the swapchain in M3.4, where presentation sets the frame cadence.
+    //
+    // Failure (p1): begin_commands answers nullptr when the driver will not allocate a command
+    // buffer, and submit_blocking answers false when it could not end, fence, submit or wait for
+    // the work. Both are logged and counted (submission_counters().failed_submissions); neither
+    // ever passes a null handle on to the driver. A refused submit_blocking has still freed the
+    // encoder's command buffer — the caller has nothing to clean up.
     [[nodiscard]] virtual std::unique_ptr<CommandBuffer> begin_commands() = 0;
-    virtual void submit_blocking(CommandBuffer& commands) = 0;
+    virtual bool submit_blocking(CommandBuffer& commands) = 0;
 
     // Asynchronous submission — the non-blocking counterpart to submit_blocking, and the seam the
     // frame tap (engine/stream) rides to hide the glass-to-CPU readback stall (ADR-0030, s1.1).
@@ -107,7 +113,9 @@ public:
     // unlike submit_blocking it takes OWNERSHIP of the command buffer, because the backend must
     // keep it — and the transient descriptor pools it baked — alive until the GPU is done, which
     // the caller's scope no longer decides. Poll the ticket with is_complete() or block with
-    // wait(); whichever first observes completion reclaims the command buffer + pools.
+    // wait(); whichever first observes completion reclaims the command buffer + pools. A
+    // submission the driver refuses (no fence, or vkQueueSubmit2 failed) answers an INVALID ticket,
+    // logged and counted, with the command buffer already freed.
     [[nodiscard]] virtual SubmitTicket submit(std::unique_ptr<CommandBuffer> commands) = 0;
 
     // Has the work behind `ticket` finished on the GPU? Non-blocking (a fence poll). Reclaims the
@@ -144,6 +152,18 @@ public:
     // command buffer, because either one doing so would pull the query pool out from under the
     // borrower. So a borrow must be released, and forgetting is a leak rather than a crash.
     virtual void release(SubmitTicket ticket) = 0;
+
+    // How many submission objects the device holds right now, and how many submissions it refused.
+    // A diagnostic, not a control: a frame loop that is not leaking returns to the same live counts
+    // after every frame, and a test can assert exactly that (p1, the terrain_flythrough crash).
+    //
+    // It exists because the leak it catches is SILENT until it is fatal. A borrowed submission
+    // that is never released (see `wait_and_borrow`) costs one fence and one command buffer per
+    // frame; on the NVIDIA driver each also pins a device file descriptor and host memory, and a
+    // few thousand frames later `vkCreateFence` answers VK_ERROR_OUT_OF_HOST_MEMORY inside an
+    // unrelated upload. Nothing before that moment says anything is wrong — unless something
+    // counts.
+    [[nodiscard]] virtual SubmissionCounters submission_counters() const = 0;
 
     // Block until the GPU is idle. Used before tearing down resources.
     virtual void wait_idle() = 0;

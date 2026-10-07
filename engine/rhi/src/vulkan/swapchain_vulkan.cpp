@@ -99,7 +99,7 @@ VulkanSwapchain::~VulkanSwapchain() {
         if (in_flight_[i])
             vkDestroyFence(dev, in_flight_[i], nullptr);
         if (frame_cmd_[i] != VK_NULL_HANDLE)
-            vkFreeCommandBuffers(dev, device_.vk_command_pool(), 1, &frame_cmd_[i]);
+            device_.free_command_buffer(frame_cmd_[i]);
         for (VkDescriptorPool pool : frame_pools_[i]) // wait_idle above: provably not in flight
             device_.recycle_descriptor_pool(pool);
         frame_pools_[i].clear();
@@ -257,7 +257,7 @@ TextureHandle VulkanSwapchain::acquire_next_image() {
     // The command buffer this slot submitted last cycle is now guaranteed complete — free it. (One
     // alloc/free per frame; command-buffer pooling is a labeled later optimization, see rhi.md.)
     if (frame_cmd_[frame_] != VK_NULL_HANDLE) {
-        vkFreeCommandBuffers(dev, device_.vk_command_pool(), 1, &frame_cmd_[frame_]);
+        device_.free_command_buffer(frame_cmd_[frame_]);
         frame_cmd_[frame_] = VK_NULL_HANDLE;
     }
     // Same argument for the slot's transient descriptor pools (ADR-0020): the fence wait above
@@ -332,7 +332,7 @@ void VulkanSwapchain::recreate(Extent2D extent) {
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VK_CHECK(vkCreateSemaphore(dev, &si, nullptr, &image_available_[i]));
         if (frame_cmd_[i] != VK_NULL_HANDLE) {
-            vkFreeCommandBuffers(dev, device_.vk_command_pool(), 1, &frame_cmd_[i]);
+            device_.free_command_buffer(frame_cmd_[i]);
             frame_cmd_[i] = VK_NULL_HANDLE;
         }
         for (VkDescriptorPool pool : frame_pools_[i]) // wait_idle above: provably not in flight

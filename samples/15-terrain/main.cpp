@@ -216,8 +216,12 @@ run_speed(const Setup& s, const Speed& sp, core::PerfReport* report, const std::
         residency.add(graph, hdr, depth, vp, eye, light);
         auto cmd = s.device->begin_commands();
         graph.execute(*cmd);
-        const rhi::SubmitTicket ticket = s.device->submit(std::move(cmd));
-        rhi::CommandBuffer* done = s.device->wait_and_borrow(ticket);
+        // Submit, wait, read the timings AND release the submission (p1). This used to borrow
+        // with `wait_and_borrow` and never release, leaking a fence and a command buffer per
+        // frame — on NVIDIA a device fd each, so a Release run under a 1024-fd limit died a few
+        // thousand frames in with vkCreateFence -> VK_ERROR_OUT_OF_HOST_MEMORY.
+        const std::vector<render::RenderGraph::PassTiming> timings =
+            graph.submit_and_time(*s.device, std::move(cmd));
         residency.end_frame_blocking();
         const render::TerrainResidencyStats& st = residency.stats();
         if (!measure) {
@@ -226,12 +230,10 @@ run_speed(const Setup& s, const Speed& sp, core::PerfReport* report, const std::
         double terrain_ms = 0.0;
         std::uint32_t timed = 0;
         std::vector<core::PassTiming> passes;
-        if (done != nullptr) {
-            for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(*done)) {
-                if (t.name.rfind("terrain", 0) == 0) {
-                    terrain_ms += t.gpu_ms;
-                    ++timed;
-                }
+        for (const render::RenderGraph::PassTiming& t : timings) {
+            if (t.name.rfind("terrain", 0) == 0) {
+                terrain_ms += t.gpu_ms;
+                ++timed;
             }
         }
         const std::uint64_t drawn = st.draws - draws_before;
@@ -435,6 +437,22 @@ int main(int argc, char** argv) {
             sp.name != nullptr ? sp.name
                                : "fly" + std::to_string(static_cast<int>(sp.metres_per_second));
         SpeedResult r = run_speed(setup, sp, &report, name);
+        // p1: a speed hands back every submission it made. Its residency is gone by now and the
+        // run has no swapchain, so anything still live is a leak, and any refusal is an upload or
+        // frame that silently did not happen — both fail the run rather than flatter its numbers.
+        const rhi::SubmissionCounters sc = setup.device->submission_counters();
+        if (sc.live_fences != 0 || sc.live_command_buffers != 0 || sc.in_flight_submissions != 0 ||
+            sc.failed_submissions != 0) {
+            std::fprintf(stderr,
+                         "  %s: submissions leaked or refused — %llu fences, %llu command buffers, "
+                         "%llu in flight live; %llu refused\n",
+                         name.c_str(),
+                         static_cast<unsigned long long>(sc.live_fences),
+                         static_cast<unsigned long long>(sc.live_command_buffers),
+                         static_cast<unsigned long long>(sc.in_flight_submissions),
+                         static_cast<unsigned long long>(sc.failed_submissions));
+            status = 1;
+        }
         const core::Distribution gpu = r.gpu.summarize();
         const core::Distribution sel = r.select.summarize();
         const core::Distribution beg = r.begin.summarize();

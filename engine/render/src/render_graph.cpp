@@ -754,6 +754,16 @@ std::vector<RenderGraph::PassTiming> RenderGraph::resolve_timings(rhi::CommandBu
     return resolve_timings(timing_plan(), cmd);
 }
 
+std::vector<RenderGraph::PassTiming>
+RenderGraph::submit_and_time(rhi::Device& device, std::unique_ptr<rhi::CommandBuffer> cmd) const {
+    const rhi::SubmitTicket ticket = device.submit(std::move(cmd));
+    std::vector<PassTiming> out;
+    if (rhi::CommandBuffer* done = device.wait_and_borrow(ticket))
+        out = resolve_timings(*done);
+    device.release(ticket); // the step the p1 leak dropped; a no-op on an invalid ticket
+    return out;
+}
+
 std::vector<RenderGraph::PassTiming> RenderGraph::resolve_timings(const TimingPlan& plan,
                                                                   rhi::CommandBuffer& cmd) {
     std::vector<PassTiming> out;
