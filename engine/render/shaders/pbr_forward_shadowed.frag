@@ -427,6 +427,7 @@ void main() {
     float metallic = draw.params.x * mr.y;
     float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
     float alpha = roughness * roughness;
+    alpha = filter_specular_alpha(n, alpha); // geometric specular AA, ADR-0078 step 1a
 
     float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
 
