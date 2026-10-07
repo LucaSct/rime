@@ -985,13 +985,13 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             graph.import_texture(taa_history_[r], taa_history_state_[r], extent, kHdrFormat);
         const RGTexture history_write =
             graph.import_texture(taa_history_[w], taa_history_state_[w], extent, kHdrFormat);
-        const RGTexture resolved = graph.create_texture({extent, kHdrFormat, "scene-hdr-taa"});
+        const RGTexture taa_resolved = graph.create_texture({extent, kHdrFormat, "scene-hdr-taa"});
         taa_resolve_.add(graph,
                          tonemap_src,
                          velocity,
                          depth,
                          history_read,
-                         resolved,
+                         taa_resolved,
                          history_write,
                          view_proj_unjittered_,
                          prev_view_proj_unjittered_,
@@ -1002,7 +1002,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         taa_history_state_[r] = rhi::ResourceState::ShaderRead;
         taa_write_index_ = r;
         taa_history_valid_ = true;
-        tonemap_src = resolved;
+        tonemap_src = taa_resolved;
         last_frame_resolved_ = true;
     } else if (taa_resolve_enabled_) {
         // No velocity this frame (motion vectors off, or no depth pre-pass): nothing to reproject
