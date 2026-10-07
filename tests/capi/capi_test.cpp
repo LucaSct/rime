@@ -16,6 +16,7 @@
 #include <string>
 
 #include "rime/capi/rime.h"
+#include "support/temp_path.hpp"
 
 TEST_CASE("rime_version reports the engine version (0.0.1)") {
     const RimeVersion v = rime_version();
@@ -48,7 +49,7 @@ TEST_CASE("rime_asset_validate reports the right status for bad inputs, with a m
         CHECK(rime_asset_validate("anything", nullptr) == RIME_ERR_INVALID_ARGUMENT);
     }
     SUBCASE("garbage bytes fail the RMA1 reader (not a crash)") {
-        const auto path = std::filesystem::temp_directory_path() / "rime_capi_corrupt.bin";
+        const auto path = rime::test::temp_path("rime_capi_corrupt.bin");
         {
             std::ofstream out(path, std::ios::binary);
             out << "definitely not an RMA1 cooked asset payload";

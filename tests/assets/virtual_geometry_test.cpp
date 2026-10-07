@@ -20,6 +20,7 @@
 #include "rime/assets/virtual_geometry.hpp"
 #include "rime/core/byte_cursor.hpp"
 #include "rime/platform/filesystem.hpp"
+#include "support/temp_path.hpp"
 
 using namespace rime::assets;
 
@@ -173,7 +174,7 @@ TEST_CASE("virtual geometry: registry content-addresses the companion payload") 
 
 TEST_CASE("virtual geometry: registry loads a companion from disk") {
     const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "rime_m18_virtual_geometry_registry.rvg";
+        rime::test::temp_path("rime_m18_virtual_geometry_registry.rvg");
     std::error_code ec;
     const std::vector<std::byte> file = write_file(valid_asset());
     REQUIRE(rime::platform::write_file(path, file));

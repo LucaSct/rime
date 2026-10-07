@@ -14,6 +14,7 @@
 #include <system_error>
 
 #include "rime/app/content_root.hpp"
+#include "support/temp_path.hpp"
 
 using namespace rime::app;
 namespace fs = std::filesystem;
@@ -22,7 +23,7 @@ namespace {
 
 // A scratch tree: <tmp>/rime_content_root_test/{build/bin, src/content, bundle/{content}}.
 struct Tree {
-    fs::path base = fs::temp_directory_path() / "rime_content_root_test";
+    fs::path base = rime::test::temp_path("rime_content_root_test");
     fs::path bin = base / "build" / "bin";
     fs::path src_content = base / "src" / "content";
     fs::path bundle = base / "bundle";

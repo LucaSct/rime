@@ -33,6 +33,7 @@
 #include "rime/editorhost/editor_host.hpp"
 #include "rime/editorhost/editor_identity.hpp"
 #include "rime/scene/scene_format.hpp"
+#include "support/temp_path.hpp"
 
 using namespace rime;
 
@@ -268,8 +269,7 @@ TEST_CASE("E1 (2): a Parent survives Stop — through a respawned parent, forwar
     }
     CHECK(parent_field_on_wire == id_parent);
 
-    const std::filesystem::path file =
-        std::filesystem::temp_directory_path() / "rime_e1_parent_after_stop.rscene";
+    const std::filesystem::path file = rime::test::temp_path("rime_e1_parent_after_stop.rscene");
     const editorhost::SceneSaveOutcome saved =
         editorhost::save_hosted_scene(w, editorhost::HostedScene{}, file.string());
     REQUIRE(saved.ok);

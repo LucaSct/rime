@@ -14,12 +14,13 @@
 #include <vector>
 
 #include "rime/platform/filesystem.hpp"
+#include "support/temp_path.hpp"
 
 using namespace rime::platform;
 
 TEST_CASE("write_file/read_file round-trip and file_exists") {
     namespace fs = std::filesystem;
-    const fs::path path = fs::temp_directory_path() / "rime_fs_roundtrip.bin";
+    const fs::path path = rime::test::temp_path("rime_fs_roundtrip.bin");
     std::error_code ec;
     fs::remove(path, ec);
 
@@ -71,4 +72,19 @@ TEST_CASE("user base dirs are absolute and namespaced by app") {
 
     // Cache is a distinct, throwaway location from persistent data on every platform we target.
     CHECK(cache != data);
+}
+
+TEST_CASE("temp_path: per-process scratch paths, stable within a process") {
+    namespace fs = std::filesystem;
+    // Same name, same process -> same path (a save-then-reload across test cases relies on this).
+    CHECK(rime::test::temp_path("a.bin") == rime::test::temp_path("a.bin"));
+    CHECK(rime::test::temp_path("a.bin") != rime::test::temp_path("b.bin"));
+
+    // It lives under a directory this process minted, not directly in the shared temp directory,
+    // so another account's file of the same name cannot be in the way.
+    const fs::path p = rime::test::temp_path("a.bin");
+    CHECK(p.parent_path() == rime::test::process_temp_dir());
+    CHECK(p.parent_path() != fs::temp_directory_path());
+    CHECK(fs::is_directory(p.parent_path()));
+    CHECK_FALSE(fs::exists(p));
 }

@@ -35,6 +35,7 @@
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/platform/filesystem.hpp"
+#include "support/temp_path.hpp"
 
 namespace fs = std::filesystem;
 using namespace rime::assets;
@@ -49,7 +50,7 @@ const fs::path kFixtures{RIME_ASSETS_FIXTURE_DIR};
 struct TempDir {
     fs::path path;
 
-    explicit TempDir(const std::string& name) : path(fs::temp_directory_path() / name) {
+    explicit TempDir(const std::string& name) : path(rime::test::temp_path(name)) {
         std::error_code ec;
         fs::remove_all(path, ec);
         fs::create_directories(path, ec);

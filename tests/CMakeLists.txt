@@ -23,6 +23,8 @@ function(rime_add_test name)
     # for the situation — it includes the real <ostream>. Set on the funnel so a new test that
     # happens to CHECK a string_view cannot reintroduce it.
     target_compile_definitions(${name} PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
+    # tests/support/ (temp_path.hpp: per-process scratch paths) is includable as "support/...".
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_FUNCTION_LIST_DIR})
     rime_apply_common_target_options(${name})
     # doctest's header transitively includes libstdc++'s <ciso646>, whose C++20 deprecation
     # #warning Clang surfaces even from a system header (GCC suppresses it). Under our -Werror

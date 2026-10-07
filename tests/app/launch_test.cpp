@@ -28,6 +28,7 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/rhi/device.hpp"
 #include "rime/scene/scene_format.hpp"
+#include "support/temp_path.hpp"
 
 using namespace rime;
 using namespace rime::app;
@@ -332,8 +333,7 @@ TEST_CASE("launch: a finished game stops the run, and a refused setup ticks noth
 }
 
 TEST_CASE("launch: an entry scene is loaded strictly before setup") {
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "rime_launch_test_entry.rscene";
+    const std::filesystem::path path = rime::test::temp_path("rime_launch_test_entry.rscene");
     {
         ecs::World authored;
         ecs::register_transform_components(authored);
@@ -373,8 +373,7 @@ TEST_CASE("launch: a relative entry scene resolves against the content root, nev
     // m20.2. A directory holding the scene, named with --content: the run finds it, hands the root
     // to `setup`, and composes WorldTransforms for what it loaded — m20.1 only re-propagated
     // existing ones, so a loaded entity reached `setup` (and PhysicsSync) with no WorldTransform.
-    const std::filesystem::path root =
-        std::filesystem::temp_directory_path() / "rime_launch_test_content";
+    const std::filesystem::path root = rime::test::temp_path("rime_launch_test_content");
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
     {
