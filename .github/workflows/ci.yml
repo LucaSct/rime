@@ -29,6 +29,12 @@ jobs:
   build:
     name: build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false # one OS failing shouldn't hide the others
       matrix:
@@ -117,6 +123,12 @@ jobs:
   sanitize-address:
     name: sanitizer (ASan + UBSan)
     runs-on: ubuntu-latest
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -197,6 +209,12 @@ jobs:
   sanitize-thread:
     name: sanitizer (TSan, Clang)
     runs-on: ubuntu-latest
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -279,6 +297,12 @@ jobs:
   sdk-consumer:
     name: SDK consumer (out-of-tree install)
     runs-on: ubuntu-latest
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -317,6 +341,12 @@ jobs:
   editor-smoke:
     name: Editor smoke (editor ⇄ live engine)
     runs-on: ubuntu-latest
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -371,6 +401,12 @@ jobs:
   lint:
     name: format, lint & license
     runs-on: ubuntu-latest # style/lint are OS-independent — check once.
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
