@@ -1153,9 +1153,9 @@ bool PerfReport::parse(std::string_view text, PerfReport& out, std::string& erro
     // make every already-committed baseline in `docs/perf/` unreadable, and a `parse` that fails on
     // the baseline is how the regression gate stops comparing anything at all -- the "gate that
     // cannot fail" this reader's strictness exists to prevent. A field an older file may
-    // legitimately not carry, read as optional, is backward-compatible; a bump is not. Absent means
-    // UNKNOWN
-    // (`integrity() == nullopt`), never zero. Present is strict like every other field here.
+    // legitimately not carry, read as optional, is backward-compatible; a bump is not. Absent
+    // means UNKNOWN (`integrity() == nullopt`), never zero; present is strict like every other
+    // field in this reader.
     if (const JsonValue* integrity = root.find("integrity")) {
         if (integrity->type != JsonValue::Type::Object) {
             error = "non-object field 'integrity'";

@@ -22,6 +22,8 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -882,4 +884,91 @@ TEST_CASE("a fingerprint compares the machine, not the run") {
         r2.set_run(other);
         CHECK(r1.machine().comparable_to(r2.machine()));
     }
+}
+
+// ── Integrity: the counters that say whether the report's numbers can be believed ────────────
+// `accounting_gaps` and `foreign_zones` used to be printed to stdout only, so a committed artefact
+// could not tell a clean run from one whose residuals were inflated. The cases below pin the
+// three things that make the field trustworthy: it survives exactly, "absent" is never "zero",
+// and a malformed object is an error rather than a default.
+
+TEST_CASE("integrity: both counters round-trip as exact 64-bit integers") {
+    PerfReport r = make_report();
+    r.set_foreign_zones(std::numeric_limits<std::uint64_t>::max());
+
+    REQUIRE(r.integrity().has_value());
+    CHECK(r.integrity()->foreign_zones == std::numeric_limits<std::uint64_t>::max());
+
+    PerfReport back;
+    std::string err;
+    REQUIRE_MESSAGE(PerfReport::parse(r.to_json(), back, err), err);
+    REQUIRE(back.integrity().has_value());
+    // 2^64-1 through a double would lose its low bits, silently, in a file nobody re-reads by hand.
+    CHECK(back.integrity()->foreign_zones == std::numeric_limits<std::uint64_t>::max());
+    CHECK(back.integrity()->accounting_gaps == 0);
+
+    // A clean measured run reports a genuine zero, not an absent answer.
+    const PerfReport clean = make_report();
+    REQUIRE(clean.integrity().has_value());
+    CHECK(clean.integrity()->accounting_gaps == 0);
+    CHECK(clean.integrity()->foreign_zones == 0);
+}
+
+TEST_CASE("integrity: a report written before the field existed is UNKNOWN, not clean") {
+    std::string text = make_report().to_json();
+    const std::size_t at = text.find(",\n  \"integrity\"");
+    REQUIRE(at != std::string::npos);
+    const std::size_t end = text.find('}', at);
+    REQUIRE(end != std::string::npos);
+    text.erase(at, end + 1 - at); // drop the whole object, as an old committed baseline lacks it
+
+    PerfReport old;
+    std::string err;
+    REQUIRE_MESSAGE(PerfReport::parse(text, old, err), err);
+    // Asserted on the optional itself: a zeroed struct would read "clean" for a run nobody checked.
+    CHECK(old.integrity() == std::nullopt);
+}
+
+TEST_CASE("integrity: a mistyped or incomplete object is an error, never a default") {
+    const std::string good = make_report().to_json();
+    PerfReport out;
+    std::string error;
+
+    SUBCASE("a string where a number belongs") {
+        std::string text = good;
+        const std::string needle = "\"foreign_zones\": 0";
+        const std::size_t at = text.find(needle);
+        REQUIRE(at != std::string::npos);
+        text.replace(at, needle.size(), "\"foreign_zones\": \"0\"");
+        CHECK_FALSE(PerfReport::parse(text, out, error));
+        CHECK_FALSE(error.empty());
+    }
+
+    SUBCASE("a missing sub-field") {
+        std::string text = good;
+        const std::string needle = "\"accounting_gaps\"";
+        const std::size_t at = text.find(needle);
+        REQUIRE(at != std::string::npos);
+        text.replace(at, needle.size(), "\"accounting_gapz\"");
+        CHECK_FALSE(PerfReport::parse(text, out, error));
+        CHECK_FALSE(error.empty());
+    }
+}
+
+TEST_CASE("integrity: the serialized gap count is the number accounting_gaps() reports") {
+    PerfReport g;
+    g.declare_accounting("frame", {"sim", "typo.render"});
+    for (std::uint64_t i = 0; i < 3; ++i) {
+        g.observe("sim", 4.0);
+        g.observe_frame(i, 10.0); // `typo.render` never recorded: one gap per frame
+    }
+    REQUIRE(g.accounting_gaps() == 3);
+    REQUIRE(g.integrity().has_value());
+    CHECK(g.integrity()->accounting_gaps == g.accounting_gaps());
+
+    PerfReport back;
+    std::string err;
+    REQUIRE_MESSAGE(PerfReport::parse(g.to_json(), back, err), err);
+    REQUIRE(back.integrity().has_value());
+    CHECK(back.integrity()->accounting_gaps == 3);
 }
