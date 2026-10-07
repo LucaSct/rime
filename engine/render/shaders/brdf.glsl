@@ -66,4 +66,24 @@ vec3 shade_light(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo, float metal
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
+// ── THE ENVIRONMENT BRDF, ANALYTICALLY ────────────────────────────────────────────────────────
+//
+// Lighting a surface by a whole environment means integrating the GGX lobe against it. The
+// "split-sum" approximation (Karis, "Real Shading in Unreal Engine 4", SIGGRAPH 2013) factors that
+// integral into (the environment averaged over the lobe) x (the BRDF integrated against a WHITE
+// environment). The second factor depends only on f0, roughness and n.v, and is linear in f0:
+// f0 * A + B. Unreal stores A and B in a 2-D lookup texture; Karis' mobile follow-up ("Physically
+// Based Shading on Mobile", 2014) fits them with the handful of terms below — "EnvBRDFApprox". It is
+// within a few percent of the LUT, and it costs no texture, no bake and no binding, which is why
+// terrain (m19.6) and the forward PBR pass (m19.6b) use it rather than growing a second lookup
+// table. `roughness` is PERCEPTUAL roughness.
+vec3 env_brdf_approx(vec3 f0, float roughness, float n_dot_v) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    const vec4 r = roughness * c0 + c1;
+    const float a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    const vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
 #endif // RIME_BRDF_GLSL

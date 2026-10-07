@@ -126,6 +126,14 @@ layout(set = 0, binding = 15) uniform sampler2D ddgi_visibility_atlas;
 #define SKY_SH_BINDING 17
 #include "sky_sh_eval.glsl"
 
+// The baked sky-view LUT (m19.6b, ADR-0065 addendum): what a surface MIRRORS, read along its
+// reflection ray — the specular half of the sky's light, where the SH above is the diffuse half.
+// Always bound (SkyPass::empty_binding's 1x1 dummy when there is no sky) and only ever sampled
+// behind sky_sh_enabled(), the same "off is a branch, not a missing resource" contract as the SH.
+// The -DWRITE_GBUFFER variant declares it and never reads it: see the ambient section in main().
+layout(set = 0, binding = 18) uniform sampler2D skyview_lut;
+#include "sky_mapping.glsl" // skyview_uv_from_direction — the mapping the LUT was baked with
+
 layout(std140, set = 0, binding = 16) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
     uvec4 grid_dims_perrow;   // xyz probe counts, w atlas probes-per-row
@@ -146,6 +154,9 @@ layout(location = 0) out vec4 out_hdr;
 // source, two SPIR-V modules — no duplicated GLSL. docs/math/ssr.md (m10.7b) is what marches it.
 #ifdef WRITE_GBUFFER
 layout(location = 1) out vec4 out_gbuffer;
+// The material half (m19.6b fix 1): base colour + metallic, so the SSR resolve can reflect this
+// surface at its own Fresnel F0 rather than a dielectric's (passes.hpp, kGbufferMaterialFormat).
+layout(location = 2) out vec4 out_gbuffer_material;
 #endif
 
 #include "brdf.glsl"
@@ -438,10 +449,22 @@ void main() {
     // the GEOMETRIC normal, not the normal-mapped `n` — it is a coarse, sparsely-sampled volumetric
     // field, so a surface's micro-detail bump cannot change which hemisphere a handful of metres-apart
     // probes are sampling (the same reasoning sun_shadow/spot_shadow use their own un-perturbed normal).
+    //
+    // DIFFUSE ONLY, AND ONLY FOR WHAT HAS A DIFFUSE (m19.6b). Both sources are irradiance — light
+    // arriving from the whole hemisphere — and what a surface does with that is its DIFFUSE lobe.
+    // A metal has none: brdf.glsl's shade_light gives it kd = (1 - F)(1 - metallic) = 0, its colour
+    // being the F0 of the specular lobe instead. Until m19.6b this term was `albedo * ambient` for
+    // every surface, so a metal was lit by a lobe it does not have — gold under an overcast sky
+    // read as yellow paint. The weight is the same (1 - metallic) the direct lights use, folded
+    // into the albedo ONCE so the DDGI branch, the sky and the flat constant cannot disagree. At
+    // metallic 0 it multiplies by exactly 1.0, which changes no bit of the product. (The Fresnel
+    // half of kd is not applied: there is no single half-vector for a hemisphere of light, and
+    // the flat constant never had it — ADR-0065's addendum records the gap.)
+    const vec3 diffuse_albedo = albedo * (1.0 - metallic);
     vec3 out_radiance;
     if (ddgi.enabled_pad.x != 0u) {
         vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal));
-        out_radiance = indirect * albedo * ao;
+        out_radiance = indirect * diffuse_albedo * ao;
     } else {
         // The sky's own irradiance when a sky is present, else M5.6's flat constant. Like DDGI
         // above this uses the GEOMETRIC normal rather than the normal-mapped `n`, and for a
@@ -451,7 +474,46 @@ void main() {
         // same no-double-counting reason the DDGI branch does.
         const vec3 sky_ambient =
             sky_sh_enabled() ? sky_sh_irradiance(normalize(v_world_normal)) : frame.ambient.rgb;
-        out_radiance = albedo * sky_ambient * ao;
+        out_radiance = diffuse_albedo * sky_ambient * ao;
+
+#ifndef WRITE_GBUFFER
+        // ── THE SKY, MIRRORED (m19.6b, ADR-0065 addendum) ────────────────────────────────────
+        //
+        // Taking the diffuse away from a metal leaves it black under a sky, which is just as
+        // wrong: a metal's ambient light is the environment it REFLECTS. This is terrain.frag's
+        // m19.6 term, reused: the sky-view LUT along r = reflect(-v, n), faded toward the SH's
+        // cosine-weighted average as alpha = roughness^2 (the LUT has no prefiltered mips, and the
+        // GGX lobe widens like alpha), times Karis' analytic environment BRDF. Dielectrics get it
+        // too, at f0 = 0.04 — the sheen a real floor has under an open sky.
+        //
+        // WHY IT IS COMPILED OUT OF THE G-BUFFER VARIANT. Exactly one path may supply a pixel's
+        // specular environment. When SSR is on, ssr_resolve.frag adds `reflection * fresnel` on
+        // top of this pass's output for every pixel that has geometry, and its reflection falls
+        // back to this same LUT wherever the screen march misses — so adding the term here as
+        // well would count the sky twice. SSR on is exactly "this pass writes the G-buffer" (the
+        // G-buffer has no other reader and SSR cannot run without it), and that is already a
+        // compile-time fact: the -DWRITE_GBUFFER twin IS the SSR-on shader. So the gate is the
+        // preprocessor's, costs no uniform, and cannot drift from the pipeline choice.
+        //
+        // It sits in the DDGI-off branch for the matching reason: with DDGI on the sky is not
+        // the surface's environment — a probe field that knows about walls is — and an
+        // unoccluded sky mirror would shine through every ceiling. (No specular environment
+        // reaches the forward pass with DDGI on and SSR off; that is a recorded gap.)
+        //
+        // Unlike terrain, the reflection is NOT clamped to the horizon: terrain clamps because a
+        // heightfield's downward ray meets more terrain, while a mesh's (the underside of a
+        // sphere, a wall) meets the ground — which is what the LUT holds below the horizon, and
+        // what ssr_resolve.frag reads there too, so SSR on and off agree. `ao` scales it because
+        // this is still unshadowed ambient light: a crevice the AO map darkens should not glow.
+        if (sky_sh_enabled()) {
+            const vec3 r = reflect(-v, n);
+            const vec3 sky_mirror = texture(skyview_lut, skyview_uv_from_direction(r)).rgb;
+            const vec3 sky_specular = mix(sky_mirror, sky_ambient, alpha);
+            const vec3 f0 = mix(vec3(0.04), albedo, metallic);
+            out_radiance +=
+                sky_specular * env_brdf_approx(f0, roughness, max(dot(n, v), 1e-4)) * ao;
+        }
+#endif
     }
 
     // The sun (light 0) is the shadow caster; its contribution is scaled by the cascade shadow
@@ -520,5 +582,8 @@ void main() {
     // and A = 1.0 as a "geometry is here" mask so the SSR march (m10.7b) can distinguish a shaded
     // fragment from cleared background (which stays A = 0).
     out_gbuffer = vec4(ddgi_oct_encode(n), roughness, 1.0);
+    // The SAME albedo and metallic the lights above were shaded with — maps already multiplied in
+    // — so the reflection SSR adds is tinted by the F0 this surface's direct highlights have.
+    out_gbuffer_material = vec4(albedo, metallic);
 #endif
 }

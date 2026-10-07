@@ -9,8 +9,10 @@
 // isolated by a control, following the M5.6/M6.4 pattern.
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 #include "render_test_support.hpp"
 #include "rime/core/math/quat.hpp"
@@ -415,4 +417,448 @@ TEST_CASE(
     // could not do this: it would return the same constant in both frames.
     CHECK(red.r > red.b);
     CHECK(blue.b > blue.r);
+}
+
+// ── m19.6b: a metal takes no DIFFUSE ambient, and mirrors the sky exactly once ───────────────────
+//
+// Everything below reads the FLOOR — rows [kFloorTop, kSize), which the level camera 1 m above a
+// 12 m plane fills with floor on every column (the horizon is row kSize/2). The claims are exact
+// (a product with a float zero IS zero; one program fed the same inputs IS the same image) or
+// strict inequalities the algebra forces, never a tuned margin — ADR-0065's addendum derives each.
+namespace {
+
+constexpr std::uint32_t kFloorTop = kSize * 5 / 8;
+
+// The NEAR floor, for the SSR cases. At the far, grazing end of the floor (measured: rows 55-61
+// of 96) the screen march's thickness test lets a nearly floor-parallel ray "hit" the floor it
+// left, so those pixels reflect the FLOOR — m10.7b's behaviour, and correct for what it is, but
+// not the environment the claims below are about. From 3/4 height down every reflection ray
+// climbs off the top of the screen without meeting anything: a pure miss, the probe alone.
+constexpr std::uint32_t kNearFloorTop = kSize * 3 / 4;
+
+// One f16 unit in the last place at `v`: binary16 keeps 11 significant bits, so a normal value
+// m * 2^e with m in [0.5, 1) is spaced 2^(e-11) from its neighbours. Read from the exponent, not
+// tuned — the same construction terrain's m19.6 anchor uses.
+[[nodiscard]] float f16_ulp(float v) {
+    int e = 0;
+    (void)std::frexp(v, &e);
+    return std::ldexp(1.0f, e - 11);
+}
+
+struct FloorStats {
+    float max_abs = 0.0f;    // the largest |channel| on the floor
+    std::uint32_t lit = 0;   // floor pixels with any channel > 0
+    std::uint32_t count = 0; // floor pixels visited
+    Rgb mean;
+};
+
+[[nodiscard]] FloorStats floor_stats(const HdrImage& img, std::uint32_t top = kFloorTop) {
+    FloorStats s;
+    for (std::uint32_t y = top; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * img.width + x) * 3;
+            const float r = img.rgb[i], g = img.rgb[i + 1], b = img.rgb[i + 2];
+            s.max_abs = std::max({s.max_abs, std::fabs(r), std::fabs(g), std::fabs(b)});
+            s.lit += (r > 0.0f || g > 0.0f || b > 0.0f) ? 1u : 0u;
+            s.mean.r += r;
+            s.mean.g += g;
+            s.mean.b += b;
+            ++s.count;
+        }
+    }
+    const float inv = 1.0f / static_cast<float>(s.count);
+    s.mean = {s.mean.r * inv, s.mean.g * inv, s.mean.b * inv};
+    return s;
+}
+
+// The worst |pixel - expected| over every floor channel, for a floor that should be one flat value.
+[[nodiscard]] float floor_worst_error(const HdrImage& img, float expected) {
+    float worst = 0.0f;
+    for (std::uint32_t y = kFloorTop; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * img.width + x) * 3;
+            for (std::size_t c = 0; c < 3; ++c) {
+                worst = std::max(worst, std::fabs(img.rgb[i + c] - expected));
+            }
+        }
+    }
+    return worst;
+}
+
+// FNV-1a over the decoded floats: a fingerprint to LOG, so a before/after run of this file on two
+// builds can be compared by eye. Never asserted against a stored value — that would be a golden.
+[[nodiscard]] std::uint64_t fingerprint(const HdrImage& img) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (const float f : img.rgb) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &f, sizeof(bits));
+        for (int k = 0; k < 4; ++k) {
+            h = (h ^ ((bits >> (8 * k)) & 0xffu)) * 1099511628211ull;
+        }
+    }
+    return h;
+}
+
+// Σ|a − b| / Σ a over the floor: how much of the surface moved, as a fraction of the surface —
+// terrain's m19.6 metric, so the two "follows the sky" proofs are the same measurement.
+[[nodiscard]] double floor_relative_change(const HdrImage& a, const HdrImage& b) {
+    double diff = 0.0;
+    double total = 0.0;
+    for (std::uint32_t y = kFloorTop; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * a.width + x) * 3;
+            for (std::size_t c = 0; c < 3; ++c) {
+                diff += std::fabs(double(a.rgb[i + c]) - double(b.rgb[i + c]));
+                total += double(a.rgb[i + c]);
+            }
+        }
+    }
+    return total > 0.0 ? diff / total : 0.0;
+}
+
+[[nodiscard]] MaterialId
+add_material(MaterialRegistry& materials, Rgb base, float metallic, float roughness) {
+    PbrMaterialDesc md{};
+    md.base_color[0] = base.r;
+    md.base_color[1] = base.g;
+    md.base_color[2] = base.b;
+    md.metallic = metallic;
+    md.roughness = roughness;
+    return materials.add(md);
+}
+
+// The floor plus the zero-radiance sun that (with shadows enabled) forces the SHADOWED pipeline —
+// the only one with an ambient branch to test — without adding any light of its own.
+void build_floor_dark_sun(ecs::World& world, MeshId floor, MaterialId mat) {
+    build_floor(world, floor, mat);
+    core::Transform sun{};
+    sun.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    (void)world_spawn_dark_sun(world, sun);
+}
+
+[[nodiscard]] SkyParams sky_at_elevation(float elevation) {
+    SkyParams sp = physical_sky(1.0f);
+    sp.sun_direction[1] = std::sin(elevation);
+    sp.sun_direction[2] = -std::cos(elevation);
+    return sp;
+}
+
+const Rgb kWarm{0.9f, 0.5f, 0.1f};
+const Rgb kCool{0.1f, 0.3f, 0.9f};
+
+} // namespace
+
+TEST_CASE(
+    "m19.6b: under the flat ambient a metal is exactly black, and a dielectric is unchanged") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the m19.6b flat-ambient proof");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "m196b-floor");
+    MaterialRegistry materials;
+    const MaterialId dielectric = add_material(materials, {kAlbedo, kAlbedo, kAlbedo}, 0.0f, 0.5f);
+    const MaterialId half = add_material(materials, {kAlbedo, kAlbedo, kAlbedo}, 0.5f, 0.5f);
+    const MaterialId metal = add_material(materials, kWarm, 1.0f, 0.5f);
+
+    LightingSettings ls{};
+    ls.shadows_enabled = true;
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_lighting(ls);
+    constexpr float kAmbient = 0.11f;
+    renderer.set_ambient(kAmbient, kAmbient, kAmbient);
+    const auto render = [&](MaterialId mat) {
+        return render_hdr(
+            *device, renderer, [&](ecs::World& w) { build_floor_dark_sun(w, floor, mat); });
+    };
+
+    // (b) METALLIC 0 IS WHAT IT WAS. With no light, white maps and AO = 1 the old shader's whole
+    // output was albedo * ambient, and the new one's is (albedo * (1 - 0)) * ambient: a float
+    // times 1.0 is itself, so the f32 value is the same product. The shader is a different
+    // program than before, though, and how a driver rounds f32 into the f16 target is its own
+    // business — so the bound is ONE f16 ULP of the expected value at every floor pixel, read
+    // from the format, not the 2% the m17.7b gate test allows.
+    const float expected = kAlbedo * kAmbient;
+    const HdrImage diel_img = render(dielectric);
+    const float diel_err = floor_worst_error(diel_img, expected);
+    MESSAGE("m19.6b flat ambient, metallic 0: worst |pixel - albedo*ambient| = "
+            << diel_err << " (one f16 ULP = " << f16_ulp(expected) << "), fingerprint "
+            << fingerprint(diel_img));
+    CHECK(diel_err <= f16_ulp(expected));
+
+    // The weight is the BRDF's (1 - metallic), not a switch: half metal is exactly half the
+    // dielectric's product (a power-of-two scale is exact in binary floating point).
+    const float half_err = floor_worst_error(render(half), 0.5f * expected);
+    MESSAGE("m19.6b flat ambient, metallic 0.5: worst error = " << half_err);
+    CHECK(half_err <= f16_ulp(0.5f * expected));
+
+    // (a) A METAL HAS NO DIFFUSE. albedo * (1 - 1) is +0 in every channel, there is no light and
+    // no sky, so nothing else can reach the pixel: the floor is 0.0 EXACTLY, whatever its colour.
+    // Before m19.6b it read albedo * ambient (0.099 in red here).
+    const FloorStats metal_floor = floor_stats(render(metal));
+    MESSAGE("m19.6b flat ambient, metallic 1: max |channel| = "
+            << metal_floor.max_abs << ", lit pixels " << metal_floor.lit << "/"
+            << metal_floor.count);
+    CHECK(metal_floor.max_abs == 0.0f);
+}
+
+TEST_CASE("m19.6b: SSR reflects each surface at its own F0 — a metal tinted, a dielectric not") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the m19.6b SSR Fresnel proof");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "m196b-floor");
+    MaterialRegistry materials;
+    // Red is 1.0 on purpose: 255/255 survives the 8-bit G-buffer exactly, and F0 = 1 makes
+    // Schlick's Fresnel exactly 1 at every angle — the channel every exact claim below reads.
+    constexpr float kSmooth = 0.05f;
+    const Rgb red{1.0f, 0.2f, 0.2f};
+    const MaterialId red_metal = add_material(materials, red, 1.0f, kSmooth);
+    const MaterialId warm_diel = add_material(materials, kWarm, 0.0f, 0.3f);
+    const MaterialId cool_diel = add_material(materials, kCool, 0.0f, 0.3f);
+
+    LightingSettings ls{};
+    ls.ssr_enabled = true;
+    ls.ssr_max_distance = 8.0f;
+    ls.ssr_thickness = 0.5f;
+    ls.ssr_max_steps = 64;
+    SceneRenderer ssr_on(*device, meshes, materials);
+    ssr_on.set_lighting(ls);
+    SceneRenderer ssr_off(*device, meshes, materials);
+    const auto render = [&](SceneRenderer& renderer, MaterialId mat) {
+        return render_hdr(*device, renderer, [&](ecs::World& w) { build_floor(w, floor, mat); });
+    };
+
+    // ── A NEUTRAL GREY ENVIRONMENT (no sky): the exact half ─────────────────────────────────────
+    // On the near floor (kNearFloorTop) every reflection ray leaves the screen, so SSR reflects
+    // the flat ambient E. The pixel is then  forward + E * F(f0, n.v)  and every term is known.
+    constexpr float kAmbient = 0.11f;
+    ssr_on.set_ambient(kAmbient, kAmbient, kAmbient);
+
+    // A METAL: forward is albedo * (1 - 1) * E = 0, and red's F0 is 1, so F = 1 + (1 - 1) * f = 1:
+    // the red channel is E itself. The resolve blends E with E twice on the way and the target
+    // rounds once, so the bound is two f16 ULPs of E — the format's, not a margin. Were the
+    // diffuse still applied this would read 2E; were F0 still 0.04, under half of E.
+    //
+    // And the TINT, exactly: green's F0 is 0.2, so its Fresnel 0.2 + 0.8 * (1 - n.v)^5 is below 1
+    // wherever n.v > 0, i.e. at every pixel that can see the floor. Under a grey environment red
+    // is therefore strictly above green at EVERY near-floor pixel — no threshold.
+    const HdrImage metal_flat = render(ssr_on, red_metal);
+    float red_err = 0.0f;
+    std::uint32_t red_over_green = 0;
+    for (std::uint32_t y = kNearFloorTop; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 3;
+            red_err = std::max(red_err, std::fabs(metal_flat.rgb[i] - kAmbient));
+            red_over_green += metal_flat.rgb[i] > metal_flat.rgb[i + 1] ? 1u : 0u;
+        }
+    }
+    const FloorStats flat_floor = floor_stats(metal_flat, kNearFloorTop);
+    MESSAGE("m19.6b fix 1, grey ambient, SSR on, red metal: worst |red - E| = "
+            << red_err << " (two f16 ULP = " << 2.0f * f16_ulp(kAmbient) << "), red > green at "
+            << red_over_green << "/" << flat_floor.count << ", mean g=" << flat_floor.mean.g);
+    CHECK(red_err <= 2.0f * f16_ulp(kAmbient));
+    CHECK(red_over_green == flat_floor.count);
+
+    // A DIELECTRIC IS NOT TINTED. Its pixel is albedo * E + E * F(0.04, n.v): subtract the
+    // diffuse (known on the CPU) and what is left is the reflection, which must not know the
+    // base colour. Two very different colours, each channel: the residuals agree to the four f16
+    // roundings between them — each frame stores its forward target and its resolved target in
+    // half floats. A reflection tinted by even 1% of the albedo would miss this by orders.
+    const HdrImage warm_flat = render(ssr_on, warm_diel);
+    const HdrImage cool_flat = render(ssr_on, cool_diel);
+    const float warm_c[3] = {kWarm.r, kWarm.g, kWarm.b};
+    const float cool_c[3] = {kCool.r, kCool.g, kCool.b};
+    float worst_excess = -1.0f; // |residual difference| - its bound, worst over the floor
+    float worst_resid_diff = 0.0f;
+    float min_reflection = 1.0e9f;
+    for (std::uint32_t y = kNearFloorTop; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 3;
+            for (std::size_t c = 0; c < 3; ++c) {
+                const float dw = warm_c[c] * kAmbient;
+                const float dc = cool_c[c] * kAmbient;
+                const float rw = warm_flat.rgb[i + c] - dw;
+                const float rc = cool_flat.rgb[i + c] - dc;
+                const float bound = f16_ulp(dw) + f16_ulp(dc) + f16_ulp(warm_flat.rgb[i + c]) +
+                                    f16_ulp(cool_flat.rgb[i + c]);
+                worst_resid_diff = std::max(worst_resid_diff, std::fabs(rw - rc));
+                worst_excess = std::max(worst_excess, std::fabs(rw - rc) - bound);
+                min_reflection = std::min({min_reflection, rw, rc});
+            }
+        }
+    }
+    MESSAGE("m19.6b fix 1, grey ambient, SSR on, dielectrics: worst reflection difference "
+            << worst_resid_diff << ", worst excess over the four-ULP bound " << worst_excess
+            << ", smallest reflection " << min_reflection);
+    CHECK(worst_excess <= 0.0f);
+    CHECK(min_reflection > 0.0f); // there IS a reflection to be untinted
+
+    // ── UNDER THE SKY ───────────────────────────────────────────────────────────────────────────
+    ssr_on.set_sky(physical_sky(1.0f));
+    ssr_off.set_sky(physical_sky(1.0f));
+    (void)render(ssr_on, red_metal); // warm both bakes; every measured frame below reuses them
+    (void)render(ssr_off, red_metal);
+
+    // The metallic-0 frames, fingerprinted so two builds can be compared (never asserted): these
+    // are the same two materials the pre-fix build logged.
+    const HdrImage warm_sky = render(ssr_on, warm_diel);
+    const HdrImage cool_sky = render(ssr_on, cool_diel);
+    const FloorStats wd = floor_stats(warm_sky);
+    const FloorStats cd = floor_stats(cool_sky);
+    MESSAGE("m19.6b SSR on, sky: dielectric warm r/b="
+            << wd.mean.r << "/" << wd.mean.b << " cool r/b=" << cd.mean.r << "/" << cd.mean.b
+            << " fingerprints " << fingerprint(warm_sky) << " " << fingerprint(cool_sky));
+    CHECK(wd.mean.r > cd.mean.r); // the base colour reaches the frame (through the diffuse)
+    CHECK(cd.mean.b > wd.mean.b);
+
+    // THE METAL, SSR ON AGAINST SSR OFF. Same floor, same sky; only who mirrors it differs.
+    //   SSR on :  lut(r) * F(f0)                                 (ssr_resolve.frag)
+    //   SSR off:  mix(lut(r), sh, alpha) * EnvBRDFApprox(f0, roughness, n.v)   (the forward pass)
+    // In the red channel f0 = 1, where both weights are closed-form: Schlick is exactly 1, and the
+    // fit is A + B = 1 - 0.55 * roughness (the n.v terms cancel). So
+    //   on / off = 1 / ((1 - 0.55 * roughness) * (1 + alpha * (sh / lut - 1))).
+    // The sky is not negative, so sh / lut >= 0 and the ratio cannot exceed
+    //   1 / ((1 - 0.55 * roughness) * (1 - alpha))                — the UPPER bound, derived.
+    // Downward it is limited only by how much brighter the hemisphere's average is than the
+    // mirrored direction; kSkyContrast = 8 is the stated assumption (measured here: the floor
+    // mean sits near the top of the interval, so the average is not far above the mirror).
+    // If SSR's reflection and the forward term were BOTH applied the ratio would be about 2; with
+    // the old dielectric Fresnel it was 0.29 — either falls far outside.
+    const HdrImage on = render(ssr_on, red_metal);
+    const HdrImage off = render(ssr_off, red_metal);
+    const float alpha = kSmooth * kSmooth;
+    const float fit = 1.0f - 0.55f * kSmooth;
+    constexpr float kSkyContrast = 8.0f;
+    const double upper = 1.0 / (double(fit) * (1.0 - double(alpha)));
+    const double lower = 1.0 / (double(fit) * (1.0 + double(alpha) * (kSkyContrast - 1.0)));
+    const FloorStats on_floor = floor_stats(on, kNearFloorTop);
+    const FloorStats off_floor = floor_stats(off, kNearFloorTop);
+    const double ratio = double(on_floor.mean.r) / double(off_floor.mean.r);
+    std::uint32_t sky_red_over_green = 0;
+    for (std::uint32_t y = kNearFloorTop; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 3;
+            sky_red_over_green += on.rgb[i] > on.rgb[i + 1] ? 1u : 0u;
+        }
+    }
+    MESSAGE("m19.6b fix 1, sky, red metal: SSR on r/g/b="
+            << on_floor.mean.r << "/" << on_floor.mean.g << "/" << on_floor.mean.b
+            << " SSR off r/g/b=" << off_floor.mean.r << "/" << off_floor.mean.g << "/"
+            << off_floor.mean.b << "; red on/off = " << ratio << " in [" << lower << ", " << upper
+            << "]; red > green at " << sky_red_over_green << "/" << on_floor.count);
+    CHECK(ratio <= upper);
+    CHECK(ratio >= lower);
+    // The reflected sky is RED-tinted: red above green at every near-floor pixel. (Blue stays
+    // above red here — the sky is blue, and a tint scales a colour, it does not replace it.)
+    CHECK(sky_red_over_green == on_floor.count);
+}
+
+TEST_CASE("m19.6b: with SSR off, the forward pass mirrors the sky — a smooth metal follows it") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the m19.6b specular sky proof");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "m196b-floor");
+    MaterialRegistry materials;
+    const MaterialId warm_metal = add_material(materials, kWarm, 1.0f, 0.1f);
+    const MaterialId cool_metal = add_material(materials, kCool, 1.0f, 0.1f);
+    const MaterialId grey_metal = add_material(materials, {0.8f, 0.8f, 0.8f}, 1.0f, 0.1f);
+    const MaterialId grey_diel = add_material(materials, {0.8f, 0.8f, 0.8f}, 0.0f, 1.0f);
+
+    SceneRenderer renderer(*device, meshes, materials); // SSR off: nothing else mirrors the sky
+    const auto render = [&](MaterialId mat, const SkyParams& sky) {
+        renderer.set_sky(sky);
+        return render_hdr(*device, renderer, [&](ecs::World& w) { build_floor(w, floor, mat); });
+    };
+    const SkyParams high = sky_at_elevation(1.2f); // ~69 degrees
+    const SkyParams low = sky_at_elevation(0.08f); // ~5 degrees: a sunset sky
+
+    // A METAL IS LIT, AND BY ITS OWN F0. No light, no diffuse (metallic 1), SSR off: every photon
+    // on this floor is the forward pass's specular sky term, env * (f0 * A + B) with f0 = the base
+    // colour and A > 0. So the floor is lit everywhere, and the metal whose base colour is larger
+    // in a channel is strictly brighter in that channel — under the SAME sky, in the same frame
+    // geometry. (With SSR on these two are the same image: the case above.)
+    const FloorStats warm = floor_stats(render(warm_metal, high));
+    const FloorStats cool = floor_stats(render(cool_metal, high));
+    MESSAGE("m19.6b SSR off, sky: warm metal r/b="
+            << warm.mean.r << "/" << warm.mean.b << " cool metal r/b=" << cool.mean.r << "/"
+            << cool.mean.b << " lit " << warm.lit << "/" << warm.count);
+    CHECK(warm.lit == warm.count);
+    CHECK(warm.mean.r > cool.mean.r);
+    CHECK(cool.mean.b > warm.mean.b);
+
+    // (c) THE MIRROR OF TERRAIN'S m19.6 (b). Swap the sky and nothing else. The smooth metal
+    // shows the sky-view LUT along its reflection ray (alpha = 0.01: 99% point sample); the
+    // roughness-1 dielectric shows only the nine-coefficient SH average, in both its diffuse and
+    // its (alpha = 1) specular. A sunset moves one direction of the sky more than it moves the
+    // hemisphere's average, so the metal must move strictly more.
+    const HdrImage metal_high = render(grey_metal, high);
+    const HdrImage metal_low = render(grey_metal, low);
+    const HdrImage diel_high = render(grey_diel, high);
+    const HdrImage diel_low = render(grey_diel, low);
+    CHECK(renderer.sky_lighting_stats().filled >= 4); // every swap really re-baked
+    const double metal_change = floor_relative_change(metal_high, metal_low);
+    const double diel_change = floor_relative_change(diel_high, diel_low);
+    MESSAGE("m19.6b relative change under the sky swap: smooth metal "
+            << metal_change << ", rough dielectric " << diel_change << "; fingerprint diel high "
+            << fingerprint(diel_high));
+    CHECK(metal_change > 0.0);
+    CHECK(metal_change > diel_change);
+}
+
+TEST_CASE("m19.6b: DDGI's indirect diffuse does not light a metal either") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the m19.6b DDGI proof");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "m196b-floor");
+    MaterialRegistry materials;
+    const MaterialId dielectric = add_material(materials, kWarm, 0.0f, 0.5f);
+    const MaterialId metal = add_material(materials, kWarm, 1.0f, 0.5f);
+
+    // An empty SDF field: every probe ray escapes and returns the flat ambient, so the lattice
+    // fills with a known, non-zero irradiance and the DDGI branch is the floor's only light.
+    LightingSettings ls{};
+    ls.sdf_clipmap_enabled = true;
+    ls.ddgi_enabled = true;
+    ls.ddgi_hysteresis = 0.7f;
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_lighting(ls);
+    renderer.set_ambient(0.5f, 0.5f, 0.5f);
+    const auto render = [&](MaterialId mat) {
+        return render_hdr(*device, renderer, [&](ecs::World& w) { build_floor(w, floor, mat); });
+    };
+    for (int i = 0; i < 8; ++i) {
+        (void)render(dielectric); // let the probes accumulate
+    }
+
+    // The control first: the field is live — a dielectric on this floor is lit by it. Then the
+    // same field, the same frame, metallic 1: indirect * (albedo * 0) is exactly zero.
+    const FloorStats diel_floor = floor_stats(render(dielectric));
+    const FloorStats metal_floor = floor_stats(render(metal));
+    MESSAGE("m19.6b DDGI: dielectric lit " << diel_floor.lit << "/" << diel_floor.count
+                                           << " mean r=" << diel_floor.mean.r
+                                           << "; metal max |channel| = " << metal_floor.max_abs);
+    CHECK(diel_floor.lit > diel_floor.count / 2);
+    CHECK(metal_floor.max_abs == 0.0f);
 }

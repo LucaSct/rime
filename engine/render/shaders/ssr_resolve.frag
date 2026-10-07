@@ -66,6 +66,10 @@ layout(set = 0, binding = 5) uniform sampler2D ddgi_visibility_atlas;
 // gains is the sky and its glow, not a second sun.
 layout(set = 0, binding = 7) uniform sampler2D skyview_lut;
 
+// The G-buffer's material half (m19.6b fix 1): RGB = base colour, A = metallic. What the Fresnel
+// term at the bottom of main() needs to reflect a METAL as a metal.
+layout(set = 0, binding = 8) uniform sampler2D gbuffer_material;
+
 layout(std140, set = 0, binding = 6) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
     uvec4 grid_dims_perrow;   // xyz probe counts, w atlas probes-per-row
@@ -296,11 +300,27 @@ void main() {
     const vec3 mirror = mix(probe, sharp, edge);
     const vec3 refl = mix(mirror, probe, cone);
 
-    // Fresnel-Schlick at a dielectric F0 — reflections rise at grazing angles (the wet-floor tell).
+    // Fresnel-Schlick at the SURFACE's F0 — reflections rise at grazing angles (the wet-floor tell).
     // The whole reflection (screen or probe) is the specular lobe, so it is modulated by Fresnel
     // exactly as an environment reflection would be. ndotv uses the surface→camera direction (−v_dir).
+    //
+    // F0 is brdf.glsl's: 0.04 for a dielectric, the base colour for a metal, mixed by metallic.
+    // Until m19.6b fix 1 this was the constant 0.04 for EVERYTHING, because the G-buffer carried
+    // no material. That was survivable while the forward pass (wrongly) lit metals with diffuse
+    // ambient; once m19.6b removed that, this reflection became a metal's ONLY ambient light, and
+    // at 4% a gold floor under an open sky rendered nearly black. At metallic 0 the mix returns
+    // the 0.04 it always was (0.04 * 1 + base * 0), and 1 - 0.04 rounds to the same float as the
+    // old literal 0.96 — so a dielectric's reflection is the old arithmetic, value for value.
+    //
+    // It is plain Schlick, not the forward pass's roughness-aware environment BRDF
+    // (env_brdf_approx): the two agree where the cone is sharp — for f0 = 1 the fit integrates to
+    // 1 - 0.55 * roughness against Schlick's 1 — and drift apart as roughness rises, which is
+    // this pass's existing over-brightness on rough surfaces, left alone so that no metallic-0
+    // frame changes (ADR-0065 addendum, Fix 1).
     const float ndotv = max(dot(n_view, -v_dir), 0.0);
-    const float fres = 0.04 + 0.96 * pow(1.0 - ndotv, 5.0);
+    const vec4 material = texture(gbuffer_material, uv);
+    const vec3 f0 = mix(vec3(0.04), material.rgb, material.a);
+    const vec3 fres = f0 + (vec3(1.0) - f0) * pow(1.0 - ndotv, 5.0);
 
     out_hdr = vec4(base + refl * fres, 1.0);
 }

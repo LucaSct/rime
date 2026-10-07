@@ -17,6 +17,7 @@
 #include "pbr_forward_shadowed.frag.spv.h"
 #include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
 #include "present.frag.spv.h"
+#include "rime/core/diagnostics/log.hpp"
 #include "tonemap.frag.spv.h"
 
 namespace rime::render {
@@ -305,6 +306,7 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
         {15, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
         {16, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
         {17, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},        // sky SH (m17.7b)
+        {18, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
     };
     // 18 of the RHI's 24 descriptor slots (rhi::kMaxBindings, vulkan_backend.hpp:355) are now
     // spoken for. The previous note here named 18 as the trigger for a second descriptor set or a
@@ -317,6 +319,12 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     //
     // The trigger stands, just moved: the next technique that wants its own bindings on the
     // forward pipeline should split the set rather than take a 19th.
+    //
+    // m19.6b took the 19th anyway (binding 18, the sky-view LUT the specular sky term mirrors),
+    // and that is a recorded exception rather than the note being ignored: it is the OTHER HALF of
+    // the sky binding already here, not a new technique — SkyLightBinding has carried the LUT
+    // since m17.7b and terrain/SSR bind the same pair. 19 of 24. The trigger is unchanged for
+    // anything that is genuinely new.
     pd.fragment_shader = shadowed_fragment_shader_;
     pd.bindings = shadowed_bindings;
     pd.depth_write = false;
@@ -334,7 +342,7 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     // somewhere to land (the baseline pair above declares one attachment, so the hardware discards
     // it there). color_formats wins over the single color_format when non-empty
     // (rhi::GraphicsPipelineDesc), which is what makes these two MRT.
-    const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat};
+    const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat, kGbufferMaterialFormat};
     pd.color_formats = gbuffer_formats;
     pd.fragment_shader = shadowed_gbuffer_fragment_shader_; // the -DWRITE_GBUFFER twin
     pd.depth_write = false;
@@ -415,14 +423,26 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   const ClusterBinding& clusters,
                                   const DdgiBinding& ddgi,
                                   const SkyLightBinding& sky,
-                                  RGTexture gbuffer) const {
+                                  RGTexture gbuffer,
+                                  RGTexture gbuffer_material) const {
     // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
     // is the "no geometry" the shader overwrites with 1 where it shades), rendered by the matching
     // MRT pipeline variant. Invalid = the one-attachment baseline, byte-for-byte the pre-SSR path.
-    const bool write_gbuffer = gbuffer.is_valid();
+    // The material half (m19.6b fix 1) is a THIRD output of the same variant and travels with the
+    // first: the G-buffer pipelines declare three attachments, so half a G-buffer cannot be drawn.
+    // A caller that passes only one gets the single-attachment path and an error, not a pipeline
+    // whose attachment count disagrees with its render pass.
+    if (gbuffer.is_valid() != gbuffer_material.is_valid()) {
+        RIME_ERROR("render: add_shadowed was given half a G-buffer (gbuffer {}, material {}) — "
+                   "drawing without one",
+                   gbuffer.is_valid(),
+                   gbuffer_material.is_valid());
+    }
+    const bool write_gbuffer = gbuffer.is_valid() && gbuffer_material.is_valid();
     const RGColorAttachment colors[] = {
         {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}},
-        {gbuffer, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+        {gbuffer, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {gbuffer_material, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
     RGDepthAttachment depth_att{};
     depth_att.texture = depth;
     if (depth_prepassed) {
@@ -437,7 +457,11 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // Both shadow arrays AND both DDGI atlases are SAMPLED here — declaring them makes the graph
     // order this pass after whatever last wrote each (m10.1 cascades, m10.2 spots, m10.5b's own
     // blend-irradiance/blend-visibility compute passes) and transition all four to ShaderRead.
-    const RGTexture sampled[] = {shadow.map, local.map, ddgi.irradiance, ddgi.visibility};
+    // The sky-view LUT joins them (m19.6b): the forward shader mirrors it when no SSR pass will,
+    // and declaring the read is what orders this pass after the bake that writes it. It leaves the
+    // LUT in ShaderRead — the state SceneRenderer already reports to SkyPass on every sky-on frame.
+    const RGTexture sampled[] = {
+        shadow.map, local.map, ddgi.irradiance, ddgi.visibility, sky.skyview};
     // Declaring the two cluster buffers is what orders this pass after the cull dispatch that
     // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
     // The sky's SH buffer joins the cluster buffers here for the same reason they are declared:
@@ -446,7 +470,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // barrier. An undeclared read would work right up until the frame that actually re-baked.
     const RGBuffer buffers[] = {clusters.lights, clusters.lists, sky.sh};
     RenderGraph::RasterPassDesc desc{};
-    desc.colors = write_gbuffer ? std::span<const RGColorAttachment>{colors, 2}
+    desc.colors = write_gbuffer ? std::span<const RGColorAttachment>{colors, 3}
                                 : std::span<const RGColorAttachment>{colors, 1};
     desc.depth = &depth_att;
     desc.sampled = sampled;
@@ -461,7 +485,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
         desc,
         [pipe, data, shadow, local, clusters, ddgi, sky, &graph](rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipe);
-            // Bindings 7–16 are attached once (they persist across draws — ADR-0020);
+            // Bindings 7–18 are attached once (they persist across draws — ADR-0020);
             // record_draws re-binds only per-draw state on top. The resources' physical handles
             // resolve now (assign_physicals has run), the same late-resolve the tonemap pass uses.
             cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
@@ -476,6 +500,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
             cmd.bind_uniform_buffer(16, ddgi.ubo.buffer, ddgi.ubo.offset, ddgi.ubo.size);
             cmd.bind_storage_buffer(17, graph.physical_buffer(sky.sh));
+            cmd.bind_texture(18, graph.physical(sky.skyview), sky.sampler);
             // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
             // overwhelming majority and the byte-identical old path — then the double-sided draws
             // with culling off. Dynamic state rather than a second pipeline: the forward pass

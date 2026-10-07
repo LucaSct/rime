@@ -42,7 +42,17 @@ inline constexpr rhi::Format kLdrFormat = rhi::Format::RGBA8Unorm;
 // The thin SSR G-buffer (m10.7a): RG = octahedral world normal, B = perceptual roughness, A = a
 // geometry mask (1 where shaded, 0 where cleared). RGBA16Float so the signed [-1,1] octahedral
 // pair and the [0,1] roughness all keep full precision — thin means two attachments, not narrow.
+// ("Two" was HDR + this; m19.6b fix 1 added the material target below, so SSR-on is three.)
 inline constexpr rhi::Format kGbufferFormat = rhi::Format::RGBA16Float;
+// The G-buffer's MATERIAL half (m19.6b fix 1): RGB = base colour, A = metallic. SSR needs it to
+// reflect a surface at its own Fresnel F0 = mix(0.04, base colour, metallic) — without it every
+// surface reflected like a dielectric, so a metal (which has no other ambient light) went dark
+// whenever SSR was on. Base colour + metallic rather than F0 itself, because metallic 0 survives
+// 8 bits EXACTLY (0/255) and then F0 is the literal 0.04 the resolve always used: a dielectric's
+// reflection does not move. RGBA8Srgb: the hardware sRGB-encodes RGB (perceptual spacing, what an
+// 8-bit albedo wants) and stores A linearly. 4 bytes per pixel on top of the 8 above, written
+// only when SSR is on.
+inline constexpr rhi::Format kGbufferMaterialFormat = rhi::Format::RGBA8Srgb;
 
 // Fixed light budgets for the per-frame uniform block. Uniform blocks are statically sized, so
 // the caps are compile-time; 4 suns and 16 point lights are generous for M5 scenes. Past these,
@@ -335,13 +345,22 @@ public:
                       // The sky's lighting half (m17.7b): nine SH coefficients for the ambient
                       // term, plus the baked sky-view LUT. Always valid — SkyPass::empty_binding
                       // stands in when there is no sky, and its zero flag is what makes the
-                      // shader keep taking FrameUniforms::ambient.
+                      // shader keep taking FrameUniforms::ambient. The LUT is the SPECULAR half
+                      // (m19.6b), mirrored only by the single-attachment variants.
                       const SkyLightBinding& sky,
                       // The thin SSR G-buffer (m10.7a). Invalid (the default) = the baseline
                       // single-attachment path. Valid = a second colour attachment the shadowed
                       // shader writes world-normal + roughness into, using a pipeline variant that
-                      // differs from the baseline shadowed pipeline ONLY in attachment count.
-                      RGTexture gbuffer = {}) const;
+                      // differs from the baseline shadowed pipeline in attachment count AND in
+                      // leaving the specular sky term out (m19.6b): passing a G-buffer is a
+                      // promise that an SSR resolve will add the specular environment instead,
+                      // so the sky is not mirrored twice (ADR-0065 addendum A2).
+                      RGTexture gbuffer = {},
+                      // The G-buffer's material half (kGbufferMaterialFormat, m19.6b fix 1):
+                      // base colour + metallic, for SSR's Fresnel. It travels WITH `gbuffer` —
+                      // both valid or both invalid. One without the other is a caller bug: it is
+                      // logged, and the pass draws the single-attachment path.
+                      RGTexture gbuffer_material = {}) const;
 
 private:
     rhi::Device& device_;
