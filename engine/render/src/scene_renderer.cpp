@@ -918,7 +918,16 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     if (has_ssr && gbuffer.is_valid()) {
         SsrInputs si{};
         si.view = scene.camera.view;
-        si.proj = proj_rasterized; // the matrix the G-buffer/depth were rasterized with
+        // The matrix the G-buffer and depth were rasterized with (ssr_resolve.frag inverts it to
+        // reconstruct a view position from uv+depth, and projects each march step back through it).
+        // NOTE, before you "simplify" this back to its own core::perspective(): unlike the sky
+        // above, NO test fails if you do. The reflected content has already moved with the jitter,
+        // so a wrong matrix here only displaces the reconstructed ray ORIGIN -- a second-order
+        // sub-pixel residual, not the one-pixel seam the sky probe measures. An image-space probe
+        // was tried and could not separate the two cases (miss ratio 0.2007 right vs 0.3395 wrong,
+        // which is no separation at all); proving this one needs a debug readback of the SSR hit
+        // position, which is not worth its own mechanism yet. The shader is the argument.
+        si.proj = proj_rasterized;
         si.z_near = scene.camera.z_near;
         si.z_far = scene.camera.z_far;
         si.extent = extent;
