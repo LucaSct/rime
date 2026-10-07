@@ -93,6 +93,18 @@ private:
     std::vector<double> ms_;
 };
 
+// Whether the report's numbers can be taken at face value. Both are zero on a clean run.
+//   * accounting_gaps: non-zero means every accounting residual is an OVERESTIMATE by an unknown
+//     amount (a declared child had no sample for a frame).
+//   * foreign_zones:   non-zero means the report is SHORT by that many measurements (zone closes
+//     from another thread that never reached it).
+struct ReportIntegrity {
+    std::uint64_t accounting_gaps = 0;
+    std::uint64_t foreign_zones = 0;
+
+    friend bool operator==(const ReportIntegrity&, const ReportIntegrity&) = default;
+};
+
 // One render pass in one frame. Names are owned (not the `string_view` the ledger uses) because a
 // report outlives the RenderGraph it was read from, and is serialized after that graph has reset.
 struct PassTiming {
@@ -272,6 +284,27 @@ public:
     // Copies the ledger's counters into owned storage. Call once, after the run.
     void set_ledger(const WorkLedger& ledger);
 
+    // Copies `ZoneTimelines::foreign_zones()` into the report. `foreign_zones` lives on a different
+    // object (the collector), so -- like the ledger -- it has to be handed over; call once, after
+    // the run and after the last collection. Without it the artefact cannot say it is short by that
+    // many measurements.
+    void set_foreign_zones(std::uint64_t count) noexcept { foreign_zones_ = count; }
+
+    // The two counters that say whether the report's numbers can be trusted at face value. They
+    // used to be printed to stdout only, so a committed report could not tell a clean run from one
+    // whose residuals were inflated; they now travel in the file.
+    //
+    // `nullopt` is NOT zero. A measured report always has the answer (a genuine 0 is a real "clean
+    // run"); a PARSED report has it only if the file carried the object, and `nullopt` there means
+    // "this report predates the field" -- we do not know. Same rule as `distribution()`: absent and
+    // zero are different answers, and every consumer is required to tell them apart. Defaulting an
+    // old baseline to zero would stamp "clean" on a run nobody ever checked.
+    [[nodiscard]] std::optional<ReportIntegrity> integrity() const noexcept {
+        if (integrity_unknown_)
+            return std::nullopt;
+        return ReportIntegrity{accounting_gaps_, foreign_zones_};
+    }
+
     // ── Reading ──────────────────────────────────────────────────────────────────────────────
     // `nullopt` when nothing was ever observed under that name — absent and zero are different
     // answers, and every consumer here is required to tell them apart. Returned by value rather
@@ -386,6 +419,8 @@ private:
     std::vector<PassCost> parsed_passes_;    // parse side
     std::uint64_t frames_closed_ = 0;        // how many observe_frame calls have completed
     std::uint64_t accounting_gaps_ = 0;
+    std::uint64_t foreign_zones_ = 0;
+    bool integrity_unknown_ = false; // parse side: the file predates the `integrity` object
     bool accounting_gap_warned_ = false;
     WorstFrame worst_;
     MachineFingerprint machine_;

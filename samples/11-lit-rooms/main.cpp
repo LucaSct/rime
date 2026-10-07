@@ -706,6 +706,8 @@ int run_perf(const PerfOptions& opt) {
             std::fprintf(stderr, "  could not write %s\n", opt.out);
             return 1;
         }
+        // The artefact carries what stdout warns of: a reader of the file cannot see the console.
+        report.set_foreign_zones(zones.foreign_zones());
         const std::string json = report.to_json();
         std::fwrite(json.data(), 1, json.size(), f);
         std::fclose(f);
