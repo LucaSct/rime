@@ -18,6 +18,77 @@
 #     and the fingerprint would (correctly) refuse to compare it against anything useful.
 set -euo pipefail
 
+# ── Choosing the baseline report ─────────────────────────────────────────────────────────────
+#
+# Reports are named <date>-<sample>-<gpu-slug>-<sha>.json. The SHA is there because the name used to
+# be one slot per sample per machine per DAY, so a before/after pair measured on one day could not
+# both be filed: on 2026-10-06 a control run on main (453866b) and a treatment run on a branch
+# (3adeee9) both wanted 2026-10-06-99-the-block-nvidia-geforce-rtx-3060.json, and which number
+# survived had to be decided by hand. Reports committed under the old, SHA-less name stay valid
+# baselines, so both shapes are matched.
+#
+# Two traps, both of which silently pick the WRONG baseline instead of failing:
+#
+#  (a) A trailing-wildcard glob (`*-<slug>*.json`) would take a `...-rtx-3060-ti-...` report for the
+#      `...-rtx-3060` machine — another GPU's numbers judged as this one's, the exact mistake the
+#      gpu-slug exists to prevent. So the name is matched by an anchored regular expression,
+#      ^<date>-<name>-<slug>(-<sha>)?\.json$, with <sha> = [0-9a-f]+(-dirty)?. `ti` is not hex, so
+#      it cannot be mistaken for a SHA. A `case` glob cannot express the optional group.
+#
+#  (b) `sort | tail -1` meant "newest" only because the name began with the date. With a SHA on the
+#      end, two reports from the same day sort by SHA, which is arbitrary. So order by the date tag
+#      first, then break ties by WHEN THE FILE WAS FILED (commit time; mtime for a report not yet
+#      committed). Commit time and not the SHA, because a SHA is a hash — it carries no order at all.
+#      Commit time and not the date alone, because the same-day tie is exactly what is being broken.
+_re_escape() { printf '%s' "$1" | sed -e 's/[][\.*^$(){}?+|]/\\&/g'; }
+
+# select_baseline <baseline_dir> <name> <slug> <self_path>  — prints the chosen path, or nothing.
+select_baseline() {
+    local dir="$1" name="$2" slug="$3" self="$4"
+    local re="^[0-9]{4}-[0-9]{2}-[0-9]{2}-$(_re_escape "$name")-$(_re_escape "$slug")(-[0-9a-f]+(-dirty)?)?\\.json$"
+    local f base ct
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/*.json; do
+        [ -e "$f" ] || continue
+        base="$(basename "$f")"
+        printf '%s\n' "$base" | grep -Eq -- "$re" || continue
+        [ "$f" = "$self" ] && continue
+        ct="$(git log -1 --format=%ct -- "$f" 2>/dev/null || true)"
+        [ -z "$ct" ] && ct="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+        printf '%s\t%s\t%s\n' "${base:0:10}" "$ct" "$f"
+    done | sort -t "$(printf '\t')" -k1,1 -k2,2n | tail -1 | cut -f3
+}
+
+# Runs with no GPU and no build: synthetic filenames in a temp dir, asserted picks.
+self_test() {
+    local d; d="$(mktemp -d)"
+    check() { # description expected-basename-or-empty actual-path
+        local got=""
+        [ -n "$3" ] && got="$(basename -- "$3")"
+        if [ "$got" = "$2" ]; then echo "ok   - $1"; else echo "FAIL - $1: expected '${2}' got '${got}'"; exit 1; fi
+    }
+    local nm="99-the-block" sl="nvidia-geforce-rtx-3060"
+    check "empty directory yields no baseline" "" "$(select_baseline "$d" "$nm" "$sl" "$d/x.json")"
+    touch "$d/2026-09-22-${nm}-${sl}.json"
+    check "legacy SHA-less name is still selectable" "2026-09-22-${nm}-${sl}.json" \
+        "$(select_baseline "$d" "$nm" "$sl" "$d/none.json")"
+    touch -d '2026-10-06 10:00' "$d/2026-10-06-${nm}-${sl}-453866b.json"
+    touch -d '2026-10-06 11:00' "$d/2026-10-06-${nm}-${sl}-3adeee9-dirty.json"
+    check "same-day pair: self excluded, the other chosen" "2026-10-06-${nm}-${sl}-453866b.json" \
+        "$(select_baseline "$d" "$nm" "$sl" "$d/2026-10-06-${nm}-${sl}-3adeee9-dirty.json")"
+    check "same-day tie broken by filing time, not SHA order" "2026-10-06-${nm}-${sl}-3adeee9-dirty.json" \
+        "$(select_baseline "$d" "$nm" "$sl" "$d/none.json")"
+    touch "$d/2026-10-08-${nm}-nvidia-geforce-rtx-3060-ti-abc1234.json" "$d/2026-10-08-${nm}-nvidia-geforce-rtx-3060-ti.json"
+    check "a 3060-ti report is not chosen for the 3060 slug" "2026-10-06-${nm}-${sl}-3adeee9-dirty.json" \
+        "$(select_baseline "$d" "$nm" "$sl" "$d/none.json")"
+    touch "$d/2026-09-30-${nm}-${sl}-fffffff.json"
+    check "older date with a larger SHA does not beat a newer date" "2026-10-06-${nm}-${sl}-3adeee9-dirty.json" \
+        "$(select_baseline "$d" "$nm" "$sl" "$d/none.json")"
+    check "another sample is never chosen" "" "$(select_baseline "$d" "11-lit-rooms" "$sl" "$d/none.json")"
+    rm -rf "$d"
+    echo "perf.sh --self-test: all cases passed"
+}
+
 usage() {
     cat <<'EOF'
 Rime perf — measure frame/sim time on this machine and write a fingerprinted report.
@@ -31,14 +102,18 @@ Usage: scripts/perf.sh [options]
   --width W --height H    render resolution (default: 1920x1080)
   --commit                write the reports into docs/perf/ instead of a scratch dir
   --baseline-dir DIR      where to look for the report to compare against (default: docs/perf)
+  --self-test             check baseline selection against synthetic report names; needs no GPU
+                          or build, exits non-zero on the first failed case
   -h, --help              show this help
 
-Reports are named <date>-<sample>-<gpu-slug>.json, so a second machine's numbers never overwrite
-the first's, and `git log docs/perf/` reads as the performance history of the engine.
+Reports are named <date>-<sample>-<gpu-slug>-<sha>.json. The slug stops a second machine's numbers
+overwriting the first's; the SHA stops a second run on the same day overwriting the first, so a
+before/after pair can both be filed. Older SHA-less names still count as baselines, and
+`git log docs/perf/` reads as the performance history of the engine.
 EOF
 }
 
-preset="release"; sample="all"; frames=""; width=1920; height=1080; commit=0
+preset="release"; sample="all"; frames=""; width=1920; height=1080; commit=0; run_self_test=0
 baseline_dir="docs/perf"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -52,10 +127,13 @@ while [ $# -gt 0 ]; do
         --height)   height="${2:?--height needs a value}"; shift 2 ;;
         --commit)   commit=1; shift ;;
         --baseline-dir) baseline_dir="${2:?--baseline-dir needs a value}"; shift 2 ;;
+        --self-test) run_self_test=1; shift ;;
         -h|--help)  usage; exit 0 ;;
         *) echo "perf.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
 done
+
+if [ "$run_self_test" -eq 1 ]; then self_test; exit 0; fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -393,13 +471,13 @@ run_one() {
     [ -z "$gpu" ] && gpu="unknown-gpu"
     local slug; slug="$(slug_of "$gpu")"
 
-    local out="${outdir}/${date_tag}-${name}-${slug}.json"
+    local out="${outdir}/${date_tag}-${name}-${slug}-${sha}.json"
     # Exclude the report this run is about to FILE, not the staging path — otherwise a second run
     # on the same date would judge itself against the copy of itself it is about to replace.
-    local self="${baseline_dir}/${date_tag}-${name}-${slug}.json"
+    # The SHA is in the name, so this is the exact file, not a date slot.
+    local self="${baseline_dir}/${date_tag}-${name}-${slug}-${sha}.json"
     local latest
-    latest="$(ls -1 "${baseline_dir}"/*-"${name}"-"${slug}".json 2>/dev/null \
-              | grep -vxF -- "$self" | tail -1 || true)"
+    latest="$(select_baseline "$baseline_dir" "$name" "$slug" "$self")"
 
     echo "── ${name} on ${gpu} ──"
     # The clock sampler is the BACKGROUND job and the benchmark stays in the foreground, so the run
