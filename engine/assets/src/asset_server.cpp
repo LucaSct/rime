@@ -125,6 +125,7 @@ template <> struct StreamKind<TextureAsset> {
 
     static std::uint64_t bytes(const TextureAsset& t) { return t.pixels.size(); }
 };
+
 // The coalescing key. Requests merge on the file they name, so two spellings of one file
 // ("a/f.mesh", "./a/f.mesh", "a/b/../f.mesh", or "a\\f.mesh" on Windows) must produce ONE key;
 // otherwise the file is read and decoded twice, two slots and GPU uploads are held for one asset,
@@ -309,7 +310,10 @@ template <class T> const AssetServer::StreamPool<T>& AssetServer::stream_pool() 
 
 template <class T>
 StreamedAssetHandle<T> AssetServer::request_streamed(const std::filesystem::path& path) {
-    const std::string key = path.string();
+    // Same normalisation as the retained path, and safe here by construction: the slot records
+    // this key (slot.key = key below) and eviction erases by slot.key, so the map and the slot
+    // always agree on the spelling.
+    const std::string key = cache_key(path);
     StreamPool<T>& pool = stream_pool<T>();
     StreamedAssetHandle<T> handle;
     {
