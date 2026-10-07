@@ -86,8 +86,8 @@ enum class Region : std::uint8_t {
 // height test is an OR with the tile test, not a fallback), and an empty hull is Exterior for
 // every input: a world with no interior has nothing inside it, and that is a usable answer.
 // A negative `band_tiles` is treated as 0 rather than as a hull that shrinks.
-[[nodiscard]] constexpr Region classify(const WorldBounds& b, std::int32_t tile_x,
-                                        std::int32_t tile_z, float y) noexcept {
+[[nodiscard]] constexpr Region
+classify(const WorldBounds& b, std::int32_t tile_x, std::int32_t tile_z, float y) noexcept {
     const std::int64_t min_x = b.hull.min_x;
     const std::int64_t min_z = b.hull.min_z;
     const std::int64_t max_x = b.hull.max_x;
@@ -111,15 +111,15 @@ enum class Region : std::uint8_t {
 }
 
 // The predicate ADR-0079 names. Exactly `classify(...) == Region::Exterior`.
-[[nodiscard]] constexpr bool is_exterior(const WorldBounds& b, std::int32_t tile_x,
-                                         std::int32_t tile_z, float y) noexcept {
+[[nodiscard]] constexpr bool
+is_exterior(const WorldBounds& b, std::int32_t tile_x, std::int32_t tile_z, float y) noexcept {
     return classify(b, tile_x, tile_z, y) == Region::Exterior;
 }
 
 // True only in Shell A. ADR-0079: weapons cannot damage cooked buildings in the band, so the edge
 // can never affect the destruction hash.
-[[nodiscard]] constexpr bool destructible(const WorldBounds& b, std::int32_t tile_x,
-                                          std::int32_t tile_z, float y) noexcept {
+[[nodiscard]] constexpr bool
+destructible(const WorldBounds& b, std::int32_t tile_x, std::int32_t tile_z, float y) noexcept {
     return classify(b, tile_x, tile_z, y) == Region::Hull;
 }
 
