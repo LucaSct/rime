@@ -103,6 +103,7 @@ void main() {
     float metallic = draw.params.x * mr.y;
     float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
     float alpha = roughness * roughness;
+    alpha = filter_specular_alpha(n, alpha); // geometric specular AA, ADR-0078 step 1a
 
     // Ambient occlusion scales the AMBIENT term ONLY — never the direct lights, which cast their own
     // real shadows; multiplying direct light by a baked AO map double-counts and greys out lit

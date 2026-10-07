@@ -39,6 +39,67 @@ vec3 f_schlick(float v_dot_h, vec3 f0) {
     return f0 + (vec3(1.0) - f0) * f;
 }
 
+// ── GEOMETRIC SPECULAR ANTI-ALIASING (ADR-0078 step 1a) ───────────────────────────────────────
+//
+// THE PROBLEM. D(n·h) assumes the surface has ONE shading normal per pixel. It does not: a pixel
+// covers a patch of surface, and on a normal-mapped or finely curved patch the normals inside that
+// footprint fan out. A smooth metal (alpha ~ 0.002) under a point-like light lights only the sliver
+// of normals that happen to align with the half-vector -- a highlight far smaller than a pixel. We
+// shade ONE normal per pixel, so whether that sliver is caught depends on where the pixel centre
+// falls, and that changes every frame as the camera moves. The highlight flickers at full contrast.
+//
+// THE FIX (Kaplanyan, Hill, Hoffman & Pettineo, "Filtering Distributions of Normals for Shading
+// Antialiasing", HPG 2016; the cheap isotropic form is Tokuyoshi & Kaplanyan, "Improved Geometric
+// Specular Antialiasing", I3D 2019, and the one Filament ships). The pixel does not see one normal,
+// it sees a DISTRIBUTION of them. Convolving a GGX lobe of width alpha with that footprint's spread
+// of normals gives, to first order, a WIDER GGX lobe. So: measure the spread from how fast the
+// shading normal changes across the screen (dFdx(n), dFdy(n): the hardware already differences
+// neighbouring pixels of the 2x2 quad), turn it into extra lobe width, and use the wider lobe. The
+// highlight then covers the pixel it really occupies instead of hopping between neighbours.
+//
+// WHY THE SPREAD IS ADDED IN alpha^2 AND NOT IN alpha. Convolution adds VARIANCES, not standard
+// deviations -- the same reason two independent noise sources of width a and b combine to
+// sqrt(a^2 + b^2), not a + b. alpha^2 is the quantity that behaves like a variance of the
+// microfacet slope, and the screen footprint's slope variance is (a constant times) the squared
+// derivative of the normal. Adding to alpha directly over-widens a smooth surface by a factor that
+// looks almost right at low roughness and is wrong everywhere, which is the worst kind of wrong.
+// So we add in alpha^2 and take the square root to hand shade_light the alpha it expects.
+//
+// WHY THE CLAMP. At a sphere's silhouette n turns fast enough that the raw variance would push alpha
+// to 1 and the rim would read as chalk. The paper caps the added alpha^2 at 0.18 (their suggested
+// kernel-width limit); we keep it, because it is what makes the filter safe to leave always on.
+//
+// WHY BEFORE ANY TEMPORAL RESOLVE, NOT AFTER. A temporal resolve (TAA) averages frames and clamps
+// each history sample to its neighbourhood. Fed an aliased highlight -- a one-pixel, full-contrast
+// spike that moves every frame -- it either clamps the spike away (the highlight dims or vanishes)
+// or smears it into a streak. By then the information is gone: the signal has become high-variance
+// and no amount of averaging restores the lobe that should have been integrated over the pixel.
+// Widening the lobe at the SOURCE is a different operation, not a smaller version of TAA, so it has
+// to run first. (Tokuyoshi & Kaplanyan and Kaplanyan et al. both say TAA alone does not cure
+// specular sparkle.)
+//
+// CONTRACT. `n` is the normalized shading normal the fragment shades with -- the PERTURBED normal,
+// because normal-map detail is the dominant source of sub-pixel normal variance, and filtering only
+// the interpolated vertex normal would miss exactly the sparkle this exists for. `alpha` is GGX
+// alpha (perceptual roughness squared). Returns alpha' >= alpha. On a flat surface n is constant, so
+// dFdx(n) = dFdy(n) = 0 and alpha' == alpha exactly: the filter is inert where it must be.
+//
+// dFdx/dFdy are only defined in a fragment shader, and only meaningful in UNIFORM control flow:
+// call this once, near the top of main(), never inside a light loop or a branch. It is NOT called
+// from a fullscreen pass over a G-buffer (ssr_resolve.frag): there, the screen-space step in the
+// normal crosses object silhouettes rather than measuring curvature.
+float filter_specular_alpha(vec3 n, float alpha) {
+    const float kScreenSpaceVariance = 0.15915494; // 1 / (2*pi): T&K 2019, the footprint's variance
+    const float kClampThreshold = 0.18;            // cap on the added alpha^2 (kernel width limit)
+
+    const vec3 dndx = dFdx(n);
+    const vec3 dndy = dFdy(n);
+    const float variance = kScreenSpaceVariance * (dot(dndx, dndx) + dot(dndy, dndy));
+    const float kernel_alpha2 = min(2.0 * variance, kClampThreshold);
+    const float filtered_alpha2 = clamp(alpha * alpha + kernel_alpha2, 0.0, 1.0);
+    return sqrt(filtered_alpha2);
+}
+
 // One punctual light's contribution: BRDF × incident radiance × the geometry cosine. `l` points
 // from the surface TOWARD the light; `radiance` is what arrives at this point (falloff already
 // applied for point lights).

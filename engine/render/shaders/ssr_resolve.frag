@@ -300,6 +300,7 @@ void main() {
     const vec3 mirror = mix(probe, sharp, edge);
     const vec3 refl = mix(mirror, probe, cone);
 
+    // Deliberately no filter_specular_alpha() here (ADR-0078): dFdx of a G-buffer normal steps across silhouettes, not curvature.
     // Fresnel-Schlick at the SURFACE's F0 — reflections rise at grazing angles (the wet-floor tell).
     // The whole reflection (screen or probe) is the specular lobe, so it is modulated by Fresnel
     // exactly as an environment reflection would be. ndotv uses the surface→camera direction (−v_dir).
