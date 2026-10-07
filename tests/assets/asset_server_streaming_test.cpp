@@ -356,6 +356,61 @@ TEST_CASE("streamed: two requests for one path are one load and two ownerships")
     CHECK(server.release(again));
 }
 
+TEST_CASE("streamed: the same file spelled two ways is one slot, and eviction erases that key") {
+    // The streamed path coalesces on the same normalised key as the retained kinds: "d/f.rhf",
+    // "d/./f.rhf" and "d/sub/../f.rhf" name one file, so they must be ONE ownership-bearing slot
+    // rather than three slots reading the same bytes three times.
+    //
+    // The second half is the part worth proving. A slot records the key it was filed under
+    // (slot.key) and eviction erases by that, so normalising the lookup cannot leave a map entry
+    // pointing at a freed slot — whichever spelling the last release arrives through. Were the two
+    // out of step, the re-request below would find a dangling entry instead of loading again.
+    JobSystem jobs(2);
+    AssetServer server(jobs);
+
+    const fs::path dotted = kFixtures / "." / "terrain.rhf";
+    const fs::path dotdot = kFixtures / "sub" / ".." / "terrain.rhf";
+
+    const HeightfieldAssetHandle a = server.request_heightfield(kTerrain);
+    const HeightfieldAssetHandle b = server.request_heightfield(dotted);
+    const HeightfieldAssetHandle c = server.request_heightfield(dotdot);
+    CHECK(a == b);
+    CHECK(a == c);
+    settle(server);
+
+    CHECK(server.physical_load_count() == 1);
+    CHECK(server.live_heightfield_slots() == 1);
+    StreamCounters sc = server.stream_counters();
+    CHECK(sc.requests == 3);
+    CHECK(sc.coalesced_requests == 2);
+    CHECK(sc.loads_started == 1);
+
+    // Negative half: a genuinely different file is still its own slot and its own load.
+    const HeightfieldAssetHandle other = server.request_heightfield(kTerrainSplat);
+    settle(server);
+    CHECK(other != a);
+    CHECK(server.physical_load_count() == 2);
+
+    // Release all three ownerships — the last one through a spelling that is not the one the slot
+    // was created with — and the slot goes.
+    CHECK(server.release(a));
+    CHECK(server.release(b));
+    CHECK(server.stream_counters().evictions == 0); // two of three owners left
+    CHECK(server.release(c));
+    CHECK(server.stream_counters().evictions == 1);
+    CHECK(server.resident_heightfields() == 1); // only kTerrainSplat remains
+
+    // The map entry went with it: requesting any spelling again is a fresh load into a fresh
+    // generation, not a resurrected handle.
+    const HeightfieldAssetHandle again = server.request_heightfield(dotted);
+    settle(server);
+    CHECK(server.physical_load_count() == 3);
+    CHECK(server.state(again) == AssetState::Ready);
+    CHECK(again.generation != a.generation);
+    CHECK(server.release(again));
+    CHECK(server.release(other));
+}
+
 TEST_CASE("streamed: a release between the job finishing and pump() evicts and is not promoted") {
     JobSystem jobs(2);
     AssetServer server(jobs);
