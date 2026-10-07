@@ -422,9 +422,28 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     const float aspect = extent.height > 0
                              ? static_cast<float>(extent.width) / static_cast<float>(extent.height)
                              : 1.0f;
-    fu.view_proj =
-        core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far) *
-        scene.camera.view;
+    // The UNJITTERED view-projection. Culling, and the previous-frame store the motion-vector brick
+    // reads, use this one: a frustum derived from the jittered matrix would wobble half a pixel per
+    // frame and pop edge objects in and out (see temporal_jitter.hpp).
+    const core::Mat4 proj_unjittered =
+        core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far);
+    const core::Mat4 view_proj_unjittered = proj_unjittered * scene.camera.view;
+    // Only the primary view's projection is jittered. With the toggle off this is exactly the
+    // unjittered matrix (same expression as before), and the sequence is not advanced.
+    core::Vec2 jitter_offset{};
+    if (temporal_jitter_enabled_) {
+        jitter_offset = temporal_jitter_.current();
+        temporal_jitter_.advance();
+        fu.view_proj =
+            jitter_projection(proj_unjittered, jitter_offset, extent.width, extent.height) *
+            scene.camera.view;
+    } else {
+        fu.view_proj = view_proj_unjittered;
+    }
+    last_jitter_offset_ = jitter_offset;
+    prev_view_proj_unjittered_ = has_view_proj_history_ ? view_proj_unjittered_ : view_proj_unjittered;
+    view_proj_unjittered_ = view_proj_unjittered;
+    has_view_proj_history_ = true;
     // ── View-frustum culling (m13.2a, ADR-0035 §2a) ──────────────────────────────────────
     //
     // Done HERE rather than inside extract_scene because the frustum needs the frame's aspect
@@ -456,7 +475,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // of them, and neither needs to know the other exists.
     std::size_t visible = scene.draws.size();
     if (cull_enabled_) {
-        const Frustum frustum = frustum_from_view_proj(fu.view_proj);
+        const Frustum frustum = frustum_from_view_proj(view_proj_unjittered);
         std::size_t front = 0;
         std::vector<DrawItem> hidden_draws;
         std::vector<ecs::Entity> hidden_entities;

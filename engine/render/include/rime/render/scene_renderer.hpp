@@ -19,6 +19,7 @@
 #include "rime/render/lighting/sky.hpp"
 #include "rime/render/lighting/ssr.hpp"
 #include "rime/render/passes.hpp"
+#include "rime/render/temporal_jitter.hpp"
 
 // The scene renderer (M5.6, ADR-0022): the bridge from "a World full of entities" to "passes
 // declared on a render graph". Each frame it
@@ -191,6 +192,35 @@ public:
 
     [[nodiscard]] const LightingSettings& lighting() const noexcept { return lighting_; }
 
+    // ── Temporal jitter (ADR-0078 step 1b) ────────────────────────────────────────────────────
+    //
+    // OFF by default, so the frame is bit-identical to a renderer without this feature; the
+    // motion-vector and resolve bricks switch it on. While off, the sequence is never advanced.
+    // Only the PRIMARY view's projection is jittered (`fu.view_proj`); the culling frustum, the
+    // shadow views and the sky/SSR inputs keep the unjittered camera (see render()).
+    void set_temporal_jitter_enabled(bool enabled) noexcept {
+        temporal_jitter_enabled_ = enabled;
+        if (!enabled) {
+            temporal_jitter_.reset();
+        }
+    }
+
+    [[nodiscard]] bool temporal_jitter_enabled() const noexcept { return temporal_jitter_enabled_; }
+
+    // The UNJITTERED view-projection of the most recent render() call, and of the render() before
+    // it. A velocity is `previous - current` of these, so it is pure geometric motion with no
+    // jitter in it. Before the second render, previous == current (there is no history yet).
+    [[nodiscard]] const core::Mat4& view_proj_unjittered() const noexcept {
+        return view_proj_unjittered_;
+    }
+
+    [[nodiscard]] const core::Mat4& previous_view_proj_unjittered() const noexcept {
+        return prev_view_proj_unjittered_;
+    }
+
+    // The sub-pixel offset (pixels) applied to the most recent render(); {0,0} when off.
+    [[nodiscard]] core::Vec2 last_jitter_offset() const noexcept { return last_jitter_offset_; }
+
     // ── The sky (m17.0) ───────────────────────────────────────────────────────────────────────
     //
     // Off by default, and gated the same way every M10 technique is: with `enabled` clear no target
@@ -344,6 +374,15 @@ private:
     SkyParams sky_params_{};      // m17.0; enabled=false == the pre-sky baseline
     bool cull_enabled_ = true;
     CullStats cull_stats_{};
+
+    // Temporal jitter state. Owned by THIS renderer -- no statics, no clock -- so two peers in one
+    // process never share a sequence.
+    bool temporal_jitter_enabled_ = false;
+    TemporalJitter temporal_jitter_{};
+    core::Mat4 view_proj_unjittered_{};
+    core::Mat4 prev_view_proj_unjittered_{};
+    core::Vec2 last_jitter_offset_{};
+    bool has_view_proj_history_ = false;
 
     // ── The uniform ring: one slot per frame that can be in flight ────────────────────────────
     //
