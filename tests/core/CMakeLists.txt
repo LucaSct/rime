@@ -18,7 +18,8 @@ rime_add_test(rime_core_tests
     reflect_test.cpp
     hash_test.cpp
     byte_cursor_test.cpp
-    module_test.cpp)
+    module_test.cpp
+    world_bounds_test.cpp)
 
 # The work-stealing-deque test spins up real threads, so it needs the platform threads library.
 find_package(Threads REQUIRED)
