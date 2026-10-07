@@ -339,17 +339,22 @@ void main() {
     // Same floor and remap as pbr_forward: alpha = roughness^2 (perceptual), and a roughness of 0
     // would make GGX's D a delta function that no finite sun can light, so clamp it.
     roughness = clamp(roughness, 0.045, 1.0);
-    float alpha = roughness * roughness;
+    const float alpha = roughness * roughness;
     const vec3 v = normalize(pc.eye.xyz - v_world);
 
     vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));
     if (n.y < 0.0) {
         n = -n; // see the header: a heightfield's surface normal is never downward
     }
-    // Geometric specular AA, ADR-0078 step 1a. It sits HERE, after n, rather than where alpha is
-    // formed, because n does not exist yet there. n is a per-triangle FACE normal (derivatives of
-    // the position), so dFdx(n) is ~0 inside a facet and non-zero only across a facet edge.
-    alpha = filter_specular_alpha(n, alpha);
+    // NO geometric specular AA here, deliberately (ADR-0078 step 1a applies it in pbr_forward*).
+    // The filter measures how fast the SHADING normal turns across a pixel, and terrain's `n` is a
+    // per-triangle FACE normal rebuilt from position derivatives just above. Within one facet that
+    // normal is constant, so dFdx(n) is zero and the filter does nothing; across a facet edge the
+    // 2x2 quad straddles two facets and the derivative is large for a reason that is not curvature,
+    // so the filter would widen roughness along a one-pixel line at every triangle edge. That is an
+    // artefact bought for no benefit. Terrain needs a SMOOTH normal first -- one differentiated from
+    // the heightfield analytically, or sampled from a baked normal map -- and then this filter
+    // becomes correct here. That is a separate brick; see ADR-0078.
 
     // `sun.xyz` is the direction the light travels, so the vector TOWARD the light is its negation
     // — the same convention `DirectionalLight` extraction pins in components.hpp. shade_light
