@@ -6,7 +6,13 @@
 #include <cstdint>
 #include <numbers>
 
+#include "render_test_support.hpp"
 #include "rime/core/math/mat.hpp"
+#include "rime/ecs/transform.hpp"
+#include "rime/ecs/world.hpp"
+#include "rime/render/components.hpp"
+#include "rime/render/mesh.hpp"
+#include "rime/render/scene_renderer.hpp"
 #include "rime/render/temporal_jitter.hpp"
 
 // ADR-0078 step 1b -- camera jitter. CPU only: pure matrix and sequence math, no device.
@@ -28,8 +34,10 @@ constexpr std::uint32_t kW = 1280; // deliberately not square: a width/height sw
 constexpr std::uint32_t kH = 720;
 
 Mat4 test_proj() {
-    return rime::core::perspective(
-        std::numbers::pi_v<float> / 3.0f, static_cast<float>(kW) / static_cast<float>(kH), 0.1f, 100.0f);
+    return rime::core::perspective(std::numbers::pi_v<float> / 3.0f,
+                                   static_cast<float>(kW) / static_cast<float>(kH),
+                                   0.1f,
+                                   100.0f);
 }
 
 // The framebuffer pixel a view-space point lands on. Vulkan: NDC y and framebuffer y both point
@@ -77,7 +85,7 @@ TEST_CASE("every offset lies in [-0.5, 0.5) across and beyond a period") {
 TEST_CASE("the sequence is unbiased: mean offset over one period is zero") {
     // A biased sequence shifts the whole image permanently; it would read as "TAA made everything
     // slightly offset", not as a bug. NOTE: a flat "halton - 0.5" is NOT unbiased over 8 frames --
-    // that would measure mean (+0.0703, -0.1065) px -- so the sequence is centred on the period's
+    // that would measure mean (-0.0547, 0) px -- so the sequence is centred on the period's
     // own mean. Measured with this implementation: |mean| < 1e-7 px on both axes.
     double sx = 0.0;
     double sy = 0.0;
@@ -142,4 +150,118 @@ TEST_CASE("two jitter sequences are independent") {
     CHECK(b.current().x == b_before.x);
     CHECK(b.current().y == b_before.y);
     CHECK(a.index() == 2);
+}
+
+// ---- The renderer integration (GPU, lavapipe) ------------------------------------------------
+//
+// The culling frustum must come from the UNJITTERED matrix. That is invisible in every pixel (a
+// frustum that wobbles half a pixel only pops objects sitting exactly on its edge), so the proof is
+// the cull COUNTER: a cube placed a fraction of a pixel inside the frustum edge must be admitted on
+// every frame of the jitter period, because the frustum does not move.
+
+namespace {
+
+using namespace rime;
+using namespace rime::render;
+using namespace rime::render::test;
+
+constexpr std::uint32_t kSize = 128;
+
+} // namespace
+
+TEST_CASE("temporal jitter: off changes nothing, on jitters the view-proj but never the frustum") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available -- skipping temporal-jitter renderer proofs");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    const MeshId cube = meshes.add(make_cube(0.5f), "jitter-cube");
+    REQUIRE(cube != kInvalidMeshId);
+    MaterialRegistry materials;
+    const MaterialId mat = materials.add({{1.0f, 1.0f, 1.0f, 1.0f}, 0.0f, 0.5f});
+
+    ecs::World world;
+    register_render_components(world);
+    core::Transform cam_tf{};
+    const ecs::Entity cam = world.spawn_with(ecs::WorldTransform{cam_tf}, Camera{});
+    SceneRenderer renderer(*device, meshes, materials);
+
+    // Spawn one cube at world x, render one frame, return how many draws that frame culled.
+    ecs::Entity cube_entity{};
+    const auto set_cube_x = [&](float x) {
+        if (cube_entity.is_valid()) {
+            world.despawn(cube_entity);
+        }
+        core::Transform tf{};
+        tf.translation = {x, 0.0f, -6.0f};
+        cube_entity = world.spawn_with(ecs::WorldTransform{tf}, MeshRef{cube}, MaterialRef{mat});
+    };
+    const auto culled_in_one_frame = [&]() {
+        renderer.reset_cull_stats();
+        RenderGraph graph(*device);
+        const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize}, true);
+        REQUIRE(out.ldr.is_valid());
+        graph.export_texture(out.ldr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        return renderer.cull_stats().culled;
+    };
+
+    // Bisect (jitter OFF) for the world x where the cube just becomes visible, then step in by a
+    // quarter of a pixel's width at that depth: close enough that a half-pixel frustum wobble would
+    // flip it, far enough that float noise cannot.
+    REQUIRE_FALSE(renderer.temporal_jitter_enabled()); // the default
+    float lo = -30.0f;                                 // culled
+    float hi = 0.0f;                                   // visible
+    set_cube_x(lo);
+    REQUIRE(culled_in_one_frame() == 1);
+    set_cube_x(hi);
+    REQUIRE(culled_in_one_frame() == 0);
+    for (int i = 0; i < 40; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        set_cube_x(mid);
+        (culled_in_one_frame() == 0 ? hi : lo) = mid;
+    }
+    const float pixel_world = 2.0f * std::abs(hi) / static_cast<float>(kSize);
+    set_cube_x(hi + 0.25f * pixel_world); // hi is the visible side of the edge; step further in
+    REQUIRE(culled_in_one_frame() == 0);
+
+    // OFF: no jitter, the history store follows the camera, the sequence never runs.
+    CHECK(renderer.last_jitter_offset().x == 0.0f);
+    CHECK(renderer.last_jitter_offset().y == 0.0f);
+    CHECK(bit_equal(renderer.view_proj_unjittered(), renderer.previous_view_proj_unjittered()));
+
+    // The previous matrix is last render's current one once the camera has moved.
+    const core::Mat4 before_move = renderer.view_proj_unjittered();
+    {
+        core::Transform moved{};
+        moved.translation = {0.0f, 0.0f, 0.001f};
+        world.despawn(cam);
+        (void)world.spawn_with(ecs::WorldTransform{moved}, Camera{});
+    }
+    (void)culled_in_one_frame();
+    CHECK(bit_equal(renderer.previous_view_proj_unjittered(), before_move));
+    CHECK_FALSE(bit_equal(renderer.view_proj_unjittered(), before_move));
+
+    // ON: the offset is applied and advances; the edge cube is admitted on EVERY frame.
+    renderer.set_temporal_jitter_enabled(true);
+    bool saw_nonzero = false;
+    for (std::uint32_t i = 0; i < 2 * TemporalJitter::kPeriod; ++i) {
+        CHECK(culled_in_one_frame() == 0);
+        const Vec2 o = renderer.last_jitter_offset();
+        const Vec2 expect = TemporalJitter::offset_for(i);
+        CHECK(o.x == expect.x);
+        CHECK(o.y == expect.y);
+        saw_nonzero = saw_nonzero || o.x != 0.0f || o.y != 0.0f;
+    }
+    CHECK(saw_nonzero);
+    // The stored matrix is the UNJITTERED one: identical on every frame of a static camera.
+    const core::Mat4 stored = renderer.view_proj_unjittered();
+    (void)culled_in_one_frame();
+    CHECK(bit_equal(renderer.view_proj_unjittered(), stored));
 }

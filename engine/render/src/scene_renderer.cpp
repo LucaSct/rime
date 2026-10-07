@@ -441,7 +441,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         fu.view_proj = view_proj_unjittered;
     }
     last_jitter_offset_ = jitter_offset;
-    prev_view_proj_unjittered_ = has_view_proj_history_ ? view_proj_unjittered_ : view_proj_unjittered;
+    prev_view_proj_unjittered_ =
+        has_view_proj_history_ ? view_proj_unjittered_ : view_proj_unjittered;
     view_proj_unjittered_ = view_proj_unjittered;
     has_view_proj_history_ = true;
     // ── View-frustum culling (m13.2a, ADR-0035 §2a) ──────────────────────────────────────

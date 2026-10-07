@@ -40,7 +40,8 @@
 // the jittered matrix it would wobble by half a pixel every frame, and objects sitting exactly on
 // its edge would pop in and out -- a new flicker caused by the fix for flicker. Culling only needs
 // the true camera, so SceneRenderer keeps an explicitly unjittered view-projection for it (and for
-// the motion-vector brick, so a velocity is pure geometric motion rather than geometry plus jitter).
+// the motion-vector brick, so a velocity is pure geometric motion rather than geometry plus
+// jitter).
 namespace rime::render {
 
 // A sub-pixel camera offset sequence. Hold one per view; advance it once per rendered frame. It is
@@ -55,12 +56,15 @@ public:
     // moves the rendered image toward +x (right), positive y toward +y (down, the framebuffer's
     // y). The sequence is centred so its mean over one period is zero: a biased sequence would
     // shift the whole image permanently. Note that "Halton - 0.5" is NOT zero-mean over 8 frames
-    // (8 base-2 points average 0.5703, not 0.5), so the centre is the period's own mean.
+    // (the 8 base-2 points average 0.4453, not 0.5), so the centre is the period's own mean.
     [[nodiscard]] static core::Vec2 offset_for(std::uint64_t index) noexcept;
 
     [[nodiscard]] core::Vec2 current() const noexcept { return offset_for(index_); }
+
     void advance() noexcept { index_ = (index_ + 1) % kPeriod; }
+
     void reset() noexcept { index_ = 0; }
+
     [[nodiscard]] std::uint64_t index() const noexcept { return index_; }
 
 private:
