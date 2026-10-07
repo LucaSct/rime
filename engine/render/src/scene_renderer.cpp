@@ -209,7 +209,8 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
       velocity_(device), forward_(device), tonemap_(device), csm_(device), local_shadows_(device),
-      clustered_(device), sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device) {
+      clustered_(device), sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device),
+      taa_resolve_(device) {
     // Default ring depth: kFramesInFlight (2, private to the Vulkan swapchain) + 1. See
     // set_frames_in_flight for why the default is the safe maximum rather than the headless
     // minimum.
@@ -279,7 +280,19 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
     }
 }
 
+void SceneRenderer::release_taa_history() {
+    for (std::size_t i = 0; i < taa_history_.size(); ++i) {
+        if (taa_history_[i].is_valid())
+            device_.destroy(taa_history_[i]);
+        taa_history_[i] = {};
+        taa_history_state_[i] = rhi::ResourceState::Undefined;
+    }
+    taa_history_extent_ = {};
+    taa_history_valid_ = false;
+}
+
 SceneRenderer::~SceneRenderer() {
+    release_taa_history();
     device_.destroy(dummy_shadow_array_);
     device_.destroy(clamp_sampler_);
     device_.destroy(material_sampler_);
@@ -941,6 +954,66 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // validation barrier disagreement.
     if (sky_on) {
         sky_.note_skyview_state(rhi::ResourceState::ShaderRead);
+    }
+
+    // TAA resolve (ADR-0078 step 1d): average the jittered frames over time. It runs HERE, on
+    // radiance, after every pass that adds light to the frame (SSR included) and before the
+    // tonemap: the mean of tonemapped values is not the tonemap of the mean, so tonemapping first
+    // would make the average depend on the operator, irreversibly. Off: nothing is allocated, no
+    // pass is declared, and tonemap_src is untouched, so the frame is byte-identical.
+    last_frame_resolved_ = false;
+    if (taa_resolve_enabled_ && velocity.is_valid()) {
+        // (Re)allocate the history pair when it does not exist or the target size changed. A fresh
+        // pair holds nothing, so this frame resolves against no history (taa_history_valid_ false).
+        if (!taa_history_allocated() || taa_history_extent_.width != extent.width ||
+            taa_history_extent_.height != extent.height) {
+            release_taa_history();
+            for (std::size_t i = 0; i < taa_history_.size(); ++i) {
+                rhi::TextureDesc td{};
+                td.extent = extent;
+                td.format = kHdrFormat; // RGBA16F: convergence is made of tiny differences
+                td.usage = rhi::TextureUsage::ColorAttachment | rhi::TextureUsage::Sampled;
+                td.debug_name = i == 0 ? "taa-history-0" : "taa-history-1";
+                taa_history_[i] = device_.create_texture(td);
+            }
+            taa_history_extent_ = extent;
+            taa_write_index_ = 0;
+        }
+        const std::uint32_t w = taa_write_index_;
+        const std::uint32_t r = 1 - w;
+        const RGTexture history_read =
+            graph.import_texture(taa_history_[r], taa_history_state_[r], extent, kHdrFormat);
+        const RGTexture history_write =
+            graph.import_texture(taa_history_[w], taa_history_state_[w], extent, kHdrFormat);
+        const RGTexture resolved = graph.create_texture({extent, kHdrFormat, "scene-hdr-taa"});
+        taa_resolve_.add(graph,
+                         tonemap_src,
+                         velocity,
+                         depth,
+                         history_read,
+                         resolved,
+                         history_write,
+                         view_proj_unjittered_,
+                         prev_view_proj_unjittered_,
+                         taa_history_valid_);
+        // What the graph will leave each in: a written attachment ends ColorTarget, a sampled
+        // read ends ShaderRead. Next frame imports them as exactly that, with the roles swapped.
+        taa_history_state_[w] = rhi::ResourceState::ColorTarget;
+        taa_history_state_[r] = rhi::ResourceState::ShaderRead;
+        taa_write_index_ = r;
+        taa_history_valid_ = true;
+        tonemap_src = resolved;
+        last_frame_resolved_ = true;
+    } else if (taa_resolve_enabled_) {
+        // No velocity this frame (motion vectors off, or no depth pre-pass): nothing to reproject
+        // with, so skip the resolve and forget the history -- a later frame must not blend against
+        // an image that is now several frames stale.
+        taa_history_valid_ = false;
+        if (!warned_taa_no_velocity_) {
+            RIME_WARN("render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled "
+                      "and a depth pre-pass) -- no resolve this frame");
+            warned_taa_no_velocity_ = true;
+        }
     }
 
     tonemap_.add(graph, tonemap_src, ldr);

@@ -19,6 +19,7 @@
 #include "present.frag.spv.h"
 #include "rime/core/diagnostics/log.hpp"
 #include "tonemap.frag.spv.h"
+#include "taa_resolve.frag.spv.h"
 #include "velocity.frag.spv.h"
 #include "velocity.vert.spv.h"
 
@@ -293,6 +294,111 @@ void VelocityPass::add(RenderGraph& graph,
                      DrawItem::DoubleSided,
                      DrawItem::DoubleSided);
     });
+}
+
+// ── TaaResolvePass ────────────────────────────────────────────────────────────────────────────
+
+TaaResolvePass::TaaResolvePass(rhi::Device& device) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 fullscreen_vert_spv,
+                                 sizeof(fullscreen_vert_spv),
+                                 "fullscreen.vert");
+    fragment_shader_ = make_shader(device,
+                                   rhi::ShaderStage::Fragment,
+                                   taa_resolve_frag_spv,
+                                   sizeof(taa_resolve_frag_spv),
+                                   "taa_resolve.frag");
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene colour
+        {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // velocity
+        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // depth
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // history
+        {4, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // TaaParams
+    };
+    // Two colour attachments of one format: the resolved frame and the new history.
+    const rhi::Format formats[] = {kHdrFormat, kHdrFormat};
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = fragment_shader_;
+    pd.color_formats = formats;
+    pd.cull = rhi::CullMode::None; // one oversized triangle; nothing to cull
+    pd.bindings = bindings;
+    pd.debug_name = "taa-resolve";
+    pipeline_ = device.create_graphics_pipeline(pd);
+
+    rhi::SamplerDesc ps{};
+    ps.mag_filter = rhi::Filter::Nearest;
+    ps.min_filter = rhi::Filter::Nearest;
+    ps.address_mode = rhi::AddressMode::ClampToEdge;
+    ps.debug_name = "taa-point";
+    point_sampler_ = device.create_sampler(ps);
+
+    rhi::SamplerDesc ls{};
+    ls.mag_filter = rhi::Filter::Linear;
+    ls.min_filter = rhi::Filter::Linear;
+    ls.address_mode = rhi::AddressMode::ClampToEdge;
+    ls.debug_name = "taa-linear";
+    linear_sampler_ = device.create_sampler(ls);
+}
+
+TaaResolvePass::~TaaResolvePass() {
+    device_.destroy(linear_sampler_);
+    device_.destroy(point_sampler_);
+    device_.destroy(pipeline_);
+    device_.destroy(fragment_shader_);
+    device_.destroy(vertex_shader_);
+}
+
+void TaaResolvePass::add(RenderGraph& graph,
+                         RGTexture scene_color,
+                         RGTexture velocity,
+                         RGTexture depth,
+                         RGTexture history_read,
+                         RGTexture resolved,
+                         RGTexture history_write,
+                         const core::Mat4& view_proj_unjittered,
+                         const core::Mat4& prev_view_proj_unjittered,
+                         bool history_valid,
+                         float history_weight) const {
+    // The shader unprojects background pixels, so it needs the INVERSE of the current matrix;
+    // inverting once here on the CPU beats every fragment doing it.
+    GpuTaaUniforms u{};
+    u.inv_view_proj = core::inverse(view_proj_unjittered);
+    u.prev_view_proj = prev_view_proj_unjittered;
+    u.params[0] = history_weight;
+    u.params[1] = history_valid ? 1.0f : 0.0f;
+    const RenderGraph::FrameSlice ubo = graph.push_frame_data(&u, sizeof(u));
+
+    // DontCare loads: the triangle covers every pixel and writes both targets whole.
+    const RGColorAttachment colors[] = {
+        {resolved, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}},
+        {history_write, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}},
+    };
+    const RGTexture sampled[] = {scene_color, velocity, depth, history_read};
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.sampled = sampled;
+    graph.add_raster_pass("taa-resolve",
+                          desc,
+                          [pipe = pipeline_,
+                           point = point_sampler_,
+                           linear = linear_sampler_,
+                           ubo,
+                           scene_color,
+                           velocity,
+                           depth,
+                           history_read,
+                           &graph](rhi::CommandBuffer& cmd) {
+                              cmd.bind_pipeline(pipe);
+                              cmd.bind_texture(0, graph.physical(scene_color), point);
+                              cmd.bind_texture(1, graph.physical(velocity), point);
+                              cmd.bind_texture(2, graph.physical(depth), point);
+                              cmd.bind_texture(3, graph.physical(history_read), linear);
+                              cmd.bind_uniform_buffer(
+                                  4, ubo.buffer, ubo.offset, sizeof(GpuTaaUniforms));
+                              cmd.draw(3);
+                          });
 }
 
 // ── ForwardPbrPass ────────────────────────────────────────────────────────────────────────────
