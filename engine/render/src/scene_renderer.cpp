@@ -208,8 +208,8 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MeshRegistry& meshes,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
-      forward_(device), tonemap_(device), csm_(device), local_shadows_(device), clustered_(device),
-      sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device) {
+      velocity_(device), forward_(device), tonemap_(device), csm_(device), local_shadows_(device),
+      clustered_(device), sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device) {
     // Default ring depth: kFramesInFlight (2, private to the Vulkan swapchain) + 1. See
     // set_frames_in_flight for why the default is the safe maximum rather than the headless
     // minimum.
@@ -445,6 +445,12 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         has_view_proj_history_ ? view_proj_unjittered_ : view_proj_unjittered;
     view_proj_unjittered_ = view_proj_unjittered;
     has_view_proj_history_ = true;
+    // The motion-vector pair (appended uniform members). Filled unconditionally -- two matrix
+    // copies cost nothing and keep the uploaded block independent of the toggle; only the velocity
+    // pass reads them. NOTE `fu.view_proj` (jittered) still positions the pixel; these two are the
+    // unjittered current and previous, so the velocity contains no jitter (see velocity.vert).
+    fu.view_proj_unjittered = view_proj_unjittered_;
+    fu.prev_view_proj = prev_view_proj_unjittered_;
     // ── View-frustum culling (m13.2a, ADR-0035 §2a) ──────────────────────────────────────
     //
     // Done HERE rather than inside extract_scene because the frustum needs the frame's aspect
@@ -546,6 +552,22 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     frame_normal_.resize(draw_count);
     frame_occlusion_.resize(draw_count);
     frame_emissive_.resize(draw_count);
+    // Previous-frame model matrices (ADR-0078 step 1c, decision 7): look each drawn entity up in
+    // the cache the LAST render() left, and build the cache for the NEXT one from this frame's
+    // draws. Building a fresh map rather than editing in place is what drops an entity that was not
+    // drawn this frame, so the cache is bounded by the live drawn set and cannot grow with a long
+    // session of spawning debris. (Culled draws are still in `frame_draws_` -- the cull PARTITIONS,
+    // it does not delete -- so an entity that merely left the frustum keeps its history.)
+    //
+    // First-seen entity: prev_model = model, i.e. ZERO object motion. A guessed velocity would
+    // smear history across a pixel that had no history; zero says "nothing moved from where I
+    // started", which is true by definition on the first frame.
+    std::unordered_map<std::uint64_t, core::Mat4> next_prev_models;
+    const bool track_motion =
+        motion_vectors_enabled_ && scene.draw_entities.size() == frame_draws_.size();
+    if (track_motion) {
+        next_prev_models.reserve(frame_draws_.size());
+    }
     for (std::uint32_t i = 0; i < draw_count; ++i) {
         const DrawItem& item = frame_draws_[i];
         // Out-of-range material ids are a caller bug, but a defensive default keeps a bad id
@@ -554,6 +576,15 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             item.material < materials_.size() ? materials_.get(item.material) : PbrMaterialDesc{};
         GpuDrawUniforms du{};
         du.model = item.model;
+        du.prev_model = item.model;
+        if (track_motion) {
+            const std::uint64_t key = std::bit_cast<std::uint64_t>(scene.draw_entities[i]);
+            const auto prev = prev_models_.find(key);
+            if (prev != prev_models_.end()) {
+                du.prev_model = prev->second;
+            }
+            next_prev_models.emplace(key, item.model);
+        }
         // Normals transform by the inverse-transpose (see pbr_forward.vert). A degenerate
         // (zero-scale) model has no inverse — fall back to the model matrix rather than feed
         // NaNs to the whole draw.
@@ -599,6 +630,9 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     }
     if (draw_count > 0)
         device_.write_buffer(draw_ubos_[ubo_slot_], draw_staging_.data(), draw_staging_.size());
+    if (motion_vectors_enabled_) {
+        prev_models_ = std::move(next_prev_models);
+    }
 
     // The runtime SDF clipmap (m10.4b): a fourth, independent gate. `sync_sdf_instances` (m10.5a)
     // closes the gap this brick's own comment used to name here: every entity carrying
@@ -753,6 +787,17 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     }
     if (use_depth_prepass)
         depth_prepass_.add(graph, depth, data);
+    // Motion vectors (ADR-0078 step 1c): a SEPARATE pass that depth-tests Equal against the
+    // pre-pass, so it needs the pre-pass. Off, or no pre-pass: nothing is allocated or declared.
+    RGTexture velocity;
+    if (motion_vectors_enabled_ && use_depth_prepass) {
+        velocity = graph.create_texture({extent, kVelocityFormat, "scene-velocity"});
+        velocity_.add(graph, velocity, depth, data);
+    } else if (motion_vectors_enabled_ && !warned_velocity_no_prepass_) {
+        RIME_WARN("render: motion vectors need the depth pre-pass (the velocity pass depth-tests "
+                  "Equal against it) -- no velocity target this frame");
+        warned_velocity_no_prepass_ = true;
+    }
     // The M10 forward path (ADR-0032 §11 regression bridge) runs only when a feature actually has
     // something to do: shadows enabled with a directional light (m10.1 cascades) and/or spot lights
     // (m10.2), clustering enabled with point lights to cull (m10.3), or DDGI actually running
@@ -904,7 +949,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // reflection-added target (tonemap_src); with SSR off it is the raw forward HDR, unchanged.
     // This is what a caller wanting the scene's HDR colour should read (and what the GPU proofs
     // assert on, like the DDGI thesis test — never the tonemapped LDR through the pass chain).
-    return {tonemap_src, ldr, gbuffer, gbuffer_material};
+    return {tonemap_src, ldr, gbuffer, gbuffer_material, velocity};
 }
 
 } // namespace rime::render

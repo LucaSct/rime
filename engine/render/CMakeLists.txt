@@ -78,6 +78,8 @@ rime_add_shaders(rime_render
     shaders/particle.vert
     shaders/particle.frag
     shaders/depth_masked.frag
+    shaders/velocity.vert
+    shaders/velocity.frag
     shaders/terrain.vert
     shaders/terrain.frag)
 
