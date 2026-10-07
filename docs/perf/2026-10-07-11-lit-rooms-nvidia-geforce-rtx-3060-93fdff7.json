@@ -1,0 +1,367 @@
+{
+  "schema": 1,
+  "run": {
+    "sample": "11-lit-rooms",
+    "commit": "93fdff7",
+    "date": "2026-10-07"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "driver": "NVIDIA 615.71.09",
+    "os": "linux",
+    "build": "RelWithDebInfo",
+    "sanitizer": "off",
+    "preset": "all-lighting-gates",
+    "width": 1920,
+    "height": 1080
+  },
+  "distributions": {
+    "frame": {
+      "count": 600,
+      "min_ms": 1.950,
+      "p50_ms": 2.039,
+      "p95_ms": 2.411,
+      "p99_ms": 3.023,
+      "max_ms": 6.378
+    },
+    "frame.collapse": {
+      "count": 60,
+      "min_ms": 2.014,
+      "p50_ms": 2.065,
+      "p95_ms": 2.429,
+      "p99_ms": 2.949,
+      "max_ms": 2.949
+    },
+    "frame.declare": {
+      "count": 600,
+      "min_ms": 0.004,
+      "p50_ms": 0.007,
+      "p95_ms": 0.015,
+      "p99_ms": 0.028,
+      "max_ms": 0.060
+    },
+    "frame.declare.per_frame": {
+      "count": 600,
+      "min_ms": 0.004,
+      "p50_ms": 0.007,
+      "p95_ms": 0.015,
+      "p99_ms": 0.028,
+      "max_ms": 0.060
+    },
+    "frame.execute": {
+      "count": 600,
+      "min_ms": 0.026,
+      "p50_ms": 0.041,
+      "p95_ms": 0.073,
+      "p99_ms": 0.109,
+      "max_ms": 1.700
+    },
+    "frame.execute.per_frame": {
+      "count": 600,
+      "min_ms": 0.026,
+      "p50_ms": 0.041,
+      "p95_ms": 0.073,
+      "p99_ms": 0.109,
+      "max_ms": 1.700
+    },
+    "frame.submit": {
+      "count": 600,
+      "min_ms": 1.907,
+      "p50_ms": 1.976,
+      "p95_ms": 2.339,
+      "p99_ms": 2.925,
+      "max_ms": 6.324
+    },
+    "frame.submit.per_frame": {
+      "count": 600,
+      "min_ms": 1.907,
+      "p50_ms": 1.976,
+      "p95_ms": 2.339,
+      "p99_ms": 2.925,
+      "max_ms": 6.324
+    },
+    "rhi.submit.queue": {
+      "count": 600,
+      "min_ms": 0.250,
+      "p50_ms": 0.281,
+      "p95_ms": 0.316,
+      "p99_ms": 0.373,
+      "max_ms": 1.788
+    },
+    "rhi.submit.queue.per_frame": {
+      "count": 600,
+      "min_ms": 0.250,
+      "p50_ms": 0.281,
+      "p95_ms": 0.316,
+      "p99_ms": 0.373,
+      "max_ms": 1.788
+    },
+    "rhi.submit.reclaim": {
+      "count": 600,
+      "min_ms": 0.283,
+      "p50_ms": 0.307,
+      "p95_ms": 0.343,
+      "p99_ms": 0.862,
+      "max_ms": 4.644
+    },
+    "rhi.submit.reclaim.per_frame": {
+      "count": 600,
+      "min_ms": 0.283,
+      "p50_ms": 0.307,
+      "p95_ms": 0.343,
+      "p99_ms": 0.862,
+      "max_ms": 4.644
+    },
+    "rhi.submit.wait": {
+      "count": 600,
+      "min_ms": 1.102,
+      "p50_ms": 1.380,
+      "p95_ms": 1.581,
+      "p99_ms": 1.957,
+      "max_ms": 3.003
+    },
+    "rhi.submit.wait.per_frame": {
+      "count": 600,
+      "min_ms": 1.102,
+      "p50_ms": 1.380,
+      "p95_ms": 1.581,
+      "p99_ms": 1.957,
+      "max_ms": 3.003
+    },
+    "sim.post": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.post.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.pre": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.pre.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.schedule": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "sim.schedule.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "sim.tick": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.001,
+      "p99_ms": 0.002,
+      "max_ms": 0.007
+    },
+    "sim.tick.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.001,
+      "p99_ms": 0.002,
+      "max_ms": 0.007
+    },
+    "sim.transforms": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.001,
+      "max_ms": 0.003
+    },
+    "sim.transforms.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.001,
+      "max_ms": 0.003
+    }
+  },
+  "passes": {
+    "ddgi-trace": {
+      "p50_ms": 0.057,
+      "max_ms": 0.076
+    },
+    "ddgi-blend-irradiance": {
+      "p50_ms": 0.012,
+      "max_ms": 0.014
+    },
+    "ddgi-blend-visibility": {
+      "p50_ms": 0.022,
+      "max_ms": 0.023
+    },
+    "depth-prepass": {
+      "p50_ms": 0.016,
+      "max_ms": 0.018
+    },
+    "velocity": {
+      "p50_ms": 0.025,
+      "max_ms": 0.031
+    },
+    "csm-cascade-0": {
+      "p50_ms": 0.007,
+      "max_ms": 0.008
+    },
+    "csm-cascade-1": {
+      "p50_ms": 0.005,
+      "max_ms": 0.005
+    },
+    "csm-cascade-2": {
+      "p50_ms": 0.003,
+      "max_ms": 0.003
+    },
+    "cluster-cull": {
+      "p50_ms": 0.006,
+      "max_ms": 0.007
+    },
+    "forward-pbr shadowed": {
+      "p50_ms": 0.378,
+      "max_ms": 0.566
+    },
+    "ssr-resolve": {
+      "p50_ms": 0.482,
+      "max_ms": 0.721
+    },
+    "taa-resolve": {
+      "p50_ms": 0.113,
+      "max_ms": 0.798
+    },
+    "tonemap": {
+      "p50_ms": 0.034,
+      "max_ms": 0.035
+    },
+    "sdf-clipmap-clear-L0": {
+      "p50_ms": 0.006,
+      "max_ms": 0.006
+    },
+    "sdf-clipmap-stamp-L0": {
+      "p50_ms": 0.005,
+      "max_ms": 0.005
+    },
+    "sdf-clipmap-clear-L1": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-stamp-L1": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-clear-L2": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-stamp-L2": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "spot-shadow-0": {
+      "p50_ms": 0.005,
+      "max_ms": 0.005
+    }
+  },
+  "worst_frame": {
+    "index": 112,
+    "ms": 6.378,
+    "passes": {
+      "ddgi-trace": 0.050,
+      "ddgi-blend-irradiance": 0.013,
+      "ddgi-blend-visibility": 0.022,
+      "depth-prepass": 0.016,
+      "velocity": 0.030,
+      "csm-cascade-0": 0.007,
+      "csm-cascade-1": 0.005,
+      "csm-cascade-2": 0.003,
+      "cluster-cull": 0.005,
+      "forward-pbr shadowed": 0.561,
+      "ssr-resolve": 0.464,
+      "taa-resolve": 0.114,
+      "tonemap": 0.034
+    },
+    "zones": {
+      "sim.pre": 0.000,
+      "sim.schedule": 0.000,
+      "sim.transforms": 0.000,
+      "sim.post": 0.000,
+      "sim.publish": 0.000,
+      "sim.tick": 0.001,
+      "frame.declare": 0.007,
+      "frame.execute": 0.040,
+      "rhi.submit.queue": 0.270,
+      "rhi.submit.wait": 1.409,
+      "rhi.submit.reclaim": 4.644,
+      "frame.submit": 6.324
+    }
+  },
+  "ledger": {
+    "frames.measured": 600,
+    "ddgi.probes_updated_static": 300,
+    "sdf.stamps_on_break": 3,
+    "shadow.rendered_on_break": 1,
+    "ddgi.fast_tracked_on_break": 60
+  },
+  "integrity": {
+    "accounting_gaps": 0,
+    "foreign_zones": 0
+  },
+  "gpu_clocks": {
+    "graphics_min": 1837,
+    "graphics_median": 1837.0,
+    "graphics_max": 1837,
+    "graphics_spread_pct": 0.0,
+    "memory_min": 7501,
+    "memory_median": 7501.0,
+    "memory_max": 7501,
+    "memory_spread_pct": 0.0,
+    "samples_total": 31,
+    "samples_under_load": 23,
+    "stable": true
+  }
+}
