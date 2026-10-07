@@ -30,8 +30,17 @@ using namespace rime::render::test;
 constexpr std::uint32_t kSize = 128;
 
 // The velocity target decoded to floats: two NDC-unit components per pixel, plus the raw 16-bit
-// words so "exactly zero" can be asserted on BITS, not on a float compare that -0.0 would also
-// pass.
+// words so "exactly zero" can be asserted on BITS rather than within an epsilon.
+//
+// Two strengths of zero, deliberately separated, because they fail for different reasons.
+// MAGNITUDE zero (0x0000 or 0x8000) is the property that matters: a static pixel reprojects to
+// where it already was, so the two clip positions are equal and their difference is zero. One ULP
+// of drift would fail it, which is the drift this file exists to catch. STRICT +0.0 (0x0000 only)
+// is a sharper probe of one cause: -0.0 appears when the compiler contracts the two syntactically
+// identical reprojections DIFFERENTLY, which `precise` in velocity.vert forbids. Measured on an
+// RTX 3060, 568 words came out -0.0 without it. That cause is vendor- and driver-specific, so it
+// gets its own test case: if a driver disagrees, the sharp probe fails and says so while the
+// load-bearing property still holds.
 struct Velocity {
     std::vector<std::uint16_t> raw; // 2 words per pixel
     std::vector<float> xy;          // 2 floats per pixel
@@ -41,15 +50,28 @@ struct Velocity {
         return {xy[i], xy[i + 1]};
     }
 
+    // Magnitude zero: +0.0 or -0.0. Any real value, however small, fails.
+    [[nodiscard]] static bool is_zero_word(std::uint16_t w) noexcept {
+        return w == 0x0000 || w == 0x8000;
+    }
+
     [[nodiscard]] bool raw_zero_at(std::uint32_t x, std::uint32_t y) const {
         const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 2;
-        return raw[i] == 0 && raw[i + 1] == 0; // +0.0 only: -0.0 is 0x8000 and must NOT pass
+        return is_zero_word(raw[i]) && is_zero_word(raw[i + 1]);
     }
 
     [[nodiscard]] std::size_t nonzero_words() const {
         std::size_t n = 0;
         for (const std::uint16_t w : raw)
-            n += w != 0 ? 1 : 0;
+            n += is_zero_word(w) ? 0 : 1;
+        return n;
+    }
+
+    // The sharper probe: strictly +0.0, no negative zero. See the note above.
+    [[nodiscard]] std::size_t negative_zero_words() const {
+        std::size_t n = 0;
+        for (const std::uint16_t w : raw)
+            n += w == 0x8000 ? 1 : 0;
         return n;
     }
 };
@@ -194,6 +216,31 @@ TEST_CASE("motion vectors: static camera, static object -> exactly zero, with an
             CHECK(f.velocity.nonzero_words() == 0);
         }
     }
+}
+
+// The sharper probe of the same frame, kept separate because it can fail for a reason that is
+// not a bug in this brick. `velocity.vert` qualifies both clip positions `precise`, which forbids
+// the compiler from contracting two syntactically identical reprojections differently. Without it,
+// 568 words of a static scene came back -0.0 on an RTX 3060 -- numerically zero, but evidence that
+// the two expressions were NOT compiled the same way, and a sign that a future driver could differ
+// by a real ULP rather than only by a sign bit.
+//
+// So this asserts the stronger thing, and its failure means "`precise` did not hold on this
+// driver", not "motion vectors are wrong". If it ever goes red while the case above stays green,
+// that is what it is telling you, and the fix is a portable formulation in the shader rather than
+// a weaker assertion here.
+TEST_CASE("motion vectors: `precise` holds -- a static scene is +0.0, never -0.0 (driver probe)") {
+    auto s = make_scene();
+    if (!s)
+        return;
+    (void)s->spawn_cube({0.0f, 0.0f, -6.0f});
+    s->renderer.set_motion_vectors_enabled(true);
+    s->renderer.set_temporal_jitter_enabled(true); // the harder case: jitter must not leak in
+    (void)s->render();                             // first frame: no history
+    const Frame f = s->render();
+    REQUIRE(f.has_velocity);
+    CHECK(f.hdr.luminance(kSize / 2, kSize / 2) > 0.05f); // the cube is really on screen
+    CHECK(f.velocity.negative_zero_words() == 0);
 }
 
 TEST_CASE("motion vectors: camera translates, object static -> the analytic NDC reprojection") {
