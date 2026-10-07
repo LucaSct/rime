@@ -444,15 +444,22 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // Only the primary view's projection is jittered. With the toggle off this is exactly the
     // unjittered matrix (same expression as before), and the sequence is not advanced.
     core::Vec2 jitter_offset{};
+    // THE projection this frame is actually rasterized with: jittered when jitter is on, the
+    // unjittered one otherwise. The depth buffer and the G-buffer are written through it, so every
+    // pass that RECONSTRUCTS a pixel's ray from them (the sky composite, the SSR march) must invert
+    // exactly this matrix. Inverting the unjittered one instead puts each reconstructed ray off by
+    // the frame's sub-pixel offset: at a silhouette that is a one-pixel seam of the wrong colour,
+    // which the TAA resolve then averages into a permanent halo. Only the velocity and the TAA
+    // reprojection want the jitter-FREE pair (view_proj_unjittered_ and its previous), which is why
+    // those exist separately and are not touched by this local.
+    core::Mat4 proj_rasterized = proj_unjittered;
     if (temporal_jitter_enabled_) {
         jitter_offset = temporal_jitter_.current();
         temporal_jitter_.advance();
-        fu.view_proj =
-            jitter_projection(proj_unjittered, jitter_offset, extent.width, extent.height) *
-            scene.camera.view;
-    } else {
-        fu.view_proj = view_proj_unjittered;
+        proj_rasterized =
+            jitter_projection(proj_unjittered, jitter_offset, extent.width, extent.height);
     }
+    fu.view_proj = proj_rasterized * scene.camera.view;
     last_jitter_offset_ = jitter_offset;
     prev_view_proj_unjittered_ =
         has_view_proj_history_ ? view_proj_unjittered_ : view_proj_unjittered;
@@ -702,8 +709,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     }
     SkyInputs ski{};
     ski.view = scene.camera.view;
-    ski.proj =
-        core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far);
+    ski.proj = proj_rasterized; // the matrix the depth buffer was rasterized with
     ski.camera_pos =
         core::Vec3{scene.camera.position[0], scene.camera.position[1], scene.camera.position[2]};
     ski.extent = extent;
@@ -912,8 +918,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     if (has_ssr && gbuffer.is_valid()) {
         SsrInputs si{};
         si.view = scene.camera.view;
-        si.proj =
-            core::perspective(scene.camera.fov_y, aspect, scene.camera.z_near, scene.camera.z_far);
+        si.proj = proj_rasterized; // the matrix the G-buffer/depth were rasterized with
         si.z_near = scene.camera.z_near;
         si.z_far = scene.camera.z_far;
         si.extent = extent;

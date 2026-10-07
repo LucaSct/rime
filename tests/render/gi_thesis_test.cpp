@@ -173,6 +173,7 @@ TEST_CASE("gi thesis: breaking a wall relights its shadow AND the indirect field
     const MaterialId mat = materials.add(md);
 
     SceneRenderer renderer(*device, meshes, materials);
+    render::test::disable_temporal_aa(renderer); // compares the plain frame (ADR-0078 1e)
     renderer.set_ambient(0.02f, 0.02f, 0.02f);
 
     // ── The scene (docs/math/ddgi.md §12 walks the geometry and the two occlusion mechanisms

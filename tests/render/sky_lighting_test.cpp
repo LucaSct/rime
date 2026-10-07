@@ -632,8 +632,10 @@ TEST_CASE("m19.6b: SSR reflects each surface at its own F0 — a metal tinted, a
     ls.ssr_thickness = 0.5f;
     ls.ssr_max_steps = 64;
     SceneRenderer ssr_on(*device, meshes, materials);
+    render::test::disable_temporal_aa(ssr_on); // compares the plain frame (ADR-0078 1e)
     ssr_on.set_lighting(ls);
     SceneRenderer ssr_off(*device, meshes, materials);
+    render::test::disable_temporal_aa(ssr_off); // compares the plain frame (ADR-0078 1e)
     const auto render = [&](SceneRenderer& renderer, MaterialId mat) {
         return render_hdr(*device, renderer, [&](ecs::World& w) { build_floor(w, floor, mat); });
     };

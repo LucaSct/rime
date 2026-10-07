@@ -201,10 +201,11 @@ public:
 
     // ── Temporal jitter (ADR-0078 step 1b) ────────────────────────────────────────────────────
     //
-    // OFF by default, so the frame is bit-identical to a renderer without this feature; the
-    // motion-vector and resolve bricks switch it on. While off, the sequence is never advanced.
-    // Only the PRIMARY view's projection is jittered (`fu.view_proj`); the culling frustum, the
-    // shadow views and the sky/SSR inputs keep the unjittered camera (see render()).
+    // ON by default (the TAA resolve needs sub-pixel samples to average). Switch it OFF for a
+    // determinism-sensitive consumer (replay / golden paths): the frame is then bit-identical to a
+    // renderer without this feature and the sequence is never advanced. Only the PRIMARY view's
+    // projection is jittered; the culling frustum and the shadow views keep the unjittered camera,
+    // while the sky and SSR inputs use the projection the frame was rasterized with (see render()).
     void set_temporal_jitter_enabled(bool enabled) noexcept {
         temporal_jitter_enabled_ = enabled;
         if (!enabled) {
@@ -227,11 +228,11 @@ public:
 
     // ── Motion vectors (ADR-0078 step 1c) ─────────────────────────────────────────────────────
     //
-    // OFF by default (the set_culling_enabled / set_temporal_jitter_enabled pattern). Off: no
-    // attachment is created, no pass is declared, the per-entity previous-transform cache is empty
-    // and untouched, and the frame is bit-identical to a renderer without this feature. The uniform
-    // blocks still carry the appended members (zero cost, filled with the plain camera/model), so
-    // the layout does not depend on the toggle.
+    // ON by default (the TAA resolve reprojects with it). Switch it OFF for a determinism-sensitive
+    // consumer (replay / golden paths). Off: no attachment is created, no pass is declared, the
+    // per-entity previous-transform cache is empty and untouched, and the frame is bit-identical to
+    // a renderer without this feature. The uniform blocks still carry the appended members (zero
+    // cost, filled with the plain camera/model), so the layout does not depend on the toggle.
     void set_motion_vectors_enabled(bool enabled) noexcept {
         motion_vectors_enabled_ = enabled;
         if (!enabled) {
@@ -250,10 +251,11 @@ public:
 
     // ── The TAA resolve (ADR-0078 step 1d) ────────────────────────────────────────────────────
     //
-    // OFF by default. Off: no history texture exists, no pass is declared, and the frame is
-    // bit-identical to a renderer without this feature. On, it averages the jittered frames into a
-    // temporally supersampled one (taa_resolve.frag explains the technique) between SSR and the
-    // tonemap, so `Output::hdr` is the RESOLVED radiance.
+    // ON by default. Switch it OFF for a determinism-sensitive consumer (replay / golden paths).
+    // Off: no history texture exists, no pass is declared, and the frame is bit-identical to a
+    // renderer without this feature. On, it averages the jittered frames into a temporally
+    // supersampled one (taa_resolve.frag explains the technique) between SSR and the tonemap, so
+    // `Output::hdr` is the RESOLVED radiance.
     //
     // It needs the velocity buffer, hence set_motion_vectors_enabled(true) and a depth pre-pass; a
     // frame without them skips the resolve (and says so once) rather than reading garbage. It does
@@ -438,7 +440,7 @@ private:
 
     // Temporal jitter state. Owned by THIS renderer -- no statics, no clock -- so two peers in one
     // process never share a sequence.
-    bool temporal_jitter_enabled_ = false;
+    bool temporal_jitter_enabled_ = true;
     TemporalJitter temporal_jitter_{};
     core::Mat4 view_proj_unjittered_{};
     core::Mat4 prev_view_proj_unjittered_{};
@@ -449,7 +451,7 @@ private:
     // one SceneRenderer, and a process-wide cache would let them stomp each other's history.
     // Keyed by the entity's bit pattern; holds the world-from-object each drawn entity had at the
     // previous render().
-    bool motion_vectors_enabled_ = false;
+    bool motion_vectors_enabled_ = true;
     std::unordered_map<std::uint64_t, core::Mat4> prev_models_;
     bool warned_velocity_no_prepass_ = false;
 
@@ -461,7 +463,7 @@ private:
     // which the next frame must import it as.
     void release_taa_history();
     TaaResolvePass taa_resolve_;
-    bool taa_resolve_enabled_ = false;
+    bool taa_resolve_enabled_ = true;
     std::array<rhi::TextureHandle, 2> taa_history_{};
     std::array<rhi::ResourceState, 2> taa_history_state_{rhi::ResourceState::Undefined,
                                                          rhi::ResourceState::Undefined};
