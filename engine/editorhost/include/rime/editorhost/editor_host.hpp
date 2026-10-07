@@ -44,10 +44,12 @@ enum class EditorMessage : std::uint16_t {
     Snapshot = 0x0201,   // engine -> editor: the whole world (entities + components)
     AssetList = 0x0203,  // engine -> editor: the cook manifest (browsable assets; m9.5)
     PickResult = 0x0204, // engine -> editor: the entity under a picked viewport pixel (m9.6)
-    ViewportCamera = 0x0205,  // engine -> editor: the viewport's exact render lens (m9.6 gizmos)
-    PlayState = 0x0206,       // engine -> editor: the play/edit phase + tick count (m9.7)
-    SaveResult = 0x0207,      // engine -> editor: the outcome of a SaveScene (m14.3)
-    EditResult = 0x0208,      // engine -> editor: ok + EditorId, per structural edit (ADR-0075)
+    ViewportCamera = 0x0205, // engine -> editor: the viewport's exact render lens (m9.6 gizmos)
+    PlayState = 0x0206,      // engine -> editor: the play/edit phase + tick count (m9.7)
+    SaveResult = 0x0207,     // engine -> editor: the outcome of a SaveScene (m14.3)
+    EditResult = 0x0208,     // engine -> editor: ok + EditorId, per structural edit (ADR-0075)
+    SceneLoadReport =
+        0x0209, // engine -> editor: the --scene load's outcome, once after the schema (E3)
     SetComponent = 0x0210,    // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,           // editor -> engine: spawn an empty entity
     Despawn = 0x0212,         // editor -> engine: despawn an entity
@@ -297,6 +299,12 @@ struct PlayStateMsg {
 struct HostedScene {
     std::string path;                   // where it was loaded from; "" for a built-in world
     std::size_t skipped_components = 0; // components the load dropped as unknown
+    // The load's outcome, reported in-band (SceneLoadReport, E3). `requested_path` is the --scene
+    // path asked for, kept even when the load failed; `path` is set only on success, because a
+    // failed load leaves an empty or partial world that must never be saved over its own file.
+    std::string requested_path;
+    bool load_ok = true; // true for a clean load and for "no --scene"
+    std::string load_error;
 };
 
 struct SceneSaveOutcome {
@@ -335,6 +343,22 @@ struct SceneSaveOutcome {
 // [ok:u8][entities:u64][bytes:u64][path_len:u32][path][error_len:u32][error].
 [[nodiscard]] std::vector<std::byte> serialize_save_result(const SceneSaveOutcome& outcome);
 [[nodiscard]] bool parse_save_result(std::span<const std::byte> payload, SceneSaveOutcome& out);
+
+// What the host says about the --scene load (SceneLoadReport, 0x0209). `ok = false` means the
+// host is serving an empty or partial world; `skipped_components > 0` with `ok = true` means a
+// partial load by the tool policy (an editor opens scenes from builds with more modules).
+struct SceneLoadReport {
+    bool ok = true;
+    std::string path;  // the --scene path; "" when none was given
+    std::string error; // empty when ok
+    std::uint32_t skipped_components = 0;
+};
+
+// Serialize / parse the `SceneLoadReport` payload:
+// [ok:u8][skipped:u32][path_len:u32][path][error_len:u32][error].
+[[nodiscard]] std::vector<std::byte> serialize_scene_load_report(const HostedScene& hosted);
+[[nodiscard]] bool parse_scene_load_report(std::span<const std::byte> payload,
+                                           SceneLoadReport& out);
 
 // What one Stop did — counted, so a test can tell "restored exactly" from "restored, and also
 // quietly did something else".
@@ -413,6 +437,8 @@ public:
 
     // Send the schema then a full world snapshot — call once, right after the connection handshake.
     // Registers EditorId if needed and gives every entity an id first.
+    // Sends the Schema, then the SceneLoadReport, then the Snapshot (E3: the report arrives before
+    // the first world, so the editor knows whether what it is showing is the file it asked for).
     [[nodiscard]] bool send_hello(ecs::World& world);
 
     // Tell the host WHICH scene it is serving, so a `SaveScene` with no path knows where to write

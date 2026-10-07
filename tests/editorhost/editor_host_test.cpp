@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <random>
 #include <span>
@@ -287,6 +288,8 @@ TEST_CASE("editorhost: serves schema + snapshot and applies an edit over the loc
             type == static_cast<stream::MessageType>(editorhost::EditorMessage::Schema)) {
             out.got_schema = true;
         }
+        (void)conn.recv_message(type,
+                                payload); // the scene-load report, between schema and world (E3)
         if (conn.recv_message(type, payload) &&
             type == static_cast<stream::MessageType>(editorhost::EditorMessage::Snapshot)) {
             // The snapshot reconstructs into a mirror world — the client's view of the scene.
@@ -449,6 +452,7 @@ TEST_CASE("editorhost: add/remove component and request-snapshot over the local 
         stream::MessageType type{};
         std::vector<std::byte> payload;
         (void)conn.recv_message(type, payload); // the hello schema
+        (void)conn.recv_message(type, payload); // the hello scene-load report (E3)
         (void)conn.recv_message(type, payload); // the hello snapshot
 
         // An [editor_id][hash] editor→engine message (Add/Remove share this shape). EditorId 1 is
@@ -548,6 +552,7 @@ TEST_CASE("editorhost: a pick on the GPU-free channel answers the nothing sentin
         stream::MessageType type{};
         std::vector<std::byte> payload;
         (void)conn.recv_message(type, payload); // the hello schema
+        (void)conn.recv_message(type, payload); // the hello scene-load report (E3)
         (void)conn.recv_message(type, payload); // the hello snapshot
 
         std::vector<std::byte> req; // [x:i32][y:i32] — any pixel; there is nothing to hit
@@ -1129,4 +1134,121 @@ TEST_CASE("codec_name names every wire codec") {
     CHECK(std::string_view(stream::codec_name(stream::Codec::Jpeg)) == "jpeg");
     CHECK(std::string_view(stream::codec_name(stream::Codec::Av1)) == "av1");
     CHECK(std::string_view(stream::codec_name(static_cast<stream::Codec>(0x7F))) == "unknown");
+}
+
+// ── E3: the --scene outcome travels in-band ────────────────────────────────────────────────
+//
+// The host used to log a failed `--scene` load and then serve whatever loaded, so an editor could
+// not tell a malformed file from a good one. These cases run the REAL load
+// (app::load_scene_for_editor) and then a send_hello over a local socket, and read the
+// SceneLoadReport the client actually received. The report is the message between the schema and
+// the snapshot.
+
+namespace {
+
+struct HelloWire {
+    bool got_report = false;
+    bool snapshot_after_report = false; // the host kept going and sent the world too
+    editorhost::SceneLoadReport report;
+};
+
+// Serve one send_hello of `world` over a real local socket and record what the client read.
+void hello_over_local_wire(ecs::World& world,
+                           const editorhost::HostedScene& hosted,
+                           HelloWire& out) {
+    const std::string path = unique_local_path();
+    auto listener = platform::LocalListener::bind(path);
+    REQUIRE(listener.has_value());
+
+    std::thread client([&] {
+        auto sock = platform::LocalSocket::connect(path);
+        if (!sock) {
+            return;
+        }
+        stream::ProtocolConnection conn(std::move(*sock));
+        if (!conn.handshake()) {
+            return;
+        }
+        stream::MessageType type{};
+        std::vector<std::byte> payload;
+        (void)conn.recv_message(type, payload); // the schema
+        if (conn.recv_message(type, payload) &&
+            type == static_cast<stream::MessageType>(editorhost::EditorMessage::SceneLoadReport)) {
+            out.got_report = editorhost::parse_scene_load_report(payload, out.report);
+        }
+        out.snapshot_after_report =
+            conn.recv_message(type, payload) &&
+            type == static_cast<stream::MessageType>(editorhost::EditorMessage::Snapshot);
+    });
+
+    auto accepted = listener->accept();
+    REQUIRE(accepted.has_value());
+    stream::ProtocolConnection server_conn(std::move(*accepted));
+    REQUIRE(server_conn.handshake());
+    editorhost::EditorHost host(std::move(server_conn));
+    host.set_hosted_scene(hosted);
+    REQUIRE(host.send_hello(world));
+    client.join();
+}
+
+// Write `text` to a scratch .rscene file and return its path.
+std::string write_scene_text(std::string_view name, std::string_view text) {
+    const std::filesystem::path p = std::filesystem::temp_directory_path() / name;
+    std::FILE* f = std::fopen(p.string().c_str(), "wb");
+    REQUIRE(f != nullptr);
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+    return p.string();
+}
+
+} // namespace
+
+TEST_CASE("E3: the host reports a malformed --scene in-band, and keeps serving") {
+    const std::string scene =
+        write_scene_text("rime_e3_malformed.rscene", "rime_scene 1\nentity 0 {");
+
+    ecs::World world;
+    editorhost::HostedScene hosted;
+    CHECK_FALSE(app::load_scene_for_editor(world, scene, hosted));
+    CHECK_FALSE(hosted.load_ok);
+    CHECK(hosted.path.empty()); // a failed load is never a save target
+
+    HelloWire wire;
+    hello_over_local_wire(world, hosted, wire);
+    REQUIRE(wire.got_report);
+    CHECK_FALSE(wire.report.ok);
+    CHECK(wire.report.path == scene);
+    CHECK_FALSE(wire.report.error.empty());
+    CHECK(wire.report.skipped_components == 0);
+    CHECK(wire.snapshot_after_report); // the host still serves what loaded
+}
+
+TEST_CASE("E3: an unknown component type is ok with a non-zero skip count in the report") {
+    const std::string scene = write_scene_text(
+        "rime_e3_unknown.rscene", "rime_scene 1\nentity 0 { some::Bogus 0x1234 { } }\n");
+
+    ecs::World world;
+    ecs::register_transform_components(world);
+    render::register_render_components(world);
+    editorhost::HostedScene hosted;
+    CHECK(app::load_scene_for_editor(world, scene, hosted));
+
+    HelloWire wire;
+    hello_over_local_wire(world, hosted, wire);
+    REQUIRE(wire.got_report);
+    CHECK(wire.report.ok);
+    CHECK(wire.report.path == scene);
+    CHECK(wire.report.error.empty());
+    CHECK(wire.report.skipped_components == 1);
+    CHECK(wire.snapshot_after_report);
+}
+
+TEST_CASE("E3: no --scene is ok with an empty path") {
+    ecs::World world;
+    HelloWire wire;
+    hello_over_local_wire(world, editorhost::HostedScene{}, wire);
+    REQUIRE(wire.got_report);
+    CHECK(wire.report.ok);
+    CHECK(wire.report.path.empty());
+    CHECK(wire.report.skipped_components == 0);
 }

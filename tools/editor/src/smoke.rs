@@ -53,8 +53,8 @@ mod imp {
     use rime_protocol::{
         decode_value, encode_value, AssetKind, AssetList, Connection, EditorMessage, FrameMessage,
         GizmoAxis, GizmoMode, GizmoState, MessageType, PickRequest, PickResult, SaveResult,
-        SaveScene, Schema, SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, SpawnEntity,
-        Value, ViewportCamera,
+        SaveScene, SceneLoadReport, Schema, SetComponent, Snapshot, SnapshotComponent,
+        SnapshotEntity, SpawnEntity, Value, ViewportCamera,
     };
 
     // A tiny cook manifest the smoke hands the engine (--assets) to prove the browse path end to end:
@@ -359,9 +359,20 @@ mod imp {
         let mut conn = Connection::new(stream);
         conn.handshake().map_err(|e| format!("handshake: {e}"))?;
 
-        // 3) Receive the schema, then the world snapshot (both modes).
+        // 3) Receive the schema, the scene-load report, then the world snapshot (both modes).
         let schema = Schema::decode(&expect_editor(&mut conn, EditorMessage::Schema)?)
             .map_err(|e| format!("decode schema: {e}"))?;
+        // E3: a smoke that was given a --scene must see it load. A refusal here is the engine
+        // saying the file is bad, which is a failure of this smoke rather than a detail to skip.
+        let load =
+            SceneLoadReport::decode(&expect_editor(&mut conn, EditorMessage::SceneLoadReport)?)
+                .map_err(|e| format!("decode scene load report: {e}"))?;
+        if !load.ok {
+            return Err(format!(
+                "engine could not load {}: {}",
+                load.path, load.error
+            ));
+        }
         let snapshot = Snapshot::decode(&expect_editor(&mut conn, EditorMessage::Snapshot)?)
             .map_err(|e| format!("decode snapshot: {e}"))?;
         if schema.types.is_empty() {

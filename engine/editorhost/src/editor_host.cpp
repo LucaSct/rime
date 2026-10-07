@@ -235,6 +235,7 @@ bool message_affects_frame(EditorMessage msg) noexcept {
         case EditorMessage::SaveScene:
         case EditorMessage::SaveResult:
         case EditorMessage::EditResult:
+        case EditorMessage::SceneLoadReport:
         case EditorMessage::Schema:
         case EditorMessage::Snapshot:
         case EditorMessage::AssetList:
@@ -714,6 +715,28 @@ bool parse_save_result(std::span<const std::byte> payload, SceneSaveOutcome& out
     return true;
 }
 
+std::vector<std::byte> serialize_scene_load_report(const HostedScene& hosted) {
+    std::vector<std::byte> out;
+    core::ByteWriter w(out);
+    w.u8(hosted.load_ok ? 1u : 0u);
+    w.u32(static_cast<std::uint32_t>(hosted.skipped_components));
+    write_string(w, hosted.requested_path);
+    write_string(w, hosted.load_error);
+    return out;
+}
+
+bool parse_scene_load_report(std::span<const std::byte> payload, SceneLoadReport& out) {
+    core::ByteReader r(payload);
+    std::uint8_t ok = 0;
+    std::uint32_t skipped = 0;
+    if (!r.u8(ok) || !r.u32(skipped) || !read_string(r, out.path) || !read_string(r, out.error)) {
+        return false;
+    }
+    out.ok = ok != 0;
+    out.skipped_components = skipped;
+    return true;
+}
+
 void PlaySession::take_baseline(const ecs::World& world) {
     const ecs::ComponentRegistry& registry = world.components();
     baseline_.clear();
@@ -1054,8 +1077,11 @@ EditorHost::EditorHost(stream::ProtocolConnection conn) noexcept : conn_(std::mo
 bool EditorHost::send_hello(ecs::World& world) {
     (void)ids_.assign_missing(world); // before the schema, so EditorId is registered (and hidden)
     const std::vector<std::byte> schema = serialize_schema(world);
+    const std::vector<std::byte> report = serialize_scene_load_report(hosted_);
     const std::vector<std::byte> snapshot = serialize_editor_snapshot(world, ids_);
     return conn_.send_message(static_cast<stream::MessageType>(EditorMessage::Schema), schema) &&
+           conn_.send_message(static_cast<stream::MessageType>(EditorMessage::SceneLoadReport),
+                              report) &&
            conn_.send_message(static_cast<stream::MessageType>(EditorMessage::Snapshot), snapshot);
 }
 

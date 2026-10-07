@@ -165,6 +165,16 @@ std::vector<std::byte> edit_result_bytes() {
     return editorhost::serialize_edit_result({.ok = true, .editor_id = 42});
 }
 
+// A SceneLoadReport payload (engine -> editor, E3): a refused --scene — ok = 0, both strings set,
+// and a zero skip count (a refused load never reports skips).
+std::vector<std::byte> scene_load_report_bytes() {
+    editorhost::HostedScene hosted;
+    hosted.requested_path = "scenes/bad.rscene";
+    hosted.load_ok = false;
+    hosted.load_error = "parse error at line 2";
+    return editorhost::serialize_scene_load_report(hosted);
+}
+
 // The asset list (engine -> editor): the browser's cook manifest (m9.5). Fixed entries so the bytes
 // are deterministic across runs/platforms.
 std::vector<std::byte> asset_list_bytes() {
@@ -338,6 +348,7 @@ std::vector<Fixture> all_fixtures() {
         {"gizmo_state.bin", gizmo_state_bytes()},
         {"entity_ref.bin", entity_ref_bytes()},
         {"edit_result.bin", edit_result_bytes()},
+        {"scene_load_report.bin", scene_load_report_bytes()},
         {"play_state.bin", play_state_bytes()},
         {"frame_lz4.bin", frame_lz4_bytes()},
         {"frame_lz4_pixels.bin", lz4_pixels_raw()},

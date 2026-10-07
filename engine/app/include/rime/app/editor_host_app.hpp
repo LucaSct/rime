@@ -5,6 +5,7 @@
 #include <array>
 #include <functional>
 #include <span>
+#include <string_view>
 
 #include "rime/platform/event.hpp"
 #include "rime/stream/frame_codec.hpp"
@@ -12,6 +13,10 @@
 namespace rime::ecs {
 class World;
 }
+
+namespace rime::editorhost {
+struct HostedScene;
+} // namespace rime::editorhost
 
 namespace rime::render {
 class MeshRegistry;
@@ -105,6 +110,14 @@ inline constexpr std::array<stream::Codec, 4> kEditorHostCodecs{stream::Codec::L
 // Parse `--editor-host <socket> [--scene <file>] [--assets <manifest>] [--viewport]` and serve
 // until the client disconnects. `usage_name` is what the usage line calls this binary, so a game's
 // host does not tell its users to run `rime-engine`.
+// Load a --scene the way the editor host must (E3): an unknown component type is skipped and
+// counted, and a failed load is recorded in `hosted` (load_ok / load_error) rather than only
+// logged, so the SceneLoadReport can say so. Returns false on a failed load; the world keeps what
+// loaded.
+bool load_scene_for_editor(ecs::World& world,
+                           std::string_view scene_path,
+                           editorhost::HostedScene& hosted);
+
 [[nodiscard]] int run_editor_host(int argc,
                                   char** argv,
                                   const ComponentRegistrar& registrar,

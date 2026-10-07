@@ -35,8 +35,8 @@ pub use editor::{
     decode_entity_ref, decode_value, encode_entity_ref, encode_value, entity_refs, AssetEntry,
     AssetKind, AssetList, ComponentRef, EditResult, EditorMessage, FieldDesc, FieldKind, GizmoAxis,
     GizmoMode, GizmoState, PickRequest, PickResult, PlayPhase, PlayState, SaveResult, SaveScene,
-    Schema, SchemaEntry, SetComponent, Snapshot, SnapshotComponent, SnapshotEntity, SpawnEntity,
-    Value, ViewportCamera, ENTITY_TYPE_NAME,
+    SceneLoadReport, Schema, SchemaEntry, SetComponent, Snapshot, SnapshotComponent,
+    SnapshotEntity, SpawnEntity, Value, ViewportCamera, ENTITY_TYPE_NAME,
 };
 pub use frame::{Codec, FrameMessage, ImageDesc, PixelFormat};
 pub use input::{InputEvent, InputKind};

@@ -15,8 +15,8 @@ use rime_protocol::{
     decode_entity_ref, decode_value, encode_entity_ref, encode_value, AssetKind, AssetList, Codec,
     ComponentRef, Connection, EditResult, EditorMessage, FieldKind, FrameMessage, GizmoAxis,
     GizmoMode, GizmoState, InputEvent, InputKind, MessageType, PickRequest, PickResult,
-    PixelFormat, PlayPhase, PlayState, SaveResult, SaveScene, Schema, SetComponent, Snapshot,
-    SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    PixelFormat, PlayPhase, PlayState, SaveResult, SaveScene, SceneLoadReport, Schema,
+    SetComponent, Snapshot, SpawnEntity, Value, ViewportCamera, PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -234,6 +234,18 @@ fn edit_result_decodes_and_re_encodes_byte_exact() {
     let r = EditResult::decode(&golden).expect("decode edit result");
     assert!(r.ok);
     assert_eq!(r.editor_id, 42);
+    assert_eq!(r.encode(), golden);
+}
+
+#[test]
+fn scene_load_report_decodes_and_re_encodes_byte_exact() {
+    // E3: a refused --scene. The golden is the C++ encoder's output (protocol_fixtures_test).
+    let golden = fixture("scene_load_report.bin");
+    let r = SceneLoadReport::decode(&golden).expect("decode scene load report");
+    assert!(!r.ok);
+    assert_eq!(r.skipped_components, 0);
+    assert_eq!(r.path, "scenes/bad.rscene");
+    assert_eq!(r.error, "parse error at line 2");
     assert_eq!(r.encode(), golden);
 }
 
