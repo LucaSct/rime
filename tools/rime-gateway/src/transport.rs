@@ -813,6 +813,49 @@ mod tests {
     use crate::test_peer::{av1_test_keyframe, TestPeer};
     use str0m::media::{Direction, MediaKind};
 
+    // Test wait budgets. There are exactly two kinds of wait in this module and they are NOT
+    // interchangeable; every wait below uses one of these and says which.
+    //
+    // RULE A -- the outcome is RELIABLE (ICE/DTLS establishing, a message over the reliable SCTP
+    // data channel). It will arrive; a fixed 5 s budget merely assumed a fast machine, and a loaded
+    // Windows CI runner is not one (a 5.57 s finish failed four unrelated PRs). So give it
+    // headroom, but keep a deadline: a genuinely wedged loop must FAIL, not hang the job.
+    const RELIABLE_WAIT: Duration = Duration::from_secs(20);
+
+    // RULE B -- retry the triggering action ONLY where the test's assertions tolerate a duplicate.
+    // RTP/RTCP are unreliable, so in principle a lone datagram can be lost for good (NACK repair
+    // needs a later packet to reveal the gap) and only a re-send would produce it. But where an
+    // assertion counts the outcome EXACTLY (one received frame, `keyframe_requests_in == 1`) a
+    // retry is wrong: a copy that was merely slow, not lost, arrives next to its retry and the
+    // count becomes 2, trading a slow-packet flake for a double-count flake. On in-process
+    // loopback UDP true loss is implausible and slowness is the likely cause, so there the fix is
+    // Rule A: one action, a wider deadline. Do not "simplify" a retry into an exact-count wait.
+    //
+    // The one legitimate retry is the keyframe inside the PLI test: nothing there counts received
+    // frames (it counts PLIs), so a duplicate keyframe is harmless, and the PLI needs a receive
+    // stream that only a delivered keyframe creates.
+    const KEYFRAME_RESEND_EVERY: Duration = Duration::from_secs(1);
+
+    /// Rule B, for ONE call site only (the PLI test): submit a keyframe, give it
+    /// `KEYFRAME_RESEND_EVERY` to reach the peer, resend if it did not, until `RELIABLE_WAIT`.
+    /// Never use it where the test counts received frames -- see the Rule B comment above.
+    fn send_keyframe_until_received(peer: &mut TestPeer, transport: &mut Str0mTransport) -> bool {
+        let deadline = Instant::now() + RELIABLE_WAIT;
+        while Instant::now() < deadline {
+            transport
+                .submit(Command::SendVideo {
+                    frame: av1_test_keyframe(),
+                    keyframe: true,
+                    capture_micros: 1_000_000,
+                })
+                .unwrap();
+            if peer.pump(KEYFRAME_RESEND_EVERY, |p| !p.received_video.is_empty()) {
+                return true;
+            }
+        }
+        false
+    }
+
     #[test]
     fn the_unspecified_address_is_refused_for_the_media_socket_too() {
         // The HTTP listener refuses a wildcard bind; a media socket that did not would be a side door
@@ -885,7 +928,8 @@ mod tests {
         peer.accept_answer(&answer);
         let mut connected = false;
         let mut requested = 0;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Rule A: ICE/DTLS handshake and the writable-track event are reliable.
+        let deadline = Instant::now() + RELIABLE_WAIT;
         while Instant::now() < deadline && !(connected && peer.connected && requested == 1) {
             peer.pump(Duration::from_millis(20), |p| p.connected);
             while let Some(event) = transport.poll_event(Duration::ZERO) {
@@ -906,6 +950,8 @@ mod tests {
     #[test]
     fn an_av1_keyframe_reaches_the_peer_through_a_negotiated_video_track() {
         let (mut peer, mut transport) = connect_video_peer();
+        // Rule A, deliberately NOT a resend: this test asserts exactly one received frame and
+        // `video_frames_out == 1`, so a duplicate would fail it. One keyframe, a wide deadline.
         transport
             .submit(Command::SendVideo {
                 frame: av1_test_keyframe(),
@@ -913,7 +959,7 @@ mod tests {
                 capture_micros: 1_000_000,
             })
             .unwrap();
-        assert!(peer.pump(Duration::from_secs(5), |p| !p.received_video.is_empty()));
+        assert!(peer.pump(RELIABLE_WAIT, |p| !p.received_video.is_empty()));
         // RFC AV1 RTP packetization strips the temporal delimiter; the peer reconstructs both
         // remaining size-bearing OBUs and their exact payload bytes.
         assert_eq!(
@@ -945,29 +991,20 @@ mod tests {
         //
         // The keyframe is ONE RTP packet, and RTP is unreliable: NACK repair works by noticing a
         // sequence gap, and a lone packet leaves no gap to notice, so a lost or not-yet-mappable
-        // first packet is gone for good. A Windows CI run failed exactly here (this wait, not the
-        // PLI below) after 5 s. A real sender does not give up after one frame: the transport asks
-        // for a keyframe (`Event::KeyframeRequested`) and the engine answers with another. Model
-        // that instead of hoping the one datagram lands: resend the keyframe every 500 ms until the
-        // peer has it. What the test proves is unchanged -- a keyframe reaches the peer, then a PLI
-        // from the peer reaches the event seam exactly once.
-        let mut delivered = false;
-        for _ in 0..10 {
-            transport
-                .submit(Command::SendVideo {
-                    frame: av1_test_keyframe(),
-                    keyframe: true,
-                    capture_micros: 1_000_000,
-                })
-                .unwrap();
-            if peer.pump(Duration::from_millis(500), |p| !p.received_video.is_empty()) {
-                delivered = true;
-                break;
-            }
-        }
-        assert!(delivered, "no keyframe reached the peer in 10 attempts");
+        // first packet is gone for good. A Windows CI run failed exactly here after 5 s, and a
+        // later one failed at the PLI below. A real sender does not give up after one frame: it
+        // is asked for a keyframe (`Event::KeyframeRequested`) and answers with another. Model
+        // that instead of hoping the one datagram lands: resend the keyframe every
+        // `KEYFRAME_RESEND_EVERY` until the peer has it. What the test proves is unchanged -- a
+        // keyframe reaches the peer, then a PLI from the peer reaches the event seam exactly once.
+        assert!(
+            send_keyframe_until_received(&mut peer, &mut transport),
+            "no keyframe reached the peer before the deadline"
+        );
+        // The PLI wait is Rule A, not a retry: `keyframe_requests_in == 1` counts every PLI the
+        // transport receives, so re-sending would risk 2. One PLI, then wait up to `RELIABLE_WAIT`.
         peer.request_pli();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + RELIABLE_WAIT;
         let mut requested = false;
         while Instant::now() < deadline && !requested {
             peer.pump(Duration::from_millis(20), |_| false);
@@ -1029,7 +1066,7 @@ mod tests {
         let (mut transport, answer) = Str0mTransport::accept_offer(&offer, bind).unwrap();
         assert!(av1_video_answer(&answer).is_none());
         peer.accept_answer(&answer);
-        assert!(peer.pump(Duration::from_secs(5), |p| p.connected));
+        assert!(peer.pump(RELIABLE_WAIT, |p| p.connected));
         transport
             .submit(Command::SendVideo {
                 frame: av1_test_keyframe(),
@@ -1042,11 +1079,11 @@ mod tests {
                 payload: b"down".to_vec(),
             })
             .unwrap();
-        assert!(peer.pump(Duration::from_secs(5), |p| !p.received.is_empty()));
+        assert!(peer.pump(RELIABLE_WAIT, |p| !p.received.is_empty()));
         assert_eq!(peer.received, vec![b"down".to_vec()]);
         assert!(peer.send(b"up"));
         let mut inbound = None;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + RELIABLE_WAIT;
         while Instant::now() < deadline && inbound.is_none() {
             peer.pump(Duration::from_millis(20), |_| false);
             if let Some(Event::Data { payload }) = transport.poll_event(Duration::from_millis(10)) {
@@ -1071,7 +1108,7 @@ mod tests {
         // The peer has to be pumped from this thread; the transport pumps itself. Interleave: give the
         // peer a slice, then look for the transport's event, until both sides report open.
         let mut server_connected = false;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + RELIABLE_WAIT;
         while Instant::now() < deadline && !(server_connected && peer.connected) {
             peer.pump(Duration::from_millis(50), |p| p.connected);
             if let Some(event) = transport.poll_event(Duration::from_millis(10)) {
@@ -1090,7 +1127,7 @@ mod tests {
         // Browser -> gateway.
         assert!(peer.send(b"up"), "the peer could not write to its channel");
         let mut inbound: Option<Vec<u8>> = None;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + RELIABLE_WAIT;
         while Instant::now() < deadline && inbound.is_none() {
             peer.pump(Duration::from_millis(20), |_| false);
             if let Some(Event::Data { payload }) = transport.poll_event(Duration::from_millis(10)) {
@@ -1111,7 +1148,7 @@ mod tests {
                 payload: b"down".to_vec(),
             })
             .unwrap();
-        let got = peer.pump(Duration::from_secs(5), |p| !p.received.is_empty());
+        let got = peer.pump(RELIABLE_WAIT, |p| !p.received.is_empty());
         assert!(got, "the peer never received the gateway's message");
         assert_eq!(peer.received[0], b"down".to_vec());
 
@@ -1151,7 +1188,7 @@ mod tests {
         // queue before `pending` ever reached its bound, and the assertion below failed. So wait and
         // retry: the property under test is `pending`'s bound, and it can only be reached through the
         // loop's draining. The deadline keeps a genuinely wedged loop a failure, not a hang.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + RELIABLE_WAIT;
         while submitted < sends && Instant::now() < deadline {
             match transport.submit(Command::SendData {
                 payload: vec![7u8; 64],
@@ -1191,7 +1228,7 @@ mod tests {
         });
         drop(cmd_tx);
         assert!(
-            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            done_rx.recv_timeout(RELIABLE_WAIT).is_ok(),
             "the run loop outlived its owner"
         );
     }
@@ -1218,7 +1255,7 @@ mod tests {
         std::thread::spawn(move || {
             let mut buf = vec![0u8; 2048];
             let mut client: Option<SocketAddr> = None;
-            let deadline = Instant::now() + Duration::from_secs(20);
+            let deadline = Instant::now() + RELIABLE_WAIT + Duration::from_secs(10);
             while Instant::now() < deadline {
                 if let Ok((n, from)) = public.recv_from(&mut buf) {
                     client = Some(from);
@@ -1255,7 +1292,7 @@ mod tests {
         peer.accept_answer(&internet_view);
 
         let mut server_connected = false;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + RELIABLE_WAIT;
         while Instant::now() < deadline && !(server_connected && peer.connected) {
             peer.pump(Duration::from_millis(50), |p| p.connected);
             if let Some(event) = transport.poll_event(Duration::from_millis(10)) {
@@ -1304,7 +1341,7 @@ mod tests {
         peer.accept_answer(&without_candidate(&answer, unused_public));
 
         let mut server_connected = false;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + RELIABLE_WAIT;
         while Instant::now() < deadline && !(server_connected && peer.connected) {
             peer.pump(Duration::from_millis(50), |p| p.connected);
             if let Some(Event::Connected) = transport.poll_event(Duration::from_millis(10)) {
