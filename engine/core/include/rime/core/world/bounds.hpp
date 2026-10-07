@@ -86,6 +86,11 @@ enum class Region : std::uint8_t {
 // height test is an OR with the tile test, not a fallback), and an empty hull is Exterior for
 // every input: a world with no interior has nothing inside it, and that is a usable answer.
 // A negative `band_tiles` is treated as 0 rather than as a hull that shrinks.
+//
+// Finiteness is NOT checked here. `y < floor_y` is false for NaN, so a NaN height would pass the
+// floor test. That is correct for this function's contract: a caller holding tile coordinates has
+// by construction already converted a position successfully. The finiteness contract belongs to
+// `classify_position`, the entry point for a caller that has a world-space position.
 [[nodiscard]] constexpr Region
 classify(const WorldBounds& b, std::int32_t tile_x, std::int32_t tile_z, float y) noexcept {
     const std::int64_t min_x = b.hull.min_x;
@@ -130,6 +135,28 @@ destructible(const WorldBounds& b, std::int32_t tile_x, std::int32_t tile_z, flo
 // values and the cast would be undefined. Not constexpr: std::floor is not usable in a constant
 // expression in C++20.
 [[nodiscard]] std::int32_t tile_of(float world_axis, float pitch) noexcept;
+
+// Classify a world-space position. This is the entry point a caller with a position (rather than
+// a tile) should use, and the one `gameplay` and `destruction` are meant to call.
+//
+// Any non-finite coordinate (NaN or infinite, in x, y or z) is Exterior, checked FIRST, before any
+// tile conversion. A body whose position has stopped being a number is broken (a physics
+// blow-up, a divide by zero mass, an uninitialised spawn), and the safest answer for a kill plane
+// is "outside": removing it is recoverable, leaving it in the world is not. Without this check
+// NaN would slip through: `tile_of` maps NaN to tile 0 and `y < floor_y` is false for NaN, so the
+// body would read as Hull and be destructible forever. Nor can `tile_of` return a sentinel tile
+// for "not a number": every int32 value, INT32_MIN included, can be inside a legitimate hull.
+//
+// Otherwise this is `tile_of` per axis plus `classify`, with no second copy of the rule. A
+// non-positive or non-finite pitch keeps `tile_of`'s meaning (no grid, tile 0) rather than
+// becoming Exterior: that is a configuration error that should show as a world behaving oddly,
+// not one that silently deletes every entity in it.
+[[nodiscard]] Region classify_position(const WorldBounds& b,
+                                       float x,
+                                       float y,
+                                       float z,
+                                       float pitch_x,
+                                       float pitch_z) noexcept;
 
 // Folds the bounds into a 64-bit value, for ADR-0079's requirement that the boundary be part of
 // the destruction hash rather than a second truth. Byte-identical on every platform.

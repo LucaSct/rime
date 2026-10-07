@@ -201,3 +201,49 @@ TEST_CASE("hash_bounds is stable: a pinned literal breaks loudly if the byte ima
     const WorldBounds b{TileSpan{-4, -4, 59, 59}, 8, -150.0f};
     CHECK(hash_bounds(b) == 0x18b1492416a3cb86ull);
 }
+
+TEST_CASE("classify_position: any non-finite coordinate is Exterior and not destructible") {
+    constexpr WorldBounds b = make_bounds();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    // (320, 0, 320) with pitch 64 is tile (5, 5): inside the hull when finite.
+    CHECK(classify_position(b, 320.0f, 0.0f, 320.0f, 64.0f, 64.0f) == Region::Hull);
+    for (const float bad : {nan, inf, -inf}) {
+        CHECK(classify_position(b, bad, 0.0f, 320.0f, 64.0f, 64.0f) == Region::Exterior);
+        CHECK(classify_position(b, 320.0f, bad, 320.0f, 64.0f, 64.0f) == Region::Exterior);
+        CHECK(classify_position(b, 320.0f, 0.0f, bad, 64.0f, 64.0f) == Region::Exterior);
+    }
+    // destructible() is exactly "region == Hull", so not-Hull means not destructible.
+    CHECK_FALSE(classify_position(b, nan, 0.0f, 320.0f, 64.0f, 64.0f) == Region::Hull);
+}
+
+TEST_CASE("classify_position: a NaN height inside the hull is Exterior") {
+    constexpr WorldBounds b = make_bounds();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    // The raw tile predicate cannot see this (y < floor is false for NaN); that is the gap.
+    CHECK(classify(b, 5, 5, nan) == Region::Hull);
+    CHECK(classify_position(b, 320.0f, nan, 320.0f, 64.0f, 64.0f) == Region::Exterior);
+}
+
+TEST_CASE("classify_position: -inf is Exterior even for a hull at INT32_MIN") {
+    constexpr std::int32_t kMin = std::numeric_limits<std::int32_t>::min();
+    constexpr WorldBounds lo{TileSpan{kMin, kMin, kMin + 10, kMin + 10}, 1000, -100.0f};
+    const float inf = std::numeric_limits<float>::infinity();
+    // tile_of(-inf) clamps to INT32_MIN, which this hull contains.
+    CHECK(tile_of(-inf, 64.0f) == kMin);
+    CHECK(classify(lo, kMin, kMin, 0.0f) == Region::Hull);
+    CHECK(classify_position(lo, -inf, 0.0f, -inf, 64.0f, 64.0f) == Region::Exterior);
+    CHECK(classify_position(lo, -inf, 0.0f, 0.0f, 64.0f, 64.0f) == Region::Exterior);
+}
+
+TEST_CASE("classify_position agrees with classify over tile_of for finite positions") {
+    constexpr WorldBounds b = make_bounds(3);
+    for (float x = -400.0f; x <= 1000.0f; x += 37.0f) {
+        for (float z = -400.0f; z <= 1000.0f; z += 41.0f) {
+            for (const float y : {-200.0f, -100.0f, 0.0f, 50.0f}) {
+                CHECK(classify_position(b, x, y, z, 64.0f, 32.0f) ==
+                      classify(b, tile_of(x, 64.0f), tile_of(z, 32.0f), y));
+            }
+        }
+    }
+}
