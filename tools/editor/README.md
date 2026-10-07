@@ -28,9 +28,20 @@ An edit made in Edit mode moves the object *immediately* — the engine composes
 `LocalTransform` into the rendered `WorldTransform` every frame, in Edit as well as during Play.
 
 The windowing stack (eframe → wgpu/winit) is behind the `gui` feature so the headless smoke stays a
-light build. Per ADR-0031 the on-screen result is **Mac-eyeballed** — CI compile-checks it but does
-not run a window (a windowed UI is not provable on a headless box). Everything the UI *calls*,
-however, is exercised headlessly:
+light build. ADR-0031 left the on-screen result **Mac-eyeballed** — "a windowed UI is not provable
+on a headless box". Two harnesses have since narrowed that to *how it looks*:
+
+- **Click tests** (`src/gui/click_tests.rs`, `cargo test -p editor --features gui`) run the shipped
+  `EditorApp::update` headlessly through `egui_kittest` and drive it by widget role and label — the
+  accessibility tree — against an in-process fake engine. One test per user-facing function. The
+  tests named `..._is_not_undoable`, `view_is_a_dead_label` and the like pin **known defects**;
+  read them as the editor's to-do list.
+- **[`scripts/editor-click-smoke.sh`](../../scripts/editor-click-smoke.sh)** runs the real binary
+  and the real engine on a private Xvfb display and drives them with `xdotool`: place → select →
+  edit → undo → redo → Play → Stop → Save As → quit, asserting the saved scene on disk. Linux-only
+  (X11 + Mesa); it is not in CI.
+
+Everything the UI *calls* is also exercised headlessly, without any window:
 
 - **`editor --smoke`** — a headless end-to-end check proving editor-as-client without a window:
   - **channel**: spawn `rime-engine --editor-host`, handshake, pull the component **schema** + a

@@ -34,6 +34,8 @@ use rime_protocol::{
 
 use crate::gizmo::{self, DragSession, Snapping};
 
+#[cfg(test)]
+mod click_tests;
 mod commands;
 mod session;
 
@@ -250,6 +252,19 @@ impl EditorApp {
         let (out_tx, out_rx) = mpsc::channel();
         let session =
             EngineSession::spawn(engine, assets, scene.clone(), Arc::clone(&shared), out_rx);
+        Self::with_session(shared, out_tx, session, scene)
+    }
+
+    /// The app over an already-made session. This is the click tests' seam (`gui/click_tests.rs`):
+    /// everything the UI knows about the engine is the `Shared` mirror it reads and the `Outbound`
+    /// channel it writes, so a test that owns the other end of both IS the engine as far as this
+    /// struct can tell — no process, no socket, and the widgets under test are the shipped ones.
+    fn with_session(
+        shared: Shared,
+        out_tx: Sender<Outbound>,
+        session: EngineSession,
+        scene: Option<String>,
+    ) -> Self {
         Self {
             dock: default_layout(),
             shared,
@@ -269,7 +284,7 @@ impl EditorApp {
             last_gizmo_state: None,
             fly: FlyCam::default(),
             scene_path: scene.clone(),
-            save_as_path: scene.clone().unwrap_or_default(),
+            save_as_path: scene.unwrap_or_default(),
             save_status: None,
         }
     }
