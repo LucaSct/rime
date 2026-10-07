@@ -51,7 +51,7 @@ exists for.
 
 | name | machine | labels | resources | service |
 |---|---|---|---|---|
-| `starbase` | CT 123 `rime-ci` on the Proxmox host (i7-3770K, 2012) | `self-hosted, Linux, X64, rime-linux, lavapipe, starbase` | 6 cores (builds at `-j4`), 6 GB RAM, 120 GB, `cpuunits 50` | `actions.runner.*.service` inside the container |
+| `starbase` | CT 123 `rime-ci` on the Proxmox host (i7-3770K, 2012) | `self-hosted, Linux, X64, lavapipe, starbase` — **`rime-linux` deliberately removed, see below** | 6 cores (builds at `-j4`), 6 GB RAM, 120 GB, `cpuunits 50` | `actions.runner.*.service` inside the container |
 | `nextos` | the workstation (Ryzen 9 9950X3D) | `self-hosted, Linux, X64, rime-linux, lavapipe, nextos` | `CPUQuota=1600%` (16 of 32 threads), `MemoryMax=12G`, `Nice=10`, `IOSchedulingClass=idle` | `actions.runner.*.service`, account `ghrunner`, home `/var/lib/github-runner` |
 
 `rime-linux` is the **capability** label the workflow selects on, so any online idle runner with the
@@ -69,6 +69,32 @@ lower than its core count on purpose: a heavy C++20 translation unit can take 1�
 real GPUs. Rime's render proofs are structural with margins **taken against lavapipe**; letting the
 loader choose would mean a green run measured a different device depending on which machine happened
 to pick up the job. A real-GPU job is a deliberate, separately-labelled thing to add later.
+
+### starbase is not yet taking pushes, and why
+
+A cold build there is **12 minutes** including Conan from scratch and all 82 test suites — faster
+than hosted `ubuntu-latest` (14 min), which was not the expectation for a 2012 CPU. But one render
+proof disagrees there:
+
+`tests/render/virtual_geometry_resolve_pass_test.cpp:473` compares the forward path's albedo against
+the visibility-buffer resolve path's with a 3-level tolerance. On starbase, 2 of 2164 covered pixels
+differ by up to **73**, deterministically (identical on two consecutive runs), while the UVs agree to
+5.96e-07 and the gradients to 1.18e-05 — the two paths compute the same coordinates and then sample
+different texels, which points at mip selection on a knife edge. Hosted `ubuntu-latest` passes, and so
+does the workstation (`max|Δalbedo| = 0`).
+
+The three environments are **not** the same Vulkan implementation: starbase has Mesa 25.2.8 / LLVM
+20.1.2, the workstation Mesa 26.2.4 / LLVM 23.1.1. A SIMD-width hypothesis was tested and **ruled
+out** — `LP_NATIVE_VECTOR_WIDTH=128` on the workstation breaks the UV/gradient agreement entirely
+(2162 mismatches) rather than nudging two pixels.
+
+So the shared `rime-linux` label has been removed from `starbase`: pushes land on `nextos` only, and
+starbase stays reachable by its machine label for pinned dispatches and for diagnosing this.
+**The honest cost: the "always-on capacity" half of this setup is not delivering yet.** With the
+workstation off, self-hosted jobs queue and `ci.yml`'s hosted matrix carries everything, exactly as
+before. The investigation is written up as an unclaimed brick in
+`.brick-vg-resolve-platform-sensitivity.md`, including what must *not* be done about it (widening the
+tolerance until a machine passes).
 
 ### Logs
 
