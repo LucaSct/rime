@@ -5,11 +5,20 @@ name: CI
 
 on:
   push:
-    # main AND long-lived feature branches. feat/icem-viewer once accumulated 57 commits
-    # that never saw CI (pushed without a PR) — a branch must not be able to do that
-    # silently again, so feature-branch pushes build too.
-    branches: [main, "feat/**"]
+    # ONLY main. Feature-branch pushes used to build here too, because feat/icem-viewer once
+    # accumulated 57 commits that never saw CI — but that hole is now covered by
+    # ci-self-hosted.yml, which builds and ASan-tests every feat/** push on our own runners.
+    #
+    # Dropping feat/** from this workflow is what stops the DUPLICATE run: with a pull request
+    # open, a push fired both a `push` run and a `pull_request` run of this same 8-job matrix,
+    # so every commit cost 16 hosted jobs instead of 8. The hosted minutes are the scarce
+    # resource now, and they should go to what we cannot run locally — Windows and macOS.
+    branches: [main]
+    # A docs-only change cannot break a build. (Workflow files are NOT excluded: a change to
+    # .github/** must always be exercised.)
+    paths-ignore: ["docs/**", "**/*.md", "LICENSE"]
   pull_request:
+    paths-ignore: ["docs/**", "**/*.md", "LICENSE"]
 
 # A newer push to the same ref supersedes in-flight runs.
 concurrency:
