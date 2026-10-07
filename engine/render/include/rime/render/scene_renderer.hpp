@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
@@ -247,6 +248,36 @@ public:
         return prev_models_.size();
     }
 
+    // ── The TAA resolve (ADR-0078 step 1d) ────────────────────────────────────────────────────
+    //
+    // OFF by default. Off: no history texture exists, no pass is declared, and the frame is
+    // bit-identical to a renderer without this feature. On, it averages the jittered frames into a
+    // temporally supersampled one (taa_resolve.frag explains the technique) between SSR and the
+    // tonemap, so `Output::hdr` is the RESOLVED radiance.
+    //
+    // It needs the velocity buffer, hence set_motion_vectors_enabled(true) and a depth pre-pass; a
+    // frame without them skips the resolve (and says so once) rather than reading garbage. It does
+    // NOT require temporal jitter: without it the resolve is a fixed point (history == current) and
+    // merely costs a pass, which is also what the "static, no jitter" proof measures. Turning it
+    // off frees the history textures and forgets them.
+    void set_taa_resolve_enabled(bool enabled) {
+        taa_resolve_enabled_ = enabled;
+        if (!enabled) {
+            release_taa_history();
+        }
+    }
+
+    [[nodiscard]] bool taa_resolve_enabled() const noexcept { return taa_resolve_enabled_; }
+
+    // Whether the history textures are allocated right now. Exposed so a test can MEASURE the
+    // "off allocates nothing" guarantee.
+    [[nodiscard]] bool taa_history_allocated() const noexcept {
+        return taa_history_[0].is_valid() || taa_history_[1].is_valid();
+    }
+
+    // Whether the most recent render() ran the resolve (as opposed to skipping it).
+    [[nodiscard]] bool last_frame_resolved() const noexcept { return last_frame_resolved_; }
+
     // The sub-pixel offset (pixels) applied to the most recent render(); {0,0} when off.
     [[nodiscard]] core::Vec2 last_jitter_offset() const noexcept { return last_jitter_offset_; }
 
@@ -421,6 +452,24 @@ private:
     bool motion_vectors_enabled_ = false;
     std::unordered_map<std::uint64_t, core::Mat4> prev_models_;
     bool warned_velocity_no_prepass_ = false;
+
+    // TAA resolve state. The history pair is owned HERE because the render graph is frame-local
+    // (it resets every frame) and history must outlive it; the graph imports them each frame.
+    // Ping-pong: frame parity picks which of the two is read (last frame's output) and which is
+    // written, so no pass ever reads and writes one image. `taa_history_state_` is the
+    // ResourceState each was LEFT in by the graph (written => ColorTarget, read => ShaderRead),
+    // which the next frame must import it as.
+    void release_taa_history();
+    TaaResolvePass taa_resolve_;
+    bool taa_resolve_enabled_ = false;
+    std::array<rhi::TextureHandle, 2> taa_history_{};
+    std::array<rhi::ResourceState, 2> taa_history_state_{rhi::ResourceState::Undefined,
+                                                         rhi::ResourceState::Undefined};
+    rhi::Extent2D taa_history_extent_{};
+    std::uint32_t taa_write_index_ = 0; // which of the pair THIS frame writes
+    bool taa_history_valid_ = false;    // does the "read" texture hold last frame's resolve?
+    bool last_frame_resolved_ = false;
+    bool warned_taa_no_velocity_ = false;
 
     // ── The uniform ring: one slot per frame that can be in flight ────────────────────────────
     //

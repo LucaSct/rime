@@ -79,6 +79,7 @@ rime_add_shaders(rime_render
     shaders/particle.frag
     shaders/depth_masked.frag
     shaders/velocity.vert
+    shaders/taa_resolve.frag
     shaders/velocity.frag
     shaders/terrain.vert
     shaders/terrain.frag)

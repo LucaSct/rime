@@ -359,6 +359,62 @@ private:
     rhi::PipelineHandle pipeline_;
 };
 
+// ── The TAA resolve pass (ADR-0078 step 1d) ───────────────────────────────────────────────────
+// Averages jittered frames over time into one supersampled frame; taa_resolve.frag explains the
+// technique, the reprojection conventions and the three defences (off-screen rejection, the YCoCg
+// neighbourhood clamp, depth reprojection for background). This class is the plumbing: it owns the
+// pipeline and samplers and declares the pass. The HISTORY TEXTURES are owned by SceneRenderer (the
+// render graph is frame-local and resets every frame) and imported by the caller.
+
+// The history weight: how much of the result comes from last frame. 0.9 means a new frame
+// contributes 10%, so an old sample's weight falls to about a tenth of its start after ~22 frames
+// (0.9^22 ~ 0.1) -- long enough to average the 8-frame jitter period nearly three times over.
+// It is a NAMED constant, not a literal in the shader, because it is the knob a per-pixel reactive
+// mask will later modulate: a pixel whose geometry just fractured (ADR-0078's destruction work)
+// must forget its history faster than a pixel on a quiet wall.
+inline constexpr float kTaaHistoryWeight = 0.9f;
+
+// std140 mirror of taa_resolve.frag's TaaParams block.
+struct GpuTaaUniforms {
+    core::Mat4 inv_view_proj;  // clip -> world, UNJITTERED current camera
+    core::Mat4 prev_view_proj; // world -> clip, UNJITTERED previous camera
+    float params[4];           // x = history weight, y = history valid (0/1), z,w unused
+};
+
+class TaaResolvePass {
+public:
+    explicit TaaResolvePass(rhi::Device& device);
+    ~TaaResolvePass();
+
+    TaaResolvePass(const TaaResolvePass&) = delete;
+    TaaResolvePass& operator=(const TaaResolvePass&) = delete;
+
+    // Declare the pass. Reads `scene_color` (jittered HDR), `velocity`, `depth` and `history_read`
+    // (last frame's resolve); writes `resolved` (what the tonemap reads) AND `history_write` (next
+    // frame's history). `history_valid` false makes every pixel take the current frame whole.
+    // The two history textures must be DIFFERENT physical textures: reading and writing one image
+    // in a single pass is a hazard, so SceneRenderer ping-pongs a pair by frame parity.
+    void add(RenderGraph& graph,
+             RGTexture scene_color,
+             RGTexture velocity,
+             RGTexture depth,
+             RGTexture history_read,
+             RGTexture resolved,
+             RGTexture history_write,
+             const core::Mat4& view_proj_unjittered,
+             const core::Mat4& prev_view_proj_unjittered,
+             bool history_valid,
+             float history_weight = kTaaHistoryWeight) const;
+
+private:
+    rhi::Device& device_;
+    rhi::ShaderHandle vertex_shader_;
+    rhi::ShaderHandle fragment_shader_;
+    rhi::PipelineHandle pipeline_;
+    rhi::SamplerHandle point_sampler_;  // texelFetch ignores filtering, but a binding needs one
+    rhi::SamplerHandle linear_sampler_; // history: bilinear, clamped (off-screen is rejected first)
+};
+
 // ── Forward PBR pass ──────────────────────────────────────────────────────────────────────────
 // Shade every draw with the Cook-Torrance BRDF into the HDR target. Two depth modes, two baked
 // pipelines: after a pre-pass it LOADS depth and tests Equal without writing (read-only depth —
