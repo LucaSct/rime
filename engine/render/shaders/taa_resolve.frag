@@ -111,18 +111,26 @@ void main() {
     // Where was this surface point last frame? Background (depth at the far plane) is reprojected
     // from depth; everything else uses the velocity buffer. See the header for why.
     vec2 prev_uv;
+    bool reprojected = true;
     if (texelFetch(scene_depth, px, 0).r >= 1.0) {
         const vec2 ndc = uv * 2.0 - 1.0;
         vec4 world = taa.inv_view_proj * vec4(ndc, 1.0, 1.0);
         world /= world.w;
         const vec4 prev_clip = taa.prev_view_proj * world;
-        prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+        // A background point can land BEHIND the previous camera -- turn hard enough in one frame
+        // and what is in front of you now was behind you then. Then prev_clip.w <= 0, the
+        // perspective divide mirrors the point through the origin, and prev_uv is a plausible
+        // on-screen coordinate pointing at unrelated history. The neighbourhood clamp would limit
+        // the damage but not remove it, so reject the sample outright instead: this pixel has no
+        // history, which is the truth.
+        reprojected = prev_clip.w > 0.0;
+        prev_uv = reprojected ? (prev_clip.xy / prev_clip.w) * 0.5 + 0.5 : vec2(-1.0);
     } else {
         prev_uv = uv - 0.5 * texelFetch(velocity, px, 0).rg;
     }
 
     // No history (first frame, after a resize) or history from outside the screen: current, whole.
-    const bool on_screen = all(greaterThanEqual(prev_uv, vec2(0.0))) &&
+    const bool on_screen = reprojected && all(greaterThanEqual(prev_uv, vec2(0.0))) &&
                            all(lessThanEqual(prev_uv, vec2(1.0)));
     vec4 result = current;
     if (taa.params.y > 0.5 && on_screen) {
