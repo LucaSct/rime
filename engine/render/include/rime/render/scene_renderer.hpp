@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -141,6 +142,11 @@ public:
         // Its material half (m19.6b fix 1): base colour + metallic, kGbufferMaterialFormat. Valid
         // exactly when `gbuffer` is.
         RGTexture gbuffer_material;
+        // The motion-vector target (ADR-0078 step 1c): kVelocityFormat, NDC-unit offset
+        // `current - previous` of unjittered matrices. Valid ONLY when set_motion_vectors_enabled
+        // is on AND this frame ran a depth pre-pass (the velocity pass depth-tests Equal against
+        // it); invalid otherwise, with no allocation and no pass declared.
+        RGTexture velocity;
     };
 
     // Extract → upload → declare into `graph` (which the caller later executes). Returns invalid
@@ -216,6 +222,29 @@ public:
 
     [[nodiscard]] const core::Mat4& previous_view_proj_unjittered() const noexcept {
         return prev_view_proj_unjittered_;
+    }
+
+    // ── Motion vectors (ADR-0078 step 1c) ─────────────────────────────────────────────────────
+    //
+    // OFF by default (the set_culling_enabled / set_temporal_jitter_enabled pattern). Off: no
+    // attachment is created, no pass is declared, the per-entity previous-transform cache is empty
+    // and untouched, and the frame is bit-identical to a renderer without this feature. The uniform
+    // blocks still carry the appended members (zero cost, filled with the plain camera/model), so
+    // the layout does not depend on the toggle.
+    void set_motion_vectors_enabled(bool enabled) noexcept {
+        motion_vectors_enabled_ = enabled;
+        if (!enabled) {
+            prev_models_.clear();
+        }
+    }
+
+    [[nodiscard]] bool motion_vectors_enabled() const noexcept { return motion_vectors_enabled_; }
+
+    // How many entities the previous-transform cache holds right now. An entity absent from a frame
+    // is dropped at that frame, so this tracks the number of distinct drawn entities and cannot
+    // grow over a long session of spawning debris. Exposed so a test can MEASURE that guard.
+    [[nodiscard]] std::size_t motion_vector_cache_size() const noexcept {
+        return prev_models_.size();
     }
 
     // The sub-pixel offset (pixels) applied to the most recent render(); {0,0} when off.
@@ -353,6 +382,7 @@ private:
     const MaterialRegistry& materials_;
 
     DepthPrepass depth_prepass_;
+    VelocityPass velocity_;
     ForwardPbrPass forward_;
     TonemapPass tonemap_;
     CascadedShadowMap csm_; // m10.1: directional shadow cascades (only declared when enabled)
@@ -383,6 +413,14 @@ private:
     core::Mat4 prev_view_proj_unjittered_{};
     core::Vec2 last_jitter_offset_{};
     bool has_view_proj_history_ = false;
+
+    // Motion-vector state, per renderer INSTANCE (no statics): 99-the-block runs two peers through
+    // one SceneRenderer, and a process-wide cache would let them stomp each other's history.
+    // Keyed by the entity's bit pattern; holds the world-from-object each drawn entity had at the
+    // previous render().
+    bool motion_vectors_enabled_ = false;
+    std::unordered_map<std::uint64_t, core::Mat4> prev_models_;
+    bool warned_velocity_no_prepass_ = false;
 
     // ── The uniform ring: one slot per frame that can be in flight ────────────────────────────
     //

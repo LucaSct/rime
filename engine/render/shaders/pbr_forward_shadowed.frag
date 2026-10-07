@@ -38,6 +38,8 @@ layout(std140, set = 0, binding = 0) uniform FrameUniforms {
     uvec4 light_counts;
     DirLight dir_lights[4];
     PointLight point_lights[16];
+    mat4 view_proj_unjittered; // appended by ADR-0078 step 1c; read only by velocity.vert
+    mat4 prev_view_proj;       // likewise: the previous render()'s unjittered view_proj
 } frame;
 
 layout(std140, set = 0, binding = 1) uniform DrawUniforms {

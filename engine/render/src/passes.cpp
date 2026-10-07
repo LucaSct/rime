@@ -19,6 +19,8 @@
 #include "present.frag.spv.h"
 #include "rime/core/diagnostics/log.hpp"
 #include "tonemap.frag.spv.h"
+#include "velocity.frag.spv.h"
+#include "velocity.vert.spv.h"
 
 namespace rime::render {
 
@@ -218,6 +220,79 @@ void DepthPrepass::add(RenderGraph& graph,
                          DrawItem::AlphaMasked | DrawItem::DoubleSided,
                          DrawItem::AlphaMasked | DrawItem::DoubleSided);
         });
+}
+
+// ── VelocityPass ──────────────────────────────────────────────────────────────────────────────
+
+VelocityPass::VelocityPass(rhi::Device& device) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 velocity_vert_spv,
+                                 sizeof(velocity_vert_spv),
+                                 "velocity.vert");
+    fragment_shader_ = make_shader(device,
+                                   rhi::ShaderStage::Fragment,
+                                   velocity_frag_spv,
+                                   sizeof(velocity_frag_spv),
+                                   "velocity.frag");
+    // Bindings 0/1 only: no material is sampled, so record_draws runs with
+    // bind_material_textures=false, exactly like the depth pre-pass.
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+    };
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = fragment_shader_;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = kVelocityFormat;
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal; // the pre-pass depth decides what is visible
+    pd.depth_format = kDepthFormat;
+    pd.bindings = bindings;
+    pd.debug_name = "velocity";
+    pipeline_ = device.create_graphics_pipeline(pd);
+}
+
+VelocityPass::~VelocityPass() {
+    device_.destroy(pipeline_);
+    device_.destroy(fragment_shader_);
+    device_.destroy(vertex_shader_);
+}
+
+void VelocityPass::add(RenderGraph& graph,
+                       RGTexture velocity,
+                       RGTexture depth,
+                       const SceneDrawData& data) const {
+    // Clear to zero: a pixel nothing covers (sky, the clear colour) has no surface to have moved,
+    // and zero is also what a static scene must produce everywhere.
+    const RGColorAttachment colors[] = {
+        {velocity, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+    RGDepthAttachment depth_att{};
+    depth_att.texture = depth;
+    depth_att.load = rhi::LoadOp::Load;
+    depth_att.store = rhi::StoreOp::DontCare;
+    depth_att.read_only = true;
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.depth = &depth_att;
+    graph.add_raster_pass("velocity", desc, [pipe = pipeline_, data](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipe);
+        // The same two cull partitions as the pre-pass and the forward pass: a face the pre-pass
+        // drew with culling off must be drawn with culling off here too, or its depth has no
+        // matching fragment and it keeps zero velocity.
+        cmd.set_cull_mode(rhi::CullMode::Back);
+        record_draws(cmd, data, /*bind_material_textures=*/false, DrawItem::DoubleSided, 0);
+        cmd.set_cull_mode(rhi::CullMode::None);
+        record_draws(cmd,
+                     data,
+                     /*bind_material_textures=*/false,
+                     DrawItem::DoubleSided,
+                     DrawItem::DoubleSided);
+    });
 }
 
 // ── ForwardPbrPass ────────────────────────────────────────────────────────────────────────────

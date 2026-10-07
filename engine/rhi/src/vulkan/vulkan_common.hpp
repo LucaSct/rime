@@ -158,6 +158,8 @@ template <class Dst, class Src>
             return VK_FORMAT_R32_UINT;
         case Format::RG32Uint:
             return VK_FORMAT_R32G32_UINT;
+        case Format::RG16Float:
+            return VK_FORMAT_R16G16_SFLOAT;
         case Format::R16Unorm:
             return VK_FORMAT_R16_UNORM;
         case Format::R16Snorm:

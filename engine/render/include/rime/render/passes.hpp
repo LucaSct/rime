@@ -38,6 +38,8 @@ namespace rime::render {
 // for why that is explicit rather than a hardware Srgb target).
 inline constexpr rhi::Format kHdrFormat = rhi::Format::RGBA16Float;
 inline constexpr rhi::Format kDepthFormat = rhi::Format::D32Float;
+// The motion-vector target (ADR-0078 step 1c): two half floats, an NDC-unit screen offset.
+inline constexpr rhi::Format kVelocityFormat = rhi::Format::RG16Float;
 inline constexpr rhi::Format kLdrFormat = rhi::Format::RGBA8Unorm;
 // The thin SSR G-buffer (m10.7a): RG = octahedral world normal, B = perceptual roughness, A = a
 // geometry mask (1 where shaded, 0 where cleared). RGBA16Float so the signed [-1,1] octahedral
@@ -85,6 +87,17 @@ struct GpuFrameUniforms {
     std::uint32_t light_counts[4] = {0, 0, 0, 0};   // x = directional, y = point
     GpuDirectionalLight dir_lights[kMaxDirectionalLights];
     GpuPointLight point_lights[kMaxPointLights];
+    // ── Appended by ADR-0078 step 1c (motion vectors). APPENDED, never inserted: every existing
+    // offset (dir_lights 112, point_lights 240) stays valid, so a layout slip cannot hide inside a
+    // diff of shifted offsets. Read only by velocity.vert; the other shaders that declare the full
+    // block carry the same members so the std140 declarations never disagree.
+    //
+    // `view_proj` above is the JITTERED matrix (it positions the pixel; the depth pre-pass and the
+    // forward pass share it bit-for-bit). A motion vector must be pure geometric motion with no
+    // jitter in it, so the velocity pass needs the UNJITTERED current matrix too, plus the
+    // unjittered matrix of the previous render().
+    core::Mat4 view_proj_unjittered; // clip-from-world, no jitter (== view_proj with jitter off)
+    core::Mat4 prev_view_proj;       // previous render()'s view_proj_unjittered
 };
 
 struct GpuDrawUniforms {
@@ -98,16 +111,23 @@ struct GpuDrawUniforms {
     // rgb = emissive factor (linear); w = alpha cutoff, 0 = no masking (m15.6). The w slot was
     // spare, so alpha masking costs no extra uniform bytes and no descriptor change.
     float emissive[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    // Appended (ADR-0078 step 1c), same reasoning as the frame block: world-from-object as it was
+    // at the previous render(), from SceneRenderer's per-entity cache. Equal to `model` for an
+    // entity seen for the first time.
+    core::Mat4 prev_model; // offset 176
 };
 
-static_assert(std::is_standard_layout_v<GpuFrameUniforms> && sizeof(GpuFrameUniforms) == 752 &&
+static_assert(std::is_standard_layout_v<GpuFrameUniforms> && sizeof(GpuFrameUniforms) == 880 &&
                   offsetof(GpuFrameUniforms, dir_lights) == 112 &&
-                  offsetof(GpuFrameUniforms, point_lights) == 240,
+                  offsetof(GpuFrameUniforms, point_lights) == 240 &&
+                  offsetof(GpuFrameUniforms, view_proj_unjittered) == 752 &&
+                  offsetof(GpuFrameUniforms, prev_view_proj) == 816,
               "GpuFrameUniforms no longer matches the std140 FrameUniforms block in the shaders");
-static_assert(std::is_standard_layout_v<GpuDrawUniforms> && sizeof(GpuDrawUniforms) == 176 &&
+static_assert(std::is_standard_layout_v<GpuDrawUniforms> && sizeof(GpuDrawUniforms) == 240 &&
                   offsetof(GpuDrawUniforms, base_color) == 128 &&
                   offsetof(GpuDrawUniforms, params) == 144 &&
-                  offsetof(GpuDrawUniforms, emissive) == 160,
+                  offsetof(GpuDrawUniforms, emissive) == 160 &&
+                  offsetof(GpuDrawUniforms, prev_model) == 176,
               "GpuDrawUniforms no longer matches the std140 DrawUniforms block in the shaders");
 
 // Per-draw uniform data lives as SLICES of one buffer, re-bound at a new offset per draw
@@ -302,6 +322,43 @@ private:
     rhi::ShaderHandle masked_vertex_shader_;
     rhi::ShaderHandle masked_fragment_shader_;
     rhi::PipelineHandle masked_pipeline_;
+};
+
+// ── The velocity pass (ADR-0078 step 1c) ───────────────────────────────────────────────────────
+// What a motion vector is FOR: temporal anti-aliasing blends this frame's pixel with a history of
+// the same surface point, and the history lives wherever that point was LAST frame. The velocity
+// buffer is the per-pixel answer to "where was I?" -- current NDC position minus previous NDC
+// position of the same world point, the point moved by its own previous model matrix and seen
+// through the previous camera.
+//
+// Why a SEPARATE pass rather than a second colour attachment on the forward pass: the forward pass
+// already bakes six pipeline variants (baseline, shadowed, shadowed+G-buffer, each after a pre-pass
+// or standalone), and a velocity output would double them. This pass instead reuses what the depth
+// pre-pass already guarantees -- it tests CompareOp::Equal against the pre-pass depth, so exactly
+// the visible surface survives (including alpha-masked holes, which the pre-pass already cut) and
+// no fragment shader needs the material. Cost: the scene's vertex work runs once more. It REQUIRES
+// the pre-pass; without one there is no depth to be Equal to, and SceneRenderer declares nothing.
+class VelocityPass {
+public:
+    explicit VelocityPass(rhi::Device& device);
+    ~VelocityPass();
+
+    VelocityPass(const VelocityPass&) = delete;
+    VelocityPass& operator=(const VelocityPass&) = delete;
+
+    // Declare the pass: clears `velocity` to zero (no motion, which is also what sky and every
+    // uncovered pixel read) and writes the offset of every surface that survived the pre-pass.
+    // `depth` must already hold the pre-pass result; it is read-only here.
+    void add(RenderGraph& graph,
+             RGTexture velocity,
+             RGTexture depth,
+             const SceneDrawData& data) const;
+
+private:
+    rhi::Device& device_;
+    rhi::ShaderHandle vertex_shader_;
+    rhi::ShaderHandle fragment_shader_;
+    rhi::PipelineHandle pipeline_;
 };
 
 // ── Forward PBR pass ──────────────────────────────────────────────────────────────────────────

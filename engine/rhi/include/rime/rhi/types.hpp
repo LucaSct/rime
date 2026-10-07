@@ -173,6 +173,13 @@ enum class Format : std::uint32_t {
               // unit-length by construction. NOTE the current shader reads z from the texture
               // (`pbr_forward_shadowed.frag`), so adopting BC5 for normals requires that change —
               // which is why BC7 is the zero-shader-churn option for normals in the meantime.
+
+    // Two 16-bit floats per pixel (ADR-0078 step 1c): the motion-vector target. A screen-space
+    // offset has exactly two components, and half precision is ample for an NDC delta. Appended
+    // AFTER the block-compressed formats rather than grouped with the uncompressed ones, so no
+    // existing enumerator's numeric value moves. Colour-attachment, sampled and transfer support
+    // for R16G16_SFLOAT are spec-mandatory (as for RGBA16Float), so no device query.
+    RG16Float,
 };
 
 // How a format is laid out in memory: the size of one addressable block and its byte cost.
@@ -208,6 +215,8 @@ struct FormatBlockInfo {
         case Format::RG32Uint:
         case Format::RGBA16Float:
             return {1, 1, 8};
+        case Format::RG16Float:
+            return {1, 1, 4};
         case Format::RGB32Float:
             return {1, 1, 12};
         case Format::RGBA32Float:
