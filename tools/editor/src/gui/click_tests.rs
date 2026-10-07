@@ -873,13 +873,10 @@ fn ctrl_s_saves_the_opened_scene() {
 }
 
 #[test]
-fn ctrl_s_over_the_viewport_also_flies_the_camera_backwards() {
-    // DOCUMENTS A DEFECT: the fly camera reads S as "back" whenever the pointer is over the
-    // viewport and never looks at the modifiers. So the save chord, pressed where the pointer
-    // usually is, also nudges the camera. The save itself goes out first and records the scene as
-    // it was — which means the world is already different from the file the instant "saved"
-    // appears, and the NEXT save writes a camera the user never moved. (The Xvfb smoke parks the
-    // pointer on the status bar before every key for exactly this reason.)
+fn ctrl_s_over_the_viewport_saves_the_scene_as_it_is() {
+    // Ctrl+S saves wherever the pointer is. With the pointer over the viewport and the right button
+    // up, it saves the world as it stood and leaves the camera where it was (E2). Before the fix the
+    // S in the chord also flew the camera backwards, after the save had already gone out.
     let mut rig = Rig::with_scene("/proj/level.rscene");
     rig.present_frame();
     rig.pointer_move((480.5, 270.5));
@@ -887,7 +884,26 @@ fn ctrl_s_over_the_viewport_also_flies_the_camera_backwards() {
     assert_eq!(rig.host.count(EditorMessage::SaveScene), 1);
     let saved_camera = &rig.host.files["/proj/level.rscene"][0].components[0].data;
     assert_eq!(*saved_camera, trs_at(0.0, 0.0, EYE_Z), "saved as it was");
-    assert!(rig.host.translation(CAMERA)[2] > EYE_Z, "then it moved");
+    assert_eq!(
+        rig.host.translation(CAMERA)[2],
+        EYE_Z,
+        "and the camera did not move"
+    );
+}
+
+#[test]
+fn ctrl_s_with_the_right_button_held_saves_without_flying() {
+    // The hard case: the fly keys are live (right button held), and the chord still must not fly.
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.present_frame();
+    rig.pointer_move((480.5, 270.5));
+    right_button_down(&mut rig, (480.5, 270.5));
+    rig.chord(CTRL, egui::Key::S);
+    right_button_up(&mut rig, (480.5, 270.5));
+    assert_eq!(rig.host.count(EditorMessage::SaveScene), 1);
+    let saved_camera = &rig.host.files["/proj/level.rscene"][0].components[0].data;
+    assert_eq!(*saved_camera, trs_at(0.0, 0.0, EYE_Z), "saved as it was");
+    assert_eq!(rig.host.translation(CAMERA)[2], EYE_Z, "and it did not fly");
 }
 
 #[test]
@@ -968,56 +984,245 @@ fn a_refused_save_as_still_becomes_the_sessions_scene() {
 }
 
 #[test]
-fn file_menu_has_no_new_or_open() {
-    // DOCUMENTS A GAP: the File menu is Save + Save As and nothing else. A scene can only be
-    // chosen on the command line (`--scene`); there is no New, no Open, no Recent, no Quit, and
-    // closing the window never asks about unsaved edits (there is no dirty flag to ask with).
+fn file_menu_has_new_and_open() {
+    // The File menu offers New and Open as well as Save and Save As. There is still no Quit or
+    // Revert: closing is the window's, and Revert is not a command the editor has.
     let mut rig = Rig::new();
     rig.click("File");
     let buttons = rig.button_labels();
-    for absent in ["New", "Open", "Quit", "Exit", "Revert"] {
+    for absent in ["Quit", "Exit", "Revert"] {
         assert!(
             !buttons.iter().any(|b| b.contains(absent)),
             "found a {absent} entry: {buttons:?}"
         );
     }
-    assert!(buttons.iter().any(|b| b == SAVE));
-    assert!(buttons.iter().any(|b| b == "Write"));
+    for present in ["New", "Open", SAVE, "Write"] {
+        assert!(
+            buttons.iter().any(|b| b == present),
+            "no {present}: {buttons:?}"
+        );
+    }
+}
+
+/// A replacement engine as the Open path sees it: a session whose mirror already holds what the
+/// engine would have sent after loading `path`. `error` stands in for a session that never came up.
+fn scripted_opener(world: Vec<SnapshotEntity>, error: Option<&'static str>) -> Opener {
+    Box::new(move |_path| {
+        let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut s = shared.lock().unwrap();
+            s.connected = error.is_none();
+            s.error = error.map(str::to_string);
+            s.schema = fake_schema();
+            s.snapshot = Snapshot {
+                entities: world.clone(),
+            };
+            // The replacement has delivered its first snapshot, whatever it holds.
+            s.snapshots_received = 1;
+        }
+        let (out_tx, _out_rx) = mpsc::channel();
+        OpenedSession {
+            shared,
+            out_tx,
+            session: EngineSession::detached(),
+        }
+    })
+}
+
+/// Open File and type into its Open path box. That box comes after Save As in the menu, so it is
+/// the last text box that was not there before the menu opened.
+fn open_file_menu_and_type_open_path(rig: &mut Rig, path: &str) {
+    let before: Vec<_> = rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .map(|n| n.id())
+        .collect();
+    rig.click("File");
+    rig.harness
+        .get_all_by_role(Role::TextInput)
+        .rfind(|n| !before.contains(&n.id()))
+        .expect("the Open path box")
+        .type_text(path);
+    rig.settle();
+}
+
+#[test]
+fn new_clears_the_scene_and_leaves_save_disabled() {
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    assert!(rig.has("3 entities"));
+    rig.click("File");
+    rig.click("New");
+    assert!(rig.host.world.is_empty(), "every entity was despawned");
+    assert!(rig.has("0 entities"));
+    assert_eq!(rig.app().scene_path, None, "an unnamed scene");
+    rig.click("File");
+    assert!(!rig.enabled(SAVE), "so Save has nowhere to write");
+    rig.key(egui::Key::Escape);
+}
+
+#[test]
+fn new_forgets_the_undo_history() {
+    // The despawns are not undoable, and the edits before them name entities that no longer exist,
+    // so New drops the history with them.
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.type_into_number_field(0, "5");
+    assert!(rig.app().stack.can_undo());
+    rig.click("File");
+    rig.click("New");
+    assert!(!rig.app().stack.can_undo());
+}
+
+#[test]
+fn new_and_open_are_unavailable_while_playing() {
+    let mut rig = Rig::new();
+    rig.click("▶");
+    rig.click("File");
+    assert!(!rig.enabled("New"));
+    assert!(!rig.enabled("Open"));
+    rig.key(egui::Key::Escape);
+}
+
+/// A real file on disk for an Open to name (Open refuses a path that is not an existing file before
+/// any engine starts). Named per process so parallel test runs do not collide.
+fn scene_file(name: &str, contents: &[u8]) -> String {
+    let path = std::env::temp_dir().join(format!("rime-e2-{}-{name}", std::process::id()));
+    std::fs::write(&path, contents).expect("write the scene fixture");
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn open_loads_the_typed_scene_into_the_window() {
+    let path = scene_file("other.rscene", b"scene");
+    let mut rig = Rig::new();
+    rig.harness.state_mut().opener = Some(scripted_opener(starting_world()[..1].to_vec(), None));
+    open_file_menu_and_type_open_path(&mut rig, &path);
+    rig.click("Open");
+    assert_eq!(rig.app().scene_path.as_deref(), Some(path.as_str()));
+    assert!(rig.has(&format!("opened {path}")));
+    assert!(
+        rig.has("1 entities"),
+        "the window shows the new engine's world"
+    );
+}
+
+#[test]
+fn an_empty_scene_file_opens_and_is_adopted() {
+    // An empty world is a valid scene. Adoption waits for the replacement's first snapshot, not for
+    // a non-empty one, so this opens with no entities in it.
+    let path = scene_file("empty.rscene", b"");
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.harness.state_mut().opener = Some(scripted_opener(Vec::new(), None));
+    open_file_menu_and_type_open_path(&mut rig, &path);
+    rig.click("Open");
+    assert_eq!(rig.app().scene_path.as_deref(), Some(path.as_str()));
+    assert!(rig.has("0 entities"), "the empty scene is what is open");
+    assert_eq!(rig.app().save_status.as_ref().map(|s| s.1), Some(true));
+}
+
+#[test]
+fn a_missing_file_is_refused_at_once_and_no_engine_starts() {
+    // The path is checked before anything starts: the opener must never be called, and the refusal
+    // is synchronous, so it is on screen after the click with the scene untouched.
+    let missing =
+        std::env::temp_dir().join(format!("rime-e2-{}-missing.rscene", std::process::id()));
+    let missing = missing.to_string_lossy().into_owned();
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.harness.state_mut().opener = Some(Box::new(|_| {
+        panic!("an engine must not start for a file that does not exist")
+    }));
+    open_file_menu_and_type_open_path(&mut rig, &missing);
+    rig.click("Open");
+    let (message, ok) = rig.app().save_status.clone().expect("a refusal is shown");
+    assert!(!ok);
+    assert!(message.starts_with(&format!("open refused: {missing} is not a readable file")));
+    assert!(rig.app().pending_open.is_none());
+    assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/level.rscene"));
+    assert!(rig.has("3 entities"), "the old world is still there");
+}
+
+#[test]
+fn open_refuses_an_engine_that_failed_to_start() {
+    let path = scene_file("broken.rscene", b"not a scene");
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.harness.state_mut().opener = Some(scripted_opener(Vec::new(), Some("connect: timed out")));
+    open_file_menu_and_type_open_path(&mut rig, &path);
+    rig.click("Open");
+    assert!(rig.has("open refused: connect: timed out"));
+    assert_eq!(rig.app().scene_path.as_deref(), Some("/proj/level.rscene"));
+    assert!(rig.has("3 entities"));
+}
+
+#[test]
+fn two_u64_fields_in_one_component_round_trip_independently() {
+    // Two 64-bit fields rendered in the same component share a parent Ui. If their text boxes shared
+    // an id they would share text and focus, and typing into one would show in both. Each must keep
+    // its own value, above 2^53, and write only its own field.
+    const H_PAIR: u64 = 0x15;
+    const A: u64 = 0xDEAD_BEEF_CAFE_F00D;
+    const B: u64 = 0x0123_4567_89AB_CDEF;
+    let mut world = starting_world();
+    let blob: Vec<u8> = [1u64, 2u64].iter().flat_map(|v| v.to_le_bytes()).collect();
+    world[2].components.push(comp(H_PAIR, blob));
+    let mut rig = Rig::build(None, world);
+    let mut schema = fake_schema();
+    schema.types.push(SchemaEntry {
+        type_hash: H_PAIR,
+        name: "rime::test::IdPair".to_string(),
+        is_component: true,
+        fields: vec![field("a", FieldKind::U64, 0), field("b", FieldKind::U64, 0)],
+    });
+    rig.host.shared.lock().unwrap().schema = schema;
+    rig.settle();
+    rig.click(ROW_CRATE);
+
+    // Each value is committed with Enter, the way a person finishes a field, before the next is typed.
+    retype_field(&mut rig, "1", &A.to_string());
+    rig.key(egui::Key::Enter);
+    retype_field(&mut rig, "2", &B.to_string());
+    rig.key(egui::Key::Enter);
+
+    let stored: Vec<u8> = [A, B].iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(rig.host.component(CRATE, H_PAIR), Some(stored.as_slice()));
+    assert!(rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .any(|n| n.value().as_deref() == Some(A.to_string().as_str())));
+    assert!(rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .any(|n| n.value().as_deref() == Some(B.to_string().as_str())));
 }
 
 // ── View ────────────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn view_is_a_dead_label() {
-    // DOCUMENTS A STUB: `View` sits in the menu bar between two real menus and is a plain text
-    // label — not a button, no popup. A closed panel cannot be reopened from here (or anywhere).
-    let rig = Rig::new();
-    assert_eq!(rig.harness.get_by_label("View").role(), Role::Label);
-    assert!(!rig.button_labels().iter().any(|b| b == "View"));
-    // Its neighbours, for contrast, are real menus.
-    assert_eq!(rig.harness.get_by_label("File").role(), Role::Button);
-    assert!(rig.button_labels().iter().any(|b| b == "Edit"));
+fn view_menu_lists_every_panel_with_its_state() {
+    // The View menu is a real menu with one checkmark per dock panel, all ticked at the default
+    // layout.
+    let mut rig = Rig::new();
+    assert_eq!(rig.harness.get_by_label("View").role(), Role::Button);
+    rig.click("View");
+    for tab in Tab::ALL {
+        assert!(
+            rig.toggled(tab.label()),
+            "{} starts open, so it is ticked",
+            tab.label()
+        );
+    }
+    rig.key(egui::Key::Escape);
 }
 
-// ── Docking ─────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn a_closed_panel_cannot_be_reopened() {
-    // DOCUMENTS A DEFECT: egui_dock's defaults are all on — every tab is closeable (a ✕ on the
-    // tab, or a middle-click on its title, which is what this test sends) — and nothing in the
-    // editor can bring a closed panel back: `View` is the dead label above and the layout is
-    // neither persisted nor resettable. The only recovery is restarting the editor, which loses
-    // unsaved work because nothing prompts. One stray middle-click on "Viewport" ends the session.
-    //
-    // Tab titles are not in the accessibility tree either, so this finds the title the blunt way:
-    // middle-click along the Assets panel's tab bar until the tab is gone.
-    let mut rig = Rig::new();
-    let has_assets_tab =
-        |rig: &Rig| {
-            rig.app().dock.main_surface().iter().any(
-                |n| matches!(n, egui_dock::Node::Leaf { tabs, .. } if tabs.contains(&Tab::Assets)),
-            )
-        };
+/// Middle-click a panel's tab until the panel is gone — the way a person closes one. Tab titles are
+/// not in the accessibility tree, so this finds the title the blunt way: along the tab bar.
+fn close_panel(rig: &mut Rig, tab: Tab) {
+    let has_tab = |rig: &Rig| {
+        rig.app()
+            .dock
+            .main_surface()
+            .iter()
+            .any(|n| matches!(n, egui_dock::Node::Leaf { tabs, .. } if tabs.contains(&tab)))
+    };
     let bar = rig
         .app()
         .dock
@@ -1029,16 +1234,16 @@ fn a_closed_panel_cannot_be_reopened() {
                 rect,
                 viewport,
                 ..
-            } if tabs.contains(&Tab::Assets) => Some(egui::Rect::from_min_max(
+            } if tabs.contains(&tab) => Some(egui::Rect::from_min_max(
                 rect.min,
                 egui::pos2(rect.right(), viewport.top()),
             )),
             _ => None,
         })
-        .expect("the layout has an Assets panel");
-    assert!(has_assets_tab(&rig));
+        .expect("the layout has the panel");
+    assert!(has_tab(rig));
     let mut x = bar.left() + 2.0;
-    while has_assets_tab(&rig) && x < bar.right() {
+    while has_tab(rig) && x < bar.right() {
         let pos = egui::pos2(x, bar.center().y);
         for event in [
             egui::Event::PointerMoved(pos),
@@ -1060,11 +1265,57 @@ fn a_closed_panel_cannot_be_reopened() {
         }
         x += 3.0;
     }
-    assert!(!has_assets_tab(&rig), "a middle-click on the tab closed it");
+    assert!(!has_tab(rig), "a middle-click on the tab closed it");
     rig.settle();
-    // The browser is gone from the screen, and no control anywhere offers it back.
-    assert!(!rig.has("meshes/crate.gltf"));
-    assert!(!rig.button_labels().iter().any(|b| b.contains("Assets")));
+}
+
+/// The screen rect of the leaf holding an open panel, from the dock's own layout.
+fn panel_rect(rig: &Rig, tab: Tab) -> egui::Rect {
+    rig.app()
+        .dock
+        .main_surface()
+        .iter()
+        .find_map(|node| match node {
+            egui_dock::Node::Leaf { tabs, viewport, .. } if tabs.contains(&tab) => Some(*viewport),
+            _ => None,
+        })
+        .expect("the panel is open")
+}
+
+// ── Docking ─────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_closed_panel_reopens_from_the_view_menu() {
+    // A closed panel comes back from View, in the place the default layout gives it: the assets
+    // browser sits below the outliner, on the left. Its checkmark follows the panel.
+    let mut rig = Rig::new();
+    close_panel(&mut rig, Tab::Assets);
+    rig.click("View");
+    assert!(!rig.toggled("Assets"), "closed, so unticked");
+    rig.harness
+        .get_by_role_and_label(Role::CheckBox, "Assets")
+        .click();
+    rig.settle();
+
+    let assets = panel_rect(&rig, Tab::Assets);
+    let outliner = panel_rect(&rig, Tab::Outliner);
+    assert_eq!(assets.left(), outliner.left(), "down the outliner's column");
+    assert!(assets.top() > outliner.top(), "below the outliner");
+    rig.click("View");
+    assert!(rig.toggled("Assets"), "open again, so ticked");
+    rig.key(egui::Key::Escape);
+}
+
+#[test]
+fn an_open_panel_is_not_closed_by_its_menu_item() {
+    // Clicking the checkmark of an open panel changes nothing: closing is a tab gesture.
+    let mut rig = Rig::new();
+    rig.click("View");
+    rig.harness
+        .get_by_role_and_label(Role::CheckBox, "Inspector")
+        .click();
+    rig.settle();
+    assert!(rig.app().dock.find_tab(&Tab::Inspector).is_some());
 }
 
 // ── Outliner ────────────────────────────────────────────────────────────────────────────────
@@ -1277,39 +1528,117 @@ fn a_new_edit_after_undo_drops_the_redo_branch() {
     assert_eq!(rig.host.translation(LIGHT)[0], 7.0);
 }
 
+/// Focus the inspector's text field showing `shown`, clear it, and type `text` into it. The field
+/// is found by what it displays, since its label is not in the accessibility tree. Focus comes from
+/// the accessibility Focus action (a click action does not focus a text box in this harness), and
+/// the clearing is real key presses, so the widget sees the same edits a person's keyboard makes.
+fn retype_field(rig: &mut Rig, shown: &str, text: &str) {
+    rig.harness
+        .get_all_by_role(Role::TextInput)
+        .find(|n| n.value().as_deref() == Some(shown))
+        .expect("the field is shown")
+        .focus();
+    rig.settle();
+    rig.key(egui::Key::End);
+    for _ in 0..24 {
+        rig.key(egui::Key::Backspace);
+    }
+    rig.harness
+        .get_all_by_role(Role::TextInput)
+        .find(|n| n.is_focused())
+        .expect("the field has focus")
+        .type_text(text);
+    rig.settle();
+}
+
 #[test]
-fn a_u64_field_cannot_hold_an_exact_asset_id() {
-    // DOCUMENTS A DEFECT: every numeric field is an egui `DragValue`, which holds its value as an
-    // f64 — 53 bits of integer. A `MeshAsset.asset` is a 64-bit content hash, so the inspector
-    // both DISPLAYS a different number than the scene holds and, on any edit, WRITES the rounded
-    // one: typing an id in exactly yields a neighbouring id that names no asset.
-    const ID: u64 = 0xdaba_e4d5_f45c_860b; // the cooked cube's real content id
-    let rounded = (ID as f64) as u64;
-    assert_ne!(rounded, ID);
+fn a_u64_field_round_trips_an_exact_asset_id() {
+    // Asset ids are 64-bit content hashes, and this one is above 2^53, where an f64 (what the old
+    // drag-number held) silently drops the low bits. The field is now text parsed as a u64, so the
+    // digits typed are the value stored, bit for bit, and are shown back exactly.
+    const ID: u64 = 0xDEAD_BEEF_CAFE_F00D;
+    assert_ne!(
+        (ID as f64) as u64,
+        ID,
+        "the value is past what an f64 holds"
+    );
 
     let mut world = starting_world();
-    world[2].components[1].data = 0xAAu64.to_le_bytes().to_vec();
+    world[2].components[1].data = 0xAAu64.to_le_bytes().to_vec(); // 170 on screen
     let mut rig = Rig::build(None, world);
     rig.click(ROW_CRATE);
-    rig.type_into_number_field(10, &ID.to_string()); // after the transform's ten floats
+    retype_field(&mut rig, "170", &ID.to_string());
+    rig.key(egui::Key::Enter);
+
     assert_eq!(
         rig.host.component(CRATE, H_MESH_ASSET),
-        Some(rounded.to_le_bytes().as_slice()),
-        "the id that was typed is not the id that was stored"
+        Some(ID.to_le_bytes().as_slice()),
+        "the id that was typed is the id that was stored"
+    );
+    assert!(
+        rig.harness
+            .get_all_by_role(Role::TextInput)
+            .any(|n| n.value().as_deref() == Some(ID.to_string().as_str())),
+        "and it is shown exactly, not rounded"
     );
 }
 
 #[test]
-fn ctrl_z_while_typing_in_a_text_box_undoes_a_world_edit() {
-    // DOCUMENTS A DEFECT: the undo chord is read from global input before any widget sees it, with
-    // no `wants_keyboard_input` gate (the gizmo hotkeys have one). So Ctrl+Z pressed to fix a typo
-    // in the asset search box reverts the last change to the WORLD instead.
+fn a_u64_field_refuses_text_that_is_not_a_number() {
+    // Bad input is refused, not coerced: the stored id is unchanged, and the field goes back to
+    // showing it once focus leaves.
+    let mut world = starting_world();
+    world[2].components[1].data = 0xAAu64.to_le_bytes().to_vec();
+    let mut rig = Rig::build(None, world);
+    rig.click(ROW_CRATE);
+    retype_field(&mut rig, "170", "12x");
+    // The text really landed (a refusal is only meaningful if something was typed), and it is red.
+    assert!(rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .any(|n| n.value().as_deref() == Some("12x")));
+    rig.key(egui::Key::Enter);
+
+    assert_eq!(
+        rig.host.component(CRATE, H_MESH_ASSET),
+        Some(0xAAu64.to_le_bytes().as_slice()),
+        "nothing was written"
+    );
+    assert!(!rig.app().stack.can_undo(), "and no undo step was recorded");
+    assert!(rig
+        .harness
+        .get_all_by_role(Role::TextInput)
+        .any(|n| n.value().as_deref() == Some("170")));
+}
+
+#[test]
+fn ctrl_z_while_typing_in_a_text_box_leaves_the_world_alone() {
+    // While a text box has focus, Ctrl+Z belongs to it, so a typo fixed in the asset search box
+    // does not revert the last world edit (E2). The world edit stays.
     let mut rig = Rig::new();
     rig.click(ROW_LIGHT);
     rig.type_into_number_field(0, "5");
     rig.harness.get_by_role(Role::TextInput).type_text("crat");
     rig.settle();
     assert_eq!(rig.app().asset_search, "crat");
+    rig.chord(CTRL, egui::Key::Z);
+    assert_eq!(rig.host.translation(LIGHT)[0], 5.0, "the world edit stays");
+}
+
+#[test]
+fn ctrl_z_outside_a_text_box_still_undoes_a_world_edit() {
+    // The other half of the routing: once focus has left the text box, Ctrl+Z is the world's undo.
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.type_into_number_field(0, "5");
+    rig.harness.get_by_role(Role::TextInput).type_text("crat");
+    rig.settle();
+    // A press on the viewport, which takes no keyboard focus, moves focus off the text box.
+    rig.viewport_click((480.0, 270.0));
+    assert!(
+        !rig.harness.ctx.wants_keyboard_input(),
+        "no text box has focus"
+    );
     rig.chord(CTRL, egui::Key::Z);
     assert_eq!(
         rig.host.translation(LIGHT)[0],
@@ -1501,13 +1830,12 @@ fn place_spawns_an_entity_referencing_the_mesh() {
 }
 
 #[test]
-fn place_is_clipped_off_the_panel_for_a_real_source_path() {
-    // DOCUMENTS A DEFECT, and the first thing a new user hits: an asset row is `glyph  path
-    // [place]` on one line that neither wraps nor scrolls sideways, and the Assets panel opens
-    // 22% of the window wide. A real cooked path ("samples/08-gltf-zoo/assets/cube.gltf") pushes
-    // "place" past the panel's right edge, where it is clipped away. The feature is unreachable
-    // until the user thinks to drag the splitter. (The accessibility node still exists, which is
-    // why the label-driven tests above can click it; a pointer cannot.)
+fn place_is_on_screen_in_the_default_panel_for_a_real_source_path() {
+    // A real cooked path ("samples/08-gltf-zoo/assets/cube.gltf") is far wider than the Assets
+    // panel, which opens 22% of the window wide. The button used to sit AFTER the path, so the
+    // path pushed "place" past the panel's right edge where a pointer could not reach it. It now
+    // comes first, so the button's whole box is inside the panel at the default layout, with no
+    // splitter dragging.
     let mut rig = Rig::new();
     rig.host.shared.lock().unwrap().assets = vec![AssetEntry {
         kind: AssetKind::Mesh,
@@ -1516,29 +1844,26 @@ fn place_is_clipped_off_the_panel_for_a_real_source_path() {
         cooked_file: "cube.rmesh".to_string(),
     }];
     rig.settle();
-    let panel = rig
-        .app()
-        .dock
-        .main_surface()
-        .iter()
-        .find_map(|node| match node {
-            egui_dock::Node::Leaf { tabs, viewport, .. } if tabs.contains(&Tab::Assets) => {
-                Some(*viewport)
-            }
-            _ => None,
-        })
-        .expect("the layout has an Assets panel");
+    let panel = panel_rect(&rig, Tab::Assets);
     let place = rig
         .harness
         .get_by_label("place")
         .raw_bounds()
         .expect("bounds");
     assert!(
-        place.x0 as f32 > panel.right(),
-        "place starts at x = {}, the panel ends at x = {}",
+        place.x0 as f32 >= panel.left() && place.x1 as f32 <= panel.right(),
+        "place spans x = {}..{}, the panel is {}..{}",
         place.x0,
+        place.x1,
+        panel.left(),
         panel.right()
     );
+    // And it is the button a person would press: a click at its centre places the mesh.
+    rig.harness
+        .get_by_role_and_label(Role::Button, "place")
+        .click();
+    rig.settle();
+    assert!(rig.has("3  MeshAsset"));
 }
 
 #[test]
@@ -1919,30 +2244,65 @@ fn a_right_drag_leaks_an_unpaired_pointer_up_to_the_engine() {
     assert_eq!(rig.host.inputs, ["up 500,270 b0"]);
 }
 
+/// Press the right button over the viewport, the way a person does to fly: it is the fly button.
+fn right_button_down(rig: &mut Rig, px: (f32, f32)) {
+    rig.pointer_move(px);
+    rig.pointer_button(px, egui::PointerButton::Secondary, true);
+}
+
+fn right_button_up(rig: &mut Rig, px: (f32, f32)) {
+    rig.pointer_button(px, egui::PointerButton::Secondary, false);
+}
+
 #[test]
-fn wasd_over_the_viewport_flies_the_camera() {
+fn wasd_flies_the_camera_while_the_right_button_is_held() {
     let mut rig = Rig::new();
     rig.present_frame();
-    rig.pointer_move((480.0, 270.0));
+    right_button_down(&mut rig, (480.0, 270.0));
     rig.hold_key(egui::Key::S);
+    right_button_up(&mut rig, (480.0, 270.0));
     let [x, y, z] = rig.host.translation(CAMERA);
     assert!(z > EYE_Z, "S backs away along +z, got z = {z}");
     assert_eq!((x, y), (0.0, 0.0));
 }
 
 #[test]
-fn w_e_and_q_both_fly_the_camera_and_switch_the_gizmo() {
-    // DOCUMENTS A DEFECT: W/E/Q are bound twice. With the pointer over the viewport — the only
-    // place either binding is useful — pressing W to fly forward also flips the gizmo to Move, E
-    // (fly up) flips it to Rotate, and Q (fly down) hides it. Navigating therefore keeps changing
-    // the tool in hand; the README documents both bindings and not the collision.
+fn wasd_over_the_viewport_does_not_fly_with_the_right_button_up() {
+    // Without the fly button, S is nothing to the viewport.
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.pointer_move((480.0, 270.0));
+    rig.hold_key(egui::Key::S);
+    assert_eq!(rig.host.translation(CAMERA), [0.0, 0.0, EYE_Z]);
+}
+
+#[test]
+fn w_e_and_q_switch_the_gizmo_while_the_right_button_is_up() {
+    // With the button up, the three letters are the gizmo's: they switch the tool and nothing else.
     let mut rig = Rig::new();
     rig.present_frame();
     rig.pointer_move((480.0, 270.0));
     rig.click("Scale (R)");
     rig.hold_key(egui::Key::W);
+    assert!(rig.toggled("Move (W)"), "W switched the gizmo");
+    assert_eq!(
+        rig.host.translation(CAMERA),
+        [0.0, 0.0, EYE_Z],
+        "and did not fly"
+    );
+}
+
+#[test]
+fn w_e_and_q_fly_while_the_right_button_is_held() {
+    // With the button held, the same letters fly, and the gizmo keeps its tool.
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.click("Scale (R)");
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    right_button_up(&mut rig, (480.0, 270.0));
     assert!(rig.host.translation(CAMERA)[2] < EYE_Z, "flew forward");
-    assert!(rig.toggled("Move (W)"), "and the gizmo changed under it");
+    assert!(rig.toggled("Scale (R)"), "and the gizmo did not change");
 }
 
 #[test]

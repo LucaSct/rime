@@ -107,6 +107,59 @@ enum Tab {
     Assets,
 }
 
+impl Tab {
+    /// Every panel, in the order the View menu lists them.
+    const ALL: [Tab; 4] = [Tab::Viewport, Tab::Outliner, Tab::Inspector, Tab::Assets];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Viewport => "Viewport",
+            Tab::Outliner => "Outliner",
+            Tab::Inspector => "Inspector",
+            Tab::Assets => "Assets",
+        }
+    }
+}
+
+/// Reopen a closed panel in the place `default_layout` gives it. egui_dock lets any tab be closed
+/// (a ✕ or a middle-click), and nothing else removes it, so the View menu is the only way back.
+///
+/// The anchors mirror `default_layout` exactly: the outliner splits off the left of the whole
+/// surface, the assets browser sits below the outliner, and the inspector splits off the right. When
+/// the anchor is itself closed, the panel falls back to the nearest equivalent edge (assets with no
+/// outliner goes to the left edge). The viewport has no edge to return to, so it rejoins the focused
+/// leaf, which is the centre only while the other panels are open.
+fn reopen(dock: &mut DockState<Tab>, tab: Tab) {
+    if dock.main_surface().is_empty() {
+        // Every panel was closed, so there is nothing to split from: the reopened panel becomes the
+        // whole layout, and the rest come back from the View menu.
+        *dock = DockState::new(vec![tab]);
+        return;
+    }
+    let root = NodeIndex::root();
+    let outliner = dock
+        .main_surface()
+        .find_tab(&Tab::Outliner)
+        .map(|(node, _)| node);
+    match tab {
+        Tab::Viewport => dock.push_to_focused_leaf(tab),
+        Tab::Outliner => {
+            dock.main_surface_mut().split_left(root, 0.22, vec![tab]);
+        }
+        Tab::Inspector => {
+            dock.main_surface_mut().split_right(root, 0.78, vec![tab]);
+        }
+        Tab::Assets => match outliner {
+            Some(node) => {
+                dock.main_surface_mut().split_below(node, 0.6, vec![tab]);
+            }
+            None => {
+                dock.main_surface_mut().split_left(root, 0.22, vec![tab]);
+            }
+        },
+    }
+}
+
 /// A component edit in progress — one drag or one focused text entry. It captures the component's
 /// bytes at the *start* of the gesture so that when the gesture ends we can push a single undo step
 /// (old → new), not one per intermediate frame. `new_blob` tracks the latest value the live edits
@@ -209,6 +262,45 @@ fn to_proto_axis(axis: Option<gizmo::Axis>) -> GizmoAxis {
     }
 }
 
+/// A session the shell can start on its own: the shared mirror it reads, the channel it writes, and
+/// the engine behind them. The production opener spawns `rime-engine`; the click tests substitute
+/// one whose far end they own.
+struct OpenedSession {
+    shared: Shared,
+    out_tx: Sender<Outbound>,
+    session: EngineSession,
+}
+
+/// Spawns the replacement session for an Open, given the scene path.
+type Opener = Box<dyn Fn(&str) -> OpenedSession>;
+
+/// An Open in flight. The replacement engine runs beside the current one, and the window only
+/// adopts it once it has connected, sent a schema, and delivered its first snapshot. Until then (or
+/// if it fails) the current scene is untouched, which is what "a failed open leaves the scene
+/// intact" means here.
+struct PendingOpen {
+    path: String,
+    opened: OpenedSession,
+}
+
+/// Why `path` cannot be opened, checked before any engine starts: it must be an existing, readable
+/// file. A missing or unreadable path is refused at once, with the OS's own reason.
+///
+/// This check is all the editor can know about the file. A malformed but existing file is NOT
+/// refused here: it opens as whatever the engine managed to load. The engine keeps running on a bad
+/// `--scene` (`editor_host_app.cpp`, `load_viewport_scene` discards the load result), so the adopted
+/// world may be empty or partial. An in-band load report from the engine is the follow-up that
+/// would turn that into a refusal.
+fn check_openable(path: &str) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a file".to_owned());
+    }
+    std::fs::File::open(path)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 struct EditorApp {
     dock: DockState<Tab>,
     shared: Shared,
@@ -244,15 +336,32 @@ struct EditorApp {
     scene_path: Option<String>,
     save_as_path: String,
     save_status: Option<(String, bool)>, // (message, ok)
+    // ── New / Open (E2) ─────────────────────────────────────────────────────────────────────
+    // `opener` starts a replacement session for Open; `None` only in tests that have not supplied
+    // one, where Open is refused rather than silently doing nothing. `open_path` is the inline path
+    // box, as Save As's is.
+    opener: Option<Opener>,
+    pending_open: Option<PendingOpen>,
+    open_path: String,
 }
 
 impl EditorApp {
     fn new(engine: String, assets: Option<String>, scene: Option<String>) -> Self {
         let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
         let (out_tx, out_rx) = mpsc::channel();
-        let session =
-            EngineSession::spawn(engine, assets, scene.clone(), Arc::clone(&shared), out_rx);
-        Self::with_session(shared, out_tx, session, scene)
+        let session = EngineSession::spawn(
+            engine.clone(),
+            assets.clone(),
+            scene.clone(),
+            Arc::clone(&shared),
+            out_rx,
+        );
+        let mut app = Self::with_session(shared, out_tx, session, scene);
+        // File → Open starts the same engine the launch did, with the scene as `--scene` would.
+        app.opener = Some(Box::new(move |path| {
+            spawn_opened(&engine, assets.as_deref(), path)
+        }));
+        app
     }
 
     /// The app over an already-made session. This is the click tests' seam (`gui/click_tests.rs`):
@@ -286,7 +395,77 @@ impl EditorApp {
             scene_path: scene.clone(),
             save_as_path: scene.unwrap_or_default(),
             save_status: None,
+            opener: None,
+            pending_open: None,
+            open_path: String::new(),
         }
+    }
+
+    /// Start a replacement engine on `path`, without touching the current one. A path that is not
+    /// an existing readable file is refused here, synchronously, before any engine starts. Otherwise
+    /// the window adopts the engine later, in `settle_pending_open`, once its first snapshot is in.
+    fn start_open(&mut self, path: String) {
+        if let Err(reason) = check_openable(&path) {
+            self.pending_open = None;
+            self.save_status = Some((
+                format!("open refused: {path} is not a readable file ({reason}); the current scene is unchanged"),
+                false,
+            ));
+            return;
+        }
+        let Some(opener) = self.opener.as_ref() else {
+            self.save_status = Some((
+                "open refused: this session has no engine to open a scene with".to_owned(),
+                false,
+            ));
+            return;
+        };
+        let opened = opener(&path);
+        self.save_status = Some((format!("opening {path}…"), true));
+        self.pending_open = Some(PendingOpen { path, opened });
+    }
+
+    /// Adopt a replacement engine once it is connected, has sent a schema, and has delivered its
+    /// first snapshot (whatever its entity count, so an empty scene opens). It is refused, and
+    /// dropped (killing its engine), if it reports an error. The current session is only dropped at
+    /// the moment of adoption. No timer is involved: the snapshot counter says when it has spoken.
+    fn settle_pending_open(&mut self) {
+        let Some(pending) = self.pending_open.as_ref() else {
+            return;
+        };
+        let (error, ready) = {
+            let s = pending.opened.shared.lock().unwrap();
+            (
+                s.error.clone(),
+                s.connected && !s.schema.types.is_empty() && s.snapshots_received > 0,
+            )
+        };
+        if let Some(error) = error {
+            self.pending_open = None;
+            self.save_status = Some((format!("open refused: {error}"), false));
+            return;
+        }
+        if !ready {
+            return;
+        }
+        let PendingOpen { path, opened, .. } = self.pending_open.take().expect("checked above");
+        self.shared = opened.shared;
+        self.out_tx = opened.out_tx;
+        // Assigning drops the old session, which kills the old engine and joins its reader.
+        self._session = opened.session;
+        // Everything that was about the old engine's world is about nothing now.
+        self.frame_tex = None;
+        self.shown_seq = 0;
+        self.selected = None;
+        self.stack = CommandStack::default();
+        self.active_edit = None;
+        self.gizmo_drag = None;
+        self.gizmo_hover = None;
+        self.last_gizmo_state = None;
+        self.fly = FlyCam::default();
+        self.scene_path = Some(path.clone());
+        self.save_as_path = path.clone();
+        self.save_status = Some((format!("opened {path}"), true));
     }
 
     /// Apply the commands the UI produced this frame: put each on the wire, patch the mirror
@@ -330,6 +509,9 @@ fn default_layout() -> DockState<Tab> {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // A replacement engine from File → Open is adopted (or refused) before this frame reads the
+        // mirror, so the frame shows the scene that is actually open.
+        self.settle_pending_open();
         // Pull the cheap state for this UI frame (hold the lock only briefly), plus the newest frame
         // as an egui image ONLY when its sequence changed — so the ~2 MB RGBA is copied once per
         // streamed frame, not once per repaint. The schema + entities are cloned so the widgets can
@@ -402,19 +584,26 @@ impl eframe::App for EditorApp {
         // Undo/redo — keyboard (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y) and the Edit menu.
         let mut do_undo = false;
         let mut do_redo = false;
+        // While a text box has focus, Ctrl+Z / Ctrl+Y belong to it (E2): the world's undo is only
+        // for when no text is being typed, so fixing a typo in the asset search box cannot revert
+        // a world edit. Only the key routing is gated; the undo itself is unchanged.
+        let typing = ctx.wants_keyboard_input();
         // Saving (m15.3): set by Ctrl+S or the File menu; `Some("")` means "write back where the
         // scene was opened", which is a decision the engine owns.
         let mut do_save: Option<String> = None;
+        // File → New and File → Open (E2): set by the menu, applied after it.
+        let mut do_new = false;
+        let mut do_open: Option<String> = None;
         let scene_is_open = self.scene_path.is_some();
         ctx.input(|i| {
-            if i.modifiers.command && i.key_pressed(egui::Key::Z) {
+            if !typing && i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 if i.modifiers.shift {
                     do_redo = true;
                 } else {
                     do_undo = true;
                 }
             }
-            if i.modifiers.command && i.key_pressed(egui::Key::Y) {
+            if !typing && i.modifiers.command && i.key_pressed(egui::Key::Y) {
                 do_redo = true;
             }
             // Ctrl/Cmd+S — the reflex every user already has. Only meaningful with a scene open;
@@ -427,18 +616,23 @@ impl eframe::App for EditorApp {
         // Gizmo-mode hotkeys (W translate / E rotate / R scale; Q or Esc = none) — the Maya/Blender
         // muscle memory. Gated on `wants_keyboard_input` so typing a value into an inspector field
         // never flips the gizmo out from under the drag.
-        if !ctx.wants_keyboard_input() {
+        //
+        // W, E and Q are also the fly keys (fly forward, up, down), so they only switch the gizmo
+        // while the right button is up. With it held they fly instead (E2, the Unreal convention),
+        // and the same key does one job at a time. R and Esc are not fly keys and always act.
+        let looking = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
+        if !typing {
             ctx.input(|i| {
-                if i.key_pressed(egui::Key::W) {
+                if !looking && i.key_pressed(egui::Key::W) {
                     self.gizmo_mode = Some(gizmo::Mode::Translate);
                 }
-                if i.key_pressed(egui::Key::E) {
+                if !looking && i.key_pressed(egui::Key::E) {
                     self.gizmo_mode = Some(gizmo::Mode::Rotate);
                 }
                 if i.key_pressed(egui::Key::R) {
                     self.gizmo_mode = Some(gizmo::Mode::Scale);
                 }
-                if i.key_pressed(egui::Key::Q) || i.key_pressed(egui::Key::Escape) {
+                if (!looking && i.key_pressed(egui::Key::Q)) || i.key_pressed(egui::Key::Escape) {
                     self.gizmo_mode = None;
                 }
             });
@@ -454,6 +648,13 @@ impl eframe::App for EditorApp {
         // these, not `self`, keeping the panel body free of a self-borrow tangle).
         let mut gizmo_mode = self.gizmo_mode;
         let mut gizmo_snap = self.gizmo_snap;
+        // The View menu's checkmarks: which panels are open right now, and a panel to reopen if the
+        // menu is clicked (applied after the bar, once the closure no longer borrows the dock).
+        let open_tabs: Vec<Tab> = Tab::ALL
+            .into_iter()
+            .filter(|t| self.dock.find_tab(t).is_some())
+            .collect();
+        let mut reopen_tab: Option<Tab> = None;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.label(egui::RichText::new("Rime Editor").strong());
@@ -498,6 +699,36 @@ impl eframe::App for EditorApp {
                             ui.close_menu();
                         }
                     });
+                    ui.separator();
+                    // New and Open replace the whole world, so they wait until it is not being
+                    // played: Stop is what brings the edit world back.
+                    let editing = play_state.phase == PlayPhase::Edit;
+                    if ui
+                        .add_enabled(editing, egui::Button::new("New"))
+                        .on_disabled_hover_text("stop the play session first")
+                        .clicked()
+                    {
+                        do_new = true;
+                        ui.close_menu();
+                    }
+                    ui.label("Open");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.open_path)
+                                .desired_width(260.0)
+                                .hint_text("path/to/scene.rscene"),
+                        );
+                        if ui
+                            .add_enabled(
+                                editing && !self.open_path.trim().is_empty(),
+                                egui::Button::new("Open"),
+                            )
+                            .clicked()
+                        {
+                            do_open = Some(self.open_path.trim().to_string());
+                            ui.close_menu();
+                        }
+                    });
                 });
                 ui.menu_button("Edit", |ui| {
                     if ui
@@ -515,7 +746,19 @@ impl eframe::App for EditorApp {
                         ui.close_menu();
                     }
                 });
-                ui.label("View");
+                // ── View ────────────────────────────────────────────────────────────────────
+                // One checkmark per dock panel. A closed panel is the only thing here that acts:
+                // clicking it reopens it in its default place (see `reopen`). Clicking an open one
+                // does nothing, since closing is a tab gesture, not a menu one.
+                ui.menu_button("View", |ui| {
+                    for tab in Tab::ALL {
+                        let mut shown = open_tabs.contains(&tab);
+                        if ui.checkbox(&mut shown, tab.label()).clicked() && shown {
+                            reopen_tab = Some(tab);
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.separator();
                 // Gizmo toolbar: the mode selector (mirrors the W/E/R hotkeys) + the snap toggle.
                 ui.label("Gizmo:");
@@ -572,6 +815,9 @@ impl eframe::App for EditorApp {
         });
         self.gizmo_mode = gizmo_mode;
         self.gizmo_snap = gizmo_snap;
+        if let Some(tab) = reopen_tab {
+            reopen(&mut self.dock, tab);
+        }
         if self.gizmo_mode.is_none() {
             self.gizmo_hover = None;
         }
@@ -584,6 +830,26 @@ impl eframe::App for EditorApp {
             if let Some(cmd) = self.stack.redo() {
                 actions.push(cmd);
             }
+        }
+        if do_new {
+            // An empty scene with no path, so Save stays disabled until Save As. There is no
+            // "clear" message on the wire, so this despawns every entity through the same Commands
+            // an edit uses. Despawns are not undoable, and the undo history names entities that are
+            // now gone, so it is dropped with them.
+            actions.extend(entities.iter().map(|e| Command::Despawn {
+                key: (e.index, e.generation),
+            }));
+            self.pending_open = None;
+            self.scene_path = None;
+            self.save_as_path.clear();
+            self.stack = CommandStack::default();
+            self.selected = None;
+            self.active_edit = None;
+            self.gizmo_drag = None;
+            self.save_status = Some(("new scene — Save As to give it a path".to_owned(), true));
+        }
+        if let Some(path) = do_open {
+            self.start_open(path);
         }
         if let Some(path) = do_save {
             // Straight to the wire, NOT onto the undo stack: a save mutates a file, not the world,
@@ -785,6 +1051,25 @@ impl eframe::App for EditorApp {
     }
 }
 
+/// Spawn a session for `scene` the way the launch does: the same engine, the same assets, and the
+/// scene passed as `--scene`. The mirror starts empty; `settle_pending_open` decides when it counts.
+fn spawn_opened(engine: &str, assets: Option<&str>, scene: &str) -> OpenedSession {
+    let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
+    let (out_tx, out_rx) = mpsc::channel();
+    let session = EngineSession::spawn(
+        engine.to_string(),
+        assets.map(str::to_string),
+        Some(scene.to_string()),
+        Arc::clone(&shared),
+        out_rx,
+    );
+    OpenedSession {
+        shared,
+        out_tx,
+        session,
+    }
+}
+
 /// The per-frame view over app state handed to each dock panel.
 struct EditorTabs<'a> {
     frame_tex: Option<&'a egui::TextureHandle>,
@@ -833,13 +1118,7 @@ impl TabViewer for EditorTabs<'_> {
     type Tab = Tab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        match tab {
-            Tab::Viewport => "Viewport",
-            Tab::Outliner => "Outliner",
-            Tab::Inspector => "Inspector",
-            Tab::Assets => "Assets",
-        }
-        .into()
+        tab.label().into()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
@@ -948,9 +1227,11 @@ fn assets_ui(
             shown += 1;
             ui.horizontal(|ui| {
                 ui.label(kind_glyph(a.kind));
-                ui.monospace(&a.source_path);
                 // Only meshes place (as a MeshAsset authoring reference); and only if the host's
-                // schema has that component.
+                // schema has that component. The button comes BEFORE the path, not after it: a real
+                // cooked path is long enough to push a trailing button past the panel's right edge,
+                // where it is clipped away, and the panel is only 22% of the window wide. A
+                // leading button is always on screen; the path is the part that gives way.
                 if a.kind == AssetKind::Mesh {
                     if let Some(hash) = mesh_asset_hash {
                         if ui.small_button("place").clicked() {
@@ -969,6 +1250,7 @@ fn assets_ui(
                         }
                     }
                 }
+                ui.monospace(&a.source_path);
             });
         }
     });
@@ -991,7 +1273,8 @@ fn kind_glyph(kind: AssetKind) -> &'static str {
     }
 }
 
-/// Fly the viewport camera (m17.1): right-drag to look, WASD to move, Q/E down/up, Shift to sprint.
+/// Fly the viewport camera (m17.1): right-drag to look, right-hold + WASD to move, Q/E down/up, Shift
+/// to sprint. The movement keys fly only while the right button is held (E2), see `viewport_fly`.
 ///
 /// The whole feature is one `SetComponent` on the camera entity's LocalTransform per frame that the
 /// input changed -- no new protocol message, no engine-side camera state, no second source of truth
@@ -1034,9 +1317,15 @@ fn viewport_fly(
         }
     }
 
-    // Move: only while the pointer is over the viewport, so WASD typed into an inspector field
-    // never flies the camera.
-    if response.hovered() {
+    // Move: only while the right button is held over the viewport (E2). That is what keeps the fly
+    // keys from firing on their other meanings: WASD typed into an inspector field never flies (the
+    // pointer is not over the viewport), W/E/Q switch the gizmo while the button is up, and Ctrl+S
+    // over the viewport saves without moving the camera (the Command modifier is excluded here).
+    let flying = response.hovered()
+        && ui.input(|i| {
+            i.pointer.button_down(egui::PointerButton::Secondary) && !i.modifiers.command
+        });
+    if flying {
         let (mut fwd, mut right, mut up) = (0.0f32, 0.0f32, 0.0f32);
         let sprint = ui.input(|i| {
             let k = |key| i.key_down(key);
@@ -1486,7 +1775,10 @@ fn component_fields_ui(
     let mut it = Interaction::default();
     if let Value::Struct(fields) = &mut value {
         for (fname, fval) in fields.iter_mut() {
-            render_field(ui, fname, fval, &mut it);
+            // Every field is keyed by its component and its path, so no two fields share an id
+            // (see `exact_int_field`).
+            let salt = format!("{:016x}/{fname}", comp.type_hash);
+            render_field(ui, &salt, fname, fval, &mut it);
         }
     }
 
@@ -1546,27 +1838,35 @@ struct Interaction {
     committed: bool,
 }
 
-fn render_field(ui: &mut egui::Ui, name: &str, value: &mut Value, it: &mut Interaction) {
+/// Draw one field and its children. `salt` is the field's path from its component (type hash plus
+/// names), unique per field, and is what an id-keyed widget mixes in so siblings never share state.
+fn render_field(
+    ui: &mut egui::Ui,
+    salt: &str,
+    name: &str,
+    value: &mut Value,
+    it: &mut Interaction,
+) {
     match value {
         Value::Struct(children) => {
             egui::CollapsingHeader::new(name)
                 .default_open(true)
                 .show(ui, |ui| {
                     for (cname, cval) in children.iter_mut() {
-                        render_field(ui, cname, cval, it);
+                        render_field(ui, &format!("{salt}/{cname}"), cname, cval, it);
                     }
                 });
         }
         scalar => {
             ui.horizontal(|ui| {
                 ui.label(name);
-                render_scalar(ui, scalar, it);
+                render_scalar(ui, &format!("{salt}/{name}"), scalar, it);
             });
         }
     }
 }
 
-fn render_scalar(ui: &mut egui::Ui, value: &mut Value, it: &mut Interaction) {
+fn render_scalar(ui: &mut egui::Ui, salt: &str, value: &mut Value, it: &mut Interaction) {
     // A checkbox is a discrete edit (no drag): its change both starts and ends the gesture at once.
     // A drag-number streams changes; the gesture ends on release / focus loss.
     let resp = match value {
@@ -1581,13 +1881,87 @@ fn render_scalar(ui: &mut egui::Ui, value: &mut Value, it: &mut Interaction) {
         Value::F64(x) => ui.add(egui::DragValue::new(x).speed(0.01)),
         Value::I32(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
         Value::U32(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
-        Value::I64(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
-        Value::U64(x) => ui.add(egui::DragValue::new(x).speed(1.0)),
+        // 64-bit integers take the exact text path (see `exact_int_field`): a DragValue holds an
+        // f64, which has 53 bits of integer, so an asset id above 2^53 was shown and stored rounded.
+        Value::I64(x) => return exact_int_field(ui, salt, x, it),
+        Value::U64(x) => return exact_int_field(ui, salt, x, it),
         Value::Struct(_) => return, // handled by render_field
     };
     it.changed |= resp.changed();
     if resp.drag_stopped() || resp.lost_focus() {
         it.committed = true;
+    }
+}
+
+/// A 64-bit integer edited as text, parsed exactly (`u64::from_str` / `i64::from_str`).
+///
+/// A `DragValue` stores its value as an f64, which keeps 53 integer bits. Asset ids are 64-bit
+/// content hashes, so a drag-number both DISPLAYED a different id than the scene held and WROTE the
+/// rounded one back on any edit. A text field has no such limit: the digits typed are the value
+/// stored, bit for bit. Text that does not parse is refused when focus leaves: nothing is written,
+/// the field shows red while it is wrong, and it goes back to the stored value.
+///
+/// The text being typed lives in egui's temporary memory under this field's id, together with the
+/// value it was typed over. It is used only while that value is still the stored one: the moment the
+/// value changes (a commit, an undo, a streamed snapshot) the field shows the value again.
+#[derive(Clone)]
+struct TypedText {
+    text: String,
+    source: String,
+}
+
+fn exact_int_field<T>(ui: &mut egui::Ui, salt: &str, value: &mut T, it: &mut Interaction)
+where
+    T: Copy + PartialEq + std::fmt::Display + std::str::FromStr,
+{
+    // The id mixes in the field's own salt. Without it, two fields in one component collided: egui's
+    // `scope_dyn` rewinds `next_auto_id_salt` after each child, so sibling `ui.horizontal` scopes get
+    // the same auto id, and the two text boxes shared text and focus (click test
+    // `two_u64_fields_in_one_component_round_trip_independently`).
+    let id = ui.id().with(("exact-int", salt));
+    let shown = value.to_string();
+    // Keyed on the value rather than on focus: when focus moves from this field to another in one
+    // frame, this field has already lost focus by the time it is drawn, and the typed text must still
+    // be the text committed.
+    let typed: Option<TypedText> = ui.data(|d| d.get_temp(id));
+    let mut text = match typed {
+        Some(t) if t.source == shown => t.text,
+        _ => shown.clone(),
+    };
+    let refused = text.trim().parse::<T>().is_err();
+    let color = if refused {
+        egui::Color32::from_rgb(220, 80, 80)
+    } else {
+        ui.visuals().text_color()
+    };
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .desired_width(180.0)
+            .text_color(color),
+    );
+    // Parsed once, when focus leaves (Enter or a click away), not per keystroke: a half-typed
+    // number is not a value, and a world edit per keystroke would pile up undo steps for one change.
+    if resp.lost_focus() {
+        if let Ok(parsed) = text.trim().parse::<T>() {
+            if parsed != *value {
+                *value = parsed;
+                it.changed = true;
+            }
+        }
+        it.committed = true;
+        // Refused or committed, the typed text is done: the field shows the stored value again.
+        ui.data_mut(|d| d.remove::<TypedText>(id));
+    } else if resp.has_focus() {
+        ui.data_mut(|d| {
+            d.insert_temp(
+                id,
+                TypedText {
+                    text,
+                    source: shown,
+                },
+            )
+        });
     }
 }
 
