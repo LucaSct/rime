@@ -12,8 +12,8 @@
 # for six hours, and on 2026-10-07 GitHub's apt mirrors hung three Linux jobs in
 # `Install Linux deps` for over three hours. A warm self-hosted runner does not run apt at all.
 #
-# `.github/workflows/ci.yml` is UNCHANGED and remains the gate: these jobs run BESIDE the hosted
-# matrix, not instead of it, until they have a track record.
+# `.github/workflows/ci.yml` still gates macOS, Windows and fork pull requests. For our own pushes every
+# Linux job lives HERE, and the hosted twin of each is its exact complement (see the `if:` guards).
 #
 # SECURITY: WHY THERE IS NO `pull_request` TRIGGER. LucaSct/rime is PUBLIC, and on a `pull_request`
 # event GitHub runs the workflow file from the PULL REQUEST's head — so a fork could add a job that
@@ -104,7 +104,19 @@ jobs:
           fi
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
-          pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &)
+          # Both halves of this matter on a runner whose processes outlive a job. `pgrep -x Xvfb`
+          # matched any Xvfb anywhere on the machine — a leftover on :98, a desktop's own — so it
+          # could read "already up" while :99 was dead; `pgrep -f 'Xvfb :99'` asks about THIS display
+          # and about a LIVE process, which a bare socket test cannot, since /tmp/.X11-unix/X99
+          # survives a SIGKILLed server. Then wait: the old code exported DISPLAY=:99 before Xvfb had
+          # bound it. Both failures surface as an unrelated GUI test "cannot open display".
+          # (`pgrep -f` is safe here because a `run:` block executes as a script FILE, so the pattern
+          # is not in any process's command line. Typed into an interactive shell it self-matches.)
+          if ! pgrep -f 'Xvfb :99' >/dev/null 2>&1; then
+            Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
+            for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          fi
+          [ -e /tmp/.X11-unix/X99 ] || { echo "::error::Xvfb :99 did not come up"; exit 1; }
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: ccache
@@ -182,7 +194,12 @@ jobs:
           [ -n "$icd" ] || { echo "::error::no lavapipe ICD"; exit 1; }
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
-          pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &)
+          # Display-specific and waits for the socket; see the `build` job above for why.
+          if ! pgrep -f 'Xvfb :99' >/dev/null 2>&1; then
+            Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
+            for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          fi
+          [ -e /tmp/.X11-unix/X99 ] || { echo "::error::Xvfb :99 did not come up"; exit 1; }
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: ccache
@@ -212,3 +229,270 @@ jobs:
       - name: Cache statistics
         if: always()
         run: ccache --show-stats | head -12
+
+  # ── The four small Linux jobs ci.yml used to run on ubuntu-latest ────────────────────────────────
+  # Each one is the hosted job's twin: same commands, same env, own checkout directory (so no two
+  # jobs share a build tree on a persistent disk). ci.yml's copy of each now runs only for a fork,
+  # on the exact complement of the guard below, so every push is covered by exactly one of the two.
+  # No `apt` anywhere: the runners are provisioned (starbase: rime-ci-toolchain.sh; nextos:
+  # github-runner-install.sh) and the account running the job has no sudo, so a package that is
+  # missing fails the job loudly instead of stalling on a mirror.
+
+  tsan:
+    name: self-hosted sanitizer (TSan, Clang)
+    runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'rime-linux' }}"]
+    if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ci-tsan
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-tsan
+          persist-credentials: false
+
+      - name: Check free disk
+        run: |
+          free_gb=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+          echo "free: ${free_gb} GB"
+          [ "$free_gb" -ge 15 ] || { echo "::error::under 15 GB free"; exit 1; }
+
+      - name: Put the toolchain on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.ci-venv/bin" >> "$GITHUB_PATH"
+
+      - name: ccache
+        run: |
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          ccache --zero-stats >/dev/null
+
+      # A TSan job that cannot detect a race is worse than no TSan job: it reads as "no races found".
+      # A runner whose Clang has no TSan runtime, or whose kernel's ASLR layout TSan cannot map,
+      # would build the targets below happily and then either fail to link or run the tests
+      # uninstrumented. So prove the instrument first: compile a program with a deliberate data race
+      # and require TSan to REPORT it (and to exit nonzero). Costs about a second.
+      - name: Canary - TSan must detect a known race on this runner
+        run: |
+          clang --version | head -1
+          d=$(mktemp -d)
+          cat > "$d/race.cpp" <<'CPP'
+          #include <thread>
+          int g = 0;
+          int main() {
+            std::thread a([] { for (int i = 0; i < 100000; ++i) ++g; });
+            std::thread b([] { for (int i = 0; i < 100000; ++i) ++g; });
+            a.join(); b.join();
+            return 0;
+          }
+          CPP
+          clang++ -std=c++20 -O1 -g -fsanitize=thread "$d/race.cpp" -o "$d/race" -pthread
+          set +e
+          "$d/race" > "$d/out.txt" 2>&1
+          rc=$?
+          set -e
+          head -8 "$d/out.txt"
+          if ! grep -q "WARNING: ThreadSanitizer: data race" "$d/out.txt" || [ "$rc" -eq 0 ]; then
+            echo "::error::TSan did not report the known race (exit $rc) - this runner cannot run the TSan job meaningfully"
+            exit 1
+          fi
+          rm -rf "$d"
+
+      # Same commands as ci.yml's sanitize-thread; see the comments there for why Clang, why the
+      # host=Clang / build=GCC profile split, and why only three GPU-free targets are built.
+      - name: Configure + build core + ecs + assets tests (Clang, TSan)
+        run: |
+          CC=clang CXX=clang++ conan profile detect --name clang --force
+          printf '[conf]\ntools.build:compiler_executables={"c": "clang", "cpp": "clang++"}\n' \
+            >> "$(conan profile path clang)"
+          scripts/conan-export-local.sh conan
+          conan install . -of build/dev -s build_type=Debug -s compiler.cppstd=20 \
+            -s "libsvtav1/*:build_type=Release" -s "dav1d/*:build_type=Release" \
+            -pr:h clang -pr:b default --build=missing
+          CC=clang CXX=clang++ cmake -S . -B build/dev -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/build/dev/conan_toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Debug -DRIME_SANITIZER=thread
+          CC=clang CXX=clang++ cmake --build build/dev --target rime_core_tests rime_ecs_tests \
+            rime_assets_tests
+
+      - name: Run core + ecs + assets tests under TSan
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build/dev -R 'rime_core_tests|rime_ecs_tests|rime_assets_tests'
+          --output-on-failure --no-tests=error
+
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats | head -12
+
+  sdk-consumer:
+    name: self-hosted SDK consumer (out-of-tree install)
+    runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'rime-linux' }}"]
+    if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ci-sdk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-sdk
+          persist-credentials: false
+
+      - name: Check free disk
+        run: |
+          free_gb=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+          echo "free: ${free_gb} GB"
+          [ "$free_gb" -ge 15 ] || { echo "::error::under 15 GB free"; exit 1; }
+
+      - name: Put the toolchain on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.ci-venv/bin" >> "$GITHUB_PATH"
+
+      - name: ccache
+        run: |
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          ccache --zero-stats >/dev/null
+
+      # The consumer runs HEADLESS (no Vulkan runtime needed), as on the hosted job. The install
+      # prefix is build/dev/sdk-prefix, which scripts/sdk-smoke.sh rm -rf's before every install,
+      # and the checkout above is a fresh tree anyway, so no stale file can satisfy find_package.
+      - name: SDK smoke (install -> out-of-tree consumer)
+        run: ./scripts/sdk-smoke.sh
+
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats | head -12
+
+  editor-smoke:
+    name: self-hosted Editor smoke (editor <-> live engine)
+    runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'rime-linux' }}"]
+    if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ci-editor
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-editor
+          persist-credentials: false
+
+      - name: Check free disk
+        run: |
+          free_gb=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+          echo "free: ${free_gb} GB"
+          [ "$free_gb" -ge 15 ] || { echo "::error::under 15 GB free"; exit 1; }
+
+      - name: Put the toolchain on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.ci-venv/bin" >> "$GITHUB_PATH"
+
+      # The streamed-viewport half of the smoke renders engine-side on lavapipe, exactly like the
+      # hosted job (which installs mesa-vulkan-drivers); pin it so a runner with a real GPU measures
+      # the same device. The editor smoke itself opens no window; Xvfb is there for the egui
+      # `--features gui` unit tests, in case a test touches a display.
+      - name: Pin lavapipe + a virtual display
+        run: |
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
+          [ -n "$icd" ] || { echo "::error::no lavapipe ICD"; exit 1; }
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
+          # Display-specific and waits for the socket; see the `build` job above for why.
+          if ! pgrep -f 'Xvfb :99' >/dev/null 2>&1; then
+            Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
+            for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          fi
+          [ -e /tmp/.X11-unix/X99 ] || { echo "::error::Xvfb :99 did not come up"; exit 1; }
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: ccache
+        run: |
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          ccache --zero-stats >/dev/null
+
+      - name: Editor smoke (channel + streamed viewport, editor spawns rime-engine)
+        run: ./scripts/editor-smoke.sh
+
+      - name: Editor GUI build + unit tests (--features gui)
+        run: cd tools && cargo test -p editor --bins --features gui
+
+      - name: Authoring round trip (blockgen -> game -> editor -> game)
+        run: ./scripts/authoring-round-trip.sh
+
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats | head -12
+
+  lint:
+    name: self-hosted format, lint & license
+    runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'rime-linux' }}"]
+    if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ci-lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-lint
+          persist-credentials: false
+
+      - name: Put the toolchain on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.ci-venv/bin" >> "$GITHUB_PATH"
+
+      # ci.yml pins dtolnay/rust-toolchain@stable, which FLOATS, so the hosted lint always runs the
+      # newest stable clippy. A persistent runner's toolchain does not move by itself and would go
+      # on passing lints the hosted job rejects, so refresh it here. Bounded, and non-fatal: a
+      # stalled network must not fail a job whose toolchain is already installed.
+      - name: Refresh stable Rust (the hosted job floats on stable)
+        run: timeout 300 rustup update stable --no-self-update || echo "::warning::rustup update failed; using the installed toolchain"
+
+      # The runner's distro clang-format is NOT the pinned one (starbase ships 18, CI pins 20.1.8),
+      # and formatting differs between majors. pip is a no-op once the pin is in the runner's venv.
+      - name: Pinned clang-format
+        run: |
+          timeout 300 pip install -q "clang-format==20.1.8"
+          clang-format --version
+
+      - name: C++ formatting (clang-format)
+        run: find engine tests \( -name '*.cpp' -o -name '*.hpp' -o -name '*.mm' \) -exec clang-format --dry-run --Werror {} +
+
+      - name: C99 header compile (rime/capi/rime.h)
+        run: cc -std=c99 -Wall -Wextra -Werror -Iengine/capi/include -fsyntax-only engine/capi/include/rime/capi/rime.h
+
+      - name: Rust formatting (cargo fmt)
+        working-directory: ci-lint/tools
+        run: cargo fmt --all -- --check
+
+      - name: Rust lints (clippy)
+        working-directory: ci-lint/tools
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: License headers (SPDX)
+        run: ./scripts/check-license-headers.sh
+
+      # See ci.yml for why: Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI.
+      - name: PowerShell scripts are ASCII (Windows PowerShell reads them as ANSI, not UTF-8)
+        run: |
+          if grep -rlP '[^[:ascii:]]' scripts/*.ps1; then
+            echo "::error::the .ps1 file(s) listed above contain non-ASCII bytes; see the header" \
+                 "comment in scripts/setup.ps1 for why that stops the script from running"
+            exit 1
+          fi

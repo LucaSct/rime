@@ -35,10 +35,23 @@ this workflow runs. That is the case for doing this at all:
   fixed hardware (ADR-0047's starbase tier), caches larger than the hosted disk. Not wired up yet;
   the runners are the prerequisite.
 
-**TSan stays hosted on purpose.** It is 5 minutes, and it is the only **Clang** build in the matrix —
-the reason `CLAUDE.md` asks for a `clang++ -fsyntax-only` pass on every new translation unit. Moving
-it would swap CI's pinned Clang for whatever each runner happens to have (18 on Ubuntu 24.04, 22 on
-Arch), trading a stable signal for five minutes.
+**TSan now runs here too, behind a canary.** It was left hosted at first, on the worry that each
+runner's Clang differs (18 on Ubuntu 24.04, 23 on Arch) from whatever the hosted job installs. The
+hosted job never pinned Clang either (it is `apt install clang`), so that was not a stable signal to
+protect. What matters is that the instrument works, so the job first compiles a program with a
+deliberate data race and fails unless TSan reports it. A runner whose TSan runtime or ASLR layout
+cannot detect races fails that step instead of going green having tested nothing.
+
+**All Linux jobs have a self-hosted twin; the hosted copy runs for forks only.** `ci.yml`'s
+`sanitize-address`, `sanitize-thread`, `sdk-consumer`, `editor-smoke` and `lint` carry
+`&& github.actor != github.repository_owner`; the twins here carry
+`github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner`. The two are
+exact complements, so a push is covered by exactly one. The hosted workflow then runs only macOS and
+Windows for our own pushes.
+
+**The runner's `clang-format` must be the pinned one.** The distro package differs (starbase ships
+18, CI pins 20.1.8) and formatting changes between majors; the toolchain scripts and the lint job
+install `clang-format==20.1.8` into the runner's `~/.ci-venv`.
 
 **Each job checks out into its own subdirectory** (`ci-build/`, `ci-asan/`), because
 `scripts/build.sh` layers `--sanitizer address` onto the *same* `build/dev` directory as a plain

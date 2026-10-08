@@ -244,7 +244,9 @@ jobs:
     # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
     # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
     # full hosted matrix before it can be merged.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # ...and fork-only: owner pushes run this on the self-hosted runners (ci-self-hosted.yml, job `tsan`).
+    # The two `if:` conditions are exact complements on github.actor, so no push loses coverage.
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.actor != github.repository_owner
     steps:
       - uses: actions/checkout@v4
 
@@ -332,7 +334,9 @@ jobs:
     # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
     # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
     # full hosted matrix before it can be merged.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # ...and fork-only: owner pushes run this on the self-hosted runners (ci-self-hosted.yml, job `sdk-consumer`).
+    # The two `if:` conditions are exact complements on github.actor, so no push loses coverage.
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.actor != github.repository_owner
     steps:
       - uses: actions/checkout@v4
 
@@ -376,7 +380,9 @@ jobs:
     # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
     # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
     # full hosted matrix before it can be merged.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # ...and fork-only: owner pushes run this on the self-hosted runners (ci-self-hosted.yml, job `editor-smoke`).
+    # The two `if:` conditions are exact complements on github.actor, so no push loses coverage.
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.actor != github.repository_owner
     steps:
       - uses: actions/checkout@v4
 
@@ -436,7 +442,9 @@ jobs:
     # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
     # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
     # full hosted matrix before it can be merged.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # ...and fork-only: owner pushes run this on the self-hosted runners (ci-self-hosted.yml, job `lint`).
+    # The two `if:` conditions are exact complements on github.actor, so no push loses coverage.
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && github.actor != github.repository_owner
     steps:
       - uses: actions/checkout@v4
 
