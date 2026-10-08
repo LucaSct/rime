@@ -134,6 +134,7 @@ jobs:
   asan:
     # The 25-minute job, and therefore the one worth moving. Its own checkout path keeps its
     # sanitizer-configured build tree from fighting the plain build above.
+    name: self-hosted sanitizer (ASan + UBSan)
     #
     # `bigmem`, NOT `rime-linux`, and the reason is measured rather than preferred. `rime_render_tests`
     # under ASan is a single process whose anon working set grows past 6.87 GiB (ASan's redzones and
