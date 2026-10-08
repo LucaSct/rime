@@ -5,11 +5,20 @@ name: CI
 
 on:
   push:
-    # main AND long-lived feature branches. feat/icem-viewer once accumulated 57 commits
-    # that never saw CI (pushed without a PR) — a branch must not be able to do that
-    # silently again, so feature-branch pushes build too.
-    branches: [main, "feat/**"]
+    # ONLY main. Feature-branch pushes used to build here too, because feat/icem-viewer once
+    # accumulated 57 commits that never saw CI — but that hole is now covered by
+    # ci-self-hosted.yml, which builds and ASan-tests every feat/** push on our own runners.
+    #
+    # Dropping feat/** from this workflow is what stops the DUPLICATE run: with a pull request
+    # open, a push fired both a `push` run and a `pull_request` run of this same 8-job matrix,
+    # so every commit cost 16 hosted jobs instead of 8. The hosted minutes are the scarce
+    # resource now, and they should go to what we cannot run locally — Windows and macOS.
+    branches: [main]
+    # A docs-only change cannot break a build. (Workflow files are NOT excluded: a change to
+    # .github/** must always be exercised.)
+    paths-ignore: ["docs/**", "**/*.md", "LICENSE"]
   pull_request:
+    paths-ignore: ["docs/**", "**/*.md", "LICENSE"]
 
 # A newer push to the same ref supersedes in-flight runs.
 concurrency:
@@ -20,6 +29,12 @@ jobs:
   build:
     name: build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false # one OS failing shouldn't hide the others
       matrix:
@@ -61,11 +76,18 @@ jobs:
       # validation. RIME_REQUIRE_VULKAN=1 makes the rhi tests treat "no device" as a failure (so a
       # broken driver can't pass as green) — set for Linux only, where we know an ICD is present.
       # (The Vulkan *build* deps — headers/volk/VMA/glslang — come from Conan, not apt.)
+      # EVERY apt CALL IS WRAPPED IN `timeout`, and that is not belt-and-braces. On 2026-10-07
+      # GitHub's Ubuntu mirrors stalled twice in one evening: three jobs sat in this step for over
+      # three hours, and three more for an hour, because apt HANGS on an unresponsive mirror rather
+      # than failing. A hung job runs to the 6-hour maximum job duration, cannot be rerun while its
+      # run still has queued jobs, and its log cannot even be read until the whole run finishes --
+      # so one stalled mirror costs an evening. Bounded, it fails in minutes and `gh run rerun
+      # --failed` costs two. Acquire::Retries handles the transient case before the timeout fires.
       - name: Install Linux deps (windowing + Vulkan runtime)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          timeout 300 sudo apt-get -o Acquire::Retries=3 update
+          timeout 900 sudo apt-get -o Acquire::Retries=3 install -y \
             libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols \
             mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers xvfb
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
@@ -108,6 +130,12 @@ jobs:
   sanitize-address:
     name: sanitizer (ASan + UBSan)
     runs-on: ubuntu-latest
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -136,8 +164,8 @@ jobs:
       # RIME_REQUIRE_VULKAN=1 makes "no device" a failure rather than a silent skip.
       - name: Install Linux deps (windowing + Vulkan runtime)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          timeout 300 sudo apt-get -o Acquire::Retries=3 update
+          timeout 900 sudo apt-get -o Acquire::Retries=3 install -y \
             libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols \
             mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
@@ -188,6 +216,12 @@ jobs:
   sanitize-thread:
     name: sanitizer (TSan, Clang)
     runs-on: ubuntu-latest
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -195,7 +229,7 @@ jobs:
         uses: lukka/get-cmake@latest
 
       - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: timeout 300 sudo apt-get -o Acquire::Retries=3 update && timeout 600 sudo apt-get -o Acquire::Retries=3 install -y clang
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -215,7 +249,7 @@ jobs:
       # present.
       - name: Install Linux deps (windowing, to configure)
         run: |
-          sudo apt-get install -y \
+          timeout 900 sudo apt-get -o Acquire::Retries=3 install -y \
             libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols
 
       # Why Clang, not GCC: GCC's ThreadSanitizer treats a standalone atomic_thread_fence as a
@@ -270,6 +304,12 @@ jobs:
   sdk-consumer:
     name: SDK consumer (out-of-tree install)
     runs-on: ubuntu-latest
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -292,8 +332,8 @@ jobs:
       # needed here — unlike the build and ASan jobs.
       - name: Install Linux deps (windowing, to configure)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          timeout 300 sudo apt-get -o Acquire::Retries=3 update
+          timeout 900 sudo apt-get -o Acquire::Retries=3 install -y \
             libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols
 
       - name: SDK smoke (install → out-of-tree consumer)
@@ -308,6 +348,12 @@ jobs:
   editor-smoke:
     name: Editor smoke (editor ⇄ live engine)
     runs-on: ubuntu-latest
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -334,8 +380,8 @@ jobs:
       # same software ICD the build/ASan jobs use.
       - name: Install Linux deps (windowing + Vulkan runtime)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          timeout 300 sudo apt-get -o Acquire::Retries=3 update
+          timeout 900 sudo apt-get -o Acquire::Retries=3 install -y \
             libx11-dev libxkbcommon-dev libwayland-dev libwayland-bin wayland-protocols \
             mesa-vulkan-drivers libvulkan1 vulkan-tools
 
@@ -362,6 +408,12 @@ jobs:
   lint:
     name: format, lint & license
     runs-on: ubuntu-latest # style/lint are OS-independent — check once.
+    # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
+    # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
+    # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
+    # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
+    # full hosted matrix before it can be merged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 

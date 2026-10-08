@@ -1,0 +1,193 @@
+# Rime CI on the self-hosted runners — the long Linux jobs, on hardware we own.
+#
+# WHAT THIS IS FOR, MEASURED RATHER THAN ASSUMED. The hosted job durations on one healthy run
+# (#279, 2026-10-07): sanitizer ASan+UBSan **25 min**, Windows 23, macOS 18, ubuntu 14, SDK consumer
+# 8, Editor smoke 8, TSan 5, format 1. So the critical path of a healthy run is a LINUX job, and
+# moving the two longest Linux jobs onto warm runners shortens the run itself — not only the
+# feedback. (An earlier version of this file claimed the opposite, "the hosted macOS and Windows legs
+# end the run". That was generalised from the starved, apt-hung runs we happened to be watching that
+# evening, and the measurement above is what corrected it.)
+#
+# The second win is queue independence: on 2026-10-06 a 24-run cascade starved the hosted macOS pool
+# for six hours, and on 2026-10-07 GitHub's apt mirrors hung three Linux jobs in
+# `Install Linux deps` for over three hours. A warm self-hosted runner does not run apt at all.
+#
+# `.github/workflows/ci.yml` is UNCHANGED and remains the gate: these jobs run BESIDE the hosted
+# matrix, not instead of it, until they have a track record.
+#
+# SECURITY: WHY THERE IS NO `pull_request` TRIGGER. LucaSct/rime is PUBLIC, and on a `pull_request`
+# event GitHub runs the workflow file from the PULL REQUEST's head — so a fork could add a job that
+# targets `self-hosted`, and an `if:` guard inside this file cannot prevent it, because the fork
+# controls the guard too. Persistent runners therefore see pushes and manual dispatches only. The
+# controls that actually hold: no fork-PR trigger, the repository's "require approval for all
+# external contributors" policy, `permissions: {}`, and no secrets reachable from these jobs.
+# docs/ci/self-hosted-runners.md states the residual risk and the stronger private-bridge design.
+#
+# EACH JOB CHECKS OUT INTO ITS OWN SUBDIRECTORY, and that is not cosmetic. `scripts/build.sh`
+# layers `--sanitizer address` onto the SAME `build/dev` directory as a plain build (see its own
+# comment at scripts/build.sh:89-102: the directory remembers what it was last told). A runner's
+# workspace persists between jobs, so a shared tree would make the plain build and the ASan build
+# reconfigure and invalidate each other on every run — destroying the warm cache this whole setup
+# exists for. Separate paths, separate build trees, both stay warm.
+name: CI (self-hosted)
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: "Which runner to use: rime-linux (any idle one), or a machine label to pin it"
+        type: choice
+        default: rime-linux
+        options: [rime-linux, starbase, nextos]
+
+# Keyed on the runner selection as well as the ref: a pinned diagnostic dispatch must not fight a
+# push build for one slot. It did, in the first version of this file — the dispatch cancelled an
+# in-flight build on the other machine, which is a silly way to lose a measurement.
+concurrency:
+  group: ci-self-${{ github.ref }}-${{ inputs.runner_label || 'push' }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build:
+    name: self-hosted build & test (${{ inputs.runner_label || 'rime-linux' }})
+    runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'rime-linux' }}"]
+    if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
+    timeout-minutes: 75 # the starbase container is a 2012 i7: a cold build there is slow but finite
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ci-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-build
+          persist-credentials: false # leave no token in .git/config on a machine that keeps its disk
+
+      - name: Check free disk
+        run: |
+          free_gb=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+          echo "free: ${free_gb} GB"
+          if [ "$free_gb" -lt 15 ]; then
+            echo "::error::under 15 GB free — clean the runner's caches (docs/ci/self-hosted-runners.md)"
+            exit 1
+          fi
+
+      - name: Put the toolchain on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.ci-venv/bin" >> "$GITHUB_PATH"
+
+      # Pin the Vulkan device. Both runners can see more than one ICD (CT 123 has llvmpipe; the
+      # workstation has an RTX 3060 and an AMD iGPU), and Rime's render proofs are structural with
+      # margins TAKEN AGAINST LAVAPIPE. Letting the loader choose would mean a green run measured a
+      # different device depending on which machine picked up the job.
+      - name: Pin lavapipe + a virtual display
+        run: |
+          # Both Ubuntu 24.04's mesa-vulkan-drivers and Arch's vulkan-swrast install it as
+          # lvp_icd.json (measured on both runners); older Debian/Ubuntu used lvp_icd.x86_64.json.
+          # The glob covers both — the first version matched only the suffixed name and failed the
+          # job, which is at least the behaviour we want from a wrong guess.
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
+          if [ -z "$icd" ]; then
+            echo "::error::no lavapipe ICD — install mesa-vulkan-drivers (Ubuntu) or vulkan-swrast (Arch)"
+            exit 1
+          fi
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
+          pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &)
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: ccache
+        run: |
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          ccache --zero-stats >/dev/null
+
+      - name: Build & test
+        run: ./scripts/build.sh
+
+      - name: Cache statistics (what made this run fast, or didn't)
+        if: always()
+        run: |
+          ccache --show-stats | head -12
+          echo "conan cache: $(du -sh "$HOME/.conan2" 2>/dev/null | cut -f1)"
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-log-${{ runner.name }}-${{ github.run_number }}
+          path: ci-build/build/dev/Testing/Temporary/LastTest.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  asan:
+    # The 25-minute job, and therefore the one worth moving. Its own checkout path keeps its
+    # sanitizer-configured build tree from fighting the plain build above.
+    name: self-hosted sanitizer (ASan + UBSan)
+    runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'rime-linux' }}"]
+    if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
+    timeout-minutes: 120 # ASan is 2-3x a plain build, and the starbase container is slow
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ci-asan
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-asan
+          persist-credentials: false
+
+      - name: Check free disk
+        run: |
+          free_gb=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+          echo "free: ${free_gb} GB"
+          [ "$free_gb" -ge 15 ] || { echo "::error::under 15 GB free"; exit 1; }
+
+      - name: Put the toolchain on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.ci-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Pin lavapipe + a virtual display
+        run: |
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
+          [ -n "$icd" ] || { echo "::error::no lavapipe ICD"; exit 1; }
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
+          pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &)
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: ccache
+        run: |
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          ccache --zero-stats >/dev/null
+
+      # Identical env to ci.yml's job, so a failure here means the same thing it would there.
+      - name: Build & test (ASan + UBSan)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ./scripts/build.sh --cpp-only --sanitizer address
+
+      # `--no-tests=error` is load-bearing, copied from ci.yml for the reason recorded there: ctest
+      # with a name regex that matches nothing prints "No tests were found!!!" and exits ZERO, so a
+      # renamed target would silently empty this step and leave it green.
+      - name: Leak-check the GPU-free suites (LeakSanitizer)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/ci-asan/scripts/lsan-suppressions.txt
+        run: >-
+          ctest --test-dir build/dev --output-on-failure --no-tests=error -R
+          'rime_core_tests|rime_ecs_tests|rime_physics_tests|rime_assets_tests|rime_destruction_tests|rime_capi_tests|hello_game_selftest'
+
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats | head -12
