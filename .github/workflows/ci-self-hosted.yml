@@ -12,8 +12,8 @@
 # for six hours, and on 2026-10-07 GitHub's apt mirrors hung three Linux jobs in
 # `Install Linux deps` for over three hours. A warm self-hosted runner does not run apt at all.
 #
-# `.github/workflows/ci.yml` is UNCHANGED and remains the gate: these jobs run BESIDE the hosted
-# matrix, not instead of it, until they have a track record.
+# `.github/workflows/ci.yml` still gates macOS, Windows and fork pull requests. For our own pushes every
+# Linux job lives HERE, and the hosted twin of each is its exact complement (see the `if:` guards).
 #
 # SECURITY: WHY THERE IS NO `pull_request` TRIGGER. LucaSct/rime is PUBLIC, and on a `pull_request`
 # event GitHub runs the workflow file from the PULL REQUEST's head — so a fork could add a job that
