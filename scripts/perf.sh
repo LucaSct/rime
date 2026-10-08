@@ -96,7 +96,8 @@ Rime perf — measure frame/sim time on this machine and write a fingerprinted r
 Usage: scripts/perf.sh [options]
   --preset dev|release    build to measure (default: release — Debug numbers mean nothing)
   --sample NAME           lit-rooms | destructible-wall | the-block | virtual-geometry | all
-                          (default: all), or terrain (m19.8e — not in `all`: it needs its
+                          (default: all), or virtual-geometry-resolve (the dead-lane borrow, two
+                          framings; not in `all`), or terrain (m19.8e — not in `all`: it needs its
                           generated world, which this script cooks first if it is missing)
   --frames N              measured frames per run (default: the sample's own, 600)
   --width W --height H    render resolution (default: 1920x1080)
@@ -568,6 +569,14 @@ case "$sample" in
     # mesh cannot move that without moving five other things with it. `--sweep` prints every row;
     # the committed report is the reference depth, so `git log docs/perf/` still reads as a series.
     virtual-geometry)  run_one virtual_geometry 14-virtual-geometry --sweep ;;
+    # The VG material resolve's dead-lane gradient borrow (#283), at 1080p: the same generated
+    # quadtree with the resolve pass appended, once filling the screen (no dead lanes) and once
+    # shrunk to 30% of its width (91% dead lanes, every one of them paying all 12 id fetches for
+    # nothing -- the worst case). Kept out of `all`: it answers one question, and `all` is the
+    # per-merge set. The dead-lane counts travel in each report's ledger (vg.resolve.*).
+    virtual-geometry-resolve)
+        run_one virtual_geometry 14-virtual-geometry-resolve-geometry --resolve 1.0
+        run_one virtual_geometry 14-virtual-geometry-resolve-sky --resolve 0.3 ;;
     # m19.8e (ADR-0073). The terrain travel budget: walk / vehicle / aircraft fly-throughs plus the
     # envelope speeds, over a generated 4 km world cooked by `rime terrain-world`. Kept out of
     # `all` because the world is ~30 MB of generated files; make_world.sh cooks it on first use.

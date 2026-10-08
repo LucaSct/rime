@@ -56,6 +56,7 @@
 #include "rime/render/render_graph.hpp"
 #include "rime/render/virtual_geometry_gpu_selection.hpp"
 #include "rime/render/virtual_geometry_residency.hpp"
+#include "rime/render/virtual_geometry_resolve_pass.hpp"
 #include "rime/render/virtual_geometry_selection.hpp"
 #include "rime/render/virtual_geometry_visibility_id.hpp"
 #include "rime/render/virtual_geometry_visibility_pass.hpp"
@@ -226,13 +227,106 @@ Quadtree build_quadtree(std::uint32_t depth, std::uint32_t tris) {
     return out;
 }
 
+// ── The resolve pass, measured (--resolve) ─────────────────────────────────────────────────────
+//
+// The material resolve (vg_resolve.frag) is not part of this sample's normal sweep: it has no
+// consumer in a frame yet. This switch appends it to the visibility pass so its GPU time can be
+// read on its own, and it exists to answer one question -- what do the DEAD LANES cost. A dead lane
+// is a pixel whose visibility ID is empty (sky); it still takes part in textureGrad by borrowing
+// the nearest live pixel's gradients, which costs up to kBorrowOffsets id fetches.
+//
+// `scale` shrinks the geometry about the screen centre (clip-space x/y multiplied by it), so the
+// live fraction is ~scale^2: 1.0 is a geometry-filled frame, 0.25 is a sky-heavy one.
+//
+// The dead-lane statistics are computed on the CPU from the visibility readback the sample already
+// takes on its last warm-up frame, by replaying the shader's search order on that image. Nothing is
+// instrumented in the shader, so the timing is not perturbed by the counting.
+constexpr int kBorrowOffsets = 12;
+constexpr int kBorrowOffsetTable[kBorrowOffsets][2] = {
+    {1, 0},
+    {-1, 0},
+    {0, 1},
+    {0, -1},
+    {2, 0},
+    {-2, 0},
+    {0, 2},
+    {0, -2},
+    {3, 0},
+    {-3, 0},
+    {4, 0},
+    {-4, 0}}; // mirrors kOffsets in vg_resolve.frag
+
+struct ResolveBench {
+    float scale = 1.0f;
+    core::DurationSamples resolve_ms; // the vg-resolve pass's own GPU timestamp pair
+    // Filled once, from the coverage readback:
+    std::uint64_t pixels = 0;
+    std::uint64_t dead = 0;                        // empty visibility IDs
+    std::uint64_t hit_by_offset[kBorrowOffsets]{}; // dead pixels whose FIRST live neighbour is k
+    std::uint64_t no_neighbour = 0; // dead pixels that pay all kBorrowOffsets for nothing
+    std::uint64_t fetches = 0;      // id fetches the dead pixels issue, summed
+    std::uint64_t warps = 0;        // 8x4 pixel groups (a 32-lane warp's footprint)
+    std::uint64_t warps_with_dead = 0;
+    std::uint64_t warp_fetches = 0; // sum over warps of the slowest lane's fetches
+};
+
+void analyse_dead_lanes(ResolveBench& rb,
+                        const std::vector<render::VirtualGeometryVisibilityWords>& ids,
+                        std::uint32_t width,
+                        std::uint32_t height) {
+    const auto live = [&](int x, int y) {
+        x = std::clamp(x, 0, static_cast<int>(width) - 1);
+        y = std::clamp(y, 0, static_cast<int>(height) - 1);
+        const auto& w = ids[static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)];
+        return (w.lo | w.hi) != 0u;
+    };
+    // Fetches a pixel issues: 0 for a live one, k+1 for a dead one that finds a neighbour at k,
+    // kBorrowOffsets for one that never does (the shader's loop has no early out past the end).
+    std::vector<std::uint8_t> cost(ids.size(), 0);
+    rb.pixels = ids.size();
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const int ix = static_cast<int>(x), iy = static_cast<int>(y);
+            if (live(ix, iy))
+                continue;
+            ++rb.dead;
+            int found = -1;
+            for (int k = 0; k < kBorrowOffsets && found < 0; ++k) {
+                if (live(ix + kBorrowOffsetTable[k][0], iy + kBorrowOffsetTable[k][1]))
+                    found = k;
+            }
+            const int fetched = found < 0 ? kBorrowOffsets : found + 1;
+            if (found < 0)
+                ++rb.no_neighbour;
+            else
+                ++rb.hit_by_offset[found];
+            rb.fetches += static_cast<std::uint64_t>(fetched);
+            cost[static_cast<std::size_t>(y) * width + x] = static_cast<std::uint8_t>(fetched);
+        }
+    }
+    for (std::uint32_t y0 = 0; y0 < height; y0 += 4) {
+        for (std::uint32_t x0 = 0; x0 < width; x0 += 8) {
+            std::uint8_t worst = 0;
+            for (std::uint32_t y = y0; y < std::min(y0 + 4, height); ++y)
+                for (std::uint32_t x = x0; x < std::min(x0 + 8, width); ++x)
+                    worst = std::max(worst, cost[static_cast<std::size_t>(y) * width + x]);
+            ++rb.warps;
+            if (worst != 0) {
+                ++rb.warps_with_dead;
+                rb.warp_fetches += worst;
+            }
+        }
+    }
+}
+
 // ── One measured frame ──────────────────────────────────────────────────────────────────────────
 
 struct FrameCost {
-    double select_ms = 0.0; // GPU selection, including the blocking submit it still does
-    double build_ms = 0.0;  // assembling the candidate array the builder consumes
-    double submit_ms = 0.0; // graph declare + record + submit + wait
-    double gpu_ms = 0.0;    // summed vg-* pass timestamps
+    double select_ms = 0.0;  // GPU selection, including the blocking submit it still does
+    double build_ms = 0.0;   // assembling the candidate array the builder consumes
+    double submit_ms = 0.0;  // graph declare + record + submit + wait
+    double gpu_ms = 0.0;     // summed vg-* pass timestamps
+    double resolve_ms = 0.0; // vg-resolve alone (--resolve), excluded from gpu_ms
     std::vector<core::PassTiming> passes;
 };
 
@@ -253,7 +347,8 @@ struct LevelResult {
     render::VirtualGeometryVisibilityStats stats{};
     std::uint32_t refinement_blocked = 0;
     std::uint32_t skipped_over_candidate_cap = 0; // per frame, not the pass's running total
-    std::uint64_t frames_without_raster = 0; // must be 0, or the GPU column is measuring a cull
+    std::uint64_t frames_without_raster = 0;  // must be 0, or the GPU column is measuring a cull
+    std::uint64_t frames_without_resolve = 0; // --resolve only: same guard for the resolve pass
     bool measured = false;
 };
 
@@ -308,7 +403,8 @@ LevelResult run_level(rhi::Device& device,
                       std::uint32_t height,
                       core::PerfReport* report,
                       const char* timeline_prefix,
-                      std::uint32_t max_draws = 0) {
+                      std::uint32_t max_draws = 0,
+                      ResolveBench* resolve_bench = nullptr) {
     LevelResult result;
     result.depth = depth;
 
@@ -336,6 +432,47 @@ LevelResult run_level(rhi::Device& device,
 
     core::DurationSamples cpu, select_s, build_s, submit_s, gpu;
     std::vector<render::VirtualGeometryClusterDraw> candidates;
+
+    // --resolve: one trilinear albedo (a 512^2 noise texture with a full mip chain, so the sample
+    // is a real texel fetch and not a constant-colour fast path) and the resolve pass itself.
+    std::unique_ptr<render::VirtualGeometryResolvePass> resolve_pass;
+    rhi::TextureHandle albedo_texture{};
+    rhi::SamplerHandle albedo_sampler{};
+    std::vector<render::VirtualGeometryResolveMaterial> resolve_materials;
+    if (resolve_bench != nullptr) {
+        resolve_pass = std::make_unique<render::VirtualGeometryResolvePass>(device);
+        constexpr std::uint32_t kTex = 512;
+        std::uint32_t levels = 1;
+        for (std::uint32_t n = kTex; n > 1; n /= 2)
+            ++levels;
+        std::vector<std::vector<std::byte>> chain;
+        std::uint32_t lcg = 12345u;
+        for (std::uint32_t level = 0, n = kTex; level < levels; ++level, n = std::max(1u, n / 2)) {
+            std::vector<std::byte> px(static_cast<std::size_t>(n) * n * 4);
+            for (std::byte& b : px) {
+                lcg = lcg * 1664525u + 1013904223u;
+                b = static_cast<std::byte>(lcg >> 24);
+            }
+            chain.push_back(std::move(px));
+        }
+        std::vector<rhi::MipData> mips;
+        for (const auto& l : chain)
+            mips.push_back({std::span<const std::byte>(l)});
+        rhi::TextureDesc td{};
+        td.extent = {kTex, kTex};
+        td.mip_levels = levels;
+        td.format = rhi::Format::RGBA8Unorm;
+        td.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+        td.debug_name = "vg-resolve-bench-albedo";
+        albedo_texture = device.create_texture(td);
+        device.write_texture_mips(albedo_texture, mips);
+        rhi::SamplerDesc sd{};
+        sd.mag_filter = rhi::Filter::Linear;
+        sd.min_filter = rhi::Filter::Linear;
+        sd.mip_filter = rhi::Filter::Linear;
+        albedo_sampler = device.create_sampler(sd);
+        resolve_materials.push_back({albedo_texture, albedo_sampler});
+    }
 
     for (int frame = 0; frame < warmup + frames; ++frame) {
         const bool measuring = frame >= warmup;
@@ -385,6 +522,9 @@ LevelResult run_level(rhi::Device& device,
         request.selection = &cut;
         request.clusters = candidates;
         request.clip_from_object = core::Mat4{}; // identity by default
+        if (resolve_bench != nullptr)
+            request.clip_from_object =
+                core::mat4_scaling({resolve_bench->scale, resolve_bench->scale, 1.0f});
         request.gpu_selection = &flags;
         request.max_draws = max_draws;
 
@@ -395,6 +535,25 @@ LevelResult run_level(rhi::Device& device,
         const std::uint32_t offered_before = pass.stats().candidates_offered;
         const std::uint32_t capped_before = pass.stats().skipped_over_candidate_cap;
         pass.declare(graph, ids, depth_bits, depth_target, request);
+        if (resolve_bench != nullptr) {
+            // Exported, or the graph culls the pass and this measures a pass that never ran.
+            const render::RGTexture m =
+                graph.create_texture({{width, height}, rhi::Format::R32Uint, "vg-material"});
+            const render::RGTexture u =
+                graph.create_texture({{width, height}, rhi::Format::RGBA32Float, "vg-uv"});
+            const render::RGTexture a =
+                graph.create_texture({{width, height}, rhi::Format::RGBA8Unorm, "vg-albedo"});
+            graph.export_texture(m);
+            graph.export_texture(u);
+            graph.export_texture(a);
+            render::VirtualGeometryResolveRequest rr{};
+            rr.clusters = &pass.cluster_buffers();
+            rr.clip_from_object = request.clip_from_object;
+            rr.materials = resolve_materials;
+            const bool resolved = resolve_pass->declare(graph, ids, {width, height}, m, u, a, rr);
+            if (!resolved && frame == 0)
+                std::fprintf(stderr, "14-virtual-geometry: the resolve pass declined the frame\n");
+        }
         auto cmd = device.begin_commands();
         graph.execute(*cmd);
         rhi::BufferHandle id_readback{};
@@ -412,9 +571,16 @@ LevelResult run_level(rhi::Device& device,
         cost.submit_ms = submit_watch.elapsed_ms();
 
         bool saw_raster = false;
+        bool saw_resolve = false;
         if (done != nullptr) {
             for (const render::RenderGraph::PassTiming& t : graph.resolve_timings(*done)) {
                 cost.passes.push_back(core::PassTiming{std::string(t.name), t.gpu_ms});
+                if (t.name == "vg-resolve") {
+                    // Kept OUT of gpu_ms: that column is the vg-* sum the committed baselines hold.
+                    cost.resolve_ms = t.gpu_ms;
+                    saw_resolve = true;
+                    continue;
+                }
                 cost.gpu_ms += t.gpu_ms;
                 if (t.name.find("vg-visibility") != std::string::npos)
                     saw_raster = true;
@@ -425,6 +591,12 @@ LevelResult run_level(rhi::Device& device,
         // did not rasterize is counted rather than averaged into the row.
         if (measuring && !saw_raster)
             ++result.frames_without_raster;
+        if (measuring && resolve_bench != nullptr) {
+            if (saw_resolve)
+                resolve_bench->resolve_ms.add(cost.resolve_ms);
+            else
+                ++result.frames_without_resolve;
+        }
         if (id_readback.is_valid()) {
             std::vector<render::VirtualGeometryVisibilityWords> ids_host(
                 static_cast<std::size_t>(width) * height);
@@ -435,6 +607,8 @@ LevelResult run_level(rhi::Device& device,
                 if ((w.lo | w.hi) != 0u)
                     ++result.covered_pixels;
             }
+            if (resolve_bench != nullptr)
+                analyse_dead_lanes(*resolve_bench, ids_host, width, height);
             device.destroy(id_readback);
         }
         device.release(ticket);
@@ -467,9 +641,16 @@ LevelResult run_level(rhi::Device& device,
             report->observe(std::string(timeline_prefix) + ".build", cost.build_ms);
             report->observe(std::string(timeline_prefix) + ".submit", cost.submit_ms);
             report->observe(std::string(timeline_prefix) + ".gpu", cost.gpu_ms);
+            if (resolve_bench != nullptr)
+                report->observe(std::string(timeline_prefix) + ".resolve", cost.resolve_ms);
         }
     }
 
+    if (resolve_bench != nullptr) {
+        resolve_pass.reset(); // before the texture and sampler it samples
+        device.destroy(albedo_sampler);
+        device.destroy(albedo_texture);
+    }
     result.cpu = cpu.summarize();
     result.select = select_s.summarize();
     result.build = build_s.summarize();
@@ -487,6 +668,7 @@ int main(int argc, char** argv) {
     std::uint32_t depth = 3, tris = 64, width = 1280, height = 720;
     const char* out = nullptr;
     const char* baseline = nullptr;
+    float resolve_scale = 0.0f; // --resolve S: append the material resolve; geometry scaled by S
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -509,6 +691,8 @@ int main(int argc, char** argv) {
             width = value(width);
         else if (a == "--height")
             height = value(height);
+        else if (a == "--resolve" && i + 1 < argc)
+            resolve_scale = static_cast<float>(std::atof(argv[++i]));
         else if (a == "--out" && i + 1 < argc)
             out = argv[++i];
         else if (a == "--baseline" && i + 1 < argc)
@@ -518,7 +702,11 @@ int main(int argc, char** argv) {
                 stderr,
                 "usage: virtual_geometry --sweep|--perf [--out f.json] [--baseline b.json]\n"
                 "                        [--frames N] [--warmup N] [--depth D]\n"
-                "                        [--triangles T] [--width W] [--height H]\n");
+                "                        [--triangles T] [--width W] [--height H]\n"
+                "                        [--resolve S]   (--perf only: also time vg-resolve with "
+                "the\n"
+                "                                         geometry scaled to S in (0,1] of the "
+                "screen)\n");
             return 2;
         }
     }
@@ -706,8 +894,19 @@ int main(int argc, char** argv) {
         fp.preset = "gpu-built-draws";
         report.set_machine(fp);
         report.set_run(core::RunInfo::detect("14-virtual-geometry"));
-        const LevelResult r =
-            run_level(*device, depth, tris, frames, warmup, width, height, &report, "vg");
+        ResolveBench resolve_bench;
+        resolve_bench.scale = resolve_scale;
+        const LevelResult r = run_level(*device,
+                                        depth,
+                                        tris,
+                                        frames,
+                                        warmup,
+                                        width,
+                                        height,
+                                        &report,
+                                        "vg",
+                                        0,
+                                        resolve_scale > 0.0f ? &resolve_bench : nullptr);
         if (!r.measured) {
             std::fprintf(stderr, "14-virtual-geometry: no frames measured\n");
             return 1;
@@ -722,6 +921,43 @@ int main(int argc, char** argv) {
                     r.submit.stat(core::PerfStat::P99),
                     r.gpu.stat(core::PerfStat::P50),
                     r.gpu.stat(core::PerfStat::P99));
+        if (resolve_scale > 0.0f) {
+            const ResolveBench& rb = resolve_bench;
+            const core::Distribution d = rb.resolve_ms.summarize();
+            std::printf(
+                "  vg-resolve (scale %.3f): gpu p50 %.4f min %.4f p95 %.4f max %.4f ms (n=%zu)\n"
+                "  dead lanes %llu of %llu (%.2f%%); no live neighbour %llu; id fetches %llu\n"
+                "  8x4 groups with a dead lane %llu of %llu (%.2f%%)\n  first-hit offset:",
+                static_cast<double>(rb.scale),
+                d.stat(core::PerfStat::P50),
+                *std::min_element(rb.resolve_ms.raw().begin(), rb.resolve_ms.raw().end()),
+                d.stat(core::PerfStat::P95),
+                d.stat(core::PerfStat::Max),
+                rb.resolve_ms.count(),
+                static_cast<unsigned long long>(rb.dead),
+                static_cast<unsigned long long>(rb.pixels),
+                100.0 * static_cast<double>(rb.dead) / static_cast<double>(rb.pixels),
+                static_cast<unsigned long long>(rb.no_neighbour),
+                static_cast<unsigned long long>(rb.fetches),
+                static_cast<unsigned long long>(rb.warps_with_dead),
+                static_cast<unsigned long long>(rb.warps),
+                100.0 * static_cast<double>(rb.warps_with_dead) / static_cast<double>(rb.warps));
+            for (int k = 0; k < kBorrowOffsets; ++k)
+                std::printf(" %d:%llu", k, static_cast<unsigned long long>(rb.hit_by_offset[k]));
+            std::printf("\n");
+            ledger.set("vg.resolve.pixels", rb.pixels);
+            ledger.set("vg.resolve.dead_lanes", rb.dead);
+            ledger.set("vg.resolve.no_live_neighbour", rb.no_neighbour);
+            ledger.set("vg.resolve.id_fetches", rb.fetches);
+            ledger.set("vg.resolve.warps", rb.warps);
+            ledger.set("vg.resolve.warps_with_dead", rb.warps_with_dead);
+            ledger.set("vg.resolve.warp_fetches", rb.warp_fetches);
+            ledger.set("vg.resolve.frames_without_resolve", r.frames_without_resolve);
+            for (int k = 0; k < kBorrowOffsets; ++k)
+                ledger.set(keys.format("vg.resolve.first_hit_offset_%d", k), rb.hit_by_offset[k]);
+            if (r.frames_without_resolve != 0)
+                status = 1;
+        }
         ledger.set("vg.candidates", r.candidates);
         ledger.set("vg.selected_triangles", r.selected_triangles);
         ledger.set("vg.emitted_draws", r.counters.emitted);
