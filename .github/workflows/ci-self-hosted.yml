@@ -104,7 +104,19 @@ jobs:
           fi
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
-          pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &)
+          # Both halves of this matter on a runner whose processes outlive a job. `pgrep -x Xvfb`
+          # matched any Xvfb anywhere on the machine — a leftover on :98, a desktop's own — so it
+          # could read "already up" while :99 was dead; `pgrep -f 'Xvfb :99'` asks about THIS display
+          # and about a LIVE process, which a bare socket test cannot, since /tmp/.X11-unix/X99
+          # survives a SIGKILLed server. Then wait: the old code exported DISPLAY=:99 before Xvfb had
+          # bound it. Both failures surface as an unrelated GUI test "cannot open display".
+          # (`pgrep -f` is safe here because a `run:` block executes as a script FILE, so the pattern
+          # is not in any process's command line. Typed into an interactive shell it self-matches.)
+          if ! pgrep -f 'Xvfb :99' >/dev/null 2>&1; then
+            Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
+            for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          fi
+          [ -e /tmp/.X11-unix/X99 ] || { echo "::error::Xvfb :99 did not come up"; exit 1; }
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: ccache
@@ -182,7 +194,12 @@ jobs:
           [ -n "$icd" ] || { echo "::error::no lavapipe ICD"; exit 1; }
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
-          pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &)
+          # Display-specific and waits for the socket; see the `build` job above for why.
+          if ! pgrep -f 'Xvfb :99' >/dev/null 2>&1; then
+            Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
+            for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          fi
+          [ -e /tmp/.X11-unix/X99 ] || { echo "::error::Xvfb :99 did not come up"; exit 1; }
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: ccache
@@ -392,7 +409,12 @@ jobs:
           [ -n "$icd" ] || { echo "::error::no lavapipe ICD"; exit 1; }
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
           echo "RIME_REQUIRE_VULKAN=1" >> "$GITHUB_ENV"
-          pgrep -x Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &)
+          # Display-specific and waits for the socket; see the `build` job above for why.
+          if ! pgrep -f 'Xvfb :99' >/dev/null 2>&1; then
+            Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
+            for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          fi
+          [ -e /tmp/.X11-unix/X99 ] || { echo "::error::Xvfb :99 did not come up"; exit 1; }
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: ccache
