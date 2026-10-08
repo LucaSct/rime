@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The GPU half of tests/render/sky_specular_test.cpp: call the ENGINE's own lookup functions
+// (sky_specular_eval.glsl, the very file the forward pass includes) on a batch of queries and write
+// the answers to a buffer the test reads on the CPU.
+//
+// WHY A PROBE AND NOT ONLY A RENDERED FRAME. A frame folds the lookup together with the material,
+// the lights, AO and the tonemap-free HDR path; a bug in the mip lerp or the energy compensation
+// would be one of many explanations for a pixel being off. Calling the functions directly, with the
+// input and the expected answer both known, isolates them -- and uses the real GLSL, not a CPU copy
+// of it that could drift from the shader.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../../../engine/render/shaders/sky_mapping.glsl"
+
+layout(local_size_x = 32) in;
+
+// Two vec4 per query. q[2i] = (direction.xyz, roughness); q[2i+1] = (f0, n.v, 0, 0).
+layout(std430, set = 0, binding = 0) readonly buffer Queries { vec4 q[]; } queries;
+// Two vec4 per query. r[2i] = (prefiltered radiance.rgb, 0); r[2i+1] = (environment BRDF.rgb, 0),
+// the latter evaluated for a grey f0 (all three channels equal to q[2i+1].x).
+layout(std430, set = 0, binding = 1) writeonly buffer Results { vec4 r[]; } results;
+
+layout(set = 0, binding = 3) uniform sampler2D skyview_lut;
+#define SKY_PREFILTERED_BINDING 4
+#define SKY_DFG_BINDING 5
+#include "../../../engine/render/shaders/sky_specular_eval.glsl"
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (2u * i + 1u >= uint(queries.q.length())) {
+        return;
+    }
+    const vec4 a = queries.q[2u * i];
+    const vec4 b = queries.q[2u * i + 1u];
+    results.r[2u * i] = vec4(sky_specular_prefiltered(normalize(a.xyz), a.w), 0.0);
+    results.r[2u * i + 1u] = vec4(sky_specular_environment_brdf(vec3(b.x), a.w, b.y), 0.0);
+}

@@ -46,6 +46,7 @@ rime_add_test(rime_render_tests
     sky_test.cpp
     sky_lighting_test.cpp
     sky_atmosphere_test.cpp
+    sky_specular_test.cpp
     pass_identity_test.cpp
     frame_scratch_test.cpp
     render_transform_test.cpp
@@ -84,5 +85,6 @@ rime_add_shaders(rime_render_tests
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/ui.vert
     ${CMAKE_SOURCE_DIR}/samples/03-icem-viewer/shaders/ui.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sdf_probe_trace.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky_specular_probe.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/vg_forward_reference.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/vg_forward_reference.frag)
