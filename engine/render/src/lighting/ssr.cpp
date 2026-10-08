@@ -9,6 +9,9 @@
 
 #include "rime/render/lighting/ssr.hpp"
 
+#include <iterator>
+#include <vector>
+
 #include "fullscreen.vert.spv.h"
 #include "rime/core/math/mat.hpp"
 #include "rime/render/passes.hpp" // kHdrFormat — the resolve target's format
@@ -16,6 +19,32 @@
 #include "ssr_resolve_sdf.frag.spv.h"
 
 namespace rime::render {
+
+namespace {
+constexpr rhi::BindingDesc kSsrBindings[] = {
+    {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene colour (HDR)
+    {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // G-buffer (m10.7a)
+    {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene depth
+    {3, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // SsrParams
+    // m10.7c probe fallback: the DDGI atlases + sample-params the miss/rough path reads. Always
+    // bound (empty_binding's 1x1 dummies when DDGI is off) — the pipeline layout is fixed.
+    {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
+    {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
+    {6, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
+    // The baked sky (m17.7b): what a ray leaving the screen reflects, in its own direction
+    // rather than as one flat colour. Always bound (SkyPass::empty_binding's 1x1 dummy when
+    // there is no sky) for the same fixed-layout reason as the DDGI pair above.
+    {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
+    // The G-buffer's material half (m19.6b fix 1): base colour + metallic, for the Fresnel F0.
+    {8, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    // The split-sum sky specular (ADR-0078 section 2): the prefiltered chain (a 2-D array) and
+    // the DFG table, the same two textures the forward pass binds at 19/20. Placeholders when
+    // the feature is off, for the same fixed-layout reason as the DDGI and sky bindings.
+    {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},  // prefiltered
+    {10, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DFG table
+};
+
+} // namespace
 
 SsrPass::SsrPass(rhi::Device& device) : device_(device) {
     rhi::ShaderDesc vs{};
@@ -32,50 +61,14 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
     fs.debug_name = "ssr_resolve.frag";
     fragment_shader_ = device.create_shader(fs);
 
-    const rhi::BindingDesc bindings[] = {
-        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene colour (HDR)
-        {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // G-buffer (m10.7a)
-        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene depth
-        {3, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // SsrParams
-        // m10.7c probe fallback: the DDGI atlases + sample-params the miss/rough path reads. Always
-        // bound (empty_binding's 1x1 dummies when DDGI is off) — the pipeline layout is fixed.
-        {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
-        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
-        {6, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
-        // The baked sky (m17.7b): what a ray leaving the screen reflects, in its own direction
-        // rather than as one flat colour. Always bound (SkyPass::empty_binding's 1x1 dummy when
-        // there is no sky) for the same fixed-layout reason as the DDGI pair above.
-        {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
-        // The G-buffer's material half (m19.6b fix 1): base colour + metallic, for the Fresnel F0.
-        {8, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
-        // The split-sum sky specular (ADR-0078 section 2): the prefiltered chain (a 2-D array) and
-        // the DFG table, the same two textures the forward pass binds at 19/20. Placeholders when
-        // the feature is off, for the same fixed-layout reason as the DDGI and sky bindings.
-        {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},  // prefiltered
-        {10, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DFG table
-    };
     rhi::GraphicsPipelineDesc pd{};
     pd.vertex_shader = vertex_shader_;
     pd.fragment_shader = fragment_shader_;
     pd.color_format = kHdrFormat;  // writes the second HDR target the tonemap reads
     pd.cull = rhi::CullMode::None; // one oversized triangle; nothing to cull
-    pd.bindings = bindings;
+    pd.bindings = kSsrBindings;
     pd.debug_name = "ssr-resolve";
     pipeline_ = device.create_graphics_pipeline(pd);
-
-    fs.spirv = ssr_resolve_sdf_frag_spv;
-    fs.spirv_size_bytes = sizeof(ssr_resolve_sdf_frag_spv);
-    fs.debug_name = "ssr_resolve_sdf.frag";
-    sdf_fragment_shader_ = device.create_shader(fs);
-    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(bindings), std::end(bindings));
-    for (std::uint32_t slot = 11; slot < 14; ++slot)
-        sdf_bindings.push_back(
-            {slot, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
-    sdf_bindings.push_back({14, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
-    pd.fragment_shader = sdf_fragment_shader_;
-    pd.bindings = sdf_bindings;
-    pd.debug_name = "ssr-resolve SDF sky";
-    sdf_pipeline_ = device.create_graphics_pipeline(pd);
 
     // Point + clamp: a blended depth is a fictional surface (the march must read exact depths), and
     // a ray that walks off the screen must read the border pixel, not wrap to the far side.
@@ -85,6 +78,30 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
     ss.address_mode = rhi::AddressMode::ClampToEdge;
     ss.debug_name = "ssr-sampler";
     sampler_ = device.create_sampler(ss);
+}
+
+void SsrPass::ensure_sdf_pipeline() {
+    if (sdf_pipeline_.is_valid())
+        return;
+    rhi::ShaderDesc fs{};
+    fs.stage = rhi::ShaderStage::Fragment;
+    fs.spirv = ssr_resolve_sdf_frag_spv;
+    fs.spirv_size_bytes = sizeof(ssr_resolve_sdf_frag_spv);
+    fs.debug_name = "ssr_resolve_sdf.frag";
+    sdf_fragment_shader_ = device_.create_shader(fs);
+    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(kSsrBindings), std::end(kSsrBindings));
+    for (std::uint32_t slot = 11; slot < 14; ++slot)
+        sdf_bindings.push_back(
+            {slot, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+    sdf_bindings.push_back({14, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.color_format = kHdrFormat;
+    pd.cull = rhi::CullMode::None;
+    pd.fragment_shader = sdf_fragment_shader_;
+    pd.bindings = sdf_bindings;
+    pd.debug_name = "ssr-resolve SDF sky";
+    sdf_pipeline_ = device_.create_graphics_pipeline(pd);
 }
 
 SsrPass::~SsrPass() {
@@ -114,6 +131,8 @@ void SsrPass::add(RenderGraph& graph,
                   rhi::SamplerHandle sky_specular_sampler,
                   bool sky_specular_live,
                   const SdfSpecularOcclusionBinding& sdf_occlusion) {
+    if (sdf_occlusion.is_valid())
+        ensure_sdf_pipeline();
     // The inverse projection is what turns a uv + depth back into a view-space position — computed
     // once here, on the CPU, rather than every one of the march's steps re-inverting it on the GPU.
     // inv_view (m10.7c) does the same job for the probe fallback: view space back to the WORLD the

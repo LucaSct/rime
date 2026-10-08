@@ -142,6 +142,7 @@ private:
     rhi::ShaderHandle vertex_shader_;   // fullscreen.vert — the oversized-triangle idiom
     rhi::ShaderHandle fragment_shader_; // ssr_resolve.frag
     rhi::PipelineHandle pipeline_;
+    void ensure_sdf_pipeline();
     rhi::ShaderHandle sdf_fragment_shader_;
     rhi::PipelineHandle sdf_pipeline_;
     rhi::SamplerHandle sampler_; // point + clamp: depth must not interpolate, edges must not wrap

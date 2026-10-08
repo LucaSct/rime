@@ -1286,7 +1286,7 @@ struct OcclusionScene {
         metal.roughness =
             0.6f; // resolve's cone is pure fallback, so this tests sky, not screen hits
         const MaterialId mat = materials.add(metal);
-        const MeshId plane = meshes.add(make_plane(6.0f), "sdf-specular-metal");
+        const MeshId plane = meshes.add(make_plane(2.9f), "sdf-specular-metal");
         for (const float x : {0.0f, 12.0f}) {
             core::Transform t{};
             t.translation.x = x;
@@ -1303,16 +1303,17 @@ struct OcclusionScene {
             (void)world.spawn_with(
                 ecs::WorldTransform{t}, MeshRef{mesh}, MaterialRef{wall_mat}, SdfRef{sdf});
         };
-        // Six overlapping 0.5 m slabs: cavity x/z=[-3,3], y=[0,3]. Camera inside, metal on
-        // the floor's inner face. The outdoor metal is 12 m away, beyond the 8 m cone reach.
-        place({3.5f, 0.25f, 3.5f}, {0.0f, -0.25f, 0.0f});
+        // Six overlapping 0.5 m slabs: cavity x/z=[-3,3], y=[-0.125,3]. Lift each metal
+        // 0.125 m above its solid floor so a coplanar depth tie cannot let the black slab
+        // overwrite the metal. The outdoor metal is 12 m away, beyond the 8 m cone reach.
+        place({3.5f, 0.25f, 3.5f}, {0.0f, -0.375f, 0.0f});
         place({3.5f, 0.25f, 3.5f}, {0.0f, 3.25f, 0.0f});
         place({0.25f, 2.0f, 3.5f}, {-3.25f, 1.5f, 0.0f});
         place({0.25f, 2.0f, 3.5f}, {3.25f, 1.5f, 0.0f});
         place({3.5f, 2.0f, 0.25f}, {0.0f, 1.5f, -3.25f});
         place({3.5f, 2.0f, 0.25f}, {0.0f, 1.5f, 3.25f});
         // An identical solid floor beneath the outdoor metal catches the self-occlusion defect.
-        place({3.5f, 0.25f, 3.5f}, {12.0f, -0.25f, 0.0f});
+        place({3.5f, 0.25f, 3.5f}, {12.0f, -0.375f, 0.0f});
         core::Transform cam{};
         cam.translation = {0.0f, 1.0f, 0.0f};
         camera = world.spawn_with(ecs::WorldTransform{cam}, Camera{1.1f, 0.1f, 100.0f, true});
@@ -1340,6 +1341,18 @@ HdrImage render_occlusion_hdr(rhi::Device& device,
     passes = graph.pass_count();
     device.submit_blocking(*cmd);
     return decode_hdr(read_texture(device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
+}
+
+// For the proof's 96x96 view, y=78.5 gives NDC y=0.6354. A camera 1 m above
+// the floor intersects it at |z|=1/(tan(1.1/2)*0.6354)=2.57 m; |x|<0.51 m.
+// Rows 78..90, columns 32..63 therefore lie strictly inside the 2.9 m half-extent
+// metal and before the cavity's wall at z=-3. Never average the wall into a metal proof.
+double occlusion_metal_mean(const HdrImage& img) {
+    double sum = 0.0;
+    for (std::uint32_t y = 78; y <= 90; ++y)
+        for (std::uint32_t x = 32; x < 64; ++x)
+            sum += img.luminance(x, y);
+    return sum / (13.0 * 32.0);
 }
 
 } // namespace
@@ -1376,14 +1389,14 @@ TEST_CASE(
                 renderer.set_sdf_specular_occlusion_enabled(true);
                 const HdrImage on = render_occlusion_hdr(*device, renderer, scene, passes);
                 CHECK(passes == off_passes); // estimator lives in the reader, no extra pass
-                const double off_mean = floor_rows(off).mean;
-                const double on_mean = floor_rows(on).mean;
+                const double off_mean = occlusion_metal_mean(off);
+                const double on_mean = occlusion_metal_mean(on);
                 REQUIRE_MESSAGE(off_mean > 1e-4, "control metal must reflect a nonzero sky");
                 MESSAGE("SDF sky: SSR=" << ssr << " chain=" << chain << " camera x=" << x
                                         << " off=" << off_mean << " on=" << on_mean
                                         << " ratio=" << on_mean / off_mean);
                 // A sealed cavity has zero visible sky; an open floor has full visibility.
-                // The inner patch (rows 66..90, columns 32..63) is wholly floor: its farthest
+                // The inner patch (rows 78..90, columns 32..63) is wholly floor: its farthest
                 // point is <3 m away at this FOV, before the back wall. A white metal has zero
                 // diffuse, so these means measure sky specular alone. Allow 10% residual for
                 // the bounded/narrow-band cone approximation, and 2% outdoor drift for FP16
@@ -1394,7 +1407,7 @@ TEST_CASE(
                 } else {
                     CHECK_MESSAGE(rel(on_mean, off_mean) < 0.02,
                                   "outdoor metal sky must change by less than 2%");
-                    for (std::uint32_t y = 66; y <= 90; ++y)
+                    for (std::uint32_t y = 78; y <= 90; ++y)
                         for (std::uint32_t px = 32; px < 64; ++px)
                             CHECK_MESSAGE(rel(on.luminance(px, y), off.luminance(px, y)) < 0.02,
                                           "outdoor pixels must retain their sky specular");

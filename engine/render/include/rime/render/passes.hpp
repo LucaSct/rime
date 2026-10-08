@@ -480,9 +480,10 @@ private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
-    rhi::ShaderHandle sdf_fragment_shader_;
-    rhi::PipelineHandle pipeline_sdf_after_prepass_;
-    rhi::PipelineHandle pipeline_sdf_standalone_;
+    void ensure_sdf_pipelines() const;
+    mutable rhi::ShaderHandle sdf_fragment_shader_;
+    mutable rhi::PipelineHandle pipeline_sdf_after_prepass_;
+    mutable rhi::PipelineHandle pipeline_sdf_standalone_;
     rhi::ShaderHandle shadowed_fragment_shader_;          // pbr_forward_shadowed.frag (m10.1)
     rhi::ShaderHandle shadowed_gbuffer_fragment_shader_;  // same, -DWRITE_GBUFFER (m10.7a)
     rhi::PipelineHandle pipeline_after_prepass_;          // depth Load + Equal + no write
