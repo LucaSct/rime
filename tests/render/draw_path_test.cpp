@@ -44,6 +44,7 @@
 #include "rime/render/gpu_asset_bridge.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
+#include "support/temp_path.hpp"
 #include "texture_fixture.hpp"
 
 using namespace rime;
@@ -281,8 +282,7 @@ TEST_CASE("m16.3: a scene-placed mesh gets its COOKED material, not neutral grey
     // A self-contained cooked tree in a temp dir: the committed fixtures carry no `.rmat` at all
     // (material is the one cooked kind with no cross-language fixture — a gap m16.5 closes), so the
     // material and its texture are synthesised here from the same builders the assets tests use.
-    const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "rime-m16-3-material-bridge";
+    const std::filesystem::path dir = rime::test::temp_path("rime-m16-3-material-bridge");
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
 
@@ -610,8 +610,7 @@ TEST_CASE("m17.8b: a surface with no cooked mesh still gets its cooked material"
         return;
     }
 
-    const std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / "rime-m17-8b-entity-material";
+    const std::filesystem::path dir = rime::test::temp_path("rime-m17-8b-entity-material");
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
 

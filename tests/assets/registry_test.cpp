@@ -16,6 +16,7 @@
 #include "mesh_fixture.hpp"
 #include "rime/assets/registry.hpp"
 #include "rime/platform/filesystem.hpp"
+#include "support/temp_path.hpp"
 
 using namespace rime::assets;
 using rime_test::MeshFileBuilder;
@@ -70,9 +71,8 @@ TEST_CASE("a corrupt in-memory file fails with the reader's error and stores not
 
 TEST_CASE("load_mesh reads a cooked file from disk") {
     std::error_code ec;
-    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
-    REQUIRE_FALSE(ec);
-    const std::filesystem::path path = dir / "rime_m6_1_registry_test.rmesh";
+    const std::filesystem::path path = rime::test::temp_path("rime_m6_1_registry_test.rmesh");
+    const std::filesystem::path dir = path.parent_path();
 
     const std::vector<std::byte> file = MeshFileBuilder{}.build();
     REQUIRE(rime::platform::write_file(path, file));

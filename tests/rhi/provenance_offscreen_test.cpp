@@ -30,6 +30,7 @@
 #include "provenance.hpp"
 #include "provenance_view.hpp"
 #include "rime/rhi/rhi.hpp"
+#include "support/temp_path.hpp"
 #include "ui.frag.spv.h"
 #include "ui.hpp"
 #include "ui.vert.spv.h"
@@ -76,8 +77,7 @@ TEST_CASE(
         "{\"id\":2,\"origin\":\"Rule\",\"label\":\"structural margin\","
         "\"value\":1.218,\"unit\":\"-\",\"inputs\":[1]}\n"
         "]}\n";
-    const std::filesystem::path tmp =
-        std::filesystem::temp_directory_path() / "rime_provenance_test.icejson";
+    const std::filesystem::path tmp = rime::test::temp_path("rime_provenance_test.icejson");
     {
         std::ofstream o(tmp, std::ios::binary);
         o << text;
@@ -106,7 +106,7 @@ TEST_CASE(
     CHECK(prov->usable());
 
     // A file that is not an icem-provenance export is rejected (nullopt), not misparsed.
-    const std::filesystem::path bad = std::filesystem::temp_directory_path() / "rime_not_prov.txt";
+    const std::filesystem::path bad = rime::test::temp_path("rime_not_prov.txt");
     {
         std::ofstream o(bad, std::ios::binary);
         o << "solid teapot\nfacet normal 0 0 1\n";

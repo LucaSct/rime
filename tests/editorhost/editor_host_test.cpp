@@ -35,6 +35,7 @@
 #include "rime/render/components.hpp"
 #include "rime/scene/scene_format.hpp"
 #include "rime/stream/protocol.hpp"
+#include "support/temp_path.hpp"
 
 using namespace rime;
 
@@ -940,8 +941,7 @@ TEST_CASE("m14.3: a hosted scene saves, and the file round-trips") {
     (void)world.spawn_with(ecs::LocalTransform{tf}, render::Camera{0.8f, 0.1f, 500.0f, true});
     (void)world.spawn_with(ecs::LocalTransform{});
 
-    const std::filesystem::path out =
-        std::filesystem::temp_directory_path() / "rime_m14_3_save.rscene";
+    const std::filesystem::path out = rime::test::temp_path("rime_m14_3_save.rscene");
     std::error_code ec;
     std::filesystem::remove(out, ec);
 
@@ -979,8 +979,7 @@ TEST_CASE("m14.3: an edit survives the save, which is the whole point of saving"
     moved.translation = {7.0f, 8.0f, 9.0f};
     world.get<ecs::LocalTransform>(e)->value = moved;
 
-    const std::filesystem::path out =
-        std::filesystem::temp_directory_path() / "rime_m14_3_edit.rscene";
+    const std::filesystem::path out = rime::test::temp_path("rime_m14_3_edit.rscene");
     std::error_code ec;
     std::filesystem::remove(out, ec);
 
@@ -1011,8 +1010,7 @@ TEST_CASE("m14.3: a lossy load can never be saved") {
     ecs::register_transform_components(world);
     (void)world.spawn_with(ecs::LocalTransform{});
 
-    const std::filesystem::path out =
-        std::filesystem::temp_directory_path() / "rime_m14_3_lossy.rscene";
+    const std::filesystem::path out = rime::test::temp_path("rime_m14_3_lossy.rscene");
     std::error_code ec;
     std::filesystem::remove(out, ec);
 
@@ -1045,8 +1043,7 @@ TEST_CASE("m14.3: a pathless save writes back where it was opened, or refuses") 
     }
 
     SUBCASE("a loaded world saves over itself") {
-        const std::filesystem::path out =
-            std::filesystem::temp_directory_path() / "rime_m14_3_inplace.rscene";
+        const std::filesystem::path out = rime::test::temp_path("rime_m14_3_inplace.rscene");
         std::error_code ec;
         std::filesystem::remove(out, ec);
         editorhost::HostedScene hosted;
@@ -1193,7 +1190,7 @@ void hello_over_local_wire(ecs::World& world,
 
 // Write `text` to a scratch .rscene file and return its path.
 std::string write_scene_text(std::string_view name, std::string_view text) {
-    const std::filesystem::path p = std::filesystem::temp_directory_path() / name;
+    const std::filesystem::path p = rime::test::temp_path(name);
     std::FILE* f = std::fopen(p.string().c_str(), "wb");
     REQUIRE(f != nullptr);
     std::fwrite(text.data(), 1, text.size(), f);
