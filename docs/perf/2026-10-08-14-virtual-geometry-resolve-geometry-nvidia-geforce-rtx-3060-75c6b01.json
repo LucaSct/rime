@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "run": {
+    "sample": "14-virtual-geometry",
+    "commit": "75c6b01",
+    "date": "2026-10-08"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "driver": "NVIDIA 615.71.09",
+    "os": "linux",
+    "build": "RelWithDebInfo",
+    "sanitizer": "off",
+    "preset": "gpu-built-draws",
+    "width": 1920,
+    "height": 1080
+  },
+  "distributions": {
+    "frame": {
+      "count": 120,
+      "min_ms": 2.096,
+      "p50_ms": 2.312,
+      "p95_ms": 2.430,
+      "p99_ms": 2.436,
+      "max_ms": 2.456
+    },
+    "vg.build": {
+      "count": 120,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "vg.gpu": {
+      "count": 120,
+      "min_ms": 0.155,
+      "p50_ms": 0.156,
+      "p95_ms": 0.164,
+      "p99_ms": 0.165,
+      "max_ms": 0.166
+    },
+    "vg.resolve": {
+      "count": 120,
+      "min_ms": 0.167,
+      "p50_ms": 0.169,
+      "p95_ms": 0.172,
+      "p99_ms": 0.191,
+      "max_ms": 0.200
+    },
+    "vg.select": {
+      "count": 120,
+      "min_ms": 1.041,
+      "p50_ms": 1.252,
+      "p95_ms": 1.274,
+      "p99_ms": 1.340,
+      "max_ms": 1.363
+    },
+    "vg.submit": {
+      "count": 120,
+      "min_ms": 0.993,
+      "p50_ms": 1.060,
+      "p95_ms": 1.159,
+      "p99_ms": 1.167,
+      "max_ms": 1.182
+    }
+  },
+  "passes": {
+    "vg-build-draws": {
+      "p50_ms": 0.016,
+      "max_ms": 0.020
+    },
+    "vg-visibility": {
+      "p50_ms": 0.140,
+      "max_ms": 0.148
+    },
+    "vg-resolve": {
+      "p50_ms": 0.169,
+      "max_ms": 0.200
+    }
+  },
+  "worst_frame": {
+    "index": 17,
+    "ms": 2.456,
+    "passes": {
+      "vg-build-draws": 0.018,
+      "vg-visibility": 0.148,
+      "vg-resolve": 0.171
+    },
+    "zones": {}
+  },
+  "ledger": {
+    "frames.measured": 120,
+    "vg.triangles_per_cluster": 64,
+    "vg.resolve.pixels": 2073600,
+    "vg.resolve.dead_lanes": 0,
+    "vg.resolve.no_live_neighbour": 0,
+    "vg.resolve.id_fetches": 0,
+    "vg.resolve.warps": 64800,
+    "vg.resolve.warps_with_dead": 0,
+    "vg.resolve.warp_fetches": 0,
+    "vg.resolve.frames_without_resolve": 0,
+    "vg.resolve.first_hit_offset_0": 0,
+    "vg.resolve.first_hit_offset_1": 0,
+    "vg.resolve.first_hit_offset_2": 0,
+    "vg.resolve.first_hit_offset_3": 0,
+    "vg.resolve.first_hit_offset_4": 0,
+    "vg.resolve.first_hit_offset_5": 0,
+    "vg.resolve.first_hit_offset_6": 0,
+    "vg.resolve.first_hit_offset_7": 0,
+    "vg.resolve.first_hit_offset_8": 0,
+    "vg.resolve.first_hit_offset_9": 0,
+    "vg.resolve.first_hit_offset_10": 0,
+    "vg.resolve.first_hit_offset_11": 0,
+    "vg.candidates": 65,
+    "vg.selected_triangles": 4096,
+    "vg.emitted_draws": 64,
+    "vg.fell_back_to_coarse": 0,
+    "vg.overflow_without_coarse": 0,
+    "vg.refinement_blocked": 0,
+    "vg.covered_pixels": 2073600,
+    "vg.frames_without_raster": 0
+  },
+  "integrity": {
+    "accounting_gaps": 0,
+    "foreign_zones": 0
+  }
+}
