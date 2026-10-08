@@ -24,6 +24,7 @@ add_library(rime_render STATIC
     src/lighting/ddgi.cpp
     src/lighting/ssr.cpp
     src/lighting/sky.cpp
+    src/lighting/sky_specular.cpp
     src/fx_pass.cpp
     src/culling.cpp
     src/temporal_jitter.cpp
@@ -60,6 +61,8 @@ rime_add_shaders(rime_render
     shaders/sky_sh.comp
     shaders/sky_transmittance.comp
     shaders/sky_multiple_scattering.comp
+    shaders/sky_specular_prefilter.comp
+    shaders/sky_specular_dfg.comp
     shaders/fullscreen.vert
     shaders/tonemap.frag
     shaders/present.frag

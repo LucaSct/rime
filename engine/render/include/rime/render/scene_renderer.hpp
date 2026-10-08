@@ -359,6 +359,32 @@ public:
         return sky_.stats();
     }
 
+    // ── Prefiltered sky specular (ADR-0078 section 2) ─────────────────────────────────────────
+    // The split-sum approximation for the sky's reflection on the forward PBR pass: a
+    // GGX-prefiltered chain of the sky plus a DFG table, both built at runtime through the graph,
+    // replacing the m19.6b mirror-faded-to-SH blend. Needs a sky (there is nothing to filter
+    // without one).
+    //
+    // DEFAULT OFF, deliberately (see the ADR-0078 section 2 status note): the forward pass is the
+    // only consumer so far. With SSR on, the forward pass compiles its sky term out and
+    // ssr_resolve still reads the sky-view LUT directly, so SSR on/off would disagree about every
+    // rough metal by the single-bounce energy the new path puts back (measured ~2x at roughness 1).
+    // Until ssr_resolve reads the same chain (ADR-0078 section 3) the switch is opt-in. With SSR or
+    // DDGI on it also builds nothing and is counted as a disabled frame: those configurations do
+    // not consume the forward pass's sky mirror, so the bake would be pure waste. Off: no pass
+    // declared, placeholders bound, and the frame is byte-identical to before.
+    void set_sky_specular_prefilter_enabled(bool enabled) {
+        sky_specular_prefilter_enabled_ = enabled;
+    }
+
+    [[nodiscard]] bool sky_specular_prefilter_enabled() const noexcept {
+        return sky_specular_prefilter_enabled_;
+    }
+
+    [[nodiscard]] const SkySpecularStats& sky_specular_stats() const noexcept {
+        return sky_.specular_stats();
+    }
+
     [[nodiscard]] const SkyAtmosphereStats& sky_atmosphere_stats() const noexcept {
         return sky_.atmosphere_stats();
     }
@@ -434,7 +460,8 @@ private:
     ecs::Version sdf_instances_since_ = 0;
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
-    SkyParams sky_params_{};      // m17.0; enabled=false == the pre-sky baseline
+    bool sky_specular_prefilter_enabled_ = false; // ADR-0078 section 2; see the setter and the ADR
+    SkyParams sky_params_{};                      // m17.0; enabled=false == the pre-sky baseline
     bool cull_enabled_ = true;
     CullStats cull_stats_{};
 

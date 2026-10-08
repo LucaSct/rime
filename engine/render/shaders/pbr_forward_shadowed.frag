@@ -136,6 +136,13 @@ layout(set = 0, binding = 15) uniform sampler2D ddgi_visibility_atlas;
 layout(set = 0, binding = 18) uniform sampler2D skyview_lut;
 #include "sky_mapping.glsl" // skyview_uv_from_direction — the mapping the LUT was baked with
 
+// The split-sum specular environment (ADR-0078 section 2): the sky prefiltered per roughness, and
+// the DFG table that is the BRDF half of the split. Always bound (placeholders when off) and only
+// ever read behind `frame.ambient.w`, the same "off is a branch, not a missing resource" contract.
+#define SKY_PREFILTERED_BINDING 19
+#define SKY_DFG_BINDING 20
+#include "sky_specular_eval.glsl"
+
 layout(std140, set = 0, binding = 16) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
     uvec4 grid_dims_perrow;   // xyz probe counts, w atlas probes-per-row
@@ -510,11 +517,26 @@ void main() {
         // this is still unshadowed ambient light: a crevice the AO map darkens should not glow.
         if (sky_sh_enabled()) {
             const vec3 r = reflect(-v, n);
-            const vec3 sky_mirror = texture(skyview_lut, skyview_uv_from_direction(r)).rgb;
-            const vec3 sky_specular = mix(sky_mirror, sky_ambient, alpha);
             const vec3 f0 = mix(vec3(0.04), albedo, metallic);
-            out_radiance +=
-                sky_specular * env_brdf_approx(f0, roughness, max(dot(n, v), 1e-4)) * ao;
+            const float n_dot_v = max(dot(n, v), 1e-4);
+            if (frame.ambient.w != 0.0) {
+                // SPLIT-SUM SKY SPECULAR (ADR-0078 section 2). The sky averaged over this
+                // surface's GGX lobe (a baked, per-roughness copy -- sky_specular_eval.glsl) times
+                // the BRDF integrated against a white sky (the DFG table). Replaces the blend
+                // below, which faded the mirror toward the SH average by hand and had no
+                // prefiltered mips to read.
+                //
+                // `sqrt(alpha)` rather than `roughness`: alpha already carries the geometric
+                // specular AA widening, and a lobe the AA made wider must read a blurrier sky.
+                const float lobe_roughness = sqrt(alpha);
+                const vec3 lookup = sky_specular_dominant_direction(n, r, lobe_roughness);
+                out_radiance += sky_specular_prefiltered(lookup, lobe_roughness) *
+                                sky_specular_environment_brdf(f0, lobe_roughness, n_dot_v) * ao;
+            } else {
+                const vec3 sky_mirror = texture(skyview_lut, skyview_uv_from_direction(r)).rgb;
+                const vec3 sky_specular = mix(sky_mirror, sky_ambient, alpha);
+                out_radiance += sky_specular * env_brdf_approx(f0, roughness, n_dot_v) * ao;
+            }
         }
 #endif
     }

@@ -488,6 +488,8 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
         {16, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
         {17, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},        // sky SH (m17.7b)
         {18, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
+        {19, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // prefiltered sky
+        {20, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DFG table
     };
     // 18 of the RHI's 24 descriptor slots (rhi::kMaxBindings, vulkan_backend.hpp:355) are now
     // spoken for. The previous note here named 18 as the trigger for a second descriptor set or a
@@ -506,6 +508,11 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     // the sky binding already here, not a new technique — SkyLightBinding has carried the LUT
     // since m17.7b and terrain/SSR bind the same pair. 19 of 24. The trigger is unchanged for
     // anything that is genuinely new.
+    //
+    // ADR-0078 section 2 took bindings 19 and 20 (the prefiltered sky chain and the DFG table) --
+    // a second recorded exception, for the same reason: they are the rest of the SAME sky
+    // binding (SkyLightBinding::specular), not a new technique. 21 of 24. The next one splits the
+    // set.
     pd.fragment_shader = shadowed_fragment_shader_;
     pd.bindings = shadowed_bindings;
     pd.depth_write = false;
@@ -641,8 +648,17 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // The sky-view LUT joins them (m19.6b): the forward shader mirrors it when no SSR pass will,
     // and declaring the read is what orders this pass after the bake that writes it. It leaves the
     // LUT in ShaderRead — the state SceneRenderer already reports to SkyPass on every sky-on frame.
-    const RGTexture sampled[] = {
-        shadow.map, local.map, ddgi.irradiance, ddgi.visibility, sky.skyview};
+    //
+    // The prefiltered chain and the DFG table join them (ADR-0078 section 2), always: with the
+    // feature off they are the placeholders, already in ShaderRead, and declaring them costs a
+    // no-op transition. Conditional declaration would make the graph's edges depend on a flag.
+    const RGTexture sampled[] = {shadow.map,
+                                 local.map,
+                                 ddgi.irradiance,
+                                 ddgi.visibility,
+                                 sky.skyview,
+                                 sky.specular.prefiltered,
+                                 sky.specular.dfg};
     // Declaring the two cluster buffers is what orders this pass after the cull dispatch that
     // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
     // The sky's SH buffer joins the cluster buffers here for the same reason they are declared:
@@ -666,7 +682,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
         desc,
         [pipe, data, shadow, local, clusters, ddgi, sky, &graph](rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipe);
-            // Bindings 7–18 are attached once (they persist across draws — ADR-0020);
+            // Bindings 7–20 are attached once (they persist across draws — ADR-0020);
             // record_draws re-binds only per-draw state on top. The resources' physical handles
             // resolve now (assign_physicals has run), the same late-resolve the tonemap pass uses.
             cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
@@ -682,6 +698,10 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             cmd.bind_uniform_buffer(16, ddgi.ubo.buffer, ddgi.ubo.offset, ddgi.ubo.size);
             cmd.bind_storage_buffer(17, graph.physical_buffer(sky.sh));
             cmd.bind_texture(18, graph.physical(sky.skyview), sky.sampler);
+            // The chain is read with the sky-view's own sampler (linear, azimuth wraps); the DFG
+            // table has no seam and clamps.
+            cmd.bind_texture(19, graph.physical(sky.specular.prefiltered), sky.sampler);
+            cmd.bind_texture(20, graph.physical(sky.specular.dfg), sky.specular.dfg_sampler);
             // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
             // overwhelming majority and the byte-identical old path — then the double-sided draws
             // with culling off. Dynamic state rather than a second pipeline: the forward pass

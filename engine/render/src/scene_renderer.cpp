@@ -539,6 +539,19 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     fu.ambient[0] = ambient_[0];
     fu.ambient[1] = ambient_[1];
     fu.ambient[2] = ambient_[2];
+    // ambient.w was padding until ADR-0078 section 2: 1.0 when the forward shader should read the
+    // split-sum sky specular instead of the m19.6b mirror. It needs a sky to filter, so the flag is
+    // the AND of the setting and "a sky is on" -- the same expression the bake below is gated by,
+    // computed once so the two cannot disagree.
+    //
+    // And only when the forward pass is the one that mirrors the sky: with SSR on its sky term is
+    // compiled out (ssr_resolve reflects instead), and with DDGI on the term sits in a branch that
+    // is not taken. Building the chain for those frames would be work nothing reads.
+    const bool forward_mirrors_sky =
+        !lighting_.ssr_enabled && !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
+    const bool sky_specular_live = sky_specular_prefilter_enabled_ && forward_mirrors_sky &&
+                                   (sky_params_.enabled || scene.has_sky);
+    fu.ambient[3] = sky_specular_live ? 1.0f : 0.0f;
 
     const auto ndir = static_cast<std::uint32_t>(
         std::min<std::size_t>(scene.dir_lights.size(), kMaxDirectionalLights));
@@ -717,7 +730,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // Either way a SkyLightBinding comes out — the real bake, or the all-zero placeholder whose
     // flag makes every consumer take its pre-m17.7b constant-ambient path (ADR-0032 §11).
     const SkyLightBinding sky_binding =
-        sky_on ? sky_.add_lighting(graph, sp, ski) : sky_.empty_binding(graph);
+        sky_on ? sky_.add_lighting(graph, sp, ski, sky_specular_live) : sky_.empty_binding(graph);
 
     // DDGI probes (m10.5a trace-and-store, m10.5b consume): a fifth, independent gate, NESTED
     // inside sdf_clipmap_enabled — DDGI sphere-traces the SAME field the block above steps, so it

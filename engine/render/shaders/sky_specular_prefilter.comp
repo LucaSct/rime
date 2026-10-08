@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The prefiltered sky specular chain (ADR-0078 section 2): the FIRST HALF of the split-sum
+// approximation.
+//
+// THE PROBLEM. A rough mirror does not reflect one direction of the sky, it reflects a whole GGX
+// lobe of directions, averaged. Doing that average per pixel per frame (hundreds of sky samples)
+// is unaffordable, and doing it ALIASED (one sample) is the sparkle ADR-0078 exists to remove.
+//
+// THE IDEA (Karis, "Real Shading in Unreal Engine 4", SIGGRAPH 2013). The reflected radiance is
+//     L_o = integral of L_i(l) * f(l,v) * (n.l) dl.
+// Split it into (the sky averaged over the lobe) x (the BRDF integrated against a WHITE sky). The
+// second factor does not depend on the sky at all -- it is the DFG table (sky_specular_dfg.comp).
+// The first depends only on the reflection direction and the roughness, so it can be BAKED:
+// one filtered copy of the sky per roughness, and the shader reads the copy for the roughness it
+// has. Preconvolved copies indexed by roughness are what we call a mip chain here: mip 0 is the
+// sky itself (a zero-width lobe filters to itself), mips 1..N-1 are increasingly blurred.
+//
+// THE TWO ASSUMPTIONS THAT MAKE THE BAKE POSSIBLE, and what they cost. The true lobe depends on
+// the view direction. Setting n = v = r removes that dependence, at the price that the lobe is
+// always symmetric about the reflection vector: real lobes stretch toward grazing angles. (The
+// shader compensates part of that by bending r toward n for rough surfaces; see
+// sky_specular_eval.glsl.) We also weight each sample by n.l, which keeps the estimate the
+// *energy-weighted* mean and makes a constant sky filter to exactly that constant.
+//
+// THE ESTIMATOR. For each output texel (direction n), draw GGX half-vectors h by importance
+// sampling, reflect v = n about h to get l, and average sky(l) weighted by n.l, normalised by the
+// sum of the weights. Normalising by the weights actually used (rather than by N) is what makes
+// the white-furnace property EXACT: for a constant sky every term is the same constant, so the
+// ratio is that constant to float precision however many samples were rejected.
+//
+// THE SOURCE and the output share the sky-view LUT's parameterisation (sky_mapping.glsl), so a
+// consumer looks both up with the SAME uv. The output is a 2-D array, one layer per roughness
+// level: the RHI binds a storage image per texture, not per mip, so layers are how the chain is
+// writable here, and a sampler2DArray plus one manual lerp between two layers IS trilinear
+// filtering across the chain.
+//
+// WHAT IS NOT DONE. This is plain importance sampling; the refinement that picks a blurrier SOURCE
+// mip for low-pdf samples (Krivanek & Colbert, "Real-time shading with filtered importance
+// sampling", 2008) is not used, because the source here is the sky-view LUT -- smooth by
+// construction (the sun's disc is excluded, see sky_skyview.comp) -- and the Hammersley set
+// integrates a smooth function without it. A source with a sharp bright feature would need it.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "sky_mapping.glsl" // skyview_direction_from_uv / skyview_uv_from_direction
+#include "sky_specular_sampling.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// One layer per filtered roughness level. RGB = filtered radiance. ALPHA IS A COUNTER, not opacity:
+// the fraction of this texel's samples that were accepted (landed in the n.l > 0 hemisphere).
+// 0.0 means every sample was rejected and the texel fell back to an unfiltered lookup -- a path
+// that must never be taken for a valid lobe, and that a test reads back and asserts is empty.
+layout(rgba16f, set = 0, binding = 0) writeonly uniform image2DArray out_levels;
+layout(set = 0, binding = 1) uniform sampler2D source;
+
+layout(std140, set = 0, binding = 2) uniform PrefilterParams {
+    // x = number of roughness levels INCLUDING mip 0 (so the array holds x - 1 layers),
+    // y = importance samples per texel.
+    uvec4 counts;
+} params;
+
+void main() {
+    const ivec3 id = ivec3(gl_GlobalInvocationID);
+    const ivec3 size = imageSize(out_levels);
+    if (any(greaterThanEqual(id, size))) {
+        return;
+    }
+
+    // Layer l holds mip l + 1, and mip m is the lobe of PERCEPTUAL roughness m / (mips - 1). The
+    // GGX width is its square (alpha = roughness^2, the same remap brdf.glsl shades with).
+    const float roughness = float(id.z + 1) / float(params.counts.x - 1u);
+    const float alpha = roughness * roughness;
+    const uint sample_count = params.counts.y;
+
+    const vec2 uv = (vec2(id.xy) + 0.5) / vec2(size.xy);
+    const vec3 n = skyview_direction_from_uv(uv);
+
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    uint accepted = 0u;
+    for (uint i = 0u; i < sample_count; ++i) {
+        const vec3 h =
+            tangent_to_world(importance_sample_ggx_half(hammersley(i, sample_count), alpha), n);
+        // v = n: reflect it about h. Below the horizon of n (n.l <= 0) the sample contributes no
+        // light to a surface facing n, so it is REJECTED -- and counted, below.
+        const vec3 l = 2.0 * dot(n, h) * h - n;
+        const float n_dot_l = dot(n, l);
+        if (n_dot_l > 0.0) {
+            sum += textureLod(source, skyview_uv_from_direction(l), 0.0).rgb * n_dot_l;
+            weight += n_dot_l;
+            ++accepted;
+        }
+    }
+
+    // `weight` is zero only if every sample was rejected, which a GGX lobe about n cannot do for
+    // alpha <= 1 (h = n itself gives l = n). The fallback keeps a NaN out of the chain if that ever
+    // changes, and a zero alpha below makes the event visible instead of silent.
+    const bool degenerate = weight <= 0.0;
+    const vec3 rgb = degenerate ? textureLod(source, uv, 0.0).rgb : sum / weight;
+    imageStore(out_levels, id, vec4(rgb, float(accepted) / float(sample_count)));
+}

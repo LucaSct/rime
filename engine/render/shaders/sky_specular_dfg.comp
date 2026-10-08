@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The DFG lookup table (ADR-0078 section 2): the SECOND HALF of the split-sum approximation.
+//
+// WHAT IT STORES. Karis' split sum factors a surface's environment reflection into
+//     (sky averaged over the GGX lobe)  x  (the BRDF integrated against a WHITE sky).
+// The second factor depends on three things only: n.v, roughness, and the Fresnel f0. Because
+// Schlick's Fresnel is linear in f0 -- F = f0 + (1 - f0) (1 - v.h)^5 -- it splits into
+//     integral = f0 * A(n.v, roughness) + B(n.v, roughness),
+//     A = integral of D G/(4 n.v n.l) * (n.l) * (1 - Fc) dl,     B = same with Fc,
+//     Fc = (1 - v.h)^5.
+// So the whole 3-D function collapses to a 2-D table of two numbers. "DFG" names the terms in the
+// BRDF it integrates: the Distribution, Fresnel and Geometry factors. D and G here are exactly
+// brdf.glsl's, so a surface lit by direct lights and by the sky uses ONE BRDF.
+//
+// WHY ON THE GPU, AT RUNTIME. The table is a pure function of constants: it depends on neither the
+// sky nor the scene. It could be baked into a file, but then it would be a binary blob whose
+// provenance nobody can read. 64 x 64 texels x 256 samples is ~1M evaluations -- microseconds on a
+// GPU, run once per device -- so the table is simply COMPUTED, and this file is its documentation.
+//
+// THE ESTIMATOR. Importance-sample h from D (sky_specular_sampling.glsl). The pdf of the reflected
+// direction l is D (n.h) / (4 v.h); dividing the integrand by it leaves
+//     G_vis = V * 4 * (n.l) * (v.h) / (n.h),     V = brdf.glsl's height-correlated visibility
+// per sample, accumulated into A (weighted 1 - Fc) and B (weighted Fc).
+//
+// TEXEL CONVENTION. Texel (x, y) is the integral at n.v = (x + 0.5) / N and roughness =
+// (y + 0.5) / N, so a shader looks it up with uv = (n.v, roughness) directly and bilinear filtering
+// interpolates between true samples; no inverse remap, no off-by-half-a-texel.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "sky_specular_sampling.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// R = A (the f0 scale), G = B (the bias), B = fraction of samples accepted (n.l, n.h, v.h all
+// positive) -- a COUNTER a test reads back, like the prefilter's alpha -- and A = 1.
+layout(rgba16f, set = 0, binding = 0) writeonly uniform image2D out_dfg;
+
+layout(std140, set = 0, binding = 1) uniform DfgParams {
+    uvec4 counts; // x = importance samples per texel
+} params;
+
+void main() {
+    const ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(out_dfg);
+    if (any(greaterThanEqual(id, size))) {
+        return;
+    }
+
+    const float n_dot_v = (float(id.x) + 0.5) / float(size.x);
+    const float roughness = (float(id.y) + 0.5) / float(size.y);
+    const float alpha = roughness * roughness;
+    const uint sample_count = params.counts.x;
+
+    // Tangent space with n = +z. v lies in the x-z plane: the lobe is isotropic about n, so the
+    // azimuth of v is a free choice and this one is the cheapest.
+    const vec3 v = vec3(sqrt(max(0.0, 1.0 - n_dot_v * n_dot_v)), 0.0, n_dot_v);
+
+    float a = 0.0;
+    float b = 0.0;
+    uint accepted = 0u;
+    for (uint i = 0u; i < sample_count; ++i) {
+        const vec3 h = importance_sample_ggx_half(hammersley(i, sample_count), alpha);
+        const vec3 l = 2.0 * dot(v, h) * h - v;
+        const float n_dot_l = l.z;
+        const float n_dot_h = h.z;
+        const float v_dot_h = dot(v, h);
+        if (n_dot_l > 0.0 && n_dot_h > 0.0 && v_dot_h > 0.0) {
+            const float g_vis =
+                v_smith_ggx(n_dot_v, n_dot_l, alpha) * 4.0 * n_dot_l * v_dot_h / n_dot_h;
+            const float fc = pow(1.0 - v_dot_h, 5.0);
+            a += (1.0 - fc) * g_vis;
+            b += fc * g_vis;
+            ++accepted;
+        }
+    }
+    const float inv = 1.0 / float(sample_count);
+    imageStore(out_dfg, id, vec4(a * inv, b * inv, float(accepted) * inv, 1.0));
+}

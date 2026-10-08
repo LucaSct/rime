@@ -145,7 +145,7 @@ constexpr std::uint64_t kSkyShBytes = 10 * 4 * sizeof(float);
 
 } // namespace
 
-SkyPass::SkyPass(rhi::Device& device) : device_(device) {
+SkyPass::SkyPass(rhi::Device& device) : device_(device), specular_(device) {
     rhi::ShaderDesc vs{};
     vs.stage = rhi::ShaderStage::Vertex;
     vs.spirv = fullscreen_vert_spv;
@@ -473,8 +473,10 @@ void SkyPass::ensure_lighting_resources() {
     sh_state_ = rhi::ResourceState::Undefined;
 }
 
-SkyLightBinding
-SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInputs& inputs) {
+SkyLightBinding SkyPass::add_lighting(RenderGraph& graph,
+                                      const SkyParams& params,
+                                      const SkyInputs& inputs,
+                                      bool prefiltered_specular) {
     ensure_lighting_resources();
 
     const RGTexture lut_rg = graph.import_texture(skyview_lut_, skyview_state_);
@@ -578,7 +580,10 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
         } else if (transmittance_dirty) {
             transmittance_state_ = rhi::ResourceState::StorageReadWrite;
         }
-        return SkyLightBinding{lut_rg, sh_rg, lut_sampler_};
+        return SkyLightBinding{lut_rg,
+                               sh_rg,
+                               lut_sampler_,
+                               service_specular(graph, lut_rg, prefiltered_specular, false)};
     }
 
     const GpuSkyUniforms u = fill_uniforms(params, inputs);
@@ -666,7 +671,29 @@ SkyPass::add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInpu
     baked_inputs_ = inputs;
     has_bake_ = true;
     ++stats_.filled;
-    return SkyLightBinding{lut_rg, sh_rg, lut_sampler_};
+    return SkyLightBinding{
+        lut_rg, sh_rg, lut_sampler_, service_specular(graph, lut_rg, prefiltered_specular, true)};
+}
+
+SkySpecularBinding
+SkyPass::service_specular(RenderGraph& graph, RGTexture lut_rg, bool enabled, bool lut_rebaked) {
+    if (!enabled) {
+        // Off must not strand a chain of an EARLIER sky: if the LUT moved while nobody filtered it,
+        // the next enabled frame has to rebuild, not reuse.
+        if (lut_rebaked) {
+            specular_.mark_stale();
+        }
+        return specular_.empty_binding(graph);
+    }
+    const std::uint32_t filled_before = specular_.stats().prefilter_filled;
+    const SkySpecularBinding binding = specular_.add(graph, lut_rg, lut_rebaked);
+    // The prefilter SAMPLES the LUT, so a frame that filters leaves it in ShaderRead rather than in
+    // the compute-write layout the bake alone would have. (A frame that reused the chain declared
+    // no read, and the state stays whatever the last consumer reported.)
+    if (specular_.stats().prefilter_filled != filled_before) {
+        skyview_state_ = rhi::ResourceState::ShaderRead;
+    }
+    return binding;
 }
 
 SkyLightBinding SkyPass::empty_binding(RenderGraph& graph) {
@@ -676,7 +703,8 @@ SkyLightBinding SkyPass::empty_binding(RenderGraph& graph) {
     // one-time write at construction.
     return SkyLightBinding{graph.import_texture(dummy_skyview_, rhi::ResourceState::ShaderRead),
                            graph.import_buffer(dummy_sh_, rhi::ResourceState::ShaderRead),
-                           lut_sampler_};
+                           lut_sampler_,
+                           specular_.empty_binding(graph)};
 }
 
 } // namespace rime::render

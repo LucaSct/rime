@@ -117,7 +117,8 @@ private:
                                                             rhi::TextureHandle texture,
                                                             std::uint32_t width,
                                                             std::uint32_t height,
-                                                            std::uint32_t bytes_per_pixel) {
+                                                            std::uint32_t bytes_per_pixel,
+                                                            std::uint32_t base_layer = 0) {
     const std::uint64_t bytes = static_cast<std::uint64_t>(width) * height * bytes_per_pixel;
     rhi::BufferDesc rbd{};
     rbd.size = bytes;
@@ -126,7 +127,7 @@ private:
     rbd.debug_name = "render-test-readback";
     const rhi::BufferHandle rb = device.create_buffer(rbd);
     auto cmd = device.begin_commands();
-    cmd->copy_texture_to_buffer(texture, rb);
+    cmd->copy_texture_to_buffer(texture, rb, base_layer);
     device.submit_blocking(*cmd);
     std::vector<std::uint8_t> out(bytes);
     device.read_buffer(rb, out.data(), out.size(), 0);
