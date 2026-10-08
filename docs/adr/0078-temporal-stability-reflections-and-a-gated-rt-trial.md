@@ -280,5 +280,15 @@ is a separate, later brick and is not started.
 - *m19.6b's SSR on/off bound:* unchanged and still asserted, now pinned to the chain-off path its
   derivation (env_brdf_approx against Schlick) describes. The chain-on counterpart is the new case
   "ADR-0078 s2: with the prefiltered chain on, SSR on and SSR off mirror the sky alike".
-- *Default ON, and the cost it owes:* see `docs/perf/` for the Release run this brick filed.
+- *Default ON, and the cost it owed:* no committed perf sample exercises the chain -- `the-block` and
+  `lit-rooms` run DDGI, where neither reader touches it, and a `scripts/perf.sh --sample the-block` run
+  on this branch shows no `sky-specular-prefilter` pass at all (and failed its gate on an unstable GPU
+  clock and CPU-side sim time, neither related) -- so no `docs/perf/` JSON is filed and none would
+  say anything about this change. What was measured instead is a probe, `sky specular: per-pass GPU
+  cost of the lookup` (`RIME_PERF_PROBE=1`, Release, RTX 3060, 1080p, a rough-metal floor under a clear
+  sky, median of 40 frames after 8 warm-up, clocks NOT pinned, so read it as a bound, not a figure):
+  the forward pass 0.075 ms -> 0.082 ms (+0.007 ms) and `ssr-resolve` 0.80 ms -> 0.79 ms (no difference
+  outside the noise) with the chain on. The bake itself is a one-off on an unchanged sky and 1.6-1.8 ms
+  on a frame where the sky changed (previous brick's measurement, unchanged); a scrolling cloud field
+  still re-bakes every frame, and the levers named there still apply.
 

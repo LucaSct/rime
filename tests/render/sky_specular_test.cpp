@@ -38,9 +38,11 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "render_test_support.hpp"
@@ -1127,4 +1129,94 @@ TEST_CASE("sky specular: with SSR and DDGI on the setting changes nothing and bu
     CHECK(on_renderer.sky_specular_stats().prefilter_filled == 0);
     CHECK(on_renderer.sky_specular_stats().dfg_filled == 0);
     CHECK(on_renderer.sky_specular_stats().disabled_frames == 1);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// A MEASUREMENT, NOT A PROOF: what the chain's per-pixel lookup costs the pass that reads it.
+//
+// ADR-0078 owes the first brick that turns the chain on a Release perf run, and no committed
+// sample exercises it (the-block and lit-rooms run DDGI, where neither reader touches the chain).
+// So this probe renders a full-HD rough-metal floor under a sky and prints the median GPU time of
+// the reading pass and of the bake, chain on against chain off, for SSR on and off. It asserts
+// nothing about time -- a time is a property of one GPU -- and is skipped unless RIME_PERF_PROBE
+// is set, because on lavapipe or a Debug build the numbers mean nothing and 1080p is slow.
+//
+//   RIME_PERF_PROBE=1 ./build/release/bin/rime_render_tests -tc="sky specular: per-pass*"
+TEST_CASE("sky specular: per-pass GPU cost of the lookup, chain on against off (probe)") {
+    if (std::getenv("RIME_PERF_PROBE") == nullptr) {
+        MESSAGE("RIME_PERF_PROBE not set -- skipping the per-pass cost probe");
+        return;
+    }
+    auto device = device_or_skip("the per-pass cost probe");
+    if (!device)
+        return;
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "sky-specular-perf-floor");
+    MaterialRegistry materials;
+    PbrMaterialDesc md{};
+    md.base_color[0] = md.base_color[1] = md.base_color[2] = 0.9f;
+    md.metallic = 1.0f;
+    md.roughness = 0.5f;
+    const MaterialId mat = materials.add(md);
+
+    constexpr std::uint32_t kWidth = 1920;
+    constexpr std::uint32_t kHeight = 1080;
+    constexpr int kWarm = 8;
+    constexpr int kFrames = 40;
+
+    const auto median_ms = [](std::vector<double> v) {
+        if (v.empty())
+            return 0.0;
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+
+    for (const bool ssr : {false, true}) {
+        for (const bool chain : {false, true}) {
+            LightingSettings ls;
+            ls.ssr_enabled = ssr;
+            ls.ssr_max_distance = 8.0f;
+            ls.ssr_thickness = 0.5f;
+            ls.ssr_max_steps = 64;
+            SceneRenderer renderer(*device, meshes, materials);
+            render::test::disable_temporal_aa(renderer);
+            renderer.set_lighting(ls);
+            renderer.set_sky(clear_sky());
+            renderer.set_sky_specular_prefilter_enabled(chain);
+
+            std::vector<double> reader, total;
+            for (int i = 0; i < kWarm + kFrames; ++i) {
+                ecs::World world;
+                register_render_components(world);
+                (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{floor}, MaterialRef{mat});
+                core::Transform cam{};
+                cam.translation = {0.0f, 1.0f, 0.0f};
+                (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{1.1f, 0.1f, 100.0f, true});
+                RenderGraph graph(*device);
+                graph.reset();
+                const SceneRenderer::Output out = renderer.render(graph, world, {kWidth, kHeight});
+                graph.export_texture(out.hdr);
+                auto cmd = device->begin_commands();
+                graph.execute(*cmd);
+                const auto timings = graph.submit_and_time(*device, std::move(cmd));
+                if (i < kWarm)
+                    continue;
+                double sum = 0.0;
+                double pass = 0.0;
+                for (const auto& t : timings) {
+                    sum += t.gpu_ms;
+                    if (t.name == (ssr ? "ssr-resolve" : "forward-pbr shadowed"))
+                        pass = t.gpu_ms;
+                }
+                reader.push_back(pass);
+                total.push_back(sum);
+            }
+            MESSAGE("1080p rough metal, SSR "
+                    << (ssr ? "on " : "off") << " chain " << (chain ? "on " : "off") << ": "
+                    << std::string(ssr ? "ssr-resolve" : "forward-pbr shadowed") << " median "
+                    << median_ms(reader) << " ms, all passes median " << median_ms(total)
+                    << " ms; chain bakes " << renderer.sky_specular_stats().prefilter_filled
+                    << " (unchanged sky: bake is one-off)");
+        }
+    }
 }
