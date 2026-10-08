@@ -32,8 +32,13 @@
 name: CI (self-hosted)
 
 on:
+  # EVERY branch, not just main and feat/**. The narrow filter was a coverage HOLE the moment the
+  # hosted Linux jobs stopped duplicating this workflow: a branch named fix/..., ci/..., perf/...
+  # matched neither pattern, so it got no Linux build and no sanitizer from anywhere. #283 and #284
+  # both merged that way -- 8 checks each, all of them hosted, none self-hosted -- which is exactly
+  # the kind of gap that reads as "green" until you list the check NAMES rather than count them.
+  # Fork code is still kept out by the actor guard on each job below, not by this filter.
   push:
-    branches: [main, "feat/**"]
   workflow_dispatch:
     inputs:
       runner_label:
