@@ -92,7 +92,8 @@ HdrImage render_hdr(rhi::Device& device,
                     ecs::World& world,
                     std::uint32_t size) {
     SceneRenderer renderer(device, meshes, materials);
-    renderer.set_ambient(0.0f, 0.0f, 0.0f); // the proofs read the SPECULAR lobe alone
+    render::test::disable_temporal_aa(renderer); // compares the plain frame (ADR-0078 1e)
+    renderer.set_ambient(0.0f, 0.0f, 0.0f);      // the proofs read the SPECULAR lobe alone
     RenderGraph graph(device);
     graph.reset();
     const SceneRenderer::Output out = renderer.render(graph, world, {size, size}, true);

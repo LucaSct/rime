@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <vector>
 
+#include "render_test_support.hpp"
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/transform.hpp"
 #include "rime/ecs/transform.hpp"
@@ -195,6 +196,7 @@ TEST_CASE("gizmo: handles, highlight, and tint render at computed pixels (m9.6b,
     (void)world.spawn_with(at_tf(2.0f, 1.5f, 8.0f), Camera{});
 
     SceneRenderer renderer(*device, meshes, materials);
+    render::test::disable_temporal_aa(renderer); // compares the plain frame (ADR-0078 1e)
     renderer.set_ambient(0.06f, 0.06f, 0.07f);
     GizmoRenderer gizmos(*device, meshes);
     RenderGraph graph(*device);

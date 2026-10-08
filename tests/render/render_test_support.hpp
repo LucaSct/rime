@@ -89,6 +89,16 @@ namespace rime::render::test {
     return out;
 }
 
+// ADR-0078 step 1e turned jitter, motion vectors and the TAA resolve ON by default. A proof about
+// something else (culling, a BRDF, the sky, a pass order...) that compares pixels exactly or reads
+// one pixel's value wants the plain frame, so it switches the temporal features OFF explicitly --
+// which is exactly what those setters are for now.
+template <typename Renderer> inline void disable_temporal_aa(Renderer& r) {
+    r.set_taa_resolve_enabled(false);
+    r.set_motion_vectors_enabled(false);
+    r.set_temporal_jitter_enabled(false);
+}
+
 // A decoded HDR image: linear radiance per channel.
 struct HdrImage {
     std::uint32_t width = 0;

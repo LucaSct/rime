@@ -73,6 +73,10 @@ struct View {
         // Ambient only: every visible face of the white cube has the SAME radiance, so an object
         // reads as one flat level against the clear colour and "coverage" is well defined.
         renderer.set_ambient(0.5f, 0.5f, 0.5f);
+        // Since ADR-0078 step 1e the defaults are ON. `ref` must be the RAW jittered stream, so the
+        // resolve and the velocity buffer are switched off here; Rig turns them on for `taa` only.
+        renderer.set_motion_vectors_enabled(false);
+        renderer.set_taa_resolve_enabled(false);
         renderer.set_temporal_jitter_enabled(true);
     }
 
@@ -332,7 +336,9 @@ TEST_CASE("taa resolve: off allocates nothing, declares nothing, and changes no 
         tf.translation = {0.0f, 0.0f, -6.0f};
         (void)v->world.spawn_with(ecs::WorldTransform{tf}, MeshRef{v->cube}, MaterialRef{v->mat});
     }
-    REQUIRE_FALSE(never.renderer.taa_resolve_enabled()); // the default
+    // The View ctor switches the feature off (the default is ON since step 1e), so `never` is a
+    // renderer that has had it off from the start and never switched it on.
+    REQUIRE_FALSE(never.renderer.taa_resolve_enabled());
     CHECK_FALSE(never.renderer.taa_history_allocated());
 
     toggled.renderer.set_motion_vectors_enabled(true);

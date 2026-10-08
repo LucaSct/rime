@@ -215,9 +215,11 @@ TEST_CASE("temporal jitter: off changes nothing, on jitters the view-proj but ne
     // Bisect (jitter OFF) for the world x where the cube just becomes visible, then step in by a
     // quarter of a pixel's width at that depth: close enough that a half-pixel frustum wobble would
     // flip it, far enough that float noise cannot.
-    REQUIRE_FALSE(renderer.temporal_jitter_enabled()); // the default
-    float lo = -30.0f;                                 // culled
-    float hi = 0.0f;                                   // visible
+    // The default is ON since ADR-0078 step 1e; this bisect needs the fixed (jitter OFF) camera.
+    REQUIRE(renderer.temporal_jitter_enabled());
+    renderer.set_temporal_jitter_enabled(false);
+    float lo = -30.0f; // culled
+    float hi = 0.0f;   // visible
     set_cube_x(lo);
     REQUIRE(culled_in_one_frame() == 1);
     set_cube_x(hi);

@@ -207,6 +207,7 @@ TEST_CASE("m13.2a: culling is invisible — on and off render byte-identical pix
                            PointLight{1.0f, 1.0f, 1.0f, 80.0f, 60.0f});
 
     SceneRenderer renderer(*device, meshes, materials);
+    render::test::disable_temporal_aa(renderer); // compares the plain frame (ADR-0078 1e)
 
     const auto frame = [&](bool cull) {
         renderer.set_culling_enabled(cull);

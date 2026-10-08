@@ -448,6 +448,7 @@ TEST_CASE("sky: clouds draw, and coverage is the knob that turns them off (m17.0
         };
     };
     SceneRenderer renderer(*device, meshes, materials);
+    render::test::disable_temporal_aa(renderer); // compares the plain frame (ADR-0078 1e)
 
     const HdrImage clear = render_hdr(*device, renderer, build(false, 0.0f));
     const HdrImage overcast = render_hdr(*device, renderer, build(true, 0.90f));

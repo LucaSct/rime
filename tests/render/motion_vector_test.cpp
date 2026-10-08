@@ -373,7 +373,15 @@ TEST_CASE("motion vectors: off creates no target, keeps no cache, and changes no
     if (!s)
         return;
     const ecs::Entity cube = s->spawn_cube({0.0f, 0.0f, -6.0f});
-    REQUIRE_FALSE(s->renderer.motion_vectors_enabled()); // the default
+    // Since ADR-0078 step 1e the default is ON; this proof is about the OFF state, so switch it off
+    // before the first frame (the cache must then stay empty from the start).
+    REQUIRE(s->renderer.motion_vectors_enabled());
+    s->renderer.set_motion_vectors_enabled(false);
+    // Jitter and the resolve are ON by default too, and both change the colour of consecutive
+    // frames (the sample position moves; the resolve blends history). This proof is about the
+    // velocity pass alone, so the other two are switched off to leave it the only variable.
+    s->renderer.set_temporal_jitter_enabled(false);
+    s->renderer.set_taa_resolve_enabled(false);
 
     s->move_cube_to(cube, {0.2f, 0.0f, -6.0f});
     const Frame off = s->render();

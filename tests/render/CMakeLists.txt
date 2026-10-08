@@ -15,6 +15,7 @@ rime_add_test(rime_render_tests
     temporal_jitter_test.cpp
     motion_vector_test.cpp
     taa_resolve_test.cpp
+    taa_default_on_test.cpp
     micro_triangle_test.cpp
     virtual_geometry_selection_test.cpp
     virtual_geometry_residency_test.cpp

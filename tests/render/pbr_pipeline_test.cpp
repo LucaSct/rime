@@ -34,6 +34,7 @@
 #include <filesystem>
 #include <vector>
 
+#include "render_test_support.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/manifest.hpp"
 #include "rime/core/jobs/job_system.hpp"
@@ -266,6 +267,7 @@ TEST_CASE("pbr: sphere-grid structural proofs (M5.6)") {
                            PointLight{1.0f, 1.0f, 1.0f, kIntensity, 30.0f});
 
     SceneRenderer renderer(*device, meshes, materials);
+    render::test::disable_temporal_aa(renderer); // compares the plain frame (ADR-0078 1e)
     renderer.set_ambient(kAmbient, kAmbient, kAmbient);
 
     // ── Frame 1: with the depth pre-pass ──────────────────────────────────────────────────
