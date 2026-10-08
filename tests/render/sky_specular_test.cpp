@@ -1061,6 +1061,7 @@ TEST_CASE("sky specular: with SSR on the setting changes nothing and builds noth
     ls.ssr_thickness = 0.5f;
     ls.ssr_max_steps = 64;
     SceneRenderer renderer(*device, meshes, materials);
+    render::test::disable_temporal_aa(renderer); // compares the plain frame (ADR-0078 1e)
     renderer.set_lighting(ls);
     renderer.set_sky(clear_sky());
 
