@@ -117,6 +117,18 @@ five minutes.
 A `workflow_dispatch` pin still overrides the label, deliberately: pinning ASan to starbase is how
 the ceiling gets re-measured, and it should keep failing there until the ceiling changes.
 
+**The cost of this pin, and what pays for it.** `bigmem` is carried only by the workstation, and the
+workstation gets switched off — so pinning ASan there means that with the machine asleep, an owner's
+branch push gets no ASan from anywhere: the job queues (for up to 24 hours) and then fails.
+
+That is acceptable before the code is in `main` and not after, so `ci.yml` keeps its **hosted** ASan
+for **pushes to `main`**. Unlike every other job in that pair, which are exact complements on
+`github.actor`, this one is deliberately **redundant**: a merge runs both. Nothing blocks merges in
+this repository, so without the exception a merge could land with its only ASan job queued against a
+sleeping machine, and "queued 24 h, then failed" would arrive long after the merge did. Every merge
+therefore gets one ASan that depends on no machine being awake, at ~37 hosted minutes per merge
+rather than per push.
+
 **`OOMPolicy=continue` is the other half, and it is the part worth copying.** systemd's default is
 `OOMPolicy=stop`, which kills the whole *service* when any process in its cgroup is OOM-killed. That
 turned one over-budget test into `##[error]The runner has received a shutdown signal` attributed to

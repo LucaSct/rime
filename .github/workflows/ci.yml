@@ -141,12 +141,24 @@ jobs:
     # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
     # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
     # full hosted matrix before it can be merged.
-    # ...and skip it entirely for our own pushes and pull requests: the self-hosted ASan job
-    # covers them in 8 minutes against this job's 37. A fork pull request, which cannot reach the
-    # self-hosted runners, still gets sanitized here.
+    # ...and skip it for our own BRANCH work, where the self-hosted ASan job covers us in 10 min
+    # against this job's 37. A fork pull request, which cannot reach the self-hosted runners, still
+    # gets sanitized here.
+    #
+    # A PUSH TO MAIN IS THE EXCEPTION, and unlike every other job in this pair it is deliberately
+    # REDUNDANT rather than complementary. ASan is the one Linux job that does not fit the
+    # always-on runner: its working set exceeds the starbase container's 8 GB, so
+    # ci-self-hosted.yml pins it to the `bigmem` label, which only the workstation carries (see
+    # docs/ci/self-hosted-runners.md). The workstation gets switched off. Without this exception a
+    # merge could land with its only ASan job queued against a sleeping machine — and since nothing
+    # blocks merges here, "queued for 24 h then failed" would arrive long after the merge did.
+    # Every merge therefore gets one ASan that depends on no machine being awake. Branch pushes
+    # still get the fast one, or none if the workstation is off, which is a cost paid before the
+    # code is in main rather than after.
     if: |
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
-      && github.actor != github.repository_owner
+      && (github.actor != github.repository_owner
+          || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     steps:
       - uses: actions/checkout@v4
 
