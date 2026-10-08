@@ -769,6 +769,37 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         ddgi_binding = ddgi_.empty_binding(graph);
     }
 
+    // No hidden work when OFF. SdfClipmap::add above is still controlled by its own setting;
+    // requesting occlusion does not implicitly build a field the caller has disabled.
+    SdfSpecularOcclusionBinding sdf_occlusion{};
+    if (!sdf_specular_occlusion_enabled_) {
+        ++sdf_specular_occlusion_stats_.disabled_frames;
+    } else {
+        bool valid_field = lighting_.sdf_clipmap_enabled;
+        for (std::uint32_t i = 0; i < kSdfClipmapLevels; ++i)
+            valid_field = valid_field && sdf_clipmap_.level(i).texture.is_valid() &&
+                          sdf_clipmap_.level_state(i) != rhi::ResourceState::Undefined;
+        // All three must be valid because the shared sampler searches fine-to-coarse. This is
+        // stronger than merely "some level exists" and prevents a partially initialized read.
+        if (!valid_field) {
+            ++sdf_specular_occlusion_stats_.unavailable_frames;
+        } else if (!sky_on || has_ddgi) {
+            ++sdf_specular_occlusion_stats_.no_reader_frames;
+        } else {
+            const GpuSdfClipmapLevels levels = sdf_clipmap_.gpu_levels();
+            sdf_occlusion.params = graph.push_frame_data(&levels, sizeof(levels));
+            sdf_occlusion.sampler = sdf_clipmap_.trace_sampler();
+            for (std::uint32_t i = 0; i < kSdfClipmapLevels; ++i) {
+                sdf_occlusion.levels[i] = graph.import_texture(sdf_clipmap_.level(i).texture,
+                                                             sdf_clipmap_.level_state(i));
+                // Exactly one sky reader will sample these imports this frame; keep the owner
+                // authoritative so the next recompose starts from the real sampled layout.
+                sdf_clipmap_.note_level_state(i, rhi::ResourceState::ShaderRead);
+            }
+            ++sdf_specular_occlusion_stats_.enabled_frames;
+        }
+    }
+
     // ── Declare the frame ─────────────────────────────────────────────────────────────────
     // The SHADOW view: every draw, because a caster outside the camera's frustum still casts into
     // it. See the partition note above.
@@ -903,7 +934,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                               ddgi_binding,
                               sky_binding,
                               gbuffer,
-                              gbuffer_material);
+                              gbuffer_material,
+                              &sdf_occlusion);
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }
@@ -975,7 +1007,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                  gbuffer_material,
                  sky_binding.specular,
                  sky_binding.sampler,
-                 sky_specular_live);
+                 sky_specular_live,
+                 sdf_occlusion);
         tonemap_src = hdr_ssr;
     }
 

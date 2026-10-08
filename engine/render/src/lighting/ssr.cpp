@@ -13,6 +13,7 @@
 #include "rime/core/math/mat.hpp"
 #include "rime/render/passes.hpp" // kHdrFormat — the resolve target's format
 #include "ssr_resolve.frag.spv.h"
+#include "ssr_resolve_sdf.frag.spv.h"
 
 namespace rime::render {
 
@@ -62,6 +63,19 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
     pd.debug_name = "ssr-resolve";
     pipeline_ = device.create_graphics_pipeline(pd);
 
+    fs.spirv = ssr_resolve_sdf_frag_spv;
+    fs.spirv_size_bytes = sizeof(ssr_resolve_sdf_frag_spv);
+    fs.debug_name = "ssr_resolve_sdf.frag";
+    sdf_fragment_shader_ = device.create_shader(fs);
+    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(bindings), std::end(bindings));
+    for (std::uint32_t slot = 11; slot < 14; ++slot)
+        sdf_bindings.push_back({slot, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+    sdf_bindings.push_back({14, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
+    pd.fragment_shader = sdf_fragment_shader_;
+    pd.bindings = sdf_bindings;
+    pd.debug_name = "ssr-resolve SDF sky";
+    sdf_pipeline_ = device.create_graphics_pipeline(pd);
+
     // Point + clamp: a blended depth is a fictional surface (the march must read exact depths), and
     // a ray that walks off the screen must read the border pixel, not wrap to the far side.
     rhi::SamplerDesc ss{};
@@ -73,6 +87,8 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
 }
 
 SsrPass::~SsrPass() {
+    device_.destroy(sdf_pipeline_);
+    device_.destroy(sdf_fragment_shader_);
     device_.destroy(sampler_);
     device_.destroy(pipeline_);
     device_.destroy(fragment_shader_);
@@ -95,7 +111,8 @@ void SsrPass::add(RenderGraph& graph,
                   RGTexture gbuffer_material,
                   const SkySpecularBinding& sky_specular,
                   rhi::SamplerHandle sky_specular_sampler,
-                  bool sky_specular_live) {
+                  bool sky_specular_live,
+                  const SdfSpecularOcclusionBinding& sdf_occlusion) {
     // The inverse projection is what turns a uv + depth back into a view-space position — computed
     // once here, on the CPU, rather than every one of the march's steps re-inverting it on the GPU.
     // inv_view (m10.7c) does the same job for the probe fallback: view space back to the WORLD the
@@ -130,7 +147,7 @@ void SsrPass::add(RenderGraph& graph,
     // that makes the octahedral border ring do its job, ddgi.md §3), distinct from SSR's own
     // point+clamp; depth/colour must not interpolate, the atlases must.
     const RGColorAttachment colors[] = {{out_hdr, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
-    const RGTexture sampled[] = {scene_color,
+    std::vector<RGTexture> sampled = {scene_color,
                                  gbuffer,
                                  depth,
                                  ddgi_irradiance,
@@ -139,13 +156,16 @@ void SsrPass::add(RenderGraph& graph,
                                  gbuffer_material,
                                  sky_specular.prefiltered,
                                  sky_specular.dfg};
+    if (sdf_occlusion.is_valid())
+        sampled.insert(sampled.end(), sdf_occlusion.levels.begin(), sdf_occlusion.levels.end());
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.sampled = sampled;
     graph.add_raster_pass(
         "ssr-resolve",
         desc,
-        [pipe = pipeline_,
+        [pipe = sdf_occlusion.is_valid() ? sdf_pipeline_ : pipeline_,
+         sdf_occlusion,
          ubo = ubo_slice.buffer,
          ubo_offset = ubo_slice.offset,
          smp = sampler_,
@@ -176,6 +196,11 @@ void SsrPass::add(RenderGraph& graph,
             // the table with its clamp sampler, as the forward pass does.
             cmd.bind_texture(9, graph.physical(sky_specular.prefiltered), sky_specular_sampler);
             cmd.bind_texture(10, graph.physical(sky_specular.dfg), sky_specular.dfg_sampler);
+            if (sdf_occlusion.is_valid()) {
+                for (std::uint32_t i = 0; i < kSdfClipmapLevels; ++i)
+                    cmd.bind_texture(11 + i, graph.physical(sdf_occlusion.levels[i]), sdf_occlusion.sampler);
+                cmd.bind_uniform_buffer(14, sdf_occlusion.params.buffer, sdf_occlusion.params.offset, sdf_occlusion.params.size);
+            }
             cmd.draw(3);
         });
 }

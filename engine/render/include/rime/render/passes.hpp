@@ -420,6 +420,8 @@ private:
 // pipelines: after a pre-pass it LOADS depth and tests Equal without writing (read-only depth —
 // the graph rewards that with weaker ordering); standalone it clears and writes with Less like
 // any classic forward renderer.
+struct SdfSpecularOcclusionBinding;
+
 class ForwardPbrPass {
 public:
     explicit ForwardPbrPass(rhi::Device& device);
@@ -471,12 +473,16 @@ public:
                       // base colour + metallic, for SSR's Fresnel. It travels WITH `gbuffer` —
                       // both valid or both invalid. One without the other is a caller bug: it is
                       // logged, and the pass draws the single-attachment path.
-                      RGTexture gbuffer_material = {}) const;
+                      RGTexture gbuffer_material = {},
+                      const SdfSpecularOcclusionBinding* sdf_occlusion = nullptr) const;
 
 private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
+    rhi::ShaderHandle sdf_fragment_shader_;
+    rhi::PipelineHandle pipeline_sdf_after_prepass_;
+    rhi::PipelineHandle pipeline_sdf_standalone_;
     rhi::ShaderHandle shadowed_fragment_shader_;          // pbr_forward_shadowed.frag (m10.1)
     rhi::ShaderHandle shadowed_gbuffer_fragment_shader_;  // same, -DWRITE_GBUFFER (m10.7a)
     rhi::PipelineHandle pipeline_after_prepass_;          // depth Load + Equal + no write

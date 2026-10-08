@@ -382,6 +382,21 @@ public:
         return sky_specular_prefilter_enabled_;
     }
 
+    // Opt-in (ADR-0078 section 2): the bounded cone estimator can miss distant/thin blockers,
+    // and its per-pixel GPU cost must be evaluated on the target scene before enabling it.
+    // Off selects the original shaders: no SDF reads, passes, uniforms or descriptor bindings.
+    void set_sdf_specular_occlusion_enabled(bool enabled) {
+        sdf_specular_occlusion_enabled_ = enabled;
+    }
+
+    [[nodiscard]] bool sdf_specular_occlusion_enabled() const noexcept {
+        return sdf_specular_occlusion_enabled_;
+    }
+
+    [[nodiscard]] const SdfSpecularOcclusionStats& sdf_specular_occlusion_stats() const noexcept {
+        return sdf_specular_occlusion_stats_;
+    }
+
     [[nodiscard]] const SkySpecularStats& sky_specular_stats() const noexcept {
         return sky_.specular_stats();
     }
@@ -461,6 +476,8 @@ private:
     ecs::Version sdf_instances_since_ = 0;
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
+    bool sdf_specular_occlusion_enabled_ = false;
+    SdfSpecularOcclusionStats sdf_specular_occlusion_stats_{};
     bool sky_specular_prefilter_enabled_ = true; // ADR-0078 section 2; see the setter and the ADR
     SkyParams sky_params_{};                     // m17.0; enabled=false == the pre-sky baseline
     bool cull_enabled_ = true;

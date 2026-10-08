@@ -82,6 +82,24 @@ static_assert(sizeof(GpuSdfLevel) == 32, "GpuSdfLevel must be two tightly-packed
 static_assert(sizeof(GpuSdfClipmapLevels) == kSdfClipmapLevels * 32,
               "GpuSdfClipmapLevels must be a flat array of GpuSdfLevel with no padding");
 
+// Optional sky-reader binding. Invalid params means OFF: consumers retain the original pipeline
+// and declare/bind no SDF resources. The clipmap owns the textures; the graph owns this frame's UBO.
+struct SdfSpecularOcclusionBinding {
+    std::array<RGTexture, kSdfClipmapLevels> levels{};
+    RenderGraph::FrameSlice params{};
+    rhi::SamplerHandle sampler{};
+
+    [[nodiscard]] bool is_valid() const noexcept { return params.buffer.is_valid(); }
+};
+
+// Cumulative frame counters: disabled, no field, and no sky reader are distinct skip reasons.
+struct SdfSpecularOcclusionStats {
+    std::uint64_t enabled_frames = 0;
+    std::uint64_t disabled_frames = 0;
+    std::uint64_t unavailable_frames = 0;
+    std::uint64_t no_reader_frames = 0;
+};
+
 // How much work the last add() did — the tests assert on this directly (ADR-0032 §11: "idle work
 // is a bug"). `stamps`/`clears` are compute dispatches issued this frame; `dirty_regions` is how
 // many (level, recompose-region) pairs had ANY work; `levels_recomposed` counts levels whose
@@ -147,6 +165,10 @@ public:
     // region and an unchanged snapped origin declares NOTHING — the ADR-0032 §11 "idle work is a
     // bug" rule, made structural rather than promised.
     void add(RenderGraph& graph, core::Vec3 camera_pos);
+
+    // The existing linear+clamp instance sampler also fits clipmap tracing; no new sampler is
+    // allocated by the sky feature. Consumers must report the levels' resulting resource state.
+    [[nodiscard]] rhi::SamplerHandle trace_sampler() const noexcept { return instance_sampler_; }
 
     [[nodiscard]] const SdfClipmapStats& stats() const noexcept { return stats_; }
 
