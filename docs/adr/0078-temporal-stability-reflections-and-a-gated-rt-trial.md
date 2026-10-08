@@ -325,12 +325,18 @@ is a separate, later brick and is not started.
   full GGX integral. The preceding brick's forward/resolve AA gap remains: the resolve reconstructs
   position/direction without derivatives but still does not have the widened alpha. The proof is
   flat and pure sky fallback, so it does not prove curved surfaces or mixed SSR hits.
-- *Cost, measured only on software:* Release, lavapipe, 1080p partial-screen outdoor metal, 40
-  medians after 8 warmups: forward 1.62184 -> 2.91621 ms (+1.29437), SSR resolve 2.38659 -> 3.72078 ms
-  (+1.33419). Above the ADR estimate on this environment; these are not RTX costs. No hardware GPU
-  is exposed, so target-GPU budget compliance could not be determined and no hardware baseline JSON
-  is filed. Raw diagnostic: `docs/perf/sdf-specular-occlusion/lavapipe-release-probe.txt:10`; procedure
-  and limits: its README. The timing probe is opt-in (`sky_specular_test.cpp:1496`).
+- *Cost, measured on the RTX 3060:* Release, 1080p partial-screen outdoor metal, median of 40
+  frames after 8 warmups, three runs agreeing to within 0.008 ms: forward 0.0512 -> 0.1597 ms
+  (**+0.109**), SSR resolve 0.1976 -> 0.2847 ms (**+0.087**). That is the bottom of this section's
+  own 0.1-0.35 ms estimate, so the estimate holds; the switch stays OFF for the approximation
+  limits above, not for its cost. Raw output and procedure:
+  `docs/perf/sdf-specular-occlusion/rtx3060-release-probe.txt` and its README. The probe is opt-in
+  (`sky_specular_test.cpp:1496`).
+- *The same probe on lavapipe costs ten times as much* -- +1.294 ms forward, +1.334 ms resolve
+  (`lavapipe-release-probe.txt`) -- and that software figure was the only one this brick's first
+  pass could reach, because it ran where no `/dev/dri` or `/dev/nvidia0` existed. Filed beside the
+  hardware run deliberately: taken for the brick's cost it would have read as a factor of ten over
+  budget. A software rasterizer's per-pixel loop does not predict a GPU's.
 - *Binding constraint, measured by source inspection:* appending four slots to the existing 21
   would exceed the RHI's 24-slot limit. The enabled forward variant reuses the inactive DDGI atlas
   slots 14/15 and adds 21/22 (23 total), a deliberate exception to the previous comment's request

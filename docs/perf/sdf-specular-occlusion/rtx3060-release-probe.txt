@@ -1,0 +1,22 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (engine/rhi/src/vulkan/device_vulkan.cpp:356)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (engine/rhi/src/vulkan/device_vulkan.cpp:356)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (engine/rhi/src/vulkan/device_vulkan.cpp:356)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (engine/rhi/src/vulkan/device_vulkan.cpp:126)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+tests/render/sky_specular_test.cpp:1496:
+TEST CASE:  SDF specular occlusion: per-pass GPU cost (probe)
+
+tests/render/sky_specular_test.cpp:1543: MESSAGE: SDF 1080p outdoor rough metal, SSR=false occlusion=false reader median=0.0512 ms, graph median=0.159744 ms; adapter=NVIDIA GeForce RTX 3060
+
+tests/render/sky_specular_test.cpp:1543: MESSAGE: SDF 1080p outdoor rough metal, SSR=false occlusion=true reader median=0.159744 ms, graph median=0.267264 ms; adapter=NVIDIA GeForce RTX 3060
+
+tests/render/sky_specular_test.cpp:1543: MESSAGE: SDF 1080p outdoor rough metal, SSR=true occlusion=false reader median=0.197632 ms, graph median=0.34432 ms; adapter=NVIDIA GeForce RTX 3060
+
+tests/render/sky_specular_test.cpp:1543: MESSAGE: SDF 1080p outdoor rough metal, SSR=true occlusion=true reader median=0.284672 ms, graph median=0.431104 ms; adapter=NVIDIA GeForce RTX 3060
+
+===============================================================================
+[doctest] test cases: 1 | 1 passed | 0 failed | 173 skipped
+[doctest] assertions: 0 | 0 passed | 0 failed |
+[doctest] Status: SUCCESS!
