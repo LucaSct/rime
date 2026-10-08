@@ -134,8 +134,23 @@ jobs:
   asan:
     # The 25-minute job, and therefore the one worth moving. Its own checkout path keeps its
     # sanitizer-configured build tree from fighting the plain build above.
-    name: self-hosted sanitizer (ASan + UBSan)
-    runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'rime-linux' }}"]
+    #
+    # `bigmem`, NOT `rime-linux`, and the reason is measured rather than preferred. `rime_render_tests`
+    # under ASan is a single process whose anon working set grows past 6.87 GiB (ASan's redzones and
+    # quarantine over lavapipe's host-memory framebuffers). The starbase container is capped at 8 GB
+    # because `universe/starbase/scripts/rime-ci-runner.sh` states the rule that CI must always lose
+    # to the service containers on that host -- so the job does not fit there, and giving it room
+    # would mean overriding that rule rather than respecting it. Three cgroup OOM kills on
+    # 2026-10-08 are the evidence; raising the cap 5.37 -> 7 GiB only moved the kill point, because
+    # the process grows until it meets the ceiling.
+    #
+    # It also belongs here on SPEED: 10.2 min on nextos (run 37809196770) against 26.3 min on
+    # starbase before it died. So the capability label costs a queue wait on one machine and buys
+    # both a 2.6x faster job and a job that finishes at all. starbase keeps the five small jobs.
+    #
+    # A `workflow_dispatch` pin still overrides this, deliberately: pinning ASan to starbase is how
+    # you re-measure the ceiling, and it should fail there until the ceiling changes.
+    runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'bigmem' }}"]
     if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
     timeout-minutes: 120 # ASan is 2-3x a plain build, and the starbase container is slow
     permissions:

@@ -51,50 +51,79 @@ exists for.
 
 | name | machine | labels | resources | service |
 |---|---|---|---|---|
-| `starbase` | CT 123 `rime-ci` on the Proxmox host (i7-3770K, 2012) | `self-hosted, Linux, X64, lavapipe, starbase` — **`rime-linux` deliberately removed, see below** | 6 cores (builds at `-j4`), 6 GB RAM, 120 GB, `cpuunits 50` | `actions.runner.*.service` inside the container |
-| `nextos` | the workstation (Ryzen 9 9950X3D) | `self-hosted, Linux, X64, rime-linux, lavapipe, nextos` | `CPUQuota=1600%` (16 of 32 threads), `MemoryMax=12G`, `Nice=10`, `IOSchedulingClass=idle` | `actions.runner.*.service`, account `ghrunner`, home `/var/lib/github-runner` |
+| `starbase` | CT 123 `rime-ci` on the Proxmox host (i7-3770K, 2012, 20 GB) | `self-hosted, Linux, X64, rime-linux, lavapipe, starbase` | container 6 cores (builds at `-j4`), **8 GB + 2 GB swap**, 120 GB, `cpuunits 50`; runner service `MemoryMax=7G`, `OOMPolicy=continue`, `Nice=10`, `IOSchedulingClass=idle` | `actions.runner.*.service` inside the container |
+| `nextos` | the workstation (Ryzen 9 9950X3D) | `self-hosted, Linux, X64, rime-linux, lavapipe, nextos, `**`bigmem`** | `CPUQuota=1600%` (16 of 32 threads), `MemoryMax=12G`, `Nice=10`, `IOSchedulingClass=idle` | `actions.runner.*.service`, account `ghrunner`, home `/var/lib/github-runner` |
 
-`rime-linux` is the **capability** label the workflow selects on, so any online idle runner with the
-Linux toolchain takes the job; `starbase` and `nextos` are **machine** labels, for pinning a job to
-one box when diagnosing. Jobs are not assigned to the workstation on purpose — starbase is the
-always-on half, and nothing essential depends on a machine that gets switched off.
+Two kinds of label, and the distinction is what makes the scheduling legible:
+
+- **Capability** labels are what the workflow selects on. `rime-linux` means "has the Linux
+  toolchain"; `bigmem` means "can hold a working set that does not fit in starbase's container"; and
+  `lavapipe` records that both runners pin the software rasterizer.
+- **Machine** labels — `starbase`, `nextos` — exist for pinning a job to one box when diagnosing,
+  through the workflow's `runner_label` dispatch input.
 
 Builds run at `-j4` on starbase and `-j16` on the workstation
 (`CMAKE_BUILD_PARALLEL_LEVEL`/`CARGO_BUILD_JOBS` in each service's drop-in). The starbase number is
 lower than its core count on purpose: a heavy C++20 translation unit can take 1–2 GB in g++, and
-`-j6` against 6 GB invites the OOM killer, which surfaces as a flaky *compiler error* rather than as
-"out of memory".
+`-j6` against the container's 8 GB invites the OOM killer, which surfaces as a flaky *compiler error*
+rather than as "out of memory".
 
 **Both runners pin lavapipe** (`VK_DRIVER_FILES` to the `lvp_icd` ICD) even though both machines have
 real GPUs. Rime's render proofs are structural with margins **taken against lavapipe**; letting the
 loader choose would mean a green run measured a different device depending on which machine happened
 to pick up the job. A real-GPU job is a deliberate, separately-labelled thing to add later.
 
-### starbase is not yet taking pushes, and why
+### starbase took its time to earn the shared label
 
-A cold build there is **12 minutes** including Conan from scratch and all 82 test suites — faster
-than hosted `ubuntu-latest` (14 min), which was not the expectation for a 2012 CPU. But one render
-proof disagrees there:
+It is worth recording that the shared `rime-linux` label was once **removed** from starbase, because
+one render proof disagreed only there:
+`tests/render/virtual_geometry_resolve_pass_test.cpp` compared the forward path's albedo against the
+visibility-buffer resolve path's, and on starbase 2 of 2164 covered pixels differed by up to 73,
+deterministically, while the UVs agreed to 5.96e-07 and the gradients to 1.18e-05.
 
-`tests/render/virtual_geometry_resolve_pass_test.cpp:473` compares the forward path's albedo against
-the visibility-buffer resolve path's with a 3-level tolerance. On starbase, 2 of 2164 covered pixels
-differ by up to **73**, deterministically (identical on two consecutive runs), while the UVs agree to
-5.96e-07 and the gradients to 1.18e-05 — the two paths compute the same coordinates and then sample
-different texels, which points at mip selection on a knife edge. Hosted `ubuntu-latest` passes, and so
-does the workstation (`max|Δalbedo| = 0`).
+That was **not** a machine fault and not a tolerance to widen. Lanes returning early from the resolve
+shader left their texture gradients undefined, and llvmpipe derives one texture LOD per 8-lane SIMD
+group — so on a CPU without AVX2 a live pixel took its LOD from a dead lane. The shader now has every
+lane take part in the `textureGrad` and discard the sample (#283), and #288 measured the cost and
+recommended changing nothing further. Mesa/LLVM version, vector width and a mip-boundary theory were
+each tested and ruled out en route.
 
-The three environments are **not** the same Vulkan implementation: starbase has Mesa 25.2.8 / LLVM
-20.1.2, the workstation Mesa 26.2.4 / LLVM 23.1.1. A SIMD-width hypothesis was tested and **ruled
-out** — `LP_NATIVE_VECTOR_WIDTH=128` on the workstation breaks the UV/gradient agreement entirely
-(2162 mismatches) rather than nudging two pixels.
+The label was restored once the fix landed. The lesson that generalises: **a runner that has only
+ever run one job shape is not provisioned, it is merely untested** — starbase's first `build & test`
+also failed for a missing `libssl-dev` that no earlier job had needed.
 
-So the shared `rime-linux` label has been removed from `starbase`: pushes land on `nextos` only, and
-starbase stays reachable by its machine label for pinned dispatches and for diagnosing this.
-**The honest cost: the "always-on capacity" half of this setup is not delivering yet.** With the
-workstation off, self-hosted jobs queue and `ci.yml`'s hosted matrix carries everything, exactly as
-before. The investigation is written up as an unclaimed brick in
-`.brick-vg-resolve-platform-sensitivity.md`, including what must *not* be done about it (widening the
-tolerance until a machine passes).
+### Why ASan is the one job pinned to `bigmem`
+
+`rime_render_tests` under ASan is a **single process**, and its anonymous working set grows past
+**6.87 GiB** — ASan's redzones and allocator quarantine over lavapipe's framebuffers, which are host
+memory because lavapipe *is* the CPU. The starbase container is capped at 8 GB, so the job does not
+fit there.
+
+It is worth being precise about what the evidence showed, because the obvious reading of it is wrong.
+Three cgroup OOM kills on 2026-10-08 named `anon-rss` 5.22, 5.25 and 5.29 GiB against a
+`MemoryMax=5500M` (5.37 GiB) cap, which looks like "the cap is a little too low". Raising it to 7 GiB
+produced a fourth kill at **6.87 GiB**. The process grows until it meets the ceiling, so an
+`anon-rss` figure from an OOM report tells you where the cap was, **not** what the job needs.
+
+Giving it room on starbase would mean overriding the rule
+`universe/starbase/scripts/rime-ci-runner.sh` exists to state — CI must always lose to the service
+containers on that host. Pinning the job to a machine that fits honours that rule instead.
+
+Speed says the same thing: **10.2 min on nextos** (run 37809196770) against **26.3 min on starbase**
+before it died. So the label costs a queue wait on one machine and buys both a 2.6× faster job and a
+job that finishes at all. starbase keeps the other five Linux jobs, all of which run there in under
+five minutes.
+
+A `workflow_dispatch` pin still overrides the label, deliberately: pinning ASan to starbase is how
+the ceiling gets re-measured, and it should keep failing there until the ceiling changes.
+
+**`OOMPolicy=continue` is the other half, and it is the part worth copying.** systemd's default is
+`OOMPolicy=stop`, which kills the whole *service* when any process in its cgroup is OOM-killed. That
+turned one over-budget test into `##[error]The runner has received a shutdown signal` attributed to
+`UNKNOWN STEP` — indistinguishable from a human cancelling, a superseded run, or GitHub's 6-hour job
+limit, and it would have taken any other job on that runner with it. With `continue`, the same event
+reads `99% tests passed, 1 tests failed out of 82` under the step that owns it. A resource cap should
+surface as a failing test, not as a dead runner.
 
 ### Logs
 
