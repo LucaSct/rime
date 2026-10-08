@@ -342,3 +342,16 @@ is a separate, later brick and is not started.
   slots 14/15 and adds 21/22 (23 total), a deliberate exception to the previous comment's request
   to split the next technique into a second set (`passes.cpp:558`, `pbr_forward_shadowed.frag:125`).
   The original layout and bindings remain the OFF path; no RHI seam change is made.
+- *SAA-widened roughness vs the SSR resolve, measured (no fix yet):* a unit smooth metal sphere
+  (perceptual roughness 0.1, camera z = 4, 256^2, clear sky, chain ON, TAA off, ambient 0).
+  *Measured, analytic* (finite-difference normals; `sky_specular_test.cpp`, "SAA roughness
+  divergence: analytic bound"): the forward pass reads the chain at `sqrt(alpha')` = 0.115 at the
+  centre (0.69 levels vs the resolve's 0.60, a 0.10-level gap; the screen-space term is never
+  zero), 0.14-0.19 in the 0.90-0.97 R rim band (up to 0.55 levels apart), and up to 0.312 at the
+  outermost pixels (1.87 vs 0.60 levels, 1.27 apart); the 0.18 cap bounds the lobe at 0.651
+  (3.9 levels). *Measured, rendered on lavapipe* (SSR-on / SSR-off mean luminance): centre disc
+  1.0004, rim band 1.0051, outer ring (0.97-0.99 R) 1.0072. *Inferred:* against this smooth clear
+  sky the artefact is below 1% in luminance even where the level gap exceeds one, so the choice
+  between "store the widened value in B" and "carry it in A" is not forced by this scene; a
+  sharper sky (sun disc, horizon) or a normal-mapped surface may show more and was not tried. The
+  fix is pending Luca's choice between those two options.

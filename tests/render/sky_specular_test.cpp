@@ -1547,3 +1547,234 @@ TEST_CASE("SDF specular occlusion: per-pass GPU cost (probe)") {
         }
     }
 }
+
+// ── SAA-widened roughness: how far apart do the forward pass and the SSR resolve read the chain?
+// ──
+//
+// The forward pass widens the lobe for geometric specular AA (brdf.glsl filter_specular_alpha) and
+// reads the prefiltered chain at the WIDENED roughness; the G-buffer keeps the UNWIDENED one, and
+// ssr_resolve.frag reads that. On a flat surface dFdx(n) = 0 and the two agree, so nothing measured
+// the gap on a curved one. This block measures it and changes nothing (ADR-0078 step 1e, open
+// item).
+namespace {
+
+constexpr std::uint32_t kSaaSize = 256;
+constexpr float kSaaCameraZ = 4.0f;   // the sphere (radius 1, at the origin) is seen from z = 4
+constexpr double kSaaRoughness = 0.1; // perceptual roughness of the material
+constexpr double kSaaVerticalFov = 0.87266; // Camera{}.fov_y; asserted equal below
+
+// The camera's view ray through the CENTRE of pixel (px, py) (aspect 1, looking down -z), and its
+// intersection with the unit sphere at the origin. Returns false on a miss; otherwise `n` is the
+// analytic surface normal (= the hit point, the sphere being the unit sphere).
+[[nodiscard]] bool saa_sphere_normal(double px, double py, Vec3d& n) {
+    const double t = std::tan(0.5 * kSaaVerticalFov);
+    const double sx = ((px / kSaaSize) * 2.0 - 1.0) * t;
+    const double sy = (1.0 - (py / kSaaSize) * 2.0) * t;
+    const Vec3d d = normalize(Vec3d{sx, sy, -1.0});
+    const Vec3d o{0.0, 0.0, static_cast<double>(kSaaCameraZ)};
+    const double b = dot(o, d);
+    const double disc = b * b - (dot(o, o) - 1.0);
+    if (disc < 0.0)
+        return false;
+    const double s = -b - std::sqrt(disc);
+    n = o + d * s;
+    return true;
+}
+
+// brdf.glsl filter_specular_alpha, restated: `alpha` in, widened alpha out; `ddx2`/`ddy2` are
+// |dFdx(n)|^2 and |dFdy(n)|^2.
+[[nodiscard]] double saa_filter_alpha(double alpha, double ddx2, double ddy2) {
+    const double variance = 0.15915494 * (ddx2 + ddy2);
+    const double kernel_alpha2 = std::min(2.0 * variance, 0.18);
+    return std::sqrt(std::clamp(alpha * alpha + kernel_alpha2, 0.0, 1.0));
+}
+
+struct SaaPixel {
+    std::uint32_t x = 0, y = 0;
+    double r_px = 0.0;    // distance from the sphere's projected centre, in pixels
+    double widened = 0.0; // sqrt(filter_specular_alpha(...)): the roughness the forward pass reads
+};
+
+[[nodiscard]] double saa_percentile(std::vector<double> v, double q) {
+    std::sort(v.begin(), v.end());
+    return v[static_cast<std::size_t>(q * static_cast<double>(v.size() - 1))];
+}
+
+// The sphere's projected silhouette radius in pixels: the tangent cone's half-angle is asin(1/z),
+// and a pinhole maps tan(angle) to (size/2) * tan(angle)/tan(fov/2).
+[[nodiscard]] double saa_silhouette_px() {
+    const double half = std::asin(1.0 / static_cast<double>(kSaaCameraZ));
+    return 0.5 * kSaaSize * std::tan(half) / std::tan(0.5 * kSaaVerticalFov);
+}
+
+[[nodiscard]] std::vector<SaaPixel> saa_analytic_pixels() {
+    std::vector<SaaPixel> out;
+    const double alpha = kSaaRoughness * kSaaRoughness;
+    const double c = 0.5 * kSaaSize;
+    for (std::uint32_t y = 0; y < kSaaSize; ++y) {
+        for (std::uint32_t x = 0; x < kSaaSize; ++x) {
+            Vec3d n, a, b;
+            if (!saa_sphere_normal(x + 0.5, y + 0.5, n))
+                continue;
+            // dFdx/dFdy approximated by a finite difference to the neighbouring pixel centre
+            // (forward; backward where the forward neighbour misses the sphere). The GPU's
+            // quad-based derivative is the same thing up to which neighbour it pairs with.
+            const bool fx = saa_sphere_normal(x + 1.5, y + 0.5, a);
+            if (!fx && !saa_sphere_normal(x - 0.5, y + 0.5, a))
+                continue;
+            const bool fy = saa_sphere_normal(x + 0.5, y + 1.5, b);
+            if (!fy && !saa_sphere_normal(x + 0.5, y - 0.5, b))
+                continue;
+            const Vec3d dx = a + n * -1.0, dy = b + n * -1.0;
+            const double w = saa_filter_alpha(alpha, dot(dx, dx), dot(dy, dy));
+            out.push_back({x, y, std::hypot(x + 0.5 - c, y + 0.5 - c), std::sqrt(w)});
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("SAA roughness divergence: analytic bound on the widened roughness over a sphere "
+          "(no GPU)") {
+    CHECK(Camera{}.fov_y == doctest::Approx(static_cast<float>(kSaaVerticalFov)));
+    const std::vector<SaaPixel> px = saa_analytic_pixels();
+    REQUIRE(px.size() > 10000);
+    const double layers = static_cast<double>(kSkySpecularLayers);
+    const double R = saa_silhouette_px();
+
+    auto report = [&](const std::string& name, double lo_frac, double hi_frac) {
+        std::vector<double> w;
+        for (const SaaPixel& p : px)
+            if (p.r_px >= lo_frac * R && p.r_px < hi_frac * R)
+                w.push_back(p.widened);
+        REQUIRE(!w.empty());
+        const double mn = *std::min_element(w.begin(), w.end());
+        const double mx = *std::max_element(w.begin(), w.end());
+        MESSAGE("[saa analytic] " << name << ": " << w.size() << " px; widened roughness min " << mn
+                                  << " median " << saa_percentile(w, 0.5) << " p95 "
+                                  << saa_percentile(w, 0.95) << " max " << mx << " | unwidened "
+                                  << kSaaRoughness << " | chain levels (x" << layers
+                                  << "): unwidened " << kSaaRoughness * layers << ", widened min "
+                                  << mn * layers << " median " << saa_percentile(w, 0.5) * layers
+                                  << " p95 " << saa_percentile(w, 0.95) * layers << " max "
+                                  << mx * layers << " | gap at max "
+                                  << (mx - kSaaRoughness) * layers << " levels");
+        return mx;
+    };
+    MESSAGE("[saa analytic] silhouette radius " << R << " px, chain layers " << layers);
+    (void)report("whole sphere", 0.0, 2.0);
+    (void)report("centre disc (r < 0.30 R)", 0.0, 0.30);
+    (void)report("rim band (0.90 R .. 0.97 R)", 0.90, 0.97);
+    (void)report("outer edge (r >= 0.97 R)", 0.97, 2.0);
+
+    // What the maths guarantees: widening only ever ADDS variance, so the lobe never narrows; and
+    // the added alpha^2 is capped at 0.18, so lobe_roughness <= (alpha0^2 + 0.18)^(1/4).
+    const double alpha0 = kSaaRoughness * kSaaRoughness;
+    const double ceiling = std::pow(alpha0 * alpha0 + 0.18, 0.25);
+    for (const SaaPixel& p : px) {
+        CHECK(p.widened >= kSaaRoughness - 1e-12);
+        CHECK(p.widened <= ceiling + 1e-12);
+    }
+    MESSAGE("[saa analytic] hard ceiling on lobe_roughness: " << ceiling << " = "
+                                                              << ceiling * layers << " levels");
+}
+
+TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sphere (rendered)") {
+    auto device = device_or_skip("the SAA roughness divergence render");
+    if (!device)
+        return;
+    MeshRegistry meshes(*device);
+    const MeshId sphere = meshes.add(make_uv_sphere(1.0f, 64, 128), "saa-divergence-sphere");
+    REQUIRE(sphere != kInvalidMeshId);
+    MaterialRegistry materials;
+    PbrMaterialDesc md{};
+    md.base_color[0] = md.base_color[1] = md.base_color[2] = 1.0f;
+    md.metallic = 1.0f;
+    md.roughness = static_cast<float>(kSaaRoughness);
+    md.normal_scale = 0.0f; // the fallback normal texel tilts n by 0.0039; remove it (as P2 does)
+    const MaterialId metal = materials.add(md);
+
+    auto render = [&](bool with_sphere, bool ssr) {
+        SceneRenderer renderer(*device, meshes, materials);
+        render::test::disable_temporal_aa(renderer);
+        renderer.set_ambient(0.0f, 0.0f, 0.0f);
+        renderer.set_sky(clear_sky());
+        renderer.set_sky_specular_prefilter_enabled(true);
+        LightingSettings ls{};
+        ls.ssr_enabled = ssr;
+        ls.ssr_max_distance = 8.0f;
+        ls.ssr_thickness = 0.5f;
+        ls.ssr_max_steps = 64;
+        renderer.set_lighting(ls);
+        ecs::World world;
+        register_render_components(world);
+        if (with_sphere)
+            (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{sphere}, MaterialRef{metal});
+        core::Transform cam{};
+        cam.translation = {0.0f, 0.0f, kSaaCameraZ};
+        (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{});
+        HdrImage img;
+        for (int frame = 0; frame < 2; ++frame) { // second frame: chain built, no first-use effects
+            RenderGraph graph(*device);
+            graph.reset();
+            const SceneRenderer::Output out = renderer.render(graph, world, {kSaaSize, kSaaSize});
+            REQUIRE(out.hdr.is_valid());
+            graph.export_texture(out.hdr);
+            auto cmd = device->begin_commands();
+            graph.execute(*cmd);
+            device->submit_blocking(*cmd);
+            img = decode_hdr(read_texture(*device, graph.physical(out.hdr), kSaaSize, kSaaSize, 8),
+                             kSaaSize,
+                             kSaaSize);
+        }
+        CHECK(renderer.sky_specular_stats().prefilter_filled == 1);
+        return img;
+    };
+    const HdrImage off = render(true, false);
+    const HdrImage on = render(true, true);
+    const HdrImage empty = render(false, false);
+
+    // ROIs from the geometry: the sphere's silhouette radius R (tangent-cone projection, see
+    // saa_silhouette_px). Centre disc r < 0.30 R; rim band 0.90 R <= r < 0.97 R -- inside the
+    // silhouette with margin for the tessellated mesh's polygonal outline.
+    const double R = saa_silhouette_px();
+    const double c = 0.5 * kSaaSize;
+
+    struct Band {
+        std::string name;
+        double lo, hi;
+        double sum_off = 0.0, sum_on = 0.0;
+        std::uint32_t n = 0, differs_from_empty = 0;
+    };
+
+    // The third band is supplementary: the outermost ring, where the analytic widening is largest.
+    std::array<Band, 3> bands = {{{"centre disc", 0.0, 0.30},
+                                  {"rim band", 0.90, 0.97},
+                                  {"outer ring (0.97-0.99 R)", 0.97, 0.99}}};
+    for (std::uint32_t y = 0; y < kSaaSize; ++y) {
+        for (std::uint32_t x = 0; x < kSaaSize; ++x) {
+            const double r = std::hypot(x + 0.5 - c, y + 0.5 - c);
+            for (Band& b : bands) {
+                if (r < b.lo * R || r >= b.hi * R)
+                    continue;
+                Vec3d n;
+                REQUIRE(saa_sphere_normal(x + 0.5, y + 0.5, n)); // analytically a sphere pixel
+                b.sum_off += off.luminance(x, y);
+                b.sum_on += on.luminance(x, y);
+                b.differs_from_empty += (off.luminance(x, y) != empty.luminance(x, y)) ? 1u : 0u;
+                ++b.n;
+            }
+        }
+    }
+    for (const Band& b : bands) {
+        REQUIRE(b.n > 100);
+        const double m_off = b.sum_off / b.n, m_on = b.sum_on / b.n;
+        MESSAGE("[saa render] " << b.name << ": " << b.n << " px (" << b.differs_from_empty
+                                << " differ from the sphere-less frame)"
+                                << "; mean luminance SSR-off " << m_off << " SSR-on " << m_on
+                                << " ratio on/off " << m_on / m_off);
+        CHECK(std::isfinite(m_off));
+        CHECK(std::isfinite(m_on));
+    }
+}
