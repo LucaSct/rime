@@ -38,7 +38,13 @@ jobs:
     strategy:
       fail-fast: false # one OS failing shouldn't hide the others
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Linux is NOT in this list for our own pushes and pull requests: ci-self-hosted.yml
+        # builds and tests it on the two personal runners, in 9 minutes against this job's 15, so
+        # running both only pays twice for the same answer. A FORK pull request cannot reach those
+        # runners -- ci-self-hosted.yml guards on the actor -- so a fork still gets the hosted Linux
+        # build here, which is the whole point: untrusted code never touches a persistent runner,
+        # and it never goes unchecked either.
+        os: ${{ fromJSON(github.actor == github.repository_owner && '["macos-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -135,7 +141,12 @@ jobs:
     # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
     # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
     # full hosted matrix before it can be merged.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # ...and skip it entirely for our own pushes and pull requests: the self-hosted ASan job
+    # covers them in 8 minutes against this job's 37. A fork pull request, which cannot reach the
+    # self-hosted runners, still gets sanitized here.
+    if: |
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+      && github.actor != github.repository_owner
     steps:
       - uses: actions/checkout@v4
 
