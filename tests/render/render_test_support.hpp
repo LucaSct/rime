@@ -10,10 +10,15 @@
 // structural.
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/rhi/rhi.hpp"
@@ -37,6 +42,46 @@ namespace rime::render::test {
 [[nodiscard]] inline bool shadow_depth_sampling_unsupported(const rhi::Device& device) {
     return device.adapter().portability;
 }
+
+// Counts the Vulkan validation messages that carry a given VUID, so a test can ASSERT the
+// validation log is clean of one specific defect instead of leaving it to someone reading stderr.
+//
+// The mechanism already exists: device_vulkan.cpp's debug messenger routes every validation message
+// through RIME_ERROR/RIME_WARN ("[vulkan] ... [ VUID-... ]"), and the log has a swappable sink.
+// This installs a counting sink for its lifetime and restores the default stderr sink on
+// destruction. Messages it does not count are re-emitted to stderr so nothing is hidden from a
+// developer. NOTE this only sees anything when the device was created with validation on (the
+// Debug/`dev` default, and the layer must be installed) -- which is why a test using it is paired
+// with a falsification (revert the fix, watch it fail) rather than trusted blind.
+class VuidCounter {
+public:
+    explicit VuidCounter(std::string vuid) : vuid_(std::move(vuid)) {
+        core::set_log_sink([this](const core::LogRecord& r) {
+            if (r.message.find(vuid_) != std::string_view::npos) {
+                ++count_;
+                last_ = std::string(r.message);
+            } else {
+                std::fprintf(
+                    stderr, "%.*s\n", static_cast<int>(r.message.size()), r.message.data());
+            }
+        });
+    }
+
+    ~VuidCounter() { core::set_log_sink({}); }
+
+    VuidCounter(const VuidCounter&) = delete;
+    VuidCounter& operator=(const VuidCounter&) = delete;
+
+    [[nodiscard]] int count() const { return count_; }
+
+    // The full text of the most recent match, for the failure message.
+    [[nodiscard]] const std::string& last() const { return last_; }
+
+private:
+    std::string vuid_;
+    int count_ = 0;
+    std::string last_;
+};
 
 // IEEE 754 half → float (sign, rebiased exponent, normalized mantissa). The HDR target is
 // RGBA16Float; the CPU decodes it to assert on radiance.

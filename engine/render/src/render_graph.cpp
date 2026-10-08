@@ -181,6 +181,7 @@ RGTexture RenderGraph::create_texture(const RGTextureDesc& desc) {
     r.extent = desc.extent;
     r.format = desc.format;
     r.array_layers = desc.array_layers == 0 ? 1u : desc.array_layers;
+    r.array_view = desc.array_view;
     r.debug_name.assign(desc.debug_name);
     resources_.push_back(std::move(r));
     return RGTexture{static_cast<std::uint32_t>(resources_.size() - 1)};
@@ -594,7 +595,7 @@ void RenderGraph::assign_physicals() {
         for (CachedTexture& c : cache_) {
             if (!c.in_use && c.extent.width == r.extent.width &&
                 c.extent.height == r.extent.height && c.format == r.format && c.usage == r.usage &&
-                c.array_layers == r.array_layers) {
+                c.array_layers == r.array_layers && c.array_view == r.array_view) {
                 found = &c;
                 break;
             }
@@ -605,13 +606,15 @@ void RenderGraph::assign_physicals() {
             td.format = r.format;
             td.usage = r.usage;
             td.array_layers = r.array_layers; // m10.1: a layered transient (CSM cascade array)
+            td.array_view = r.array_view;
             td.debug_name = r.debug_name;
             const rhi::TextureHandle handle = device_.create_texture(td);
             if (!handle.is_valid()) {
                 RIME_ERROR("render: transient allocation failed for '{}'", r.debug_name);
                 continue;
             }
-            cache_.push_back({r.extent, r.format, r.usage, r.array_layers, handle, false});
+            cache_.push_back(
+                {r.extent, r.format, r.usage, r.array_layers, r.array_view, handle, false});
             found = &cache_.back();
         }
         found->in_use = true;

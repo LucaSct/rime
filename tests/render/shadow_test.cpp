@@ -20,6 +20,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 
 #include "render_test_support.hpp"
 #include "rime/core/math/mat.hpp"
@@ -204,4 +205,69 @@ TEST_CASE("shadows: the sun casts a shadow, gated by LightingSettings (m10.1)") 
     // (b) the regression bridge: shadows OFF ⇒ the box casts nothing, the spot is lit like the
     //     baseline. (The off path is literally the unmodified M5.6 forward pipeline.)
     CHECK(off > 0.7f * lit);
+}
+
+TEST_CASE("shadows: every cascade count samples as an array, no viewType-07752 (single cascade)") {
+    // The shadowed forward shader declares `sampler2DArrayShadow shadow_map` for EVERY cascade
+    // count. The cascade atlas is one layer per cascade, so cascade_count = 1 (the low-end preset)
+    // is a one-layer image -- and the RHI used to derive the sampling view type from the layer
+    // count alone, handing it a plain 2-D view. Sampling a 2-D view through an arrayed image type
+    // is undefined (VUID-vkCmdDrawIndexed-viewType-07752); it "worked" on the drivers we run, so
+    // the only witness was a validation message nobody read. This turns that message into a
+    // failure.
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available -- skipping the array-view proof");
+        return;
+    }
+    if (test::shadow_depth_sampling_unsupported(*device)) {
+        MESSAGE("device cannot sample depth -- skipping the array-view proof");
+        return;
+    }
+
+    MeshRegistry meshes(*device);
+    const MeshId plane = meshes.add(make_plane(6.0f), "arrview-floor");
+    const MeshId cube = meshes.add(make_cube(1.0f), "arrview-cube");
+    MaterialRegistry materials;
+    const MaterialId mat = materials.add({{1.0f, 1.0f, 1.0f, 1.0f}, 0.0f, 0.9f});
+
+    ecs::World world;
+    register_render_components(world);
+    core::Transform floor_tf{};
+    (void)world.spawn_with(ecs::WorldTransform{floor_tf}, MeshRef{plane}, MaterialRef{mat});
+    core::Transform box_tf{};
+    box_tf.translation = {0.0f, 1.0f, 0.0f};
+    (void)world.spawn_with(ecs::WorldTransform{box_tf}, MeshRef{cube}, MaterialRef{mat});
+    core::Transform cam_tf{};
+    cam_tf.translation = {0.0f, 1.5f, 6.0f};
+    (void)world.spawn_with(ecs::WorldTransform{cam_tf}, Camera{});
+    core::Transform sun_tf{};
+    sun_tf.rotation =
+        core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -std::numbers::pi_v<float> / 2.0f);
+    (void)world.spawn_with(ecs::WorldTransform{sun_tf}, DirectionalLight{1.0f, 1.0f, 1.0f, 3.0f});
+
+    SceneRenderer renderer(*device, meshes, materials);
+    test::VuidCounter counter("VUID-vkCmdDrawIndexed-viewType-07752");
+
+    for (const std::uint32_t cascades : {1u, 2u, 4u}) {
+        CAPTURE(cascades);
+        LightingSettings ls;
+        ls.shadows_enabled = true;
+        ls.cascade_count = cascades;
+        renderer.set_lighting(ls);
+
+        RenderGraph graph(*device);
+        const SceneRenderer::Output out = renderer.render(graph, world, {64, 64}, true);
+        REQUIRE(out.hdr.is_valid());
+        graph.export_texture(out.hdr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+    }
+
+    INFO("last validation message: " << counter.last());
+    CHECK(counter.count() == 0);
 }

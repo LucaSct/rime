@@ -148,12 +148,14 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc) {
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = t.image;
     // The whole-image (sampling) view type follows the image shape: a 3-D volume, a cube (or cube
-    // array) when the caller asked for one, an array when it has >1 layer, else a plain 2-D image.
+    // array) when the caller asked for one, an array when it has >1 layer (or the caller declared
+    // `array_view`, because the shader samples it as an array whatever its layer count), else a
+    // plain 2-D image.
     vci.viewType = is_3d ? VK_IMAGE_VIEW_TYPE_3D
                    : desc.cube
                        ? (layers > 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE)
-                   : layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
-                                : VK_IMAGE_VIEW_TYPE_2D;
+                   : layers > 1 || desc.array_view ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                                   : VK_IMAGE_VIEW_TYPE_2D;
     vci.format = ici.format;
     // A depth image is viewed through its depth aspect, a color image through its color aspect.
     vci.subresourceRange.aspectMask = aspect_for(ici.format);
