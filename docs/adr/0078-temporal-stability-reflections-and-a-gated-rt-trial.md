@@ -364,5 +364,16 @@ is a separate, later brick and is not started.
   between bands says this is resolved STRUCTURE rather than a uniform bias -- the sharper level
   sees cloud detail the blurrier one does not -- so it will read as a visible difference between an
   SSR-on and an SSR-off frame, not as a global tint that could be tuned away. A normal-mapped flat
-  surface was not tried. The fix is pending Luca's choice between "store the widened value in B"
-  and "carry it in A".
+  surface was not tried.
+- *Decision (owner, 2026-10-09), on the strength of those numbers:* the G-buffer will carry the
+  **widened** roughness in B, so both readers agree on the chain level and on the SDF cone width.
+  The known cost is accepted: `ssr_resolve.frag:285`'s `smoothstep(0.25, 0.55, roughness)` then
+  responds to curvature, and screen hits fade into the probe earlier where the normal varies fast.
+  At base roughness 0.1 that is confined to pixels whose widened value crosses 0.25 -- the
+  outermost ring, about a 10% probe blend there, with the 0.90-0.97 R rim band's 0.14-0.19 staying
+  below the threshold entirely. The reason this is accepted rather than merely tolerated: a lobe
+  genuinely widened by sub-pixel normal variance *cannot* be carried by a single screen sample, so
+  fading it toward the probe is the physically right behaviour rather than a regression. The
+  rejected alternative was carrying the widened value in the mask channel A to leave SSR's cone
+  untouched; it was declined because it puts two roughnesses in one target for every future
+  consumer to keep apart. Implementation is its own brick.
