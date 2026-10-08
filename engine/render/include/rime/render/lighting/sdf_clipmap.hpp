@@ -83,7 +83,8 @@ static_assert(sizeof(GpuSdfClipmapLevels) == kSdfClipmapLevels * 32,
               "GpuSdfClipmapLevels must be a flat array of GpuSdfLevel with no padding");
 
 // Optional sky-reader binding. Invalid params means OFF: consumers retain the original pipeline
-// and declare/bind no SDF resources. The clipmap owns the textures; the graph owns this frame's UBO.
+// and declare/bind no SDF resources. The clipmap owns the textures; the graph owns this frame's
+// UBO.
 struct SdfSpecularOcclusionBinding {
     std::array<RGTexture, kSdfClipmapLevels> levels{};
     RenderGraph::FrameSlice params{};

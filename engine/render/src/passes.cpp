@@ -7,7 +7,6 @@
 // offline-compile model; an asset-driven shader system is an M6+ concern).
 
 #include "rime/render/passes.hpp"
-#include "rime/render/lighting/sdf_clipmap.hpp"
 
 #include "depth_masked.frag.spv.h"
 #include "depth_only.vert.spv.h"
@@ -16,10 +15,11 @@
 #include "pbr_forward.frag.spv.h"
 #include "pbr_forward.vert.spv.h"
 #include "pbr_forward_shadowed.frag.spv.h"
-#include "pbr_forward_shadowed_sdf.frag.spv.h"
 #include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
+#include "pbr_forward_shadowed_sdf.frag.spv.h"
 #include "present.frag.spv.h"
 #include "rime/core/diagnostics/log.hpp"
+#include "rime/render/lighting/sdf_clipmap.hpp"
 #include "taa_resolve.frag.spv.h"
 #include "tonemap.frag.spv.h"
 #include "velocity.frag.spv.h"
@@ -531,11 +531,12 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     // levels 0/1, then spend 21/22 on level 2/metadata. Four appended slots would exceed the
     // RHI's 24-slot limit. This deliberate reuse leaves every OFF layout and binding unchanged.
     sdf_fragment_shader_ = make_shader(device,
-                                      rhi::ShaderStage::Fragment,
-                                      pbr_forward_shadowed_sdf_frag_spv,
-                                      sizeof(pbr_forward_shadowed_sdf_frag_spv),
-                                      "pbr_forward_shadowed_sdf.frag");
-    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(shadowed_bindings), std::end(shadowed_bindings));
+                                       rhi::ShaderStage::Fragment,
+                                       pbr_forward_shadowed_sdf_frag_spv,
+                                       sizeof(pbr_forward_shadowed_sdf_frag_spv),
+                                       "pbr_forward_shadowed_sdf.frag");
+    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(shadowed_bindings),
+                                               std::end(shadowed_bindings));
     sdf_bindings.push_back({21, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
     sdf_bindings.push_back({22, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
     pd.bindings = sdf_bindings;
@@ -642,7 +643,8 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   RGTexture gbuffer,
                                   RGTexture gbuffer_material,
                                   const SdfSpecularOcclusionBinding* sdf_occlusion_ptr) const {
-    const SdfSpecularOcclusionBinding sdf_occlusion = sdf_occlusion_ptr ? *sdf_occlusion_ptr : SdfSpecularOcclusionBinding{};
+    const SdfSpecularOcclusionBinding sdf_occlusion =
+        sdf_occlusion_ptr ? *sdf_occlusion_ptr : SdfSpecularOcclusionBinding{};
     // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
     // is the "no geometry" the shader overwrites with 1 where it shades), rendered by the matching
     // MRT pipeline variant. Invalid = the one-attachment baseline, byte-for-byte the pre-SSR path.
@@ -683,11 +685,8 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // feature off they are the placeholders, already in ShaderRead, and declaring them costs a
     // no-op transition. Conditional declaration would make the graph's edges depend on a flag.
     const bool use_sdf = sdf_occlusion.is_valid() && !write_gbuffer;
-    std::vector<RGTexture> sampled = {shadow.map,
-                                     local.map,
-                                     sky.skyview,
-                                     sky.specular.prefiltered,
-                                     sky.specular.dfg};
+    std::vector<RGTexture> sampled = {
+        shadow.map, local.map, sky.skyview, sky.specular.prefiltered, sky.specular.dfg};
     if (use_sdf) {
         sampled.insert(sampled.end(), sdf_occlusion.levels.begin(), sdf_occlusion.levels.end());
     } else {
@@ -711,11 +710,13 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             ? (depth_prepassed ? pipeline_shadowed_gbuffer_after_prepass_
                                : pipeline_shadowed_gbuffer_standalone_)
             : (use_sdf ? (depth_prepassed ? pipeline_sdf_after_prepass_ : pipeline_sdf_standalone_)
-                       : (depth_prepassed ? pipeline_shadowed_after_prepass_ : pipeline_shadowed_standalone_));
+                       : (depth_prepassed ? pipeline_shadowed_after_prepass_
+                                          : pipeline_shadowed_standalone_));
     graph.add_raster_pass(
         "forward-pbr shadowed",
         desc,
-        [pipe, data, shadow, local, clusters, ddgi, sky, use_sdf, sdf_occlusion, &graph](rhi::CommandBuffer& cmd) {
+        [pipe, data, shadow, local, clusters, ddgi, sky, use_sdf, sdf_occlusion, &graph](
+            rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipe);
             // Bindings 7–20 are attached once (they persist across draws — ADR-0020);
             // record_draws re-binds only per-draw state on top. The resources' physical handles
@@ -729,10 +730,16 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             cmd.bind_uniform_buffer(
                 13, clusters.ubo.buffer, clusters.ubo.offset, clusters.ubo.size);
             if (use_sdf) {
-                cmd.bind_texture(14, graph.physical(sdf_occlusion.levels[0]), sdf_occlusion.sampler);
-                cmd.bind_texture(15, graph.physical(sdf_occlusion.levels[1]), sdf_occlusion.sampler);
-                cmd.bind_texture(21, graph.physical(sdf_occlusion.levels[2]), sdf_occlusion.sampler);
-                cmd.bind_uniform_buffer(22, sdf_occlusion.params.buffer, sdf_occlusion.params.offset, sdf_occlusion.params.size);
+                cmd.bind_texture(
+                    14, graph.physical(sdf_occlusion.levels[0]), sdf_occlusion.sampler);
+                cmd.bind_texture(
+                    15, graph.physical(sdf_occlusion.levels[1]), sdf_occlusion.sampler);
+                cmd.bind_texture(
+                    21, graph.physical(sdf_occlusion.levels[2]), sdf_occlusion.sampler);
+                cmd.bind_uniform_buffer(22,
+                                        sdf_occlusion.params.buffer,
+                                        sdf_occlusion.params.offset,
+                                        sdf_occlusion.params.size);
             } else {
                 cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
                 cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);

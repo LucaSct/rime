@@ -69,7 +69,8 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
     sdf_fragment_shader_ = device.create_shader(fs);
     std::vector<rhi::BindingDesc> sdf_bindings(std::begin(bindings), std::end(bindings));
     for (std::uint32_t slot = 11; slot < 14; ++slot)
-        sdf_bindings.push_back({slot, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+        sdf_bindings.push_back(
+            {slot, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
     sdf_bindings.push_back({14, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
     pd.fragment_shader = sdf_fragment_shader_;
     pd.bindings = sdf_bindings;
@@ -148,14 +149,14 @@ void SsrPass::add(RenderGraph& graph,
     // point+clamp; depth/colour must not interpolate, the atlases must.
     const RGColorAttachment colors[] = {{out_hdr, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
     std::vector<RGTexture> sampled = {scene_color,
-                                 gbuffer,
-                                 depth,
-                                 ddgi_irradiance,
-                                 ddgi_visibility,
-                                 skyview_lut,
-                                 gbuffer_material,
-                                 sky_specular.prefiltered,
-                                 sky_specular.dfg};
+                                      gbuffer,
+                                      depth,
+                                      ddgi_irradiance,
+                                      ddgi_visibility,
+                                      skyview_lut,
+                                      gbuffer_material,
+                                      sky_specular.prefiltered,
+                                      sky_specular.dfg};
     if (sdf_occlusion.is_valid())
         sampled.insert(sampled.end(), sdf_occlusion.levels.begin(), sdf_occlusion.levels.end());
     RenderGraph::RasterPassDesc desc{};
@@ -198,8 +199,12 @@ void SsrPass::add(RenderGraph& graph,
             cmd.bind_texture(10, graph.physical(sky_specular.dfg), sky_specular.dfg_sampler);
             if (sdf_occlusion.is_valid()) {
                 for (std::uint32_t i = 0; i < kSdfClipmapLevels; ++i)
-                    cmd.bind_texture(11 + i, graph.physical(sdf_occlusion.levels[i]), sdf_occlusion.sampler);
-                cmd.bind_uniform_buffer(14, sdf_occlusion.params.buffer, sdf_occlusion.params.offset, sdf_occlusion.params.size);
+                    cmd.bind_texture(
+                        11 + i, graph.physical(sdf_occlusion.levels[i]), sdf_occlusion.sampler);
+                cmd.bind_uniform_buffer(14,
+                                        sdf_occlusion.params.buffer,
+                                        sdf_occlusion.params.offset,
+                                        sdf_occlusion.params.size);
             }
             cmd.draw(3);
         });

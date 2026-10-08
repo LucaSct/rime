@@ -530,8 +530,8 @@ void main() {
         // Unlike terrain, the reflection is NOT clamped to the horizon: terrain clamps because a
         // heightfield's downward ray meets more terrain, while a mesh's (the underside of a
         // sphere, a wall) meets the ground — which is what the LUT holds below the horizon, and
-        // what ssr_resolve.frag reads there too, so SSR on and off agree. `ao` scales it because
-        // this is still unshadowed ambient light: a crevice the AO map darkens should not glow.
+        // what ssr_resolve.frag reads there too, so SSR on and off agree. The legacy variant
+        // retains diffuse AO here; the opt-in SDF variant replaces it with specular visibility.
         if (sky_sh_enabled()) {
             const vec3 r = reflect(-v, n);
             const vec3 f0 = mix(vec3(0.04), albedo, metallic);
@@ -551,20 +551,21 @@ void main() {
                 // with visibility of this SPECULAR lobe; multiplying both would double-darken it.
 #ifdef SDF_SPECULAR_OCCLUSION
                 const float specular_visibility = sdf_sky_visibility(v_world_pos, n, lookup, lobe_roughness);
-#else
-                const float specular_visibility = ao;
-#endif
                 out_radiance += sky_specular_prefiltered(lookup, lobe_roughness) *
                                 sky_specular_environment_brdf(f0, lobe_roughness, n_dot_v) * specular_visibility;
+#else
+                out_radiance += sky_specular_prefiltered(lookup, lobe_roughness) *
+                                sky_specular_environment_brdf(f0, lobe_roughness, n_dot_v) * ao;
+#endif
             } else {
                 const vec3 sky_mirror = texture(skyview_lut, skyview_uv_from_direction(r)).rgb;
                 const vec3 sky_specular = mix(sky_mirror, sky_ambient, alpha);
 #ifdef SDF_SPECULAR_OCCLUSION
                 const float specular_visibility = sdf_sky_visibility(v_world_pos, n, r, sqrt(alpha));
-#else
-                const float specular_visibility = ao;
-#endif
                 out_radiance += sky_specular * env_brdf_approx(f0, roughness, n_dot_v) * specular_visibility;
+#else
+                out_radiance += sky_specular * env_brdf_approx(f0, roughness, n_dot_v) * ao;
+#endif
             }
         }
 #endif

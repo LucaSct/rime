@@ -791,7 +791,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             sdf_occlusion.sampler = sdf_clipmap_.trace_sampler();
             for (std::uint32_t i = 0; i < kSdfClipmapLevels; ++i) {
                 sdf_occlusion.levels[i] = graph.import_texture(sdf_clipmap_.level(i).texture,
-                                                             sdf_clipmap_.level_state(i));
+                                                               sdf_clipmap_.level_state(i));
                 // Exactly one sky reader will sample these imports this frame; keep the owner
                 // authoritative so the next recompose starts from the real sampled layout.
                 sdf_clipmap_.note_level_state(i, rhi::ResourceState::ShaderRead);

@@ -6,8 +6,8 @@
 #include <cstdint>
 
 #include "rime/core/math/mat.hpp"
-#include "rime/render/lighting/sky_specular.hpp"
 #include "rime/render/lighting/sdf_clipmap.hpp"
+#include "rime/render/lighting/sky_specular.hpp"
 #include "rime/render/render_graph.hpp"
 
 // Screen-space reflections — the resolve pass (m10.7b, ADR-0032 §5).
