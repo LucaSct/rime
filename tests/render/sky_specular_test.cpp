@@ -1694,12 +1694,22 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
     md.roughness = static_cast<float>(kSaaRoughness);
     md.normal_scale = 0.0f; // the fallback normal texel tilts n by 0.0039; remove it (as P2 does)
     const MaterialId metal = materials.add(md);
+    // THE SENSITIVITY CONTROL. The ratio below answers "do the two readers differ?", which is only
+    // half the question: a chain whose levels all look alike would answer "no" however far apart
+    // they read. So render the SAME scene with the material roughness set to what the rim's widened
+    // lobe actually resolves to (the analytic case above: ~0.55 levels of 6, i.e. +0.092 perceptual
+    // roughness), with SSR OFF both times. That difference is what one rim-sized chain step is
+    // WORTH in this sky, measured through the same code path, and it is the yardstick the
+    // SSR-on/off ratio has to be read against.
+    PbrMaterialDesc md_widened = md;
+    md_widened.roughness = static_cast<float>(kSaaRoughness) + 0.092f;
+    const MaterialId metal_widened = materials.add(md_widened);
 
-    auto render = [&](bool with_sphere, bool ssr) {
+    auto render = [&](bool with_sphere, bool ssr, MaterialId mat, const SkyParams& sky) {
         SceneRenderer renderer(*device, meshes, materials);
         render::test::disable_temporal_aa(renderer);
         renderer.set_ambient(0.0f, 0.0f, 0.0f);
-        renderer.set_sky(clear_sky());
+        renderer.set_sky(sky);
         renderer.set_sky_specular_prefilter_enabled(true);
         LightingSettings ls{};
         ls.ssr_enabled = ssr;
@@ -1710,7 +1720,7 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
         ecs::World world;
         register_render_components(world);
         if (with_sphere)
-            (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{sphere}, MaterialRef{metal});
+            (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{sphere}, MaterialRef{mat});
         core::Transform cam{};
         cam.translation = {0.0f, 0.0f, kSaaCameraZ};
         (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{});
@@ -1731,9 +1741,19 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
         CHECK(renderer.sky_specular_stats().prefilter_filled == 1);
         return img;
     };
-    const HdrImage off = render(true, false);
-    const HdrImage on = render(true, true);
-    const HdrImage empty = render(false, false);
+    // A cloudy sky is the same measurement on a HIGH-CONTRAST environment. The clear sky's
+    // prefiltered levels differ mainly around the sun disc, so averaging a ring over it dilutes the
+    // very thing being measured; clouds put contrast across the whole upper hemisphere.
+    SkyParams cloudy = clear_sky();
+    cloudy.clouds_enabled = true;
+    cloudy.coverage = 0.45f;
+
+    const HdrImage off = render(true, false, metal, clear_sky());
+    const HdrImage on = render(true, true, metal, clear_sky());
+    const HdrImage empty = render(false, false, metal, clear_sky());
+    const HdrImage off_widened = render(true, false, metal_widened, clear_sky());
+    const HdrImage cloudy_off = render(true, false, metal, cloudy);
+    const HdrImage cloudy_on = render(true, true, metal, cloudy);
 
     // ROIs from the geometry: the sphere's silhouette radius R (tangent-cone projection, see
     // saa_silhouette_px). Centre disc r < 0.30 R; rim band 0.90 R <= r < 0.97 R -- inside the
@@ -1745,6 +1765,7 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
         std::string name;
         double lo, hi;
         double sum_off = 0.0, sum_on = 0.0;
+        double sum_off_widened = 0.0, sum_cloudy_off = 0.0, sum_cloudy_on = 0.0;
         std::uint32_t n = 0, differs_from_empty = 0;
     };
 
@@ -1762,6 +1783,9 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
                 REQUIRE(saa_sphere_normal(x + 0.5, y + 0.5, n)); // analytically a sphere pixel
                 b.sum_off += off.luminance(x, y);
                 b.sum_on += on.luminance(x, y);
+                b.sum_off_widened += off_widened.luminance(x, y);
+                b.sum_cloudy_off += cloudy_off.luminance(x, y);
+                b.sum_cloudy_on += cloudy_on.luminance(x, y);
                 b.differs_from_empty += (off.luminance(x, y) != empty.luminance(x, y)) ? 1u : 0u;
                 ++b.n;
             }
@@ -1770,11 +1794,21 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
     for (const Band& b : bands) {
         REQUIRE(b.n > 100);
         const double m_off = b.sum_off / b.n, m_on = b.sum_on / b.n;
+        const double m_widened = b.sum_off_widened / b.n;
+        const double m_cl_off = b.sum_cloudy_off / b.n, m_cl_on = b.sum_cloudy_on / b.n;
         MESSAGE("[saa render] " << b.name << ": " << b.n << " px (" << b.differs_from_empty
                                 << " differ from the sphere-less frame)"
                                 << "; mean luminance SSR-off " << m_off << " SSR-on " << m_on
                                 << " ratio on/off " << m_on / m_off);
+        // The yardstick: what a rim-sized chain step is worth here, through the same path.
+        MESSAGE("[saa render] " << b.name << ": sensitivity -- SSR-off at roughness "
+                                << kSaaRoughness + 0.092 << " gives " << m_widened << ", ratio "
+                                << m_widened / m_off << " against roughness " << kSaaRoughness);
+        MESSAGE("[saa render] " << b.name << ": CLOUDY sky -- SSR-off " << m_cl_off << " SSR-on "
+                                << m_cl_on << " ratio on/off " << m_cl_on / m_cl_off);
         CHECK(std::isfinite(m_off));
         CHECK(std::isfinite(m_on));
+        CHECK(std::isfinite(m_widened));
+        CHECK(std::isfinite(m_cl_on));
     }
 }

@@ -350,8 +350,19 @@ is a separate, later brick and is not started.
   zero), 0.14-0.19 in the 0.90-0.97 R rim band (up to 0.55 levels apart), and up to 0.312 at the
   outermost pixels (1.87 vs 0.60 levels, 1.27 apart); the 0.18 cap bounds the lobe at 0.651
   (3.9 levels). *Measured, rendered on lavapipe* (SSR-on / SSR-off mean luminance): centre disc
-  1.0004, rim band 1.0051, outer ring (0.97-0.99 R) 1.0072. *Inferred:* against this smooth clear
-  sky the artefact is below 1% in luminance even where the level gap exceeds one, so the choice
-  between "store the widened value in B" and "carry it in A" is not forced by this scene; a
-  sharper sky (sun disc, horizon) or a normal-mapped surface may show more and was not tried. The
-  fix is pending Luca's choice between those two options.
+  1.0004, rim band 1.0051, outer ring (0.97-0.99 R) 1.0072 -- all under 1%.
+- *Why that 1% is a property of the SKY and not of the widening, measured:* the same scene rendered
+  with SSR OFF both times and the material roughness raised by 0.092 (one rim-sized chain step)
+  changes the bands by x0.9904, x0.9909 and x0.9968. So a 0.55-level step is worth only about 1% of
+  luminance in a clear sky, and the SSR-on/off difference above is roughly half of the most this
+  sky can express -- the readers really do disagree, the sky is just too smooth to show it. The
+  signs agree: SSR-on reads the SHARPER level and comes out brighter, and raising roughness
+  darkens.
+- *The same measurement on a cloudy sky (coverage 0.45), measured:* centre +0.22%, rim band
+  **-1.16%**, outer ring **+15.2%** (mean luminance 9.743 -> 11.220). So the divergence is
+  contrast-bound, and on a high-contrast environment it is large. *Inferred:* the sign flipping
+  between bands says this is resolved STRUCTURE rather than a uniform bias -- the sharper level
+  sees cloud detail the blurrier one does not -- so it will read as a visible difference between an
+  SSR-on and an SSR-off frame, not as a global tint that could be tuned away. A normal-mapped flat
+  surface was not tried. The fix is pending Luca's choice between "store the widened value in B"
+  and "carry it in A".
