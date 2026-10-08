@@ -544,12 +544,13 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // the AND of the setting and "a sky is on" -- the same expression the bake below is gated by,
     // computed once so the two cannot disagree.
     //
-    // And only when the forward pass is the one that mirrors the sky: with SSR on its sky term is
-    // compiled out (ssr_resolve reflects instead), and with DDGI on the term sits in a branch that
-    // is not taken. Building the chain for those frames would be work nothing reads.
-    const bool forward_mirrors_sky =
-        !lighting_.ssr_enabled && !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
-    const bool sky_specular_live = sky_specular_prefilter_enabled_ && forward_mirrors_sky &&
+    // And only when something reads the chain. Exactly one pass mirrors the sky: the forward pass
+    // when SSR is off (with SSR on its sky term is compiled out), or ssr_resolve when SSR is on
+    // (it reads the same chain and the same DFG table, so the two agree). With DDGI on neither
+    // reads it -- the forward pass's term sits in a branch that is not taken and the resolve's
+    // probe is the DDGI field -- so building the chain for that frame would be work nothing reads.
+    const bool chain_has_reader = !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
+    const bool sky_specular_live = sky_specular_prefilter_enabled_ && chain_has_reader &&
                                    (sky_params_.enabled || scene.has_sky);
     fu.ambient[3] = sky_specular_live ? 1.0f : 0.0f;
 
@@ -971,7 +972,10 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                  sky_binding.skyview,
                  sky_binding.sampler,
                  sky_on,
-                 gbuffer_material);
+                 gbuffer_material,
+                 sky_binding.specular,
+                 sky_binding.sampler,
+                 sky_specular_live);
         tonemap_src = hdr_ssr;
     }
 

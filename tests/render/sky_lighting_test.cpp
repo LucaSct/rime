@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 
 #include "render_test_support.hpp"
 #include "rime/core/math/quat.hpp"
@@ -636,6 +637,14 @@ TEST_CASE("m19.6b: SSR reflects each surface at its own F0 — a metal tinted, a
     ssr_on.set_lighting(ls);
     SceneRenderer ssr_off(*device, meshes, materials);
     render::test::disable_temporal_aa(ssr_off); // compares the plain frame (ADR-0078 1e)
+    // This case's SSR on/off bound below is derived from the ANALYTIC environment BRDF
+    // (env_brdf_approx against plain Schlick), so it pins the path that arithmetic describes: the
+    // prefiltered chain OFF. That path is still shipped (it is what a frame runs with the setting
+    // off), so the proof stays; the chain-ON counterpart -- where both sides compute the identical
+    // split-sum product and the ratio is 1 by construction rather than by a fit -- is the case
+    // "ADR-0078 s2: with the prefiltered chain on, SSR on and SSR off mirror the sky alike" below.
+    ssr_on.set_sky_specular_prefilter_enabled(false);
+    ssr_off.set_sky_specular_prefilter_enabled(false);
     const auto render = [&](SceneRenderer& renderer, MaterialId mat) {
         return render_hdr(*device, renderer, [&](ecs::World& w) { build_floor(w, floor, mat); });
     };
@@ -763,6 +772,132 @@ TEST_CASE("m19.6b: SSR reflects each surface at its own F0 — a metal tinted, a
     // The reflected sky is RED-tinted: red above green at every near-floor pixel. (Blue stays
     // above red here — the sky is blue, and a tint scales a colour, it does not replace it.)
     CHECK(sky_red_over_green == on_floor.count);
+}
+
+// SSR ON AGAINST SSR OFF, WITH THE PREFILTERED CHAIN (ADR-0078 section 2). The property whose
+// absence kept the feature switched off. With SSR off the forward pass mirrors the sky
+// (prefiltered(dominant(n, r, rough), rough) * envBRDF(f0, rough, n.v)); with SSR on the forward
+// pass's sky term is compiled out and ssr_resolve.frag must add the SAME product. Both include
+// sky_specular_eval.glsl, so for a pixel whose reflection ray leaves the screen -- every pixel of
+// the near floor, by construction (see kNearFloorTop) -- the two images differ only by the
+// precision of what the SSR path reads back out of the G-buffer: the shading normal and perceptual
+// roughness, stored as RGBA16Float (11 significant bits, a relative step of about 5e-4 each).
+// That perturbs the reflection direction and the lookup roughness slightly (inferred from the
+// format, not isolated by a probe), and the sky is not constant across either, so a small residual
+// is EXPECTED rather than a defect. The
+// bounds below are measured on both devices (RTX 3060: worst pixel 1.0%, worst mean 0.7%;
+// lavapipe: worst pixel 1.1%, worst mean 0.8%) with about 2.7x headroom: 3% per pixel, 2% on the
+// mean. Anything structural -- a missing weight, the wrong roughness, the wrong BRDF -- moves a
+// rough metal by tens of percent (the control below: 3.5x), so these cannot hide one.
+//
+// The control is the SAME measurement with the chain OFF, where SSR still reflects the raw LUT
+// with plain Schlick: it must disagree with the forward pass by at least 2x on the roughest metal
+// (the ADR's recorded "about 2x"; measured 3.5x), or this test could not see the bug it exists
+// for.
+TEST_CASE("ADR-0078 s2: with the prefiltered chain on, SSR on and SSR off mirror the sky alike") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available — skipping the SSR/forward sky coherence proof");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "adr78-coherence-floor");
+    MaterialRegistry materials;
+
+    struct Case {
+        const char* name;
+        Rgb base;
+        float metallic;
+        float roughness;
+    };
+
+    const Case cases[] = {
+        {"red metal, r=0.05", {1.0f, 0.2f, 0.2f}, 1.0f, 0.05f},
+        {"warm metal, r=0.30", kWarm, 1.0f, 0.30f},
+        {"warm metal, r=0.60", kWarm, 1.0f, 0.60f},
+        {"grey metal, r=1.00", {0.8f, 0.8f, 0.8f}, 1.0f, 1.00f},
+        {"grey dielectric, r=1.00", {0.8f, 0.8f, 0.8f}, 0.0f, 1.00f},
+    };
+
+    LightingSettings ls{};
+    ls.ssr_enabled = true;
+    ls.ssr_max_distance = 8.0f;
+    ls.ssr_thickness = 0.5f;
+    ls.ssr_max_steps = 64;
+
+    // One renderer per (SSR, chain) corner, each warmed on the same sky so every measured frame
+    // reuses its bake. Same floor, same sky, same camera: ONLY who mirrors the sky differs.
+    const auto make = [&](bool ssr, bool chain) {
+        auto r = std::make_unique<SceneRenderer>(*device, meshes, materials);
+        render::test::disable_temporal_aa(*r); // compares the plain frame (ADR-0078 1e)
+        if (ssr) {
+            r->set_lighting(ls);
+        }
+        r->set_sky_specular_prefilter_enabled(chain);
+        r->set_sky(physical_sky(1.0f));
+        return r;
+    };
+    auto on_chain = make(true, true);
+    auto off_chain = make(false, true);
+    auto on_legacy = make(true, false);
+    auto off_legacy = make(false, false);
+
+    const auto render = [&](SceneRenderer& renderer, MaterialId mat) {
+        (void)render_hdr(*device, renderer, [&](ecs::World& w) { build_floor(w, floor, mat); });
+        return render_hdr(*device, renderer, [&](ecs::World& w) { build_floor(w, floor, mat); });
+    };
+
+    // Per-channel mean ratio on/off, and the worst per-pixel |on - off| / off over the near floor.
+    struct Agreement {
+        double ratio[3] = {0, 0, 0};
+        double worst_pixel = 0.0;
+    };
+
+    const auto compare = [&](const HdrImage& on, const HdrImage& off) {
+        Agreement a;
+        double sum_on[3] = {0, 0, 0}, sum_off[3] = {0, 0, 0};
+        for (std::uint32_t y = kNearFloorTop; y < kSize; ++y) {
+            for (std::uint32_t x = 0; x < kSize; ++x) {
+                const std::size_t i = (static_cast<std::size_t>(y) * kSize + x) * 3;
+                for (std::size_t c = 0; c < 3; ++c) {
+                    sum_on[c] += on.rgb[i + c];
+                    sum_off[c] += off.rgb[i + c];
+                    a.worst_pixel = std::max(a.worst_pixel,
+                                             std::fabs(double(on.rgb[i + c]) - off.rgb[i + c]) /
+                                                 std::max(double(off.rgb[i + c]), 1.0e-4));
+                }
+            }
+        }
+        for (std::size_t c = 0; c < 3; ++c) {
+            a.ratio[c] = sum_on[c] / sum_off[c];
+        }
+        return a;
+    };
+
+    for (const Case& c : cases) {
+        const MaterialId mat = add_material(materials, c.base, c.metallic, c.roughness);
+        const Agreement chain = compare(render(*on_chain, mat), render(*off_chain, mat));
+        const Agreement legacy = compare(render(*on_legacy, mat), render(*off_legacy, mat));
+        // Per pixel, then on the mean: the mean could hide opposite errors, the pixel cannot.
+        CHECK_MESSAGE(chain.worst_pixel <= 0.03, c.name);
+        for (const double r : chain.ratio) {
+            CHECK_MESSAGE(std::fabs(r - 1.0) <= 0.02, c.name);
+        }
+        // The chain is strictly closer to agreement than the legacy pair, on every case.
+        CHECK_MESSAGE(std::fabs(chain.ratio[0] - 1.0) < std::fabs(legacy.ratio[0] - 1.0), c.name);
+        if (c.metallic == 1.0f && c.roughness == 1.0f) {
+            CHECK_MESSAGE(legacy.ratio[0] >= 2.0, "control: " << c.name);
+        }
+        MESSAGE(c.name << ": chain ON  on/off r/g/b = " << chain.ratio[0] << "/" << chain.ratio[1]
+                       << "/" << chain.ratio[2] << " worst pixel " << chain.worst_pixel
+                       << " | chain OFF on/off r/g/b = " << legacy.ratio[0] << "/"
+                       << legacy.ratio[1] << "/" << legacy.ratio[2]);
+    }
+    CHECK(on_chain->sky_specular_stats().prefilter_filled >= 1);
+    CHECK(off_chain->sky_specular_stats().prefilter_filled >= 1);
 }
 
 TEST_CASE("m19.6b: with SSR off, the forward pass mirrors the sky — a smooth metal follows it") {

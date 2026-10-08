@@ -47,6 +47,11 @@ SsrPass::SsrPass(rhi::Device& device) : device_(device) {
         {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
         // The G-buffer's material half (m19.6b fix 1): base colour + metallic, for the Fresnel F0.
         {8, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        // The split-sum sky specular (ADR-0078 section 2): the prefiltered chain (a 2-D array) and
+        // the DFG table, the same two textures the forward pass binds at 19/20. Placeholders when
+        // the feature is off, for the same fixed-layout reason as the DDGI and sky bindings.
+        {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},  // prefiltered
+        {10, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DFG table
     };
     rhi::GraphicsPipelineDesc pd{};
     pd.vertex_shader = vertex_shader_;
@@ -87,7 +92,10 @@ void SsrPass::add(RenderGraph& graph,
                   RGTexture skyview_lut,
                   rhi::SamplerHandle skyview_sampler,
                   bool sky_enabled,
-                  RGTexture gbuffer_material) {
+                  RGTexture gbuffer_material,
+                  const SkySpecularBinding& sky_specular,
+                  rhi::SamplerHandle sky_specular_sampler,
+                  bool sky_specular_live) {
     // The inverse projection is what turns a uv + depth back into a view-space position — computed
     // once here, on the CPU, rather than every one of the march's steps re-inverting it on the GPU.
     // inv_view (m10.7c) does the same job for the probe fallback: view space back to the WORLD the
@@ -103,6 +111,7 @@ void SsrPass::add(RenderGraph& graph,
     u.extent_near_far[3] = inputs.z_far;
     u.params[0] = static_cast<float>(inputs.max_steps);
     u.params[1] = inputs.thickness;
+    u.params[2] = sky_specular_live ? 1.0f : 0.0f; // was unused padding until ADR-0078 section 2
     u.params[3] = inputs.max_distance;
     u.ambient[0] = inputs.ambient[0];
     u.ambient[1] = inputs.ambient[1];
@@ -127,40 +136,48 @@ void SsrPass::add(RenderGraph& graph,
                                  ddgi_irradiance,
                                  ddgi_visibility,
                                  skyview_lut,
-                                 gbuffer_material};
+                                 gbuffer_material,
+                                 sky_specular.prefiltered,
+                                 sky_specular.dfg};
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.sampled = sampled;
-    graph.add_raster_pass("ssr-resolve",
-                          desc,
-                          [pipe = pipeline_,
-                           ubo = ubo_slice.buffer,
-                           ubo_offset = ubo_slice.offset,
-                           smp = sampler_,
-                           scene_color,
-                           gbuffer,
-                           depth,
-                           ddgi_irradiance,
-                           ddgi_visibility,
-                           ddgi_params,
-                           ddgi_sampler,
-                           skyview_lut,
-                           skyview_sampler,
-                           gbuffer_material,
-                           &graph](rhi::CommandBuffer& cmd) {
-                              cmd.bind_pipeline(pipe);
-                              cmd.bind_texture(0, graph.physical(scene_color), smp);
-                              cmd.bind_texture(1, graph.physical(gbuffer), smp);
-                              cmd.bind_texture(2, graph.physical(depth), smp);
-                              cmd.bind_uniform_buffer(3, ubo, ubo_offset, sizeof(GpuSsrUniforms));
-                              cmd.bind_texture(4, graph.physical(ddgi_irradiance), ddgi_sampler);
-                              cmd.bind_texture(5, graph.physical(ddgi_visibility), ddgi_sampler);
-                              cmd.bind_uniform_buffer(
-                                  6, ddgi_params.buffer, ddgi_params.offset, ddgi_params.size);
-                              cmd.bind_texture(7, graph.physical(skyview_lut), skyview_sampler);
-                              cmd.bind_texture(8, graph.physical(gbuffer_material), smp);
-                              cmd.draw(3);
-                          });
+    graph.add_raster_pass(
+        "ssr-resolve",
+        desc,
+        [pipe = pipeline_,
+         ubo = ubo_slice.buffer,
+         ubo_offset = ubo_slice.offset,
+         smp = sampler_,
+         scene_color,
+         gbuffer,
+         depth,
+         ddgi_irradiance,
+         ddgi_visibility,
+         ddgi_params,
+         ddgi_sampler,
+         skyview_lut,
+         skyview_sampler,
+         gbuffer_material,
+         sky_specular,
+         sky_specular_sampler,
+         &graph](rhi::CommandBuffer& cmd) {
+            cmd.bind_pipeline(pipe);
+            cmd.bind_texture(0, graph.physical(scene_color), smp);
+            cmd.bind_texture(1, graph.physical(gbuffer), smp);
+            cmd.bind_texture(2, graph.physical(depth), smp);
+            cmd.bind_uniform_buffer(3, ubo, ubo_offset, sizeof(GpuSsrUniforms));
+            cmd.bind_texture(4, graph.physical(ddgi_irradiance), ddgi_sampler);
+            cmd.bind_texture(5, graph.physical(ddgi_visibility), ddgi_sampler);
+            cmd.bind_uniform_buffer(6, ddgi_params.buffer, ddgi_params.offset, ddgi_params.size);
+            cmd.bind_texture(7, graph.physical(skyview_lut), skyview_sampler);
+            cmd.bind_texture(8, graph.physical(gbuffer_material), smp);
+            // Read with the sky-view's own sampler (linear, azimuth wraps) and
+            // the table with its clamp sampler, as the forward pass does.
+            cmd.bind_texture(9, graph.physical(sky_specular.prefiltered), sky_specular_sampler);
+            cmd.bind_texture(10, graph.physical(sky_specular.dfg), sky_specular.dfg_sampler);
+            cmd.draw(3);
+        });
 }
 
 } // namespace rime::render

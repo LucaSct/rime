@@ -360,19 +360,20 @@ public:
     }
 
     // ── Prefiltered sky specular (ADR-0078 section 2) ─────────────────────────────────────────
-    // The split-sum approximation for the sky's reflection on the forward PBR pass: a
-    // GGX-prefiltered chain of the sky plus a DFG table, both built at runtime through the graph,
-    // replacing the m19.6b mirror-faded-to-SH blend. Needs a sky (there is nothing to filter
-    // without one).
+    // The split-sum approximation for the sky's reflection: a GGX-prefiltered chain of the sky plus
+    // a DFG table, both built at runtime through the graph, replacing the m19.6b mirror-faded-to-SH
+    // blend. Needs a sky (there is nothing to filter without one).
     //
-    // DEFAULT OFF, deliberately (see the ADR-0078 section 2 status note): the forward pass is the
-    // only consumer so far. With SSR on, the forward pass compiles its sky term out and
-    // ssr_resolve still reads the sky-view LUT directly, so SSR on/off would disagree about every
-    // rough metal by the single-bounce energy the new path puts back (measured ~2x at roughness 1).
-    // Until ssr_resolve reads the same chain (ADR-0078 section 3) the switch is opt-in. With SSR or
-    // DDGI on it also builds nothing and is counted as a disabled frame: those configurations do
-    // not consume the forward pass's sky mirror, so the bake would be pure waste. Off: no pass
-    // declared, placeholders bound, and the frame is byte-identical to before.
+    // DEFAULT ON. It was off while the forward pass was its only reader: with SSR on the forward
+    // pass compiles its sky term out and ssr_resolve reflected the sky-view LUT with plain Schlick,
+    // so SSR on/off disagreed about a rough metal by the single-bounce energy the new path puts
+    // back (measured 3.5x at roughness 1). ssr_resolve.frag now reads the same chain and the same
+    // DFG table through the same header, and the two agree to a few percent (the G-buffer's own
+    // precision; sky_lighting_test.cpp has the numbers). Exactly one pass mirrors the sky: the
+    // forward pass with SSR off, the resolve with SSR on. With DDGI on neither does -- a probe
+    // field that knows about walls is the environment -- so the setting builds nothing and the
+    // frame is counted as disabled. Off: no pass declared, placeholders bound, and the frame is the
+    // pre-ADR-0078 one (the analytic mirror in the forward pass, plain Schlick in the resolve).
     void set_sky_specular_prefilter_enabled(bool enabled) {
         sky_specular_prefilter_enabled_ = enabled;
     }
@@ -460,8 +461,8 @@ private:
     ecs::Version sdf_instances_since_ = 0;
 
     LightingSettings lighting_{}; // M10 feature gates; default off == the M5.6 baseline
-    bool sky_specular_prefilter_enabled_ = false; // ADR-0078 section 2; see the setter and the ADR
-    SkyParams sky_params_{};                      // m17.0; enabled=false == the pre-sky baseline
+    bool sky_specular_prefilter_enabled_ = true; // ADR-0078 section 2; see the setter and the ADR
+    SkyParams sky_params_{};                     // m17.0; enabled=false == the pre-sky baseline
     bool cull_enabled_ = true;
     CullStats cull_stats_{};
 
