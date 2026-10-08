@@ -252,3 +252,33 @@ is a separate, later brick and is not started.
   The estimate and the measurement answer different questions: the per-pixel lookup is unmeasured.
   No `docs/perf/` JSON was filed: with the switch off the frame is byte-identical, and the bake is
   event-driven rather than per-frame. The first brick that turns it on owes the Release run.
+
+**Step 2, second brick: `ssr_resolve` reads the chain, and the switch flips ON.**
+
+- *What changed:* `ssr_resolve.frag` includes the same `sky_specular_eval.glsl` the forward pass does
+  (bindings 9 and 10; `GpuSsrUniforms::params.z` is the live flag). With the chain live, a reflection
+  that misses the screen reads `sky_specular_prefiltered(sky_specular_dominant_direction(n, r, rough),
+  rough)` at the G-buffer's roughness, and the whole reflection (hit and miss alike) is weighted by
+  `sky_specular_environment_brdf` instead of plain Schlick. The screen *hit* colour is untouched. With
+  DDGI on, the resolve's probe is still the DDGI field and the weight is still Schlick, exactly as the
+  forward pass reads no chain in that configuration. Exactly one pass mirrors the sky: the forward pass
+  with SSR off, the resolve with SSR on; so the chain is built whenever DDGI is off (it used to be built
+  only with SSR off too).
+- *Why this closes the gap:* the old disagreement was two different BRDFs (Karis fit against plain
+  Schlick) over two different skies (the SH-blended LUT against the raw LUT). Both sides now evaluate the
+  same product from the same header, so for a pixel whose reflection leaves the screen they differ only by
+  what the resolve can read back out of the G-buffer (RGBA16Float normal and roughness, RGBA8Srgb base
+  colour). Measured on the 96x96 near floor, sky on, no lights: on/off mean ratio 0.993-1.008 and worst
+  pixel 1.1% on both the RTX 3060 and lavapipe, for a red metal at roughness 0.05, a warm metal at 0.3 and
+  0.6, a grey metal at 1.0 and a grey dielectric at 1.0; the chain-off pair on the same frames reads 1.03,
+  1.23-1.33, 1.72-2.10, 3.5-3.6 and 1.22. `sky_lighting_test.cpp` asserts 3% per pixel and 2% on the mean.
+- *What is NOT the same:* the forward pass looks the chain up at `sqrt(alpha)` where alpha carries the
+  geometric specular AA widening (step 1a); the G-buffer holds the unwidened roughness and the resolve
+  deliberately does not recompute the widening (a G-buffer normal's derivatives step across silhouettes,
+  not curvature). On a high-curvature surface the forward pass therefore looks up a blurrier level than
+  the resolve. The proof's floor is flat, so it does not exercise this; it is a named gap.
+- *m19.6b's SSR on/off bound:* unchanged and still asserted, now pinned to the chain-off path its
+  derivation (env_brdf_approx against Schlick) describes. The chain-on counterpart is the new case
+  "ADR-0078 s2: with the prefiltered chain on, SSR on and SSR off mirror the sky alike".
+- *Default ON, and the cost it owes:* see `docs/perf/` for the Release run this brick filed.
+

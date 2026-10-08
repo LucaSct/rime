@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "rime/core/math/mat.hpp"
+#include "rime/render/lighting/sky_specular.hpp"
 #include "rime/render/render_graph.hpp"
 
 // Screen-space reflections — the resolve pass (m10.7b, ADR-0032 §5).
@@ -68,7 +69,8 @@ struct GpuSsrUniforms {
     core::Mat4 view;               // 128
     core::Mat4 inv_view;           // 192: view → world, for the m10.7c probe fallback
     float extent_near_far[4] = {}; // 256: xy = extent px, z = near, w = far
-    float params[4] = {};  // 272: x = max_steps, y = thickness, z = unused, w = max_distance
+    float params[4] =
+        {}; // 272: x = max_steps, y = thickness, z = prefiltered sky live (0/1), w = max_distance
     float ambient[4] = {}; // 288: rgb = miss fallback (the flat sky, when DDGI is off)
 };
 
@@ -122,7 +124,16 @@ public:
              // The G-buffer's material half (m19.6b fix 1): base colour + metallic, written by
              // the same forward draw as `gbuffer`. The resolve reflects each surface at its own
              // Fresnel F0 = mix(0.04, base colour, metallic) instead of a dielectric's for all.
-             RGTexture gbuffer_material);
+             RGTexture gbuffer_material,
+             // The split-sum sky specular (ADR-0078 section 2): the prefiltered chain and the DFG
+             // table, the SAME binding the forward pass reads. ALWAYS valid (the placeholders when
+             // the feature is off). `sky_specular_live` is what the resolve branches on: true makes
+             // a miss read the chain at the surface's roughness and weight the reflection by the
+             // table's environment BRDF instead of plain Schlick, so SSR on and SSR off mirror the
+             // sky identically. False leaves the pre-ADR-0078 arithmetic untouched.
+             const SkySpecularBinding& sky_specular,
+             rhi::SamplerHandle sky_specular_sampler,
+             bool sky_specular_live);
 
 private:
     rhi::Device& device_;

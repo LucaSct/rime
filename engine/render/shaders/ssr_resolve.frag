@@ -44,7 +44,8 @@ layout(std140, set = 0, binding = 3) uniform SsrParams {
     mat4 view;             // world→view, to rotate the G-buffer's world normal into view space
     mat4 inv_view;         // view→world, to sample the probe field where the DDGI lattice lives
     vec4 extent_near_far;  // xy = render size (px), z = near, w = far
-    vec4 params;           // x = max_steps, y = thickness (view units), z = unused, w = max_distance
+    vec4 params;           // x = max_steps, y = thickness (view units), z = prefiltered sky specular
+                           // live (0/1), w = max_distance
     vec4 ambient;          // rgb = the flat fallback a missed ray reflects; a = sky-LUT enabled
 } ssr;
 
@@ -69,6 +70,17 @@ layout(set = 0, binding = 7) uniform sampler2D skyview_lut;
 // The G-buffer's material half (m19.6b fix 1): RGB = base colour, A = metallic. What the Fresnel
 // term at the bottom of main() needs to reflect a METAL as a metal.
 layout(set = 0, binding = 8) uniform sampler2D gbuffer_material;
+
+// The split-sum sky specular (ADR-0078 section 2): the sky prefiltered per roughness (binding 9)
+// and the DFG table (binding 10), the SAME two textures the forward pass reads at its bindings
+// 19/20 through the SAME header. Sharing sky_specular_eval.glsl is the point: SSR on and SSR off
+// must answer one question with one piece of arithmetic, and two copies of it would drift. Always
+// bound (placeholders when the feature is off) and only ever read behind `ssr.params.z`, the "off
+// is a branch, not a missing resource" contract the rest of this pass keeps. The header needs
+// `skyview_lut` and sky_mapping.glsl declared first (mip 0 of the chain IS the LUT).
+#define SKY_PREFILTERED_BINDING 9
+#define SKY_DFG_BINDING 10
+#include "sky_specular_eval.glsl"
 
 layout(std140, set = 0, binding = 6) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
@@ -242,9 +254,27 @@ void main() {
     // Precedence: a live DDGI field wins (it knows about the actual scene), else the baked sky in
     // the ray's own direction, else m10.7b's flat constant. Each step is strictly more informed
     // than the one below it.
+    //
+    // The prefiltered chain (ADR-0078 section 2) slots in between DDGI and the raw LUT. It is the
+    // sky averaged over this surface's GGX lobe, which is exactly the "pre-integrated, low-
+    // frequency" thing this term has always stood in for: a rough surface now blurs the sky by the
+    // right amount rather than reading a single LUT texel at its mirror direction. A live DDGI
+    // field still wins (it knows about walls the sky cannot see), exactly as in the forward pass,
+    // where the chain is not read either when DDGI is on.
+    const bool use_chain = ssr.params.z != 0.0 && ssr.ambient.a != 0.0 && ddgi.enabled_pad.x == 0u;
     vec3 probe = ssr.ambient.rgb;
     if (ssr.ambient.a != 0.0) {
         probe = texture(skyview_lut, skyview_uv_from_direction(r_world)).rgb;
+    }
+    if (use_chain) {
+        // The G-buffer carries perceptual `roughness` and the (normal-mapped) shading normal; the
+        // forward pass reads the chain at sqrt(alpha), where alpha is roughness^2 widened by the
+        // geometric specular AA (ADR-0078 step 1a). The two agree wherever that widening is zero,
+        // which is every flat or smoothly curved surface; on a high-curvature silhouette the forward
+        // pass looks up a blurrier level. The G-buffer does not hold the widened value and this
+        // pass deliberately does not recompute it (see the note on filter_specular_alpha below).
+        const vec3 lookup = sky_specular_dominant_direction(n_world, r_world, roughness);
+        probe = sky_specular_prefiltered(lookup, roughness);
     }
     if (ddgi.enabled_pad.x != 0u) {
         probe = ddgi_sample_irradiance(world_pos, r_world);
@@ -313,15 +343,26 @@ void main() {
     // the 0.04 it always was (0.04 * 1 + base * 0), and 1 - 0.04 rounds to the same float as the
     // old literal 0.96 — so a dielectric's reflection is the old arithmetic, value for value.
     //
-    // It is plain Schlick, not the forward pass's roughness-aware environment BRDF
-    // (env_brdf_approx): the two agree where the cone is sharp — for f0 = 1 the fit integrates to
-    // 1 - 0.55 * roughness against Schlick's 1 — and drift apart as roughness rises, which is
-    // this pass's existing over-brightness on rough surfaces, left alone so that no metallic-0
-    // frame changes (ADR-0065 addendum, Fix 1).
+    // WHICH BRDF WEIGHTS THE REFLECTION. Until ADR-0078 section 2 this was plain Schlick, which
+    // agrees with the forward pass's roughness-aware environment BRDF where the cone is sharp (for
+    // f0 = 1 the Karis fit integrates to 1 - 0.55 * roughness against Schlick's 1) and drifts as
+    // roughness rises: this pass's old over-brightness on rough surfaces, left alone so that no
+    // metallic-0 frame changed (ADR-0065 addendum, Fix 1). That path survives, unchanged, for a
+    // frame whose chain is off or whose environment is DDGI.
+    //
+    // With the chain live the weight is the forward pass's: the DFG table with the multiple-
+    // scattering energy compensation (sky_specular_environment_brdf), at the same roughness the
+    // lookup used. Then SSR on and SSR off compute the SAME  prefiltered(r) * envBRDF  for a
+    // surface whose reflection leaves the screen, and differ only by what SSR adds: the hit.
+    // The weight multiplies a screen HIT too, not only the miss term. In the split-sum factoring the
+    // BRDF weight and the incoming radiance are separate factors, and a screen hit is merely a
+    // better estimate of the radiance; weighting hit and miss differently would put a brightness
+    // step wherever a ray stops finding geometry.
     const float ndotv = max(dot(n_view, -v_dir), 0.0);
     const vec4 material = texture(gbuffer_material, uv);
     const vec3 f0 = mix(vec3(0.04), material.rgb, material.a);
     const vec3 fres = f0 + (vec3(1.0) - f0) * pow(1.0 - ndotv, 5.0);
 
-    out_hdr = vec4(base + refl * fres, 1.0);
+    const vec3 weight = use_chain ? sky_specular_environment_brdf(f0, roughness, ndotv) : fres;
+    out_hdr = vec4(base + refl * weight, 1.0);
 }
