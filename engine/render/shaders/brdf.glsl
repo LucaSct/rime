@@ -88,6 +88,8 @@ vec3 f_schlick(float v_dot_h, vec3 f0) {
 // call this once, near the top of main(), never inside a light loop or a branch. It is NOT called
 // from a fullscreen pass over a G-buffer (ssr_resolve.frag): there, the screen-space step in the
 // normal crosses object silhouettes rather than measuring curvature.
+#ifdef GL_FRAGMENT_SHADER // derivatives exist only in a fragment stage; compute includers (the sky
+                          // specular bakes) take the BRDF terms above without this function
 float filter_specular_alpha(vec3 n, float alpha) {
     const float kScreenSpaceVariance = 0.15915494; // 1 / (2*pi): T&K 2019, the footprint's variance
     const float kClampThreshold = 0.18;            // cap on the added alpha^2 (kernel width limit)
@@ -99,6 +101,7 @@ float filter_specular_alpha(vec3 n, float alpha) {
     const float filtered_alpha2 = clamp(alpha * alpha + kernel_alpha2, 0.0, 1.0);
     return sqrt(filtered_alpha2);
 }
+#endif // GL_FRAGMENT_SHADER
 
 // One punctual light's contribution: BRDF × incident radiance × the geometry cosine. `l` points
 // from the surface TOWARD the light; `radiance` is what arrives at this point (falloff already

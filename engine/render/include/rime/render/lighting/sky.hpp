@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "rime/core/math.hpp"
+#include "rime/render/lighting/sky_specular.hpp"
 #include "rime/render/render_graph.hpp"
 #include "rime/rhi/device.hpp"
 
@@ -93,6 +94,10 @@ struct SkyLightBinding {
     RGTexture skyview;
     RGBuffer sh;                // ten vec4: nine SH coefficients, then the live flag
     rhi::SamplerHandle sampler; // linear; wraps in azimuth, clamps in elevation
+    // The split-sum specular environment (ADR-0078 section 2): the prefiltered chain and the DFG
+    // table. ALWAYS valid -- the placeholders when the feature is off -- and gated in the shader by
+    // FrameUniforms::ambient[3], the same "off is a branch, not a missing resource" contract.
+    SkySpecularBinding specular;
 };
 
 // How the LUT/SH pair was serviced this frame. CLAUDE.md requires every skip path to carry a
@@ -140,8 +145,14 @@ public:
     // MUST be called before anything that reads the result: the forward pass, the DDGI trace and
     // the SSR resolve all consume it, so the graph needs these passes declared first for its
     // dependency edges to order them. See scene_renderer.cpp.
-    [[nodiscard]] SkyLightBinding
-    add_lighting(RenderGraph& graph, const SkyParams& params, const SkyInputs& inputs);
+    //
+    // `prefiltered_specular` additionally builds the split-sum chain from the sky-view LUT (a third
+    // pass, `sky-specular-prefilter`, when the sky changed) and the one-shot DFG table. Off, the
+    // binding carries placeholders and no pass is declared.
+    [[nodiscard]] SkyLightBinding add_lighting(RenderGraph& graph,
+                                               const SkyParams& params,
+                                               const SkyInputs& inputs,
+                                               bool prefiltered_specular = false);
 
     // The no-sky placeholder: a 1x1 dummy LUT and an all-zero SH buffer, so `sky_sh_enabled()`
     // reads false and every consumer takes the constant-ambient path it took before m17.7b.
@@ -152,6 +163,13 @@ public:
     [[nodiscard]] const SkyAtmosphereStats& atmosphere_stats() const noexcept {
         return atmosphere_stats_;
     }
+
+    [[nodiscard]] const SkySpecularStats& specular_stats() const noexcept {
+        return specular_.stats();
+    }
+
+    // For a test that reads the bakes back (and must then report the state it left them in).
+    [[nodiscard]] SkySpecular& specular() noexcept { return specular_; }
 
     // The persistent LUT, for a test that wants to read back what was baked.
     [[nodiscard]] rhi::TextureHandle skyview_lut() const noexcept { return skyview_lut_; }
@@ -195,8 +213,13 @@ private:
     [[nodiscard]] static bool multiple_scattering_inputs_equal(const SkyParams& a,
                                                                const SkyParams& b) noexcept;
     void ensure_lighting_resources();
+    // Build (or skip, or stand in for) the split-sum specular once the LUT's fate this frame is
+    // known.
+    [[nodiscard]] SkySpecularBinding
+    service_specular(RenderGraph& graph, RGTexture lut_rg, bool enabled, bool lut_rebaked);
 
     rhi::Device& device_;
+    SkySpecular specular_;
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
