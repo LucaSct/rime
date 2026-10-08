@@ -109,54 +109,121 @@ Barycentrics analytic_barycentrics(vec4 c0, vec4 c1, vec4 c2, vec2 ndc) {
     return b;
 }
 
-void main() {
-    out_material = 0u;
-    out_uv = vec4(0.0);
-    out_albedo = vec4(0.0);
+// What one pixel resolves to: everything the albedo sample needs.
+struct Resolved {
+    uint material_slot;
+    vec2 uv;
+    vec2 duv_dx;
+    vec2 duv_dy;
+};
 
-    uvec2 id = texelFetch(visibility, ivec2(gl_FragCoord.xy), 0).rg;
+const uint kLive = 0u;
+const uint kEmpty = 1u;
+const uint kBad = 2u;
+
+// Decode one visibility ID. kLive: `c` is the cluster record and `triangle` is valid. Every way a
+// covered pixel can fail to resolve is VISIBLE (kStale at the caller), never silently empty.
+uint classify(uvec2 id, out Cluster c, out uint triangle) {
+    c = Cluster(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+    triangle = 0u;
     if (id == uvec2(0u)) {
-        return; // the ABI's empty sentinel: nothing was drawn here
+        return kEmpty; // the ABI's empty sentinel: nothing was drawn here
     }
     uint version = id.y >> 28;
-    uint triangle = id.x & 0x7fu;
     uint slot = id.x >> 7;
-    uint generation = id.y & 0x0fffffffu;
-    // Every way a covered pixel can fail to resolve is VISIBLE (kStale), never silently empty.
+    triangle = id.x & 0x7fu;
     if (version != 3u || slot >= pc.cluster_count) {
-        out_material = kStale;
-        return;
+        return kBad;
     }
-    Cluster c = table.clusters[slot];
-    if (c.valid == 0u || c.generation != generation || triangle >= c.triangle_count) {
-        out_material = kStale;
-        return;
+    c = table.clusters[slot];
+    if (c.valid == 0u || c.generation != (id.y & 0x0fffffffu) || triangle >= c.triangle_count) {
+        return kBad;
     }
+    return kLive;
+}
 
+Resolved reconstruct(Cluster c, uint triangle, ivec2 pixel) {
     uint i = c.index_base + triangle * 3u;
     uint v0 = c.vertex_base + index_data.indices[i];
     uint v1 = c.vertex_base + index_data.indices[i + 1u];
     uint v2 = c.vertex_base + index_data.indices[i + 2u];
 
-    vec2 ndc = gl_FragCoord.xy / pc.viewport * 2.0 - 1.0;
+    vec2 ndc = (vec2(pixel) + 0.5) / pc.viewport * 2.0 - 1.0;
     Barycentrics b = analytic_barycentrics(pc.mvp * vec4(position_of(v0), 1.0),
                                            pc.mvp * vec4(position_of(v1), 1.0),
                                            pc.mvp * vec4(position_of(v2), 1.0), ndc);
 
     mat3x2 uvs = mat3x2(uv_of(v0), uv_of(v1), uv_of(v2));
-    vec2 uv = uvs * b.lambda;
-    vec2 duv_dx = uvs * b.ddx;
-    vec2 duv_dy = uvs * b.ddy;
+    Resolved r;
+    r.material_slot = c.material_slot;
+    r.uv = uvs * b.lambda;
+    r.duv_dx = uvs * b.ddx;
+    r.duv_dy = uvs * b.ddy;
+    return r;
+}
 
+void main() {
+    out_material = 0u;
+    out_uv = vec4(0.0);
+    out_albedo = vec4(0.0);
+
+    ivec2 pixel = ivec2(gl_FragCoord.xy);
+    Cluster c;
+    uint triangle;
+    uint state = classify(texelFetch(visibility, pixel, 0).rg, c, triangle);
+
+    // LANES THAT WILL NOT SAMPLE STILL FEED THE SAMPLER. A software rasterizer shades pixels in
+    // SIMD groups (llvmpipe: two 2x2 quads per 8-lane vector) and derives the texture LOD of a
+    // quad from the whole group. A lane that returned early (empty background, stale cluster)
+    // leaves its gradients undefined, and on the one JIT path we have measured -- llvmpipe on a CPU
+    // without AVX2 -- a live neighbour's LOD was taken from such a dead lane: 2 of 2164 covered
+    // pixels came out one or two mips too sharp. A hardware rasterizer avoids this for free
+    // because helper lanes run with extrapolated, valid attributes; here the "helper" is us. So a
+    // dead lane borrows the nearest live pixel's gradients (found with a few id fetches, paid
+    // only by dead lanes) and takes part in the sample, discarding the result.
+    Resolved r;
+    r.material_slot = 0u;
+    r.uv = vec2(0.5);
+    r.duv_dx = vec2(0.0);
+    r.duv_dy = vec2(0.0);
+    if (state == kLive) {
+        r = reconstruct(c, triangle, pixel);
+    } else {
+        const ivec2 kOffsets[12] = ivec2[12](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+                                             ivec2(2, 0), ivec2(-2, 0), ivec2(0, 2), ivec2(0, -2),
+                                             ivec2(3, 0), ivec2(-3, 0), ivec2(4, 0), ivec2(-4, 0));
+        ivec2 hi = ivec2(pc.viewport) - 1;
+        for (int k = 0; k < 12; ++k) {
+            ivec2 q = clamp(pixel + kOffsets[k], ivec2(0), hi);
+            Cluster nc;
+            uint nt;
+            if (classify(texelFetch(visibility, q, 0).rg, nc, nt) == kLive) {
+                r = reconstruct(nc, nt, q);
+                break;
+            }
+        }
+    }
+
+    vec4 albedo = vec4(0.0);
+    uint slot = r.material_slot < pc.material_count ? r.material_slot : 0u;
+    switch (slot) {
+        case 0u: albedo = textureGrad(albedo0, r.uv, r.duv_dx, r.duv_dy); break;
+        case 1u: albedo = textureGrad(albedo1, r.uv, r.duv_dx, r.duv_dy); break;
+        case 2u: albedo = textureGrad(albedo2, r.uv, r.duv_dx, r.duv_dy); break;
+        default: albedo = textureGrad(albedo3, r.uv, r.duv_dx, r.duv_dy); break;
+    }
+
+    if (state == kEmpty) {
+        return;
+    }
+    if (state == kBad) {
+        out_material = kStale;
+        return;
+    }
     out_material = c.material_slot + 1u;
-    out_uv = vec4(uv, duv_dx.x, duv_dy.y);
+    out_uv = vec4(r.uv, r.duv_dx.x, r.duv_dy.y);
     if (c.material_slot >= pc.material_count) {
         return; // no texture for this slot: albedo stays 0, the material id still says which
     }
-    switch (c.material_slot) {
-        case 0u: out_albedo = textureGrad(albedo0, uv, duv_dx, duv_dy); break;
-        case 1u: out_albedo = textureGrad(albedo1, uv, duv_dx, duv_dy); break;
-        case 2u: out_albedo = textureGrad(albedo2, uv, duv_dx, duv_dy); break;
-        default: out_albedo = textureGrad(albedo3, uv, duv_dx, duv_dy); break;
-    }
+    out_albedo = albedo;
 }
