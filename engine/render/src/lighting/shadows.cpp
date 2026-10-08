@@ -160,7 +160,12 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
     // The cascade depth array — one layered transient (m10.1a): DepthStencil (rendered per cascade)
     // + Sampled (the forward pass reads it), both accumulated by the graph from the declarations.
     const rhi::Extent2D res{settings.shadow_map_resolution, settings.shadow_map_resolution};
-    const RGTexture cascades = graph.create_texture({res, kDepthFormat, "csm-cascades", fit.count});
+    //
+    // array_view = true: pbr_forward_shadowed.frag samples this as `sampler2DArrayShadow` for every
+    // cascade count, so a one-cascade atlas (the low-end preset) must still get a 2-D-ARRAY view,
+    // not the plain 2-D view a 1-layer image would otherwise be given (VUID-...-viewType-07752).
+    const RGTexture cascades =
+        graph.create_texture({res, kDepthFormat, "csm-cascades", fit.count, /*array_view=*/true});
 
     // One depth pass per cascade, reusing the pre-pass verbatim but aimed from the light: the same
     // draw list, binding 0 pointed at cascade c's view_proj slice, rendering into layer c.

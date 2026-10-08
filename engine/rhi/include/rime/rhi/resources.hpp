@@ -57,6 +57,15 @@ struct TextureDesc {
     // `array_layers` to be a positive multiple of 6 (6 for one cube, 6·N for a cube array). Each
     // face is still rendered into as its own layer.
     bool cube = false;
+    // Array VIEW intent. The whole-image sampling view normally follows the layer count (>1 layers
+    // = a 2-D-array view, 1 = a plain 2-D view). But the view type must match how the SHADER
+    // declares the binding: a `sampler2DArray(Shadow)` needs an array view (Vulkan
+    // VUID-vkCmdDrawIndexed-viewType-07752) even when this particular texture happens to hold one
+    // layer — e.g. a single-cascade shadow atlas, a legitimate low-end preset that shares the
+    // cascaded shader. Set true to get a 2-D-array view of a 1-layer image. Ignored for cubes and
+    // 3-D volumes (their view types are fixed by their shape). Per-layer RENDER views stay plain
+    // 2-D regardless.
+    bool array_view = false;
     Format format = Format::RGBA8Unorm;
     TextureUsage usage = TextureUsage::None;
     std::string_view debug_name = {};

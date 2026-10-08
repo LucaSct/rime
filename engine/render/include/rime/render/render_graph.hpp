@@ -84,6 +84,11 @@ struct RGTextureDesc {
     // texture. Part of the transient-cache key, so a layered and a flat texture never alias. Placed
     // last so the common positional `{extent, format, name}` call sites are unaffected.
     std::uint32_t array_layers = 1;
+    // Declare that shaders sample this texture as an ARRAY even if it holds one layer (a
+    // single-cascade shadow atlas read through `sampler2DArrayShadow`). Forwarded to
+    // rhi::TextureDesc::array_view; part of the cache key so an array-viewed and a plain 1-layer
+    // texture never alias. Placed after array_layers so existing positional call sites compile.
+    bool array_view = false;
 };
 
 // One declared color attachment of a raster pass. Mirrors rhi::ColorAttachment but names a
@@ -402,6 +407,7 @@ private:
         rhi::Extent2D extent{};
         rhi::Format format = rhi::Format::Undefined;
         std::uint32_t array_layers = 1; // >1 → a layered transient (m10.1 CSM cascade array)
+        bool array_view = false;        // sampled as an array even at 1 layer
         std::uint64_t size_bytes = 0;   // buffers only
         std::string debug_name;
         bool imported = false;
@@ -423,6 +429,7 @@ private:
         rhi::TextureUsage usage = rhi::TextureUsage::None;
         std::uint32_t array_layers =
             1; // part of the key (m10.1): a layered target never aliases a flat one
+        bool array_view = false; // part of the key: an array-viewed 1-layer never aliases a plain
         rhi::TextureHandle handle{};
         bool in_use = false; // claimed by a resource this frame
     };
