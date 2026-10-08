@@ -8,7 +8,7 @@ exposes no `/dev/dri` or `/dev/nvidia0`; the adapter selected by the probe is ll
 **Measured:** Release preset (RelWithDebInfo), validation off, no sanitizer, 1920x1080, clear steady
 sky, no analytic lights, roughness 0.6 metal outside a six-wall box. For each SSR setting, discard
 8 warmup frames and report the median of 40 measured frames, SDF occlusion off then on. Warmups precede the measured frames. The metal covers part of the lower frame; this does
-not claim a full-screen bound. Probe implementation: `tests/render/sky_specular_test.cpp:1485`.
+not claim a full-screen bound. Probe implementation: `tests/render/sky_specular_test.cpp:1496`.
 
 | Reader | Off median (ms) | On median (ms) | Difference (ms) |
 |---|---:|---:|---:|

@@ -1330,7 +1330,8 @@ struct OcclusionScene {
 HdrImage render_occlusion_hdr(rhi::Device& device,
                               SceneRenderer& renderer,
                               OcclusionScene& scene,
-                              std::size_t& passes) {
+                              std::size_t& passes,
+                              std::vector<std::uint8_t>* raw = nullptr) {
     RenderGraph graph(device);
     graph.reset();
     const auto out = renderer.render(graph, scene.world, {kSize, kSize});
@@ -1340,7 +1341,11 @@ HdrImage render_occlusion_hdr(rhi::Device& device,
     graph.execute(*cmd);
     passes = graph.pass_count();
     device.submit_blocking(*cmd);
-    return decode_hdr(read_texture(device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
+    auto bytes = read_texture(device, graph.physical(out.hdr), kSize, kSize, 8);
+    auto image = decode_hdr(bytes, kSize, kSize);
+    if (raw)
+        *raw = std::move(bytes);
+    return image;
 }
 
 // For the proof's 96x96 view, y=78.5 gives NDC y=0.6354. A camera 1 m above
@@ -1384,7 +1389,9 @@ TEST_CASE(
                 scene.view(x);
                 renderer.set_sdf_specular_occlusion_enabled(false);
                 (void)render_occlusion_hdr(*device, renderer, scene, passes); // warm bakes/recentre
-                const HdrImage off = render_occlusion_hdr(*device, renderer, scene, passes);
+                std::vector<std::uint8_t> off_bytes;
+                const HdrImage off =
+                    render_occlusion_hdr(*device, renderer, scene, passes, &off_bytes);
                 const std::size_t off_passes = passes;
                 renderer.set_sdf_specular_occlusion_enabled(true);
                 const HdrImage on = render_occlusion_hdr(*device, renderer, scene, passes);
@@ -1413,8 +1420,12 @@ TEST_CASE(
                                           "outdoor pixels must retain their sky specular");
                 }
                 renderer.set_sdf_specular_occlusion_enabled(false);
-                const HdrImage off_again = render_occlusion_hdr(*device, renderer, scene, passes);
-                CHECK(off_again.rgb == off.rgb); // OFF after ON restores every HDR byte
+                std::vector<std::uint8_t> off_again_bytes;
+                const HdrImage off_again =
+                    render_occlusion_hdr(*device, renderer, scene, passes, &off_again_bytes);
+                CHECK(off_again.rgb == off.rgb);
+                CHECK_MESSAGE(off_again_bytes == off_bytes,
+                              "OFF after ON must restore every RGBA16F byte");
             }
             CHECK(renderer.sdf_specular_occlusion_stats().enabled_frames == 2);
             CHECK(renderer.sdf_specular_occlusion_stats().disabled_frames == 6);

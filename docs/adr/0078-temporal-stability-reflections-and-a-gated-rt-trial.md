@@ -314,10 +314,10 @@ is a separate, later brick and is not started.
   and an identical outdoor plane, same world geometry viewed from two camera positions, clear sky,
   no lights. In all four SSR/prefilter on/off combinations the enclosed mean falls to zero and the
   outdoor mean ratio is exactly 1.0; every outdoor sample stays within 2%. The proof requires at
-  least 10x enclosed suppression and less than 2% outdoor change (`sky_specular_test.cpp:1360`).
+  least 10x enclosed suppression and less than 2% outdoor change (`sky_specular_test.cpp:1366`).
   Returning 1.0 from the cone falsifies all four enclosed cases with "enclosed metal sky must drop
   by at least 10x" (the mutation is restored). OFF after ON restores every HDR byte, and unavailable
-  fields are counted and byte-identical (`sky_specular_test.cpp:1417,1426`).
+  fields are counted and byte-identical (`sky_specular_test.cpp:1427,1437`).
 - *Why off / what is not the same, inferred:* sixteen samples and an 8 m reach cannot guarantee
   distant/thin blockers, and a narrow-band saturated value is a lower distance bound, not a measured
   distance; using it in d/radius would darken empty outdoors. Such samples advance the ray but do
@@ -330,7 +330,7 @@ is a separate, later brick and is not started.
   (+1.33419). Above the ADR estimate on this environment; these are not RTX costs. No hardware GPU
   is exposed, so target-GPU budget compliance could not be determined and no hardware baseline JSON
   is filed. Raw diagnostic: `docs/perf/sdf-specular-occlusion/lavapipe-release-probe.txt:10`; procedure
-  and limits: its README. The timing probe is opt-in (`sky_specular_test.cpp:1485`).
+  and limits: its README. The timing probe is opt-in (`sky_specular_test.cpp:1496`).
 - *Binding constraint, measured by source inspection:* appending four slots to the existing 21
   would exceed the RHI's 24-slot limit. The enabled forward variant reuses the inactive DDGI atlas
   slots 14/15 and adds 21/22 (23 total), a deliberate exception to the previous comment's request
