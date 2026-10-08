@@ -38,7 +38,13 @@ jobs:
     strategy:
       fail-fast: false # one OS failing shouldn't hide the others
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Linux is NOT in this list for our own pushes and pull requests: ci-self-hosted.yml
+        # builds and tests it on the two personal runners, in 9 minutes against this job's 15, so
+        # running both only pays twice for the same answer. A FORK pull request cannot reach those
+        # runners -- ci-self-hosted.yml guards on the actor -- so a fork still gets the hosted Linux
+        # build here, which is the whole point: untrusted code never touches a persistent runner,
+        # and it never goes unchecked either.
+        os: ${{ fromJSON(github.actor == github.repository_owner && '["macos-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -135,7 +141,24 @@ jobs:
     # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
     # draft is not unchecked -- it is checked locally. Marking the PR ready for review runs the
     # full hosted matrix before it can be merged.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # ...and skip it for our own BRANCH work, where the self-hosted ASan job covers us in 10 min
+    # against this job's 37. A fork pull request, which cannot reach the self-hosted runners, still
+    # gets sanitized here.
+    #
+    # A PUSH TO MAIN IS THE EXCEPTION, and unlike every other job in this pair it is deliberately
+    # REDUNDANT rather than complementary. ASan is the one Linux job that does not fit the
+    # always-on runner: its working set exceeds the starbase container's 8 GB, so
+    # ci-self-hosted.yml pins it to the `bigmem` label, which only the workstation carries (see
+    # docs/ci/self-hosted-runners.md). The workstation gets switched off. Without this exception a
+    # merge could land with its only ASan job queued against a sleeping machine — and since nothing
+    # blocks merges here, "queued for 24 h then failed" would arrive long after the merge did.
+    # Every merge therefore gets one ASan that depends on no machine being awake. Branch pushes
+    # still get the fast one, or none if the workstation is off, which is a cost paid before the
+    # code is in main rather than after.
+    if: |
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+      && (github.actor != github.repository_owner
+          || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     steps:
       - uses: actions/checkout@v4
 
