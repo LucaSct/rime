@@ -223,3 +223,32 @@ its own ADR rather than guessed at here.
 Every millisecond figure in this ADR is an **estimate** — from the consulted models or from
 published slides on other hardware — except ADR-0077's pinned numbers. None has been measured on
 this engine. The first brick that lands must bring its own `docs/perf/` run.
+
+## Implementation record (appended; the Decision above is unchanged)
+
+**Step 2, first brick: the split-sum half.** Landed **switched off** (`SceneRenderer::
+set_sky_specular_prefilter_enabled`, default `false`). The SDF specular-occlusion half of section 2
+is a separate, later brick and is not started.
+
+- *What exists:* `SkySpecular` (`lighting/sky_specular.hpp`) builds, through the render graph, a
+  6-layer GGX-prefiltered array (level 0 is the sky-view LUT itself, levels 1-6 are perceptual
+  roughness k/6) and a 64x64 DFG table, and `pbr_forward_shadowed.frag` reads them in place of the
+  m19.6b mirror-faded-to-SH blend. Both bakes are GPU compute; the DFG table is built once per
+  device, the chain only on a frame where the sky changed.
+- *Why off:* `ssr_resolve` still reflects the sky-view LUT with plain Schlick, and with SSR on the
+  forward pass compiles its sky term out, so the chain has no reader there. Turned on, SSR on/off
+  would disagree about a rough metal by the single-bounce energy the new path restores (measured
+  about 2x at roughness 1), and `sky_lighting_test`'s m19.6b SSR on/off bridge (bound derived from
+  the old analytic fit) would fail. With SSR or DDGI on the setting builds nothing and counts the
+  frame as disabled. Section 3 (SSR on the new history) is where `ssr_resolve` moves to the same
+  chain; the switch flips then.
+- *A deviation from "split-sum" as the ADR names it:* the DFG lookup is followed by Filament's
+  single-line energy compensation (`1 + f0 (1/E - 1)`), because a single-bounce table loses 55% of a
+  white metal's energy at roughness 1 (measured), which makes the white-furnace property false
+  without it.
+- *Cost, measured:* the chain rebuild is 1.6-1.8 ms of GPU on the reference RTX 3060 (Debug build,
+  validation on, clocks not pinned) -- **above this ADR's 0.1-0.35 ms estimate if the sky changes
+  every frame** (a scrolling cloud field does). It is zero on a frame where the sky did not change.
+  The estimate and the measurement answer different questions: the per-pixel lookup is unmeasured.
+  No `docs/perf/` JSON was filed: with the switch off the frame is byte-identical, and the bake is
+  event-driven rather than per-frame. The first brick that turns it on owes the Release run.
