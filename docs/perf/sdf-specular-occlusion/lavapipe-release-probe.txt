@@ -1,0 +1,20 @@
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (engine/rhi/src/vulkan/device_vulkan.cpp:356)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (engine/rhi/src/vulkan/device_vulkan.cpp:126)
+===============================================================================
+tests/render/sky_specular_test.cpp:1485:
+TEST CASE:  SDF specular occlusion: per-pass GPU cost (probe)
+
+tests/render/sky_specular_test.cpp:1532: MESSAGE: SDF 1080p outdoor rough metal, SSR=false occlusion=false reader median=1.62184 ms, graph median=5.6639 ms; adapter=llvmpipe (LLVM 23.1.1, 256 bits)
+
+tests/render/sky_specular_test.cpp:1532: MESSAGE: SDF 1080p outdoor rough metal, SSR=false occlusion=true reader median=2.91621 ms, graph median=6.91624 ms; adapter=llvmpipe (LLVM 23.1.1, 256 bits)
+
+tests/render/sky_specular_test.cpp:1532: MESSAGE: SDF 1080p outdoor rough metal, SSR=true occlusion=false reader median=2.38659 ms, graph median=12.2015 ms; adapter=llvmpipe (LLVM 23.1.1, 256 bits)
+
+tests/render/sky_specular_test.cpp:1532: MESSAGE: SDF 1080p outdoor rough metal, SSR=true occlusion=true reader median=3.72078 ms, graph median=13.7752 ms; adapter=llvmpipe (LLVM 23.1.1, 256 bits)
+
+===============================================================================
+[doctest] test cases: 1 | 1 passed | 0 failed | 173 skipped
+[doctest] assertions: 0 | 0 passed | 0 failed |
+[doctest] Status: SUCCESS!

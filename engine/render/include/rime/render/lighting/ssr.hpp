@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "rime/core/math/mat.hpp"
+#include "rime/render/lighting/sdf_clipmap.hpp"
 #include "rime/render/lighting/sky_specular.hpp"
 #include "rime/render/render_graph.hpp"
 
@@ -133,13 +134,17 @@ public:
              // sky identically. False leaves the pre-ADR-0078 arithmetic untouched.
              const SkySpecularBinding& sky_specular,
              rhi::SamplerHandle sky_specular_sampler,
-             bool sky_specular_live);
+             bool sky_specular_live,
+             const SdfSpecularOcclusionBinding& sdf_occlusion = {});
 
 private:
     rhi::Device& device_;
     rhi::ShaderHandle vertex_shader_;   // fullscreen.vert — the oversized-triangle idiom
     rhi::ShaderHandle fragment_shader_; // ssr_resolve.frag
     rhi::PipelineHandle pipeline_;
+    void ensure_sdf_pipeline();
+    rhi::ShaderHandle sdf_fragment_shader_;
+    rhi::PipelineHandle sdf_pipeline_;
     rhi::SamplerHandle sampler_; // point + clamp: depth must not interpolate, edges must not wrap
 };
 

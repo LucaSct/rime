@@ -8,10 +8,7 @@
 // blend passes (ddgi_blend_irradiance.comp / ddgi_blend_visibility.comp) gather these into the
 // octahedral atlases. Derivation: docs/math/ddgi.md.
 //
-// `sdf_sample`/`sdf_sphere_trace` below are LIFTED VERBATIM from tests/render/sdf_probe_trace.comp
-// (that file's own header says m10.5 would — no shader-include mechanism exists yet in this
-// engine, the same constraint sdf_compose.comp lives with, so every consumer of this math carries
-// its own copy rather than #including one).
+// The shared SDF sampling, sphere trace and normal functions now live in sdf_trace.glsl.
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
@@ -19,17 +16,11 @@
 
 layout(local_size_x = 64) in;
 
-layout(set = 0, binding = 0) uniform sampler3D level0;
-layout(set = 0, binding = 1) uniform sampler3D level1;
-layout(set = 0, binding = 2) uniform sampler3D level2;
-
-struct LevelInfo {
-    vec4 origin_extent; // xyz = world origin (voxel (0,0,0)'s corner), w = world extent
-    vec4 band_voxel;    // x = band, y = voxel size, z/w unused
-};
-layout(std140, set = 0, binding = 3) uniform Levels {
-    LevelInfo info[3];
-} clipmap;
+#define SDF_LEVEL0_BINDING 0
+#define SDF_LEVEL1_BINDING 1
+#define SDF_LEVEL2_BINDING 2
+#define SDF_LEVELS_BINDING 3
+#include "sdf_trace.glsl"
 
 // Mirrors GpuDdgiTraceParams (lighting/ddgi.hpp) exactly.
 layout(std140, set = 0, binding = 4) uniform DdgiParams {
@@ -52,57 +43,6 @@ layout(std430, set = 0, binding = 5) writeonly buffer Rays { DdgiRay r[]; } out_
 // matter which way it was pointing, which meant a probe under an open sky and a probe under a dark
 // overhang disagreed about nothing. It now reads the sky in the ray's own direction.
 layout(set = 0, binding = 6) uniform sampler2D skyview_lut;
-
-// ── Sphere-trace helpers (lifted from tests/render/sdf_probe_trace.comp — see that file's own
-// derivation comments for why each piece is shaped this way; not repeated here). ─────────────────
-float sample_level(int i, vec3 uvw) {
-    if (i == 0) return texture(level0, uvw).r;
-    if (i == 1) return texture(level1, uvw).r;
-    return texture(level2, uvw).r;
-}
-
-float sdf_sample(vec3 world_pos) {
-    for (int i = 0; i < 3; ++i) {
-        vec4 oe = clipmap.info[i].origin_extent;
-        vec3 uvw = (world_pos - oe.xyz) / oe.w;
-        if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)))) {
-            return sample_level(i, uvw) * clipmap.info[i].band_voxel.x;
-        }
-    }
-    vec4 oe2 = clipmap.info[2].origin_extent;
-    vec3 uvw2 = clamp((world_pos - oe2.xyz) / oe2.w, 0.0, 1.0);
-    return sample_level(2, uvw2) * clipmap.info[2].band_voxel.x;
-}
-
-float sdf_sphere_trace(vec3 origin, vec3 dir, float max_dist) {
-    float t = 0.0;
-    const float kHitEpsilon = 0.001;
-    const int kMaxSteps = 128;
-    for (int i = 0; i < kMaxSteps; ++i) {
-        if (t >= max_dist) {
-            break;
-        }
-        float d = sdf_sample(origin + dir * t);
-        if (d < kHitEpsilon) {
-            return t;
-        }
-        t += max(d, kHitEpsilon);
-    }
-    return -1.0;
-}
-
-// The field's gradient by central differences, normalized — the standard way to recover a surface
-// NORMAL from an SDF (the field has no separate normal channel; its own shape IS the geometry).
-// `eps` is half the FINEST clipmap level's voxel size: fine enough to resolve real surface detail
-// at the level actually doing the tracing, coarse enough to stay well above the field's own
-// quantization noise (docs/math/sdf.md's narrow-band error).
-vec3 sdf_normal(vec3 p, float eps) {
-    vec3 d;
-    d.x = sdf_sample(p + vec3(eps, 0.0, 0.0)) - sdf_sample(p - vec3(eps, 0.0, 0.0));
-    d.y = sdf_sample(p + vec3(0.0, eps, 0.0)) - sdf_sample(p - vec3(0.0, eps, 0.0));
-    d.z = sdf_sample(p + vec3(0.0, 0.0, eps)) - sdf_sample(p - vec3(0.0, 0.0, eps));
-    return normalize(d);
-}
 
 // Spherical Fibonacci direction i of n — mirrors ddgi_fibonacci_direction (lighting/ddgi.cpp)
 // exactly, which is itself the same formula the m10.4c spike measured

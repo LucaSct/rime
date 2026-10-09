@@ -119,8 +119,19 @@ layout(std140, set = 0, binding = 13) uniform ClusterUniforms {
 // move when a wall breaks; this is what makes the BOUNCED light move too. Each is a sampler2D over
 // the WHOLE atlas — one probe's octahedral tile is a small sub-rectangle of it, and
 // DdgiSampleParams (mirroring GpuDdgiTraceParams field-for-field, m10.5a) is what locates it.
+#ifndef SDF_SPECULAR_OCCLUSION
 layout(set = 0, binding = 14) uniform sampler2D ddgi_irradiance_atlas;
 layout(set = 0, binding = 15) uniform sampler2D ddgi_visibility_atlas;
+
+#else
+// DDGI is gated off for this sky-only variant, so its two atlas slots can hold SDF volumes.
+// This stays within the RHI's 24 slots without adding any bindings to the disabled variant.
+#define SDF_LEVEL0_BINDING 14
+#define SDF_LEVEL1_BINDING 15
+#define SDF_LEVEL2_BINDING 21
+#define SDF_LEVELS_BINDING 22
+#include "sdf_trace.glsl"
+#endif
 
 // The sky's nine SH coefficients (m17.7b). `N` is the shading world normal, and with a sky present
 // the ambient term becomes what the SKY delivers to a surface facing that way instead of one flat
@@ -357,6 +368,7 @@ float ddgi_chebyshev_weight(float mean, float mean2, float dist) {
 // tidy-up (m10.5b's own first attempt at this function hit exactly this: a floor patch reading
 // pure ambient with a fully-lit probe one cell away, because DIVIDE was correct and EVERY weight
 // was nonetheless zero).
+#ifndef SDF_SPECULAR_OCCLUSION
 vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) {
     float spacing = max(ddgi.grid_origin_spacing.w, 1.0e-4);
     ivec3 dims = ivec3(ddgi.grid_dims_perrow.xyz);
@@ -417,6 +429,11 @@ vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) {
     }
     return weight_sum > 1.0e-6 ? accum / weight_sum : vec3(0.0);
 }
+#else
+// The enabled variant is selected only with DDGI disabled; keep its unreachable branch typed.
+vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) { return vec3(0.0); }
+#endif
+
 
 void main() {
     vec3 n = perturb_normal(v_world_normal);
@@ -513,8 +530,8 @@ void main() {
         // Unlike terrain, the reflection is NOT clamped to the horizon: terrain clamps because a
         // heightfield's downward ray meets more terrain, while a mesh's (the underside of a
         // sphere, a wall) meets the ground — which is what the LUT holds below the horizon, and
-        // what ssr_resolve.frag reads there too, so SSR on and off agree. `ao` scales it because
-        // this is still unshadowed ambient light: a crevice the AO map darkens should not glow.
+        // what ssr_resolve.frag reads there too, so SSR on and off agree. The legacy variant
+        // retains diffuse AO here; the opt-in SDF variant replaces it with specular visibility.
         if (sky_sh_enabled()) {
             const vec3 r = reflect(-v, n);
             const vec3 f0 = mix(vec3(0.04), albedo, metallic);
@@ -530,12 +547,25 @@ void main() {
                 // specular AA widening, and a lobe the AA made wider must read a blurrier sky.
                 const float lobe_roughness = sqrt(alpha);
                 const vec3 lookup = sky_specular_dominant_direction(n, r, lobe_roughness);
+                // Diffuse AO remains on diffuse light. With the SDF variant, replace it here
+                // with visibility of this SPECULAR lobe; multiplying both would double-darken it.
+#ifdef SDF_SPECULAR_OCCLUSION
+                const float specular_visibility = sdf_sky_visibility(v_world_pos, n, lookup, lobe_roughness);
+                out_radiance += sky_specular_prefiltered(lookup, lobe_roughness) *
+                                sky_specular_environment_brdf(f0, lobe_roughness, n_dot_v) * specular_visibility;
+#else
                 out_radiance += sky_specular_prefiltered(lookup, lobe_roughness) *
                                 sky_specular_environment_brdf(f0, lobe_roughness, n_dot_v) * ao;
+#endif
             } else {
                 const vec3 sky_mirror = texture(skyview_lut, skyview_uv_from_direction(r)).rgb;
                 const vec3 sky_specular = mix(sky_mirror, sky_ambient, alpha);
+#ifdef SDF_SPECULAR_OCCLUSION
+                const float specular_visibility = sdf_sky_visibility(v_world_pos, n, r, sqrt(alpha));
+                out_radiance += sky_specular * env_brdf_approx(f0, roughness, n_dot_v) * specular_visibility;
+#else
                 out_radiance += sky_specular * env_brdf_approx(f0, roughness, n_dot_v) * ao;
+#endif
             }
         }
 #endif

@@ -82,6 +82,14 @@ layout(set = 0, binding = 8) uniform sampler2D gbuffer_material;
 #define SKY_DFG_BINDING 10
 #include "sky_specular_eval.glsl"
 
+#ifdef SDF_SPECULAR_OCCLUSION
+#define SDF_LEVEL0_BINDING 11
+#define SDF_LEVEL1_BINDING 12
+#define SDF_LEVEL2_BINDING 13
+#define SDF_LEVELS_BINDING 14
+#include "sdf_trace.glsl"
+#endif
+
 layout(std140, set = 0, binding = 6) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
     uvec4 grid_dims_perrow;   // xyz probe counts, w atlas probes-per-row
@@ -276,6 +284,14 @@ void main() {
         const vec3 lookup = sky_specular_dominant_direction(n_world, r_world, roughness);
         probe = sky_specular_prefiltered(lookup, roughness);
     }
+#ifdef SDF_SPECULAR_OCCLUSION
+    // Occlude ONLY the sky fallback before blending: a real SSR hit carries local radiance.
+    // World position and reflection are already reconstructed above, with no normal derivatives.
+    if (ssr.ambient.a != 0.0 && ddgi.enabled_pad.x == 0u) {
+        vec3 lookup = use_chain ? sky_specular_dominant_direction(n_world, r_world, roughness) : r_world;
+        probe *= sdf_sky_visibility(world_pos, n_world, lookup, roughness);
+    }
+#endif
     if (ddgi.enabled_pad.x != 0u) {
         probe = ddgi_sample_irradiance(world_pos, r_world);
     }

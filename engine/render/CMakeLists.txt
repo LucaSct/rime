@@ -131,3 +131,9 @@ rime_apply_common_target_options(rime_render)
 # SDK install/export (M6.8): headers + archive into the rime-targets export set. The embedded
 # shader headers stay PRIVATE (rime_add_shaders above), so no shader bytes leak into the SDK.
 rime_install_module(rime_render)
+
+# Opt-in SDF readers: the ordinary modules/layouts retain zero SDF binding cost.
+rime_add_shader_variant(rime_render
+    shaders/pbr_forward_shadowed.frag SDF_SPECULAR_OCCLUSION pbr_forward_shadowed_sdf.frag)
+rime_add_shader_variant(rime_render
+    shaders/ssr_resolve.frag SDF_SPECULAR_OCCLUSION ssr_resolve_sdf.frag)

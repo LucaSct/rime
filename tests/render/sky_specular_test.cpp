@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "render_test_support.hpp"
+#include "rime/assets/sdf_asset.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/transform.hpp"
 #include "rime/core/math/vec.hpp"
@@ -1217,6 +1218,332 @@ TEST_CASE("sky specular: per-pass GPU cost of the lookup, chain on against off (
                     << median_ms(reader) << " ms, all passes median " << median_ms(total)
                     << " ms; chain bakes " << renderer.sky_specular_stats().prefilter_filled
                     << " (unchanged sky: bake is one-off)");
+        }
+    }
+}
+
+namespace {
+
+// Analytic box fields, independently sampled as texel-centre signed distances. The renderer's
+// extraction and compose paths still run: the proof does not upload a finished clipmap.
+float occlusion_box_distance(core::Vec3 p, core::Vec3 h) {
+    const core::Vec3 q{std::fabs(p.x) - h.x, std::fabs(p.y) - h.y, std::fabs(p.z) - h.z};
+    const core::Vec3 outside{std::max(q.x, 0.0f), std::max(q.y, 0.0f), std::max(q.z, 0.0f)};
+    const float outside_len =
+        std::sqrt(outside.x * outside.x + outside.y * outside.y + outside.z * outside.z);
+    const float inside = std::min(std::max(q.x, std::max(q.y, q.z)), 0.0f);
+    return outside_len + inside;
+}
+
+assets::MeshSdfAsset occlusion_box_sdf(core::Vec3 half_extents,
+                                       std::uint32_t target_resolution = 24) {
+    const float longest = std::max({half_extents.x, half_extents.y, half_extents.z}) * 2.0f;
+    const float voxel_size = longest / static_cast<float>(target_resolution);
+    const float pad = 2.0f * voxel_size;
+    std::uint32_t res[3] = {0, 0, 0};
+    float origin[3] = {0.0f, 0.0f, 0.0f};
+    const float half[3] = {half_extents.x, half_extents.y, half_extents.z};
+    for (int a = 0; a < 3; ++a) {
+        const float padded_extent = 2.0f * half[a] + 2.0f * pad;
+        res[a] = std::max<std::uint32_t>(
+            static_cast<std::uint32_t>(std::ceil(padded_extent / voxel_size)), 4u);
+        origin[a] = -0.5f * static_cast<float>(res[a]) * voxel_size;
+    }
+    assets::MeshSdfAsset sdf;
+    sdf.grid_origin = {origin[0], origin[1], origin[2]};
+    sdf.voxel_size = voxel_size;
+    sdf.resolution = {res[0], res[1], res[2]};
+    sdf.local_bounds =
+        assets::Aabb{core::Vec3{-half_extents.x, -half_extents.y, -half_extents.z}, half_extents};
+    sdf.distances.resize(sdf.voxel_count());
+    float max_abs = 0.0f;
+    for (std::uint32_t kz = 0; kz < res[2]; ++kz) {
+        for (std::uint32_t jy = 0; jy < res[1]; ++jy) {
+            for (std::uint32_t ix = 0; ix < res[0]; ++ix) {
+                const core::Vec3 p{sdf.grid_origin.x + (static_cast<float>(ix) + 0.5f) * voxel_size,
+                                   sdf.grid_origin.y + (static_cast<float>(jy) + 0.5f) * voxel_size,
+                                   sdf.grid_origin.z +
+                                       (static_cast<float>(kz) + 0.5f) * voxel_size};
+                const float d = occlusion_box_distance(p, half_extents);
+                sdf.distances[sdf.index(ix, jy, kz)] = d;
+                max_abs = std::max(max_abs, std::fabs(d));
+            }
+        }
+    }
+    sdf.max_abs_distance = max_abs;
+    return sdf;
+}
+
+struct OcclusionScene {
+    ecs::World world;
+    ecs::Entity camera;
+
+    OcclusionScene(SceneRenderer& renderer, MeshRegistry& meshes, MaterialRegistry& materials) {
+        register_render_components(world);
+        PbrMaterialDesc metal{};
+        metal.base_color[0] = metal.base_color[1] = metal.base_color[2] = 0.9f;
+        metal.metallic = 1.0f;
+        metal.roughness =
+            0.6f; // resolve's cone is pure fallback, so this tests sky, not screen hits
+        const MaterialId mat = materials.add(metal);
+        const MeshId plane = meshes.add(make_plane(2.9f), "sdf-specular-metal");
+        for (const float x : {0.0f, 12.0f}) {
+            core::Transform t{};
+            t.translation.x = x;
+            (void)world.spawn_with(ecs::WorldTransform{t}, MeshRef{plane}, MaterialRef{mat});
+        }
+        PbrMaterialDesc wall{};
+        wall.base_color[0] = wall.base_color[1] = wall.base_color[2] = 0.0f;
+        const MaterialId wall_mat = materials.add(wall);
+        const auto place = [&](core::Vec3 half, core::Vec3 at) {
+            const SdfSourceId sdf = renderer.register_sdf_source(occlusion_box_sdf(half, 64));
+            const MeshId mesh = meshes.add(make_box(half), "sdf-specular-wall");
+            core::Transform t{};
+            t.translation = at;
+            (void)world.spawn_with(
+                ecs::WorldTransform{t}, MeshRef{mesh}, MaterialRef{wall_mat}, SdfRef{sdf});
+        };
+        // Six overlapping 0.5 m slabs: cavity x/z=[-3,3], y=[-0.125,3]. Lift each metal
+        // 0.125 m above its solid floor so a coplanar depth tie cannot let the black slab
+        // overwrite the metal. The outdoor metal is 12 m away, beyond the 8 m cone reach.
+        place({3.5f, 0.25f, 3.5f}, {0.0f, -0.375f, 0.0f});
+        place({3.5f, 0.25f, 3.5f}, {0.0f, 3.25f, 0.0f});
+        place({0.25f, 2.0f, 3.5f}, {-3.25f, 1.5f, 0.0f});
+        place({0.25f, 2.0f, 3.5f}, {3.25f, 1.5f, 0.0f});
+        place({3.5f, 2.0f, 0.25f}, {0.0f, 1.5f, -3.25f});
+        place({3.5f, 2.0f, 0.25f}, {0.0f, 1.5f, 3.25f});
+        // An identical solid floor beneath the outdoor metal catches the self-occlusion defect.
+        place({3.5f, 0.25f, 3.5f}, {12.0f, -0.375f, 0.0f});
+        core::Transform cam{};
+        cam.translation = {0.0f, 1.0f, 0.0f};
+        camera = world.spawn_with(ecs::WorldTransform{cam}, Camera{1.1f, 0.1f, 100.0f, true});
+    }
+
+    void view(float x) {
+        core::Transform cam{};
+        cam.translation = {x, 1.0f, 0.0f};
+        *world.get<ecs::WorldTransform>(camera) = ecs::WorldTransform{cam};
+        world.mark_changed<ecs::WorldTransform>(camera);
+    }
+};
+
+HdrImage render_occlusion_hdr(rhi::Device& device,
+                              SceneRenderer& renderer,
+                              OcclusionScene& scene,
+                              std::size_t& passes,
+                              std::vector<std::uint8_t>* raw = nullptr) {
+    RenderGraph graph(device);
+    graph.reset();
+    const auto out = renderer.render(graph, scene.world, {kSize, kSize});
+    REQUIRE(out.hdr.is_valid());
+    graph.export_texture(out.hdr);
+    auto cmd = device.begin_commands();
+    graph.execute(*cmd);
+    passes = graph.pass_count();
+    device.submit_blocking(*cmd);
+    auto bytes = read_texture(device, graph.physical(out.hdr), kSize, kSize, 8);
+    auto image = decode_hdr(bytes, kSize, kSize);
+    if (raw)
+        *raw = std::move(bytes);
+    return image;
+}
+
+// For the proof's 96x96 view, y=78.5 gives NDC y=0.6354. A camera 1 m above
+// the floor intersects it at |z|=1/(tan(1.1/2)*0.6354)=2.57 m; |x|<0.51 m.
+// Rows 78..90, columns 32..63 therefore lie strictly inside the 2.9 m half-extent
+// metal and before the cavity's wall at z=-3. Never average the wall into a metal proof.
+double occlusion_metal_mean(const HdrImage& img) {
+    double sum = 0.0;
+    for (std::uint32_t y = 78; y <= 90; ++y)
+        for (std::uint32_t x = 32; x < 64; ++x)
+            sum += img.luminance(x, y);
+    return sum / (13.0 * 32.0);
+}
+
+} // namespace
+
+TEST_CASE(
+    "SDF specular occlusion: enclosed metal loses sky and identical outdoor metal stays bright") {
+    auto device = device_or_skip("the SDF specular occlusion proof");
+    if (!device)
+        return;
+    for (const bool ssr : {false, true}) {
+        for (const bool chain : {false, true}) {
+            CAPTURE(ssr);
+            CAPTURE(chain);
+            MeshRegistry meshes(*device);
+            MaterialRegistry materials;
+            SceneRenderer renderer(*device, meshes, materials);
+            render::test::disable_temporal_aa(renderer);
+            CHECK_FALSE(renderer.sdf_specular_occlusion_enabled());
+            renderer.set_sky(clear_sky());
+            renderer.set_sky_specular_prefilter_enabled(chain);
+            LightingSettings ls{};
+            ls.sdf_clipmap_enabled = true;
+            ls.ssr_enabled = ssr;
+            renderer.set_lighting(ls);
+            OcclusionScene scene(renderer, meshes, materials);
+            std::size_t passes = 0;
+            for (const float x : {0.0f, 12.0f}) {
+                CAPTURE(x);
+                scene.view(x);
+                renderer.set_sdf_specular_occlusion_enabled(false);
+                (void)render_occlusion_hdr(*device, renderer, scene, passes); // warm bakes/recentre
+                std::vector<std::uint8_t> off_bytes;
+                const HdrImage off =
+                    render_occlusion_hdr(*device, renderer, scene, passes, &off_bytes);
+                const std::size_t off_passes = passes;
+                renderer.set_sdf_specular_occlusion_enabled(true);
+                const HdrImage on = render_occlusion_hdr(*device, renderer, scene, passes);
+                CHECK(passes == off_passes); // estimator lives in the reader, no extra pass
+                const double off_mean = occlusion_metal_mean(off);
+                const double on_mean = occlusion_metal_mean(on);
+                REQUIRE_MESSAGE(off_mean > 1e-4, "control metal must reflect a nonzero sky");
+                MESSAGE("SDF sky: SSR=" << ssr << " chain=" << chain << " camera x=" << x
+                                        << " off=" << off_mean << " on=" << on_mean
+                                        << " ratio=" << on_mean / off_mean);
+                // A sealed cavity has zero visible sky; an open floor has full visibility.
+                // The inner patch (rows 78..90, columns 32..63) is wholly floor: its farthest
+                // point is <3 m away at this FOV, before the back wall. A white metal has zero
+                // diffuse, so these means measure sky specular alone. Allow 10% residual for
+                // the bounded/narrow-band cone approximation, and 2% outdoor drift for FP16
+                // storage/reconstruction; both are far smaller than a global darkening defect.
+                if (x == 0.0f) {
+                    CHECK_MESSAGE(on_mean < off_mean * 0.1,
+                                  "enclosed metal sky must drop by at least 10x");
+                } else {
+                    CHECK_MESSAGE(rel(on_mean, off_mean) < 0.02,
+                                  "outdoor metal sky must change by less than 2%");
+                    for (std::uint32_t y = 78; y <= 90; ++y)
+                        for (std::uint32_t px = 32; px < 64; ++px)
+                            CHECK_MESSAGE(rel(on.luminance(px, y), off.luminance(px, y)) < 0.02,
+                                          "outdoor pixels must retain their sky specular");
+                }
+                renderer.set_sdf_specular_occlusion_enabled(false);
+                std::vector<std::uint8_t> off_again_bytes;
+                const HdrImage off_again =
+                    render_occlusion_hdr(*device, renderer, scene, passes, &off_again_bytes);
+                CHECK(off_again.rgb == off.rgb);
+                CHECK_MESSAGE(off_again_bytes == off_bytes,
+                              "OFF after ON must restore every RGBA16F byte");
+            }
+            CHECK(renderer.sdf_specular_occlusion_stats().enabled_frames == 2);
+            CHECK(renderer.sdf_specular_occlusion_stats().disabled_frames == 6);
+            CHECK(renderer.sdf_specular_occlusion_stats().unavailable_frames == 0);
+        }
+    }
+}
+
+TEST_CASE(
+    "SDF specular occlusion: an unavailable clipmap is counted and the frame is byte identical") {
+    auto device = device_or_skip("the unavailable SDF proof");
+    if (!device)
+        return;
+    for (const bool ssr : {false, true}) {
+        MeshRegistry meshes(*device);
+        const MeshId floor = meshes.add(make_plane(12.0f), "sdf-disabled-floor");
+        MaterialRegistry materials;
+        PbrMaterialDesc md{};
+        md.metallic = 1.0f;
+        md.roughness = 0.6f;
+        const MaterialId mat = materials.add(md);
+        SceneRenderer renderer(*device, meshes, materials);
+        render::test::disable_temporal_aa(renderer);
+        LightingSettings ls{};
+        ls.ssr_enabled = ssr;
+        renderer.set_lighting(ls); // no SDF levels have been allocated or composed
+        renderer.set_sky(clear_sky());
+        const HdrImage off = render_hdr(*device, renderer, floor, mat);
+        renderer.set_sdf_specular_occlusion_enabled(true);
+        CHECK(renderer.sdf_specular_occlusion_enabled());
+        const HdrImage unavailable = render_hdr(*device, renderer, floor, mat);
+        CHECK(unavailable.rgb == off.rgb);
+        CHECK(renderer.sdf_specular_occlusion_stats().unavailable_frames == 1);
+        CHECK(renderer.sdf_specular_occlusion_stats().enabled_frames == 0);
+        CHECK(renderer.sdf_specular_occlusion_stats().disabled_frames == 1);
+    }
+}
+
+TEST_CASE("SDF specular occlusion: frames without a sky reader are counted") {
+    auto device = device_or_skip("the SDF no-reader counter proof");
+    if (!device)
+        return;
+    for (const bool ddgi : {false, true}) {
+        MeshRegistry meshes(*device);
+        MaterialRegistry materials;
+        SceneRenderer renderer(*device, meshes, materials);
+        render::test::disable_temporal_aa(renderer);
+        LightingSettings ls{};
+        ls.sdf_clipmap_enabled = true;
+        ls.ddgi_enabled = ddgi;
+        renderer.set_lighting(ls);
+        if (ddgi)
+            renderer.set_sky(clear_sky()); // DDGI owns the environment, so there is no sky reader
+        renderer.set_sdf_specular_occlusion_enabled(true);
+        OcclusionScene scene(renderer, meshes, materials);
+        std::size_t passes = 0;
+        (void)render_occlusion_hdr(*device, renderer, scene, passes);
+        CHECK(renderer.sdf_specular_occlusion_stats().no_reader_frames == 1);
+        CHECK(renderer.sdf_specular_occlusion_stats().unavailable_frames == 0);
+        CHECK(renderer.sdf_specular_occlusion_stats().enabled_frames == 0);
+    }
+}
+
+// An opt-in measurement, not a timing assertion. A steady sky/field excludes bake/compose work;
+// report each sky reader and the full graph so its cost cannot hide inside another pass. Release,
+// 1080p, actual sky on, no lights, identical outdoor metal; clocks are not pinned. The lower floor
+// covers only part of this view, so this is a scene measurement rather than a full-screen bound.
+TEST_CASE("SDF specular occlusion: per-pass GPU cost (probe)") {
+    if (std::getenv("RIME_PERF_PROBE") == nullptr) {
+        MESSAGE("RIME_PERF_PROBE not set -- skipping the SDF per-pass cost probe");
+        return;
+    }
+    auto device = device_or_skip("the SDF cost probe");
+    if (!device)
+        return;
+    const auto median = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    for (const bool ssr : {false, true}) {
+        MeshRegistry meshes(*device);
+        MaterialRegistry materials;
+        SceneRenderer renderer(*device, meshes, materials);
+        render::test::disable_temporal_aa(renderer);
+        LightingSettings ls{};
+        ls.sdf_clipmap_enabled = true;
+        ls.ssr_enabled = ssr;
+        renderer.set_lighting(ls);
+        renderer.set_sky(clear_sky());
+        OcclusionScene scene(renderer, meshes, materials);
+        scene.view(12.0f);
+        for (const bool enabled : {false, true}) {
+            renderer.set_sdf_specular_occlusion_enabled(enabled);
+            std::vector<double> reader, total;
+            for (int frame = 0; frame < 48; ++frame) {
+                RenderGraph graph(*device);
+                graph.reset();
+                const auto out = renderer.render(graph, scene.world, {1920, 1080});
+                graph.export_texture(out.hdr);
+                auto cmd = device->begin_commands();
+                graph.execute(*cmd);
+                const auto timings = graph.submit_and_time(*device, std::move(cmd));
+                if (frame < 8)
+                    continue;
+                double sum = 0.0;
+                double pass = 0.0;
+                for (const auto& t : timings) {
+                    sum += t.gpu_ms;
+                    if (t.name == (ssr ? "ssr-resolve" : "forward-pbr shadowed"))
+                        pass = t.gpu_ms;
+                }
+                reader.push_back(pass);
+                total.push_back(sum);
+            }
+            MESSAGE("SDF 1080p outdoor rough metal, SSR="
+                    << ssr << " occlusion=" << enabled << " reader median=" << median(reader)
+                    << " ms, graph median=" << median(total)
+                    << " ms; adapter=" << device->adapter().name);
         }
     }
 }

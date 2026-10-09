@@ -8,6 +8,9 @@
 
 #include "rime/render/passes.hpp"
 
+#include <iterator>
+#include <vector>
+
 #include "depth_masked.frag.spv.h"
 #include "depth_only.vert.spv.h"
 #include "depth_only_masked.vert.spv.h"
@@ -16,8 +19,10 @@
 #include "pbr_forward.vert.spv.h"
 #include "pbr_forward_shadowed.frag.spv.h"
 #include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
+#include "pbr_forward_shadowed_sdf.frag.spv.h"
 #include "present.frag.spv.h"
 #include "rime/core/diagnostics/log.hpp"
+#include "rime/render/lighting/sdf_clipmap.hpp"
 #include "taa_resolve.frag.spv.h"
 #include "tonemap.frag.spv.h"
 #include "velocity.frag.spv.h"
@@ -26,6 +31,30 @@
 namespace rime::render {
 
 namespace {
+
+constexpr rhi::BindingDesc kShadowedBindings[] = {
+    {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+    {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+    {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // cascade map
+    {8, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // ShadowUniforms
+    {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // local (spot) map
+    {10, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},       // LocalShadowUniforms
+    {11, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // clustered lights (m10.3)
+    {12, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // per-froxel light lists
+    {13, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment}, // ClusterUniforms
+    {14, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
+    {15, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
+    {16, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
+    {17, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},        // sky SH (m17.7b)
+    {18, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
+    {19, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // prefiltered sky
+    {20, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DFG table
+};
 
 [[nodiscard]] rhi::ShaderHandle make_shader(rhi::Device& device,
                                             rhi::ShaderStage stage,
@@ -468,29 +497,6 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     // 8 = the ShadowUniforms block, 9 = the local (spot) depth array, 10 = the LocalShadowUniforms
     // block. A separate pipeline so the shadow-off path is the byte-identical baseline above
     // (ADR-0032 §11); it is only ever bound when a caller opts shadows in.
-    const rhi::BindingDesc shadowed_bindings[] = {
-        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
-        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
-        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
-        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
-        {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
-        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
-        {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
-        {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // cascade map
-        {8, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // ShadowUniforms
-        {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // local (spot) map
-        {10, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment}, // LocalShadowUniforms
-        {11, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // clustered lights (m10.3)
-        {12, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // per-froxel light lists
-        {13, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment}, // ClusterUniforms
-        {14, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
-        {15, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
-        {16, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
-        {17, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},        // sky SH (m17.7b)
-        {18, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
-        {19, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // prefiltered sky
-        {20, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DFG table
-    };
     // 18 of the RHI's 24 descriptor slots (rhi::kMaxBindings, vulkan_backend.hpp:355) are now
     // spoken for. The previous note here named 18 as the trigger for a second descriptor set or a
     // bindless table, and expected SSR to be what spent it; SSR did not, because it resolves in a
@@ -514,7 +520,7 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     // binding (SkyLightBinding::specular), not a new technique. 21 of 24. The next one splits the
     // set.
     pd.fragment_shader = shadowed_fragment_shader_;
-    pd.bindings = shadowed_bindings;
+    pd.bindings = kShadowedBindings;
     pd.depth_write = false;
     pd.depth_compare = rhi::CompareOp::Equal;
     pd.debug_name = "forward-pbr shadowed (after prepass)";
@@ -544,7 +550,47 @@ ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
     pipeline_shadowed_gbuffer_standalone_ = device.create_graphics_pipeline(pd);
 }
 
+// Created only on the first live SDF sky frame: OFF pays neither shader/pipeline creation nor
+// descriptor layout allocation, in addition to declaring and binding no SDF resources.
+void ForwardPbrPass::ensure_sdf_pipelines() const {
+    if (pipeline_sdf_after_prepass_.is_valid())
+        return;
+    // The SDF sky variant is mutually exclusive with DDGI: reuse its two atlas slots for
+    // levels 0/1, then spend 21/22 on level 2/metadata. Four appended slots would exceed the
+    // RHI's 24-slot limit. This deliberate reuse leaves every OFF layout and binding unchanged.
+    sdf_fragment_shader_ = make_shader(device_,
+                                       rhi::ShaderStage::Fragment,
+                                       pbr_forward_shadowed_sdf_frag_spv,
+                                       sizeof(pbr_forward_shadowed_sdf_frag_spv),
+                                       "pbr_forward_shadowed_sdf.frag");
+    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(kShadowedBindings),
+                                               std::end(kShadowedBindings));
+    sdf_bindings.push_back({21, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+    sdf_bindings.push_back({22, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = kHdrFormat;
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_format = kDepthFormat;
+    pd.bindings = sdf_bindings;
+    pd.fragment_shader = sdf_fragment_shader_;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.debug_name = "forward-pbr SDF sky (after prepass)";
+    pipeline_sdf_after_prepass_ = device_.create_graphics_pipeline(pd);
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.debug_name = "forward-pbr SDF sky (standalone)";
+    pipeline_sdf_standalone_ = device_.create_graphics_pipeline(pd);
+}
+
 ForwardPbrPass::~ForwardPbrPass() {
+    device_.destroy(pipeline_sdf_after_prepass_);
+    device_.destroy(pipeline_sdf_standalone_);
+    device_.destroy(sdf_fragment_shader_);
     device_.destroy(pipeline_shadowed_gbuffer_standalone_);
     device_.destroy(pipeline_shadowed_gbuffer_after_prepass_);
     device_.destroy(pipeline_shadowed_standalone_);
@@ -612,7 +658,10 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   const DdgiBinding& ddgi,
                                   const SkyLightBinding& sky,
                                   RGTexture gbuffer,
-                                  RGTexture gbuffer_material) const {
+                                  RGTexture gbuffer_material,
+                                  const SdfSpecularOcclusionBinding* sdf_occlusion_ptr) const {
+    const SdfSpecularOcclusionBinding sdf_occlusion =
+        sdf_occlusion_ptr ? *sdf_occlusion_ptr : SdfSpecularOcclusionBinding{};
     // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
     // is the "no geometry" the shader overwrites with 1 where it shades), rendered by the matching
     // MRT pipeline variant. Invalid = the one-attachment baseline, byte-for-byte the pre-SSR path.
@@ -652,13 +701,16 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // The prefiltered chain and the DFG table join them (ADR-0078 section 2), always: with the
     // feature off they are the placeholders, already in ShaderRead, and declaring them costs a
     // no-op transition. Conditional declaration would make the graph's edges depend on a flag.
-    const RGTexture sampled[] = {shadow.map,
-                                 local.map,
-                                 ddgi.irradiance,
-                                 ddgi.visibility,
-                                 sky.skyview,
-                                 sky.specular.prefiltered,
-                                 sky.specular.dfg};
+    const bool use_sdf = sdf_occlusion.is_valid() && !write_gbuffer;
+    if (use_sdf)
+        ensure_sdf_pipelines();
+    std::vector<RGTexture> sampled = {
+        shadow.map, local.map, sky.skyview, sky.specular.prefiltered, sky.specular.dfg};
+    if (use_sdf) {
+        sampled.insert(sampled.end(), sdf_occlusion.levels.begin(), sdf_occlusion.levels.end());
+    } else {
+        sampled.insert(sampled.end(), {ddgi.irradiance, ddgi.visibility});
+    }
     // Declaring the two cluster buffers is what orders this pass after the cull dispatch that
     // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
     // The sky's SH buffer joins the cluster buffers here for the same reason they are declared:
@@ -676,11 +728,14 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
         write_gbuffer
             ? (depth_prepassed ? pipeline_shadowed_gbuffer_after_prepass_
                                : pipeline_shadowed_gbuffer_standalone_)
-            : (depth_prepassed ? pipeline_shadowed_after_prepass_ : pipeline_shadowed_standalone_);
+            : (use_sdf ? (depth_prepassed ? pipeline_sdf_after_prepass_ : pipeline_sdf_standalone_)
+                       : (depth_prepassed ? pipeline_shadowed_after_prepass_
+                                          : pipeline_shadowed_standalone_));
     graph.add_raster_pass(
         "forward-pbr shadowed",
         desc,
-        [pipe, data, shadow, local, clusters, ddgi, sky, &graph](rhi::CommandBuffer& cmd) {
+        [pipe, data, shadow, local, clusters, ddgi, sky, use_sdf, sdf_occlusion, &graph](
+            rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipe);
             // Bindings 7–20 are attached once (they persist across draws — ADR-0020);
             // record_draws re-binds only per-draw state on top. The resources' physical handles
@@ -693,8 +748,21 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             cmd.bind_storage_buffer(12, graph.physical_buffer(clusters.lists));
             cmd.bind_uniform_buffer(
                 13, clusters.ubo.buffer, clusters.ubo.offset, clusters.ubo.size);
-            cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
-            cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
+            if (use_sdf) {
+                cmd.bind_texture(
+                    14, graph.physical(sdf_occlusion.levels[0]), sdf_occlusion.sampler);
+                cmd.bind_texture(
+                    15, graph.physical(sdf_occlusion.levels[1]), sdf_occlusion.sampler);
+                cmd.bind_texture(
+                    21, graph.physical(sdf_occlusion.levels[2]), sdf_occlusion.sampler);
+                cmd.bind_uniform_buffer(22,
+                                        sdf_occlusion.params.buffer,
+                                        sdf_occlusion.params.offset,
+                                        sdf_occlusion.params.size);
+            } else {
+                cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
+                cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
+            }
             cmd.bind_uniform_buffer(16, ddgi.ubo.buffer, ddgi.ubo.offset, ddgi.ubo.size);
             cmd.bind_storage_buffer(17, graph.physical_buffer(sky.sh));
             cmd.bind_texture(18, graph.physical(sky.skyview), sky.sampler);
