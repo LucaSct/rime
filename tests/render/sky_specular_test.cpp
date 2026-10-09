@@ -1705,7 +1705,11 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
     md_widened.roughness = static_cast<float>(kSaaRoughness) + 0.092f;
     const MaterialId metal_widened = materials.add(md_widened);
 
-    auto render = [&](bool with_sphere, bool ssr, MaterialId mat, const SkyParams& sky) {
+    auto render = [&](bool with_sphere,
+                      bool ssr,
+                      MaterialId mat,
+                      const SkyParams& sky,
+                      HdrImage* gbuffer_out = nullptr) {
         SceneRenderer renderer(*device, meshes, materials);
         render::test::disable_temporal_aa(renderer);
         renderer.set_ambient(0.0f, 0.0f, 0.0f);
@@ -1731,12 +1735,21 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
             const SceneRenderer::Output out = renderer.render(graph, world, {kSaaSize, kSaaSize});
             REQUIRE(out.hdr.is_valid());
             graph.export_texture(out.hdr);
+            if (gbuffer_out != nullptr) {
+                REQUIRE(out.gbuffer.is_valid()); // SSR on => the G-buffer exists
+                graph.export_texture(out.gbuffer);
+            }
             auto cmd = device->begin_commands();
             graph.execute(*cmd);
             device->submit_blocking(*cmd);
             img = decode_hdr(read_texture(*device, graph.physical(out.hdr), kSaaSize, kSaaSize, 8),
                              kSaaSize,
                              kSaaSize);
+            if (gbuffer_out != nullptr)
+                *gbuffer_out = decode_hdr(
+                    read_texture(*device, graph.physical(out.gbuffer), kSaaSize, kSaaSize, 8),
+                    kSaaSize,
+                    kSaaSize);
         }
         CHECK(renderer.sky_specular_stats().prefilter_filled == 1);
         return img;
@@ -1753,7 +1766,8 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
     const HdrImage empty = render(false, false, metal, clear_sky());
     const HdrImage off_widened = render(true, false, metal_widened, clear_sky());
     const HdrImage cloudy_off = render(true, false, metal, cloudy);
-    const HdrImage cloudy_on = render(true, true, metal, cloudy);
+    HdrImage gbuf;
+    const HdrImage cloudy_on = render(true, true, metal, cloudy, &gbuf);
 
     // ROIs from the geometry: the sphere's silhouette radius R (tangent-cone projection, see
     // saa_silhouette_px). Centre disc r < 0.30 R; rim band 0.90 R <= r < 0.97 R -- inside the
@@ -1767,6 +1781,9 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
         double sum_off = 0.0, sum_on = 0.0;
         double sum_off_widened = 0.0, sum_cloudy_off = 0.0, sum_cloudy_on = 0.0;
         std::uint32_t n = 0, differs_from_empty = 0;
+        // The G-buffer's B channel as rendered (what ssr_resolve's `roughness` and cone read).
+        double sum_gb_rough = 0.0, sum_cone = 0.0;
+        std::uint32_t crosses_025 = 0;
     };
 
     // The third band is supplementary: the outermost ring, where the analytic widening is largest.
@@ -1787,6 +1804,12 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
                 b.sum_cloudy_off += cloudy_off.luminance(x, y);
                 b.sum_cloudy_on += cloudy_on.luminance(x, y);
                 b.differs_from_empty += (off.luminance(x, y) != empty.luminance(x, y)) ? 1u : 0u;
+                const float gb_rough = gbuf.rgb[(static_cast<std::size_t>(y) * kSaaSize + x) * 3 + 2];
+                b.sum_gb_rough += gb_rough;
+                // ssr_resolve.frag: cone = smoothstep(0.25, 0.55, roughness).
+                const double u = std::clamp((gb_rough - 0.25) / 0.30, 0.0, 1.0);
+                b.sum_cone += u * u * (3.0 - 2.0 * u);
+                b.crosses_025 += gb_rough > 0.25f ? 1u : 0u;
                 ++b.n;
             }
         }
@@ -1806,6 +1829,9 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
                                 << m_widened / m_off << " against roughness " << kSaaRoughness);
         MESSAGE("[saa render] " << b.name << ": CLOUDY sky -- SSR-off " << m_cl_off << " SSR-on "
                                 << m_cl_on << " ratio on/off " << m_cl_on / m_cl_off);
+        MESSAGE("[saa render] " << b.name << ": G-buffer B mean " << b.sum_gb_rough / b.n
+                                << "; mean cone " << b.sum_cone / b.n << "; px with B > 0.25: "
+                                << b.crosses_025 << " of " << b.n);
         CHECK(std::isfinite(m_off));
         CHECK(std::isfinite(m_on));
         CHECK(std::isfinite(m_widened));
