@@ -1806,7 +1806,8 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
                 b.sum_cloudy_off += cloudy_off.luminance(x, y);
                 b.sum_cloudy_on += cloudy_on.luminance(x, y);
                 b.differs_from_empty += (off.luminance(x, y) != empty.luminance(x, y)) ? 1u : 0u;
-                const float gb_rough = gbuf.rgb[(static_cast<std::size_t>(y) * kSaaSize + x) * 3 + 2];
+                const float gb_rough =
+                    gbuf.rgb[(static_cast<std::size_t>(y) * kSaaSize + x) * 3 + 2];
                 if (gb_rough == 0.0f) { // cleared G-buffer texel: the mesh's outline missed it
                     ++b.n;
                     continue;
@@ -1926,9 +1927,8 @@ TEST_CASE("SAA roughness in the G-buffer: a FLAT surface stores exactly its mate
             graph.execute(*cmd);
             device->submit_blocking(*cmd);
             hdr_bytes = read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8);
-            gb = decode_hdr(read_texture(*device, graph.physical(out.gbuffer), kSize, kSize, 8),
-                            kSize,
-                            kSize);
+            gb = decode_hdr(
+                read_texture(*device, graph.physical(out.gbuffer), kSize, kSize, 8), kSize, kSize);
         }
         std::uint64_t h = 1469598103934665603ull;
         for (const std::uint8_t b : hdr_bytes)
@@ -1940,9 +1940,9 @@ TEST_CASE("SAA roughness in the G-buffer: a FLAT surface stores exactly its mate
             ++covered;
             exact += gb.rgb[i + 2] == rough ? 1u : 0u;
         }
-        MESSAGE("[saa flat] roughness " << rough << ": raw HDR FNV-1a " << std::hex << h
-                                        << std::dec << "; G-buffer B exact on " << exact << " of "
-                                        << covered << " covered px");
+        MESSAGE("[saa flat] roughness " << rough << ": raw HDR FNV-1a " << std::hex << h << std::dec
+                                        << "; G-buffer B exact on " << exact << " of " << covered
+                                        << " covered px");
         CHECK(covered > 1000);
         CHECK(exact == covered);
     }
