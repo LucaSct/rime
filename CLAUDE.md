@@ -138,6 +138,17 @@ Verify proportionately to the change — don't re-run the whole world for every 
   sanitizer pass. Still exercise every change end-to-end at least once.
 - GPU proofs are **structural** — properties the physics guarantees, checked with margins on
   lavapipe — never golden images (the M5.6/M6.4 pattern in `tests/render/pbr_pipeline_test.cpp`).
+- **A near-null proof needs a SENSITIVITY CONTROL before it means anything.** A structural proof
+  that returns "the two paths agree to 0.5 %" and a scene that *cannot express more than 1 %* look
+  identical in the output, so a ratio near 1.0 is not evidence until something says what the scene
+  is capable of showing. The control is a second run that perturbs the **input** by the size of the
+  effect under test, reported in the same units. Proving ADR-0078 step 1e, the forward and
+  SSR-resolve readers provably sample the prefiltered chain up to **1.27 levels apart**, yet measured
+  0.5 % apart on a clear sky — and the control (same scene, SSR off both times, roughness raised by
+  one chain step) moved the bands ~1 %, so that 0.5 % was *half of everything that sky could
+  express*. The same proof on a cloudy sky read **+15.2 %** on the outer ring with the sign flipping
+  between bands. If the measured effect is the same order as the control, the scene is the limit:
+  change the scene and say so, rather than reporting a null.
 - **Judge a build by its EXIT STATUS, never by grepping its output.** `cmake --build ... | grep -E
   "error:"` is the habit to break: glslang reports a failed shader compile as `ERROR:` and ninja as
   `FAILED:`, so a broken build passes the grep, ninja leaves the previous binaries in place, and the
