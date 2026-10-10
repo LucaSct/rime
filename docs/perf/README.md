@@ -188,3 +188,57 @@ a readable summary of what got slower and which pass did it.
 
 **Perf-touching bricks commit a `docs/perf/` run.** That line is also in
 [CLAUDE.md](../../CLAUDE.md)'s brick-delivery list, so its absence is something a review can notice.
+
+## Every committed `99-the-block` baseline was measured with the GPU clocks PINNED
+
+**So an unpinned run cannot be compared against them, and the comparison will not fail — it will
+report a large, convincing regression that is not there.** Verified 2026-10-10.
+
+`2026-10-06-99-the-block-nvidia-geforce-rtx-3060.json` carries
+
+```json
+"gpu_clocks": { "graphics_median": 1837.0, "graphics_spread_pct": 0.0,
+                "memory_median":   7501.0, "memory_spread_pct":   0.0, "stable": true }
+```
+
+A **0.0 %** spread at exactly 1837/7501 MHz is a locked clock, not a lucky one. `scripts/perf.sh`
+does **not** pin (it only documents the caveats), so that state came from the box being pinned by
+hand at the time.
+
+**What an unpinned run on the same tree looks like**, measured on `f4bff14` with the box otherwise
+idle:
+
+| | pinned baseline (2026-10-06) | unpinned (2026-10-10) | |
+|---|---|---|---|
+| `frame` p99 | 13.705 ms | **22.336 ms** | reported as REGRESSED |
+| `frame` max | 15.971 ms | **30.882 ms** | reported as REGRESSED |
+| `sim.block` p99 | 8.328 ms | **8.498 ms** | **+2.0 %** |
+| graphics clock | 1837 MHz, 0.0 % spread | **1215 MHz median, 98.8 % spread** | gate limit is 2.0 % |
+
+**`sim.block` is the control, and it is what makes the rest interpretable.** It is pure CPU physics
+and never touches the GPU, so a clock change cannot move it — and it moved **2.0 %**, inside the
+~2 % a perf number is worth across sittings. The CPU side did not regress. The `frame` difference is
+the clock state and nothing else.
+
+**Why this card will not hold a clock on this sample.** `99-the-block` runs both client and server
+physics (739 bodies, two worlds) and is **CPU-bound**: measured under 108 s of sustained load, GPU
+utilisation stayed at 4–44 % and power at **13–17 W of a ~170 W part** at 36 °C, and the graphics
+clock sat at **210 MHz** for the first ~70 s before creeping only to ~350 MHz. The governor is not
+throttling — it has nothing to do. The card also returns to 210 MHz the instant load stops, so
+running `perf.sh` twice in a row does not warm it: every invocation starts parked, its 90-frame
+warmup is under a second, and the ramp runs straight through the 600 measured frames.
+
+**Do not fix this by pinning.** That requirement was withdrawn on 2026-09-16 — the box is genuinely
+shared, and other computation runs here. The standing replacement is to **filter, not pin**: record a
+clock trace beside each run, keep only the frames whose nearest sample has both domains at boost
+(`clocks.gr >= 1700`, `clocks.mem >= 7000`), count the frames dropped, and **add a render-only hold
+loop after the measured frames, which is what makes a CPU-bound sample boost at all.** A harness that
+does this, with 14 runs behind it, is at `~/rime-perf-harness-m17.8b/`. Known hazard, unsettled:
+filtering on boost may select different frame populations per arm, since boost correlates with the
+treatment — check retained/dropped counts per arm before trusting a delta.
+
+**Consequence for M18 gate 7.** The gate's row says "clock-pinned tree" while the standing ruling
+forbids pinning, so the gate as written cannot be satisfied by the procedure the project is allowed
+to use. That conflict is an owner decision, not a measurement problem. Until it is resolved, an
+unpinned `99-the-block` run is a **probe**, and `sim.block` is the only part of it comparable to
+history.
