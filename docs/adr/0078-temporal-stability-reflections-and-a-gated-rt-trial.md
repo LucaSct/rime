@@ -342,3 +342,38 @@ is a separate, later brick and is not started.
   slots 14/15 and adds 21/22 (23 total), a deliberate exception to the previous comment's request
   to split the next technique into a second set (`passes.cpp:558`, `pbr_forward_shadowed.frag:125`).
   The original layout and bindings remain the OFF path; no RHI seam change is made.
+- *SAA-widened roughness vs the SSR resolve, measured (no fix yet):* a unit smooth metal sphere
+  (perceptual roughness 0.1, camera z = 4, 256^2, clear sky, chain ON, TAA off, ambient 0).
+  *Measured, analytic* (finite-difference normals; `sky_specular_test.cpp`, "SAA roughness
+  divergence: analytic bound"): the forward pass reads the chain at `sqrt(alpha')` = 0.115 at the
+  centre (0.69 levels vs the resolve's 0.60, a 0.10-level gap; the screen-space term is never
+  zero), 0.14-0.19 in the 0.90-0.97 R rim band (up to 0.55 levels apart), and up to 0.312 at the
+  outermost pixels (1.87 vs 0.60 levels, 1.27 apart); the 0.18 cap bounds the lobe at 0.651
+  (3.9 levels). *Measured, rendered on lavapipe* (SSR-on / SSR-off mean luminance): centre disc
+  1.0004, rim band 1.0051, outer ring (0.97-0.99 R) 1.0072 -- all under 1%.
+- *Why that 1% is a property of the SKY and not of the widening, measured:* the same scene rendered
+  with SSR OFF both times and the material roughness raised by 0.092 (one rim-sized chain step)
+  changes the bands by x0.9904, x0.9909 and x0.9968. So a 0.55-level step is worth only about 1% of
+  luminance in a clear sky, and the SSR-on/off difference above is roughly half of the most this
+  sky can express -- the readers really do disagree, the sky is just too smooth to show it. The
+  signs agree: SSR-on reads the SHARPER level and comes out brighter, and raising roughness
+  darkens.
+- *The same measurement on a cloudy sky (coverage 0.45), measured:* centre +0.22%, rim band
+  **-1.16%**, outer ring **+15.2%** (mean luminance 9.743 -> 11.220). So the divergence is
+  contrast-bound, and on a high-contrast environment it is large. *Inferred:* the sign flipping
+  between bands says this is resolved STRUCTURE rather than a uniform bias -- the sharper level
+  sees cloud detail the blurrier one does not -- so it will read as a visible difference between an
+  SSR-on and an SSR-off frame, not as a global tint that could be tuned away. A normal-mapped flat
+  surface was not tried.
+- *Decision (owner, 2026-10-09), on the strength of those numbers:* the G-buffer will carry the
+  **widened** roughness in B, so both readers agree on the chain level and on the SDF cone width.
+  The known cost is accepted: `ssr_resolve.frag:285`'s `smoothstep(0.25, 0.55, roughness)` then
+  responds to curvature, and screen hits fade into the probe earlier where the normal varies fast.
+  At base roughness 0.1 that is confined to pixels whose widened value crosses 0.25 -- the
+  outermost ring, about a 10% probe blend there, with the 0.90-0.97 R rim band's 0.14-0.19 staying
+  below the threshold entirely. The reason this is accepted rather than merely tolerated: a lobe
+  genuinely widened by sub-pixel normal variance *cannot* be carried by a single screen sample, so
+  fading it toward the probe is the physically right behaviour rather than a regression. The
+  rejected alternative was carrying the widened value in the mask channel A to leave SSR's cone
+  untouched; it was declined because it puts two roughnesses in one target for every future
+  consumer to keep apart. Implementation is its own brick.
