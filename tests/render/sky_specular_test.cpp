@@ -1947,3 +1947,276 @@ TEST_CASE("SAA roughness in the G-buffer: a FLAT surface stores exactly its mate
         CHECK(exact == covered);
     }
 }
+
+// Local copy of the tangent-space normal encoder (pbr_pipeline_test.cpp has the original; a test TU
+// is not included from another, hence a distinct name).
+static std::array<std::uint8_t, 4> encode_tangent_normal(float x, float y, float z) {
+    const auto b = [](float c) {
+        return static_cast<std::uint8_t>(std::lround((c * 0.5f + 0.5f) * 255.0f));
+    };
+    return {b(x), b(y), b(z), 255};
+}
+
+TEST_CASE("SAA roughness in the G-buffer: a FLAT plane carrying a normal map, swept in frequency") {
+    // The filter's own contract (brdf.glsl) calls normal-map detail the DOMINANT source of
+    // sub-pixel normal variance, yet the sphere proofs only reach a one-pixel rim and the flat
+    // case above has no map. Here the geometry is flat and ALL the variance comes from an 8x8
+    // checker of (+-0.6, 0, 0.8) tangent normals, whose screen frequency we sweep with uv_tiles.
+    //
+    // MEASURED (lavapipe, 96x96, 9216 covered px, material roughness 0.1, cloudy sky 0.45).
+    // B is the G-buffer's widened perceptual roughness; levels are B * 6 (6 chain layers):
+    //
+    //   variant   B med    levels med   crossing 0.25   at the 0.6514 ceiling
+    //   no-map    0.0999   0.60          0 %             0 %
+    //   1 tile    0.1344   0.81          0 %             0 %
+    //   8 tiles   0.3489   2.09         89.6 %           0 %
+    //   64 tiles  0.4197   2.52         93.3 %           0 %
+    //
+    // The sphere proofs' comparable figure is 1.57 % of pixels crossing 0.25, on a one-pixel
+    // silhouette rim. Here it is 93 % of the surface, at a median of 2.5 chain levels against the
+    // unwidened 0.6 -- so on the case the filter's contract calls dominant, the widening is not an
+    // edge effect, it IS the shading.
+    //
+    // FALSIFIED (measured, not inferred): with `lobe_roughness` reverted to `roughness` at the
+    // G-buffer write (pbr_forward_shadowed.frag:651, i.e. #293 undone), 6 assertions fail -- every
+    // median collapses to 0.0999756, crossing 0.25 falls to 0 %, and the SSR on/off ratio goes to
+    // 0.6681, a **33.2 % divergence**. That is the size of the ADR-0078 step-1e bug on a
+    // normal-mapped plane, against 15.2 % on a cloudy sphere's outer ring and under 1 % on a clear
+    // sky. The dominant case is also the worst case, which no previous measurement could see.
+    auto device = device_or_skip("the normal-mapped plane SAA proof");
+    if (!device)
+        return;
+
+    constexpr std::uint32_t kN = 8;
+    std::vector<std::uint8_t> npx(static_cast<std::size_t>(kN) * kN * 4);
+    for (std::uint32_t y = 0; y < kN; ++y)
+        for (std::uint32_t x = 0; x < kN; ++x) {
+            const auto t = (((x + y) & 1u) == 0u) ? encode_tangent_normal(0.6f, 0.0f, 0.8f)
+                                                  : encode_tangent_normal(-0.6f, 0.0f, 0.8f);
+            std::memcpy(&npx[(static_cast<std::size_t>(y) * kN + x) * 4], t.data(), 4);
+        }
+    rhi::TextureDesc nd{};
+    nd.extent = {kN, kN};
+    nd.format = rhi::Format::RGBA8Unorm; // linear data, never sRGB
+    nd.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    nd.debug_name = "saa-normal-plane-map";
+    const rhi::TextureHandle normal_map = device->create_texture(nd);
+    device->write_texture(normal_map, npx.data(), npx.size());
+
+    SkyParams cloudy = clear_sky();
+    cloudy.clouds_enabled = true;
+    cloudy.coverage = 0.45f;
+
+    struct Result {
+        HdrImage hdr;
+        HdrImage gb;
+    };
+
+    const auto run = [&](float tiles, bool mapped, float rough, bool ssr) -> Result {
+        MeshRegistry meshes(*device);
+        const MeshId plane = meshes.add(make_plane(12.0f, tiles), "saa-normal-plane");
+        MaterialRegistry materials;
+        PbrMaterialDesc md{};
+        md.base_color[0] = md.base_color[1] = md.base_color[2] = 0.9f;
+        md.metallic = 1.0f;
+        md.roughness = rough;
+        if (mapped)
+            md.normal_texture = normal_map;
+        const MaterialId mat = materials.add(md);
+        LightingSettings ls;
+        ls.ssr_enabled = ssr;
+        ls.ssr_max_distance = 8.0f;
+        ls.ssr_thickness = 0.5f;
+        ls.ssr_max_steps = 64;
+        SceneRenderer renderer(*device, meshes, materials);
+        render::test::disable_temporal_aa(renderer);
+        renderer.set_lighting(ls);
+        renderer.set_sky(cloudy);
+        renderer.set_sky_specular_prefilter_enabled(true);
+        ecs::World world;
+        register_render_components(world);
+        (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{plane}, MaterialRef{mat});
+        // LOOKING STRAIGHT DOWN, not along the plane. A camera at eye height sees a plane at a
+        // grazing angle, and a grazing reflection ray marches ALONG the surface in screen space:
+        // SSR then self-intersects the plane and the "reflection" reads the floor's own shading
+        // instead of the sky. Measured: at y=1 looking horizontally the no-map plane -- where the
+        // widening is provably zero, so SSR-on and SSR-off must agree -- read a ratio of 0.9603, a
+        // 4% instrument offset twice the size of the effect under test. From above, every
+        // reflection ray leaves the screen into the sky, which is the case ssr_resolve.frag:367-372
+        // says the two paths compute identically.
+        core::Transform cam{};
+        cam.translation = {0.0f, 6.0f, 0.0f};
+        cam.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -core::kHalfPi);
+        (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{1.1f, 0.1f, 100.0f, true});
+        Result r;
+        for (int frame = 0; frame < 2; ++frame) {
+            RenderGraph graph(*device);
+            graph.reset();
+            const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize});
+            REQUIRE(out.hdr.is_valid());
+            graph.export_texture(out.hdr);
+            if (ssr) { // the G-buffer exists only when SSR is on
+                REQUIRE(out.gbuffer.is_valid());
+                graph.export_texture(out.gbuffer);
+            }
+            auto cmd = device->begin_commands();
+            graph.execute(*cmd);
+            device->submit_blocking(*cmd);
+            r.hdr = decode_hdr(
+                read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
+            if (ssr)
+                r.gb =
+                    decode_hdr(read_texture(*device, graph.physical(out.gbuffer), kSize, kSize, 8),
+                               kSize,
+                               kSize);
+        }
+        return r;
+    };
+    // decode_hdr keeps rgb only, so use the flat case's coverage rule: cleared background is
+    // all-zero in the G-buffer.
+    const auto covered_idx = [](const HdrImage& gb) {
+        std::vector<std::size_t> idx;
+        for (std::size_t i = 0; i + 2 < gb.rgb.size(); i += 3)
+            if (!(gb.rgb[i] == 0.0f && gb.rgb[i + 1] == 0.0f && gb.rgb[i + 2] == 0.0f))
+                idx.push_back(i);
+        return idx;
+    };
+    // The mask always comes from the SSR-on G-buffer (the SSR-off frame has none); the camera and
+    // geometry are identical, so the covered set is the same.
+    const auto mean_lum = [&](const Result& r, const HdrImage& mask) {
+        double s = 0.0;
+        const auto idx = covered_idx(mask);
+        for (const std::size_t i : idx)
+            s += 0.2126 * r.hdr.rgb[i] + 0.7152 * r.hdr.rgb[i + 1] + 0.0722 * r.hdr.rgb[i + 2];
+        return s / static_cast<double>(idx.empty() ? 1 : idx.size());
+    };
+
+    constexpr float kCeiling = 0.6514f; // sqrt(sqrt(0.01^2 + 0.18)) at material roughness 0.1
+
+    struct Stats {
+        std::size_t covered = 0;
+        float mn = 0, med = 0, p95 = 0, mx = 0;
+        double cross25 = 0, saturated = 0;
+    };
+
+    const auto stats_of = [&](const HdrImage& gb) {
+        std::vector<float> b;
+        for (const std::size_t i : covered_idx(gb))
+            b.push_back(gb.rgb[i + 2]);
+        std::sort(b.begin(), b.end());
+        Stats s;
+        s.covered = b.size();
+        if (b.empty())
+            return s;
+        s.mn = b.front();
+        s.med = b[b.size() / 2];
+        s.p95 = b[static_cast<std::size_t>(0.95 * static_cast<double>(b.size() - 1))];
+        s.mx = b.back();
+        for (const float v : b) {
+            s.cross25 += v > 0.25f ? 1.0 : 0.0;
+            s.saturated += std::abs(v - kCeiling) < 1e-3f ? 1.0 : 0.0;
+        }
+        s.cross25 /= static_cast<double>(b.size());
+        s.saturated /= static_cast<double>(b.size());
+        return s;
+    };
+
+    struct Variant {
+        const char* name;
+        float tiles;
+        bool mapped;
+    };
+
+    const Variant variants[4] = {{"no-map", 1.0f, false},
+                                 {"1 tile", 1.0f, true},
+                                 {"8 tiles", 8.0f, true},
+                                 {"64 tiles", 64.0f, true}};
+    Stats st[4];
+    Result r64_on;
+    for (int v = 0; v < 4; ++v) {
+        const Result r = run(variants[v].tiles, variants[v].mapped, 0.1f, true);
+        st[v] = stats_of(r.gb);
+        if (v == 3)
+            r64_on = r;
+        MESSAGE("[saa normal plane] "
+                << std::string(variants[v].name) << ": covered " << st[v].covered
+                << " | B min/med/p95/max " << st[v].mn << " / " << st[v].med << " / " << st[v].p95
+                << " / " << st[v].mx << " | chain levels " << st[v].mn * 6 << " / " << st[v].med * 6
+                << " / " << st[v].p95 * 6 << " / " << st[v].mx * 6 << " | crossing 0.25: "
+                << st[v].cross25 * 100 << "% | at ceiling: " << st[v].saturated * 100 << "%");
+        REQUIRE(st[v].covered > 1000);
+        // 4. The ceiling is the clamp: the one bound the physics guarantees exactly.
+        CHECK(st[v].mx <= kCeiling + 1e-3f);
+        if (v == 0) {
+            // 1. No-map control is inert. 0.1 is not exact in binary16 (the G-buffer is RGBA16F),
+            // so the flat case's bitwise equality (0.5/0.25 are exact) does not apply; 2e-3 is
+            // far above the half-float step near 0.1 (~6e-5) and far below any real widening.
+            std::size_t bad = 0;
+            for (const std::size_t i : covered_idx(r.gb))
+                bad += std::abs(r.gb.rgb[i + 2] - 0.1f) < 2e-3f ? 0u : 1u;
+            CHECK(bad == 0);
+        }
+    }
+
+    // 2. Monotone in frequency.
+    CHECK(st[0].med < st[1].med);
+    CHECK(st[1].med < st[2].med);
+    CHECK(st[2].med < st[3].med);
+
+    // 3. The high-frequency map reaches the regime the sphere (1.57% crossing 0.25) never did.
+    CHECK(st[3].cross25 > 0.20);
+
+    // 5. THE #293 FIX HOLDS WHERE THE WIDENING IS LARGEST -- and the two measurements that make
+    // that statement mean anything. SSR-on against SSR-off over the plane, mean luminance.
+    //
+    // ssr_resolve.frag:367-372 states the invariant: with the chain live, "SSR on and SSR off
+    // compute the SAME prefiltered(r) * envBRDF for a surface whose reflection leaves the screen,
+    // and differ only by what SSR adds: the hit". Looking down at a lone plane, every reflection
+    // ray leaves into the sky, so there is no hit and the two paths must agree -- which they can
+    // only do if both read the chain at the same level, i.e. only if the G-buffer carries the
+    // widened roughness (ADR-0078 step 1e, #293).
+    const Result r64_off = run(64.0f, true, 0.1f, false);
+    const double ratio = mean_lum(r64_on, r64_on.gb) / mean_lum(r64_off, r64_on.gb);
+
+    // 5a. THE INSTRUMENT'S ZERO POINT, asserted, not assumed. The same on/off comparison on the
+    // NO-MAP plane, where the widening is provably zero (variant 0 above: B == 0.1 everywhere), so
+    // the level mismatch #293 fixed cannot contribute. Whatever this reads is the comparison's own
+    // offset, and the residual in 5 is only evidence about roughness insofar as it exceeds it.
+    //
+    // This is asserted because it is what caught the first version of this test. With the camera at
+    // eye height looking ALONG the plane, this baseline read 0.9603 -- a 4% offset with nothing to
+    // measure, from SSR self-intersecting the grazing floor -- while the mapped case read 0.9325.
+    // Reported alone, that 6.75% looks exactly like "the step-1e fix fails on the dominant case".
+    // It was the instrument. A proof whose zero point is twice the size of its effect is not a
+    // proof, and nothing in the output says so unless the zero point is measured.
+    const Result nm_on = run(1.0f, false, 0.1f, true);
+    const Result nm_off = run(1.0f, false, 0.1f, false);
+    const double base_ratio = mean_lum(nm_on, nm_on.gb) / mean_lum(nm_off, nm_on.gb);
+
+    // 5b. THE SENSITIVITY CONTROL (CLAUDE.md, "Verification rhythm"). 5 is a near-null, and a
+    // near-null is uninterpretable until something says what this scene can express. Perturb the
+    // INPUT by the size of the effect under test -- SSR off both times, material roughness raised
+    // from 0.1 to the measured median widening -- and report it in the same units.
+    const Result ctl = run(64.0f, true, st[3].med, false);
+    const double ctl_ratio = mean_lum(ctl, r64_on.gb) / mean_lum(r64_off, r64_on.gb);
+
+    MESSAGE("[saa normal plane] SSR on/off "
+            << ratio << " (|r-1| = " << std::abs(ratio - 1.0) << ") | no-map baseline "
+            << base_ratio << " (|r-1| = " << std::abs(base_ratio - 1.0) << ") | control at "
+            << "roughness " << st[3].med << " " << ctl_ratio
+            << " (|r-1| = " << std::abs(ctl_ratio - 1.0) << ")");
+
+    // The control must be LARGE, or 5 proves nothing. Measured 0.168; 0.05 is a third of that, and
+    // more than 20x the agreement 5 asserts. This assertion is the sensitivity-control rule made
+    // executable: a future edit that moves this scene to one which cannot express the effect turns
+    // 5 into a vacuous pass, and THIS is the check that refuses it rather than letting the null
+    // read as evidence. Contrast #292's clear sky, where the control moved only ~1% against a 0.5%
+    // measurement -- half of everything the scene could show, and so not a null at all.
+    CHECK(std::abs(ctl_ratio - 1.0) > 0.05);
+    // The zero point must be small for the same reason.
+    CHECK(std::abs(base_ratio - 1.0) < 0.02);
+    // And the agreement itself. 0.02 is ~3x the worst measured residual (0.63%), and is the margin
+    // #293 asserts on the sphere's outer ring -- deliberately not looser on a harder case.
+    CHECK(std::abs(ratio - 1.0) < 0.02);
+    device->destroy(normal_map);
+}
