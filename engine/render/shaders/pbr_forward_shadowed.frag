@@ -454,6 +454,11 @@ void main() {
     float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
     float alpha = roughness * roughness;
     alpha = filter_specular_alpha(n, alpha); // geometric specular AA, ADR-0078 step 1a
+    // The perceptual roughness of the lobe AFTER that widening. One value, computed once, read by
+    // the sky-specular lookup below AND written to the G-buffer, so the SSR-on and SSR-off paths
+    // read the prefiltered chain at the same level (ADR-0078 step 1e). On a flat surface
+    // dFdx(n) = 0, the widening adds nothing, and this equals `roughness` exactly.
+    const float lobe_roughness = sqrt(alpha);
 
     float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
 
@@ -545,7 +550,6 @@ void main() {
                 //
                 // `sqrt(alpha)` rather than `roughness`: alpha already carries the geometric
                 // specular AA widening, and a lobe the AA made wider must read a blurrier sky.
-                const float lobe_roughness = sqrt(alpha);
                 const vec3 lookup = sky_specular_dominant_direction(n, r, lobe_roughness);
                 // Diffuse AO remains on diffuse light. With the SDF variant, replace it here
                 // with visibility of this SPECULAR lobe; multiplying both would double-darken it.
@@ -561,7 +565,7 @@ void main() {
                 const vec3 sky_mirror = texture(skyview_lut, skyview_uv_from_direction(r)).rgb;
                 const vec3 sky_specular = mix(sky_mirror, sky_ambient, alpha);
 #ifdef SDF_SPECULAR_OCCLUSION
-                const float specular_visibility = sdf_sky_visibility(v_world_pos, n, r, sqrt(alpha));
+                const float specular_visibility = sdf_sky_visibility(v_world_pos, n, r, lobe_roughness);
                 out_radiance += sky_specular * env_brdf_approx(f0, roughness, n_dot_v) * specular_visibility;
 #else
                 out_radiance += sky_specular * env_brdf_approx(f0, roughness, n_dot_v) * ao;
@@ -633,10 +637,18 @@ void main() {
 #ifdef WRITE_GBUFFER
     // Thin G-buffer for SSR (m10.7a): the shading normal `n` (already normal-mapped, world-space)
     // octahedral-encoded into RG (the exact ddgi_oct_encode used for probe directions — one encode
-    // in the module, one decode to match in gbuffer_test.cpp), the perceptual `roughness` into B,
-    // and A = 1.0 as a "geometry is here" mask so the SSR march (m10.7b) can distinguish a shaded
+    // in the module, one decode to match in gbuffer_test.cpp), the perceptual roughness into B, and
+    // A = 1.0 as a "geometry is here" mask so the SSR march (m10.7b) can distinguish a shaded
     // fragment from cleared background (which stays A = 0).
-    out_gbuffer = vec4(ddgi_oct_encode(n), roughness, 1.0);
+    //
+    // B is the SAA-WIDENED roughness (`lobe_roughness`, = sqrt of the widened alpha), NOT the
+    // material's. The forward pass reads the sky chain at the widened value; if this channel held
+    // the unwidened one, the SSR resolve would read a sharper chain level than the SSR-off path on
+    // any surface whose normal varies within a pixel (cloudy-sky outer ring: +15% luminance). Do
+    // not "fix" this back to `roughness`. Cost: ssr_resolve's roughness cone now responds to
+    // curvature too, which is intended (a lobe widened by sub-pixel normal variance cannot be
+    // carried by one screen sample).
+    out_gbuffer = vec4(ddgi_oct_encode(n), lobe_roughness, 1.0);
     // The SAME albedo and metallic the lights above were shaded with — maps already multiplied in
     // — so the reflection SSR adds is tinted by the F0 this surface's direct highlights have.
     out_gbuffer_material = vec4(albedo, metallic);

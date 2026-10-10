@@ -35,7 +35,7 @@
 #include "sky_mapping.glsl" // skyview_uv_from_direction -- shared with the pass that BAKES the LUT
 
 layout(set = 0, binding = 0) uniform sampler2D scene_color; // the lit HDR frame (reflection source)
-layout(set = 0, binding = 1) uniform sampler2D gbuffer;     // RG oct world normal, B roughness, A mask
+layout(set = 0, binding = 1) uniform sampler2D gbuffer;     // RG oct world normal, B SAA-WIDENED roughness, A mask
 layout(set = 0, binding = 2) uniform sampler2D scene_depth; // D32, Vulkan NDC z in [0,1]
 
 layout(std140, set = 0, binding = 3) uniform SsrParams {
@@ -275,12 +275,11 @@ void main() {
         probe = texture(skyview_lut, skyview_uv_from_direction(r_world)).rgb;
     }
     if (use_chain) {
-        // The G-buffer carries perceptual `roughness` and the (normal-mapped) shading normal; the
-        // forward pass reads the chain at sqrt(alpha), where alpha is roughness^2 widened by the
-        // geometric specular AA (ADR-0078 step 1a). The two agree wherever that widening is zero,
-        // which is every flat or smoothly curved surface; on a high-curvature silhouette the forward
-        // pass looks up a blurrier level. The G-buffer does not hold the widened value and this
-        // pass deliberately does not recompute it (see the note on filter_specular_alpha below).
+        // The G-buffer's B is the perceptual roughness AFTER the geometric specular AA widening
+        // (ADR-0078 step 1a): the forward pass writes the very `sqrt(alpha)` it reads the chain at,
+        // so this lookup and the SSR-off one land on the same level even on a high-curvature
+        // silhouette. This pass does not recompute the widening (it has no per-pixel normal
+        // derivatives of the surface; see the note on filter_specular_alpha below) and need not.
         const vec3 lookup = sky_specular_dominant_direction(n_world, r_world, roughness);
         probe = sky_specular_prefiltered(lookup, roughness);
     }

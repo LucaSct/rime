@@ -1705,7 +1705,11 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
     md_widened.roughness = static_cast<float>(kSaaRoughness) + 0.092f;
     const MaterialId metal_widened = materials.add(md_widened);
 
-    auto render = [&](bool with_sphere, bool ssr, MaterialId mat, const SkyParams& sky) {
+    auto render = [&](bool with_sphere,
+                      bool ssr,
+                      MaterialId mat,
+                      const SkyParams& sky,
+                      HdrImage* gbuffer_out = nullptr) {
         SceneRenderer renderer(*device, meshes, materials);
         render::test::disable_temporal_aa(renderer);
         renderer.set_ambient(0.0f, 0.0f, 0.0f);
@@ -1731,12 +1735,21 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
             const SceneRenderer::Output out = renderer.render(graph, world, {kSaaSize, kSaaSize});
             REQUIRE(out.hdr.is_valid());
             graph.export_texture(out.hdr);
+            if (gbuffer_out != nullptr) {
+                REQUIRE(out.gbuffer.is_valid()); // SSR on => the G-buffer exists
+                graph.export_texture(out.gbuffer);
+            }
             auto cmd = device->begin_commands();
             graph.execute(*cmd);
             device->submit_blocking(*cmd);
             img = decode_hdr(read_texture(*device, graph.physical(out.hdr), kSaaSize, kSaaSize, 8),
                              kSaaSize,
                              kSaaSize);
+            if (gbuffer_out != nullptr)
+                *gbuffer_out = decode_hdr(
+                    read_texture(*device, graph.physical(out.gbuffer), kSaaSize, kSaaSize, 8),
+                    kSaaSize,
+                    kSaaSize);
         }
         CHECK(renderer.sky_specular_stats().prefilter_filled == 1);
         return img;
@@ -1753,7 +1766,8 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
     const HdrImage empty = render(false, false, metal, clear_sky());
     const HdrImage off_widened = render(true, false, metal_widened, clear_sky());
     const HdrImage cloudy_off = render(true, false, metal, cloudy);
-    const HdrImage cloudy_on = render(true, true, metal, cloudy);
+    HdrImage gbuf;
+    const HdrImage cloudy_on = render(true, true, metal, cloudy, &gbuf);
 
     // ROIs from the geometry: the sphere's silhouette radius R (tangent-cone projection, see
     // saa_silhouette_px). Centre disc r < 0.30 R; rim band 0.90 R <= r < 0.97 R -- inside the
@@ -1767,12 +1781,17 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
         double sum_off = 0.0, sum_on = 0.0;
         double sum_off_widened = 0.0, sum_cloudy_off = 0.0, sum_cloudy_on = 0.0;
         std::uint32_t n = 0, differs_from_empty = 0;
+        // The G-buffer's B channel as rendered (what ssr_resolve's `roughness` and cone read).
+        double sum_gb_rough = 0.0, sum_cone = 0.0, max_gb_rough = 0.0;
+        std::uint32_t crosses_025 = 0, gb_covered = 0;
     };
 
     // The third band is supplementary: the outermost ring, where the analytic widening is largest.
-    std::array<Band, 3> bands = {{{"centre disc", 0.0, 0.30},
+    std::array<Band, 5> bands = {{{"centre disc", 0.0, 0.30},
                                   {"rim band", 0.90, 0.97},
-                                  {"outer ring (0.97-0.99 R)", 0.97, 0.99}}};
+                                  {"outer ring (0.97-0.99 R)", 0.97, 0.99},
+                                  {"edge (0.99-1.00 R)", 0.99, 1.0},
+                                  {"whole sphere", 0.0, 1.0}}};
     for (std::uint32_t y = 0; y < kSaaSize; ++y) {
         for (std::uint32_t x = 0; x < kSaaSize; ++x) {
             const double r = std::hypot(x + 0.5 - c, y + 0.5 - c);
@@ -1787,6 +1806,19 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
                 b.sum_cloudy_off += cloudy_off.luminance(x, y);
                 b.sum_cloudy_on += cloudy_on.luminance(x, y);
                 b.differs_from_empty += (off.luminance(x, y) != empty.luminance(x, y)) ? 1u : 0u;
+                const float gb_rough =
+                    gbuf.rgb[(static_cast<std::size_t>(y) * kSaaSize + x) * 3 + 2];
+                if (gb_rough == 0.0f) { // cleared G-buffer texel: the mesh's outline missed it
+                    ++b.n;
+                    continue;
+                }
+                ++b.gb_covered;
+                b.max_gb_rough = std::max<double>(b.max_gb_rough, gb_rough);
+                b.sum_gb_rough += gb_rough;
+                // ssr_resolve.frag: cone = smoothstep(0.25, 0.55, roughness).
+                const double u = std::clamp((gb_rough - 0.25) / 0.30, 0.0, 1.0);
+                b.sum_cone += u * u * (3.0 - 2.0 * u);
+                b.crosses_025 += gb_rough > 0.25f ? 1u : 0u;
                 ++b.n;
             }
         }
@@ -1806,9 +1838,112 @@ TEST_CASE("SAA roughness divergence: SSR-on against SSR-off on a smooth metal sp
                                 << m_widened / m_off << " against roughness " << kSaaRoughness);
         MESSAGE("[saa render] " << b.name << ": CLOUDY sky -- SSR-off " << m_cl_off << " SSR-on "
                                 << m_cl_on << " ratio on/off " << m_cl_on / m_cl_off);
+        REQUIRE(b.gb_covered > 0);
+        MESSAGE("[saa render] " << b.name << ": G-buffer B (" << b.gb_covered
+                                << " covered px) mean " << b.sum_gb_rough / b.gb_covered << " max "
+                                << b.max_gb_rough << "; mean cone " << b.sum_cone / b.gb_covered
+                                << "; px with B > 0.25 (cone leaves 0): " << b.crosses_025 << " = "
+                                << 100.0 * b.crosses_025 / b.gb_covered << "%");
+        // What the maths guarantees about the stored value (see the analytic case above): widening
+        // only adds variance, capped at alpha^2 + 0.18. 1e-3 is a generous binary16 allowance (the
+        // spacing at 0.3 is 2.4e-4).
+        const double alpha0 = kSaaRoughness * kSaaRoughness;
+        CHECK(b.max_gb_rough <= std::pow(alpha0 * alpha0 + 0.18, 0.25) + 1e-3);
+        CHECK(b.sum_gb_rough / b.gb_covered >= kSaaRoughness - 1e-3);
+        if (b.name == "outer ring (0.97-0.99 R)") {
+            // THE DIVERGENCE CLOSES. Before the G-buffer carried the widened roughness this ratio
+            // was 1.152 (the resolve read the chain up to ~1.3 levels sharper than the forward
+            // pass). Now both passes read the chain at the same per-pixel value, so what remains
+            // is only what the two do differently on purpose or by quantisation:
+            //  - binary16 storage of B: <= 1.2e-4 roughness = 7e-4 of a chain level (measured
+            //    sensitivity ~0.2 ln-luminance per level here: ln 1.152 over ~0.7 mean levels),
+            //    i.e. ~0.015%: negligible;
+            //  - the octahedral normal in binary16: <= ~5e-4 per component, so the lookup
+            //    direction moves by up to ~2e-3 rad -- I did NOT derive its luminance effect
+            //    analytically; the cloudy sky's angular gradient is not known in closed form;
+            //  - the roughness cone (mean 0 here, up to ~0.15 at the very edge) mixes in a screen
+            //    sample instead of the probe where it is non-zero.
+            // So the margin is an ENVELOPE, not a derivation: the worst residual measured across
+            // the bands (0.55%) with ~4x headroom, and 7x below the 15.2% it replaces. Failing it
+            // means the two readers have come apart again by more than any named source explains.
+            CHECK(std::abs(m_cl_on / m_cl_off - 1.0) < 0.02);
+        }
         CHECK(std::isfinite(m_off));
         CHECK(std::isfinite(m_on));
         CHECK(std::isfinite(m_widened));
         CHECK(std::isfinite(m_cl_on));
+    }
+}
+
+TEST_CASE("SAA roughness in the G-buffer: a FLAT surface stores exactly its material roughness") {
+    // On a plane dFdx(n) = dFdy(n) = 0, so filter_specular_alpha adds nothing and the widened
+    // perceptual roughness sqrt(alpha) must equal the material's, to the last bit the G-buffer can
+    // hold. 0.5 and 0.25 are exact in binary16, so "equal" means equal, not "within a tolerance".
+    // The SSR-on frame's raw RGBA16F bytes are also hashed (FNV-1a) and printed: the hash was read
+    // on the commit BEFORE the shader change and again after it, and the two must be identical --
+    // that is the byte-identical proof, which a single binary cannot make about itself.
+    auto device = device_or_skip("the flat G-buffer roughness proof");
+    if (!device)
+        return;
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "saa-gbuffer-flat-floor");
+    SkyParams cloudy = clear_sky();
+    cloudy.clouds_enabled = true;
+    cloudy.coverage = 0.45f;
+    for (const float rough : {0.5f, 0.25f}) {
+        MaterialRegistry materials;
+        PbrMaterialDesc md{};
+        md.base_color[0] = md.base_color[1] = md.base_color[2] = 0.9f;
+        md.metallic = 1.0f;
+        md.roughness = rough;
+        const MaterialId mat = materials.add(md);
+        LightingSettings ls;
+        ls.ssr_enabled = true;
+        ls.ssr_max_distance = 8.0f;
+        ls.ssr_thickness = 0.5f;
+        ls.ssr_max_steps = 64;
+        SceneRenderer renderer(*device, meshes, materials);
+        render::test::disable_temporal_aa(renderer);
+        renderer.set_lighting(ls);
+        renderer.set_sky(cloudy);
+        renderer.set_sky_specular_prefilter_enabled(true);
+        ecs::World world;
+        register_render_components(world);
+        (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{floor}, MaterialRef{mat});
+        core::Transform cam{};
+        cam.translation = {0.0f, 1.0f, 0.0f};
+        (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{1.1f, 0.1f, 100.0f, true});
+        std::vector<std::uint8_t> hdr_bytes;
+        HdrImage gb;
+        for (int frame = 0; frame < 2; ++frame) {
+            RenderGraph graph(*device);
+            graph.reset();
+            const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize});
+            REQUIRE(out.hdr.is_valid());
+            REQUIRE(out.gbuffer.is_valid());
+            graph.export_texture(out.hdr);
+            graph.export_texture(out.gbuffer);
+            auto cmd = device->begin_commands();
+            graph.execute(*cmd);
+            device->submit_blocking(*cmd);
+            hdr_bytes = read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8);
+            gb = decode_hdr(
+                read_texture(*device, graph.physical(out.gbuffer), kSize, kSize, 8), kSize, kSize);
+        }
+        std::uint64_t h = 1469598103934665603ull;
+        for (const std::uint8_t b : hdr_bytes)
+            h = (h ^ b) * 1099511628211ull;
+        std::size_t covered = 0, exact = 0;
+        for (std::size_t i = 0; i + 2 < gb.rgb.size(); i += 3) {
+            if (gb.rgb[i + 2] == 0.0f && gb.rgb[i] == 0.0f && gb.rgb[i + 1] == 0.0f)
+                continue; // cleared background: A = 0
+            ++covered;
+            exact += gb.rgb[i + 2] == rough ? 1u : 0u;
+        }
+        MESSAGE("[saa flat] roughness " << rough << ": raw HDR FNV-1a " << std::hex << h << std::dec
+                                        << "; G-buffer B exact on " << exact << " of " << covered
+                                        << " covered px");
+        CHECK(covered > 1000);
+        CHECK(exact == covered);
     }
 }
