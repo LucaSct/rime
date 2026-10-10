@@ -476,3 +476,29 @@ curved surfaces or mixed SSR hits."* Both are now proven, in `tests/render/sdf_s
   measures the invariant rather than passing beside it. Both reverted; tree verified clean.
 - *Still not proven by either scene:* a surface with both high curvature and a mixed hit/miss
   population in the same frame, and anything on hardware — all of the above is lavapipe.
+
+### The proofs are no longer lavapipe-only (2026-10-11)
+
+Every proof in this section carried the caveat that it had only ever run on a software rasterizer.
+*Measured:* the whole render suite — **14 test binaries, 181 cases** — passes on the **NVIDIA driver**
+(615.71.09, RTX 3060) as well as on lavapipe, `ctest --preset dev -R render` exit **0** both ways,
+from one freshly built binary at `584dba9`. Nothing in the ADR-0078 stream behaves differently on
+hardware: no margin needed widening, no case diverged.
+
+Two notes on how that was established, because the obvious versions of both are wrong:
+
+- **Build first.** An earlier attempt reported 14/14 from a stale `build/dev`: `ctest` runs whatever
+  binary is there and reports green, and the tell was a run of **130 cases against a tree holding
+  181**. Same family as this file's standing rule about judging a build by its exit status rather
+  than by grepping its output.
+- **`VK_ICD_FILENAMES` is not evidence the driver was used, and `nvidia-smi` cannot confirm it** —
+  `--query-compute-apps` lists CUDA contexts, so a Vulkan *graphics* process never appears and the
+  query returns nothing, which reads exactly like a silent software fallback. What settles it is the
+  process's own mappings while it runs: `libGLX_nvidia.so.615.71.09` + `libnvidia-glcore` for
+  hardware against `libvulkan_lvp.so` for lavapipe.
+
+*Measured and worth expecting:* the hardware run is **slower** — 83.4 s against lavapipe's 51.7 s.
+Not a defect. These cases are readback- and submit-bound and the card idles at 210 MHz throughout,
+which is the same parked-clock behaviour `docs/perf/README.md` records for `99-the-block`. A real
+driver's per-process init is also heavier than lavapipe's. Read it as "hardware adds no risk to these
+proofs", not as "hardware is slow".
