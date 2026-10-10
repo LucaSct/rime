@@ -81,6 +81,18 @@ lower than its core count on purpose: a heavy C++20 translation unit can take 1�
 `-j6` against the container's 8 GB invites the OOM killer, which surfaces as a flaky *compiler error*
 rather than as "out of memory".
 
+**That cap covered COMPILATION only, and the sentence above used to read as though it covered the
+whole job.** `cargo test` runs the test *harness* with `--test-threads` defaulting to available
+parallelism, which `CARGO_BUILD_JOBS` does not touch: on 2026-10-10 the `asset_pipeline` test binary
+was measured at **468 % CPU** — 4.7 of starbase's 6 cores, from one test binary — during
+`build & test`, on the box whose whole purpose is to lose to the service containers. `Nice=10`,
+`cpuunits 50` and `IOSchedulingClass=idle` did contain it (pvestatd, staxy and its postgres were
+served throughout), so this was never an incident — but a cap you believe is in force and is not is
+worth more trouble than no cap at all, because it is what you will trust while diagnosing the next
+slowdown. `Environment=RUST_TEST_THREADS=4` now sits beside the other two in
+`universe/starbase/scripts/rime-ci-runner.sh`, so it survives re-provisioning rather than living only
+in the live drop-in.
+
 **Both runners pin lavapipe** (`VK_DRIVER_FILES` to the `lvp_icd` ICD) even though both machines have
 real GPUs. Rime's render proofs are structural with margins **taken against lavapipe**; letting the
 loader choose would mean a green run measured a different device depending on which machine happened
