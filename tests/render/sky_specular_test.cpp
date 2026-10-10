@@ -2367,4 +2367,112 @@ TEST_CASE("sky specular: how often a scrolling cloud field rebuilds the chain, a
     // Structural: the field really moved (layer 0 is the least filtered and must show it).
     CHECK(one[0] > 0.0);
     CHECK(ten[0] > one[0]);
+
+    // ── Part 4: the same measurement on the REAL chain, read through Output::sky_prefiltered. ──
+    // Part 3 is kept as the CPU-source control. Here the renderer bakes its own wind-scrolled
+    // cloud field into its own sky-view LUT and filters that; the chain is exported like
+    // out.hdr and one array layer at a time is copied out with read_texture.
+    {
+        const auto frame = [&](SceneRenderer& renderer,
+                               bool read_back) -> std::vector<std::vector<float>> {
+            ecs::World world;
+            register_render_components(world);
+            (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{floor}, MaterialRef{mat});
+            core::Transform cam{};
+            cam.translation = {0.0f, 1.0f, 0.0f};
+            (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{1.1f, 0.1f, 100.0f, true});
+            RenderGraph graph(*device);
+            graph.reset();
+            const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize});
+            REQUIRE(out.hdr.is_valid());
+            REQUIRE(out.sky_prefiltered.is_valid());
+            graph.export_texture(out.hdr);
+            if (read_back)
+                graph.export_texture(out.sky_prefiltered);
+            auto cmd = device->begin_commands();
+            graph.execute(*cmd);
+            device->submit_blocking(*cmd);
+            std::vector<std::vector<float>> layers;
+            if (read_back) {
+                const rhi::TextureHandle chain = graph.physical(out.sky_prefiltered);
+                for (std::uint32_t l = 0; l < kSkySpecularLayers; ++l) {
+                    const auto bytes =
+                        read_texture(*device, chain, kSkySpecularWidth, kSkySpecularHeight, 8, l);
+                    const auto* h = reinterpret_cast<const std::uint16_t*>(bytes.data());
+                    std::vector<float> f(bytes.size() / 2);
+                    for (std::size_t i = 0; i < f.size(); ++i)
+                        f[i] = half_to_float(h[i]);
+                    layers.push_back(std::move(f));
+                }
+                // The copy left the array in TransferSrc; the renderer believes ShaderRead.
+                auto back = device->begin_commands();
+                back->texture_barrier(
+                    chain, rhi::ResourceState::TransferSrc, rhi::ResourceState::ShaderRead);
+                device->submit_blocking(*back);
+            }
+            return layers;
+        };
+        SceneRenderer renderer(*device, meshes, materials);
+        SkyParams sp = cloudy();
+        const auto at = [&](int f) {
+            sp.wind[0] = kWindPerFrame * static_cast<float>(f);
+            sp.wind[1] = 0.6f * kWindPerFrame * static_cast<float>(f);
+            renderer.set_sky(sp);
+        };
+        at(0);
+        const auto f0 = frame(renderer, true);
+        at(1);
+        const auto f1 = frame(renderer, true);
+        for (int f = 2; f < 10; ++f) {
+            at(f);
+            (void)frame(renderer, false);
+        }
+        at(10);
+        const auto f10 = frame(renderer, true);
+        CHECK(f0.size() == kSkySpecularLayers);
+        const auto change = [&](const std::vector<std::vector<float>>& x,
+                                const std::vector<std::vector<float>>& y,
+                                std::uint32_t l) {
+            const std::size_t n = static_cast<std::size_t>(kSkySpecularWidth) * kSkySpecularHeight;
+            double sum = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto lum = [&](const std::vector<float>& t) {
+                    return 0.2126 * t[i * 4] + 0.7152 * t[i * 4 + 1] + 0.0722 * t[i * 4 + 2];
+                };
+                sum += rel(lum(y[l]), lum(x[l]));
+            }
+            return sum / static_cast<double>(n);
+        };
+        std::vector<double> real1, real10;
+        for (std::uint32_t l = 0; l < kSkySpecularLayers; ++l) {
+            real1.push_back(change(f0, f1, l));
+            real10.push_back(change(f0, f10, l));
+            MESSAGE("REAL chain layer " << l << ": 1 frame = " << real1[l]
+                                        << ", 10 frames = " << real10[l]
+                                        << "   | proxy (Part 3): " << one[l] << ", " << ten[l]);
+        }
+        CHECK(real1[0] > 0.0);
+        CHECK(real10[0] > real1[0]);
+    }
+
+    // ── The field's validity contract: valid iff the prefilter is on (DDGI off is the default). ─
+    for (const bool prefilter : {true, false}) {
+        SceneRenderer renderer(*device, meshes, materials);
+        renderer.set_sky(cloudy());
+        renderer.set_sky_specular_prefilter_enabled(prefilter);
+        ecs::World world;
+        register_render_components(world);
+        (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{floor}, MaterialRef{mat});
+        core::Transform cam{};
+        cam.translation = {0.0f, 1.0f, 0.0f};
+        (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{1.1f, 0.1f, 100.0f, true});
+        RenderGraph graph(*device);
+        graph.reset();
+        const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize});
+        CHECK(out.sky_prefiltered.is_valid() == prefilter);
+        graph.export_texture(out.hdr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+    }
 }

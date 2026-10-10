@@ -1087,7 +1087,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // reflection-added target (tonemap_src); with SSR off it is the raw forward HDR, unchanged.
     // This is what a caller wanting the scene's HDR colour should read (and what the GPU proofs
     // assert on, like the DDGI thesis test — never the tonemapped LDR through the pass chain).
-    return {tonemap_src, ldr, gbuffer, gbuffer_material, velocity};
+    // The chain handle only when the chain was really built or reused this frame; otherwise the
+    // binding holds the 1x1 placeholder, which a test must not mistake for the real thing.
+    const RGTexture sky_prefiltered =
+        (sky_on && sky_specular_live) ? sky_binding.specular.prefiltered : RGTexture{};
+    return {tonemap_src, ldr, gbuffer, gbuffer_material, velocity, sky_prefiltered};
 }
 
 } // namespace rime::render
