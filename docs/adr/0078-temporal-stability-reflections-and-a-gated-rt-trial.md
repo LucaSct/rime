@@ -402,3 +402,77 @@ median and the fraction crossing the cone threshold 0.25: no-map 0.0999 / 0 %; 1
   effect. The decision itself stands on the 33.2 % above — the alternative is far worse — but the
   cost is a surface-wide cost, and the rejected channel-A alternative was declined against a price
   believed to be an order of magnitude smaller than it is.
+
+### How often a moving sky rebuilds the chain, and how much of it changes (2026-10-10, #297)
+
+The cost note above says the rebuild is "above this ADR's 0.1-0.35 ms estimate if the sky changes
+every frame (a scrolling cloud field does)". That parenthesis is now measured, and it holds.
+
+- *Measured, through `SceneRenderer` over 60 frames:* a **static** sky rebuilds the chain **once**
+  and reuses it 59 times; a **wind-scrolled** sky (+0.005/frame) rebuilds it **60 times with zero
+  reuses**, and bakes the sky-view LUT 60 times with it. The mechanism, read from the source:
+  `SkyPass::inputs_equal` compares `wind[0]`/`wind[1]` with `==` (`sky.cpp:405-406`), so *any* wind
+  change invalidates. There is no epsilon and no rate limit between a moving cloud field and a full
+  rebake.
+- *Measured, from the source and confirmed by the counter:* **a partial rebuild cannot be
+  expressed.** `SkySpecular` holds one `prefilter_valid_` flag and issues **one** dispatch whose z
+  extent is `kSkySpecularLayers` (`sky_specular.cpp:201-203,205`), so the dirty unit is the whole
+  6-layer chain and one triggering frame adds exactly 1 to `prefilter_filled`. "Rebuild only the
+  changed levels" is therefore not a tuning knob that exists; it is a change to the dirty state.
+- *Measured on a PROXY, and the caveat is the point:* the renderer exposes neither the chain texture
+  nor the sky-view LUT, so the content of a real cloud rebuild cannot be read back without an engine
+  change. Against a scrolling value-noise proxy at the same per-frame step, the mean relative
+  luminance change per layer is 0.157 / 0.114 / 0.107 / 0.116 / 0.121 / 0.123 % for one frame, and
+  1.59 / 1.15 / 1.07 / 1.15 / 1.19 / 1.21 % for ten. *Inferred:* a 1-frame change near 0.1 % is close
+  to fp16 quantisation, so read the 10-frame column; each frame's full rebuild moves chain content by
+  roughly a tenth of a percent.
+- *A hypothesis this refutes.* The brief expected the change to fall with layer index, since a
+  high-roughness layer is a wide blur that small cloud motion should barely move. It does not: the
+  shape is nearly flat, highest at layer 0, with a dip at layer 2. So "the rough layers are the
+  wasted ones" is **false on this proxy** — the waste, if it is waste, is uniform across the chain,
+  which argues for amortising *whole rebuilds* over frames rather than for refreshing sharp layers
+  more often than rough ones.
+- *Not decided here.* Which lever to pull — temporal amortisation, a reduced rebake rate, a wind
+  epsilon, or per-level dirty state — is an owner decision, and it would currently rest on proxy
+  extent numbers. The cheap prerequisite is a test-visible accessor for the chain, so the real
+  figure can replace the proxy before the lever is chosen.
+
+### The two limits this section named about itself, closed (2026-10-10, #298)
+
+The SDF occlusion brick above says: *"The proof is flat and pure sky fallback, so it does not prove
+curved surfaces or mixed SSR hits."* Both are now proven, in `tests/render/sdf_specular_occlusion_test.cpp`
+(2 cases, 132 assertions, default still OFF).
+
+- *Curved, measured on lavapipe:* a `make_uv_sphere` in the same enclosed/outdoor pair, so the cone
+  width `2*alpha` varies per pixel with the normal instead of being constant. Enclosed on/off mean
+  ratio **0 exactly** and worst-pixel ratio 0; outdoor twin **1.0** with worst-pixel change 0 — in
+  all four SSR x chain combinations. The sphere is genuinely non-flat: unoccluded luminance spans
+  **0.58-2.69**, asserted to vary by more than 5 % of the mean, so curvature is a property of the
+  measurement rather than only of the mesh.
+- *Two corrections to the scene, and both were the CONTROL being contaminated rather than the
+  feature misbehaving.* (1) The outdoor twin at x = 12 has its -x limb **7.7 m** from the cavity's
+  east wall, inside the 8 m cone reach, so the occlusion correctly darkened the "unoccluded" control
+  by 14-19 % with its worst pixel reaching 0. It moved to x = 20. A control the effect under test can
+  reach is not a control. (2) A sphere's lower half reflects into the floor slab, which is a real
+  occluder, so the outdoor claim is asserted only on pixels whose analytic mirror ray has y >= 0 —
+  **1094 px**, found by per-pixel ray-sphere intersection, not a hand-drawn region.
+- *Mixed SSR hits, measured:* a mirror-like metal floor, a pure-emission box standing on it (metal
+  with a black base colour, so it contributes no specular of its own), and an SDF canopy the camera
+  cannot see covering the floor rays near x = 0. **The partition is derived, not drawn** — by
+  rendering an object-free twin and diffing SDF-on against SDF-off. Result: **202** floor pixels with
+  a real screen hit change by **0** (2e-5 with the chain on), **1901** pixels that missed into a
+  blocked direction fall to as low as 0, and **zero pixels anywhere get brighter**. Every derived hit
+  pixel lies inside the box's mirror image in the floor, which cross-checks the derivation against
+  the geometry. Two hand-picked points agree independently: blocked **2.49 -> 0**, open
+  **1.54491 -> 1.54491**.
+- *What that proves, precisely:* `ssr_resolve.frag`'s own claim — "Occlude ONLY the sky fallback
+  before blending: a real SSR hit carries local radiance" — which no previous proof could test,
+  because every pixel in the flat scene missed into the sky.
+- *Falsified twice, and the second mutation is the load-bearing one.* Returning 1.0 from the cone
+  fails scene 1's four enclosed assertions and leaves scene 2 with no darkened pixels — but it leaves
+  the hit-unchanged assertion **true**, so it does not test the invariant. Multiplying the occlusion
+  into the SSR hit as well drives the hit-pixel change from **0 to 1**, failing
+  `worst_hit_change < 0.02` in both chain modes. That is the mutation that establishes scene 2
+  measures the invariant rather than passing beside it. Both reverted; tree verified clean.
+- *Still not proven by either scene:* a surface with both high curvature and a mixed hit/miss
+  population in the same frame, and anything on hardware — all of the above is lavapipe.
