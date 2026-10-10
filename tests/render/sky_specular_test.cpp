@@ -2220,3 +2220,151 @@ TEST_CASE("SAA roughness in the G-buffer: a FLAT plane carrying a normal map, sw
     CHECK(std::abs(ratio - 1.0) < 0.02);
     device->destroy(normal_map);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// ADR-0078 records the chain rebuild as a cost "if the sky changes every frame (a scrolling cloud
+// field does)". This case measures how often a scrolling cloud field really triggers a rebuild, and
+// how much of the chain's CONTENT a rebuild changes. It is a STRUCTURAL measurement: no clock is
+// read anywhere, because a time taken on a shared machine is not a property of the code.
+//
+// Two facts come from the source rather than from a counter, and are restated here so a reader can
+// check them: (1) SkyPass::inputs_equal (sky.cpp) compares `wind[0]`/`wind[1]` exactly, so ANY
+// change of wind re-bakes the sky-view LUT and calls SkySpecular::add(..., source_changed = true);
+// (2) that function has one `prefilter_valid_` flag and ONE dispatch with z = kSkySpecularLayers,
+// so the dirty unit is the whole chain. There is no per-layer dirty state to count.
+TEST_CASE("sky specular: how often a scrolling cloud field rebuilds the chain, and how much of "
+          "the chain a rebuild changes") {
+    auto device = device_or_skip("the sky-chain rebake measurement");
+    if (!device)
+        return;
+
+    // ── Part 1: rebuild FREQUENCY, through the real renderer. ────────────────────────────────
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(12.0f), "sky-rebake-floor");
+    MaterialRegistry materials;
+    PbrMaterialDesc md{};
+    md.base_color[0] = md.base_color[1] = md.base_color[2] = 0.9f;
+    md.metallic = 1.0f;
+    md.roughness = 0.5f;
+    const MaterialId mat = materials.add(md);
+
+    constexpr int kFrames = 60;
+    // Clouds on, wind is the only thing that moves. `wind` is added in noise space (sky_common.glsl
+    // line 145), so 0.005 per frame drifts the field by 0.3 of a noise cell in a second at 60 fps.
+    constexpr float kWindPerFrame = 0.005f;
+    const auto cloudy = [] {
+        SkyParams sp = clear_sky();
+        sp.clouds_enabled = true;
+        return sp;
+    };
+
+    std::uint32_t static_filled = 0, static_reused = 0, static_lut_filled = 0;
+    {
+        SceneRenderer renderer(*device, meshes, materials);
+        renderer.set_sky(cloudy());
+        for (int f = 0; f < kFrames; ++f)
+            (void)render_hdr(*device, renderer, floor, mat);
+        static_filled = renderer.sky_specular_stats().prefilter_filled;
+        static_reused = renderer.sky_specular_stats().prefilter_reused;
+        static_lut_filled = renderer.sky_lighting_stats().filled;
+    }
+    std::uint32_t anim_filled = 0, anim_reused = 0, anim_lut_filled = 0;
+    {
+        SceneRenderer renderer(*device, meshes, materials);
+        SkyParams sp = cloudy();
+        for (int f = 0; f < kFrames; ++f) {
+            sp.wind[0] = kWindPerFrame * static_cast<float>(f);
+            sp.wind[1] = 0.6f * kWindPerFrame * static_cast<float>(f);
+            renderer.set_sky(sp);
+            (void)render_hdr(*device, renderer, floor, mat);
+        }
+        anim_filled = renderer.sky_specular_stats().prefilter_filled;
+        anim_reused = renderer.sky_specular_stats().prefilter_reused;
+        anim_lut_filled = renderer.sky_lighting_stats().filled;
+    }
+    MESSAGE("rebuilds per " << kFrames << " frames: static sky chain " << static_filled
+                            << " (reused " << static_reused << ", sky LUT bakes "
+                            << static_lut_filled << "); wind-scrolled sky chain " << anim_filled
+                            << " (reused " << anim_reused << ", sky LUT bakes " << anim_lut_filled
+                            << ")");
+    CHECK(static_filled == 1);
+    CHECK(static_reused == kFrames - 1);
+    CHECK(anim_filled > 1);
+
+    // ── Part 2: dirty GRANULARITY. One rebuild is one dispatch of kSkySpecularLayers layers. ──
+    // The counter has no per-layer resolution to read, so this is stated from the source (above)
+    // and what the counters CAN show is that a rebuild adds exactly 1 to prefilter_filled.
+    {
+        Rig rig(*device);
+        rig.set_sky([](Vec3d) { return Rgb{0.5, 0.5, 0.5}; });
+        rig.bake(true);
+        const std::uint32_t before = rig.spec().stats().prefilter_filled;
+        rig.bake(true);
+        MESSAGE("one triggering frame adds " << rig.spec().stats().prefilter_filled - before
+                                             << " to prefilter_filled and rebuilds "
+                                             << kSkySpecularLayers << " layers in one dispatch");
+        CHECK(rig.spec().stats().prefilter_filled == before + 1);
+    }
+
+    // ── Part 3: rebuild EXTENT -- how much of each layer's content changes. ───────────────────
+    // The renderer does not expose its chain texture, and the sky-view LUT it filters is not
+    // exposed either, so the content of a REAL cloud rebuild cannot be read back without touching
+    // the engine. This uses the Rig (the same SkySpecular, a CPU-built source) fed a PROXY cloud
+    // field: a scrolling value-noise coverage over a blue gradient, advanced by the same
+    // kWindPerFrame. The numbers are therefore for the proxy, not the engine's own noise.
+    const auto clouds_at = [](double off) -> SkyFn {
+        return [off](Vec3d d) -> Rgb {
+            d = normalize(d);
+            if (d.y <= 0.02) {
+                return {0.08, 0.08, 0.09};
+            }
+            const double px = (d.x / d.y) * 0.9 + off;
+            const double pz = (d.z / d.y) * 0.9 + 0.6 * off;
+            const double n = 0.5 + 0.18 * (std::sin(1.7 * px + 0.3) + std::sin(2.3 * pz + 1.1) +
+                                           std::sin(1.1 * (px + pz) + 2.0));
+            const double t = std::clamp((n - 0.55) / 0.2, 0.0, 1.0);
+            const double c = t * t * (3.0 - 2.0 * t);
+            const double sky[3] = {0.2, 0.35, 0.75};
+            return {sky[0] + c * (2.0 - sky[0]),
+                    sky[1] + c * (2.0 - sky[1]),
+                    sky[2] + c * (2.0 - sky[2])};
+        };
+    };
+    const auto layer_change = [&](double off_a, double off_b) {
+        Rig rig(*device);
+        rig.set_sky(clouds_at(off_a));
+        rig.bake(true);
+        std::vector<std::vector<float>> a;
+        for (std::uint32_t l = 0; l < kSkySpecularLayers; ++l)
+            a.push_back(rig.read_layer(l));
+        rig.set_sky(clouds_at(off_b));
+        rig.bake(true);
+        std::vector<double> out;
+        for (std::uint32_t l = 0; l < kSkySpecularLayers; ++l) {
+            const std::vector<float> b = rig.read_layer(l);
+            double sum = 0.0;
+            const std::size_t n = static_cast<std::size_t>(kSkySpecularWidth) * kSkySpecularHeight;
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto lum = [&](const std::vector<float>& t) {
+                    return 0.2126 * t[i * 4] + 0.7152 * t[i * 4 + 1] + 0.0722 * t[i * 4 + 2];
+                };
+                sum += rel(lum(b), lum(a[l]));
+            }
+            out.push_back(sum / static_cast<double>(n));
+        }
+        return out;
+    };
+    const std::vector<double> one = layer_change(0.0, kWindPerFrame);
+    const std::vector<double> ten = layer_change(0.0, 10.0 * kWindPerFrame);
+    bool monotonic = true;
+    for (std::uint32_t l = 0; l < kSkySpecularLayers; ++l) {
+        MESSAGE("layer " << l << ": mean |relative luminance change| 1 frame = " << one[l]
+                         << ", 10 frames = " << ten[l]);
+        if (l > 0 && one[l] > one[l - 1])
+            monotonic = false;
+    }
+    MESSAGE("1-frame change monotonically non-increasing in layer index: " << monotonic);
+    // Structural: the field really moved (layer 0 is the least filtered and must show it).
+    CHECK(one[0] > 0.0);
+    CHECK(ten[0] > one[0]);
+}
