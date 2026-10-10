@@ -377,3 +377,28 @@ is a separate, later brick and is not started.
   rejected alternative was carrying the widened value in the mask channel A to leave SSR's cone
   untouched; it was declined because it puts two roughnesses in one target for every future
   consumer to keep apart. Implementation is its own brick.
+
+### Step 1e on a normal-mapped flat surface — the case that was not tried (2026-10-10)
+
+`brdf.glsl` calls normal-map detail the *dominant* source of sub-pixel normal variance, and the
+paragraphs above measure only a sphere. *Measured* (lavapipe, 96x96, 9216 px, roughness 0.1, cloudy
+sky 0.45, 8x8 checker of (±0.6, 0, 0.8) tangent normals on `make_plane(12, uv_tiles)`), G-buffer B
+median and the fraction crossing the cone threshold 0.25: no-map 0.0999 / 0 %; 1 tile 0.1344 / 0 %;
+8 tiles 0.3489 / **89.6 %**; 64 tiles 0.4197 / **93.3 %**. Max B 0.591, under the 0.6514 clamp.
+
+- *The divergence this step closes is far larger here than on a sphere.* With `lobe_roughness`
+  reverted to `roughness` at the G-buffer write, the SSR-on/off mean-luminance ratio is **0.6681 —
+  a 33.2 % divergence**, against 15.2 % on the cloudy sphere's outer ring. With the fix it is
+  0.9937. *The null is load-bearing because the instrument was calibrated:* the no-map plane, where
+  the widening is provably zero, reads 0.9950, and the sensitivity control (same scene, SSR off
+  both times, roughness raised to the measured median 0.4197) moves luminance by **16.8 %** — 27x
+  the residual. An earlier version of this measurement looked ALONG the plane instead of down at
+  it; SSR then self-intersected the grazing floor and the no-map baseline read 0.9603, a 4 %
+  instrument offset that mimicked a failing fix almost exactly.
+- *The accepted cost above is scoped wrongly, and this revises it.* It says the cone response is
+  "confined to pixels whose widened value crosses 0.25 -- the outermost ring, about a 10 % probe
+  blend there". On normal-mapped content it is **93 % of the surface**, at a median widened
+  roughness of 0.42, i.e. a ~44 % blend toward the probe over almost the whole plane, not a rim
+  effect. The decision itself stands on the 33.2 % above — the alternative is far worse — but the
+  cost is a surface-wide cost, and the rejected channel-A alternative was declined against a price
+  believed to be an order of magnitude smaller than it is.
