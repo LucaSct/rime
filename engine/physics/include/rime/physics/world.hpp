@@ -210,6 +210,42 @@ struct WorldStats {
     std::uint32_t heightfield_manifolds = 0;
     std::uint32_t heightfield_patch_merges = 0;
     std::uint32_t heightfield_ccd_skipped = 0;
+
+    // Island solve COST, in time (opt-in; all zero unless set_island_profile_enabled(true)).
+    //
+    // largest_active_island above is a BODY COUNT, and body share is not solver-time share: an
+    // Amdahl ceiling derived from "92 % of awake bodies sit in one island" is a statement about
+    // WIDTH, not about COST. These fields are the cost. Unlike every other field here they are
+    // wall-clock, so they are machine-dependent, NOT deterministic, and never enter world_hash().
+    //
+    //  - island_solve_ns_total: the summed solve time of every active island this step.
+    //  - largest_active_island_solve_ns: the solve time of the single most expensive active island
+    //    (the serial tail in TIME — not necessarily the one with the most bodies; the per-island
+    //    profile has both, see island_solve_profile_last()).
+    //
+    // largest_active_island_solve_ns / island_solve_ns_total IS the real Amdahl serial fraction of
+    // the island-parallel solve, and 1 / that fraction is the real ceiling on island-level speedup.
+    //
+    // largest_island_membership_changed: the biggest (by bodies) active island's member set differs
+    // from the previous profiled step's. largest_island_prev_bodies is that previous island's body
+    // count (0 = no previous profiled step with an active island, in which case changed is false).
+    // The comparison is an FNV-1a hash of the sorted dense body indices plus the count, so it is
+    // EXACT up to a 64-bit collision. It CAN say "a different set of bodies is the big island now".
+    // It CANNOT say why: a merge, a wake of sleeping neighbours, a split, a swap to a different
+    // island, and body create/destroy between steps (which shifts dense indices) all read as
+    // "changed"; compare prev_bodies with largest_active_island to see growth vs shrink.
+    std::uint64_t island_solve_ns_total = 0;
+    std::uint64_t largest_active_island_solve_ns = 0;
+    std::uint32_t largest_island_prev_bodies = 0;
+    bool largest_island_membership_changed = false;
+};
+
+// One ACTIVE island's solve cost in the last step (see WorldStats::island_solve_ns_total).
+struct IslandSolveCost {
+    std::uint32_t island = 0;      // partition number: islands are numbered by lowest dense body
+    std::uint32_t bodies = 0;      // dynamic bodies in the island
+    std::uint32_t constraints = 0; // contact constraints (points) in the island
+    std::uint64_t solve_ns = 0; // wall time of that island's solve only, on the thread that ran it
 };
 
 class PhysicsWorld {
@@ -345,6 +381,17 @@ public:
     // to step; disabling immediately wakes every body — useful for a test that wants pure
     // continuous dynamics, or a scene where nothing should ever deactivate.
     void set_sleeping_enabled(bool enabled) noexcept;
+
+    // Per-island solve timing (off by default; costs nothing when off). When on, each step() times
+    // every ACTIVE island's solve on the thread that ran it and exposes the result through
+    // island_solve_profile_last() and the WorldStats time fields. Timing never changes the
+    // simulation: world_hash() is bit-identical with it on or off.
+    void set_island_profile_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool island_profile_enabled() const noexcept;
+
+    // One entry per active island of the most recent step(), in island-id order; empty when the
+    // profile is off. Invalidated by the next step().
+    [[nodiscard]] std::span<const IslandSolveCost> island_solve_profile_last() const noexcept;
 
     // Whether a body is currently asleep (deactivated): skipped by integration and the solver until
     // something wakes it — a moving body colliding into its island, wake_body(), or sleeping being
