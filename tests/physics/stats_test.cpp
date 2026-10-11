@@ -2,10 +2,13 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <map>
 #include <memory>
 #include <span>
 #include <vector>
@@ -330,4 +333,180 @@ TEST_CASE("m17.5: the tail is the largest island that was AWAKE, not the largest
     // the dispatch declines and says so — the counter reports what was SOLVED in parallel, which
     // here is nothing, even though a job system is attached and two islands exist.
     CHECK(s.islands_solved_parallel == 0);
+}
+
+// ---- Island solve COST in time (the per-island profile) -----------------------------------------
+//
+// WorldStats::largest_active_island is a BODY COUNT. "92 % of awake bodies sit in one island, so
+// the Amdahl ceiling is 1.09x" is a claim about WIDTH; body share is not solver-time share. This
+// test builds one large island beside several small ones, with a DIFFERENT size for each so the
+// cost-vs-size relationship has more than two points, and PRINTS what each island's solve costs.
+// It asserts only what must be true (accounting, positivity, determinism) and never a magnitude:
+// the nanoseconds are the measurement, and a machine-dependent number in an assertion is a flake.
+namespace {
+
+// Vertical columns of unit boxes, one per entry of `heights`, 4 m apart along x (never touching),
+// each its own island. Returns the total body count.
+int build_columns(physics::PhysicsWorld& w, const std::vector<int>& heights) {
+    add_floor(w);
+    int made = 0;
+    for (std::size_t c = 0; c < heights.size(); ++c) {
+        const float cx = static_cast<float>(c) * 4.0f;
+        for (int j = 0; j < heights[c]; ++j) {
+            add_body(w, box({0.5f, 0.5f, 0.5f}), {cx, 0.5f + static_cast<float>(j) * 1.02f, 0.0f});
+            ++made;
+        }
+    }
+    return made;
+}
+
+const std::vector<int> kColumnHeights = {24, 12, 6, 3, 2, 2};
+
+} // namespace
+
+TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash that cannot tell") {
+    constexpr int kWarmup = 60;
+    constexpr int kMeasured = 120;
+    core::JobSystem jobs{4};
+
+    physics::PhysicsWorld on;  // profiled, sequential solve: clean per-island times
+    physics::PhysicsWorld off; // the same scene, profile never enabled
+    physics::PhysicsWorld par; // profiled, island solve on the job system
+    for (physics::PhysicsWorld* w : {&on, &off, &par}) {
+        w->set_sleeping_enabled(false); // keep every island active so every step has work to time
+    }
+    par.set_job_system(&jobs);
+    const int made = build_columns(on, kColumnHeights);
+    build_columns(off, kColumnHeights);
+    build_columns(par, kColumnHeights);
+    REQUIRE(!on.island_profile_enabled()); // OFF by default
+    CHECK(on.island_solve_profile_last().empty());
+    on.set_island_profile_enabled(true);
+    par.set_island_profile_enabled(true);
+
+    struct Acc {
+        std::uint32_t bodies = 0;
+        std::uint32_t constraints = 0;
+        std::uint64_t ns_sum = 0;
+        int steps = 0;
+    };
+
+    std::map<std::uint32_t, Acc> acc;
+    std::uint64_t total_sum = 0;
+    std::uint64_t largest_sum = 0;
+    int measured = 0;
+    int changed_steady = 0;
+
+    for (int i = 0; i < kWarmup + kMeasured; ++i) {
+        on.step(kDt);
+        off.step(kDt);
+        par.step(kDt);
+        const physics::WorldStats s = on.stats();
+        const auto prof = on.island_solve_profile_last();
+
+        // Accounting that must hold every step, whatever the clock says.
+        REQUIRE(prof.size() == s.active_islands);
+        std::uint32_t body_sum = 0;
+        std::uint32_t most_bodies = 0;
+        std::uint64_t ns_sum = 0;
+        std::uint64_t ns_max = 0;
+        for (const physics::IslandSolveCost& c : prof) {
+            body_sum += c.bodies;
+            most_bodies = std::max(most_bodies, c.bodies);
+            ns_sum += c.solve_ns;
+            ns_max = std::max(ns_max, c.solve_ns);
+        }
+        CHECK(body_sum ==
+              s.awake_bodies); // sleeping is off: every dynamic body is awake and active
+        CHECK(body_sum == static_cast<std::uint32_t>(made));
+        CHECK(most_bodies == s.largest_active_island);
+        CHECK(s.island_solve_ns_total == ns_sum);
+        CHECK(s.largest_active_island_solve_ns == ns_max);
+        CHECK(s.island_solve_ns_total >= s.largest_active_island_solve_ns);
+        CHECK(s.island_solve_ns_total > 0);
+        CHECK(s.largest_active_island_solve_ns > 0);
+        // The profiled worker-thread run reports the same island STRUCTURE (times differ).
+        const auto pprof = par.island_solve_profile_last();
+        REQUIRE(pprof.size() == prof.size());
+        for (std::size_t k = 0; k < prof.size(); ++k) {
+            CHECK(pprof[k].island == prof[k].island);
+            CHECK(pprof[k].bodies == prof[k].bodies);
+            CHECK(pprof[k].constraints == prof[k].constraints);
+        }
+        // Profile off means all of it is zero.
+        const physics::WorldStats so = off.stats();
+        CHECK(off.island_solve_profile_last().empty());
+        CHECK(so.island_solve_ns_total == 0);
+        CHECK(so.largest_active_island_solve_ns == 0);
+
+        if (i >= kWarmup) {
+            ++measured;
+            total_sum += s.island_solve_ns_total;
+            largest_sum += s.largest_active_island_solve_ns;
+            changed_steady += s.largest_island_membership_changed ? 1 : 0;
+            for (const physics::IslandSolveCost& c : prof) {
+                Acc& a = acc[c.island];
+                a.bodies = c.bodies;
+                a.constraints = c.constraints;
+                a.ns_sum += c.solve_ns;
+                ++a.steps;
+            }
+        }
+    }
+
+    // THE determinism check: timing is a read-only side channel, so the profile must be invisible
+    // to the simulation — on, off, and on-with-workers all land on the same bits.
+    CHECK(on.world_hash() == off.world_hash());
+    CHECK(par.world_hash() == off.world_hash());
+
+    std::printf(
+        "\n[island-profile] %d bodies, %zu columns, mean over %d steps (sequential solve)\n",
+        made,
+        kColumnHeights.size(),
+        measured);
+    std::printf("[island-profile] %8s %8s %12s %12s %14s\n",
+                "island",
+                "bodies",
+                "constraints",
+                "solve_ns",
+                "ns_per_body");
+    double largest_by_time_ns = 0.0;
+    double total_ns = 0.0;
+    for (const auto& [id, a] : acc) {
+        const double mean = static_cast<double>(a.ns_sum) / std::max(1, a.steps);
+        total_ns += mean;
+        largest_by_time_ns = std::max(largest_by_time_ns, mean);
+        std::printf("[island-profile] %8u %8u %12u %12.0f %14.0f\n",
+                    id,
+                    a.bodies,
+                    a.constraints,
+                    mean,
+                    mean / static_cast<double>(std::max(1u, a.bodies)));
+    }
+    const double frac = largest_by_time_ns / total_ns;
+    std::printf("[island-profile] serial fraction (largest island time / total) = %.4f\n", frac);
+    std::printf("[island-profile] implied island-parallel ceiling (1 / fraction) = %.3fx\n",
+                1.0 / frac);
+    std::printf("[island-profile] per-step means: total %.0f ns, largest %.0f ns\n",
+                static_cast<double>(total_sum) / measured,
+                static_cast<double>(largest_sum) / measured);
+    std::printf("[island-profile] largest-island membership changed on %d of %d steady steps\n",
+                changed_steady,
+                measured);
+
+    // Merge event: a box set down overlapping the foot of the biggest column joins that island. The
+    // signal must see it (membership changed, previous count one smaller).
+    const std::uint32_t before = on.stats().largest_active_island;
+    add_body(on, box({0.5f, 0.5f, 0.5f}), {0.95f, 0.5f, 0.0f});
+    on.step(kDt);
+    const physics::WorldStats after = on.stats();
+    std::printf(
+        "[island-profile] merge step: largest %u -> %u bodies, changed=%d, prev_bodies=%u\n",
+        before,
+        after.largest_active_island,
+        after.largest_island_membership_changed ? 1 : 0,
+        after.largest_island_prev_bodies);
+    CHECK(after.largest_active_island == before + 1);
+    CHECK(after.largest_island_membership_changed);
+    CHECK(after.largest_island_prev_bodies == before);
 }
