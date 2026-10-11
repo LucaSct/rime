@@ -8,6 +8,8 @@
 
 #include "rime/render/lighting/sky_specular.hpp"
 
+#include <bit> // popcount, for the never-written layer mask
+
 #include "sky_specular_dfg.comp.spv.h"
 #include "sky_specular_prefilter.comp.spv.h"
 
@@ -133,6 +135,8 @@ void SkySpecular::ensure_resources() {
     td.debug_name = "sky-specular-prefiltered";
     prefiltered_ = device_.create_texture(td);
     prefiltered_state_ = rhi::ResourceState::Undefined;
+    // Created without a clear, so every layer is uninitialised until something dispatches over it.
+    prefilter_written_mask_ = 0;
 
     td.extent = {kSkySpecularDfgSize, kSkySpecularDfgSize};
     td.array_layers = 1;
@@ -174,36 +178,88 @@ SkySpecularBinding SkySpecular::add(RenderGraph& graph, RGTexture source, bool s
         dfg_state_ = rhi::ResourceState::ShaderRead;
     }
 
-    // ── The prefiltered chain: rebuilt when the sky it filters moved. ────────────────────────
-    if (prefilter_valid_ && !source_changed) {
+    // ── The prefiltered chain: dirty layers are rebuilt, at most max_layers_per_frame_ a frame. ──
+    // See the header for why this is correct. A moved source dirties every layer.
+    if (source_changed)
+        prefilter_valid_mask_ = 0;
+
+    constexpr std::uint32_t kAllLayers = (1u << kSkySpecularLayers) - 1u;
+
+    // A NEVER-WRITTEN layer is not deferrable. The budget's correctness argument is that a deferred
+    // layer still holds a filter of a slightly older sky, which the forward pass can safely sample;
+    // a layer the texture has never had written to it holds uninitialised device memory instead,
+    // and the forward pass samples every layer regardless of the budget. So those are serviced
+    // unconditionally, which also means the FIRST build always fills the whole chain. In the
+    // default configuration this changes nothing: the budget is already every layer.
+    std::uint32_t selected = ~prefilter_written_mask_ & kAllLayers;
+    std::uint32_t count = std::popcount(selected);
+
+    // Then spend what is left of the budget on the STALE layers, walking from the cursor and
+    // wrapping, so that under a budget no layer starves.
+    for (std::uint32_t i = 0; i < kSkySpecularLayers && count < max_layers_per_frame_; ++i) {
+        const std::uint32_t layer = (next_layer_ + i) % kSkySpecularLayers;
+        const std::uint32_t bit = 1u << layer;
+        if ((prefilter_valid_mask_ & bit) == 0 && (selected & bit) == 0) {
+            selected |= bit;
+            ++count;
+        }
+    }
+
+    // The cursor advances past the highest-indexed layer serviced this frame.
+    std::uint32_t highest = next_layer_;
+    for (std::uint32_t layer = 0; layer < kSkySpecularLayers; ++layer)
+        if ((selected & (1u << layer)) != 0)
+            highest = layer;
+
+    if (count == 0) {
+        // Exactly the old reuse path: no pass, and prefiltered_state_ is left to the last consumer.
         ++stats_.prefilter_reused;
     } else {
-        const GpuSpecularParams p{{kSkySpecularLevels, kSkySpecularPrefilterSamples, 0, 0}};
-        const RenderGraph::FrameSlice ubo = graph.push_frame_data(&p, sizeof(p));
+        // One pass per contiguous run of ascending layer indices; the shader adds the run's base
+        // layer to gl_GlobalInvocationID.z, so z is the run length and the roughness it computes is
+        // the ABSOLUTE layer's.
         const RGTexture sampled[] = {source};
         const RGTexture writes[] = {prefiltered_rg};
-        RenderGraph::ComputePassDesc desc{};
-        desc.sampled = sampled;
-        desc.storage_write = writes;
-        graph.add_compute_pass(
-            "sky-specular-prefilter",
-            desc,
-            [pipe = prefilter_pipeline_,
-             prefiltered_rg,
-             source,
-             ubo,
-             smp = source_sampler_,
-             &graph](rhi::CommandBuffer& cmd) {
-                cmd.bind_compute_pipeline(pipe);
-                cmd.bind_storage_image(0, graph.physical(prefiltered_rg));
-                cmd.bind_texture(1, graph.physical(source), smp);
-                cmd.bind_uniform_buffer(2, ubo.buffer, ubo.offset, sizeof(p));
-                cmd.dispatch((kSkySpecularWidth + kSkySpecularGroup - 1) / kSkySpecularGroup,
-                             (kSkySpecularHeight + kSkySpecularGroup - 1) / kSkySpecularGroup,
-                             kSkySpecularLayers);
-            });
-        prefilter_valid_ = true;
+        for (std::uint32_t layer = 0; layer < kSkySpecularLayers;) {
+            if ((selected & (1u << layer)) == 0) {
+                ++layer;
+                continue;
+            }
+            std::uint32_t run = 1;
+            while (layer + run < kSkySpecularLayers && (selected & (1u << (layer + run))) != 0)
+                ++run;
+            const GpuSpecularParams p{{kSkySpecularLevels, kSkySpecularPrefilterSamples, layer, 0}};
+            const RenderGraph::FrameSlice ubo = graph.push_frame_data(&p, sizeof(p));
+            RenderGraph::ComputePassDesc desc{};
+            desc.sampled = sampled;
+            desc.storage_write = writes;
+            graph.add_compute_pass(
+                "sky-specular-prefilter",
+                desc,
+                [pipe = prefilter_pipeline_,
+                 prefiltered_rg,
+                 source,
+                 ubo,
+                 run,
+                 smp = source_sampler_,
+                 &graph](rhi::CommandBuffer& cmd) {
+                    cmd.bind_compute_pipeline(pipe);
+                    cmd.bind_storage_image(0, graph.physical(prefiltered_rg));
+                    cmd.bind_texture(1, graph.physical(source), smp);
+                    cmd.bind_uniform_buffer(2, ubo.buffer, ubo.offset, sizeof(GpuSpecularParams));
+                    cmd.dispatch((kSkySpecularWidth + kSkySpecularGroup - 1) / kSkySpecularGroup,
+                                 (kSkySpecularHeight + kSkySpecularGroup - 1) / kSkySpecularGroup,
+                                 run);
+                });
+            layer += run;
+        }
+        prefilter_valid_mask_ |= selected;
+        prefilter_written_mask_ |= selected;
+        next_layer_ = (highest + 1) % kSkySpecularLayers;
+        stats_.prefilter_layers_filled += count;
         ++stats_.prefilter_filled;
+        if ((prefilter_valid_mask_ & kAllLayers) != kAllLayers)
+            ++stats_.prefilter_partial_frames;
         prefiltered_state_ = rhi::ResourceState::ShaderRead;
     }
 

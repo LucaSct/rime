@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 
 #include "rime/render/render_graph.hpp"
@@ -70,8 +71,15 @@ struct SkySpecularBinding {
 struct SkySpecularStats {
     std::uint32_t dfg_filled = 0;
     std::uint32_t dfg_reused = 0;
-    std::uint32_t prefilter_filled = 0;
-    std::uint32_t prefilter_reused = 0;
+    std::uint32_t prefilter_filled = 0; // frames that dispatched at least one layer
+    std::uint32_t prefilter_reused = 0; // frames that dispatched none
+    // Layers dispatched in total, summed over frames: a frame that rebuilt the whole chain adds
+    // kSkySpecularLayers, a budgeted one adds the budget.
+    std::uint32_t prefilter_layers_filled = 0;
+    // Frames that dispatched at least one layer and left at least one dirty layer for a later
+    // frame. The defer path's counter: a chain that is quietly lagging looks exactly like one
+    // keeping up.
+    std::uint32_t prefilter_partial_frames = 0;
     // Frames served the placeholder: the feature was switched off, SSR or DDGI made the forward
     // pass's sky mirror unreachable, or there was no sky at all. A frame that is not counted
     // anywhere is a frame a test cannot tell from "worked and was reused".
@@ -95,6 +103,35 @@ public:
     // changed, or when it has never been built, or when a disabled stretch let the source move
     // underneath it.
     //
+    // PER-LAYER DIRTY STATE AND A PER-FRAME BUDGET.
+    //
+    // Measured: a wind-scrolled sky rebuilds the chain 60 times in 60 frames with zero reuses, and
+    // each rebuild redoes all kSkySpecularLayers layers in one dispatch, because validity used to
+    // be a single bool. One frame's full rebuild changes the chain's content by only about 0.3%, so
+    // roughly 99.7% of every rebake reproduces what was already there. A per-layer validity mask is
+    // the mechanism that makes a PARTIAL rebuild expressible; the budget below is the policy that
+    // spends it.
+    //
+    // The non-obvious part: all layers filter the SAME source (the sky-view LUT), so when the sky
+    // moves EVERY layer is dirty and the mask alone saves nothing. The saving comes from the budget
+    // deferring layers across frames. That is correct because each layer is independently a
+    // complete filter of the source it was built from: a chain holding layers from frame N and from
+    // frame N-3 is a chain of slightly different skies per roughness, not a corrupt one. A rotating
+    // cursor makes the deferral fair, so under a budget no layer starves.
+    //
+    // The limit of that argument, and the reason the first build ignores the budget: "a slightly
+    // older sky" is only safe for a layer that HOLDS one. The array is created without a clear, so
+    // a layer that has never been written is uninitialised device memory -- and the forward pass
+    // samples every layer, whatever the budget. So a never-written layer is serviced immediately
+    // and is not deferrable; only a STALE layer is. Without that, turning this knob down would
+    // sample garbage for the first few frames, which no counter would show.
+    //
+    // At most `n` layers are dispatched per frame, clamped to [1, kSkySpecularLayers]. The default
+    // is all of them, which is exactly the behaviour before this existed.
+    void set_max_layers_per_frame(std::uint32_t n) noexcept {
+        max_layers_per_frame_ = std::clamp<std::uint32_t>(n, 1u, kSkySpecularLayers);
+    }
+
     // The graph orders the prefilter after whatever wrote `source`, and the consumer after the
     // prefilter, from the declared reads -- so this MUST be called after the source's producer is
     // declared and before its consumers (scene_renderer.cpp).
@@ -103,7 +140,7 @@ public:
     // Tell the chain its source moved while nobody was filtering it (the feature was switched off
     // for a frame that re-baked the sky), so the next enabled frame rebuilds instead of reusing a
     // chain of an earlier sky.
-    void mark_stale() noexcept { prefilter_valid_ = false; }
+    void mark_stale() noexcept { prefilter_valid_mask_ = 0; }
 
     // The placeholders: a 1x1, 2-layer array (so it takes a 2-D-array view) and a 1x1 table.
     [[nodiscard]] SkySpecularBinding empty_binding(RenderGraph& graph);
@@ -143,7 +180,14 @@ private:
     rhi::TextureHandle dfg_;
     rhi::ResourceState prefiltered_state_ = rhi::ResourceState::Undefined;
     rhi::ResourceState dfg_state_ = rhi::ResourceState::Undefined;
-    bool prefilter_valid_ = false;
+    // Bit k set: layer k holds a filter of the CURRENT source. Zero means nothing does.
+    std::uint32_t prefilter_valid_mask_ = 0;
+    // Bit k set: layer k has been written AT LEAST ONCE since the texture was created. This is NOT
+    // the same thing as valid, and the difference is what keeps the budget safe -- see add().
+    // Cleared only when the texture is created; a moved sky and mark_stale() both leave it alone.
+    std::uint32_t prefilter_written_mask_ = 0;
+    std::uint32_t max_layers_per_frame_ = kSkySpecularLayers;
+    std::uint32_t next_layer_ = 0; // where the next frame's walk for dirty layers starts
     bool dfg_valid_ = false;
 
     rhi::TextureHandle dummy_prefiltered_;
