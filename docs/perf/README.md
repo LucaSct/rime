@@ -266,3 +266,76 @@ that silently acquires root to change a shared machine's clocks is the wrong sha
 unstable clock (graphics spread > 2 %), and that refusal is what makes the pin a precondition the
 operator satisfies rather than a side effect the tool causes. An unpinned `99-the-block` run remains
 a **probe**, with `sim.block` the only part of it comparable to history.
+
+## The gate-7 run, pinned, 2026-10-11 — the `frame` clause is MET and the simulation gate is not
+
+First pinned run since the baselines, taken under the owner's ruling above: clocks pinned by hand at
+1837/7501, box quiet, clean `main` tree at `bdd3be0`, Release, 1920x1080, 600 frames. It **filed**,
+which is the part that matters procedurally — `perf.sh`'s contention watcher found no competitor and
+the graphics spread was 0.0 %, so the run was not discarded.
+
+**The clock fingerprint is byte-identical to the baseline's** — graphics 1837/1837/1837 at 0.0 %
+spread, memory 7501 at 0.0 %, 134 of 140 samples loaded. That is exactly what pinning bought: a run
+directly comparable to committed history, which an unpinned run is not.
+
+| metric | budget | 2026-10-06 (pinned) | 2026-10-11 (pinned) | |
+|---|---|---|---|---|
+| `frame` p99 | **16.600** | 13.705 | **14.619** | **inside budget**, +6.7 % vs baseline |
+| `frame` max | 16.600 | 15.971 | **15.517** | inside budget, and **-2.8 %** |
+| `frame.player` p99 | — | 13.329 | 14.068 | +5.5 % |
+| `sim.block` p99 | **6.000** | 8.328 | **8.533** | **BREACH**, +42 % over budget |
+| `sim.collapse` p99/max | — | 8.154 | 9.980 | flagged REGRESSED (+22.4 %) |
+
+**What this closes and what it does not.** ADR-0043 gate 7 requires a clean-tree clock-pinned report
+to meet "the unchanged ratified `frame` p99/max **and** simulation gates". The `frame` half is met —
+for the first time since the clause was written into M13, carried unpaid through M17 (28.376 ms on
+2026-09-22) and inherited by M18. The simulation half is not: `sim.block` p99 is 8.533 ms against a
+6.000 ms budget. So **gate 7 stays open, and the remaining miss is isolated to the simulation gate**,
+which is a much smaller and better-understood target than "the block is 1.7x over frame budget".
+
+`PerfGate::format` prints only violations (`perf_report.cpp:1415`), so the absence of a `frame` line
+is the evidence it passed — not an omission.
+
+### Do not trust the +22.4 % `sim.collapse` regression, and the reason generalises
+
+Two independent facts say it is not code:
+
+1. **`engine/physics` and `engine/destruction` are byte-identical** between `3adeee9` and `bdd3be0`
+   (`git diff --stat 3adeee9 bdd3be0 -- engine/physics engine/destruction` is empty). Nothing that
+   computes `sim.block` or `sim.collapse` changed. The `engine/core` changes in that range are
+   additive (world bounds, entity refs, the perf report's own fields).
+2. **`sim.collapse` p99 == max in BOTH runs** (8.154/8.154 and 9.980/9.980). The collapse window is
+   **90 frames**, so p99 *is* the top sample — this is one worst frame against one worst frame, not a
+   distribution that moved. Meanwhile `sim.collapse` p50 moved +3.3 %.
+
+The pattern across the whole run is the tell: **every** simulation median moved +3 to +6 % and
+**every** simulation tail moved +13 to +22 %, while the `frame` tail *improved* by 2.8 %. A uniform
+shift with no code change is an instrument, not a regression.
+
+### The instrument: we pinned the GPU for a sample that is CPU-bound
+
+This is the actionable finding, and it is the same error this file already records twice in other
+forms — controlling the wrong variable and believing the number anyway.
+
+`99-the-block` is **CPU-bound** (this file says so above: 4–44 % GPU utilisation, 13–17 W of a ~170 W
+part). The pin fixes the GPU. **Nothing fixes or even records the CPU**, and on this box the CPU is a
+hostile instrument:
+
+- **AMD Ryzen 9 9950X3D, 16C/32T, and it is HETEROGENEOUS**: two L3 instances of 128 MiB total
+  (`cpu0` shares L3 with `0-7,16-23`; `cpu8` with `8-15,24-31`). One CCD carries the 3D V-Cache. For
+  a cache-resident workload like island solving, **which CCD the simulation threads land on changes
+  the answer**, and nothing pins them.
+- Governor `performance`, boost **on**, and per-core clocks measured live spanning **2024 to
+  5721 MHz** — a 2.8x spread across cores in one sample.
+- The committed report's `machine` block is `{gpu, driver, os, build, sanitizer, preset, width,
+  height}`. **There is no CPU field anywhere in the JSON.** So the one device that determines the
+  metric still missing its budget is neither controlled nor recorded, and a future reader cannot tell
+  two runs apart on it.
+
+**So the next step for gate 7's simulation half is CPU control, not more GPU pinning.** Concretely, and
+in the order worth doing: record CPU model, governor and per-core clock min/median/max/spread in the
+report fingerprint, exactly as `gpu_clocks` already does — an unrecorded precondition is the thing
+this whole file is about; then pin the simulation threads to one CCD (`taskset -c 0-7,16-23` or the
+V-Cache die) so cache locality stops varying between runs; then re-baseline `sim.block` under that
+procedure before judging any delta against it. Until then, a `sim.block` *delta* is not evidence,
+though the **42 % breach is far larger than the ~6 % variance observed here and is therefore real**.
