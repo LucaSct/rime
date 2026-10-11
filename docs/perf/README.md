@@ -34,12 +34,18 @@ A dirty tree is recorded as `<sha>-dirty` rather than attributed to a commit it 
 commands for the card it found. On the reference machine:
 
 ```bash
-sudo nvidia-smi -pm 1
-sudo nvidia-smi -lgc 1785,1785   # 85% of max: a clock the card holds, so the THERMAL governor
-sudo nvidia-smi -lmc 7501        # does not take over from the idle one
+sudo nvidia-smi -pm 1            # persistence mode is OFF by default on this box
+sudo nvidia-smi -lgc 1837,1837   # the clock EVERY committed baseline encodes -- see below
+sudo nvidia-smi -lmc 7501        # both domains; the memory one is the one that bites
 # afterwards
 sudo nvidia-smi -rgc && sudo nvidia-smi -rmc
 ```
+
+**1837, not 1785.** This block said `1785` until 2026-10-11 ("85 % of max: a clock the card holds").
+Both are supported clocks on the RTX 3060 (max 2100), but every committed baseline carries
+`graphics_median 1837.0`, so pinning at 1785 measures a **2.8 % slower** graphics clock than the
+number being compared against — inside the 10 % gate tolerance, and therefore a bias that passes
+silently rather than failing. Pin at the baseline's own clock.
 
 Both domains, and the memory one is the one that bites. `99-the-block` is CPU-bound — the
 simulation is most of the frame — so the GPU is idle most of every frame and the power governor
@@ -237,8 +243,26 @@ does this, with 14 runs behind it, is at `~/rime-perf-harness-m17.8b/`. Known ha
 filtering on boost may select different frame populations per arm, since boost correlates with the
 treatment — check retained/dropped counts per arm before trusting a delta.
 
-**Consequence for M18 gate 7.** The gate's row says "clock-pinned tree" while the standing ruling
-forbids pinning, so the gate as written cannot be satisfied by the procedure the project is allowed
-to use. That conflict is an owner decision, not a measurement problem. Until it is resolved, an
-unpinned `99-the-block` run is a **probe**, and `sim.block` is the only part of it comparable to
-history.
+**Consequence for M18 gate 7 — RESOLVED by the owner, 2026-10-11.** The gate's row says
+"clock-pinned tree" while the 2026-09-16 ruling forbade pinning, so as written the gate could not be
+satisfied by any procedure the project was allowed to use. Luca's decision: *"run it on this machine
+when its quiet and i pin it with the commands."*
+
+So **gate-7 runs are pinned by exception, by hand, with the owner present, on an otherwise quiet
+box** — using the three commands at the top of this file at exactly 1837/7501. What that buys is the
+thing the alternatives could not: the measurement stays **directly comparable to every baseline
+already committed**, so M18's history is not invalidated and no tolerance has to be re-derived.
+
+The 2026-09-16 withdrawal is **narrowed, not reversed**, and the distinction is the whole point:
+
+- **A gate-7 or terrain budget run** — pinned, by hand, owner present, box quiet. Rare, attended,
+  and comparable to history.
+- **Everything else, including any unattended or routine run** — must still work without pinning,
+  because the box is shared and Luca is not always at it. The **filter, not pin** procedure above
+  remains the standing answer there, with its unsettled population hazard intact.
+
+What has *not* changed: `scripts/perf.sh` still does not pin and must not start, because a script
+that silently acquires root to change a shared machine's clocks is the wrong shape. It refuses an
+unstable clock (graphics spread > 2 %), and that refusal is what makes the pin a precondition the
+operator satisfies rather than a side effect the tool causes. An unpinned `99-the-block` run remains
+a **probe**, with `sim.block` the only part of it comparable to history.
