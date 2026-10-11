@@ -103,3 +103,40 @@ measurement". Measuring the property directly is better in three ways:
 - **Pin via the power limit instead.** `-pl` is settable and does bound boost behaviour, but a power
   limit is not a clock and a run capped at 60 W would measure a different machine. It stays at its
   120 W default, which is part of the fingerprint rather than a knob this script turns.
+
+## Addendum, 2026-10-11 — pinning returns as an operator precondition for the attended gates only
+
+This ADR replaced "pin the clocks" with "check the clock was stable", and that remains the rule the
+script enforces. Two things measured on 2026-10-10 narrowed where it is *sufficient*:
+
+1. **Every committed `99-the-block` baseline is a pinned run** (`graphics_median 1837.0`,
+   `graphics_spread_pct 0.0`). A 0.0 % spread at an exact supported clock is locked, not lucky, and
+   `scripts/perf.sh` does not pin — so that state came from the box being pinned by hand. An unpinned
+   run against those baselines therefore does not merely read noisier; it is **incomparable**, and the
+   gate reports a confident regression that is not there (`frame` p99 22.336 vs 13.705 ms, while the
+   CPU-only control `sim.block` moved 2.0 %).
+2. **This card cannot be made to hold a clock on this sample at all.** `99-the-block` is CPU-bound:
+   4-44 % GPU utilisation, 13-17 W of a ~170 W part, graphics clock parked at 210 MHz for ~70 s of a
+   108 s load. The governor is not throttling, it has nothing to do. So "a machine that holds its
+   clock passes without being pinned" — the sentence this ADR rests on — is **true but vacuous here**:
+   this machine does not hold its clock on this workload, under any configuration short of a pin.
+
+The owner's ruling (Luca, 2026-10-11): *"run it on this machine when its quiet and i pin it with the
+commands."* The resulting split, with the reasoning, is in
+[`docs/perf/README.md`](../perf/README.md):
+
+- **attended budget gates** (M18 gate 7, the terrain run) — pinned by hand at 1837/7501, owner
+  present, quiet box, which keeps the measurement comparable to the baselines already committed;
+- **everything unattended or routine** — must still work unpinned; the filter-on-a-clock-trace
+  procedure stays the answer there.
+
+**Nothing in this ADR's decision is reversed, and `perf.sh` does not change.** The 2 % graphics-spread
+refusal stays exactly as specified. What changes is only its *reading*: the refusal is not a
+diagnostic the operator may override, it is the precondition the operator satisfies — by pinning,
+when the run is one of the attended gates. A script that silently acquired root to reclock a shared
+machine would be the wrong shape, which is why the pin stays outside the tool.
+
+One correction this surfaced: the pin command documented in `docs/perf/README.md` said `-lgc
+1785,1785` while every baseline encodes 1837. Both are supported clocks, so the error was silent and
+would have biased a pinned run **2.8 % slow** against its own baseline — inside the 10 % tolerance,
+so it would have passed rather than failed. Corrected to 1837 in the same change.
