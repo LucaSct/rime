@@ -339,3 +339,104 @@ this whole file is about; then pin the simulation threads to one CCD (`taskset -
 V-Cache die) so cache locality stops varying between runs; then re-baseline `sim.block` under that
 procedure before judging any delta against it. Until then, a `sim.block` *delta* is not evidence,
 though the **42 % breach is far larger than the ~6 % variance observed here and is therefore real**.
+
+### CORRECTION, same day: the `frame` clause was NOT met "for the first time" on 2026-10-11
+
+The section above claimed the 2026-10-11 run met the `frame` clause *for the first time since M13
+wrote it*. **That is wrong, and it was wrong in the commit message, the PR and the ROADMAP row too.**
+Caught by an external consult that asked why `sim.block` would drift 8.328 -> 8.533 in five days while
+the frame clause "first" passed — the right question, and the answer is that it had already passed.
+
+Every committed `99-the-block` report, `frame` p99 against the 16.600 ms budget and `sim.block` p99
+against 6.000:
+
+| report | `frame` p99 | | `sim.block` p99 | | GPU pinned |
+|---|---|---|---|---|---|
+| 2026-08-30 | 35.598 | fail | 25.491 | fail | unrecorded |
+| 2026-09-05 | 28.915 | fail | 24.555 | fail | unrecorded |
+| 2026-09-06 | 20.976 | fail | 16.881 | fail | unrecorded |
+| 2026-09-07 | 19.624 | fail | 15.435 | fail | unrecorded |
+| 2026-09-18 | 32.605 | fail | 15.634 | fail | unrecorded |
+| 2026-09-22 | 28.376 | fail | 15.692 | fail | unrecorded |
+| **2026-10-06** | **13.705** | **PASS** | 8.328 | fail | **yes** |
+| **2026-10-11** | **14.619** | **PASS** | 8.533 | fail | **yes** |
+
+So the `frame` clause was first met on **2026-10-06**. 2026-10-11 is the **second** such run, and its
+number is **worse** (+6.7 %). What today actually established is narrower and worth stating as such:
+the clause *still* holds on a tree eleven PRs newer, under a now-ratified procedure, and gate 7's
+remaining miss is isolated to simulation.
+
+**And the stronger point, which the wrong claim obscured.** The only two runs that pass are the only
+two runs that were **pinned**. Every earlier report has no clock record at all. We also know from this
+very file what unpinned does to this metric: the 2026-10-10 unpinned probe on a near-identical tree
+read `frame` p99 **22.336** where the pinned run reads 14.619 — a **1.53x inflation** from the
+instrument alone. The 2026-09-22 -> 2026-10-06 improvement is 28.376 -> 13.705, a factor of **2.07**.
+
+**Those two factors are the same order, so this data cannot separate "the engine got faster" from
+"the measurement got honest."** Real work did land in that window (m17.5's one-step-per-tick change
+alone was worth -6.4 ms, measured), so the truth is certainly some of both — but the split is not
+recoverable from these reports, and no claim resting on that split should be made. `sim.block`, which
+is clock-independent, fell 15.692 -> 8.328 across the same boundary, which is the best available
+evidence that genuine work landed.
+
+`sim.block` has **never** passed, in eight reports: 25.491 -> 8.533.
+
+### What two independent consults said about the reasoning above (2026-10-11)
+
+`gpt-6-astra` (via codex, read-only repo access) and `claude-fable-5-1` (via the gateway, excerpts
+inlined) were each asked for their **own** proposal, without being shown mine or each other's. Two
+things they agreed on, reached by different routes, which makes the agreement worth more than a
+shared opinion:
+
+1. **The 1.09x island-parallelism ceiling is not established by the evidence behind it.** This file's
+   sibling memory and ADR reasoning derive it from "~92 % of awake bodies are in ONE island". Both
+   said that does not follow: *"body share is not solver-time share"* (astra), *"without the scaling
+   exponent, 1.09x is a width argument, not a cost argument — that's the missing number"* (Fable). The
+   conclusion may still be right; the stated basis does not support it. **The missing measurement is
+   per-island solver time against body count**, not body count alone.
+2. **Two named results, not one.** A pinned number for regression detection and an unrestricted one
+   for shipping, with affinity never silently satisfying the shipping gate. Fable would rename the
+   gated metric `sim.block@pinned` to make the redefinition explicit; astra would keep both timelines
+   joint rather than reporting them independently, because *"independently reported p99 values cannot
+   establish which work causes missed frames"* — the `frame` p99 tick and the `sim.block` p99 tick are
+   not the same tick, so one cannot attribute the other.
+
+Both also warned the tail statistics are thin: **600 samples leave ~6 observations in the top 1 %**,
+so a small p99 difference between single runs is not evidence. Repeat whole scripted runs and report
+variance before trusting any `sim.block` delta.
+
+Where they differed, and the useful part:
+
+- **Which CCD.** Astra refused to guess and would A/B cache-CCD vs frequency-CCD vs worlds-split with
+  randomised run blocks and confidence intervals over whole runs. Fable named a prior — *"602 bodies
+  plus contacts is a few MB, fits 32 MiB either way, so the high-clock CCD probably wins, but that is
+  exactly the claim the test exists to kill"* — and proposed `perf stat` with an explicit decision
+  rule (cache wins only if IPC rises >5 % and LLC-miss rate falls materially). **Take Fable's decision
+  rule inside astra's experiment design**: a stated threshold is what stops the A/B being read as
+  taste, and randomised blocks are what stop thermal drift being read as an effect.
+- **MEASURED by astra, and verified here**, which no amount of reasoning would have produced:
+  `0-7,16-23` share **96 MiB** L3 and `8-15,24-31` share **32 MiB**, so the first group is the
+  3D V-Cache CCD. Note this also kills Fable's identification method on this box: it suggested finding
+  the V-Cache die by its lower clock ceiling, but `cpuinfo_max_freq` reads an identical 5756452 kHz on
+  **both** CCDs here. **L3 size identifies them; frequency ceiling does not.**
+- **The budget.** Fable: 6.000 is *"not binding on the user-visible budget — it is a headroom
+  allocation, not a need"*, and until someone states what the reclaimed 2.5 ms buys, the gate is
+  taste. Astra: keep 6.000 **provisionally** and measure the tail tick's critical path first, then
+  bound the feasible improvement from measured removable time. **Astra's order is the right one** —
+  "the gate is taste" may well be true, but it is a conclusion to earn from a critical-path
+  measurement, not a reason to skip taking one.
+
+Three unique points worth acting on:
+
+- **Fable: a determinism contract is not a quality contract.** A Jacobi or hybrid velocity solver
+  changes convergence and stacking stiffness, so within-island parallelism needs a **correctness** gate
+  (does the stack still stand, does it settle), not only the bitwise replay contract ADR-0026 already
+  specifies. The engine's existing determinism apparatus would pass a solver that visibly ruins
+  stacking.
+- **Fable: is the tail tick a steady state or a merge/wake spike?** If the 602-body island is formed by
+  a merge event, *"a sleep/split policy beats a parallel solver by an order of magnitude in effort."*
+  Cheap to check and it changes which brick is next.
+- **Astra: fingerprint more than the clock** — residency, migrations, context switches, temperature,
+  throttling, power limits, kernel, compiler options, executable hash, workload hashes. Today's CPU
+  fingerprint records model, governor, boost, L3 topology and clock spread; migrations and residency
+  are the next most valuable and are not there yet.
