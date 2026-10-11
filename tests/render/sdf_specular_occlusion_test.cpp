@@ -554,3 +554,210 @@ TEST_CASE("SDF specular occlusion: only the sky fallback is occluded, never a re
         CHECK_MESSAGE(rel(open_on, open_off) < 0.02, "a floor ray beside the canopy must not");
     }
 }
+
+// ── Scene 3: scene 2's mixed hit/miss floor, with a metal SPHERE in place of the emissive box
+// ───── ADR-0078 named the remaining gap: no scene had high curvature AND a mixed hit/miss
+// population in one frame. The two interact -- the cone width (2*alpha) varies per pixel with the
+// normal, while the hit/miss split decides whether the cone is applied at all. One frame here holds
+// all three: the sphere's own pixels (curved), floor pixels whose mirror ray hits the sphere on
+// screen (a real SSR hit, which must not change), and floor pixels whose ray misses into the canopy
+// (must darken).
+namespace {
+
+constexpr float kBallR = 0.45f;
+constexpr core::Vec3 kBallAt{0.0f, kBallR, -1.8f}; // rests on the floor (y = 0)
+
+struct BallScene {
+    ecs::World world;
+
+    BallScene(SceneRenderer& renderer,
+              MeshRegistry& meshes,
+              MaterialRegistry& materials,
+              bool with_object) {
+        register_render_components(world);
+        PbrMaterialDesc floor_mat{};
+        floor_mat.base_color[0] = floor_mat.base_color[1] = floor_mat.base_color[2] = 0.9f;
+        floor_mat.metallic = 1.0f;
+        floor_mat.roughness = 0.2f; // a mirror, as in scene 2
+        const MaterialId floor = materials.add(floor_mat);
+        const MeshId plane = meshes.add(make_plane(6.0f), "sdf-ball-floor");
+        (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{plane}, MaterialRef{floor});
+        place_slab(renderer, meshes, materials, world, {7.0f, 0.25f, 7.0f}, {0.0f, -0.375f, 0.0f});
+        place_slab(renderer, meshes, materials, world, {1.2f, 0.25f, 7.5f}, {0.0f, 3.25f, -4.5f});
+        if (with_object) {
+            PbrMaterialDesc metal{};
+            metal.base_color[0] = metal.base_color[1] = metal.base_color[2] = 0.9f;
+            metal.metallic = 1.0f;
+            metal.roughness = 0.6f; // scene 1's value: its own sky specular is visible
+            // A small emission, for the SSR hits' sake. The floor mirrors the sphere's UNDERSIDE,
+            // which sees only the dark ground: without emission every hit pixel reads 0 (measured
+            // on the first run), and "0 is unchanged by the occlusion" is true of any mutation.
+            metal.emissive[0] = metal.emissive[1] = metal.emissive[2] = 1.0f;
+            const MaterialId mat = materials.add(metal);
+            const MeshId ball = meshes.add(make_uv_sphere(kBallR, 32, 64), "sdf-ball");
+            core::Transform t{};
+            t.translation = kBallAt;
+            (void)world.spawn_with(ecs::WorldTransform{t}, MeshRef{ball}, MaterialRef{mat});
+        }
+        core::Transform cam{};
+        cam.translation = kCam;
+        cam.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, kPitch);
+        (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{kFov, 0.1f, 40.0f, true});
+    }
+};
+
+MixedFrames render_ball(rhi::Device& device, bool with_object, bool chain) {
+    MeshRegistry meshes(device);
+    MaterialRegistry materials;
+    SceneRenderer renderer(device, meshes, materials);
+    render::test::disable_temporal_aa(renderer);
+    renderer.set_sky(clear_sky());
+    renderer.set_sky_specular_prefilter_enabled(chain);
+    LightingSettings ls{};
+    ls.sdf_clipmap_enabled = true;
+    ls.ssr_enabled = true;
+    renderer.set_lighting(ls);
+    BallScene scene(renderer, meshes, materials, with_object);
+    renderer.set_sdf_specular_occlusion_enabled(false);
+    (void)render_hdr(device, renderer, scene.world); // warm bakes / recentre
+    MixedFrames f;
+    f.off = render_hdr(device, renderer, scene.world);
+    renderer.set_sdf_specular_occlusion_enabled(true);
+    f.on = render_hdr(device, renderer, scene.world);
+    CHECK(renderer.sdf_specular_occlusion_stats().enabled_frames == 1);
+    CHECK(renderer.sdf_specular_occlusion_stats().unavailable_frames == 0);
+    return f;
+}
+
+// True when the pitched pinhole ray through this pixel hits the sphere of radius scale*kBallR
+// (analytic; fixes the "pixels on the sphere" set independently of any rendered output).
+bool ball_covers(std::uint32_t px, std::uint32_t py, double scale) {
+    const double f = 48.0 / std::tan(0.5 * static_cast<double>(kFov));
+    const double dx = (px + 0.5 - 48.0) / f, dy = -(py + 0.5 - 48.0) / f;
+    const double c = std::cos(static_cast<double>(kPitch)),
+                 s = std::sin(static_cast<double>(kPitch));
+    // Camera-space (dx, dy, -1) rotated about x by the pitch.
+    double rx = dx, ry = dy * c + s, rz = dy * s - c;
+    const double inv = 1.0 / std::sqrt(rx * rx + ry * ry + rz * rz);
+    rx *= inv;
+    ry *= inv;
+    rz *= inv;
+    const double ox = kBallAt.x - kCam.x, oy = kBallAt.y - kCam.y, oz = kBallAt.z - kCam.z;
+    const double b = rx * ox + ry * oy + rz * oz;
+    const double r = scale * static_cast<double>(kBallR);
+    return b > 0.0 && b * b - (ox * ox + oy * oy + oz * oz - r * r) > 0.0;
+}
+
+} // namespace
+
+TEST_CASE("SDF specular occlusion: a curved sphere and a mixed SSR hit/miss floor in one frame") {
+    auto device = device_or_skip("the curved + mixed SDF occlusion proof");
+    if (!device)
+        return;
+    const core::Mat4 vp = mixed_view_proj();
+    // The sphere's mirror image in the floor is a disc (up to perspective, which squashes it into a
+    // slightly off-centre ellipse): sample its silhouette surface, project, and take the centre of
+    // the samples' extent and the farthest sample from it. Conservative on purpose.
+    Rect mirror_box;
+    std::vector<render::test::Pixel> mirror_pts;
+    for (int i = 0; i <= 24; ++i)
+        for (int j = 0; j < 48; ++j) {
+            const double th = 3.14159265358979 * i / 24.0, ph = 6.28318530717959 * j / 48.0;
+            const core::Vec3 p{kBallAt.x + kBallR * static_cast<float>(std::sin(th) * std::cos(ph)),
+                               -(kBallAt.y + kBallR * static_cast<float>(std::cos(th))),
+                               kBallAt.z +
+                                   kBallR * static_cast<float>(std::sin(th) * std::sin(ph))};
+            mirror_pts.push_back(render::test::project(vp, p, kSize));
+            mirror_box.add(mirror_pts.back());
+        }
+
+    struct {
+        double x, y;
+    } mc{0.5 * (mirror_box.x0 + mirror_box.x1), 0.5 * (mirror_box.y0 + mirror_box.y1)};
+
+    double mirror_radius = 0.0;
+    for (const render::test::Pixel& q : mirror_pts)
+        mirror_radius =
+            std::max(mirror_radius,
+                     std::hypot(static_cast<double>(q.x) - mc.x, static_cast<double>(q.y) - mc.y));
+    CAPTURE(mc.x);
+    CAPTURE(mc.y);
+    CAPTURE(mirror_radius);
+
+    for (const bool chain : {false, true}) {
+        CAPTURE(chain);
+        const MixedFrames with = render_ball(*device, true, chain);
+        const MixedFrames without = render_ball(*device, false, chain);
+
+        int own = 0, own_changed = 0, hit = 0, dark = 0, open = 0, hit_outside_disc = 0;
+        int brighter = 0, edge = 0;
+        double worst_hit_change = 0.0, worst_dark_ratio = 0.0, best_dark_ratio = 1e30;
+        double own_sum = 0.0, own_on_sum = 0.0, own_lo = 1e30, own_hi = 0.0, hit_lum_sum = 0.0;
+        for (std::uint32_t y = 0; y < kSize; ++y)
+            for (std::uint32_t x = 0; x < kSize; ++x) {
+                const double w_off = with.off.luminance(x, y);
+                const double w_on = with.on.luminance(x, y);
+                const double wo_off = without.off.luminance(x, y);
+                const bool object_touches = rel(w_off, wo_off) > 0.05;
+                const double change = rel(w_on, w_off);
+                if (w_on > w_off * 1.0001)
+                    ++brighter;
+                if (ball_covers(x, y, 0.9)) {
+                    // Interior of the sphere's silhouette: its own pixels (curved class).
+                    ++own;
+                    own_sum += w_off;
+                    own_on_sum += w_on;
+                    own_lo = std::min(own_lo, w_off);
+                    own_hi = std::max(own_hi, w_off);
+                    if (change > 0.05)
+                        ++own_changed;
+                } else if (ball_covers(x, y, 1.1)) {
+                    ++edge; // silhouette rim: neither class, excluded from every count
+                } else if (object_touches) {
+                    ++hit;
+                    worst_hit_change = std::max(worst_hit_change, change);
+                    hit_lum_sum += w_off;
+                    const double d = std::hypot(static_cast<double>(x) + 0.5 - mc.x,
+                                                static_cast<double>(y) + 0.5 - mc.y);
+                    if (d > mirror_radius + 3.0)
+                        ++hit_outside_disc;
+                } else if (change > 0.05) {
+                    ++dark;
+                    const double ratio = w_on / std::max(w_off, 1e-9);
+                    worst_dark_ratio = std::max(worst_dark_ratio, ratio);
+                    best_dark_ratio = std::min(best_dark_ratio, ratio);
+                } else {
+                    ++open;
+                }
+            }
+        const double own_mean = own > 0 ? own_sum / own : 0.0;
+        MESSAGE("SDF ball: chain="
+                << chain << " sphere px=" << own << " (rim excluded " << edge
+                << ") unoccluded lum mean=" << own_mean << " [" << own_lo << ", " << own_hi
+                << "] occluded mean=" << (own > 0 ? own_on_sum / own : 0.0)
+                << " px changed>5%=" << own_changed << " | SSR-hit floor px=" << hit
+                << " mean lum=" << (hit > 0 ? hit_lum_sum / hit : 0.0)
+                << " (outside mirror disc +3px: " << hit_outside_disc
+                << ") worst on/off change=" << worst_hit_change << " | missed+blocked px=" << dark
+                << " on/off in [" << best_dark_ratio << ", " << worst_dark_ratio
+                << "] | other px=" << open << " | px that got brighter=" << brighter);
+
+        // 1. All three classes must exist or nothing below proves anything.
+        REQUIRE_MESSAGE(own >= 20, "the sphere must cover pixels");
+        REQUIRE_MESSAGE(hit >= 20, "some floor rays must genuinely hit the sphere on screen");
+        REQUIRE_MESSAGE(dark >= 20, "some floor rays must miss into a blocked sky direction");
+        // A hit set that is black cannot show "unchanged" (0 stays 0 under any mutation).
+        REQUIRE_MESSAGE(hit_lum_sum / hit > 0.1, "the SSR hits must carry real radiance");
+        // 2. A real SSR hit is unchanged, now with a curved surface in the frame. Scene 2's margin.
+        CHECK_MESSAGE(worst_hit_change < 0.02, "an SSR hit must not be occluded");
+        // 3. Blocked misses darken; nothing anywhere gets brighter.
+        CHECK_MESSAGE(worst_dark_ratio < 0.95, "occluded sky fallback must darken");
+        CHECK(brighter == 0);
+        // 4. Curvature is real: the unoccluded sphere is not flat.
+        CHECK_MESSAGE((own_hi - own_lo) > 0.05 * own_mean,
+                      "the sphere's luminance must vary across its pixels");
+        // 5. Geometry cross-check of the DERIVED hit set against the sphere's mirror disc.
+        CHECK_MESSAGE(hit_outside_disc == 0,
+                      "derived SSR-hit pixels must lie in the sphere's mirror image");
+    }
+}
