@@ -2230,8 +2230,13 @@ TEST_CASE("SAA roughness in the G-buffer: a FLAT plane carrying a normal map, sw
 // Two facts come from the source rather than from a counter, and are restated here so a reader can
 // check them: (1) SkyPass::inputs_equal (sky.cpp) compares `wind[0]`/`wind[1]` exactly, so ANY
 // change of wind re-bakes the sky-view LUT and calls SkySpecular::add(..., source_changed = true);
-// (2) that function has one `prefilter_valid_` flag and ONE dispatch with z = kSkySpecularLayers,
-// so the dirty unit is the whole chain. There is no per-layer dirty state to count.
+// (2) a moved source dirties EVERY layer, because all of them filter that same sky-view LUT, so
+// the measurement below is of a full six-layer rebuild whatever the dirty unit is. When this case
+// was written the dirty unit was literally the whole chain -- one `prefilter_valid_` flag, one
+// dispatch with z = kSkySpecularLayers. Per-layer dirty state and a per-frame budget exist now
+// (SkySpecular::set_max_layers_per_frame), and this case deliberately leaves the budget at its
+// default of every layer: it measures what a rebuild COSTS, which is the input to choosing a
+// budget, so it must not itself be throttled by one.
 TEST_CASE("sky specular: how often a scrolling cloud field rebuilds the chain, and how much of "
           "the chain a rebuild changes") {
     auto device = device_or_skip("the sky-chain rebake measurement");
@@ -2524,6 +2529,47 @@ TEST_CASE("sky specular budget: the default rebuilds every layer every moving fr
     CHECK(s.prefilter_reused == 0);
     CHECK(s.prefilter_layers_filled == kSkySpecularLayers * kN);
     CHECK(s.prefilter_partial_frames == 0);
+}
+
+TEST_CASE("sky specular budget: the FIRST build ignores the budget, so no layer is ever sampled "
+          "unwritten") {
+    auto device = device_or_skip("the never-written-layer proof");
+    if (!device)
+        return;
+    // The array is created without a clear, and the forward pass samples EVERY layer whatever the
+    // budget is. So the budget's correctness argument -- "a deferred layer still holds a filter of
+    // a slightly older sky" -- does not cover a layer that has never been written: that is
+    // uninitialised device memory. Those layers are not deferrable, which makes the first build
+    // fill the whole chain however small the budget.
+    //
+    // This is the case that would pass VACUOUSLY if it only read the counters back, because a
+    // budget of one would report "1 layer filled" and look obedient while five layers held garbage.
+    // So it also checks the content: every layer must equal the one a full unbudgeted build makes.
+    Rig ref(*device);
+    ref.set_sky(spot_sky);
+    ref.bake(true);
+    const Chain full = read_chain(ref);
+
+    Rig rig(*device);
+    rig.set_sky(spot_sky);
+    rig.spec().set_max_layers_per_frame(1); // set BEFORE anything is ever written
+    rig.bake(true);
+
+    const SkySpecularStats& s = rig.spec().stats();
+    CHECK(s.prefilter_layers_filled == kSkySpecularLayers); // all six, not the budget's one
+    CHECK(s.prefilter_filled == 1);
+    CHECK(s.prefilter_partial_frames == 0); // nothing was left dirty, so nothing was deferred
+
+    const Chain now = read_chain(rig);
+    for (std::uint32_t l = 0; l < kSkySpecularLayers; ++l)
+        CHECK(layer_max_abs_diff(now[l], full[l]) < 1e-3);
+
+    // And the budget DOES apply from the second build on, once every layer holds something: the
+    // sky moves, so all six are dirty, and exactly one is serviced.
+    const std::uint32_t before = s.prefilter_layers_filled;
+    rig.bake(true);
+    CHECK(s.prefilter_layers_filled == before + 1);
+    CHECK(s.prefilter_partial_frames == 1);
 }
 
 TEST_CASE("sky specular budget: one layer a frame is obeyed, and every layer is serviced once") {

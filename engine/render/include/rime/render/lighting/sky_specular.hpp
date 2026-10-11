@@ -119,6 +119,13 @@ public:
     // frame N-3 is a chain of slightly different skies per roughness, not a corrupt one. A rotating
     // cursor makes the deferral fair, so under a budget no layer starves.
     //
+    // The limit of that argument, and the reason the first build ignores the budget: "a slightly
+    // older sky" is only safe for a layer that HOLDS one. The array is created without a clear, so
+    // a layer that has never been written is uninitialised device memory -- and the forward pass
+    // samples every layer, whatever the budget. So a never-written layer is serviced immediately
+    // and is not deferrable; only a STALE layer is. Without that, turning this knob down would
+    // sample garbage for the first few frames, which no counter would show.
+    //
     // At most `n` layers are dispatched per frame, clamped to [1, kSkySpecularLayers]. The default
     // is all of them, which is exactly the behaviour before this existed.
     void set_max_layers_per_frame(std::uint32_t n) noexcept {
@@ -175,6 +182,10 @@ private:
     rhi::ResourceState dfg_state_ = rhi::ResourceState::Undefined;
     // Bit k set: layer k holds a filter of the CURRENT source. Zero means nothing does.
     std::uint32_t prefilter_valid_mask_ = 0;
+    // Bit k set: layer k has been written AT LEAST ONCE since the texture was created. This is NOT
+    // the same thing as valid, and the difference is what keeps the budget safe -- see add().
+    // Cleared only when the texture is created; a moved sky and mark_stale() both leave it alone.
+    std::uint32_t prefilter_written_mask_ = 0;
     std::uint32_t max_layers_per_frame_ = kSkySpecularLayers;
     std::uint32_t next_layer_ = 0; // where the next frame's walk for dirty layers starts
     bool dfg_valid_ = false;
