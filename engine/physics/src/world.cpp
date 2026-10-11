@@ -219,6 +219,22 @@ struct PhysicsWorld::Impl {
     // that the parallel path was actually taken — see WorldStats::islands_solved_parallel.
     std::uint32_t parallel_islands_last = 0;
 
+    // Per-island solve timing (set_island_profile_enabled). OFF by default and then untouched: the
+    // step() never reads the clock and never touches these buffers. One cache line per slot so two
+    // workers finishing neighbouring islands do not false-share a line and perturb the very times
+    // being measured; each island writes ONLY its own slot, so no lock or atomic is needed.
+    struct alignas(64) SolveSlot {
+        std::uint64_t ns = 0;
+    };
+
+    bool island_profile_enabled = false;
+    std::vector<SolveSlot> island_solve_slots;   // sized island_count per profiled step
+    std::vector<IslandSolveCost> island_profile; // the published entries (active islands)
+    // The previous profiled step's biggest active island: body count + membership hash.
+    bool prev_largest_valid = false;
+    std::uint32_t prev_largest_bodies = 0;
+    std::uint64_t prev_largest_hash = 0;
+
     // The most recent step()'s instrument panel (M7.13, WorldStats). Populated in the sequential
     // tail as a pure read of the just-computed tick — so, like the event emission, it never touches
     // body state and never perturbs the world hash. islands_last() and contacts_warm_started_last()
@@ -1347,34 +1363,62 @@ void PhysicsWorld::step(float dt) {
         solve_positions(bodies, cs, kPositionIterations);
     };
 
-    // The zone wraps the DISPATCH, on the calling thread — deliberately not inside `solve_island`,
-    // which the job system runs on workers. The zone sink is one global slot with no per-thread
-    // accumulation, so a zone on a worker would serialize the parallel region it is measuring.
-    {
-        RIME_PROFILE_ZONE(p.zone(StepZone::Solve));
-        // The gate is the ACTIVE island count, not the island count (m17.5). An asleep island is a
-        // no-op inside solve_island, so a tick holding one awake pile beside fifty resting ones has
-        // exactly one island's worth of work and no way to divide it — dispatching it still costs a
-        // parallel_for's full wake-and-join across every worker, paid for nothing. That case is not
-        // rare in a destruction scene: it is what most of a collapse's aftermath looks like.
-        if (p.jobs != nullptr && active_count > 1) {
-            // Over-decompose to ~4 chunks per participant so work-stealing balances the (wildly
-            // uneven) island sizes. Any chunking is correct — islands are independent — so the
-            // RESULT never depends on the chunk size or the worker count, only the timing does.
-            // Chunked over ALL islands, because solve_island is indexed by island: the asleep ones
-            // return immediately and work-stealing absorbs the empty chunks.
-            const std::size_t participants = p.jobs->participant_count();
-            const std::size_t chunk = std::max<std::size_t>(
-                1, (isl.island_count + participants * 4 - 1) / (participants * 4));
-            p.jobs->parallel_for(isl.island_count, chunk, solve_island);
-            p.parallel_islands_last = static_cast<std::uint32_t>(active_count);
-        } else {
-            for (std::size_t k = 0; k < isl.island_count; ++k) {
-                solve_island(k);
-            }
-            p.parallel_islands_last = 0;
+    const bool profile_islands = p.island_profile_enabled;
+    if (profile_islands) {
+        p.island_solve_slots.assign(isl.island_count,
+                                    Impl::SolveSlot{}); // allocates only when profiling
+    }
+    // Island-profile timing wrapper: a second callable, so the profile-off path hands out
+    // `solve_island` itself and carries no clock call, no slot write and no branch. The one
+    // `profile_islands` test is hoisted to the dispatch below, outside every per-island and
+    // per-constraint loop. Each island is timed ON THE THREAD THAT SOLVES it, writing slot k alone.
+    const auto solve_island_timed = [&](std::size_t k) {
+        if (active[k] == 0) {
+            return;
         }
-    } // physics.solve
+        const core::Stopwatch watch;
+        solve_island(k);
+        p.island_solve_slots[k].ns = static_cast<std::uint64_t>(watch.elapsed_us() * 1000.0 + 0.5);
+    };
+
+    // The dispatch below is the original, generic over which per-island callable it hands out.
+    const auto dispatch_islands = [&](const auto& solve_one) {
+        // The zone wraps the DISPATCH, on the calling thread — deliberately not inside
+        // `solve_island`, which the job system runs on workers. The zone sink is one global slot
+        // with no per-thread accumulation, so a zone on a worker would serialize the parallel
+        // region it is measuring.
+        {
+            RIME_PROFILE_ZONE(p.zone(StepZone::Solve));
+            // The gate is the ACTIVE island count, not the island count (m17.5). An asleep island
+            // is a no-op inside solve_island, so a tick holding one awake pile beside fifty resting
+            // ones has exactly one island's worth of work and no way to divide it — dispatching it
+            // still costs a parallel_for's full wake-and-join across every worker, paid for
+            // nothing. That case is not rare in a destruction scene: it is what most of a
+            // collapse's aftermath looks like.
+            if (p.jobs != nullptr && active_count > 1) {
+                // Over-decompose to ~4 chunks per participant so work-stealing balances the (wildly
+                // uneven) island sizes. Any chunking is correct — islands are independent — so the
+                // RESULT never depends on the chunk size or the worker count, only the timing does.
+                // Chunked over ALL islands, because solve_island is indexed by island: the asleep
+                // ones return immediately and work-stealing absorbs the empty chunks.
+                const std::size_t participants = p.jobs->participant_count();
+                const std::size_t chunk = std::max<std::size_t>(
+                    1, (isl.island_count + participants * 4 - 1) / (participants * 4));
+                p.jobs->parallel_for(isl.island_count, chunk, solve_one);
+                p.parallel_islands_last = static_cast<std::uint32_t>(active_count);
+            } else {
+                for (std::size_t k = 0; k < isl.island_count; ++k) {
+                    solve_one(k);
+                }
+                p.parallel_islands_last = 0;
+            }
+        } // physics.solve
+    };
+    if (profile_islands) {
+        dispatch_islands(solve_island_timed);
+    } else {
+        dispatch_islands(solve_island);
+    }
 
     // ---- 7. Update SLEEPING, measured on the POST-solve velocities (a resting body's pre-solve
     // velocity still holds the g·dt its contact just cancelled, so only now is it near rest). Each
@@ -1656,6 +1700,48 @@ void PhysicsWorld::step(float dt) {
             st.largest_active_island = std::max(st.largest_active_island, sz);
         }
     }
+
+    // ---- Island solve cost (opt-in; see WorldStats::island_solve_ns_total). Sequential, after the
+    // join, reading the per-island slots the workers wrote — so it adds nothing to the parallel
+    // region and cannot touch body state.
+    if (profile_islands) {
+        p.island_profile.clear();
+        std::size_t big = isl.island_count; // biggest-by-bodies active island (lowest id on a tie)
+        std::uint32_t big_bodies = 0;
+        for (std::size_t k = 0; k < isl.island_count; ++k) {
+            if (active[k] == 0) {
+                continue;
+            }
+            const std::uint32_t nb = isl.body_offsets[k + 1] - isl.body_offsets[k];
+            const std::uint64_t ns = p.island_solve_slots[k].ns;
+            p.island_profile.push_back(
+                IslandSolveCost{static_cast<std::uint32_t>(k),
+                                nb,
+                                isl.constraint_offsets[k + 1] - isl.constraint_offsets[k],
+                                ns});
+            st.island_solve_ns_total += ns;
+            st.largest_active_island_solve_ns = std::max(st.largest_active_island_solve_ns, ns);
+            if (nb > big_bodies) {
+                big_bodies = nb;
+                big = k;
+            }
+        }
+        if (big < isl.island_count) {
+            // Membership fingerprint: FNV-1a over the island's (dense-sorted) body indices.
+            const std::span<const std::uint32_t> members{isl.bodies.data() + isl.body_offsets[big],
+                                                         big_bodies};
+            const std::uint64_t h = core::fnv1a_64(std::as_bytes(members));
+            st.largest_island_prev_bodies = p.prev_largest_valid ? p.prev_largest_bodies : 0;
+            st.largest_island_membership_changed =
+                p.prev_largest_valid &&
+                (p.prev_largest_bodies != big_bodies || p.prev_largest_hash != h);
+            p.prev_largest_valid = true;
+            p.prev_largest_bodies = big_bodies;
+            p.prev_largest_hash = h;
+        } else {
+            p.prev_largest_valid = false; // nothing solved: no previous island to compare against
+        }
+    }
 }
 
 void PhysicsWorld::compute_pairs(std::vector<Pair>& out) const {
@@ -1722,6 +1808,22 @@ void PhysicsWorld::wake_body(BodyId id) noexcept {
     // The rest of its island reactivates on the next step(): stage 5 sees an awake member and wakes
     // the others. (Waking the whole island here would need the island partition, which step()
     // owns.)
+}
+
+void PhysicsWorld::set_island_profile_enabled(bool enabled) noexcept {
+    impl_->island_profile_enabled = enabled;
+    impl_->prev_largest_valid = false; // a gap in profiled steps makes the old island no comparison
+    if (!enabled) {
+        impl_->island_profile.clear();
+    }
+}
+
+bool PhysicsWorld::island_profile_enabled() const noexcept {
+    return impl_->island_profile_enabled;
+}
+
+std::span<const IslandSolveCost> PhysicsWorld::island_solve_profile_last() const noexcept {
+    return impl_->island_profile;
 }
 
 std::size_t PhysicsWorld::islands_last() const noexcept {
