@@ -60,7 +60,7 @@ The resource picture that decides every budget answer, both verified:
 | resource | state | source |
 |---|---|---|
 | CPU `sim.block` p99 | **15.468 vs 6.000 ratified — 2.58× over, the largest breach** | ADR-0041:889, 2026-09-07 amendment |
-| CPU sim composition | ~31% solve, ~28% contacts+broadphase, ~32% shared math; **~92% of awake bodies in ONE island**, so island-level parallelism's ceiling is 1.09× — the paydown (graph colouring / Jacobi, under the ADR-0026 determinism contract) is *ranked with M18, not schedulable here* | ADR-0041:457-467, 586-599 |
+| CPU sim composition | ~31% solve, ~28% contacts+broadphase, ~32% shared math; **~92% of awake bodies in ONE island**, so island-level parallelism's ceiling is 1.09× *(body share; MEASURED in time 2026-10-11 as **1.000×** — see `docs/perf/README.md`)* — the paydown (graph colouring / Jacobi, under the ADR-0026 determinism contract) is *ranked with M18, not schedulable here* | ADR-0041:457-467, 586-599 |
 | GPU | **1.841 ms p50 / 2.407 ms max across all twelve passes — ~8% of the 16.6 budget** | ADR-0041:643-644 ("Ruling 6") |
 | GPU→frame coupling | GPU cost **passes through to the gated frame ~1:1** (measured, disjoint ranges: +0.130 ms `frame.submit` → +0.132 ms `frame` p99) | ADR-0041:849-861, the m17.8b A/B |
 | precedent for adding cost | m17.8's textured ground: landed *after* the budget bricks, priced by its own A/B, +0.67% frame p99, arms separated by a ledger counter, not memory | ADR-0041:820-870 |

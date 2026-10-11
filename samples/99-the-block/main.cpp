@@ -190,6 +190,12 @@ std::uint64_t g_ticks = kDefaultTicks;
 // thing the counters are describing.
 std::string g_ppm;
 
+// --island-profile: per-island solve TIMING (#311). Off by default because it reads a clock once
+// per active island -- off the per-constraint path and tiny, but not free, so A RUN TAKEN WITH THIS
+// FLAG MUST NOT BE FILED AS A BASELINE. It answers one question: what fraction of the solve is the
+// biggest island in TIME, where every other counter here measures it in BODIES.
+bool g_island_profile = false;
+
 // ── Small helpers ───────────────────────────────────────────────────────────────────────────────
 
 // Every component this demo's worlds hold: the engine's profile (m14.1) plus the game's own.
@@ -738,6 +744,15 @@ struct Session {
         std::uint32_t largest_active_island = 0;
         std::uint32_t awake_bodies = 0; // the DENOMINATOR the largest island is a share of
         std::uint32_t parallel_steps = 0;
+        // The same two facts in TIME rather than in bodies, and the reason they exist: every field
+        // above counts BODIES, so the serial fraction this tick implies has always been a body
+        // share -- `largest_active_island / awake_bodies`. Two independent reviews rejected that as
+        // a basis for the recorded 1.09x island-parallel ceiling, in the same words: body share is
+        // not solver-time share. These are summed and maxed exactly as `ms` and
+        // `largest_active_island` are, so `island_ns_largest / island_ns_total` is the tick's REAL
+        // Amdahl serial fraction. Zero unless --island-profile was passed.
+        std::uint64_t island_ns_total = 0;   // every active island's solve, both worlds
+        std::uint64_t island_ns_largest = 0; // the single most expensive island in the tick
     };
 
     TickSolve tick_solve;       // accumulating, this tick
@@ -781,6 +796,43 @@ struct Session {
         tick_solve.awake_bodies = std::max(tick_solve.awake_bodies, s.awake_bodies);
         tick_solve.parallel_steps += (s.islands_solved_parallel > 0) ? 1u : 0u;
         max_active_islands = std::max(max_active_islands, s.active_islands);
+        // Summed over the tick's steps like `ms`; maxed like `largest_active_island`. Both are 0
+        // when the profile is off, and then the ratio below is simply not reported.
+        tick_solve.island_ns_total += s.island_solve_ns_total;
+        tick_solve.island_ns_largest =
+            std::max(tick_solve.island_ns_largest, s.largest_active_island_solve_ns);
+    }
+
+    // The most expensive single SOLVE STEP, and its per-island table -- snapshotted only when a
+    // step beats the record, so the measured loop pays a vector copy a handful of times across a
+    // run rather than once per step.
+    //
+    // KEYED ON THE STEP, NOT THE TICK, AND THAT IS THE WHOLE POINT. Amdahl's serial fraction is a
+    // property of ONE parallel region, and the parallel region here is one step's island dispatch.
+    // A tick runs a server step plus up to kMaxCatchUpBatchesPerTick client ones, SEQUENTIALLY, so
+    // a tick-level ratio of (max island over steps) / (summed island time over steps) is not a
+    // serial fraction at all -- with two similar steps it lands near 0.5 whatever the solve looks
+    // like. The first version of this instrument did exactly that and reported a 2.040x ceiling for
+    // a tick whose worst step had ONE active island, i.e. a true ceiling of 1.00x. The per-tick
+    // sums below are still recorded, as totals; only the per-step ratio is a bound.
+    std::vector<physics::IslandSolveCost> worst_step_islands;
+    std::uint64_t worst_step_island_ns = 0;  // that step's total island solve
+    std::uint64_t worst_step_largest_ns = 0; // its single most expensive island
+    std::uint32_t worst_step_active_islands = 0;
+    std::uint32_t worst_step_largest_bodies = 0;
+    std::uint32_t worst_step_awake_bodies = 0;
+
+    void note_island_profile(const physics::PhysicsWorld& w, const physics::WorldStats& s) {
+        if (s.island_solve_ns_total <= worst_step_island_ns) {
+            return;
+        }
+        worst_step_island_ns = s.island_solve_ns_total;
+        worst_step_largest_ns = s.largest_active_island_solve_ns;
+        worst_step_active_islands = s.active_islands;
+        worst_step_largest_bodies = s.largest_active_island;
+        worst_step_awake_bodies = s.awake_bodies;
+        const std::span<const physics::IslandSolveCost> p = w.island_solve_profile_last();
+        worst_step_islands.assign(p.begin(), p.end());
     }
 
     // Steps whose solve actually went through the job system. THE HANDOFF, not the value: a pool
@@ -861,6 +913,10 @@ struct Session {
         // shape m17.5 would otherwise have gone off and optimised.
         server.physics.set_profile_label("server");
         client.physics.set_profile_label("client");
+        // BOTH worlds, because the tick's solve is their sum: a serial fraction taken from the
+        // server alone would describe half of the thing the budget is about.
+        server.physics.set_island_profile_enabled(g_island_profile);
+        client.physics.set_island_profile_enabled(g_island_profile);
     }
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked,
@@ -1128,6 +1184,9 @@ struct Session {
                 client.physics.step(kDt);
                 const physics::WorldStats cs = client.physics.stats();
                 note_step(client_step_watch.elapsed_ms(), cs);
+                if (g_island_profile) {
+                    note_island_profile(client.physics, cs);
+                }
                 client_parallel_steps += (cs.islands_solved_parallel > 0) ? 1u : 0u;
                 client_max_bodies = std::max(client_max_bodies, cs.body_count);
                 client_max_pairs = std::max(client_max_pairs, cs.broadphase_pairs);
@@ -1154,6 +1213,9 @@ struct Session {
             last_join_ms = join_watch.elapsed_ms();
         }
         note_step(server_step_ms, server_step_stats);
+        if (g_island_profile) {
+            note_island_profile(server.physics, server_step_stats);
+        }
 
         // The damage-op shape, and it is not a curiosity — it is the number that made m13.5's
         // runaway collapse legible. Parts stand at 1.0 health, so an op at or above 1.0 kills
@@ -2761,7 +2823,71 @@ int run_perf(const std::filesystem::path& cooked,
     ledger.set("physics.worst_tick_largest", wt.largest_active_island);
     ledger.set("physics.worst_tick_awake_bodies", wt.awake_bodies);
     ledger.set("physics.worst_tick_parallel_steps", wt.parallel_steps);
+    // The worst tick's serial fraction in TIME, beside the same tick's body counts. Both are 0
+    // without --island-profile, and then nothing below is printed -- an absent measurement reads as
+    // absent rather than as a zero.
+    ledger.set("physics.worst_tick_island_ns_total", wt.island_ns_total);
+    ledger.set("physics.worst_tick_island_ns_largest", wt.island_ns_largest);
+    // The per-STEP figures, which are the ones that bound anything. A tick's steps run in
+    // sequence, so only a single step's (largest / total) is an Amdahl serial fraction.
+    ledger.set("physics.worst_step_island_ns_total", demo.session.worst_step_island_ns);
+    ledger.set("physics.worst_step_island_ns_largest", demo.session.worst_step_largest_ns);
+    ledger.set("physics.worst_step_active_islands", demo.session.worst_step_active_islands);
+    ledger.set("physics.worst_step_largest_bodies", demo.session.worst_step_largest_bodies);
+    ledger.set("physics.worst_step_awake_bodies", demo.session.worst_step_awake_bodies);
     report.set_ledger(ledger);
+
+    if (g_island_profile && demo.session.worst_step_island_ns > 0) {
+        const auto& S = demo.session;
+        // THE NUMBER: the most expensive solve STEP in the run, and what fraction of it was its
+        // single biggest island. Per step, because that is the one parallel region -- see the
+        // comment on worst_step_islands for why a per-tick ratio is not a bound.
+        const double frac = static_cast<double>(S.worst_step_largest_ns) /
+                            static_cast<double>(S.worst_step_island_ns);
+        const double body_frac = (S.worst_step_awake_bodies > 0)
+                                     ? static_cast<double>(S.worst_step_largest_bodies) /
+                                           static_cast<double>(S.worst_step_awake_bodies)
+                                     : 0.0;
+        std::printf("  islands   : worst SOLVE STEP -- %llu us of island solve across %u active "
+                    "islands, biggest island %llu us\n",
+                    static_cast<unsigned long long>(S.worst_step_island_ns / 1000),
+                    S.worst_step_active_islands,
+                    static_cast<unsigned long long>(S.worst_step_largest_ns / 1000));
+        std::printf("  islands   : SERIAL FRACTION %.4f in TIME vs %.4f in BODIES (%u of %u) -- "
+                    "island-parallel ceiling %.3fx in time, %.3fx in bodies\n",
+                    frac,
+                    body_frac,
+                    S.worst_step_largest_bodies,
+                    S.worst_step_awake_bodies,
+                    (frac > 0.0) ? 1.0 / frac : 0.0,
+                    (body_frac > 0.0) ? 1.0 / body_frac : 0.0);
+        // The two ceilings differing is the whole point: the body one is where the project's
+        // recorded 1.09x came from, and only the time one is an Amdahl bound on the solve.
+        std::printf("  islands   : worst TICK %llu totals (NOT a serial fraction -- %u sequential "
+                    "steps): %llu us island solve, biggest single island %llu us\n",
+                    static_cast<unsigned long long>(wt.tick - measure_from_tick),
+                    wt.steps,
+                    static_cast<unsigned long long>(wt.island_ns_total / 1000),
+                    static_cast<unsigned long long>(wt.island_ns_largest / 1000));
+        const auto& isl = S.worst_step_islands;
+        if (!isl.empty()) {
+            std::printf("  islands   : the most expensive single STEP, %zu active islands\n",
+                        isl.size());
+            std::printf("  islands   :   island  bodies  constraints   solve_us   ns_per_body\n");
+            for (const physics::IslandSolveCost& e : isl) {
+                if (e.solve_ns == 0 && e.bodies == 0) {
+                    continue;
+                }
+                std::printf(
+                    "  islands   :   %6u  %6u  %11u  %9llu  %12llu\n",
+                    e.island,
+                    e.bodies,
+                    e.constraints,
+                    static_cast<unsigned long long>(e.solve_ns / 1000),
+                    static_cast<unsigned long long>(e.bodies > 0 ? e.solve_ns / e.bodies : 0));
+            }
+        }
+    }
 
     core::PerfGate gate;
     gate.at_most("frame", core::PerfStat::P99, 16.6)
@@ -3168,6 +3294,8 @@ int main(int argc, char** argv) {
             scene_path = argv[++i];
         } else if (a == "--cooked" && i + 1 < argc) {
             cooked = argv[++i];
+        } else if (a == "--island-profile") {
+            g_island_profile = true;
         }
     }
 

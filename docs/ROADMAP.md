@@ -2607,7 +2607,10 @@ m17.8, m17.10.
 >
 > **92% of the awake bodies at the tail are in ONE island** (602 of 656), across 25–31 islands with
 > every step going wide. So the width was never the problem and neither was the wiring: Amdahl's
-> ceiling on island-level parallelism at that tick is **1.09x**, worth ~0.96 ms of an 11.4 ms solve
+> ceiling on island-level parallelism at that tick is **1.09x** *(a BODY share; MEASURED in TIME on
+> 2026-10-11 as **1.000x** — the worst solve STEP has ONE active island, 362 bodies, so there is
+> nothing to divide and no scheduler can help it. Stronger than this row claims, same conclusion.
+> `docs/perf/README.md`)*, worth ~0.96 ms of an 11.4 ms solve
 > and ~3% of a 29 ms frame — at the edge of this rig's run-to-run spread. **A measurement finding
 > nothing is what a 1.09x ceiling looks like.** The residual (a perfectly realised 1.09x should
 > have been just detectable, and was not) is dispatch overhead and the fact that solve cost tracks
