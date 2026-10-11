@@ -282,6 +282,156 @@ inject_gpu_clocks() {
         }' "$report" > "$report.tmp" && mv "$report.tmp" "$report"
 }
 
+# ── The CPU fingerprint (m17.6): record the one device the GPU clock check cannot see ─────────────
+#
+# WHY THIS EXISTS. `99-the-block` is CPU-bound: 4-44% GPU utilisation, 13-17 W of a ~170 W part. On
+# 2026-10-11 a run with the GPU pinned (1837 MHz, 0.0% spread, a fingerprint byte-identical to the
+# baseline's) still moved EVERY simulation median +3..+6% and EVERY simulation tail +13..+22%, while
+# engine/physics and engine/destruction were byte-identical between the two commits. One sim.collapse
+# number was flagged REGRESSED at +22.4% and was not a regression. The report could not say why,
+# because its `machine` block is {gpu, driver, os, build, sanitizer, preset, width, height}: no CPU
+# field anywhere. The script watches for rival processes (below) but never recorded the CPU's own
+# state, so two runs on this part were indistinguishable.
+#
+# The part is also a hostile instrument. A Ryzen 9 9950X3D is HETEROGENEOUS: two L3 domains, one CCD
+# carrying 3D V-Cache, so for cache-resident work like island solving WHICH domain the threads land on
+# changes the answer. `l3_domains > 1` is therefore the decisive field below: it says thread placement
+# is a free variable of the measurement. Per-core clocks on that box were seen spanning 2024..5721 MHz.
+#
+# RECORD ONLY. There is deliberately NO gate here: no CPU number fails a run, sets `status`, or
+# refuses a filing. The GPU's 2% spread bound exists because it was measured; there is no such
+# evidence for any CPU bound, and ADR-0050 says the right response to a flapping gate is to widen the
+# evidence before widening the bound. Inventing a threshold now would be that error. Do not "finish
+# the job" by adding one. Likewise no taskset/affinity: pinning is the NEXT brick and needs a
+# re-baseline; smuggling it in here would be an uncontrolled change measured by an instrument that
+# cannot yet report what it did.
+
+# Per-core clocks are readable from cpufreq (kHz) or, failing that, /proc/cpuinfo `cpu MHz`.
+cpu_sampler_available() {
+    compgen -G "/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq" >/dev/null 2>&1 \
+        || grep -q '^cpu MHz' /proc/cpuinfo 2>/dev/null
+}
+
+# Start ONE long-lived background loop writing a line per sample into $1 — the clock of every online
+# core in MHz, space-separated — at the same 20 Hz as the GPU sampler, and echo its pid. The loop uses
+# only shell builtins (`read`, `printf`; the 50 ms wait is `read -t` on an idle descriptor) so it
+# forks nothing per sample: like the GPU sampler it must not contend with the run it is describing.
+# Source order: cpufreq `scaling_cur_freq` first (kHz / 1000); this box (Ryzen 9 9950X3D, amd-pstate)
+# uses it. /proc/cpuinfo is the fallback for kernels without cpufreq.
+start_cpu_sampler() {
+    local log="$1"
+    (
+        local idle
+        exec {idle}<> <(:)
+        local files=(/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq) f k line key rest
+        if [ -e "${files[0]}" ]; then
+            while :; do
+                line=""
+                for f in "${files[@]}"; do
+                    read -r k < "$f" 2>/dev/null || continue
+                    line+="$((k / 1000)) "
+                done
+                printf '%s\n' "$line" >> "$log"
+                read -r -t 0.05 -u "$idle" _ || true
+            done
+        else
+            while :; do
+                line=""
+                while read -r key rest; do
+                    case "$key" in cpu) case "$rest" in MHz*) line+="${rest#*: } " ;; esac ;; esac
+                done < /proc/cpuinfo
+                printf '%s\n' "$line" >> "$log"
+                read -r -t 0.05 -u "$idle" _ || true
+            done
+        fi
+    ) >/dev/null 2>&1 &   # detach stdout: the caller captures our pid with $(...), which would otherwise wait for this loop to exit
+    echo $!
+}
+
+stop_cpu_sampler() {
+    kill "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
+}
+
+# Reduce the log to "bmin bmed bmax bspread meanmed total", or print nothing without a readable
+# sample. Two series per sample: the BUSIEST core (a CPU-bound solve rides one core, so this is the
+# number that matters) and the MEAN across all cores. Both go through col_stats.
+cpu_clock_stats() {
+    local log="$1" series total
+    series="$(awk 'NF > 0 { m = 0; s = 0; for (i = 1; i <= NF; i++) { if ($i + 0 > m) m = $i + 0; s += $i }
+                    printf "%.0f %.1f\n", m, s / NF }' "$log")"
+    [ -n "$series" ] || return 0
+    total="$(printf '%s\n' "$series" | grep -c .)"
+    local bmin bmed bmax bspread _a meanmed _c _d
+    read -r bmin bmed bmax bspread <<<"$(printf '%s\n' "$series" | awk '{ print $1 }' | sort -n | col_stats)"
+    read -r _a meanmed _c _d <<<"$(printf '%s\n' "$series" | awk '{ print $2 }' | sort -n | col_stats)"
+    printf '%s %s %s %s %s %s\n' "$bmin" "$bmed" "$bmax" "$bspread" "$meanmed" "$total"
+}
+
+# Static facts, read once. Sets cpu_model, cpu_cores, cpu_threads, cpu_governor, cpu_boost,
+# cpu_l3_domains and cpu_l3_lists ('|'-separated distinct shared_cpu_list values across online CPUs).
+cpu_info() {
+    local cpuinfo=/proc/cpuinfo sys=/sys/devices/system/cpu
+    cpu_model="$(awk -F': *' '/^model name/ { print $2; exit }' "$cpuinfo" 2>/dev/null)"
+    cpu_model="${cpu_model//[\"\\]/}"
+    [ -n "$cpu_model" ] || cpu_model="unknown"
+    cpu_threads="$(grep -c '^processor' "$cpuinfo" 2>/dev/null || true)"
+    cpu_cores="$(awk -F': *' '/^physical id/ { p = $2 } /^core id/ { seen[p ":" $2] = 1 }
+                  END { n = 0; for (k in seen) n++; print n }' "$cpuinfo" 2>/dev/null)"
+    # No core ids in cpuinfo (some VMs / arm): do not guess a core count, say so.
+    [ "${cpu_cores:-0}" -gt 0 ] || cpu_cores="null"
+    [ "${cpu_threads:-0}" -gt 0 ] || cpu_threads="null"
+    cpu_governor="unknown"
+    [ -r "$sys/cpu0/cpufreq/scaling_governor" ] && cpu_governor="$(cat "$sys/cpu0/cpufreq/scaling_governor")"
+    cpu_boost="unknown"
+    [ -r "$sys/cpufreq/boost" ] && cpu_boost="$(cat "$sys/cpufreq/boost")"
+    cpu_l3_lists="$(cat "$sys"/cpu*/cache/index3/shared_cpu_list 2>/dev/null | sort -u | paste -sd'|' -)"
+    if [ -n "$cpu_l3_lists" ]; then
+        cpu_l3_domains="$(printf '%s' "$cpu_l3_lists" | awk -F'|' '{ print NF }')"
+    else
+        cpu_l3_domains="null"
+    fi
+}
+
+# Splice a top-level `cpu` object in the way inject_gpu_clocks splices `gpu_clocks`. Sampled fields
+# arrive empty/"null" when there was no sampler: an absent fingerprint must read as "not measured",
+# never as a zero (the rule `"stable": null` already follows). The C++ reader looks up the keys it
+# needs by name and ignores the rest (as it already does for gpu_clocks), so no schema bump.
+inject_cpu_info() {
+    local report="$1"; shift
+    awk -v model="$cpu_model" -v cores="$cpu_cores" -v threads="$cpu_threads" \
+        -v gov="$cpu_governor" -v boost="$cpu_boost" -v l3n="$cpu_l3_domains" -v l3l="$cpu_l3_lists" \
+        -v bmin="${1:-}" -v bmed="${2:-}" -v bmax="${3:-}" -v bspr="${4:-}" -v mmed="${5:-}" -v tot="${6:-}" '
+        function nz(v) { return (v == "" ? "null" : v) }
+        { line[NR] = $0; if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) last = NR }
+        END {
+            n = split(l3l, lists, "|")
+            ls = ""
+            for (j = 1; j <= n && l3l != ""; j++) ls = ls (j > 1 ? ", " : "") "\"" lists[j] "\""
+            for (i = 1; i <= NR; i++) {
+                if (i == last - 1) { print line[i] ","; continue }
+                if (i == last) {
+                    print "  \"cpu\": {"
+                    printf "    \"model\": \"%s\",\n", model
+                    printf "    \"cores\": %s,\n", nz(cores)
+                    printf "    \"threads\": %s,\n", nz(threads)
+                    printf "    \"governor\": \"%s\",\n", gov
+                    printf "    \"boost\": \"%s\",\n", boost
+                    printf "    \"l3_domains\": %s,\n", nz(l3n)
+                    printf "    \"l3_shared_cpu_lists\": [%s],\n", ls
+                    printf "    \"busiest_core_min\": %s,\n", nz(bmin)
+                    printf "    \"busiest_core_median\": %s,\n", nz(bmed)
+                    printf "    \"busiest_core_max\": %s,\n", nz(bmax)
+                    printf "    \"busiest_core_spread_pct\": %s,\n", nz(bspr)
+                    printf "    \"all_core_mean_median\": %s,\n", nz(mmed)
+                    printf "    \"samples_total\": %s\n", nz(tot)
+                    print "  }"
+                }
+                print line[i]
+            }
+        }' "$report" > "$report.tmp" && mv "$report.tmp" "$report"
+}
+
 # ── …and the CPU must not be shared either (m17.5) ───────────────────────────────────────────
 #
 # The sibling to the clock guard, and learned the same way: `99-the-block` is CPU-bound, so a rival
@@ -490,6 +640,11 @@ run_one() {
         clock_log="$(mktemp)"
         sampler_pid="$(start_gpu_sampler "$clock_log")"
     fi
+    local cpu_log="" cpu_pid=""
+    if cpu_sampler_available; then
+        cpu_log="$(mktemp)"
+        cpu_pid="$(start_cpu_sampler "$cpu_log")"
+    fi
     if [ -n "$latest" ]; then
         echo "  baseline: ${latest}"
         "${bin}/${exe}" --perf --width "$width" --height "$height" \
@@ -500,6 +655,26 @@ run_one() {
             --out "$out" "${extra[@]}" "$@" || status=1
     fi
     [ -n "$sampler_pid" ] && stop_gpu_sampler "$sampler_pid"
+    [ -n "$cpu_pid" ] && stop_cpu_sampler "$cpu_pid"
+
+    # The CPU fingerprint is RECORD ONLY — see the comment above cpu_sampler_available. Nothing below
+    # touches `status`. A missing sampler still files the static facts, with the sampled fields null.
+    local cpu_line=""
+    if [ -n "$cpu_log" ]; then
+        cpu_line="$(cpu_clock_stats "$cpu_log")"
+        rm -f "$cpu_log"
+    fi
+    if [ -s "$out" ]; then
+        cpu_info
+        local cbmin="" cbmed="" cbmax="" cbspread="" cmean="" ctotal=""
+        [ -n "$cpu_line" ] && read -r cbmin cbmed cbmax cbspread cmean ctotal <<<"$cpu_line"
+        inject_cpu_info "$out" "$cbmin" "$cbmed" "$cbmax" "$cbspread" "$cmean" "$ctotal"
+        if [ -n "$cpu_line" ]; then
+            echo "  cpu: ${cpu_model}, governor ${cpu_governor}, ${cpu_l3_domains} L3 domain(s), busiest core ${cbmed} MHz median, ${cbspread}% spread over ${ctotal} samples"
+        else
+            echo "  cpu: ${cpu_model}, governor ${cpu_governor}, ${cpu_l3_domains} L3 domain(s), clocks not measured"
+        fi
+    fi
 
     if [ -n "$clock_log" ]; then
         local clock_line
