@@ -316,13 +316,26 @@ cpu_sampler_available() {
 # core in MHz, space-separated — at the same 20 Hz as the GPU sampler, and echo its pid. The loop uses
 # only shell builtins (`read`, `printf`; the 50 ms wait is `read -t` on an idle descriptor) so it
 # forks nothing per sample: like the GPU sampler it must not contend with the run it is describing.
+#
+# THE IDLE DESCRIPTOR MUST BE A REAL FIFO OPENED READ-WRITE, and the obvious version is a trap. A
+# process substitution — `exec {idle}<> <(:)` — is a pipe that is ALREADY AT EOF, so `read -t`
+# returns instantly instead of waiting, and the loop spins: measured **99.70% of one core and 190 Hz
+# instead of 20 Hz**. That matters more here than it would anywhere else, because this sampler exists
+# to describe a CPU-BOUND benchmark, so a spinning sampler is a competitor for the very number it is
+# reporting. It is not even a silent failure: a subshell's `comm` under this script is `bash`, which
+# is not in `$foreign_mine`, so `foreign_compare` flags `bash at ~100% CPU` and the run fails its own
+# contention check and refuses to file. A fifo opened `<>` keeps a writer open, so reads block for the
+# full timeout. The fifo is unlinked immediately; the open descriptor keeps it alive.
 # Source order: cpufreq `scaling_cur_freq` first (kHz / 1000); this box (Ryzen 9 9950X3D, amd-pstate)
 # uses it. /proc/cpuinfo is the fallback for kernels without cpufreq.
 start_cpu_sampler() {
     local log="$1"
     (
-        local idle
-        exec {idle}<> <(:)
+        local idle fifo
+        fifo="$(mktemp -u)"
+        mkfifo "$fifo" || exit 1
+        exec {idle}<>"$fifo"
+        rm -f "$fifo"
         local files=(/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq) f k line key rest
         if [ -e "${files[0]}" ]; then
             while :; do
