@@ -502,3 +502,44 @@ Not a defect. These cases are readback- and submit-bound and the card idles at 2
 which is the same parked-clock behaviour `docs/perf/README.md` records for `99-the-block`. A real
 driver's per-process init is also heavier than lavapipe's. Read it as "hardware adds no risk to these
 proofs", not as "hardware is slow".
+
+### The curvature-plus-mixed-hits gap is closed, and it nearly closed vacuously (2026-10-11)
+
+The occlusion note above listed one thing neither scene proved: *"a surface with both high curvature
+and a mixed hit/miss population in the same frame."* Scene 1 had curvature and no SSR hits; scene 2
+had a mixed population on a flat floor. `tests/render/sdf_specular_occlusion_test.cpp` scene 3 now
+holds both — scene 2's pitched mirror floor and unseen SDF canopy, with a **metal sphere** in place
+of the emissive box, so the curved reflector and the hit/miss partition are the same frame.
+
+*Measured:* **380** sphere pixels spanning luminance [1, 6.5]; **333** floor pixels whose mirror ray
+really hits the sphere on screen, **all** inside the sphere's mirror disc to within 3 px of its edge;
+**1846 of 1898** miss pixels darkened; **0** pixels anywhere brighter; worst hit-pixel change **0**
+against scene 2's margin, which was *not* loosened to accommodate the curvature. The hit/miss
+partition comes from an object-free twin render and is cross-checked against the mirror disc derived
+from the geometry, so neither derivation stands alone.
+
+**The first version of this case passed while testing nothing, and the way that was caught is the
+part worth keeping.** With a plain metal sphere, all 333 hit pixels read exactly **0** luminance: the
+floor mirrors the sphere's *underside*, which sees only dark ground. "A real SSR hit is unchanged" is
+trivially true of 0 under any mutation, so the assertion could not fail. It was not spotted by
+reading the code — it was spotted by **mutating** the shader's hit branch to `sharp *= 0.5` and
+observing that nothing changed. The fix is a small sphere emission plus a guard that makes the
+precondition executable and states why:
+
+    // A hit set that is black cannot show "unchanged" (0 stays 0 under any mutation).
+    REQUIRE_MESSAGE(hit_lum_sum / hit > 0.1, "the SSR hits must carry real radiance");
+
+*measured at 0.897.* The consequence is sharp: **the occlusion-into-the-hit mutation — the one the
+note above calls load-bearing — only bites because of that fix.** Without the emission it would have
+left the assertion true, and the proof would have been decorative.
+
+That is the fourth time in this stream that the **instrument**, not the effect, was in error: the
+4 % SSR self-intersection offset on the normal-mapped plane (step 1e), an "unoccluded" control
+sitting inside the 8 m cone reach, a sphere reflecting into its own floor, and now a black hit set.
+Every one was caught by a sensitivity control, an instrument-zero-point run, or a mutation — none by
+inspection. Four in one stream is the argument for keeping all three mandatory rather than
+discretionary.
+
+*Still not proven:* nothing further about occlusion geometry that this file names. The open items in
+this section are now the **gate-7 clock conflict** (`docs/perf/README.md`) and the **sky-rebake
+lever**, both of which are Luca's decisions, not measurements.
