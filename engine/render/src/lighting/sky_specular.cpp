@@ -174,36 +174,75 @@ SkySpecularBinding SkySpecular::add(RenderGraph& graph, RGTexture source, bool s
         dfg_state_ = rhi::ResourceState::ShaderRead;
     }
 
-    // ── The prefiltered chain: rebuilt when the sky it filters moved. ────────────────────────
-    if (prefilter_valid_ && !source_changed) {
+    // ── The prefiltered chain: dirty layers are rebuilt, at most max_layers_per_frame_ a frame. ──
+    // See the header for why this is correct. A moved source dirties every layer.
+    if (source_changed)
+        prefilter_valid_mask_ = 0;
+
+    // Walk the layers from the cursor, wrapping, taking the dirty ones until the budget is spent.
+    std::uint32_t selected = 0; // bit k set: layer k is serviced this frame
+    std::uint32_t count = 0;
+    std::uint32_t highest = next_layer_; // highest-indexed serviced layer
+    for (std::uint32_t i = 0; i < kSkySpecularLayers && count < max_layers_per_frame_; ++i) {
+        const std::uint32_t layer = (next_layer_ + i) % kSkySpecularLayers;
+        if ((prefilter_valid_mask_ & (1u << layer)) == 0) {
+            selected |= 1u << layer;
+            if (count == 0 || layer > highest)
+                highest = layer;
+            ++count;
+        }
+    }
+
+    if (count == 0) {
+        // Exactly the old reuse path: no pass, and prefiltered_state_ is left to the last consumer.
         ++stats_.prefilter_reused;
     } else {
-        const GpuSpecularParams p{{kSkySpecularLevels, kSkySpecularPrefilterSamples, 0, 0}};
-        const RenderGraph::FrameSlice ubo = graph.push_frame_data(&p, sizeof(p));
+        // One pass per contiguous run of ascending layer indices; the shader adds the run's base
+        // layer to gl_GlobalInvocationID.z, so z is the run length and the roughness it computes is
+        // the ABSOLUTE layer's.
         const RGTexture sampled[] = {source};
         const RGTexture writes[] = {prefiltered_rg};
-        RenderGraph::ComputePassDesc desc{};
-        desc.sampled = sampled;
-        desc.storage_write = writes;
-        graph.add_compute_pass(
-            "sky-specular-prefilter",
-            desc,
-            [pipe = prefilter_pipeline_,
-             prefiltered_rg,
-             source,
-             ubo,
-             smp = source_sampler_,
-             &graph](rhi::CommandBuffer& cmd) {
-                cmd.bind_compute_pipeline(pipe);
-                cmd.bind_storage_image(0, graph.physical(prefiltered_rg));
-                cmd.bind_texture(1, graph.physical(source), smp);
-                cmd.bind_uniform_buffer(2, ubo.buffer, ubo.offset, sizeof(p));
-                cmd.dispatch((kSkySpecularWidth + kSkySpecularGroup - 1) / kSkySpecularGroup,
-                             (kSkySpecularHeight + kSkySpecularGroup - 1) / kSkySpecularGroup,
-                             kSkySpecularLayers);
-            });
-        prefilter_valid_ = true;
+        for (std::uint32_t layer = 0; layer < kSkySpecularLayers;) {
+            if ((selected & (1u << layer)) == 0) {
+                ++layer;
+                continue;
+            }
+            std::uint32_t run = 1;
+            while (layer + run < kSkySpecularLayers && (selected & (1u << (layer + run))) != 0)
+                ++run;
+            const GpuSpecularParams p{
+                {kSkySpecularLevels, kSkySpecularPrefilterSamples, layer, 0}};
+            const RenderGraph::FrameSlice ubo = graph.push_frame_data(&p, sizeof(p));
+            RenderGraph::ComputePassDesc desc{};
+            desc.sampled = sampled;
+            desc.storage_write = writes;
+            graph.add_compute_pass(
+                "sky-specular-prefilter",
+                desc,
+                [pipe = prefilter_pipeline_,
+                 prefiltered_rg,
+                 source,
+                 ubo,
+                 run,
+                 smp = source_sampler_,
+                 &graph](rhi::CommandBuffer& cmd) {
+                    cmd.bind_compute_pipeline(pipe);
+                    cmd.bind_storage_image(0, graph.physical(prefiltered_rg));
+                    cmd.bind_texture(1, graph.physical(source), smp);
+                    cmd.bind_uniform_buffer(2, ubo.buffer, ubo.offset, sizeof(GpuSpecularParams));
+                    cmd.dispatch((kSkySpecularWidth + kSkySpecularGroup - 1) / kSkySpecularGroup,
+                                 (kSkySpecularHeight + kSkySpecularGroup - 1) / kSkySpecularGroup,
+                                 run);
+                });
+            layer += run;
+        }
+        prefilter_valid_mask_ |= selected;
+        next_layer_ = (highest + 1) % kSkySpecularLayers;
+        stats_.prefilter_layers_filled += count;
         ++stats_.prefilter_filled;
+        constexpr std::uint32_t kAll = (1u << kSkySpecularLayers) - 1u;
+        if ((prefilter_valid_mask_ & kAll) != kAll)
+            ++stats_.prefilter_partial_frames;
         prefiltered_state_ = rhi::ResourceState::ShaderRead;
     }
 

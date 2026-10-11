@@ -58,12 +58,15 @@ layout(set = 0, binding = 1) uniform sampler2D source;
 
 layout(std140, set = 0, binding = 2) uniform PrefilterParams {
     // x = number of roughness levels INCLUDING mip 0 (so the array holds x - 1 layers),
-    // y = importance samples per texel.
+    // y = importance samples per texel,
+    // z = BASE LAYER: the first array layer this dispatch writes. Dispatch z covers only a run of
+    //     layers (the CPU defers the rest under a per-frame budget), so the absolute layer is
+    //     gl_GlobalInvocationID.z + z. w is unused.
     uvec4 counts;
 } params;
 
 void main() {
-    const ivec3 id = ivec3(gl_GlobalInvocationID);
+    const ivec3 id = ivec3(gl_GlobalInvocationID) + ivec3(0, 0, int(params.counts.z));
     const ivec3 size = imageSize(out_levels);
     if (any(greaterThanEqual(id, size))) {
         return;
