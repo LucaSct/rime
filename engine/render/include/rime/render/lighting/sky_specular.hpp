@@ -76,8 +76,9 @@ struct SkySpecularStats {
     // Layers dispatched in total, summed over frames: a frame that rebuilt the whole chain adds
     // kSkySpecularLayers, a budgeted one adds the budget.
     std::uint32_t prefilter_layers_filled = 0;
-    // Frames that dispatched at least one layer and left at least one dirty layer for a later frame.
-    // The defer path's counter: a chain that is quietly lagging looks exactly like one keeping up.
+    // Frames that dispatched at least one layer and left at least one dirty layer for a later
+    // frame. The defer path's counter: a chain that is quietly lagging looks exactly like one
+    // keeping up.
     std::uint32_t prefilter_partial_frames = 0;
     // Frames served the placeholder: the feature was switched off, SSR or DDGI made the forward
     // pass's sky mirror unreachable, or there was no sky at all. A frame that is not counted
@@ -105,8 +106,8 @@ public:
     // PER-LAYER DIRTY STATE AND A PER-FRAME BUDGET.
     //
     // Measured: a wind-scrolled sky rebuilds the chain 60 times in 60 frames with zero reuses, and
-    // each rebuild redoes all kSkySpecularLayers layers in one dispatch, because validity used to be
-    // a single bool. One frame's full rebuild changes the chain's content by only about 0.3%, so
+    // each rebuild redoes all kSkySpecularLayers layers in one dispatch, because validity used to
+    // be a single bool. One frame's full rebuild changes the chain's content by only about 0.3%, so
     // roughly 99.7% of every rebake reproduces what was already there. A per-layer validity mask is
     // the mechanism that makes a PARTIAL rebuild expressible; the budget below is the policy that
     // spends it.

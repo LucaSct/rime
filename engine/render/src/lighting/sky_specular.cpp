@@ -210,8 +210,7 @@ SkySpecularBinding SkySpecular::add(RenderGraph& graph, RGTexture source, bool s
             std::uint32_t run = 1;
             while (layer + run < kSkySpecularLayers && (selected & (1u << (layer + run))) != 0)
                 ++run;
-            const GpuSpecularParams p{
-                {kSkySpecularLevels, kSkySpecularPrefilterSamples, layer, 0}};
+            const GpuSpecularParams p{{kSkySpecularLevels, kSkySpecularPrefilterSamples, layer, 0}};
             const RenderGraph::FrameSlice ubo = graph.push_frame_data(&p, sizeof(p));
             RenderGraph::ComputePassDesc desc{};
             desc.sampled = sampled;
