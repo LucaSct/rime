@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -225,6 +226,10 @@ struct PhysicsWorld::Impl {
     // being measured; each island writes ONLY its own slot, so no lock or atomic is needed.
     struct alignas(64) SolveSlot {
         std::uint64_t ns = 0;
+        std::uint64_t warm_ns = 0;
+        std::uint64_t velocity_ns = 0;
+        std::uint64_t store_ns = 0;
+        std::uint64_t position_ns = 0;
     };
 
     bool island_profile_enabled = false;
@@ -1335,7 +1340,12 @@ void PhysicsWorld::step(float dt) {
     // dynamic bodies (immovable anchors are read-only), so the job system runs them in parallel
     // with no locks and the result is identical to the sequential loop, bit for bit, at any thread
     // count.
-    const auto solve_island = [&](std::size_t k) {
+    //
+    // ONE body, two instantiations. `Profile` is a compile-time bool, so the profile-off
+    // instantiation contains no clock call, no slot write and no branch, and the solve sequence is
+    // written exactly once — two hand-kept copies of it is how a solver bug gets introduced. Every
+    // clock read sits inside `if constexpr (Profile)`; none of them moves a line of real work.
+    const auto solve_island_impl = [&]<bool Profile>(std::size_t k) {
         if (active[k] == 0) {
             return; // wholly asleep — its bodies stay frozen
         }
@@ -1343,9 +1353,33 @@ void PhysicsWorld::step(float dt) {
         const std::uint32_t ce = isl.constraint_offsets[k + 1];
         const std::span<ContactConstraint> cs{ordered.data() + cb, ce - cb};
 
+        // `whole` times the island end to end; `lap` is restarted at each phase boundary. Both are
+        // read ON THE THREAD THAT SOLVES, and slot k is written by this island alone.
+        // In the off instantiation both are an empty type, so not even the constructor's clock
+        // read survives.
+        struct NoClock {};
+        using Clock = std::conditional_t<Profile, core::Stopwatch, NoClock>;
+        [[maybe_unused]] Clock whole;
+        [[maybe_unused]] Clock lap;
+        [[maybe_unused]] const auto ns_of = [](const core::Stopwatch& w) {
+            return static_cast<std::uint64_t>(w.elapsed_us() * 1000.0 + 0.5);
+        };
+
         warm_start(bodies, cs);
+        if constexpr (Profile) {
+            p.island_solve_slots[k].warm_ns = ns_of(lap);
+            lap.restart();
+        }
         solve_velocities(bodies, cs, kVelocityIterations);
+        if constexpr (Profile) {
+            p.island_solve_slots[k].velocity_ns = ns_of(lap);
+            lap.restart();
+        }
         store_impulses(cs, manifolds); // writes only this island's manifold indices — disjoint
+        if constexpr (Profile) {
+            p.island_solve_slots[k].store_ns = ns_of(lap);
+            lap.restart();
+        }
 
         // Integrate this island's dynamic bodies with their post-solve velocities. Orientation
         // integrates by q̇ = ½·ω·q then renormalizes (docs/math/rigid-body-dynamics.md §3).
@@ -1361,6 +1395,14 @@ void PhysicsWorld::step(float dt) {
         // NGS position pass: recover residual penetration by adjusting poses only — never
         // velocities (the deliberate not-Baumgarte choice; solver.hpp, ADR-0026).
         solve_positions(bodies, cs, kPositionIterations);
+        if constexpr (Profile) {
+            // The position half = the integration loop above PLUS solve_positions, one bucket.
+            p.island_solve_slots[k].position_ns = ns_of(lap);
+            p.island_solve_slots[k].ns = ns_of(whole);
+        }
+    };
+    const auto solve_island = [&](std::size_t k) {
+        solve_island_impl.template operator()<false>(k);
     };
 
     const bool profile_islands = p.island_profile_enabled;
@@ -1368,17 +1410,12 @@ void PhysicsWorld::step(float dt) {
         p.island_solve_slots.assign(isl.island_count,
                                     Impl::SolveSlot{}); // allocates only when profiling
     }
-    // Island-profile timing wrapper: a second callable, so the profile-off path hands out
-    // `solve_island` itself and carries no clock call, no slot write and no branch. The one
-    // `profile_islands` test is hoisted to the dispatch below, outside every per-island and
-    // per-constraint loop. Each island is timed ON THE THREAD THAT SOLVES it, writing slot k alone.
+    // Island-profile timing: the `Profile = true` instantiation of the one solve body above. The
+    // one `profile_islands` test is hoisted to the dispatch below, outside every per-island and
+    // per-constraint loop, so the profile-off path hands out `solve_island` and carries no clock
+    // call, no slot write and no branch.
     const auto solve_island_timed = [&](std::size_t k) {
-        if (active[k] == 0) {
-            return;
-        }
-        const core::Stopwatch watch;
-        solve_island(k);
-        p.island_solve_slots[k].ns = static_cast<std::uint64_t>(watch.elapsed_us() * 1000.0 + 0.5);
+        solve_island_impl.template operator()<true>(k);
     };
 
     // The dispatch below is the original, generic over which per-island callable it hands out.
@@ -1718,7 +1755,11 @@ void PhysicsWorld::step(float dt) {
                 IslandSolveCost{static_cast<std::uint32_t>(k),
                                 nb,
                                 isl.constraint_offsets[k + 1] - isl.constraint_offsets[k],
-                                ns});
+                                ns,
+                                p.island_solve_slots[k].warm_ns,
+                                p.island_solve_slots[k].velocity_ns,
+                                p.island_solve_slots[k].store_ns,
+                                p.island_solve_slots[k].position_ns});
             st.island_solve_ns_total += ns;
             st.largest_active_island_solve_ns = std::max(st.largest_active_island_solve_ns, ns);
             if (nb > big_bodies) {

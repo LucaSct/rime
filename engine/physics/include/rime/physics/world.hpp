@@ -246,6 +246,18 @@ struct IslandSolveCost {
     std::uint32_t bodies = 0;      // dynamic bodies in the island
     std::uint32_t constraints = 0; // contact constraints (points) in the island
     std::uint64_t solve_ns = 0; // wall time of that island's solve only, on the thread that ran it
+    // The same solve split into its phases. Like solve_ns these are wall-clock, machine-dependent,
+    // NEVER in world_hash(), and zero unless set_island_profile_enabled(true). They exist to size
+    // two opposite levers with one number: velocity_ns / solve_ns is the share a change to the
+    // velocity sweep can touch, which prices "fewer iterations" (cheap, costs quality) against
+    // "hoist repeated per-iteration work out of the sweep" (quality-neutral, more work); and
+    // velocity_ns / kVelocityIterations is the cost of ONE velocity iteration, the unit any
+    // iteration-count change is priced in. The buckets need not sum to solve_ns (the gaps are the
+    // clock reads and loop overhead between them).
+    std::uint64_t warm_ns = 0;     // warm_start
+    std::uint64_t velocity_ns = 0; // solve_velocities (all kVelocityIterations)
+    std::uint64_t store_ns = 0;    // store_impulses
+    std::uint64_t position_ns = 0; // pose integration loop + solve_positions (the position half)
 };
 
 class PhysicsWorld {

@@ -821,6 +821,7 @@ struct Session {
     std::uint32_t worst_step_active_islands = 0;
     std::uint32_t worst_step_largest_bodies = 0;
     std::uint32_t worst_step_awake_bodies = 0;
+    std::uint64_t worst_step_tick = 0; // the tick_index the record step ran in (absolute)
 
     void note_island_profile(const physics::PhysicsWorld& w, const physics::WorldStats& s) {
         if (s.island_solve_ns_total <= worst_step_island_ns) {
@@ -831,6 +832,7 @@ struct Session {
         worst_step_active_islands = s.active_islands;
         worst_step_largest_bodies = s.largest_active_island;
         worst_step_awake_bodies = s.awake_bodies;
+        worst_step_tick = tick_index;
         const std::span<const physics::IslandSolveCost> p = w.island_solve_profile_last();
         worst_step_islands.assign(p.begin(), p.end());
     }
@@ -2869,22 +2871,58 @@ int run_perf(const std::filesystem::path& cooked,
                     wt.steps,
                     static_cast<unsigned long long>(wt.island_ns_total / 1000),
                     static_cast<unsigned long long>(wt.island_ns_largest / 1000));
+        // Is the worst solve STEP in the worst solve TICK? "Halve this step" only moves the tail if
+        // so. The tick compared against is `worst_tick_solve` -- the tick with the largest summed
+        // physics step time, which is what the sample already tracks; it is NOT keyed on the
+        // `sim.block` zone (the zone sink keeps no per-tick index), so a sim.block p99 tick can
+        // still differ from both.
+        std::printf(
+            "  islands   : worst solve STEP ran in tick %llu; worst solve TICK is %llu -- %s\n",
+            static_cast<unsigned long long>(S.worst_step_tick - measure_from_tick),
+            static_cast<unsigned long long>(wt.tick - measure_from_tick),
+            (S.worst_step_tick == wt.tick) ? "SAME tick" : "DIFFERENT ticks");
         const auto& isl = S.worst_step_islands;
         if (!isl.empty()) {
             std::printf("  islands   : the most expensive single STEP, %zu active islands\n",
                         isl.size());
-            std::printf("  islands   :   island  bodies  constraints   solve_us   ns_per_body\n");
+            std::printf("  islands   :   island  bodies  constraints   solve_us   ns_per_body"
+                        "   warm_us  velocity_us  store_us  position_us\n");
             for (const physics::IslandSolveCost& e : isl) {
                 if (e.solve_ns == 0 && e.bodies == 0) {
                     continue;
                 }
                 std::printf(
-                    "  islands   :   %6u  %6u  %11u  %9llu  %12llu\n",
+                    "  islands   :   %6u  %6u  %11u  %9llu  %12llu  %8llu  %11llu  %8llu  %11llu\n",
                     e.island,
                     e.bodies,
                     e.constraints,
                     static_cast<unsigned long long>(e.solve_ns / 1000),
-                    static_cast<unsigned long long>(e.bodies > 0 ? e.solve_ns / e.bodies : 0));
+                    static_cast<unsigned long long>(e.bodies > 0 ? e.solve_ns / e.bodies : 0),
+                    static_cast<unsigned long long>(e.warm_ns / 1000),
+                    static_cast<unsigned long long>(e.velocity_ns / 1000),
+                    static_cast<unsigned long long>(e.store_ns / 1000),
+                    static_cast<unsigned long long>(e.position_ns / 1000));
+            }
+            // The number the phase split exists for: of the biggest island's solve, how much is the
+            // velocity sweep, and what ONE velocity iteration costs (kVelocityIterations = 8).
+            const physics::IslandSolveCost* big = &isl.front();
+            for (const physics::IslandSolveCost& e : isl) {
+                if (e.solve_ns > big->solve_ns) {
+                    big = &e;
+                }
+            }
+            if (big->solve_ns > 0) {
+                const double sn = static_cast<double>(big->solve_ns);
+                std::printf(
+                    "  islands   : biggest island %u: velocity %.1f%% of solve (warm %.1f%%, "
+                    "store %.1f%%, position %.1f%%); ONE velocity iteration = %.1f us "
+                    "(velocity_us / 8)\n",
+                    big->island,
+                    100.0 * static_cast<double>(big->velocity_ns) / sn,
+                    100.0 * static_cast<double>(big->warm_ns) / sn,
+                    100.0 * static_cast<double>(big->store_ns) / sn,
+                    100.0 * static_cast<double>(big->position_ns) / sn,
+                    static_cast<double>(big->velocity_ns) / 1000.0 / 8.0);
             }
         }
     }

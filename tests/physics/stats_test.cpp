@@ -396,6 +396,11 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
     std::uint64_t largest_sum = 0;
     int measured = 0;
     int changed_steady = 0;
+    // Phase split of the biggest island (24 stacked boxes), summed over the measured steps.
+    std::uint64_t big_velocity_sum = 0;
+    std::uint64_t big_store_sum = 0;
+    std::uint64_t big_solve_sum = 0;
+    std::uint64_t big_phase_sum = 0;
 
     for (int i = 0; i < kWarmup + kMeasured; ++i) {
         on.step(kDt);
@@ -433,8 +438,34 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
             CHECK(pprof[k].bodies == prof[k].bodies);
             CHECK(pprof[k].constraints == prof[k].constraints);
         }
-        // Profile off means all of it is zero.
+        // The four phase buckets (warm / velocity / store / position). Every island here has
+        // contacts (each column rests on the floor), so every bucket must have read a clock.
+        // The buckets are laps of ONE stopwatch sequence inside the island's own whole-island
+        // stopwatch, so they cannot sum to more than solve_ns -- but a strict `<=` is not safe:
+        // each bucket is rounded to the nearest ns on its own (up to +0.5 ns apiece), and the
+        // double-microsecond clock read can disagree with its neighbour by a few ns. The slack is
+        // 5 % of solve_ns plus 100 ns, far above that noise and far below any real overlap (a
+        // phase double-counted would add 100 % of a bucket).
+        for (const physics::IslandSolveCost& c : prof) {
+            if (c.constraints == 0) {
+                continue;
+            }
+            CHECK(c.warm_ns > 0);
+            CHECK(c.velocity_ns > 0);
+            CHECK(c.store_ns > 0);
+            CHECK(c.position_ns > 0);
+            const std::uint64_t phases = c.warm_ns + c.velocity_ns + c.store_ns + c.position_ns;
+            CHECK(phases <= c.solve_ns + c.solve_ns / 20 + 100);
+        }
+        // Profile off means all of it is zero. (The profile is not published at all when off, so
+        // there is no entry whose four phase fields could be non-zero.)
         const physics::WorldStats so = off.stats();
+        for (const physics::IslandSolveCost& c : off.island_solve_profile_last()) {
+            CHECK(c.warm_ns == 0);
+            CHECK(c.velocity_ns == 0);
+            CHECK(c.store_ns == 0);
+            CHECK(c.position_ns == 0);
+        }
         CHECK(off.island_solve_profile_last().empty());
         CHECK(so.island_solve_ns_total == 0);
         CHECK(so.largest_active_island_solve_ns == 0);
@@ -450,6 +481,12 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
                 a.constraints = c.constraints;
                 a.ns_sum += c.solve_ns;
                 ++a.steps;
+                if (c.bodies == static_cast<std::uint32_t>(kColumnHeights[0])) {
+                    big_velocity_sum += c.velocity_ns;
+                    big_store_sum += c.store_ns;
+                    big_solve_sum += c.solve_ns;
+                    big_phase_sum += c.warm_ns + c.velocity_ns + c.store_ns + c.position_ns;
+                }
             }
         }
     }
@@ -458,6 +495,18 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
     // to the simulation — on, off, and on-with-workers all land on the same bits.
     CHECK(on.world_hash() == off.world_hash());
     CHECK(par.world_hash() == off.world_hash());
+
+    // FALSIFICATION that the instrument can see a difference at all: the velocity phase runs 8
+    // iterations over the island's constraints, store_impulses is one pass over them, so velocity
+    // must dominate store. Summed over the measured steps so one preempted step cannot flip it.
+    // A near-equal pair would mean the buckets are not reading different work.
+    CHECK(big_velocity_sum > big_store_sum);
+    std::printf("[island-profile] 24-box island, mean/step: solve %.0f ns, velocity %.0f ns, store "
+                "%.0f ns, sum of phases %.0f ns\n",
+                static_cast<double>(big_solve_sum) / measured,
+                static_cast<double>(big_velocity_sum) / measured,
+                static_cast<double>(big_store_sum) / measured,
+                static_cast<double>(big_phase_sum) / measured);
 
     std::printf(
         "\n[island-profile] %d bodies, %zu columns, mean over %d steps (sequential solve)\n",
