@@ -388,10 +388,17 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
         std::uint32_t bodies = 0;
         std::uint32_t constraints = 0;
         std::uint64_t ns_sum = 0;
+        std::array<std::uint64_t, 4> phase_ns{};
+        std::array<int, 4> zero_samples{};
         int steps = 0;
     };
 
     std::map<std::uint32_t, Acc> acc;
+    std::map<std::uint32_t, Acc> parallel_acc;
+    const auto has_phase_evidence = [](const Acc& a) {
+        return std::all_of(
+            a.phase_ns.begin(), a.phase_ns.end(), [](std::uint64_t ns) { return ns > 0; });
+    };
     std::uint64_t total_sum = 0;
     std::uint64_t largest_sum = 0;
     int measured = 0;
@@ -440,22 +447,24 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
         }
         // The four phase buckets (warm / velocity / store / position). Every island here has
         // contacts (each column rests on the floor), so every bucket must have read a clock.
+        // Reading a monotonic clock does not guarantee it advanced: Windows reported zero for
+        // individual impulse-store laps even though their cumulative time was positive. Accept
+        // sub-tick samples here and require evidence for every island/phase over the measured
+        // window below, for both sequential and worker-thread solves.
         // The buckets are laps of ONE stopwatch sequence inside the island's own whole-island
         // stopwatch, so they cannot sum to more than solve_ns -- but a strict `<=` is not safe:
         // each bucket is rounded to the nearest ns on its own (up to +0.5 ns apiece), and the
         // double-microsecond clock read can disagree with its neighbour by a few ns. The slack is
-        // 5 % of solve_ns plus 100 ns, far above that noise and far below any real overlap (a
-        // phase double-counted would add 100 % of a bucket).
-        for (const physics::IslandSolveCost& c : prof) {
-            if (c.constraints == 0) {
-                continue;
+        // 5 % of solve_ns plus 100 ns. This catches substantial overlap; duplication of a small
+        // bucket such as store can fit inside the slack and is not proven absent by this bound.
+        for (const auto costs : {prof, pprof}) {
+            for (const physics::IslandSolveCost& c : costs) {
+                if (c.constraints == 0) {
+                    continue;
+                }
+                const std::uint64_t phases = c.warm_ns + c.velocity_ns + c.store_ns + c.position_ns;
+                CHECK(phases <= c.solve_ns + c.solve_ns / 20 + 100);
             }
-            CHECK(c.warm_ns > 0);
-            CHECK(c.velocity_ns > 0);
-            CHECK(c.store_ns > 0);
-            CHECK(c.position_ns > 0);
-            const std::uint64_t phases = c.warm_ns + c.velocity_ns + c.store_ns + c.position_ns;
-            CHECK(phases <= c.solve_ns + c.solve_ns / 20 + 100);
         }
         // Profile off means all of it is zero -- and the phase fields are covered by the
         // emptiness check below, NOT by a loop asserting they are zero. Profile-off publishes no
@@ -472,18 +481,36 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
             total_sum += s.island_solve_ns_total;
             largest_sum += s.largest_active_island_solve_ns;
             changed_steady += s.largest_island_membership_changed ? 1 : 0;
-            for (const physics::IslandSolveCost& c : prof) {
-                Acc& a = acc[c.island];
+            const auto accumulate = [&](std::map<std::uint32_t, Acc>& totals,
+                                        const physics::IslandSolveCost& c) {
+                // Island numbers are partition indices, not persistent IDs. This particular
+                // steady fixture must retain its six separate columns throughout measurement.
+                REQUIRE(c.island < kColumnHeights.size());
+                CHECK(c.bodies == static_cast<std::uint32_t>(kColumnHeights[c.island]));
+                REQUIRE(c.constraints > 0);
+                Acc& a = totals[c.island];
                 a.bodies = c.bodies;
                 a.constraints = c.constraints;
                 a.ns_sum += c.solve_ns;
+                const std::array phases{c.warm_ns, c.velocity_ns, c.store_ns, c.position_ns};
+                for (std::size_t phase = 0; phase < phases.size(); ++phase) {
+                    a.phase_ns[phase] += phases[phase];
+                    a.zero_samples[phase] += phases[phase] == 0 ? 1 : 0;
+                }
                 ++a.steps;
+            };
+            REQUIRE(prof.size() == kColumnHeights.size());
+            for (const physics::IslandSolveCost& c : prof) {
+                accumulate(acc, c);
                 if (c.bodies == static_cast<std::uint32_t>(kColumnHeights[0])) {
                     big_velocity_sum += c.velocity_ns;
                     big_store_sum += c.store_ns;
                     big_solve_sum += c.solve_ns;
                     big_phase_sum += c.warm_ns + c.velocity_ns + c.store_ns + c.position_ns;
                 }
+            }
+            for (const physics::IslandSolveCost& c : pprof) {
+                accumulate(parallel_acc, c);
             }
         }
     }
@@ -492,6 +519,44 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
     // to the simulation — on, off, and on-with-workers all land on the same bits.
     CHECK(on.world_hash() == off.world_hash());
     CHECK(par.world_hash() == off.world_hash());
+
+    // A missing phase timer must still fail. Positivity belongs to the whole measured window,
+    // separately for each island and phase, rather than to a single clock tick. These controls
+    // erase each phase in turn from otherwise real measurements and use the SAME predicate,
+    // proving that legitimate zero samples have not made absent instrumentation invisible.
+    constexpr std::array phase_names{"warm", "velocity", "store", "position"};
+    for (const auto* totals : {&acc, &parallel_acc}) {
+        REQUIRE(totals->size() == kColumnHeights.size());
+        for (const auto& [id, a] : *totals) {
+            CAPTURE(id);
+            CAPTURE(totals == &parallel_acc);
+            CAPTURE(a.steps);
+            CHECK(a.steps == kMeasured);
+            INFO("phase totals (warm/velocity/store/position): ",
+                 a.phase_ns[0],
+                 "/",
+                 a.phase_ns[1],
+                 "/",
+                 a.phase_ns[2],
+                 "/",
+                 a.phase_ns[3]);
+            INFO("zero samples: ",
+                 a.zero_samples[0],
+                 "/",
+                 a.zero_samples[1],
+                 "/",
+                 a.zero_samples[2],
+                 "/",
+                 a.zero_samples[3]);
+            CHECK(has_phase_evidence(a));
+            for (std::size_t phase = 0; phase < phase_names.size(); ++phase) {
+                CAPTURE(phase_names[phase]);
+                Acc missing = a;
+                missing.phase_ns[phase] = 0;
+                CHECK_FALSE(has_phase_evidence(missing));
+            }
+        }
+    }
 
     // FALSIFICATION that the instrument can see a difference at all: the velocity phase runs 8
     // iterations over the island's constraints, store_impulses is one pass over them, so velocity

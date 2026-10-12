@@ -1,0 +1,406 @@
+{
+  "benchmark": "solver_bench",
+  "measurement_date": "2026-10-12",
+  "source": "Five alternating A/B pairs retained by personal-profile Claude Opus 5.5; each sample uses the minimum of five internal repeats. Owner independently reparsed raw log.",
+  "baseline_commit": "ad7c163",
+  "locals_commit": "b1d06e9",
+  "preset": "release",
+  "cmake_build_type": "RelWithDebInfo",
+  "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
+  "bodies": 448,
+  "steps": 32,
+  "repeats": 5,
+  "seed": 1369956643,
+  "samples": [
+    {
+      "variant": "baseline",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 15283.0,
+          "min": 15133.398,
+          "max": 15651.473
+        },
+        "velocity_us": {
+          "median": 13214.571,
+          "min": 13076.69,
+          "max": 13575.086
+        },
+        "us_per_constraint": {
+          "median": 3.435926,
+          "min": 3.400075,
+          "max": 3.529664
+        },
+        "us_per_velocity_iteration": {
+          "median": 1651.821375,
+          "min": 1634.58625,
+          "max": 1696.88575
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "locals",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 13549.503,
+          "min": 13496.024,
+          "max": 14218.361
+        },
+        "velocity_us": {
+          "median": 11478.647,
+          "min": 11438.426,
+          "max": 12109.023
+        },
+        "us_per_constraint": {
+          "median": 2.984568,
+          "min": 2.97411,
+          "max": 3.148472
+        },
+        "us_per_velocity_iteration": {
+          "median": 1434.830875,
+          "min": 1429.80325,
+          "max": 1513.627875
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "baseline",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 15070.326,
+          "min": 14677.382,
+          "max": 15546.78
+        },
+        "velocity_us": {
+          "median": 13034.099,
+          "min": 12683.285,
+          "max": 13265.621
+        },
+        "us_per_constraint": {
+          "median": 3.389001,
+          "min": 3.297786,
+          "max": 3.449199
+        },
+        "us_per_velocity_iteration": {
+          "median": 1629.262375,
+          "min": 1585.410625,
+          "max": 1658.202625
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "locals",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 13378.4,
+          "min": 13334.32,
+          "max": 13569.062
+        },
+        "velocity_us": {
+          "median": 11343.474,
+          "min": 11294.913,
+          "max": 11504.344
+        },
+        "us_per_constraint": {
+          "median": 2.949421,
+          "min": 2.936795,
+          "max": 2.991249
+        },
+        "us_per_velocity_iteration": {
+          "median": 1417.93425,
+          "min": 1411.864125,
+          "max": 1438.043
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "baseline",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 14788.401,
+          "min": 14682.6,
+          "max": 15425.177
+        },
+        "velocity_us": {
+          "median": 12760.165,
+          "min": 12687.284,
+          "max": 13377.96
+        },
+        "us_per_constraint": {
+          "median": 3.317776,
+          "min": 3.298826,
+          "max": 3.478409
+        },
+        "us_per_velocity_iteration": {
+          "median": 1595.020625,
+          "min": 1585.9105,
+          "max": 1672.245
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "locals",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 13590.601,
+          "min": 13547.489,
+          "max": 13604.761
+        },
+        "velocity_us": {
+          "median": 11509.434,
+          "min": 11470.213,
+          "max": 11528.544
+        },
+        "us_per_constraint": {
+          "median": 2.992573,
+          "min": 2.982375,
+          "max": 2.997541
+        },
+        "us_per_velocity_iteration": {
+          "median": 1438.67925,
+          "min": 1433.776625,
+          "max": 1441.068
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "baseline",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 15296.273,
+          "min": 15202.992,
+          "max": 15435.714
+        },
+        "velocity_us": {
+          "median": 13216.866,
+          "min": 13135.065,
+          "max": 13282.077
+        },
+        "us_per_constraint": {
+          "median": 3.436523,
+          "min": 3.415254,
+          "max": 3.453478
+        },
+        "us_per_velocity_iteration": {
+          "median": 1652.10825,
+          "min": 1641.883125,
+          "max": 1660.259625
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "locals",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 13292.406,
+          "min": 13076.204,
+          "max": 13674.969
+        },
+        "velocity_us": {
+          "median": 11287.37,
+          "min": 11076.739,
+          "max": 11594.721
+        },
+        "us_per_constraint": {
+          "median": 2.934834,
+          "min": 2.880067,
+          "max": 3.014748
+        },
+        "us_per_velocity_iteration": {
+          "median": 1410.92125,
+          "min": 1384.592375,
+          "max": 1449.340125
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "baseline",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 15383.452,
+          "min": 14699.226,
+          "max": 15426.491
+        },
+        "velocity_us": {
+          "median": 13290.925,
+          "min": 12694.94,
+          "max": 13354.455
+        },
+        "us_per_constraint": {
+          "median": 3.455779,
+          "min": 3.300816,
+          "max": 3.472297
+        },
+        "us_per_velocity_iteration": {
+          "median": 1661.365625,
+          "min": 1586.8675,
+          "max": 1669.306875
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "locals",
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 13311.644,
+          "min": 13060.332,
+          "max": 13643.556
+        },
+        "velocity_us": {
+          "median": 11241.818,
+          "min": 11052.036,
+          "max": 11562.621
+        },
+        "us_per_constraint": {
+          "median": 2.92299,
+          "min": 2.873644,
+          "max": 3.006402
+        },
+        "us_per_velocity_iteration": {
+          "median": 1405.22725,
+          "min": 1381.5045,
+          "max": 1445.327625
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    }
+  ],
+  "summary": {
+    "baseline": {
+      "us_per_constraint": {
+        "min": 3.297786,
+        "median": 3.300816,
+        "max": 3.415254
+      },
+      "velocity_us": {
+        "min": 12683.285,
+        "median": 12694.94,
+        "max": 13135.065
+      },
+      "solve_us": {
+        "min": 14677.382,
+        "median": 14699.226,
+        "max": 15202.992
+      }
+    },
+    "locals": {
+      "us_per_constraint": {
+        "min": 2.873644,
+        "median": 2.936795,
+        "max": 2.982375
+      },
+      "velocity_us": {
+        "min": 11052.036,
+        "median": 11294.913,
+        "max": 11470.213
+      },
+      "solve_us": {
+        "min": 13060.332,
+        "median": 13334.32,
+        "max": 13547.489
+      }
+    }
+  },
+  "velocity_speedup_ratio_of_mins": 1.1475972667456371,
+  "additional_seed_hash_checks": [
+    {
+      "seed": 1,
+      "binary": "baseline",
+      "world_hash_step1": 17418870239713108330,
+      "world_hash_last": 7257968575343334740
+    },
+    {
+      "seed": 1,
+      "binary": "locals",
+      "world_hash_step1": 17418870239713108330,
+      "world_hash_last": 7257968575343334740
+    },
+    {
+      "seed": 123456789,
+      "binary": "baseline",
+      "world_hash_step1": 12487114463205084597,
+      "world_hash_last": 8680856396528271516
+    },
+    {
+      "seed": 123456789,
+      "binary": "locals",
+      "world_hash_step1": 12487114463205084597,
+      "world_hash_last": 8680856396528271516
+    },
+    {
+      "seed": 4294967295,
+      "binary": "baseline",
+      "world_hash_step1": 6620338830336262915,
+      "world_hash_last": 14669144025873388557
+    },
+    {
+      "seed": 4294967295,
+      "binary": "locals",
+      "world_hash_step1": 6620338830336262915,
+      "world_hash_last": 14669144025873388557
+    }
+  ],
+  "limits": [
+    "CPU velocity-phase throughput only; real-frame speedup unmeasured.",
+    "Hashes cover steps 1 and 32 of the first internal repeat; they do not observe every intermediate state.",
+    "Historical sample min/median values are independently parsed, not newly timed during continuation."
+  ]
+}
