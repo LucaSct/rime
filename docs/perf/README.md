@@ -725,3 +725,31 @@ Two cautions, measured:
 produces is acceptable (the 29 claims cannot say, by the section above), and why it failed peer
 destruction-state agreement on the real sample (600 of 600 quiet ticks). The bench prices the lever;
 it does not license it.
+
+### Tier 1b — keep the constraint's velocity rows in locals. Bit-identical, ~1.15x on the bench (2026-10-12)
+
+Inside one `ContactConstraint` only bodies `a` and `b` are touched, yet `apply_impulse` read and
+wrote their four velocity rows (`v`/`ω` of each) through memory on every impulse, and `rel_velocity`
+re-read them for every normal and tangent solve. `solve_velocities` now loads those rows — plus each
+body's `inv_mass`, `inv_inertia` and cached `inertia_orientation` — into locals once per constraint,
+applies the same operations in the same order to the locals, and stores the rows back once at the
+end of **each** constraint (so Gauss–Seidel order is untouched), and only for a dynamic body (so an
+immovable anchor's row is still never written — the M7.5 cross-island guarantee). `warm_start`
+still uses `apply_impulse` unchanged.
+
+**Bit-identity, measured:** `solver_bench`'s `world_hash` is the same before and after —
+step 1 `8259430909484038691`, last step `3498710367934836673` from both binaries.
+
+**Interleaved A/B, five alternating pairs**, release, step 1 (each sample is one run's min over its
+5 repeats):
+
+| | `main` (`ad7c163`) min / median | locals min / median | ratio of mins |
+|---|---|---|---|
+| us per constraint | 3.298 / 3.301 | **2.874 / 2.937** | **1.148x** |
+| `velocity_us` | 12 683 / 12 695 | **11 052 / 11 295** | 1.148x |
+| whole `solve_us` | 14 677 / 14 699 | 13 060 / 13 334 | 1.124x |
+
+The two populations do not overlap (worst locals run 2.982, best `main` run 3.298), so this is well
+outside the bench's ±4 % per-run noise. **Caveat:** the bench's phase mix is not the real tail's —
+velocity is 86.9 % of solve here against 94.0 % in `99-the-block` — so this is a per-constraint
+velocity-phase number, not a prediction of the real frame's solve time.

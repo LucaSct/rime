@@ -346,13 +346,45 @@ inline void solve_velocities(const SolverBodies& bodies,
             const std::uint32_t ia = c.body_a;
             const std::uint32_t ib = c.body_b;
 
+            // CONSTRAINT-LOCAL VELOCITY ROWS — the standard sequential-impulse trick of keeping a
+            // constraint's two bodies' velocities in registers for the whole constraint. Every
+            // point's normal and friction solve touches exactly these four rows (v/ω of a and b),
+            // and nothing else in this constraint can, so they are loaded once here, updated in
+            // locals, and stored once at the end instead of round-tripping memory per impulse.
+            // This is ARITHMETICALLY IDENTICAL, not an approximation: the same operations run in
+            // the same order on the same values, only the storage moved. Gauss–Seidel order is
+            // untouched because the store happens at the end of EACH constraint, so the next
+            // constraint still reads every earlier one's updates from memory. And the M7.5 guard
+            // carries over unchanged (see apply_impulse): an immovable body (inv_mass == 0) is
+            // neither updated nor STORED, so its velocity rows stay strictly read-only and islands
+            // sharing a static or kinematic anchor never write the same row.
+            core::Vec3 va = bodies.linear_velocity[ia];
+            core::Vec3 wa = bodies.angular_velocity[ia];
+            core::Vec3 vb = bodies.linear_velocity[ib];
+            core::Vec3 wb = bodies.angular_velocity[ib];
+            const float ima = bodies.inv_mass[ia];
+            const float imb = bodies.inv_mass[ib];
+            const core::Vec3 iia = bodies.inv_inertia[ia];
+            const core::Vec3 iib = bodies.inv_inertia[ib];
+            const core::Quat qa = bodies.inertia_orientation[ia];
+            const core::Quat qb = bodies.inertia_orientation[ib];
+
             // Relative velocity of the contact point on b w.r.t. the point on a: a POSITIVE
             // normal component means separating (the normal points a → b).
             const auto rel_velocity = [&](const ContactPointConstraint& p) {
-                return (bodies.linear_velocity[ib] +
-                        core::cross(bodies.angular_velocity[ib], p.r_b)) -
-                       (bodies.linear_velocity[ia] +
-                        core::cross(bodies.angular_velocity[ia], p.r_a));
+                return (vb + core::cross(wb, p.r_b)) - (va + core::cross(wa, p.r_a));
+            };
+
+            // apply_impulse on the locals: the same ± pair, the same guards, the same order.
+            const auto apply_local = [&](core::Vec3 r_a, core::Vec3 r_b, core::Vec3 p) {
+                if (ima > 0.0f) {
+                    va -= p * ima;
+                    wa -= apply_inv_inertia(qa, iia, core::cross(r_a, p));
+                }
+                if (imb > 0.0f) {
+                    vb += p * imb;
+                    wb += apply_inv_inertia(qb, iib, core::cross(r_b, p));
+                }
             };
 
             // Normal constraint: drive vₙ to the bias (0, or the restitution target).
@@ -368,7 +400,7 @@ inline void solve_velocities(const SolverBodies& bodies,
                 const float accumulated = std::max(p.normal_impulse + delta, 0.0f);
                 const float applied = accumulated - p.normal_impulse;
                 p.normal_impulse = accumulated;
-                apply_impulse(bodies, ia, ib, p.r_a, p.r_b, c.normal * applied);
+                apply_local(p.r_a, p.r_b, c.normal * applied);
             }
 
             // FRICTION PYRAMID, solved after the normals so the bound |λ_t| ≤ μ·λₙ uses this
@@ -386,8 +418,17 @@ inline void solve_velocities(const SolverBodies& bodies,
                         std::clamp(p.tangent_impulse[t] + delta, -max_friction, max_friction);
                     const float applied = accumulated - p.tangent_impulse[t];
                     p.tangent_impulse[t] = accumulated;
-                    apply_impulse(bodies, ia, ib, p.r_a, p.r_b, c.tangent[t] * applied);
+                    apply_local(p.r_a, p.r_b, c.tangent[t] * applied);
                 }
+            }
+
+            if (ima > 0.0f) {
+                bodies.linear_velocity[ia] = va;
+                bodies.angular_velocity[ia] = wa;
+            }
+            if (imb > 0.0f) {
+                bodies.linear_velocity[ib] = vb;
+                bodies.angular_velocity[ib] = wb;
             }
         }
     }
