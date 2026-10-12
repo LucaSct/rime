@@ -164,8 +164,9 @@ Verify proportionately to the change — don't re-run the whole world for every 
   holding a `std::vector<std::pair<std::string, T>>` — legal-looking, accepted by libstdc++, and
   ill-formed (`std::vector` permits an incomplete element type; `std::pair` does not). A
   GCC-only loop cannot see that class of bug. Reconstruct the flags from
-  `build/dev/compile_commands.json` so the check uses the real include paths. On this workstation (clang 22 +
-  libstdc++ 16) a **test** TU needs `-Wno-c2y-extensions -Wno-#warnings` added, or doctest's own
+  `build/dev/compile_commands.json` so the check uses the real include paths. On this workstation
+  (clang **23.1.1** as of 2026-10-12, libstdc++ 16) a **test** TU needs
+  `-Wno-c2y-extensions -Wno-#warnings` added, or doctest's own
   `__COUNTER__` and its `<ciso646>` include bury your diff under ~15 `-Werror` errors that fire on
   every untouched test file too — check an untouched file before believing the report.
 - **`--headless`'s claims are calibrated for its DEFAULT tick window — passing `--ticks` at all can

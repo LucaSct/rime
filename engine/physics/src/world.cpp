@@ -1251,17 +1251,20 @@ void PhysicsWorld::step(float dt) {
         p.build_contacts(manifolds, dt);
     }
 
+    // ---- 2.5 Fill the inertia-composite cache, BEFORE the solver's view of the bodies is built
+    // and before anything reads it. One sequential pass over ALL dense bodies, on this thread,
+    // outside every parallel region — statics are anchors shared between islands, so a per-island
+    // fill would be a cross-island write race on them. Same multiply, same operand order as the
+    // live 4-argument apply_inv_inertia, so the velocity phase is bit-identical to composing
+    // inline (tests/physics/solver_test.cpp asserts that identity bitwise).
+    for (std::size_t i = 0; i < p.orientation.size(); ++i) {
+        p.inertia_orientation[i] = p.orientation[i] * p.inertia_principal[i];
+    }
+
     // ---- 3. Prepare the contact constraints (solver.hpp). prepare_contact_constraint reads the
     // post-gravity velocities to fix each restitution bias, so it must precede any warm-start
     // impulse (the M7.4 ordering, preserved). Pairs with no dynamic participant are skipped — an
     // impulse could never move either end.
-    // Fill the inertia-composite cache: one sequential pass over ALL dense bodies, on this thread,
-    // outside every parallel region (statics are anchors shared between islands, so a per-island
-    // fill would be a cross-island write race). Same multiply, same operand order as the live
-    // 4-argument apply_inv_inertia, so the velocity phase is bit-identical to computing it inline.
-    for (std::size_t i = 0; i < p.orientation.size(); ++i) {
-        p.inertia_orientation[i] = p.orientation[i] * p.inertia_principal[i];
-    }
     SolverBodies bodies{p.position.data(),
                         p.orientation.data(),
                         p.linear_velocity.data(),
