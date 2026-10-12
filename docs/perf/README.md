@@ -598,3 +598,95 @@ and the comment needs correcting to say *velocity phase* rather than *per tick*.
 on 2026-10-11 — the same run-to-run spread the single-clock version sat inside, and run 1 was
 perturbed on `frame` p99 as well. No unprofiled control was taken in this sitting, so the instrument's
 own cost is bounded by that spread rather than isolated.
+
+## The 94 % phase has a 2.4x lever — and this sample CANNOT judge it (2026-10-12)
+
+The section above found the tail island is 94 % `solve_velocities`, and named the one quantity
+recomputed in its innermost loop: `apply_impulse` composing `q * inertia_principal` and doing two
+quaternion rotates on every impulse application, for a value that is constant across all 8 velocity
+iterations. Two tiers were built. **The first shipped. The second produced a number this sample is
+not able to measure, and finding that out is the more useful result.**
+
+### Tier 1 — cache the composite. Bit-identical, and worth ~5.5 %
+
+`SolverBodies::inertia_orientation` holds `orientation[i] * inertia_principal[i]`, filled once per
+step before the solver's view is built, used by `prepare_contact_constraint`, `warm_start` and
+`solve_velocities` and **never** by the NGS position pass. The 4-argument `apply_inv_inertia` is
+literally the 3-argument one applied to `q * principal`, so the cached path is the same float bits.
+
+**Measured:** `world_hash()` = `b287c43ece8868a5` before and after, over 300 steps of the
+colliding/rubbing/bouncing fixture — unchanged, so no FMA-contraction surprise and nothing
+re-baselined. Worst-step `velocity_ns` 5077 -> ~4800 us, i.e. **~5.5 %**.
+
+**The prediction that was wrong, recorded because it was wrong:** flop-counting said the compose was
+~20 % of the sweep. It is ~5.5 %. The cost is the two *rotates*, not the compose.
+
+### Tier 2 — the world inverse inertia as a 3x3. ~2.4x, and unshippable on this evidence
+
+`I_world^-1 = R diag(w) R^T = sum_k w_k (R e_k)(R e_k)^T`, built once per body per step, replacing the
+two rotates with one symmetric matvec. Same operator, different rounding.
+
+| | tier 1 | tier 2 | budget |
+|---|---|---|---|
+| `sim.block` p99 | 8.333 / 8.598 ms | **5.186 / 5.046 ms** | 6.000 |
+| `frame` p99 | 21.43 / 22.03 ms | **13.25 / 12.36 ms** | 16.600 |
+| gate verdict | FAILED | **"within budget"** | |
+
+**That table is not a gate closure, because the two columns are not simulating the same thing.**
+From the same runs' work ledgers:
+
+| | tier 1 | tier 2 | ratio |
+|---|---|---|---|
+| `physics.server.max_bodies` | 739 | 578 | **0.78** |
+| `physics.server.max_broadphase_pairs` | 4971 | 3435 | **0.69** |
+| `parts.alive_end` | 1314 | 1517 | 1.15 |
+| `debris.peak_live` | 636 | 458 | 0.72 |
+
+The building collapses **less** under tier 2, so a large part of 8.3 -> 5.1 ms is **less work, not
+faster work**. The only workload-normalised figure is per-constraint cost at matched step size
+(362 bodies, 1348 manifolds): **~3.6 -> ~1.5 us per constraint, ~2.4x** on the sweep. That is the
+honest size of the lever, and even it comes from steps on two different trajectories.
+
+Tier 2 also fails **2 of the 29** `--headless` claims — `net: the peers' destruction state hashes
+agree` and `they agreed WITHIN the settle bound`: the peers never converged (600 of 600 quiet ticks,
+710 replication ticks and 3816 ops against tier 1's 160 and 2391). Inside a single world it *is*
+deterministic — the physics tests pass, thread-count hash equality included.
+
+### The control that makes this a finding about the MEASUREMENT, not about the 3x3
+
+Take tier 1 and perturb it by something that is **mathematically a no-op**: normalise an already-unit
+quaternion in the fill. Nothing changes but the low bits.
+
+**It also fails 2 of 29 claims — and DIFFERENT ones:** `collapse: the far side of the street is
+untouched` and `most of the block is still standing`, i.e. the block collapsed **more** and debris
+crossed the street. The peers did converge, at 407 quiet ticks, but took 6535 ops.
+
+Two last-bit-scale changes, two materially different collapses, **in opposite directions**. So:
+
+- **`99-the-block`'s 29 claims cannot gate a non-bit-identical solver change.** They are threshold
+  assertions on a chaotic fracture cascade and they flip on the last bit, in whichever direction the
+  cascade happens to go. A pass is not evidence the change is good and a failure is not evidence it
+  is bad.
+- **Neither can its perf numbers.** The workload moves with the rounding — 22 % fewer bodies, 31 %
+  fewer broadphase pairs — so an A/B between two non-bit-identical solvers on this sample is not a
+  comparison of solver cost at all. This is the same trap as a near-null proof without a sensitivity
+  control, arriving from the other side: here the instrument is *saturated* by the thing it is
+  measuring.
+- **A bit-identical change is immune to all of it**, which is why tier 1's unchanged `world_hash()`
+  is the whole of its proof and why it could ship tonight.
+
+### Decision (owner, 2026-10-12): a fixed-workload solver bench comes first
+
+Every lever with real headroom — tier 2, graph colouring, SIMD within a colour, the 8/2 -> 4/1
+iteration cut — is non-bit-identical, and none of them can currently be evaluated. So the next brick
+is a **deterministic solver benchmark with chaos removed**: a frozen rubble pile, a fixed body set,
+fracture disabled, measuring solver cost per constraint and per iteration. Tier 2 and every later
+solver change get priced there.
+
+Two things that bench does **not** settle, recorded so they are not quietly assumed:
+
+- it does not make the 29 claims robust, so *shipping* a non-bit-identical solver still needs a
+  separate decision about whether a re-tuned collapse is acceptable;
+- it does not explain tier 2's peer-agreement failure. On this evidence that is most likely another
+  face of the same divergence (the probe diverged too, and merely settled inside the bound), but it
+  is **not proven** to be, and a shipping decision would have to close it.

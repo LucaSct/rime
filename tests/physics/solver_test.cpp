@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -14,6 +15,7 @@
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/physics.hpp"
+#include "solver.hpp" // PRIVATE header: the bitwise-identity test below reaches under the seam
 
 // M7.4 proofs: the sequential-impulse solver turns contact manifolds into believable motion. All
 // structural/analytic and pure-CPU, in the house pattern: rest heights against closed forms,
@@ -443,4 +445,54 @@ TEST_CASE("a colliding, rubbing, bouncing scene is bit-identical run to run") {
         return hash_states(w, ids);
     };
     CHECK(run() == run());
+}
+
+// The velocity-phase inertia cache (SolverBodies::inertia_orientation) is only legitimate if
+// composing q * principal ONCE and calling the 3-argument overload is the same float bits as the
+// 4-argument form that composes inline on every call. It is the same arithmetic on the same
+// operands, so the claim is bitwise -- compared as bit patterns, never with a tolerance. This is
+// the portable half of the proof; the world hash before/after the change is the other, and is
+// deliberately not pinned as a constant (cross-compiler float identity is not a project claim).
+//
+// Not asserted here, on purpose: that the cache is "fresh" after step(). It is NOT -- it is filled
+// before pose integration, so once step() returns it holds the PRE-integration composite, one step
+// behind `orientation`. It lives in PhysicsWorld::Impl, unreachable from the public seam this
+// suite drives, and the invariant it must keep (constant across the velocity phase) is exactly
+// what the unchanged world hash and the determinism witnesses above observe.
+TEST_CASE("the cached inertia composite is bit-identical to composing inline") {
+    const auto bits = [](float f) { return std::bit_cast<std::uint32_t>(f); };
+    const std::array<core::Quat, 5> orientations = {
+        core::quat_identity(),
+        core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, 0.3f),
+        core::quat_from_axis_angle(core::normalize(core::Vec3{1.0f, 2.0f, -0.5f}), 1.9f),
+        core::quat_from_axis_angle({0.0f, 0.0f, 1.0f}, -2.7f),
+        core::quat_from_axis_angle(core::normalize(core::Vec3{-3.0f, 0.1f, 1.0f}), 0.011f)};
+    const std::array<core::Quat, 4> principals = {
+        core::quat_identity(),
+        core::quat_from_axis_angle(core::normalize(core::Vec3{1.0f, 1.0f, 1.0f}), 0.8f),
+        core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, 1.5707963f),
+        core::quat_from_axis_angle(core::normalize(core::Vec3{0.2f, -1.0f, 0.7f}), -0.37f)};
+    const std::array<core::Vec3, 3> inv_inertias = {
+        core::Vec3{1.5f, 0.25f, 4.0f}, core::Vec3{0.0f, 0.0f, 0.0f}, core::Vec3{2.0f, 2.0f, 2.0f}};
+    const std::array<core::Vec3, 4> inputs = {core::Vec3{0.3f, -1.2f, 2.5f},
+                                              core::Vec3{1.0f, 0.0f, 0.0f},
+                                              core::Vec3{-7.1f, 3.3f, 0.01f},
+                                              core::Vec3{0.0f, 0.0f, 0.0f}};
+    int cases = 0;
+    for (const core::Quat& q : orientations) {
+        for (const core::Quat& pr : principals) {
+            const core::Quat composed = q * pr; // what the per-step fill computes
+            for (const core::Vec3& ii : inv_inertias) {
+                for (const core::Vec3& l : inputs) {
+                    const core::Vec3 live = physics::apply_inv_inertia(q, pr, ii, l);
+                    const core::Vec3 cached = physics::apply_inv_inertia(composed, ii, l);
+                    CHECK(bits(live.x) == bits(cached.x));
+                    CHECK(bits(live.y) == bits(cached.y));
+                    CHECK(bits(live.z) == bits(cached.z));
+                    ++cases;
+                }
+            }
+        }
+    }
+    CHECK(cases == 5 * 4 * 3 * 4);
 }

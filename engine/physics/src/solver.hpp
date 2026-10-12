@@ -84,6 +84,14 @@ struct SolverBodies {
     // eigendecomposition for a convex hull (ADR-0027). Together with the diagonal above it
     // carries a full inertia tensor without widening the solver's storage or math to 3×3.
     const core::Quat* inertia_principal = nullptr;
+    // The per-body composite orientation[i] * inertia_principal[i], filled ONCE per step by
+    // PhysicsWorld::step (world.cpp) just before this view is built, on the calling thread. VALID
+    // ONLY for the velocity phase (prepare_contact_constraint, warm_start, solve_velocities):
+    // those never write `orientation`, so the composite is constant across all their iterations.
+    // It is the PRE-integration value: the pose-integration loop rotates the bodies afterwards, so
+    // once step() returns this array is one step behind `orientation`. solve_positions must NOT
+    // read it — NGS rotates bodies mid-pass and re-reads the live pose (see apply_inv_inertia).
+    const core::Quat* inertia_orientation = nullptr;
     const float* friction = nullptr;    // Coulomb μ per body
     const float* restitution = nullptr; // bounciness e per body
 };
@@ -105,10 +113,15 @@ apply_inv_inertia(const core::Quat& q, core::Vec3 inv_inertia_body, core::Vec3 l
 // The full form for a shape whose principal axes are rotated within its body frame (a convex
 // hull, M7.11): I_world⁻¹ = R(q·p)·diag·R(q·p)ᵀ, because rotations compose right-to-left —
 // principal→body (p), then body→world (q). The compose costs one quaternion product per use and
-// is DELIBERATELY not cached per tick: the NGS position pass rotates bodies mid-pass and
-// re-reads their orientation (that is what "non-linear" buys), so any cached composite would go
-// stale exactly where the correction math matters. For primitives p is identity and the result
-// is the diagonal path's, unchanged.
+// is cached for the VELOCITY PHASE only (SolverBodies::inertia_orientation, filled once per step
+// in world.cpp): prepare_contact_constraint, warm_start and solve_velocities all run before the
+// pose-integration loop and write no orientation, so across every velocity iteration a body's
+// composite is a constant, and recomputing it per impulse was pure waste (the 3-argument overload
+// above is the same arithmetic on a pre-composed q, so the cached path is bit-identical). It is
+// DELIBERATELY not used by the NGS position pass: that pass rotates bodies mid-pass and re-reads
+// their orientation (that is what "non-linear" buys), so a cached composite would go stale
+// exactly where the correction math matters — solve_positions keeps this live 4-argument form.
+// For primitives p is identity and the result is the diagonal path's, unchanged.
 [[nodiscard]] inline core::Vec3 apply_inv_inertia(const core::Quat& q,
                                                   const core::Quat& principal,
                                                   core::Vec3 inv_inertia_body,
@@ -189,17 +202,13 @@ inline void apply_impulse(const SolverBodies& bodies,
     // what the unguarded code produced.
     if (bodies.inv_mass[ia] > 0.0f) {
         bodies.linear_velocity[ia] -= p * bodies.inv_mass[ia];
-        bodies.angular_velocity[ia] -= apply_inv_inertia(bodies.orientation[ia],
-                                                         bodies.inertia_principal[ia],
-                                                         bodies.inv_inertia[ia],
-                                                         core::cross(r_a, p));
+        bodies.angular_velocity[ia] -= apply_inv_inertia(
+            bodies.inertia_orientation[ia], bodies.inv_inertia[ia], core::cross(r_a, p));
     }
     if (bodies.inv_mass[ib] > 0.0f) {
         bodies.linear_velocity[ib] += p * bodies.inv_mass[ib];
-        bodies.angular_velocity[ib] += apply_inv_inertia(bodies.orientation[ib],
-                                                         bodies.inertia_principal[ib],
-                                                         bodies.inv_inertia[ib],
-                                                         core::cross(r_b, p));
+        bodies.angular_velocity[ib] += apply_inv_inertia(
+            bodies.inertia_orientation[ib], bodies.inv_inertia[ib], core::cross(r_b, p));
     }
 }
 
@@ -231,8 +240,9 @@ inline void apply_impulse(const SolverBodies& bodies,
     const float imb = bodies.inv_mass[body_b];
     const core::Vec3 iia = bodies.inv_inertia[body_a];
     const core::Vec3 iib = bodies.inv_inertia[body_b];
-    const core::Quat pia = bodies.inertia_principal[body_a];
-    const core::Quat pib = bodies.inertia_principal[body_b];
+    const core::Quat qia =
+        bodies.inertia_orientation[body_a]; // cached q * principal (velocity phase)
+    const core::Quat qib = bodies.inertia_orientation[body_b];
 
     ContactConstraint c;
     c.body_a = body_a;
@@ -259,9 +269,9 @@ inline void apply_impulse(const SolverBodies& bodies,
         // velocity error" into an impulse with a single multiply.
         const auto effective_mass = [&](core::Vec3 d) {
             const core::Vec3 ang_a =
-                core::cross(apply_inv_inertia(qa, pia, iia, core::cross(out.r_a, d)), out.r_a);
+                core::cross(apply_inv_inertia(qia, iia, core::cross(out.r_a, d)), out.r_a);
             const core::Vec3 ang_b =
-                core::cross(apply_inv_inertia(qb, pib, iib, core::cross(out.r_b, d)), out.r_b);
+                core::cross(apply_inv_inertia(qib, iib, core::cross(out.r_b, d)), out.r_b);
             const float k_d = ima + imb + core::dot(ang_a + ang_b, d);
             return k_d > 0.0f ? 1.0f / k_d : 0.0f;
         };

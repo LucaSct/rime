@@ -126,6 +126,10 @@ struct PhysicsWorld::Impl {
     // primitives, a hull's registration-time eigendecomposition otherwise. Composed with the
     // orientation wherever the inverse inertia is applied (solver.hpp).
     std::vector<core::Quat> inertia_principal;
+    // orientation[i] * inertia_principal[i], rebuilt once per step() before the solver view is
+    // made (see SolverBodies::inertia_orientation for what it is and is not valid for). Derived
+    // scratch: never hashed, never serialised, but kept the same length as its siblings.
+    std::vector<core::Quat> inertia_orientation;
     std::vector<std::uint8_t> motion;
     std::vector<float> linear_damping;
     std::vector<float> angular_damping;
@@ -983,6 +987,7 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     p.inv_mass.push_back(im);
     p.inv_inertia.push_back(ii);
     p.inertia_principal.push_back(principal);
+    p.inertia_orientation.push_back(orient * principal);
     p.motion.push_back(motion8);
     p.linear_damping.push_back(d.linear_damping);
     p.angular_damping.push_back(d.angular_damping);
@@ -1027,6 +1032,7 @@ void PhysicsWorld::destroy_body(BodyId id) {
         p.inv_mass[d] = p.inv_mass[last];
         p.inv_inertia[d] = p.inv_inertia[last];
         p.inertia_principal[d] = p.inertia_principal[last];
+        p.inertia_orientation[d] = p.inertia_orientation[last];
         p.motion[d] = p.motion[last];
         p.linear_damping[d] = p.linear_damping[last];
         p.angular_damping[d] = p.angular_damping[last];
@@ -1050,6 +1056,7 @@ void PhysicsWorld::destroy_body(BodyId id) {
     p.inv_mass.pop_back();
     p.inv_inertia.pop_back();
     p.inertia_principal.pop_back();
+    p.inertia_orientation.pop_back();
     p.motion.pop_back();
     p.linear_damping.pop_back();
     p.angular_damping.pop_back();
@@ -1244,6 +1251,16 @@ void PhysicsWorld::step(float dt) {
         p.build_contacts(manifolds, dt);
     }
 
+    // ---- 2.5 Fill the inertia-composite cache, BEFORE the solver's view of the bodies is built
+    // and before anything reads it. One sequential pass over ALL dense bodies, on this thread,
+    // outside every parallel region — statics are anchors shared between islands, so a per-island
+    // fill would be a cross-island write race on them. Same multiply, same operand order as the
+    // live 4-argument apply_inv_inertia, so the velocity phase is bit-identical to composing
+    // inline (tests/physics/solver_test.cpp asserts that identity bitwise).
+    for (std::size_t i = 0; i < p.orientation.size(); ++i) {
+        p.inertia_orientation[i] = p.orientation[i] * p.inertia_principal[i];
+    }
+
     // ---- 3. Prepare the contact constraints (solver.hpp). prepare_contact_constraint reads the
     // post-gravity velocities to fix each restitution bias, so it must precede any warm-start
     // impulse (the M7.4 ordering, preserved). Pairs with no dynamic participant are skipped — an
@@ -1255,6 +1272,7 @@ void PhysicsWorld::step(float dt) {
                         p.inv_mass.data(),
                         p.inv_inertia.data(),
                         p.inertia_principal.data(),
+                        p.inertia_orientation.data(),
                         p.friction.data(),
                         p.restitution.data()};
     std::vector<ContactConstraint> constraints;

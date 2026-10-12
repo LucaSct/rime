@@ -164,10 +164,22 @@ Verify proportionately to the change — don't re-run the whole world for every 
   holding a `std::vector<std::pair<std::string, T>>` — legal-looking, accepted by libstdc++, and
   ill-formed (`std::vector` permits an incomplete element type; `std::pair` does not). A
   GCC-only loop cannot see that class of bug. Reconstruct the flags from
-  `build/dev/compile_commands.json` so the check uses the real include paths. On this workstation (clang 22 +
-  libstdc++ 16) a **test** TU needs `-Wno-c2y-extensions -Wno-#warnings` added, or doctest's own
+  `build/dev/compile_commands.json` so the check uses the real include paths. On this workstation
+  (clang **23.1.1** as of 2026-10-12, libstdc++ 16) a **test** TU needs
+  `-Wno-c2y-extensions -Wno-#warnings` added, or doctest's own
   `__COUNTER__` and its `<ciso646>` include bury your diff under ~15 `-Werror` errors that fire on
   every untouched test file too — check an untouched file before believing the report.
+- **The 29 `--headless` claims CANNOT gate a change that moves the last bit, and neither can the
+  sample's perf numbers.** They are threshold assertions on a chaotic fracture cascade. Measured
+  2026-10-12: a perturbation that is mathematically a *no-op* (normalising an already-unit
+  quaternion in a solver cache) failed 2 of 29 claims by collapsing the block MORE, while a
+  different non-bit-identical solver change failed 2 *other* claims by collapsing it LESS — and
+  moved the workload with it, 22 % fewer bodies and 31 % fewer broadphase pairs, which poisons any
+  perf A/B between two such changes. **So: a bit-identical change is proven by an unchanged
+  `world_hash()` and nothing else is needed; a non-bit-identical one cannot be judged on this
+  sample at all** and needs a fixed-workload bench (owner's call, 2026-10-12 — see
+  [`docs/perf/README.md`](docs/perf/README.md)). A green 29/29 is not evidence such a change is
+  good, and a red one is not evidence it is bad.
 - **`--headless`'s claims are calibrated for its DEFAULT tick window — passing `--ticks` at all can
   fail them innocently.** `99-the-block --headless` asserts 29 claims about a scripted beat, and
   they are end-state claims: too SHORT and the charge never fires (m19.4 read five failures off
