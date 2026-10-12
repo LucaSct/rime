@@ -242,10 +242,26 @@ struct WorldStats {
 
 // One ACTIVE island's solve cost in the last step (see WorldStats::island_solve_ns_total).
 struct IslandSolveCost {
-    std::uint32_t island = 0;      // partition number: islands are numbered by lowest dense body
-    std::uint32_t bodies = 0;      // dynamic bodies in the island
-    std::uint32_t constraints = 0; // contact constraints (points) in the island
+    std::uint32_t island = 0; // partition number: islands are numbered by lowest dense body
+    std::uint32_t bodies = 0; // dynamic bodies in the island
+    // One entry per contact MANIFOLD, not per contact point: world.cpp pushes one
+    // ContactConstraint per manifold and each carries up to four points, so an island's solver
+    // work is this number times its points, not this number. The old comment here said "(points)"
+    // and was wrong, which matters as soon as anyone prices a solver change off it.
+    std::uint32_t constraints = 0;
     std::uint64_t solve_ns = 0; // wall time of that island's solve only, on the thread that ran it
+    // The same solve split into its phases. Like solve_ns these are wall-clock, machine-dependent,
+    // NEVER in world_hash(), and zero unless set_island_profile_enabled(true). They exist to size
+    // two opposite levers with one number: velocity_ns / solve_ns is the share a change to the
+    // velocity sweep can touch, which prices "fewer iterations" (cheap, costs quality) against
+    // "hoist repeated per-iteration work out of the sweep" (quality-neutral, more work); and
+    // velocity_ns / kVelocityIterations is the cost of ONE velocity iteration, the unit any
+    // iteration-count change is priced in. The buckets need not sum to solve_ns (the gaps are the
+    // clock reads and loop overhead between them).
+    std::uint64_t warm_ns = 0;     // warm_start
+    std::uint64_t velocity_ns = 0; // solve_velocities (all kVelocityIterations)
+    std::uint64_t store_ns = 0;    // store_impulses
+    std::uint64_t position_ns = 0; // pose integration loop + solve_positions (the position half)
 };
 
 class PhysicsWorld {

@@ -168,6 +168,13 @@ Verify proportionately to the change — don't re-run the whole world for every 
   libstdc++ 16) a **test** TU needs `-Wno-c2y-extensions -Wno-#warnings` added, or doctest's own
   `__COUNTER__` and its `<ciso646>` include bury your diff under ~15 `-Werror` errors that fire on
   every untouched test file too — check an untouched file before believing the report.
+- **`--headless`'s claims are calibrated for its DEFAULT tick window — passing `--ticks` at all can
+  fail them innocently.** `99-the-block --headless` asserts 29 claims about a scripted beat, and
+  they are end-state claims: too SHORT and the charge never fires (m19.4 read five failures off
+  `--ticks 60` and spent time confirming them innocent), too LONG and the block keeps degrading past
+  the beat the claim describes (`--ticks 900` fails "collapse: most of the block is still standing"
+  on unmodified `main`). Two sessions have now misread the same flag in opposite directions. Run the
+  bare `--headless` for the gate; use `--ticks` only to look at something, never to judge.
 - **A `.ps1` is only verified by RUNNING it under `powershell.exe`** — a parse check is not the
   proof. Why, and the 10 weeks `setup.ps1` was dead: [`scripts/CLAUDE.md`](scripts/CLAUDE.md).
 - **A red `format, lint & license` on a PR that touched no Rust is probably not yours.** CI pins
