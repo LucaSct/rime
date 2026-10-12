@@ -26,7 +26,7 @@ rime_add_test(rime_physics_tests
 target_link_libraries(rime_physics_tests
     PRIVATE rime::physics)
 
-# gjk_test.cpp is the ONE test that reaches below the PhysicsWorld seam, into engine/physics/src.
+# gjk_test.cpp (and, for one bitwise-identity case, solver_test.cpp) reach below the PhysicsWorld seam, into engine/physics/src.
 # The exception is deliberate and argued at the top of that file: the defect it gates lives in a
 # private header, and the layers above it mask the symptom on x86-64 — a 21,000-case sweep through
 # the public seam gives byte-identical results with the bug present and absent — so a seam-level
