@@ -4,6 +4,7 @@
 add_subdirectory(jobs_core_saturation) # M1.6: work-stealing job system saturating all cores
 add_subdirectory(00-hello-window)      # M2: open a native window, pump input (preview of M2.5)
 add_subdirectory(codec_bench)          # S0.3: measure the streaming codecs (raw/LZ4/JPEG); GPU-free
+add_subdirectory(solver_bench)         # Fixed-workload, GPU-free physics solver timing
 add_subdirectory(05-ecs-playground)    # M4.6: 200k entities in parallel + transforms composing; GPU-free
 add_subdirectory(09-physics-playground) # M7.8: M7's "done when" — fall/collide/stack, raycast, parallel fixed tick; GPU-free
 add_subdirectory(12-networked-destruction) # M11.7: M11's "done when" — a server + two clients agree on a broken wall; GPU-free
