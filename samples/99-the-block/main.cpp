@@ -2904,7 +2904,11 @@ int run_perf(const std::filesystem::path& cooked,
                     static_cast<unsigned long long>(e.position_ns / 1000));
             }
             // The number the phase split exists for: of the biggest island's solve, how much is the
-            // velocity sweep, and what ONE velocity iteration costs (kVelocityIterations = 8).
+            // velocity sweep, and what ONE velocity iteration costs. The 8 below is
+            // `kVelocityIterations` from engine/physics/src/solver.hpp, which is a PRIVATE header
+            // the sample cannot include -- so it is duplicated here and must be changed with it.
+            // A stale copy would not fail to build, it would quietly misprice the one number this
+            // line exists to report.
             const physics::IslandSolveCost* big = &isl.front();
             for (const physics::IslandSolveCost& e : isl) {
                 if (e.solve_ns > big->solve_ns) {

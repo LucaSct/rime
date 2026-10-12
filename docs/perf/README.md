@@ -501,3 +501,100 @@ from `physics.worst_step_island_ns_*`.
 - **`--island-profile` runs must never be filed as baselines.** The flag reads a clock once per active
   island: off the per-constraint path and small, but not free. `sim.block` p99 read 8.416 and 8.467 ms
   on the two profiled runs against 8.533 unprofiled, i.e. inside run-to-run spread either way.
+
+## The tail island is 94 % VELOCITY SWEEP — phase split, and what the consult said (2026-10-12)
+
+The section above bounded island-level parallelism at **1.000x**: the worst solve step of
+`99-the-block` is one island and that island *is* the whole solve. That says what cannot help. This
+says where the time actually is. `--island-profile` now splits one island's solve into its four
+phases — `warm_start`, `solve_velocities` (all `kVelocityIterations = 8`), `store_impulses`, and the
+position half (the pose integration loop plus `solve_positions`' 2 NGS iterations).
+
+**Measured, Release, `the_block --perf --frames 600 --island-profile`, two runs:**
+
+| phase | run 2 (362 bodies, 1348 manifolds) | share | run 1 (574 bodies, 1195 manifolds) | share |
+|---|---|---|---|---|
+| `warm_start` | 165 us | 3.1 % | 90 us | 1.2 % |
+| **`solve_velocities`** | **4958 us** | **94.0 %** | **7013 us** | **94.3 %** |
+| `store_impulses` | 4 us | 0.1 % | 5 us | 0.1 % |
+| position half | 144 us | 2.7 % | 325 us | 4.4 % |
+| whole island | 5273 us | | 7435 us | |
+
+**ONE velocity iteration costs 619.8 us** on run 2's step (876.6 us on run 1's larger one). Run 2's
+step reproduces #312's 5275 us step exactly (362 bodies, 1348 manifolds); run 1 found a *different*,
+larger worst step and was visibly perturbed (frame p99 27.6 ms against 21.8 ms). **The runs disagree
+on which step was worst and agree on the split** — and the split is the measured quantity here, so
+the ~94 % is the result that carries, not the choice of step.
+
+So **every lever worth pricing is a lever on `solve_velocities`**, and the two that exist pull in
+opposite directions: fewer iterations (minutes to build, pays in simulation quality) against hoisting
+repeated per-iteration work out of the sweep (quality-neutral, more work). `velocity_ns / 8` is the
+unit the first one is priced in; the second is sized below.
+
+### What the consult proposed, and where I disagree with it
+
+`gpt-6-astra` was asked for its own ranked proposal with the measurement inlined and **no repo
+access** (record: `.consult-tail-island.md`; prompt and raw answer beside it). It ranked (1) cut
+8/2 -> 4/1 iterations, (2) hoist invariant work out of the sweep, (3) deterministic graph-coloured
+intra-island solving, and said it would **not** start by sleeping individual slow bodies.
+
+- **Accepted, and it changed the plan:** the sleep/split direction that the section above called
+  "more attractive than it looked" is *weaker* than it looked. A stationary body in that island can
+  be carrying the building's load — freezing it individually either invents a support or loses
+  support propagation, and a correct wake rule re-wakes the whole connected component anyway. "Most
+  of the island is under the sleep threshold" is headroom only if those bodies are not load paths,
+  and in a collapsing building they are exactly the load paths. The `largest_island_membership_changed`
+  instrument #311 built for that question is therefore **not** the next brick.
+- **Rejected:** its ordering, which is effort-first. `99-the-block` exists to demonstrate a building
+  that stands and then collapses believably, so the first lever tried should be one that cannot
+  change the picture; a quality-neutral change comes before a quality trade, and the iteration cut
+  becomes a priced fallback rather than an optimisation.
+- **Refuted from the source:** it flagged that a shared immovable ground might be unioning otherwise
+  independent dynamic components (which would be a cheap structural fix). It is not — static and
+  kinematic bodies are shared anchors and not island members, and a pair with no dynamic member never
+  becomes a constraint (`world.cpp` ~1266 and ~1284). The 362-body island is a genuinely connected
+  dynamic structure.
+- **Its framing correction that stuck:** the worst solve STEP need not be the tick that sets
+  `sim.block` p99, so "halve this step" does not imply "p99 drops by half of it". Now printed by the
+  instrument, and the answer is run-dependent: run 1's worst step was in the worst solve tick, run 2's
+  was not. **Known gap:** the tick compared against is the sample's largest summed physics-step tick,
+  not the `sim.block` p99 tick — the zone sink keeps no per-tick index, and this brick deliberately
+  did not add a timing path to get one.
+
+### The one thing the consult hedged on and was wrong about
+
+It warned candidate 2 might have "little headroom if preparation is already good". Preparation here
+*is* good: `prepare_contact_constraint` already caches effective mass, both tangent masses, the
+velocity bias, the tangent basis, the lever arms, combined friction and restitution, once per
+manifold per step. **One quantity is not cached, and it is recomputed in the innermost loop.**
+`apply_impulse` (`solver.hpp` ~177) calls the composed `apply_inv_inertia(orientation,
+inertia_principal, inv_inertia, r x p)` per body, which composes `q * principal` and then does two
+quaternion rotates — **on every impulse application**. The comment above it says the compose is
+*"DELIBERATELY not cached per tick: the NGS position pass rotates bodies mid-pass and re-reads their
+orientation"*. **That reason is true of `solve_positions` and false of `solve_velocities`:** nothing
+in the velocity sweep writes `orientation` — the integration loop that does runs *after* it, inside
+`solve_island` — so across all 8 iterations each body's orientation, its composite and its world
+inverse inertia are constant. Upper bound on the recompute (INFERRED, 1348 manifolds x <= 4 points x
+8 iterations x 3 impulses x 2 bodies): ~2.6e5 composes and ~5.2e5 quaternion rotates per step, for a
+quantity with **362** distinct values that do not change.
+
+That is 94 % of the tail, so the next brick is the hoist, in two tiers that must not be confused:
+
+- **tier 1, bit-identical:** cache `q * principal` per body for the velocity phase only. Same value,
+  so every rotate downstream is identical, so `world_hash()` does not move and no recorded hash is
+  re-baselined. Saves one quaternion product of the three operations.
+- **tier 2, faster and it re-baselines replay hashes:** build the symmetric world inverse inertia
+  once per body per step and replace the two rotates with a matvec. The same operator, not the same
+  rounding — so it is a deliberate one-time hash change and a decision to put to the owner with the
+  tier-1 number measured first.
+
+Either way NGS keeps reading the live orientation; that is what the existing comment is right about,
+and the comment needs correcting to say *velocity phase* rather than *per tick*.
+
+### Instrument cost
+
+`--island-profile` now reads four clocks per active island instead of one. Still never a baseline:
+`sim.block` p99 read 8.724 and 8.685 ms on the two profiled runs here, against 8.533 ms unprofiled
+on 2026-10-11 — the same run-to-run spread the single-clock version sat inside, and run 1 was
+perturbed on `frame` p99 as well. No unprofiled control was taken in this sitting, so the instrument's
+own cost is bounded by that spread rather than isolated.

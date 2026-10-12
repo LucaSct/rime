@@ -457,15 +457,12 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
             const std::uint64_t phases = c.warm_ns + c.velocity_ns + c.store_ns + c.position_ns;
             CHECK(phases <= c.solve_ns + c.solve_ns / 20 + 100);
         }
-        // Profile off means all of it is zero. (The profile is not published at all when off, so
-        // there is no entry whose four phase fields could be non-zero.)
+        // Profile off means all of it is zero -- and the phase fields are covered by the
+        // emptiness check below, NOT by a loop asserting they are zero. Profile-off publishes no
+        // entries at all, so such a loop runs zero times and reports PASS having inspected
+        // nothing, which is the house failure mode (a proof that cannot see what it skipped still
+        // reads as passing). Emptiness is the claim that can actually fail.
         const physics::WorldStats so = off.stats();
-        for (const physics::IslandSolveCost& c : off.island_solve_profile_last()) {
-            CHECK(c.warm_ns == 0);
-            CHECK(c.velocity_ns == 0);
-            CHECK(c.store_ns == 0);
-            CHECK(c.position_ns == 0);
-        }
         CHECK(off.island_solve_profile_last().empty());
         CHECK(so.island_solve_ns_total == 0);
         CHECK(so.largest_active_island_solve_ns == 0);
