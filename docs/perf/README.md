@@ -739,6 +739,10 @@ still uses `apply_impulse` unchanged.
 
 **Bit-identity, measured:** `solver_bench`'s `world_hash` is the same before and after —
 step 1 `8259430909484038691`, last step `3498710367934836673` from both binaries.
+These are the first internal repeat's step-1/step-32 checkpoints, rather than observations of
+every intermediate state. Three additional seeds also match at both checkpoints. The ten
+retained samples, independent summary, and additional hash checks are committed in
+[`2026-10-12-solver-bench-locals-b1d06e9.json`](2026-10-12-solver-bench-locals-b1d06e9.json).
 
 **Interleaved A/B, five alternating pairs**, release, step 1 (each sample is one run's min over its
 5 repeats):
@@ -753,3 +757,12 @@ The two populations do not overlap (worst locals run 2.982, best `main` run 3.29
 outside the bench's ±4 % per-run noise. **Caveat:** the bench's phase mix is not the real tail's —
 velocity is 86.9 % of solve here against 94.0 % in `99-the-block` — so this is a per-constraint
 velocity-phase number, not a prediction of the real frame's solve time.
+
+The attempted hardware frame report was rejected by `perf.sh`: graphics clocks ranged from
+210 to 1935 MHz (123.7% spread), and pinning them required unavailable sudo credentials.
+It supplies no comparable frame measurement. Windows CI separately exposed an invalid profiling
+test assumption: a monotonic clock may return equal readings around a short impulse-store pass.
+The test now requires positive cumulative evidence for every phase of each of the six islands,
+in both sequential and worker runs, over 120 measured steps. It retains per-step accounting and
+hash checks, and rejects each missing phase in sensitivity controls. Temporarily suppressing the
+actual store timer also failed the test; production timing was restored unchanged.
