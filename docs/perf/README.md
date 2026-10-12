@@ -690,3 +690,38 @@ Two things that bench does **not** settle, recorded so they are not quietly assu
 - it does not explain tier 2's peer-agreement failure. On this evidence that is most likely another
   face of the same divergence (the probe diverged too, and merely settled inside the bound), but it
   is **not proven** to be, and a shipping decision would have to close it.
+
+### What the bench then said about tier 2 — 2.2x, with the workload held still (2026-10-12)
+
+`samples/solver_bench` exists because of the section above. Its first job was to price the tier 2 the
+real sample could not. Release, 448 bodies and 3846 manifolds in ONE island, **step 1 — identical
+initial poses, therefore identical broadphase pairs and identical manifolds under either solver, by
+construction** (the bench asserts the step-1 workload is the same across repeats and refuses to
+report otherwise):
+
+| | tier 1 (`main`) | tier 2 (3x3, unshipped) | ratio |
+|---|---|---|---|
+| us per constraint | 3.333 – 3.472 | **1.503** | **2.2 – 2.3x** |
+| `velocity_us` | 12 819 – 13 352 | **5 779** | 2.2 – 2.3x |
+| whole `solve_us` | 14 826 – 15 451 | **7 507** | ~2.0x |
+
+**So the ~2.4x read off the real sample was real, and it was not an artefact of the lighter
+collapse** — it survives with the scene nailed down. The bench also reproduces tier 1's own size
+independently: 3.518 us per constraint at `fc0c56e` against 3.333 at `eaf2f62`, i.e. **5.3 %**, where
+the real sample read ~5.5 %.
+
+Two cautions, measured:
+
+- **The bench's own precision is about ±4 % per run, not ±1 %.** Two runs of the *same binary* two
+  minutes apart read 3.333 and 3.472 us per constraint. That is plenty to resolve a 2.2x lever and
+  **marginal for a 5 % one** — tier 1's 5.3 % here is at the edge of what three repeats can see. Use
+  more repeats, or a pinned CPU, before believing anything of that size.
+- **The pile's phase mix is not the real tail's.** The deliberate 5 mm overlap makes NGS heavier:
+  velocity is 86.9 % of solve here against 94.0 % on the real step, position 10.2 % against 2.7 %. So
+  this is a per-constraint *velocity-phase* instrument — which is what every open lever acts on — and
+  not a model of where a real frame's solve time sits.
+
+**What is still NOT answered, and must be before tier 2 could ship:** whether the collapse it
+produces is acceptable (the 29 claims cannot say, by the section above), and why it failed peer
+destruction-state agreement on the real sample (600 of 600 quiet ticks). The bench prices the lever;
+it does not license it.
