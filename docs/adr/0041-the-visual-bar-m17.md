@@ -588,7 +588,7 @@ The previous amendment's finding 1 — the block never hands its `PhysicsWorld` 
 true, and wiring it changes nothing measurable. Not because there is no parallelism available: at
 the tick that sets the tail there are 25–31 active islands and every step is dispatched. It is that
 **~92% of the awake bodies are in ONE island** (602 of 656 when first measured, 628 of 678 on the
-committed baseline). Amdahl's ceiling on island-level parallelism there is **1.09×** — under a
+committed baseline). Amdahl's ceiling on island-level parallelism there is **1.09×** *(SUPERSEDED 2026-10-11: that is a BODY share, and the measured time-based ceiling at the worst solve step is **1.000×** — one active island, nothing to divide. See `docs/perf/README.md`. The conclusion below is unchanged and better supported.)* — under a
 millisecond of a 29 ms frame, at the edge of the rig's run-to-run spread. A measurement finding
 nothing is exactly what that ceiling predicts.
 

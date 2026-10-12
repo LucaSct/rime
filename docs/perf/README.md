@@ -440,3 +440,64 @@ Three unique points worth acting on:
   throttling, power limits, kernel, compiler options, executable hash, workload hashes. Today's CPU
   fingerprint records model, governor, boost, L3 topology and clock spread; migrations and residency
   are the next most valuable and are not there yet.
+
+## The island-parallel ceiling is 1.000x, not 1.09x — measured per STEP (2026-10-11)
+
+The project has recorded, since ADR-0041, that island-level parallelism's ceiling on `99-the-block`
+is **1.09x**, derived from "~92 % of awake bodies sit in ONE island". Two independent reviews
+(`gpt-6-astra`, `claude-fable-5-1`, each asked for its own proposal without seeing the other's)
+rejected that derivation in the same words: **body share is not solver-time share.** They were right
+about the code — every island field on `WorldStats` was a body count, and #311 added the time.
+
+**Measured, Release, `the_block --perf --island-profile`, 600 frames:**
+
+| | time | bodies |
+|---|---|---|
+| serial fraction, worst solve STEP | **1.0000** | 1.0000 (362 of 362) |
+| island-parallel ceiling | **1.000x** | 1.000x |
+
+The most expensive solve step in the run has **ONE active island** — 362 bodies, 1348 constraints,
+**5275 us** — and that island *is* the whole solve. Two independent runs agree on the step's shape
+(5300 vs 5275 us, identical 362 bodies and 1348 constraints), so this is not one freak tick.
+
+**So the recorded figure was wrong in the OPTIMISTIC direction.** There is not 9 % of speedup waiting
+at the tail for a better scheduler; there is **none**. No island dispatch, chunk size, worker count or
+work-stealing policy can touch the tail step, because at the tail there is nothing to divide. Only
+**within-island** parallelism (graph colouring, a Jacobi/hybrid velocity solver) or **making the island
+smaller** (a sleep/split policy) can move it. That is a stronger statement than ADR-0041's and it
+rests on time rather than on a proxy.
+
+Note what the body share did at the step level: **it agreed exactly** (362 of 362). The proxy and the
+measurement coincide here only because the degenerate case has one island, so the agreement is not
+evidence the proxy works. The 1.09x came from a **tick-level** body share (597 of 632 = 0.944), and a
+tick is the wrong unit — see below.
+
+### A tick-level ratio is NOT a serial fraction, and the first version of this instrument got it wrong
+
+Worth recording because the wrong version is the one anybody would write first. My first metric
+accumulated `island_ns_total` as a **sum** over the tick's steps while taking `island_ns_largest` as a
+**max** over them. It reported a **2.040x** ceiling for a tick whose worst step had a true ceiling of
+**1.000x**.
+
+The reason: a tick runs a server step plus up to `kMaxCatchUpBatchesPerTick` client steps, **in
+sequence** (`physics.worst_tick_steps` = 2 on the tick in question). Amdahl's serial fraction is a
+property of ONE parallel region, and the parallel region here is one step's island dispatch. So
+max-over-steps / sum-over-steps lands near 0.5 for any two similar steps, whatever the solve looks
+like — it was measuring that there were two steps. The per-tick sums are still recorded, as
+`physics.worst_tick_island_ns_*`, labelled as totals and explicitly not a fraction; the bound comes
+from `physics.worst_step_island_ns_*`.
+
+### Consequences to act on
+
+- **ADR-0041's 1.09x and `docs/design/fluids-track-plan.md`'s copy of it are superseded** by this
+  measurement. The *conclusion* both drew — island parallelism cannot pay this down, the paydown is
+  within-island work under ADR-0026's determinism contract — stands, and is now better supported.
+- **The sleep/split direction is more attractive than it looked.** It is the only lever that reduces
+  the tail without a new solver, and `largest_island_membership_changed` (#311) exists to tell whether
+  the tail island is formed by a merge/wake event. **Not yet answered on the real sample.**
+- **A determinism contract is not a quality contract** (Fable's point, worth keeping): a Jacobi or
+  hybrid solver changes convergence and stacking stiffness, so within-island parallelism needs a
+  *correctness* gate — does the stack still stand, does it settle — not only ADR-0026's bitwise replay.
+- **`--island-profile` runs must never be filed as baselines.** The flag reads a clock once per active
+  island: off the per-constraint path and small, but not free. `sim.block` p99 read 8.416 and 8.467 ms
+  on the two profiled runs against 8.533 unprofiled, i.e. inside run-to-run spread either way.
