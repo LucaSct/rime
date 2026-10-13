@@ -1470,3 +1470,134 @@ TEST_CASE(
           destruction_net::shared_state_hash(
               client_peer.world, state_client.map(), client_peer.destruction));
 }
+
+TEST_CASE("a reliable channel that refuses op packets is counted, not silently skipped") {
+    // Guardrail 5: every skip/drop path has a counter. Destruction ops are a per-tick list with no
+    // re-offer, so a refused packet is a permanently lost transition for that client. Here the
+    // client goes silent after connecting (never updates, never acks), so the server's reliable
+    // backlog (ReliableChannel::kMaxPending = 256) fills and send_reliable() starts refusing.
+    const assets::DestructibleAsset asset = load_asset("wall.rdest");
+    constexpr std::uint64_t kAssetId = 0xABCDull;
+
+    Peer server_peer;
+    Peer client_peer;
+    server_peer.register_components();
+    client_peer.register_components();
+    server_peer.register_pattern(asset, kAssetId);
+    client_peer.register_pattern(asset, kAssetId);
+
+    net::ScriptedNetwork network{0x1234ull,
+                                 {/*loss_rate=*/0.0f,
+                                  /*duplicate_rate=*/0.0f,
+                                  /*min_latency_ms=*/1,
+                                  /*max_latency_ms=*/1}};
+    const net::Endpoint server_endpoint{0x7F000001u, kServerPort};
+    const net::Endpoint client_endpoint{0x7F000001u, kClientPort};
+    net::Link& server_link = network.add_node(server_endpoint);
+    net::Link& client_link = network.add_node(client_endpoint);
+
+    net::NetDriver::Config config;
+    config.app_id = 0x52494D45u;
+    config.schema_hash = ecs::component_schema_hash(server_peer.world);
+    config.salt_seed = 0x1111ull;
+    net::NetDriver::Config client_config = config;
+    client_config.salt_seed = 0x2222ull;
+
+    net::NetDriver server_driver{server_link, config};
+    net::NetDriver client_driver{client_link, client_config};
+    server_driver.listen();
+
+    replication::ServerReplicator state_server{server_peer.world};
+    replication::ClientReplicator state_client{client_peer.world};
+    destruction_net::DestructionServer destruction_server;
+
+    constexpr int kWalls = 6;
+    for (int i = 0; i < kWalls; ++i) {
+        core::Transform placement;
+        placement.translation.x = static_cast<float>(i) * 50.0f;
+        const ecs::Entity e = server_peer.world.spawn_with(ecs::LocalTransform{placement},
+                                                           destruction::Destructible{kAssetId});
+        (void)state_server.replicate(e);
+    }
+    REQUIRE(client_driver.connect(server_endpoint, kTickMs).has_value());
+
+    std::uint64_t now_ms = 0;
+    std::uint64_t tick_index = 0;
+    std::vector<net::SessionEvent> events;
+
+    // `client_alive` false = the client is never serviced: it neither processes packets nor acks.
+    const auto tick = [&](bool client_alive, bool damage) {
+        now_ms += kTickMs;
+        ++tick_index;
+        network.advance_time(now_ms);
+        events.clear();
+        server_driver.update(now_ms, events);
+        state_server.on_session_events(events);
+        (void)state_server.apply_inbound(server_driver);
+        if (client_alive) {
+            events.clear();
+            client_driver.update(now_ms, events);
+        }
+        (void)destruction::bind_destructibles(server_peer.world,
+                                              server_peer.destruction,
+                                              server_peer.physics,
+                                              server_peer.resolver(),
+                                              destruction::Authority::Local);
+        server_peer.world.advance_version();
+        if (damage) {
+            std::vector<ecs::Entity> bound;
+            destruction::build_instance_entity_table(server_peer.world, bound);
+            for (std::uint32_t i = 0; i < bound.size(); ++i) {
+                if (bound[i].is_valid()) {
+                    server_peer.destruction.apply_damage(
+                        destruction::InstanceId{i, 0},
+                        core::Vec3{static_cast<float>(i) * 50.0f, 0.0f, 0.0f},
+                        100.0f,
+                        0.001f,
+                        core::Vec3{});
+                }
+            }
+        }
+        server_peer.physics.step(kDt);
+        server_peer.destruction.update(server_peer.physics);
+        destruction_server.publish(server_driver,
+                                   state_server.map(),
+                                   server_peer.world,
+                                   server_peer.destruction,
+                                   tick_index,
+                                   now_ms);
+        state_server.publish(server_driver, now_ms);
+    };
+
+    for (int i = 0; i < 40; ++i) {
+        tick(true, false);
+    }
+    REQUIRE(server_driver.session_ids().size() == 1);
+    // Control: a healthy link refuses nothing.
+    CHECK(destruction_server.op_packets_refused() == 0);
+    CHECK(destruction_server.ops_refused() == 0);
+
+    // Starve the channel. Each tick checks the accounting identity: every committed op is sent,
+    // refused, or unaddressable — never none of them — so a refusal credits neither sent counter.
+    std::uint64_t total_committed = 0;
+    for (int i = 0; i < 120; ++i) {
+        const std::uint64_t sent_before = destruction_server.ops_sent();
+        const std::uint64_t refused_before = destruction_server.ops_refused();
+        const std::uint64_t unaddr_before = destruction_server.ops_unaddressable();
+        tick(false, true);
+        const std::uint64_t committed = server_peer.destruction.committed_ops().size();
+        total_committed += committed;
+        CHECK(destruction_server.ops_sent() - sent_before +
+                  (destruction_server.ops_refused() - refused_before) +
+                  (destruction_server.ops_unaddressable() - unaddr_before) ==
+              committed);
+    }
+    // Non-vacuous: the session survived (no timeout) and the backlog really refused.
+    REQUIRE(server_driver.session_ids().size() == 1);
+    CHECK(total_committed > 0);
+    CHECK(destruction_server.op_packets_refused() > 0);
+    CHECK(destruction_server.ops_refused() >= destruction_server.op_packets_refused());
+    CHECK(destruction_server.ops_sent() + destruction_server.ops_refused() +
+              destruction_server.ops_unaddressable() ==
+          total_committed);
+}

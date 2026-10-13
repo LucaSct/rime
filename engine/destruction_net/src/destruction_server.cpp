@@ -117,12 +117,25 @@ void DestructionServer::publish(net::NetDriver& driver,
             if (session->send_reliable(scratch_, now_ms)) {
                 ++packets_sent_;
                 ops_sent_ += last - first;
+            } else {
+                ++packets_refused_;
+                ops_refused_ += last - first;
             }
             // A refused send is BACKPRESSURE (the 256-message backlog is full), not a lost packet:
             // the channel is reliable, so anything it accepted still arrives. Deliberately not
             // retried or queued here — a peer that cannot keep up with destruction is a peer the
             // game should decide about (session->disconnect()), and silently growing an unbounded
             // shadow queue behind a channel that already has one is how a memory leak gets built.
+            //
+            // BUT COUNT IT, because destruction ops are unlike the replicator's state. The
+            // replicator re-derives what a peer is missing by DIFFING world state every tick, so a
+            // refused update is simply offered again next tick. `committed_ops()` is a PER-TICK
+            // list: once this tick is over there is no diff and no re-offer, so a refused packet is
+            // a permanently lost damage transition for that client, and the "reliable" guarantee
+            // never applied to it because it never entered the channel. The refusal counters are
+            // the only evidence it ever existed; without them a proof reads as passing over a
+            // client that silently diverged. They deliberately imply no repair policy — that is a
+            // separate decision (retry, resync, or disconnect), not made here.
         }
 
         // The composition check for this tick, after its ops (m11.4b). Ordered delivery is what
@@ -141,6 +154,9 @@ void DestructionServer::publish(net::NetDriver& driver,
             }
             if (session->send_reliable(scratch_, now_ms)) {
                 ++composition_checks_sent_;
+            } else {
+                // Same reasoning as the op packets: this tick's check is not re-offered either.
+                ++composition_checks_refused_;
             }
         }
     }
