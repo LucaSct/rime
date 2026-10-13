@@ -80,6 +80,19 @@ public:
         return composition_checks_sent_;
     }
 
+    // Refusals by the reliable channel (its 256-message backlog was full). Destruction ops are a
+    // per-tick list with no re-offer, so each refused op packet is a damage transition that client
+    // never receives; these counters are the only evidence it existed. They imply no repair policy.
+    [[nodiscard]] std::uint64_t op_packets_refused() const noexcept { return packets_refused_; }
+
+    // The ops carried inside those refused packets: the lost-transition count, not the packet
+    // count.
+    [[nodiscard]] std::uint64_t ops_refused() const noexcept { return ops_refused_; }
+
+    [[nodiscard]] std::uint64_t composition_checks_refused() const noexcept {
+        return composition_checks_refused_;
+    }
+
     [[nodiscard]] std::uint64_t debris_entities_spawned() const noexcept { return debris_spawned_; }
 
     [[nodiscard]] std::uint64_t debris_entities_retracted() const noexcept {
@@ -122,6 +135,9 @@ private:
     std::uint64_t debris_retracted_ = 0;
     std::uint64_t debris_unaddressable_ = 0;
     std::uint64_t composition_checks_sent_ = 0;
+    std::uint64_t packets_refused_ = 0;
+    std::uint64_t ops_refused_ = 0;
+    std::uint64_t composition_checks_refused_ = 0;
 };
 
 } // namespace rime::destruction_net
