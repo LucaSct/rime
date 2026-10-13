@@ -1,4 +1,4 @@
-# Handoff — 2026-10-13: three replication/proof bricks landed, and a real solver-energy bug found
+# Handoff — 2026-10-13: three replication/proof bricks landed, and the solver-energy question closed
 
 Session scope: Luca asked for all three bricks left open by
 `HANDOFF-2026-10-12-TIER2-CONVERGENCE.md`. All three are done. The third one's result **inverted**
@@ -86,7 +86,12 @@ sleeps, and the block's peers never converge.
 session): `server hash changed on 591 of 600 quiet ticks`, `outstanding 3`, zero dropped, zero
 malformed. Delivery was fine; the authority simply never stopped producing damage.
 
-## THE OPEN BUG: a settling pile gains energy, on `main`
+## ~~THE OPEN BUG: a settling pile gains energy, on `main`~~ — SUPERSEDED, see the ledger section at the end
+
+> **This section's conclusion is wrong and is kept only for the measurements in it.** The
+> phase-energy ledger ran later the same day and showed the energy is gravitational, not
+> injected: no solver phase adds net work on any step. Read
+> "RESOLVED: the ledger ran" below before acting on anything here.
 
 A numerical probe (2.8M samples) refuted the suspicion against the matrix: it is symmetric by
 construction, positive definite in **every** sample, median error 6e-8 against a double reference —
@@ -228,9 +233,68 @@ Worktrees: four of five removed after checking each for untracked files; `agent-
 is deliberately retained (the validation checkout) and its matrix work is archived as a patch
 either way. `main` checkout is at `7da85c8`.
 
+## RESOLVED: the ledger ran — nothing injects energy, and the real question changed
+
+Evidence: `/home/next/reports/rime-tier2-ledger-2026-10-13/` (`REPORT.md`,
+`phase-energy-ledger.patch`, `analyse.py`, both traces). Instrumented worktree
+`.claude/worktrees/energy-ledger`, retained; the patch is gated on `RIME_LEDGER=1` and is **not**
+proposed for merge.
+
+Both consults' designs were unioned and run: KE and gravitational potential in double precision,
+rotational energy from the **live pose**, sampled around gravity/damping, `warm_start`,
+`solve_velocities`, pose integration and NGS, accumulated in per-island slots (race-free by the
+island-timing-slot argument) and summed after the join. Failing seed 1 at eps=1e-6 against the
+eps=0 control, over the 300 steps containing the scripted charge:
+
+| term (J) | control | failing seed |
+|---|---:|---:|
+| gravity + damping | +15,305 | +53,628 |
+| `warm_start` | +2,986 | +24,775 |
+| `solve_velocities` | −18,419 | −78,433 |
+| pose integration, KE | +5.2e-5 | −1.6e-2 |
+| pose integration, PE | −1,518 | −43,897 |
+| NGS, KE | −0.118 | −11.16 |
+| NGS, PE | +201 | +974 |
+| **steps where the solver's own work is net positive** | **0 / 299** | **0 / 299** |
+
+- The ledger **closes**: `grav + warm + vel + int_ke + ngs_ke` equals the step's ΔKE to a median
+  **5.7e-6 J**, with the residual confined to steps where bodies spawn or are removed. Separately,
+  gravity's work (+38,016 J) and the potential drop at integration (−37,391 J) agree to 1.6 % over
+  the burst, which validates the sign and scale of the PE term without another experiment.
+- **The solver is net dissipative on every single step of both runs**, cumulatively −55.7 kJ over
+  the burst, with a maximum positive cumulative excursion of exactly zero. Warm start is a positive
+  term — and the velocity solve removes more in the same step, every step.
+- **The energy is gravitational.** The failing seed admits 3.5× more gravity work because 29× more
+  potential is released. The earlier "~50× the scene's energy input" framing was wrong: 5.5e2 was
+  the *control's peak*, not an input, and the wall's own potential energy is tens of kJ.
+- **astra was right that NGS's rotational-metric term is real** — it measures −11.2 J, and it is
+  negative. Fable's "NGS cannot inject KE directly" is false in principle and harmless here.
+  Fable's NGS potential-lift loop is also real: +974 J, two orders below gravity's work.
+- All four hypotheses both consults ranked (warm start, NGS, restitution, speculative bias) are
+  **refuted as the energy source**. Fable's three falsification toggles were deliberately not run:
+  they discriminate between candidate injectors, and there is no injector.
+
+**What actually differs** between the control and a failing seed: nothing in the destruction
+facts. `parts_died 17`, `islands_detached 1`, `debris_count 18`, `bodies_final 19`, peaks
+77/256/18 — identical. Only `settled` (yes/no), `awake_final` (0 vs 15) and `ticks_run` (530 vs
+1500) differ. The 1e-6 rad perturbation does not change what breaks; it changes whether the 18
+debris chunks come to rest. In the failing tail total KE oscillates between 7e-3 and 2e-1 J across
+15 awake bodies, so something re-excites them just above the sleep threshold rather than energy
+accumulating. **The open question is a sleep limit cycle.**
+
+One trap for whoever reads these traces: `destructible_wall --headless` replays the scene **5
+times** and steps physics **5 times per sample tick**, so a per-world step counter reaches 7500 for
+`sim.ticks_run: 1500`, and the world's stack address is reused across replays (the tell is a
+`PE → 0` discontinuity every 1500 steps). The "growth at ticks 860–1008" quoted above is a step
+index inside one replay, not a sample tick.
+
 ## If resumed, in order
 
-1. **The phase-energy ledger above.** It names the subsystem and produces the non-luck gate.
+1. **The sleep limit cycle.** Why do 15 of 18 debris chunks never fall below the sleep thresholds
+   when the solver is provably dissipative? Candidates to measure, not to rank: the island rejoin
+   that resets `sleep_timer` for every body when any neighbour moves (`world.cpp` stage 5), and
+   contact-set churn that keeps re-exciting a wedged chunk. The ledger harness is reusable as-is —
+   add a per-body sleep-timer and wake-cause trace rather than another energy term.
 2. **Then** re-judge the matrix against that gate, and bring a test of the matrix path with it —
    `solver_test.cpp:462` ("cached inertia composite is bit-identical") exercises
    `apply_inv_inertia` directly, so it is sound on `main` today but would go **vacuous** the moment

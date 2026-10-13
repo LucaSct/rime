@@ -187,6 +187,17 @@ Verify proportionately to the change — don't re-run the whole world for every 
   the beat the claim describes (`--ticks 900` fails "collapse: most of the block is still standing"
   on unmodified `main`). Two sessions have now misread the same flag in opposite directions. Run the
   bare `--headless` for the gate; use `--ticks` only to look at something, never to judge.
+- **`destructible_wall --headless`'s `awake_final == 0` is the same kind of gate, and it passes on
+  `main` by rounding luck** (measured 2026-10-13). Perturb each body's velocity-phase principal
+  frame by **1e-6 rad** — rounding scale — and 2 of 6 seeds miss the gate while 4 of 6 settle
+  hundreds of ticks late. Its red is therefore not evidence a bit-moving change is bad, and its
+  green is not evidence one is good. A phase-energy ledger closed the obvious follow-up question:
+  the KE spread is **gravitational**, the solver's own work is net negative on every step of both
+  runs, and the two runs' destruction facts are identical — only whether the debris comes to rest
+  differs. So do not re-open "which phase injects energy"; the open question is a sleep limit
+  cycle. Evidence: `/home/next/reports/rime-tier2-ledger-2026-10-13/REPORT.md`. The sample also
+  replays the scene **5×** and substeps physics **5×**, so a per-world step counter in any trace is
+  25× the sample tick and the world pointer is reused between replays.
 - **A `.ps1` is only verified by RUNNING it under `powershell.exe`** — a parse check is not the
   proof. Why, and the 10 weeks `setup.ps1` was dead: [`scripts/CLAUDE.md`](scripts/CLAUDE.md).
 - **A red `format, lint & license` on a PR that touched no Rust is probably not yours.** CI pins
