@@ -290,15 +290,45 @@ index inside one replay, not a sample tick.
 
 ## If resumed, in order
 
-1. **The sleep limit cycle.** Why do 15 of 18 debris chunks never fall below the sleep thresholds
-   when the solver is provably dissipative? Candidates to measure, not to rank: the island rejoin
-   that resets `sleep_timer` for every body when any neighbour moves (`world.cpp` stage 5), and
-   contact-set churn that keeps re-exciting a wedged chunk. The ledger harness is reusable as-is —
-   add a per-body sleep-timer and wake-cause trace rather than another energy term.
-2. **Then** re-judge the matrix against that gate, and bring a test of the matrix path with it —
-   `solver_test.cpp:462` ("cached inertia composite is bit-identical") exercises
-   `apply_inv_inertia` directly, so it is sound on `main` today but would go **vacuous** the moment
-   the matrix landed. That is a precondition on shipping, not a present defect.
+1. **Sleep starvation** — renamed, because "limit cycle" claims more than a finite run can show.
+   Why do 15 of 18 debris chunks never fall below the sleep thresholds when the solver is provably
+   dissipative? Two things to **unlearn first**, both established 2026-10-13:
+
+   - **The stage-5 island rejoin is NOT the mechanism.** This handoff named it as the prime
+     candidate. Its reset is guarded by `if (p.asleep[b] != 0)` (`world.cpp:1369`), so an
+     already-awake body's timer is never touched there. Reactivation can only contribute if a
+     component actually slept and then reconnected, or got an explicit wake. Refuted by reading
+     the code — astra found the guard, and I checked it.
+   - **"The 18 debris chunks form one island" was an over-read of a PEAK.** `awake_final` 15–16
+     cannot coexist with sleeping bodies inside one unchanged 18-body island, because stage 7's
+     predicate is all-or-nothing per island. `physics.largest_island_peak: 18` is a peak, not the
+     final partition. The tail's island topology is **unmeasured** and is part of this question.
+
+   What stage 7 actually requires (`world.cpp:1501-1534`): every member of the island under both
+   thresholds (0.05 m/s, 0.05 rad/s) for `kTimeToSleep` = 0.5 s, and the sample substeps 5× at
+   60 Hz, so that is **150 consecutive substeps with all members simultaneously quiet**. One
+   violation zeroes that body's timer and vetoes the whole island. More bodies, more chances to
+   veto.
+
+   The design to implement, and why, is in `/home/next/reports/rime-sleep-consult-2026-10-13/`
+   (`REPORT.md`, astra's raw answer beside it): a **bounded-pose** rest criterion OR-ed with the
+   velocity one — per-body anchor pose, 1 mm / 1 mrad envelope held for `kTimeToSleep`, anchor
+   replaced wholesale on violation and never crept. Its cheapest falsifiable measurement first: a
+   **read-only shadow detector** over one failing tail recording the violating body ids, their
+   violation magnitudes, the minimum sleep timer, the **actual island membership**, and the
+   pose-envelope durations the proposed predicate would have accumulated. The ledger harness is
+   reusable — swap the energy terms for these. One thing astra flagged unprompted that belongs
+   here: `world_hash()` hashes poses and velocities and **omits even the existing sleep timers**
+   (`world.cpp:1907`), so the cross-worker bit-identity test proves nothing about sleep decisions
+   today.
+2. **The matrix is now PR #320**, with both sides of the sample question measured rather than
+   argued. Velocity phase **1.997×**, whole solve **1.805×**, 5 interleaved pairs on an idle box,
+   committed as `docs/perf/2026-10-13-solver-bench-matrix-908b31b.json`. It brings a test of the
+   new path with a sensitivity control, and `solver_test.cpp`'s #314 cache test does **not** go
+   vacuous after all: `inertia_orientation` remains the materialized tensor's input and remains
+   the NGS path's operand. Open question on it, and the owner's call: `destructible_wall_headless`
+   and `the_block_headless` are green on `87b02c8` (13/13 with their cook fixtures, measured) and
+   **red on the branch**, so merging it reds trunk until item 1 lands.
 3. **Wire #317's `op ledger:` to #318's refusal counters.** Both are on `main` now, and the ledger
    currently cannot see a refused send at all. Small.
 4. Record the wall-test luck-gate rule in the repo's `CLAUDE.md` beside the 29-claims rule, so the

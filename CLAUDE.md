@@ -194,8 +194,15 @@ Verify proportionately to the change — don't re-run the whole world for every 
   green is not evidence one is good. A phase-energy ledger closed the obvious follow-up question:
   the KE spread is **gravitational**, the solver's own work is net negative on every step of both
   runs, and the two runs' destruction facts are identical — only whether the debris comes to rest
-  differs. So do not re-open "which phase injects energy"; the open question is a sleep limit
-  cycle. Evidence: `/home/next/reports/rime-tier2-ledger-2026-10-13/REPORT.md`. The sample also
+  differs. So do not re-open "which phase injects energy"; the open question is **sleep
+  starvation** — stage 7 sleeps an island only when *every* member has stayed under both
+  thresholds for 150 consecutive substeps, and one violation zeroes that body's timer and vetoes
+  the whole island (`world.cpp:1501-1534`). Two dead ends not to re-walk: stage 5's island rejoin
+  is **not** it (its reset is guarded by `if (p.asleep[b] != 0)`, `world.cpp:1369`), and
+  `physics.largest_island_peak: 18` is a **peak**, so "the debris is one island" is not a fact
+  about the tail. Design and the measurement to run first:
+  `/home/next/reports/rime-sleep-consult-2026-10-13/REPORT.md`.
+  Evidence: `/home/next/reports/rime-tier2-ledger-2026-10-13/REPORT.md`. The sample also
   replays the scene **5×** and substeps physics **5×**, so a per-world step counter in any trace is
   25× the sample tick and the world pointer is reused between replays.
 - **A `.ps1` is only verified by RUNNING it under `powershell.exe`** — a parse check is not the
