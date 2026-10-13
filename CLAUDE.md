@@ -194,14 +194,17 @@ Verify proportionately to the change — don't re-run the whole world for every 
   green is not evidence one is good. A phase-energy ledger closed the obvious follow-up question:
   the KE spread is **gravitational**, the solver's own work is net negative on every step of both
   runs, and the two runs' destruction facts are identical — only whether the debris comes to rest
-  differs. So do not re-open "which phase injects energy"; the open question is **sleep
-  starvation** — stage 7 sleeps an island only when *every* member has stayed under both
-  thresholds for 150 consecutive substeps, and one violation zeroes that body's timer and vetoes
-  the whole island (`world.cpp:1501-1534`). Two dead ends not to re-walk: stage 5's island rejoin
-  is **not** it (its reset is guarded by `if (p.asleep[b] != 0)`, `world.cpp:1369`), and
-  `physics.largest_island_peak: 18` is a **peak**, so "the debris is one island" is not a fact
-  about the tail. Design and the measurement to run first:
-  `/home/next/reports/rime-sleep-consult-2026-10-13/REPORT.md`.
+  differs. **The sleep half is FIXED** (#321, `c9bbe5f`): the island was starving the speed test,
+  which is sampled once per step and zeroed by one tick above the bound, so a chunk kicked every
+  few ticks while moving micrometres vetoed a whole pile. A body is now a candidate by either
+  route, the second being a **pose** that has not left a 25 mm / 25 mrad envelope —
+  `kLinearSleepThreshold * kTimeToSleep`, i.e. exactly what the speed bound already permits over
+  the same window. The wall now settles at tick **179**, was 530, and `ctest` is 82/82. Three dead
+  ends not to re-walk: stage 5's rejoin (guarded by `if (p.asleep[b] != 0)`), island churn (9
+  changes in 400 steps against a 289-step stable run), and `largest_island_peak: 18` as evidence
+  the tail is one island (it is a *peak*; the tail is four islands).
+  **Still open and NOT a sleep question:** what kicks a chunk to 7.6 rad/s every ~30 substeps.
+  Evidence and the reproducible harness: `/home/next/reports/rime-sleep-detector-2026-10-13/`.
   **Confirmed by a platform, 2026-10-13:** PR #320's single commit passes
   `destructible_wall_headless` on **macOS** (81/82) and fails it on Linux and Windows (80/82) —
   a different compiler and libm is a different last bit, and the gate flips. So when a bit-moving

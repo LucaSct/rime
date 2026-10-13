@@ -6,10 +6,29 @@ whose resume item 1 is **done** and whose item 2 is now unblocked.
 
 ## State in one table
 
-| PR | branch | what | CI |
-|---|---|---|---|
-| **#321** | `sleep-pose-rest` | the pose rest route — the sleep starvation fix | opened, running at handoff |
-| **#320** | `tier2-matrix` | the materialized world inverse inertia, **1.997×** | 3 jobs red, **and that is a draw, not a defect** |
+**BOTH MERGED, 2026-10-14.** `c9bbe5f` (#321, the pose rest route) then `37c18d0` (#320, the
+materialized world inverse inertia, **1.997×** on the velocity phase). Both landed with **all
+eight CI jobs green**, macOS and Windows included. The "to finish" list below is therefore done;
+it is kept because the *method* is the part worth reusing.
+
+| PR | merged as | what |
+|---|---|---|
+| **#321** | `c9bbe5f` | the pose rest route — the sleep starvation fix |
+| **#320** | `37c18d0` | the materialized world inverse inertia, **1.997×** velocity phase |
+
+Two things from the landing worth keeping:
+
+- **#320's CI evidence did NOT carry over the rebase, and that was correct.** `main` had gained a
+  real change (#321) beneath it, so `main`'s tree was not byte-identical to the old parent tip's
+  and the stacked-PR carry-over argument did not apply. What was verified instead is that the
+  rebase preserved #320's *own* contribution: the diff-of-diffs between `87b02c8→924be48` and
+  `c9bbe5f→d09adc4` is **12 lines, all blob-index and hunk-header line numbers, zero `+`/`-`
+  payload**. Then the pushed state was rebuilt and retested (179/179 cases, `ctest` **82/82**)
+  rather than trusting the earlier local stack proof.
+- **One job came back `cancelled` with `runner_name: ''` and `runner_id: 0`** — assigned to no
+  machine at all, after 42 minutes queued. Runner starvation from landing two PRs and four `main`
+  pushes onto the one self-hosted runner in quick succession; nothing to diagnose in the code. It
+  passed on a rerun once the queue drained (0 in-progress, 0 queued).
 
 **The owner's call, recorded and not to be re-asked: #321 lands first, then #320 rebases onto
 `main` and merges green.** Priced against merging red (which spends trunk's CI signal), merging
@@ -79,14 +98,19 @@ byte-identical work ledger.
 
 ## Worktrees and reports
 
-| worktree | contents |
-|---|---|
-| `.claude/worktrees/sleep-pose` | branch `sleep-pose-rest` — #321 |
-| `.claude/worktrees/tier2-matrix` | branch `tier2-matrix` — #320, with `build/release` for the bench |
-| `.claude/worktrees/matrix-base` | detached at `87b02c8` + detector + perturbation — the control arm |
-| `.claude/worktrees/sleep-detector` | detached at `924be48` + detector + perturbation — the matrix arm |
-| `.claude/worktrees/stack-check` | detached, `#321 + #320` — the stack proof; disposable |
-| `.claude/worktrees/energy-ledger` | the earlier phase-energy ledger; retained |
+All five worktrees this work used are **gone**, reclaiming 4.0 GB (the box was at 83 % of /home),
+and both merged branches are deleted locally and on the remote. Nothing was lost: each arm's full
+instrumentation is archived as a patch, so the sweep is reproducible in one build.
+
+| to rebuild | apply | onto |
+|---|---|---|
+| the control arm | `rime-sleep-detector-2026-10-13/arm-base-87b02c8.patch` | `87b02c8` |
+| the matrix arm | `rime-sleep-detector-2026-10-13/arm-matrix-924be48.patch` | `924be48` |
+
+Each patch carries the `RIME_SLEEP_TRACE=1` detector **and** the `RIME_PERT_EPS`/`RIME_PERT_SEED`
+perturbation, applied to the same quantity in both arms, plus the `RIME_SLEEP_POSE_POS`/`_ANG`
+envelope overrides. `.claude/worktrees/energy-ledger` is the one still standing (18 MB), holding
+the earlier phase-energy instrumentation.
 
 Reports: `rime-sleep-detector-2026-10-13/` (this one), `rime-sleep-consult-2026-10-13/` (astra's
 design and where it was right and wrong), `rime-tier2-ledger-2026-10-13/` (the energy question,
