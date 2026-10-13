@@ -1,0 +1,408 @@
+{
+  "benchmark": "solver_bench",
+  "measurement_date": "2026-10-13",
+  "source": "Five alternating A/B pairs, personal-profile Claude Opus 5; each sample is the minimum of five internal repeats. The run waited for Runner.Worker/ninja/ctest/cmake/cc1plus/codex to be absent for 60 consecutive seconds before starting, because this workstation IS the self-hosted Actions runner.",
+  "baseline_commit": "87b02c8",
+  "matrix_commit": "908b31b",
+  "preset": "release",
+  "cmake_build_type": "RelWithDebInfo",
+  "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
+  "bodies": "448",
+  "steps": "32",
+  "repeats": "5",
+  "seed": 1369956643,
+  "samples": [
+    {
+      "variant": "baseline",
+      "pair": 0,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 12985.887,
+          "min": 12983.897,
+          "max": 13868.012
+        },
+        "velocity_us": {
+          "median": 11001.364,
+          "min": 11000.313,
+          "max": 11824.039
+        },
+        "us_per_constraint": {
+          "median": 2.860469,
+          "min": 2.860196,
+          "max": 3.074373
+        },
+        "us_per_velocity_iteration": {
+          "median": 1375.1705,
+          "min": 1375.039125,
+          "max": 1478.004875
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "baseline",
+      "pair": 1,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 13031.957,
+          "min": 12988.296,
+          "max": 13055.387
+        },
+        "velocity_us": {
+          "median": 11042.863,
+          "min": 11004.674,
+          "max": 11058.784
+        },
+        "us_per_constraint": {
+          "median": 2.871259,
+          "min": 2.86133,
+          "max": 2.875399
+        },
+        "us_per_velocity_iteration": {
+          "median": 1380.357875,
+          "min": 1375.58425,
+          "max": 1382.348
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "baseline",
+      "pair": 2,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 12994.297,
+          "min": 12983.297,
+          "max": 13732.601
+        },
+        "velocity_us": {
+          "median": 11008.703,
+          "min": 10999.824,
+          "max": 11743.259
+        },
+        "us_per_constraint": {
+          "median": 2.862377,
+          "min": 2.860069,
+          "max": 3.053369
+        },
+        "us_per_velocity_iteration": {
+          "median": 1376.087875,
+          "min": 1374.978,
+          "max": 1467.907375
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "baseline",
+      "pair": 3,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 13062.298,
+          "min": 13024.058,
+          "max": 13150.738
+        },
+        "velocity_us": {
+          "median": 11067.424,
+          "min": 11031.384,
+          "max": 11141.615
+        },
+        "us_per_constraint": {
+          "median": 2.877645,
+          "min": 2.868275,
+          "max": 2.896936
+        },
+        "us_per_velocity_iteration": {
+          "median": 1383.428,
+          "min": 1378.923,
+          "max": 1392.701875
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "baseline",
+      "pair": 4,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 13029.687,
+          "min": 13005.856,
+          "max": 13507.421
+        },
+        "velocity_us": {
+          "median": 11038.824,
+          "min": 11018.574,
+          "max": 11462.097
+        },
+        "us_per_constraint": {
+          "median": 2.870209,
+          "min": 2.864944,
+          "max": 2.980264
+        },
+        "us_per_velocity_iteration": {
+          "median": 1379.853,
+          "min": 1377.32175,
+          "max": 1432.762125
+        }
+      },
+      "world_hash_step1": 8259430909484038691,
+      "world_hash_last": 3498710367934836673
+    },
+    {
+      "variant": "matrix",
+      "pair": 0,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 7204.398,
+          "min": 7192.318,
+          "max": 7230.768
+        },
+        "velocity_us": {
+          "median": 5519.257,
+          "min": 5512.387,
+          "max": 5536.557
+        },
+        "us_per_constraint": {
+          "median": 1.435064,
+          "min": 1.433278,
+          "max": 1.439562
+        },
+        "us_per_velocity_iteration": {
+          "median": 689.907125,
+          "min": 689.048375,
+          "max": 692.069625
+        }
+      },
+      "world_hash_step1": 1969937751204667904,
+      "world_hash_last": 18250217108498342280
+    },
+    {
+      "variant": "matrix",
+      "pair": 1,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 7197.158,
+          "min": 7196.688,
+          "max": 7397.35
+        },
+        "velocity_us": {
+          "median": 5517.687,
+          "min": 5514.537,
+          "max": 5667.388
+        },
+        "us_per_constraint": {
+          "median": 1.434656,
+          "min": 1.433837,
+          "max": 1.47358
+        },
+        "us_per_velocity_iteration": {
+          "median": 689.710875,
+          "min": 689.317125,
+          "max": 708.4235
+        }
+      },
+      "world_hash_step1": 1969937751204667904,
+      "world_hash_last": 18250217108498342280
+    },
+    {
+      "variant": "matrix",
+      "pair": 2,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 7218.598,
+          "min": 7197.148,
+          "max": 7834.282
+        },
+        "velocity_us": {
+          "median": 5534.338,
+          "min": 5516.976,
+          "max": 6156.662
+        },
+        "us_per_constraint": {
+          "median": 1.438985,
+          "min": 1.434471,
+          "max": 1.600796
+        },
+        "us_per_velocity_iteration": {
+          "median": 691.79225,
+          "min": 689.622,
+          "max": 769.58275
+        }
+      },
+      "world_hash_step1": 1969937751204667904,
+      "world_hash_last": 18250217108498342280
+    },
+    {
+      "variant": "matrix",
+      "pair": 3,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 7199.518,
+          "min": 7193.988,
+          "max": 7515.4
+        },
+        "velocity_us": {
+          "median": 5518.817,
+          "min": 5512.906,
+          "max": 5795.499
+        },
+        "us_per_constraint": {
+          "median": 1.43495,
+          "min": 1.433413,
+          "max": 1.50689
+        },
+        "us_per_velocity_iteration": {
+          "median": 689.852125,
+          "min": 689.11325,
+          "max": 724.437375
+        }
+      },
+      "world_hash_step1": 1969937751204667904,
+      "world_hash_last": 18250217108498342280
+    },
+    {
+      "variant": "matrix",
+      "pair": 4,
+      "step1": {
+        "bodies": 448,
+        "constraints": 3846,
+        "manifolds": 3846,
+        "active_islands": 1,
+        "solve_us": {
+          "median": 7204.258,
+          "min": 7203.218,
+          "max": 7281.929
+        },
+        "velocity_us": {
+          "median": 5525.957,
+          "min": 5507.217,
+          "max": 5585.687
+        },
+        "us_per_constraint": {
+          "median": 1.436806,
+          "min": 1.431934,
+          "max": 1.452337
+        },
+        "us_per_velocity_iteration": {
+          "median": 690.744625,
+          "min": 688.402125,
+          "max": 698.210875
+        }
+      },
+      "world_hash_step1": 1969937751204667904,
+      "world_hash_last": 18250217108498342280
+    }
+  ],
+  "summary": {
+    "baseline": {
+      "solve_us": {
+        "min": 12983.297,
+        "median": 13029.687
+      },
+      "velocity_us": {
+        "min": 10999.824,
+        "median": 11038.824
+      },
+      "us_per_constraint": {
+        "min": 2.860069,
+        "median": 2.870209
+      }
+    },
+    "matrix": {
+      "solve_us": {
+        "min": 7192.318,
+        "median": 7204.258
+      },
+      "velocity_us": {
+        "min": 5507.217,
+        "median": 5519.257
+      },
+      "us_per_constraint": {
+        "min": 1.431934,
+        "median": 1.435064
+      }
+    }
+  },
+  "velocity_speedup_ratio_of_mins": 1.9973471174279134,
+  "velocity_speedup_ratio_of_median_of_pair_mins": 1.9961657245742992,
+  "solve_speedup_ratio_of_mins": 1.80516170169339,
+  "controls": {
+    "workload_held_still": true,
+    "workload_step1": {
+      "bodies": 448,
+      "constraints": 3846,
+      "manifolds": 3846,
+      "active_islands": 1
+    },
+    "distinct_hash_pairs_per_arm": {
+      "baseline": 1,
+      "matrix": 1
+    },
+    "hashes_differ_between_arms": true,
+    "arm_hashes": {
+      "baseline": [
+        {
+          "step1": 8259430909484038691,
+          "last": 3498710367934836673
+        }
+      ],
+      "matrix": [
+        {
+          "step1": 1969937751204667904,
+          "last": 18250217108498342280
+        }
+      ]
+    },
+    "interleaved": "A-B-A-B, not blocked: on this box a perf number is worth ~0.9% within a sitting and ~2% across one, so a blocked A/B measures drift as if it were the change."
+  },
+  "binaries_sha256": {
+    "baseline": "73a7f5cb39c4cc453aff334dd802d0ddc9bc48b9043e4b74912f82531742cea6",
+    "matrix": "877d8f0f80ed90e568f1558ca9271a87fabe45fcc471697009ea69229a2cfcf5"
+  },
+  "limits": [
+    "CPU velocity-phase cost only. No GPU and no hardware frame time was measured; the engine's frame cost is not this ratio.",
+    "The change is NOT bit-identical, so the arms' world hashes differ by construction. That is why the two headless samples are not the gate: a rounding change moves the fracture cascade and the workload with it (see CLAUDE.md on the 29 --headless claims and on destructible_wall's awake_final gate).",
+    "One machine, one compiler, one sitting. Flag comparability across the two binaries is INFERRED from both being configured RelWithDebInfo against the same Conan toolchain; binaries_sha256 records exactly what was compared.",
+    "The historical '2.2x tier 2' figure predates #316 and must not be quoted as current."
+  ]
+}

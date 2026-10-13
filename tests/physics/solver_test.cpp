@@ -496,3 +496,89 @@ TEST_CASE("the cached inertia composite is bit-identical to composing inline") {
     }
     CHECK(cases == 5 * 4 * 3 * 4);
 }
+
+// The materialized world inverse inertia (SolverBodies::inverse_inertia_world) replaced the
+// quaternion round trip inside the velocity phase, so the claim that has to hold is that the two
+// routes compute the same operator. It is NOT a bitwise claim, unlike the cache test above: six
+// stored floats multiplied out is different arithmetic from rotate → scale → rotate back, and the
+// whole point of the change is that it is cheaper, not that it is identical. So this compares with
+// a tolerance, and the tolerance is only meaningful next to a control.
+//
+// THE CONTROL is the off-diagonal weight. A near-null proof means nothing until something says
+// what the fixture could have shown (CLAUDE.md, sensitivity control): if every body in the grid
+// had isotropic inertia or an axis-aligned principal frame, I_world⁻¹ would be diagonal, every
+// route would agree trivially, and a passing test would prove nothing about the one case that
+// matters. So the grid's off-diagonal magnitude is measured in the same units as the agreement
+// and asserted to be large — the same blind spot #319 closed for the island-parallel proof.
+TEST_CASE("the materialized world inverse inertia matches the quaternion route") {
+    const std::array<core::Quat, 5> orientations = {
+        core::quat_identity(),
+        core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, 0.3f),
+        core::quat_from_axis_angle(core::normalize(core::Vec3{1.0f, 2.0f, -0.5f}), 1.9f),
+        core::quat_from_axis_angle({0.0f, 0.0f, 1.0f}, -2.7f),
+        core::quat_from_axis_angle(core::normalize(core::Vec3{-3.0f, 0.1f, 1.0f}), 0.011f)};
+    const std::array<core::Quat, 4> principals = {
+        core::quat_identity(),
+        core::quat_from_axis_angle(core::normalize(core::Vec3{1.0f, 1.0f, 1.0f}), 0.8f),
+        core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, 1.5707963f),
+        core::quat_from_axis_angle(core::normalize(core::Vec3{0.2f, -1.0f, 0.7f}), -0.37f)};
+    // Deliberately anisotropic (a 16:1 spread) plus the immovable all-zero row: an elongated chunk
+    // is what a fractured wall is made of, and it is the only shape that can expose the difference.
+    const std::array<core::Vec3, 3> inv_inertias = {
+        core::Vec3{1.5f, 0.25f, 4.0f}, core::Vec3{0.0f, 0.0f, 0.0f}, core::Vec3{2.0f, 2.0f, 2.0f}};
+    const std::array<core::Vec3, 4> inputs = {core::Vec3{0.3f, -1.2f, 2.5f},
+                                              core::Vec3{1.0f, 0.0f, 0.0f},
+                                              core::Vec3{-7.1f, 3.3f, 0.01f},
+                                              core::Vec3{0.0f, 0.0f, 0.0f}};
+    float worst_relative = 0.0f;
+    float worst_asymmetry = 0.0f;
+    float largest_off_diagonal_ratio = 0.0f; // the control
+    int cases = 0;
+    for (const core::Quat& q : orientations) {
+        for (const core::Quat& pr : principals) {
+            const core::Quat composed = q * pr;
+            for (const core::Vec3& ii : inv_inertias) {
+                const physics::SymMat3 m = physics::make_inverse_inertia_world(composed, ii);
+
+                // How far from diagonal this tensor actually is, as a fraction of its own scale.
+                const float diagonal = std::max({std::abs(m.xx), std::abs(m.yy), std::abs(m.zz)});
+                const float off = std::max({std::abs(m.xy), std::abs(m.xz), std::abs(m.yz)});
+                if (diagonal > 0.0f) {
+                    largest_off_diagonal_ratio =
+                        std::max(largest_off_diagonal_ratio, off / diagonal);
+                }
+
+                for (const core::Vec3& l : inputs) {
+                    const core::Vec3 quaternion_route = physics::apply_inv_inertia(composed, ii, l);
+                    const core::Vec3 matrix_route = physics::apply_inv_inertia(m, l);
+                    const float scale = std::max(1e-6f, core::length(quaternion_route));
+                    worst_relative = std::max(
+                        worst_relative, core::length(matrix_route - quaternion_route) / scale);
+                    ++cases;
+                }
+
+                // Self-adjointness: dot(a, M·b) == dot(M·a, b) for a symmetric operator. With the
+                // upper triangle stored this is exact in exact arithmetic and differs only by
+                // float summation order, so the residual measures round-off, not a modelling error.
+                const core::Vec3 a{0.7f, -2.1f, 0.4f};
+                const core::Vec3 b{-1.3f, 0.6f, 3.2f};
+                const float left = core::dot(a, physics::apply_inv_inertia(m, b));
+                const float right = core::dot(physics::apply_inv_inertia(m, a), b);
+                const float pair_scale = std::max(1e-6f, std::abs(left));
+                worst_asymmetry = std::max(worst_asymmetry, std::abs(left - right) / pair_scale);
+            }
+        }
+    }
+    CHECK(cases == 5 * 4 * 3 * 4);
+    INFO("worst relative disagreement ",
+         worst_relative,
+         ", worst asymmetry ",
+         worst_asymmetry,
+         ", largest off-diagonal ratio ",
+         largest_off_diagonal_ratio);
+    // The control first: if this fails the fixture has gone blind and the agreement below is
+    // vacuous, whatever it reads.
+    CHECK(largest_off_diagonal_ratio > 0.3f);
+    CHECK(worst_relative < 1.0e-5f);
+    CHECK(worst_asymmetry < 1.0e-5f);
+}
