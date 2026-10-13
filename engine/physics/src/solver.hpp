@@ -69,6 +69,15 @@ inline constexpr float kNgsMaxCorrection = 0.2f; // metres
 inline constexpr float kRestitutionThreshold = 1.0f;
 
 // -------------------------------------------------------------------------- body access --------
+// The upper triangle of a symmetric 3×3, which is all an inverse inertia tensor ever needs:
+// I_world⁻¹ = R·diag(i)·Rᵀ is symmetric for ANY rotation R, so the three lower entries are not
+// approximately equal to their mirrors, they ARE them. Storing six floats instead of nine is
+// therefore not a space optimization with an accuracy cost — it is the exact representation, and
+// it makes the symmetry a property of the type rather than something a test has to check.
+struct SymMat3 {
+    float xx = 0.0f, xy = 0.0f, xz = 0.0f, yy = 0.0f, yz = 0.0f, zz = 0.0f;
+};
+
 // The solver's non-owning view of PhysicsWorld's SoA body pool (world.cpp builds one per step).
 // Raw pointers, dense-indexed: the solver reads and writes exactly the arrays the integrator
 // does, with no copies — data-oriented, and trivially partitionable for the M7.5 island pass.
@@ -94,6 +103,14 @@ struct SolverBodies {
     const core::Quat* inertia_orientation = nullptr;
     const float* friction = nullptr;    // Coulomb μ per body
     const float* restitution = nullptr; // bounciness e per body
+    // I_world⁻¹ itself, materialized once per step from `inertia_orientation` and `inv_inertia`
+    // (world.cpp, same loop and same calling thread). Everything written about
+    // `inertia_orientation` above applies unchanged — it is the PRE-integration value, it is valid
+    // for the velocity phase ONLY, and solve_positions must not read it. The velocity phase
+    // applies it thousands of times per step and never changes it, so paying for the
+    // eigenframe→world→eigenframe round trip at every one of those applications was the waste;
+    // see the SymMat3 overload of apply_inv_inertia for the trade this makes.
+    const SymMat3* inverse_inertia_world = nullptr;
 };
 
 // I_world⁻¹·L without ever building a 3×3 matrix. The stored inverse inertia is the diagonal in
@@ -184,6 +201,45 @@ struct ContactConstraint {
     ContactPointConstraint points[4];
 };
 
+// I_world⁻¹·L from the materialized tensor: 9 multiplies and 6 adds, against two quaternion
+// rotates (~30 multiplies) plus a quaternion compose for the overloads above. The same answer by a
+// different route, so NOT bit-identical to them — the round-off differs, which is why this lands
+// as a deliberate numerical change and not as a refactor (ADR-0026's bit-identity claims are
+// about worker counts, not about arithmetic reformulations). Building the tensor costs one pass
+// over the bodies per step; the velocity phase then applies it once per contact point per
+// iteration, which is where the eight iterations × four points × two bodies make the trade pay.
+[[nodiscard]] inline SymMat3 make_inverse_inertia_world(const core::Quat& composite,
+                                                        core::Vec3 inv_inertia_body) noexcept {
+    // I_world⁻¹ = R·diag(i)·Rᵀ with R the principal→world rotation, and the j-th column of R is
+    // R·e_j — so this is literally Σ_j i_j·(R·e_j)⊗(R·e_j), the spectral decomposition written
+    // out. Every term of that sum is symmetric, which is why only the upper triangle is formed.
+    // The columns come from `core::rotate` rather than a hand-expanded quaternion→matrix formula
+    // so the tensor is built from the same rotation, with the same rounding, as the rest of the
+    // engine. world.cpp calls this once per body per step; the velocity phase then reuses it.
+    const core::Vec3 axis[3] = {core::rotate(composite, core::Vec3{1.0f, 0.0f, 0.0f}),
+                                core::rotate(composite, core::Vec3{0.0f, 1.0f, 0.0f}),
+                                core::rotate(composite, core::Vec3{0.0f, 0.0f, 1.0f})};
+    const float moment[3] = {inv_inertia_body.x, inv_inertia_body.y, inv_inertia_body.z};
+    SymMat3 m;
+    for (int j = 0; j < 3; ++j) {
+        const core::Vec3 a = axis[j];
+        const float w = moment[j];
+        m.xx += w * a.x * a.x;
+        m.xy += w * a.x * a.y;
+        m.xz += w * a.x * a.z;
+        m.yy += w * a.y * a.y;
+        m.yz += w * a.y * a.z;
+        m.zz += w * a.z * a.z;
+    }
+    return m;
+}
+
+[[nodiscard]] inline core::Vec3 apply_inv_inertia(const SymMat3& m, core::Vec3 l) noexcept {
+    return {m.xx * l.x + m.xy * l.y + m.xz * l.z,
+            m.xy * l.x + m.yy * l.y + m.yz * l.z,
+            m.xz * l.x + m.yz * l.y + m.zz * l.z};
+}
+
 // Apply one impulse `p` at a contact point: +p to body b at r_b, −p to body a at r_a. This ±
 // pair IS Newton's third law — total linear and angular momentum of the pair are conserved by
 // construction, which the momentum test observes directly.
@@ -202,13 +258,13 @@ inline void apply_impulse(const SolverBodies& bodies,
     // what the unguarded code produced.
     if (bodies.inv_mass[ia] > 0.0f) {
         bodies.linear_velocity[ia] -= p * bodies.inv_mass[ia];
-        bodies.angular_velocity[ia] -= apply_inv_inertia(
-            bodies.inertia_orientation[ia], bodies.inv_inertia[ia], core::cross(r_a, p));
+        bodies.angular_velocity[ia] -=
+            apply_inv_inertia(bodies.inverse_inertia_world[ia], core::cross(r_a, p));
     }
     if (bodies.inv_mass[ib] > 0.0f) {
         bodies.linear_velocity[ib] += p * bodies.inv_mass[ib];
-        bodies.angular_velocity[ib] += apply_inv_inertia(
-            bodies.inertia_orientation[ib], bodies.inv_inertia[ib], core::cross(r_b, p));
+        bodies.angular_velocity[ib] +=
+            apply_inv_inertia(bodies.inverse_inertia_world[ib], core::cross(r_b, p));
     }
 }
 
@@ -238,11 +294,8 @@ inline void apply_impulse(const SolverBodies& bodies,
     const core::Vec3 wb = bodies.angular_velocity[body_b];
     const float ima = bodies.inv_mass[body_a];
     const float imb = bodies.inv_mass[body_b];
-    const core::Vec3 iia = bodies.inv_inertia[body_a];
-    const core::Vec3 iib = bodies.inv_inertia[body_b];
-    const core::Quat qia =
-        bodies.inertia_orientation[body_a]; // cached q * principal (velocity phase)
-    const core::Quat qib = bodies.inertia_orientation[body_b];
+    const SymMat3& inverse_inertia_a = bodies.inverse_inertia_world[body_a];
+    const SymMat3& inverse_inertia_b = bodies.inverse_inertia_world[body_b];
 
     ContactConstraint c;
     c.body_a = body_a;
@@ -269,9 +322,9 @@ inline void apply_impulse(const SolverBodies& bodies,
         // velocity error" into an impulse with a single multiply.
         const auto effective_mass = [&](core::Vec3 d) {
             const core::Vec3 ang_a =
-                core::cross(apply_inv_inertia(qia, iia, core::cross(out.r_a, d)), out.r_a);
+                core::cross(apply_inv_inertia(inverse_inertia_a, core::cross(out.r_a, d)), out.r_a);
             const core::Vec3 ang_b =
-                core::cross(apply_inv_inertia(qib, iib, core::cross(out.r_b, d)), out.r_b);
+                core::cross(apply_inv_inertia(inverse_inertia_b, core::cross(out.r_b, d)), out.r_b);
             const float k_d = ima + imb + core::dot(ang_a + ang_b, d);
             return k_d > 0.0f ? 1.0f / k_d : 0.0f;
         };
@@ -364,10 +417,8 @@ inline void solve_velocities(const SolverBodies& bodies,
             core::Vec3 wb = bodies.angular_velocity[ib];
             const float ima = bodies.inv_mass[ia];
             const float imb = bodies.inv_mass[ib];
-            const core::Vec3 iia = bodies.inv_inertia[ia];
-            const core::Vec3 iib = bodies.inv_inertia[ib];
-            const core::Quat qa = bodies.inertia_orientation[ia];
-            const core::Quat qb = bodies.inertia_orientation[ib];
+            const SymMat3& inverse_inertia_a = bodies.inverse_inertia_world[ia];
+            const SymMat3& inverse_inertia_b = bodies.inverse_inertia_world[ib];
 
             // Relative velocity of the contact point on b w.r.t. the point on a: a POSITIVE
             // normal component means separating (the normal points a → b).
@@ -379,11 +430,11 @@ inline void solve_velocities(const SolverBodies& bodies,
             const auto apply_local = [&](core::Vec3 r_a, core::Vec3 r_b, core::Vec3 p) {
                 if (ima > 0.0f) {
                     va -= p * ima;
-                    wa -= apply_inv_inertia(qa, iia, core::cross(r_a, p));
+                    wa -= apply_inv_inertia(inverse_inertia_a, core::cross(r_a, p));
                 }
                 if (imb > 0.0f) {
                     vb += p * imb;
-                    wb += apply_inv_inertia(qb, iib, core::cross(r_b, p));
+                    wb += apply_inv_inertia(inverse_inertia_b, core::cross(r_b, p));
                 }
             };
 

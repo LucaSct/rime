@@ -130,6 +130,15 @@ struct PhysicsWorld::Impl {
     // made (see SolverBodies::inertia_orientation for what it is and is not valid for). Derived
     // scratch: never hashed, never serialised, but kept the same length as its siblings.
     std::vector<core::Quat> inertia_orientation;
+    // The materialized I_world⁻¹ per body, filled in the same pass as the composite above and
+    // consumed by the velocity phase through SolverBodies::inverse_inertia_world. Derived scratch
+    // on exactly the same footing: never hashed, never serialised, world-owned so that two worlds
+    // stepping on two threads never share it. Unlike its siblings it is NOT grown at the three
+    // body-lifecycle sites — step() sizes it at the top of the pass that fills it, because it
+    // carries no value between steps and a push_back there would only be overwritten
+    // unconditionally. One `resize` cannot drift out of sync with the pool; three mirrored edits
+    // can.
+    std::vector<SymMat3> inverse_inertia_world;
     std::vector<std::uint8_t> motion;
     std::vector<float> linear_damping;
     std::vector<float> angular_damping;
@@ -1280,14 +1289,30 @@ void PhysicsWorld::step(float dt) {
         p.build_contacts(manifolds, dt);
     }
 
-    // ---- 2.5 Fill the inertia-composite cache, BEFORE the solver's view of the bodies is built
-    // and before anything reads it. One sequential pass over ALL dense bodies, on this thread,
-    // outside every parallel region — statics are anchors shared between islands, so a per-island
-    // fill would be a cross-island write race on them. Same multiply, same operand order as the
-    // live 4-argument apply_inv_inertia, so the velocity phase is bit-identical to composing
-    // inline (tests/physics/solver_test.cpp asserts that identity bitwise).
+    // ---- 2.5 Materialize each body's world inverse inertia, BEFORE the solver's view of the
+    // bodies is built and before anything reads it. One sequential pass over ALL dense bodies, on
+    // this thread, outside every parallel region — statics are anchors shared between islands, so a
+    // per-island fill would be a cross-island write race on them.
+    //
+    // Two things are filled in the one pass, because they are the same arithmetic read twice. The
+    // composite orientation·principal is still the quantity the NGS pass's live 4-argument
+    // apply_inv_inertia composes per use (same multiply, same operand order, so it stays
+    // bit-identical to composing inline — tests/physics/solver_test.cpp asserts that bitwise), and
+    // it is also the rotation the tensor below is built from.
+    //
+    // make_inverse_inertia_world (solver.hpp) is the whole of the second quantity, so the formula
+    // lives in one place and tests/physics/solver_test.cpp can drive the same code this loop runs.
+    // Materializing it is a deliberate numerical change, NOT a refactor: the velocity phase then
+    // multiplies by six stored floats instead of rotating into the eigenframe and back, which is
+    // the same answer along a different arithmetic path. ADR-0026's bit-identity guarantee is
+    // across worker counts and is untouched; what moves is the last bits of a float, and the
+    // collapse of a fracture cascade is sensitive to those (see CLAUDE.md on the 29 --headless
+    // claims). The measurement that justifies it is the fixed-workload solver bench, not a sample.
+    p.inverse_inertia_world.resize(p.orientation.size());
     for (std::size_t i = 0; i < p.orientation.size(); ++i) {
-        p.inertia_orientation[i] = p.orientation[i] * p.inertia_principal[i];
+        const core::Quat q = p.orientation[i] * p.inertia_principal[i];
+        p.inertia_orientation[i] = q;
+        p.inverse_inertia_world[i] = make_inverse_inertia_world(q, p.inv_inertia[i]);
     }
 
     // ---- 3. Prepare the contact constraints (solver.hpp). prepare_contact_constraint reads the
@@ -1303,7 +1328,8 @@ void PhysicsWorld::step(float dt) {
                         p.inertia_principal.data(),
                         p.inertia_orientation.data(),
                         p.friction.data(),
-                        p.restitution.data()};
+                        p.restitution.data(),
+                        p.inverse_inertia_world.data()};
     std::vector<ContactConstraint> constraints;
     constraints.reserve(manifolds.size());
     {
