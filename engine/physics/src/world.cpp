@@ -139,6 +139,26 @@ struct PhysicsWorld::Impl {
     std::vector<std::uint8_t> ccd;    // 1 ⇒ continuous collision: speculative contacts (M7.10)
     std::vector<std::uint8_t> sensor; // 1 ⇒ a trigger volume: overlaps reported, no impulse (m15.6)
     std::vector<float> sleep_timer;   // seconds spent below the sleep thresholds (M7.5)
+    // The POSE rest route (see islands.hpp): the pose a body was last pinned to, and how long it
+    // has stayed inside the envelope around it. Pinned WHOLESALE on every violation and never
+    // crept towards the current pose — a creeping anchor would hide exactly the slow drift the
+    // envelope exists to catch. Carried at the same three lifecycle sites as sleep_timer and
+    // cleared wherever sleep_timer is, because the two are one decision with two routes.
+    std::vector<core::Vec3> rest_anchor_position;
+    std::vector<core::Quat> rest_anchor_orientation;
+    std::vector<float> pose_rest_timer;
+
+    // "This body has to earn sleep again from scratch." Both routes are cleared together and the
+    // anchor is re-pinned to where the body is NOW, because every caller is a site that has just
+    // made the old anchor a lie (a teleport, an impulse, a wake, a rejoin). A single function so
+    // that adding a route later cannot leave one of the six call sites behind.
+    void clear_rest(std::size_t d) {
+        sleep_timer[d] = 0.0f;
+        pose_rest_timer[d] = 0.0f;
+        rest_anchor_position[d] = position[d];
+        rest_anchor_orientation[d] = orientation[d];
+    }
+
     std::vector<std::uint8_t> asleep; // 1 ⇒ deactivated: skipped by integration + solve (M7.5)
     std::vector<ShapeDesc> shape;     // needed to recompute the world AABB after moving
     std::vector<std::int32_t> proxy;  // this body's node in its broadphase tree
@@ -997,6 +1017,9 @@ BodyId PhysicsWorld::create_body(const BodyDesc& d) {
     p.ccd.push_back(d.ccd ? std::uint8_t{1} : std::uint8_t{0});
     p.sensor.push_back(d.sensor ? std::uint8_t{1} : std::uint8_t{0});
     p.sleep_timer.push_back(0.0f);
+    p.rest_anchor_position.push_back(d.position);
+    p.rest_anchor_orientation.push_back(orient); // the NORMALISED one that was stored
+    p.pose_rest_timer.push_back(0.0f);
     p.asleep.push_back(0); // a freshly created body always starts awake
     p.shape.push_back(d.shape);
     p.proxy.push_back(proxy);
@@ -1042,6 +1065,9 @@ void PhysicsWorld::destroy_body(BodyId id) {
         p.ccd[d] = p.ccd[last];
         p.sensor[d] = p.sensor[last];
         p.sleep_timer[d] = p.sleep_timer[last];
+        p.rest_anchor_position[d] = p.rest_anchor_position[last];
+        p.rest_anchor_orientation[d] = p.rest_anchor_orientation[last];
+        p.pose_rest_timer[d] = p.pose_rest_timer[last];
         p.asleep[d] = p.asleep[last];
         p.shape[d] = p.shape[last];
         p.proxy[d] = p.proxy[last];
@@ -1066,6 +1092,9 @@ void PhysicsWorld::destroy_body(BodyId id) {
     p.ccd.pop_back();
     p.sensor.pop_back();
     p.sleep_timer.pop_back();
+    p.rest_anchor_position.pop_back();
+    p.rest_anchor_orientation.pop_back();
+    p.pose_rest_timer.pop_back();
     p.asleep.pop_back();
     p.shape.pop_back();
     p.proxy.pop_back();
@@ -1120,7 +1149,7 @@ bool PhysicsWorld::set_body_state(BodyId id, const BodyState& state) {
     // Wake it: an asleep body is asserting it has come to rest where it stands, which a teleport
     // has just made false. Clearing the timer too, so it has to earn sleep again from scratch.
     p.asleep[d] = 0;
-    p.sleep_timer[d] = 0.0f;
+    p.clear_rest(d);
 
     // Refit the proxy to where the body actually is now. step()'s stage-8 refit only covers active
     // islands, so without this a body moved while asleep keeps a proxy at its old pose (see the
@@ -1345,7 +1374,7 @@ void PhysicsWorld::step(float dt) {
                     const std::uint32_t b = isl.bodies[bi];
                     if (p.asleep[b] != 0) { // a neighbour is moving — rejoin the simulation
                         p.asleep[b] = 0;
-                        p.sleep_timer[b] = 0.0f;
+                        p.clear_rest(b);
                     }
                 }
             }
@@ -1476,11 +1505,15 @@ void PhysicsWorld::step(float dt) {
     }
 
     // ---- 7. Update SLEEPING, measured on the POST-solve velocities (a resting body's pre-solve
-    // velocity still holds the g·dt its contact just cancelled, so only now is it near rest). Each
-    // active island's bodies accrue sleep time while below the thresholds and reset the instant
-    // they exceed them; once EVERY member has rested past kTimeToSleep the whole island sleeps —
-    // velocities zeroed, and from next tick skipped. Sequential and deterministic, so sleeping
-    // never perturbs the cross-thread world hash.
+    // velocity still holds the g·dt its contact just cancelled, so only now is it near rest) and
+    // on the POST-NGS poses. Each active island's bodies accrue sleep time by EITHER of two
+    // routes — speed under the thresholds, or a pose that has not left its rest envelope (both in
+    // islands.hpp) — and lose it the instant they break the one they were accruing on. Once every
+    // member has earned candidacy for kTimeToSleep the whole island sleeps: velocities zeroed, and
+    // from next tick skipped. Sequential and deterministic, so sleeping never perturbs the
+    // cross-thread world hash. Note that world_hash() covers poses and velocities but NOT this
+    // bookkeeping, so the cross-worker bit-identity test observes the consequences of a sleep
+    // decision and not the decision itself.
     if (p.sleeping_enabled) {
         RIME_PROFILE_ZONE(p.zone(StepZone::Sleep));
         constexpr float lin2 = kLinearSleepThreshold * kLinearSleepThreshold;
@@ -1495,7 +1528,27 @@ void PhysicsWorld::step(float dt) {
                 const bool sleepy = core::dot(p.linear_velocity[i], p.linear_velocity[i]) < lin2 &&
                                     core::dot(p.angular_velocity[i], p.angular_velocity[i]) < ang2;
                 p.sleep_timer[i] = sleepy ? p.sleep_timer[i] + dt : 0.0f;
-                if (p.sleep_timer[i] < kTimeToSleep) {
+
+                // The second route, on the POST-NGS pose (islands.hpp): has the body actually
+                // GONE anywhere? Velocity is sampled once per step and a settling pile's chunks
+                // get kicked above the bound every few ticks while moving micrometres, so the
+                // speed route alone keeps such a pile awake forever. On a violation the anchor is
+                // re-pinned here rather than crept, so the envelope measures total displacement
+                // from one pose and not a sliding window that drift can walk through.
+                if (pose_within_rest_envelope(p.position[i],
+                                              p.orientation[i],
+                                              p.rest_anchor_position[i],
+                                              p.rest_anchor_orientation[i])) {
+                    p.pose_rest_timer[i] += dt;
+                } else {
+                    p.pose_rest_timer[i] = 0.0f;
+                    p.rest_anchor_position[i] = p.position[i];
+                    p.rest_anchor_orientation[i] = p.orientation[i];
+                }
+
+                // EITHER route earns this body its candidacy; the island still needs every member
+                // to have earned it, which is what keeps a stack from half-sleeping.
+                if (p.sleep_timer[i] < kTimeToSleep && p.pose_rest_timer[i] < kTimeToSleep) {
                     island_can_sleep = false;
                 }
             }
@@ -1848,7 +1901,9 @@ void PhysicsWorld::set_sleeping_enabled(bool enabled) noexcept {
         // Wake everything now so step() never skips a body while sleeping is off (and a body frozen
         // by an earlier sleep resumes integrating on the very next tick).
         std::fill(impl_->asleep.begin(), impl_->asleep.end(), std::uint8_t{0});
-        std::fill(impl_->sleep_timer.begin(), impl_->sleep_timer.end(), 0.0f);
+        for (std::size_t i = 0; i < impl_->sleep_timer.size(); ++i) {
+            impl_->clear_rest(i);
+        }
     }
 }
 
@@ -1863,7 +1918,7 @@ void PhysicsWorld::wake_body(BodyId id) noexcept {
         return; // stale/unknown — safe no-op
     }
     impl_->asleep[d] = 0;
-    impl_->sleep_timer[d] = 0.0f;
+    impl_->clear_rest(d);
     // The rest of its island reactivates on the next step(): stage 5 sees an awake member and wakes
     // the others. (Waking the whole island here would need the island partition, which step()
     // owns.)
@@ -2437,7 +2492,7 @@ void PhysicsWorld::apply_impulse(BodyId id, core::Vec3 impulse, core::Vec3 point
     // A sleeping body ignores velocity until something wakes it, so an impulse must wake it (its
     // island reactivates on the next step, exactly as wake_body documents).
     p.asleep[d] = 0;
-    p.sleep_timer[d] = 0.0f;
+    p.clear_rest(d);
 }
 
 void PhysicsWorld::apply_central_impulse(BodyId id, core::Vec3 impulse) noexcept {
@@ -2448,7 +2503,7 @@ void PhysicsWorld::apply_central_impulse(BodyId id, core::Vec3 impulse) noexcept
     }
     p.linear_velocity[d] += impulse * p.inv_mass[d]; // applied through the COM ⇒ no torque
     p.asleep[d] = 0;
-    p.sleep_timer[d] = 0.0f;
+    p.clear_rest(d);
 }
 
 HullId PhysicsWorld::register_hull(const HullDesc& desc) {

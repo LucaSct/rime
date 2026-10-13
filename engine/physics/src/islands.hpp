@@ -2,6 +2,8 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -80,6 +82,49 @@ inline constexpr std::uint32_t kInvalidIsland = 0xFFFFFFFFu;
 inline constexpr float kLinearSleepThreshold = 0.05f;  // m/s
 inline constexpr float kAngularSleepThreshold = 0.05f; // rad/s
 inline constexpr float kTimeToSleep = 0.5f;            // seconds
+
+// ------------------------------------------------------------------- the POSE rest envelope -----
+// The same tolerance, INTEGRATED rather than sampled. The speed test above asks "is this body slow
+// right now", and one tick above the bound zeroes its timer — so a body that is kicked hard and
+// goes nowhere (a chunk pinched in a settling pile, jostled by its neighbours every few ticks)
+// never accumulates the half second, and because the island needs EVERY member to accumulate it
+// simultaneously, one such chunk keeps a pile of twenty awake forever. Measured on the destruction
+// wall: the island's minimum timer never exceeds 0.27 s of the 0.5 s needed, over nine hundred
+// ticks (/home/next/reports/rime-sleep-detector-2026-10-13/REPORT.md).
+//
+// So a body is ALSO a sleep candidate while its POSE stays inside an envelope — which is what
+// sleeping actually asserts: "freezing the body here changes little". The envelope is DERIVED from
+// the thresholds above rather than invented, and that is the whole argument for it: travelling at
+// exactly kLinearSleepThreshold for kTimeToSleep covers 25 mm, so the speed test already accepts
+// 25 mm of pending motion before it calls a body at rest. Asking for the same 25 mm of total
+// displacement is therefore not a loosening — for steady motion the two agree exactly, and the
+// pose test is only more permissive for motion that CANCELS, which is precisely the case the speed
+// test gets wrong. A consult proposed 1 mm / 1 mrad here; measured, that is 25x stricter than the
+// engine's own notion of rest and no failing draw ever cleared it.
+inline constexpr float kPoseRestTranslation = kLinearSleepThreshold * kTimeToSleep; // 25 mm
+inline constexpr float kPoseRestRotation = kAngularSleepThreshold * kTimeToSleep;   // 25 mrad
+
+// Is `position`/`orientation` still within the rest envelope of the anchor pose it was last
+// pinned to? The rotation is compared as the SHORTEST-ARC angle, via the absolute value of the
+// quaternion dot product: q and -q are the same orientation (the double cover), so without the
+// absolute value a body that drifted across the sign boundary would read as having rotated by
+// nearly 2π and would be denied sleep forever, at random.
+[[nodiscard]] inline bool pose_within_rest_envelope(const core::Vec3& position,
+                                                    const core::Quat& orientation,
+                                                    const core::Vec3& anchor_position,
+                                                    const core::Quat& anchor_orientation) noexcept {
+    const core::Vec3 d = position - anchor_position;
+    if (core::dot(d, d) > kPoseRestTranslation * kPoseRestTranslation) {
+        return false;
+    }
+    const float cosine =
+        std::abs(orientation.x * anchor_orientation.x + orientation.y * anchor_orientation.y +
+                 orientation.z * anchor_orientation.z + orientation.w * anchor_orientation.w);
+    // 2·acos|cos(θ/2)| is the shortest-arc angle; clamped because round-off can push a unit
+    // quaternion's self-dot a hair above 1 and acos would then return NaN.
+    const float angle = 2.0f * std::acos(std::min(1.0f, cosine));
+    return angle <= kPoseRestRotation;
+}
 
 // Build the island partition of `body_count` bodies given their motion types and the tick's contact
 // constraints (each carries the two bodies' dense indices, canonical order). Fills `out` in CSR.
