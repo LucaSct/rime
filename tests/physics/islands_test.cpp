@@ -6,7 +6,9 @@
 #include <cstdint>
 #include <memory>
 
+#include "islands.hpp" // the sleep thresholds and the pose rest envelope they derive
 #include "rime/core/jobs/job_system.hpp"
+#include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/physics/physics.hpp"
 
@@ -297,4 +299,92 @@ TEST_CASE("validate: tumbling elongated boxes in 16 islands - parallel hash == s
         CHECK(par.max_parallel > 1);
         CHECK(par.hash == seq.hash);
     }
+}
+
+// ---------------------------------------------------------------- the POSE rest route (2026-10) --
+// Why this route exists, measured on the destruction wall: the speed test is sampled once per step,
+// so a chunk pinched in a settling pile that is kicked above the bound every few ticks while moving
+// micrometres never accrues the half second — and because the island needs EVERY member
+// simultaneously, one such chunk kept eighteen bodies awake for nine hundred ticks. The second
+// route asks the question sleeping actually asserts: has the body GONE anywhere?
+// Evidence: /home/next/reports/rime-sleep-detector-2026-10-13/REPORT.md.
+
+TEST_CASE("the pose rest envelope is the speed thresholds, integrated") {
+    // THE CONTROL, and the whole argument that this is not a loosening: the envelope is DERIVED
+    // from the existing thresholds, so steady motion at exactly the speed bound covers exactly the
+    // displacement bound. Were these ever tuned apart, the route would stop being "the same
+    // tolerance, integrated" and start being a second, unargued knob.
+    CHECK(physics::kPoseRestTranslation == physics::kLinearSleepThreshold * physics::kTimeToSleep);
+    CHECK(physics::kPoseRestRotation == physics::kAngularSleepThreshold * physics::kTimeToSleep);
+
+    const core::Vec3 anchor_p{3.0f, -1.0f, 0.5f};
+    const core::Quat anchor_q =
+        core::quat_from_axis_angle(core::normalize(core::Vec3{1.0f, 2.0f, -0.5f}), 0.7f);
+    const float r = physics::kPoseRestTranslation;
+
+    SUBCASE("translation is bounded by the envelope, on both sides of it") {
+        for (const core::Vec3 dir : {core::Vec3{1.0f, 0.0f, 0.0f},
+                                     core::Vec3{0.0f, 1.0f, 0.0f},
+                                     core::Vec3{0.0f, 0.0f, 1.0f},
+                                     core::normalize(core::Vec3{1.0f, 1.0f, 1.0f})}) {
+            CHECK(physics::pose_within_rest_envelope(
+                anchor_p + dir * (r * 0.95f), anchor_q, anchor_p, anchor_q));
+            CHECK_FALSE(physics::pose_within_rest_envelope(
+                anchor_p + dir * (r * 1.05f), anchor_q, anchor_p, anchor_q));
+        }
+    }
+
+    SUBCASE("rotation is bounded by the envelope, about any axis") {
+        const float a = physics::kPoseRestRotation;
+        for (const core::Vec3 axis : {core::Vec3{1.0f, 0.0f, 0.0f},
+                                      core::Vec3{0.0f, 0.0f, 1.0f},
+                                      core::normalize(core::Vec3{-2.0f, 1.0f, 3.0f})}) {
+            const core::Quat inside = anchor_q * core::quat_from_axis_angle(axis, a * 0.8f);
+            const core::Quat outside = anchor_q * core::quat_from_axis_angle(axis, a * 1.2f);
+            CHECK(physics::pose_within_rest_envelope(anchor_p, inside, anchor_p, anchor_q));
+            CHECK_FALSE(physics::pose_within_rest_envelope(anchor_p, outside, anchor_p, anchor_q));
+        }
+    }
+
+    SUBCASE("q and -q are the same orientation — the double cover must not deny sleep") {
+        // A unit quaternion and its negation name the same rotation. Comparing them without the
+        // absolute value reads as a rotation of nearly 2π, so a body that happened to drift across
+        // the sign boundary would be refused sleep forever, at random. That failure would be
+        // invisible in every test above, because they all stay on one side of it.
+        const core::Quat negated{-anchor_q.x, -anchor_q.y, -anchor_q.z, -anchor_q.w};
+        CHECK(physics::pose_within_rest_envelope(anchor_p, negated, anchor_p, anchor_q));
+        CHECK(physics::pose_within_rest_envelope(anchor_p, anchor_q, anchor_p, negated));
+    }
+}
+
+TEST_CASE("the pose route does not let a steadily DRIFTING body sleep") {
+    // The control on the behaviour, not on the formula: the new route must not turn into "sleep
+    // anything that is not obviously flying". A body translating just above the speed bound fails
+    // the speed route, and must fail the pose route too — which it does only because the envelope
+    // is the speed bound integrated. Both halves are checked, so neither route can be the one
+    // carrying the result by accident.
+    const float just_over = physics::kLinearSleepThreshold * 1.2f;
+    const float just_under = physics::kLinearSleepThreshold * 0.8f;
+
+    const auto drifting_body_sleeps_within = [](float speed, int budget) {
+        physics::PhysicsWorld w;
+        w.set_gravity({0.0f, 0.0f, 0.0f}); // no contacts, no gravity: a pure drift
+        physics::BodyDesc d;
+        d.motion = physics::MotionType::Dynamic;
+        d.shape = box({0.5f, 0.5f, 0.5f});
+        d.position = {0.0f, 0.0f, 0.0f};
+        d.linear_velocity = {speed, 0.0f, 0.0f};
+        const physics::BodyId b = w.create_body(d);
+        for (int i = 0; i < budget; ++i) {
+            w.step(kDt);
+            if (w.is_asleep(b)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 300 ticks is 5 s, ten times the half second either route needs.
+    CHECK_FALSE(drifting_body_sleeps_within(just_over, 300));
+    CHECK(drifting_body_sleeps_within(just_under, 300)); // the speed route still works
 }
