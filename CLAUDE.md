@@ -202,6 +202,11 @@ Verify proportionately to the change — don't re-run the whole world for every 
   `physics.largest_island_peak: 18` is a **peak**, so "the debris is one island" is not a fact
   about the tail. Design and the measurement to run first:
   `/home/next/reports/rime-sleep-consult-2026-10-13/REPORT.md`.
+  **Confirmed by a platform, 2026-10-13:** PR #320's single commit passes
+  `destructible_wall_headless` on **macOS** (81/82) and fails it on Linux and Windows (80/82) —
+  a different compiler and libm is a different last bit, and the gate flips. So when a bit-moving
+  change reds these two samples on some jobs and not others, that is the gate, not a
+  platform-specific defect; check for a compile diagnostic before reading it as one.
   Evidence: `/home/next/reports/rime-tier2-ledger-2026-10-13/REPORT.md`. The sample also
   replays the scene **5×** and substeps physics **5×**, so a per-world step counter in any trace is
   25× the sample tick and the world pointer is reused between replays.
