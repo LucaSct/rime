@@ -2161,21 +2161,58 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
     // happened to hold at whatever tick the loop stopped.
     constexpr std::uint64_t kSettleBound = 600;
     std::uint64_t settled_after = 0;
-    const auto agree = [&demo] {
+    // WHY the loop's two exits must be told apart: it leaves either because the peers agreed or
+    // because the bound ran out, and only the first is convergence. A message that says "agreed"
+    // on both is a proof that reads as passing when it is not. When the bound DOES run out there
+    // are two very different causes: delivery is behind (or an op was lost), or the authority is
+    // still committing NEW damage — empty player input is not authoritative quiescence, since the
+    // falling pile keeps fracturing things. The server's own state hash is the tell: while it
+    // keeps changing, the server is still producing damage and the peers cannot be expected to
+    // match; once it has been stable for many ticks and the peers still disagree, the fault is in
+    // delivery. This is observation only — it changes no behaviour and gates nothing.
+    const auto server_state_hash = [&demo] {
         return destruction_net::shared_state_hash(demo.session.server.world,
                                                   demo.session.server.replicator->map(),
-                                                  demo.session.server.destruction) ==
-               destruction_net::shared_state_hash(demo.session.client.world,
+                                                  demo.session.server.destruction);
+    };
+    const auto client_state_hash = [&demo] {
+        return destruction_net::shared_state_hash(demo.session.client.world,
                                                   demo.session.client.replicator->map(),
                                                   demo.session.client.destruction);
     };
-    while (settled_after < kSettleBound && !agree()) {
+    std::uint64_t server_hash_changes = 0;
+    std::uint64_t server_stable_tail = 0;
+    auto last_server_hash = server_state_hash();
+    bool peers_agree = last_server_hash == client_state_hash();
+    while (settled_after < kSettleBound && !peers_agree) {
         demo.step_sim(replication::InputCommand{});
         ++settled_after;
+        const auto sh = server_state_hash();
+        if (sh != last_server_hash) {
+            ++server_hash_changes;
+            server_stable_tail = 0;
+            last_server_hash = sh;
+        } else {
+            ++server_stable_tail;
+        }
+        peers_agree = sh == client_state_hash();
     }
-    std::printf("  settled   : peers agreed after %llu quiet ticks (bound %llu)\n",
+    if (peers_agree) {
+        std::printf("  settled   : peers agreed after %llu quiet ticks (bound %llu)\n",
+                    static_cast<unsigned long long>(settled_after),
+                    static_cast<unsigned long long>(kSettleBound));
+    } else {
+        std::printf("  settled   : peers did NOT agree - the bound was exhausted after %llu quiet "
+                    "ticks (bound %llu)\n",
+                    static_cast<unsigned long long>(settled_after),
+                    static_cast<unsigned long long>(kSettleBound));
+    }
+    std::printf("  settle obs: server hash changed on %llu of %llu quiet ticks, unchanged for the "
+                "last %llu (moving = authority still damaging; stable while peers differ = "
+                "delivery behind or lost)\n",
+                static_cast<unsigned long long>(server_hash_changes),
                 static_cast<unsigned long long>(settled_after),
-                static_cast<unsigned long long>(kSettleBound));
+                static_cast<unsigned long long>(server_stable_tail));
 
     const std::size_t parts_at_end = demo.session.parts_alive();
     {
@@ -2227,6 +2264,23 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
                 static_cast<unsigned long long>(dc.composition_mismatches()),
                 static_cast<unsigned long long>(dc.debris_bound()),
                 static_cast<unsigned long long>(dc.debris_unresolved()));
+    {
+        const auto& ds = demo.session.server.destruction_net_server;
+        const std::uint64_t sent = ds.ops_sent();
+        const std::uint64_t applied = dc.ops_applied();
+        std::printf("  op ledger : server sent %llu ops in %llu packets (%llu unaddressable, %llu "
+                    "composition checks); client applied %llu, dropped-unmapped %llu, malformed "
+                    "%llu, unverified checks %llu; outstanding (sent - applied) %lld\n",
+                    static_cast<unsigned long long>(sent),
+                    static_cast<unsigned long long>(ds.op_packets_sent()),
+                    static_cast<unsigned long long>(ds.ops_unaddressable()),
+                    static_cast<unsigned long long>(ds.composition_checks_sent()),
+                    static_cast<unsigned long long>(applied),
+                    static_cast<unsigned long long>(dc.ops_dropped_unmapped()),
+                    static_cast<unsigned long long>(dc.malformed_messages()),
+                    static_cast<unsigned long long>(dc.composition_checks_unverified()),
+                    static_cast<long long>(sent) - static_cast<long long>(applied));
+    }
     std::printf("  damage    : %llu ops, %llu instant kills (>= 1.0 health), largest %.2f\n",
                 static_cast<unsigned long long>(demo.session.total_ops),
                 static_cast<unsigned long long>(demo.session.lethal_ops),
