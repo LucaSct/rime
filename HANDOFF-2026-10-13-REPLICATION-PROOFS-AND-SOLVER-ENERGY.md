@@ -151,26 +151,60 @@ speculative-contact bias at `solver.hpp:296-298`, where `velocity_bias = penetra
 unverified coincidence, and astra ranks restitution third. Do not treat it as eliminated or as
 established.
 
-**fable** (`claude-fable-5-1` over the devpass gateway): **no answer obtained, $0.532 spent across
-two attempts, and the cause is diagnosed.** Both calls returned `finish_reason: "length"` after
-spending their entire 4000-token completion budget inside a `reasoning_details` block (encrypted
-signature, empty visible text) without emitting one word of answer. **Fable is a thinking model over
-this gateway: `max_tokens` must cover the thinking AND the reply, or you pay in full for nothing.**
-A third attempt at `max_tokens: 20000` was in flight at handoff time — see
-`scratchpad/fable3.out.md`, and the raw SSE from the failed run is kept at
-`fable-prompt.md.rawsse` (24 lines, 3 data chunks) as the evidence.
+**fable** (`claude-fable-5-1` over the devpass gateway, 3rd attempt, 7235 completion tokens,
+**$0.896 total across all three**). Its first two calls returned `finish_reason: "length"` having
+spent an entire 4000-token budget inside an encrypted `reasoning_details` block without emitting a
+word: **Fable is a thinking model over this gateway, so `max_tokens` must cover the thinking AND the
+reply or you pay in full for nothing.** At 20000 it answered in 118 s.
 
-**Nothing from fable is recorded as agreement or disagreement, because nothing was ever read.** Do
-not infer that it concurred with astra.
+1. **Warm start applying stale cached impulses to churned contact points** — its top suspect, and
+   **its stated premise is WRONG**: it inferred that "nothing ties a cached scalar to a feature
+   identity" because `store_impulses` writes by slot index (`solver.hpp:441-449`). But
+   `contact.hpp:33-41,54` has `feature_id`, "a stable hash of the shape features", and the
+   persistent manifold cache "matches this frame's points to last frame's **by feature id** and
+   carries their accumulated impulses forward". **The fault is the prompt's, not the model's** — only
+   `solver.hpp` was inlined, and fable correctly hedged the claim to "nothing in the excerpt".
+   Its *measurement* survives the correction and is still worth running: count points whose cached
+   impulse is applied with |r_a − r_a_prev| > 5 mm or a flipped tangent basis.
+2. **NGS injects POTENTIAL energy** — up to `kNgsMaxCorrection` 0.2 m per point per iteration x 2
+   iterations, which is large for wall chunks: a body is lifted, falls, re-penetrates deeper, and is
+   lifted further. Toggle `kPositionIterations = 0` (`solver.hpp:48`); the burst persisting refutes it.
+3. **Restitution multi-contact over-count** — sharper than astra's version: a body wedged between two
+   neighbours gets **two independent separating targets** computed from the same pre-solve state
+   (`solver.hpp:283-285`). And since growth begins at KE~2, likely below the 1 m/s gate, restitution
+   is more plausibly the **amplifier than the trigger**.
+4. It **engaged with the orchestrator's speculative-bias candidate** (`solver.hpp:290-292`) and
+   ranked it LOW with a mechanism: a cached positive normal impulse warm-started onto a point whose
+   bias flipped to `penetration/dt` can be fully retracted by the clamp to zero. astra ignored that
+   candidate entirely. **Taken together the orchestrator concedes it is unlikely to be primary**, and
+   the 4 m/s coincidence stays a coincidence.
+5. Velocity solve proper is dissipative (PGS with a consistent effective mass); integrator low,
+   inconsistent with an onset at KE~2.
+
+### Where the two consults agree, and where they do not
+
+- **Agreement: warm start ranks first in both** — but by *different* mechanisms (astra: the friction
+  clamp doing positive work; fable: stale impulses on churned points). Two opinions converging on a
+  phase, which is **weak evidence** — not two independent measurements.
+- **Disagreement, and astra is right:** fable asserts NGS "cannot inject KE directly" because it
+  writes no velocity. That is exactly the orchestrator's own error. `KE_rot = 1/2 w.I(q).w` depends on
+  orientation, so rotating an anisotropic body at fixed w *does* change rotational energy. **Two of
+  the three analyses made the same mistake; astra's correction stands.**
+- **Fable adds what astra lacked: cheap falsification TOGGLES** — zero the cached impulses, set
+  `kPositionIterations = 0`, set restitution to 0 — plus the right framing that **exactly one ledger
+  term should grow at 1.9x/8 ticks**, and a tight tick window (seed 1, ticks 850-1010).
 
 ### astra's decisive experiment (the recommended next brick)
-A **phase-energy ledger**, in double precision, on a failing seed, across the onset and growth:
+Both consults converge on this, and it should now be run as the **union** of their two designs:
+a **phase-energy ledger**, in double precision, on a failing seed, across the onset and growth:
 sum translational KE + rotational KE **using the live pose** + **gravitational potential**, sampled
 before/after gravity-damping, warm start, velocity solve, pose integration and NGS. Phase
 boundaries named at `world.cpp:1212, :1386, :1391, :1406, :1415`. Keep warm-start and velocity-solve
 deltas both separate and combined. **The cumulative ledger must account for the growth — a transient
 positive spike is not enough.** The gravitational-potential term is astra's addition and was missing
-from the orchestrator's own design.
+from the orchestrator's own design. Add fable's three toggles as the confirmation step, and its
+expectation that **exactly one** term grows at 1.9x/8 ticks — a ledger where several terms drift is
+a ledger that has not isolated anything.
 
 ## Environment findings recorded this session
 
