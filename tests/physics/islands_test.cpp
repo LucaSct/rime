@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 
@@ -221,4 +222,79 @@ TEST_CASE("M7.5: the full pipeline (islands + sleeping) is bit-identical across 
     CHECK(run_hash(1) == sequential);
     CHECK(run_hash(2) == sequential);
     CHECK(run_hash(4) == sequential);
+}
+
+// ── Tier-2 matrix validation: sequential vs parallel, WITH the sensitivity control ──
+TEST_CASE("validate: tumbling elongated boxes in 16 islands - parallel hash == sequential hash") {
+    // Why elongated AND tilted: the world inverse inertia is R * diag(1/Ixx,1/Iyy,1/Izz) * R^T.
+    // That is a full (non-diagonal) matrix only when the three principal moments DIFFER (a long
+    // thin box) and the body is rotated off the world axes (the tilt, then spin keeps it so). A
+    // cube or sphere has isotropic inertia, I = k*Identity, so R * (1/k)I * R^T = (1/k)I stays
+    // diagonal under every rotation: the cube/sphere scenes in build_multi_island_scene cannot
+    // express any divergence in how the off-diagonal terms are stored or multiplied, so their
+    // bit-identity proofs are structurally blind to it. This scene is the first that can. The eight
+    // columns hold two boxes each and the pair never touches, so every BOX is its own island:
+    // sixteen of them, measured, not the eight the column count suggests. The control is
+    // islands_solved_parallel: it must exceed 1 in the parallel run and be 0 in the sequential one,
+    // or the comparison proves nothing.
+    struct R {
+        std::uint64_t hash;
+        std::uint32_t max_parallel;
+        std::uint32_t active;
+    };
+
+    auto run = [](int workers) -> R {
+        physics::PhysicsWorld w;
+        w.set_sleeping_enabled(false);
+        add_ground(w);
+        for (int k = 0; k < 8; ++k) {
+            for (int j = 0; j < 2; ++j) {
+                physics::BodyDesc d;
+                d.motion = physics::MotionType::Dynamic;
+                d.shape = box({0.2f, 0.6f, 1.0f});
+                d.position = {k * 6.0f - 21.0f, 1.5f + 2.5f * static_cast<float>(j), 0.0f};
+                d.orientation = core::normalize(core::Quat{0.3f * static_cast<float>(k + 1),
+                                                           0.2f,
+                                                           0.1f * static_cast<float>(j + 1),
+                                                           1.0f});
+                d.angular_velocity = {1.0f, 0.5f * static_cast<float>(k), -2.0f};
+                static_cast<void>(w.create_body(d));
+            }
+        }
+        std::unique_ptr<core::JobSystem> js;
+        if (workers >= 0) {
+            js = std::make_unique<core::JobSystem>(static_cast<unsigned>(workers));
+            w.set_job_system(js.get());
+        }
+        R r{0, 0, 0};
+        for (int i = 0; i < 300; ++i) {
+            w.step(kDt);
+            const auto s = w.stats();
+            r.max_parallel = std::max(r.max_parallel, s.islands_solved_parallel);
+            r.active = std::max(r.active, s.active_islands);
+        }
+        r.hash = w.world_hash();
+        return r;
+    };
+    const R seq = run(-1);
+    MESSAGE("seq: hash=",
+            seq.hash,
+            " max_islands_solved_parallel=",
+            seq.max_parallel,
+            " max_active=",
+            seq.active);
+    CHECK(seq.max_parallel == 0);
+    for (int workers : {1, 2, 4}) {
+        const R par = run(workers);
+        MESSAGE("workers=",
+                workers,
+                " hash=",
+                par.hash,
+                " max_islands_solved_parallel=",
+                par.max_parallel,
+                " max_active=",
+                par.active);
+        CHECK(par.max_parallel > 1);
+        CHECK(par.hash == seq.hash);
+    }
 }
