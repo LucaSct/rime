@@ -328,7 +328,18 @@ index inside one replay, not a sample tick.
    vacuous after all: `inertia_orientation` remains the materialized tensor's input and remains
    the NGS path's operand. Open question on it, and the owner's call: `destructible_wall_headless`
    and `the_block_headless` are green on `87b02c8` (13/13 with their cook fixtures, measured) and
-   **red on the branch**, so merging it reds trunk until item 1 lands.
+   **red on the branch**, so merging it reds trunk until item 1 lands. The self-hosted **Editor
+   smoke** is a third red from the same cause — its authoring round-trip runs the block demo and
+   fails the same two net-convergence claims.
+
+   **OWNER'S DECISION, 2026-10-13 (Luca): the sleep fix lands FIRST, then #320 merges green.**
+   Asked with the alternatives priced — merge now and red trunk, merge and quarantine the three
+   gates, or park the branch. The reasoning that decided it: trunk's red has to keep meaning
+   something, because every other verification rule in `CLAUDE.md` is built on reading a red job
+   as information. The cost accepted is that a measured 2× waits for a full brick, and the risk
+   accepted is astra's own caveat — if the pile genuinely creeps beyond the pose envelope, the fix
+   *should not* force it asleep, and the decision comes back with the work spent. Do not re-ask
+   this; #320 stays open and unmerged until item 1 is green.
 3. **Wire #317's `op ledger:` to #318's refusal counters.** Both are on `main` now, and the ledger
    currently cannot see a refused send at all. Small.
 4. Record the wall-test luck-gate rule in the repo's `CLAUDE.md` beside the 29-claims rule, so the
