@@ -2137,8 +2137,13 @@ struct Demo {
         std::snprintf(buf, sizeof(buf), "%zu", visuals->leaf_stats.leaves_live);
         row("leaves", buf, st::kText);
         // The convergence claim, on screen: the two hashes are the peers agreeing or not.
-        const bool agree =
-            session.client.destruction.state_hash() == session.server.destruction.state_hash();
+        // With a play_world the server instantiated block physics BEFORE terrain tiles, so the two
+        // peers' BodyIds differ though their destruction facts agree: compare content, not handles.
+        const bool agree = session.play_world
+                               ? session.client.destruction.replicated_content_hash() ==
+                                     session.server.destruction.replicated_content_hash()
+                               : session.client.destruction.state_hash() ==
+                                     session.server.destruction.state_hash();
         row("peers", agree ? "in sync" : "DIVERGED", agree ? st::kText : st::kWarn);
         std::snprintf(buf, sizeof(buf), "%zu", mixer.voice_count());
         row("voices", buf, st::kText);

@@ -554,3 +554,54 @@ TEST_CASE("M8.5 soak: continuous refracture under a cap stays bounded and bit-re
     CHECK(run_soak(asset, 2, kCap) == base);
     CHECK(run_soak(asset, 4, kCap) == base);
 }
+
+TEST_CASE("replicated_content_hash ignores peer-local BodyIds but not destruction facts") {
+    // Two worlds with identical destruction; one allocates a dummy body first, so every BodyId the
+    // destruction world holds is shifted. state_hash folds those handles (differs); the content
+    // hash must not (matches) — yet it must still move on a real health / alive / debris change.
+    const assets::DestructibleAsset asset = make_grid(3, 4, {0.25f, 0.25f, 0.15f}, 1000.0f, 1.0f);
+
+    struct Peer {
+        destruction::DestructionWorld dw;
+        physics::PhysicsWorld pw;
+        destruction::InstanceId inst{};
+    };
+
+    const auto make = [&](bool dummy_first) {
+        auto p = std::make_unique<Peer>();
+        if (dummy_first) {
+            (void)add_ground(p->pw, -10.0f);
+        }
+        const destruction::PatternId pattern = p->dw.register_pattern(asset, p->pw);
+        p->inst = p->dw.spawn(pattern, core::Transform{}, p->pw);
+        return p;
+    };
+    auto a = make(false);
+    auto b = make(true);
+    CHECK(a->dw.state_hash() != b->dw.state_hash());
+    CHECK(a->dw.replicated_content_hash() == b->dw.replicated_content_hash());
+
+    // Light damage (health only, nothing breaks) to one peer: content must now differ.
+    const core::Vec3 at = a->dw.part_placement(a->inst, 0).translation;
+    a->dw.apply_damage(a->inst, at, 0.1f, 1.0f, core::Vec3{});
+    a->dw.update(a->pw);
+    CHECK(a->dw.replicated_content_hash() != b->dw.replicated_content_hash());
+
+    // Same light damage to the other peer: content agrees again.
+    b->dw.apply_damage(b->inst, at, 0.1f, 1.0f, core::Vec3{});
+    b->dw.update(b->pw);
+    CHECK(a->dw.replicated_content_hash() == b->dw.replicated_content_hash());
+
+    // Same lethal damage on both: debris appear, handles still differ, content still agrees.
+    for (auto* p : {a.get(), b.get()}) {
+        for (std::uint32_t x = 0; x < 3; ++x) {
+            p->dw.apply_damage(
+                p->inst, p->dw.part_placement(p->inst, x).translation, 0.15f, 1e6f, core::Vec3{});
+        }
+        p->dw.update(p->pw);
+    }
+    CHECK(a->dw.debris_count() > 0);
+    CHECK(a->dw.debris_count() == b->dw.debris_count());
+    CHECK(a->dw.state_hash() != b->dw.state_hash());
+    CHECK(a->dw.replicated_content_hash() == b->dw.replicated_content_hash());
+}
