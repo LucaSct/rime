@@ -445,3 +445,134 @@ TEST_CASE("render graph: compute-written indirect arguments get an IndirectRead 
     CHECK(order[1] == 1);
     CHECK_FALSE(graph.was_culled(0));
 }
+
+TEST_CASE(
+    "render graph: externally visible sampled-only compute keeps a persistent state transition") {
+    using namespace rime::rhi;
+    using namespace rime::render;
+    constexpr std::uint32_t kSize = 8;
+    auto device = create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    Kit kit(*device);
+    TextureDesc td{};
+    td.extent = {kSize, kSize};
+    td.format = Format::RGBA8Unorm;
+    td.usage = TextureUsage::ColorAttachment | TextureUsage::Sampled;
+    td.debug_name = "rg-persistent-effect";
+    const TextureHandle persistent = device->create_texture(td);
+
+    // Leave the persistent texture in ColorTarget, the state the next graph must import.
+    {
+        RenderGraph graph(*device);
+        graph.reset();
+        const RGTexture target = graph.import_texture(
+            persistent, ResourceState::Undefined, {kSize, kSize}, Format::RGBA8Unorm);
+        const RGColorAttachment attachment[] = {{target, LoadOp::Clear, StoreOp::Store, {}}};
+        graph.add_raster_pass("fill-persistent", {.colors = attachment}, [&](CommandBuffer& cmd) {
+            cmd.bind_pipeline(kit.fill);
+            const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+            cmd.push_constants(red, sizeof(red));
+            cmd.draw(3);
+        });
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        CHECK_FALSE(graph.was_culled(0));
+    }
+
+    bool unmarked_ran = false;
+    bool marked_ran = false;
+    {
+        RenderGraph graph(*device);
+        graph.reset();
+        const RGTexture sampled = graph.import_texture(persistent, ResourceState::ColorTarget);
+        const RGTexture reads[] = {sampled};
+        graph.add_compute_pass(
+            "pure-read", {.sampled = reads}, [&](CommandBuffer&) { unmarked_ran = true; });
+        graph.add_compute_pass("persistent-transition",
+                               {.sampled = reads, .externally_visible = true},
+                               [&](CommandBuffer&) { marked_ran = true; });
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        CHECK(graph.was_culled(0));
+        CHECK_FALSE(graph.was_culled(1));
+        REQUIRE(graph.execution_order().size() == 1);
+        CHECK(graph.execution_order()[0] == 1);
+    }
+    CHECK_FALSE(unmarked_ran);
+    CHECK(marked_ran);
+
+    // The owner imports the state the marked pass left behind. Sampling it in a real raster
+    // pipeline then verifies the image contents through a GPU readback.
+    {
+        RenderGraph graph(*device);
+        graph.reset();
+        const RGTexture sampled = graph.import_texture(persistent, ResourceState::ShaderRead);
+        const RGTexture out =
+            graph.create_texture({{kSize, kSize}, Format::RGBA8Unorm, "rg-persistent-copy"});
+        const RGTexture reads[] = {sampled};
+        const RGColorAttachment attachment[] = {{out, LoadOp::Clear, StoreOp::Store, {}}};
+        graph.add_raster_pass(
+            "copy-persistent", {.colors = attachment, .sampled = reads}, [&](CommandBuffer& cmd) {
+                cmd.bind_pipeline(kit.blit);
+                cmd.bind_texture(0, persistent, kit.nearest);
+                cmd.draw(3);
+            });
+        graph.export_texture(out);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        const auto rgba = read_back(*device, graph.physical(out), kSize);
+        const std::size_t center = (kSize / 2 * kSize + kSize / 2) * 4;
+        CHECK(rgba[center + 0] == 255);
+        CHECK(rgba[center + 1] == 0);
+        CHECK(rgba[center + 2] == 0);
+        CHECK(rgba[center + 3] == 255);
+    }
+    device->destroy(persistent);
+}
+
+TEST_CASE("render graph: externally visible read retains its transient producer") {
+    using namespace rime::rhi;
+    using namespace rime::render;
+    auto device = create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    Kit kit(*device);
+    RenderGraph graph(*device);
+    graph.reset();
+    const RGTexture transient =
+        graph.create_texture({{8, 8}, Format::RGBA8Unorm, "rg-effect-input"});
+    const RGColorAttachment attachment[] = {{transient, LoadOp::Clear, StoreOp::Store, {}}};
+    bool producer_ran = false;
+    graph.add_raster_pass("transient-producer", {.colors = attachment}, [&](CommandBuffer& cmd) {
+        producer_ran = true;
+        cmd.bind_pipeline(kit.fill);
+        const float green[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+        cmd.push_constants(green, sizeof(green));
+        cmd.draw(3);
+    });
+    const RGTexture reads[] = {transient};
+    bool consumer_ran = false;
+    graph.add_compute_pass("external-consumer",
+                           {.sampled = reads, .externally_visible = true},
+                           [&](CommandBuffer&) { consumer_ran = true; });
+    auto cmd = device->begin_commands();
+    graph.execute(*cmd);
+    device->submit_blocking(*cmd);
+    CHECK(producer_ran);
+    CHECK(consumer_ran);
+    CHECK_FALSE(graph.was_culled(0));
+    CHECK_FALSE(graph.was_culled(1));
+    REQUIRE(graph.execution_order().size() == 2);
+    CHECK(graph.execution_order()[0] == 0);
+    CHECK(graph.execution_order()[1] == 1);
+}

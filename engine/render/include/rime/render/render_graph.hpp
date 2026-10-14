@@ -226,6 +226,10 @@ public:
         // Arguments consumed by an indirect dispatch/draw command. Kept distinct from
         // buffer_reads so the graph can request ResourceState::IndirectRead.
         std::span<const RGBuffer> indirect_reads = {};
+        // Keep a compute pass whose effect is visible outside this graph's current outputs.
+        // A final sampled-only transition of a persistent imported resource matters to its
+        // owner next frame, even though this pass writes no graph resource this frame.
+        bool externally_visible = false;
     };
 
     void add_compute_pass(std::string_view name, const ComputePassDesc& desc, ExecuteFn fn);
@@ -392,7 +396,8 @@ private:
         std::vector<Access> accesses;
         ExecuteFn fn;
         bool culled = false;
-        bool fold_repeats = false; // this name is declared several times per frame on purpose
+        bool fold_repeats = false;       // this name is declared several times per frame on purpose
+        bool externally_visible = false; // compute side effect beyond graph resource writes
     };
 
     // Textures and buffers share ONE resource table (and therefore one index space, one versioning
