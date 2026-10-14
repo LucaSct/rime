@@ -221,9 +221,15 @@ def build(kind):
     for o in objects: o.select_set(True)
     bpy.context.view_layer.objects.active=gun[0]
     output=ROOT/(f'held-{kind}.glb')
+    # export_yup=False is load-bearing. weapon_transform() already places the geometry in the
+    # engine's camera-local frame (+X right, +Y up, -Z forward) -- that IS glTF's convention, so
+    # the exporter's default Z-up-to-Y-up conversion would rotate a correct model 90 degrees about
+    # X and leave the weapon pointing at the floor BEHIND the camera. It shipped that way once:
+    # every part reached the GPU, nothing was dropped, and the frame simply had no gun in it.
     bpy.ops.export_scene.gltf(filepath=str(output),export_format='GLB',use_selection=True,
                               export_apply=True,export_cameras=False,export_lights=False,
-                              export_animations=False,export_materials='EXPORT')
+                              export_animations=False,export_materials='EXPORT',
+                              export_yup=False)
     print('EXPORTED',output,output.stat().st_size,flush=True)
     preview(kind,objects)
     for obj in gun: obj.hide_render=True
