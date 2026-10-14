@@ -295,6 +295,15 @@ inline constexpr std::int32_t kTerrainPushCornerShift = 9;
 static_assert(sizeof(TerrainPush) == 208,
               "TerrainPush must match terrain.vert / terrain.frag's push_constant block");
 
+// Scene-only matrices live in a uniform block: appending 128 bytes to the 208-byte push block
+// would exceed common devices' 256-byte push-constant limit. The ordinary pass never binds this.
+struct TerrainSceneUniforms {
+    core::Mat4 view_proj_unjittered;
+    core::Mat4 prev_view_proj;
+};
+
+static_assert(sizeof(TerrainSceneUniforms) == 128);
+
 // Fold a tile + a view + a light into the shader's constant block. Free and public on purpose:
 // the pass uses it, and so does the proof's own pipeline, so the two cannot drift. A zero-length
 // `sun_direction` falls back to straight down rather than producing a NaN normal. `eye` is the
@@ -424,6 +433,23 @@ public:
              const SkyLightBinding& sky = {},
              const TerrainLodDraw& lod = {});
 
+    // Scene opaque stage: loads existing HDR/depth and optional SSR G-buffer / velocity targets.
+    // Both G-buffer textures must be valid together. `scene_uniforms` is graph frame scratch;
+    // its current/previous matrices are unjittered while view_proj is the rasterized matrix.
+    void add_scene(RenderGraph& graph,
+                   RGTexture hdr,
+                   RGTexture depth,
+                   RGTexture gbuffer,
+                   RGTexture gbuffer_material,
+                   RGTexture velocity,
+                   TerrainTileId id,
+                   const core::Mat4& view_proj,
+                   const core::Vec3& eye,
+                   const TerrainLight& light,
+                   const SkyLightBinding& sky,
+                   const TerrainLodDraw& lod,
+                   RenderGraph::FrameSlice scene_uniforms);
+
     // Assets `upload()` would not draw. Guardrail 5: a refused tile and a tile that was never
     // handed over produce the same empty frame, so the difference has to be countable.
     [[nodiscard]] std::uint64_t tiles_refused() const noexcept { return refused_; }
@@ -469,6 +495,8 @@ private:
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
+    std::array<rhi::ShaderHandle, 3> scene_fragment_shaders_{};
+    std::array<rhi::PipelineHandle, 4> scene_pipelines_{};
     rhi::SamplerHandle sampler_;
     rhi::SamplerHandle weight_sampler_; // LINEAR, clamp-to-edge: the weight map is meant to filter
     // m19.7b: the layer textures' sampler (trilinear, REPEAT — a layer tiles the ground) and the
@@ -483,6 +511,20 @@ private:
     std::vector<bool> live_;          // m19.8a: tiles_[i] holds resources
     std::vector<TerrainTileId> free_; // m19.8a: released ids, reused LIFO by upload()
     TerrainTileId upload_impl(const assets::HeightfieldAsset& asset, const TerrainPalette* palette);
+    void add_impl(RenderGraph& graph,
+                  RGTexture hdr,
+                  RGTexture depth,
+                  RGTexture gbuffer,
+                  RGTexture gbuffer_material,
+                  RGTexture velocity,
+                  TerrainTileId id,
+                  const core::Mat4& view_proj,
+                  const core::Vec3& eye,
+                  const TerrainLight& light,
+                  const SkyLightBinding& sky,
+                  const TerrainLodDraw& lod,
+                  RenderGraph::FrameSlice scene_uniforms,
+                  bool scene);
 
     bool push_fits_ = true; // adapter().max_push_constant_bytes >= sizeof(TerrainPush)
     bool push_warned_ = false;

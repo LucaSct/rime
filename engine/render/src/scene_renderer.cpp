@@ -940,6 +940,42 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }
 
+    // Resident terrain joins opaque geometry before the sky fills far depth and before SSR/TAA
+    // consume depth, material and motion. No frame scratch or graph pass is declared when off.
+    if (terrain_pass_ != nullptr && !terrain_draws_.empty()) {
+        TerrainLight terrain_light{};
+        terrain_light.ambient = (fu.ambient[0] + fu.ambient[1] + fu.ambient[2]) / 3.0f;
+        if (ndir != 0) {
+            terrain_light.sun_direction = {fu.dir_lights[0].direction[0],
+                                           fu.dir_lights[0].direction[1],
+                                           fu.dir_lights[0].direction[2]};
+            terrain_light.sun_irradiance =
+                (fu.dir_lights[0].radiance[0] + fu.dir_lights[0].radiance[1] +
+                 fu.dir_lights[0].radiance[2]) /
+                3.0f;
+        } else {
+            terrain_light.sun_irradiance = 0.0f;
+        }
+        const TerrainSceneUniforms matrices{view_proj_unjittered_, prev_view_proj_unjittered_};
+        const auto scene_uniforms = graph.push_frame_data(&matrices, sizeof(matrices));
+        const core::Vec3 eye{fu.camera_pos[0], fu.camera_pos[1], fu.camera_pos[2]};
+        for (const TerrainSceneDraw& draw : terrain_draws_) {
+            terrain_pass_->add_scene(graph,
+                                     hdr,
+                                     depth,
+                                     gbuffer,
+                                     gbuffer_material,
+                                     velocity,
+                                     draw.tile,
+                                     fu.view_proj,
+                                     eye,
+                                     terrain_light,
+                                     sky_binding,
+                                     draw.lod,
+                                     scene_uniforms);
+        }
+    }
+
     // Sky (m17.0): composite the procedural sky into the background — the pixels the depth buffer
     // says nothing was drawn on — writing a THIRD HDR target the next stage reads. It goes here,
     // before SSR rather than after, so a reflected ray that misses the screen still finds sky

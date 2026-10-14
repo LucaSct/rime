@@ -92,6 +92,12 @@ rime_add_shaders(rime_render
 # the baseline shadowed shader stays free of the unused second output.
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag WRITE_GBUFFER pbr_forward_shadowed_gbuffer.frag)
+rime_add_shader_variant(rime_render
+    shaders/terrain.frag SCENE_GBUFFER terrain_scene_gbuffer.frag)
+rime_add_shader_variant(rime_render
+    shaders/terrain.frag SCENE_VELOCITY terrain_scene_velocity.frag)
+rime_add_shader_variant(rime_render
+    shaders/terrain.frag SCENE_GBUFFER_VELOCITY terrain_scene_gbuffer_velocity.frag)
 
 # The micro-triangle rasterizer's portable fallback (M18.4, ADR-0058): the SAME source as the 64-bit
 # single pass, compiled twice more as the two 32-bit passes that compute the identical minimum on a

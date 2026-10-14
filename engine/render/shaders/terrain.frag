@@ -89,6 +89,24 @@ layout(set = 0, binding = 12) uniform sampler2D parent_bake_material;
 
 layout(location = 0) out vec4 out_color;
 
+#if defined(SCENE_GBUFFER) || defined(SCENE_GBUFFER_VELOCITY)
+#define TERRAIN_WRITE_GBUFFER
+layout(location = 1) out vec4 out_gbuffer;
+layout(location = 2) out vec4 out_gbuffer_material;
+#endif
+#if defined(SCENE_VELOCITY) || defined(SCENE_GBUFFER_VELOCITY)
+#define TERRAIN_WRITE_VELOCITY
+#ifdef TERRAIN_WRITE_GBUFFER
+layout(location = 3) out vec2 out_velocity;
+#else
+layout(location = 1) out vec2 out_velocity;
+#endif
+layout(std140, set = 0, binding = 13) uniform TerrainSceneUniforms {
+    mat4 view_proj_unjittered;
+    mat4 prev_view_proj;
+} scene;
+#endif
+
 // lod_tile.z bits (kTerrainPush* in terrain_pass.hpp); bits 0..4 are the vertex stage's.
 const int kOwnBake = 32;     // shade from bake_color / bake_material
 const int kParentBake = 64;  // fade toward parent_bake_* by the morph factor
@@ -225,6 +243,18 @@ layout(push_constant) uniform Pc {
     vec4 lod_camera;
     ivec4 lod_tile;
 } pc;
+
+#ifdef TERRAIN_WRITE_GBUFFER
+vec2 terrain_oct_encode(vec3 dir) {
+    float denom = abs(dir.x) + abs(dir.y) + abs(dir.z);
+    vec2 p = dir.xy / max(denom, 1.0e-8);
+    if (dir.z <= 0.0) {
+        vec2 s = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+        p = vec2((1.0 - abs(p.y)) * s.x, (1.0 - abs(p.x)) * s.y);
+    }
+    return p;
+}
+#endif
 
 void main() {
     // ── THE SPLAT BLEND, AND WHY IT IS WRITTEN AS DIFFERENCES FROM LAYER 0 ────────────────────
@@ -416,4 +446,19 @@ void main() {
         radiance += pc.surface.w * ((1.0 - metallic) * base + f0);
     }
     out_color = vec4(radiance, 1.0);
+#ifdef TERRAIN_WRITE_GBUFFER
+    // Terrain's face normal is constant inside a facet; the shared filter has no widening there.
+    // Keep the same lobe convention as pbr_forward_shadowed for the SSR resolve.
+    out_gbuffer = vec4(terrain_oct_encode(n), sqrt(filter_specular_alpha(n, alpha)), 1.0);
+    out_gbuffer_material = vec4(base, metallic);
+#endif
+#ifdef TERRAIN_WRITE_VELOCITY
+    // A static world point still moves on screen when the camera moves. Both endpoints exclude
+    // temporal jitter; raster placement above uses pc.view_proj, which includes it.
+    precise vec4 current_clip = scene.view_proj_unjittered * vec4(v_world, 1.0);
+    precise vec4 previous_clip = scene.prev_view_proj * vec4(v_world, 1.0);
+    precise vec2 current_ndc = current_clip.xy / current_clip.w;
+    precise vec2 previous_ndc = previous_clip.xy / previous_clip.w;
+    out_velocity = current_ndc - previous_ndc;
+#endif
 }
