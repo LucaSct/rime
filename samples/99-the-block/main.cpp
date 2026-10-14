@@ -2066,7 +2066,11 @@ struct Demo {
                 use_authored_camera ? visuals->authored_camera : session.client.camera_transform();
         }
         if (play_world) {
-            const core::Vec3 eye = session.client.camera_transform().translation;
+            // --world-gpu-smoke pins the camera at a far, deterministic pose; live play and
+            // --world-smoke never set use_authored_camera together with a streamed world.
+            const core::Vec3 eye = use_authored_camera
+                                       ? visuals->authored_camera.translation
+                                       : session.client.camera_transform().translation;
             if (!play_world->recenter(eye)) {
                 session.world_stopped = true;
                 app.request_quit();
@@ -3575,6 +3579,204 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
     return okay ? 0 : 1;
 }
 
+// The GPU half of the streamed-world proof. --world-smoke has no device, so it never reaches the
+// rolling terrain ring. This route starts the same streamed Demo with the charge off, then drives
+// PlayWorld::recenter / pass / TerrainPass through the real render callback at sparse checkpoints
+// (a full frame per checkpoint, not thousands), plus a dense recenter-only sweep. Every claim is
+// structural: counters and pixel properties with margins, never a golden image.
+int run_world_gpu_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
+    constexpr std::uint32_t kW = 640;
+    constexpr std::uint32_t kH = 360;
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {kW, kH};
+    cfg.tick_hz = 60.0;
+    Demo demo(cfg);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    if (demo.app.device() == nullptr) {
+        std::fprintf(stderr, "world-gpu-smoke: no Vulkan device — skipped\n");
+        return std::getenv("RIME_REQUIRE_VULKAN") != nullptr ? 1 : 0;
+    }
+    if (!demo.start(cooked, scene_path))
+        return 1;
+    demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
+    if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera))
+        camera->z_far = 3072.0f; // same far plane as --play, so the outer ring is what is seen
+
+    bool okay = true;
+    auto check = [&](bool condition, const char* label) {
+        if (!condition) {
+            std::fprintf(stderr, "world-gpu-smoke: FAILED %s\n", label);
+            okay = false;
+        }
+    };
+    block_play::PlayWorld& pw = *demo.play_world;
+    constexpr float kEyeY = 60.0f; // above the 32 m hills, above the -54 m recovery floor
+
+    // Pose the camera, draw `frames` real frames, return the readback of the last one.
+    auto draw = [&](float x, float z, float pitch_deg, int frames) {
+        gameplay::FirstPersonView v{};
+        v.yaw = 1.57079632679f; // engine forward = -X, down the street's long axis
+        v.pitch = pitch_deg * 0.0174532925f;
+        v.eye_height = 0.0f;
+        demo.visuals->authored_camera = gameplay::eye_transform(v, {x, kEyeY, z});
+        demo.use_authored_camera = true;
+        demo.app.run_frames(static_cast<std::uint32_t>(frames));
+        std::vector<std::uint8_t> px;
+        if (render::RenderGraph* graph = demo.app.graph()) {
+            const rhi::TextureHandle tex = graph->physical(demo.visuals->last_ldr);
+            if (tex.is_valid())
+                px = read_rgba8(*demo.app.device(), tex, kW, kH);
+        }
+        demo.app.finish_gpu();
+        return px;
+    };
+
+    struct Band {
+        double luma = 0, sd = 0, black = 0;
+        double rgb[3] = {0, 0, 0};
+    };
+
+    auto band = [&](const std::vector<std::uint8_t>& px, double r0, double r1) {
+        Band b;
+        const auto y0 = static_cast<std::uint32_t>(r0 * kH),
+                   y1 = static_cast<std::uint32_t>(r1 * kH);
+        double sum = 0, sq = 0, n = 0, dark = 0;
+        for (std::uint32_t y = y0; y < y1; ++y)
+            for (std::uint32_t x = 0; x < kW; ++x) {
+                const std::uint8_t* p = &px[(static_cast<std::size_t>(y) * kW + x) * 4];
+                const double l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+                sum += l;
+                sq += l * l;
+                n += 1;
+                dark += (p[0] < 6 && p[1] < 6 && p[2] < 6) ? 1 : 0;
+                for (int c = 0; c < 3; ++c)
+                    b.rgb[c] += p[c];
+            }
+        b.luma = sum / n;
+        b.sd = std::sqrt(std::max(0.0, sq / n - b.luma * b.luma));
+        b.black = dark / n;
+        for (double& c : b.rgb)
+            c /= n;
+        return b;
+    };
+
+    const struct {
+        float x, z;
+    } kCentres[] = {{0, 0},
+                    {-64, 0},
+                    {-128, 32},
+                    {-512, -96},
+                    {-2048, 160},
+                    {-512, -96},
+                    {0, 0},
+                    {2048, -1024},
+                    {4096, 3000},
+                    {2048, -1024},
+                    {-2048, 160},
+                    {0, 0}};
+
+    const char* ppm = g_ppm.empty() ? nullptr : g_ppm.c_str();
+    int index = 0;
+    for (const auto& c : kCentres) {
+        const auto before = pw.stats();
+        auto px = draw(c.x, c.z, -15.0f, 2);
+        check(!demo.session.world_stopped, "world not stopped");
+        check(px.size() == static_cast<std::size_t>(kW) * kH * 4, "readback size");
+        if (px.size() != static_cast<std::size_t>(kW) * kH * 4)
+            break;
+        const Band sky = band(px, 0.0, 0.08), ground = band(px, 0.70, 1.0);
+        const double diff = std::abs(sky.rgb[0] - ground.rgb[0]) +
+                            std::abs(sky.rgb[1] - ground.rgb[1]) +
+                            std::abs(sky.rgb[2] - ground.rgb[2]);
+        const auto& s = pw.stats();
+        std::printf(
+            "world-gpu-smoke: [%2d] centre (%7.0f,%7.0f) draws %zu resident %u gpu %.1f MiB "
+            "ground luma %.1f sd %.1f black %.3f | sky luma %.1f | rgb-diff %.1f\n",
+            index,
+            c.x,
+            c.z,
+            pw.draws().size(),
+            s.resident,
+            static_cast<double>(s.gpu_bytes) / 1048576.0,
+            ground.luma,
+            ground.sd,
+            ground.black,
+            sky.luma,
+            diff);
+        check(!pw.draws().empty(), "terrain draws nonempty");
+        check(s.resident <= 304 && s.peak_resident <= 304, "resident <= 304");
+        check(s.peak_gpu_bytes <= block_play::PlayWorld::kMaxGpuBytes, "gpu bytes <= 96 MiB");
+        check(ground.black < 0.02, "no black void below the horizon");
+        check(ground.luma > 8.0 && ground.sd > 1.0, "ground band is lit and not flat");
+        check(diff > 6.0, "ground differs from sky");
+        if (index == 0 && ppm)
+            write_ppm(ppm, px, kW, kH);
+        // A second draw at the unchanged centre must change nothing: no upload, eviction, recenter.
+        const auto after = pw.stats();
+        (void)draw(c.x, c.z, -15.0f, 2);
+        const auto& again = pw.stats();
+        check(again.uploads == after.uploads && again.evictions == after.evictions &&
+                  again.recenters == after.recenters && again.resident == after.resident,
+              "unchanged centre is a no-op");
+        (void)before;
+        ++index;
+    }
+
+    // SENSITIVITY CONTROL: at the farthest centre, look at the sky. The lower band must then stop
+    // looking like ground, which is what shows the ground metric can fail at all.
+    {
+        const auto ground_px = draw(4096, 3000, -15.0f, 1);
+        const auto sky_px = draw(4096, 3000, 25.0f, 1);
+        if (!ground_px.empty() && !sky_px.empty()) {
+            const Band g = band(ground_px, 0.70, 1.0), k = band(sky_px, 0.70, 1.0);
+            const double d = std::abs(g.rgb[0] - k.rgb[0]) + std::abs(g.rgb[1] - k.rgb[1]) +
+                             std::abs(g.rgb[2] - k.rgb[2]);
+            std::printf("world-gpu-smoke: control lower-band ground vs skyward diff %.1f\n", d);
+            check(d > 6.0, "sensitivity control: skyward view differs in the lower band");
+        }
+    }
+
+    // Dense recenter-only sweep: the real recenter + mark_drawn at 16 m steps there and back,
+    // across zero, with both reversals. No frame is rendered; the draw list is what is checked.
+    const auto sweep_from = pw.stats();
+    auto sweep = [&](float from, float to, float step) {
+        for (float x = from; step > 0 ? x <= to : x >= to; x += step) {
+            if (!pw.recenter({x, kEyeY, 0.5f * x})) {
+                check(false, "sweep recenter accepted");
+                return;
+            }
+            check(!pw.draws().empty() && pw.stats().resident <= 304, "sweep draws/resident");
+            pw.mark_drawn();
+        }
+    };
+    sweep(4096, -2048, -16.0f);
+    sweep(-2048, 2048, 16.0f);
+    sweep(2048, -64, -16.0f);
+    const auto& fin = pw.stats();
+    check(fin.uploads > sweep_from.uploads && fin.evictions > sweep_from.evictions,
+          "sweep uploaded and evicted");
+    check(fin.refusals == 0, "zero refusals");
+    check(pw.server().source.stats().refused_requests == 0 &&
+              pw.client().source.stats().refused_requests == 0,
+          "zero collision source refusals");
+    check(fin.peak_resident <= 304 && fin.peak_gpu_bytes <= block_play::PlayWorld::kMaxGpuBytes,
+          "final peak bounds");
+    check(fin.uploads > 0 && fin.evictions > 0 && fin.recenters > 0,
+          "uploads, evictions, recenters");
+    std::printf("world-gpu-smoke: uploads %llu evictions %llu recenters %llu refusals %llu peak "
+                "resident %u peak gpu %.1f MiB\n",
+                static_cast<unsigned long long>(fin.uploads),
+                static_cast<unsigned long long>(fin.evictions),
+                static_cast<unsigned long long>(fin.recenters),
+                static_cast<unsigned long long>(fin.refusals),
+                fin.peak_resident,
+                static_cast<double>(fin.peak_gpu_bytes) / 1048576.0);
+    demo.app.finish_gpu();
+    return okay ? 0 : 1;
+}
+
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
@@ -3694,7 +3896,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 } // namespace
 
 int main(int argc, char** argv) {
-    enum class Mode { Headless, Play, Perf, WorldSmoke } mode = Mode::Headless;
+    enum class Mode { Headless, Play, Perf, WorldSmoke, WorldGpuSmoke } mode = Mode::Headless;
     PerfOptions perf{};
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
     std::string scene_path; // --scene: run a scene someone authored, not the generated one (m14.4)
@@ -3707,6 +3909,8 @@ int main(int argc, char** argv) {
             mode = Mode::Play;
         } else if (a == "--world-smoke") {
             mode = Mode::WorldSmoke;
+        } else if (a == "--world-gpu-smoke") {
+            mode = Mode::WorldGpuSmoke;
         } else if (a == "--perf") {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
@@ -3763,6 +3967,9 @@ int main(int argc, char** argv) {
     }
     if (mode == Mode::WorldSmoke) {
         return run_world_smoke(cooked, scene_path);
+    }
+    if (mode == Mode::WorldGpuSmoke) {
+        return run_world_gpu_smoke(cooked, scene_path);
     }
     return run_headless(cooked, scene_path);
 }

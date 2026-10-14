@@ -124,3 +124,8 @@ add_test(NAME the_block_world_smoke COMMAND the_block --world-smoke)
 set_tests_properties(the_block_world_smoke PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
     TIMEOUT 600)
+
+add_test(NAME the_block_world_gpu_smoke COMMAND the_block --world-gpu-smoke)
+set_tests_properties(the_block_world_gpu_smoke PROPERTIES
+    FIXTURES_REQUIRED block_demo_cook
+    TIMEOUT 600)
