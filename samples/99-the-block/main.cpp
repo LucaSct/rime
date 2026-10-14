@@ -3891,6 +3891,11 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     Demo demo(cfg);
     demo.scripted_charge = false;
     demo.viewmodel_enabled = true;
+    // Stream the world, exactly as --play does. Without this the proof renders only the authored
+    // street slab, whose finite edge leaves a band of sky-below-horizon -- correctly black, since
+    // the atmosphere kills transmittance for rays that hit the planet -- across the frame. That
+    // reads as a rendering bug and is really a weapon proof measuring a world no player sees.
+    demo.streamed_world = true;
     if (!demo.app.device()) {
         std::fprintf(stderr, "viewmodel-smoke: no Vulkan device — skipped\n");
         return std::getenv("RIME_REQUIRE_VULKAN") != nullptr ? 1 : 0;
