@@ -40,6 +40,7 @@ rime_add_test(rime_render_tests
     clustered_test.cpp
     sdf_clipmap_test.cpp
     ddgi_test.cpp
+    ddgi_history_test.cpp
     gi_thesis_test.cpp
     gbuffer_test.cpp
     ssr_test.cpp
@@ -73,6 +74,7 @@ target_compile_definitions(rime_render_tests
     PRIVATE RIME_ASSETS_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/assets/fixtures")
 
 rime_add_shaders(rime_render_tests
+    ${CMAKE_SOURCE_DIR}/engine/render/shaders/ddgi_remap.comp
     ${CMAKE_SOURCE_DIR}/tests/rhi/shaders/pushconst.vert
     ${CMAKE_SOURCE_DIR}/tests/rhi/shaders/pushconst.frag
     ${CMAKE_SOURCE_DIR}/tests/rhi/shaders/sample_storage.frag

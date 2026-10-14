@@ -443,6 +443,17 @@ TEST_CASE("ddgi: sub-spacing camera motion does not reshuffle the lattice (m10.5
     CHECK(nudged.newly_primed == 0);
     CHECK(ddgi.origin().x == origin0.x); // bit-identical, not merely close
 
+    // One snapped cell moves a 4^3 lattice by one x-column. Exactly 3*4*4 primed
+    // world positions survive and exactly 4*4 exposed slots need first updates.
+    const DdgiStats moved = step(*device, clipmap, ddgi, {1.0f, 0.0f, 0.0f}, lighting, settings);
+    CHECK(moved.grid_shifted);
+    CHECK(moved.kept_history == 48);
+    CHECK(moved.newly_primed == 16);
+    const DdgiStats reversed = step(*device, clipmap, ddgi, {0.0f, 0.0f, 0.0f}, lighting, settings);
+    CHECK(reversed.grid_shifted);
+    CHECK(reversed.kept_history == 48);
+    CHECK(reversed.newly_primed == 16);
+
     // Back to the exact position the origin above was measured against.
     (void)step(*device, clipmap, ddgi, {0.0f, 0.0f, 0.0f}, lighting, settings);
 

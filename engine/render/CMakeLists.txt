@@ -53,6 +53,7 @@ rime_add_shaders(rime_render
     shaders/vg_build_draws.comp
     shaders/sdf_compose.comp
     shaders/ddgi_trace.comp
+    shaders/ddgi_remap.comp
     shaders/ddgi_blend_irradiance.comp
     shaders/ddgi_blend_visibility.comp
     shaders/ssr_resolve.frag

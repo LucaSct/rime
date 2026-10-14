@@ -12,10 +12,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #include "ddgi_blend_irradiance.comp.spv.h"
 #include "ddgi_blend_visibility.comp.spv.h"
+#include "ddgi_remap.comp.spv.h"
 #include "ddgi_trace.comp.spv.h"
 #include "rime/core/math/quat.hpp"
 
@@ -42,6 +45,22 @@ constexpr std::uint32_t kTraceGroupSize = 64;
 // convergence test does.
 constexpr float kFastTrackHysteresis = 0.5f;
 constexpr std::uint32_t kFastTrackUpdates = 5;
+
+// The shader's std140 block; a signed shift is the old logical coordinate minus the new one.
+struct RemapParams {
+    std::int32_t shift[4] = {0, 0, 0, 0};
+    std::uint32_t dims_perrow[4] = {0, 0, 0, 0};
+};
+
+static_assert(sizeof(RemapParams) == 32);
+
+std::int64_t snapped_cell(double coordinate, double spacing) noexcept {
+    const double cell = std::floor(coordinate / spacing);
+    constexpr double limit = static_cast<double>(std::numeric_limits<std::int64_t>::max() / 4);
+    if (!std::isfinite(cell) || cell <= -limit || cell >= limit)
+        return 0;
+    return static_cast<std::int64_t>(cell);
+}
 
 float sign_not_zero(float v) noexcept {
     return v >= 0.0f ? 1.0f : -1.0f;
@@ -180,6 +199,27 @@ DdgiProbes::DdgiProbes(rhi::Device& device) : device_(device) {
         blend_visibility_pipeline_ = device.create_compute_pipeline(pd);
     }
 
+    {
+        rhi::ShaderDesc sd{};
+        sd.stage = rhi::ShaderStage::Compute;
+        sd.spirv = ddgi_remap_comp_spv;
+        sd.spirv_size_bytes = sizeof(ddgi_remap_comp_spv);
+        sd.debug_name = "ddgi_remap.comp";
+        remap_shader_ = device.create_shader(sd);
+        const rhi::BindingDesc bindings[] = {
+            {0, rhi::BindingType::StorageImage, rhi::StageMask::Compute},
+            {1, rhi::BindingType::StorageImage, rhi::StageMask::Compute},
+            {2, rhi::BindingType::StorageImage, rhi::StageMask::Compute},
+            {3, rhi::BindingType::StorageImage, rhi::StageMask::Compute},
+            {4, rhi::BindingType::UniformBuffer, rhi::StageMask::Compute},
+        };
+        rhi::ComputePipelineDesc pd{};
+        pd.shader = remap_shader_;
+        pd.bindings = bindings;
+        pd.debug_name = "ddgi-remap";
+        remap_pipeline_ = device.create_compute_pipeline(pd);
+    }
+
     rhi::SamplerDesc smd{};
     smd.mag_filter = rhi::Filter::Linear;
     smd.min_filter = rhi::Filter::Linear;
@@ -232,6 +272,8 @@ DdgiProbes::DdgiProbes(rhi::Device& device) : device_(device) {
 }
 
 DdgiProbes::~DdgiProbes() {
+    // Atlases and pipelines may still be referenced by an asynchronous submission.
+    device_.wait_idle();
     if (ray_buffer_.is_valid())
         device_.destroy(ray_buffer_);
     device_.destroy(dummy_visibility_);
@@ -240,10 +282,16 @@ DdgiProbes::~DdgiProbes() {
         device_.destroy(visibility_atlas_);
     if (irradiance_atlas_.is_valid())
         device_.destroy(irradiance_atlas_);
+    if (scratch_visibility_atlas_.is_valid())
+        device_.destroy(scratch_visibility_atlas_);
+    if (scratch_irradiance_atlas_.is_valid())
+        device_.destroy(scratch_irradiance_atlas_);
     device_.destroy(atlas_sampler_);
     device_.destroy(clipmap_sampler_);
     device_.destroy(blend_visibility_pipeline_);
     device_.destroy(blend_visibility_shader_);
+    device_.destroy(remap_pipeline_);
+    device_.destroy(remap_shader_);
     device_.destroy(blend_irradiance_pipeline_);
     device_.destroy(blend_irradiance_shader_);
     device_.destroy(trace_pipeline_);
@@ -255,10 +303,17 @@ void DdgiProbes::ensure_atlases(std::uint32_t total_probes, std::uint32_t probes
         probes_per_row == atlas_probes_per_row_) {
         return;
     }
+    // Rare reallocation only: wait before destroying textures that an older graph may still use.
+    if (irradiance_atlas_.is_valid())
+        device_.wait_idle();
     if (irradiance_atlas_.is_valid())
         device_.destroy(irradiance_atlas_);
     if (visibility_atlas_.is_valid())
         device_.destroy(visibility_atlas_);
+    if (scratch_irradiance_atlas_.is_valid())
+        device_.destroy(scratch_irradiance_atlas_);
+    if (scratch_visibility_atlas_.is_valid())
+        device_.destroy(scratch_visibility_atlas_);
 
     const std::uint32_t rows = (total_probes + probes_per_row - 1) / probes_per_row;
 
@@ -282,6 +337,9 @@ void DdgiProbes::ensure_atlases(std::uint32_t total_probes, std::uint32_t probes
         device_.write_texture(irradiance_atlas_, zeros.data(), zeros.size());
     }
     irradiance_state_ = rhi::ResourceState::ShaderRead; // write_texture's own post-condition
+    itd.debug_name = "ddgi-irradiance-scratch";
+    scratch_irradiance_atlas_ = device_.create_texture(itd);
+    scratch_irradiance_state_ = rhi::ResourceState::Undefined;
 
     rhi::TextureDesc vtd{};
     vtd.extent = {probes_per_row * kDdgiVisibilityTileSize, rows * kDdgiVisibilityTileSize};
@@ -296,6 +354,9 @@ void DdgiProbes::ensure_atlases(std::uint32_t total_probes, std::uint32_t probes
         device_.write_texture(visibility_atlas_, zeros.data(), zeros.size());
     }
     visibility_state_ = rhi::ResourceState::ShaderRead;
+    vtd.debug_name = "ddgi-visibility-scratch";
+    scratch_visibility_atlas_ = device_.create_texture(vtd);
+    scratch_visibility_state_ = rhi::ResourceState::Undefined;
 
     atlas_total_probes_ = total_probes;
     atlas_probes_per_row_ = probes_per_row;
@@ -364,7 +425,9 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     const std::uint32_t count_y = std::max<std::uint32_t>(settings.ddgi_probe_count_y, 1u);
     const std::uint32_t count_z = std::max<std::uint32_t>(settings.ddgi_probe_count_z, 1u);
     const std::uint32_t total_probes = count_x * count_y * count_z;
-    const float spacing = std::max(settings.ddgi_probe_spacing, 1.0e-4f);
+    const float spacing = std::isfinite(settings.ddgi_probe_spacing)
+                              ? std::max(settings.ddgi_probe_spacing, 1.0e-4f)
+                              : 1.0e-4f;
 
     // ── Recentre the lattice, texel-snapped to its own spacing — SdfClipmap::add()'s level-snap
     // trick (lighting/sdf_clipmap.cpp), applied to probes instead of voxels: floor to a whole
@@ -374,33 +437,67 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     const core::Vec3 half_extent{static_cast<float>(count_x - 1) * spacing * 0.5f,
                                  static_cast<float>(count_y - 1) * spacing * 0.5f,
                                  static_cast<float>(count_z - 1) * spacing * 0.5f};
-    const core::Vec3 ideal_min = camera_pos - half_extent;
-    const core::Vec3 snapped{std::floor(ideal_min.x / spacing) * spacing,
-                             std::floor(ideal_min.y / spacing) * spacing,
-                             std::floor(ideal_min.z / spacing) * spacing};
+    const double safe_spacing = static_cast<double>(spacing);
+    const std::int64_t new_cells[3] = {
+        snapped_cell(static_cast<double>(camera_pos.x) - half_extent.x, safe_spacing),
+        snapped_cell(static_cast<double>(camera_pos.y) - half_extent.y, safe_spacing),
+        snapped_cell(static_cast<double>(camera_pos.z) - half_extent.z, safe_spacing)};
+    const core::Vec3 snapped{static_cast<float>(new_cells[0]) * spacing,
+                             static_cast<float>(new_cells[1]) * spacing,
+                             static_cast<float>(new_cells[2]) * spacing};
 
     const bool dims_changed =
         count_x != last_count_x_ || count_y != last_count_y_ || count_z != last_count_z_;
-    const bool shifted = !origin_initialized_ || dims_changed || snapped.x != origin_.x ||
-                         snapped.y != origin_.y || snapped.z != origin_.z;
+    const bool spacing_changed = spacing != last_spacing_;
+    const bool shifted = !origin_initialized_ || dims_changed || spacing_changed ||
+                         new_cells[0] != origin_cells_[0] || new_cells[1] != origin_cells_[1] ||
+                         new_cells[2] != origin_cells_[2];
+    const std::int64_t shift64[3] = {new_cells[0] - origin_cells_[0],
+                                     new_cells[1] - origin_cells_[1],
+                                     new_cells[2] - origin_cells_[2]};
+    const bool overlap =
+        origin_initialized_ && !dims_changed && !spacing_changed &&
+        count_x <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) &&
+        count_y <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) &&
+        count_z <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) &&
+        std::llabs(shift64[0]) < count_x && std::llabs(shift64[1]) < count_y &&
+        std::llabs(shift64[2]) < count_z;
+    const bool atlas_same = irradiance_atlas_.is_valid() && total_probes == atlas_total_probes_ &&
+                            count_x * count_y == atlas_probes_per_row_;
     origin_ = snapped;
     origin_initialized_ = true;
+    std::copy(std::begin(new_cells), std::end(new_cells), std::begin(origin_cells_));
+    last_spacing_ = spacing;
     last_count_x_ = count_x;
     last_count_y_ = count_y;
     last_count_z_ = count_z;
 
     if (shifted) {
-        // A whole-lattice move invalidates every probe's accumulated history — the same "changed
-        // at all => start over" simplification SdfClipmap makes for its compose state (there, a
-        // full recompose; here, forgetting who was primed). A toroidal remap that PRESERVES
-        // history for probes that land at the same world position across the shift is the natural
-        // follow-up optimization, deferred until a profile asks for it (docs/math/ddgi.md §6).
-        primed_.assign(total_probes, false);
-        // m10.5b: a shifted lattice's indices no longer name the same world-space probes, so any
-        // pending fast-track (indexed by the OLD lattice) would fast-track the wrong points in
-        // space — drop it along with the primed history it is paired with.
-        fast_track_remaining_.assign(total_probes, 0);
-        round_robin_cursor_ = 0;
+        std::vector<bool> next_primed(total_probes, false);
+        std::vector<std::uint32_t> next_fast_track(total_probes, 0);
+        if (overlap && primed_.size() == total_probes) {
+            for (std::uint32_t z = 0; z < count_z; ++z)
+                for (std::uint32_t y = 0; y < count_y; ++y)
+                    for (std::uint32_t x = 0; x < count_x; ++x) {
+                        const std::int64_t sx = static_cast<std::int64_t>(x) + shift64[0];
+                        const std::int64_t sy = static_cast<std::int64_t>(y) + shift64[1];
+                        const std::int64_t sz = static_cast<std::int64_t>(z) + shift64[2];
+                        if (sx < 0 || sy < 0 || sz < 0 || sx >= count_x || sy >= count_y ||
+                            sz >= count_z)
+                            continue;
+                        const auto dst = x + count_x * (y + count_y * z);
+                        const auto src = static_cast<std::uint32_t>(sx) +
+                                         count_x * (static_cast<std::uint32_t>(sy) +
+                                                    count_y * static_cast<std::uint32_t>(sz));
+                        next_primed[dst] = primed_[src];
+                        next_fast_track[dst] = fast_track_remaining_[src];
+                        stats_.kept_history += primed_[src] ? 1u : 0u;
+                    }
+        }
+        primed_ = std::move(next_primed);
+        fast_track_remaining_ = std::move(next_fast_track);
+        if (!overlap)
+            round_robin_cursor_ = 0;
         stats_.grid_shifted = true;
     } else if (primed_.size() != total_probes) {
         primed_.assign(total_probes, false); // defensive: dims changed without origin moving
@@ -434,6 +531,65 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
 
     const std::uint32_t probes_per_row = count_x * count_y;
     ensure_atlases(total_probes, probes_per_row);
+
+    // The first allocation is already zeroed. Later shifts remap into the persistent alternate
+    // pair; full resets use the same pass with all source coordinates marked invalid.
+    RGTexture irradiance_rg{};
+    RGTexture visibility_rg{};
+    if (shifted && atlas_same) {
+        const RGTexture source_irr = graph.import_texture(irradiance_atlas_, irradiance_state_);
+        const RGTexture source_vis = graph.import_texture(visibility_atlas_, visibility_state_);
+        const RGTexture dest_irr =
+            graph.import_texture(scratch_irradiance_atlas_, scratch_irradiance_state_);
+        const RGTexture dest_vis =
+            graph.import_texture(scratch_visibility_atlas_, scratch_visibility_state_);
+        RemapParams rp{};
+        rp.shift[0] = overlap ? static_cast<std::int32_t>(shift64[0]) : 0;
+        rp.shift[1] = overlap ? static_cast<std::int32_t>(shift64[1]) : 0;
+        rp.shift[2] = overlap ? static_cast<std::int32_t>(shift64[2]) : 0;
+        rp.shift[3] = overlap ? 0 : 1;
+        rp.dims_perrow[0] = count_x;
+        rp.dims_perrow[1] = count_y;
+        rp.dims_perrow[2] = count_z;
+        rp.dims_perrow[3] = probes_per_row;
+        const auto rp_slice = graph.push_frame_data(&rp, sizeof(rp));
+        const RGTexture reads[] = {source_irr, source_vis};
+        const RGTexture writes[] = {dest_irr, dest_vis};
+        RenderGraph::ComputePassDesc remap_desc{};
+        remap_desc.storage_read = reads;
+        remap_desc.storage_write = writes;
+        graph.add_compute_pass("ddgi-remap",
+                               remap_desc,
+                               [pipe = remap_pipeline_,
+                                src_i = irradiance_atlas_,
+                                src_v = visibility_atlas_,
+                                dst_i = scratch_irradiance_atlas_,
+                                dst_v = scratch_visibility_atlas_,
+                                params = rp_slice,
+                                total_probes](rhi::CommandBuffer& cmd) {
+                                   cmd.bind_compute_pipeline(pipe);
+                                   cmd.bind_storage_image(0, src_i);
+                                   cmd.bind_storage_image(1, src_v);
+                                   cmd.bind_storage_image(2, dst_i);
+                                   cmd.bind_storage_image(3, dst_v);
+                                   cmd.bind_uniform_buffer(
+                                       4, params.buffer, params.offset, params.size);
+                                   cmd.dispatch(1, 1, total_probes);
+                               });
+        irradiance_rg = dest_irr;
+        visibility_rg = dest_vis;
+        irradiance_state_ = rhi::ResourceState::StorageReadWrite;
+        visibility_state_ = rhi::ResourceState::StorageReadWrite;
+        scratch_irradiance_state_ = rhi::ResourceState::StorageReadWrite;
+        scratch_visibility_state_ = rhi::ResourceState::StorageReadWrite;
+        std::swap(irradiance_atlas_, scratch_irradiance_atlas_);
+        std::swap(visibility_atlas_, scratch_visibility_atlas_);
+        std::swap(irradiance_state_, scratch_irradiance_state_);
+        std::swap(visibility_state_, scratch_visibility_state_);
+    } else {
+        irradiance_rg = graph.import_texture(irradiance_atlas_, irradiance_state_);
+        visibility_rg = graph.import_texture(visibility_atlas_, visibility_state_);
+    }
 
     const std::uint32_t probes_this_update = std::min(total_probes, kMaxDdgiProbesPerUpdate);
     const std::uint32_t round_robin_base = round_robin_cursor_ % total_probes;
@@ -568,7 +724,6 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     for (std::uint32_t i = 0; i < kSdfClipmapLevels; ++i)
         clipmap.note_level_state(i, rhi::ResourceState::ShaderRead);
 
-    const RGTexture irradiance_rg = graph.import_texture(irradiance_atlas_, irradiance_state_);
     {
         const RGBuffer reads[] = {rays_rg};
         const RGTexture writes[] = {irradiance_rg};
@@ -593,7 +748,6 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
                                });
     }
 
-    const RGTexture visibility_rg = graph.import_texture(visibility_atlas_, visibility_state_);
     {
         const RGBuffer reads[] = {rays_rg};
         const RGTexture writes[] = {visibility_rg};
