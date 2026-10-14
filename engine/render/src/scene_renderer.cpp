@@ -423,6 +423,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         }
     }
     if (!scene.camera.found) {
+        terrain_pass_ = nullptr;
+        terrain_draws_ = {};
         if (!warned_no_camera_) {
             RIME_WARN("render: no active camera in the world — declaring no passes");
             warned_no_camera_ = true;
@@ -975,6 +977,10 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                                      scene_uniforms);
         }
     }
+    // The caller only promises the span and pass through this declaration. Require a fresh
+    // setter call next frame so a temporary draw list cannot become a dangling borrow.
+    terrain_pass_ = nullptr;
+    terrain_draws_ = {};
 
     // Sky (m17.0): composite the procedural sky into the background — the pixels the depth buffer
     // says nothing was drawn on — writing a THIRD HDR target the next stage reads. It goes here,

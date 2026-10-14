@@ -168,8 +168,9 @@ public:
                   rhi::Extent2D extent,
                   bool use_depth_prepass = true);
 
-    // Borrow the pass and draw list through the next synchronous render() declaration. An empty
-    // list or null pass disables terrain; tile resources stay alive through GPU retirement.
+    // Borrow the pass and draw list through the next synchronous render() declaration. Call each
+    // frame that should draw terrain; render() clears this borrow afterward. An empty list or null
+    // pass disables terrain; tile resources stay alive through GPU retirement.
     void set_terrain_draws(TerrainPass* pass, std::span<const TerrainSceneDraw> draws) noexcept {
         terrain_pass_ = pass;
         terrain_draws_ = draws;

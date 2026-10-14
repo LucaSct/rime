@@ -220,6 +220,7 @@ TEST_CASE("terrain scene is declared between opaque and sky/TAA, with an empty d
     SkyParams sky{};
     sky.enabled = true;
     renderer.set_sky(sky);
+    renderer.set_terrain_draws(&pass, draws);
     RenderGraph sky_graph(*device);
     sky_graph.reset();
     (void)renderer.render(sky_graph, world, {kSize, kSize});
