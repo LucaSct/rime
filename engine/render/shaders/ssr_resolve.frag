@@ -169,7 +169,16 @@ float ddgi_chebyshev_weight(float mean, float mean2, float dist) {
 // what it gets wrong. Clamped to the grid's own volume first (the CLAMP_TO_EDGE a texture sampler
 // would apply, done here by hand) so a fragment exactly on the lattice's lowest grid line still
 // brackets a real cell.
-vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) {
+//
+// COVERAGE IS NOT RADIANCE. `covered` reports whether ANY probe survived the trilinear, wrap and
+// Chebyshev gates. That is the only thing that can tell "the field says this direction is dark"
+// (a covered probe reading 0, e.g. a sealed room: a real answer that must stay dark) from "the
+// field has no opinion here" (every probe rejected, so the 0 below is a placeholder, not a
+// measurement). Only this copy reports it: the forward shader's diffuse use keeps its own
+// behaviour. Clamping to the grid is still CLAMP_TO_EDGE, so a fragment past the lattice's
+// boundary is covered whenever an edge probe passes the gates; it is the gates, not the
+// boundary, that decide validity.
+vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n, out bool covered) {
     float spacing = max(ddgi.grid_origin_spacing.w, 1.0e-4);
     ivec3 dims = ivec3(ddgi.grid_dims_perrow.xyz);
     vec3 rel = (world_pos - ddgi.grid_origin_spacing.xyz) / spacing;
@@ -222,7 +231,8 @@ vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) {
             }
         }
     }
-    return weight_sum > 1.0e-6 ? accum / weight_sum : vec3(0.0);
+    covered = weight_sum > 1.0e-6;
+    return covered ? accum / weight_sum : vec3(0.0);
 }
 
 void main() {
@@ -259,22 +269,35 @@ void main() {
     // hemisphere integral) as directional specular radiance is the documented approximation — it
     // over-blurs, which is exactly right for the rough end of the cone and an acceptable gap-filler
     // for a mirror miss (docs/math/ssr.md §5/§6).
-    // Precedence: a live DDGI field wins (it knows about the actual scene), else the baked sky in
-    // the ray's own direction, else m10.7b's flat constant. Each step is strictly more informed
-    // than the one below it.
+    // Precedence: a live DDGI field wins WHERE IT HAS COVERAGE (it knows about the actual scene),
+    // else the baked sky in the ray's own direction, else m10.7b's flat constant. Each step is
+    // strictly more informed than the one below it.
     //
     // The prefiltered chain (ADR-0078 section 2) slots in between DDGI and the raw LUT. It is the
     // sky averaged over this surface's GGX lobe, which is exactly the "pre-integrated, low-
     // frequency" thing this term has always stood in for: a rough surface now blurs the sky by the
-    // right amount rather than reading a single LUT texel at its mirror direction. A live DDGI
-    // field still wins (it knows about walls the sky cannot see), exactly as in the forward pass,
-    // where the chain is not read either when DDGI is on.
-    const bool use_chain = ssr.params.z != 0.0 && ssr.ambient.a != 0.0 && ddgi.enabled_pad.x == 0u;
+    // right amount rather than reading a single LUT texel at its mirror direction. A COVERED DDGI
+    // field still wins (it knows about walls the sky cannot see), exactly as in the forward pass.
+    //
+    // The sky term is always computed, and DDGI replaces it only where some probe was accepted.
+    // Until 2026-10-14 DDGI replaced it unconditionally, so a fragment with NO supporting probe
+    // (far down the street, every probe rejected by the wrap or Chebyshev gate) reflected exactly
+    // black: a missing answer rendered as a measured one, flipping with sub-pixel jitter. Testing
+    // the RADIANCE for zero instead would be wrong in the other direction -- a covered dark room
+    // must stay dark -- so the switch is the sampler's own `covered` flag.
+    //
+    // `chain_live` (may the chain be read) and `use_chain` (does the chain's environment BRDF
+    // weight this pixel) are deliberately different. The weight below stays a FRAME-level choice:
+    // switching it per pixel on coverage would re-weight SSR hits at the coverage boundary, and a
+    // DDGI frame's weight has always been Schlick.
+    const bool ddgi_live = ddgi.enabled_pad.x != 0u;
+    const bool chain_live = ssr.params.z != 0.0 && ssr.ambient.a != 0.0;
+    const bool use_chain = chain_live && !ddgi_live;
     vec3 probe = ssr.ambient.rgb;
     if (ssr.ambient.a != 0.0) {
         probe = texture(skyview_lut, skyview_uv_from_direction(r_world)).rgb;
     }
-    if (use_chain) {
+    if (chain_live) {
         // The G-buffer's B is the perceptual roughness AFTER the geometric specular AA widening
         // (ADR-0078 step 1a): the forward pass writes the very `sqrt(alpha)` it reads the chain at,
         // so this lookup and the SSR-off one land on the same level even on a high-curvature
@@ -283,16 +306,24 @@ void main() {
         const vec3 lookup = sky_specular_dominant_direction(n_world, r_world, roughness);
         probe = sky_specular_prefiltered(lookup, roughness);
     }
+    bool ddgi_covered = false;
+    vec3 ddgi_probe = vec3(0.0);
+    if (ddgi_live) {
+        ddgi_probe = ddgi_sample_irradiance(world_pos, r_world, ddgi_covered);
+    }
 #ifdef SDF_SPECULAR_OCCLUSION
-    // Occlude ONLY the sky fallback before blending: a real SSR hit carries local radiance.
+    // Occlude ONLY the sky fallback before blending: a real SSR hit carries local radiance, and a
+    // covered DDGI answer already carries its own visibility (its Chebyshev test). An UNCOVERED
+    // pixel's sky is occluded even with DDGI live: it is the same sky fallback, and an open sky
+    // reflected under a canopy is exactly the leak this cone exists to stop.
     // World position and reflection are already reconstructed above, with no normal derivatives.
-    if (ssr.ambient.a != 0.0 && ddgi.enabled_pad.x == 0u) {
-        vec3 lookup = use_chain ? sky_specular_dominant_direction(n_world, r_world, roughness) : r_world;
+    if (ssr.ambient.a != 0.0 && !ddgi_covered) {
+        vec3 lookup = chain_live ? sky_specular_dominant_direction(n_world, r_world, roughness) : r_world;
         probe *= sdf_sky_visibility(world_pos, n_world, lookup, roughness);
     }
 #endif
-    if (ddgi.enabled_pad.x != 0u) {
-        probe = ddgi_sample_irradiance(world_pos, r_world);
+    if (ddgi_covered) {
+        probe = ddgi_probe;
     }
 
     // The roughness cone: 0 = a sharp mirror (screen sample), 1 = a fully rough lobe (the pre-

@@ -43,6 +43,7 @@ rime_add_test(rime_render_tests
     gi_thesis_test.cpp
     gbuffer_test.cpp
     ssr_test.cpp
+    ssr_ddgi_coverage_test.cpp
     sky_test.cpp
     sky_lighting_test.cpp
     sky_atmosphere_test.cpp
