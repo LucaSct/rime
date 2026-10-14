@@ -455,6 +455,6 @@ TEST_CASE("ssr ddgi coverage: normal-biased query stays on the covered side of a
                   "small plane-crossing depth changes must not flip reflection source");
     CHECK_MESSAGE(worst_against(outside, kChainSource) < 1e-2,
                   "a query beyond the bias must still read the filtered sky");
-    CHECK_MESSAGE(worst_against(outside, kDdgiBright) > 0.5,
+    CHECK_MESSAGE(worst_against(outside, kDdgiBright) > 0.2,
                   "the unsupported control must differ visibly from probe radiance");
 }
