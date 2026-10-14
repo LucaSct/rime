@@ -3603,6 +3603,11 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     play_sunset::apply(demo.session.client.world);
     demo.session.client.view.yaw = play_sunset::kViewYaw;
     demo.session.client.view.pitch = play_sunset::kViewPitch;
+    if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera)) {
+        // The outer 8x8 LOD5 square guarantees at least 4 km of ground around the eye,
+        // including immediately before a recenter. Show several kilometres of that cover.
+        camera->z_far = 3072.0f;
+    }
 
     // The device->intent map's bindings, owned by main so the render callback below can read the
     // look scheme the window actually granted.
