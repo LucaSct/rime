@@ -1087,7 +1087,7 @@ TEST_CASE("sky specular: with SSR on the resolve reads the chain too, and the pi
     CHECK(st.disabled_frames == 1); // the one OFF frame above, nothing else
 }
 
-TEST_CASE("sky specular: with SSR and DDGI on the setting changes nothing and builds nothing") {
+TEST_CASE("sky specular: SSR keeps its sky fallback chain available with DDGI on") {
     auto device = device_or_skip("the DDGI-gap proof");
     if (!device)
         return;
@@ -1118,25 +1118,40 @@ TEST_CASE("sky specular: with SSR and DDGI on the setting changes nothing and bu
         r->set_sky(clear_sky());
     }
 
-    // With DDGI on the sky is not the surface's environment -- a probe field that knows about walls
-    // is -- so neither reader touches the chain: the forward pass's sky term sits in a branch that
-    // is not taken, and ssr_resolve's miss term is the DDGI field. Building the chain would be work
-    // nothing reads, so the renderer declines and counts the frames it declined.
+    // Covered probes retain precedence, so this fully supported floor must still be unchanged.
+    // But SSR also reflects pixels without accepted probes (the separate DDGI coverage proof).
+    // Those now read filtered sky: the chain must be available even with DDGI enabled.
     off_renderer.set_sky_specular_prefilter_enabled(false);
     on_renderer.set_sky_specular_prefilter_enabled(true);
     const HdrImage off = render_hdr(*device, off_renderer, floor, mat);
     const HdrImage on = render_hdr(*device, on_renderer, floor, mat);
     CHECK(on.rgb == off.rgb);
-    CHECK(on_renderer.sky_specular_stats().prefilter_filled == 0);
-    CHECK(on_renderer.sky_specular_stats().dfg_filled == 0);
-    CHECK(on_renderer.sky_specular_stats().disabled_frames == 1);
+    CHECK(off_renderer.sky_specular_stats().prefilter_filled == 0);
+    CHECK(off_renderer.sky_specular_stats().disabled_frames == 1);
+    CHECK(on_renderer.sky_specular_stats().prefilter_filled == 1);
+    CHECK(on_renderer.sky_specular_stats().dfg_filled == 1);
+    CHECK(on_renderer.sky_specular_stats().disabled_frames == 0);
+
+    // Without SSR the DDGI forward shader alone has no chain reader. Preserve that admission
+    // rule rather than doing unused filtering on every DDGI frame.
+    SceneRenderer forward_only(*device, meshes, materials);
+    ls.ssr_enabled = false;
+    forward_only.set_lighting(ls);
+    forward_only.set_sky(clear_sky());
+    forward_only.set_sky_specular_prefilter_enabled(true);
+    render::test::disable_temporal_aa(forward_only);
+    (void)render_hdr(*device, forward_only, floor, mat);
+    CHECK(forward_only.sky_specular_stats().prefilter_filled == 0);
+    CHECK(forward_only.sky_specular_stats().dfg_filled == 0);
+    CHECK(forward_only.sky_specular_stats().disabled_frames == 1);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 // A MEASUREMENT, NOT A PROOF: what the chain's per-pixel lookup costs the pass that reads it.
 //
 // ADR-0078 owes the first brick that turns the chain on a Release perf run, and no committed
-// sample exercises it (the-block and lit-rooms run DDGI, where neither reader touches the chain).
+// sample originally exercised it (the-block and lit-rooms ran DDGI, which suppressed the chain).
+// The block's SSR sky fallback now reads it even with DDGI on.
 // So this probe renders a full-HD rough-metal floor under a sky and prints the median GPU time of
 // the reading pass and of the bake, chain on against chain off, for SSR on and off. It asserts
 // nothing about time -- a time is a property of one GPU -- and is skipped unless RIME_PERF_PROBE
