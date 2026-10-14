@@ -164,6 +164,8 @@ TEST_CASE("terrain scene variants write depth, material and unjittered camera ve
             CHECK(still.depth < 0.9f);
             CHECK(still.hdr > 0.01f);
             if (gbuffer) {
+                CHECK(std::abs(still.gbuffer[0]) < 0.02f);
+                CHECK(still.gbuffer[1] > 0.98f); // +Y face normal, octahedral encoded
                 CHECK(still.gbuffer[3] == doctest::Approx(1.0f));
                 CHECK(still.gbuffer[2] == doctest::Approx(1.0f));
                 CHECK(still.material[0] > 0.1f);

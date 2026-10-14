@@ -303,6 +303,8 @@ struct TerrainSceneUniforms {
 };
 
 static_assert(sizeof(TerrainSceneUniforms) == 128);
+static_assert(offsetof(TerrainSceneUniforms, view_proj_unjittered) == 0);
+static_assert(offsetof(TerrainSceneUniforms, prev_view_proj) == 64);
 
 // Fold a tile + a view + a light into the shader's constant block. Free and public on purpose:
 // the pass uses it, and so does the proof's own pipeline, so the two cannot drift. A zero-length
