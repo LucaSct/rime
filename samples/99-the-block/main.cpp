@@ -3450,8 +3450,12 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
             const auto* character = demo.session.server.world.get<gameplay::CharacterConfig>(
                 demo.session.server.avatars.front());
             physics::RayHit support;
+            // A fast capsule may be launched well above a hill. Cast from above its current
+            // position all the way below the world's minimum support height, so a legitimate
+            // airborne tick does not turn a range-limited query into "missing ground".
+            const float ray_top = std::max(s->position.y + 64.0f, 64.0f);
             const physics::Ray support_ray{
-                {s->position.x, s->position.y + 64.0f, s->position.z}, {0.0f, -1.0f, 0.0f}, 128.0f};
+                {s->position.x, ray_top, s->position.z}, {0.0f, -1.0f, 0.0f}, ray_top + 64.0f};
             const bool found_support =
                 demo.session.server.physics.raycast(support_ray, support, statics);
             if (!found_support) {
