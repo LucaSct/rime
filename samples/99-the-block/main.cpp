@@ -1725,6 +1725,11 @@ struct Demo {
     std::uint64_t audio_events = 0;
     bool charge_fired = false;
 
+    // Whether step_sim fires the charge itself at kChargeAt. Headless and perf keep the scripted
+    // beat; --play turns it off, because an interactive player is the one who decides when the
+    // block goes (F calls fire_charge()).
+    bool scripted_charge = true;
+
     explicit Demo(const app::AppConfig& cfg) : app(cfg) {}
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked, std::string_view scene_path) {
@@ -1854,7 +1859,7 @@ struct Demo {
 
         // The scripted hero beat. In --play a key does this instead; either way it is one server
         // side call, so the two paths cannot drift into two different explosions.
-        if (!charge_fired && session.tick_index >= kChargeAt) {
+        if (scripted_charge && !charge_fired && session.tick_index >= kChargeAt) {
             fire_charge();
         }
 
@@ -3262,6 +3267,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     cfg.window_size = {kWidth, kHeight};
 
     Demo demo(cfg);
+    demo.scripted_charge = false; // interactive: wait for F, not the tape
     if (demo.app.device() == nullptr) {
         std::fprintf(stderr, "99-the-block: --play needs a Vulkan device\n");
         return 1;
