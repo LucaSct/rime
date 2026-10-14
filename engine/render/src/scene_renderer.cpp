@@ -548,10 +548,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     //
     // And only when something reads the chain. Exactly one pass mirrors the sky: the forward pass
     // when SSR is off (with SSR on its sky term is compiled out), or ssr_resolve when SSR is on
-    // (it reads the same chain and the same DFG table, so the two agree). With DDGI on neither
-    // reads it -- the forward pass's term sits in a branch that is not taken and the resolve's
-    // probe is the DDGI field -- so building the chain for that frame would be work nothing reads.
-    const bool chain_has_reader = !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
+    // (it reads the same chain and the same DFG table, so the two agree). With DDGI on, SSR still
+    // needs the filtered sky wherever no probe supports its reflection query. The forward path
+    // alone reads no chain with DDGI, but that is no longer a reason to starve the SSR fallback.
+    const bool chain_has_reader =
+        lighting_.ssr_enabled || !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
     const bool sky_specular_live = sky_specular_prefilter_enabled_ && chain_has_reader &&
                                    (sky_params_.enabled || scene.has_sky);
     fu.ambient[3] = sky_specular_live ? 1.0f : 0.0f;

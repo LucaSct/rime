@@ -309,7 +309,15 @@ void main() {
     bool ddgi_covered = false;
     vec3 ddgi_probe = vec3(0.0);
     if (ddgi_live) {
-        ddgi_probe = ddgi_sample_irradiance(world_pos, r_world, ddgi_covered);
+        // Query just above the surface, in its NORMAL direction; the reflection direction still
+        // selects irradiance. At a probe plane, depth reconstruction can put an asphalt fragment
+        // microscopically on either side. Its on-surface probes have zero visibility, while a
+        // tiny trilinear contribution from the open layer above can pass the acceptance threshold
+        // and normalize to a full answer. That flips sky/DDGI with temporal jitter. A small
+        // spacing-relative surface bias gives the query a stable side without changing the SSR
+        // ray, treating measured black as missing, or disabling the normal map and AA.
+        const float surface_bias = max(0.01, ddgi.grid_origin_spacing.w * 0.025);
+        ddgi_probe = ddgi_sample_irradiance(world_pos + n_world * surface_bias, r_world, ddgi_covered);
     }
 #ifdef SDF_SPECULAR_OCCLUSION
     // Occlude ONLY the sky fallback before blending: a real SSR hit carries local radiance, and a
