@@ -873,7 +873,7 @@ void TerrainPass::add_impl(RenderGraph& graph,
                            sky_sh,
                            sky_sampler,
                            scene_uniforms,
-                           write_velocity,
+                           scene,
                            &graph,
                            push](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipeline);
@@ -884,7 +884,9 @@ void TerrainPass::add_impl(RenderGraph& graph,
                               // late-resolve add_shadowed uses for the same graph resources.
                               cmd.bind_texture(3, graph.physical(sky_lut), sky_sampler);
                               cmd.bind_storage_buffer(4, graph.physical_buffer(sky_sh));
-                              if (write_velocity) {
+                              // Every scene pipeline declares binding 13. The RHI requires it
+                              // attached even when this fragment variant does not read motion.
+                              if (scene) {
                                   cmd.bind_uniform_buffer(13,
                                                           scene_uniforms.buffer,
                                                           scene_uniforms.offset,

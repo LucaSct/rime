@@ -133,10 +133,11 @@ Probe draw_scene_tile(rhi::Device& device,
     result.hdr = f16(test::read_texture(device, graph.physical(hdr), kSize, kSize, 8), pixel() * 8);
     if (gbuffer) {
         const auto bytes = test::read_texture(device, graph.physical(gb), kSize, kSize, 8);
-        const auto material = test::read_texture(device, graph.physical(gm), kSize, kSize, 8);
+        const auto material = test::read_texture(device, graph.physical(gm), kSize, kSize, 4);
         for (std::size_t i = 0; i < 4; ++i) {
             result.gbuffer[i] = f16(bytes, pixel() * 8 + i * 2);
-            result.material[i] = f16(material, pixel() * 8 + i * 2);
+            // kGbufferMaterialFormat is RGBA8Srgb: RGB encoded, A linear UNORM.
+            result.material[i] = static_cast<float>(material[pixel() * 4 + i]) / 255.0f;
         }
     }
     if (velocity) {
