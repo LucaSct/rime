@@ -1027,8 +1027,11 @@ struct Session {
         }
 
         // ── PreSim: the client sends this tick's intent, takes its mail, then predicts ──
-        const replication::InputCommand command = client.sender.record(intent);
-        client.sender.send(*client.driver, now_ms);
+        replication::InputCommand command{};
+        if (!play_world) {
+            command = client.sender.record(intent);
+            client.sender.send(*client.driver, now_ms);
+        }
 
         events.clear();
         client.driver->update(now_ms, events);
@@ -1126,6 +1129,9 @@ struct Session {
                              static_cast<unsigned long long>(tick_index));
                 return;
             }
+            // A refused barrier must not consume this input or advance the prediction tape.
+            command = client.sender.record(intent);
+            client.sender.send(*client.driver, now_ms);
         }
 
         // ── THE TWO HALVES RUN AT ONCE (p2-perf, ADR-0077) ──
