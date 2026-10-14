@@ -3447,6 +3447,20 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
             min_y = std::min(min_y, s->position.y);
             check(std::isfinite(s->position.y) && s->position.y > -5.0f,
                   "player stayed on supported ground");
+            const auto* character = demo.session.server.world.get<gameplay::CharacterConfig>(
+                demo.session.server.avatars.front());
+            physics::RayHit support;
+            const physics::Ray support_ray{
+                {s->position.x, s->position.y + 64.0f, s->position.z}, {0.0f, -1.0f, 0.0f}, 128.0f};
+            const bool found_support =
+                demo.session.server.physics.raycast(support_ray, support, statics);
+            check(character != nullptr && found_support,
+                  "authoritative player has static support beneath current XZ");
+            if (character && found_support) {
+                const float feet = s->position.y - character->radius - character->half_height;
+                check(feet >= support.point.y - 0.1f,
+                      "capsule feet never pass through current static surface");
+            }
         }
     };
     travel(150); // handshakes, then walking speed beyond the west end of the old slab
@@ -3481,6 +3495,12 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
     check(demo.session.server.physics.raycast(
               physics::Ray{remote, {0.0f, -1.0f, 0.0f}, 120.0f}, remote_hit, statics),
           "negative-coordinate terrain answers a physics ray");
+    physics::RayHit missing_hit;
+    check(!demo.session.server.physics.raycast(
+              physics::Ray{{8193.0f, 64.0f, 8193.0f}, {0.0f, -1.0f, 0.0f}, 128.0f},
+              missing_hit,
+              statics),
+          "missing support negative control remains observable");
 
     const auto& sc = demo.play_world->server().collision.counters();
     const auto& cc = demo.play_world->client().collision.counters();
