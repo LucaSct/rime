@@ -80,6 +80,7 @@
 #include <vector>
 
 #include "play_sunset.hpp"
+#include "play_world.hpp"
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/cooked_reader.hpp"
@@ -699,6 +700,8 @@ struct Session {
     net::Endpoint server_endpoint{0x7F000001u, 7901};
     ServerPeer server;
     ClientPeer client;
+    block_play::PlayWorld* play_world = nullptr; // owned by Demo; active in --play/--world-smoke
+    bool world_stopped = false;
 
     std::uint64_t now_ms = 0;
     std::uint64_t tick_index = 0;
@@ -1041,6 +1044,88 @@ struct Session {
             (void)client.gameplay.apply_messages(inbox);
             client.destruction_net_client.apply_messages(
                 inbox, client.replicator->map(), client.world);
+        }
+
+        if (play_world) {
+            const core::Vec3 spawn = [&] {
+                core::Vec3 p = blockkit::west_viewpoint(blockkit::BlockParams{});
+                p.y = server.character.half_height + server.character.radius;
+                return p;
+            }();
+            bool recovered = false;
+            for (ecs::Entity e : server.avatars) {
+                auto* state = server.world.get<gameplay::CharacterState>(e);
+                if (!state || !block_play::needs_recovery(state->position))
+                    continue;
+                state->position = spawn;
+                state->velocity = {};
+                state->grounded = false;
+                if (auto* t = server.world.get<ecs::LocalTransform>(e))
+                    t->value.translation = spawn;
+                if (auto* t = server.world.get<ecs::WorldTransform>(e))
+                    t->value.translation = spawn;
+                if (const auto* h = server.world.get<physics::RigidBodyHandle>(e)) {
+                    physics::BodyState body;
+                    if (server.physics.get_body_state(h->body, body)) {
+                        body.position = spawn;
+                        body.linear_velocity = {};
+                        body.angular_velocity = {};
+                        (void)server.physics.set_body_state(h->body, body);
+                    }
+                }
+                recovered = true;
+            }
+            if (recovered) {
+                play_world->note_recovery();
+                const ecs::Entity e = client.local_player();
+                if (auto* state =
+                        e.is_valid() ? client.world.get<gameplay::CharacterState>(e) : nullptr) {
+                    state->position = spawn;
+                    state->velocity = {};
+                    state->grounded = false;
+                    client.predictor.reset(*state);
+                    gameplay::write_character_pose(client.world, e, spawn);
+                }
+            }
+            core::Vec3 server_position = spawn;
+            if (!server.avatars.empty()) {
+                if (const auto* s =
+                        server.world.get<gameplay::CharacterState>(server.avatars.front())) {
+                    server_position = s->position;
+                }
+            }
+            core::Vec3 client_position = client.eye_anchor();
+            if (!client.local_player().is_valid())
+                client_position = spawn;
+            if (block_play::needs_recovery(client_position)) {
+                const ecs::Entity e = client.local_player();
+                if (auto* state =
+                        e.is_valid() ? client.world.get<gameplay::CharacterState>(e) : nullptr) {
+                    *state = gameplay::CharacterState{};
+                    state->position = spawn;
+                    client.predictor.reset(*state);
+                    gameplay::write_character_pose(client.world, e, spawn);
+                }
+                client_position = spawn;
+                play_world->note_recovery();
+            }
+            // Both collision worlds are mutated here on the main thread, before the server solve
+            // job is launched and before either gameplay or prediction reads physics queries.
+            if (!play_world->prepare(
+                    server.world,
+                    server.destruction,
+                    client.world,
+                    client.destruction,
+                    tick_index,
+                    server_position,
+                    client_position,
+                    std::max(server.character.max_speed, client.config.max_speed))) {
+                world_stopped = true;
+                std::fprintf(stderr,
+                             "99-the-block: procedural collision barrier refused tick %llu\n",
+                             static_cast<unsigned long long>(tick_index));
+                return;
+            }
         }
 
         // ── THE TWO HALVES RUN AT ONCE (p2-perf, ADR-0077) ──
@@ -1679,6 +1764,8 @@ struct Demo {
     app::Application app;
     Session session{0x13B10Cull};
     std::unique_ptr<Visuals> visuals;
+    std::unique_ptr<block_play::PlayWorld> play_world;
+    bool streamed_world = false;
 
     // ── The cooked catalog (m17.8b) ─────────────────────────────────────────────────────────────
     // Held HERE, not in `Visuals`, because `GpuAssetBridge::set_catalog` keeps a REFERENCE to the
@@ -1755,6 +1842,27 @@ struct Demo {
                            visuals ? &visuals->meshes : nullptr,
                            ground_material)) {
             return false;
+        }
+        if (streamed_world) {
+            play_world = std::make_unique<block_play::PlayWorld>(
+                session.server.world, session.server.physics, session.client.physics, app.device());
+            if (!play_world->valid()) {
+                std::fprintf(stderr, "99-the-block: invalid street footprint or terrain pin\n");
+                return false;
+            }
+            session.play_world = play_world.get();
+            const core::Vec3 spawn = blockkit::west_viewpoint(blockkit::BlockParams{});
+            if (!play_world->prepare(session.server.world,
+                                     session.server.destruction,
+                                     session.client.world,
+                                     session.client.destruction,
+                                     0,
+                                     spawn,
+                                     spawn,
+                                     session.server.character.max_speed)) {
+                std::fprintf(stderr, "99-the-block: spawn terrain could not be installed\n");
+                return false;
+            }
         }
         if (visuals) {
             visuals->dress(session.client.world);
@@ -1857,6 +1965,10 @@ struct Demo {
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
+        if (session.world_stopped) {
+            app.request_quit();
+            return;
+        }
 
         // The scripted hero beat. In --play a key does this instead; either way it is one server
         // side call, so the two paths cannot drift into two different explosions.
@@ -1946,6 +2058,16 @@ struct Demo {
         if (auto* tf = world.get<ecs::WorldTransform>(visuals->camera)) {
             tf->value =
                 use_authored_camera ? visuals->authored_camera : session.client.camera_transform();
+        }
+        if (play_world) {
+            const core::Vec3 eye = session.client.camera_transform().translation;
+            if (!play_world->recenter(eye)) {
+                session.world_stopped = true;
+                app.request_quit();
+                return;
+            }
+            visuals->renderer.set_terrain_draws(play_world->pass(), play_world->draws());
+            play_world->mark_drawn();
         }
         visuals->renderer.reset_cull_stats();
         visuals->last_ldr = visuals->renderer.render(*ctx.graph, world, ctx.extent, true).ldr;
@@ -3257,6 +3379,143 @@ int run_perf(const std::filesystem::path& cooked,
     return result.ok() ? 0 : 1;
 }
 
+// The streamed-world proof uses the same Demo, Session tick and collision setup as live play.
+// It keeps the charge disabled so the travelling floor, rather than rubble, is what it measures.
+int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
+    app::AppConfig cfg{};
+    cfg.gpu = false;
+    cfg.tick_hz = 60.0;
+    Demo demo(cfg);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    if (!demo.start(cooked, scene_path))
+        return 1;
+
+    bool okay = true;
+    auto check = [&](bool condition, const char* label) {
+        if (!condition) {
+            std::fprintf(stderr, "world-smoke: FAILED %s\n", label);
+            okay = false;
+        }
+    };
+    check(demo.play_world->server().source.config().seed ==
+                  demo.play_world->client().source.config().seed &&
+              demo.play_world->server().source.config().version ==
+                  demo.play_world->client().source.config().version,
+          "peer seed/version agreement");
+
+    // At the authored street centre, the slab must be the first downward static hit. The
+    // procedural sample is deliberately below its top face.
+    physics::BodyId street{};
+    demo.session.server.world.query<ground::GroundBody>().for_each(
+        [&](ecs::Entity, ground::GroundBody& g) { street = g.body; });
+    physics::RayHit street_hit;
+    physics::QueryFilter statics;
+    statics.dynamics = false;
+    const auto& c = demo.play_world->config();
+    const physics::Ray street_ray{
+        {0.5f * (c.street_min_x + c.street_max_x), 50.0f, 0.5f * (c.street_min_z + c.street_max_z)},
+        {0.0f, -1.0f, 0.0f},
+        100.0f};
+    check(street.is_valid() &&
+              demo.session.server.physics.raycast(street_ray, street_hit, statics) &&
+              street_hit.body == street,
+          "original street is first downward hit");
+
+    replication::InputCommand west{};
+    west.yaw = 1.57079632679f; // engine forward = -X
+    west.move_y = 1.0f;
+    float min_x = std::numeric_limits<float>::infinity();
+    float min_y = std::numeric_limits<float>::infinity();
+    auto travel = [&](int ticks) {
+        for (int i = 0; i < ticks && okay; ++i) {
+            demo.step_sim(west);
+            check(!demo.session.world_stopped, "collision barrier remained ready");
+            if (demo.session.server.avatars.empty())
+                continue;
+            const auto* s = demo.session.server.world.get<gameplay::CharacterState>(
+                demo.session.server.avatars.front());
+            if (!s)
+                continue;
+            min_x = std::min(min_x, s->position.x);
+            min_y = std::min(min_y, s->position.y);
+            check(std::isfinite(s->position.y) && s->position.y > -5.0f,
+                  "player stayed on supported ground");
+        }
+    };
+    travel(150); // handshakes, then walking speed beyond the west end of the old slab
+    check(min_x < static_cast<float>(c.street_min_x) - 2.0f,
+          "walk-speed traversal crossed original slab");
+
+    // This is an actual character configuration, consumed by gameplay and prediction. It is not
+    // a camera teleport or a fabricated collision query.
+    demo.session.server.character.max_speed = 100.0f;
+    demo.session.server.character.accel = 500.0f;
+    for (ecs::Entity e : demo.session.server.avatars) {
+        if (auto* ch = demo.session.server.world.get<gameplay::CharacterConfig>(e)) {
+            ch->max_speed = 100.0f;
+            ch->accel = 500.0f;
+        }
+    }
+    const ecs::Entity local = demo.session.client.local_player();
+    if (auto* ch = local.is_valid()
+                       ? demo.session.client.world.get<gameplay::CharacterConfig>(local)
+                       : nullptr) {
+        ch->max_speed = 100.0f;
+        ch->accel = 500.0f;
+    }
+    demo.session.client.config.max_speed = 100.0f;
+    demo.session.client.config.accel = 500.0f;
+    const float stress_start = min_x;
+    travel(360);
+    check(min_x < stress_start - 300.0f && min_x < -300.0f,
+          "100m/s control traversed hundreds of negative metres");
+    const core::Vec3 remote{min_x, 60.0f, 0.0f};
+    physics::RayHit remote_hit;
+    check(demo.session.server.physics.raycast(
+              physics::Ray{remote, {0.0f, -1.0f, 0.0f}, 120.0f}, remote_hit, statics),
+          "negative-coordinate terrain answers a physics ray");
+
+    const auto& sc = demo.play_world->server().collision.counters();
+    const auto& cc = demo.play_world->client().collision.counters();
+    check(sc.evictions > 0 && cc.evictions > 0, "both collision peers evicted old tiles");
+    check(sc.tiles_installed <= 256 && cc.tiles_installed <= 256 &&
+              sc.peak_bytes_resident < 4ull * 1024ull * 1024ull &&
+              cc.peak_bytes_resident < 4ull * 1024ull * 1024ull,
+          "collision tile and byte gauges plateaued");
+    check(demo.play_world->server().source.stats().refused_requests == 0 &&
+              demo.play_world->client().source.stats().refused_requests == 0,
+          "no source pool or coordinate refusal");
+
+    // Inject two server-authoritative escape states; each must return to a supported spawn before
+    // gameplay consumes another input. This is the explicit prototype safety boundary.
+    if (!demo.session.server.avatars.empty()) {
+        auto* s = demo.session.server.world.get<gameplay::CharacterState>(
+            demo.session.server.avatars.front());
+        s->position.x = block_play::PlayWorld::kPracticalLimit + 1.0f;
+        demo.step_sim({});
+        check(!demo.session.world_stopped && !block_play::needs_recovery(s->position),
+              "practical X limit recovered safely");
+        s->position.y = block_play::PlayWorld::kRecoveryFloor - 1.0f;
+        demo.step_sim({});
+        check(!demo.session.world_stopped && !block_play::needs_recovery(s->position) &&
+                  demo.play_world->stats().recoveries >= 2,
+              "absolute floor recovered safely");
+    } else {
+        check(false, "authoritative player spawned");
+    }
+    std::printf("world-smoke: min x %.1f m, min y %.1f m, server %llu installs/%llu evictions, "
+                "client %llu installs/%llu evictions, recoveries %llu\n",
+                min_x,
+                min_y,
+                static_cast<unsigned long long>(sc.installs),
+                static_cast<unsigned long long>(sc.evictions),
+                static_cast<unsigned long long>(cc.installs),
+                static_cast<unsigned long long>(cc.evictions),
+                static_cast<unsigned long long>(demo.play_world->stats().recoveries));
+    return okay ? 0 : 1;
+}
+
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
@@ -3269,6 +3528,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 
     Demo demo(cfg);
     demo.scripted_charge = false; // interactive: wait for F, not the tape
+    demo.streamed_world = true;
     if (demo.app.device() == nullptr) {
         std::fprintf(stderr, "99-the-block: --play needs a Vulkan device\n");
         return 1;
@@ -3365,7 +3625,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 } // namespace
 
 int main(int argc, char** argv) {
-    enum class Mode { Headless, Play, Perf } mode = Mode::Headless;
+    enum class Mode { Headless, Play, Perf, WorldSmoke } mode = Mode::Headless;
     PerfOptions perf{};
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
     std::string scene_path; // --scene: run a scene someone authored, not the generated one (m14.4)
@@ -3376,6 +3636,8 @@ int main(int argc, char** argv) {
             mode = Mode::Headless;
         } else if (a == "--play") {
             mode = Mode::Play;
+        } else if (a == "--world-smoke") {
+            mode = Mode::WorldSmoke;
         } else if (a == "--perf") {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
@@ -3429,6 +3691,9 @@ int main(int argc, char** argv) {
     }
     if (mode == Mode::Play) {
         return run_play(cooked, scene_path);
+    }
+    if (mode == Mode::WorldSmoke) {
+        return run_world_smoke(cooked, scene_path);
     }
     return run_headless(cooked, scene_path);
 }
