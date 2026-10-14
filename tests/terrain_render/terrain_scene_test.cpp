@@ -200,13 +200,12 @@ TEST_CASE("terrain scene is declared between opaque and sky/TAA, with an empty d
     register_render_components(world);
     (void)world.spawn_with(ecs::WorldTransform{}, Camera{});
     SceneRenderer renderer(*device, meshes, materials);
-    SkyParams sky{};
-    sky.enabled = true;
-    renderer.set_sky(sky);
     RenderGraph empty(*device);
     empty.reset();
     (void)renderer.render(empty, world, {kSize, kSize});
     const auto default_count = empty.pass_count();
+    for (std::size_t i = 0; i < default_count; ++i)
+        CHECK(empty.pass_name(i) != "terrain-scene");
     TerrainPass pass(*device);
     const auto tile = pass.upload(flat_tile());
     REQUIRE(tile != kInvalidTerrainTile);
@@ -216,18 +215,24 @@ TEST_CASE("terrain scene is declared between opaque and sky/TAA, with an empty d
     graph.reset();
     (void)renderer.render(graph, world, {kSize, kSize});
     CHECK(graph.pass_count() == default_count + 1);
-    std::size_t terrain_index = graph.pass_count();
-    std::size_t sky_index = graph.pass_count();
-    std::size_t taa_index = graph.pass_count();
-    for (std::size_t i = 0; i < graph.pass_count(); ++i) {
-        if (graph.pass_name(i) == "terrain-scene")
+    SkyParams sky{};
+    sky.enabled = true;
+    renderer.set_sky(sky);
+    RenderGraph sky_graph(*device);
+    sky_graph.reset();
+    (void)renderer.render(sky_graph, world, {kSize, kSize});
+    std::size_t terrain_index = sky_graph.pass_count();
+    std::size_t sky_index = sky_graph.pass_count();
+    std::size_t taa_index = sky_graph.pass_count();
+    for (std::size_t i = 0; i < sky_graph.pass_count(); ++i) {
+        if (sky_graph.pass_name(i) == "terrain-scene")
             terrain_index = i;
-        if (graph.pass_name(i) == "sky")
+        if (sky_graph.pass_name(i) == "sky")
             sky_index = i;
-        if (graph.pass_name(i) == "taa-resolve")
+        if (sky_graph.pass_name(i) == "taa-resolve")
             taa_index = i;
     }
-    CHECK(terrain_index < graph.pass_count());
+    CHECK(terrain_index < sky_graph.pass_count());
     CHECK(terrain_index > 0);
     CHECK(terrain_index < sky_index);
     CHECK(sky_index < taa_index);
