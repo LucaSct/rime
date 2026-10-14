@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// play_sunset — the evening preset `--play` applies to the block (sample-local, header-only).
+//
+// The authored rig puts the sun BEHIND the street-view camera, which makes a fine shadow-raking
+// shot and a poor sunset: you never see the disc. This preset turns the sun round to sit ahead of
+// the player, low over the end of the street. It is applied to PLAY ONLY — `--headless`, the perf
+// harness and the authored captures keep the rig exactly as cooked, because their claims and
+// baselines were measured against it.
+//
+// ONE DirectionalLight drives everything. The sky draws its analytic disc from the scene's first
+// DirectionalLight (`SkyParams::use_scene_sun`), so rotating that one entity moves the shadows,
+// the direct light and the visible sun together; there is no second sun direction to disagree.
+
+#pragma once
+
+#include <numbers>
+
+#include "rime/core/math.hpp"
+#include "rime/ecs/query.hpp"
+#include "rime/ecs/transform.hpp"
+#include "rime/ecs/world.hpp"
+#include "rime/render/components.hpp"
+
+namespace rime::play_sunset {
+
+inline constexpr float kPi = std::numbers::pi_v<float>;
+
+// Elevation of the sun's centre above the horizon [rad] (~3.7 deg): low enough to read as dusk.
+inline constexpr float kSunElevation = 0.065f;
+// View: yaw -pi/2 makes forward (-sin yaw, 0, -cos yaw) = +X, down the street; a slight upward
+// pitch keeps the disc inside the frame.
+inline constexpr float kViewYaw = -kPi * 0.5f;
+inline constexpr float kViewPitch = 0.04f;
+// Warm direct light, linear RGB.
+inline constexpr float kSunColor[3] = {1.0f, 0.66f, 0.36f};
+inline constexpr float kSunIntensity = 1.7f;
+
+// A light SHINES along its entity's forward axis (rotation applied to -z), i.e. the direction
+// light TRAVELS. The direction TOWARD the sun is the opposite. Wanting the sun toward +X and
+// elevated, light travels toward -X and downward: yaw +pi/2 turns forward from -Z to -X, then a
+// pitch of -elevation about local X tips it downward. The result is
+//   travel = (-cos e, -sin e, 0),  toward-sun = (cos e, sin e, 0).
+[[nodiscard]] inline core::Quat sun_rotation(float elevation = kSunElevation) noexcept {
+    const core::Quat yaw = core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, kPi * 0.5f);
+    const core::Quat pitch = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -elevation);
+    return core::normalize(yaw * pitch);
+}
+
+// Retarget the EXISTING sun in `world`: no entity or light is created. Local and world transform
+// are both written because nothing re-propagates transforms before the next draw on a peer that
+// already ran its first frame. Returns the number of lights edited (the authored block has one).
+inline int apply(ecs::World& world) {
+    int edited = 0;
+    const core::Quat q = sun_rotation();
+    world.query<render::DirectionalLight>().for_each(
+        [&](ecs::Entity e, render::DirectionalLight& l) {
+            l.color_r = kSunColor[0];
+            l.color_g = kSunColor[1];
+            l.color_b = kSunColor[2];
+            l.intensity = kSunIntensity;
+            if (auto* lt = world.get<ecs::LocalTransform>(e)) {
+                lt->value.rotation = q;
+            }
+            if (auto* wt = world.get<ecs::WorldTransform>(e)) {
+                wt->value.rotation = q;
+            }
+            ++edited;
+        });
+    return edited;
+}
+
+} // namespace rime::play_sunset

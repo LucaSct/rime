@@ -79,6 +79,7 @@
 #include <utility>
 #include <vector>
 
+#include "play_sunset.hpp"
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/cooked_reader.hpp"
@@ -3275,6 +3276,14 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     if (!demo.start(cooked, scene_path)) {
         return 1;
     }
+
+    // PLAY-ONLY evening preset (play_sunset.hpp): turn the one authored sun ahead of the player on
+    // both peers, and face the live view down the street at it. Done before the live intent is
+    // built below, so the first frame already looks at the sun.
+    play_sunset::apply(demo.session.server.world);
+    play_sunset::apply(demo.session.client.world);
+    demo.session.client.view.yaw = play_sunset::kViewYaw;
+    demo.session.client.view.pitch = play_sunset::kViewPitch;
 
     // The device->intent map's bindings, owned by main so the render callback below can read the
     // look scheme the window actually granted.
