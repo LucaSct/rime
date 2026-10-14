@@ -80,6 +80,7 @@
 #include <vector>
 
 #include "play_sunset.hpp"
+#include "play_viewmodel.hpp"
 #include "play_world.hpp"
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_server.hpp"
@@ -138,6 +139,9 @@
 
 #ifndef RIME_BLOCK_COOKED_DIR
 #define RIME_BLOCK_COOKED_DIR "cooked"
+#endif
+#ifndef RIME_VIEWMODEL_COOKED_DIR
+#define RIME_VIEWMODEL_COOKED_DIR "viewmodel-cooked"
 #endif
 
 namespace {
@@ -1771,7 +1775,9 @@ struct Demo {
     Session session{0x13B10Cull};
     std::unique_ptr<Visuals> visuals;
     std::unique_ptr<block_play::PlayWorld> play_world;
+    std::unique_ptr<block_play::PlayViewmodel> viewmodel;
     bool streamed_world = false;
+    bool viewmodel_enabled = false; // explicit --play/--viewmodel-smoke only
 
     // ── The cooked catalog (m17.8b) ─────────────────────────────────────────────────────────────
     // Held HERE, not in `Visuals`, because `GpuAssetBridge::set_catalog` keeps a REFERENCE to the
@@ -1965,6 +1971,32 @@ struct Demo {
                 }
             }
         }
+        if (viewmodel_enabled) {
+            if (!visuals)
+                return false;
+            // The held weapon art is third-party CC-BY work that deliberately does not live in
+            // this repository (assets/viewmodel/README.md says how to fetch and prepare it), so a
+            // clean clone simply has no cook to load. That is a normal state, not a defect: drop
+            // the hands and say why. Art that IS present but fails to load is the opposite case --
+            // a real fault -- and stays fatal below, so the two can never be confused.
+            if (!std::filesystem::exists(std::filesystem::path(RIME_VIEWMODEL_COOKED_DIR) /
+                                         "manifest.txt")) {
+                std::fprintf(stderr,
+                             "99-the-block: no cooked viewmodel under %s -- running without the "
+                             "held weapon (see samples/99-the-block/assets/viewmodel/README.md)\n",
+                             RIME_VIEWMODEL_COOKED_DIR);
+                viewmodel_enabled = false;
+                return true;
+            }
+            viewmodel = std::make_unique<block_play::PlayViewmodel>();
+            if (!viewmodel->load(RIME_VIEWMODEL_COOKED_DIR,
+                                 session.jobs,
+                                 *app.device(),
+                                 visuals->meshes,
+                                 visuals->materials)) {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -2078,6 +2110,12 @@ struct Demo {
             }
             visuals->renderer.set_terrain_draws(play_world->pass(), play_world->draws());
             play_world->mark_drawn();
+        }
+        if (viewmodel && viewmodel_enabled) {
+            const core::Transform eye = session.client.camera_transform();
+            viewmodel->observe_camera(eye.translation);
+            visuals->renderer.set_first_person_draws(viewmodel->pose(eye),
+                                                     viewmodel->identity_epoch());
         }
         visuals->renderer.reset_cull_stats();
         visuals->last_ldr = visuals->renderer.render(*ctx.graph, world, ctx.extent, true).ldr;
@@ -3509,17 +3547,17 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
                       "capsule feet never pass through current static surface");
             }
             const auto local_avatar = demo.session.client.local_player();
-            const auto* client_cfg = local_avatar.is_valid()
-                                         ? demo.session.client.world.get<gameplay::CharacterConfig>(
-                                               local_avatar)
-                                         : nullptr;
+            const auto* client_cfg =
+                local_avatar.is_valid()
+                    ? demo.session.client.world.get<gameplay::CharacterConfig>(local_avatar)
+                    : nullptr;
             if (client_cfg && demo.session.client.predictor.seeded()) {
                 const auto& predicted = demo.session.client.predictor.state();
                 const auto visual = demo.session.client.predictor.visual_position();
                 min_client_x = std::min(min_client_x, predicted.position.x);
                 min_visual_x = std::min(min_visual_x, visual.x);
-                max_visual_offset = std::max(
-                    max_visual_offset, core::length(visual - predicted.position));
+                max_visual_offset =
+                    std::max(max_visual_offset, core::length(visual - predicted.position));
                 const auto check_client_support = [&](core::Vec3 at, bool is_visual) {
                     const float top = std::max(at.y + 64.0f, 64.0f);
                     physics::RayHit hit;
@@ -3527,8 +3565,9 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
                         physics::Ray{{at.x, top, at.z}, {0.0f, -1.0f, 0.0f}, top + 64.0f},
                         hit,
                         statics);
-                    check(found, is_visual ? "client visual terrain support exists"
-                                           : "client predicted terrain support exists");
+                    check(found,
+                          is_visual ? "client visual terrain support exists"
+                                    : "client predicted terrain support exists");
                     if (found) {
                         const float feet = at.y - client_cfg->half_height - client_cfg->radius;
                         if (is_visual) {
@@ -3839,6 +3878,135 @@ int run_world_gpu_smoke(const std::filesystem::path& cooked, std::string_view sc
     return okay ? 0 : 1;
 }
 
+// Real GPU proof for the opt-in first-person art path. It compares readback with and without the
+// overlay, then swaps to M4 and checks both visible coverage and fixed GPU residency. No window,
+// input tape or world mutation is needed to make the two models draw.
+int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
+    constexpr std::uint32_t kW = 640;
+    constexpr std::uint32_t kH = 360;
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {kW, kH};
+    cfg.tick_hz = 60.0;
+    Demo demo(cfg);
+    demo.scripted_charge = false;
+    demo.viewmodel_enabled = true;
+    if (!demo.app.device()) {
+        std::fprintf(stderr, "viewmodel-smoke: no Vulkan device — skipped\n");
+        return std::getenv("RIME_REQUIRE_VULKAN") != nullptr ? 1 : 0;
+    }
+    // Skip rather than fail when the art is absent, the same way the missing-Vulkan case above
+    // does. This check has to come BEFORE start(), because start() treats absent art as benign and
+    // quietly clears viewmodel_enabled -- without this the proof below would read a frame with no
+    // model in it and still call every claim satisfied.
+    if (!std::filesystem::exists(std::filesystem::path(RIME_VIEWMODEL_COOKED_DIR) /
+                                 "manifest.txt")) {
+        std::fprintf(stderr, "viewmodel-smoke: no cooked viewmodel art -- skipped\n");
+        return std::getenv("RIME_REQUIRE_VIEWMODEL") != nullptr ? 1 : 0;
+    }
+    if (!demo.start(cooked, scene_path))
+        return 1;
+    if (!demo.viewmodel) {
+        std::fprintf(stderr, "viewmodel-smoke: the viewmodel did not load\n");
+        return 1;
+    }
+    demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
+    for (int i = 0; i < 30; ++i)
+        demo.step_sim({}); // replicate/seed the local camera
+
+    bool okay = true;
+    const auto check = [&](bool condition, const char* label) {
+        if (!condition) {
+            std::fprintf(stderr, "viewmodel-smoke: FAILED %s\n", label);
+            okay = false;
+        }
+    };
+    const auto capture = [&]() {
+        demo.app.run_frames(4);
+        std::vector<std::uint8_t> pixels;
+        if (render::RenderGraph* graph = demo.app.graph()) {
+            const auto tex = graph->physical(demo.visuals->last_ldr);
+            if (tex.is_valid())
+                pixels = read_rgba8(*demo.app.device(), tex, kW, kH);
+        }
+        demo.app.finish_gpu();
+        return pixels;
+    };
+    demo.viewmodel_enabled = false;
+    demo.app.run_frames(64); // fill DDGI/temporal histories before comparing model pixels
+    const auto baseline = capture();
+    const auto baseline_control = capture();
+    demo.viewmodel_enabled = true;
+    const auto scar = capture();
+    const auto scar_control = capture();
+    const auto initial_epoch = demo.viewmodel->identity_epoch();
+    const auto meshes = demo.viewmodel->resident_meshes();
+    const auto materials = demo.viewmodel->resident_materials();
+    const auto textures = demo.viewmodel->resident_textures();
+    check(demo.viewmodel->selected() == block_play::PlayViewmodel::Weapon::Scar &&
+              demo.viewmodel->selected_draw_count() > 0,
+          "SCAR-H is the default resident draw");
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+    const auto m4 = capture();
+    if (!g_ppm.empty() && !scar.empty() && !m4.empty()) {
+        write_ppm((g_ppm + ".scar.ppm").c_str(), scar, kW, kH);
+        write_ppm((g_ppm + ".m4.ppm").c_str(), m4, kW, kH);
+    }
+    demo.viewmodel_enabled = false;
+    const auto baseline_again = capture(); // temporal/lighting drift control
+    check(demo.viewmodel->identity_epoch() > initial_epoch &&
+              demo.viewmodel->selected_draw_count() > 0,
+          "M4 swap invalidates first-person history and draws");
+    check(meshes == 2 && materials >= 2 && textures >= 4 &&
+              demo.viewmodel->resident_meshes() == meshes &&
+              demo.viewmodel->resident_materials() == materials &&
+              demo.viewmodel->resident_textures() == textures,
+          "both models and maps were loaded once and stayed resident");
+
+    const auto changed = [&](const std::vector<std::uint8_t>& a,
+                             const std::vector<std::uint8_t>& b) {
+        std::size_t count = 0;
+        if (a.size() != static_cast<std::size_t>(kW) * kH * 4 || b.size() != a.size())
+            return count;
+        for (std::size_t pixel = 0; pixel < a.size() / 4; ++pixel) {
+            const std::size_t p = pixel * 4;
+            const int rgb = std::abs(int(a[p]) - int(b[p])) +
+                            std::abs(int(a[p + 1]) - int(b[p + 1])) +
+                            std::abs(int(a[p + 2]) - int(b[p + 2]));
+            count += rgb >= 30 ? 1u : 0u;
+        }
+        return count;
+    };
+    const auto scar_coverage = changed(baseline, scar);
+    const auto swap_coverage = changed(scar_control, m4);
+    const auto baseline_drift = changed(baseline, baseline_control);
+    const auto scar_drift = changed(scar, scar_control);
+    const auto after_overlay_residual = changed(baseline, baseline_again);
+    std::printf("viewmodel-smoke: SCAR coverage %zu px, M4 swap %zu px, "
+                "baseline drift %zu px, SCAR drift %zu px, removal residual %zu px, "
+                "meshes/materials/textures %zu/%zu/%zu\n",
+                scar_coverage,
+                swap_coverage,
+                baseline_drift,
+                scar_drift,
+                after_overlay_residual,
+                meshes,
+                materials,
+                textures);
+    check(baseline.size() == static_cast<std::size_t>(kW) * kH * 4 &&
+              scar.size() == baseline.size() && scar_control.size() == baseline.size() &&
+              m4.size() == baseline.size() && baseline_again.size() == baseline.size() &&
+              baseline_control.size() == baseline.size(),
+          "all six frames read back");
+    check(scar_coverage > static_cast<std::size_t>(kW) * kH / 200,
+          "SCAR changes at least 0.5 percent of the frame");
+    check(swap_coverage > static_cast<std::size_t>(kW) * kH / 200,
+          "M4 swap changes at least 0.5 percent of the frame");
+    check(scar_coverage > baseline_drift * 3 && swap_coverage > scar_drift * 3,
+          "model coverage and swap exceed their unchanged controls");
+    return okay ? 0 : 1;
+}
+
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
@@ -3852,6 +4020,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     Demo demo(cfg);
     demo.scripted_charge = false; // interactive: wait for F, not the tape
     demo.streamed_world = true;
+    demo.viewmodel_enabled = true;
     if (demo.app.device() == nullptr) {
         std::fprintf(stderr, "99-the-block: --play needs a Vulkan device\n");
         return 1;
@@ -3897,7 +4066,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         bindings.look_requires_drag = gameplay::look_requires_drag_for(cursor);
         std::printf("99-the-block: presenting in a window.\n"
                     "  WASD move · %s to look · LEFT CLICK to fire\n"
-                    "  F detonates the charge on the hero building · ESC to exit\n",
+                    "  1 SCAR-H · 2 M4A1 · F detonates the hero building · ESC to exit\n",
                     bindings.look_requires_drag
                         // Not "this display cannot lock": at startup the pointer is usually not
                         // over the window yet, and on Wayland that alone is enough to refuse. The
@@ -3940,6 +4109,20 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         if (demo.session.client.devices.key_pressed(platform::Key::F)) {
             demo.fire_charge();
         }
+        if (demo.session.client.devices.key_pressed(platform::Key::Num1)) {
+            demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Scar);
+        }
+        if (demo.session.client.devices.key_pressed(platform::Key::Num2)) {
+            demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+        }
+        // Presentation follows actual predicted motion and the local fire edge; neither bob nor
+        // weapon choice enters CharacterInput or the replicated simulation state.
+        const auto velocity = demo.session.client.predictor.seeded()
+                                  ? demo.session.client.predictor.state().velocity
+                                  : core::Vec3{};
+        demo.viewmodel->advance(static_cast<float>(ctx.frame_dt),
+                                velocity,
+                                (intent.character.pressed & gameplay::kActionFire) != 0u);
         demo.render(ctx);
     });
 
@@ -3952,13 +4135,21 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
                 static_cast<unsigned long long>(demo.app.frame_index()),
                 static_cast<unsigned long long>(demo.app.tick_count()),
                 quit ? " (ESC)" : "");
+    demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries
     return 0;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    enum class Mode { Headless, Play, Perf, WorldSmoke, WorldGpuSmoke } mode = Mode::Headless;
+    enum class Mode {
+        Headless,
+        Play,
+        Perf,
+        WorldSmoke,
+        WorldGpuSmoke,
+        ViewmodelSmoke
+    } mode = Mode::Headless;
     PerfOptions perf{};
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
     std::string scene_path; // --scene: run a scene someone authored, not the generated one (m14.4)
@@ -3973,6 +4164,8 @@ int main(int argc, char** argv) {
             mode = Mode::WorldSmoke;
         } else if (a == "--world-gpu-smoke") {
             mode = Mode::WorldGpuSmoke;
+        } else if (a == "--viewmodel-smoke") {
+            mode = Mode::ViewmodelSmoke;
         } else if (a == "--perf") {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
@@ -4032,6 +4225,9 @@ int main(int argc, char** argv) {
     }
     if (mode == Mode::WorldGpuSmoke) {
         return run_world_gpu_smoke(cooked, scene_path);
+    }
+    if (mode == Mode::ViewmodelSmoke) {
+        return run_viewmodel_smoke(cooked, scene_path);
     }
     return run_headless(cooked, scene_path);
 }
