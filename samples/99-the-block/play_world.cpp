@@ -149,10 +149,15 @@ bool PlayWorld::CollisionPeer::prepare(ecs::World& world,
             states_valid = false;
             return;
         }
-        // A ten-metre support box covers the largest intact block piece and its rotation.
-        // The sweep adds next-tick velocity; the margin covers controller and solver correction.
-        demands.push_back({terrain_collision::swept_bounds(
-                               around(s.position, 10.0f), s.linear_velocity, kDt, 2.0f),
+        physics::Aabb bounds;
+        if (!physics.broadphase_aabb(id, bounds)) {
+            states_valid = false;
+            return;
+        }
+        // Use the shape's current broadphase bounds, including rotation and sleeping bodies.
+        // A fixed radius would silently stop covering a larger authored piece. The sweep adds
+        // next-tick velocity; the margin covers controller and solver correction.
+        demands.push_back({terrain_collision::swept_bounds(bounds, s.linear_velocity, kDt, 2.0f),
                            terrain_collision::DemandKind::Body});
     };
     world.query<physics::RigidBodyHandle>().for_each(

@@ -28,8 +28,9 @@ namespace rime::play_sunset {
 
 inline constexpr float kPi = std::numbers::pi_v<float>;
 
-// Elevation of the sun's centre above the horizon [rad] (~3.7 deg): low enough to read as dusk.
-inline constexpr float kSunElevation = 0.065f;
+// Elevation of the sun's centre above the horizon [rad] (~6.9 deg): low evening light, high
+// enough to remain visible above the generated hills from the initial street viewpoint.
+inline constexpr float kSunElevation = 0.12f;
 // View: yaw -pi/2 makes forward (-sin yaw, 0, -cos yaw) = +X, down the street; a slight upward
 // pitch keeps the disc inside the frame.
 inline constexpr float kViewYaw = -kPi * 0.5f;
