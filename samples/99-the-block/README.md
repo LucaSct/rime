@@ -9,14 +9,19 @@ replicated server, a predicted client, a first-person camera, a window and a mix
 ```bash
 build/dev/bin/the_block --headless          # the CI-gated proof
 build/dev/bin/the_block --play              # walk around it and shoot
+build/dev/bin/the_block --headless --ppm frame.ppm   # also write the intact frame as an image
 build/dev/bin/the_block --headless --idle   # the control: nobody touches the block
 build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI stops caring
 ```
 
+`--play` controls: **WASD** move · **mouse** to look, or hold **right-drag** when the window could
+not lock the cursor · **left click** fires · **F** detonates the charge on the hero building ·
+**Esc** exits.
+
 `--cooked <dir>` points at the nine `.rdest` files; the build cooks them into the target's own
 directory and bakes that path in, so the two commands above just work after a build.
 
-## Status: 23 claims pass — M13's "done when" is met
+## Status: 29 claims pass — M13's "done when" is met
 
 It did not start that way. m13.5 shipped this demo with 20 claims passing and one **reported as a
 known defect**: *the collapse does not stay local*. A charge on one building flattened the whole
@@ -47,7 +52,7 @@ and `damage` prints the op population that made the defect legible.
 | render | the cull considers every part and rejects **1,983 of 2,051** · every leaf finds its mesh · the frame comes back lit |
 | collapse | the far side of the street is untouched · most of the block is still standing |
 
-"A playable frame rate" is the one clause CI cannot judge — lavapipe is a CPU rasteriser, so a
+"A playable frame rate" is the one clause CI cannot judge, and it has not been established here — lavapipe is a CPU rasteriser, so a
 millisecond there is a statement about the runner's mood. Counts stay in `--headless` where CI can
 fail on them forever; the clock belongs in a `--perf` mode (m13.p), on hardware whose fingerprint
 goes into the report. That is the 11-lit-rooms split, ADR-0035 §2b.
