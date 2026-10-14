@@ -210,9 +210,11 @@ Verify proportionately to the change — don't re-run the whole world for every 
   a different compiler and libm is a different last bit, and the gate flips. So when a bit-moving
   change reds these two samples on some jobs and not others, that is the gate, not a
   platform-specific defect; check for a compile diagnostic before reading it as one.
-  Evidence: `/home/next/reports/rime-tier2-ledger-2026-10-13/REPORT.md`. The sample also
-  replays the scene **5×** and substeps physics **5×**, so a per-world step counter in any trace is
-  25× the sample tick and the world pointer is reused between replays.
+  Evidence: `/home/next/reports/rime-tier2-ledger-2026-10-13/REPORT.md`. Correction verified
+  2026-10-14: the wall replays the scene **5×**, but calls `pw.step(1/60)` **once per tick**.
+  A per-replay trace counter is therefore the sample tick, not 25× it; the world pointer can be
+  reused between replays. The observed rotational bursts cluster, rather than establishing a
+  periodic 30-substep mechanism. Physics diagnosis remains open; do not reopen the fixed sleep route.
 - **A `.ps1` is only verified by RUNNING it under `powershell.exe`** — a parse check is not the
   proof. Why, and the 10 weeks `setup.ps1` was dead: [`scripts/CLAUDE.md`](scripts/CLAUDE.md).
 - **A red `format, lint & license` on a PR that touched no Rust is probably not yours.** CI pins
