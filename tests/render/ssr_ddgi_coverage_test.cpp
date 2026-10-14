@@ -101,7 +101,7 @@ constexpr std::array<float, 3> kDdgiBright{2.0f, 1.0f, 0.5f};
 }
 
 struct Fixture {
-    enum class Coverage { None, Covered };
+    enum class Coverage { None, Covered, ProbePlane };
 
     rhi::Device& device;
     SsrPass ssr;
@@ -167,6 +167,22 @@ struct Fixture {
         return upload(e, 1, rhi::Format::RG32Float, px.data(), px.size() * sizeof(float));
     }
 
+    rhi::TextureHandle probe_plane_visibility() {
+        constexpr rhi::Extent2D e{kProbes * kDdgiVisibilityTileSize, kDdgiVisibilityTileSize};
+        std::vector<float> px(static_cast<std::size_t>(e.width) * e.height * 2);
+        for (std::uint32_t y = 0; y < e.height; ++y) {
+            for (std::uint32_t x = 0; x < e.width; ++x) {
+                // Probe index = x + y*2 + z*4. The z=0 layer sits on the query plane
+                // and rejects every nonzero distance; the z=1 layer is fully visible.
+                const float mean = x / kDdgiVisibilityTileSize >= 4 ? 100.0f : 0.0f;
+                const std::size_t i = 2 * (static_cast<std::size_t>(y) * e.width + x);
+                px[i] = mean;
+                px[i + 1] = mean * mean;
+            }
+        }
+        return upload(e, 1, rhi::Format::RG32Float, px.data(), px.size() * sizeof(float));
+    }
+
     // A narrow-band SDF level filled with ONE unsaturated distance: half the band everywhere. It
     // is never solid (d > 0), so the cone never hits; it only narrows, and sdf_cone_occlusion's
     // min(d / cone radius) darkens the sky by a fixed, scene-independent fraction.
@@ -182,11 +198,12 @@ struct Fixture {
         std::array<float, 3> ddgi_radiance{0.0f, 0.0f, 0.0f};
         bool chain = false;
         bool sdf = false;
+        float wall_z = kWallZ;
     };
 
     HdrImage run(const Case& c) {
         const core::Mat4 proj = core::perspective(1.0f, 1.0f, 0.1f, 100.0f);
-        const core::Vec4 wall_clip = proj * core::Vec4{0.0f, 0.0f, kWallZ, 1.0f};
+        const core::Vec4 wall_clip = proj * core::Vec4{0.0f, 0.0f, c.wall_z, 1.0f};
         const float wall_ndc = wall_clip.z / wall_clip.w;
 
         const rhi::Extent2D e{kSize, kSize};
@@ -202,13 +219,17 @@ struct Fixture {
             constant_f16({kProbes * kDdgiIrradianceTileSize, kDdgiIrradianceTileSize},
                          {c.ddgi_radiance[0], c.ddgi_radiance[1], c.ddgi_radiance[2], 1.0f});
         const float mean = c.coverage == Coverage::Covered ? 100.0f : 0.0f;
-        const rhi::TextureHandle visibility = constant_rg32(
-            {kProbes * kDdgiVisibilityTileSize, kDdgiVisibilityTileSize}, mean, mean * mean);
+        const rhi::TextureHandle visibility =
+            c.coverage == Coverage::ProbePlane
+                ? probe_plane_visibility()
+                : constant_rg32({kProbes * kDdgiVisibilityTileSize, kDdgiVisibilityTileSize},
+                                mean,
+                                mean * mean);
 
         GpuDdgiSampleParams dp{};
         dp.grid_origin_spacing[0] = kGridOrigin[0];
         dp.grid_origin_spacing[1] = kGridOrigin[1];
-        dp.grid_origin_spacing[2] = kGridOrigin[2];
+        dp.grid_origin_spacing[2] = c.coverage == Coverage::ProbePlane ? kWallZ : kGridOrigin[2];
         dp.grid_origin_spacing[3] = kGridSpacing;
         dp.grid_dims_perrow[0] = dp.grid_dims_perrow[1] = dp.grid_dims_perrow[2] = 2;
         dp.grid_dims_perrow[3] = kProbes; // one atlas row
@@ -396,4 +417,44 @@ TEST_CASE("ssr ddgi coverage: SDF occlusion darkens an uncovered sky and never a
                   "an uncovered pixel's sky is occluded exactly as with DDGI off");
     CHECK_MESSAGE(worst_against(covered_bright, kDdgiBright) < 1e-3,
                   "the SDF cone must never alter a covered DDGI answer");
+}
+
+TEST_CASE("ssr ddgi coverage: normal-biased query stays on the covered side of a probe plane") {
+    auto device = device_or_skip("the SSR probe-plane stability proof");
+    if (!device)
+        return;
+    Fixture f(*device);
+
+    // The wall is the z=0 probe plane, with a zero-visibility layer on it and a bright,
+    // visible layer at z=+2. These depth perturbations straddle the plane without changing
+    // the reflection direction or material. A query at the unmodified negative wall position
+    // clamps to z=0 and would return the sky; the 5 cm normal bias reaches the visible layer.
+    const HdrImage just_below = f.run({.coverage = Fixture::Coverage::ProbePlane,
+                                       .ddgi_radiance = kDdgiBright,
+                                       .chain = true,
+                                       .wall_z = kWallZ - 0.001f});
+    const HdrImage just_above = f.run({.coverage = Fixture::Coverage::ProbePlane,
+                                       .ddgi_radiance = kDdgiBright,
+                                       .chain = true,
+                                       .wall_z = kWallZ + 0.001f});
+    // Ten centimetres below the plane is beyond the five-centimetre bias. A blanket "DDGI is
+    // covered" branch fails this control: it must still choose the actual filtered sky.
+    const HdrImage outside = f.run({.coverage = Fixture::Coverage::ProbePlane,
+                                    .ddgi_radiance = kDdgiBright,
+                                    .chain = true,
+                                    .wall_z = kWallZ - 0.1f});
+
+    MESSAGE("ssr probe plane: below=" << just_below.luminance(3, 3)
+                                      << " above=" << just_above.luminance(3, 3)
+                                      << " outside=" << outside.luminance(3, 3));
+    CHECK_MESSAGE(worst_against(just_below, kDdgiBright) < 1e-2,
+                  "negative depth perturbation must see the bright accepted probe layer");
+    CHECK_MESSAGE(worst_against(just_above, kDdgiBright) < 1e-2,
+                  "positive depth perturbation must see the same bright probe layer");
+    CHECK_MESSAGE(worst_against(just_below, just_above) < 1e-2,
+                  "small plane-crossing depth changes must not flip reflection source");
+    CHECK_MESSAGE(worst_against(outside, kChainSource) < 1e-2,
+                  "a query beyond the bias must still read the filtered sky");
+    CHECK_MESSAGE(worst_against(outside, kDdgiBright) > 0.5,
+                  "the unsupported control must differ visibly from probe radiance");
 }
