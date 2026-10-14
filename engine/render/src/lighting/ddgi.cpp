@@ -595,6 +595,7 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
             const RGTexture parked[] = {source_irr, source_vis, dest_irr, dest_vis};
             RenderGraph::ComputePassDesc done{};
             done.sampled = parked;
+            done.externally_visible = true; // parked source states belong to the next frame
             graph.add_compute_pass("ddgi-remap-done", done, [](rhi::CommandBuffer&) {});
         }
         irradiance_rg = dest_irr;
@@ -797,22 +798,17 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     // samples the returned handles later in this graph; its read uses this same ShaderRead state.
     // This also makes the next frame's import accurate for either physical pair after a swap.
     //
-    // The graph culls any pass that writes no imported resource, and a pass that only samples
-    // writes nothing — so in a compute-only frame this transition silently never ran, and the
-    // ShaderRead claimed below was false (the backend's "'from' disagrees with the tracked layout"
-    // warning, every frame). So the pass also claims the ray buffer as its write. That claim is
-    // honest about ordering: the rays are dead once both blends have read them, and the next
-    // trace overwrites them. It keeps the pass live, and the graph's buffer write-after-write rule
-    // then orders next frame's trace after it.
+    // This sampled-only pass establishes states for the next frame's imports, an observable
+    // effect beyond this graph's output pixels. Declare that effect explicitly so compute-only
+    // callers keep the transitions even without a forward consumer.
     {
         const RGTexture sampled[] = {irradiance_rg, visibility_rg};
-        const RGBuffer retired[] = {rays_rg};
         RenderGraph::ComputePassDesc ready{};
         ready.sampled = sampled;
-        ready.buffer_writes = retired;
+        ready.externally_visible = true;
         graph.add_compute_pass("ddgi-atlases-ready", ready, [](rhi::CommandBuffer&) {});
     }
-    ray_buffer_state_ = rhi::ResourceState::StorageReadWrite; // ddgi-atlases-ready's claim
+    ray_buffer_state_ = rhi::ResourceState::ShaderRead; // read by both blend passes
     irradiance_state_ = rhi::ResourceState::ShaderRead;
     visibility_state_ = rhi::ResourceState::ShaderRead;
 
