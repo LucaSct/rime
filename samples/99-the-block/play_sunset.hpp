@@ -22,6 +22,7 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/lighting/sky.hpp"
 
 namespace rime::play_sunset {
 
@@ -69,6 +70,23 @@ inline int apply(ecs::World& world) {
             ++edited;
         });
     return edited;
+}
+
+// The physical sky's solar source is NOT read from the DirectionalLight's colour or intensity:
+// the renderer couples only the DIRECTION (use_scene_sun), so `sun_radiance` has to be set to the
+// same warm source the light uses, or the visible sun and the direct light would be two sources.
+// The authored `intensity` is an exposure for a sun BEHIND the camera. Looking INTO a low sun, the
+// forward-scattering halo around the disc is huge and at the authored exposure it saturates the
+// whole horizon, so the disc has no contrast to read against. A lower exposure keeps the same
+// physical atmosphere and disc and lets the disc resolve. Clouds and atmosphere are untouched.
+[[nodiscard]] inline render::SkyParams sky(render::SkyParams authored) noexcept {
+    for (int i = 0; i < 3; ++i) {
+        authored.sun_radiance[i] = kSunColor[i] * kSunIntensity;
+    }
+    authored.intensity = 0.06f;
+    authored.use_scene_sun = true;
+    authored.angular_radius = 0.012f;
+    return authored;
 }
 
 } // namespace rime::play_sunset

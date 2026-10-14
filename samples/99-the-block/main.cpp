@@ -3608,6 +3608,11 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         // including immediately before a recenter. Show several kilometres of that cover.
         camera->z_far = 3072.0f;
     }
+    if (demo.visuals) {
+        // The sky's solar radiance is not coupled to the light's colour, so match it here and
+        // lower the exposure for a sun-facing view (see play_sunset::sky).
+        demo.visuals->renderer.set_sky(play_sunset::sky(Visuals::authored_sky()));
+    }
 
     // The device->intent map's bindings, owned by main so the render callback below can read the
     // look scheme the window actually granted.
