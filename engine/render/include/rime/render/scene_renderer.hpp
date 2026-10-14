@@ -152,7 +152,8 @@ public:
         RGTexture velocity;
         // The GGX-prefiltered sky chain (ADR-0078 section 2): a kSkySpecularLayers-layer array,
         // level k being perceptual roughness k/layers. Valid ONLY on a frame where the chain was
-        // built or reused -- i.e. the prefilter is enabled and DDGI is off; invalid otherwise, with
+        // built or reused -- the prefilter is enabled and the forward or SSR path can read it.
+        // SSR's unsupported-probe fallback reads it even with DDGI on. Invalid otherwise, with
         // no allocation and no pass declared. Exported to read it back; the forward pass and the
         // SSR resolve sample it directly. It is a persistent texture the graph imports, so a caller
         // that reads it back must return it to ShaderRead afterwards (the owner tracks that state).

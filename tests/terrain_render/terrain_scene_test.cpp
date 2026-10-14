@@ -121,7 +121,7 @@ Probe draw_scene_tile(rhi::Device& device,
                    {},
                    {},
                    slice);
-    CHECK(graph.pass_name(graph.pass_count() - 1) == "terrain-scene");
+    CHECK(graph.pass_name(static_cast<std::uint32_t>(graph.pass_count() - 1)) == "terrain-scene");
     graph.export_texture(hdr);
     graph.export_texture(depth);
     if (gbuffer) {
@@ -290,7 +290,7 @@ TEST_CASE("terrain scene is declared between opaque and sky/TAA, with an empty d
     (void)renderer.render(empty, world, {kSize, kSize});
     const auto default_count = empty.pass_count();
     for (std::size_t i = 0; i < default_count; ++i)
-        CHECK(empty.pass_name(i) != "terrain-scene");
+        CHECK(empty.pass_name(static_cast<std::uint32_t>(i)) != "terrain-scene");
     TerrainPass pass(*device);
     const auto tile = pass.upload(flat_tile());
     REQUIRE(tile != kInvalidTerrainTile);
@@ -311,11 +311,11 @@ TEST_CASE("terrain scene is declared between opaque and sky/TAA, with an empty d
     std::size_t sky_index = sky_graph.pass_count();
     std::size_t taa_index = sky_graph.pass_count();
     for (std::size_t i = 0; i < sky_graph.pass_count(); ++i) {
-        if (sky_graph.pass_name(i) == "terrain-scene")
+        if (sky_graph.pass_name(static_cast<std::uint32_t>(i)) == "terrain-scene")
             terrain_index = i;
-        if (sky_graph.pass_name(i) == "sky")
+        if (sky_graph.pass_name(static_cast<std::uint32_t>(i)) == "sky")
             sky_index = i;
-        if (sky_graph.pass_name(i) == "taa-resolve")
+        if (sky_graph.pass_name(static_cast<std::uint32_t>(i)) == "taa-resolve")
             taa_index = i;
     }
     CHECK(terrain_index < sky_graph.pass_count());
