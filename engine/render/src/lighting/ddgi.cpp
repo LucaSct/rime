@@ -772,9 +772,18 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
                                });
     }
 
+    // Give both atlases a defined final state even in compute-only callers. The forward pass
+    // samples the returned handles later in this graph; its read uses this same ShaderRead state.
+    // This also makes the next frame's import accurate for either physical pair after a swap.
+    {
+        const RGTexture sampled[] = {irradiance_rg, visibility_rg};
+        RenderGraph::ComputePassDesc ready{};
+        ready.sampled = sampled;
+        graph.add_compute_pass("ddgi-atlases-ready", ready, [](rhi::CommandBuffer&) {});
+    }
     ray_buffer_state_ = rhi::ResourceState::ShaderRead; // read by both blend passes above
-    irradiance_state_ = rhi::ResourceState::StorageReadWrite;
-    visibility_state_ = rhi::ResourceState::StorageReadWrite;
+    irradiance_state_ = rhi::ResourceState::ShaderRead;
+    visibility_state_ = rhi::ResourceState::ShaderRead;
 
     stats_.probes_updated = probes_this_update;
     stats_.rays_traced = ray_count;
