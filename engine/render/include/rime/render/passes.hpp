@@ -349,8 +349,12 @@ public:
     // Declare the pass: clears `velocity` to zero (no motion, which is also what sky and every
     // uncovered pixel read) and writes the offset of every surface that survived the pre-pass.
     // `depth` must already hold the pre-pass result; it is read-only here.
-    void
-    add(RenderGraph& graph, RGTexture velocity, RGTexture depth, const SceneDrawData& data) const;
+    void add(RenderGraph& graph,
+             RGTexture velocity,
+             RGTexture depth,
+             const SceneDrawData& data,
+             rhi::LoadOp color_load = rhi::LoadOp::Clear,
+             std::string_view label = "velocity") const;
 
 private:
     rhi::Device& device_;
@@ -474,7 +478,10 @@ public:
                       // both valid or both invalid. One without the other is a caller bug: it is
                       // logged, and the pass draws the single-attachment path.
                       RGTexture gbuffer_material = {},
-                      const SdfSpecularOcclusionBinding* sdf_occlusion = nullptr) const;
+                      const SdfSpecularOcclusionBinding* sdf_occlusion = nullptr,
+                      rhi::LoadOp hdr_load = rhi::LoadOp::Clear,
+                      bool first_person = false,
+                      std::string_view label = "forward-pbr shadowed") const;
 
 private:
     rhi::Device& device_;
@@ -484,6 +491,11 @@ private:
     mutable rhi::ShaderHandle sdf_fragment_shader_;
     mutable rhi::PipelineHandle pipeline_sdf_after_prepass_;
     mutable rhi::PipelineHandle pipeline_sdf_standalone_;
+    void ensure_first_person_pipelines() const;
+    mutable rhi::ShaderHandle first_person_fragment_shader_;
+    mutable rhi::ShaderHandle first_person_sdf_fragment_shader_;
+    mutable rhi::PipelineHandle pipeline_first_person_;
+    mutable rhi::PipelineHandle pipeline_first_person_sdf_;
     rhi::ShaderHandle shadowed_fragment_shader_;          // pbr_forward_shadowed.frag (m10.1)
     rhi::ShaderHandle shadowed_gbuffer_fragment_shader_;  // same, -DWRITE_GBUFFER (m10.7a)
     rhi::PipelineHandle pipeline_after_prepass_;          // depth Load + Equal + no write

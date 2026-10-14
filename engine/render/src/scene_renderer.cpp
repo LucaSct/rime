@@ -423,6 +423,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         }
     }
     if (!scene.camera.found) {
+        if (previous_first_person_active_)
+            taa_history_valid_ = false;
+        previous_first_person_active_ = false;
+        previous_first_person_models_.clear();
+        first_person_draws_ = {};
         terrain_pass_ = nullptr;
         terrain_draws_ = {};
         if (!warned_no_camera_) {
@@ -551,8 +556,9 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // (it reads the same chain and the same DFG table, so the two agree). With DDGI on, SSR still
     // needs the filtered sky wherever no probe supports its reflection query. The forward path
     // alone reads no chain with DDGI, but that is no longer a reason to starve the SSR fallback.
-    const bool chain_has_reader =
-        lighting_.ssr_enabled || !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
+    const bool first_person_active = !first_person_draws_.empty();
+    const bool chain_has_reader = lighting_.ssr_enabled || first_person_active ||
+                                  !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
     const bool sky_specular_live = sky_specular_prefilter_enabled_ && chain_has_reader &&
                                    (sky_params_.enabled || scene.has_sky);
     fu.ambient[3] = sky_specular_live ? 1.0f : 0.0f;
@@ -887,10 +893,13 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // exists to fix. The baseline path itself is deliberately left untouched, so its
     // byte-identity guarantee is unchanged.
     const bool has_sky_light = sky_on;
-    if (has_sun || has_local || has_clusters || has_ddgi || has_ssr || has_sky_light) {
+    ShadowBinding shadow{};
+    LocalShadowBinding local{};
+    ClusterBinding clusters{};
+    if (has_sun || has_local || has_clusters || has_ddgi || has_ssr || has_sky_light ||
+        first_person_active) {
         // The cascade binding: the real fit when there is a sun, else a valid count-0 placeholder
         // so the shadowed pipeline's binding 7/8 is always satisfied (a spot-only scene).
-        ShadowBinding shadow;
         if (has_sun) {
             CascadeInputs ci{};
             ci.camera_view = scene.camera.view;
@@ -907,13 +916,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             shadow = csm_.empty_binding(graph, dummy_shadow_array_);
         }
         // The local (spot) binding: the cached spot maps, else the same count-0 placeholder.
-        const LocalShadowBinding local =
-            has_local ? local_shadows_.add(
-                            graph, depth_prepass_, shadow_data, scene.spot_lights, lighting_)
-                      : local_shadows_.empty_binding(graph, dummy_shadow_array_);
+        local = has_local ? local_shadows_.add(
+                                graph, depth_prepass_, shadow_data, scene.spot_lights, lighting_)
+                          : local_shadows_.empty_binding(graph, dummy_shadow_array_);
         // The clustered binding (m10.3): the froxel light lists, else the flag-0 placeholder that
         // sends the shader back to the uniform-block light loop.
-        ClusterBinding clusters;
         if (has_clusters) {
             ClusterInputs cin{};
             cin.view = scene.camera.view;
@@ -1068,6 +1075,140 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         sky_.note_skyview_state(rhi::ResourceState::ShaderRead);
     }
 
+    RGTexture taa_depth = depth;
+    if (first_person_active) {
+        constexpr std::size_t kMaxFirstPersonDraws = 32;
+        if (first_person_draws_.size() > kMaxFirstPersonDraws) {
+            RIME_WARN("render: first-person draw list has {} entries; drawing the first {}",
+                      first_person_draws_.size(),
+                      kMaxFirstPersonDraws);
+        }
+        const bool continuous = previous_first_person_active_ &&
+                                previous_first_person_epoch_ == first_person_epoch_ &&
+                                previous_first_person_extent_.width == extent.width &&
+                                previous_first_person_extent_.height == extent.height;
+        if (!continuous) {
+            taa_history_valid_ = false;
+            previous_first_person_models_.clear();
+        }
+        frame_first_person_draws_.clear();
+        first_person_base_color_.clear();
+        first_person_metallic_roughness_.clear();
+        first_person_normal_.clear();
+        first_person_occlusion_.clear();
+        first_person_emissive_.clear();
+        std::vector<std::uint8_t> staging;
+        std::vector<core::Mat4> next_models;
+        const auto pick = [](rhi::TextureHandle map, rhi::TextureHandle fallback) {
+            return map.is_valid() ? map : fallback;
+        };
+        for (const DrawItem& source : first_person_draws_.subspan(
+                 0, std::min(first_person_draws_.size(), kMaxFirstPersonDraws))) {
+            if (!meshes_.contains(source.mesh) || source.index_count == 0)
+                continue;
+            const GpuMesh& mesh = meshes_.get(source.mesh);
+            if (source.first_index > mesh.index_count ||
+                source.index_count > mesh.index_count - source.first_index)
+                continue;
+            const std::size_t i = frame_first_person_draws_.size();
+            DrawItem draw = source;
+            const PbrMaterialDesc material = draw.material < materials_.size()
+                                                 ? materials_.get(draw.material)
+                                                 : PbrMaterialDesc{};
+            if (material.alpha_cutoff > 0.0f)
+                draw.flags |= DrawItem::AlphaMasked;
+            if (material.double_sided)
+                draw.flags |= DrawItem::DoubleSided;
+            if (material.clamp_uv)
+                draw.flags |= DrawItem::ClampUv;
+            frame_first_person_draws_.push_back(draw);
+            GpuDrawUniforms du{};
+            du.model = draw.model;
+            du.prev_model = continuous && i < previous_first_person_models_.size()
+                                ? previous_first_person_models_[i]
+                                : draw.model;
+            const float det = core::determinant(draw.model);
+            du.normal_matrix =
+                std::fabs(det) > 1e-12f ? core::transpose(core::inverse(draw.model)) : draw.model;
+            std::copy(
+                std::begin(material.base_color), std::end(material.base_color), du.base_color);
+            du.params[0] = material.metallic;
+            du.params[1] = material.roughness;
+            du.params[2] = material.normal_scale;
+            du.params[3] = material.occlusion_strength;
+            du.emissive[0] = material.emissive[0];
+            du.emissive[1] = material.emissive[1];
+            du.emissive[2] = material.emissive[2];
+            du.emissive[3] = material.alpha_cutoff;
+            const std::size_t offset = staging.size();
+            staging.resize(offset + kDrawUniformStride, 0);
+            std::memcpy(staging.data() + offset, &du, sizeof(du));
+            next_models.push_back(draw.model);
+            first_person_base_color_.push_back(pick(material.base_color_texture, white_));
+            first_person_metallic_roughness_.push_back(
+                pick(material.metallic_roughness_texture, white_));
+            first_person_normal_.push_back(pick(material.normal_texture, flat_normal_));
+            first_person_occlusion_.push_back(pick(material.occlusion_texture, white_));
+            first_person_emissive_.push_back(pick(material.emissive_texture, white_));
+        }
+        previous_first_person_models_ = std::move(next_models);
+        previous_first_person_active_ = true;
+        previous_first_person_epoch_ = first_person_epoch_;
+        previous_first_person_extent_ = extent;
+        if (!frame_first_person_draws_.empty()) {
+            if (!first_person_pass_)
+                first_person_pass_ = std::make_unique<FirstPersonPass>(device_);
+            SceneDrawData model_data{};
+            model_data.meshes = &meshes_;
+            model_data.draws = frame_first_person_draws_;
+            model_data.base_color_textures = first_person_base_color_;
+            model_data.metallic_roughness_textures = first_person_metallic_roughness_;
+            model_data.normal_textures = first_person_normal_;
+            model_data.occlusion_textures = first_person_occlusion_;
+            model_data.emissive_textures = first_person_emissive_;
+            model_data.bind_frame_ubo(frame_ubos_[ubo_slot_], 0, sizeof(GpuFrameUniforms));
+            model_data.draw_ubo = graph.push_frame_buffer(staging.data(), staging.size());
+            model_data.material_sampler = material_sampler_;
+            model_data.clamp_sampler = clamp_sampler_;
+            const RGTexture model_depth =
+                graph.create_texture({extent, kDepthFormat, "first-person-depth"});
+            depth_prepass_.add(graph, model_depth, model_data, 0, "first-person-depth-prepass");
+            if (velocity.is_valid()) {
+                velocity_.add(graph,
+                              velocity,
+                              model_depth,
+                              model_data,
+                              rhi::LoadOp::Load,
+                              "first-person-velocity");
+            }
+            // SceneRenderer exposes SDF sky occlusion only when DDGI is off: the shadowed
+            // shader's 14/15 bindings hold either SDF or DDGI data, never both. DDGI diffuse
+            // remains active through its own variant, with filtered sky specular added there.
+            forward_.add_shadowed(graph,
+                                  tonemap_src,
+                                  model_depth,
+                                  true,
+                                  model_data,
+                                  shadow,
+                                  local,
+                                  clusters,
+                                  ddgi_binding,
+                                  sky_binding,
+                                  {},
+                                  {},
+                                  &sdf_occlusion,
+                                  rhi::LoadOp::Load,
+                                  true,
+                                  "first-person-forward");
+            taa_depth = first_person_pass_->combine_depth(graph, depth, model_depth, extent);
+        }
+    } else if (previous_first_person_active_) {
+        taa_history_valid_ = false;
+        previous_first_person_active_ = false;
+        previous_first_person_models_.clear();
+    }
+    first_person_draws_ = {}; // the caller's span is borrowed only through this declaration
+
     // TAA resolve (ADR-0078 step 1d): average the jittered frames over time. It runs HERE, on
     // radiance, after every pass that adds light to the frame (SSR included) and before the
     // tonemap: the mean of tonemapped values is not the tonemap of the mean, so tonemapping first
@@ -1101,7 +1242,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         taa_resolve_.add(graph,
                          tonemap_src,
                          velocity,
-                         depth,
+                         taa_depth,
                          history_read,
                          taa_resolved,
                          history_write,

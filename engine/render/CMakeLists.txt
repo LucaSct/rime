@@ -28,6 +28,7 @@ add_library(rime_render STATIC
     src/fx_pass.cpp
     src/culling.cpp
     src/temporal_jitter.cpp
+    src/first_person_pass.cpp
     src/terrain_pass.cpp
     src/terrain_builder.cpp
     src/terrain_residency.cpp
@@ -65,6 +66,7 @@ rime_add_shaders(rime_render
     shaders/sky_specular_prefilter.comp
     shaders/sky_specular_dfg.comp
     shaders/fullscreen.vert
+    shaders/first_person_depth.frag
     shaders/tonemap.frag
     shaders/present.frag
     shaders/hud.vert
@@ -93,6 +95,10 @@ rime_add_shaders(rime_render
 # the baseline shadowed shader stays free of the unused second output.
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag WRITE_GBUFFER pbr_forward_shadowed_gbuffer.frag)
+rime_add_shader_variant(rime_render
+    shaders/pbr_forward_shadowed.frag FIRST_PERSON pbr_forward_first_person.frag)
+rime_add_shader_variant(rime_render
+    shaders/pbr_forward_shadowed.frag FIRST_PERSON_SDF_SPECULAR pbr_forward_first_person_sdf.frag)
 rime_add_shader_variant(rime_render
     shaders/terrain.frag SCENE_BASE terrain_scene_base.frag)
 rime_add_shader_variant(rime_render
