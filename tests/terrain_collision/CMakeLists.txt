@@ -6,7 +6,8 @@ rime_add_test(rime_terrain_collision_tests
     residency_test.cpp
     refusal_test.cpp
     prediction_test.cpp
-    asset_server_source_test.cpp)
+    asset_server_source_test.cpp
+    procedural_source_test.cpp)
 
 # gameplay_net is the TEST's dependency, not the module's: the client fixture drives the real
 # Predictor against a world this module populates. The module itself links neither.
