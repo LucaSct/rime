@@ -2280,6 +2280,16 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
                     static_cast<unsigned long long>(dc.malformed_messages()),
                     static_cast<unsigned long long>(dc.composition_checks_unverified()),
                     static_cast<long long>(sent) - static_cast<long long>(applied));
+        // Refusals are a separate line on purpose. They happen BEFORE channel admission (the
+        // reliable channel's backlog was full), so they are neither in "sent" above nor packets the
+        // scripted network later lost: an op counted here never left the server at all. Folding
+        // them into "outstanding" would change what that number means, and leaving them out would
+        // let a lost damage transition read as a clean ledger.
+        std::printf("  op refused: %llu ops in %llu packets, %llu composition checks "
+                    "(refused at admission; not in sent, not network loss)\n",
+                    static_cast<unsigned long long>(ds.ops_refused()),
+                    static_cast<unsigned long long>(ds.op_packets_refused()),
+                    static_cast<unsigned long long>(ds.composition_checks_refused()));
     }
     std::printf("  damage    : %llu ops, %llu instant kills (>= 1.0 health), largest %.2f\n",
                 static_cast<unsigned long long>(demo.session.total_ops),
