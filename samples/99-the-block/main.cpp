@@ -3454,6 +3454,35 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
                 {s->position.x, s->position.y + 64.0f, s->position.z}, {0.0f, -1.0f, 0.0f}, 128.0f};
             const bool found_support =
                 demo.session.server.physics.raycast(support_ray, support, statics);
+            if (!found_support) {
+                const auto tx = static_cast<std::int32_t>(std::floor(s->position.x / 64.0f));
+                const auto tz = static_cast<std::int32_t>(std::floor(s->position.z / 64.0f));
+                const auto key = terrain_collision::TileKey{tx, tz, c.version};
+                const auto sample = assets::procedural_terrain_sample(
+                    c,
+                    static_cast<std::int64_t>(std::floor(s->position.x)),
+                    static_cast<std::int64_t>(std::floor(s->position.z)));
+                std::fprintf(
+                    stderr,
+                    "world-smoke: support miss tick %llu at (%.9g, %.9g, %.9g), "
+                    "tile (%d,%d) state %u body %u, sample %u, "
+                    "installed %llu requests %llu failures %llu\n",
+                    static_cast<unsigned long long>(demo.session.tick_index),
+                    s->position.x,
+                    s->position.y,
+                    s->position.z,
+                    tx,
+                    tz,
+                    static_cast<unsigned>(demo.play_world->server().collision.tile_state(key)),
+                    demo.play_world->server().collision.tile_body(key).index,
+                    sample ? static_cast<unsigned>(*sample) : 0u,
+                    static_cast<unsigned long long>(
+                        demo.play_world->server().collision.counters().installs),
+                    static_cast<unsigned long long>(
+                        demo.play_world->server().collision.counters().requests),
+                    static_cast<unsigned long long>(
+                        demo.play_world->server().collision.counters().load_failures));
+            }
             check(character != nullptr && found_support,
                   "authoritative player has static support beneath current XZ");
             if (character && found_support) {
