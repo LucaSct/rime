@@ -14,6 +14,7 @@
 # transport is a later brick).
 add_library(rime_terrain_collision STATIC
     src/asset_server_source.cpp
+    src/procedural_source.cpp
     src/terrain_collision.cpp)
 
 add_library(rime::terrain_collision ALIAS rime_terrain_collision)

@@ -775,12 +775,23 @@ std::span<const DestructionEvent> DestructionWorld::events() const noexcept {
 }
 
 std::uint64_t DestructionWorld::state_hash() const noexcept {
+    return hash_state(*impl_, /*include_body_handles=*/true);
+}
+
+std::uint64_t DestructionWorld::replicated_content_hash() const noexcept {
+    return hash_state(*impl_, /*include_body_handles=*/false);
+}
+
+std::uint64_t DestructionWorld::hash_state(const Impl& impl, bool include_body_handles) noexcept {
     // FNV-1a over every field that defines the destruction state, folded field by field (never
     // over whole structs — padding bytes would poison the hash) in the one canonical order:
     // instances ascending, then debris in creation order. Pairs with PhysicsWorld::world_hash()
     // as the M11 witness: destruction equality + motion-state equality = the replayed tick really
     // was the same tick.
-    const Impl& impl = *impl_;
+    //
+    // include_body_handles = false drops the physics BodyId index/generation (replicated_content_
+    // hash): those are each peer's own allocation order, so they differ between peers that agree on
+    // every destruction fact. Every other field is folded identically and in the same order.
     std::uint64_t h = core::kFnv1a64OffsetBasis;
     const auto fold_u32 = [&h](std::uint32_t v) {
         const std::array<std::uint32_t, 1> one = {v};
@@ -788,8 +799,10 @@ std::uint64_t DestructionWorld::state_hash() const noexcept {
     };
     fold_u32(static_cast<std::uint32_t>(impl.instances.size()));
     for (const Impl::Instance& inst : impl.instances) {
-        fold_u32(inst.body.index);
-        fold_u32(inst.body.generation);
+        if (include_body_handles) {
+            fold_u32(inst.body.index);
+            fold_u32(inst.body.generation);
+        }
         h = core::fnv1a_64(
             std::as_bytes(std::span<const std::uint8_t>{inst.alive.data(), inst.alive.size()}), h);
         for (const float f : inst.health) {
@@ -798,8 +811,10 @@ std::uint64_t DestructionWorld::state_hash() const noexcept {
     }
     fold_u32(static_cast<std::uint32_t>(impl.debris.size()));
     for (const Impl::Debris& d : impl.debris) {
-        fold_u32(d.body.index);
-        fold_u32(d.body.generation);
+        if (include_body_handles) {
+            fold_u32(d.body.index);
+            fold_u32(d.body.generation);
+        }
         fold_u32(d.instance);
         fold_u32(d.part_count);
         h = core::fnv1a_64(std::as_bytes(std::span<const std::uint32_t>{

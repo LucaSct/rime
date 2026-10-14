@@ -4,7 +4,7 @@
 #
 # It links nearly the whole engine, which is the point — this is the first binary that holds M8, M10,
 # M11, M12 and M13 at once.
-add_executable(the_block main.cpp)
+add_executable(the_block main.cpp play_world.cpp)
 
 target_link_libraries(the_block
     PRIVATE rime::app
@@ -19,6 +19,7 @@ target_link_libraries(the_block
             rime::replication
             rime::net
             rime::physics
+            rime::terrain_collision
             rime::assets
             rime::audio
             rime::render
@@ -116,5 +117,15 @@ set_tests_properties(block_demo_cook_ground PROPERTIES FIXTURES_SETUP block_demo
 # while M13 stays open. See main.cpp's KNOWN DEFECT block; it becomes claim #21 when it is fixed.
 add_test(NAME the_block_headless COMMAND the_block --headless)
 set_tests_properties(the_block_headless PROPERTIES
+    FIXTURES_REQUIRED block_demo_cook
+    TIMEOUT 600)
+
+add_test(NAME the_block_world_smoke COMMAND the_block --world-smoke)
+set_tests_properties(the_block_world_smoke PROPERTIES
+    FIXTURES_REQUIRED block_demo_cook
+    TIMEOUT 600)
+
+add_test(NAME the_block_world_gpu_smoke COMMAND the_block --world-gpu-smoke)
+set_tests_properties(the_block_world_gpu_smoke PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
     TIMEOUT 600)

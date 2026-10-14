@@ -341,8 +341,17 @@ public:
     // field by field (never over padded structs), like world_hash.
     [[nodiscard]] std::uint64_t state_hash() const noexcept;
 
+    // Same fold as state_hash() minus the physics BodyId index/generation of instances and debris:
+    // alive bits, health, debris instance/part membership, in canonical order. For comparing two
+    // PEERS whose physics worlds allocated bodies in a different order (e.g. a server that built
+    // terrain after the block). NOT a general identity-independent hash: the caller must already
+    // guarantee that instance order and debris creation order/identity correspond between the two
+    // worlds. state_hash() stays the replay witness and is unchanged.
+    [[nodiscard]] std::uint64_t replicated_content_hash() const noexcept;
+
 private:
     struct Impl;
+    static std::uint64_t hash_state(const Impl& impl, bool include_body_handles) noexcept;
     std::unique_ptr<Impl> impl_;
 };
 

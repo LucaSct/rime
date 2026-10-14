@@ -404,6 +404,7 @@ void RenderGraph::add_compute_pass(std::string_view name,
                                    const ComputePassDesc& desc,
                                    ExecuteFn fn) {
     add_pass_common(name, false, desc.fold_repeats, std::move(fn));
+    passes_.back().externally_visible = desc.externally_visible;
     for (const RGTexture& t : desc.sampled) {
         declare_access(t.index, rhi::ResourceState::ShaderRead, false);
     }
@@ -470,11 +471,18 @@ void RenderGraph::compile() {
 
     // ── 2. Liveness: cull passes that feed no output ──────────────────────────────────────
     // A pass is live iff something the outside world can observe depends on it: it writes an
-    // imported or exported resource, or a live pass reads something it writes. Seed with the
-    // observable writers, then let liveness flow backwards along the edges.
+    // imported or exported resource, or it is explicitly externally visible, or a live pass
+    // reads something it writes. A final sampled-only transition of a persistent imported
+    // resource affects the state its owner imports next frame; culling it loses that transition.
+    // Seed those roots, then let liveness flow backwards along the edges.
     std::vector<bool> live(n, false);
     std::vector<std::uint32_t> worklist;
     for (std::uint32_t pi = 0; pi < n; ++pi) {
+        if (passes_[pi].externally_visible) {
+            live[pi] = true;
+            worklist.push_back(pi);
+            continue;
+        }
         for (const Access& a : passes_[pi].accesses) {
             const Resource& r = resources_[a.resource];
             if (a.write && (r.imported || r.exported)) {

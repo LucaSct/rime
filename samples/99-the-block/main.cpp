@@ -79,6 +79,8 @@
 #include <utility>
 #include <vector>
 
+#include "play_sunset.hpp"
+#include "play_world.hpp"
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/cooked_reader.hpp"
@@ -698,6 +700,8 @@ struct Session {
     net::Endpoint server_endpoint{0x7F000001u, 7901};
     ServerPeer server;
     ClientPeer client;
+    block_play::PlayWorld* play_world = nullptr; // owned by Demo; active in --play/--world-smoke
+    bool world_stopped = false;
 
     std::uint64_t now_ms = 0;
     std::uint64_t tick_index = 0;
@@ -1023,8 +1027,11 @@ struct Session {
         }
 
         // ── PreSim: the client sends this tick's intent, takes its mail, then predicts ──
-        const replication::InputCommand command = client.sender.record(intent);
-        client.sender.send(*client.driver, now_ms);
+        replication::InputCommand command{};
+        if (!play_world) {
+            command = client.sender.record(intent);
+            client.sender.send(*client.driver, now_ms);
+        }
 
         events.clear();
         client.driver->update(now_ms, events);
@@ -1040,6 +1047,91 @@ struct Session {
             (void)client.gameplay.apply_messages(inbox);
             client.destruction_net_client.apply_messages(
                 inbox, client.replicator->map(), client.world);
+        }
+
+        if (play_world) {
+            const core::Vec3 spawn = [&] {
+                core::Vec3 p = blockkit::west_viewpoint(blockkit::BlockParams{});
+                p.y = server.character.half_height + server.character.radius;
+                return p;
+            }();
+            bool recovered = false;
+            for (ecs::Entity e : server.avatars) {
+                auto* state = server.world.get<gameplay::CharacterState>(e);
+                if (!state || !block_play::needs_recovery(state->position))
+                    continue;
+                state->position = spawn;
+                state->velocity = {};
+                state->grounded = false;
+                if (auto* t = server.world.get<ecs::LocalTransform>(e))
+                    t->value.translation = spawn;
+                if (auto* t = server.world.get<ecs::WorldTransform>(e))
+                    t->value.translation = spawn;
+                if (const auto* h = server.world.get<physics::RigidBodyHandle>(e)) {
+                    physics::BodyState body;
+                    if (server.physics.get_body_state(h->body, body)) {
+                        body.position = spawn;
+                        body.linear_velocity = {};
+                        body.angular_velocity = {};
+                        (void)server.physics.set_body_state(h->body, body);
+                    }
+                }
+                recovered = true;
+            }
+            if (recovered) {
+                play_world->note_recovery();
+                const ecs::Entity e = client.local_player();
+                if (auto* state =
+                        e.is_valid() ? client.world.get<gameplay::CharacterState>(e) : nullptr) {
+                    state->position = spawn;
+                    state->velocity = {};
+                    state->grounded = false;
+                    client.predictor.reset(*state);
+                    gameplay::write_character_pose(client.world, e, spawn);
+                }
+            }
+            core::Vec3 server_position = spawn;
+            if (!server.avatars.empty()) {
+                if (const auto* s =
+                        server.world.get<gameplay::CharacterState>(server.avatars.front())) {
+                    server_position = s->position;
+                }
+            }
+            core::Vec3 client_position = client.eye_anchor();
+            if (!client.local_player().is_valid())
+                client_position = spawn;
+            if (block_play::needs_recovery(client_position)) {
+                const ecs::Entity e = client.local_player();
+                if (auto* state =
+                        e.is_valid() ? client.world.get<gameplay::CharacterState>(e) : nullptr) {
+                    *state = gameplay::CharacterState{};
+                    state->position = spawn;
+                    client.predictor.reset(*state);
+                    gameplay::write_character_pose(client.world, e, spawn);
+                }
+                client_position = spawn;
+                play_world->note_recovery();
+            }
+            // Both collision worlds are mutated here on the main thread, before the server solve
+            // job is launched and before either gameplay or prediction reads physics queries.
+            if (!play_world->prepare(
+                    server.world,
+                    server.destruction,
+                    client.world,
+                    client.destruction,
+                    tick_index,
+                    server_position,
+                    client_position,
+                    std::max(server.character.max_speed, client.config.max_speed))) {
+                world_stopped = true;
+                std::fprintf(stderr,
+                             "99-the-block: procedural collision barrier refused tick %llu\n",
+                             static_cast<unsigned long long>(tick_index));
+                return;
+            }
+            // A refused barrier must not consume this input or advance the prediction tape.
+            command = client.sender.record(intent);
+            client.sender.send(*client.driver, now_ms);
         }
 
         // ── THE TWO HALVES RUN AT ONCE (p2-perf, ADR-0077) ──
@@ -1678,6 +1770,8 @@ struct Demo {
     app::Application app;
     Session session{0x13B10Cull};
     std::unique_ptr<Visuals> visuals;
+    std::unique_ptr<block_play::PlayWorld> play_world;
+    bool streamed_world = false;
 
     // ── The cooked catalog (m17.8b) ─────────────────────────────────────────────────────────────
     // Held HERE, not in `Visuals`, because `GpuAssetBridge::set_catalog` keeps a REFERENCE to the
@@ -1725,6 +1819,11 @@ struct Demo {
     std::uint64_t audio_events = 0;
     bool charge_fired = false;
 
+    // Whether step_sim fires the charge itself at kChargeAt. Headless and perf keep the scripted
+    // beat; --play turns it off, because an interactive player is the one who decides when the
+    // block goes (F calls fire_charge()).
+    bool scripted_charge = true;
+
     explicit Demo(const app::AppConfig& cfg) : app(cfg) {}
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked, std::string_view scene_path) {
@@ -1749,6 +1848,27 @@ struct Demo {
                            visuals ? &visuals->meshes : nullptr,
                            ground_material)) {
             return false;
+        }
+        if (streamed_world) {
+            play_world = std::make_unique<block_play::PlayWorld>(
+                session.server.world, session.server.physics, session.client.physics, app.device());
+            if (!play_world->valid()) {
+                std::fprintf(stderr, "99-the-block: invalid street footprint or terrain pin\n");
+                return false;
+            }
+            session.play_world = play_world.get();
+            const core::Vec3 spawn = blockkit::west_viewpoint(blockkit::BlockParams{});
+            if (!play_world->prepare(session.server.world,
+                                     session.server.destruction,
+                                     session.client.world,
+                                     session.client.destruction,
+                                     0,
+                                     spawn,
+                                     spawn,
+                                     session.server.character.max_speed)) {
+                std::fprintf(stderr, "99-the-block: spawn terrain could not be installed\n");
+                return false;
+            }
         }
         if (visuals) {
             visuals->dress(session.client.world);
@@ -1851,10 +1971,14 @@ struct Demo {
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
+        if (session.world_stopped) {
+            app.request_quit();
+            return;
+        }
 
         // The scripted hero beat. In --play a key does this instead; either way it is one server
         // side call, so the two paths cannot drift into two different explosions.
-        if (!charge_fired && session.tick_index >= kChargeAt) {
+        if (scripted_charge && !charge_fired && session.tick_index >= kChargeAt) {
             fire_charge();
         }
 
@@ -1941,6 +2065,20 @@ struct Demo {
             tf->value =
                 use_authored_camera ? visuals->authored_camera : session.client.camera_transform();
         }
+        if (play_world) {
+            // --world-gpu-smoke pins the camera at a far, deterministic pose; live play and
+            // --world-smoke never set use_authored_camera together with a streamed world.
+            const core::Vec3 eye = use_authored_camera
+                                       ? visuals->authored_camera.translation
+                                       : session.client.camera_transform().translation;
+            if (!play_world->recenter(eye)) {
+                session.world_stopped = true;
+                app.request_quit();
+                return;
+            }
+            visuals->renderer.set_terrain_draws(play_world->pass(), play_world->draws());
+            play_world->mark_drawn();
+        }
         visuals->renderer.reset_cull_stats();
         visuals->last_ldr = visuals->renderer.render(*ctx.graph, world, ctx.extent, true).ldr;
         visuals->cull = visuals->renderer.cull_stats();
@@ -1999,8 +2137,13 @@ struct Demo {
         std::snprintf(buf, sizeof(buf), "%zu", visuals->leaf_stats.leaves_live);
         row("leaves", buf, st::kText);
         // The convergence claim, on screen: the two hashes are the peers agreeing or not.
-        const bool agree =
-            session.client.destruction.state_hash() == session.server.destruction.state_hash();
+        // With a play_world the server instantiated block physics BEFORE terrain tiles, so the two
+        // peers' BodyIds differ though their destruction facts agree: compare content, not handles.
+        const bool agree = session.play_world
+                               ? session.client.destruction.replicated_content_hash() ==
+                                     session.server.destruction.replicated_content_hash()
+                               : session.client.destruction.state_hash() ==
+                                     session.server.destruction.state_hash();
         row("peers", agree ? "in sync" : "DIVERGED", agree ? st::kText : st::kWarn);
         std::snprintf(buf, sizeof(buf), "%zu", mixer.voice_count());
         row("voices", buf, st::kText);
@@ -3251,6 +3394,394 @@ int run_perf(const std::filesystem::path& cooked,
     return result.ok() ? 0 : 1;
 }
 
+// The streamed-world proof uses the same Demo, Session tick and collision setup as live play.
+// It keeps the charge disabled so the travelling floor, rather than rubble, is what it measures.
+int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
+    app::AppConfig cfg{};
+    cfg.gpu = false;
+    cfg.tick_hz = 60.0;
+    Demo demo(cfg);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    if (!demo.start(cooked, scene_path))
+        return 1;
+
+    bool okay = true;
+    auto check = [&](bool condition, const char* label) {
+        if (!condition) {
+            std::fprintf(stderr, "world-smoke: FAILED %s\n", label);
+            okay = false;
+        }
+    };
+    check(demo.play_world->server().source.config().seed ==
+                  demo.play_world->client().source.config().seed &&
+              demo.play_world->server().source.config().version ==
+                  demo.play_world->client().source.config().version,
+          "peer seed/version agreement");
+
+    // At the authored street centre, the slab must be the first downward static hit. The
+    // procedural sample is deliberately below its top face.
+    physics::BodyId street{};
+    demo.session.server.world.query<ground::GroundBody>().for_each(
+        [&](ecs::Entity, ground::GroundBody& g) { street = g.body; });
+    physics::RayHit street_hit;
+    physics::QueryFilter statics;
+    statics.dynamics = false;
+    const auto& c = demo.play_world->config();
+    const physics::Ray street_ray{
+        {0.5f * (c.street_min_x + c.street_max_x), 50.0f, 0.5f * (c.street_min_z + c.street_max_z)},
+        {0.0f, -1.0f, 0.0f},
+        100.0f};
+    check(street.is_valid() &&
+              demo.session.server.physics.raycast(street_ray, street_hit, statics) &&
+              street_hit.body == street,
+          "original street is first downward hit");
+
+    replication::InputCommand west{};
+    west.yaw = 1.57079632679f; // engine forward = -X
+    west.move_y = 1.0f;
+    float min_x = std::numeric_limits<float>::infinity();
+    float min_y = std::numeric_limits<float>::infinity();
+    auto travel = [&](int ticks) {
+        for (int i = 0; i < ticks && okay; ++i) {
+            demo.step_sim(west);
+            check(!demo.session.world_stopped, "collision barrier remained ready");
+            if (demo.session.server.avatars.empty())
+                continue;
+            const auto* s = demo.session.server.world.get<gameplay::CharacterState>(
+                demo.session.server.avatars.front());
+            if (!s)
+                continue;
+            min_x = std::min(min_x, s->position.x);
+            min_y = std::min(min_y, s->position.y);
+            check(std::isfinite(s->position.y) && s->position.y > -5.0f,
+                  "player stayed on supported ground");
+            const auto* character = demo.session.server.world.get<gameplay::CharacterConfig>(
+                demo.session.server.avatars.front());
+            physics::RayHit support;
+            // A fast capsule may be launched well above a hill. Cast from above its current
+            // position all the way below the world's minimum support height, so a legitimate
+            // airborne tick does not turn a range-limited query into "missing ground".
+            const float ray_top = std::max(s->position.y + 64.0f, 64.0f);
+            const physics::Ray support_ray{
+                {s->position.x, ray_top, s->position.z}, {0.0f, -1.0f, 0.0f}, ray_top + 64.0f};
+            const bool found_support =
+                demo.session.server.physics.raycast(support_ray, support, statics);
+            if (!found_support) {
+                const auto tx = static_cast<std::int32_t>(std::floor(s->position.x / 64.0f));
+                const auto tz = static_cast<std::int32_t>(std::floor(s->position.z / 64.0f));
+                const auto key = terrain_collision::TileKey{tx, tz, c.version};
+                const auto sample = assets::procedural_terrain_sample(
+                    c,
+                    static_cast<std::int64_t>(std::floor(s->position.x)),
+                    static_cast<std::int64_t>(std::floor(s->position.z)));
+                std::fprintf(
+                    stderr,
+                    "world-smoke: support miss tick %llu at (%.9g, %.9g, %.9g), "
+                    "tile (%d,%d) state %u body %u, sample %u, "
+                    "installed %llu requests %llu failures %llu\n",
+                    static_cast<unsigned long long>(demo.session.tick_index),
+                    s->position.x,
+                    s->position.y,
+                    s->position.z,
+                    tx,
+                    tz,
+                    static_cast<unsigned>(demo.play_world->server().collision.tile_state(key)),
+                    demo.play_world->server().collision.tile_body(key).index,
+                    sample ? static_cast<unsigned>(*sample) : 0u,
+                    static_cast<unsigned long long>(
+                        demo.play_world->server().collision.counters().installs),
+                    static_cast<unsigned long long>(
+                        demo.play_world->server().collision.counters().requests),
+                    static_cast<unsigned long long>(
+                        demo.play_world->server().collision.counters().load_failures));
+            }
+            check(character != nullptr && found_support,
+                  "authoritative player has static support beneath current XZ");
+            if (character && found_support) {
+                const float feet = s->position.y - character->radius - character->half_height;
+                check(feet >= support.point.y - 0.1f,
+                      "capsule feet never pass through current static surface");
+            }
+        }
+    };
+    travel(150); // handshakes, then walking speed beyond the west end of the old slab
+    check(min_x < static_cast<float>(c.street_min_x) - 2.0f,
+          "walk-speed traversal crossed original slab");
+
+    // This is an actual character configuration, consumed by gameplay and prediction. It is not
+    // a camera teleport or a fabricated collision query.
+    demo.session.server.character.max_speed = 100.0f;
+    demo.session.server.character.accel = 500.0f;
+    for (ecs::Entity e : demo.session.server.avatars) {
+        if (auto* ch = demo.session.server.world.get<gameplay::CharacterConfig>(e)) {
+            ch->max_speed = 100.0f;
+            ch->accel = 500.0f;
+        }
+    }
+    const ecs::Entity local = demo.session.client.local_player();
+    if (auto* ch = local.is_valid()
+                       ? demo.session.client.world.get<gameplay::CharacterConfig>(local)
+                       : nullptr) {
+        ch->max_speed = 100.0f;
+        ch->accel = 500.0f;
+    }
+    demo.session.client.config.max_speed = 100.0f;
+    demo.session.client.config.accel = 500.0f;
+    const float stress_start = min_x;
+    travel(360);
+    check(min_x < stress_start - 300.0f && min_x < -300.0f,
+          "100m/s control traversed hundreds of negative metres");
+    const core::Vec3 remote{min_x, 60.0f, 0.0f};
+    physics::RayHit remote_hit;
+    check(demo.session.server.physics.raycast(
+              physics::Ray{remote, {0.0f, -1.0f, 0.0f}, 120.0f}, remote_hit, statics),
+          "negative-coordinate terrain answers a physics ray");
+    physics::RayHit missing_hit;
+    check(!demo.session.server.physics.raycast(
+              physics::Ray{{8193.0f, 64.0f, 8193.0f}, {0.0f, -1.0f, 0.0f}, 128.0f},
+              missing_hit,
+              statics),
+          "missing support negative control remains observable");
+
+    const auto& sc = demo.play_world->server().collision.counters();
+    const auto& cc = demo.play_world->client().collision.counters();
+    check(sc.evictions > 0 && cc.evictions > 0, "both collision peers evicted old tiles");
+    check(sc.tiles_installed <= 256 && cc.tiles_installed <= 256 &&
+              sc.peak_bytes_resident < 4ull * 1024ull * 1024ull &&
+              cc.peak_bytes_resident < 4ull * 1024ull * 1024ull,
+          "collision tile and byte gauges plateaued");
+    check(demo.play_world->server().source.stats().refused_requests == 0 &&
+              demo.play_world->client().source.stats().refused_requests == 0,
+          "no source pool or coordinate refusal");
+
+    // Inject two server-authoritative escape states; each must return to a supported spawn before
+    // gameplay consumes another input. This is the explicit prototype safety boundary.
+    if (!demo.session.server.avatars.empty()) {
+        auto* s = demo.session.server.world.get<gameplay::CharacterState>(
+            demo.session.server.avatars.front());
+        s->position.x = block_play::PlayWorld::kPracticalLimit + 1.0f;
+        demo.step_sim({});
+        check(!demo.session.world_stopped && !block_play::needs_recovery(s->position),
+              "practical X limit recovered safely");
+        s->position.y = block_play::PlayWorld::kRecoveryFloor - 1.0f;
+        demo.step_sim({});
+        check(!demo.session.world_stopped && !block_play::needs_recovery(s->position) &&
+                  demo.play_world->stats().recoveries >= 2,
+              "absolute floor recovered safely");
+    } else {
+        check(false, "authoritative player spawned");
+    }
+    std::printf("world-smoke: min x %.1f m, min y %.1f m, server %llu installs/%llu evictions, "
+                "client %llu installs/%llu evictions, recoveries %llu\n",
+                min_x,
+                min_y,
+                static_cast<unsigned long long>(sc.installs),
+                static_cast<unsigned long long>(sc.evictions),
+                static_cast<unsigned long long>(cc.installs),
+                static_cast<unsigned long long>(cc.evictions),
+                static_cast<unsigned long long>(demo.play_world->stats().recoveries));
+    return okay ? 0 : 1;
+}
+
+// The GPU half of the streamed-world proof. --world-smoke has no device, so it never reaches the
+// rolling terrain ring. This route starts the same streamed Demo with the charge off, then drives
+// PlayWorld::recenter / pass / TerrainPass through the real render callback at sparse checkpoints
+// (a full frame per checkpoint, not thousands), plus a dense recenter-only sweep. Every claim is
+// structural: counters and pixel properties with margins, never a golden image.
+int run_world_gpu_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
+    constexpr std::uint32_t kW = 640;
+    constexpr std::uint32_t kH = 360;
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {kW, kH};
+    cfg.tick_hz = 60.0;
+    Demo demo(cfg);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    if (demo.app.device() == nullptr) {
+        std::fprintf(stderr, "world-gpu-smoke: no Vulkan device — skipped\n");
+        return std::getenv("RIME_REQUIRE_VULKAN") != nullptr ? 1 : 0;
+    }
+    if (!demo.start(cooked, scene_path))
+        return 1;
+    demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
+    if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera))
+        camera->z_far = 3072.0f; // same far plane as --play, so the outer ring is what is seen
+
+    bool okay = true;
+    auto check = [&](bool condition, const char* label) {
+        if (!condition) {
+            std::fprintf(stderr, "world-gpu-smoke: FAILED %s\n", label);
+            okay = false;
+        }
+    };
+    block_play::PlayWorld& pw = *demo.play_world;
+    constexpr float kEyeY = 60.0f; // above the 32 m hills, above the -54 m recovery floor
+
+    // Pose the camera, draw `frames` real frames, return the readback of the last one.
+    auto draw = [&](float x, float z, float pitch_deg, int frames) {
+        gameplay::FirstPersonView v{};
+        v.yaw = 1.57079632679f; // engine forward = -X, down the street's long axis
+        v.pitch = pitch_deg * 0.0174532925f;
+        v.eye_height = 0.0f;
+        demo.visuals->authored_camera = gameplay::eye_transform(v, {x, kEyeY, z});
+        demo.use_authored_camera = true;
+        demo.app.run_frames(static_cast<std::uint32_t>(frames));
+        std::vector<std::uint8_t> px;
+        if (render::RenderGraph* graph = demo.app.graph()) {
+            const rhi::TextureHandle tex = graph->physical(demo.visuals->last_ldr);
+            if (tex.is_valid())
+                px = read_rgba8(*demo.app.device(), tex, kW, kH);
+        }
+        demo.app.finish_gpu();
+        return px;
+    };
+
+    struct Band {
+        double luma = 0, sd = 0, black = 0;
+        double rgb[3] = {0, 0, 0};
+    };
+
+    auto band = [&](const std::vector<std::uint8_t>& px, double r0, double r1) {
+        Band b;
+        const auto y0 = static_cast<std::uint32_t>(r0 * kH),
+                   y1 = static_cast<std::uint32_t>(r1 * kH);
+        double sum = 0, sq = 0, n = 0, dark = 0;
+        for (std::uint32_t y = y0; y < y1; ++y)
+            for (std::uint32_t x = 0; x < kW; ++x) {
+                const std::uint8_t* p = &px[(static_cast<std::size_t>(y) * kW + x) * 4];
+                const double l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+                sum += l;
+                sq += l * l;
+                n += 1;
+                dark += (p[0] < 6 && p[1] < 6 && p[2] < 6) ? 1 : 0;
+                for (int c = 0; c < 3; ++c)
+                    b.rgb[c] += p[c];
+            }
+        b.luma = sum / n;
+        b.sd = std::sqrt(std::max(0.0, sq / n - b.luma * b.luma));
+        b.black = dark / n;
+        for (double& c : b.rgb)
+            c /= n;
+        return b;
+    };
+
+    const struct {
+        float x, z;
+    } kCentres[] = {{0, 0},
+                    {-64, 0},
+                    {-128, 32},
+                    {-512, -96},
+                    {-2048, 160},
+                    {-512, -96},
+                    {0, 0},
+                    {2048, -1024},
+                    {4096, 3000},
+                    {2048, -1024},
+                    {-2048, 160},
+                    {0, 0}};
+
+    const char* ppm = g_ppm.empty() ? nullptr : g_ppm.c_str();
+    int index = 0;
+    for (const auto& c : kCentres) {
+        const auto before = pw.stats();
+        auto px = draw(c.x, c.z, -15.0f, 2);
+        check(!demo.session.world_stopped, "world not stopped");
+        check(px.size() == static_cast<std::size_t>(kW) * kH * 4, "readback size");
+        if (px.size() != static_cast<std::size_t>(kW) * kH * 4)
+            break;
+        const Band sky = band(px, 0.0, 0.08), ground = band(px, 0.70, 1.0);
+        const double diff = std::abs(sky.rgb[0] - ground.rgb[0]) +
+                            std::abs(sky.rgb[1] - ground.rgb[1]) +
+                            std::abs(sky.rgb[2] - ground.rgb[2]);
+        const auto& s = pw.stats();
+        std::printf(
+            "world-gpu-smoke: [%2d] centre (%7.0f,%7.0f) draws %zu resident %u gpu %.1f MiB "
+            "ground luma %.1f sd %.1f black %.3f | sky luma %.1f | rgb-diff %.1f\n",
+            index,
+            c.x,
+            c.z,
+            pw.draws().size(),
+            s.resident,
+            static_cast<double>(s.gpu_bytes) / 1048576.0,
+            ground.luma,
+            ground.sd,
+            ground.black,
+            sky.luma,
+            diff);
+        check(!pw.draws().empty(), "terrain draws nonempty");
+        check(s.resident <= 304 && s.peak_resident <= 304, "resident <= 304");
+        check(s.peak_gpu_bytes <= block_play::PlayWorld::kMaxGpuBytes, "gpu bytes <= 96 MiB");
+        check(ground.black < 0.02, "no black void below the horizon");
+        check(ground.luma > 8.0 && ground.sd > 1.0, "ground band is lit and not flat");
+        check(diff > 6.0, "ground differs from sky");
+        if (index == 0 && ppm)
+            write_ppm(ppm, px, kW, kH);
+        // A second draw at the unchanged centre must change nothing: no upload, eviction, recenter.
+        const auto after = pw.stats();
+        (void)draw(c.x, c.z, -15.0f, 2);
+        const auto& again = pw.stats();
+        check(again.uploads == after.uploads && again.evictions == after.evictions &&
+                  again.recenters == after.recenters && again.resident == after.resident,
+              "unchanged centre is a no-op");
+        (void)before;
+        ++index;
+    }
+
+    // SENSITIVITY CONTROL: at the farthest centre, look at the sky. The lower band must then stop
+    // looking like ground, which is what shows the ground metric can fail at all.
+    {
+        const auto ground_px = draw(4096, 3000, -15.0f, 1);
+        const auto sky_px = draw(4096, 3000, 25.0f, 1);
+        if (!ground_px.empty() && !sky_px.empty()) {
+            const Band g = band(ground_px, 0.70, 1.0), k = band(sky_px, 0.70, 1.0);
+            const double d = std::abs(g.rgb[0] - k.rgb[0]) + std::abs(g.rgb[1] - k.rgb[1]) +
+                             std::abs(g.rgb[2] - k.rgb[2]);
+            std::printf("world-gpu-smoke: control lower-band ground vs skyward diff %.1f\n", d);
+            check(d > 6.0, "sensitivity control: skyward view differs in the lower band");
+        }
+    }
+
+    // Dense recenter-only sweep: the real recenter + mark_drawn at 16 m steps there and back,
+    // across zero, with both reversals. No frame is rendered; the draw list is what is checked.
+    const auto sweep_from = pw.stats();
+    auto sweep = [&](float from, float to, float step) {
+        for (float x = from; step > 0 ? x <= to : x >= to; x += step) {
+            if (!pw.recenter({x, kEyeY, 0.5f * x})) {
+                check(false, "sweep recenter accepted");
+                return;
+            }
+            check(!pw.draws().empty() && pw.stats().resident <= 304, "sweep draws/resident");
+            pw.mark_drawn();
+        }
+    };
+    sweep(4096, -2048, -16.0f);
+    sweep(-2048, 2048, 16.0f);
+    sweep(2048, -64, -16.0f);
+    const auto& fin = pw.stats();
+    check(fin.uploads > sweep_from.uploads && fin.evictions > sweep_from.evictions,
+          "sweep uploaded and evicted");
+    check(fin.refusals == 0, "zero refusals");
+    check(pw.server().source.stats().refused_requests == 0 &&
+              pw.client().source.stats().refused_requests == 0,
+          "zero collision source refusals");
+    check(fin.peak_resident <= 304 && fin.peak_gpu_bytes <= block_play::PlayWorld::kMaxGpuBytes,
+          "final peak bounds");
+    check(fin.uploads > 0 && fin.evictions > 0 && fin.recenters > 0,
+          "uploads, evictions, recenters");
+    std::printf("world-gpu-smoke: uploads %llu evictions %llu recenters %llu refusals %llu peak "
+                "resident %u peak gpu %.1f MiB\n",
+                static_cast<unsigned long long>(fin.uploads),
+                static_cast<unsigned long long>(fin.evictions),
+                static_cast<unsigned long long>(fin.recenters),
+                static_cast<unsigned long long>(fin.refusals),
+                fin.peak_resident,
+                static_cast<double>(fin.peak_gpu_bytes) / 1048576.0);
+    demo.app.finish_gpu();
+    return okay ? 0 : 1;
+}
+
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
@@ -3262,12 +3793,32 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     cfg.window_size = {kWidth, kHeight};
 
     Demo demo(cfg);
+    demo.scripted_charge = false; // interactive: wait for F, not the tape
+    demo.streamed_world = true;
     if (demo.app.device() == nullptr) {
         std::fprintf(stderr, "99-the-block: --play needs a Vulkan device\n");
         return 1;
     }
     if (!demo.start(cooked, scene_path)) {
         return 1;
+    }
+
+    // PLAY-ONLY evening preset (play_sunset.hpp): turn the one authored sun ahead of the player on
+    // both peers, and face the live view down the street at it. Done before the live intent is
+    // built below, so the first frame already looks at the sun.
+    play_sunset::apply(demo.session.server.world);
+    play_sunset::apply(demo.session.client.world);
+    demo.session.client.view.yaw = play_sunset::kViewYaw;
+    demo.session.client.view.pitch = play_sunset::kViewPitch;
+    if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera)) {
+        // The outer 8x8 LOD5 square guarantees at least 4 km of ground around the eye,
+        // including immediately before a recenter. Show several kilometres of that cover.
+        camera->z_far = 3072.0f;
+    }
+    if (demo.visuals) {
+        // The sky's solar radiance is not coupled to the light's colour, so match it here and
+        // lower the exposure for a sun-facing view (see play_sunset::sky).
+        demo.visuals->renderer.set_sky(play_sunset::sky(Visuals::authored_sky()));
     }
 
     // The device->intent map's bindings, owned by main so the render callback below can read the
@@ -3350,7 +3901,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 } // namespace
 
 int main(int argc, char** argv) {
-    enum class Mode { Headless, Play, Perf } mode = Mode::Headless;
+    enum class Mode { Headless, Play, Perf, WorldSmoke, WorldGpuSmoke } mode = Mode::Headless;
     PerfOptions perf{};
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
     std::string scene_path; // --scene: run a scene someone authored, not the generated one (m14.4)
@@ -3361,6 +3912,10 @@ int main(int argc, char** argv) {
             mode = Mode::Headless;
         } else if (a == "--play") {
             mode = Mode::Play;
+        } else if (a == "--world-smoke") {
+            mode = Mode::WorldSmoke;
+        } else if (a == "--world-gpu-smoke") {
+            mode = Mode::WorldGpuSmoke;
         } else if (a == "--perf") {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
@@ -3414,6 +3969,12 @@ int main(int argc, char** argv) {
     }
     if (mode == Mode::Play) {
         return run_play(cooked, scene_path);
+    }
+    if (mode == Mode::WorldSmoke) {
+        return run_world_smoke(cooked, scene_path);
+    }
+    if (mode == Mode::WorldGpuSmoke) {
+        return run_world_gpu_smoke(cooked, scene_path);
     }
     return run_headless(cooked, scene_path);
 }

@@ -216,8 +216,8 @@ struct DdgiStats {
     std::uint32_t probes_updated = 0; // probes traced + blended this call
     std::uint32_t rays_traced = 0;    // probes_updated * rays_per_probe
     std::uint32_t newly_primed = 0;   // of probes_updated, how many were on their FIRST-EVER update
-    bool grid_shifted = false;        // the lattice origin (or its dimensions) changed this call —
-                                      // every probe's "primed" history was reset
+    bool grid_shifted = false;        // lattice origin, spacing, or dimensions changed
+    std::uint32_t kept_history = 0;   // surviving, previously primed probes on a remapped lattice
     // m10.5b: of probes_updated, how many used the FAST-TRACKED hysteresis (kFastTrackHysteresis,
     // ddgi.cpp) rather than the steady-state settings.ddgi_hysteresis, because invalidate() marked
     // their lattice point since their last update. What a test reads to confirm a destruction event
@@ -330,6 +330,8 @@ private:
     rhi::PipelineHandle blend_irradiance_pipeline_;
     rhi::ShaderHandle blend_visibility_shader_;
     rhi::PipelineHandle blend_visibility_pipeline_;
+    rhi::ShaderHandle remap_shader_;
+    rhi::PipelineHandle remap_pipeline_;
 
     rhi::SamplerHandle clipmap_sampler_; // linear + ClampToEdge, for the 3 clipmap levels
     // m10.5b: linear + ClampToEdge for BOTH atlases (confirmed on lavapipe: RG32Float — the
@@ -339,10 +341,14 @@ private:
     rhi::SamplerHandle atlas_sampler_;
 
     // Persistent (imported, not transient) — they hold TEMPORAL state across frames.
-    rhi::TextureHandle irradiance_atlas_;                                 // RGBA16Float
-    rhi::TextureHandle visibility_atlas_;                                 // RG32Float
+    rhi::TextureHandle irradiance_atlas_;         // RGBA16Float
+    rhi::TextureHandle visibility_atlas_;         // RG32Float
+    rhi::TextureHandle scratch_irradiance_atlas_; // persistent destination on a lattice shift
+    rhi::TextureHandle scratch_visibility_atlas_;
     rhi::ResourceState irradiance_state_ = rhi::ResourceState::Undefined; // carried across frames
     rhi::ResourceState visibility_state_ = rhi::ResourceState::Undefined;
+    rhi::ResourceState scratch_irradiance_state_ = rhi::ResourceState::Undefined;
+    rhi::ResourceState scratch_visibility_state_ = rhi::ResourceState::Undefined;
     std::uint32_t atlas_probes_per_row_ = 0; // sizes the atlases; part of "did the grid change?"
     std::uint32_t atlas_total_probes_ = 0;
 
@@ -362,6 +368,8 @@ private:
 
     // The lattice snap state (mirrors SdfClipmap::Level exactly).
     core::Vec3 origin_{0.0f, 0.0f, 0.0f};
+    std::int64_t origin_cells_[3] = {0, 0, 0};
+    float last_spacing_ = 0.0f;
     bool origin_initialized_ = false;
     std::uint32_t last_count_x_ = 0, last_count_y_ = 0, last_count_z_ = 0;
 
@@ -370,8 +378,7 @@ private:
     std::vector<bool> primed_; // has probe i ever completed an update?
     // m10.5b: how many MORE updates probe i should use the fast-tracked hysteresis for (0 = ride
     // the steady-state settings.ddgi_hysteresis like normal). Parallel to `primed_` — same size,
-    // same indexing, reset alongside it on a grid shift (a shifted lattice's indices no longer name
-    // the same world-space probes, so any pending fast-track loses its meaning). Decremented one
+    // same indexing, remapped alongside it on an overlapping grid shift. Decremented one
     // update at a time in add(); see invalidate()'s own comment for what sets it.
     std::vector<std::uint32_t> fast_track_remaining_;
     // Regions queued by invalidate() since the last add() drained them — the identical

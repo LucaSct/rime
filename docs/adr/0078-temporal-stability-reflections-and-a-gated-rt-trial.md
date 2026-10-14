@@ -543,3 +543,38 @@ discretionary.
 *Still not proven:* nothing further about occlusion geometry that this file names. The open items in
 this section are now the **gate-7 clock conflict** (`docs/perf/README.md`) and the **sky-rebake
 lever**, both of which are Luca's decisions, not measurements.
+### Live DDGI reflection stability — 2026-10-14
+
+The block already had specular AA, temporal jitter, motion vectors and TAA enabled by default.
+Live captures still showed discontinuous road reflections. Three compositional defects needed
+correction before asking the temporal resolve to converge:
+
+- A reflection query with no accepted DDGI probes replaced a valid sky fallback with zero.
+  The resolve now distinguishes unsupported queries from covered probes measuring black. Its
+  sky fallback can read the roughness-filtered chain even when DDGI is enabled, so that chain's
+  renderer admission rule now includes the SSR reader. Covered probes retain precedence.
+- A surface on a probe plane could reconstruct microscopically to either side under jitter.
+  Tiny contributions from the open probe layer crossed the acceptance threshold and normalized
+  to a full answer, flipping between sky and DDGI. Querying along the surface normal by
+  `max(1 cm, 0.025 * probe spacing)` gives the reflection lookup a stable side. The reflected ray
+  and irradiance lookup direction remain unchanged. A direct GPU proof perturbs depth by
+  +/-1 mm around such a plane; removing only the bias makes it fail. A -10 cm input control
+  remains unsupported, and existing covered-dark assertions remain intact.
+- A snapped lattice movement discarded every probe's history. Small overlapping shifts now
+  remap whole irradiance and visibility tiles, including borders and both moments, into a
+  persistent alternate atlas pair. Surviving primed/fast-track flags follow their world positions;
+  exposed probes initialize normally. Dimension, spacing and non-overlapping changes still reset.
+  Three queued production shifts, including a reversal, preserve exact seeded survivor signatures.
+
+The atlas remap also exposed two render-graph requirements: storage accesses with identical state
+still need actual memory dependencies, and final persistent-resource transitions must survive
+culling. Explicit sampled transition passes order the atlas hazards; their external state effect
+is declared through `ComputePassDesc::externally_visible`, without pretending to write a buffer.
+
+On the RTX 3060, the recorded 16-frame stationary road sequence's share of pixels varying by more
+than 32/255 fell from 12.85% to 0.04% with the normal bias. Hiding terrain left the baseline unchanged,
+and disabling jitter eliminated its classification flips. A subsequent integrated window capture
+kept all features enabled and had almost no adjacent sharp road jumps. These measurements describe
+the recorded region and sequence, not every material, camera or lighting condition. Synchronization
+validation's positive control did not establish detection of missing memory hazards; the queued
+signature proof and reviewed dependencies provide the operative evidence.

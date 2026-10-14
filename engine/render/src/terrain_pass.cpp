@@ -14,6 +14,10 @@
 #include "rime/render/passes.hpp" // kHdrFormat / kDepthFormat — one place decides the formats
 #include "terrain.frag.spv.h"
 #include "terrain.vert.spv.h"
+#include "terrain_scene_base.frag.spv.h"
+#include "terrain_scene_gbuffer.frag.spv.h"
+#include "terrain_scene_gbuffer_velocity.frag.spv.h"
+#include "terrain_scene_velocity.frag.spv.h"
 
 namespace rime::render {
 namespace {
@@ -164,6 +168,26 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
                                    terrain_frag_spv,
                                    sizeof(terrain_frag_spv),
                                    "terrain.frag");
+    scene_fragment_shaders_[0] = make_shader(device,
+                                             rhi::ShaderStage::Fragment,
+                                             terrain_scene_base_frag_spv,
+                                             sizeof(terrain_scene_base_frag_spv),
+                                             "terrain_scene_base.frag");
+    scene_fragment_shaders_[1] = make_shader(device,
+                                             rhi::ShaderStage::Fragment,
+                                             terrain_scene_gbuffer_frag_spv,
+                                             sizeof(terrain_scene_gbuffer_frag_spv),
+                                             "terrain_scene_gbuffer.frag");
+    scene_fragment_shaders_[2] = make_shader(device,
+                                             rhi::ShaderStage::Fragment,
+                                             terrain_scene_velocity_frag_spv,
+                                             sizeof(terrain_scene_velocity_frag_spv),
+                                             "terrain_scene_velocity.frag");
+    scene_fragment_shaders_[3] = make_shader(device,
+                                             rhi::ShaderStage::Fragment,
+                                             terrain_scene_gbuffer_velocity_frag_spv,
+                                             sizeof(terrain_scene_gbuffer_velocity_frag_spv),
+                                             "terrain_scene_gbuffer_velocity.frag");
 
     // The heightfield is read in the VERTEX stage — unusual enough to be worth saying out loud,
     // and the whole reason this pass needs no vertex buffer.
@@ -215,6 +239,31 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     pd.push_constant_size = sizeof(TerrainPush);
     pd.debug_name = "terrain";
     pipeline_ = device.create_graphics_pipeline(pd);
+
+    // Scene pipelines match their exact output set and all read the scene uniform block.
+    std::array<rhi::BindingDesc, 14> scene_bindings{};
+    std::copy(std::begin(bindings), std::end(bindings), scene_bindings.begin());
+    scene_bindings[13] = {13, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment};
+    pd.bindings = scene_bindings;
+    pd.fragment_shader = scene_fragment_shaders_[0];
+    pd.debug_name = "terrain-scene-base";
+    scene_pipelines_[0] = device.create_graphics_pipeline(pd);
+    const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat, kGbufferMaterialFormat};
+    pd.color_formats = gbuffer_formats;
+    pd.fragment_shader = scene_fragment_shaders_[1];
+    pd.debug_name = "terrain-scene-gbuffer";
+    scene_pipelines_[1] = device.create_graphics_pipeline(pd);
+    const rhi::Format velocity_formats[] = {kHdrFormat, kVelocityFormat};
+    pd.color_formats = velocity_formats;
+    pd.fragment_shader = scene_fragment_shaders_[2];
+    pd.debug_name = "terrain-scene-velocity";
+    scene_pipelines_[2] = device.create_graphics_pipeline(pd);
+    const rhi::Format all_formats[] = {
+        kHdrFormat, kGbufferFormat, kGbufferMaterialFormat, kVelocityFormat};
+    pd.color_formats = all_formats;
+    pd.fragment_shader = scene_fragment_shaders_[3];
+    pd.debug_name = "terrain-scene-gbuffer-velocity";
+    scene_pipelines_[3] = device.create_graphics_pipeline(pd);
 
     // NEAREST, CLAMP, no mips, no anisotropy — and none of it matters, because terrain.vert reads
     // the texture with `texelFetch`, which bypasses filtering and addressing entirely. The sampler
@@ -314,6 +363,12 @@ TerrainPass::~TerrainPass() {
     device_.destroy(weight_sampler_);
     device_.destroy(sampler_);
     device_.destroy(pipeline_);
+    for (auto pipeline : scene_pipelines_) {
+        device_.destroy(pipeline);
+    }
+    for (auto shader : scene_fragment_shaders_) {
+        device_.destroy(shader);
+    }
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
 }
@@ -638,6 +693,52 @@ void TerrainPass::add(RenderGraph& graph,
                       const TerrainLight& light,
                       const SkyLightBinding& sky,
                       const TerrainLodDraw& lod) {
+    add_impl(graph, hdr, depth, {}, {}, {}, id, view_proj, eye, light, sky, lod, {}, false);
+}
+
+void TerrainPass::add_scene(RenderGraph& graph,
+                            RGTexture hdr,
+                            RGTexture depth,
+                            RGTexture gbuffer,
+                            RGTexture gbuffer_material,
+                            RGTexture velocity,
+                            TerrainTileId id,
+                            const core::Mat4& view_proj,
+                            const core::Vec3& eye,
+                            const TerrainLight& light,
+                            const SkyLightBinding& sky,
+                            const TerrainLodDraw& lod,
+                            RenderGraph::FrameSlice scene_uniforms) {
+    add_impl(graph,
+             hdr,
+             depth,
+             gbuffer,
+             gbuffer_material,
+             velocity,
+             id,
+             view_proj,
+             eye,
+             light,
+             sky,
+             lod,
+             scene_uniforms,
+             true);
+}
+
+void TerrainPass::add_impl(RenderGraph& graph,
+                           RGTexture hdr,
+                           RGTexture depth,
+                           RGTexture gbuffer,
+                           RGTexture gbuffer_material,
+                           RGTexture velocity,
+                           TerrainTileId id,
+                           const core::Mat4& view_proj,
+                           const core::Vec3& eye,
+                           const TerrainLight& light,
+                           const SkyLightBinding& sky,
+                           const TerrainLodDraw& lod,
+                           RenderGraph::FrameSlice scene_uniforms,
+                           bool scene) {
     // The structural gate: an unknown tile declares NO pass, so the frame is byte-identical to one
     // from a build without this file. A pass that ran and drew zero indices would be *almost*
     // that, and almost is not a regression bridge (ADR-0032 §11).
@@ -669,7 +770,21 @@ void TerrainPass::add(RenderGraph& graph,
     // LOAD the HDR target: terrain is one contributor to a frame, not its owner. Depth is written,
     // because terrain is opaque — a tile must occlude what is behind it, and be occluded by what
     // is in front.
-    const RGColorAttachment colors[] = {{hdr, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
+    const bool write_gbuffer = gbuffer.is_valid() && gbuffer_material.is_valid();
+    const bool write_velocity = velocity.is_valid();
+    if (gbuffer.is_valid() != gbuffer_material.is_valid()) {
+        RIME_ERROR("terrain: scene draw requires both SSR G-buffer attachments");
+        return;
+    }
+    RGColorAttachment colors[4] = {{hdr, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
+    std::size_t color_count = 1;
+    if (write_gbuffer) {
+        colors[color_count++] = {gbuffer, rhi::LoadOp::Load, rhi::StoreOp::Store, {}};
+        colors[color_count++] = {gbuffer_material, rhi::LoadOp::Load, rhi::StoreOp::Store, {}};
+    }
+    if (write_velocity) {
+        colors[color_count++] = {velocity, rhi::LoadOp::Load, rhi::StoreOp::Store, {}};
+    }
     RGDepthAttachment depth_att{};
     depth_att.texture = depth;
     depth_att.load = rhi::LoadOp::Load;
@@ -677,7 +792,7 @@ void TerrainPass::add(RenderGraph& graph,
     depth_att.read_only = false;
 
     RenderGraph::RasterPassDesc desc{};
-    desc.colors = colors;
+    desc.colors = std::span<const RGColorAttachment>(colors, color_count);
     desc.depth = &depth_att;
     // The heightfield is a SAMPLED input of this pass. Declaring it is what lets the graph put the
     // texture into a shader-read state before the draw; a pass that read it without saying so
@@ -738,6 +853,8 @@ void TerrainPass::add(RenderGraph& graph,
         }
     }
     desc.sampled = std::span<const RGTexture>(sampled, sampled_count);
+    // The scene matrix slice is CPU-written frame scratch, like SceneRenderer's frame UBO; it
+    // never has a GPU writer and is bound directly rather than imported as a graph resource.
     const RGBuffer buffers[] = {sky_sh};
     desc.buffer_reads = buffers;
 
@@ -745,9 +862,10 @@ void TerrainPass::add(RenderGraph& graph,
     if (caller_sky) {
         ++sky_bound_;
     }
-    graph.add_raster_pass("terrain",
+    const std::uint32_t scene_variant = (write_gbuffer ? 1u : 0u) + (write_velocity ? 2u : 0u);
+    graph.add_raster_pass(scene ? "terrain-scene" : "terrain",
                           desc,
-                          [pipeline = pipeline_,
+                          [pipeline = scene ? scene_pipelines_[scene_variant] : pipeline_,
                            sampler = sampler_,
                            weight_sampler = weight_sampler_,
                            layer_sampler = layer_sampler_,
@@ -761,6 +879,8 @@ void TerrainPass::add(RenderGraph& graph,
                            sky_lut,
                            sky_sh,
                            sky_sampler,
+                           scene_uniforms,
+                           scene,
                            &graph,
                            push](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipeline);
@@ -771,6 +891,14 @@ void TerrainPass::add(RenderGraph& graph,
                               // late-resolve add_shadowed uses for the same graph resources.
                               cmd.bind_texture(3, graph.physical(sky_lut), sky_sampler);
                               cmd.bind_storage_buffer(4, graph.physical_buffer(sky_sh));
+                              // Every scene pipeline declares binding 13. The RHI requires it
+                              // attached even when this fragment variant does not read motion.
+                              if (scene) {
+                                  cmd.bind_uniform_buffer(13,
+                                                          scene_uniforms.buffer,
+                                                          scene_uniforms.offset,
+                                                          scene_uniforms.size);
+                              }
                               for (std::uint32_t k = 0; k < 4; ++k) {
                                   cmd.bind_texture(5 + k, layers[k], layer_sampler);
                               }

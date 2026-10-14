@@ -443,6 +443,26 @@ TEST_CASE("ddgi: sub-spacing camera motion does not reshuffle the lattice (m10.5
     CHECK(nudged.newly_primed == 0);
     CHECK(ddgi.origin().x == origin0.x); // bit-identical, not merely close
 
+    // An event at the low corner (with the one-spacing invalidation pad) touches a 2³
+    // block. On the next +x shift only the x=-1 half of that block survives.
+    ddgi.invalidate(WorldAabb{{-2.0f, -2.0f, -2.0f}, {-2.0f, -2.0f, -2.0f}});
+    const DdgiStats invalidated =
+        step(*device, clipmap, ddgi, {0.0f, 0.0f, 0.0f}, lighting, settings);
+    CHECK(invalidated.fast_tracked == 8);
+
+    // One snapped cell moves a 4^3 lattice by one x-column. Exactly 3*4*4 primed
+    // world positions survive and exactly 4*4 exposed slots need first updates.
+    const DdgiStats moved = step(*device, clipmap, ddgi, {1.0f, 0.0f, 0.0f}, lighting, settings);
+    CHECK(moved.grid_shifted);
+    CHECK(moved.kept_history == 48);
+    CHECK(moved.newly_primed == 16);
+    CHECK(moved.fast_tracked == 4); // pending budgets followed the four surviving world points
+    const DdgiStats reversed = step(*device, clipmap, ddgi, {0.0f, 0.0f, 0.0f}, lighting, settings);
+    CHECK(reversed.grid_shifted);
+    CHECK(reversed.kept_history == 48);
+    CHECK(reversed.newly_primed == 16);
+    CHECK(reversed.fast_tracked == 4);
+
     // Back to the exact position the origin above was measured against.
     (void)step(*device, clipmap, ddgi, {0.0f, 0.0f, 0.0f}, lighting, settings);
 
@@ -452,7 +472,20 @@ TEST_CASE("ddgi: sub-spacing camera motion does not reshuffle the lattice (m10.5
     const DdgiStats jumped = step(*device, clipmap, ddgi, {50.0f, 0.0f, 0.0f}, lighting, settings);
     CHECK(jumped.grid_shifted);
     CHECK(jumped.newly_primed == 64);
+    CHECK(jumped.kept_history == 0);
     CHECK(ddgi.origin().x != origin0.x);
+
+    LightingSettings changed = settings;
+    changed.ddgi_probe_spacing = 2.0f;
+    const DdgiStats spaced = step(*device, clipmap, ddgi, {50.0f, 0.0f, 0.0f}, lighting, changed);
+    CHECK(spaced.grid_shifted);
+    CHECK(spaced.kept_history == 0);
+    CHECK(spaced.newly_primed == 64);
+    changed.ddgi_probe_count_z = 3;
+    const DdgiStats resized = step(*device, clipmap, ddgi, {50.0f, 0.0f, 0.0f}, lighting, changed);
+    CHECK(resized.grid_shifted);
+    CHECK(resized.kept_history == 0);
+    CHECK(resized.newly_primed == 48);
 }
 
 TEST_CASE("ddgi: invalidate() fast-tracks a probe's hysteresis after a destruction event, "

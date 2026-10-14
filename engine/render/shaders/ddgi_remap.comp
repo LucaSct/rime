@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+// Preserve complete DDGI tiles (including octahedral gutters and both visibility moments).
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(rgba16f, set = 0, binding = 0) readonly uniform image2D old_irradiance;
+layout(rg32f, set = 0, binding = 1) readonly uniform image2D old_visibility;
+layout(rgba16f, set = 0, binding = 2) writeonly uniform image2D new_irradiance;
+layout(rg32f, set = 0, binding = 3) writeonly uniform image2D new_visibility;
+layout(std140, set = 0, binding = 4) uniform RemapParams {
+    ivec4 shift;
+    uvec4 dims_perrow;
+} params;
+
+void main() {
+    uint index = gl_WorkGroupID.z;
+    uvec3 dims = params.dims_perrow.xyz;
+    uint per_row = params.dims_perrow.w;
+    ivec3 q = ivec3(int(index % dims.x),
+                    int((index / dims.x) % dims.y),
+                    int(index / (dims.x * dims.y)));
+    ivec3 source = q + params.shift.xyz;
+    bool survives = params.shift.w == 0 && all(greaterThanEqual(source, ivec3(0))) &&
+                    all(lessThan(source, ivec3(dims)));
+    uint source_index = survives
+        ? uint(source.x) + dims.x * (uint(source.y) + dims.y * uint(source.z)) : 0u;
+    ivec2 dst_tile = ivec2(int(index % per_row), int(index / per_row));
+    ivec2 src_tile = ivec2(int(source_index % per_row), int(source_index / per_row));
+    ivec2 texel = ivec2(gl_LocalInvocationID.xy);
+    // The visibility tile is 16x16; the irradiance tile is 8x8. Both include their border.
+    imageStore(new_visibility, dst_tile * 16 + texel,
+               survives ? imageLoad(old_visibility, src_tile * 16 + texel) : vec4(0.0));
+    if (texel.x < 8 && texel.y < 8) {
+        imageStore(new_irradiance, dst_tile * 8 + texel,
+                   survives ? imageLoad(old_irradiance, src_tile * 8 + texel) : vec4(0.0));
+    }
+}

@@ -423,6 +423,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         }
     }
     if (!scene.camera.found) {
+        terrain_pass_ = nullptr;
+        terrain_draws_ = {};
         if (!warned_no_camera_) {
             RIME_WARN("render: no active camera in the world — declaring no passes");
             warned_no_camera_ = true;
@@ -546,10 +548,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     //
     // And only when something reads the chain. Exactly one pass mirrors the sky: the forward pass
     // when SSR is off (with SSR on its sky term is compiled out), or ssr_resolve when SSR is on
-    // (it reads the same chain and the same DFG table, so the two agree). With DDGI on neither
-    // reads it -- the forward pass's term sits in a branch that is not taken and the resolve's
-    // probe is the DDGI field -- so building the chain for that frame would be work nothing reads.
-    const bool chain_has_reader = !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
+    // (it reads the same chain and the same DFG table, so the two agree). With DDGI on, SSR still
+    // needs the filtered sky wherever no probe supports its reflection query. The forward path
+    // alone reads no chain with DDGI, but that is no longer a reason to starve the SSR fallback.
+    const bool chain_has_reader =
+        lighting_.ssr_enabled || !(lighting_.sdf_clipmap_enabled && lighting_.ddgi_enabled);
     const bool sky_specular_live = sky_specular_prefilter_enabled_ && chain_has_reader &&
                                    (sky_params_.enabled || scene.has_sky);
     fu.ambient[3] = sky_specular_live ? 1.0f : 0.0f;
@@ -939,6 +942,51 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     } else {
         forward_.add(graph, hdr, depth, use_depth_prepass, data);
     }
+
+    // Resident terrain joins opaque geometry before the sky fills far depth and before SSR/TAA
+    // consume depth, material and motion. No frame scratch or graph pass is declared when off.
+    if (terrain_pass_ != nullptr && !terrain_draws_.empty()) {
+        TerrainLight terrain_light{};
+        terrain_light.ambient = (fu.ambient[0] + fu.ambient[1] + fu.ambient[2]) / 3.0f;
+        if (ndir != 0) {
+            terrain_light.sun_direction = {fu.dir_lights[0].direction[0],
+                                           fu.dir_lights[0].direction[1],
+                                           fu.dir_lights[0].direction[2]};
+            terrain_light.sun_irradiance =
+                (fu.dir_lights[0].radiance[0] + fu.dir_lights[0].radiance[1] +
+                 fu.dir_lights[0].radiance[2]) /
+                3.0f;
+        } else {
+            terrain_light.sun_irradiance = 0.0f;
+        }
+        TerrainSceneUniforms matrices{view_proj_unjittered_, prev_view_proj_unjittered_};
+        if (ndir != 0) {
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                matrices.sun_radiance[channel] = fu.dir_lights[0].radiance[channel];
+            }
+        }
+        const auto scene_uniforms = graph.push_frame_data(&matrices, sizeof(matrices));
+        const core::Vec3 eye{fu.camera_pos[0], fu.camera_pos[1], fu.camera_pos[2]};
+        for (const TerrainSceneDraw& draw : terrain_draws_) {
+            terrain_pass_->add_scene(graph,
+                                     hdr,
+                                     depth,
+                                     gbuffer,
+                                     gbuffer_material,
+                                     velocity,
+                                     draw.tile,
+                                     fu.view_proj,
+                                     eye,
+                                     terrain_light,
+                                     sky_binding,
+                                     draw.lod,
+                                     scene_uniforms);
+        }
+    }
+    // The caller only promises the span and pass through this declaration. Require a fresh
+    // setter call next frame so a temporary draw list cannot become a dangling borrow.
+    terrain_pass_ = nullptr;
+    terrain_draws_ = {};
 
     // Sky (m17.0): composite the procedural sky into the background — the pixels the depth buffer
     // says nothing was drawn on — writing a THIRD HDR target the next stage reads. It goes here,

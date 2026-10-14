@@ -9,6 +9,8 @@ replicated server, a predicted client, a first-person camera, a window and a mix
 ```bash
 build/dev/bin/the_block --headless          # the CI-gated proof
 build/dev/bin/the_block --play              # walk around it and shoot
+build/dev/bin/the_block --world-smoke       # streamed collision, fast travel and recovery
+build/dev/bin/the_block --world-gpu-smoke   # streamed drawing, uploads and evictions
 build/dev/bin/the_block --headless --ppm frame.ppm   # also write the intact frame as an image
 build/dev/bin/the_block --headless --idle   # the control: nobody touches the block
 build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI stops caring
@@ -17,6 +19,17 @@ build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI
 `--play` controls: **WASD** move · **mouse** to look, or hold **right-drag** when the window could
 not lock the cursor · **left click** fires · **F** detonates the charge on the hero building ·
 **Esc** exits.
+
+Live play starts at sunset and waits for **F** before detonating the scripted charge. Seeded
+terrain extends beyond the original street: nearby collision is installed before simulation,
+and six moving LOD rings keep ground visible in the distance. Generated tiles are released as
+they leave the resident region and are never cached to disk. The GPU ring holds 304 tiles
+(about 7.8 MiB of tile resources); this excludes the rest of the renderer and physics memory.
+
+This prototype returns the player to a supported spawn beyond eight kilometres on either
+horizontal axis or below its recovery floor. Recentring currently waits for old GPU readers,
+so tile changes can hitch; unlimited coordinates and asynchronous streaming are later work.
+See [ADR-0081](../../docs/adr/0081-playable-procedural-terrain.md).
 
 `--cooked <dir>` points at the nine `.rdest` files; the build cooks them into the target's own
 directory and bakes that path in, so the commands above just work after a build.

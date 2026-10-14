@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "rime/render/lighting/ssr.hpp"
 #include "rime/render/passes.hpp"
 #include "rime/render/temporal_jitter.hpp"
+#include "rime/render/terrain_scene.hpp"
 
 // The scene renderer (M5.6, ADR-0022): the bridge from "a World full of entities" to "passes
 // declared on a render graph". Each frame it
@@ -150,7 +152,8 @@ public:
         RGTexture velocity;
         // The GGX-prefiltered sky chain (ADR-0078 section 2): a kSkySpecularLayers-layer array,
         // level k being perceptual roughness k/layers. Valid ONLY on a frame where the chain was
-        // built or reused -- i.e. the prefilter is enabled and DDGI is off; invalid otherwise, with
+        // built or reused -- the prefilter is enabled and the forward or SSR path can read it.
+        // SSR's unsupported-probe fallback reads it even with DDGI on. Invalid otherwise, with
         // no allocation and no pass declared. Exported to read it back; the forward pass and the
         // SSR resolve sample it directly. It is a persistent texture the graph imports, so a caller
         // that reads it back must return it to ShaderRead afterwards (the owner tracks that state).
@@ -165,6 +168,14 @@ public:
                   ecs::World& world,
                   rhi::Extent2D extent,
                   bool use_depth_prepass = true);
+
+    // Borrow the pass and draw list through the next synchronous render() declaration. Call each
+    // frame that should draw terrain; render() clears this borrow afterward. An empty list or null
+    // pass disables terrain; tile resources stay alive through GPU retirement.
+    void set_terrain_draws(TerrainPass* pass, std::span<const TerrainSceneDraw> draws) noexcept {
+        terrain_pass_ = pass;
+        terrain_draws_ = draws;
+    }
 
     // Constant ambient radiance (linear RGB) — the crude GI stand-in until M10. Default is a dim
     // 0.02: unlit sides stay visible, tests can still tell lit from unlit by an order of
@@ -462,6 +473,8 @@ private:
     rhi::Device& device_;
     const MeshRegistry& meshes_;
     const MaterialRegistry& materials_;
+    TerrainPass* terrain_pass_ = nullptr;
+    std::span<const TerrainSceneDraw> terrain_draws_{};
 
     DepthPrepass depth_prepass_;
     VelocityPass velocity_;

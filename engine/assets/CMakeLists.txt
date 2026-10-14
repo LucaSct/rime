@@ -18,7 +18,8 @@ add_library(rime_assets STATIC
     src/terrain_world.cpp
     src/asset_server.cpp
     src/clip_sampler.cpp
-    src/sdf_sampler.cpp)
+    src/sdf_sampler.cpp
+    src/procedural_terrain.cpp)
 
 # Namespaced alias so dependents link rime::assets (matching the other modules).
 add_library(rime::assets ALIAS rime_assets)
