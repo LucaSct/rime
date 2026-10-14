@@ -64,14 +64,13 @@ RGTexture FirstPersonPass::combine_depth(RenderGraph& graph,
     RenderGraph::RasterPassDesc desc{};
     desc.depth = &output;
     desc.sampled = sampled;
-    graph.add_raster_pass("first-person-combine-depth",
-                          desc,
-                          [this, world_depth, model_depth, &graph](rhi::CommandBuffer& cmd) {
-                              cmd.bind_pipeline(pipeline_);
-                              cmd.bind_texture(0, graph.physical(world_depth), sampler_);
-                              cmd.bind_texture(1, graph.physical(model_depth), sampler_);
-                              cmd.draw(3);
-                          });
+    auto draw = [this, world_depth, model_depth, &graph](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipeline_);
+        cmd.bind_texture(0, graph.physical(world_depth), sampler_);
+        cmd.bind_texture(1, graph.physical(model_depth), sampler_);
+        cmd.draw(3);
+    };
+    graph.add_raster_pass("first-person-combine-depth", desc, draw);
     return combined;
 }
 
