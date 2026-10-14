@@ -117,8 +117,8 @@ private:
     [[nodiscard]] std::vector<Key> wanted(core::Vec3 eye) const;
     [[nodiscard]] Held* find(const Key& key) noexcept;
 
-    assets::ProceduralTerrainConfig config_{};
     bool valid_ = false;
+    assets::ProceduralTerrainConfig config_{};
     CollisionPeer server_;
     CollisionPeer client_;
     rhi::Device* device_ = nullptr;

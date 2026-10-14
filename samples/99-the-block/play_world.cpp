@@ -72,14 +72,18 @@ assets::ProceduralTerrainConfig PlayWorld::street_config(ecs::World& world, bool
     world.query<ground::GroundSurface>().for_each([&](ecs::Entity e, ground::GroundSurface& s) {
         const auto* t = world.get<ecs::WorldTransform>(e);
         if (!t || !finite(t->value.translation) || !std::isfinite(s.half_x) ||
-            !std::isfinite(s.half_z) || s.half_x <= 0.0f || s.half_z <= 0.0f) {
+            !std::isfinite(s.half_z) || s.half_x <= 0.0f || s.half_z <= 0.0f ||
+            std::abs(t->value.translation.y) > 0.001f ||
+            std::abs(t->value.translation.x) + s.half_x > kPracticalLimit ||
+            std::abs(t->value.translation.z) + s.half_z > kPracticalLimit) {
             return;
         }
         const auto q = t->value.rotation;
         // Heightfield tiles are axis-aligned. A rotated street needs an explicitly transformed
         // footprint, not a silently incorrect flat region.
-        if (std::abs(q.x) > 0.001f || std::abs(q.y) > 0.001f || std::abs(q.z) > 0.001f ||
-            std::abs(q.w - 1.0f) > 0.001f) {
+        if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z) ||
+            !std::isfinite(q.w) || std::abs(q.x) > 0.001f || std::abs(q.y) > 0.001f ||
+            std::abs(q.z) > 0.001f || std::abs(q.w - 1.0f) > 0.001f) {
             return;
         }
         const auto p = t->value.translation;
