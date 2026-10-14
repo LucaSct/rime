@@ -958,7 +958,12 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         } else {
             terrain_light.sun_irradiance = 0.0f;
         }
-        const TerrainSceneUniforms matrices{view_proj_unjittered_, prev_view_proj_unjittered_};
+        TerrainSceneUniforms matrices{view_proj_unjittered_, prev_view_proj_unjittered_};
+        if (ndir != 0) {
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                matrices.sun_radiance[channel] = fu.dir_lights[0].radiance[channel];
+            }
+        }
         const auto scene_uniforms = graph.push_frame_data(&matrices, sizeof(matrices));
         const core::Vec3 eye{fu.camera_pos[0], fu.camera_pos[1], fu.camera_pos[2]};
         for (const TerrainSceneDraw& draw : terrain_draws_) {

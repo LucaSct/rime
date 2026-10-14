@@ -14,6 +14,7 @@
 #include "rime/render/passes.hpp" // kHdrFormat / kDepthFormat — one place decides the formats
 #include "terrain.frag.spv.h"
 #include "terrain.vert.spv.h"
+#include "terrain_scene_base.frag.spv.h"
 #include "terrain_scene_gbuffer.frag.spv.h"
 #include "terrain_scene_gbuffer_velocity.frag.spv.h"
 #include "terrain_scene_velocity.frag.spv.h"
@@ -169,15 +170,20 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
                                    "terrain.frag");
     scene_fragment_shaders_[0] = make_shader(device,
                                              rhi::ShaderStage::Fragment,
+                                             terrain_scene_base_frag_spv,
+                                             sizeof(terrain_scene_base_frag_spv),
+                                             "terrain_scene_base.frag");
+    scene_fragment_shaders_[1] = make_shader(device,
+                                             rhi::ShaderStage::Fragment,
                                              terrain_scene_gbuffer_frag_spv,
                                              sizeof(terrain_scene_gbuffer_frag_spv),
                                              "terrain_scene_gbuffer.frag");
-    scene_fragment_shaders_[1] = make_shader(device,
+    scene_fragment_shaders_[2] = make_shader(device,
                                              rhi::ShaderStage::Fragment,
                                              terrain_scene_velocity_frag_spv,
                                              sizeof(terrain_scene_velocity_frag_spv),
                                              "terrain_scene_velocity.frag");
-    scene_fragment_shaders_[2] = make_shader(device,
+    scene_fragment_shaders_[3] = make_shader(device,
                                              rhi::ShaderStage::Fragment,
                                              terrain_scene_gbuffer_velocity_frag_spv,
                                              sizeof(terrain_scene_gbuffer_velocity_frag_spv),
@@ -234,27 +240,28 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     pd.debug_name = "terrain";
     pipeline_ = device.create_graphics_pipeline(pd);
 
-    // Scene pipelines match their exact output set. The optional matrix block is only read by
-    // velocity variants; binding 13 is harmless in the other two scene layouts.
+    // Scene pipelines match their exact output set and all read the scene uniform block.
     std::array<rhi::BindingDesc, 14> scene_bindings{};
     std::copy(std::begin(bindings), std::end(bindings), scene_bindings.begin());
     scene_bindings[13] = {13, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment};
     pd.bindings = scene_bindings;
+    pd.fragment_shader = scene_fragment_shaders_[0];
+    pd.debug_name = "terrain-scene-base";
     scene_pipelines_[0] = device.create_graphics_pipeline(pd);
     const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat, kGbufferMaterialFormat};
     pd.color_formats = gbuffer_formats;
-    pd.fragment_shader = scene_fragment_shaders_[0];
+    pd.fragment_shader = scene_fragment_shaders_[1];
     pd.debug_name = "terrain-scene-gbuffer";
     scene_pipelines_[1] = device.create_graphics_pipeline(pd);
     const rhi::Format velocity_formats[] = {kHdrFormat, kVelocityFormat};
     pd.color_formats = velocity_formats;
-    pd.fragment_shader = scene_fragment_shaders_[1];
+    pd.fragment_shader = scene_fragment_shaders_[2];
     pd.debug_name = "terrain-scene-velocity";
     scene_pipelines_[2] = device.create_graphics_pipeline(pd);
     const rhi::Format all_formats[] = {
         kHdrFormat, kGbufferFormat, kGbufferMaterialFormat, kVelocityFormat};
     pd.color_formats = all_formats;
-    pd.fragment_shader = scene_fragment_shaders_[2];
+    pd.fragment_shader = scene_fragment_shaders_[3];
     pd.debug_name = "terrain-scene-gbuffer-velocity";
     scene_pipelines_[3] = device.create_graphics_pipeline(pd);
 

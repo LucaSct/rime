@@ -9,6 +9,7 @@
 
 #include "../render/render_test_support.hpp"
 #include "rime/assets/heightfield_asset.hpp"
+#include "rime/core/math/quat.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
@@ -51,6 +52,7 @@ std::size_t pixel(std::uint32_t x = 32, std::uint32_t y = 32) {
 struct Probe {
     float depth = 1.0f;
     float hdr = 0.0f;
+    float hdr_blue = 0.0f;
     std::array<float, 4> gbuffer{};
     std::array<float, 4> material{};
     std::array<float, 2> velocity{};
@@ -62,7 +64,8 @@ Probe draw_scene_tile(rhi::Device& device,
                       bool gbuffer,
                       bool velocity,
                       float camera_x,
-                      float previous_x) {
+                      float previous_x,
+                      core::Vec3 sun_rgb = {}) {
     RenderGraph graph(device);
     graph.reset();
     const auto hdr = graph.create_texture({{kSize, kSize}, kHdrFormat, "terrain-hdr"});
@@ -97,7 +100,10 @@ Probe draw_scene_tile(rhi::Device& device,
                              core::Vec3{x, 0.0f, 0.0f},
                              core::Vec3{0.0f, 0.0f, -1.0f});
     };
-    const TerrainSceneUniforms matrices{vp(camera_x), vp(previous_x)};
+    TerrainSceneUniforms matrices{vp(camera_x), vp(previous_x)};
+    matrices.sun_radiance[0] = sun_rgb.x;
+    matrices.sun_radiance[1] = sun_rgb.y;
+    matrices.sun_radiance[2] = sun_rgb.z;
     const auto slice = graph.push_frame_data(&matrices, sizeof(matrices));
     TerrainLight light{};
     light.sun_irradiance = 0.0f;
@@ -130,7 +136,9 @@ Probe draw_scene_tile(rhi::Device& device,
     Probe result{};
     result.depth =
         f32(test::read_texture(device, graph.physical(depth), kSize, kSize, 4), pixel() * 4);
-    result.hdr = f16(test::read_texture(device, graph.physical(hdr), kSize, kSize, 8), pixel() * 8);
+    const auto hdr_bytes = test::read_texture(device, graph.physical(hdr), kSize, kSize, 8);
+    result.hdr = f16(hdr_bytes, pixel() * 8);
+    result.hdr_blue = f16(hdr_bytes, pixel() * 8 + 4);
     if (gbuffer) {
         const auto bytes = test::read_texture(device, graph.physical(gb), kSize, kSize, 8);
         const auto material = test::read_texture(device, graph.physical(gm), kSize, kSize, 4);
@@ -188,6 +196,80 @@ TEST_CASE("terrain scene variants write depth, material and unjittered camera ve
             }
         }
     }
+}
+
+TEST_CASE("terrain scene preserves red and blue directional sunlight in every variant") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (test::vulkan_required())
+            FAIL("Vulkan device required");
+        return;
+    }
+    TerrainPass pass(*device);
+    const auto tile = pass.upload(flat_tile());
+    REQUIRE(tile != kInvalidTerrainTile);
+    for (bool gbuffer : {false, true}) {
+        for (bool velocity : {false, true}) {
+            const Probe red = draw_scene_tile(
+                *device, pass, tile, gbuffer, velocity, 0.0f, 0.0f, {3.0f, 0.0f, 0.0f});
+            const Probe blue = draw_scene_tile(
+                *device, pass, tile, gbuffer, velocity, 0.0f, 0.0f, {0.0f, 0.0f, 3.0f});
+            CHECK(red.depth < 0.9f);
+            CHECK(blue.depth < 0.9f);
+            CHECK(red.hdr > blue.hdr + 0.05f);
+            CHECK(blue.hdr_blue > red.hdr_blue + 0.05f);
+        }
+    }
+}
+
+TEST_CASE("scene renderer carries authored RGB sun into terrain") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (test::vulkan_required())
+            FAIL("Vulkan device required");
+        return;
+    }
+    TerrainPass pass(*device);
+    const auto tile = pass.upload(flat_tile());
+    REQUIRE(tile != kInvalidTerrainTile);
+    const std::array<TerrainSceneDraw, 1> draws{{{tile, {}}}};
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    ecs::World world;
+    register_render_components(world);
+    core::Transform aimed{};
+    aimed.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f);
+    core::Transform camera = aimed;
+    camera.translation = {0.0f, 8.0f, 0.0f};
+    (void)world.spawn_with(ecs::WorldTransform{camera}, Camera{1.0f, 0.1f, 20.0f, true});
+    const auto sun =
+        world.spawn_with(ecs::WorldTransform{aimed}, DirectionalLight{1.0f, 0.0f, 0.0f, 3.0f});
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_ambient(0.0f, 0.0f, 0.0f);
+    renderer.set_temporal_jitter_enabled(false);
+    renderer.set_motion_vectors_enabled(false);
+    renderer.set_taa_resolve_enabled(false);
+    const auto render_color = [&] {
+        RenderGraph graph(*device);
+        graph.reset();
+        renderer.set_terrain_draws(&pass, draws);
+        const auto out = renderer.render(graph, world, {kSize, kSize});
+        REQUIRE(out.hdr.is_valid());
+        graph.export_texture(out.hdr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        const auto bytes = test::read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8);
+        return std::array<float, 2>{f16(bytes, pixel() * 8), f16(bytes, pixel() * 8 + 4)};
+    };
+    const auto red = render_color();
+    auto* light = world.get<DirectionalLight>(sun);
+    REQUIRE(light != nullptr);
+    light->color_r = 0.0f;
+    light->color_b = 1.0f;
+    const auto blue = render_color();
+    CHECK(red[0] > blue[0] + 0.05f);
+    CHECK(blue[1] > red[1] + 0.05f);
 }
 
 TEST_CASE("terrain scene is declared between opaque and sky/TAA, with an empty default") {

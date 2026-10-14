@@ -295,16 +295,19 @@ inline constexpr std::int32_t kTerrainPushCornerShift = 9;
 static_assert(sizeof(TerrainPush) == 208,
               "TerrainPush must match terrain.vert / terrain.frag's push_constant block");
 
-// Scene-only matrices live in a uniform block: appending 128 bytes to the 208-byte push block
-// would exceed common devices' 256-byte push-constant limit. The ordinary pass never binds this.
+// Scene-only matrices and RGB sun live in a uniform block: appending them to the 208-byte push
+// block would exceed common devices' 256-byte push-constant limit. The ordinary pass never binds
+// it.
 struct TerrainSceneUniforms {
     core::Mat4 view_proj_unjittered;
     core::Mat4 prev_view_proj;
+    float sun_radiance[4] = {}; // RGB irradiance from the scene's first directional light
 };
 
-static_assert(sizeof(TerrainSceneUniforms) == 128);
+static_assert(sizeof(TerrainSceneUniforms) == 144);
 static_assert(offsetof(TerrainSceneUniforms, view_proj_unjittered) == 0);
 static_assert(offsetof(TerrainSceneUniforms, prev_view_proj) == 64);
+static_assert(offsetof(TerrainSceneUniforms, sun_radiance) == 128);
 
 // Fold a tile + a view + a light into the shader's constant block. Free and public on purpose:
 // the pass uses it, and so does the proof's own pipeline, so the two cannot drift. A zero-length
@@ -497,7 +500,7 @@ private:
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
-    std::array<rhi::ShaderHandle, 3> scene_fragment_shaders_{};
+    std::array<rhi::ShaderHandle, 4> scene_fragment_shaders_{};
     std::array<rhi::PipelineHandle, 4> scene_pipelines_{};
     rhi::SamplerHandle sampler_;
     rhi::SamplerHandle weight_sampler_; // LINEAR, clamp-to-edge: the weight map is meant to filter

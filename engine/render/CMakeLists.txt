@@ -93,6 +93,8 @@ rime_add_shaders(rime_render
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag WRITE_GBUFFER pbr_forward_shadowed_gbuffer.frag)
 rime_add_shader_variant(rime_render
+    shaders/terrain.frag SCENE_BASE terrain_scene_base.frag)
+rime_add_shader_variant(rime_render
     shaders/terrain.frag SCENE_GBUFFER terrain_scene_gbuffer.frag)
 rime_add_shader_variant(rime_render
     shaders/terrain.frag SCENE_VELOCITY terrain_scene_velocity.frag)
