@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 The Rime Engine Authors.
-"""Bake two static first-person, camera-local, metal-rough GLBs from CC BY sources.
+"""Prepare first-person weapons and weighted arm rigs from CC BY sources.
 
 Run from the repository root with:  blender -b -t 4 --python <this file>
-Inputs: only the original GLBs in ../source/. Outputs: ../held-scar-h.glb, ../held-m4a1.glb,
+Inputs: the original GLBs in ../source/. Outputs: ../held-*.glb, ../arms-*.glb, editable rigs,
 plus preview renders in $RIME_PREVIEW_DIR (default: ./viewmodel-previews).
 
 Why textures come from the images EMBEDDED in those GLBs: the textures that Sketchfab's
@@ -18,7 +18,6 @@ converted to metal/rough (see viewmodel_textures.py); the M4A1 already ships met
 Derivative CC BY 4.0 artwork: do not add project code-license headers to the GLBs.
 """
 import bpy
-import math
 import os
 import sys
 import tempfile
@@ -115,40 +114,6 @@ def replace_materials(objects, mapping, arm=False):
             if key in mapping:
                 obj.data.materials[i] = mapping[key]
 
-def bake_arms(mapping):
-    bpy.ops.import_scene.gltf(filepath=str(SRC/'fps-arms.glb'))
-    armature = next(o for o in bpy.context.scene.objects if o.type=='ARMATURE')
-    mesh = next(o for o in bpy.context.scene.objects if o.type=='MESH' and o.name!='Icosphere')
-    for o in list(bpy.context.scene.objects):
-        if o.name=='Icosphere': bpy.data.objects.remove(o, do_unlink=True)
-    # Source arm coordinates are centimetres: shoulders near y=+18, palms near y=-30.
-    # IK shifts the left support palm to the fore-end and the right palm onto the pistol grip.
-    for name, xyz in [('L_wrist_03',(0.0,-40.0,-5.0)),
-                      ('R_wrist_025',(-5.0,-31.0,2.0))]:
-        target=bpy.data.objects.new(name+'-grip-target',None)
-        bpy.context.collection.objects.link(target)
-        target.location=xyz
-        bone=armature.pose.bones[name]
-        ik=bone.constraints.new('IK')
-        ik.target=target
-        ik.chain_count=3
-        ik.use_stretch=False
-    bpy.context.view_layer.update()
-    deps=bpy.context.evaluated_depsgraph_get()
-    baked=bpy.data.meshes.new_from_object(mesh.evaluated_get(deps),
-                                         preserve_all_data_layers=True,depsgraph=deps)
-    baked.transform(mesh.matrix_world)
-    obj=bpy.data.objects.new('Baked grip arms',baked)
-    bpy.context.collection.objects.link(obj)
-    replace_materials([obj],mapping,arm=True)
-    # Source shoulders run toward +Y. Lower them out of frame while the wrists
-    # stay near the weapon grips; map source -Y forward to camera -Z.
-    scale=.01
-    transform=Matrix(((-scale,0,0,.14),(0,-.008,scale,-.36),(0,scale,0,-.14),(0,0,0,1)))
-    obj.data.transform(transform)
-    for o in list(bpy.context.scene.objects):
-        if o != obj: bpy.data.objects.remove(o,do_unlink=True)
-    return obj
 
 def weapon_transform(kind):
     if kind=='scar-h':
@@ -210,31 +175,8 @@ def preview(kind, objects):
     for o in list(bpy.context.scene.objects):
         if o.type=='LIGHT': bpy.data.objects.remove(o,do_unlink=True)
 
-def build(kind):
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    mapping=make_materials(kind)
-    arms=bake_arms(mapping)
-    gun=import_weapon(kind,mapping)
-    objects=[arms]+gun
-    print('BOUNDS',kind,'all',bounds(objects),'arms',bounds([arms]),'weapon',bounds(gun),flush=True)
-    for o in bpy.context.scene.objects: o.select_set(False)
-    for o in objects: o.select_set(True)
-    bpy.context.view_layer.objects.active=gun[0]
-    output=ROOT/(f'held-{kind}.glb')
-    # export_yup=False is load-bearing. weapon_transform() already places the geometry in the
-    # engine's camera-local frame (+X right, +Y up, -Z forward) -- that IS glTF's convention, so
-    # the exporter's default Z-up-to-Y-up conversion would rotate a correct model 90 degrees about
-    # X and leave the weapon pointing at the floor BEHIND the camera. It shipped that way once:
-    # every part reached the GPU, nothing was dropped, and the frame simply had no gun in it.
-    bpy.ops.export_scene.gltf(filepath=str(output),export_format='GLB',use_selection=True,
-                              export_apply=True,export_cameras=False,export_lights=False,
-                              export_animations=False,export_materials='EXPORT',
-                              export_yup=False)
-    print('EXPORTED',output,output.stat().st_size,flush=True)
-    preview(kind,objects)
-    for obj in gun: obj.hide_render=True
-    preview(kind+'-arms',[arms])
-    for obj in gun: obj.hide_render=False
 
-for kind in ('scar-h','m4a1'):
-    build(kind)
+if __name__ == '__main__':
+    import viewmodel_rig
+    for kind in ('scar-h','m4a1','msr'):
+        viewmodel_rig.build(sys.modules[__name__], kind)

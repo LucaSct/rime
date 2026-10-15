@@ -13,6 +13,9 @@
 *.jpg
 *.jpeg
 *.ktx2
+*.blend
+*.blend1
+*.grip
 
 # Blender/python scratch from running prepare/ in place.
 __pycache__/

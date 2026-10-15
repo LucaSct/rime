@@ -4,7 +4,7 @@
 #
 # It links nearly the whole engine, which is the point — this is the first binary that holds M8, M10,
 # M11, M12 and M13 at once.
-add_executable(the_block main.cpp play_world.cpp play_viewmodel.cpp)
+add_executable(the_block main.cpp play_world.cpp play_viewmodel.cpp play_arm_ik.cpp)
 
 target_link_libraries(the_block
     PRIVATE rime::app
@@ -68,7 +68,11 @@ target_compile_definitions(the_block PRIVATE
 # can clone, and would make CI red for a reason that is not a defect.
 set(BLOCK_VIEWMODEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/assets/viewmodel")
 if(EXISTS "${BLOCK_VIEWMODEL_SOURCE}/held-scar-h.glb" AND
-   EXISTS "${BLOCK_VIEWMODEL_SOURCE}/held-m4a1.glb")
+   EXISTS "${BLOCK_VIEWMODEL_SOURCE}/held-m4a1.glb" AND
+   EXISTS "${BLOCK_VIEWMODEL_SOURCE}/held-msr.glb" AND
+   EXISTS "${BLOCK_VIEWMODEL_SOURCE}/arms-scar-h.glb" AND
+   EXISTS "${BLOCK_VIEWMODEL_SOURCE}/arms-m4a1.glb" AND
+   EXISTS "${BLOCK_VIEWMODEL_SOURCE}/arms-msr.glb")
     set(BLOCK_HAVE_VIEWMODEL_ART TRUE)
 else()
     set(BLOCK_HAVE_VIEWMODEL_ART FALSE)
@@ -87,6 +91,10 @@ if(BLOCK_HAVE_VIEWMODEL_ART)
                 cook samples/99-the-block/assets/viewmodel --out "${BLOCK_VIEWMODEL_COOKED}"
         DEPENDS "${BLOCK_VIEWMODEL_SOURCE}/held-scar-h.glb"
                 "${BLOCK_VIEWMODEL_SOURCE}/held-m4a1.glb"
+                "${BLOCK_VIEWMODEL_SOURCE}/held-msr.glb"
+                "${BLOCK_VIEWMODEL_SOURCE}/arms-scar-h.glb"
+                "${BLOCK_VIEWMODEL_SOURCE}/arms-m4a1.glb"
+                "${BLOCK_VIEWMODEL_SOURCE}/arms-msr.glb"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "Cook play-only SCAR-H and M4A1 viewmodels"
         VERBATIM)

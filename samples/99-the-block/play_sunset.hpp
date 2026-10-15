@@ -35,6 +35,15 @@ inline constexpr float kSunElevation = 0.12f;
 // pitch keeps the disc inside the frame.
 inline constexpr float kViewYaw = -kPi * 0.5f;
 inline constexpr float kViewPitch = 0.04f;
+
+// A real optic's ocular is 90 mm from the eye. The default 100 mm near plane
+// clips that glass completely, even though its housing and second-camera feed draw.
+// Keep the common world/weapon projection, but give the PLAY rig room for the lens.
+inline void configure_camera(render::Camera& camera) noexcept {
+    camera.z_near = .02f;
+    camera.z_far = 3072.0f;
+}
+
 // Warm direct light, linear RGB.
 inline constexpr float kSunColor[3] = {1.0f, 0.66f, 0.36f};
 inline constexpr float kSunIntensity = 1.7f;

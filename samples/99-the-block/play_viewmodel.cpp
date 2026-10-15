@@ -16,7 +16,12 @@
 namespace rime::block_play {
 namespace {
 
-constexpr std::array<const char*, 2> kSources{"held-scar-h.glb", "held-m4a1.glb"};
+constexpr std::array<const char*, 6> kSources{"held-scar-h.glb",
+                                              "held-m4a1.glb",
+                                              "held-msr.glb",
+                                              "arms-scar-h.glb",
+                                              "arms-m4a1.glb",
+                                              "arms-msr.glb"};
 constexpr std::size_t kMaxDraws = 32; // SceneRenderer's first-person draw contract
 
 struct TextureRefs {
@@ -65,8 +70,8 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
     bridge_ = std::make_unique<render::GpuAssetBridge>(device, *server_);
     bridge_->set_catalog(*manifest_, cooked);
 
-    std::array<const assets::ManifestEntry*, 2> entries{};
-    std::array<assets::MeshAssetHandle, 2> requests{};
+    std::array<const assets::ManifestEntry*, 6> entries{};
+    std::array<assets::MeshAssetHandle, 6> requests{};
     for (std::size_t i = 0; i < entries.size(); ++i) {
         entries[i] = mesh_entry(*manifest_, kSources[i]);
         if (!entries[i]) {
@@ -79,7 +84,7 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
     server_->pump();
 
     std::unordered_set<std::uint64_t> expected_textures;
-    std::array<std::vector<PendingMaterial>, 2> pending;
+    std::array<std::vector<PendingMaterial>, 6> pending;
     bool valid_textures = true;
     const auto request_texture = [&](assets::AssetId id, assets::TextureAssetHandle& out) {
         if (!id.is_valid())
@@ -105,6 +110,25 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
         if (!meshes.contains(mesh_id))
             return false;
         ++resident_meshes_;
+        if (i >= 3) {
+            auto& model = models_[i - 3];
+            const auto* skeleton_entry =
+                manifest_->find_by_source(entries[i]->source_path + "#skeleton");
+            const auto skeleton_bytes =
+                skeleton_entry ? platform::read_file(cooked / skeleton_entry->cooked_file)
+                               : std::nullopt;
+            assets::AssetError error{};
+            const auto skeleton =
+                skeleton_bytes ? assets::read_skeleton(*skeleton_bytes, error) : std::nullopt;
+            if (!skeleton || !model.arms.initialize(*mesh, *skeleton)) {
+                std::fprintf(stderr, "99-the-block: invalid weighted arm rig %s\n", kSources[i]);
+                return false;
+            }
+            model.arm_mesh = mesh_id;
+            model.grips = model.arms.bind_wrists();
+            model.previous.resize(mesh->vertex_count);
+            model.last.resize(mesh->vertex_count);
+        }
         const auto& ranges = meshes.get(mesh_id).submeshes;
         if (ranges.size() != mesh->submeshes.size())
             return false;
@@ -135,10 +159,15 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             request_texture(material->occlusion_tex, p.textures.occlusion);
             request_texture(material->emissive_tex, p.textures.emissive);
             pending[i].push_back(p);
-            models_[i].parts.push_back(
-                {mesh_id, render::kInvalidMaterialId, range.first_index, range.index_count});
+            models_[i % 3].parts.push_back({mesh_id,
+                                            render::kInvalidMaterialId,
+                                            range.first_index,
+                                            range.index_count,
+                                            i >= 3});
         }
-        if (normal_mapped == 0 || metal_rough_mapped == 0) {
+        // The CC-BY MSR is a solid-material model; retain those source materials
+        // honestly. The other weapons and every arm still require their native maps.
+        if (i != 2 && (normal_mapped == 0 || metal_rough_mapped == 0)) {
             std::fprintf(
                 stderr, "99-the-block: %s needs real normal and metal-rough maps\n", kSources[i]);
             return false;
@@ -170,11 +199,46 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             desc.normal_texture = ready(p.textures.normal);
             desc.occlusion_texture = ready(p.textures.occlusion);
             desc.emissive_texture = ready(p.textures.emissive);
-            models_[i].parts[j].material = materials.add(desc);
+            const std::size_t part_offset = i >= 3 ? pending[i - 3].size() : 0;
+            models_[i % 3].parts[part_offset + j].material = materials.add(desc);
             ++resident_materials_;
         }
     }
     draws_.reserve(kMaxDraws);
+    deformations_.reserve(1);
+    // Ocular geometry participates in the SAME model depth and velocity passes as
+    // the housing. The optical pass shades this physical surface before main TAA.
+    render::CpuMesh lens;
+    constexpr unsigned segments = 64;
+    const core::Vec3 ocular{.14f, -.118f, -.085f};
+    constexpr float radius = .026f;
+    lens.vertices.push_back({ocular.x, ocular.y, ocular.z, 0, 0, 1, .5f, .5f});
+    for (unsigned i = 0; i <= segments; ++i) {
+        const float angle = static_cast<float>(i) * 6.28318530718f / segments;
+        const float x = std::cos(angle), y = std::sin(angle);
+        lens.vertices.push_back({ocular.x + radius * x,
+                                 ocular.y + radius * y,
+                                 ocular.z,
+                                 0,
+                                 0,
+                                 1,
+                                 .5f + .5f * x,
+                                 .5f + .5f * y});
+        if (i > 0)
+            lens.indices.insert(lens.indices.end(), {0, i, i + 1});
+    }
+    lens_.mesh = meshes.add(lens, "MSR PM II ocular");
+    if (!meshes.contains(lens_.mesh))
+        return false;
+    ++resident_meshes_;
+    render::PbrMaterialDesc glass{};
+    glass.base_color[0] = .012f;
+    glass.base_color[1] = .018f;
+    glass.base_color[2] = .02f;
+    glass.roughness = .12f;
+    lens_.material = materials.add(glass);
+    ++resident_materials_;
+    lens_.index_count = static_cast<std::uint32_t>(lens.indices.size());
     return true;
 }
 
@@ -184,6 +248,9 @@ void PlayViewmodel::select(Weapon weapon) noexcept {
         ++identity_epoch_;
         gait_phase_ = 0.0f;
         recoil_ = 0.0f;
+        aim_ = 0.0f;
+        for (auto& model : models_)
+            model.history = false;
     }
 }
 
@@ -196,6 +263,8 @@ void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fir
     if (fired)
         recoil_ = std::min(recoil_ + 0.012f, 0.035f);
     recoil_ *= std::exp(-14.0f * dt);
+    const float target_aim = aiming_ && selected_ == Weapon::Sniper ? 1.0f : 0.0f;
+    aim_ += (target_aim - aim_) * (1.0f - std::exp(-16.0f * dt));
 }
 
 void PlayViewmodel::observe_camera(core::Vec3 eye) noexcept {
@@ -205,6 +274,8 @@ void PlayViewmodel::observe_camera(core::Vec3 eye) noexcept {
         ++identity_epoch_;
         gait_phase_ = 0.0f;
         recoil_ = 0.0f;
+        for (auto& model : models_)
+            model.history = false;
     }
     previous_eye_ = eye;
     have_eye_ = true;
@@ -216,21 +287,44 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     local.translation = {0.006f * std::sin(gait_phase_) * bob_amount_,
                          0.008f * std::sin(2.0f * gait_phase_) * bob_amount_ - recoil_,
                          recoil_ * 0.5f};
-    const core::Mat4 model = core::to_matrix(camera) * core::to_matrix(local);
-    for (const auto& part : models_[static_cast<unsigned>(selected_)].parts) {
+    const float pose_amount = 1.0f - aim_ * .85f;
+    local.translation = local.translation * pose_amount;
+    local.translation = local.translation + core::Vec3{-.14f, .118f, -.005f} * aim_;
+    local.rotation = core::quat_from_euler(
+        recoil_ * .8f, .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount, 0.0f);
+    const core::Mat4 camera_matrix = core::to_matrix(camera);
+    const core::Mat4 weapon_local = core::to_matrix(local);
+    const core::Mat4 model = camera_matrix * weapon_local;
+    auto& selected = models_[static_cast<unsigned>(selected_)];
+    const auto vertices = selected.arms.solve(
+        weapon_local, selected.grips, {{{-.4f, -.65f, -.25f}, {.5f, -.65f, -.25f}}});
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+        const core::Vec3 current{vertices[i].px, vertices[i].py, vertices[i].pz};
+        selected.previous[i] = selected.history ? selected.last[i] : current;
+        selected.last[i] = current;
+    }
+    selected.history = true;
+    deformations_.clear();
+    deformations_.push_back({selected.arm_mesh, vertices, selected.previous});
+    for (const auto& part : selected.parts) {
         render::DrawItem draw{};
         draw.mesh = part.mesh;
         draw.material = part.material;
-        draw.model = model;
+        draw.model = part.arm ? camera_matrix : model;
         draw.first_index = part.first_index;
         draw.index_count = part.index_count;
         draws_.push_back(draw);
+    }
+    if (scoped()) {
+        lens_.model = model;
+        draws_.push_back(lens_);
+        optic_world_ = model * core::mat4_translation({.14f, -.118f, -.085f});
     }
     return draws_;
 }
 
 std::size_t PlayViewmodel::selected_draw_count() const noexcept {
-    return models_[static_cast<unsigned>(selected_)].parts.size();
+    return models_[static_cast<unsigned>(selected_)].parts.size() + (scoped() ? 1 : 0);
 }
 
 render::MeshId PlayViewmodel::selected_mesh() const noexcept {
