@@ -127,10 +127,12 @@ DdgiStats step(rhi::Device& device,
                DdgiProbes& ddgi,
                core::Vec3 camera_pos,
                const DdgiLightingInputs& lighting,
-               const LightingSettings& settings) {
+               const LightingSettings& settings,
+               bool update_sdf = true) {
     RenderGraph graph(device);
     graph.reset();
-    clipmap.add(graph, camera_pos);
+    if (update_sdf)
+        clipmap.add(graph, camera_pos);
     (void)ddgi.add(graph, clipmap, camera_pos, lighting, settings); // m10.5b: now returns a
                                                                     // DdgiBinding these
                                                                     // compute-only tests don't need
@@ -588,4 +590,100 @@ TEST_CASE("ddgi: invalidate() fast-tracks a probe's hysteresis after a destructi
     // State the contrast directly, not just each against its own initial value: the fast rig ends
     // up markedly darker than the plain rig, from the SAME starting brightness.
     CHECK(after_fast < after_plain * 0.3f);
+}
+
+TEST_CASE("ddgi: stable world quadrature retraces at zero hysteresis and survives atlas recenter") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("Vulkan required for stable DDGI quadrature proof");
+        return;
+    }
+    LightingSettings settings{};
+    settings.ddgi_probe_count_x = settings.ddgi_probe_count_y = settings.ddgi_probe_count_z = 6;
+    settings.ddgi_probe_spacing = 1.0f;
+    settings.ddgi_rays_per_probe = 64;
+    settings.ddgi_hysteresis = 0.0f;
+    settings.ddgi_stable_rays = true;
+    settings.ddgi_albedo = 0.6f;
+    DdgiLightingInputs sunlight{};
+    sunlight.has_sun = true;
+    sunlight.sun_direction = {0, -1, 0};
+    sunlight.sun_radiance[0] = sunlight.sun_radiance[1] = sunlight.sun_radiance[2] = 3.0f;
+    sunlight.sky_radiance[0] = sunlight.sky_radiance[1] = sunlight.sky_radiance[2] = 0.0f;
+    SdfClipmap clipmap(*device);
+    DdgiProbes stable(*device), rotating(*device);
+    compose_open_floor(clipmap);
+
+    const auto world_tile = [&](const DdgiProbes& probes) {
+        const auto image = read_irradiance(*device, probes);
+        const auto origin = probes.origin();
+        // Follow the SAME WORLD point (0,0,0), not its changing atlas slot. Copy the complete
+        // real tile, including its border, so no convenient directional texel hides ray drift.
+        const auto x = static_cast<std::uint32_t>(std::lround(-origin.x));
+        const auto y = static_cast<std::uint32_t>(std::lround(-origin.y));
+        const auto z = static_cast<std::uint32_t>(std::lround(-origin.z));
+        REQUIRE(x < 6);
+        REQUIRE(y < 6);
+        REQUIRE(z < 6);
+        const auto tile =
+            ddgi_atlas_tile(x + 6 * (y + 6 * z), image.width / kDdgiIrradianceTileSize);
+        std::vector<float> values;
+        for (std::uint32_t row = 0; row < kDdgiIrradianceTileSize; ++row)
+            for (std::uint32_t col = 0; col < kDdgiIrradianceTileSize; ++col) {
+                const auto pixel = (tile.row * kDdgiIrradianceTileSize + row) * image.width +
+                                   tile.col * kDdgiIrradianceTileSize + col;
+                for (unsigned channel = 0; channel < 3; ++channel)
+                    values.push_back(image.rgb[pixel * 3 + channel]);
+            }
+        return values;
+    };
+    const auto max_delta = [](const auto& a, const auto& b) {
+        float result = 0.0f;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            result = std::max(result, std::abs(a[i] - b[i]));
+        return result;
+    };
+    const auto first_stats = step(*device, clipmap, stable, {}, sunlight, settings);
+    REQUIRE(first_stats.probes_updated == 216);
+    const auto first = world_tile(stable);
+    REQUIRE(*std::max_element(first.begin(), first.end()) > 0.05f);
+    for (unsigned frame = 0; frame < 3; ++frame) {
+        const auto stats = step(*device, clipmap, stable, {}, sunlight, settings, false);
+        REQUIRE(stats.probes_updated == 216);
+        REQUIRE(stats.newly_primed == 0);
+        CHECK(world_tile(stable) == first);
+    }
+
+    // Sensitivity: the same live scene, 64 rays and h=0 DOES express quadrature noise when
+    // temporal rotation is enabled. A noise-free scene or an accidental h=1 cannot pass this.
+    LightingSettings stochastic = settings;
+    stochastic.ddgi_stable_rays = false;
+    (void)step(*device, clipmap, rotating, {}, sunlight, stochastic, false);
+    const auto random_first = world_tile(rotating);
+    float rotating_delta = 0.0f;
+    for (unsigned frame = 0; frame < 3; ++frame) {
+        (void)step(*device, clipmap, rotating, {}, sunlight, stochastic, false);
+        rotating_delta = std::max(rotating_delta, max_delta(random_first, world_tile(rotating)));
+    }
+    REQUIRE(rotating_delta > 0.001f);
+
+    // Freeze the COMPOSED SDF, not the GI: every probe is freshly traced with h=0 after the
+    // lattice moves. A hash keyed to atlas slot instead of world position fails this comparison.
+    const auto before_origin = stable.origin();
+    const auto shifted = step(*device, clipmap, stable, {1, 0, 0}, sunlight, settings, false);
+    REQUIRE(shifted.grid_shifted);
+    REQUIRE(shifted.probes_updated == 216);
+    REQUIRE(shifted.kept_history == 180);
+    REQUIRE(stable.origin().x == before_origin.x + 1.0f);
+    CHECK(world_tile(stable) == first);
+    DdgiLightingInputs dark{};
+    dark.sky_radiance[0] = dark.sky_radiance[1] = dark.sky_radiance[2] = 0.0f;
+    (void)step(*device, clipmap, stable, {1, 0, 0}, dark, settings, false);
+    const auto unlit = world_tile(stable);
+    CHECK(*std::max_element(unlit.begin(), unlit.end()) == 0.0f);
+    (void)step(*device, clipmap, stable, {1, 0, 0}, sunlight, settings, false);
+    CHECK(world_tile(stable) == first);
+    MESSAGE("stable quadrature: stable tile delta=0; rotating sensitivity="
+            << rotating_delta << "; sun removal=" << max_delta(first, unlit));
 }
