@@ -227,6 +227,42 @@ TEST_CASE(
     CHECK(dw.instance_part_count(inst2) == 3);
 }
 
+TEST_CASE("explicitly woken settled debris cannot freeze during its old linger window") {
+    physics::PhysicsWorld pw;
+    destruction::DestructionWorld dw;
+    destruction::LifecycleConfig cfg;
+    cfg.enabled = true;
+    cfg.freeze_delay_ticks = 8;
+    cfg.max_live_debris = 1000;
+    dw.configure_lifecycle(cfg);
+    const auto asset = make_grid(1, 1, {.25f, .25f, .15f}, 1000, 1);
+    const auto pattern = dw.register_pattern(asset, pw);
+    const auto instance = dw.spawn(pattern, {}, pw);
+    add_ground(pw);
+    dw.apply_damage(instance, {.0f, .25f, .0f}, .1f, 10, {});
+    dw.update(pw);
+    REQUIRE(dw.debris_count() == 1);
+    settle(dw, pw);
+    const auto body = dw.debris_body(0);
+    REQUIRE(pw.is_alive(body));
+    REQUIRE(pw.is_asleep(body));
+    // A public state write wakes before step() snapshots the island. There is deliberately no
+    // Woke event to repair destruction's stale Settled label, and the old expiry still arrives.
+    physics::BodyState state{};
+    REQUIRE(pw.get_body_state(body, state));
+    state.position.y += 10;
+    REQUIRE(pw.set_body_state(body, state));
+    for (std::uint32_t i = 0; i < cfg.freeze_delay_ticks + 2; ++i) {
+        pw.step(kDt);
+        dw.update(pw);
+    }
+    CHECK(pw.is_alive(body));
+    CHECK_FALSE(pw.is_asleep(body));
+    REQUIRE(pw.get_body_state(body, state));
+    CHECK(state.position.y > 8);
+    CHECK(state.linear_velocity.y < -1);
+}
+
 TEST_CASE("M8.5 body swap: repeated fracture frees the old remainder compounds (bounded store)") {
     // A tall 1×N column: killing the current TOP part each update keeps the base standing and swaps
     // the body every tick, so from the 2nd swap on each swap frees the PRIOR remainder compound. A

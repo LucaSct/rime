@@ -118,6 +118,25 @@ void DestructionWorld::Impl::freeze_debris(std::size_t debris_index, physics::Ph
 void DestructionWorld::Impl::enforce_debris_budget(physics::PhysicsWorld& world) {
     const std::uint64_t now = tick;
 
+    // Explicit wakes (including removal of a supporting collider during this destruction
+    // update) need not emit a physics Woke event. Reconcile the current state at the reclamation
+    // boundary; an old Settled label must never freeze a body that has started falling again.
+    //
+    // Why this is needed in ONE direction only, which is the first thing a reader asks.
+    // PhysicsWorld snapshots `asleep` at the TOP of step() and diffs it at the tail, so it reports
+    // exactly the transitions that step caused. Sleep is only ever set inside step(), before that
+    // diff, so a Slept event is guaranteed and Falling→Settled can stay purely event-driven --
+    // which it must, because that edge also emits the canonical DebrisSettled event the replication
+    // stream carries (ADR-0029 §3), and inventing it from state would desync clients. Waking, by
+    // contrast, also happens BETWEEN steps -- destroy_body's neighbour wake, wake_body,
+    // set_body_state -- and those writes land before the snapshot is taken, so they are invisible
+    // to the diff forever, not merely late. That blind spot is why this edge reads state instead.
+    for (Debris& rec : debris) {
+        if (rec.phase == DebrisPhase::Settled && world.is_alive(rec.body) &&
+            !world.is_asleep(rec.body))
+            rec.phase = DebrisPhase::Falling;
+    }
+
     // 1) Linger → freeze. Any SETTLED debris that has rested at least freeze_delay_ticks is
     //    reclaimed. Ascending roster order keeps it deterministic; a still-Falling (or already
     //    Frozen) debris is skipped — freezing a moving body would pop it out of the air.
