@@ -141,14 +141,23 @@ TEST_CASE("first-person overlay loads world HDR and is off unless explicitly sup
     held.model = core::mat4_translation({0.0f, 0.0f, -3.0f});
     held.first_index = 0;
     held.index_count = static_cast<std::uint32_t>(meshes.get(slab).index_count);
-    auto render = [&](bool overlay) {
+    auto render = [&](bool overlay, bool sight = false) {
         RenderGraph graph(*device);
         graph.reset();
         if (overlay)
             renderer.set_first_person_draws(std::span<const DrawItem>(&held, 1), 1);
+        if (sight) {
+            ScopeLensPass::Params params{};
+            params.unmagnified = true;
+            params.optic_from_world = core::inverse(held.model);
+            params.reticle_strength = 0;
+            params.reflection_strength = 0;
+            renderer.set_first_person_scope({}, held, params);
+        }
         const auto out = renderer.render(graph, world, {kSize, kSize}, true);
         CHECK(has_pass(graph, "first-person-forward") == overlay);
         CHECK(has_pass(graph, "first-person-combine-depth") == overlay);
+        CHECK(has_pass(graph, "scope-lens") == sight);
         graph.export_texture(out.hdr);
         auto cmd = device->begin_commands();
         graph.execute(*cmd);
@@ -172,6 +181,14 @@ TEST_CASE("first-person overlay loads world HDR and is off unless explicitly sup
           doctest::Approx(channel(only_world, 2, 32, 0)).epsilon(0.02));
     CHECK(channel(off_again, 32, 32, 0) > channel(off_again, 32, 32, 2) + 0.1f);
     CHECK(channel(with_ssr, 32, 32, 2) > channel(with_ssr, 32, 32, 0) + 0.1f);
+    // The same opaque blue mesh now serves as glass: the engine must preserve the red world
+    // BEFORE first-person shading, rather than feeding blue weapon colour back into itself.
+    const auto through_sight = render(true, true);
+    CHECK(channel(through_sight, 32, 32, 0) > channel(through_sight, 32, 32, 2) + .1f);
+    CHECK(channel(through_sight, 2, 32, 0) ==
+          doctest::Approx(channel(with_ssr, 2, 32, 0)).epsilon(.02));
+    const auto opaque_again = render(true);
+    CHECK(channel(opaque_again, 32, 32, 2) > channel(opaque_again, 32, 32, 0) + .1f);
 }
 
 TEST_CASE("first-person velocity cancels camera attachment motion but detects pose change") {

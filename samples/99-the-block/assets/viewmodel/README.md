@@ -46,5 +46,13 @@ images and says so.
 The MSR source has solid materials and no texture maps; the preparation keeps those materials.
 Its original opaque glass is replaced by a physical lens with the separate camera's HDR image,
 eye-box blackout, reticle and Fresnel-weighted sky reflections. This is an optical approximation,
-not a simulation of every glass element. Scope rendering adds a second scene view only while the
-MSR is selected. Pressing right mouse in drag-look mode keeps looking; use `Q` to aim there.
+not a simulation of every glass element. Scope rendering adds a second scene view only when its
+exit pupil can transmit to the eye. At hip fire the same glass/reflection pass uses a black input.
+Hold right mouse to aim while drag-look remains available; `Q` is another held aim control.
+
+The camera represents the right eye. Each measured stock seats on a fixed right shoulder with
+a bladed arm frame; wrist constraints still follow bob, recoil and the full aim blend. Both M4
+sights define its calibrated sight line. The SCAR's opaque panes are separated from their shared
+housing material; its original near glass masks a transparent 1× parent-world image and collimated
+red ring. This path needs no second world camera. See
+[ADR-0086](../../../../docs/adr/0086-play-sight-calibration-and-render-graph-scale.md).

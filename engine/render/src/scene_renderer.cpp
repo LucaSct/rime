@@ -433,6 +433,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         first_person_draws_ = {};
         first_person_deformations_ = {};
         scope_hdr_ = {};
+        scope_requested_ = false;
         terrain_pass_ = nullptr;
         terrain_draws_ = {};
         if (!warned_no_camera_) {
@@ -1088,6 +1089,15 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         sky_.note_skyview_state(rhi::ResourceState::ShaderRead);
     }
 
+    // Preserve world radiance BEFORE first-person colour overwrites it. A 1x collimated sight
+    // reads this snapshot through its own indexed glass/depth; sampling the attachment being
+    // written would be a feedback hazard. No extra world, lighting, or visibility pass is needed.
+    if (scope_requested_ && scope_params_.unmagnified && first_person_active) {
+        if (!sight_world_copy_)
+            sight_world_copy_ = std::make_unique<PresentPass>(device_, kHdrFormat);
+        scope_hdr_ = graph.create_texture({extent, kHdrFormat, "sight-world-radiance"});
+        sight_world_copy_->add(graph, tonemap_src, scope_hdr_);
+    }
     RGTexture taa_depth = depth;
     if (first_person_active) {
         constexpr std::size_t kMaxFirstPersonDraws = 32;
@@ -1328,6 +1338,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     first_person_draws_ = {}; // the caller's spans are borrowed only through this declaration
     first_person_deformations_ = {};
     scope_hdr_ = {};
+    scope_requested_ = false;
 
     // TAA resolve (ADR-0078 step 1d): average the jittered frames over time. It runs HERE, on
     // radiance, after every pass that adds light to the frame (SSR included) and before the

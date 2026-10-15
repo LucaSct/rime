@@ -169,6 +169,50 @@ TEST_CASE("scope image changes physical lens pixels while parent exterior remain
     CHECK(channel(blocked, 37, 32, 0) > 0.5f);
 }
 
+TEST_CASE("unmagnified sight preserves screen-space landmarks and remains transparent off-axis") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (test::vulkan_required())
+            FAIL("Vulkan required for sight glass proof");
+        return;
+    }
+    LensFixture fixture(*device);
+    rhi::TextureDesc desc{};
+    desc.extent = {kSize, kSize};
+    desc.format = rhi::Format::RGBA8Unorm;
+    desc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    fixture.optical_input = device->create_texture(desc);
+    std::array<std::uint8_t, kSize * kSize * 4> pixels{};
+    for (unsigned y = 0; y < kSize; ++y)
+        for (unsigned x = 0; x < kSize; ++x) {
+            const auto i = (y * kSize + x) * 4;
+            pixels[i] = static_cast<std::uint8_t>(x * 4);
+            pixels[i + 1] = static_cast<std::uint8_t>(y * 4);
+            pixels[i + 2] = 64;
+            pixels[i + 3] = 255;
+        }
+    device->write_texture(fixture.optical_input, pixels.data(), pixels.size());
+    fixture.params.unmagnified = true;
+    fixture.params.reflection_strength = 0;
+    fixture.params.main_eye.x = .3f; // a magnifying scope's exit pupil is entirely closed here
+    const auto clear = fixture.render({});
+    for (const auto x : {29u, 37u}) {
+        // Fresnel is a scalar: channel ratios remove it and expose a shifted/flipped/scaled
+        // transmission image. This asymmetric gradient can detect all three errors.
+        const float r_over_b = channel(clear, x, 32, 0) / channel(clear, x, 32, 2);
+        const float g_over_b = channel(clear, x, 32, 1) / channel(clear, x, 32, 2);
+        CHECK(r_over_b == doctest::Approx((x / 16.0f) * .965f / .975f).epsilon(.01));
+        CHECK(g_over_b == doctest::Approx(2.0f * .985f / .975f).epsilon(.01));
+    }
+    CHECK(channel(clear, 0, 0, 0) == .125f);
+    const auto blocked = fixture.render({}, true);
+    CHECK(channel(blocked, 25, 32, 0) == .125f);
+    fixture.params.unmagnified = false;
+    const auto scope = fixture.render({});
+    CHECK(channel(scope, 37, 32, 2) == 0);
+    device->destroy(fixture.optical_input);
+}
+
 TEST_CASE("scope glass reflection responds to control, normal and eye; eye box blacks out") {
     auto device = rhi::create_device({});
     if (!device) {

@@ -348,13 +348,18 @@ inline constexpr std::uint32_t kMaxColorAttachments = 8;
 // warned once to the log and said nothing in the committed artifact, so no `docs/perf/` file has
 // ever contained the block's full GPU frame.
 //
-// 256 (128 timed passes) is the raise, not 64 (32) doubled to just clear today's frame: m17.7's
+// The first raise was 256 (128 timed passes), not 64 (32) doubled to clear that frame: m17.7's
 // sky lighting, m17.8's ground and m17.9's shadow work all add passes, and a ceiling re-crossed
 // mid-milestone would silently un-attribute the frame again exactly when the numbers start being
-// spent. The cost is a 2 KB query pool per command buffer and a `vkCmdResetQueryPool` over 256
-// slots once per encoder; the per-frame readback is sized by the passes actually timed, not by
+// spent. That cost a 2 KB query pool and a `vkCmdResetQueryPool` over 256
+// slots once per encoder; per-frame readback is sized by the passes actually timed, not by
 // this constant, so a small frame pays nothing for the headroom.
-inline constexpr std::uint32_t kMaxTimestamps = 256;
+// The streamed play scene now declares 324 passes for one view and 644 for the independent
+// scope plus parent (RTX 3060 diagnostic, 2026-10-15). Most are resident terrain tiles. Reserve
+// 1,024 pass pairs so BOTH complete views fit; 128 pairs truncated before even the first view
+// finished and made its GPU cost look almost free. This is 16 KB of query results per encoder;
+// readback still uses only the written prefix. The overflow warning remains for larger graphs.
+inline constexpr std::uint32_t kMaxTimestamps = 2048;
 
 // What a texture is being used AS at a point in the frame — the RHI's abstract spelling of
 // Vulkan's image layout + stage/access pairs (M5.4, ADR-0019). The render graph derives one

@@ -166,6 +166,7 @@ void RenderGraph::reset() {
     frame_pushed_ = 0;
 
     passes_.clear();
+    pass_names_.clear();
     resources_.clear();
     order_.clear();
     timed_passes_ = 0;
@@ -315,39 +316,30 @@ void RenderGraph::add_pass_common(std::string_view name,
     //
     // The real fix is upstream — callers now pass names that say what the work is (`csm-cascade-2`)
     // — and this is the backstop that stops the CLASS from coming back the next time a pass is
-    // reused. O(passes²) in the declare phase, which is ~20 passes and 0.3 ms; the alternative (a
-    // hash set) would cost an allocation to save nothing measurable.
+    // reused. The original linear search restarted at suffix #1 for EACH repeat. Streaming
+    // terrain declares 304 identically named passes per view: two views made this cubic search
+    // consume ~37 ms in the parent declaration alone. Index exact names and remember each base's
+    // first unchecked suffix instead. Names only accumulate until reset(), so an earlier occupied
+    // suffix cannot become free: this preserves the original smallest-free-name rule.
     // The declared exception: a caller that set `fold_repeats` is saying the repeat is deliberate
     // and its measurement is the SUM (see ComputePassDesc::fold_repeats). Both sides must agree —
     // folding a repeat onto a pass that did NOT ask for it would merge unrelated work under one
     // key, which is the bug this whole block exists to prevent, so that case still uniquifies.
-    const auto folds_onto = [this](const std::string& candidate) {
-        for (const Pass& existing : passes_) {
-            if (existing.name == candidate)
-                return existing.fold_repeats;
-        }
-        return false;
-    };
-    const auto taken = [this](const std::string& candidate) {
-        for (const Pass& existing : passes_) {
-            if (existing.name == candidate)
-                return true;
-        }
-        return false;
-    };
-    if (fold_repeats && folds_onto(p.name)) {
-        passes_.push_back(std::move(p));
-        return;
-    }
-    if (taken(p.name)) {
+    const auto [existing, inserted] =
+        pass_names_.try_emplace(p.name, PassNameState{fold_repeats, 1});
+    if (!inserted && !(fold_repeats && existing->second.fold_repeats)) {
         // Bump until nothing answers to it. Testing the CANDIDATE rather than counting prefix
         // matches is what makes this airtight: counting would hand out `a#1` twice if some caller
         // had already declared a literal `a#1` by hand.
         const std::string base = p.name;
-        for (std::uint32_t n = 1;; ++n) {
+        auto& next_suffix = existing->second.next_suffix;
+        for (std::size_t n = next_suffix;; ++n) {
             p.name = base + '#' + std::to_string(n);
-            if (!taken(p.name))
+            if (!pass_names_.contains(p.name)) {
+                next_suffix = n + 1;
+                pass_names_.emplace(p.name, PassNameState{fold_repeats, 1});
                 break;
+            }
         }
     }
 
@@ -640,8 +632,8 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
         Pass& pass = passes_[pi];
         cmd.begin_debug_label(pass.name);
 
-        // Timestamps bracket every pass while slots last (64 slots = 32 timed passes; a bigger
-        // frame times its first 32 and says so once).
+        // Timestamp pairs bracket every pass while slots last. A larger frame still executes
+        // in full and warns that its timing prefix is incomplete; rendering is never truncated.
         const bool timed = timed_passes_ < max_timed_passes();
         if (timed) {
             cmd.write_timestamp(timed_passes_ * 2);

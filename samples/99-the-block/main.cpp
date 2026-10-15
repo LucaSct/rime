@@ -1587,6 +1587,21 @@ std::size_t detonate(Session& s, std::uint32_t building, const Charge& charge) {
     return slabs.size();
 }
 
+render::ExtractedCamera optical_camera(const core::Mat4& optic_world) {
+    render::ExtractedCamera camera{};
+    camera.found = true;
+    camera.view = core::inverse(optic_world);
+    const auto position = core::transform_point(optic_world, {});
+    camera.position[0] = position.x;
+    camera.position[1] = position.y;
+    camera.position[2] = position.z;
+    // Feed FOV accounts for the physical aperture and eye relief, not just parent focal ratio.
+    camera.fov_y = block_play::PlayViewmodel::scope_fov_y();
+    camera.z_near = .04f;
+    camera.z_far = 3072.0f;
+    return camera;
+}
+
 // ── The visuals ─────────────────────────────────────────────────────────────────────────────────
 //
 // Owned separately from the session because they need a DEVICE and the simulation does not. A host
@@ -1791,8 +1806,10 @@ struct Demo {
     bool streamed_world = false;
     bool environment_enabled = false; // the playable art layer, also exercised without weapon art
     bool development_hud = true;
+    bool player_help = false;
     bool viewmodel_enabled = false;  // explicit --play/--viewmodel-smoke only
     float scope_transmission = 1.0f; // real optical-input sensitivity control in the art proof
+    std::uint64_t scope_feed_frames = 0;
 
     // ── The cooked catalog (m17.8b) ─────────────────────────────────────────────────────────────
     // Held HERE, not in `Visuals`, because `GpuAssetBridge::set_catalog` keeps a REFERENCE to the
@@ -2042,6 +2059,51 @@ struct Demo {
         return true;
     }
 
+    void ensure_scope_renderer() {
+        if (!visuals->scope_renderer) {
+            visuals->scope_renderer = std::make_unique<render::SceneRenderer>(
+                *app.device(), visuals->meshes, visuals->materials);
+            visuals->scope_renderer->set_frames_in_flight(app.frames_in_flight());
+            visuals->seed_field(*visuals->scope_renderer, session.client.world);
+        }
+    }
+
+    bool warm_scope_view() {
+        // Loading work belongs before interactive input. Use the SAME graph cache/rings as play,
+        // with blocking submissions before any presented frame exists. A throwaway graph would
+        // free its scratch textures and leave the first aim paying their allocation cost again.
+        const auto eye = session.client.camera_transform();
+        if (play_world && !play_world->recenter(eye.translation))
+            return false;
+        ensure_scope_renderer();
+        auto& optical = *visuals->scope_renderer;
+        optical.set_lighting(visuals->renderer.lighting());
+        optical.set_sky(visuals->renderer.sky());
+        const bool taa = optical.taa_resolve_enabled();
+        optical.set_taa_resolve_enabled(false);
+        const auto camera = optical_camera(
+            core::to_matrix(eye) *
+            core::mat4_translation({0, 0, -block_play::PlayViewmodel::kScopeEyeRelief}));
+        auto& graph = *app.graph();
+        for (unsigned i = 0; i < 3; ++i) {
+            graph.reset();
+            if (play_world)
+                optical.set_terrain_draws(play_world->pass(), play_world->draws());
+            const auto output =
+                optical.render(graph, session.client.world, {512, 512}, true, &camera);
+            graph.export_texture(output.hdr);
+            graph.export_texture(output.ldr);
+            auto commands = app.device()->begin_commands();
+            graph.execute(*commands);
+            app.device()->submit_blocking(*commands);
+            if (play_world)
+                play_world->mark_drawn();
+        }
+        // Warm resources, not a stale aiming image: first actual ADS starts with no TAA history.
+        optical.set_taa_resolve_enabled(taa);
+        return true;
+    }
+
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
@@ -2186,41 +2248,56 @@ struct Demo {
             if (viewmodel->scoped()) {
                 // Each optical view owns its history. The main camera is never mutated,
                 // and both views read the same replicated world and streamed terrain.
-                if (!visuals->scope_renderer) {
-                    visuals->scope_renderer = std::make_unique<render::SceneRenderer>(
-                        *ctx.device, visuals->meshes, visuals->materials);
-                    visuals->scope_renderer->set_frames_in_flight(app.frames_in_flight());
-                    visuals->seed_field(*visuals->scope_renderer, world);
-                }
-                auto& optical = *visuals->scope_renderer;
-                optical.set_lighting(visuals->renderer.lighting());
-                optical.set_sky(visuals->renderer.sky());
-                if (play_world)
-                    optical.set_terrain_draws(play_world->pass(), play_world->draws());
+                const bool feed_visible = viewmodel->scope_feed_visible(eye);
+                if (feed_visible)
+                    ensure_scope_renderer();
                 const core::Mat4 optic_world = viewmodel->optic_world();
-                render::ExtractedCamera camera{};
-                camera.found = true;
-                camera.view = core::inverse(optic_world);
-                const auto position = core::transform_point(optic_world, {});
-                camera.position[0] = position.x;
-                camera.position[1] = position.y;
-                camera.position[2] = position.z;
-                // Fit a fixed 5x angular image into the physical ocular at its ADS eye relief.
-                // The feed's focal ratio alone is insufficient because the lens fills only part
-                // of the parent viewport. The parent projection remains untouched.
-                camera.fov_y = block_play::PlayViewmodel::scope_fov_y();
-                camera.z_near = .04f;
-                camera.z_far = 3072.0f;
-                const auto scoped = optical.render(*ctx.graph, world, {512, 512}, true, &camera);
-                visuals->last_scope_ldr = scoped.ldr;
+                const auto camera = optical_camera(optic_world);
+                render::RGTexture scope_hdr;
+                core::Mat4 optical_view_proj{};
+                visuals->last_scope_ldr = {};
+                if (feed_visible) {
+                    auto& optical = *visuals->scope_renderer;
+                    optical.set_lighting(visuals->renderer.lighting());
+                    optical.set_sky(visuals->renderer.sky());
+                    if (play_world)
+                        optical.set_terrain_draws(play_world->pass(), play_world->draws());
+                    const auto scoped =
+                        optical.render(*ctx.graph, world, {512, 512}, true, &camera);
+                    scope_hdr = scoped.hdr;
+                    visuals->last_scope_ldr = scoped.ldr;
+                    optical_view_proj = optical.view_proj_unjittered();
+                    ++scope_feed_frames;
+                } else {
+                    // Keep the SAME physical glass/reflection pass when the eye cannot see
+                    // through the pupil. Its transmitted term is identically zero, so a 1x1
+                    // black input replaces an otherwise invisible full second world render.
+                    scope_hdr = ctx.graph->create_texture(
+                        {{1, 1}, render::kHdrFormat, "scope-closed-pupil"});
+                    const render::RGColorAttachment color[] = {
+                        {scope_hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0, 0, 0, 0}}};
+                    render::RenderGraph::RasterPassDesc desc{};
+                    desc.colors = color;
+                    ctx.graph->add_raster_pass(
+                        "scope-closed-pupil", desc, [](rhi::CommandBuffer&) {});
+                }
                 render::ScopeLensPass::Params params{};
                 params.optic_from_world = core::inverse(optic_world);
-                params.optical_view_proj = optical.view_proj_unjittered();
+                params.optical_view_proj = optical_view_proj;
                 params.optical_tan_half_fov = std::tan(camera.fov_y * .5f);
                 params.lens_radius = block_play::PlayViewmodel::kScopeLensRadius;
                 params.eye_relief = block_play::PlayViewmodel::kScopeEyeRelief;
+                params.eye_box_radius = block_play::PlayViewmodel::kScopeEyeBoxRadius;
+                params.eye_relief_tolerance = block_play::PlayViewmodel::kScopeEyeReliefTolerance;
                 params.intensity = scope_transmission;
-                visuals->renderer.set_first_person_scope(scoped.hdr, viewmodel->lens(), params);
+                visuals->renderer.set_first_person_scope(scope_hdr, viewmodel->lens(), params);
+            } else if (viewmodel->selected() == block_play::PlayViewmodel::Weapon::Scar) {
+                render::ScopeLensPass::Params params{};
+                params.unmagnified = true;
+                params.optic_from_world = core::inverse(viewmodel->optic_world());
+                params.lens_radius = .026f;
+                params.intensity = scope_transmission;
+                visuals->renderer.set_first_person_scope({}, viewmodel->lens(), params);
             }
         }
         visuals->renderer.reset_cull_stats();
@@ -2243,10 +2320,19 @@ struct Demo {
         hud.begin(ctx.extent);
         if (!development_hud)
             return;
-        if (viewmodel_enabled && viewmodel && viewmodel->scoped() &&
-            viewmodel->aim_fraction() > .5f)
-            return; // keep the optic and reticle clear of the development statistics panel
+        if (viewmodel_enabled && viewmodel && viewmodel->aim_fraction() > .5f)
+            return; // keep every aiming sight clear of the development statistics panel
 
+        if (player_help && viewmodel) {
+            constexpr std::array names{"1 SCAR-H | RMB: holographic sight | LMB: fire",
+                                       "2 M4A1 | RMB: iron sights | LMB: fire",
+                                       "3 MSR / PM II | hold RMB: 5x scope | LMB: fire"};
+            hud.text(st::kPadding,
+                     static_cast<float>(ctx.extent.height) - 24.0f,
+                     names[static_cast<unsigned>(viewmodel->selected())],
+                     st::kAccent,
+                     14.0f);
+        }
         constexpr float kW = 300.0f;
         const float h = st::kPadding * 2.0f + st::kLineHeight * 7.4f;
         hud.panel(st::kPadding, st::kPadding, kW, h);
@@ -4046,6 +4132,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
     for (int i = 0; i < 30; ++i)
         demo.step_sim({}); // replicate/seed the local camera
+    if (!demo.warm_scope_view())
+        return 1;
 
     bool okay = true;
     const auto check = [&](bool condition, const char* label) {
@@ -4054,6 +4142,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             okay = false;
         }
     };
+    check(demo.visuals->scope_renderer && !demo.visuals->scope_renderer->taa_history_allocated(),
+          "scope loading primes resources without retaining a stale aiming image");
     const auto capture = [&]() {
         demo.app.run_frames(4);
         std::vector<std::uint8_t> pixels;
@@ -4123,13 +4213,28 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     gameplay::InputBindings aim_bindings{};
     const auto control_frame = [&](std::span<const platform::Event> events) {
         (void)gameplay::map_frame_input(aim_devices, events, aim_view, aim_bindings);
-        demo.viewmodel->apply_controls(aim_devices);
+        demo.viewmodel->apply_controls(aim_devices, events);
         demo.viewmodel->advance(1.0f / 60.0f, {}, false);
     };
     const auto settle_controls = [&]() {
         for (int i = 0; i < 64; ++i)
             control_frame({}); // held buttons must survive frames containing no events
     };
+    for (const auto key : {platform::Key::Num1, platform::Key::Num2, platform::Key::Num3}) {
+        platform::Event down{};
+        down.type = platform::EventType::KeyDown;
+        down.key.key = key;
+        auto up = down;
+        up.type = platform::EventType::KeyUp;
+        const std::array tap{down, up};
+        control_frame(tap);
+        const auto expected = key == platform::Key::Num1 ? block_play::PlayViewmodel::Weapon::Scar
+                              : key == platform::Key::Num2
+                                  ? block_play::PlayViewmodel::Weapon::M4
+                                  : block_play::PlayViewmodel::Weapon::Sniper;
+        check(demo.viewmodel->selected() == expected,
+              "a complete weapon-selection tap in one frame selects the requested weapon");
+    }
     platform::Event right_down{};
     right_down.type = platform::EventType::MouseButton;
     right_down.button.button = platform::MouseButton::Right;
@@ -4194,6 +4299,11 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         settle_controls();
         check(demo.viewmodel->aim_fraction() < .001f, "Q release ends aiming");
     }
+    const auto closed_pupil_frames = demo.scope_feed_frames;
+    (void)capture();
+    check(!demo.viewmodel->scope_feed_visible(demo.session.client.camera_transform()) &&
+              demo.scope_feed_frames == closed_pupil_frames,
+          "closed hip-fire pupil keeps glass without rendering an invisible optical world");
     control_frame(std::span(&right_down, 1));
     for (int i = 0; i < 120; ++i)
         control_frame({});
@@ -4206,8 +4316,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
               aimed_stats.wrist_position_error[0] < .0001f &&
               aimed_stats.wrist_position_error[1] < .0001f,
           "ADS remains within both arms' reachable workspace");
-    check(demo.visuals->scope_renderer && parent_camera && parent_camera->fov_y == parent_fov &&
-              sniper.size() == scar.size(),
+    check(demo.scope_feed_frames > closed_pupil_frames && demo.visuals->scope_renderer &&
+              parent_camera && parent_camera->fov_y == parent_fov && sniper.size() == scar.size(),
           "independent optical renderer draws without changing the parent FOV");
     if (demo.visuals->scope_renderer) {
         const auto& main_vp = demo.visuals->renderer.view_proj_unjittered();
@@ -4292,7 +4402,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     check(demo.viewmodel->identity_epoch() > initial_epoch &&
               demo.viewmodel->selected_draw_count() > 0,
           "M4 swap invalidates first-person history and draws");
-    check(meshes == 7 && materials >= 2 && textures >= 4 &&
+    check(meshes == 8 && materials >= 2 && textures >= 4 &&
               demo.viewmodel->resident_meshes() == meshes &&
               demo.viewmodel->resident_materials() == materials &&
               demo.viewmodel->resident_textures() == textures,
@@ -4626,12 +4736,17 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     cfg.windowed = true;
     cfg.window_title = "Rime — the block";
     cfg.window_size = {kWidth, kHeight};
+    // On the measured Wayland/NVIDIA path FIFO acquisition periodically waited an extra
+    // refresh despite ~5 ms CPU work. Prefer the RHI's tear-free latest-frame presentation;
+    // unsupported surfaces retain FIFO. This changes presentation, not simulation cadence.
+    cfg.vsync = false;
 
     Demo demo(cfg);
     demo.scripted_charge = false; // interactive: wait for F, not the tape
     demo.streamed_world = true;
     demo.environment_enabled = true;
     demo.viewmodel_enabled = true;
+    demo.player_help = true;
     if (demo.app.device() == nullptr) {
         std::fprintf(stderr, "99-the-block: --play needs a Vulkan device\n");
         return 1;
@@ -4660,6 +4775,19 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 
     // The device->intent map's bindings, owned by main so the render callback below can read the
     // look scheme the window actually granted.
+    // The requested sniper is the live default; nonmagnifying rifle sights remain selectable.
+    if (demo.viewmodel)
+        demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
+    if (demo.viewmodel) {
+        // Complete the local startup handshake before warming its replicated render scene.
+        gameplay::CharacterInput idle{};
+        idle.yaw = play_sunset::kViewYaw;
+        idle.pitch = play_sunset::kViewPitch;
+        for (unsigned i = 0; i < 30; ++i)
+            demo.step_sim(gameplay_net::to_input_command(idle));
+        if (!demo.warm_scope_view())
+            return 1;
+    }
     gameplay::InputBindings bindings{};
 
     if (demo.app.windowed()) {
@@ -4729,7 +4857,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         if (demo.viewmodel) {
             // map_frame_input has already folded this frame's events and applied mouse motion.
             // Read the SAME held button in both locked and right-drag fallback modes.
-            demo.viewmodel->apply_controls(demo.session.client.devices);
+            demo.viewmodel->apply_controls(demo.session.client.devices, ctx.input);
             // Presentation follows predicted motion and accepted server shots; neither bob nor
             // weapon choice enters CharacterInput or the replicated simulation state.
             const auto velocity = demo.session.client.predictor.seeded()

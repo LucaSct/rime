@@ -87,6 +87,10 @@ struct AppConfig {
     // the no-GPU machine hands in one that returns null, which is what `create_device` returns on a
     // box with no Vulkan loader.
     std::function<std::unique_ptr<rhi::Device>()> device_factory;
+
+    // Window presentation policy. False prefers tear-free MAILBOX (latest completed frame)
+    // when supported; the RHI falls back to FIFO otherwise. Headless apps do not consult it.
+    bool vsync = true;
 };
 
 // Everything a render callback is handed for one frame. `world` is post-tick (already simulated

@@ -40,6 +40,27 @@ vec3 reflected_environment(vec3 direction) {
 void main() {
     vec3 p = (lens.optic_from_world * vec4(v_world_pos, 1.0)).xyz;
     vec3 eye = (lens.optic_from_world * vec4(lens.main_eye.xyz, 1.0)).xyz;
+    if (lens.glass.z > 0.5) {
+        // A holographic sight has unity magnification: transmit the world pixel behind this
+        // physical glass, before the weapon overwrote it. Sampling the parent world snapshot
+        // preserves exact perspective and avoids spending a second world render on a 1x sight.
+        vec2 uv = gl_FragCoord.xy / vec2(textureSize(scope_hdr, 0));
+        vec3 transmitted = texture(scope_hdr, uv).rgb;
+        // Parallel rays along the optic axis put the collimated reticle at p.xy = eye.xy.
+        // Unlike painted texture marks, it stays on the sight line as the eye moves across glass.
+        vec2 q = (p.xy - eye.xy) / lens.aperture.x;
+        float aa = max(fwidth(q.x), fwidth(q.y));
+        float ring = 1.0 - smoothstep(0.003, 0.003 + aa, abs(length(q) - 0.10));
+        float dot_mark = 1.0 - smoothstep(0.006, 0.006 + aa, length(q));
+        vec3 n = normalize(v_world_normal);
+        vec3 v = normalize(lens.main_eye.xyz - v_world_pos);
+        float fresnel = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
+        vec3 reflection = reflected_environment(reflect(-v, n));
+        vec3 glass = transmitted * vec3(0.965, 0.985, 0.975) * lens.optical.z;
+        out_color = vec4(glass * (1.0 - fresnel) + reflection * fresnel * lens.optical.w +
+                         vec3(2.5, 0.018, 0.008) * max(ring, dot_mark) * lens.glass.y, 1.0);
+        return;
+    }
     vec2 aperture_uv = p.xy / lens.aperture.x;
     // Physical mesh/depth is the primary boundary; this also rejects a wrongly oversized disc.
     if (dot(aperture_uv, aperture_uv) > 1.0001) discard;

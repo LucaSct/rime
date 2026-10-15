@@ -400,6 +400,71 @@ TEST_CASE("render graph v0: multi-pass frames, culling, transients, order, timin
     }
 }
 
+TEST_CASE("render graph: repeated names preserve literal collisions, folding and frame reset") {
+    using namespace rime::render;
+    auto device = rime::rhi::create_device({});
+    if (!device) {
+        REQUIRE_FALSE(vulkan_required());
+        return;
+    }
+    RenderGraph graph(*device);
+    const auto add = [&](const char* name, bool fold) {
+        graph.add_compute_pass(name,
+                               {.fold_repeats = fold, .externally_visible = true},
+                               [](rime::rhi::CommandBuffer&) {});
+    };
+    add("tile#2", false);
+    add("tile", false);
+    add("tile", true);
+    add("tile", false);
+    add("tile#1", true);
+    add("tile#2", true);
+    add("tile", true);
+    add("fold", true);
+    add("fold", true);
+    add("fold", false);
+    add("fold#1", true);
+    constexpr std::array expected{"tile#2",
+                                  "tile",
+                                  "tile#1",
+                                  "tile#3",
+                                  "tile#1",
+                                  "tile#2#1",
+                                  "tile#4",
+                                  "fold",
+                                  "fold",
+                                  "fold#1",
+                                  "fold#1#1"};
+    REQUIRE(graph.pass_count() == expected.size());
+    for (std::uint32_t i = 0; i < expected.size(); ++i)
+        CHECK(graph.pass_name(i) == expected[i]);
+
+    graph.reset();
+    add("fold", false);
+    add("fold", true);
+    CHECK(graph.pass_name(0) == "fold");
+    CHECK(graph.pass_name(1) == "fold#1");
+
+    // Two streamed views declare over 600 terrain passes. Check the complete naming and
+    // timestamp path at that scale: a small four-pass frame cannot reveal the old 128-pass cap.
+    graph.reset();
+    constexpr std::uint32_t count = 644;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        add("terrain", false);
+        CHECK(graph.pass_name(i) == (i ? "terrain#" + std::to_string(i) : "terrain"));
+    }
+    auto cmd = device->begin_commands();
+    graph.execute(*cmd);
+    device->submit_blocking(*cmd);
+    const auto plan = graph.timing_plan();
+    CHECK(plan.timed == count);
+    const auto timings = graph.resolve_timings(*cmd);
+    if (!timings.empty()) {
+        REQUIRE(timings.size() == count);
+        CHECK(timings.back().name == "terrain#643");
+    }
+}
+
 TEST_CASE("render graph: compute-written indirect arguments get an IndirectRead barrier (M18)") {
     using namespace rime::rhi;
     using namespace rime::render;

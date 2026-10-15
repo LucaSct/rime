@@ -81,6 +81,7 @@ void Application::open_window() {
     rhi::SwapchainDesc sd{};
     sd.window = window_->native_handle();
     sd.extent = to_rhi(window_->framebuffer_size());
+    sd.vsync = config_.vsync;
     swapchain_ = device_->create_swapchain(sd);
     if (!swapchain_) {
         RIME_WARN("app: this device cannot present to a window — running headless");
@@ -159,6 +160,7 @@ void Application::finish_gpu() {
 // system reading frame_input() cannot tell the two apart — which is what makes the headless input
 // proof meaningful about the windowed build. Returns false when the user asked to close.
 bool Application::pump_window() {
+    RIME_PROFILE_ZONE("frame.pump");
     if (!window_) {
         return true;
     }
@@ -292,6 +294,9 @@ void Application::render_frame(double alpha, double frame_dt) {
         // than usually safe.
         rhi::TextureHandle backbuffer{};
         if (swapchain_ != nullptr) {
+            // Native pacing can stall before any graph work, waiting for an available image
+            // or retired frame slot. Keep it visible separately from declaration/presentation.
+            RIME_PROFILE_ZONE("frame.acquire");
             // Check the window's real size every frame, not only on an out-of-date result: on
             // Wayland the surface reports a sentinel extent and NOTHING ever reports out-of-date
             // for a compositor resize (see Swapchain::ensure_extent).

@@ -39,13 +39,16 @@ while the surrounding view retains its normal field of view. The aim pose passed
 
 The reported disappearing dark blob under trees is **still under investigation**.
 Normal-correct foliage fixes white undersides; it did not fix that ground symptom.
-Controlled walking/rotation captures have not reproduced a non-occluded ground
-blob, and shortening the shadow range did not improve those controls.
+Controlled captures reproduced a moving dark shape on a reflective puddle. A denser
+reflection march preserved the transition; an incorrect intersection is not established.
+Shortening the shadow range did not improve the ground controls.
 
-Live play draws a camera-attached SCAR-H by default. Keys **1/2/3** switch between the three
+Live play draws the MSR by default. Keys **1/2/3**, including quick taps, switch between the three
 prepared viewmodels without changing the replicated weapon or movement input. The MSR's German
 Schmidt & Bender optic uses a separate camera for apparent 5× magnification inside its lens;
-the outer view keeps its field of view. Rifle aim has no optical magnification. Weighted arms
+the outer view keeps its field of view. The SCAR has a transparent collimated 1× sight;
+the M4 aligns its rear aperture and front post. Stocks seat at the right shoulder and
+the camera represents the right eye. Weighted arms
 solve full wrist frames after weapon motion; fingers retain separately authored grip poses. Their
 meshes and normal/metal-roughness textures are cooked once from
 `assets/viewmodel/held-scar-h.glb`, `held-m4a1.glb` and `held-msr.glb` into the build tree; building `the_block`
@@ -64,6 +67,11 @@ stationary noise and abrupt edge-probe relighting. See [ADR-0084](../../docs/adr
 `--environment-smoke --ppm /path/preview` renders street, puddle and park captures, and checks
 texture/reflection/cloud sensitivity above unchanged controls. This proof runs on clean clones
 without the optional weapon art. Headless and performance workloads retain their authored scene.
+
+Pass-name indexing avoids repeated linear suffix searches across hundreds of streamed terrain
+passes. All 643 aimed passes fit the expanded timestamp pool. The sniper skips its invisible
+world view outside the exit pupil while retaining glass reflections. Hardware diagnostics and
+their limits are in [ADR-0086](../../docs/adr/0086-play-sight-calibration-and-render-graph-scale.md).
 
 This prototype returns the player to a supported spawn beyond eight kilometres on either
 horizontal axis or below its recovery floor. Recentring currently waits for old GPU readers,

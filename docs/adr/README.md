@@ -112,3 +112,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0084](0084-local-gi-support-and-play-environment.md) — finite camera-relative GI support, stable world-probe quadrature, corrected held aiming, and native textured scenery with reflective water.
 
 - [ADR-0085](0085-multiplayer-development-and-shipment.md) — multiplayer-first development and shipment, native target artifacts, dedicated/browser profiles, and gated creator-enabled player authoring.
+- [ADR-0086](0086-play-sight-calibration-and-render-graph-scale.md) — right-eye rifle calibration, transparent collimated sights, exit-pupil rendering support, scalable pass-name indexing and complete streamed-view timing.

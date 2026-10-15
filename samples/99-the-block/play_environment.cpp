@@ -97,7 +97,7 @@ Texel surface(Surface kind, float u, float v) {
             break;
         case Surface::Bark: {
             const float groove =
-                std::pow(.5f + .5f * std::sin(u * kPi * 32 + noise(u * 8, v * 4, 8) * 5), 4);
+                std::pow(.5f + .5f * std::sin(u * kPi * 32 + noise(u * 8, v * 4, 8) * 5), 4.0f);
             t.color = core::Vec3{.15f, .085f, .041f} * (.6f + medium * .5f - groove * .3f);
             t.height = .58f - groove * .22f + fine * .12f;
             break;
