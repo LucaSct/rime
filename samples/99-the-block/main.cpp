@@ -3915,6 +3915,22 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         std::fprintf(stderr, "viewmodel-smoke: the viewmodel did not load\n");
         return 1;
     }
+    // The same PLAY-ONLY evening preset run_play applies (play_sunset.hpp): the authored sun on
+    // both peers, the view faced down the street at it, and the matching lowered exposure. Without
+    // it this proof renders the DEFAULT rig -- a bright sky-dominated scene pointed at open ground
+    // -- in which the sun contributes so little that killing every shadow in the frame moves 1.39%
+    // of pixels by at most 10/255, against 19.8% and 99/255 in the block's own headless view. A
+    // weapon is lit by whatever the player is standing in, so the proof has to stand there too.
+    play_sunset::apply(demo.session.server.world);
+    play_sunset::apply(demo.session.client.world);
+    demo.session.client.view.yaw = play_sunset::kViewYaw;
+    demo.session.client.view.pitch = play_sunset::kViewPitch;
+    if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera)) {
+        camera->z_far = 3072.0f;
+    }
+    if (demo.visuals) {
+        demo.visuals->renderer.set_sky(play_sunset::sky(Visuals::authored_sky()));
+    }
     demo.app.on_render([&demo](app::FrameContext& ctx) { demo.render(ctx); });
     for (int i = 0; i < 30; ++i)
         demo.step_sim({}); // replicate/seed the local camera
@@ -3942,6 +3958,11 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     const auto baseline = capture();
     const auto baseline_control = capture();
     demo.viewmodel_enabled = true;
+    // Appearing invalidates the overlay's TAA history by design (the identity epoch), so the first
+    // frames after a state change are deliberately un-converged. Measuring there would read
+    // convergence as drift: under the evening rig it put the unchanged-control at 37965 px when the
+    // bright default rig had shown 632. Let the temporal passes settle, THEN measure.
+    demo.app.run_frames(48);
     const auto scar = capture();
     const auto scar_control = capture();
     const auto initial_epoch = demo.viewmodel->identity_epoch();
@@ -3952,12 +3973,14 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
               demo.viewmodel->selected_draw_count() > 0,
           "SCAR-H is the default resident draw");
     demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+    demo.app.run_frames(48); // same reason: the swap resets history too
     const auto m4 = capture();
     if (!g_ppm.empty() && !scar.empty() && !m4.empty()) {
         write_ppm((g_ppm + ".scar.ppm").c_str(), scar, kW, kH);
         write_ppm((g_ppm + ".m4.ppm").c_str(), m4, kW, kH);
     }
     demo.viewmodel_enabled = false;
+    demo.app.run_frames(48);
     const auto baseline_again = capture(); // temporal/lighting drift control
     check(demo.viewmodel->identity_epoch() > initial_epoch &&
               demo.viewmodel->selected_draw_count() > 0,
