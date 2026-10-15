@@ -243,6 +243,7 @@ MeshId MeshRegistry::add(const CpuMesh& mesh, std::string_view debug_name) {
         return kInvalidMeshId;
     }
     g.index_count = static_cast<std::uint32_t>(mesh.indices.size());
+    g.vertex_count = static_cast<std::uint32_t>(mesh.vertices.size());
 
     // The submesh table (m16.2). Two jobs here, and both matter downstream.
     //

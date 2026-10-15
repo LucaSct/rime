@@ -976,3 +976,7 @@ See also **Determinism / replication** under *Physics & destruction*.
   for the system that owns it, but invisible to anything that only walks components (reflection,
   a `.rscene` save, a PIE snapshot) unless that system also exposes a **reconstructible-from-
   components** path — M9.7's restore proof is exactly that check, brick by brick.
+
+- **Inverse kinematics (IK).** Solve joint rotations from a desired end contact, such as a wrist on a weapon grip. A two-bone arm uses shoulder/elbow/wrist positions and an elbow pole to choose its bend plane.
+- **Aim down sights (ADS).** Move the weapon so its sights or optic align with the eye. Optical magnification can be confined to a second camera sampled by the scope lens.
+- **Linear blend skinning.** Deform each mesh vertex by a weighted sum of joint pose matrices multiplied by inverse bind matrices; the same pose must transform normals and tangents.

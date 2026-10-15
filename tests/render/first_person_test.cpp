@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 #include "first_person_depth_probe.frag.spv.h"
 #include "fullscreen.vert.spv.h"
@@ -417,4 +418,132 @@ TEST_CASE("first-person appearance, swap and disable reject parent TAA history")
     CHECK(settled_green.first != settled_green.second);
     const auto disabled = pair(false, green, 2);
     CHECK(disabled.first == disabled.second);
+}
+
+TEST_CASE(
+    "first-person deformation copies current geometry and preserves local-position velocity") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (test::vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device exists");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    // The immutable registry triangle is offscreen. Only the deformed stream can put a surface
+    // at the probe, so its nonzero velocity ALSO proves the depth prepass used current geometry.
+    CpuMesh source{};
+    source.vertices = {{9.2f, -0.8f, 0.0f}, {10.8f, -0.8f, 0.0f}, {10.0f, 0.8f, 0.0f}};
+    source.indices = {0, 1, 2};
+    const MeshId triangle = meshes.add(source, "deformation-triangle");
+    REQUIRE(meshes.get(triangle).vertex_count == 3);
+    const MaterialId blue = materials.add({{0.0f, 0.0f, 1.0f, 1.0f}, 0.0f, 1.0f});
+    ecs::World world;
+    register_render_components(world);
+    const auto camera = world.spawn_with(ecs::WorldTransform{}, Camera{});
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_taa_resolve_enabled(false);
+    renderer.set_temporal_jitter_enabled(false);
+    renderer.set_ambient(0.5f, 0.5f, 0.5f);
+    DrawItem draw{};
+    draw.mesh = triangle;
+    draw.material = blue;
+    draw.model = core::mat4_translation({0.0f, 0.0f, -2.0f});
+    draw.index_count = 3;
+    draw.flags = DrawItem::DoubleSided;
+    const std::array<DrawItem, 2> submesh_draws{draw, draw};
+    std::vector<MeshVertex> current = source.vertices;
+    for (MeshVertex& vertex : current)
+        vertex.px -= 10.0f;
+    std::vector<core::Vec3> previous;
+    for (const MeshVertex& vertex : current)
+        previous.push_back({vertex.px - 0.25f, vertex.py, vertex.pz});
+    FirstPersonDeformation deformation{triangle, current, previous};
+
+    struct Probe {
+        std::vector<std::uint8_t> hdr;
+        float vx = 0.0f;
+        float vy = 0.0f;
+        float blue = 0.0f;
+        std::uint64_t bytes_pushed = 0;
+    };
+
+    RenderGraph graph(*device);
+    const auto render = [&](std::span<const FirstPersonDeformation> deformations,
+                            std::uint64_t epoch,
+                            bool overwrite_borrow = false,
+                            bool two_submeshes = false,
+                            const ExtractedCamera* override_camera = nullptr) {
+        graph.reset();
+        renderer.set_first_person_draws(two_submeshes ? std::span<const DrawItem>(submesh_draws)
+                                                      : std::span<const DrawItem>(&draw, 1),
+                                        epoch);
+        if (!deformations.empty())
+            renderer.set_first_person_deformations(deformations);
+        const auto out = renderer.render(graph, world, {kSize, kSize}, true, override_camera);
+        REQUIRE(out.velocity.is_valid());
+        graph.export_texture(out.velocity);
+        graph.export_texture(out.hdr);
+        if (overwrite_borrow)
+            for (MeshVertex& vertex : current)
+                vertex.px += 100.0f;
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        Probe probe{};
+        const auto velocity =
+            test::read_texture(*device, graph.physical(out.velocity), kSize, kSize, 4);
+        const auto* half = reinterpret_cast<const std::uint16_t*>(velocity.data());
+        probe.vx = test::half_to_float(half[(32 * kSize + 32) * 2]);
+        probe.vy = test::half_to_float(half[(32 * kSize + 32) * 2 + 1]);
+        probe.hdr = test::read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8);
+        probe.blue = test::decode_hdr(probe.hdr, kSize, kSize).rgb[(32 * kSize + 32) * 3 + 2];
+        probe.bytes_pushed = graph.frame_bytes_pushed();
+        if (overwrite_borrow)
+            for (MeshVertex& vertex : current)
+                vertex.px -= 100.0f;
+        return probe;
+    };
+    const auto supplied = std::span<const FirstPersonDeformation>(&deformation, 1);
+    const auto static_before = render({}, 7);
+    const auto first = render(supplied, 8);
+    CHECK(first.blue > 0.1f); // forward shading also fetched current, rather than registry vertices
+    CHECK(first.vx == 0.0f); // a new identity starts with previous local positions equal to current
+    const auto moving = render(supplied, 8, true);
+    const float expected = 0.25f / (2.0f * std::tan(Camera{}.fov_y * 0.5f));
+    CHECK(moving.vx == doctest::Approx(expected).epsilon(0.005));
+    CHECK(std::abs(moving.vy) < 0.0001f);
+    const auto repeated_submesh = render(supplied, 8, false, true);
+    CHECK(repeated_submesh.bytes_pushed == moving.bytes_pushed); // one vertex pair per mesh
+    CHECK(repeated_submesh.vx == doctest::Approx(expected).epsilon(0.005));
+    const auto reset = render(supplied, 9);
+    CHECK(reset.vx == 0.0f);
+    const auto static_after = render({}, 9); // render cleared the prior deformation borrow
+    CHECK(static_after.hdr == static_before.hdr);
+    CHECK(static_after.vx == 0.0f);
+    const auto rejected_before = renderer.rejected_first_person_deformations();
+    FirstPersonDeformation bad_current{triangle, std::span(current).first(2), previous};
+    const auto invalid_current =
+        render(std::span<const FirstPersonDeformation>(&bad_current, 1), 10);
+    CHECK(invalid_current.hdr == static_before.hdr);
+    CHECK(renderer.rejected_first_person_deformations() == rejected_before + 1);
+    FirstPersonDeformation bad_previous{triangle, current, std::span(previous).first(2)};
+    const auto invalid_previous =
+        render(std::span<const FirstPersonDeformation>(&bad_previous, 1), 11);
+    CHECK(invalid_previous.hdr == static_before.hdr);
+    CHECK(renderer.rejected_first_person_deformations() == rejected_before + 2);
+    const std::array duplicate{deformation, deformation};
+    const auto invalid_duplicate = render(duplicate, 12);
+    CHECK(invalid_duplicate.hdr == static_before.hdr);
+    CHECK(renderer.rejected_first_person_deformations() == rejected_before + 3);
+
+    // An explicit camera is a snapshot, including on a world without an active camera. The scope
+    // renderer must never toggle the parent's camera component while extracting the same world.
+    world.get<Camera>(camera)->active = false;
+    ExtractedCamera explicit_camera{};
+    explicit_camera.found = true;
+    explicit_camera.view = core::identity();
+    const auto explicit_view = render(supplied, 13, false, false, &explicit_camera);
+    CHECK(explicit_view.blue > 0.1f);
+    CHECK_FALSE(world.get<Camera>(camera)->active);
 }

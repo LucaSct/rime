@@ -29,6 +29,7 @@ add_library(rime_render STATIC
     src/culling.cpp
     src/temporal_jitter.cpp
     src/first_person_pass.cpp
+    src/scope_lens_pass.cpp
     src/terrain_pass.cpp
     src/terrain_builder.cpp
     src/terrain_residency.cpp
@@ -67,6 +68,8 @@ rime_add_shaders(rime_render
     shaders/sky_specular_dfg.comp
     shaders/fullscreen.vert
     shaders/first_person_depth.frag
+    shaders/scope_lens.vert
+    shaders/scope_lens.frag
     shaders/tonemap.frag
     shaders/present.frag
     shaders/hud.vert
@@ -99,6 +102,8 @@ rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag FIRST_PERSON pbr_forward_first_person.frag)
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag FIRST_PERSON_SDF_SPECULAR pbr_forward_first_person_sdf.frag)
+rime_add_shader_variant(rime_render
+    shaders/scope_lens.frag SKY_REFLECTION scope_lens_sky.frag)
 rime_add_shader_variant(rime_render
     shaders/terrain.frag SCENE_BASE terrain_scene_base.frag)
 rime_add_shader_variant(rime_render
