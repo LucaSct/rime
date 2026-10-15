@@ -311,3 +311,33 @@ referenced them.
   Apple Silicon hardware (a purchase). Note the distinction that matters for planning: an Intel Mac
   could *cross-compile* arm64 binaries, but running Apple Silicon **tests** needs Apple Silicon.
   Until then `macos-latest` stays hosted, and that is the right answer rather than a gap.
+
+## Linux exported-game gate (m20.3)
+
+The trusted plain Linux build runs Python 3.11+ bundle unit tests. A separate,
+mandatory **Linux export proof** job runs on **nextos**, after that build succeeds.
+It needs Bubblewrap and working unprivileged user/mount namespaces, with Python
+3.11+ at `/usr/bin/python3` for the copied trusted TOML verifier. The prerequisite
+probe and the actual proof both fail if unavailable; neither silently skips.
+
+The starbase runner lives in CT 123, an unprivileged LXC with nesting disabled.
+Measured 2026-10-15: `unshare --user --map-root-user --mount true` as `runner`
+returns permission denied. Keep that boundary; the export job selects the existing
+`nextos` label instead. A mistakenly installed host Bubblewrap package was removed.
+No container nesting or service permissions were relaxed.
+
+The artifact is read-only mounted at `/tmp/rime-export-proof` inside the sandbox,
+so the original empty-HOME/repository/Conan-cache checks still run when CI stages
+its output under the runner's home directory. For checkouts outside HOME, the
+proof also hides the checkout's parent; that layout has a separate local proof.
+Vulkan manifests and loader are
+hidden as before. The in-tree-vs-bundle simulation comparisons and missing-content/
+wrong-digest controls remain, alongside byte/notice verification.
+
+Successful proofs upload `linux-game-dev-<revision>-<attempt>` with the verified
+bundle, manifest and proof metadata. Unit/proof logs are retained even on failure.
+The export job uses its own `ci-export/` checkout; it cannot mutate another job's
+build configuration. This is a **development artifact**, not a production release
+or clean second-machine compatibility claim. ABI requirements come from the actual
+ELF; a shipment built on nextos currently requires GLIBC 2.43. Choose and prove a
+Linux release baseline before advertising broader compatibility.

@@ -128,6 +128,12 @@ jobs:
       - name: Build & test
         run: ./scripts/build.sh
 
+      - name: Verify game bundle tools
+        run: |
+          set -o pipefail
+          mkdir -p build/export-evidence
+          python3 -m unittest discover -s scripts -p 'test_game_bundle*.py' 2>&1 | tee build/export-evidence/unit.log
+
       - name: Cache statistics (what made this run fast, or didn't)
         if: always()
         run: |
@@ -139,7 +145,69 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ctest-log-${{ runner.name }}-${{ github.run_number }}
-          path: ci-build/build/dev/Testing/Temporary/LastTest.log
+          path: |
+            ci-build/build/dev/Testing/Temporary/LastTest.log
+            ci-build/build/export-evidence/
+          retention-days: 7
+          if-no-files-found: warn
+
+  game-export:
+    name: self-hosted Linux export proof (development artifact)
+    # The starbase runner is an unprivileged LXC with nesting disabled. Do not relax that
+    # boundary for Bubblewrap: the nextos workstation supports this namespace-based proof.
+    runs-on: [self-hosted, Linux, X64, nextos]
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ci-export
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci-export
+          persist-credentials: false
+
+      - name: Check free disk and sandbox prerequisites
+        run: |
+          free_gb=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+          [ "$free_gb" -ge 15 ] || { echo "::error::under 15 GB free"; exit 1; }
+          command -v bwrap
+          bwrap --ro-bind / / --tmpfs /tmp /usr/bin/python3 -c 'import tomllib'
+
+      - name: Put the toolchain on PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.ci-venv/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.rime-tools/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+
+      - name: Verify exported game without repository or Vulkan
+        run: |
+          set -o pipefail
+          mkdir -p build/export-evidence
+          ./scripts/export-proof.sh --preset dev \
+            --out-dir "$RUNNER_TEMP/rime-export-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            2>&1 | tee build/export-evidence/proof.log
+
+      - name: Upload verified development bundle and proof
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-game-dev-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rime-export-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload export log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: export-log-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-export/build/export-evidence/
           retention-days: 7
           if-no-files-found: warn
 

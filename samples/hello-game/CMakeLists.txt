@@ -19,7 +19,11 @@ rime_apply_common_target_options(hello_game)
 # root (`--content`, else `content/` beside the executable, else — for a binary still in its build
 # directory only — this source directory). rime_game_content() hands the game those two build-tree
 # paths and writes the export record `scripts/export-game.sh hello_game <out>` reads.
-rime_game_content(hello_game ${CMAKE_CURRENT_SOURCE_DIR}/content)
+# This game's redistribution audit is deliberately target-scoped: other games can link codecs
+# or ship third-party art. They must provide their own reviewed metadata before being packaged.
+include(${CMAKE_CURRENT_SOURCE_DIR}/bundle-metadata.cmake)
+rime_game_content(hello_game ${CMAKE_CURRENT_SOURCE_DIR}/content
+    BUNDLE_METADATA "${HELLO_GAME_BUNDLE_METADATA}")
 
 # The default run is the GPU-FREE self-check, so it gates on every CI OS and under both sanitizers —
 # the rules, the character controller and the trigger volumes are all CPU work, and none of them

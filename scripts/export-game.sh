@@ -26,8 +26,10 @@
 # dependency: the engine's loader (volk) dlopen()s it inside the device factory, which `dedicated`
 # never enters — so a bundle runs on a box with no Vulkan at all. A violation fails the export.
 #
-# A PowerShell twin is a follow-up, not a copy of this: the Windows dependency check needs dumpbin /
-# the PE import table, and that is not a line-for-line translation of ldd.
+# m20.3 adds rime-game.toml, authentic redistribution notices, measured ABI requirements and
+# binary-hash-bound build provenance. Only the audited Linux hello_game profile is implemented;
+# other targets need their own native packaging/dependency proof. Python 3.11+ is a BUILD tool,
+# not a runtime dependency of the game.
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -49,6 +51,10 @@ done
 
 say() { printf 'export-game: %s\n' "$*"; }
 die() { printf 'export-game: FAILED — %s\n' "$*" >&2; exit 1; }
+[ "$(uname -s)" = "Linux" ] || die "native packaging for this host is not implemented yet"
+[ "$target" = "hello_game" ] || die "only the reviewed hello_game export is implemented"
+case "$preset" in release|dev) ;; *) usage ;; esac
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "export-game: Python 3.11+ required")'
 
 # ── 1. Build ──────────────────────────────────────────────────────────────────────────────────
 build_dir="$repo/build/$preset"
@@ -65,80 +71,15 @@ if [ "$build" -eq 1 ]; then
     fi
 fi
 
-# ── 2. The export record ──────────────────────────────────────────────────────────────────────
+# ── 2. Resolve the reviewed export record ─────────────────────────────────────────────────────
 mapfile -t records < <(find "$build_dir/export" -name "$target.export" 2>/dev/null)
 [ "${#records[@]}" -eq 1 ] ||
-    die "expected one export record for '$target' under $build_dir/export, found ${#records[@]} (does its CMakeLists.txt call rime_game_content()?)"
-exe="$(sed -n 's/^executable=//p' "${records[0]}")"
-content="$(sed -n 's/^content=//p' "${records[0]}")"
-[ -x "$exe" ] || die "the export record names $exe, which is not an executable"
-[ -d "$content" ] || die "the export record names content $content, which is not a directory"
+    die "expected one export record for '$target', found ${#records[@]} (reconfigure and build the game)"
 
-# ── 3. Shaders: embedded, so nothing loose may be needed ──────────────────────────────────────
+# Shaders stay embedded. Keep this original guard in addition to the standalone execution proof.
 loose_spv=$(find "$build_dir/bin" -maxdepth 2 -name '*.spv' 2>/dev/null | wc -l)
-[ "$loose_spv" -eq 0 ] || die "$loose_spv loose .spv file(s) beside the binaries — a shader is being read from disk"
+[ "$loose_spv" -eq 0 ] || die "$loose_spv loose .spv file(s) beside the binaries"
 
-# ── 4. Copy ───────────────────────────────────────────────────────────────────────────────────
-mkdir -p "$out_root"
-bundle="$(cd "$out_root" && pwd)/$target"
-case "$bundle/" in
-    "$repo"/*) die "the bundle must be written outside the repository ($bundle)" ;;
-esac
-rm -rf "$bundle"
-mkdir -p "$bundle"
-cp "$exe" "$bundle/$target"
-cp -R "$content" "$bundle/content"
-
-cat >"$bundle/README.txt" <<EOF
-$target — a game built with the Rime engine.
-
-Run it from anywhere; it finds its content in the content/ directory beside it
-(or wherever --content DIR says).
-
-  ./$target                       play (the default): a window, keyboard input
-  ./$target play --headless       play off-screen (no window)
-  ./$target dedicated             a headless server: no window, no GPU, no Vulkan needed
-  ./$target dedicated --ticks N --autopilot
-                                  a bounded, deterministic run; prints a state digest
-  ./$target browser | stream | host
-                                  not implemented yet (exit code 3)
-  ./$target --help                every option
-
-Exit codes: 0 ok, 1 failed, 2 usage, 3 not yet implemented.
-Shaders are compiled into the executable; there are no shader files.
-Exported from $(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown), preset $preset.
-EOF
-
-# ── 5. The dependency check ───────────────────────────────────────────────────────────────────
-bin="$bundle/$target"
-fail=0
-if [ "$(uname -s)" = "Linux" ]; then
-    needed=$(readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
-    say "NEEDED: $(echo "$needed" | tr '\n' ' ')"
-    if echo "$needed" | grep -qi vulkan; then
-        echo "  libvulkan is a LINK-TIME dependency — dedicated could not start without a Vulkan loader" >&2
-        fail=1
-    fi
-    if readelf -d "$bin" | grep -qE '\((RPATH|RUNPATH)\)'; then
-        echo "  the binary carries an RPATH/RUNPATH: $(readelf -d "$bin" | grep -E 'RPATH|RUNPATH')" >&2
-        fail=1
-    fi
-    while read -r line; do
-        case "$line" in
-            *"not found"*) echo "  unresolved: $line" >&2; fail=1 ;;
-        esac
-        path=$(echo "$line" | sed -n 's/.*=> \(\/[^ ]*\).*/\1/p; t; s/^\(\/[^ ]*\).*/\1/p')
-        [ -n "$path" ] || continue
-        case "$path" in
-            "$repo"/* | "$HOME"/* | *conan*) echo "  non-system library: $path" >&2; fail=1 ;;
-            /lib/* | /lib64/* | /usr/lib/* | /usr/lib64/*) ;;
-            *) echo "  library outside the system directories: $path" >&2; fail=1 ;;
-        esac
-    done < <(ldd "$bin")
-    say "ldd: $(ldd "$bin" | wc -l) entries, all system libraries: $([ $fail -eq 0 ] && echo yes || echo NO)"
-else
-    say "dependency check: NOT RUN (Linux only for now; macOS wants otool -L)"
-fi
-[ "$fail" -eq 0 ] || die "the bundle depends on something a player's machine will not have"
-
-say "bundle written: $bundle ($(du -sh "$bundle" | cut -f1); content: $(find "$bundle/content" -type f | wc -l) file(s))"
+# Python handles staged copying, authentic notices, ELF requirements and strict manifest checks.
+# It publishes only after verification, preserving an existing good bundle if any input is bad.
+exec python3 "$repo/scripts/stage_game_bundle.py" "${records[0]}" "$out_root" --repository "$repo"
