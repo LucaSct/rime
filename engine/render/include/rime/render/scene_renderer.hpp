@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +14,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/culling.hpp"
+#include "rime/render/first_person_pass.hpp"
 #include "rime/render/lighting/clustered.hpp"
 #include "rime/render/lighting/ddgi.hpp"
 #include "rime/render/lighting/local_shadows.hpp"
@@ -175,6 +177,16 @@ public:
     void set_terrain_draws(TerrainPass* pass, std::span<const TerrainSceneDraw> draws) noexcept {
         terrain_pass_ = pass;
         terrain_draws_ = draws;
+    }
+
+    // Borrow up to 32 already-resident draw ranges through the next render() declaration.
+    // Models are WORLD transforms attached to the camera by the caller; keep mesh/material
+    // resources alive until every submitted reader retires. Bump identity_epoch on selection or
+    // pose discontinuity so TAA forgets the old image. Call every frame the model should appear.
+    void set_first_person_draws(std::span<const DrawItem> draws,
+                                std::uint64_t identity_epoch) noexcept {
+        first_person_draws_ = draws;
+        first_person_epoch_ = identity_epoch;
     }
 
     // Constant ambient radiance (linear RGB) — the crude GI stand-in until M10. Default is a dim
@@ -473,6 +485,19 @@ private:
     rhi::Device& device_;
     const MeshRegistry& meshes_;
     const MaterialRegistry& materials_;
+    std::span<const DrawItem> first_person_draws_{};
+    std::uint64_t first_person_epoch_ = 0;
+    std::uint64_t previous_first_person_epoch_ = 0;
+    bool previous_first_person_active_ = false;
+    rhi::Extent2D previous_first_person_extent_{};
+    std::vector<core::Mat4> previous_first_person_models_;
+    std::unique_ptr<FirstPersonPass> first_person_pass_; // constructed only on first live draw
+    std::vector<DrawItem> frame_first_person_draws_;
+    std::vector<rhi::TextureHandle> first_person_base_color_;
+    std::vector<rhi::TextureHandle> first_person_metallic_roughness_;
+    std::vector<rhi::TextureHandle> first_person_normal_;
+    std::vector<rhi::TextureHandle> first_person_occlusion_;
+    std::vector<rhi::TextureHandle> first_person_emissive_;
     TerrainPass* terrain_pass_ = nullptr;
     std::span<const TerrainSceneDraw> terrain_draws_{};
 

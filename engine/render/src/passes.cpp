@@ -17,6 +17,8 @@
 #include "fullscreen.vert.spv.h"
 #include "pbr_forward.frag.spv.h"
 #include "pbr_forward.vert.spv.h"
+#include "pbr_forward_first_person.frag.spv.h"
+#include "pbr_forward_first_person_sdf.frag.spv.h"
 #include "pbr_forward_shadowed.frag.spv.h"
 #include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
 #include "pbr_forward_shadowed_sdf.frag.spv.h"
@@ -296,11 +298,13 @@ VelocityPass::~VelocityPass() {
 void VelocityPass::add(RenderGraph& graph,
                        RGTexture velocity,
                        RGTexture depth,
-                       const SceneDrawData& data) const {
+                       const SceneDrawData& data,
+                       rhi::LoadOp color_load,
+                       std::string_view label) const {
     // Clear to zero: a pixel nothing covers (sky, the clear colour) has no surface to have moved,
     // and zero is also what a static scene must produce everywhere.
     const RGColorAttachment colors[] = {
-        {velocity, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+        {velocity, color_load, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
     RGDepthAttachment depth_att{};
     depth_att.texture = depth;
     depth_att.load = rhi::LoadOp::Load;
@@ -309,7 +313,7 @@ void VelocityPass::add(RenderGraph& graph,
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.depth = &depth_att;
-    graph.add_raster_pass("velocity", desc, [pipe = pipeline_, data](rhi::CommandBuffer& cmd) {
+    graph.add_raster_pass(label, desc, [pipe = pipeline_, data](rhi::CommandBuffer& cmd) {
         cmd.bind_pipeline(pipe);
         // The same two cull partitions as the pre-pass and the forward pass: a face the pre-pass
         // drew with culling off must be drawn with culling off here too, or its depth has no
@@ -587,7 +591,48 @@ void ForwardPbrPass::ensure_sdf_pipelines() const {
     pipeline_sdf_standalone_ = device_.create_graphics_pipeline(pd);
 }
 
+void ForwardPbrPass::ensure_first_person_pipelines() const {
+    if (pipeline_first_person_.is_valid())
+        return;
+    first_person_fragment_shader_ = make_shader(device_,
+                                                rhi::ShaderStage::Fragment,
+                                                pbr_forward_first_person_frag_spv,
+                                                sizeof(pbr_forward_first_person_frag_spv),
+                                                "pbr_forward_first_person.frag");
+    first_person_sdf_fragment_shader_ = make_shader(device_,
+                                                    rhi::ShaderStage::Fragment,
+                                                    pbr_forward_first_person_sdf_frag_spv,
+                                                    sizeof(pbr_forward_first_person_sdf_frag_spv),
+                                                    "pbr_forward_first_person_sdf.frag");
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = first_person_fragment_shader_;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = kHdrFormat;
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.depth_format = kDepthFormat;
+    pd.bindings = kShadowedBindings;
+    pd.debug_name = "forward-pbr first-person";
+    pipeline_first_person_ = device_.create_graphics_pipeline(pd);
+    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(kShadowedBindings),
+                                               std::end(kShadowedBindings));
+    sdf_bindings.push_back({21, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+    sdf_bindings.push_back({22, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
+    pd.fragment_shader = first_person_sdf_fragment_shader_;
+    pd.bindings = sdf_bindings;
+    pd.debug_name = "forward-pbr first-person SDF sky";
+    pipeline_first_person_sdf_ = device_.create_graphics_pipeline(pd);
+}
+
 ForwardPbrPass::~ForwardPbrPass() {
+    device_.destroy(pipeline_first_person_sdf_);
+    device_.destroy(pipeline_first_person_);
+    device_.destroy(first_person_sdf_fragment_shader_);
+    device_.destroy(first_person_fragment_shader_);
     device_.destroy(pipeline_sdf_after_prepass_);
     device_.destroy(pipeline_sdf_standalone_);
     device_.destroy(sdf_fragment_shader_);
@@ -659,7 +704,10 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   const SkyLightBinding& sky,
                                   RGTexture gbuffer,
                                   RGTexture gbuffer_material,
-                                  const SdfSpecularOcclusionBinding* sdf_occlusion_ptr) const {
+                                  const SdfSpecularOcclusionBinding* sdf_occlusion_ptr,
+                                  rhi::LoadOp hdr_load,
+                                  bool first_person,
+                                  std::string_view label) const {
     const SdfSpecularOcclusionBinding sdf_occlusion =
         sdf_occlusion_ptr ? *sdf_occlusion_ptr : SdfSpecularOcclusionBinding{};
     // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
@@ -677,7 +725,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     }
     const bool write_gbuffer = gbuffer.is_valid() && gbuffer_material.is_valid();
     const RGColorAttachment colors[] = {
-        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {hdr, hdr_load, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}},
         {gbuffer, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}},
         {gbuffer_material, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
     RGDepthAttachment depth_att{};
@@ -704,6 +752,8 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     const bool use_sdf = sdf_occlusion.is_valid() && !write_gbuffer;
     if (use_sdf)
         ensure_sdf_pipelines();
+    if (first_person)
+        ensure_first_person_pipelines();
     std::vector<RGTexture> sampled = {
         shadow.map, local.map, sky.skyview, sky.specular.prefiltered, sky.specular.dfg};
     if (use_sdf) {
@@ -725,14 +775,15 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     desc.sampled = sampled;
     desc.buffer_reads = buffers;
     const rhi::PipelineHandle pipe =
-        write_gbuffer
+        first_person ? (use_sdf ? pipeline_first_person_sdf_ : pipeline_first_person_)
+        : write_gbuffer
             ? (depth_prepassed ? pipeline_shadowed_gbuffer_after_prepass_
                                : pipeline_shadowed_gbuffer_standalone_)
             : (use_sdf ? (depth_prepassed ? pipeline_sdf_after_prepass_ : pipeline_sdf_standalone_)
                        : (depth_prepassed ? pipeline_shadowed_after_prepass_
                                           : pipeline_shadowed_standalone_));
     graph.add_raster_pass(
-        "forward-pbr shadowed",
+        label,
         desc,
         [pipe, data, shadow, local, clusters, ddgi, sky, use_sdf, sdf_occlusion, &graph](
             rhi::CommandBuffer& cmd) {

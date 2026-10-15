@@ -21,6 +21,11 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+#ifdef FIRST_PERSON_SDF_SPECULAR
+#define FIRST_PERSON
+#define SDF_SPECULAR_OCCLUSION
+#endif
+
 struct DirLight {
     vec4 direction; // xyz = the direction the light TRAVELS (world), w unused
     vec4 radiance;  // rgb = color * intensity (linear), w unused
@@ -497,6 +502,26 @@ void main() {
     if (ddgi.enabled_pad.x != 0u) {
         vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal));
         out_radiance = indirect * diffuse_albedo * ao;
+#ifdef FIRST_PERSON
+        // The held model is outside world SSR, so it must retain the filtered sky reflection
+        // even when DDGI supplies its diffuse bounce. The world variant keeps its existing
+        // DDGI-only behavior: the viewmodel is the explicit overlay exception.
+        if (sky_sh_enabled()) {
+            const vec3 r = reflect(-v, n);
+            const vec3 f0 = mix(vec3(0.04), albedo, metallic);
+            const float n_dot_v = max(dot(n, v), 1e-4);
+            if (frame.ambient.w != 0.0) {
+                const vec3 lookup = sky_specular_dominant_direction(n, r, lobe_roughness);
+                out_radiance += sky_specular_prefiltered(lookup, lobe_roughness) *
+                                sky_specular_environment_brdf(f0, lobe_roughness, n_dot_v) * ao;
+            } else {
+                const vec3 sky_ambient = sky_sh_irradiance(normalize(v_world_normal));
+                const vec3 sky_mirror = texture(skyview_lut, skyview_uv_from_direction(r)).rgb;
+                out_radiance += mix(sky_mirror, sky_ambient, alpha) *
+                                env_brdf_approx(f0, roughness, n_dot_v) * ao;
+            }
+        }
+#endif
     } else {
         // The sky's own irradiance when a sky is present, else M5.6's flat constant. Like DDGI
         // above this uses the GEOMETRIC normal rather than the normal-mapped `n`, and for a

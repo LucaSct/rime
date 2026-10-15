@@ -13,11 +13,12 @@ rime_add_test(rime_gameplay_tests
     character_recovery_test.cpp
     character_replay_test.cpp
     character_grid_test.cpp
+    procedural_character_test.cpp
     input_map_test.cpp
     weapon_test.cpp)
 
 target_link_libraries(rime_gameplay_tests
-    PRIVATE rime::gameplay rime::physics)
+    PRIVATE rime::gameplay rime::physics rime::assets)
 
 # The shared fixture header (character_fixture.hpp) lives beside these sources.
 target_include_directories(rime_gameplay_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

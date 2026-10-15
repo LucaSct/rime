@@ -3442,6 +3442,11 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
     west.move_y = 1.0f;
     float min_x = std::numeric_limits<float>::infinity();
     float min_y = std::numeric_limits<float>::infinity();
+    float min_client_x = std::numeric_limits<float>::infinity();
+    float min_visual_x = std::numeric_limits<float>::infinity();
+    float min_predicted_gap = std::numeric_limits<float>::infinity();
+    float min_visual_gap = std::numeric_limits<float>::infinity();
+    float max_visual_offset = 0.0f;
     auto travel = [&](int ticks) {
         for (int i = 0; i < ticks && okay; ++i) {
             demo.step_sim(west);
@@ -3503,11 +3508,54 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
                 check(feet >= support.point.y - 0.1f,
                       "capsule feet never pass through current static surface");
             }
+            const auto local_avatar = demo.session.client.local_player();
+            const auto* client_cfg = local_avatar.is_valid()
+                                         ? demo.session.client.world.get<gameplay::CharacterConfig>(
+                                               local_avatar)
+                                         : nullptr;
+            if (client_cfg && demo.session.client.predictor.seeded()) {
+                const auto& predicted = demo.session.client.predictor.state();
+                const auto visual = demo.session.client.predictor.visual_position();
+                min_client_x = std::min(min_client_x, predicted.position.x);
+                min_visual_x = std::min(min_visual_x, visual.x);
+                max_visual_offset = std::max(
+                    max_visual_offset, core::length(visual - predicted.position));
+                const auto check_client_support = [&](core::Vec3 at, bool is_visual) {
+                    const float top = std::max(at.y + 64.0f, 64.0f);
+                    physics::RayHit hit;
+                    const bool found = demo.session.client.physics.raycast(
+                        physics::Ray{{at.x, top, at.z}, {0.0f, -1.0f, 0.0f}, top + 64.0f},
+                        hit,
+                        statics);
+                    check(found, is_visual ? "client visual terrain support exists"
+                                           : "client predicted terrain support exists");
+                    if (found) {
+                        const float feet = at.y - client_cfg->half_height - client_cfg->radius;
+                        if (is_visual) {
+                            min_visual_gap = std::min(min_visual_gap, feet - hit.point.y);
+                            check(feet >= hit.point.y - 0.1f,
+                                  "client visual feet stay above terrain");
+                            const float eye = demo.session.client.camera_transform().translation.y;
+                            check(eye >= hit.point.y + 0.05f,
+                                  "client camera stays above visual terrain");
+                        } else {
+                            min_predicted_gap = std::min(min_predicted_gap, feet - hit.point.y);
+                            check(feet >= hit.point.y - 0.1f,
+                                  "client predicted feet stay above terrain");
+                        }
+                    }
+                };
+                check_client_support(predicted.position, false);
+                check_client_support(visual, true);
+            }
         }
     };
     travel(150); // handshakes, then walking speed beyond the west end of the old slab
     check(min_x < static_cast<float>(c.street_min_x) - 2.0f,
           "walk-speed traversal crossed original slab");
+    check(min_client_x < static_cast<float>(c.street_min_x) - 2.0f &&
+              min_visual_x < static_cast<float>(c.street_min_x) - 2.0f,
+          "client predicted and visual traversal crossed original slab");
 
     // This is an actual character configuration, consumed by gameplay and prediction. It is not
     // a camera teleport or a fabricated collision query.
@@ -3532,6 +3580,8 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
     travel(360);
     check(min_x < stress_start - 300.0f && min_x < -300.0f,
           "100m/s control traversed hundreds of negative metres");
+    check(min_client_x < stress_start - 280.0f && min_visual_x < stress_start - 280.0f,
+          "client predicted and visual control traversed negative terrain");
     const core::Vec3 remote{min_x, 60.0f, 0.0f};
     physics::RayHit remote_hit;
     check(demo.session.server.physics.raycast(
@@ -3573,14 +3623,21 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
         check(false, "authoritative player spawned");
     }
     std::printf("world-smoke: min x %.1f m, min y %.1f m, server %llu installs/%llu evictions, "
-                "client %llu installs/%llu evictions, recoveries %llu\n",
+                "client %llu installs/%llu evictions, recoveries %llu, client min x %.1f m, "
+                "visual min x %.1f m, predicted/visual min feet gaps %.3f/%.3f m, "
+                "max visual offset %.3f m\n",
                 min_x,
                 min_y,
                 static_cast<unsigned long long>(sc.installs),
                 static_cast<unsigned long long>(sc.evictions),
                 static_cast<unsigned long long>(cc.installs),
                 static_cast<unsigned long long>(cc.evictions),
-                static_cast<unsigned long long>(demo.play_world->stats().recoveries));
+                static_cast<unsigned long long>(demo.play_world->stats().recoveries),
+                min_client_x,
+                min_visual_x,
+                min_predicted_gap,
+                min_visual_gap,
+                max_visual_offset);
     return okay ? 0 : 1;
 }
 
