@@ -24,6 +24,7 @@
 #include "rime/render/lighting/sky.hpp"
 #include "rime/render/lighting/ssr.hpp"
 #include "rime/render/passes.hpp"
+#include "rime/render/scope_lens_pass.hpp"
 #include "rime/render/temporal_jitter.hpp"
 #include "rime/render/terrain_scene.hpp"
 
@@ -122,6 +123,14 @@ struct ResolveDrawStats {
 // nothing for a world that never produces one.
 [[nodiscard]] ExtractedScene extract_scene(ecs::World& world);
 
+// A sample-owned CPU deformation; the renderer knows vertices, never bones or IK. Both spans
+// are borrowed until render() copies them into GPU-retired frame scratch. One entry per mesh.
+struct FirstPersonDeformation {
+    MeshId mesh = kInvalidMeshId;
+    std::span<const MeshVertex> current;
+    std::span<const core::Vec3> previous_positions;
+};
+
 // ── The renderer ──────────────────────────────────────────────────────────────────────────────
 
 class SceneRenderer {
@@ -165,11 +174,13 @@ public:
     // Extract → upload → declare into `graph` (which the caller later executes). Returns invalid
     // handles (and declares nothing) when the World has no active camera. The depth pre-pass is
     // optional per frame — same pixels either way (the M5.6 proof asserts it), different cost
-    // profile; measure per workload.
+    // profile; measure per workload. A camera snapshot override replaces only extraction
+    // camera data, allowing an independent scope view without mutating the world camera.
     Output render(RenderGraph& graph,
                   ecs::World& world,
                   rhi::Extent2D extent,
-                  bool use_depth_prepass = true);
+                  bool use_depth_prepass = true,
+                  const ExtractedCamera* camera_override = nullptr);
 
     // Borrow the pass and draw list through the next synchronous render() declaration. Call each
     // frame that should draw terrain; render() clears this borrow afterward. An empty list or null
@@ -187,6 +198,27 @@ public:
                                 std::uint64_t identity_epoch) noexcept {
         first_person_draws_ = draws;
         first_person_epoch_ = identity_epoch;
+    }
+
+    // The second view is declared first on the same graph. Its HDR is sampled only on
+    // the physical ocular surface after weapon shading, before the main temporal resolve.
+    void set_first_person_scope(RGTexture hdr,
+                                const DrawItem& lens,
+                                const ScopeLensPass::Params& params) noexcept {
+        scope_hdr_ = hdr;
+        scope_lens_ = lens;
+        scope_params_ = params;
+    }
+
+    // Optional and single-render, like the draw borrow. Counts must match the registry and
+    // each other; invalid/duplicate entries refuse matching draws and increment this counter.
+    void
+    set_first_person_deformations(std::span<const FirstPersonDeformation> deformations) noexcept {
+        first_person_deformations_ = deformations;
+    }
+
+    [[nodiscard]] std::uint64_t rejected_first_person_deformations() const noexcept {
+        return rejected_first_person_deformations_;
     }
 
     // Constant ambient radiance (linear RGB) — the crude GI stand-in until M10. Default is a dim
@@ -472,6 +504,10 @@ public:
     }
 
 private:
+    std::unique_ptr<ScopeLensPass> scope_lens_pass_;
+    RGTexture scope_hdr_{};
+    DrawItem scope_lens_{};
+    ScopeLensPass::Params scope_params_{};
     void ensure_draw_capacity(std::uint32_t draw_count);
 
     // Feed every (WorldTransform, SdfRef) entity into sdf_clipmap_ — the m10.4b extraction gap.
@@ -486,6 +522,8 @@ private:
     const MeshRegistry& meshes_;
     const MaterialRegistry& materials_;
     std::span<const DrawItem> first_person_draws_{};
+    std::span<const FirstPersonDeformation> first_person_deformations_{};
+    std::uint64_t rejected_first_person_deformations_ = 0;
     std::uint64_t first_person_epoch_ = 0;
     std::uint64_t previous_first_person_epoch_ = 0;
     bool previous_first_person_active_ = false;

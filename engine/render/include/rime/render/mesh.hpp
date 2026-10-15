@@ -130,6 +130,7 @@ struct GpuMesh {
     rhi::BufferHandle vertices;
     rhi::BufferHandle indices;
     std::uint32_t index_count = 0;
+    std::uint32_t vertex_count = 0; // validate draw-local deformation against resident topology
 
     // The mesh's LOCAL-space bounding box, computed once at upload from the vertex positions
     // (m13.2a). It is what view-frustum culling transforms and tests — see culling.hpp.

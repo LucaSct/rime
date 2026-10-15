@@ -21,6 +21,8 @@
 #version 450
 
 layout(location = 0) in vec3 in_position;
+// Only the velocity twin stream puts previous local positions in the normal slot.
+layout(location = 1) in vec3 in_previous_position;
 
 struct DirLight {
     vec4 direction;
@@ -50,6 +52,7 @@ layout(std140, set = 0, binding = 1) uniform DrawUniforms {
     vec4 params;
     vec4 emissive;
     mat4 prev_model;
+    vec4 motion_params;
 } draw;
 
 // Clip-space (NOT yet divided by w): clip space is linear in the vertex attributes, so the
@@ -70,6 +73,7 @@ invariant gl_Position;
 
 void main() {
     v_clip_current = frame.view_proj_unjittered * (draw.model * vec4(in_position, 1.0));
-    v_clip_previous = frame.prev_view_proj * (draw.prev_model * vec4(in_position, 1.0));
+    vec3 previous_position = draw.motion_params.x > 0.5 ? in_previous_position : in_position;
+    v_clip_previous = frame.prev_view_proj * (draw.prev_model * vec4(previous_position, 1.0));
     gl_Position = frame.view_proj * (draw.model * vec4(in_position, 1.0));
 }

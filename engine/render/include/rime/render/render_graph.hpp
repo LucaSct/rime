@@ -351,7 +351,8 @@ public:
     // until this frame's GPU work completes, and its memory is not handed out again until the ring
     // returns to this slot. Offsets are 256-byte aligned — the universal uniform-offset alignment
     // this engine already assumes everywhere it strides a uniform array — so a slice is always a
-    // legal `bind_uniform_buffer` offset.
+    // legal `bind_uniform_buffer` offset. Buffers also support vertex-input binding; write_buffer
+    // flushes host writes and submission publishes them to GPU consumers, including vertex input.
     //
     // Never invalidates a slice already handed out this frame: a push that does not fit takes a
     // fresh block rather than growing the current one, because growing means destroying a buffer

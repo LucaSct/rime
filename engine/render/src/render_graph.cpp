@@ -95,7 +95,7 @@ rhi::BufferHandle RenderGraph::push_frame_buffer(const void* data, std::size_t b
             device_.destroy(entry.handle);
         rhi::BufferDesc bd{};
         bd.size = std::max<std::uint64_t>(bytes, 1);
-        bd.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Storage;
+        bd.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Storage | rhi::BufferUsage::Vertex;
         bd.memory = rhi::MemoryUsage::CpuToGpu;
         bd.debug_name = "frame-scratch-buffer";
         entry = FrameBlock{device_.create_buffer(bd), bd.size};
@@ -125,10 +125,11 @@ RenderGraph::FrameSlice RenderGraph::push_frame_data(const void* data, std::size
     if (slot.block >= slot.blocks.size()) {
         rhi::BufferDesc bd{};
         bd.size = std::max(kFrameBlockBytes, need);
-        // Both usages on one buffer: eleven of the fourteen callers bind a uniform and three bind
-        // a storage buffer, and splitting the ring by usage would double the bookkeeping to save
-        // nothing — the memory is host-visible either way.
-        bd.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Storage;
+        // Uniform, storage and draw-local deformed vertices share the same retirement ring.
+        // write_buffer flushes noncoherent host memory before submission; queue submission makes
+        // those host writes visible to vertex input as well as shaders. No GPU producer exists
+        // here, so a shader/transfer barrier would express the wrong dependency.
+        bd.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Storage | rhi::BufferUsage::Vertex;
         bd.memory = rhi::MemoryUsage::CpuToGpu;
         bd.debug_name = "frame-scratch";
         const rhi::BufferHandle handle = device_.create_buffer(bd);

@@ -115,6 +115,8 @@ struct GpuDrawUniforms {
     // at the previous render(), from SceneRenderer's per-entity cache. Equal to `model` for an
     // entity seen for the first time.
     core::Mat4 prev_model; // offset 176
+    // Velocity alone repurposes vertex location 1 as the previous local position when x is 1.
+    float motion_params[4] = {}; // offset 240; zero preserves rigid/static draws
 };
 
 static_assert(std::is_standard_layout_v<GpuFrameUniforms> && sizeof(GpuFrameUniforms) == 880 &&
@@ -123,11 +125,12 @@ static_assert(std::is_standard_layout_v<GpuFrameUniforms> && sizeof(GpuFrameUnif
                   offsetof(GpuFrameUniforms, view_proj_unjittered) == 752 &&
                   offsetof(GpuFrameUniforms, prev_view_proj) == 816,
               "GpuFrameUniforms no longer matches the std140 FrameUniforms block in the shaders");
-static_assert(std::is_standard_layout_v<GpuDrawUniforms> && sizeof(GpuDrawUniforms) == 240 &&
+static_assert(std::is_standard_layout_v<GpuDrawUniforms> && sizeof(GpuDrawUniforms) == 256 &&
                   offsetof(GpuDrawUniforms, base_color) == 128 &&
                   offsetof(GpuDrawUniforms, params) == 144 &&
                   offsetof(GpuDrawUniforms, emissive) == 160 &&
-                  offsetof(GpuDrawUniforms, prev_model) == 176,
+                  offsetof(GpuDrawUniforms, prev_model) == 176 &&
+                  offsetof(GpuDrawUniforms, motion_params) == 240,
               "GpuDrawUniforms no longer matches the std140 DrawUniforms block in the shaders");
 
 // Per-draw uniform data lives as SLICES of one buffer, re-bound at a new offset per draw
@@ -173,6 +176,13 @@ struct DrawItem {
     };
 
     std::uint32_t flags = None;
+
+    // Draw-local frame scratch: registry indices/topology remain immutable. Every geometry
+    // pass uses the current stream; velocity may bind a twin carrying previous positions.
+    rhi::BufferHandle vertex_override = {};
+    std::uint64_t vertex_override_offset = 0;
+    rhi::BufferHandle velocity_vertex_override = {};
+    std::uint64_t velocity_vertex_override_offset = 0;
 };
 
 // Everything the geometry passes need to record their draws. The spans/pointers are BORROWED and

@@ -401,13 +401,16 @@ void SceneRenderer::sync_sdf_instances(ecs::World& world) {
 SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                                             ecs::World& world,
                                             rhi::Extent2D extent,
-                                            bool use_depth_prepass) {
+                                            bool use_depth_prepass,
+                                            const ExtractedCamera* camera_override) {
     // Advance the uniform ring first, so every buffer this frame touches belongs to a slot the
     // presentation fence has already waited on. Done unconditionally — an early-return frame
     // consuming a slot costs nothing and keeps the slot sequence independent of scene content.
     ubo_slot_ = (ubo_slot_ + 1) % static_cast<std::uint32_t>(frame_ubos_.size());
 
     ExtractedScene scene = extract_scene(world);
+    if (camera_override)
+        scene.camera = *camera_override;
     // Before ANY registry lookup: a MeshRef can name a mesh this registry does not hold (a scene
     // file is untrusted input), and every path below — the cull loop, record_draws for the depth,
     // forward and shadow passes — indexes with it.
@@ -428,6 +431,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         previous_first_person_active_ = false;
         previous_first_person_models_.clear();
         first_person_draws_ = {};
+        first_person_deformations_ = {};
+        scope_hdr_ = {};
         terrain_pass_ = nullptr;
         terrain_draws_ = {};
         if (!warned_no_camera_) {
@@ -1113,6 +1118,29 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         std::size_t dropped_unknown_mesh = 0;
         std::size_t dropped_empty = 0;
         std::size_t dropped_bad_range = 0;
+        std::unordered_map<MeshId, const FirstPersonDeformation*> deformations;
+        std::unordered_set<MeshId> refused_deformations;
+        for (const FirstPersonDeformation& deformation : first_person_deformations_) {
+            const bool duplicate = !deformations.emplace(deformation.mesh, &deformation).second;
+            if (duplicate || !meshes_.contains(deformation.mesh) ||
+                deformation.current.size() != meshes_.get(deformation.mesh).vertex_count ||
+                deformation.previous_positions.size() != deformation.current.size()) {
+                refused_deformations.insert(deformation.mesh);
+                ++rejected_first_person_deformations_;
+                RIME_WARN("render: refused first-person deformation for mesh {} (current {}, "
+                          "previous {}, unknown mesh or mismatched/duplicate topology)",
+                          deformation.mesh,
+                          deformation.current.size(),
+                          deformation.previous_positions.size());
+            }
+        }
+
+        struct DeformationUpload {
+            RenderGraph::FrameSlice current;
+            RenderGraph::FrameSlice velocity;
+        };
+
+        std::unordered_map<MeshId, DeformationUpload> deformation_uploads;
         for (const DrawItem& source : first_person_draws_.subspan(
                  0, std::min(first_person_draws_.size(), kMaxFirstPersonDraws))) {
             if (!meshes_.contains(source.mesh) || source.index_count == 0) {
@@ -1128,8 +1156,49 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                 ++dropped_bad_range;
                 continue;
             }
+            if (refused_deformations.contains(source.mesh))
+                continue;
             const std::size_t i = frame_first_person_draws_.size();
             DrawItem draw = source;
+            const auto deformation = deformations.find(source.mesh);
+            const bool deformed = deformation != deformations.end();
+            if (deformed) {
+                auto uploaded = deformation_uploads.find(source.mesh);
+                if (uploaded == deformation_uploads.end()) {
+                    const FirstPersonDeformation& vertices = *deformation->second;
+                    // Copy before graph execution: the caller may reuse its skinning arrays as
+                    // soon as render returns. One upload per mesh, shared by all its submeshes.
+                    DeformationUpload upload{};
+                    upload.current = graph.push_frame_data(vertices.current.data(),
+                                                           vertices.current.size_bytes());
+                    std::vector<MeshVertex> velocity_vertices(vertices.current.begin(),
+                                                              vertices.current.end());
+                    for (std::size_t v = 0; v < velocity_vertices.size(); ++v) {
+                        const core::Vec3 previous = continuous ? vertices.previous_positions[v]
+                                                               : core::Vec3{vertices.current[v].px,
+                                                                            vertices.current[v].py,
+                                                                            vertices.current[v].pz};
+                        velocity_vertices[v].nx = previous.x;
+                        velocity_vertices[v].ny = previous.y;
+                        velocity_vertices[v].nz = previous.z;
+                    }
+                    upload.velocity = graph.push_frame_data(
+                        velocity_vertices.data(), velocity_vertices.size() * sizeof(MeshVertex));
+                    if (!upload.current.buffer.is_valid() || !upload.velocity.buffer.is_valid()) {
+                        refused_deformations.insert(source.mesh);
+                        ++rejected_first_person_deformations_;
+                        RIME_WARN("render: refused first-person deformation for mesh {}: "
+                                  "frame scratch allocation failed",
+                                  source.mesh);
+                        continue;
+                    }
+                    uploaded = deformation_uploads.emplace(source.mesh, upload).first;
+                }
+                draw.vertex_override = uploaded->second.current.buffer;
+                draw.vertex_override_offset = uploaded->second.current.offset;
+                draw.velocity_vertex_override = uploaded->second.velocity.buffer;
+                draw.velocity_vertex_override_offset = uploaded->second.velocity.offset;
+            }
             const PbrMaterialDesc material = draw.material < materials_.size()
                                                  ? materials_.get(draw.material)
                                                  : PbrMaterialDesc{};
@@ -1142,6 +1211,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             frame_first_person_draws_.push_back(draw);
             GpuDrawUniforms du{};
             du.model = draw.model;
+            du.motion_params[0] = deformed ? 1.0f : 0.0f;
             du.prev_model = continuous && i < previous_first_person_models_.size()
                                 ? previous_first_person_models_[i]
                                 : draw.model;
@@ -1232,6 +1302,22 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                                   rhi::LoadOp::Load,
                                   true,
                                   "first-person-forward");
+            if (scope_hdr_.is_valid()) {
+                if (!scope_lens_pass_)
+                    scope_lens_pass_ = std::make_unique<ScopeLensPass>(device_);
+                scope_params_.main_view_proj = fu.view_proj;
+                scope_params_.main_eye = {fu.camera_pos[0], fu.camera_pos[1], fu.camera_pos[2]};
+                tonemap_src = scope_lens_pass_->add(
+                    graph,
+                    tonemap_src,
+                    model_depth,
+                    scope_hdr_,
+                    (sky_on && sky_specular_live) ? sky_binding.specular.prefiltered : RGTexture{},
+                    extent,
+                    meshes_,
+                    scope_lens_,
+                    scope_params_);
+            }
             taa_depth = first_person_pass_->combine_depth(graph, depth, model_depth, extent);
         }
     } else if (previous_first_person_active_) {
@@ -1239,7 +1325,9 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         previous_first_person_active_ = false;
         previous_first_person_models_.clear();
     }
-    first_person_draws_ = {}; // the caller's span is borrowed only through this declaration
+    first_person_draws_ = {}; // the caller's spans are borrowed only through this declaration
+    first_person_deformations_ = {};
+    scope_hdr_ = {};
 
     // TAA resolve (ADR-0078 step 1d): average the jittered frames over time. It runs HERE, on
     // radiance, after every pass that adds light to the frame (SSR included) and before the

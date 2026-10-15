@@ -32,6 +32,7 @@ rime_add_test(rime_render_tests
     hud_test.cpp
     scene_layer_test.cpp
     first_person_test.cpp
+    scope_lens_test.cpp
     pbr_pipeline_test.cpp
     specular_aa_test.cpp
     pick_test.cpp

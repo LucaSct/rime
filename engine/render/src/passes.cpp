@@ -84,7 +84,8 @@ void record_draws(rhi::CommandBuffer& cmd,
                   const SceneDrawData& data,
                   bool bind_material_textures,
                   std::uint32_t flag_filter = 0,
-                  std::uint32_t flag_match = 0) {
+                  std::uint32_t flag_match = 0,
+                  bool velocity = false) {
     // Binding 0 is FrameUniforms at data.frame_ubo_offset — 0 for the camera pass, cascade c's
     // 256-byte view_proj slice for a CSM depth pass (m10.1). depth_only.vert / the forward shaders
     // read only the leading members of whatever block sits there, so one loop serves every view.
@@ -95,7 +96,13 @@ void record_draws(rhi::CommandBuffer& cmd,
             continue; // belongs to the other partition
         }
         const GpuMesh& mesh = data.meshes->get(item.mesh);
-        cmd.bind_vertex_buffer(mesh.vertices);
+        if (velocity && item.velocity_vertex_override.is_valid())
+            cmd.bind_vertex_buffer(item.velocity_vertex_override,
+                                   item.velocity_vertex_override_offset);
+        else if (item.vertex_override.is_valid())
+            cmd.bind_vertex_buffer(item.vertex_override, item.vertex_override_offset);
+        else
+            cmd.bind_vertex_buffer(mesh.vertices);
         cmd.bind_index_buffer(mesh.indices, rhi::IndexType::Uint32);
         cmd.bind_uniform_buffer(1, data.draw_ubo, i * kDrawUniformStride, sizeof(GpuDrawUniforms));
         if (bind_material_textures) {
@@ -319,13 +326,19 @@ void VelocityPass::add(RenderGraph& graph,
         // drew with culling off must be drawn with culling off here too, or its depth has no
         // matching fragment and it keeps zero velocity.
         cmd.set_cull_mode(rhi::CullMode::Back);
-        record_draws(cmd, data, /*bind_material_textures=*/false, DrawItem::DoubleSided, 0);
+        record_draws(cmd,
+                     data,
+                     /*bind_material_textures=*/false,
+                     DrawItem::DoubleSided,
+                     0,
+                     /*velocity=*/true);
         cmd.set_cull_mode(rhi::CullMode::None);
         record_draws(cmd,
                      data,
                      /*bind_material_textures=*/false,
                      DrawItem::DoubleSided,
-                     DrawItem::DoubleSided);
+                     DrawItem::DoubleSided,
+                     /*velocity=*/true);
     });
 }
 
