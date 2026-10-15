@@ -12,6 +12,7 @@
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/platform/filesystem.hpp"
+#include "rime/platform/input.hpp"
 
 namespace rime::block_play {
 namespace {
@@ -211,7 +212,7 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
     render::CpuMesh lens;
     constexpr unsigned segments = 64;
     const core::Vec3 ocular{.14f, -.118f, -.085f};
-    constexpr float radius = .026f;
+    constexpr float radius = kScopeLensRadius;
     lens.vertices.push_back({ocular.x, ocular.y, ocular.z, 0, 0, 1, .5f, .5f});
     for (unsigned i = 0; i <= segments; ++i) {
         const float angle = static_cast<float>(i) * 6.28318530718f / segments;
@@ -254,6 +255,25 @@ void PlayViewmodel::select(Weapon weapon) noexcept {
     }
 }
 
+void PlayViewmodel::apply_controls(const platform::Input& devices) noexcept {
+    if (devices.key_pressed(platform::Key::Num1))
+        select(Weapon::Scar);
+    if (devices.key_pressed(platform::Key::Num2))
+        select(Weapon::M4);
+    if (devices.key_pressed(platform::Key::Num3))
+        select(Weapon::Sniper);
+    set_aiming(devices.key_down(platform::Key::Q) ||
+               devices.mouse_down(platform::MouseButton::Right));
+}
+
+float PlayViewmodel::scope_fov_y() noexcept {
+    // The rendered feed is fitted into a physical aperture, not across the whole viewport.
+    // At ADS, angular magnification = (ocular radius / eye relief) / tan(feed half-FOV).
+    // Dividing the PARENT camera's focal length by five ignored the aperture's apparent size
+    // and produced only about 2.36x apparent zoom for the authored 26 mm / 90 mm ocular.
+    return 2.0f * std::atan(kScopeLensRadius / (kScopeEyeRelief * kScopeMagnification));
+}
+
 void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept {
     const float dt = std::clamp(frame_dt, 0.0f, 0.05f);
     const float speed =
@@ -263,7 +283,7 @@ void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fir
     if (fired)
         recoil_ = std::min(recoil_ + 0.012f, 0.035f);
     recoil_ *= std::exp(-14.0f * dt);
-    const float target_aim = aiming_ && selected_ == Weapon::Sniper ? 1.0f : 0.0f;
+    const float target_aim = aiming_ ? 1.0f : 0.0f;
     aim_ += (target_aim - aim_) * (1.0f - std::exp(-16.0f * dt));
 }
 
@@ -289,7 +309,12 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
                          recoil_ * 0.5f};
     const float pose_amount = 1.0f - aim_ * .85f;
     local.translation = local.translation * pose_amount;
-    local.translation = local.translation + core::Vec3{-.14f, .118f, -.005f} * aim_;
+    // These weapon-local sight lines are authored in metres: SCAR rear iron, M4 sight tube,
+    // and PM II ocular. Translate each line onto the eye without changing the world camera.
+    // Rifle aim has no magnification; only the sniper owns a second optical camera.
+    constexpr std::array<core::Vec3, 3> aim_offsets{
+        {{-.14f, .09f, .06f}, {-.1378f, .1097f, .06f}, {-.14f, .118f, -.005f}}};
+    local.translation = local.translation + aim_offsets[static_cast<unsigned>(selected_)] * aim_;
     local.rotation = core::quat_from_euler(
         recoil_ * .8f, .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount, 0.0f);
     const core::Mat4 camera_matrix = core::to_matrix(camera);

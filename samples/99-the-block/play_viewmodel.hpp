@@ -21,6 +21,10 @@ namespace rime::core {
 class JobSystem;
 }
 
+namespace rime::platform {
+class Input;
+}
+
 namespace rime::block_play {
 
 // Play-only presentation. Mesh topology/materials/textures load once. Each render solves
@@ -43,7 +47,16 @@ public:
     void advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept;
     void observe_camera(core::Vec3 eye) noexcept;
 
+    // Consumes the already-folded frame levels/selection edges. A right drag can look and aim
+    // together when pointer capture is unavailable; capture must never disable the aim button.
+    void apply_controls(const platform::Input& devices) noexcept;
+
     void set_aiming(bool aiming) noexcept { aiming_ = aiming; }
+
+    static constexpr float kScopeLensRadius = 0.026f;
+    static constexpr float kScopeEyeRelief = 0.09f;
+    static constexpr float kScopeMagnification = 5.0f;
+    [[nodiscard]] static float scope_fov_y() noexcept;
 
     [[nodiscard]] std::span<const render::DrawItem> pose(const core::Transform& camera);
 

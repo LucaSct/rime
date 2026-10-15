@@ -2146,11 +2146,10 @@ struct Demo {
                 camera.position[0] = position.x;
                 camera.position[1] = position.y;
                 camera.position[2] = position.z;
-                // 5x is the ratio of projection focal lengths, using the actual parent
-                // lens rather than an assumed FOV. Only the optical projection changes.
-                const auto* parent = world.get<render::Camera>(visuals->camera);
-                const float parent_fov = parent ? parent->fov_y : 1.1f;
-                camera.fov_y = 2.0f * std::atan(std::tan(parent_fov * .5f) / 5.0f);
+                // Fit a fixed 5x angular image into the physical ocular at its ADS eye relief.
+                // The feed's focal ratio alone is insufficient because the lens fills only part
+                // of the parent viewport. The parent projection remains untouched.
+                camera.fov_y = block_play::PlayViewmodel::scope_fov_y();
                 camera.z_near = .04f;
                 camera.z_far = 3072.0f;
                 const auto scoped = optical.render(*ctx.graph, world, {512, 512}, true, &camera);
@@ -2159,7 +2158,8 @@ struct Demo {
                 params.optic_from_world = core::inverse(optic_world);
                 params.optical_view_proj = optical.view_proj_unjittered();
                 params.optical_tan_half_fov = std::tan(camera.fov_y * .5f);
-                params.lens_radius = .026f;
+                params.lens_radius = block_play::PlayViewmodel::kScopeLensRadius;
+                params.eye_relief = block_play::PlayViewmodel::kScopeEyeRelief;
                 params.intensity = scope_transmission;
                 visuals->renderer.set_first_person_scope(scoped.hdr, viewmodel->lens(), params);
             }
@@ -4054,9 +4054,87 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     check(max_skin_motion > .001f &&
               demo.visuals->renderer.rejected_first_person_deformations() == 0,
           "IK visibly deforms actual vertices, with no refused uploads");
-    demo.viewmodel->set_aiming(true);
-    for (int i = 0; i < 120; ++i)
+    // Exercise the live event fold and the SAME sample controls as --play. Calling set_aiming
+    // directly missed both the captured-pointer gate and the rifles' ignored aim input.
+    platform::Input aim_devices;
+    gameplay::FirstPersonView aim_view{};
+    gameplay::InputBindings aim_bindings{};
+    const auto control_frame = [&](std::span<const platform::Event> events) {
+        (void)gameplay::map_frame_input(aim_devices, events, aim_view, aim_bindings);
+        demo.viewmodel->apply_controls(aim_devices);
         demo.viewmodel->advance(1.0f / 60.0f, {}, false);
+    };
+    const auto settle_controls = [&]() {
+        for (int i = 0; i < 64; ++i)
+            control_frame({}); // held buttons must survive frames containing no events
+    };
+    platform::Event right_down{};
+    right_down.type = platform::EventType::MouseButton;
+    right_down.button.button = platform::MouseButton::Right;
+    right_down.button.down = true;
+    auto right_up = right_down;
+    right_up.button.down = false;
+    platform::Event motion{};
+    motion.type = platform::EventType::MouseMove;
+    motion.mouse_move.dx = 12.0f;
+    const auto eye_pose = demo.session.client.camera_transform();
+    const auto weapon_origin = [&]() {
+        for (const auto& draw : demo.viewmodel->pose(eye_pose))
+            if (draw.mesh == demo.viewmodel->selected_mesh())
+                return core::transform_point(draw.model, {});
+        return core::Vec3{};
+    };
+    for (bool drag : {false, true}) {
+        aim_bindings.look_requires_drag = drag;
+        for (auto key : {platform::Key::Num1, platform::Key::Num2, platform::Key::Num3}) {
+            platform::Event select{};
+            select.type = platform::EventType::KeyDown;
+            select.key.key = key;
+            control_frame(std::span(&select, 1));
+            const auto hip_origin = weapon_origin();
+            const float initial_yaw = aim_view.yaw;
+            // In fallback, motion deliberately arrives BEFORE the button in the event batch.
+            const std::array press =
+                drag ? std::array{motion, right_down} : std::array{right_down, motion};
+            control_frame(press);
+            settle_controls();
+            const auto aim_origin = weapon_origin();
+            if (!drag && key != platform::Key::Num3 && !g_ppm.empty()) {
+                demo.app.run_frames(48);
+                const auto aimed = capture();
+                const auto suffix = key == platform::Key::Num1 ? ".scar-aim.ppm" : ".m4-aim.ppm";
+                write_ppm((g_ppm + suffix).c_str(), aimed, kW, kH);
+            }
+            check(aim_devices.mouse_down(platform::MouseButton::Right) &&
+                      demo.viewmodel->aim_fraction() > .99f &&
+                      core::length(aim_origin - hip_origin) > .08f && aim_view.yaw != initial_yaw,
+                  "right hold aims every weapon and preserves look in locked and drag modes");
+            const auto& stats = demo.viewmodel->arm_stats();
+            check(stats.valid_input && stats.clamped_targets == 0 &&
+                      stats.wrist_position_error[0] < .0001f &&
+                      stats.wrist_position_error[1] < .0001f,
+                  "each held aim pose remains inside the rigged arms' reachable workspace");
+            select.type = platform::EventType::KeyUp;
+            const std::array release{right_up, select};
+            control_frame(release);
+            settle_controls();
+            check(demo.viewmodel->aim_fraction() < .001f,
+                  "right release returns every weapon to its hip pose");
+        }
+        platform::Event q{};
+        q.type = platform::EventType::KeyDown;
+        q.key.key = platform::Key::Q;
+        control_frame(std::span(&q, 1));
+        settle_controls();
+        check(demo.viewmodel->aim_fraction() > .99f, "Q remains a held aim alternative");
+        q.type = platform::EventType::KeyUp;
+        control_frame(std::span(&q, 1));
+        settle_controls();
+        check(demo.viewmodel->aim_fraction() < .001f, "Q release ends aiming");
+    }
+    control_frame(std::span(&right_down, 1));
+    for (int i = 0; i < 120; ++i)
+        control_frame({});
     const auto* parent_camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera);
     const float parent_fov = parent_camera ? parent_camera->fov_y : 0.0f;
     demo.app.run_frames(48);
@@ -4072,12 +4150,29 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     if (demo.visuals->scope_renderer) {
         const auto& main_vp = demo.visuals->renderer.view_proj_unjittered();
         const auto& optic_vp = demo.visuals->scope_renderer->view_proj_unjittered();
-        const auto row_length = [](const core::Mat4& m) {
-            return core::length(core::Vec3{m.at(1, 0), m.at(1, 1), m.at(1, 2)});
+        const auto optic_world = demo.viewmodel->optic_world();
+        const auto project = [](const core::Mat4& vp, core::Vec3 point) {
+            const auto clip = vp * core::Vec4{point.x, point.y, point.z, 1.0f};
+            return core::Vec3{clip.x / clip.w, clip.y / clip.w, clip.z / clip.w};
         };
-        const float measured_zoom = row_length(optic_vp) / row_length(main_vp);
-        check(std::abs(measured_zoom - 5.0f) < .001f,
-              "optical projection measures exactly 5x the actual parent focal length");
+        // Project a real target pair at 100 m, then place its optical image onto the physical
+        // ocular and project THAT through the parent camera. This measures the apparent zoom
+        // the player sees, including aperture size; a feed-camera focal ratio does not.
+        const auto axis = core::transform_point(optic_world, {0, 0, -100});
+        const auto target = core::transform_point(optic_world, {0, 1, -100});
+        const float direct_span = std::abs(project(main_vp, target).y - project(main_vp, axis).y);
+        const float radius = block_play::PlayViewmodel::kScopeLensRadius;
+        const auto image_axis =
+            core::transform_point(optic_world, {0, -radius * project(optic_vp, axis).y, 0});
+        const auto image_target =
+            core::transform_point(optic_world, {0, -radius * project(optic_vp, target).y, 0});
+        const float optical_span =
+            std::abs(project(main_vp, image_target).y - project(main_vp, image_axis).y);
+        const float measured_zoom = optical_span / direct_span;
+        check(std::abs(measured_zoom - block_play::PlayViewmodel::kScopeMagnification) < .02f,
+              "real target projected through the physical ocular measures 5x apparent zoom");
+        std::printf("viewmodel-smoke: physical ocular apparent magnification %.5fx\n",
+                    measured_zoom);
     }
     if (!g_ppm.empty() && !sniper.empty())
         write_ppm((g_ppm + ".sniper.ppm").c_str(), sniper, kW, kH);
@@ -4243,7 +4338,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
             "99-the-block: presenting in a window.\n"
             "  WASD move · %s to look · LEFT CLICK to fire\n"
             "  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II\n"
-            "  Q or captured right mouse aims · F detonates the hero building · ESC exits\n",
+            "  Hold Q or RIGHT MOUSE to aim (also while dragging) · F detonates · ESC exits\n",
             bindings.look_requires_drag
                 // Not "this display cannot lock": at startup the pointer is usually not
                 // over the window yet, and on Wayland that alone is enough to refuse. The
@@ -4278,8 +4373,9 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
             bindings.look_requires_drag = gameplay::look_requires_drag_for(win->cursor_mode());
         }
         demo.session.client.view.sensitivity =
-            look_sensitivity *
-            (demo.viewmodel ? 1.0f - .8f * demo.viewmodel->aim_fraction() : 1.0f);
+            look_sensitivity * (demo.viewmodel && demo.viewmodel->scoped()
+                                    ? 1.0f - .8f * demo.viewmodel->aim_fraction()
+                                    : 1.0f);
         const gameplay::FrameIntent intent = gameplay::map_frame_input(
             demo.session.client.devices, ctx.input, demo.session.client.view, bindings);
         live = gameplay_net::to_input_command(intent.character);
@@ -4291,19 +4387,9 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
             demo.fire_charge();
         }
         if (demo.viewmodel) {
-            if (demo.session.client.devices.key_pressed(platform::Key::Num1)) {
-                demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Scar);
-            }
-            if (demo.session.client.devices.key_pressed(platform::Key::Num2)) {
-                demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
-            }
-            if (demo.session.client.devices.key_pressed(platform::Key::Num3)) {
-                demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
-            }
-            demo.viewmodel->set_aiming(
-                demo.session.client.devices.key_down(platform::Key::Q) ||
-                (!bindings.look_requires_drag &&
-                 demo.session.client.devices.mouse_down(platform::MouseButton::Right)));
+            // map_frame_input has already folded this frame's events and applied mouse motion.
+            // Read the SAME held button in both locked and right-drag fallback modes.
+            demo.viewmodel->apply_controls(demo.session.client.devices);
             // Presentation follows actual predicted motion and the local fire edge; neither bob nor
             // weapon choice enters CharacterInput or the replicated simulation state.
             const auto velocity = demo.session.client.predictor.seeded()
