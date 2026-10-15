@@ -225,6 +225,30 @@ void quad(render::CpuMesh& mesh, core::Vec3 c, core::Vec3 u, core::Vec3 v) {
     mesh.indices.insert(mesh.indices.end(), {i, i + 1, i + 2, i, i + 2, i + 3});
 }
 
+void add_back_faces(render::CpuMesh& mesh) {
+    // These thin leaves/blades need a shading normal facing EACH visible side. Disabling
+    // culling alone leaves an underside using its top-side normal; NdotV then clamps near zero
+    // and the reflection becomes white at every angle below the canopy. Explicit back faces
+    // preserve correct culling, opposite normals and tangent frames without a new shader mode.
+    const auto vertices = static_cast<std::uint32_t>(mesh.vertices.size());
+    const auto indices = mesh.indices.size();
+    mesh.vertices.reserve(vertices * 2);
+    mesh.indices.reserve(indices * 2);
+    for (std::uint32_t i = 0; i < vertices; ++i) {
+        auto v = mesh.vertices[i];
+        v.nx = -v.nx;
+        v.ny = -v.ny;
+        v.nz = -v.nz;
+        mesh.vertices.push_back(v);
+    }
+    for (std::size_t i = 0; i < indices; i += 3) {
+        const auto a = mesh.indices[i] + vertices;
+        const auto b = mesh.indices[i + 1] + vertices;
+        const auto c = mesh.indices[i + 2] + vertices;
+        mesh.indices.insert(mesh.indices.end(), {a, c, b});
+    }
+}
+
 void branch(render::CpuMesh& mesh, core::Vec3 from, core::Vec3 to, float radius) {
     const core::Vec3 axis = core::normalize(to - from);
     const core::Vec3 u = core::normalize(
@@ -277,6 +301,7 @@ std::array<render::CpuMesh, 2> tree_meshes() {
                   -std::cos(yaw) * std::cos(pitch) * size});
         }
     }
+    add_back_faces(m[1]);
     for (auto& mesh : m)
         render::compute_tangents(mesh);
     return m;
@@ -379,7 +404,6 @@ bool PlayEnvironment::build(ecs::World& world,
     }
     const auto bark = materials.add(material(get(Surface::Bark)));
     auto leaf_desc = material(get(Surface::Leaf));
-    leaf_desc.double_sided = true;
     leaf_desc.alpha_cutoff = .5f;
     const auto leaf = materials.add(leaf_desc);
     const auto grass = materials.add(material(get(Surface::Grass)));
@@ -420,7 +444,6 @@ bool PlayEnvironment::build(ecs::World& world,
     // Tufts are geometry, not a painted green floor: crossed tapered blades with true silhouettes.
     // Merge all nearby tufts into four patches so grass does not add a draw call per blade.
     auto grass_desc = material(get(Surface::Grass));
-    grass_desc.double_sided = true;
     const auto blades_mat = materials.add(grass_desc);
     for (unsigned side = 0; side < 2; ++side) {
         for (unsigned section = 0; section < 2; ++section) {
@@ -447,6 +470,7 @@ bool PlayEnvironment::build(ecs::World& world,
                 }
                 ++stats_.grass_tufts;
             }
+            add_back_faces(blades);
             render::compute_tangents(blades);
             spawn(world, meshes.add(blades, "play-grass-blades"), blades_mat, {});
         }

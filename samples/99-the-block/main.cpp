@@ -80,8 +80,10 @@
 #include <vector>
 
 #include "play_environment.hpp"
+#include "play_input.hpp"
 #include "play_sunset.hpp"
 #include "play_viewmodel.hpp"
+#include "play_weapon_fx.hpp"
 #include "play_world.hpp"
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_server.hpp"
@@ -1784,6 +1786,8 @@ struct Demo {
     std::unique_ptr<Visuals> visuals;
     std::unique_ptr<block_play::PlayWorld> play_world;
     std::unique_ptr<block_play::PlayViewmodel> viewmodel;
+    std::unique_ptr<block_play::PlayWeaponFx> weapon_fx;
+    bool shot_presented = false;
     bool streamed_world = false;
     bool environment_enabled = false; // the playable art layer, also exercised without weapon art
     bool development_hud = true;
@@ -2003,6 +2007,12 @@ struct Demo {
             lighting.ddgi_rays_per_probe = 128;
             visuals->renderer.set_lighting(lighting);
         }
+        if (environment_enabled && visuals) {
+            weapon_fx = std::make_unique<block_play::PlayWeaponFx>(
+                *app.device(), visuals->meshes, visuals->materials);
+            if (!weapon_fx->initialize())
+                return false;
+        }
         if (viewmodel_enabled) {
             if (!visuals)
                 return false;
@@ -2035,6 +2045,26 @@ struct Demo {
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
+        // Session::tick has joined both jobs: these are accepted authoritative shots, including
+        // misses. Rejected cooldown inputs produce neither recoil nor visual feedback.
+        for (const auto& shot : session.server.gameplay.shots()) {
+            if (session.server.avatars.empty() ||
+                shot.shooter_entity != session.server.avatars.front())
+                continue;
+            shot_presented = true;
+            if (weapon_fx) {
+                const auto eye = session.client.camera_transform();
+                const auto muzzle =
+                    viewmodel ? viewmodel->muzzle_world(eye) : shot.origin + shot.direction * .5f;
+                weapon_fx->fire(shot.origin,
+                                shot.direction,
+                                muzzle,
+                                shot.did_hit
+                                    ? shot.point
+                                    : shot.origin + shot.direction * session.server.weapon.range,
+                                shot.did_hit);
+            }
+        }
         if (session.world_stopped) {
             app.request_quit();
             return;
@@ -2125,6 +2155,10 @@ struct Demo {
             return;
         }
         ecs::World& world = session.client.world;
+        if (weapon_fx) {
+            weapon_fx->advance(static_cast<float>(ctx.frame_dt));
+            weapon_fx->pose(world);
+        }
         if (auto* tf = world.get<ecs::WorldTransform>(visuals->camera)) {
             tf->value =
                 use_authored_camera ? visuals->authored_camera : session.client.camera_transform();
@@ -4227,7 +4261,10 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     std::size_t optical_pixels = 0, optical_changed = 0;
     if (sniper.size() == static_cast<std::size_t>(kW) * kH * 4 &&
         no_transmission.size() == sniper.size()) {
-        const float radius = .75f * (.026f / .09f) / std::tan(parent_fov * .5f) * kH * .5f;
+        const float radius = .75f *
+                             (block_play::PlayViewmodel::kScopeLensRadius /
+                              block_play::PlayViewmodel::kScopeEyeRelief) /
+                             std::tan(parent_fov * .5f) * kH * .5f;
         for (std::uint32_t y = 0; y < kH; ++y) {
             for (std::uint32_t x = 0; x < kW; ++x) {
                 const float dx = static_cast<float>(x) - kW * .5f;
@@ -4302,6 +4339,65 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
           "M4 swap changes at least 0.5 percent of the frame");
     check(scar_coverage > baseline_drift * 3 && swap_coverage > scar_drift * 3,
           "model coverage and swap exceed their unchanged controls");
+
+    // A matrix ratio alone cannot prove that the feed reaches the lens at that scale. Render
+    // a real magenta target through BOTH paths and measure its pixel silhouette after TAA.
+    // Six metres keeps the target in the empty street, ahead of the weapon and nearby walls.
+    render::PbrMaterialDesc target_material{};
+    target_material.base_color[0] = target_material.base_color[1] = target_material.base_color[2] =
+        0.0f;
+    target_material.emissive[0] = target_material.emissive[2] = 8.0f;
+    const auto target_mesh =
+        demo.visuals->meshes.add(render::make_cube(.5f), "optical proof target");
+    const auto target_mat = demo.visuals->materials.add(target_material);
+    core::Transform target_pose = eye_pose;
+    target_pose.translation = core::transform_point(core::to_matrix(eye_pose), {.22f, .12f, -6.0f});
+    target_pose.scale = {.16f, .16f, .015f};
+    const auto target_entity =
+        demo.session.client.world.spawn_with(ecs::WorldTransform{target_pose},
+                                             render::MeshRef{target_mesh},
+                                             render::MaterialRef{target_mat});
+    demo.development_hud = false;
+    demo.app.run_frames(48);
+    const auto direct_target = capture();
+    demo.viewmodel_enabled = true;
+    demo.viewmodel->set_aiming(true);
+    for (int i = 0; i < 64; ++i)
+        demo.viewmodel->advance(1.0f / 60.0f, {}, false);
+    demo.app.run_frames(48);
+    const auto scoped_target = capture();
+    const auto target_width = [&](const auto& pixels) {
+        int left = static_cast<int>(kW), right = -1;
+        if (pixels.size() != kW * kH * 4)
+            return 0;
+        for (unsigned y = kH / 4; y < kH * 3 / 4; ++y)
+            for (unsigned x = kW / 4; x < kW * 3 / 4; ++x) {
+                const auto p = (static_cast<std::size_t>(y) * kW + x) * 4;
+                if (pixels[p] > 100 && pixels[p + 2] > 80 &&
+                    int(pixels[p]) > int(pixels[p + 1]) + 60 &&
+                    int(pixels[p + 2]) > int(pixels[p + 1]) + 30) {
+                    left = std::min(left, static_cast<int>(x));
+                    right = std::max(right, static_cast<int>(x));
+                }
+            }
+        return right >= left ? right - left + 1 : 0;
+    };
+    const int direct_width = target_width(direct_target);
+    const int scoped_width = target_width(scoped_target);
+    const float pixel_zoom = direct_width > 0 ? float(scoped_width) / float(direct_width) : 0;
+    check(direct_width >= 5 && scoped_width >= 30 && pixel_zoom > 4.3f && pixel_zoom < 5.8f,
+          "rendered target silhouette is visibly magnified about 5x through the real lens");
+    std::printf("viewmodel-smoke: rendered target %d -> %d pixels (%.3fx); eye relief %.0f mm\n",
+                direct_width,
+                scoped_width,
+                pixel_zoom,
+                block_play::PlayViewmodel::kScopeEyeRelief * 1000.0f);
+    if (!g_ppm.empty()) {
+        write_ppm((g_ppm + ".target-direct.ppm").c_str(), direct_target, kW, kH);
+        write_ppm((g_ppm + ".target-scoped.ppm").c_str(), scoped_target, kW, kH);
+    }
+    (void)demo.session.client.world.despawn(target_entity);
+    demo.app.finish_gpu();
     return okay ? 0 : 1;
 }
 
@@ -4478,6 +4574,46 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
                 s.grass_tufts,
                 s.puddles,
                 s.ponds);
+
+    // Prove the same accepted-shot path used by live play without optional weapon art. A clean
+    // clone must still shoot, and cooldown refusal must not spawn another visual event.
+    demo.use_authored_camera = false;
+    demo.visuals->renderer.set_sky(play_sunset::sky(Visuals::authored_sky()));
+    (void)capture(); // settle the live camera before the input tape
+    const auto entities_before = demo.session.client.world.entity_count();
+    const auto shots_before = demo.session.shots_fired;
+    gameplay::CharacterInput trigger{};
+    trigger.yaw = demo.session.client.view.yaw;
+    trigger.pitch = demo.session.client.view.pitch;
+    trigger.pressed = trigger.held = gameplay::kActionFire;
+    // The in-process demo still sends over its real transport: server PreSim drains before
+    // client PreSim sends. Pump the bounded wire latency, then inspect ACCEPTED events. Two
+    // consecutive pressed commands exercise the actual server's cooldown, not a raw local edge.
+    demo.step_sim(gameplay_net::to_input_command(trigger));
+    demo.step_sim(gameplay_net::to_input_command(trigger));
+    trigger.pressed = trigger.held = 0;
+    for (int tick = 0; tick < 8; ++tick)
+        demo.step_sim(gameplay_net::to_input_command(trigger));
+    check(demo.session.shots_fired == shots_before + 1 && demo.shot_presented,
+          "live transport accepts one shot and refuses the consecutive cooldown input");
+    demo.app.run_frames(1);
+    const auto fired =
+        read_rgba8(*demo.app.device(), demo.app.graph()->physical(demo.visuals->last_ldr), kW, kH);
+    demo.app.finish_gpu();
+    check(demo.session.client.world.entity_count() == entities_before,
+          "firing reuses its resident entity pool");
+    const auto expired = capture();
+    const auto unchanged = capture();
+    const auto firing_pixels = changed(fired, expired);
+    const auto firing_drift = changed(expired, unchanged);
+    check(firing_pixels > 50 && firing_pixels > firing_drift * 3,
+          "accepted muzzle/tracer feedback is visible and expires above static drift");
+    std::printf(
+        "environment-smoke: accepted firing feedback %zu pixels / drift %zu; pool24 entities\n",
+        firing_pixels,
+        firing_drift);
+    if (!g_ppm.empty())
+        write_ppm((g_ppm + ".firing.ppm").c_str(), fired, kW, kH);
     return okay ? 0 : 1;
 }
 
@@ -4560,13 +4696,12 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     // and the tick run at different rates, so the tick reads the latest fold rather than doing its
     // own — which is also what keeps the yaw the mover receives the one the player is looking
     // along.
-    replication::InputCommand live{};
+    block_play::PlayInput live;
     bool quit = false;
     const float look_sensitivity = demo.session.client.view.sensitivity;
 
     demo.app.add_sim_stage(app::Application::SimStage::PreSim, [&](ecs::World&, double) {
-        demo.step_sim(live);
-        live.pressed = 0; // an edge is consumed by exactly one tick, or one click fires forever
+        demo.step_sim(gameplay_net::to_input_command(live.tick()));
     });
     demo.app.on_render([&](app::FrameContext& ctx) {
         // The look scheme follows the cursor mode the window ACTUALLY holds, every frame. It is
@@ -4583,7 +4718,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
                                     : 1.0f);
         const gameplay::FrameIntent intent = gameplay::map_frame_input(
             demo.session.client.devices, ctx.input, demo.session.client.view, bindings);
-        live = gameplay_net::to_input_command(intent.character);
+        live.frame(intent.character, ctx.input, bindings.fire, gameplay::kActionFire);
         if (intent.quit) {
             quit = true;
             demo.app.request_quit();
@@ -4595,14 +4730,14 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
             // map_frame_input has already folded this frame's events and applied mouse motion.
             // Read the SAME held button in both locked and right-drag fallback modes.
             demo.viewmodel->apply_controls(demo.session.client.devices);
-            // Presentation follows actual predicted motion and the local fire edge; neither bob nor
+            // Presentation follows predicted motion and accepted server shots; neither bob nor
             // weapon choice enters CharacterInput or the replicated simulation state.
             const auto velocity = demo.session.client.predictor.seeded()
                                       ? demo.session.client.predictor.state().velocity
                                       : core::Vec3{};
-            demo.viewmodel->advance(static_cast<float>(ctx.frame_dt),
-                                    velocity,
-                                    (intent.character.pressed & gameplay::kActionFire) != 0u);
+            demo.viewmodel->advance(
+                static_cast<float>(ctx.frame_dt), velocity, demo.shot_presented);
+            demo.shot_presented = false;
         }
         demo.render(ctx);
     });

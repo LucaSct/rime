@@ -6,6 +6,8 @@
 #include <numbers>
 
 #include "character_fixture.hpp"
+#include "play_input.hpp"
+#include "rime/gameplay/input_map.hpp"
 #include "rime/gameplay/weapon.hpp"
 
 // m12.3's weapon proofs, in ISOLATION — one shooter, static box geometry, no network anywhere.
@@ -65,6 +67,49 @@ trigger(bool pressed, bool held, float yaw = 0.0f, float pitch = 0.0f) {
 }
 
 } // namespace
+
+TEST_CASE("play firing: render frames retain a short trigger edge until exactly one fixed tick") {
+    physics::PhysicsWorld world;
+    Shooter shooter;
+    shooter.spawn(world, {});
+    shooter.config.cooldown_ticks = 1;
+    block_play::PlayInput pending;
+    platform::Input devices;
+    gameplay::FirstPersonView view{};
+    gameplay::InputBindings bindings{};
+    const auto frame = [&](std::span<const platform::Event> events) {
+        const auto mapped = gameplay::map_frame_input(devices, events, view, bindings);
+        pending.frame(mapped.character, events, bindings.fire, gameplay::kActionFire);
+    };
+    platform::Event down{};
+    down.type = platform::EventType::MouseButton;
+    down.button.button = bindings.fire;
+    down.button.down = true;
+    auto up = down;
+    up.button.down = false;
+    frame({&down, 1});
+    frame({});
+    frame({&up, 1});
+    frame({}); // several rendered frames, no simulation tick yet
+    CHECK(shooter.tick(pending.tick()).fired);
+    for (int tick = 0; tick < 8; ++tick)
+        CHECK_FALSE(shooter.tick(pending.tick()).fired);
+    CHECK(shooter.stats.shots == 1);
+
+    const platform::Event quick_tap[]{down, up};
+    frame(quick_tap); // a complete tap in ONE frame also fires once
+    CHECK(shooter.tick(pending.tick()).fired);
+    CHECK_FALSE(shooter.tick(pending.tick()).fired);
+    CHECK(shooter.stats.shots == 2);
+
+    frame({&down, 1});
+    platform::Event lost{};
+    lost.type = platform::EventType::WindowFocus;
+    lost.focus.focused = false;
+    frame({&lost, 1});
+    CHECK_FALSE(shooter.tick(pending.tick()).fired);
+    CHECK_FALSE(devices.mouse_down(bindings.fire));
+}
 
 TEST_CASE("the aim basis is the engine's, and the mover's, and the camera's") {
     // ONE convention, checked against its own definition rather than against a recorded vector.

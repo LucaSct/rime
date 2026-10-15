@@ -55,7 +55,7 @@ are baked in original slab coordinates before COM rebasing, preserving phase acr
 intact chunks and following the geometry after fracture. Terrain weights use global
 coordinates at every LOD; collision heights are untouched.
 
-The scene adds 26 instanced trees with branching trunks and alpha-masked leaves,
+The scene adds 26 instanced trees with branching trunks and alpha-masked leaves (opposite front/back shading normals),
 bounded merged grass patches, dirt paths/verges, seven irregular puddles, a park
 pool, and a broken cloud deck. Water is opaque surface shading with ripple normals,
 screen-space object reflections, and the existing environment fallback. It is not

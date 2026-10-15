@@ -11,7 +11,8 @@ build/dev/bin/the_block --headless          # the CI-gated proof
 build/dev/bin/the_block --play              # walk around it and shoot
 build/dev/bin/the_block --world-smoke       # streamed collision, fast travel and recovery
 build/dev/bin/the_block --world-gpu-smoke   # streamed drawing, uploads and evictions
-build/dev/bin/the_block --viewmodel-smoke   # SCAR-H/M4A1 GPU load, draw, swap and residency
+build/dev/bin/the_block --viewmodel-smoke   # grips, held aim, rendered scope zoom and residency
+build/dev/bin/the_block --environment-smoke # native scenery, water reflections and firing feedback
 build/dev/bin/the_block --headless --ppm frame.ppm   # also write the intact frame as an image
 build/dev/bin/the_block --headless --idle   # the control: nobody touches the block
 build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI stops caring
@@ -21,12 +22,25 @@ build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI
 not lock the cursor · **left click** fires · **F** detonates the charge on the hero building ·
 **1** selects the SCAR-H · **2** selects the M4A1 · **3** selects the MSR ·
 **hold right mouse or Q** aims (also during drag-look) · **Esc** exits.
+Releasing aim returns to the hip pose; losing focus releases held input. Short clicks survive
+render frames with no simulation tick. Accepted shots produce muzzle flash, a tracer and hit
+sparks; cooldown-refused inputs produce no feedback. Damage remains server-authoritative.
 
 Live play starts at sunset and waits for **F** before detonating the scripted charge. Seeded
 terrain extends beyond the original street: nearby collision is installed before simulation,
 and six moving LOD rings keep ground visible in the distance. Generated tiles are released as
 they leave the resident region and are never cached to disk. The GPU ring holds 304 tiles
 (about 9 MiB of dressed tile resources); this excludes the rest of the renderer and physics memory.
+
+The aimed MSR ocular sits 50 mm from the eye and fills about 85% of frame height.
+A real rendered target measures 11 → 54 pixels through it (4.91× on the RTX 3060),
+while the surrounding view retains its normal field of view. The aim pose passed
+5,376 runtime arm poses with no unreachable grip or near-plane clipping.
+
+The reported disappearing dark blob under trees is **still under investigation**.
+Normal-correct foliage fixes white undersides; it did not fix that ground symptom.
+Controlled walking/rotation captures have not reproduced a non-occluded ground
+blob, and shortening the shadow range did not improve those controls.
 
 Live play draws a camera-attached SCAR-H by default. Keys **1/2/3** switch between the three
 prepared viewmodels without changing the replicated weapon or movement input. The MSR's German

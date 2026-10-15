@@ -54,7 +54,7 @@ public:
     void set_aiming(bool aiming) noexcept { aiming_ = aiming; }
 
     static constexpr float kScopeLensRadius = 0.026f;
-    static constexpr float kScopeEyeRelief = 0.09f;
+    static constexpr float kScopeEyeRelief = 0.05f;
     static constexpr float kScopeMagnification = 5.0f;
     [[nodiscard]] static float scope_fov_y() noexcept;
 
@@ -83,6 +83,11 @@ public:
 
     [[nodiscard]] core::Mat4 optic_world() const noexcept { return optic_world_; }
 
+    [[nodiscard]] core::Vec3 muzzle_world(const core::Transform& camera) const noexcept {
+        return core::transform_point(core::to_matrix(camera) * weapon_local_,
+                                     models_[static_cast<unsigned>(selected_)].muzzle);
+    }
+
     [[nodiscard]] std::size_t resident_meshes() const noexcept { return resident_meshes_; }
 
     [[nodiscard]] std::size_t resident_materials() const noexcept { return resident_materials_; }
@@ -99,6 +104,7 @@ private:
     };
 
     struct Model {
+        core::Vec3 muzzle{};
         std::vector<Part> parts;
         PlayArmIk arms;
         render::MeshId arm_mesh = render::kInvalidMeshId;
@@ -123,6 +129,7 @@ private:
     float aim_ = 0.0f;
     render::DrawItem lens_{};
     core::Mat4 optic_world_{};
+    core::Mat4 weapon_local_{};
     std::vector<render::FirstPersonDeformation> deformations_;
     std::size_t resident_meshes_ = 0;
     std::size_t resident_materials_ = 0;

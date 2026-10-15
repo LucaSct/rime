@@ -107,7 +107,23 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                 stderr, "99-the-block: viewmodel %s has missing/oversized geometry\n", kSources[i]);
             return false;
         }
-        const render::MeshId mesh_id = meshes.add(render::mesh_from_cooked(*mesh), kSources[i]);
+        const auto geometry = render::mesh_from_cooked(*mesh);
+        if (i < 3 && !geometry.vertices.empty()) {
+            // Prepared guns point down -Z. Average the frontmost centimetre of the barrel
+            // rather than guessing a camera-space flash position for differently sized guns.
+            float front = geometry.vertices.front().pz;
+            for (const auto& v : geometry.vertices)
+                front = std::min(front, v.pz);
+            core::Vec3 muzzle{};
+            unsigned count = 0;
+            for (const auto& v : geometry.vertices)
+                if (v.pz <= front + .01f) {
+                    muzzle = muzzle + core::Vec3{v.px, v.py, v.pz};
+                    ++count;
+                }
+            models_[i].muzzle = muzzle / static_cast<float>(count);
+        }
+        const render::MeshId mesh_id = meshes.add(geometry, kSources[i]);
         if (!meshes.contains(mesh_id))
             return false;
         ++resident_meshes_;
@@ -315,12 +331,13 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // Keep rifle butts about 23 cm from the eye: at the old +6 cm Z offset the rear stock
     // was only 9 cm away and filled the lower view through perspective, despite clear sights.
     constexpr std::array<core::Vec3, 3> aim_offsets{
-        {{-.14f, .09f, -.08f}, {-.1378f, .1097f, -.08f}, {-.14f, .118f, -.005f}}};
+        {{-.14f, .09f, -.08f}, {-.1378f, .1097f, -.08f}, {-.14f, .118f, .035f}}};
     local.translation = local.translation + aim_offsets[static_cast<unsigned>(selected_)] * aim_;
     local.rotation = core::quat_from_euler(
         recoil_ * .8f, .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount, 0.0f);
     const core::Mat4 camera_matrix = core::to_matrix(camera);
     const core::Mat4 weapon_local = core::to_matrix(local);
+    weapon_local_ = weapon_local;
     const core::Mat4 model = camera_matrix * weapon_local;
     auto& selected = models_[static_cast<unsigned>(selected_)];
     const auto vertices = selected.arms.solve(
