@@ -178,6 +178,17 @@ struct LightingSettings {
     float ssr_max_distance = 8.0f;
     float ssr_thickness = 0.5f;
     std::uint32_t ssr_max_steps = 48;
+
+    // Local, camera-following GI must not extrapolate its edge probes onto arbitrarily distant
+    // receivers. Opt in to a continuous camera-centred support envelope that fades to sky/ambient
+    // BEFORE a scrolling edge layer can affect the result. Legacy authored/thin probe volumes
+    // retain their explicit clamp-to-edge contract unless enabled (ADR-0084).
+    bool ddgi_volume_fade = false;
+
+    // Fixed quadrature per WORLD probe coordinate: still retrace every scheduled update, so
+    // geometry/light edits respond, but an unchanged scene does not receive fresh Monte Carlo
+    // noise each frame. Trades temporal convergence for bounded spatial quadrature error.
+    bool ddgi_stable_rays = false;
 };
 
 } // namespace rime::render

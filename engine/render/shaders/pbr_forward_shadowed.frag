@@ -162,8 +162,10 @@ layout(set = 0, binding = 18) uniform sampler2D skyview_lut;
 layout(std140, set = 0, binding = 16) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
     uvec4 grid_dims_perrow;   // xyz probe counts, w atlas probes-per-row
-    uvec4 enabled_pad;        // x enabled (0/1), yzw unused
+    uvec4 enabled_pad;        // x enabled, y finite camera-relative support, zw unused
 } ddgi;
+
+#include "ddgi_support.glsl"
 
 layout(location = 0) in vec3 v_world_pos;
 layout(location = 1) in vec3 v_world_normal;
@@ -362,19 +364,14 @@ float ddgi_chebyshev_weight(float mean, float mean2, float dist) {
 // this) — `weight_sum`'s own small-epsilon floor is what keeps a FULLY occluded cell from dividing
 // by zero.
 //
-// CLAMPED to the grid's own volume before bracketing (clamp(rel, 0, dims-1), the CLAMP_TO_EDGE a
-// texture sampler applies, done here by hand): probes never extend past the lattice's own extent
-// on any axis, so an ordinary floor sitting at a "round" world height (y=0, almost always an EXACT
-// multiple of any probe spacing, since 0 is a multiple of everything) would otherwise land its
-// fragments EXACTLY on the lattice's own lowest grid line — one bracketing corner past the edge
-// (dropped, correctly), the other exactly AT the fragment's own height, so its trilinear weight
-// (a fractional-distance-into-the-cell term) is EXACTLY zero. Left unclamped, that is a silent
-// all-8-corners-contribute-nothing failure, not a visible bug — this is the fix, not a cosmetic
-// tidy-up (m10.5b's own first attempt at this function hit exactly this: a floor patch reading
-// pure ambient with a fully-lit probe one cell away, because DIVIDE was correct and EVERY weight
-// was nonetheless zero).
+// Clamp before bracketing so a legacy authored volume can extend its edge estimate, like a
+// CLAMP_TO_EDGE texture. Exactly on a probe plane frac=0 gives the lower corner weight ONE;
+// outside the volume this deliberately reuses a boundary plane. A scrolling LOCAL volume must
+// additionally limit that extrapolation: the caller's continuous support envelope prevents
+// remote receivers depending on a newly exposed edge layer. Coverage is reported separately
+// so an accepted black estimate is never mistaken for missing data.
 #ifndef SDF_SPECULAR_OCCLUSION
-vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) {
+vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n, out bool covered) {
     float spacing = max(ddgi.grid_origin_spacing.w, 1.0e-4);
     ivec3 dims = ivec3(ddgi.grid_dims_perrow.xyz);
     vec3 rel = (world_pos - ddgi.grid_origin_spacing.xyz) / spacing;
@@ -432,11 +429,15 @@ vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) {
             }
         }
     }
-    return weight_sum > 1.0e-6 ? accum / weight_sum : vec3(0.0);
+    covered = weight_sum > 1.0e-6;
+    return covered ? accum / weight_sum : vec3(0.0);
 }
 #else
 // The enabled variant is selected only with DDGI disabled; keep its unreachable branch typed.
-vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n) { return vec3(0.0); }
+vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n, out bool covered) {
+    covered = false;
+    return vec3(0.0);
+}
 #endif
 
 
@@ -500,7 +501,16 @@ void main() {
     const vec3 diffuse_albedo = albedo * (1.0 - metallic);
     vec3 out_radiance;
     if (ddgi.enabled_pad.x != 0u) {
-        vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal));
+        bool covered;
+        vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal), covered);
+        if (ddgi.enabled_pad.y != 0u) {
+            // Coverage and radiance are separate: an accepted zero inside the core stays dark.
+            // Replace ONE diffuse environment term instead of adding sky on top of measured GI.
+            const vec3 fallback = sky_sh_enabled() ? sky_sh_irradiance(normalize(v_world_normal))
+                                                   : frame.ambient.rgb;
+            const float influence = covered ? ddgi_spatial_influence(v_world_pos, frame.camera_pos.xyz) : 0.0;
+            indirect = mix(fallback, indirect, influence);
+        }
         out_radiance = indirect * diffuse_albedo * ao;
 #ifdef FIRST_PERSON
         // The held model is outside world SSR, so it must retain the filtered sky reflection

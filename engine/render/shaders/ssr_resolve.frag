@@ -93,8 +93,10 @@ layout(set = 0, binding = 8) uniform sampler2D gbuffer_material;
 layout(std140, set = 0, binding = 6) uniform DdgiSampleParams {
     vec4 grid_origin_spacing; // xyz snapped lattice origin, w spacing
     uvec4 grid_dims_perrow;   // xyz probe counts, w atlas probes-per-row
-    uvec4 enabled_pad;        // x enabled (0/1), yzw unused
+    uvec4 enabled_pad;        // x enabled, y finite camera-relative support, zw unused
 } ddgi;
+
+#include "ddgi_support.glsl"
 
 layout(location = 0) out vec4 out_hdr; // scene_color + reflection (a second HDR target)
 
@@ -174,8 +176,8 @@ float ddgi_chebyshev_weight(float mean, float mean2, float dist) {
 // Chebyshev gates. That is the only thing that can tell "the field says this direction is dark"
 // (a covered probe reading 0, e.g. a sealed room: a real answer that must stay dark) from "the
 // field has no opinion here" (every probe rejected, so the 0 below is a placeholder, not a
-// measurement). Only this copy reports it: the forward shader's diffuse use keeps its own
-// behaviour. Clamping to the grid is still CLAMP_TO_EDGE, so a fragment past the lattice's
+// measurement). Both forward diffuse and SSR report this independently of spatial support.
+// Clamping to the grid is still CLAMP_TO_EDGE, so a fragment past the lattice's
 // boundary is covered whenever an edge probe passes the gates; it is the gates, not the
 // boundary, that decide validity.
 vec3 ddgi_sample_irradiance(vec3 world_pos, vec3 n, out bool covered) {
@@ -325,13 +327,18 @@ void main() {
     // pixel's sky is occluded even with DDGI live: it is the same sky fallback, and an open sky
     // reflected under a canopy is exactly the leak this cone exists to stop.
     // World position and reflection are already reconstructed above, with no normal derivatives.
-    if (ssr.ambient.a != 0.0 && !ddgi_covered) {
+    if (ssr.ambient.a != 0.0 && (!ddgi_covered || ddgi.enabled_pad.y != 0u)) {
         vec3 lookup = chain_live ? sky_specular_dominant_direction(n_world, r_world, roughness) : r_world;
         probe *= sdf_sky_visibility(world_pos, n_world, lookup, roughness);
     }
 #endif
     if (ddgi_covered) {
-        probe = ddgi_probe;
+        if (ddgi.enabled_pad.y == 0u) {
+            probe = ddgi_probe; // preserve the authored-volume path without another arithmetic step
+        } else {
+            probe = mix(probe, ddgi_probe,
+                        ddgi_spatial_influence(world_pos, ssr.inv_view[3].xyz));
+        }
     }
 
     // The roughness cone: 0 = a sharp mirror (screen sample), 1 = a fully rough lobe (the pre-

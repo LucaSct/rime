@@ -261,7 +261,7 @@ struct Fixture {
                     : kGridOrigin[axis];
         }
         if (c.coverage == Coverage::ProbePlane)
-            dp.grid_origin_spacing[2] = c.wall_z;
+            dp.grid_origin_spacing[2] = kWallZ;
         dp.grid_origin_spacing[3] = c.grid_spacing;
         dp.grid_dims_perrow[0] = dp.grid_dims_perrow[1] = dp.grid_dims_perrow[2] = c.grid_dims;
         dp.grid_dims_perrow[3] = per_row;

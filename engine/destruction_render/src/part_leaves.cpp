@@ -14,13 +14,12 @@
 #include "rime/render/components.hpp"
 
 namespace rime::destruction_render {
-namespace {
 
 // One cooked convex part → a drawable mesh. Each face is fan-triangulated with its OWN copies of
 // the vertices, so the flat face normal is never averaged across the shared edge with a neighbour:
 // rubble should read as faceted chunks, not as smooth pebbles. (Lifted from the m8.6 wall sample,
 // which is where this loop has been living for two milestones.)
-[[nodiscard]] render::CpuMesh part_to_cpu_mesh(const assets::DestructiblePart& part) {
+render::CpuMesh mesh_from_part(const assets::DestructiblePart& part) {
     render::CpuMesh mesh;
     std::uint32_t base = 0; // running offset into the CSR face_indices
     for (const std::uint32_t count : part.face_counts) {
@@ -39,6 +38,23 @@ namespace {
                 v.nx = nrm.x;
                 v.ny = nrm.y;
                 v.nz = nrm.z;
+                // Box projection uses the face's dominant normal to choose a stable tangent
+                // plane. The cook stores vertices about each part's COM: adding that COM back
+                // prevents every chunk restarting its texture at a different phase. Baking UVs
+                // here also means the mortar rotates with a falling wall instead of swimming
+                // through a world-space texture. One repeat is one authored metre.
+                const core::Vec3 q = p + part.com;
+                const core::Vec3 a{std::abs(nrm.x), std::abs(nrm.y), std::abs(nrm.z)};
+                if (a.y >= a.x && a.y >= a.z) {
+                    v.u = q.x;
+                    v.v = q.z;
+                } else if (a.x >= a.z) {
+                    v.u = q.z;
+                    v.v = q.y;
+                } else {
+                    v.u = q.x;
+                    v.v = q.y;
+                }
                 mesh.vertices.push_back(v);
             };
             for (std::uint32_t k = 1; k + 1 < count; ++k) {
@@ -56,6 +72,8 @@ namespace {
     render::compute_tangents(mesh); // the forward pipeline is always-tangented (M6.4)
     return mesh;
 }
+
+namespace {
 
 // The combined centre of mass of a debris island, volume-weighted over its member parts. A debris
 // body's pose is about THIS point (register_compound re-centres on the combined COM, ADR-0028's
@@ -92,7 +110,7 @@ std::size_t PartLeafRenderer::register_pattern(destruction::PatternId pattern,
         entry.part_com.push_back(asset.parts[p].com);
         entry.part_volume.push_back(asset.parts[p].volume);
         if (meshes != nullptr) {
-            entry.part_mesh[p] = meshes->add(part_to_cpu_mesh(asset.parts[p]), "destructible_part");
+            entry.part_mesh[p] = meshes->add(mesh_from_part(asset.parts[p]), "destructible_part");
         }
     }
 

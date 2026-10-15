@@ -666,6 +666,7 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     tp.probes_rays_total[0] = probes_this_update;
     tp.probes_rays_total[1] = rays_per_probe;
     tp.probes_rays_total[2] = total_probes;
+    tp.probes_rays_total[3] = settings.ddgi_stable_rays ? 1u : 0u;
     tp.sun_dir_maxdist[0] = lighting.sun_direction.x;
     tp.sun_dir_maxdist[1] = lighting.sun_direction.y;
     tp.sun_dir_maxdist[2] = lighting.sun_direction.z;
@@ -830,6 +831,7 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     sp.grid_dims_perrow[2] = count_z;
     sp.grid_dims_perrow[3] = probes_per_row;
     sp.enabled_pad[0] = 1u;
+    sp.enabled_pad[1] = settings.ddgi_volume_fade ? 1u : 0u;
     const RenderGraph::FrameSlice sp_slice = graph.push_frame_data(&sp, sizeof(sp));
 
     return DdgiBinding{irradiance_rg, visibility_rg, sp_slice, atlas_sampler_};
