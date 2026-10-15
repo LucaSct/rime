@@ -11,6 +11,7 @@
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
 #include "rime/render/lighting/sky.hpp" // SkyLightBinding — the interface only, never SkyPass state
+#include "rime/render/passes.hpp"       // ShadowBinding: the sun cascades the scene pass receives
 #include "rime/render/render_graph.hpp"
 
 // The terrain heightfield DRAW pass (m19.3, ADR-0062-m19.3-terrain-render).
@@ -441,6 +442,8 @@ public:
     // Scene opaque stage: loads existing HDR/depth and optional SSR G-buffer / velocity targets.
     // Both G-buffer textures must be valid together. `scene_uniforms` is graph frame scratch;
     // its current/previous matrices are unjittered while view_proj is the rasterized matrix.
+    // `shadow` is the frame's sun cascade binding (bindings 14/15); the count-0 placeholder from
+    // CascadedShadowMap::empty_binding means no sun and leaves the shading unchanged.
     void add_scene(RenderGraph& graph,
                    RGTexture hdr,
                    RGTexture depth,
@@ -453,7 +456,8 @@ public:
                    const TerrainLight& light,
                    const SkyLightBinding& sky,
                    const TerrainLodDraw& lod,
-                   RenderGraph::FrameSlice scene_uniforms);
+                   RenderGraph::FrameSlice scene_uniforms,
+                   const ShadowBinding& shadow);
 
     // Assets `upload()` would not draw. Guardrail 5: a refused tile and a tile that was never
     // handed over produce the same empty frame, so the difference has to be countable.
@@ -529,6 +533,7 @@ private:
                   const SkyLightBinding& sky,
                   const TerrainLodDraw& lod,
                   RenderGraph::FrameSlice scene_uniforms,
+                  const ShadowBinding& shadow,
                   bool scene);
 
     bool push_fits_ = true; // adapter().max_push_constant_bytes >= sizeof(TerrainPush)

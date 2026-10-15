@@ -893,6 +893,9 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // exists to fix. The baseline path itself is deliberately left untouched, so its
     // byte-identity guarantee is unchanged.
     const bool has_sky_light = sky_on;
+    // These three are declared out here because the terrain scene pass below also binds them: it
+    // uses the SAME cascades as the forward pass, with no second fit and no second shadow render.
+    // `shadow` stays invalid when the baseline path is taken, which the terrain block handles.
     ShadowBinding shadow{};
     LocalShadowBinding local{};
     ClusterBinding clusters{};
@@ -973,6 +976,10 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             }
         }
         const auto scene_uniforms = graph.push_frame_data(&matrices, sizeof(matrices));
+        // The baseline forward path builds no cascade binding; terrain still needs a satisfied one.
+        if (!shadow.map.is_valid()) {
+            shadow = csm_.empty_binding(graph, dummy_shadow_array_);
+        }
         const core::Vec3 eye{fu.camera_pos[0], fu.camera_pos[1], fu.camera_pos[2]};
         for (const TerrainSceneDraw& draw : terrain_draws_) {
             terrain_pass_->add_scene(graph,
@@ -987,7 +994,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                                      terrain_light,
                                      sky_binding,
                                      draw.lod,
-                                     scene_uniforms);
+                                     scene_uniforms,
+                                     shadow);
         }
     }
     // The caller only promises the span and pass through this declaration. Require a fresh
