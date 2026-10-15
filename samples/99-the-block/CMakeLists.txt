@@ -4,7 +4,7 @@
 #
 # It links nearly the whole engine, which is the point — this is the first binary that holds M8, M10,
 # M11, M12 and M13 at once.
-add_executable(the_block main.cpp play_world.cpp)
+add_executable(the_block main.cpp play_world.cpp play_viewmodel.cpp)
 
 target_link_libraries(the_block
     PRIVATE rime::app
@@ -50,6 +50,49 @@ rime_apply_common_target_options(the_block_host)
 # or debugged without a test fixture in play. `--cooked <dir>` overrides it for a hand-run.
 set(BLOCK_DEMO_COOKED "${CMAKE_CURRENT_BINARY_DIR}/cooked")
 target_compile_definitions(the_block PRIVATE RIME_BLOCK_COOKED_DIR="${BLOCK_DEMO_COOKED}")
+
+# Viewmodel content has its own manifest: the block's fracture/ground cook is deliberately
+# independent, and all non-play modes can keep using it without touching weapon art.
+set(BLOCK_VIEWMODEL_COOKED "${CMAKE_CURRENT_BINARY_DIR}/viewmodel-cooked")
+target_compile_definitions(the_block PRIVATE
+    RIME_VIEWMODEL_COOKED_DIR="${BLOCK_VIEWMODEL_COOKED}")
+
+# The cook CLI scans only this directory's immediate sources; the `source/` reference downloads
+# remain outside its input set. The manifest is the output/dependency marker, so changing either
+# prepared GLB recooks both models before the next game build or smoke run.
+#
+# The art itself is third-party CC-BY work and is deliberately NOT in this repository (see
+# assets/viewmodel/README.md), so the whole weapon path is conditional on it being present. A
+# clean clone configures, builds and plays without it -- just without hands. The alternative,
+# cooking unconditionally, would make a fresh checkout fail its build for want of a file nobody
+# can clone, and would make CI red for a reason that is not a defect.
+set(BLOCK_VIEWMODEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/assets/viewmodel")
+if(EXISTS "${BLOCK_VIEWMODEL_SOURCE}/held-scar-h.glb" AND
+   EXISTS "${BLOCK_VIEWMODEL_SOURCE}/held-m4a1.glb")
+    set(BLOCK_HAVE_VIEWMODEL_ART TRUE)
+else()
+    set(BLOCK_HAVE_VIEWMODEL_ART FALSE)
+    # Say it once, at configure time, so "where are the hands" has a visible answer. Note this is
+    # an EXISTS check evaluated during configure: adding the art later needs a re-configure.
+    message(STATUS
+        "the_block: viewmodel art absent -- --play runs without a held weapon and "
+        "the_block_viewmodel_smoke is not registered "
+        "(samples/99-the-block/assets/viewmodel/README.md)")
+endif()
+
+if(BLOCK_HAVE_VIEWMODEL_ART)
+    add_custom_command(OUTPUT "${BLOCK_VIEWMODEL_COOKED}/manifest.txt"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${BLOCK_VIEWMODEL_COOKED}"
+        COMMAND cargo run --quiet --manifest-path tools/Cargo.toml --bin rime --
+                cook samples/99-the-block/assets/viewmodel --out "${BLOCK_VIEWMODEL_COOKED}"
+        DEPENDS "${BLOCK_VIEWMODEL_SOURCE}/held-scar-h.glb"
+                "${BLOCK_VIEWMODEL_SOURCE}/held-m4a1.glb"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Cook play-only SCAR-H and M4A1 viewmodels"
+        VERBATIM)
+    add_custom_target(the_block_viewmodel_cook DEPENDS "${BLOCK_VIEWMODEL_COOKED}/manifest.txt")
+    add_dependencies(the_block the_block_viewmodel_cook)
+endif()
 
 # This list and `blockkit::cook_specs()` are two descriptions of one thing; the demo reads the
 # produced files back and refuses to start if they disagree, so a drift here is a loud failure
@@ -129,3 +172,17 @@ add_test(NAME the_block_world_gpu_smoke COMMAND the_block --world-gpu-smoke)
 set_tests_properties(the_block_world_gpu_smoke PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
     TIMEOUT 600)
+
+# Registered only when the art is here; the binary itself skips the mode rather than failing, so
+# running it by hand on a clean clone is harmless too.
+if(BLOCK_HAVE_VIEWMODEL_ART)
+    add_test(NAME the_block_viewmodel_smoke COMMAND the_block --viewmodel-smoke)
+    set_tests_properties(the_block_viewmodel_smoke PROPERTIES
+        FIXTURES_REQUIRED "block_demo_cook;viewmodel_cook"
+        ENVIRONMENT "RIME_REQUIRE_VIEWMODEL=1"
+        TIMEOUT 600)
+
+    add_test(NAME block_demo_cook_viewmodel
+        COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --target the_block_viewmodel_cook)
+    set_tests_properties(block_demo_cook_viewmodel PROPERTIES FIXTURES_SETUP viewmodel_cook)
+endif()

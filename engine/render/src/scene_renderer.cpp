@@ -1102,14 +1102,24 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         const auto pick = [](rhi::TextureHandle map, rhi::TextureHandle fallback) {
             return map.is_valid() ? map : fallback;
         };
+        std::size_t dropped_unknown_mesh = 0;
+        std::size_t dropped_empty = 0;
+        std::size_t dropped_bad_range = 0;
         for (const DrawItem& source : first_person_draws_.subspan(
                  0, std::min(first_person_draws_.size(), kMaxFirstPersonDraws))) {
-            if (!meshes_.contains(source.mesh) || source.index_count == 0)
+            if (!meshes_.contains(source.mesh) || source.index_count == 0) {
+                if (meshes_.contains(source.mesh))
+                    ++dropped_empty;
+                else
+                    ++dropped_unknown_mesh;
                 continue;
+            }
             const GpuMesh& mesh = meshes_.get(source.mesh);
             if (source.first_index > mesh.index_count ||
-                source.index_count > mesh.index_count - source.first_index)
+                source.index_count > mesh.index_count - source.first_index) {
+                ++dropped_bad_range;
                 continue;
+            }
             const std::size_t i = frame_first_person_draws_.size();
             DrawItem draw = source;
             const PbrMaterialDesc material = draw.material < materials_.size()
@@ -1150,6 +1160,20 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             first_person_normal_.push_back(pick(material.normal_texture, flat_normal_));
             first_person_occlusion_.push_back(pick(material.occlusion_texture, white_));
             first_person_emissive_.push_back(pick(material.emissive_texture, white_));
+        }
+        // Every skip above is silent, and a first-person model that is entirely skipped looks
+        // exactly like one that is drawn out of frame: a frame with no weapon in it and no
+        // complaint anywhere. Say so instead. `continuous` is false precisely when the model
+        // appeared, swapped, vanished or the extent changed, so this reports once per identity
+        // rather than once per frame.
+        if (!continuous && frame_first_person_draws_.size() < first_person_draws_.size()) {
+            RIME_WARN("render: first-person kept {} of {} draws (unknown mesh {}, empty {}, "
+                      "index range outside mesh {})",
+                      frame_first_person_draws_.size(),
+                      first_person_draws_.size(),
+                      dropped_unknown_mesh,
+                      dropped_empty,
+                      dropped_bad_range);
         }
         previous_first_person_models_ = std::move(next_models);
         previous_first_person_active_ = true;

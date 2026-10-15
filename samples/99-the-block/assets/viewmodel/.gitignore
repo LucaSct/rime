@@ -1,0 +1,19 @@
+# The held weapon art is third-party CC-BY work (see ASSET-LICENSES.md). It is prepared locally
+# and never committed: the two runtime GLBs plus their sources run to hundreds of megabytes,
+# against a repository whose entire history is tens. What IS committed is everything needed to
+# reproduce them -- the attribution, the provenance and the preparation scripts under prepare/.
+#
+# Keeping the art out is what makes the build conditional: see the BLOCK_HAVE_VIEWMODEL_ART
+# branch in ../../CMakeLists.txt, which is why a clean clone still configures, builds and plays.
+/source/
+/source-textures/
+/prepared-textures/
+*.glb
+*.png
+*.jpg
+*.jpeg
+*.ktx2
+
+# Blender/python scratch from running prepare/ in place.
+__pycache__/
+*.pyc

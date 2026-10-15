@@ -11,6 +11,7 @@ build/dev/bin/the_block --headless          # the CI-gated proof
 build/dev/bin/the_block --play              # walk around it and shoot
 build/dev/bin/the_block --world-smoke       # streamed collision, fast travel and recovery
 build/dev/bin/the_block --world-gpu-smoke   # streamed drawing, uploads and evictions
+build/dev/bin/the_block --viewmodel-smoke   # SCAR-H/M4A1 GPU load, draw, swap and residency
 build/dev/bin/the_block --headless --ppm frame.ppm   # also write the intact frame as an image
 build/dev/bin/the_block --headless --idle   # the control: nobody touches the block
 build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI stops caring
@@ -18,7 +19,7 @@ build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI
 
 `--play` controls: **WASD** move · **mouse** to look, or hold **right-drag** when the window could
 not lock the cursor · **left click** fires · **F** detonates the charge on the hero building ·
-**Esc** exits.
+**1** selects the SCAR-H · **2** selects the M4A1 · **Esc** exits.
 
 Live play starts at sunset and waits for **F** before detonating the scripted charge. Seeded
 terrain extends beyond the original street: nearby collision is installed before simulation,
@@ -26,13 +27,23 @@ and six moving LOD rings keep ground visible in the distance. Generated tiles ar
 they leave the resident region and are never cached to disk. The GPU ring holds 304 tiles
 (about 7.8 MiB of tile resources); this excludes the rest of the renderer and physics memory.
 
+Live play draws a camera-attached SCAR-H by default. Keys **1/2** switch between the two
+prepared, textured viewmodels without changing the replicated weapon or movement input. Their
+meshes and normal/metal-roughness textures are cooked once from
+`assets/viewmodel/held-scar-h.glb` and `held-m4a1.glb` into the build tree; building `the_block`
+automatically runs `the_block_viewmodel_cook` when either source changes. Source downloads under
+`assets/viewmodel/source/` are references only and are not cooked. `--viewmodel-smoke` renders
+both guns offscreen, checks visible image coverage and the swap, and checks that mesh, material
+and texture counts stay resident. Headless/world-smoke paths do not load the models.
+
 This prototype returns the player to a supported spawn beyond eight kilometres on either
 horizontal axis or below its recovery floor. Recentring currently waits for old GPU readers,
 so tile changes can hitch; unlimited coordinates and asynchronous streaming are later work.
 See [ADR-0081](../../docs/adr/0081-playable-procedural-terrain.md).
 
-`--cooked <dir>` points at the nine `.rdest` files; the build cooks them into the target's own
-directory and bakes that path in, so the commands above just work after a build.
+`--cooked <dir>` points at the nine `.rdest` files; the viewmodels use their separate build-tree
+manifest. CTest cooks the block patterns and ground material; the CMake viewmodel target cooks
+weapon art as a build dependency.
 
 ## Status: 29 structural claims pass — the frame-rate clause remains open
 
