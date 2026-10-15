@@ -18,7 +18,7 @@
 
 ## What is Rime?
 
-Rime is a game engine for building **large-scale, high-fidelity games** — think
+Rime is a multiplayer-first game engine for developing and shipping **large-scale, high-fidelity games** — think
 real-time destructible worlds at the scale and look of *Battlefield 6* — and it is
 **free and open source** so anyone can use it, ship commercial games on it
 royalty-free, *and read the source to learn how a modern engine works*.
@@ -35,7 +35,7 @@ and openly:
 - 🧩 **Modularity like O3DE** — a small core plus composable, swappable modules; a
   data-oriented, ECS-centric world; delete a feature and the engine still builds.
 
-The full picture is in **[VISION.md](VISION.md)**.
+The full picture is in **[VISION.md](VISION.md)**. The [multiplayer shipment plan](docs/design/multiplayer-shipping.md) separates native-target goals from verified build and export capabilities.
 
 ## Why another engine?
 
@@ -57,7 +57,7 @@ high-end engine out there. See the [engine survey](docs/research/engine-survey.m
 
 ## Status
 
-**Pre-alpha — foundations in progress.** There is no playable engine yet. We are
+**Pre-alpha — foundations in progress.** A playable multiplayer/destruction sample exists; production shipment and additional target support remain in progress. We are
 building it in the open, brick by brick. Watch [docs/ROADMAP.md](docs/ROADMAP.md) for
 the milestone map. Expect rapid change and clearly-labeled stubs.
 

@@ -3,6 +3,17 @@
 The big-picture map from "empty repo" to the **vision demo**: a destructible urban
 block with dynamic lighting, networked, at a playable frame rate (see [VISION.md](../VISION.md)).
 
+**Product direction updated 2026-10-15:** multiplayer development **and shipment**,
+native target artifacts (including the PS4/Xbox goal), dedicated hosting, browser
+play and creator-enabled browser development are now explicit requirements.
+[ADR-0085](adr/0085-multiplayer-development-and-shipment.md) revises ADR-0074's
+post-M19 ordering: finish the current playable repair, verified Linux packaging,
+exported multiplayer, measured capacity/operations, further native targets and
+browser play, then optional player authoring. Authoring work can proceed alongside
+shipment; its unfinished gates still block editing releases. See the
+[step-by-step plan and target evidence](design/multiplayer-shipping.md).
+The historical progress below remains evidence of what actually landed.
+
 **How we use this roadmap.** These are *milestones* — the map, not the turn-by-turn
 directions. Each milestone is decomposed into small **bricks**, and every brick is
 planned again before it's built. A milestone is **"done" only when its proof runs** (a

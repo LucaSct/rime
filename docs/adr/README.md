@@ -110,3 +110,5 @@ is* to anyone who arrives later — including our future selves.
 
 - [ADR-0083](0083-runtime-arm-grips-and-optical-scope.md) — sample-owned runtime arm IK and weighted deformation, an independent optical camera, and a physical reflective scope lens before parent TAA.
 - [ADR-0084](0084-local-gi-support-and-play-environment.md) — finite camera-relative GI support, stable world-probe quadrature, corrected held aiming, and native textured scenery with reflective water.
+
+- [ADR-0085](0085-multiplayer-development-and-shipment.md) — multiplayer-first development and shipment, native target artifacts, dedicated/browser profiles, and gated creator-enabled player authoring.
