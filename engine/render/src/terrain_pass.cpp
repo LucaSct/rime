@@ -241,9 +241,13 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     pipeline_ = device.create_graphics_pipeline(pd);
 
     // Scene pipelines match their exact output set and all read the scene uniform block.
-    std::array<rhi::BindingDesc, 14> scene_bindings{};
+    std::array<rhi::BindingDesc, 16> scene_bindings{};
     std::copy(std::begin(bindings), std::end(bindings), scene_bindings.begin());
     scene_bindings[13] = {13, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment};
+    // The sun's cascaded shadow map and its uniforms: the forward pass's bindings 7/8 (see
+    // pbr_forward_shadowed.frag), here at 14/15 because 0..13 are taken.
+    scene_bindings[14] = {14, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment};
+    scene_bindings[15] = {15, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment};
     pd.bindings = scene_bindings;
     pd.fragment_shader = scene_fragment_shaders_[0];
     pd.debug_name = "terrain-scene-base";
@@ -693,7 +697,7 @@ void TerrainPass::add(RenderGraph& graph,
                       const TerrainLight& light,
                       const SkyLightBinding& sky,
                       const TerrainLodDraw& lod) {
-    add_impl(graph, hdr, depth, {}, {}, {}, id, view_proj, eye, light, sky, lod, {}, false);
+    add_impl(graph, hdr, depth, {}, {}, {}, id, view_proj, eye, light, sky, lod, {}, {}, false);
 }
 
 void TerrainPass::add_scene(RenderGraph& graph,
@@ -708,7 +712,8 @@ void TerrainPass::add_scene(RenderGraph& graph,
                             const TerrainLight& light,
                             const SkyLightBinding& sky,
                             const TerrainLodDraw& lod,
-                            RenderGraph::FrameSlice scene_uniforms) {
+                            RenderGraph::FrameSlice scene_uniforms,
+                            const ShadowBinding& shadow) {
     add_impl(graph,
              hdr,
              depth,
@@ -722,6 +727,7 @@ void TerrainPass::add_scene(RenderGraph& graph,
              sky,
              lod,
              scene_uniforms,
+             shadow,
              true);
 }
 
@@ -738,6 +744,7 @@ void TerrainPass::add_impl(RenderGraph& graph,
                            const SkyLightBinding& sky,
                            const TerrainLodDraw& lod,
                            RenderGraph::FrameSlice scene_uniforms,
+                           const ShadowBinding& shadow,
                            bool scene) {
     // The structural gate: an unknown tile declares NO pass, so the frame is byte-identical to one
     // from a build without this file. A pass that ran and drew zero indices would be *almost*
@@ -834,7 +841,7 @@ void TerrainPass::add_impl(RenderGraph& graph,
     // as two resources with two independent states.
     // m19.8d3: the four bake bindings join the same list, under the same rule (an absent bake is
     // the white fallback again, and a parent's bake is another tile's texture).
-    RGTexture sampled[3 + 4 + 4] = {
+    RGTexture sampled[3 + 4 + 4 + 1] = {
         graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead),
         graph.import_texture(tile.weights, rhi::ResourceState::ShaderRead),
         sky_lut};
@@ -852,6 +859,11 @@ void TerrainPass::add_impl(RenderGraph& graph,
             sampled[sampled_count++] = graph.import_texture(h, rhi::ResourceState::ShaderRead);
         }
     }
+    // The cascade array is written by the shadow pass earlier in the frame; declaring the read
+    // orders this pass after it and emits the depth-write -> shader-read barrier.
+    if (scene && shadow.map.is_valid()) {
+        sampled[sampled_count++] = shadow.map;
+    }
     desc.sampled = std::span<const RGTexture>(sampled, sampled_count);
     // The scene matrix slice is CPU-written frame scratch, like SceneRenderer's frame UBO; it
     // never has a GPU writer and is bound directly rather than imported as a graph resource.
@@ -863,57 +875,59 @@ void TerrainPass::add_impl(RenderGraph& graph,
         ++sky_bound_;
     }
     const std::uint32_t scene_variant = (write_gbuffer ? 1u : 0u) + (write_velocity ? 2u : 0u);
-    graph.add_raster_pass(scene ? "terrain-scene" : "terrain",
-                          desc,
-                          [pipeline = scene ? scene_pipelines_[scene_variant] : pipeline_,
-                           sampler = sampler_,
-                           weight_sampler = weight_sampler_,
-                           layer_sampler = layer_sampler_,
-                           layers = tile.layer_textures,
-                           bakes,
-                           heights = tile.heights,
-                           weights = tile.weights,
-                           splat_ubo = tile.splat_ubo,
-                           indices = tile.indices,
-                           index_count = tile.index_count,
-                           sky_lut,
-                           sky_sh,
-                           sky_sampler,
-                           scene_uniforms,
-                           scene,
-                           &graph,
-                           push](rhi::CommandBuffer& cmd) {
-                              cmd.bind_pipeline(pipeline);
-                              cmd.bind_texture(0, heights, sampler);
-                              cmd.bind_texture(1, weights, weight_sampler);
-                              cmd.bind_uniform_buffer(2, splat_ubo);
-                              // The sky's handles resolve now, after assign_physicals — the
-                              // late-resolve add_shadowed uses for the same graph resources.
-                              cmd.bind_texture(3, graph.physical(sky_lut), sky_sampler);
-                              cmd.bind_storage_buffer(4, graph.physical_buffer(sky_sh));
-                              // Every scene pipeline declares binding 13. The RHI requires it
-                              // attached even when this fragment variant does not read motion.
-                              if (scene) {
-                                  cmd.bind_uniform_buffer(13,
-                                                          scene_uniforms.buffer,
-                                                          scene_uniforms.offset,
-                                                          scene_uniforms.size);
-                              }
-                              for (std::uint32_t k = 0; k < 4; ++k) {
-                                  cmd.bind_texture(5 + k, layers[k], layer_sampler);
-                              }
-                              // m19.8d3: read with texelFetch (terrain.frag blends the four
-                              // texels itself), so the inert NEAREST sampler is the right one.
-                              for (std::uint32_t k = 0; k < 4; ++k) {
-                                  cmd.bind_texture(9 + k, bakes[k], sampler);
-                              }
-                              cmd.bind_index_buffer(indices, rhi::IndexType::Uint32);
-                              cmd.push_constants(&push, sizeof(push));
-                              // No vertex buffer is bound because there is nothing to bind: the
-                              // vertex stage derives (i, j) from the index it is handed and pulls
-                              // the height out of the texture.
-                              cmd.draw_indexed(index_count);
-                          });
+    graph.add_raster_pass(
+        scene ? "terrain-scene" : "terrain",
+        desc,
+        [pipeline = scene ? scene_pipelines_[scene_variant] : pipeline_,
+         sampler = sampler_,
+         weight_sampler = weight_sampler_,
+         layer_sampler = layer_sampler_,
+         layers = tile.layer_textures,
+         bakes,
+         heights = tile.heights,
+         weights = tile.weights,
+         splat_ubo = tile.splat_ubo,
+         indices = tile.indices,
+         index_count = tile.index_count,
+         sky_lut,
+         sky_sh,
+         sky_sampler,
+         scene_uniforms,
+         shadow,
+         scene,
+         &graph,
+         push](rhi::CommandBuffer& cmd) {
+            cmd.bind_pipeline(pipeline);
+            cmd.bind_texture(0, heights, sampler);
+            cmd.bind_texture(1, weights, weight_sampler);
+            cmd.bind_uniform_buffer(2, splat_ubo);
+            // The sky's handles resolve now, after assign_physicals — the
+            // late-resolve add_shadowed uses for the same graph resources.
+            cmd.bind_texture(3, graph.physical(sky_lut), sky_sampler);
+            cmd.bind_storage_buffer(4, graph.physical_buffer(sky_sh));
+            // Every scene pipeline declares binding 13. The RHI requires it
+            // attached even when this fragment variant does not read motion.
+            if (scene) {
+                cmd.bind_uniform_buffer(
+                    13, scene_uniforms.buffer, scene_uniforms.offset, scene_uniforms.size);
+                cmd.bind_texture(14, graph.physical(shadow.map), shadow.sampler);
+                cmd.bind_uniform_buffer(15, shadow.ubo.buffer, shadow.ubo.offset, shadow.ubo.size);
+            }
+            for (std::uint32_t k = 0; k < 4; ++k) {
+                cmd.bind_texture(5 + k, layers[k], layer_sampler);
+            }
+            // m19.8d3: read with texelFetch (terrain.frag blends the four
+            // texels itself), so the inert NEAREST sampler is the right one.
+            for (std::uint32_t k = 0; k < 4; ++k) {
+                cmd.bind_texture(9 + k, bakes[k], sampler);
+            }
+            cmd.bind_index_buffer(indices, rhi::IndexType::Uint32);
+            cmd.push_constants(&push, sizeof(push));
+            // No vertex buffer is bound because there is nothing to bind: the
+            // vertex stage derives (i, j) from the index it is handed and pulls
+            // the height out of the texture.
+            cmd.draw_indexed(index_count);
+        });
 }
 
 } // namespace rime::render

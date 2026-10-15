@@ -13,6 +13,8 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/render/components.hpp"
+#include "rime/render/lighting/shadows.hpp"
+#include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/render/terrain_scene.hpp"
 
@@ -49,6 +51,31 @@ std::size_t pixel(std::uint32_t x = 32, std::uint32_t y = 32) {
     return static_cast<std::size_t>(y) * kSize + x;
 }
 
+// A count-0 sun binding for tests that drive TerrainPass::add_scene directly (no SceneRenderer):
+// the same placeholder pair SceneRenderer builds when a scene has no sun.
+struct NoSun {
+    rhi::Device& device;
+    CascadedShadowMap csm;
+    rhi::TextureHandle dummy;
+
+    explicit NoSun(rhi::Device& d) : device(d), csm(d) {
+        rhi::TextureDesc dd{};
+        dd.extent = {1, 1};
+        dd.array_layers = 2;
+        dd.format = kDepthFormat;
+        dd.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::Sampled;
+        dd.debug_name = "test-shadow-dummy";
+        dummy = d.create_texture(dd);
+        auto cmd = d.begin_commands();
+        cmd->texture_barrier(dummy, rhi::ResourceState::Undefined, rhi::ResourceState::ShaderRead);
+        d.submit_blocking(*cmd);
+    }
+
+    ~NoSun() { device.destroy(dummy); }
+
+    ShadowBinding binding(RenderGraph& graph) { return csm.empty_binding(graph, dummy); }
+};
+
 struct Probe {
     float depth = 1.0f;
     float hdr = 0.0f;
@@ -66,6 +93,7 @@ Probe draw_scene_tile(rhi::Device& device,
                       float camera_x,
                       float previous_x,
                       core::Vec3 sun_rgb = {}) {
+    NoSun no_sun(device);
     RenderGraph graph(device);
     graph.reset();
     const auto hdr = graph.create_texture({{kSize, kSize}, kHdrFormat, "terrain-hdr"});
@@ -120,7 +148,8 @@ Probe draw_scene_tile(rhi::Device& device,
                    light,
                    {},
                    {},
-                   slice);
+                   slice,
+                   no_sun.binding(graph));
     CHECK(graph.pass_name(static_cast<std::uint32_t>(graph.pass_count() - 1)) == "terrain-scene");
     graph.export_texture(hdr);
     graph.export_texture(depth);
@@ -322,4 +351,119 @@ TEST_CASE("terrain scene is declared between opaque and sky/TAA, with an empty d
     CHECK(terrain_index > 0);
     CHECK(terrain_index < sky_index);
     CHECK(sky_index < taa_index);
+}
+
+// The ground receives the sun's cascaded shadow (the forward pass's own map, bound at 14/15).
+// Structural, not golden: a box floats over a terrain tile, the sun points straight down, and the
+// terrain pixel under the box must be darker than the pixel beside it. Controls make the number
+// mean something (a near-null proof is not evidence until the scene's range is known):
+//   * RELIT   -- the box removed: the same pixel must light back up, so the darkening was a cast
+//                shadow and not a terrain artefact. |lit - relit| is the noise floor, in the same
+//                units as the effect, lit - shadowed.
+//   * CEILING -- the sun removed: the radiance a FULLY shadowed pixel could show (ambient only).
+//   * NO SUN  -- the count-0 path: the box must change nothing on the terrain.
+TEST_CASE("terrain receives the sun's cascaded shadow from a mesh occluder") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (test::vulkan_required())
+            FAIL("Vulkan device required");
+        return;
+    }
+    if (test::shadow_depth_sampling_unsupported(*device)) {
+        MESSAGE("device cannot sample layered shadow depth -- skipping the terrain shadow proof");
+        return;
+    }
+    constexpr std::uint32_t size = 256;
+    assets::HeightfieldAsset big = flat_tile();
+    big.cell_size_x = 2.0f; // 16 x 16 m, so the lit control pixel is also on terrain
+    big.cell_size_z = 2.0f;
+    big.origin = {-8.0f, 0.0f, -8.0f};
+    TerrainPass pass(*device);
+    const auto tile = pass.upload(big);
+    REQUIRE(tile != kInvalidTerrainTile);
+    const std::array<TerrainSceneDraw, 1> draws{{{tile, {}}}};
+    MeshRegistry meshes(*device);
+    const MeshId box = meshes.add(make_cube(0.5f), "terrain-shadow-occluder");
+    MaterialRegistry materials;
+    PbrMaterialDesc md{};
+    md.base_color[0] = md.base_color[1] = md.base_color[2] = 0.8f;
+    md.roughness = 1.0f;
+    const MaterialId mat = materials.add(md);
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_ambient(0.02f, 0.02f, 0.02f);
+    renderer.set_temporal_jitter_enabled(false);
+    renderer.set_motion_vectors_enabled(false);
+    renderer.set_taa_resolve_enabled(false);
+
+    core::Transform cam_tf{};
+    cam_tf.translation = {0.0f, 8.0f, 8.0f};
+    cam_tf.rotation = core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -0.7853982f);
+    core::Transform light_tf{};
+    light_tf.rotation =
+        core::quat_from_axis_angle({1.0f, 0.0f, 0.0f}, -1.5707963f); // straight down
+    const core::Mat4 view_proj =
+        core::perspective(0.9f, 1.0f, 0.1f, 40.0f) * core::inverse(core::to_matrix(cam_tf));
+    const test::Pixel shadow_px = test::project(view_proj, {0.0f, 0.0f, 0.0f}, size);
+    const test::Pixel lit_px = test::project(view_proj, {3.5f, 0.0f, 0.0f}, size);
+
+    const auto luma = [&](bool sun, bool with_box) {
+        ecs::World world;
+        register_render_components(world);
+        if (with_box) {
+            core::Transform box_tf{};
+            box_tf.translation = {0.0f, 2.0f, 0.0f};
+            (void)world.spawn_with(ecs::WorldTransform{box_tf}, MeshRef{box}, MaterialRef{mat});
+        }
+        if (sun)
+            (void)world.spawn_with(ecs::WorldTransform{light_tf},
+                                   DirectionalLight{1.0f, 1.0f, 1.0f, 3.0f});
+        (void)world.spawn_with(ecs::WorldTransform{cam_tf}, Camera{0.9f, 0.1f, 40.0f, true});
+        LightingSettings ls;
+        ls.shadows_enabled = true;
+        ls.cascade_count = 3;
+        ls.shadow_map_resolution = 1024;
+        renderer.set_lighting(ls);
+        RenderGraph graph(*device);
+        graph.reset();
+        renderer.set_terrain_draws(&pass, draws);
+        const auto out = renderer.render(graph, world, {size, size}, true);
+        REQUIRE(out.hdr.is_valid());
+        graph.export_texture(out.hdr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        const auto bytes = test::read_texture(*device, graph.physical(out.hdr), size, size, 8);
+        const auto at = [&](const test::Pixel& px) {
+            const std::size_t o =
+                (static_cast<std::size_t>(px.y) * size + static_cast<std::size_t>(px.x)) * 8;
+            return (f16(bytes, o) + f16(bytes, o + 2) + f16(bytes, o + 4)) / 3.0f;
+        };
+        return std::array<float, 2>{at(shadow_px), at(lit_px)};
+    };
+
+    const auto occluded = luma(true, true);
+    const auto open = luma(true, false);
+    const auto sunless = luma(false, false);
+    const auto sunless_box = luma(false, true);
+    const float shadowed = occluded[0];
+    const float lit = occluded[1];
+    const float relit = open[0];
+    const float effect = lit - shadowed;
+    const float noise = std::abs(lit - relit);
+    MESSAGE("terrain shadow: shadowed=" << shadowed << " lit=" << lit << " relit(no box)=" << relit
+                                        << " ceiling(no sun)=" << sunless[0]
+                                        << " | effect(lit-shadowed)=" << effect
+                                        << " control |lit-relit|=" << noise);
+
+    REQUIRE(lit > 0.05f); // the control pixel really is sunlit
+    CHECK(shadowed < 0.4f * lit);
+    CHECK(relit > 0.7f * lit);
+    // Sensitivity: the effect must dwarf the control, and the scene's range (lit - ambient-only)
+    // must be far larger than any pixel-to-pixel difference the control shows.
+    CHECK(effect > 10.0f * noise);
+    CHECK(lit - sunless[0] > 10.0f * noise);
+    // Count-0 path: no sun => nothing can cast onto the terrain, the box changes no pixel.
+    CHECK(sunless[0] > 0.0f);
+    CHECK(sunless_box[0] == sunless[0]);
+    CHECK(sunless_box[1] == sunless[1]);
 }

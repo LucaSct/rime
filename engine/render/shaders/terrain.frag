@@ -113,6 +113,46 @@ layout(std140, set = 0, binding = 13) uniform TerrainSceneUniforms {
     mat4 prev_view_proj;
     vec4 sun_radiance;
 } scene;
+
+// The SAME cascaded sun shadow map the forward mesh pass samples (pbr_forward_shadowed.frag
+// bindings 7/8): SceneRenderer's one CascadedShadowMap fit, one shadow render, bound here too so the
+// ground receives the shadows the meshes cast. Without it buildings looked like they floated.
+layout(set = 0, binding = 14) uniform sampler2DArrayShadow shadow_map;
+layout(std140, set = 0, binding = 15) uniform ShadowUniforms {
+    mat4 cascade_view_proj[4]; // light clip-from-world per cascade
+    vec4 params;               // x = cascade count, y = PCF radius (texels), z = depth bias, w = normal bias
+    vec4 texel;                // x = 1 / shadow-map resolution
+} shadow;
+
+// Sun visibility, 1 = lit, 0 = shadowed. A line-for-line copy of sun_shadow() in
+// pbr_forward_shadowed.frag (no shader-include mechanism exists): first cascade the fragment
+// projects inside, normal-offset then constant depth bias, 3x3 hardware-compare PCF. Count 0 (the
+// no-sun placeholder) returns exactly 1.0, so a sunless scene is unchanged.
+float sun_shadow(vec3 world_pos, vec3 N) {
+    uint count = uint(shadow.params.x);
+    if (count == 0u)
+        return 1.0;
+    vec3 biased = world_pos + N * shadow.params.w;
+    for (uint c = 0u; c < count && c < 4u; ++c) {
+        vec4 lc = shadow.cascade_view_proj[c] * vec4(biased, 1.0);
+        vec3 p = lc.xyz / lc.w;
+        vec2 uv = p.xy * 0.5 + 0.5;
+        if (all(greaterThanEqual(uv, vec2(0.001))) && all(lessThanEqual(uv, vec2(0.999))) &&
+            p.z >= 0.0 && p.z <= 1.0) {
+            float ref = p.z - shadow.params.z;
+            float step = shadow.params.y * shadow.texel.x;
+            float sum = 0.0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    vec2 o = vec2(float(dx), float(dy)) * step;
+                    sum += texture(shadow_map, vec4(uv + o, float(c), ref));
+                }
+            }
+            return sum / 9.0;
+        }
+    }
+    return 1.0;
+}
 #endif
 
 // lod_tile.z bits (kTerrainPush* in terrain_pass.hpp); bits 0..4 are the vertex stage's.
@@ -402,6 +442,8 @@ void main() {
     vec3 sun_radiance = vec3(pc.sun.w);
 #ifdef TERRAIN_SCENE
     sun_radiance = scene.sun_radiance.rgb;
+    // Only the DIRECT sun is shadowed; ambient, sky, bakes and sky specular below are untouched.
+    sun_radiance *= sun_shadow(v_world, n);
 #endif
     vec3 radiance = shade_light(n, v, -pc.sun.xyz, sun_radiance, base, metallic, alpha);
 
